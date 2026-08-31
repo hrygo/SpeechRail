@@ -3,7 +3,7 @@ info:
   title: SpeechRail API
   version: 0.1.0
   description: |
-    Local-first shared speech recognition service.
+    Local-first shared ASR and TTS service.
 
     The /v1/audio/transcriptions endpoint follows the OpenAI-compatible
     multipart shape so existing SDK clients can be reused. The realtime
@@ -24,6 +24,8 @@ tags:
     description: Exposed model identities
   - name: transcription
     description: OpenAI-compatible audio transcription
+  - name: speech
+    description: OpenAI-compatible text-to-speech
 paths:
   /health:
     get:
@@ -140,6 +142,43 @@ paths:
           $ref: '#/components/responses/QueueFull'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+  /v1/audio/speech:
+    post:
+      operationId: createSpeech
+      tags: [speech]
+      summary: Synthesize a sentence as audio
+      description: |
+        OpenAI-compatible JSON request shape. The initial runtime supports WAV
+        and signed 16-bit little-endian PCM streaming responses.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechRequest'
+      responses:
+        '200':
+          description: Synthesized audio stream
+          content:
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/x-pcm:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
 components:
   securitySchemes:
     BearerAuth:
@@ -211,6 +250,25 @@ components:
           type: string
           enum: [json, verbose_json, text, srt, vtt]
           default: json
+    SpeechRequest:
+      type: object
+      required: [model, input, voice]
+      properties:
+        model:
+          type: string
+          const: speechrail/qwen3-tts
+        input:
+          type: string
+          minLength: 1
+          maxLength: 100000
+        voice:
+          type: string
+          minLength: 1
+          maxLength: 200
+        response_format:
+          type: string
+          enum: [pcm, wav]
+          default: wav
     Usage:
       type: object
       required: [type, seconds]

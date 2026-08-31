@@ -45,6 +45,8 @@
 
 ## Task 1: Lock v2 domain types and session state machines
 
+实施状态：**已完成**（`c2efe11`、`000d847`）。
+
 **Files:**
 - Create: src/speechrail/domain/realtime_v2.py
 - Create: src/speechrail/realtime/v2_session.py
@@ -58,7 +60,7 @@
 - TranscriptionSession exposes append(audio_b64), flush(), commit(), delta(), completed().
 - SpeechSession exposes append(text), flush(), commit(), response_created(), audio_delta(), response_completed(), response_cancelled().
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
     def test_delta_is_a_revisable_snapshot() -> None:
         session = TranscriptionSession("sess_1", max_frame_bytes=64, max_buffer_bytes=128)
@@ -70,13 +72,13 @@
 
 Add cases for append-before-configure, double configuration, bad Base64, odd PCM, oversized frame, empty TTS text, unknown response ID, commit-after-cancel and monotonic event sequence.
 
-- [ ] **Step 2: Run the focused test and verify it fails**
+- [x] **Step 2: Run the focused test and verify it fails**
 
 Run: uv run --extra dev pytest tests/test_realtime_v2_session.py -q --no-cov
 
 Expected: module import failure.
 
-- [ ] **Step 3: Implement the minimal state machines**
+- [x] **Step 3: Implement the minimal state machines**
 
     class SequencedSession:
         def event(self, event_type: str, **payload: object) -> dict[str, object]:
@@ -92,7 +94,7 @@ Expected: module import failure.
 
 Reject every invalid state transition with V2SessionError(code). Store only bounded uncommitted audio/text; do not import a worker or vendor SDK.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
 Run: uv run --extra dev pytest tests/test_realtime_v2_session.py -q --no-cov
 
@@ -100,6 +102,8 @@ Run: uv run --extra dev pytest tests/test_realtime_v2_session.py -q --no-cov
     git commit -m "feat: add realtime v2 session state machines"
 
 ## Task 2: Add Resource Governor and Settings
+
+实施状态：**已完成**（`69ff841`）。
 
 **Files:**
 - Create: src/speechrail/runtime/governor.py
@@ -111,7 +115,7 @@ Run: uv run --extra dev pytest tests/test_realtime_v2_session.py -q --no-cov
 - Create ResourceGovernor.acquire(lane) and try_acquire(lane).
 - lane is asr_realtime, tts_realtime or batch.
 
-- [ ] **Step 1: Write failing isolation/fairness tests**
+- [x] **Step 1: Write failing isolation/fairness tests**
 
     async def test_batch_cannot_consume_reserved_asr_slot() -> None:
         governor = ResourceGovernor(GovernorConfig(1, 1, 1, 0.01))
@@ -121,21 +125,23 @@ Run: uv run --extra dev pytest tests/test_realtime_v2_session.py -q --no-cov
 
 Add a fake monotonic-clock test: an aged batch request becomes eligible after batch_aging_seconds but cannot bypass already queued realtime work.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: uv run --extra dev pytest tests/test_governor.py -q --no-cov
 
-- [ ] **Step 3: Implement governor and config**
+- [x] **Step 3: Implement governor and config**
 
 Use separate bounded semaphores and an enqueue-time batch deque. Do not use Semaphore.locked() as the admission decision. Add positive settings with defaults: REALTIME_ASR_SLOTS=1, REALTIME_TTS_SLOTS=1, BATCH_SLOTS=1, BATCH_AGING_SECONDS=30.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
     uv run --extra dev pytest tests/test_governor.py -q --no-cov
     git add src/speechrail/runtime/governor.py src/speechrail/config tests/test_governor.py
     git commit -m "feat: reserve realtime speech capacity"
 
 ## Task 3: Define streaming backend ports
+
+实施状态：**已完成**（`c214541`）。
 
 **Files:**
 - Create: src/speechrail/backends/streaming.py
@@ -148,28 +154,30 @@ Use separate bounded semaphores and an enqueue-time batch deque. Do not use Sema
 - AsrBackendEvent(kind, item_id, revision, text, segments).
 - TtsBackendEvent(kind, response_id, chunk_index, audio, duration_ms).
 
-- [ ] **Step 1: Write failing typed-event tests**
+- [x] **Step 1: Write failing typed-event tests**
 
     async def test_backend_events_are_typed_before_public_rendering() -> None:
         session = FakeStreamingAsrSession()
         await session.send_pcm(b"\x00\x00")
         assert [event.kind async for event in session.events()] == ["partial", "completed"]
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: uv run --extra dev pytest tests/test_streaming_backends.py -q --no-cov
 
-- [ ] **Step 3: Implement protocols and strict event models**
+- [x] **Step 3: Implement protocols and strict event models**
 
 Vendor JSON and WLK lines/buffer_transcription never cross the port. Public JSON rendering remains the responsibility of the v2 gateway.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
     uv run --extra dev pytest tests/test_streaming_backends.py -q --no-cov
     git add src/speechrail/backends tests/test_streaming_backends.py
     git commit -m "feat: define streaming speech backend ports"
 
 ## Task 4: Expose Realtime v2 transcription with a fake backend
+
+实施状态：**已完成**（`000d847`）。
 
 **Files:**
 - Create: src/speechrail/realtime/v2_gateway.py
@@ -182,7 +190,7 @@ Vendor JSON and WLK lines/buffer_transcription never cross the port. Public JSON
 - WS /v2/realtime accepts only one session.update.
 - v2 errors follow the common fields defined in contracts/realtime-v2.md.
 
-- [ ] **Step 1: Write failing WebSocket tests**
+- [x] **Step 1: Write failing WebSocket tests**
 
     with client.websocket_connect("/v2/realtime") as socket:
         socket.send_json({"type": "session.update", "session": TRANSCRIPTION_CONFIG})
@@ -195,21 +203,24 @@ Vendor JSON and WLK lines/buffer_transcription never cross the port. Public JSON
 
 Test auth failure, invalid event order (1008), governor saturation (1013), flush preserving a session, cancel producing one terminal event and reconnect generating a new session ID.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: uv run --extra dev pytest tests/test_realtime_v2_websocket.py -q --no-cov
 
-- [ ] **Step 3: Implement the gateway**
+- [x] **Step 3: Implement the gateway**
 
 Inject the backend. Run a client-event producer and backend-event consumer task. Acquire asr_realtime capacity before opening the session. On cancel, cancel/await both tasks and suppress all later events. Convert only QueueFullError/profile saturation to 1013.
 
-- [ ] **Step 4: Synchronize the contract and commit**
+- [x] **Step 4: Synchronize the contract and commit**
 
     uv run --extra dev pytest tests/test_realtime_v2_websocket.py -q --no-cov
     git add src/speechrail/app.py src/speechrail/realtime contracts/realtime-v2.md tests/test_realtime_v2_websocket.py
     git commit -m "feat: expose realtime v2 transcription"
 
 ## Task 5: Port the TTS worker mechanics and add REST speech
+
+实施状态：**进行中**。REST contract-first 切片与 fake backend 已完成（`9d68e0e`）；
+隔离 TTS worker、真实本地模型装载和 OpenAPI 增补尚未实施。
 
 **Files:**
 - Create: src/speechrail/backends/qwen3_tts.py
@@ -452,4 +463,3 @@ Only after explicit authorization: ASR v2 synthetic PCM; TTS REST/v2 preconfigur
 - Tasks 1-4 cover the Realtime v2 contract; Tasks 2 and 7 cover Resource Governor/jobs; Tasks 5-6 implement batch/stream TTS; Task 8 supplies real streaming ASR; Task 9 migrates both voice-realtime ports; Task 10 covers security, operations and acceptance.
 - No task downloads models, activates a profile, switches a client or installs a service without the named authorization gate.
 - Every public event is produced from Task 1 session types and Task 3 typed backend ports; no vendor or meeting field crosses into the public API.
-
