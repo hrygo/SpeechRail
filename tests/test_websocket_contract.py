@@ -22,7 +22,9 @@ def _backend(_: bytes, __: str | None, ___: str) -> Awaitable[TranscriptResult]:
 
 
 def test_realtime_websocket_accepts_ordered_events_and_completes_once() -> None:
-    client = TestClient(create_app(Settings(), transcribe=_backend))
+    client = TestClient(
+        create_app(Settings(qwen3_model_dir=None, qwen3_python=None), transcribe=_backend)
+    )
     with client.websocket_connect("/v1/realtime") as socket:
         socket.send_json(
             {
@@ -41,7 +43,9 @@ def test_realtime_websocket_accepts_ordered_events_and_completes_once() -> None:
 
 
 def test_legacy_websocket_emits_config_then_ready_to_stop_for_empty_eof() -> None:
-    client = TestClient(create_app(Settings(), transcribe=_backend))
+    client = TestClient(
+        create_app(Settings(qwen3_model_dir=None, qwen3_python=None), transcribe=_backend)
+    )
     with client.websocket_connect("/asr") as socket:
         assert socket.receive_json() == {"type": "config", "mode": "full"}
         socket.send_bytes(b"")

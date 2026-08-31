@@ -21,6 +21,19 @@ from speechrail.runtime.worker_protocol import (
 )
 
 MAX_PCM_BYTES = 40 * 1024 * 1024
+LANGUAGES = {
+    "auto": "auto",
+    "zh": "Chinese",
+    "chinese": "Chinese",
+    "en": "English",
+    "english": "English",
+    "yue": "Cantonese",
+    "cantonese": "Cantonese",
+    "ja": "Japanese",
+    "japanese": "Japanese",
+    "ko": "Korean",
+    "korean": "Korean",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +73,10 @@ def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str]:
         raise ProtocolError("invalid PCM payload") from exc
     if not pcm or len(pcm) % 2 or len(pcm) > MAX_PCM_BYTES:
         raise ProtocolError("invalid PCM length")
-    return request_id, pcm, language, prompt
+    canonical_language = LANGUAGES.get(language.strip().lower())
+    if canonical_language is None:
+        raise ProtocolError("unsupported language")
+    return request_id, pcm, canonical_language, prompt
 
 
 def serve(

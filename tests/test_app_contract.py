@@ -5,7 +5,7 @@ from speechrail.config import Settings
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(api_key=None)))
+    return TestClient(create_app(Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)))
 
 
 def test_health_reports_contract_shell_without_backend() -> None:
@@ -78,14 +78,20 @@ def test_readyz_returns_retryable_error_until_backend_is_ready() -> None:
 
 
 def test_readyz_is_200_when_runtime_reports_ready() -> None:
-    response = TestClient(create_app(Settings(api_key=None, backend_ready=True))).get("/readyz")
+    response = TestClient(
+        create_app(
+            Settings(api_key=None, backend_ready=True, qwen3_model_dir=None, qwen3_python=None)
+        )
+    ).get("/readyz")
 
     assert response.status_code == 200
     assert response.json() == {"ready": True}
 
 
 def test_api_key_and_model_errors_are_distinct() -> None:
-    client = TestClient(create_app(Settings(api_key="secret")))
+    client = TestClient(
+        create_app(Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None))
+    )
 
     unauthorized = client.post(
         "/v1/audio/transcriptions",

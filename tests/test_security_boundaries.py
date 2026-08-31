@@ -8,11 +8,13 @@ from speechrail.config import Settings
 
 def test_lan_binding_requires_api_key() -> None:
     with pytest.raises(ValidationError, match="api_key is required"):
-        Settings(host="0.0.0.0")
+        Settings(host="0.0.0.0", qwen3_model_dir=None, qwen3_python=None)
 
 
 def test_api_key_is_not_accepted_from_query_or_wrong_bearer() -> None:
-    client = TestClient(create_app(Settings(api_key="secret")))
+    client = TestClient(
+        create_app(Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None))
+    )
     for headers in ({}, {"Authorization": "Bearer wrong"}):
         response = client.post(
             "/v1/audio/transcriptions?token=secret",

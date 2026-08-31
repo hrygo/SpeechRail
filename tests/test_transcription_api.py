@@ -22,7 +22,12 @@ def _backend(_: bytes, __: str | None, ___: str) -> Awaitable[TranscriptResult]:
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(max_upload_bytes=8), transcribe=_backend))
+    return TestClient(
+        create_app(
+            Settings(max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None),
+            transcribe=_backend,
+        )
+    )
 
 
 def test_transcription_formats_results_from_one_domain_result() -> None:

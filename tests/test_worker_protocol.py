@@ -12,6 +12,7 @@ class _FakeEngine:
 
     def transcribe(self, audio: bytes, *, language: str, prompt: str) -> tuple[str, str]:
         assert audio == b"\x00\x00"
+        assert language == "Chinese"
         assert prompt == "names"
         return "hello", language
 
@@ -45,7 +46,7 @@ def test_worker_reuses_one_loaded_engine_for_framed_requests() -> None:
             "sample_rate": 16000,
             "channels": 1,
             "sample_width_bytes": 2,
-            "language": "en",
+            "language": "zh",
             "prompt": "names",
             "pcm_b64": "AAA=",
         },
@@ -67,7 +68,7 @@ def test_worker_reuses_one_loaded_engine_for_framed_requests() -> None:
         "type": "result",
         "request_id": "req_1",
         "text": "hello",
-        "language": "en",
+        "language": "Chinese",
         "device": "mps",
         "dtype": "float16",
     }

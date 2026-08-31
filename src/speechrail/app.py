@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from speechrail import __version__
+from speechrail.backends.qwen3_native import Qwen3BackendConfig, Qwen3Worker
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
@@ -92,14 +95,68 @@ async def _read_upload(file: UploadFile, limit: int) -> bytes:
     return bytes(content)
 
 
+async def _decode_pcm(audio: bytes) -> bytes:
+    """Decode any supported local upload with fixed ffmpeg argv, never a shell."""
+
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        "pipe:0",
+        "-f",
+        "s16le",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    pcm, _ = await process.communicate(audio)
+    if process.returncode != 0 or not pcm or len(pcm) % 2:
+        raise ValueError("audio_decode_failed")
+    return pcm
+
+
 def create_app(
     settings: Settings | None = None, *, transcribe: Transcribe | None = None
 ) -> FastAPI:
     resolved = settings or Settings()
+    worker: Qwen3Worker | None = None
+    if (
+        transcribe is None
+        and resolved.qwen3_model_dir is not None
+        and resolved.qwen3_python is not None
+    ):
+        worker = Qwen3Worker(
+            Qwen3BackendConfig(
+                repository_root=Path(__file__).parents[2],
+                python_executable=resolved.qwen3_python,
+                model_dir=resolved.qwen3_model_dir,
+                device=resolved.device,
+                dtype=resolved.dtype,
+                timeout_seconds=resolved.request_timeout_seconds,
+            )
+        )
+        transcribe = worker.transcribe
     admission = AdmissionQueue(resolved.max_queue_size)
     app = FastAPI(title="SpeechRail API", version=resolved.version)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
+
+    if worker is not None:
+
+        @app.on_event("startup")
+        async def start_worker() -> None:
+            await worker.start()
+
+        @app.on_event("shutdown")
+        async def stop_worker() -> None:
+            await worker.close()
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -189,6 +246,8 @@ def create_app(
             )
         try:
             audio = await _read_upload(file, resolved.max_upload_bytes)
+            if worker is not None:
+                audio = await _decode_pcm(audio)
         except OverflowError:
             return _error_response(413, request_id, "audio_too_large", "Audio exceeds upload limit")
         except ValueError as exc:
