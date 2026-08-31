@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import struct
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -36,6 +37,7 @@ from speechrail.http.formatters import format_json, format_srt, format_verbose, 
 from speechrail.realtime.events import RealtimeSession, SessionError
 from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
 
 Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
@@ -71,6 +73,11 @@ class _SpeechHTTPBody(BaseModel):
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+
+
+class _JobHTTPBody(BaseModel):
+    kind: Literal["speech", "transcription"]
+    input_ref: str = Field(min_length=1, max_length=1_000)
 
 
 def _error(
@@ -175,6 +182,7 @@ def create_app(
     transcribe: Transcribe | None = None,
     v2_transcriber: BatchTranscriber | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
+    job_repository: JobRepository | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     worker: Qwen3Worker | None = None
@@ -203,6 +211,38 @@ def create_app(
     app = FastAPI(title="SpeechRail API", version=resolved.version)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
+
+    def job_owner(request: Request) -> str:
+        if resolved.api_key is None:
+            return "loopback"
+        return hashlib.sha256(resolved.api_key.encode()).hexdigest()
+
+    def job_auth_error(request: Request) -> JSONResponse | None:
+        if (
+            resolved.api_key is not None
+            and request.headers.get("Authorization", "") != f"Bearer {resolved.api_key}"
+        ):
+            return JSONResponse(
+                status_code=401,
+                content=_error(
+                    message="Invalid or missing API key",
+                    error_type="authentication_error",
+                    code="invalid_api_key",
+                    request_id=request.state.request_id,
+                    retryable=False,
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return None
+
+    def job_response(job: JobRecord) -> dict[str, object]:
+        return {
+            "id": job.id,
+            "kind": job.kind,
+            "state": job.state,
+            "error_code": job.error_code,
+            "result_ref": job.result_ref,
+        }
 
     if worker is not None:
 
@@ -419,6 +459,57 @@ def create_app(
                 media_type="audio/wav",
             )
         return StreamingResponse(audio_stream(), media_type="audio/x-pcm")
+
+    @app.post("/v1/jobs", status_code=202)
+    async def create_job(request: Request, body: _JobHTTPBody) -> Response:
+        if error := job_auth_error(request):
+            return error
+        if job_repository is None:
+            return _error_response(
+                503,
+                request.state.request_id,
+                "backend_not_ready",
+                "SpeechRail job spool is not ready",
+                retryable=True,
+            )
+        job = job_repository.create(
+            kind=body.kind, owner=job_owner(request), request={"input_ref": body.input_ref}
+        )
+        return JSONResponse(status_code=202, content=job_response(job))
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(request: Request, job_id: str) -> Response:
+        if error := job_auth_error(request):
+            return error
+        if job_repository is None:
+            return _error_response(
+                503,
+                request.state.request_id,
+                "backend_not_ready",
+                "SpeechRail job spool is not ready",
+                retryable=True,
+            )
+        job = job_repository.get(job_id, owner=job_owner(request))
+        if job is None:
+            return _error_response(404, request.state.request_id, "job_not_found", "Unknown job")
+        return JSONResponse(job_response(job))
+
+    @app.delete("/v1/jobs/{job_id}")
+    async def delete_job(request: Request, job_id: str) -> Response:
+        if error := job_auth_error(request):
+            return error
+        if job_repository is None:
+            return _error_response(
+                503,
+                request.state.request_id,
+                "backend_not_ready",
+                "SpeechRail job spool is not ready",
+                retryable=True,
+            )
+        job = job_repository.cancel(job_id, owner=job_owner(request))
+        if job is None:
+            return _error_response(404, request.state.request_id, "job_not_found", "Unknown job")
+        return JSONResponse(job_response(job))
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
