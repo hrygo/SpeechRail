@@ -53,3 +53,14 @@ def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
     expired = repository.get(job.id, owner="owner-a")
     assert expired is not None
     assert expired.state == "expired"
+
+
+def test_job_repository_records_a_bounded_failure_code(tmp_path: Path) -> None:
+    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    job = repository.create(kind="transcription", owner="owner-a", request={"input_ref": "opaque"})
+    assert repository.claim_next() is not None
+
+    failed = repository.fail(job.id, error_code="backend_timeout")
+
+    assert failed.state == "failed"
+    assert failed.error_code == "backend_timeout"

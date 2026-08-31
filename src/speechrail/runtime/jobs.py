@@ -106,6 +106,24 @@ class JobRepository:
             raise RuntimeError("completed job disappeared")
         return record
 
+    def fail(self, job_id: str, *, error_code: str) -> JobRecord:
+        if not error_code or len(error_code) > 200:
+            raise ValueError("error_code must be between one and 200 characters")
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE jobs SET state = 'failed', error_code = ?, updated_at = ?
+                WHERE id = ? AND state = 'running'
+                """,
+                (error_code, _now(), job_id),
+            )
+        if updated.rowcount != 1:
+            raise ValueError("job is not running")
+        record = self._get_any(job_id)
+        if record is None:
+            raise RuntimeError("failed job disappeared")
+        return record
+
     def cancel(self, job_id: str, *, owner: str) -> JobRecord | None:
         with self._connect() as connection:
             connection.execute(
