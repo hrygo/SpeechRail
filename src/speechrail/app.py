@@ -185,6 +185,8 @@ def create_app(
     job_repository: JobRepository | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
+    if job_repository is None and resolved.job_spool_dir is not None:
+        job_repository = JobRepository(resolved.job_spool_dir)
     worker: Qwen3Worker | None = None
     if (
         transcribe is None
@@ -244,12 +246,16 @@ def create_app(
             "result_ref": job.result_ref,
         }
 
-    if worker is not None:
+    if worker is not None or job_repository is not None:
 
         @app.on_event("startup")
-        async def start_worker() -> None:
-            await worker.start()
+        async def start_runtime() -> None:
+            if job_repository is not None:
+                job_repository.recover_interrupted()
+            if worker is not None:
+                await worker.start()
 
+    if worker is not None:
         @app.on_event("shutdown")
         async def stop_worker() -> None:
             await worker.close()

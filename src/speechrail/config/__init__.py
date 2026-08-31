@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     qwen3_tts_python: Path | None = None
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
+    job_spool_dir: Path | None = None
     compatibility_model_ids: tuple[str, ...] = (
         "Qwen3-ASR-1.7B",
         "qwen3-asr-1.7b",
@@ -57,6 +58,13 @@ class Settings(BaseSettings):
     @classmethod
     def blank_api_key_is_unset(cls, value: Any) -> Any:
         return None if value == "" else value
+
+    @field_validator("job_spool_dir")
+    @classmethod
+    def require_absolute_job_spool(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("job_spool_dir must be an external absolute path")
+        return value
 
     @model_validator(mode="after")
     def validate_exposure(self) -> Settings:

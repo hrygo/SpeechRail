@@ -64,3 +64,29 @@ def test_jobs_api_delete_releases_a_completed_owner_scoped_result(tmp_path) -> N
     assert response.status_code == 200
     assert response.json()["state"] == "completed"
     assert response.json()["result_ref"] is None
+
+
+def test_configured_job_spool_recovers_interrupted_jobs_on_startup(tmp_path) -> None:
+    spool_dir = tmp_path.parent / "speechrail-job-spool"
+    repository = JobRepository(spool_dir)
+    job = repository.create(
+        kind="speech",
+        owner="loopback",
+        request={"input_ref": "external/input"},
+    )
+    assert repository.claim_next() is not None
+
+    with TestClient(
+        create_app(
+            Settings(
+                job_spool_dir=spool_dir,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+            )
+        )
+    ) as client:
+        response = client.get(f"/v1/jobs/{job.id}")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "failed"
+    assert response.json()["error_code"] == "worker_interrupted"
