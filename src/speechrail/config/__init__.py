@@ -8,6 +8,8 @@ from typing import Any, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from speechrail.runtime.resource_governor import GovernorLimits
+
 
 class Settings(BaseSettings):
     """Validated, environment-backed service configuration."""
@@ -37,6 +39,10 @@ class Settings(BaseSettings):
     max_audio_seconds: int = Field(default=3600, ge=1)
     max_realtime_frame_bytes: int = Field(default=160_000, ge=2, le=4_000_000)
     max_realtime_buffer_bytes: int = Field(default=8_388_608, ge=2, le=64_000_000)
+    runtime_total_capacity: int = Field(default=4, ge=2, le=128)
+    realtime_reserved_capacity: int = Field(default=1, ge=1, le=127)
+    runtime_max_pending_per_class: int = Field(default=8, ge=1, le=1024)
+    batch_aging_seconds: float = Field(default=30, gt=0, le=3600)
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     legacy_wlk_enabled: bool = True
     legacy_query_token_enabled: bool = False
@@ -54,7 +60,18 @@ class Settings(BaseSettings):
             raise ValueError("MPS profile requires float16")
         if self.device == "cpu" and self.dtype != "float32":
             raise ValueError("CPU profile requires float32")
+        if self.realtime_reserved_capacity >= self.runtime_total_capacity:
+            raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
         return self
+
+    @property
+    def governor_limits(self) -> GovernorLimits:
+        """Translate validated service settings into the runtime admission limits."""
+        return GovernorLimits(
+            total_capacity=self.runtime_total_capacity,
+            realtime_reserved_capacity=self.realtime_reserved_capacity,
+            max_pending_per_class=self.runtime_max_pending_per_class,
+        )
 
 
 __all__ = ["Settings"]
