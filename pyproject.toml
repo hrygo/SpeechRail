@@ -35,8 +35,10 @@ dev = [
     "pyyaml>=6.0",
 ]
 diarization = [
+    "kaldi-native-fbank>=1.22",
     "nemo-toolkit[asr]>=2.0",
     "numpy>=1.26,<2.0",
+    "onnxruntime>=1.20",
 ]
 
 [project.scripts]

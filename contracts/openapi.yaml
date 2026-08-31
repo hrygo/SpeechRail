@@ -426,6 +426,25 @@ components:
           type: string
         speaker:
           type: [string, "null"]
+        speakers:
+          type: array
+          description: Optional anonymous speaker attribution, ordered by confidence.
+          items:
+            $ref: '#/components/schemas/DiarizationSpeaker'
+        speaker_revision:
+          type: [integer, "null"]
+          minimum: 1
+    DiarizationSpeaker:
+      type: object
+      required: [id, confidence]
+      properties:
+        id:
+          type: string
+          pattern: '^spk_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
     TranscriptWord:
       type: object
       required: [word, start, end]

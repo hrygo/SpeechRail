@@ -65,6 +65,12 @@ VR_INTERACTION_SPEECHRAIL_REALTIME_URL=ws://127.0.0.1:8201/v2/realtime
 并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道；TTS bridge 未修改。
 SpeechRail 不接管 AudioHub、TTS、会议、PostgreSQL 或 UI。
 
+多人会议另需在 SpeechRail 启用本地 Sortformer profile。`voice-realtime` 的 meeting adapter
+会请求 `diarization.enabled`、传入应用派生的不透明 group ID，并消费 completed segment 的
+匿名 `speaker`/`speakers` 与 commit 前的 remap；缺少 profile 时以
+`SPEECHRAIL_DIARIZATION_UNAVAILABLE` fail closed，不会降级为单 speaker 会议。CAM++ 只用于
+短 TTL 内的匿名重连归并，姓名、人工改名和 PostgreSQL 事务仍归 meeting application。
+
 此状态是**运行时唯一切换**，不是 `voice-realtime` 源码的旧 adapter 删除。其 WLK、SenseVoice
 及内嵌 Qwen 兼容代码仍在仓库中，但当前私有运行配置不会选择它们。删除这些兼容代码属于
 `docs/superpowers/plans/2026-08-31-runtime-migration.md` 的 Task 4，需单独做破坏性版本迁移。

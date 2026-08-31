@@ -49,7 +49,9 @@ class SpeakerCentroidStore:
             self._evict_if_full()
             group = _Group(updated_at=now)
             self._groups[group_id] = group
-        canonical = self._best_match(group, vector) or raw_label
+        canonical = self._best_match(group, vector)
+        if canonical is None:
+            canonical = raw_label if raw_label not in group.centroids else self._next_label(group)
         self._update(group, canonical, vector)
         group.updated_at = now
         return canonical
@@ -78,6 +80,13 @@ class SpeakerCentroidStore:
             if score > best_score:
                 best_score, best_label = score, label
         return best_label if best_score >= self._similarity_threshold else None
+
+    @staticmethod
+    def _next_label(group: _Group) -> str:
+        number = 1
+        while f"spk_{number:02d}" in group.centroids:
+            number += 1
+        return f"spk_{number:02d}"
 
     @staticmethod
     def _update(group: _Group, label: str, vector: tuple[float, ...]) -> None:

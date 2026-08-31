@@ -35,6 +35,14 @@ SPEECHRAIL_BACKEND_READY=false
 SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 # Optional external local WLK sidecar; leave commented until its independent smoke passes.
 # SPEECHRAIL_WLK_STREAMING_URL=ws://127.0.0.1:8001
+# Optional Realtime v2 diarization profile. Sortformer enables online anonymous labels;
+# CAM++ additionally enables bounded cross-reconnect anonymous remaps.
+# SPEECHRAIL_DIARIZATION_MODEL_PATH=/absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
+# SPEECHRAIL_DIARIZATION_EMBEDDING_MODEL_PATH=/absolute/path/outside/SpeechRail/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+# SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES=8388608
+# SPEECHRAIL_DIARIZATION_MAX_GROUPS=64
+# SPEECHRAIL_DIARIZATION_GROUP_TTL_SECONDS=900
+# SPEECHRAIL_DIARIZATION_SIMILARITY_THRESHOLD=0.8
 # Optional external TTS runtime; both paths are required before its worker starts.
 # SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-TTS
 # SPEECHRAIL_QWEN3_TTS_PYTHON=/absolute/path/to/qwen3-tts-runtime/bin/python
@@ -59,7 +67,7 @@ resolver，`queued` 不会被自动解释为可读取的模型输入。
 
 ```bash
 cd <path-to-SpeechRail>
-uv sync --extra dev
+uv sync --extra dev --extra diarization
 uv run speechrail
 ```
 
@@ -82,12 +90,26 @@ REST smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音�
 | `Qwen/Qwen3-ASR-1.7B` snapshot | 配置 ASR 路径时加载一份到隔离 Qwen3 worker |
 | Qwen3-TTS CustomVoice snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker |
 | WLK sidecar | 从不由 SpeechRail 启动；仅配置 endpoint 时作为 v2 流式 ASR transport |
+| Sortformer diarization snapshot | 仅配置 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 后按首个 diarization session 惰性载入；仅产生匿名 label |
+| CAM++ embedding snapshot | 仅同时配置 CAM++ 路径和 Sortformer profile 时，按首次需要短片段 embedding 的请求惰性载入；只保留有界短期匿名质心 |
 | PyTorch + `qwen-asr` | 仅专用 worker Python runtime |
 | Apple Silicon device | MPS / `float16`；不允许自动 CPU fallback |
 | HTTP 服务依赖 | 主 `uv` 环境中的 FastAPI 等，不加载模型权重 |
 
 它不会加载 Whisper、LM Studio chat/embedding 模型或 `voice-realtime` 的会议组件。未配置
 对应 snapshot/runtime 时不会加载该 profile；请求会安全返回 `503 backend_not_ready`。
+
+## 说话人分离 profile
+
+Realtime v2 transcription 客户端显式设置 `diarization.enabled=true` 才启用。Sortformer 缓冲
+PCM 的上限由 `SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` 强制；超过上限返回
+`buffer_limit_exceeded`。CAM++ 不保存 embedding；仅当客户端提供不透明 `group_id` 时，服务在
+`MAX_GROUPS` 和 `GROUP_TTL_SECONDS` 限制内保留匿名归一化质心，并在 commit 前发出可选 remap。
+不要把 `group_id` 设置为姓名、邮箱、会议标题或数据库主键。
+
+真实模型验收必须使用操作者有权处理的评测音频，至少记录实时延迟、DER/JER、重连 label
+稳定率与人工更正率；不把音频、embedding、转写原文或 group ID 写入日志。发现质量退化时，
+先移除两条 diarization 模型路径并重启服务；此操作只关闭该可选 profile，不影响 ASR/TTS。
 
 ## macOS `launchd` 常驻安装
 
@@ -132,6 +154,8 @@ launchctl bootout "gui/$(id -u)/com.speechrail"
 | 转写 422 | 音频 Content-Type、容器、ffmpeg PATH | 使用音频文件并修复 ffmpeg 环境 |
 | 转写 429/503 | 队列、worker stderr、资源压力 | 按 `retryable` / `Retry-After` 有界重试，不复制模型 |
 | QwenPaw 失败 | provider URL/model、完整重启、REST curl | 先使 REST smoke 通过再检查客户端 |
+| diarization 不可用 | Sortformer/CAM++ 路径、`uv sync --extra diarization`、stderr | 修复外部路径或依赖；不要以单 speaker 结果替代失败 |
+| label 重连不稳定 | group TTL/容量、短片段比例、评测指标 | 调整受控阈值并重新评测；不要扩大 PCM/embedding 留存 |
 
 排障记录只保留时间、版本、request ID、错误码、耗时、设备/dtype 与资源摘要；不要收集
 API key、Authorization、音频、Base64、完整 prompt 或转写正文。

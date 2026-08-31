@@ -76,6 +76,12 @@ deterministic fake-backend 测试。没有已授权且通过 smoke 的本地流�
     },
     "endpointing": {
       "mode": "server_vad"
+    },
+    "diarization": {
+      "enabled": true,
+      "speaker_count_hint": 4,
+      "finalize": true,
+      "group_id": "application-owned-opaque-group-id"
     }
   }
 }
@@ -94,6 +100,12 @@ server VAD 的等价实现。
 
 服务端返回 `session.created`，回显实际 model、language、audio format、endpointing 和运行限制。
 创建成功后才可 append PCM。
+
+`diarization` 是可选的 SpeechRail 声学 profile。未请求时，所有既有事件形状保持不变；
+请求但没有配置本地 Sortformer snapshot 时，服务返回 `diarization_not_available`，不会伪造
+`speaker:0`。`speaker_count_hint` 是 1–8 的软上限。`group_id` 只能是客户端生成的 16–128
+字符不透明 ID；服务绝不把它解释为会议、人名或账号。它可让同一应用在短暂断线重连期间获得
+匿名 label remap，但服务只保留有 TTL、容量上限的内存质心，不保存 PCM、embedding 或身份。
 
 ### 2.2 音频、partial 与逐句完成
 
@@ -149,7 +161,9 @@ server VAD 的等价实现。
       "start_ms": 1200,
       "end_ms": 2460,
       "text": "稳定文本",
-      "speaker": null
+      "speaker": "spk_01",
+      "speakers": [{"id": "spk_01", "confidence": 1.0}],
+      "speaker_revision": 1
     }
   ]
 }
@@ -157,6 +171,20 @@ server VAD 的等价实现。
 
 所有时间戳相对当前 SpeechRail session 的首个已接受 PCM 字节。客户端 adapter 负责把应用
 拥有的 source epoch/offset 加到该时间轴上。`completed` 发出后，同一 item 不再修改。
+
+启用 diarization 时，`speaker` 是兼容用主 speaker；`speakers` 可包含重叠发言的所有匿名
+speaker，按置信度降序排列。label 仅对当前 WebSocket session 稳定。若请求了
+`finalize: true`，commit 后、`session.completed` 前服务恰好发送一次：
+
+```json
+{
+  "type": "transcription.diarization.completed",
+  "mapping": {"spk_02": "spk_01"}
+}
+```
+
+`mapping` 把当前 session 的临时 label 映射到 canonical anonymous label；空对象表示无需
+归并。消费方必须把它作为一次原子更名，不能把该 label 当作真实身份或跨 group 的声纹库。
 
 ### 2.3 flush、commit、cancel 与终态
 

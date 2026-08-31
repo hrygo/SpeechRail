@@ -25,6 +25,8 @@ def format_verbose(result: TranscriptResult) -> dict[str, object]:
                 "end": s.end_ms / 1000,
                 "text": s.text,
                 "speaker": s.speaker,
+                "speakers": [speaker.model_dump(mode="json") for speaker in s.speakers],
+                "speaker_revision": s.speaker_revision,
             }
             for s in result.segments
         ],

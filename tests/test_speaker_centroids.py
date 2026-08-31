@@ -25,3 +25,10 @@ def test_centroid_store_does_not_link_groups_or_retains_expired_groups() -> None
     store.expire()
 
     assert store.group_count == 0
+
+
+def test_centroid_store_allocates_a_new_canonical_label_for_a_raw_label_collision() -> None:
+    store = SpeakerCentroidStore(max_groups=1, ttl_seconds=60, similarity_threshold=0.95)
+
+    assert store.assign(group_id="group-a", raw_label="spk_01", embedding=(1.0, 0.0)) == "spk_01"
+    assert store.assign(group_id="group-a", raw_label="spk_01", embedding=(0.0, 1.0)) == "spk_02"

@@ -20,6 +20,8 @@ from starlette.responses import Response
 from starlette.websockets import WebSocketDisconnect
 
 from speechrail import __version__
+from speechrail.backends.camplus import CamPlusEmbeddingExtractor
+from speechrail.backends.nemo_sortformer import NemoSortformerEngine
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -49,6 +51,7 @@ from speechrail.runtime.diarization import DiarizationCoordinator
 from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
+from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 
 Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
 
@@ -263,6 +266,27 @@ def create_app(
         tts_synthesizer = tts_worker
     if realtime_asr_factory is None and resolved.wlk_streaming_url is not None:
         realtime_asr_factory = WlkRealtimeFactory(url=resolved.wlk_streaming_url)
+    if diarization_engine is None and resolved.diarization_model_path is not None:
+        embedding = (
+            None
+            if resolved.diarization_embedding_model_path is None
+            else CamPlusEmbeddingExtractor(model_path=resolved.diarization_embedding_model_path)
+        )
+        centroids = (
+            None
+            if embedding is None
+            else SpeakerCentroidStore(
+                max_groups=resolved.diarization_max_groups,
+                ttl_seconds=resolved.diarization_group_ttl_seconds,
+                similarity_threshold=resolved.diarization_similarity_threshold,
+            )
+        )
+        diarization_engine = NemoSortformerEngine(
+            model_path=resolved.diarization_model_path,
+            max_buffer_bytes=resolved.diarization_max_buffer_bytes,
+            embedding=embedding,
+            centroids=centroids,
+        )
     admission = AdmissionQueue(resolved.max_queue_size)
     governor = ResourceGovernor(resolved.governor_limits)
     if job_repository is not None and job_processor is not None:
@@ -1059,9 +1083,3 @@ def _wav_pcm16(pcm: bytes, *, sample_rate: int) -> bytes:
 app = create_app()
 
 __all__ = ["__version__", "app", "create_app"]
-from speechrail.backends.nemo_sortformer import NemoSortformerEngine
-    if diarization_engine is None and resolved.diarization_model_path is not None:
-        diarization_engine = NemoSortformerEngine(
-            model_path=resolved.diarization_model_path,
-            max_buffer_bytes=resolved.diarization_max_buffer_bytes,
-        )
