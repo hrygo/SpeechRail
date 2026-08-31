@@ -14,7 +14,7 @@ build/
 .env.*
 !.env.example
 *.log
-runtime/
+/runtime/
 models/
 secrets/
 .DS_Store
