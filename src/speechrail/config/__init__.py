@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
     tts_model_id: str = "speechrail/qwen3-tts"
+    tts_voice_ids: tuple[str, ...] = ("default",)
+    qwen3_tts_model_dir: Path | None = None
+    qwen3_tts_python: Path | None = None
+    tts_allow_model_downloads: bool = False
+    tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
     compatibility_model_ids: tuple[str, ...] = (
         "Qwen3-ASR-1.7B",
         "qwen3-asr-1.7b",
@@ -63,6 +68,10 @@ class Settings(BaseSettings):
             raise ValueError("CPU profile requires float32")
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
+        if not self.tts_voice_ids or any(not voice.strip() for voice in self.tts_voice_ids):
+            raise ValueError("tts_voice_ids must contain non-empty preset voices")
+        if self.tts_sample_rate != 24_000:
+            raise ValueError("tts_sample_rate must be 24000 for the public PCM profile")
         return self
 
     @property

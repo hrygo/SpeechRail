@@ -378,6 +378,14 @@ def create_app(
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
+        if body.voice not in resolved.tts_voice_ids:
+            return _error_response(
+                400,
+                request_id,
+                "voice_not_found",
+                f"Unknown preset voice: {body.voice}",
+                param="voice",
+            )
         if tts_synthesizer is None:
             return _error_response(
                 503,

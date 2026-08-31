@@ -109,3 +109,24 @@ def test_speech_endpoint_validates_speed_at_the_public_boundary() -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_speech_endpoint_rejects_voice_outside_server_registry() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None, tts_voice_ids=("default",)),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "free-form-description",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "voice_not_found"
