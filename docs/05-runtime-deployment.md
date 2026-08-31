@@ -50,12 +50,18 @@ ASR 模型或 `voice-realtime` 组件。
 | `SPEECHRAIL_MAX_UPLOAD_BYTES` | REST 上传的强制字节上限 |
 | `SPEECHRAIL_MAX_REALTIME_*` | WebSocket 单帧和缓存字节上限 |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | 一个 worker 调用的 deadline |
+| `SPEECHRAIL_JOB_SPOOL_DIR` | 可选、仓库外绝对 SQLite spool；启用 `/v1/jobs` 元数据与启动恢复 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
 | `SPEECHRAIL_LEGACY_WLK_ENABLED` | 是否暴露当前有限 `/asr` 兼容路径 |
 
 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS` 必须为 `false`。`allowed_origins` 与
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 当前为预留配置，尚未分别连接到 CORS middleware 和解码后
 时长拒绝逻辑；不要把它们视为已启用的安全/容量控制。
+
+启用 job spool 时，目录须是项目外的绝对路径，并由运行账户独占。服务以 `0700` 创建目录、
+以 `0600` 创建数据库，保存的仅是 owner 指纹、任务状态和不透明输入/结果引用；不保存原始
+音频或完整转写。重启会将未完成的 `running` 任务标为 `failed(worker_interrupted)`。当前
+foundation 尚未启动 batch executor，故 `queued` 任务不会自行调用模型。
 
 ## 端口与进程策略
 

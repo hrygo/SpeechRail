@@ -35,6 +35,10 @@ speechrail/qwen3-asr-1.7b
 | `GET` | `/readyz` | 无推理入口时为 503；有入口时为 200，仍须用真实音频验收 worker |
 | `GET` | `/v1/models` | canonical ID 与兼容 aliases |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS；当前支持 `wav` 与 `pcm` |
+| `POST` | `/v1/jobs` | 创建 owner-scoped 异步语音任务元数据（需配置 spool） |
+| `GET` | `/v1/jobs/{job_id}` | 读取同 owner 的任务状态与可选结果引用 |
+| `DELETE` | `/v1/jobs/{job_id}` | 取消 queued 任务，或清除 completed 任务的结果引用 |
 | `WS` | `/v1/realtime` | PCM append 后在一次 commit 做最终转写 |
 | `WS` | `/asr` | 仅 `config` / 空帧 EOF 行为，尚无 legacy ASR |
 
@@ -60,6 +64,18 @@ Content-Type: multipart/form-data
 上传字节数由 `SPEECHRAIL_MAX_UPLOAD_BYTES` 强制限制。`SPEECHRAIL_MAX_AUDIO_SECONDS`
 已是配置字段，但 `0.1.0` 尚未在解码后强制按时长拒绝，因此运营上应同时控制客户端
 音频时长和上传字节数。
+
+## 异步 Jobs
+
+`POST /v1/jobs` 接收 `{"kind":"speech"|"transcription","input_ref":"…"}` 并返回
+`202` 与 `{id, kind, state, error_code, result_ref}`。`input_ref` 是调用方自行解析的
+不透明外部引用：不得传入原始音频、转写正文、文本内容或凭据。服务只保存该引用和 API-key
+派生的 owner 指纹（loopback 无 key 时为本机 owner），因此不同 owner 一律得到 404。
+
+仅当设置绝对路径 `SPEECHRAIL_JOB_SPOOL_DIR` 时才启用该资源；未设置时返回
+`503 backend_not_ready`。启动时残留的 `running` 记录会标记为
+`failed / worker_interrupted`。当前 `0.1.0 foundation` 已有元数据生命周期与 TTL
+原语，但尚未连接实际 batch executor；调用方不得把 `queued` 视为模型任务已经执行。
 
 ## 响应与错误
 

@@ -31,11 +31,18 @@ SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false
 SPEECHRAIL_DEVICE=mps
 SPEECHRAIL_DTYPE=float16
 SPEECHRAIL_BACKEND_READY=false
+# Optional: enables durable owner-scoped job metadata, not model batch execution.
+SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 ```
 
 非 loopback 绑定必须配置强随机 `SPEECHRAIL_API_KEY`。当前没有 CORS 实现，且 `/asr`
 无认证，因此禁止将服务或该兼容路径直接暴露到 LAN / 公网。`BACKEND_READY` 不是模型
 开关；真实部署保持 `false`，由两个 Qwen 路径触发 worker startup。
+
+`SPEECHRAIL_JOB_SPOOL_DIR` 可选；目录必须在仓库外且由当前运行账户私有。设置后服务会在
+启动时恢复任务元数据，并将上次异常中断的 `running` 任务标记为
+`failed(worker_interrupted)`。这不会安装或启动 batch executor，`queued` 任务在该阶段
+仍不会自动执行。
 
 ## 启动、停止与验收
 
