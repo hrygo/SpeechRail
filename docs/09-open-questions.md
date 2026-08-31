@@ -8,10 +8,11 @@ date: 2026-08-31
 
 ## 已确认
 
-1. REST 文件转写使用本地 Qwen3-ASR-1.7B worker；snapshot 在仓库外，运行时离线。
+1. REST 文件转写使用仓库外 Qwen3-ASR worker；运行时明确设置离线环境变量。
 2. 默认 Apple Silicon profile 为 MPS / `float16`，worker 拒绝自动 CPU fallback。
-3. 服务启动时只加载一个 Qwen3 模型实例；不加载 LM Studio、WLK、Whisper、TTS 或会议模型。
-4. QwenPaw 已使用 OpenAI-compatible provider 经 `8201/v1` 完成一次本机短音频 smoke。
+3. 未配置 profile 路径时不加载模型；已配置 ASR/TTS profile 各自最多启动一个隔离 worker，
+   WLK 只可连接外部已运行 endpoint。
+4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
 
 ## 明确限制
@@ -26,7 +27,7 @@ date: 2026-08-31
 ## 待验收或待实现
 
 - Hermes 的 STT 配置和聊天 endpoint 隔离 smoke；
-- `voice-realtime` 的现代 adapter 或真实 WLK compatibility adapter；
+- `voice-realtime` adapter 的真实 shadow、切换和回滚验收；
 - 多语言/长文件的质量、吞吐、峰值内存和失败恢复基准；
 - 非 loopback 的 TLS、CORS、网段控制、速率限制和 legacy auth；
 - 解码后实际音频时长限制、观测指标与日志收集策略；

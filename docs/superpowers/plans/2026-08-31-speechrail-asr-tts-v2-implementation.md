@@ -219,8 +219,9 @@ Inject the backend. Run a client-event producer and backend-event consumer task.
 
 ## Task 5: Port the TTS worker mechanics and add REST speech
 
-实施状态：**进行中**。REST contract-first 切片与 fake backend 已完成（`9d68e0e`）；
-隔离 TTS worker、真实本地模型装载和 OpenAPI 增补尚未实施。
+实施状态：**代码完成，真实模型未验收**（`5805f3c`）。REST、受监督隔离 TTS worker、
+私有 IPC 与 fake-runtime 生命周期测试均已完成；模型下载、依赖安装、实际加载及质量/延迟
+验收仍需单独授权。
 
 **Files:**
 - Create: src/speechrail/backends/qwen3_tts.py
@@ -273,6 +274,8 @@ WAV response prepends a correct 44-byte header only after final PCM length is kn
 
 ## Task 6: Add Realtime v2 TTS response lifecycle
 
+实施状态：**已完成**（`8bf2389`、`af21d7c`）。
+
 **Files:**
 - Create: tests/test_realtime_v2_tts.py
 - Modify: src/speechrail/realtime/v2_gateway.py
@@ -309,6 +312,8 @@ Use a bounded outbound queue; producer assigns chunk_index and writer serially s
     git commit -m "feat: stream text to speech over realtime v2"
 
 ## Task 7: Implement durable batch jobs
+
+实施状态：**已完成**（`2116085` 至 `6d582a5`）。
 
 **Files:**
 - Create: src/speechrail/runtime/jobs.py
@@ -348,6 +353,9 @@ POST returns 202/job ID; GET returns only same-owner state/result reference; DEL
     git commit -m "feat: add durable speech batch jobs"
 
 ## Task 8: Port real streaming ASR backend without leaking WLK
+
+实施状态：**代码完成，sidecar smoke 未验收**（`4fd23de`）。已实现外部 WLK endpoint 的
+受限连接、snapshot 归一化和 v2 session 接线；服务不会安装、启动或下载 sidecar。
 
 **Files:**
 - Create: src/speechrail/backends/wlk_streaming.py
@@ -390,6 +398,8 @@ The profile returns backend_not_ready until a separately authorized local stream
 
 ## Task 9: Migrate voice-realtime through two narrow adapters
 
+实施状态：**代码完成，影子/切换未验收**（`e585597` 至 `dcb45f2`）。
+
 **Workspace:** create a new voice-realtime worktree and branch. Do not edit SpeechRail in this task.
 
 **Files:**
@@ -426,6 +436,8 @@ Add disabled-by-default independent ASR v2 settings for subtitles and conversati
     git commit -m "feat(asr): add speechrail realtime v2 adapters"
 
 ## Task 10: Complete docs, tests and separately authorized smokes
+
+实施状态：**文档与确定性质量门已完成；真实运行 gate 待授权**（`ecfb815`、`39dcb9b`）。
 
 **Files:**
 - Modify: README.md, CHANGELOG.md, configs/speechrail.example.env, contracts/openapi.yaml

@@ -130,6 +130,58 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
     assert lifecycle == ["start", "close"]
 
 
+def test_startup_failure_closes_already_started_runtime_workers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    asr_snapshot = tmp_path / "external-qwen3-asr-snapshot"
+    asr_snapshot.mkdir()
+    for filename in MODEL_FILES:
+        (asr_snapshot / filename).touch()
+    tts_snapshot = tmp_path / "external-qwen3-tts-snapshot"
+    tts_snapshot.mkdir()
+    (tts_snapshot / "config.json").touch()
+    lifecycle: list[str] = []
+
+    class FakeAsrWorker:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def start(self) -> None:
+            lifecycle.append("asr.start")
+
+        async def close(self) -> None:
+            lifecycle.append("asr.close")
+
+        async def transcribe(self, audio: bytes, language: str | None, prompt: str) -> object:
+            del audio, language, prompt
+            raise AssertionError("transcribe is not expected in this lifecycle test")
+
+    class FailingTtsWorker:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def start(self) -> None:
+            lifecycle.append("tts.start")
+            raise RuntimeError("tts_start_failed")
+
+        async def close(self) -> None:
+            lifecycle.append("tts.close")
+
+    monkeypatch.setattr(app_module, "Qwen3Worker", FakeAsrWorker)
+    monkeypatch.setattr(app_module, "Qwen3TtsWorker", FailingTtsWorker)
+    settings = Settings(
+        qwen3_model_dir=asr_snapshot,
+        qwen3_python=Path(executable),
+        qwen3_tts_model_dir=tts_snapshot,
+        qwen3_tts_python=Path(executable),
+    )
+
+    with pytest.raises(RuntimeError, match="tts_start_failed"), TestClient(create_app(settings)):
+        pass
+
+    assert lifecycle == ["asr.start", "tts.start", "tts.close", "asr.close"]
+
+
 def test_api_key_and_model_errors_are_distinct() -> None:
     client = TestClient(
         create_app(Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None))

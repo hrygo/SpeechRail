@@ -26,6 +26,8 @@ tags:
     description: OpenAI-compatible audio transcription
   - name: speech
     description: OpenAI-compatible text-to-speech
+  - name: jobs
+    description: Owner-scoped asynchronous speech job metadata
 paths:
   /health:
     get:
@@ -179,6 +181,88 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+  /v1/jobs:
+    post:
+      operationId: createSpeechJob
+      tags: [jobs]
+      summary: Queue an asynchronous speech job
+      description: |
+        Creates an owner-scoped job record. `input_ref` is an opaque caller
+        reference; it must not contain raw audio, transcript text, or credentials.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JobCreateRequest'
+      responses:
+        '202':
+          description: Job accepted for later processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+  /v1/jobs/{job_id}:
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^job_[a-f0-9]{32}$'
+    get:
+      operationId: getSpeechJob
+      tags: [jobs]
+      summary: Get an asynchronous speech job
+      description: Returns metadata only when the caller has the same authenticated owner scope.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Job metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+    delete:
+      operationId: cancelSpeechJob
+      tags: [jobs]
+      summary: Cancel an asynchronous speech job
+      description: Cancels queued work or releases a completed result reference when available.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Current job metadata after the delete operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
 components:
   securitySchemes:
     BearerAuth:
@@ -269,6 +353,45 @@ components:
           type: string
           enum: [pcm, wav]
           default: wav
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
+    JobCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, input_ref]
+      properties:
+        kind:
+          type: string
+          enum: [speech, transcription]
+        input_ref:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Opaque external input reference; no raw content or credentials.
+    Job:
+      type: object
+      additionalProperties: false
+      required: [id, kind, state, error_code, result_ref]
+      properties:
+        id:
+          type: string
+          pattern: '^job_[a-f0-9]{32}$'
+          readOnly: true
+        kind:
+          type: string
+          enum: [speech, transcription]
+        state:
+          type: string
+          enum: [queued, running, completed, failed, cancelled, expired]
+        error_code:
+          type: [string, 'null']
+          maxLength: 200
+        result_ref:
+          type: [string, 'null']
+          description: Opaque result reference, present only for completed jobs.
     Usage:
       type: object
       required: [type, seconds]
@@ -405,6 +528,12 @@ components:
             $ref: '#/components/schemas/ErrorBody'
     BackendNotReady:
       description: Model runtime is not ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotFound:
+      description: Job does not exist or is outside the caller owner scope
       content:
         application/json:
           schema:

@@ -1,8 +1,8 @@
 # SpeechRail
 
-SpeechRail（声轨）是面向本机应用的独立语音识别服务。它以稳定的 OpenAI-compatible
-接口提供 Qwen3-ASR，并将模型运行、队列、认证与观测从 QwenPaw、`voice-realtime`、
-Hermes Agent 等客户端中分离出来。
+SpeechRail（声轨）是面向本机应用的独立 ASR/TTS 运行时。它以稳定的 OpenAI-compatible
+REST 与 Realtime v2 接口提供语音转写和文本转语音，并将模型运行、队列、认证与观测从
+QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 
 ## 当前状态
 
@@ -16,10 +16,13 @@ Qwen3-ASR-1.7B snapshot 到隔离 worker，Apple Silicon 默认使用 MPS / `flo
 |---|---|---|
 | `POST /v1/audio/transcriptions` | 可用 | 文件转写，支持 `json`、`verbose_json`、`text`、`srt`、`vtt` |
 | `GET /health`、`/readyz`、`/v1/models` | 可用 | 存活、配置就绪与模型身份检查 |
+| `POST /v1/audio/speech` | 契约可用 | OpenAI-compatible 整句 TTS；仅在配置外部 TTS runtime 后可推理 |
+| `POST/GET/DELETE /v1/jobs` | 可用 | owner-scoped durable job 元数据；执行器需由部署注入受信任 processor |
+| `WS /v2/realtime` | 契约可用 | ASR partial/completed 与 TTS audio delta、取消和背压；真实后端仍待 smoke |
 | `WS /v1/realtime` | 有限可用 | 收集 PCM 后在一次 `commit` 时批量转写；当前不产生增量 delta |
 | `WS /asr` | 兼容骨架 | 只保留握手 `config` 与空 PCM EOF → `ready_to_stop`，尚不能替代旧 WLK 转写 |
-| QwenPaw | 已验证 | 使用现有 `whisper_api` provider 指向 SpeechRail |
-| Hermes Agent、`voice-realtime` 迁移 | 未验证 | 保持各自现有服务，按 Runbook 单独验收与回滚 |
+| QwenPaw、Hermes Agent | 未在本分支复验 | REST 接入方法已文档化；不得据此改动当前客户端配置 |
+| `voice-realtime` | adapter 已实现 | 会议/字幕和语音助手均为 opt-in；尚未完成真实 shadow、切换或回滚演练 |
 | `launchd` 服务安装 | 提供操作步骤 | 尚未在本机自动安装或启用 |
 
 不要把 `whisper-1` 兼容别名误认为后端模型；新配置使用
@@ -71,11 +74,14 @@ curl -X POST http://127.0.0.1:8201/v1/audio/transcriptions \\
 | `GET` | `/readyz` | 推理入口是否已配置；仍应以真实短音频确认模型可工作 |
 | `GET` | `/v1/models` | canonical 模型 ID 与兼容别名 |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS（`wav` / `pcm`） |
+| `POST` / `GET` / `DELETE` | `/v1/jobs` / `/v1/jobs/{id}` | durable ASR/TTS job 生命周期 |
+| `WS` | `/v2/realtime` | 新客户端的 ASR/TTS Realtime v2 |
 | `WS` | `/v1/realtime` | 16 kHz/单声道/PCM16 的 commit 后批量转写 |
 | `WS` | `/asr` | 仅旧客户端迁移期间的有限 EOF 协议 |
 
-REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/openapi.yaml) 为准；两个
-WebSocket 的真实状态机与限制以 [Realtime 契约](contracts/realtime.md) 为准。
+REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/openapi.yaml) 为准；v2 的
+状态机与限制以 [Realtime v2 契约](contracts/realtime-v2.md) 为准。
 
 ## 给不同读者的入口
 

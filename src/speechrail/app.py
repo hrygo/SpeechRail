@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import struct
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -14,6 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from starlette.websockets import WebSocketDisconnect
 
 from speechrail import __version__
 from speechrail.backends.qwen3_native import (
@@ -21,11 +25,15 @@ from speechrail.backends.qwen3_native import (
     Qwen3BatchTranscriber,
     Qwen3Worker,
 )
+from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
+from speechrail.backends.wlk_streaming import WlkRealtimeFactory
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
-from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.ports import (
     BatchTranscriber,
+    RealtimeAsrFactory,
+    RealtimeAsrSession,
     SpeechRequest,
     SpeechSynthesizer,
     TranscriptionRequest,
@@ -33,8 +41,11 @@ from speechrail.domain.ports import (
 from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.realtime.events import RealtimeSession, SessionError
+from speechrail.realtime.outbound import BoundedOutboundEventPump, SlowConsumerError
 from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+from speechrail.runtime.job_runner import JobProcessor, JobRunner
+from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
 
 Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
@@ -61,6 +72,7 @@ class _SpeechHTTPBody(BaseModel):
     input: str = Field(min_length=1, max_length=100_000)
     voice: str = Field(min_length=1, max_length=200)
     response_format: Literal["pcm", "wav"] = "wav"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
 
     @field_validator("input", "voice")
     @classmethod
@@ -69,6 +81,11 @@ class _SpeechHTTPBody(BaseModel):
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+
+
+class _JobHTTPBody(BaseModel):
+    kind: Literal["speech", "transcription"]
+    input_ref: str = Field(min_length=1, max_length=1_000)
 
 
 def _error(
@@ -167,15 +184,29 @@ async def _decode_pcm(audio: bytes) -> bytes:
     return pcm
 
 
+async def _run_job_runner(runner: JobRunner, *, poll_seconds: float) -> None:
+    """Run one durable job at a time; idle waits prevent a busy loop."""
+    while True:
+        if not await runner.run_once():
+            await asyncio.sleep(poll_seconds)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
     transcribe: Transcribe | None = None,
     v2_transcriber: BatchTranscriber | None = None,
+    realtime_asr_factory: RealtimeAsrFactory | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
+    job_repository: JobRepository | None = None,
+    job_processor: JobProcessor | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
+    if job_repository is None and resolved.job_spool_dir is not None:
+        job_repository = JobRepository(resolved.job_spool_dir)
+    job_runner: JobRunner | None = None
     worker: Qwen3Worker | None = None
+    tts_worker: Qwen3TtsWorker | None = None
     if (
         transcribe is None
         and resolved.qwen3_model_dir is not None
@@ -193,8 +224,34 @@ def create_app(
         )
         transcribe = worker.transcribe
         v2_transcriber = Qwen3BatchTranscriber(worker=worker, model_id=resolved.model_id)
+    if (
+        tts_synthesizer is None
+        and resolved.qwen3_tts_model_dir is not None
+        and resolved.qwen3_tts_python is not None
+    ):
+        tts_worker = Qwen3TtsWorker(
+            Qwen3TtsBackendConfig(
+                repository_root=Path(__file__).parents[2],
+                python_executable=resolved.qwen3_tts_python,
+                model_dir=resolved.qwen3_tts_model_dir,
+                device=resolved.device,
+                dtype=resolved.dtype,
+                sample_rate=resolved.tts_sample_rate,
+                timeout_seconds=resolved.request_timeout_seconds,
+            )
+        )
+        tts_synthesizer = tts_worker
+    if realtime_asr_factory is None and resolved.wlk_streaming_url is not None:
+        realtime_asr_factory = WlkRealtimeFactory(url=resolved.wlk_streaming_url)
     admission = AdmissionQueue(resolved.max_queue_size)
     governor = ResourceGovernor(resolved.governor_limits)
+    if job_repository is not None and job_processor is not None:
+        job_runner = JobRunner(
+            repository=job_repository,
+            governor=governor,
+            processor=job_processor,
+            deadline_seconds=resolved.request_timeout_seconds,
+        )
     resolved_v2_transcriber = v2_transcriber
     if resolved_v2_transcriber is None and transcribe is not None:
         resolved_v2_transcriber = _CallableBatchTranscriber(transcribe, resolved.model_id)
@@ -202,15 +259,80 @@ def create_app(
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
 
-    if worker is not None:
+    def job_owner(request: Request) -> str:
+        if resolved.api_key is None:
+            return "loopback"
+        return hashlib.sha256(resolved.api_key.encode()).hexdigest()
+
+    def job_auth_error(request: Request) -> JSONResponse | None:
+        if (
+            resolved.api_key is not None
+            and request.headers.get("Authorization", "") != f"Bearer {resolved.api_key}"
+        ):
+            return JSONResponse(
+                status_code=401,
+                content=_error(
+                    message="Invalid or missing API key",
+                    error_type="authentication_error",
+                    code="invalid_api_key",
+                    request_id=request.state.request_id,
+                    retryable=False,
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return None
+
+    def job_response(job: JobRecord) -> dict[str, object]:
+        return {
+            "id": job.id,
+            "kind": job.kind,
+            "state": job.state,
+            "error_code": job.error_code,
+            "result_ref": job.result_ref,
+        }
+
+    job_runner_task: asyncio.Task[None] | None = None
+
+    async def stop_runtime() -> None:
+        """Stop partially or fully initialized local runtimes in reverse order."""
+        if job_runner_task is not None:
+            job_runner_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await job_runner_task
+        for runtime in (tts_worker, worker):
+            if runtime is not None:
+                with contextlib.suppress(Exception):
+                    await runtime.close()
+
+    if (
+        worker is not None
+        or tts_worker is not None
+        or job_repository is not None
+        or job_runner is not None
+    ):
 
         @app.on_event("startup")
-        async def start_worker() -> None:
-            await worker.start()
+        async def start_runtime() -> None:
+            nonlocal job_runner_task
+            try:
+                if job_repository is not None:
+                    job_repository.recover_interrupted()
+                if worker is not None:
+                    await worker.start()
+                if tts_worker is not None:
+                    await tts_worker.start()
+                if job_runner is not None:
+                    job_runner_task = asyncio.create_task(
+                        _run_job_runner(job_runner, poll_seconds=resolved.job_poll_seconds)
+                    )
+            except BaseException:
+                await stop_runtime()
+                raise
 
+    if worker is not None or tts_worker is not None or job_runner is not None:
         @app.on_event("shutdown")
         async def stop_worker() -> None:
-            await worker.close()
+            await stop_runtime()
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -377,6 +499,14 @@ def create_app(
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
+        if body.voice not in resolved.tts_voice_ids:
+            return _error_response(
+                400,
+                request_id,
+                "voice_not_found",
+                f"Unknown preset voice: {body.voice}",
+                param="voice",
+            )
         if tts_synthesizer is None:
             return _error_response(
                 503,
@@ -389,6 +519,7 @@ def create_app(
             text=body.input,
             voice=body.voice,
             output_format="pcm16" if body.response_format == "pcm" else "wav",
+            speed=body.speed,
         )
 
         async def audio_stream() -> AsyncIterator[bytes]:
@@ -399,8 +530,66 @@ def create_app(
                 expected_chunk += 1
                 yield chunk.audio
 
-        media_type = "audio/x-pcm" if body.response_format == "pcm" else "audio/wav"
-        return StreamingResponse(audio_stream(), media_type=media_type)
+        if body.response_format == "wav":
+            pcm = bytearray()
+            async for chunk in audio_stream():
+                pcm.extend(chunk)
+            return Response(
+                content=_wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate),
+                media_type="audio/wav",
+            )
+        return StreamingResponse(audio_stream(), media_type="audio/x-pcm")
+
+    @app.post("/v1/jobs", status_code=202)
+    async def create_job(request: Request, body: _JobHTTPBody) -> Response:
+        if error := job_auth_error(request):
+            return error
+        if job_repository is None:
+            return _error_response(
+                503,
+                request.state.request_id,
+                "backend_not_ready",
+                "SpeechRail job spool is not ready",
+                retryable=True,
+            )
+        job = job_repository.create(
+            kind=body.kind, owner=job_owner(request), request={"input_ref": body.input_ref}
+        )
+        return JSONResponse(status_code=202, content=job_response(job))
+
+    @app.get("/v1/jobs/{job_id}")
+    async def get_job(request: Request, job_id: str) -> Response:
+        if error := job_auth_error(request):
+            return error
+        if job_repository is None:
+            return _error_response(
+                503,
+                request.state.request_id,
+                "backend_not_ready",
+                "SpeechRail job spool is not ready",
+                retryable=True,
+            )
+        job = job_repository.get(job_id, owner=job_owner(request))
+        if job is None:
+            return _error_response(404, request.state.request_id, "job_not_found", "Unknown job")
+        return JSONResponse(job_response(job))
+
+    @app.delete("/v1/jobs/{job_id}")
+    async def delete_job(request: Request, job_id: str) -> Response:
+        if error := job_auth_error(request):
+            return error
+        if job_repository is None:
+            return _error_response(
+                503,
+                request.state.request_id,
+                "backend_not_ready",
+                "SpeechRail job spool is not ready",
+                retryable=True,
+            )
+        job = job_repository.cancel(job_id, owner=job_owner(request))
+        if job is None:
+            return _error_response(404, request.state.request_id, "job_not_found", "Unknown job")
+        return JSONResponse(job_response(job))
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
@@ -464,7 +653,11 @@ def create_app(
 
     @app.websocket("/v2/realtime")
     async def realtime_v2(websocket: WebSocket) -> None:
-        if resolved_v2_transcriber is None and tts_synthesizer is None:
+        if (
+            resolved_v2_transcriber is None
+            and realtime_asr_factory is None
+            and tts_synthesizer is None
+        ):
             await websocket.close(code=1013, reason="SpeechRail inference backend is not ready")
             return
         if (
@@ -478,6 +671,62 @@ def create_app(
             max_audio_bytes=resolved.max_realtime_buffer_bytes,
             max_frame_bytes=resolved.max_realtime_frame_bytes,
         )
+        active_synthesis: asyncio.Task[None] | None = None
+        active_streaming_asr: RealtimeAsrSession | None = None
+        streaming_reader: asyncio.Task[None] | None = None
+        streaming_item_id: str | None = None
+        streaming_revision = 0
+
+        async def consume_streaming_asr_events() -> None:
+            nonlocal streaming_item_id, streaming_revision
+            if active_streaming_asr is None:
+                return
+            async for event in active_streaming_asr.events():
+                if not isinstance(session, TranscriptionSession):
+                    return
+                if event.kind == "partial":
+                    if not event.text.strip():
+                        continue
+                    streaming_item_id = streaming_item_id or f"item_{uuid4().hex}"
+                    streaming_revision += 1
+                    await websocket.send_json(
+                        session.transcription_delta(
+                            item_id=streaming_item_id,
+                            revision=streaming_revision,
+                            text=event.text,
+                            start_ms=0,
+                            end_ms=0,
+                        )
+                    )
+                elif event.kind == "completed":
+                    if not event.text.strip():
+                        continue
+                    item_id = streaming_item_id or f"item_{uuid4().hex}"
+                    segments = event.segments or (
+                        TranscriptSegment(
+                            id=f"seg_{uuid4().hex}", start_ms=0, end_ms=0, text=event.text
+                        ),
+                    )
+                    await websocket.send_json(
+                        session.transcription_completed(
+                            item_id=item_id,
+                            text=event.text,
+                            language=event.language,
+                            segments=[segment.model_dump(mode="json") for segment in segments],
+                        )
+                    )
+                    streaming_item_id = None
+                    streaming_revision = 0
+                else:
+                    await websocket.send_json(
+                        session.protocol_error(
+                            code=event.error_code or "backend_error",
+                            message="ASR backend reported an error",
+                            retryable=True,
+                        )
+                    )
+                    await websocket.close(code=1013)
+                    return
 
         async def transcribe_item(audio: bytes) -> None:
             if not audio:
@@ -518,21 +767,42 @@ def create_app(
                 output_format="pcm16",
                 sample_rate=24_000,
             )
-            async with governor.reserve(
-                WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
-            ):
-                async for chunk in tts_synthesizer.synthesize(request):
-                    await websocket.send_json(
-                        session.audio_delta(
-                            response_id=response_id,
-                            chunk_index=chunk.chunk_index,
-                            audio=chunk.audio,
+            output = BoundedOutboundEventPump(
+                max_events=resolved.realtime_outbound_max_events,
+                send=websocket.send_json,
+            )
+            await output.start()
+            finished = False
+            try:
+                async with governor.reserve(
+                    WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
+                ):
+                    async for chunk in tts_synthesizer.synthesize(request):
+                        await output.publish(
+                            session.audio_delta(
+                                response_id=response_id,
+                                chunk_index=chunk.chunk_index,
+                                audio=chunk.audio,
+                            )
                         )
+                await output.publish(session.response_completed(response_id=response_id))
+                completed = session.complete_if_input_committed()
+                if completed is not None:
+                    await output.publish(completed)
+                await output.finish()
+                finished = True
+            except SlowConsumerError:
+                await websocket.send_json(
+                    session.protocol_error(
+                        code="slow_consumer",
+                        message="Realtime client cannot consume audio fast enough",
+                        retryable=False,
                     )
-            await websocket.send_json(session.response_completed(response_id=response_id))
-            completed = session.complete_if_input_committed()
-            if completed is not None:
-                await websocket.send_json(completed)
+                )
+                await websocket.close(code=1013)
+            finally:
+                if not finished:
+                    await output.abort()
 
         try:
             while True:
@@ -545,14 +815,24 @@ def create_app(
                             "session must be an object", code="invalid_session"
                         )
                     if configured.get("type") == "transcription":
-                        if resolved_v2_transcriber is None:
+                        if resolved_v2_transcriber is None and realtime_asr_factory is None:
                             raise RealtimeV2Error(
                                 "ASR backend is not ready", code="backend_not_ready"
                             )
                         model = configured.get("model", resolved.model_id)
                         if model not in {resolved.model_id, *resolved.compatibility_model_ids}:
                             raise RealtimeV2Error("unknown model", code="model_not_found")
+                        if not isinstance(session, TranscriptionSession):
+                            raise RealtimeV2Error(
+                                "session type cannot change", code="invalid_session"
+                            )
                         await websocket.send_json(session.configure(configured))
+                        if realtime_asr_factory is not None:
+                            active_streaming_asr = realtime_asr_factory.create(
+                                language=session.language, prompt=session.prompt
+                            )
+                            await active_streaming_asr.connect()
+                            streaming_reader = asyncio.create_task(consume_streaming_asr_events())
                     elif configured.get("type") == "speech":
                         if tts_synthesizer is None:
                             raise RealtimeV2Error(
@@ -572,16 +852,28 @@ def create_app(
                 elif event_type == "input_audio_buffer.append":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    session.append_audio(event.get("audio"))
+                    audio = session.append_audio(event.get("audio"))
+                    if active_streaming_asr is not None:
+                        await active_streaming_asr.append_audio(audio)
                     await websocket.send_json(session.audio_ack())
                 elif event_type == "input_audio_buffer.flush":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    await transcribe_item(session.flush_audio())
+                    audio = session.flush_audio()
+                    if active_streaming_asr is not None:
+                        await active_streaming_asr.flush()
+                    else:
+                        await transcribe_item(audio)
                 elif event_type == "input_audio_buffer.commit":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    await transcribe_item(session.commit_audio())
+                    audio = session.commit_audio()
+                    if active_streaming_asr is not None:
+                        await active_streaming_asr.commit()
+                        if streaming_reader is not None:
+                            await streaming_reader
+                    else:
+                        await transcribe_item(audio)
                     await websocket.send_json(session.session_completed())
                     await websocket.close()
                     return
@@ -599,16 +891,31 @@ def create_app(
                         raise RealtimeV2Error(
                             "event is not valid for transcription", code="invalid_event"
                         )
-                    await synthesize_text(session.flush_text())
+                    if active_synthesis is not None and not active_synthesis.done():
+                        raise RealtimeV2Error(
+                            "a response is already active", code="response_in_progress"
+                        )
+                    text = session.flush_text()
+                    if text:
+                        active_synthesis = asyncio.create_task(synthesize_text(text))
                 elif event_type == "speech_input.commit":
                     if not isinstance(session, SpeechSession):
                         raise RealtimeV2Error(
                             "event is not valid for transcription", code="invalid_event"
                         )
-                    await synthesize_text(session.commit_text())
-                    if session.state == "committed":
-                        await websocket.close()
-                        return
+                    if active_synthesis is not None and not active_synthesis.done():
+                        raise RealtimeV2Error(
+                            "a response is already active", code="response_in_progress"
+                        )
+                    text = session.commit_text()
+                    if text:
+                        active_synthesis = asyncio.create_task(synthesize_text(text))
+                    else:
+                        completed = session.complete_if_input_committed()
+                        if completed is not None:
+                            await websocket.send_json(completed)
+                            await websocket.close()
+                            return
                 elif event_type == "response.cancel":
                     if not isinstance(session, SpeechSession):
                         raise RealtimeV2Error(
@@ -617,7 +924,12 @@ def create_app(
                     response_id = event.get("response_id")
                     if not isinstance(response_id, str):
                         raise RealtimeV2Error("response_id is required", code="invalid_event")
+                    if active_synthesis is not None and not active_synthesis.done():
+                        active_synthesis.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await active_synthesis
                     await websocket.send_json(session.response_cancel(response_id=response_id))
+                    active_synthesis = None
                 elif event_type == "session.cancel":
                     await websocket.send_json(session.cancel())
                     await websocket.close()
@@ -643,6 +955,19 @@ def create_app(
                 )
             )
             await websocket.close(code=1013)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if active_synthesis is not None and not active_synthesis.done():
+                active_synthesis.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await active_synthesis
+            if streaming_reader is not None and not streaming_reader.done():
+                streaming_reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await streaming_reader
+            if active_streaming_asr is not None:
+                await active_streaming_asr.close()
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:
@@ -661,6 +986,30 @@ def create_app(
             await websocket.close()
 
     return app
+
+
+def _wav_pcm16(pcm: bytes, *, sample_rate: int) -> bytes:
+    """Wrap a complete mono PCM16 payload in a standard WAV container."""
+    if len(pcm) % 2:
+        raise ValueError("PCM16 payload must have an even byte length")
+    byte_rate = sample_rate * 2
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + len(pcm),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sample_rate,
+        byte_rate,
+        2,
+        16,
+        b"data",
+        len(pcm),
+    )
+    return header + pcm
 
 
 app = create_app()

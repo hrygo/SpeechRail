@@ -77,24 +77,25 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 OpenAI-compatible 转写调用形状，但尚未在当前环境完成真实 Hermes 消息 smoke；实施时先在
 单独配置/进程试运行，再验证聊天功能未受影响。失败时还原这两个 STT 配置并重启 Hermes。
 
-## `voice-realtime`（尚未迁移）
+## `voice-realtime`（adapter 已实现，尚未切换）
 
-`voice-realtime` 当前仍应使用自己的 WLK / 字幕服务。SpeechRail 的 `/asr` 当前只实现
-兼容握手和 EOF，不输出转写 snapshot，不能占用旧 `8001` 端口或替换会议字幕链路。
+`voice-realtime` 独立分支已有一个共享 `SpeechRailRealtimeClient` 和两个 opt-in adapter：
 
-未来接入有两条路线：
+1. 会议/字幕设置 `VR_SUBTITLE_BACKEND=speechrail-realtime-v2`，并设置
+   `VR_SUBTITLE_SPEECHRAIL_URL=ws://127.0.0.1:8201/v2/realtime`；
+2. 语音助手设置 `VR_INTERACTION_STT_BACKEND=speechrail-realtime-v2`，并设置
+   `VR_INTERACTION_SPEECHRAIL_REALTIME_URL=ws://127.0.0.1:8201/v2/realtime`。
 
-1. 在 `voice-realtime` 独立分支实现 `/v1/realtime` adapter；它应把 16 kHz 单声道 PCM
-   append 后 commit，并消费最终 completed 事件。
-2. 先完善 SpeechRail legacy adapter、以真实 consumer fixtures 做 WLK parity，再安排
-   `/asr` 的兼容切换。
+两项默认均不启用，且可独立回退到原 WLK / SenseVoice 设置。它们只传入 16 kHz 单声道
+PCM 并消费 v2 的 partial/completed 事件；不接管 AudioHub、会议、TTS、数据库、UI 或 LLM。
+不要通过 `/asr` 或占用旧 `8001` 端口迁移。
 
-两条路线都需要独立契约、会议闭环和回滚演练。SpeechRail 不会擅自修改
-`voice-realtime` 的 AudioHub、会议、TTS、数据库或 UI。
+在真实 backend 已授权并通过基础 PCM smoke 前，不得开启任何客户端开关。之后按
+[迁移 Runbook](08-migration-runbook.md)先做影子比对，再逐端口切换与回滚演练。
 
 ## Realtime 客户端限制
 
-新 WebSocket 客户端发送 `transcription_session.update`、0..N 个
-`input_audio_buffer.append`、一次 `input_audio_buffer.commit`。当前服务会把累积音频作为
-一次 batch 转写，返回 completed 后结束连接；不会连续发 delta。完整示例和状态机见
-[Realtime 契约](../contracts/realtime.md)。
+新 WebSocket 客户端使用 `/v2/realtime`，发送 `session.update`、0..N 个
+`input_audio_buffer.append` 与 flush/commit；持续 streaming backend 可在 commit 前产生
+partial/completed，受限 batch backend 只在 flush/commit 后产生 completed。完整事件、取消和
+背压规则见 [Realtime v2 契约](../contracts/realtime-v2.md)。

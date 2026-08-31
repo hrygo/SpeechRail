@@ -7,7 +7,7 @@ date: 2026-08-31
 # SpeechRail 运维 Runbook
 
 本 Runbook 面向在 macOS 本机运行 SpeechRail 的操作者。首发部署只支持一台机器、一个
-服务进程、一个 Qwen3 worker。它不自动安装系统服务，也不会下载或移动模型。
+服务进程、每个已配置 profile 一个隔离 worker。它不自动安装系统服务，也不会下载或移动模型。
 
 ## 上线前清单
 
@@ -31,11 +31,29 @@ SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false
 SPEECHRAIL_DEVICE=mps
 SPEECHRAIL_DTYPE=float16
 SPEECHRAIL_BACKEND_READY=false
+# Optional: enables durable owner-scoped job metadata, not model batch execution.
+SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
+# Optional external local WLK sidecar; leave commented until its independent smoke passes.
+# SPEECHRAIL_WLK_STREAMING_URL=ws://127.0.0.1:8001
+# Optional external TTS runtime; both paths are required before its worker starts.
+# SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-TTS
+# SPEECHRAIL_QWEN3_TTS_PYTHON=/absolute/path/to/qwen3-tts-runtime/bin/python
 ```
 
 非 loopback 绑定必须配置强随机 `SPEECHRAIL_API_KEY`。当前没有 CORS 实现，且 `/asr`
 无认证，因此禁止将服务或该兼容路径直接暴露到 LAN / 公网。`BACKEND_READY` 不是模型
-开关；真实部署保持 `false`，由两个 Qwen 路径触发 worker startup。
+开关；真实部署保持 `false`，由各 profile 成对配置的外部路径触发 worker startup。
+
+`SPEECHRAIL_JOB_SPOOL_DIR` 可选；目录必须在仓库外且由当前运行账户私有。设置后服务会在
+启动时恢复任务元数据，并将上次异常中断的 `running` 任务标记为
+`failed(worker_interrupted)`。仅当部署代码显式注入受信任 `JobProcessor` 时才启动 batch
+executor；该 processor 和 realtime 共用 Resource Governor。默认没有 `input_ref` 的路径/URL
+resolver，`queued` 不会被自动解释为可读取的模型输入。
+
+`SPEECHRAIL_WLK_STREAMING_URL` 也是可选项。配置后，`/v2/realtime` transcription session
+会连接已运行的外部 WLK endpoint，并在服务内归一化 partial/completed 事件；SpeechRail 不
+管理该进程。两条 TTS 外部路径同时配置后会启动一个隔离 worker；该 runtime 必须已安装兼容
+依赖并具有完整 local snapshot，服务本身始终设置离线环境变量。
 
 ## 启动、停止与验收
 
@@ -61,14 +79,15 @@ REST smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音�
 
 | 项目 | 行为 |
 |---|---|
-| `Qwen/Qwen3-ASR-1.7B` snapshot | 一份，加载到隔离 Qwen3 worker |
+| `Qwen/Qwen3-ASR-1.7B` snapshot | 配置 ASR 路径时加载一份到隔离 Qwen3 worker |
+| Qwen3-TTS CustomVoice snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker |
+| WLK sidecar | 从不由 SpeechRail 启动；仅配置 endpoint 时作为 v2 流式 ASR transport |
 | PyTorch + `qwen-asr` | 仅专用 worker Python runtime |
 | Apple Silicon device | MPS / `float16`；不允许自动 CPU fallback |
 | HTTP 服务依赖 | 主 `uv` 环境中的 FastAPI 等，不加载模型权重 |
 
-它不会加载 Whisper、第二个 ASR 模型、WLK sidecar、LM Studio chat/embedding 模型、TTS
-模型或 `voice-realtime` 的会议组件。未配置 snapshot/runtime 时不会加载任何模型，推理
-请求返回 `503 backend_not_ready`。
+它不会加载 Whisper、LM Studio chat/embedding 模型或 `voice-realtime` 的会议组件。未配置
+对应 snapshot/runtime 时不会加载该 profile；请求会安全返回 `503 backend_not_ready`。
 
 ## macOS `launchd` 常驻安装
 
@@ -124,6 +143,6 @@ API key、Authorization、音频、Base64、完整 prompt 或转写正文。
 模型 snapshot；不要通过 `git reset --hard` 丢弃配置。
 
 服务回滚为：停止新进程，恢复上一个已验证版本工作目录与 `.env`，启动后完成 REST smoke。
-QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。Hermes 与
-`voice-realtime` 尚未迁入；未来切换须使用[迁移 Runbook](08-migration-runbook.md)，不能
-假定 `/asr` 已有 WLK 转写 parity。
+QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。`voice-realtime` adapter
+已经实现但未完成真实切换；启用、影子、回滚均须使用[迁移 Runbook](08-migration-runbook.md)，
+不能假定 `/asr` 已有 WLK 转写 parity。
