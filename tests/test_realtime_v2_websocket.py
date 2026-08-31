@@ -185,6 +185,62 @@ def test_v2_streaming_asr_backend_emits_partial_and_completed_before_commit() ->
         assert factory.session.received == [b"\x00\x00"]
 
 
+def test_v2_streaming_asr_backend_error_is_sent_without_waiting_for_commit() -> None:
+    class ErrorStreamingSession:
+        async def connect(self) -> None:
+            return None
+
+        async def append_audio(self, audio: bytes) -> None:
+            del audio
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            return None
+
+        def events(self) -> AsyncIterator[StreamingAsrEvent]:
+            async def iterator() -> AsyncIterator[StreamingAsrEvent]:
+                yield StreamingAsrEvent(kind="error", error_code="wlk_error")
+
+            return iterator()
+
+        async def close(self) -> None:
+            return None
+
+    class ErrorStreamingFactory:
+        def create(self, *, language: str | None, prompt: str) -> ErrorStreamingSession:
+            assert language == "zh"
+            assert prompt == ""
+            return ErrorStreamingSession()
+
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            realtime_asr_factory=ErrorStreamingFactory(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "language": "zh",
+                    "audio_format": PCM16,
+                    "endpointing": {"mode": "manual"},
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+
+        error = socket.receive_json()
+
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "wlk_error"
+        assert error["error"]["retryable"] is True
+
+
 def test_v2_speech_streams_ordered_audio_and_completes_on_commit() -> None:
     client = _client()
     with client.websocket_connect("/v2/realtime") as socket:

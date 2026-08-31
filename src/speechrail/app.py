@@ -293,6 +293,17 @@ def create_app(
 
     job_runner_task: asyncio.Task[None] | None = None
 
+    async def stop_runtime() -> None:
+        """Stop partially or fully initialized local runtimes in reverse order."""
+        if job_runner_task is not None:
+            job_runner_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await job_runner_task
+        for runtime in (tts_worker, worker):
+            if runtime is not None:
+                with contextlib.suppress(Exception):
+                    await runtime.close()
+
     if (
         worker is not None
         or tts_worker is not None
@@ -303,28 +314,25 @@ def create_app(
         @app.on_event("startup")
         async def start_runtime() -> None:
             nonlocal job_runner_task
-            if job_repository is not None:
-                job_repository.recover_interrupted()
-            if worker is not None:
-                await worker.start()
-            if tts_worker is not None:
-                await tts_worker.start()
-            if job_runner is not None:
-                job_runner_task = asyncio.create_task(
-                    _run_job_runner(job_runner, poll_seconds=resolved.job_poll_seconds)
-                )
+            try:
+                if job_repository is not None:
+                    job_repository.recover_interrupted()
+                if worker is not None:
+                    await worker.start()
+                if tts_worker is not None:
+                    await tts_worker.start()
+                if job_runner is not None:
+                    job_runner_task = asyncio.create_task(
+                        _run_job_runner(job_runner, poll_seconds=resolved.job_poll_seconds)
+                    )
+            except BaseException:
+                await stop_runtime()
+                raise
 
     if worker is not None or tts_worker is not None or job_runner is not None:
         @app.on_event("shutdown")
         async def stop_worker() -> None:
-            if job_runner_task is not None:
-                job_runner_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await job_runner_task
-            if worker is not None:
-                await worker.close()
-            if tts_worker is not None:
-                await tts_worker.close()
+            await stop_runtime()
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -710,10 +718,15 @@ def create_app(
                     streaming_item_id = None
                     streaming_revision = 0
                 else:
-                    raise RealtimeV2Error(
-                        "ASR backend reported an error",
-                        code=event.error_code or "backend_error",
+                    await websocket.send_json(
+                        session.protocol_error(
+                            code=event.error_code or "backend_error",
+                            message="ASR backend reported an error",
+                            retryable=True,
+                        )
                     )
+                    await websocket.close(code=1013)
+                    return
 
         async def transcribe_item(audio: bytes) -> None:
             if not audio:
