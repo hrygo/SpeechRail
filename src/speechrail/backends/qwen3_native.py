@@ -10,10 +10,11 @@ import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import uuid4
 
 from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
 
 MODEL_FILES = (
@@ -153,15 +154,17 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 await self.close()
                 raise
 
-    async def transcribe(self, pcm: bytes, language: str | None, prompt: str) -> TranscriptResult:
+    async def transcribe(
+        self, pcm: bytes, language: str | None, prompt: str, *, request_id: str | None = None
+    ) -> TranscriptResult:
         await self.start()
         async with self._lock:
-            request_id = f"req_{uuid4().hex}"
+            resolved_request_id = request_id or f"req_{uuid4().hex}"
             await self._write(
                 {
                     "version": PROTOCOL_VERSION,
                     "type": "transcribe",
-                    "request_id": request_id,
+                    "request_id": resolved_request_id,
                     "sample_rate": 16000,
                     "channels": 1,
                     "sample_width_bytes": 2,
@@ -171,18 +174,19 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 }
             )
             result = await self._read()
-        if result.get("type") != "result" or result.get("request_id") != request_id:
+        if result.get("type") != "result" or result.get("request_id") != resolved_request_id:
             raise RuntimeError(str(result.get("code", "worker_request_failed")))
         text, detected = result.get("text"), result.get("language")
         if not isinstance(text, str) or not isinstance(detected, str):
             raise RuntimeError("worker_result_invalid")
         return TranscriptResult(
-            request_id=request_id,
+            request_id=resolved_request_id,
             model_id="speechrail/qwen3-asr-1.7b",
             text=text,
             language=detected,
             duration_ms=round(len(pcm) * 1000 / 32000),
         )
+
 
     async def _write(self, frame: dict[str, object]) -> None:
         if self._process is None or self._process.stdin is None:
@@ -218,3 +222,25 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         except TimeoutError:
             process.kill()
             await process.wait()
+
+
+class _Qwen3TranscriptionWorker(Protocol):
+    async def transcribe(
+        self, pcm: bytes, language: str | None, prompt: str, *, request_id: str | None = None
+    ) -> TranscriptResult: ...
+
+
+class Qwen3BatchTranscriber(BatchTranscriber):
+    """Normalize the isolated Qwen worker behind the public batch ASR port."""
+
+    def __init__(self, *, worker: _Qwen3TranscriptionWorker, model_id: str) -> None:
+        self._worker = worker
+        self._model_id = model_id
+
+    async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+        result = await self._worker.transcribe(
+            request.audio, request.language, request.prompt, request_id=request.request_id
+        )
+        return result.model_copy(
+            update={"request_id": request.request_id, "model_id": self._model_id}
+        )

@@ -6,5 +6,14 @@ from speechrail.domain.contracts import (
     TranscriptWindow,
     TranscriptWord,
 )
+from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
 
-__all__ = ["TranscriptResult", "TranscriptSegment", "TranscriptWindow", "TranscriptWord"]
+__all__ = [
+    "AudioChunk",
+    "SpeechRequest",
+    "TranscriptResult",
+    "TranscriptSegment",
+    "TranscriptWindow",
+    "TranscriptWord",
+    "TranscriptionRequest",
+]
