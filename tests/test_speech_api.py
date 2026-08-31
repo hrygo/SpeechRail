@@ -53,3 +53,37 @@ def test_speech_endpoint_returns_stable_not_ready_error_without_backend() -> Non
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "backend_not_ready"
+
+
+def test_speech_endpoint_requires_bearer_key_when_configured() -> None:
+    client = TestClient(
+        create_app(
+            Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_speech_endpoint_rejects_unknown_model_before_synthesis() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"model": "not-a-model", "input": "你好", "voice": "default"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "model_not_found"

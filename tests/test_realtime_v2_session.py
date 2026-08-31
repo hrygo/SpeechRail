@@ -90,3 +90,17 @@ def test_speech_response_cancel_is_idempotent_and_session_cancel_is_terminal() -
 
     with pytest.raises(RealtimeV2Error, match="terminal"):
         session.append_text("再次输入")
+
+
+def test_v2_session_rejects_wrong_session_type_and_audio_format() -> None:
+    session = TranscriptionSession(max_audio_bytes=16)
+
+    with pytest.raises(RealtimeV2Error, match=r"session.type"):
+        session.configure({"type": "speech", "audio_format": PCM16})
+    with pytest.raises(RealtimeV2Error, match="PCM16"):
+        session.configure(
+            {
+                "type": "transcription",
+                "audio_format": {**PCM16, "rate": 48_000},
+            }
+        )
