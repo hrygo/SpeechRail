@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
     job_spool_dir: Path | None = None
+    job_poll_seconds: float = Field(default=0.1, gt=0, le=60)
     compatibility_model_ids: tuple[str, ...] = (
         "Qwen3-ASR-1.7B",
         "qwen3-asr-1.7b",

@@ -40,6 +40,7 @@ from speechrail.realtime.events import RealtimeSession, SessionError
 from speechrail.realtime.outbound import BoundedOutboundEventPump, SlowConsumerError
 from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
 
@@ -179,6 +180,13 @@ async def _decode_pcm(audio: bytes) -> bytes:
     return pcm
 
 
+async def _run_job_runner(runner: JobRunner, *, poll_seconds: float) -> None:
+    """Run one durable job at a time; idle waits prevent a busy loop."""
+    while True:
+        if not await runner.run_once():
+            await asyncio.sleep(poll_seconds)
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -186,10 +194,12 @@ def create_app(
     v2_transcriber: BatchTranscriber | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
     job_repository: JobRepository | None = None,
+    job_processor: JobProcessor | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     if job_repository is None and resolved.job_spool_dir is not None:
         job_repository = JobRepository(resolved.job_spool_dir)
+    job_runner: JobRunner | None = None
     worker: Qwen3Worker | None = None
     if (
         transcribe is None
@@ -210,6 +220,13 @@ def create_app(
         v2_transcriber = Qwen3BatchTranscriber(worker=worker, model_id=resolved.model_id)
     admission = AdmissionQueue(resolved.max_queue_size)
     governor = ResourceGovernor(resolved.governor_limits)
+    if job_repository is not None and job_processor is not None:
+        job_runner = JobRunner(
+            repository=job_repository,
+            governor=governor,
+            processor=job_processor,
+            deadline_seconds=resolved.request_timeout_seconds,
+        )
     resolved_v2_transcriber = v2_transcriber
     if resolved_v2_transcriber is None and transcribe is not None:
         resolved_v2_transcriber = _CallableBatchTranscriber(transcribe, resolved.model_id)
@@ -249,19 +266,31 @@ def create_app(
             "result_ref": job.result_ref,
         }
 
-    if worker is not None or job_repository is not None:
+    job_runner_task: asyncio.Task[None] | None = None
+
+    if worker is not None or job_repository is not None or job_runner is not None:
 
         @app.on_event("startup")
         async def start_runtime() -> None:
+            nonlocal job_runner_task
             if job_repository is not None:
                 job_repository.recover_interrupted()
             if worker is not None:
                 await worker.start()
+            if job_runner is not None:
+                job_runner_task = asyncio.create_task(
+                    _run_job_runner(job_runner, poll_seconds=resolved.job_poll_seconds)
+                )
 
-    if worker is not None:
+    if worker is not None or job_runner is not None:
         @app.on_event("shutdown")
         async def stop_worker() -> None:
-            await worker.close()
+            if job_runner_task is not None:
+                job_runner_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await job_runner_task
+            if worker is not None:
+                await worker.close()
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
