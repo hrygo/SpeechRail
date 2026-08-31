@@ -7,6 +7,7 @@ from sys import executable
 
 import pytest
 
+import speechrail.backends.qwen3_tts as tts_module
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.domain.ports import SpeechRequest
 
@@ -119,3 +120,80 @@ def test_tts_worker_normalizes_private_audio_frames_to_public_chunks(tmp_path: P
     assert chunks[0].response_id == written[0]["request_id"]
     assert chunks[0].chunk_index == 0
     assert chunks[0].audio == b"\x00\x00"
+
+
+def test_tts_worker_starts_offline_process_and_checks_ready_identity(
+    monkeypatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-start"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+
+    class FakeProcess:
+        stdin = None
+        stdout = None
+        returncode: int | None = None
+
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+        async def wait(self) -> int:
+            return 0
+
+    process = FakeProcess()
+    written: list[dict[str, object]] = []
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        assert args == tuple(worker.config.command())
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        assert environment["HF_HUB_OFFLINE"] == "1"
+        assert environment["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+        return process
+
+    async def write(frame: dict[str, object]) -> None:
+        written.append(frame)
+
+    async def read() -> dict[str, object]:
+        return {
+            "type": "ready",
+            "model_loaded": True,
+            "device": "mps",
+            "dtype": "float16",
+            "sample_rate": 24_000,
+        }
+
+    monkeypatch.setattr(tts_module.asyncio, "create_subprocess_exec", create_process)
+    worker._write = write  # type: ignore[method-assign]
+    worker._read = read  # type: ignore[method-assign]
+
+    async def start_and_close() -> None:
+        await worker.start()
+        await worker.close()
+
+    asyncio.run(start_and_close())
+
+    assert written == [
+        {
+            "version": 1,
+            "type": "start",
+            "model_dir": str(snapshot.resolve()),
+            "device": "mps",
+            "sample_rate": 24_000,
+        }
+    ]
+    assert process.terminated is True

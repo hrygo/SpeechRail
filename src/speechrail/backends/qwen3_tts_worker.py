@@ -36,7 +36,7 @@ class TtsWorkerEngine(Protocol):
 EngineFactory = Callable[[Path], TtsWorkerEngine]
 
 
-class _Qwen3CustomVoiceEngine:
+class _Qwen3CustomVoiceEngine:  # pragma: no cover - requires separately authorized model runtime.
     """Minimal Qwen3-TTS CustomVoice bridge, isolated in the worker process."""
 
     def __init__(self, model_dir: Path, *, device: Literal["mps", "cpu"]) -> None:
@@ -80,7 +80,9 @@ class _Qwen3CustomVoiceEngine:
             yield pcm[offset : offset + 9_600]
 
 
-def _default_engine_factory(device: Literal["mps", "cpu"]) -> EngineFactory:
+def _default_engine_factory(  # pragma: no cover - requires separately authorized model runtime.
+    device: Literal["mps", "cpu"],
+) -> EngineFactory:
     return lambda model_dir: _Qwen3CustomVoiceEngine(model_dir, device=device)
 
 

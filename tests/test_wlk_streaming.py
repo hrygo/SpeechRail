@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
+
 from speechrail.backends.wlk_streaming import WlkRealtimeSession, WlkStreamingBackend
 
 
@@ -85,3 +87,38 @@ def test_wlk_realtime_session_hides_vendor_snapshots_behind_streaming_events() -
 
 async def _connection(connection: object) -> object:
     return connection
+
+
+def test_wlk_realtime_session_rejects_non_websocket_or_credentialed_url() -> None:
+    with pytest.raises(ValueError, match="credential-free"):
+        WlkRealtimeSession(url="https://127.0.0.1:8001", language="zh")
+    with pytest.raises(ValueError, match="credential-free"):
+        WlkRealtimeSession(url="ws://token@127.0.0.1:8001", language="zh")
+
+
+def test_wlk_realtime_session_surfaces_backend_errors_without_raw_payload() -> None:
+    class FakeConnection:
+        uri = "ws://127.0.0.1:8001/asr?language=zh&mode=full"
+
+        async def send(self, message: bytes) -> None:
+            del message
+
+        async def recv(self) -> str:
+            return '{"type":"error","error":"backend unavailable"}'
+
+        async def close(self) -> None:
+            return None
+
+    async def collect() -> list[object]:
+        session = WlkRealtimeSession(
+            url="ws://127.0.0.1:8001",
+            language="zh",
+            connection_factory=lambda _: _connection(FakeConnection()),
+        )
+        await session.connect()
+        return [event async for event in session.events()]
+
+    events = asyncio.run(collect())
+
+    assert events[0].kind == "error"
+    assert events[0].error_code == "wlk_error"
