@@ -1042,3 +1042,9 @@ def _wav_pcm16(pcm: bytes, *, sample_rate: int) -> bytes:
 app = create_app()
 
 __all__ = ["__version__", "app", "create_app"]
+from speechrail.backends.nemo_sortformer import NemoSortformerEngine
+    if diarization_engine is None and resolved.diarization_model_path is not None:
+        diarization_engine = NemoSortformerEngine(
+            model_path=resolved.diarization_model_path,
+            max_buffer_bytes=resolved.diarization_max_buffer_bytes,
+        )

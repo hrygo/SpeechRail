@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
     wlk_streaming_url: str | None = None
+    diarization_model_path: Path | None = None
+    diarization_max_buffer_bytes: int = Field(default=8_388_608, ge=2, le=64_000_000)
     job_spool_dir: Path | None = None
     job_poll_seconds: float = Field(default=0.1, gt=0, le=60)
     compatibility_model_ids: tuple[str, ...] = (
@@ -68,6 +70,13 @@ class Settings(BaseSettings):
     def require_absolute_job_spool(cls, value: Path | None) -> Path | None:
         if value is not None and not value.is_absolute():
             raise ValueError("job_spool_dir must be an external absolute path")
+        return value
+
+    @field_validator("diarization_model_path")
+    @classmethod
+    def require_absolute_diarization_model(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("diarization_model_path must be an external absolute path")
         return value
 
     @field_validator("wlk_streaming_url")
