@@ -13,10 +13,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from speechrail import __version__
-from speechrail.compatibility.presenters import legacy_config
+from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
+from speechrail.realtime.events import RealtimeSession, SessionError
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
 
 Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
@@ -235,7 +236,63 @@ def create_app(
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
-        await websocket.close(code=1013, reason="SpeechRail backend is not ready")
+        if transcribe is None:
+            await websocket.close(code=1013, reason="SpeechRail backend is not ready")
+            return
+        if (
+            resolved.api_key is not None
+            and websocket.headers.get("Authorization", "") != f"Bearer {resolved.api_key}"
+        ):
+            await websocket.close(code=1008, reason="Invalid API key")
+            return
+        await websocket.accept()
+        session = RealtimeSession(
+            session_id=f"sess_{uuid4().hex}",
+            max_frame_bytes=resolved.max_realtime_frame_bytes,
+            max_buffer_bytes=resolved.max_realtime_buffer_bytes,
+        )
+        try:
+            while True:
+                event = await websocket.receive_json()
+                event_type = event.get("type") if isinstance(event, dict) else None
+                if event_type == "transcription_session.update":
+                    await websocket.send_json(session.update(event.get("session")))
+                elif event_type == "input_audio_buffer.append":
+                    session.append(event.get("audio"))
+                elif event_type == "input_audio_buffer.commit":
+                    audio = session.commit()
+
+                    async def operation(
+                        audio: bytes = audio,
+                        language: str | None = session.language,
+                        prompt: str = session.prompt,
+                    ) -> TranscriptResult:
+                        return await transcribe(audio, language, prompt)
+
+                    result = await admission.run(
+                        operation,
+                        deadline=resolved.request_timeout_seconds,
+                    )
+                    await websocket.send_json(session.completed(result))
+                    return
+                else:
+                    raise SessionError("invalid_event")
+        except SessionError as exc:
+            await websocket.send_json(
+                {
+                    "type": "error",
+                    "error": _error(
+                        message="Invalid realtime event",
+                        error_type="invalid_request_error",
+                        code=exc.code,
+                        request_id=f"req_{uuid4().hex}",
+                        retryable=False,
+                    )["error"],
+                }
+            )
+            await websocket.close(code=1008)
+        finally:
+            session.close()
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:
@@ -244,7 +301,14 @@ def create_app(
             return
         await websocket.accept()
         await websocket.send_json(legacy_config())
-        await websocket.close(code=1013, reason="SpeechRail backend is not ready")
+        try:
+            while True:
+                chunk = await websocket.receive_bytes()
+                if not chunk:
+                    await websocket.send_json(legacy_ready_to_stop())
+                    return
+        finally:
+            await websocket.close()
 
     return app
 
