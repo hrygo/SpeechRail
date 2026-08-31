@@ -62,8 +62,9 @@ VR_INTERACTION_SPEECHRAIL_REALTIME_URL=ws://127.0.0.1:8201/v2/realtime
 ```
 
 已使用真实本地 PCM 验证 Realtime `session.update → append → commit → transcription.completed`，
-并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道；TTS bridge 未修改。
-SpeechRail 不接管 AudioHub、TTS、会议、PostgreSQL 或 UI。
+并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为 SpeechRail v2/REST：
+`voice-realtime` 保留 Pipecat、播放、回声、persona、会议、PostgreSQL 与 UI，仅消费
+SpeechRail 返回的 PCM 和公开 preset。SpeechRail 不接管 AudioHub、LLM、会议、PostgreSQL 或 UI。
 
 多人会议另需在 SpeechRail 启用本地 Sortformer profile。`voice-realtime` 的 meeting adapter
 会请求 `diarization.enabled`、传入应用派生的不透明 group ID，并消费 completed segment 的

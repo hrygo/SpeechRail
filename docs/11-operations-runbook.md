@@ -12,7 +12,8 @@ date: 2026-08-31
 ## 上线前清单
 
 确认 Python 3.12、`uv`、`ffmpeg`、完整的仓库外 Qwen3-ASR snapshot，以及包含
-`qwen-asr`、PyTorch、NumPy 的专用 Python runtime。`.env` 只能由当前账户读取，且不应
+`qwen-asr`、PyTorch、NumPy 的 ASR runtime。启用 TTS 另需一个可导入 `mlx_audio` 的专用
+Python runtime 与本机 MLX Qwen3-TTS VoiceDesign snapshot。`.env` 只能由当前账户读取，且不应
 进入 Git。
 
 ```bash
@@ -44,8 +45,10 @@ SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 # SPEECHRAIL_DIARIZATION_GROUP_TTL_SECONDS=900
 # SPEECHRAIL_DIARIZATION_SIMILARITY_THRESHOLD=0.8
 # Optional external TTS runtime; both paths are required before its worker starts.
-# SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-TTS
+# SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-TTS-VoiceDesign
 # SPEECHRAIL_QWEN3_TTS_PYTHON=/absolute/path/to/qwen3-tts-runtime/bin/python
+# SPEECHRAIL_TTS_VOICE_IDS=["default","warm","bright","calm"]
+# SPEECHRAIL_TTS_WARMUP_ON_START=true
 ```
 
 非 loopback 绑定必须配置强随机 `SPEECHRAIL_API_KEY`。当前没有 CORS 实现，且 `/asr`
@@ -78,17 +81,20 @@ uv run speechrail
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
 curl http://127.0.0.1:8201/v1/models
+curl http://127.0.0.1:8201/v1/voices
 ```
 
 `/readyz` 为 200 仅说明推理入口已配置；发布前还要用操作者拥有的非敏感短音频完成一次
-REST smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音频。
+REST ASR smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音频。启用 TTS 后，使用
+`POST /v1/audio/speech` 请求 `speechrail/qwen3-tts`、登记 voice 和 `response_format=pcm`，确认
+HTTP 200、非空且偶数字节的 24 kHz PCM16；不得记录输入文本或输出音频。
 
 ## 启动时加载的模型
 
 | 项目 | 行为 |
 |---|---|
 | `Qwen/Qwen3-ASR-1.7B` snapshot | 配置 ASR 路径时加载一份到隔离 Qwen3 worker |
-| Qwen3-TTS CustomVoice snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker |
+| MLX Qwen3-TTS VoiceDesign snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker；公开 preset 为 `default`、`warm`、`bright`、`calm` |
 | WLK sidecar | 从不由 SpeechRail 启动；仅配置 endpoint 时作为 v2 流式 ASR transport |
 | Sortformer diarization snapshot | 仅配置 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 后按首个 diarization session 惰性载入；仅产生匿名 label |
 | CAM++ embedding snapshot | 仅同时配置 CAM++ 路径和 Sortformer profile 时，按首次需要短片段 embedding 的请求惰性载入；只保留有界短期匿名质心 |
