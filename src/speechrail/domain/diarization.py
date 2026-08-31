@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _SPEAKER_ID = re.compile(r"^spk_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_GROUP_ID = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
 class DiarizationConfig(BaseModel):
@@ -22,6 +23,13 @@ class DiarizationConfig(BaseModel):
     enabled: bool = False
     speaker_count_hint: int | None = Field(default=None, ge=1, le=8)
     finalize: bool = True
+    group_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_group_id(self) -> DiarizationConfig:
+        if self.group_id is not None and _GROUP_ID.fullmatch(self.group_id) is None:
+            raise ValueError("group_id must be an opaque 16-128 character identifier")
+        return self
 
 
 class DiarizationSpeaker(BaseModel):

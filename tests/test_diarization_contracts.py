@@ -12,7 +12,9 @@ from speechrail.domain.diarization import (
 
 
 def test_diarization_contract_accepts_anonymous_overlap_and_canonical_mapping() -> None:
-    config = DiarizationConfig(enabled=True, speaker_count_hint=4, finalize=True)
+    config = DiarizationConfig(
+        enabled=True, speaker_count_hint=4, finalize=True, group_id="a" * 64
+    )
     update = DiarizationUpdate(
         assignments=(
             DiarizationAssignment(
@@ -27,6 +29,7 @@ def test_diarization_contract_accepts_anonymous_overlap_and_canonical_mapping() 
     )
 
     assert config.speaker_count_hint == 4
+    assert config.group_id == "a" * 64
     assert update.assignments[0].primary_speaker_id == "spk_01"
     assert update.mapping == {"spk_03": "spk_01"}
 
