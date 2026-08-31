@@ -25,6 +25,7 @@ from speechrail.backends.qwen3_native import (
     Qwen3BatchTranscriber,
     Qwen3Worker,
 )
+from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
@@ -201,6 +202,7 @@ def create_app(
         job_repository = JobRepository(resolved.job_spool_dir)
     job_runner: JobRunner | None = None
     worker: Qwen3Worker | None = None
+    tts_worker: Qwen3TtsWorker | None = None
     if (
         transcribe is None
         and resolved.qwen3_model_dir is not None
@@ -218,6 +220,23 @@ def create_app(
         )
         transcribe = worker.transcribe
         v2_transcriber = Qwen3BatchTranscriber(worker=worker, model_id=resolved.model_id)
+    if (
+        tts_synthesizer is None
+        and resolved.qwen3_tts_model_dir is not None
+        and resolved.qwen3_tts_python is not None
+    ):
+        tts_worker = Qwen3TtsWorker(
+            Qwen3TtsBackendConfig(
+                repository_root=Path(__file__).parents[2],
+                python_executable=resolved.qwen3_tts_python,
+                model_dir=resolved.qwen3_tts_model_dir,
+                device=resolved.device,
+                dtype=resolved.dtype,
+                sample_rate=resolved.tts_sample_rate,
+                timeout_seconds=resolved.request_timeout_seconds,
+            )
+        )
+        tts_synthesizer = tts_worker
     admission = AdmissionQueue(resolved.max_queue_size)
     governor = ResourceGovernor(resolved.governor_limits)
     if job_repository is not None and job_processor is not None:
@@ -268,7 +287,12 @@ def create_app(
 
     job_runner_task: asyncio.Task[None] | None = None
 
-    if worker is not None or job_repository is not None or job_runner is not None:
+    if (
+        worker is not None
+        or tts_worker is not None
+        or job_repository is not None
+        or job_runner is not None
+    ):
 
         @app.on_event("startup")
         async def start_runtime() -> None:
@@ -277,12 +301,14 @@ def create_app(
                 job_repository.recover_interrupted()
             if worker is not None:
                 await worker.start()
+            if tts_worker is not None:
+                await tts_worker.start()
             if job_runner is not None:
                 job_runner_task = asyncio.create_task(
                     _run_job_runner(job_runner, poll_seconds=resolved.job_poll_seconds)
                 )
 
-    if worker is not None or job_runner is not None:
+    if worker is not None or tts_worker is not None or job_runner is not None:
         @app.on_event("shutdown")
         async def stop_worker() -> None:
             if job_runner_task is not None:
@@ -291,6 +317,8 @@ def create_app(
                     await job_runner_task
             if worker is not None:
                 await worker.close()
+            if tts_worker is not None:
+                await tts_worker.close()
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:

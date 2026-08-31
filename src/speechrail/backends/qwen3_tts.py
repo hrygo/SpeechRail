@@ -7,10 +7,19 @@ snapshot path.
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import os
+import struct
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
+
+from speechrail.domain.ports import AudioChunk, SpeechRequest
+from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,3 +68,151 @@ class Qwen3TtsBackendConfig:
             "--sample-rate",
             str(self.sample_rate),
         ]
+
+
+class Qwen3TtsWorker:
+    """One supervised local Qwen3-TTS worker behind the public TTS port.
+
+    The worker owns all vendor imports and model weights.  This parent process
+    speaks only the private framed protocol and never passes a model ID, URL,
+    instruction, or arbitrary voice description across that boundary.
+    """
+
+    def __init__(self, config: Qwen3TtsBackendConfig) -> None:
+        self.config = config
+        self._process: asyncio.subprocess.Process | None = None
+        self._lock = asyncio.Lock()
+        self._started = False
+
+    async def start(self) -> None:
+        async with self._lock:
+            if self._started:
+                return
+            environment = {
+                key: value
+                for key, value in os.environ.items()
+                if key in {"PATH", "TMPDIR", "LANG", "LC_ALL"}
+            }
+            environment.update(
+                {
+                    "PYTHONPATH": str(self.config.repository_root / "src"),
+                    "HF_HUB_OFFLINE": "1",
+                    "TRANSFORMERS_OFFLINE": "1",
+                    "HF_DATASETS_OFFLINE": "1",
+                    "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+                    "TOKENIZERS_PARALLELISM": "false",
+                }
+            )
+            self._process = await asyncio.create_subprocess_exec(
+                *self.config.command(),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=self.config.repository_root,
+                env=environment,
+            )
+            try:
+                await self._write(
+                    {
+                        "version": PROTOCOL_VERSION,
+                        "type": "start",
+                        "model_dir": str(self.config.model_dir),
+                        "device": self.config.device,
+                        "sample_rate": self.config.sample_rate,
+                    }
+                )
+                ready = await self._read()
+                if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
+                    raise RuntimeError(str(ready.get("code", "worker_start_failed")))
+                if (
+                    ready.get("device") != self.config.device
+                    or ready.get("dtype") != self.config.dtype
+                    or ready.get("sample_rate") != self.config.sample_rate
+                ):
+                    raise RuntimeError("backend_identity_mismatch")
+                self._started = True
+            except BaseException:
+                await self.close()
+                raise
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        """Yield ordered public PCM chunks while serializing private worker access."""
+
+        async def stream() -> AsyncIterator[AudioChunk]:
+            await self.start()
+            async with self._lock:
+                response_id = f"resp_{uuid4().hex}"
+                await self._write(
+                    {
+                        "version": PROTOCOL_VERSION,
+                        "type": "synthesize",
+                        "request_id": response_id,
+                        "text": request.text,
+                        "voice": request.voice,
+                        "speed": request.speed,
+                    }
+                )
+                expected_chunk_index = 0
+                while True:
+                    frame = await self._read()
+                    if frame.get("request_id") != response_id:
+                        raise RuntimeError("worker_response_id_mismatch")
+                    if frame.get("type") == "completed":
+                        return
+                    if frame.get("type") == "error":
+                        raise RuntimeError(str(frame.get("code", "worker_inference_error")))
+                    if frame.get("type") != "audio":
+                        raise RuntimeError("worker_frame_invalid")
+                    chunk_index = frame.get("chunk_index")
+                    encoded = frame.get("pcm_b64")
+                    if chunk_index != expected_chunk_index or not isinstance(encoded, str):
+                        raise RuntimeError("worker_audio_frame_invalid")
+                    try:
+                        audio = base64.b64decode(encoded, validate=True)
+                    except ValueError as exc:
+                        raise RuntimeError("worker_audio_frame_invalid") from exc
+                    if not audio or len(audio) % 2:
+                        raise RuntimeError("worker_audio_frame_invalid")
+                    yield AudioChunk(
+                        response_id=response_id,
+                        chunk_index=expected_chunk_index,
+                        audio=audio,
+                    )
+                    expected_chunk_index += 1
+
+        return stream()
+
+    async def _write(self, frame: dict[str, object]) -> None:
+        if self._process is None or self._process.stdin is None:
+            raise RuntimeError("worker_not_started")
+        body = json.dumps(frame, separators=(",", ":")).encode()
+        self._process.stdin.write(struct.pack(">I", len(body)) + body)
+        async with asyncio.timeout(self.config.timeout_seconds):
+            await self._process.stdin.drain()
+
+    async def _read(self) -> dict[str, object]:
+        if self._process is None or self._process.stdout is None:
+            raise RuntimeError("worker_not_started")
+        async with asyncio.timeout(self.config.timeout_seconds):
+            length = struct.unpack(">I", await self._process.stdout.readexactly(4))[0]
+            if not 0 < length <= 64 * 1024 * 1024:
+                raise RuntimeError("worker_frame_invalid")
+            payload = json.loads((await self._process.stdout.readexactly(length)).decode())
+        if not isinstance(payload, dict):
+            raise RuntimeError("worker_frame_invalid")
+        return {str(key): value for key, value in payload.items()}
+
+    async def close(self) -> None:
+        process, self._process, self._started = self._process, None, False
+        if process is None:
+            return
+        if process.stdin is not None:
+            process.stdin.close()
+        if process.returncode is None:
+            process.terminate()
+        try:
+            async with asyncio.timeout(2):
+                await process.wait()
+        except TimeoutError:
+            process.kill()
+            await process.wait()

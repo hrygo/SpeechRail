@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
+from sys import executable
 
 from fastapi.testclient import TestClient
 
+import speechrail.app as app_module
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.ports import AudioChunk, SpeechRequest
@@ -151,3 +154,50 @@ def test_speech_endpoint_rejects_voice_outside_server_registry() -> None:
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_not_found"
+
+
+def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
+    monkeypatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-app"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    instances: list[object] = []
+
+    class FakeConfiguredWorker:
+        def __init__(self, config: object) -> None:
+            self.config = config
+            self.started = False
+            self.closed = False
+            instances.append(self)
+
+        async def start(self) -> None:
+            self.started = True
+
+        async def close(self) -> None:
+            self.closed = True
+
+        def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+            async def chunks() -> AsyncIterator[AudioChunk]:
+                yield AudioChunk(response_id="resp-configured", chunk_index=0, audio=b"\x00\x00")
+
+            return chunks()
+
+    monkeypatch.setattr(app_module, "Qwen3TtsWorker", FakeConfiguredWorker)
+    settings = Settings(
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        qwen3_tts_model_dir=snapshot,
+        qwen3_tts_python=Path(executable),
+    )
+
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/v1/audio/speech",
+            json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+        )
+        assert response.status_code == 200
+        assert response.content[:4] == b"RIFF"
+        assert instances[0].started is True
+
+    assert instances[0].closed is True
