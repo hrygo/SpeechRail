@@ -9,6 +9,7 @@ import pytest
 
 import speechrail.backends.qwen3_tts as tts_module
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
+from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import SpeechRequest
 
 
@@ -39,6 +40,14 @@ def test_tts_worker_config_requires_external_snapshot_and_builds_private_command
         "mps",
         "--sample-rate",
         "24000",
+        "--chunk-ms",
+        "100",
+        "--repetition-penalty",
+        "1.25",
+        "--temperature",
+        "0.85",
+        "--top-p",
+        "0.95",
     ]
 
 
@@ -116,6 +125,7 @@ def test_tts_worker_normalizes_private_audio_frames_to_public_chunks(tmp_path: P
         "text": "你好",
         "voice": "default",
         "speed": 1.0,
+        "language": "auto",
     }
     assert chunks[0].response_id == written[0]["request_id"]
     assert chunks[0].chunk_index == 0
@@ -172,6 +182,7 @@ def test_tts_worker_starts_offline_process_and_checks_ready_identity(
         return {
             "type": "ready",
             "model_loaded": True,
+            "backend": TTS_BACKEND_ID,
             "device": "mps",
             "dtype": "float16",
             "sample_rate": 24_000,
@@ -197,3 +208,55 @@ def test_tts_worker_starts_offline_process_and_checks_ready_identity(
         }
     ]
     assert process.terminated is True
+
+
+def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Path) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-cancel"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    aborted = asyncio.Event()
+
+    async def fake_start() -> None:
+        worker._started = True
+
+    async def fake_write(_frame: dict[str, object]) -> None:
+        started.set()
+
+    async def blocked_read() -> dict[str, object]:
+        await release.wait()
+        return {"type": "completed"}
+
+    async def fake_abort() -> None:
+        aborted.set()
+        worker._started = False
+
+    worker.start = fake_start  # type: ignore[method-assign]
+    worker._write = fake_write  # type: ignore[method-assign]
+    worker._read = blocked_read  # type: ignore[method-assign]
+    worker._abort_process = fake_abort  # type: ignore[method-assign]
+
+    async def consume() -> None:
+        async for _chunk in worker.synthesize(SpeechRequest(text="取消", voice="default")):
+            pass
+
+    async def scenario() -> None:
+        task = asyncio.create_task(consume())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert aborted.is_set()
+
+    asyncio.run(scenario())

@@ -7,8 +7,7 @@ info:
 
     The /v1/audio/transcriptions endpoint follows the OpenAI-compatible
     multipart shape so existing SDK clients can be reused. The realtime
-    WebSocket contract is documented in contracts/realtime.md; it currently
-    returns one final result after an audio-buffer commit.
+    WebSocket contract is documented in contracts/realtime-v2.md.
   license:
     name: MIT
     identifier: MIT
@@ -144,6 +143,23 @@ paths:
           $ref: '#/components/responses/QueueFull'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+  /v1/voices:
+    get:
+      operationId: listVoices
+      tags: [speech]
+      summary: List server-owned TTS preset voices
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Public TTS voice catalog
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /v1/audio/speech:
     post:
       operationId: createSpeech
@@ -312,6 +328,30 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/Model'
+    VoiceProfile:
+      type: object
+      required: [id, description, is_default, available]
+      properties:
+        id:
+          type: string
+          enum: [default, warm, bright, calm]
+        description:
+          type: string
+        is_default:
+          type: boolean
+        available:
+          type: boolean
+    VoiceList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceProfile'
     TranscriptionRequest:
       type: object
       required: [file]
@@ -358,6 +398,11 @@ components:
           minimum: 0.25
           maximum: 4
           default: 1
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: auto
     JobCreateRequest:
       type: object
       additionalProperties: false

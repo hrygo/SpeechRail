@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
 
@@ -31,6 +32,11 @@ class Qwen3TtsBackendConfig:
     dtype: Literal["float16", "float32"]
     sample_rate: int
     timeout_seconds: float = 120.0
+    chunk_ms: int = 100
+    repetition_penalty: float = 1.25
+    temperature: float = 0.85
+    top_p: float = 0.95
+    warmup_on_start: bool = True
 
     def __post_init__(self) -> None:
         repository_root = self.repository_root.resolve(strict=True)
@@ -52,12 +58,20 @@ class Qwen3TtsBackendConfig:
             raise ValueError("Qwen3-TTS public PCM profile requires 24000 Hz")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if not 10 <= self.chunk_ms <= 2_000:
+            raise ValueError("chunk_ms must be between 10 and 2000")
+        if not 1.0 <= self.repetition_penalty <= 2.0:
+            raise ValueError("repetition_penalty must be between 1.0 and 2.0")
+        if not 0.0 < self.temperature <= 2.0:
+            raise ValueError("temperature must be between 0 and 2")
+        if not 0.0 < self.top_p <= 1.0:
+            raise ValueError("top_p must be between 0 and 1")
         object.__setattr__(self, "repository_root", repository_root)
         object.__setattr__(self, "python_executable", python_executable)
         object.__setattr__(self, "model_dir", model_dir)
 
     def command(self) -> list[str]:
-        return [
+        command = [
             str(self.python_executable),
             "-m",
             "speechrail.backends.qwen3_tts_worker",
@@ -67,7 +81,18 @@ class Qwen3TtsBackendConfig:
             self.device,
             "--sample-rate",
             str(self.sample_rate),
+            "--chunk-ms",
+            str(self.chunk_ms),
+            "--repetition-penalty",
+            str(self.repetition_penalty),
+            "--temperature",
+            str(self.temperature),
+            "--top-p",
+            str(self.top_p),
         ]
+        if not self.warmup_on_start:
+            command.append("--no-warmup")
+        return command
 
 
 class Qwen3TtsWorker:
@@ -125,7 +150,8 @@ class Qwen3TtsWorker:
                 if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
                     raise RuntimeError(str(ready.get("code", "worker_start_failed")))
                 if (
-                    ready.get("device") != self.config.device
+                    ready.get("backend") != TTS_BACKEND_ID
+                    or ready.get("device") != self.config.device
                     or ready.get("dtype") != self.config.dtype
                     or ready.get("sample_rate") != self.config.sample_rate
                 ):
@@ -150,35 +176,42 @@ class Qwen3TtsWorker:
                         "text": request.text,
                         "voice": request.voice,
                         "speed": request.speed,
+                        "language": request.language,
                     }
                 )
                 expected_chunk_index = 0
-                while True:
-                    frame = await self._read()
-                    if frame.get("request_id") != response_id:
-                        raise RuntimeError("worker_response_id_mismatch")
-                    if frame.get("type") == "completed":
-                        return
-                    if frame.get("type") == "error":
-                        raise RuntimeError(str(frame.get("code", "worker_inference_error")))
-                    if frame.get("type") != "audio":
-                        raise RuntimeError("worker_frame_invalid")
-                    chunk_index = frame.get("chunk_index")
-                    encoded = frame.get("pcm_b64")
-                    if chunk_index != expected_chunk_index or not isinstance(encoded, str):
-                        raise RuntimeError("worker_audio_frame_invalid")
-                    try:
-                        audio = base64.b64decode(encoded, validate=True)
-                    except ValueError as exc:
-                        raise RuntimeError("worker_audio_frame_invalid") from exc
-                    if not audio or len(audio) % 2:
-                        raise RuntimeError("worker_audio_frame_invalid")
-                    yield AudioChunk(
-                        response_id=response_id,
-                        chunk_index=expected_chunk_index,
-                        audio=audio,
-                    )
-                    expected_chunk_index += 1
+                completed = False
+                try:
+                    while True:
+                        frame = await self._read()
+                        if frame.get("request_id") != response_id:
+                            raise RuntimeError("worker_response_id_mismatch")
+                        if frame.get("type") == "completed":
+                            completed = True
+                            return
+                        if frame.get("type") == "error":
+                            raise RuntimeError(str(frame.get("code", "worker_inference_error")))
+                        if frame.get("type") != "audio":
+                            raise RuntimeError("worker_frame_invalid")
+                        chunk_index = frame.get("chunk_index")
+                        encoded = frame.get("pcm_b64")
+                        if chunk_index != expected_chunk_index or not isinstance(encoded, str):
+                            raise RuntimeError("worker_audio_frame_invalid")
+                        try:
+                            audio = base64.b64decode(encoded, validate=True)
+                        except (ValueError, TypeError) as exc:
+                            raise RuntimeError("worker_audio_frame_invalid") from exc
+                        if not audio or len(audio) % 2:
+                            raise RuntimeError("worker_audio_frame_invalid")
+                        yield AudioChunk(
+                            response_id=response_id,
+                            chunk_index=expected_chunk_index,
+                            audio=audio,
+                        )
+                        expected_chunk_index += 1
+                finally:
+                    if not completed:
+                        await self._abort_process()
 
         return stream()
 
@@ -206,6 +239,14 @@ class Qwen3TtsWorker:
         process, self._process, self._started = self._process, None, False
         if process is None:
             return
+        await self._terminate_process(process)
+
+    async def _abort_process(self) -> None:
+        process, self._process, self._started = self._process, None, False
+        if process is not None:
+            await self._terminate_process(process)
+
+    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
         if process.stdin is not None:
             process.stdin.close()
         if process.returncode is None:

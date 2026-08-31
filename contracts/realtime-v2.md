@@ -209,6 +209,9 @@ audio format。v2.0 不接受 voice sample、voice clone prompt 或任意文件/
 response；`speech_input.flush` 强制处理当前可读文本，`speech_input.commit` 处理剩余文本并
 关闭输入。服务端不得逐 token 启动独立推理。
 
+`speech_input.flush` 和 `speech_input.commit` 可选携带 `speed`（0.25..4.0，默认 1.0），
+仅作用于这次排出的文本。
+
 ### 3.2 response 与音频块
 
 每个被接受的文本单元先产生唯一 response：
@@ -217,7 +220,7 @@ response；`speech_input.flush` 强制处理当前可读文本，`speech_input.c
 {
   "type": "response.created",
   "response_id": "resp_...",
-  "voice": "speechrail/voice/zh-default",
+  "voice": "default",
   "audio_format": {
     "type": "audio/pcm",
     "rate": 24000,

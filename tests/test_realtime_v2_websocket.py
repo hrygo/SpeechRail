@@ -350,6 +350,47 @@ def test_v2_speech_streams_ordered_audio_and_completes_on_commit() -> None:
         assert terminal["type"] == "session.completed"
 
 
+def test_v2_speech_forwards_commit_speed_to_tts_backend() -> None:
+    speeds: list[float] = []
+
+    class SpeedCaptureSynthesizer:
+        def synthesize(self, request: SpeechRequest):
+            speeds.append(request.speed)
+
+            async def chunks():
+                yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+            return chunks()
+
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=SpeedCaptureSynthesizer(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "speech",
+                    "model": "speechrail/qwen3-tts",
+                    "voice": "default",
+                    "audio_format": PCM16_24K,
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "speech_input.append", "text": "你好"})
+        socket.send_json({"type": "speech_input.commit", "speed": 1.25})
+        assert socket.receive_json()["type"] == "response.created"
+        assert socket.receive_json()["type"] == "response.audio.delta"
+        assert socket.receive_json()["type"] == "response.audio.completed"
+        assert socket.receive_json()["type"] == "session.completed"
+
+    assert speeds == [1.25]
+
+
 def test_v2_speech_cancel_stops_pending_audio_before_the_next_delta() -> None:
     client = TestClient(
         create_app(
@@ -379,6 +420,39 @@ def test_v2_speech_cancel_stops_pending_audio_before_the_next_delta() -> None:
 
         assert created["type"] == "response.created"
         assert cancelled["type"] == "response.audio.cancelled"
+
+
+def test_v2_speech_cancel_after_commit_still_completes_the_session() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=SlowSpeechSynthesizer(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "speech",
+                    "model": "speechrail/qwen3-tts",
+                    "voice": "default",
+                    "audio_format": PCM16_24K,
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "speech_input.append", "text": "请取消"})
+        socket.send_json({"type": "speech_input.commit"})
+
+        created = socket.receive_json()
+        socket.send_json({"type": "response.cancel", "response_id": created["response_id"]})
+        cancelled = socket.receive_json()
+        completed = socket.receive_json()
+
+        assert created["type"] == "response.created"
+        assert cancelled["type"] == "response.audio.cancelled"
+        assert completed["type"] == "session.completed"
 
 
 def _pcm16(value: bytes) -> str:

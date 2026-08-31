@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import math
 import struct
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -42,6 +43,7 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.realtime_v2 import RealtimeV2Error
+from speechrail.domain.tts import VOICE_PROFILES
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.realtime.events import RealtimeSession, SessionError
 from speechrail.realtime.outbound import BoundedOutboundEventPump, SlowConsumerError
@@ -78,6 +80,7 @@ class _SpeechHTTPBody(BaseModel):
     voice: str = Field(min_length=1, max_length=200)
     response_format: Literal["pcm", "wav"] = "wav"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    language: str = Field(default="auto", min_length=1, max_length=64)
 
     @field_validator("input", "voice")
     @classmethod
@@ -86,6 +89,24 @@ class _SpeechHTTPBody(BaseModel):
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+    @field_validator("language")
+    @classmethod
+    def normalize_language(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+
+def _speech_speed(event: dict[str, Any]) -> float:
+    """Validate the optional realtime speed field at the protocol boundary."""
+    value = event.get("speed", 1.0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RealtimeV2Error("invalid speech speed", code="invalid_speed")
+    speed = float(value)
+    if not math.isfinite(speed) or not 0.25 <= speed <= 4.0:
+        raise RealtimeV2Error("invalid speech speed", code="invalid_speed")
+    return speed
 
 
 class _JobHTTPBody(BaseModel):
@@ -261,6 +282,11 @@ def create_app(
                 dtype=resolved.dtype,
                 sample_rate=resolved.tts_sample_rate,
                 timeout_seconds=resolved.request_timeout_seconds,
+                chunk_ms=resolved.tts_chunk_ms,
+                repetition_penalty=resolved.tts_repetition_penalty,
+                temperature=resolved.tts_temperature,
+                top_p=resolved.tts_top_p,
+                warmup_on_start=resolved.tts_warmup_on_start,
             )
         )
         tts_synthesizer = tts_worker
@@ -424,6 +450,22 @@ def create_app(
             ],
         }
 
+    @app.get("/v1/voices")
+    async def voices() -> dict[str, Any]:
+        """List the server-owned preset voices without exposing model internals."""
+        return {
+            "object": "list",
+            "data": [
+                {
+                    "id": voice_id,
+                    "description": VOICE_PROFILES[voice_id].description,
+                    "is_default": VOICE_PROFILES[voice_id].is_default,
+                    "available": tts_synthesizer is not None,
+                }
+                for voice_id in resolved.tts_voice_ids
+            ],
+        }
+
     @app.post("/v1/audio/transcriptions")
     async def transcription(
         request: Request,
@@ -564,6 +606,7 @@ def create_app(
             voice=body.voice,
             output_format="pcm16" if body.response_format == "pcm" else "wav",
             speed=body.speed,
+            language=body.language,
         )
 
         async def audio_stream() -> AsyncIterator[bytes]:
@@ -803,7 +846,7 @@ def create_app(
                 )
             )
 
-        async def synthesize_text(text: str) -> None:
+        async def synthesize_text(text: str, *, speed: float = 1.0) -> None:
             if not text:
                 return
             if not isinstance(session, SpeechSession) or tts_synthesizer is None:
@@ -816,6 +859,8 @@ def create_app(
                 voice=session.voice,
                 output_format="pcm16",
                 sample_rate=24_000,
+                speed=speed,
+                language=session.language,
             )
             output = BoundedOutboundEventPump(
                 max_events=resolved.realtime_outbound_max_events,
@@ -902,7 +947,9 @@ def create_app(
                         if model != resolved.tts_model_id:
                             raise RealtimeV2Error("unknown model", code="model_not_found")
                         session = SpeechSession(
-                            max_text_chars=100_000, request_id=session.request_id
+                            max_text_chars=100_000,
+                            allowed_voices=resolved.tts_voice_ids,
+                            request_id=session.request_id,
                         )
                         await websocket.send_json(session.configure(configured))
                     else:
@@ -961,9 +1008,12 @@ def create_app(
                         raise RealtimeV2Error(
                             "a response is already active", code="response_in_progress"
                         )
+                    speed = _speech_speed(event)
                     text = session.flush_text()
                     if text:
-                        active_synthesis = asyncio.create_task(synthesize_text(text))
+                        active_synthesis = asyncio.create_task(
+                            synthesize_text(text, speed=speed)
+                        )
                 elif event_type == "speech_input.commit":
                     if not isinstance(session, SpeechSession):
                         raise RealtimeV2Error(
@@ -973,9 +1023,12 @@ def create_app(
                         raise RealtimeV2Error(
                             "a response is already active", code="response_in_progress"
                         )
+                    speed = _speech_speed(event)
                     text = session.commit_text()
                     if text:
-                        active_synthesis = asyncio.create_task(synthesize_text(text))
+                        active_synthesis = asyncio.create_task(
+                            synthesize_text(text, speed=speed)
+                        )
                     else:
                         completed = session.complete_if_input_committed()
                         if completed is not None:
@@ -996,7 +1049,17 @@ def create_app(
                             await active_synthesis
                     await websocket.send_json(session.response_cancel(response_id=response_id))
                     active_synthesis = None
+                    completed = session.complete_if_input_committed()
+                    if completed is not None:
+                        await websocket.send_json(completed)
+                        await websocket.close()
+                        return
                 elif event_type == "session.cancel":
+                    if active_synthesis is not None and not active_synthesis.done():
+                        active_synthesis.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await active_synthesis
+                        active_synthesis = None
                     await websocket.send_json(session.cancel())
                     await websocket.close()
                     return

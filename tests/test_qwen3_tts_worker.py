@@ -12,8 +12,8 @@ from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, wri
 class FakeEngine:
     identity = TtsWorkerIdentity(device="mps", dtype="float16", sample_rate=24_000)
 
-    def synthesize(self, text: str, *, voice: str, speed: float):
-        assert (text, voice, speed) == ("你好。", "default", 1.0)
+    def synthesize(self, text: str, *, voice: str, speed: float, language: str):
+        assert (text, voice, speed, language) == ("你好。", "default", 1.0, "auto")
         yield b"\x00\x00"
         yield b"\x01\x00"
 
@@ -64,6 +64,7 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
     assert ready == {
         "version": PROTOCOL_VERSION,
         "type": "ready",
+        "backend": "mlx-qwen3-tts-voice-design",
         "device": "mps",
         "dtype": "float16",
         "sample_rate": 24_000,

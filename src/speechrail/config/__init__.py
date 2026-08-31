@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from speechrail.domain.tts import VOICE_PROFILES
 from speechrail.runtime.resource_governor import GovernorLimits
 
 
@@ -23,11 +24,16 @@ class Settings(BaseSettings):
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
     tts_model_id: str = "speechrail/qwen3-tts"
-    tts_voice_ids: tuple[str, ...] = ("default",)
+    tts_voice_ids: tuple[str, ...] = ("default", "warm", "bright", "calm")
     qwen3_tts_model_dir: Path | None = None
     qwen3_tts_python: Path | None = None
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
+    tts_chunk_ms: int = Field(default=100, ge=10, le=2_000)
+    tts_repetition_penalty: float = Field(default=1.25, ge=1.0, le=2.0)
+    tts_temperature: float = Field(default=0.85, gt=0.0, le=2.0)
+    tts_top_p: float = Field(default=0.95, gt=0.0, le=1.0)
+    tts_warmup_on_start: bool = True
     wlk_streaming_url: str | None = None
     diarization_model_path: Path | None = None
     diarization_embedding_model_path: Path | None = None
@@ -109,8 +115,10 @@ class Settings(BaseSettings):
             raise ValueError("CPU profile requires float32")
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
-        if not self.tts_voice_ids or any(not voice.strip() for voice in self.tts_voice_ids):
-            raise ValueError("tts_voice_ids must contain non-empty preset voices")
+        if not self.tts_voice_ids or any(
+            not voice.strip() or voice not in VOICE_PROFILES for voice in self.tts_voice_ids
+        ):
+            raise ValueError("tts_voice_ids must contain registered preset voices")
         if self.tts_sample_rate != 24_000:
             raise ValueError("tts_sample_rate must be 24000 for the public PCM profile")
         return self

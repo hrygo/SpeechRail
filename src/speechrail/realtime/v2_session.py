@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
@@ -268,7 +268,13 @@ class TranscriptionSession(_BaseSession):
 class SpeechSession(_BaseSession):
     """State and event invariants for a Realtime v2 TTS session."""
 
-    def __init__(self, *, max_text_chars: int, request_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_text_chars: int,
+        allowed_voices: Collection[str] | None = None,
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(expected_type="speech", request_id=request_id)
         if max_text_chars <= 0:
             raise ValueError("max_text_chars must be positive")
@@ -278,7 +284,9 @@ class SpeechSession(_BaseSession):
         self._active_response_id: str | None = None
         self._next_chunk_index = 0
         self._cancelled_responses: set[str] = set()
+        self._allowed_voices = None if allowed_voices is None else frozenset(allowed_voices)
         self.voice = ""
+        self.language = "auto"
         self.audio_format: dict[str, int | str] = dict(PCM16_24K)
 
     def append_text(self, text: str) -> None:
@@ -368,10 +376,17 @@ class SpeechSession(_BaseSession):
         return self._event("response.audio.cancelled", response_id=response_id)
 
     def _validate_configure(self, session: Mapping[str, Any]) -> None:
-        if not isinstance(session.get("voice"), str) or not session["voice"].strip():
+        voice = session.get("voice")
+        if not isinstance(voice, str) or not voice.strip():
             raise RealtimeV2Error("speech sessions require a voice", code="invalid_session")
+        if self._allowed_voices is not None and voice.strip() not in self._allowed_voices:
+            raise RealtimeV2Error("unknown preset voice", code="voice_not_found")
+        language = session.get("language", "auto")
+        if not isinstance(language, str) or not language.strip() or len(language) > 64:
+            raise RealtimeV2Error("invalid speech language", code="invalid_session")
         _validate_pcm16(session.get("audio_format"), expected=PCM16_24K)
-        self.voice = session["voice"].strip()
+        self.voice = voice.strip()
+        self.language = language.strip()
         self.audio_format = dict(PCM16_24K)
 
     def _require_active_response(self, response_id: str) -> None:
@@ -402,4 +417,7 @@ def _decode_pcm16(encoded_audio: object) -> bytes:
 
 def _validate_pcm16(value: object, *, expected: Mapping[str, int | str] = PCM16) -> None:
     if not isinstance(value, Mapping) or dict(value) != expected:
-        raise RealtimeV2Error("only 16 kHz mono PCM16 is supported", code="invalid_audio_format")
+        rate = expected.get("rate", 16_000)
+        raise RealtimeV2Error(
+            f"only {rate} Hz mono PCM16 is supported", code="invalid_audio_format"
+        )
