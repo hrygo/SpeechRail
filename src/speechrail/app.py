@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import struct
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -16,6 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
+from starlette.websockets import WebSocketDisconnect
 
 from speechrail import __version__
 from speechrail.backends.qwen3_native import (
@@ -593,6 +595,7 @@ def create_app(
             max_audio_bytes=resolved.max_realtime_buffer_bytes,
             max_frame_bytes=resolved.max_realtime_frame_bytes,
         )
+        active_synthesis: asyncio.Task[None] | None = None
 
         async def transcribe_item(audio: bytes) -> None:
             if not audio:
@@ -714,16 +717,31 @@ def create_app(
                         raise RealtimeV2Error(
                             "event is not valid for transcription", code="invalid_event"
                         )
-                    await synthesize_text(session.flush_text())
+                    if active_synthesis is not None and not active_synthesis.done():
+                        raise RealtimeV2Error(
+                            "a response is already active", code="response_in_progress"
+                        )
+                    text = session.flush_text()
+                    if text:
+                        active_synthesis = asyncio.create_task(synthesize_text(text))
                 elif event_type == "speech_input.commit":
                     if not isinstance(session, SpeechSession):
                         raise RealtimeV2Error(
                             "event is not valid for transcription", code="invalid_event"
                         )
-                    await synthesize_text(session.commit_text())
-                    if session.state == "committed":
-                        await websocket.close()
-                        return
+                    if active_synthesis is not None and not active_synthesis.done():
+                        raise RealtimeV2Error(
+                            "a response is already active", code="response_in_progress"
+                        )
+                    text = session.commit_text()
+                    if text:
+                        active_synthesis = asyncio.create_task(synthesize_text(text))
+                    else:
+                        completed = session.complete_if_input_committed()
+                        if completed is not None:
+                            await websocket.send_json(completed)
+                            await websocket.close()
+                            return
                 elif event_type == "response.cancel":
                     if not isinstance(session, SpeechSession):
                         raise RealtimeV2Error(
@@ -732,7 +750,12 @@ def create_app(
                     response_id = event.get("response_id")
                     if not isinstance(response_id, str):
                         raise RealtimeV2Error("response_id is required", code="invalid_event")
+                    if active_synthesis is not None and not active_synthesis.done():
+                        active_synthesis.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await active_synthesis
                     await websocket.send_json(session.response_cancel(response_id=response_id))
+                    active_synthesis = None
                 elif event_type == "session.cancel":
                     await websocket.send_json(session.cancel())
                     await websocket.close()
@@ -758,6 +781,13 @@ def create_app(
                 )
             )
             await websocket.close(code=1013)
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if active_synthesis is not None and not active_synthesis.done():
+                active_synthesis.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await active_synthesis
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:

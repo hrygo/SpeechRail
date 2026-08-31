@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 
 from fastapi.testclient import TestClient
@@ -26,6 +27,16 @@ class FakeSpeechSynthesizer:
     def synthesize(self, request: SpeechRequest):
         async def chunks():
             assert request.text == "你好"
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
+class SlowSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            assert request.text == "请取消"
+            await asyncio.sleep(1)
             yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
 
         return chunks()
@@ -122,6 +133,37 @@ def test_v2_speech_streams_ordered_audio_and_completes_on_commit() -> None:
         assert delta["type"] == "response.audio.delta"
         assert completed["type"] == "response.audio.completed"
         assert terminal["type"] == "session.completed"
+
+
+def test_v2_speech_cancel_stops_pending_audio_before_the_next_delta() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=SlowSpeechSynthesizer(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "speech",
+                    "model": "speechrail/qwen3-tts",
+                    "voice": "default",
+                    "audio_format": PCM16_24K,
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "speech_input.append", "text": "请取消"})
+        socket.send_json({"type": "speech_input.flush"})
+
+        created = socket.receive_json()
+        socket.send_json({"type": "response.cancel", "response_id": created["response_id"]})
+        cancelled = socket.receive_json()
+
+        assert created["type"] == "response.created"
+        assert cancelled["type"] == "response.audio.cancelled"
 
 
 def _pcm16(value: bytes) -> str:
