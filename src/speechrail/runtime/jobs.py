@@ -22,6 +22,7 @@ class JobRecord:
     owner: str
     request: dict[str, str]
     error_code: str | None
+    result_ref: str | None
 
 
 class JobRepository:
@@ -51,13 +52,13 @@ class JobRepository:
                 """,
                 (job_id, kind, owner, json.dumps(request, separators=(",", ":")), _now()),
             )
-        return JobRecord(job_id, kind, "queued", owner, dict(request), None)
+        return JobRecord(job_id, kind, "queued", owner, dict(request), None, None)
 
     def get(self, job_id: str, *, owner: str) -> JobRecord | None:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, kind, state, owner, request_json, error_code
+                SELECT id, kind, state, owner, request_json, error_code, result_ref
                 FROM jobs WHERE id = ? AND owner = ?
                 """,
                 (job_id, owner),
@@ -69,7 +70,7 @@ class JobRepository:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT id, kind, state, owner, request_json, error_code
+                SELECT id, kind, state, owner, request_json, error_code, result_ref
                 FROM jobs WHERE state = 'queued' ORDER BY updated_at, id LIMIT 1
                 """
             ).fetchone()
@@ -85,6 +86,25 @@ class JobRepository:
             if updated.rowcount != 1:
                 return None
             return _record({**dict(row), "state": "running"})
+
+    def complete(self, job_id: str, *, result_ref: str) -> JobRecord:
+        if not result_ref:
+            raise ValueError("result_ref must not be empty")
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE jobs
+                SET state = 'completed', result_ref = ?, completed_at = ?, updated_at = ?
+                WHERE id = ? AND state = 'running'
+                """,
+                (result_ref, _now(), _now(), job_id),
+            )
+        if updated.rowcount != 1:
+            raise ValueError("job is not running")
+        record = self._get_any(job_id)
+        if record is None:
+            raise RuntimeError("completed job disappeared")
+        return record
 
     def cancel(self, job_id: str, *, owner: str) -> JobRecord | None:
         with self._connect() as connection:
@@ -108,6 +128,25 @@ class JobRepository:
             )
         return updated.rowcount
 
+    def delete_result(self, job_id: str, *, owner: str) -> JobRecord | None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE jobs SET result_ref = NULL, updated_at = ? WHERE id = ? AND owner = ?",
+                (_now(), job_id, owner),
+            )
+        return self.get(job_id, owner=owner)
+
+    def expire_completed(self, *, before: str) -> int:
+        with self._connect() as connection:
+            updated = connection.execute(
+                """
+                UPDATE jobs SET state = 'expired', result_ref = NULL, updated_at = ?
+                WHERE state = 'completed' AND completed_at IS NOT NULL AND completed_at < ?
+                """,
+                (_now(), before),
+            )
+        return updated.rowcount
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
@@ -120,6 +159,8 @@ class JobRepository:
                     owner TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     error_code TEXT,
+                    result_ref TEXT,
+                    completed_at TEXT,
                     updated_at TEXT NOT NULL
                 )
                 """
@@ -129,6 +170,17 @@ class JobRepository:
         connection = sqlite3.connect(self._database)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _get_any(self, job_id: str) -> JobRecord | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, kind, state, owner, request_json, error_code, result_ref
+                FROM jobs WHERE id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        return _record(row)
 
 
 def _record(row: sqlite3.Row | dict[str, object] | None) -> JobRecord | None:
@@ -141,6 +193,7 @@ def _record(row: sqlite3.Row | dict[str, object] | None) -> JobRecord | None:
         owner=str(row["owner"]),
         request=json.loads(str(row["request_json"])),
         error_code=str(row["error_code"]) if row["error_code"] is not None else None,
+        result_ref=str(row["result_ref"]) if row["result_ref"] is not None else None,
     )
 
 
