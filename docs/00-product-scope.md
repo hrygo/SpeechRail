@@ -7,74 +7,40 @@ date: 2026-08-31
 
 # SpeechRail 产品范围
 
-## 一句话定位
+SpeechRail 是一项本地优先的共享语音识别服务：一次加载、管理 Qwen3-ASR runtime，向
+多个应用提供稳定的转写接口。英文技术标识为 `speechrail`，中文名为“声轨”。
 
-SpeechRail 是一个面向本机和可信局域网的共享语音识别基础服务：一次加载和管理
-Qwen3-ASR 能力，向多个应用提供稳定、可替换运行时的标准 API。
+## 服务拥有的责任
 
-中文产品名为“声轨”，英文技术标识统一使用 `speechrail`。
+- Qwen3-ASR snapshot 预检、隔离 worker、设备/dtype 身份和有界推理准入；
+- OpenAI-compatible 文件转写、健康、模型清单及统一错误 envelope；
+- 当前有限的 Realtime 和 legacy 兼容协议；
+- 认证配置、request ID、无正文的运行诊断边界。
 
-## 目标用户
+## 不属于服务的责任
 
-1. QwenPaw：录音结束后上传文件，得到一段文本。
-2. `voice-realtime`：实时字幕和会议录音，需要 partial、confirmed、时间轴、EOF
-   冲刷和重连兼容。
-3. Hermes Agent：通过 OpenAI-compatible STT 配置转写语音消息和桌面语音输入。
-4. 后续应用：只依赖公共 API，不需要了解 Qwen3-ASR、WhisperLiveKit、MPS 或
-   本机模型路径。
+- 麦克风、扬声器、TTS、回声消除；
+- 会议状态、UI、SRT、PostgreSQL、Sortformer、AudioHub；
+- QwenPaw/Hermes 的 prompt、会话、权限和聊天模型；
+- LM Studio 的 chat/embedding 运行时。
 
-## 产品能力边界
+这些职责仍由各消费应用拥有。SpeechRail 不能 import 或托管 `voice-realtime` 的会议/UI
+模块来实现所谓“集成”。
 
-### SpeechRail 拥有
+## 目标用户与当前适配度
 
-- ASR 模型 profile、加载和生命周期。
-- 批量/文件转写。
-- 实时转写连接、会话、背压和 EOF 语义。
-- OpenAI-compatible REST API。
-- OpenAI Realtime 风格转写 WebSocket。
-- `voice-realtime` 旧 WLK `/asr` WebSocket 兼容层。
-- 认证、限流、请求 ID、健康检查、运行状态和指标。
-- 运行时/模型指纹和不含正文的审计信息。
+| 用户 | 需求 | 当前状态 |
+|---|---|---|
+| QwenPaw | 上传录音并获得文本 | 已使用 `whisper_api` 完成本机 smoke |
+| OpenAI-compatible 客户端 | multipart 文件转写 | 已实现 REST 契约 |
+| Hermes Agent | 使用独立 STT endpoint | 文档化，尚未真实验收 |
+| `voice-realtime` | partial 字幕/会议 EOF | 尚未迁移；不能使用当前 `/asr` 替换 WLK |
+| 新 WebSocket 客户端 | 发送 PCM 后获得最终文本 | 可用，但没有 partial streaming |
 
-### SpeechRail 不拥有
+## 不变的产品约束
 
-- 麦克风采集和扬声器播放。
-- TTS、回声消除和打断策略。
-- 会议状态机、会议 UI 和 PostgreSQL 会议事实源。
-- Sortformer/CAM++ 说话人分离的业务决策。
-- QwenPaw、Hermes 或其他 Agent 的 prompt、会话和权限。
-- LM Studio 的聊天模型、推理链和 thinking 策略。
-
-## 核心成功标准
-
-| 维度 | 标准 |
-|---|---|
-| 接入 | OpenAI SDK 可直接调用；QwenPaw/Hermes 无需自定义 SDK |
-| 实时 | 能发送 16 kHz mono s16le PCM，收到 partial 和 final 事件 |
-| 兼容 | 旧 `voice-realtime` 的 `/asr`、空 PCM EOF、full snapshot 行为保持可用 |
-| 隔离 | 模型路径、模型依赖和运行时不进入消费方代码 |
-| 安全 | 默认只监听 loopback；LAN 模式必须有 Bearer key |
-| 隐私 | 默认不持久化音频，不在日志记录 API key 或完整转写正文 |
-| 可回退 | 任一迁移阶段都能通过端口/URL 切回旧 WLK |
-| 可追溯 | 每次模型调用可以关联 request ID、backend、device、dtype、版本和耗时 |
-
-## 术语
-
-| 术语 | 定义 |
-|---|---|
-| batch transcription | 上传完整音频文件后返回完整文本；对应 REST |
-| realtime transcription | 发送连续音频块并接收 partial/final；对应现代 WS |
-| legacy WLK | 当前 `voice-realtime` 使用的 `/asr` full snapshot 协议 |
-| backend profile | 模型 + 运行时 + 设备 + 参数的不可变配置 |
-| adapter | 将 vendor/运行时协议转换为 SpeechRail 领域事件的窄边界 |
-| compatibility alias | 为旧客户端保留的模型名或路径；必须记录弃用策略 |
-
-## 明确的产品取舍
-
-- 名称不包含 Qwen、Whisper、Hermes 或 `voice-realtime`，避免模型/客户端绑定。
-- 公共接口只表达“转写”，不暴露 `TranscriptionEngine`、worker pipe、WLK `FrontData`
-  等实现细节。
-- 第一阶段只做语音转文字；TTS、翻译、摘要、说话人分离作为消费者或后续独立能力。
-- 默认一台机器一个 SpeechRail 服务实例；服务内部对推理进行有界排队，不用多个
-  Uvicorn worker 复制模型。
-- 默认模型为 `speechrail/qwen3-asr-1.7b`；模型别名用于兼容，不改变实际模型身份。
+- 模型 snapshot 在仓库外；服务和请求不下载模型、不读取远程音频 URL。
+- 默认只监听 loopback；非 loopback 需要 key，额外网络防护须在实现后再启用。
+- 音频/转写默认瞬态，不能提交或记录其原始内容。
+- 公共模型 ID 为 `speechrail/qwen3-asr-1.7b`；兼容 aliases 不改变真实后端身份。
+- 0.x 优先采用兼容扩展；破坏性变更使用 `/v2` 和迁移说明。

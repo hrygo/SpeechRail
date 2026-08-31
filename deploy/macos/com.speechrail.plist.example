@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.speechrail</string>
+  <key>WorkingDirectory</key>
+  <string>&lt;absolute-path-to-SpeechRail&gt;</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>&lt;absolute-path-to-uv&gt;</string>
+    <string>run</string>
+    <string>speechrail</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>StandardOutPath</key>
+  <string>&lt;absolute-path-to-stdout-log&gt;</string>
+  <key>StandardErrorPath</key>
+  <string>&lt;absolute-path-to-stderr-log&gt;</string>
+</dict>
+</plist>

@@ -15,10 +15,14 @@
   与 legacy `/asr` 的有序协议测试路径。
 - 默认服务现在会在配置外部 snapshot 与专用 Python runtime 后启动单一 Qwen3 worker，
   使用固定 `ffmpeg` argv 解码上传音频，并验证 worker 的 MPS/float16 身份。
+- 完成本机 Qwen3 worker 的 REST smoke，以及 QwenPaw `whisper_api` provider 指向
+  SpeechRail 后的中文短音频 smoke。
+- 新增按用户、开发和运维职责组织的文档、macOS `launchd` 模板及运行/迁移边界说明。
 
 ### Known limitations
 
 - WLK sidecar、Hermes 与 `voice-realtime` 的真实切换/回滚仍待分别按 Runbook 验收。
 - 没有配置 snapshot 或专用 runtime 的部署仍安全返回 `backend_not_ready`；本机 runtime
   配置保留在被忽略的 `.env`，不提交绝对模型路径或任何凭据。
-- 未启动真实模型、未切换任何现有客户端、未修改 `voice-realtime`。
+- `/v1/realtime` 当前是 commit 后 batch 转写，没有 delta；legacy `/asr` 仅有 config/EOF
+  骨架，不能替代旧 WLK。`voice-realtime` 未被修改。

@@ -6,130 +6,51 @@ date: 2026-08-31
 
 # SpeechRail 测试与验收
 
-## 1. 测试层级
+## 自动化门禁
 
-```text
-纯函数单元测试
-  → adapter/vendor fixture 测试
-    → FastAPI/WS 契约测试
-      → 本机真实模型 smoke
-        → 三客户端集成验收
-```
-
-多数测试不加载模型、不访问网络、不读真实音频；真实模型只作为发布前的少量门禁。
-
-## 2. 单元测试
-
-必须覆盖：
-
-- language alias normalization。
-- model canonical/alias resolution。
-- segment 时间戳和 source epoch 校验。
-- WLK full snapshot → `TranscriptWindow`。
-- `TranscriptWindow` → WLK `lines`/`buffer_transcription`。
-- Qwen worker framed protocol 的长度、request ID、错误码和 EOF。
-- Base64 realtime event 解析和非法状态拒绝。
-- OpenAI response format：json、verbose_json、text、srt、vtt。
-- 错误 envelope、request ID、retryable 和 `Retry-After`。
-- 临时文件在成功、失败、超时和取消路径都清理。
-
-## 3. 契约测试
-
-### REST
+提交前运行：
 
 ```bash
-uv run pytest tests/test_app_contract.py -q --no-cov
+cd <path-to-SpeechRail>
+uv run --extra dev pytest
+uv run --extra dev ruff check src tests
+uv run --extra dev mypy src
+npx @redocly/cli lint contracts/openapi.yaml
+git diff --check
 ```
 
-要求：
+测试使用 fake backend 和合成/脱敏数据，不加载模型、不访问网络，也不提交真实音频。
+至少覆盖：模型 aliases、错误 envelope、上传限制、队列、响应格式、worker frame 协议、
+snapshot preflight、Realtime 的 update/append/commit 顺序，以及 legacy config/EOF 行为。
 
-- `/health` 在 backend not ready 时仍返回 200 且 `ready=false`。
-- `/readyz` 在 backend not ready 时返回 503。
-- `/v1/models` 返回 canonical ID 和兼容 alias。
-- multipart 缺 file 返回 422 的统一 envelope。
-- 未认证、未知模型、队列满、模型未 ready 返回稳定错误码。
-- OpenAPI operationId、响应 schema 和代码路由一致。
+## 真实 worker smoke
 
-### Realtime
-
-- 创建 session 后只能按规定顺序发送 update/append/commit。
-- partial delta 不被误判为 completed。
-- commit 后只产生一次 completed 或一个明确 error。
-- 超过单帧/单连接上限会释放资源。
-
-### Legacy WLK
-
-- 首帧为 `config`。
-- 二进制 PCM 顺序不变。
-- full snapshot 字段与旧 `voice-realtime` consumer 兼容。
-- 空 PCM 能触发 `ready_to_stop`。
-- token header/query 规则与弃用策略一致。
-
-## 4. 真实模型 smoke
-
-模型准备完成后执行：
+在完整外部 snapshot 和 runtime 配置下：
 
 ```bash
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
+curl http://127.0.0.1:8201/v1/models
 curl -X POST http://127.0.0.1:8201/v1/audio/transcriptions \
-  -F 'file=@fixtures/zh-short.wav' \
+  -F 'file=@sample.wav' \
   -F 'model=speechrail/qwen3-asr-1.7b' \
   -F 'language=zh' \
   -F 'response_format=verbose_json'
 ```
 
-记录文本、duration、segment 数量、TTFT/RTF、峰值内存、device/dtype 和 request ID；
-不要把真实音频或完整 transcript 提交到仓库。
+验收 HTTP 状态、非空文本、`X-Request-ID`、模型设备/dtype 与预期 profile。测试音频由
+操作者本地保存，结束后删除；提交/报告只保留最小结果摘要而非文本或音频。
 
-实时 smoke 使用固定 16 kHz mono PCM：
+## 集成验收矩阵
 
-1. 发送 session update。
-2. 发送 100–500 ms PCM append。
-3. 检查 delta 到达。
-4. commit。
-5. 检查 completed 和时间轴。
-6. 断线/重连时检查资源释放和 session 行为。
-
-## 5. 三客户端验收矩阵
-
-| 客户端 | 接口 | 必验行为 |
+| 客户端/接口 | 当前状态 | 通过条件 |
 |---|---|---|
-| QwenPaw | REST multipart | 录音 → 中文文本；完整 app 重启后仍生效 |
-| Hermes Agent | REST multipart via OpenAI SDK | 语音消息 → 文本；不影响聊天 endpoint |
-| voice-realtime | legacy `/asr` → realtime | partial、confirmed、EOF、会议封存和 SRT 不回退 |
+| REST curl | 已完成本机 smoke | health / readyz / models 正常，短音频得到结果 |
+| QwenPaw `whisper_api` | 已完成本机 smoke | provider 指向 `8201/v1`、应用完整重启、短中文音频有文本 |
+| OpenAI SDK | 可按兼容契约接入 | multipart 调用和错误处理符合 OpenAPI |
+| Hermes Agent | 待验收 | STT 专用 base URL/model 生效且不改变聊天 endpoint |
+| `/v1/realtime` | 协议测试 | update → append → commit → 一次 completed；不要求 delta |
+| `voice-realtime` `/asr` | 不可验收为转写 | 当前只验证 config / EOF；不允许作为替换结论 |
 
-## 6. 质量门禁
-
-```bash
-uv run pytest
-uv run ruff check src tests
-uv run mypy src
-```
-
-OpenAPI 校验：
-
-```bash
-npx @redocly/cli lint contracts/openapi.yaml
-```
-
-发布前还需要真实运行时检查：
-
-- `lms ps`/系统资源没有异常；SpeechRail worker identity 与 profile 相符。
-- 没有隐式模型下载。
-- 单 worker 不会因 HTTP 并发复制模型。
-- `SIGTERM` 能优雅关闭 WebSocket、队列和 worker。
-- 旧 WLK 端口可以按 Runbook 回滚。
-
-## 7. 验收证据
-
-每次发布保存：
-
-- 命令、时间和退出码。
-- 测试总数/失败数和 coverage。
-- OpenAPI lint 输出。
-- 模型/runtime/snapshot 指纹。
-- 三客户端 smoke 结果。
-- 未验证事项和剩余风险。
-
-不能以“命令退出码为 0”单独替代 API 响应、模型身份和客户端行为验收。
+每次发布保存命令、时间、版本/commit、测试摘要、OpenAPI lint、设备/dtype、request ID 与
+未验证风险。命令退出码不能单独替代 API 响应或客户端行为证据。

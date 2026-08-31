@@ -6,6 +6,11 @@ date: 2026-08-31
 
 # 吸收 `voice-realtime` 的方案
 
+> 状态说明（2026-08-31）：本文是目标模块边界和未来迁移设计，不是已完成的迁移记录。
+> Qwen3 native worker 已独立实现；WLK streaming adapter、legacy snapshot parity 和
+> `voice-realtime` 侧的改动均尚未实施。当前 `/asr` 仅支持 config/EOF 骨架，不能据此切换
+> 旧服务。实际执行顺序见 [迁移 Runbook](08-migration-runbook.md)。
+
 ## 1. 核心结论
 
 SpeechRail 吸收的是“ASR 基础设施能力”，不是把 `voice-realtime` 整个仓库复制成

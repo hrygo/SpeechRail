@@ -7,189 +7,85 @@ date: 2026-08-31
 
 # SpeechRail 公共 API 契约
 
-## 1. 契约选择
+机器可读 REST 事实来源是 [OpenAPI 3.1](../contracts/openapi.yaml)。本页解释客户端应如何
+使用当前实现；WebSocket 的事件详情以 [Realtime 契约](../contracts/realtime.md) 为准。
 
-SpeechRail 的文件转写 API 遵循 OpenAI Audio Transcriptions 的请求形状，使用
-`POST /v1/audio/transcriptions`；这样 QwenPaw、Hermes Agent 和任何使用 OpenAI
-SDK 的应用都可以复用已有客户端。实时 API 使用 OpenAI Realtime transcription
-的事件命名；旧 `voice-realtime` 则继续使用独立的 `/asr` 兼容协议。
+## 地址、身份和版本
 
-参考：
-
-- [OpenAI Audio Transcriptions](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
-- [OpenAI Realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription)
-
-公共 API 的 base URL 是服务根地址；使用 OpenAI SDK 时把 `/v1` 作为 `base_url`：
-
-```text
-服务根地址：  http://127.0.0.1:8201
-SDK base_url：http://127.0.0.1:8201/v1
-```
-
-## 2. 稳定端点
-
-| 方法 | 路径 | 用途 | 稳定性 |
-|---|---|---|---|
-| GET | `/health` | 进程存活和版本 | stable |
-| GET | `/readyz` | 模型/运行时是否可接收请求 | stable |
-| GET | `/v1/models` | 公共模型清单和兼容别名 | stable |
-| POST | `/v1/audio/transcriptions` | 文件/批量转写 | stable |
-| WS | `/v1/realtime` | 新实时客户端 | stable after realtime milestone |
-| WS | `/asr` | `voice-realtime` WLK 兼容层 | legacy |
-
-`/health` 为进程存活，不代表模型 ready；客户端在发起推理前检查 `/readyz` 或把
-`503` 当作可重试错误。
-
-## 3. 模型身份
-
-服务内部使用一个 canonical ID：
+服务根地址默认是 `http://127.0.0.1:8201`；OpenAI SDK / QwenPaw 的 base URL 是
+`http://127.0.0.1:8201/v1`。公共 canonical model ID：
 
 ```text
 speechrail/qwen3-asr-1.7b
 ```
 
-以下别名在 `0.x` 兼容期接受，并由 `/v1/models` 返回：
+`Qwen3-ASR-1.7B`、`qwen3-asr-1.7b`、`whisper-1` 为 `0.x` 兼容别名；最后一个不代表
+服务使用 Whisper。新配置一律使用 canonical ID。
 
-```text
-Qwen3-ASR-1.7B
-qwen3-asr-1.7b
-whisper-1             # 仅兼容旧配置；不代表实际使用 Whisper
-```
+删除字段、改变字段类型、错误码语义或 WebSocket 状态机属于破坏性变更，必须进入 `/v2`
+并附迁移说明。`/asr` 不承诺稳定新功能。
 
-`whisper-1` 只为旧 Hermes/OpenAI 配置提供迁移缓冲；新配置必须使用 canonical ID。
-服务日志和审计记录同时保留 `requested_model` 与 `resolved_model`，以便识别旧别名。
+## 当前端点
 
-## 4. REST 请求
+| 方法 | 路径 | 实际行为 |
+|---|---|---|
+| `GET` | `/health` | 返回进程、版本、后端名称和是否有配置的推理入口 |
+| `GET` | `/readyz` | 无推理入口时为 503；有入口时为 200，仍须用真实音频验收 worker |
+| `GET` | `/v1/models` | canonical ID 与兼容 aliases |
+| `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
+| `WS` | `/v1/realtime` | PCM append 后在一次 commit 做最终转写 |
+| `WS` | `/asr` | 仅 `config` / 空帧 EOF 行为，尚无 legacy ASR |
+
+## 文件转写
 
 ```http
-POST /v1/audio/transcriptions HTTP/1.1
-Host: 127.0.0.1:8201
-Authorization: Bearer <optional-local-key>
-Content-Type: multipart/form-data; boundary=...
-X-Request-ID: req_client_123
-
-file=@meeting.wav
-model=speechrail/qwen3-asr-1.7b
-language=zh
-prompt=产品名：SpeechRail、QwenPaw
-response_format=verbose_json
-timestamp_granularities[]=segment
+POST /v1/audio/transcriptions
+Authorization: Bearer <key-if-configured>
+Content-Type: multipart/form-data
 ```
 
-### 请求字段
+| 字段 | 当前支持 | 说明 |
+|---|---|---|
+| `file` | 必填 | `Content-Type` 必须以 `audio/` 开头；服务以固定 `ffmpeg` 参数解码 |
+| `model` | 可选 | 留空或使用 canonical/已登记 alias |
+| `language` | 可选 | `zh`、`en`、`auto` 及 worker 支持的语言别名 |
+| `prompt` | 可选 | 最多 2,000 字符的专名提示，不是指令通道 |
+| `response_format` | 可选 | `json`、`verbose_json`、`text`、`srt`、`vtt` |
 
-| 字段 | 类型 | 默认 | 说明 |
-|---|---|---|---|
-| `file` | binary | 必填 | 音频文件；服务端统一解码为 16 kHz mono PCM |
-| `model` | string | canonical ID | 接受 canonical 或已登记 alias |
-| `language` | string | auto | 建议 `zh`、`en`；也兼容 `Chinese`/`English` |
-| `prompt` | string | 空 | 专名/领域上下文；有长度上限，不是系统指令 |
-| `response_format` | enum | `json` | `json`、`verbose_json`、`text`、`srt`、`vtt` |
-| `timestamp_granularities[]` | string[] | `segment` | 当前只在真实能力存在时返回 word 时间戳 |
-| `stream` | boolean | `false` | 文件转写首发不支持 `true`；实时请使用 WS |
+当前路由不接收 `stream` 或 `timestamp_granularities[]`；不要依赖它们。`verbose_json`
+包含 segment 结果；Qwen3 当前不生成 word-level timestamps，`words` 为空。
 
-### 音频限制
+上传字节数由 `SPEECHRAIL_MAX_UPLOAD_BYTES` 强制限制。`SPEECHRAIL_MAX_AUDIO_SECONDS`
+已是配置字段，但 `0.1.0` 尚未在解码后强制按时长拒绝，因此运营上应同时控制客户端
+音频时长和上传字节数。
 
-- 支持的容器由解码器配置决定；首发覆盖 WAV、MP3、M4A、WebM、OGG、FLAC 等常见格式。
-- 服务端不会信任文件扩展名；先落入受限临时文件，再通过 `ffmpeg` 无 shell 方式解码。
-- 最大字节数和最大时长必须由配置控制，默认值不写死在客户端。
-- 空文件、损坏容器、超限文件在进入模型前拒绝。
-- 源音频处理结束后删除临时文件；需要留存由消费者显式负责，不由 SpeechRail 隐式保存。
+## 响应与错误
 
-## 5. REST 响应
+`json` 返回 `{ "text": "…", "usage": { "type": "duration", "seconds": … } }`。
+`text`、`srt`、`vtt` 返回纯文本，`verbose_json` 返回文本、语言、时长与 segments。
 
-### `json`
-
-```json
-{
-  "text": "这是转写结果。",
-  "usage": {
-    "type": "duration",
-    "seconds": 5.2
-  }
-}
-```
-
-### `verbose_json`
-
-```json
-{
-  "task": "transcribe",
-  "language": "zh",
-  "duration": 5.2,
-  "text": "这是转写结果。",
-  "segments": [
-    {
-      "id": "seg_0001",
-      "start": 0.0,
-      "end": 5.2,
-      "text": "这是转写结果。"
-    }
-  ],
-  "words": [],
-  "usage": {
-    "type": "duration",
-    "seconds": 5.2
-  }
-}
-```
-
-`words` 为空表示当前 backend 没有真实 word-level 时间戳，不表示服务端计算失败。
-禁止用平均插值结果冒充真实对齐。
-
-### `text`、`srt`、`vtt`
-
-- `text`：`text/plain; charset=utf-8`，只返回全文。
-- `srt`：`text/plain; charset=utf-8`，使用 `HH:MM:SS,mmm`。
-- `vtt`：`text/vtt; charset=utf-8`，使用 `WEBVTT` 和 `HH:MM:SS.mmm`。
-
-## 6. 错误契约
-
-为了让 OpenAI SDK、Hermes 和 QwenPaw 都能稳定解析，公共接口统一使用 OpenAI-compatible
-`error` envelope，而不是让不同端点各自返回不同结构：
+所有 HTTP 错误遵循同一 envelope，且响应携带 `X-Request-ID`：
 
 ```json
 {
   "error": {
     "message": "SpeechRail inference backend is not ready",
     "type": "server_error",
-    "param": null,
     "code": "backend_not_ready",
-    "request_id": "req_abc123",
+    "request_id": "req_...",
     "retryable": true
   }
 }
 ```
 
-| HTTP | code | retryable | 典型原因 |
-|---:|---|:---:|---|
-| 400 | `invalid_request` / `model_not_found` | 否 | 参数或模型别名不合法 |
-| 401 | `invalid_api_key` | 否 | key 缺失或错误 |
-| 413 | `audio_too_large` | 否 | 文件字节数超限 |
-| 422 | `validation_error` | 否 | multipart 字段缺失或类型错误 |
-| 429 | `queue_full` | 是 | 有界推理队列已满 |
-| 408 | `inference_timeout` | 是 | 单次推理超时 |
-| 500 | `internal_error` | 视情况 | 非预期错误；正文不含 traceback |
-| 503 | `backend_not_ready` / `backend_unavailable` | 是 | 模型尚未 ready 或熔断 |
-| 504 | `backend_timeout` | 是 | 下游 runtime 超时 |
+当前可依赖的典型 code：`invalid_api_key` (401)、`model_not_found` (400)、
+`audio_too_large` (413)、`empty_audio` / `unsupported_audio_type` / `audio_decode_failed`
+(422)、`queue_full` (429)、`backend_not_ready` / `backend_timeout` (503)。只对
+`retryable=true` 做带退避的有限重试；429 同时读取 `Retry-After`。
 
-所有响应包含 `X-Request-ID`；客户端重试只针对 `retryable=true`，并使用指数退避和
-`Retry-After`。重复的 REST 请求如需业务级幂等，由消费者用自己的 request ID 管理；
-服务不默认缓存音频正文。
+## 认证与网络
 
-## 7. 认证与网络
-
-- 默认只监听 `127.0.0.1`，本机场景可不设置 key。
-- 绑定 LAN/`0.0.0.0` 时必须设置 `SPEECHRAIL_API_KEY`，并限制 CORS/origin。
-- HTTP 使用 `Authorization: Bearer <key>`。
-- Realtime 使用握手 `Authorization` header；浏览器场景使用经过认证的短期会话票据，
-  不把长期 key 写进 URL。
-- legacy `/asr?token=...` 仅为旧客户端兼容保留，属于弃用路径；因为 URL 可能进入代理
-  日志，迁移后的 `voice-realtime` 应改用 header 认证。
-
-## 8. 版本策略
-
-- 路径版本固定为 `/v1`；新增可选字段、响应字段和端点属于兼容扩展。
-- 删除字段、改变类型、改变错误语义或改变 realtime 事件状态机时创建 `/v2`。
-- legacy `/asr` 至少保留到所有 `voice-realtime` 实例切换到 `/v1/realtime` 后一个发布周期。
-- 兼容 alias 先记录弃用告警，再在主版本移除；不会静默重解释成另一个模型。
+默认 loopback 且不需要 key。非 loopback host 在 Settings 校验阶段必须有
+`SPEECHRAIL_API_KEY`；REST 和 `/v1/realtime` 要求 `Authorization: Bearer <key>`。
+`allowed_origins` 是预留配置，当前版本未安装 CORS middleware；不要把它当作 LAN 防护。
+legacy `/asr` 目前也不校验 header/query token，因此只能用于 loopback 开发验证。

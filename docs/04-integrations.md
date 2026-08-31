@@ -1,159 +1,46 @@
 ---
-title: "SpeechRail 客户端接入"
+title: "SpeechRail 用户与客户端接入"
 status: active
 date: 2026-08-31
 ---
 
-# SpeechRail 客户端接入
+# SpeechRail 用户与客户端接入
 
-## 1. 统一约定
+客户端只调用 SpeechRail 的公共 HTTP / WebSocket 接口，绝不直接访问模型目录、Qwen SDK
+或 worker。接入前先完成 [运维 Runbook](11-operations-runbook.md) 的 REST smoke。
 
-所有客户端都只需要一个 base URL：
-
-```text
-http://127.0.0.1:8201/v1
-```
-
-如果完成兼容端口切换，则改为：
+## 通用约定
 
 ```text
-http://127.0.0.1:8001/v1
+服务根地址：  http://127.0.0.1:8201
+SDK base URL： http://127.0.0.1:8201/v1
+模型：        speechrail/qwen3-asr-1.7b
 ```
 
-客户端不应直接访问模型目录、`wlk`、Qwen SDK 或 SpeechRail worker。文件转写统一
-调用 `POST /audio/transcriptions`（当 base URL 已包含 `/v1` 时）。
+loopback 模式不需 API key；非 loopback 模式将 key 放在客户端安全配置中并通过
+`Authorization: Bearer` 发送，不写进 URL、截图或日志。
 
-## 2. QwenPaw
+## QwenPaw（已验证）
 
-### 当前核对状态
+QwenPaw 使用已有的 `whisper_api` provider，不需要 SpeechRail SDK。2026-08-31 已在本机
+将 provider `voice-realtime-asr` 的 base URL 改为 `http://127.0.0.1:8201/v1`，并设置
+模型 `speechrail/qwen3-asr-1.7b`；完成完整应用重启和中文短音频 smoke。
 
-2026-08-31 的本机配置记录显示：QwenPaw 2.1.0 使用 `audio_mode: auto`，转写提供商
-为 `voice-realtime-asr`，provider 类型为 `whisper_api`，模型为 `Qwen3-ASR-1.7B`，
-base URL 为 `http://127.0.0.1:8001/v1`。这说明 QwenPaw 已经具备所需的 OpenAI-compatible
-接入形态，不需要为 SpeechRail 开发专用 SDK。
-
-### 推荐配置
-
-在 QwenPaw 的语音/转写设置中：
+在 QwenPaw 的语音/转写设置中填写：
 
 ```text
 Audio mode: auto
 Provider type: Whisper API / whisper_api
 Base URL: http://127.0.0.1:8201/v1
 Model: speechrail/qwen3-asr-1.7b
-API key: 本机 loopback 可填占位值；LAN 必须填写 SpeechRail key
+API key: loopback 可留空或用客户端要求的占位值；非 loopback 使用服务 key
 ```
 
-若界面限制模型输入，可暂时填兼容别名 `Qwen3-ASR-1.7B`。不要把
-`voice-realtime-asr` 继续作为 SpeechRail 的产品名，它只是旧 provider 标识。
+每次改 provider URL 或 model 后必须完整重启 QwenPaw，不能只 reload agent 配置。
+先确认 `curl` 转写可用，再从 QwenPaw 录制短音频。回滚只恢复原 provider 的 base URL/model
+后完整重启；不要修改聊天模型 endpoint。
 
-### 验证
-
-```bash
-curl http://127.0.0.1:8201/health
-curl http://127.0.0.1:8201/v1/models
-curl -X POST http://127.0.0.1:8201/v1/audio/transcriptions \
-  -F 'file=@sample.wav' \
-  -F 'model=speechrail/qwen3-asr-1.7b' \
-  -F 'language=zh' \
-  -F 'response_format=json'
-```
-
-确认 curl 通过后，再用 QwenPaw 录一段中文短句。更新 provider/model 后必须完整重启
-QwenPaw app；仅 reload agent 配置不能保证常驻 provider registry 已刷新。
-
-## 3. Hermes Agent
-
-### 推荐方式：只改 STT 环境变量
-
-Hermes Agent 0.20.5 的转写工具使用 `STT_OPENAI_BASE_URL` 和 `STT_OPENAI_MODEL`，
-并通过 OpenAI SDK 的 `audio.transcriptions.create` 发送 multipart 文件。建议在
-`~/.hermes/.env` 中加入：
-
-```dotenv
-STT_OPENAI_BASE_URL=http://127.0.0.1:8201/v1
-STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
-```
-
-如果当前 Hermes 配置显式选择 provider，则保持：
-
-```yaml
-stt:
-  enabled: true
-  provider: openai
-  openai:
-    model: speechrail/qwen3-asr-1.7b
-```
-
-环境变量是跨版本最稳妥的 endpoint 覆盖方式。不要为了 STT 修改全局
-`OPENAI_BASE_URL`，它可能同时改变 Hermes 的聊天模型出口。loopback 地址通常不需要
-真实 API key；如果本地 OpenAI SDK 初始化强制要求 key，只使用不会泄露的占位值，并确保
-它只用于 STT provider。
-
-### Hermes 的文件限制
-
-当前 Hermes 转写工具自身仍有 25 MB 文件上限。因此：
-
-- SpeechRail 可以有更高的服务端上限，但 Hermes 客户端超过 25 MB 仍会在客户端拒绝。
-- 长会议应由 `voice-realtime` 通过 realtime/legacy WS 处理，或由调用方先切段。
-- 发生 `backend_not_ready`、`queue_full`、`backend_timeout` 时按 `retryable` 和
-  `Retry-After` 重试，不要无限重试。
-
-### 验证
-
-```bash
-hermes doctor
-curl http://127.0.0.1:8201/readyz
-```
-
-再从 Hermes 发送一条语音消息，检查转写文本和 provider 状态。不要把完整音频或完整
-转写正文贴入公共日志。
-
-## 4. voice-realtime
-
-### 迁移前并行运行
-
-第一阶段不改 `voice-realtime`：
-
-```text
-旧 WLK :8001      ← voice-realtime 字幕/会议（稳定回退）
-SpeechRail :8201  ← QwenPaw、Hermes shadow smoke
-```
-
-这时 `voice-realtime` 继续使用自己的 `SubtitleProxy`、AudioHub、会议和 Sortformer。
-SpeechRail 只承接新的 REST 客户端，避免端口和模型进程冲突。
-
-### 兼容端口切换
-
-当 SpeechRail 的 legacy `/asr` parity 验收通过后：
-
-1. 停止 `voice-realtime` 的 `vr-subtitles`/WLK 子进程。
-2. 将 SpeechRail 监听切换到 `127.0.0.1:8001`。
-3. 保持 `voice-realtime` 的 `VR_SUBTITLE_HOST=127.0.0.1`、
-   `VR_SUBTITLE_PORT=8001`。
-4. 重新启动 `voice-realtime` UI；其现有 `SubtitleStream` 继续连接
-   `/asr?language=...&mode=full`。
-
-因为 SpeechRail 重建了 `config`、full snapshot、`lines`、`buffer_transcription` 和
-空 PCM EOF，应用层可以先不改代码完成切换。
-
-### 现代 Realtime 迁移
-
-后续在 `voice-realtime` 增加一个 `SpeechRailRealtimeAdapter`：
-
-```text
-AudioHub PCM
-  → SpeechRailRealtimeAdapter
-  → WS /v1/realtime
-  → delta/completed
-  → SubtitleProxy / MeetingSession
-```
-
-这项改动需要修改 `voice-realtime`，当前项目没有擅自写入该仓库。推荐增加明确的
-`VR_SUBTITLE_EXTERNAL_URL` 和 `VR_SUBTITLE_MANAGED=false` 配置：现有项目目前没有这
-两个字段，不能把它们误写成已经生效的配置。
-
-## 5. 通用 OpenAI SDK
+## OpenAI SDK
 
 ```python
 from openai import OpenAI
@@ -174,10 +61,40 @@ with open("sample.wav", "rb") as audio:
 print(result.text)
 ```
 
-## 6. 不推荐的接入方式
+客户端应捕获 HTTP 错误 envelope，只对 `retryable=true` 做指数退避。不要无界重试 429/503，
+也不要依赖 `whisper-1` 作为新配置。
 
-- 直接 import `voice_realtime.asr`：会绑定综合应用的发布周期和会议模型。
-- 直接启动 `wlk` 并让每个客户端猜参数：会产生多个模型实例和不一致的 EOF 语义。
-- 把 SpeechRail base URL 填到 Hermes 的全局 `OPENAI_BASE_URL`：可能误路由聊天请求。
-- 在客户端硬编码 Qwen snapshot 路径：破坏模型替换和跨机器部署。
-- 用 `whisper-1` 作为新配置的实际模型 ID：会隐藏真实后端，增加排障成本。
+## Hermes Agent（配置方法，未验收）
+
+Hermes 的 STT 配置应与聊天模型 endpoint 分离。建议设置其 STT 专用配置：
+
+```dotenv
+STT_OPENAI_BASE_URL=http://127.0.0.1:8201/v1
+STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
+```
+
+不要为了 STT 修改全局 `OPENAI_BASE_URL`，否则可能改变 Hermes 聊天流量。此方法依据其
+OpenAI-compatible 转写调用形状，但尚未在当前环境完成真实 Hermes 消息 smoke；实施时先在
+单独配置/进程试运行，再验证聊天功能未受影响。失败时还原这两个 STT 配置并重启 Hermes。
+
+## `voice-realtime`（尚未迁移）
+
+`voice-realtime` 当前仍应使用自己的 WLK / 字幕服务。SpeechRail 的 `/asr` 当前只实现
+兼容握手和 EOF，不输出转写 snapshot，不能占用旧 `8001` 端口或替换会议字幕链路。
+
+未来接入有两条路线：
+
+1. 在 `voice-realtime` 独立分支实现 `/v1/realtime` adapter；它应把 16 kHz 单声道 PCM
+   append 后 commit，并消费最终 completed 事件。
+2. 先完善 SpeechRail legacy adapter、以真实 consumer fixtures 做 WLK parity，再安排
+   `/asr` 的兼容切换。
+
+两条路线都需要独立契约、会议闭环和回滚演练。SpeechRail 不会擅自修改
+`voice-realtime` 的 AudioHub、会议、TTS、数据库或 UI。
+
+## Realtime 客户端限制
+
+新 WebSocket 客户端发送 `transcription_session.update`、0..N 个
+`input_audio_buffer.append`、一次 `input_audio_buffer.commit`。当前服务会把累积音频作为
+一次 batch 转写，返回 completed 后结束连接；不会连续发 delta。完整示例和状态机见
+[Realtime 契约](../contracts/realtime.md)。
