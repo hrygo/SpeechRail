@@ -15,7 +15,7 @@ date: 2026-08-31
 - `allowed_origins` 是配置字段，但 `0.1.0` 未安装 CORS middleware。LAN 访问不是首发
   支持场景；如需暴露，先补齐 CORS、TLS、网段限制、速率限制和 `/asr` 认证。
 - snapshot 必须是仓库外绝对路径，启动时检查完整性；worker 与请求均设离线环境变量。
-- REST 上传仅接受 `audio/*`，以内存有界读取，调用 `ffmpeg` 固定 argv 解码，不使用 shell。
+- REST 上传按 OpenAI 常见音频容器和 MIME/文件名提示做有界接收，调用 `ffmpeg` 固定 argv 解码，不使用 shell；MIME 和文件名不作为内容真实性证明。
 
 ## 数据处理与日志
 

@@ -57,7 +57,7 @@ Content-Type: multipart/form-data
 
 | 字段 | 当前支持 | 说明 |
 |---|---|---|
-| `file` | 必填 | `Content-Type` 必须以 `audio/` 开头；服务以固定 `ffmpeg` 参数解码 |
+| `file` | 必填 | 支持 `flac`、`mp3`、`mp4`、`mpeg`、`mpga`、`m4a`、`ogg`、`wav`、`webm`；multipart MIME 与文件名仅作格式提示，服务会用固定 `ffmpeg` 参数校验并解码 |
 | `model` | 可选 | 留空或使用 canonical/已登记 alias |
 | `language` | 可选 | `zh`、`en`、`auto` 及 worker 支持的语言别名 |
 | `prompt` | 可选 | 最多 2,000 字符的专名提示，不是指令通道 |

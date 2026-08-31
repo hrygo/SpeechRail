@@ -146,8 +146,25 @@ def _error_response(
     )
 
 
+_OPENAI_AUDIO_EXTENSIONS = frozenset(
+    {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
+)
+_AUDIO_CONTAINER_MIME_TYPES = frozenset(
+    {"video/mp4", "video/mpeg", "video/webm", "application/ogg", "application/octet-stream"}
+)
+
+
+def _has_supported_audio_hint(file: UploadFile) -> bool:
+    """Accept standard audio containers without trusting client metadata as proof."""
+
+    content_type = (file.content_type or "").split(";", 1)[0].strip().lower()
+    if content_type.startswith("audio/") or content_type in _AUDIO_CONTAINER_MIME_TYPES:
+        return True
+    return Path(file.filename or "").suffix.lower() in _OPENAI_AUDIO_EXTENSIONS
+
+
 async def _read_upload(file: UploadFile, limit: int) -> bytes:
-    if not (file.content_type or "").startswith("audio/"):
+    if not _has_supported_audio_hint(file):
         raise ValueError("unsupported_audio_type")
     content = bytearray()
     while chunk := await file.read(64 * 1024):

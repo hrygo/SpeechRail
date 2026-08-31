@@ -104,7 +104,10 @@ paths:
       description: |
         Accepts multipart/form-data. The model defaults to
         speechrail/qwen3-asr-1.7b. For realtime audio-buffer commits use the
-        WebSocket contract in contracts/realtime.md instead.
+        WebSocket contract in contracts/realtime.md instead. The file may use
+        the OpenAI-compatible audio containers flac, mp3, mp4, mpeg, mpga, m4a,
+        ogg, wav, or webm. The multipart Content-Type and filename are format
+        hints; the service validates and decodes the uploaded content.
       security:
         - BearerAuth: []
         - {}
@@ -114,9 +117,6 @@ paths:
           multipart/form-data:
             schema:
               $ref: '#/components/schemas/TranscriptionRequest'
-            encoding:
-              file:
-                contentType: audio/*
       responses:
         '200':
           description: Transcription result

@@ -1,5 +1,6 @@
 from collections.abc import Awaitable
 
+import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
@@ -46,6 +47,30 @@ def test_transcription_formats_results_from_one_domain_result() -> None:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith(content_type)
         assert expected in response.text
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type"),
+    (
+        ("clip.webm", "video/webm"),
+        ("clip.webm", "audio/webm; codecs=opus"),
+        ("clip.mp4", "video/mp4"),
+        ("clip.mpeg", "video/mpeg"),
+        ("clip.wav", None),
+        ("clip.bin", "application/octet-stream"),
+    ),
+)
+def test_transcription_accepts_openai_audio_container_hints(
+    filename: str, content_type: str | None
+) -> None:
+    response = _client().post(
+        "/v1/audio/transcriptions",
+        files={"file": (filename, b"1234", content_type)},
+        data={"model": "whisper-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "hello"
 
 
 def test_transcription_rejects_oversized_and_unsupported_mime() -> None:
