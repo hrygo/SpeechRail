@@ -41,3 +41,26 @@ def test_jobs_api_requires_bearer_key_when_configured(tmp_path) -> None:
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_jobs_api_delete_releases_a_completed_owner_scoped_result(tmp_path) -> None:
+    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    job = repository.create(
+        kind="speech",
+        owner="loopback",
+        request={"input_ref": "external/input"},
+    )
+    assert repository.claim_next() is not None
+    repository.complete(job.id, result_ref="result.wav")
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            job_repository=repository,
+        )
+    )
+
+    response = client.delete(f"/v1/jobs/{job.id}")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "completed"
+    assert response.json()["result_ref"] is None

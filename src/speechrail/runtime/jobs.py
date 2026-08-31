@@ -128,8 +128,12 @@ class JobRepository:
         with self._connect() as connection:
             connection.execute(
                 """
-                UPDATE jobs SET state = 'cancelled', updated_at = ?
-                WHERE id = ? AND owner = ? AND state = 'queued'
+                UPDATE jobs
+                SET
+                    state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE state END,
+                    result_ref = CASE WHEN state = 'completed' THEN NULL ELSE result_ref END,
+                    updated_at = ?
+                WHERE id = ? AND owner = ? AND state IN ('queued', 'completed')
                 """,
                 (_now(), job_id, owner),
             )

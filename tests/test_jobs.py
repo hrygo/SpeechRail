@@ -55,6 +55,21 @@ def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
     assert expired.state == "expired"
 
 
+def test_cancelling_a_completed_job_releases_its_result_without_rewriting_state(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    job = repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"})
+    assert repository.claim_next() is not None
+    repository.complete(job.id, result_ref="result.wav")
+
+    deleted = repository.cancel(job.id, owner="owner-a")
+
+    assert deleted is not None
+    assert deleted.state == "completed"
+    assert deleted.result_ref is None
+
+
 def test_job_repository_records_a_bounded_failure_code(tmp_path: Path) -> None:
     repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
     job = repository.create(kind="transcription", owner="owner-a", request={"input_ref": "opaque"})
