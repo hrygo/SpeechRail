@@ -34,6 +34,7 @@
 
 ## 面向开发者
 
+- [高级工程师审查交接](12-senior-engineer-handoff.md)：当前事实、目标方案、风险与审查清单。
 - [总体架构](01-architecture.md)：组件边界与数据流；其中未落地的 realtime/WLK 内容均标记为目标设计。
 - [开发指南](10-development-guide.md)：本地开发、目录、测试、契约变更与提交前检查。
 - [测试与验收](07-testing-acceptance.md)：自动化、真实模型 smoke 与集成验收矩阵。
