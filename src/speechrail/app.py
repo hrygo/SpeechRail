@@ -37,6 +37,7 @@ from speechrail.domain.ports import (
 from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.realtime.events import RealtimeSession, SessionError
+from speechrail.realtime.outbound import BoundedOutboundEventPump, SlowConsumerError
 from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
 from speechrail.runtime.jobs import JobRecord, JobRepository
@@ -636,21 +637,42 @@ def create_app(
                 output_format="pcm16",
                 sample_rate=24_000,
             )
-            async with governor.reserve(
-                WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
-            ):
-                async for chunk in tts_synthesizer.synthesize(request):
-                    await websocket.send_json(
-                        session.audio_delta(
-                            response_id=response_id,
-                            chunk_index=chunk.chunk_index,
-                            audio=chunk.audio,
+            output = BoundedOutboundEventPump(
+                max_events=resolved.realtime_outbound_max_events,
+                send=websocket.send_json,
+            )
+            await output.start()
+            finished = False
+            try:
+                async with governor.reserve(
+                    WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
+                ):
+                    async for chunk in tts_synthesizer.synthesize(request):
+                        await output.publish(
+                            session.audio_delta(
+                                response_id=response_id,
+                                chunk_index=chunk.chunk_index,
+                                audio=chunk.audio,
+                            )
                         )
+                await output.publish(session.response_completed(response_id=response_id))
+                completed = session.complete_if_input_committed()
+                if completed is not None:
+                    await output.publish(completed)
+                await output.finish()
+                finished = True
+            except SlowConsumerError:
+                await websocket.send_json(
+                    session.protocol_error(
+                        code="slow_consumer",
+                        message="Realtime client cannot consume audio fast enough",
+                        retryable=False,
                     )
-            await websocket.send_json(session.response_completed(response_id=response_id))
-            completed = session.complete_if_input_committed()
-            if completed is not None:
-                await websocket.send_json(completed)
+                )
+                await websocket.close(code=1013)
+            finally:
+                if not finished:
+                    await output.abort()
 
         try:
             while True:

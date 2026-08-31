@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     max_audio_seconds: int = Field(default=3600, ge=1)
     max_realtime_frame_bytes: int = Field(default=160_000, ge=2, le=4_000_000)
     max_realtime_buffer_bytes: int = Field(default=8_388_608, ge=2, le=64_000_000)
+    realtime_outbound_max_events: int = Field(default=8, ge=1, le=1_024)
     runtime_total_capacity: int = Field(default=4, ge=2, le=128)
     realtime_reserved_capacity: int = Field(default=1, ge=1, le=127)
     runtime_max_pending_per_class: int = Field(default=8, ge=1, le=1024)
