@@ -43,6 +43,27 @@ def test_openai_compatible_speech_endpoint_streams_pcm() -> None:
     assert response.content == b"\x00\x00\x01\x00"
 
 
+def test_speech_endpoint_wraps_wav_after_collecting_pcm() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
+    assert response.content[:4] == b"RIFF"
+    assert response.content[8:12] == b"WAVE"
+    assert response.content[40:44] == (4).to_bytes(4, "little")
+    assert response.content[44:] == b"\x00\x00\x01\x00"
+
+
 def test_speech_endpoint_returns_stable_not_ready_error_without_backend() -> None:
     client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
@@ -409,8 +410,15 @@ def create_app(
                 expected_chunk += 1
                 yield chunk.audio
 
-        media_type = "audio/x-pcm" if body.response_format == "pcm" else "audio/wav"
-        return StreamingResponse(audio_stream(), media_type=media_type)
+        if body.response_format == "wav":
+            pcm = bytearray()
+            async for chunk in audio_stream():
+                pcm.extend(chunk)
+            return Response(
+                content=_wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate),
+                media_type="audio/wav",
+            )
+        return StreamingResponse(audio_stream(), media_type="audio/x-pcm")
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
@@ -671,6 +679,30 @@ def create_app(
             await websocket.close()
 
     return app
+
+
+def _wav_pcm16(pcm: bytes, *, sample_rate: int) -> bytes:
+    """Wrap a complete mono PCM16 payload in a standard WAV container."""
+    if len(pcm) % 2:
+        raise ValueError("PCM16 payload must have an even byte length")
+    byte_rate = sample_rate * 2
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + len(pcm),
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sample_rate,
+        byte_rate,
+        2,
+        16,
+        b"data",
+        len(pcm),
+    )
+    return header + pcm
 
 
 app = create_app()
