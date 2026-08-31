@@ -32,6 +32,7 @@ from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.ports import (
     BatchTranscriber,
+    DiarizationEngine,
     RealtimeAsrFactory,
     RealtimeAsrSession,
     SpeechRequest,
@@ -44,6 +45,7 @@ from speechrail.realtime.events import RealtimeSession, SessionError
 from speechrail.realtime.outbound import BoundedOutboundEventPump, SlowConsumerError
 from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+from speechrail.runtime.diarization import DiarizationCoordinator
 from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
@@ -197,6 +199,7 @@ def create_app(
     transcribe: Transcribe | None = None,
     v2_transcriber: BatchTranscriber | None = None,
     realtime_asr_factory: RealtimeAsrFactory | None = None,
+    diarization_engine: DiarizationEngine | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
     job_repository: JobRepository | None = None,
     job_processor: JobProcessor | None = None,
@@ -674,6 +677,7 @@ def create_app(
         active_synthesis: asyncio.Task[None] | None = None
         active_streaming_asr: RealtimeAsrSession | None = None
         streaming_reader: asyncio.Task[None] | None = None
+        active_diarization: DiarizationCoordinator | None = None
         streaming_item_id: str | None = None
         streaming_revision = 0
 
@@ -707,6 +711,8 @@ def create_app(
                             id=f"seg_{uuid4().hex}", start_ms=0, end_ms=0, text=event.text
                         ),
                     )
+                    if active_diarization is not None:
+                        segments = await active_diarization.annotate(segments)
                     await websocket.send_json(
                         session.transcription_completed(
                             item_id=item_id,
@@ -744,12 +750,15 @@ def create_app(
                 WorkClass.REALTIME_ASR,
                 deadline=resolved.request_timeout_seconds,
             )
+            segments = result.segments
+            if active_diarization is not None:
+                segments = await active_diarization.annotate(segments)
             await websocket.send_json(
                 session.transcription_completed(
                     item_id=f"item_{uuid4().hex}",
                     text=result.text,
                     language=result.language,
-                    segments=[segment.model_dump(mode="json") for segment in result.segments],
+                    segments=[segment.model_dump(mode="json") for segment in segments],
                 )
             )
 
@@ -826,7 +835,17 @@ def create_app(
                             raise RealtimeV2Error(
                                 "session type cannot change", code="invalid_session"
                             )
-                        await websocket.send_json(session.configure(configured))
+                        created = session.configure(configured)
+                        if session.diarization.enabled:
+                            if diarization_engine is None:
+                                raise RealtimeV2Error(
+                                    "diarization profile is not available",
+                                    code="diarization_not_available",
+                                )
+                            active_diarization = DiarizationCoordinator(
+                                diarization_engine.create(config=session.diarization)
+                            )
+                        await websocket.send_json(created)
                         if realtime_asr_factory is not None:
                             active_streaming_asr = realtime_asr_factory.create(
                                 language=session.language, prompt=session.prompt
@@ -853,6 +872,8 @@ def create_app(
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
                     audio = session.append_audio(event.get("audio"))
+                    if active_diarization is not None:
+                        await active_diarization.append_audio(audio)
                     if active_streaming_asr is not None:
                         await active_streaming_asr.append_audio(audio)
                     await websocket.send_json(session.audio_ack())
@@ -874,6 +895,10 @@ def create_app(
                             await streaming_reader
                     else:
                         await transcribe_item(audio)
+                    if active_diarization is not None and session.diarization.finalize:
+                        await websocket.send_json(
+                            session.diarization_completed(await active_diarization.finalize())
+                        )
                     await websocket.send_json(session.session_completed())
                     await websocket.close()
                     return
@@ -968,6 +993,8 @@ def create_app(
                     await streaming_reader
             if active_streaming_asr is not None:
                 await active_streaming_asr.close()
+            if active_diarization is not None:
+                await active_diarization.close()
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:

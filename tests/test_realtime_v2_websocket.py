@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
 from speechrail.config import Settings
-from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
+from speechrail.domain.diarization import (
+    DiarizationAssignment,
+    DiarizationSpeaker,
+    DiarizationUpdate,
+)
 from speechrail.domain.ports import (
     AudioChunk,
     SpeechRequest,
@@ -239,6 +244,81 @@ def test_v2_streaming_asr_backend_error_is_sent_without_waiting_for_commit() -> 
         assert error["type"] == "error"
         assert error["error"]["code"] == "wlk_error"
         assert error["error"]["retryable"] is True
+
+
+def test_v2_diarization_annotates_completed_segments_and_finalizes_before_eof() -> None:
+    class SegmentTranscriber:
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            return TranscriptResult(
+                request_id=request.request_id,
+                model_id="speechrail/qwen3-asr-1.7b",
+                text="两位说话人",
+                language="zh",
+                duration_ms=100,
+                segments=(
+                    TranscriptSegment(
+                        id="seg-1", start_ms=0, end_ms=100, text="两位说话人"
+                    ),
+                ),
+            )
+
+    class FakeDiarizationSession:
+        async def append_audio(self, audio: bytes) -> None:
+            assert audio == b"\x00\x00"
+
+        async def annotate(self, segments: tuple[TranscriptSegment, ...]) -> DiarizationUpdate:
+            return DiarizationUpdate(
+                assignments=(
+                    DiarizationAssignment(
+                        segment_id=segments[0].id,
+                        speakers=(DiarizationSpeaker(id="spk_01", confidence=0.93),),
+                    ),
+                )
+            )
+
+        async def finalize(self) -> DiarizationUpdate:
+            return DiarizationUpdate(mapping={"spk_02": "spk_01"})
+
+        async def close(self) -> None:
+            return None
+
+    class FakeDiarizationEngine:
+        def create(self, *, config: object) -> FakeDiarizationSession:
+            assert config.enabled is True
+            return FakeDiarizationSession()
+
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            v2_transcriber=SegmentTranscriber(),
+            diarization_engine=FakeDiarizationEngine(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "language": "zh",
+                    "audio_format": PCM16,
+                    "diarization": {"enabled": True, "finalize": True},
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        assert socket.receive_json()["type"] == "input_audio_buffer.ack"
+        socket.send_json({"type": "input_audio_buffer.flush"})
+        completed = socket.receive_json()
+        assert completed["segments"][0]["speaker"] == "spk_01"
+        assert completed["segments"][0]["speakers"] == [{"id": "spk_01", "confidence": 0.93}]
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        finalized = socket.receive_json()
+        terminal = socket.receive_json()
+        assert finalized["type"] == "transcription.diarization.completed"
+        assert finalized["mapping"] == {"spk_02": "spk_01"}
+        assert terminal["type"] == "session.completed"
 
 
 def test_v2_speech_streams_ordered_audio_and_completes_on_commit() -> None:

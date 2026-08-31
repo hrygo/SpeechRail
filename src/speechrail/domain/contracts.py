@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from speechrail.domain.diarization import DiarizationSpeaker
+
 
 class TranscriptWord(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -28,6 +30,8 @@ class TranscriptSegment(BaseModel):
     text: str = Field(min_length=1, max_length=100_000)
     language: str | None = Field(default=None, max_length=64)
     speaker: str | None = Field(default=None, max_length=200)
+    speakers: tuple[DiarizationSpeaker, ...] = ()
+    speaker_revision: int | None = Field(default=None, ge=1)
     partial: bool = False
     source_epoch: int = Field(default=0, ge=0)
 
