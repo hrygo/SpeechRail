@@ -13,10 +13,12 @@
   有界 admission queue、统一 REST formatter 与隐私安全观测边界。
 - 接通 `json`、`verbose_json`、`text`、`srt`、`vtt` REST formatter，以及现代 Realtime
   与 legacy `/asr` 的有序协议测试路径。
+- 默认服务现在会在配置外部 snapshot 与专用 Python runtime 后启动单一 Qwen3 worker，
+  使用固定 `ffmpeg` argv 解码上传音频，并验证 worker 的 MPS/float16 身份。
 
 ### Known limitations
 
-- 真实 Qwen3 snapshot、隔离 Python runtime 与 WLK sidecar 没有在本工作区配置；默认服务
-  因而仍安全返回 `backend_not_ready`。真实 MPS/三方客户端 smoke 需要按 Runbook 在外部
-  模型环境执行。
+- WLK sidecar、Hermes 与 `voice-realtime` 的真实切换/回滚仍待分别按 Runbook 验收。
+- 没有配置 snapshot 或专用 runtime 的部署仍安全返回 `backend_not_ready`；本机 runtime
+  配置保留在被忽略的 `.env`，不提交绝对模型路径或任何凭据。
 - 未启动真实模型、未切换任何现有客户端、未修改 `voice-realtime`。
