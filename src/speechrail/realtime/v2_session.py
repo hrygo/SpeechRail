@@ -58,9 +58,22 @@ class _BaseSession:
     def cancel(self) -> dict[str, Any]:
         if self.state is SessionState.CANCELLED:
             return self._event("session.cancelled")
+        self._ensure_active()
         self.state = SessionState.CANCELLED
         self._on_cancel()
         return self._event("session.cancelled")
+
+    def protocol_error(
+        self, *, code: str, message: str, retryable: bool = False
+    ) -> dict[str, Any]:
+        return self._event(
+            "error", error={"code": code, "message": message, "retryable": retryable}
+        )
+
+    def session_completed(self) -> dict[str, Any]:
+        if self.state is not SessionState.COMMITTED:
+            raise RealtimeV2Error("session has not committed input", code="invalid_state")
+        return self._event("session.completed")
 
     def _ensure_active(self) -> None:
         if self.state is SessionState.NEW:
@@ -89,25 +102,55 @@ class _BaseSession:
 class TranscriptionSession(_BaseSession):
     """State and event invariants for a Realtime v2 ASR session."""
 
-    def __init__(self, *, max_audio_bytes: int, request_id: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        max_audio_bytes: int,
+        max_frame_bytes: int | None = None,
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(expected_type="transcription", request_id=request_id)
         if max_audio_bytes <= 0:
             raise ValueError("max_audio_bytes must be positive")
         self._max_audio_bytes = max_audio_bytes
+        self._max_frame_bytes = max_frame_bytes or max_audio_bytes
+        if self._max_frame_bytes > max_audio_bytes:
+            raise ValueError("max_frame_bytes must not exceed max_audio_bytes")
         self._audio = bytearray()
+        self._accepted_bytes = 0
         self._item_revisions: dict[str, int] = {}
         self._completed_items: set[str] = set()
+        self.language: str | None = None
+        self.prompt = ""
 
-    def append_audio(self, encoded_audio: str) -> bytes:
+    def append_audio(self, encoded_audio: object) -> bytes:
         self._ensure_active()
         audio = _decode_pcm16(encoded_audio)
+        if len(audio) > self._max_frame_bytes:
+            raise RealtimeV2Error("audio frame limit exceeded", code="frame_limit_exceeded")
         if len(self._audio) + len(audio) > self._max_audio_bytes:
             raise RealtimeV2Error("audio buffer limit exceeded", code="buffer_limit_exceeded")
         self._audio.extend(audio)
+        self._accepted_bytes += len(audio)
         return audio
 
-    def flush_audio(self) -> bytes:
+    @property
+    def buffered_bytes(self) -> int:
+        return len(self._audio)
+
+    def audio_ack(self) -> dict[str, Any]:
         self._ensure_active()
+        return self._event(
+            "input_audio_buffer.ack",
+            accepted_bytes=self._accepted_bytes,
+            buffered_bytes=self.buffered_bytes,
+        )
+
+    def flush_audio(self) -> bytes:
+        if self.state is SessionState.NEW:
+            raise RealtimeV2Error("session.update is required first", code="invalid_state")
+        if self.state is SessionState.CANCELLED:
+            raise RealtimeV2Error("session is terminal", code="invalid_state")
         return self._drain_audio()
 
     def commit_audio(self) -> bytes:
@@ -139,8 +182,8 @@ class TranscriptionSession(_BaseSession):
             item_id=item_id,
             revision=revision,
             text=text,
-            start_ms=start_ms,
-            end_ms=end_ms,
+            audio_start_ms=start_ms,
+            audio_end_ms=end_ms,
         )
 
     def transcription_completed(
@@ -151,7 +194,10 @@ class TranscriptionSession(_BaseSession):
         language: str | None,
         segments: list[Mapping[str, Any]],
     ) -> dict[str, Any]:
-        self._ensure_active()
+        if self.state is SessionState.NEW:
+            raise RealtimeV2Error("session.update is required first", code="invalid_state")
+        if self.state is SessionState.CANCELLED:
+            raise RealtimeV2Error("session is terminal", code="invalid_state")
         if item_id in self._completed_items:
             raise RealtimeV2Error("item has already completed", code="invalid_item_state")
         self._completed_items.add(item_id)
@@ -164,7 +210,21 @@ class TranscriptionSession(_BaseSession):
         )
 
     def _validate_configure(self, session: Mapping[str, Any]) -> None:
-        _validate_pcm16(session.get("input_audio_format"))
+        _validate_pcm16(session.get("audio_format"))
+        language = session.get("language")
+        prompt = session.get("prompt", "")
+        endpointing = session.get("endpointing", {"mode": "server_vad"})
+        if language is not None and (not isinstance(language, str) or len(language) > 64):
+            raise RealtimeV2Error("invalid transcription language", code="invalid_session")
+        if not isinstance(prompt, str) or len(prompt) > 10_000:
+            raise RealtimeV2Error("invalid transcription prompt", code="invalid_session")
+        if not isinstance(endpointing, Mapping) or endpointing.get("mode") not in {
+            "server_vad",
+            "manual",
+        }:
+            raise RealtimeV2Error("invalid endpointing mode", code="invalid_session")
+        self.language = language
+        self.prompt = prompt
 
     def _drain_audio(self) -> bytes:
         audio = bytes(self._audio)
@@ -240,16 +300,16 @@ class SpeechSession(_BaseSession):
         self._ensure_active()
         self._require_active_response(response_id)
         self._active_response_id = None
-        return self._event("response.completed", response_id=response_id)
+        return self._event("response.audio.completed", response_id=response_id)
 
     def response_cancel(self, *, response_id: str) -> dict[str, Any]:
         if response_id in self._cancelled_responses:
-            return self._event("response.cancelled", response_id=response_id)
+            return self._event("response.audio.cancelled", response_id=response_id)
         self._ensure_active()
         self._require_active_response(response_id)
         self._active_response_id = None
         self._cancelled_responses.add(response_id)
-        return self._event("response.cancelled", response_id=response_id)
+        return self._event("response.audio.cancelled", response_id=response_id)
 
     def _validate_configure(self, session: Mapping[str, Any]) -> None:
         if not isinstance(session.get("voice"), str) or not session["voice"].strip():
@@ -270,7 +330,7 @@ class SpeechSession(_BaseSession):
         self._active_response_id = None
 
 
-def _decode_pcm16(encoded_audio: str) -> bytes:
+def _decode_pcm16(encoded_audio: object) -> bytes:
     if not isinstance(encoded_audio, str) or not encoded_audio:
         raise RealtimeV2Error("audio must be a non-empty base64 string", code="invalid_audio")
     try:

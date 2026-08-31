@@ -15,7 +15,7 @@ def _pcm16(data: bytes) -> str:
 def test_transcription_session_emits_monotonic_revisions_and_completes_item() -> None:
     session = TranscriptionSession(max_audio_bytes=16, request_id="req-test")
 
-    created = session.configure({"type": "transcription", "input_audio_format": PCM16})
+    created = session.configure({"type": "transcription", "audio_format": PCM16})
     first = session.transcription_delta(
         item_id="item-1", revision=1, text="你", start_ms=0, end_ms=100
     )
@@ -42,7 +42,7 @@ def test_transcription_session_emits_monotonic_revisions_and_completes_item() ->
 
 def test_transcription_flush_preserves_session_and_commit_is_terminal() -> None:
     session = TranscriptionSession(max_audio_bytes=16)
-    session.configure({"type": "transcription", "input_audio_format": PCM16})
+    session.configure({"type": "transcription", "audio_format": PCM16})
 
     session.append_audio(_pcm16(b"\x00\x00\x01\x00"))
     flushed = session.flush_audio()
@@ -72,7 +72,7 @@ def test_speech_session_enforces_one_active_response_and_chunk_order() -> None:
         session.audio_delta(response_id="response-1", chunk_index=2, audio=b"\x00\x00")
 
     completed = session.response_completed(response_id="response-1")
-    assert completed["type"] == "response.completed"
+    assert completed["type"] == "response.audio.completed"
 
 
 def test_speech_response_cancel_is_idempotent_and_session_cancel_is_terminal() -> None:
@@ -84,8 +84,8 @@ def test_speech_response_cancel_is_idempotent_and_session_cancel_is_terminal() -
     repeated = session.response_cancel(response_id="response-1")
     terminal = session.cancel()
 
-    assert cancelled["type"] == "response.cancelled"
-    assert repeated["type"] == "response.cancelled"
+    assert cancelled["type"] == "response.audio.cancelled"
+    assert repeated["type"] == "response.audio.cancelled"
     assert terminal["type"] == "session.cancelled"
 
     with pytest.raises(RealtimeV2Error, match="terminal"):

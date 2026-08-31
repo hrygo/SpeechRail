@@ -15,15 +15,37 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from speechrail import __version__
-from speechrail.backends.qwen3_native import Qwen3BackendConfig, Qwen3Worker
+from speechrail.backends.qwen3_native import (
+    Qwen3BackendConfig,
+    Qwen3BatchTranscriber,
+    Qwen3Worker,
+)
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
+from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.realtime.events import RealtimeSession, SessionError
+from speechrail.realtime.v2_session import TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
 
 Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
+
+
+class _CallableBatchTranscriber(BatchTranscriber):
+    """Bridge the v1 callable seam while v2 adopts typed backend ports."""
+
+    def __init__(self, transcribe: Transcribe, model_id: str) -> None:
+        self._transcribe = transcribe
+        self._model_id = model_id
+
+    async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+        result = await self._transcribe(request.audio, request.language, request.prompt)
+        return result.model_copy(
+            update={"request_id": request.request_id, "model_id": self._model_id}
+        )
 
 
 def _error(
@@ -123,7 +145,10 @@ async def _decode_pcm(audio: bytes) -> bytes:
 
 
 def create_app(
-    settings: Settings | None = None, *, transcribe: Transcribe | None = None
+    settings: Settings | None = None,
+    *,
+    transcribe: Transcribe | None = None,
+    v2_transcriber: BatchTranscriber | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     worker: Qwen3Worker | None = None
@@ -143,7 +168,12 @@ def create_app(
             )
         )
         transcribe = worker.transcribe
+        v2_transcriber = Qwen3BatchTranscriber(worker=worker, model_id=resolved.model_id)
     admission = AdmissionQueue(resolved.max_queue_size)
+    governor = ResourceGovernor(resolved.governor_limits)
+    resolved_v2_transcriber = v2_transcriber
+    if resolved_v2_transcriber is None and transcribe is not None:
+        resolved_v2_transcriber = _CallableBatchTranscriber(transcribe, resolved.model_id)
     app = FastAPI(title="SpeechRail API", version=resolved.version)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
@@ -352,6 +382,100 @@ def create_app(
             await websocket.close(code=1008)
         finally:
             session.close()
+
+    @app.websocket("/v2/realtime")
+    async def realtime_v2(websocket: WebSocket) -> None:
+        if resolved_v2_transcriber is None:
+            await websocket.close(code=1013, reason="SpeechRail ASR backend is not ready")
+            return
+        if (
+            resolved.api_key is not None
+            and websocket.headers.get("Authorization", "") != f"Bearer {resolved.api_key}"
+        ):
+            await websocket.close(code=1008, reason="Invalid API key")
+            return
+        await websocket.accept()
+        session = TranscriptionSession(
+            max_audio_bytes=resolved.max_realtime_buffer_bytes,
+            max_frame_bytes=resolved.max_realtime_frame_bytes,
+        )
+
+        async def transcribe_item(audio: bytes) -> None:
+            if not audio:
+                return
+            request = TranscriptionRequest(
+                request_id=session.request_id,
+                audio=audio,
+                language=session.language,
+                prompt=session.prompt,
+            )
+            result = await governor.run(
+                lambda: resolved_v2_transcriber.transcribe(request),
+                WorkClass.REALTIME_ASR,
+                deadline=resolved.request_timeout_seconds,
+            )
+            await websocket.send_json(
+                session.transcription_completed(
+                    item_id=f"item_{uuid4().hex}",
+                    text=result.text,
+                    language=result.language,
+                    segments=[segment.model_dump(mode="json") for segment in result.segments],
+                )
+            )
+
+        try:
+            while True:
+                event = await websocket.receive_json()
+                event_type = event.get("type") if isinstance(event, dict) else None
+                if event_type == "session.update":
+                    configured = event.get("session")
+                    if (
+                        not isinstance(configured, dict)
+                        or configured.get("type") != "transcription"
+                    ):
+                        raise RealtimeV2Error(
+                            "only transcription is available in this deployment",
+                            code="capability_not_supported",
+                        )
+                    model = configured.get("model", resolved.model_id)
+                    if model not in {resolved.model_id, *resolved.compatibility_model_ids}:
+                        raise RealtimeV2Error("unknown model", code="model_not_found")
+                    await websocket.send_json(session.configure(configured))
+                elif event_type == "input_audio_buffer.append":
+                    session.append_audio(event.get("audio"))
+                    await websocket.send_json(session.audio_ack())
+                elif event_type == "input_audio_buffer.flush":
+                    await transcribe_item(session.flush_audio())
+                elif event_type == "input_audio_buffer.commit":
+                    await transcribe_item(session.commit_audio())
+                    await websocket.send_json(session.session_completed())
+                    await websocket.close()
+                    return
+                elif event_type == "session.cancel":
+                    await websocket.send_json(session.cancel())
+                    await websocket.close()
+                    return
+                else:
+                    raise RealtimeV2Error("unsupported realtime v2 event", code="invalid_event")
+        except RealtimeV2Error as exc:
+            await websocket.send_json(
+                session.protocol_error(code=exc.code, message=str(exc), retryable=False)
+            )
+            await websocket.close(code=1008)
+        except GovernorQueueFullError:
+            await websocket.send_json(
+                session.protocol_error(
+                    code="queue_full", message="Realtime inference queue is full", retryable=True
+                )
+            )
+            await websocket.close(code=1013)
+        except TimeoutError:
+            await websocket.send_json(
+                session.protocol_error(
+                    code="backend_timeout", message="Realtime inference timed out", retryable=True
+                )
+            )
+            await websocket.close(code=1013)
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:
