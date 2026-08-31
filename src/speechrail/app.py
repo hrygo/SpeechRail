@@ -28,9 +28,11 @@ from speechrail.backends.qwen3_native import (
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
-from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.ports import (
     BatchTranscriber,
+    RealtimeAsrFactory,
+    RealtimeAsrSession,
     SpeechRequest,
     SpeechSynthesizer,
     TranscriptionRequest,
@@ -193,6 +195,7 @@ def create_app(
     *,
     transcribe: Transcribe | None = None,
     v2_transcriber: BatchTranscriber | None = None,
+    realtime_asr_factory: RealtimeAsrFactory | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
     job_repository: JobRepository | None = None,
     job_processor: JobProcessor | None = None,
@@ -639,7 +642,11 @@ def create_app(
 
     @app.websocket("/v2/realtime")
     async def realtime_v2(websocket: WebSocket) -> None:
-        if resolved_v2_transcriber is None and tts_synthesizer is None:
+        if (
+            resolved_v2_transcriber is None
+            and realtime_asr_factory is None
+            and tts_synthesizer is None
+        ):
             await websocket.close(code=1013, reason="SpeechRail inference backend is not ready")
             return
         if (
@@ -654,6 +661,56 @@ def create_app(
             max_frame_bytes=resolved.max_realtime_frame_bytes,
         )
         active_synthesis: asyncio.Task[None] | None = None
+        active_streaming_asr: RealtimeAsrSession | None = None
+        streaming_reader: asyncio.Task[None] | None = None
+        streaming_item_id: str | None = None
+        streaming_revision = 0
+
+        async def consume_streaming_asr_events() -> None:
+            nonlocal streaming_item_id, streaming_revision
+            if active_streaming_asr is None:
+                return
+            async for event in active_streaming_asr.events():
+                if not isinstance(session, TranscriptionSession):
+                    return
+                if event.kind == "partial":
+                    if not event.text.strip():
+                        continue
+                    streaming_item_id = streaming_item_id or f"item_{uuid4().hex}"
+                    streaming_revision += 1
+                    await websocket.send_json(
+                        session.transcription_delta(
+                            item_id=streaming_item_id,
+                            revision=streaming_revision,
+                            text=event.text,
+                            start_ms=0,
+                            end_ms=0,
+                        )
+                    )
+                elif event.kind == "completed":
+                    if not event.text.strip():
+                        continue
+                    item_id = streaming_item_id or f"item_{uuid4().hex}"
+                    segments = event.segments or (
+                        TranscriptSegment(
+                            id=f"seg_{uuid4().hex}", start_ms=0, end_ms=0, text=event.text
+                        ),
+                    )
+                    await websocket.send_json(
+                        session.transcription_completed(
+                            item_id=item_id,
+                            text=event.text,
+                            language=event.language,
+                            segments=[segment.model_dump(mode="json") for segment in segments],
+                        )
+                    )
+                    streaming_item_id = None
+                    streaming_revision = 0
+                else:
+                    raise RealtimeV2Error(
+                        "ASR backend reported an error",
+                        code=event.error_code or "backend_error",
+                    )
 
         async def transcribe_item(audio: bytes) -> None:
             if not audio:
@@ -742,14 +799,24 @@ def create_app(
                             "session must be an object", code="invalid_session"
                         )
                     if configured.get("type") == "transcription":
-                        if resolved_v2_transcriber is None:
+                        if resolved_v2_transcriber is None and realtime_asr_factory is None:
                             raise RealtimeV2Error(
                                 "ASR backend is not ready", code="backend_not_ready"
                             )
                         model = configured.get("model", resolved.model_id)
                         if model not in {resolved.model_id, *resolved.compatibility_model_ids}:
                             raise RealtimeV2Error("unknown model", code="model_not_found")
+                        if not isinstance(session, TranscriptionSession):
+                            raise RealtimeV2Error(
+                                "session type cannot change", code="invalid_session"
+                            )
                         await websocket.send_json(session.configure(configured))
+                        if realtime_asr_factory is not None:
+                            active_streaming_asr = realtime_asr_factory.create(
+                                language=session.language, prompt=session.prompt
+                            )
+                            await active_streaming_asr.connect()
+                            streaming_reader = asyncio.create_task(consume_streaming_asr_events())
                     elif configured.get("type") == "speech":
                         if tts_synthesizer is None:
                             raise RealtimeV2Error(
@@ -769,16 +836,28 @@ def create_app(
                 elif event_type == "input_audio_buffer.append":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    session.append_audio(event.get("audio"))
+                    audio = session.append_audio(event.get("audio"))
+                    if active_streaming_asr is not None:
+                        await active_streaming_asr.append_audio(audio)
                     await websocket.send_json(session.audio_ack())
                 elif event_type == "input_audio_buffer.flush":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    await transcribe_item(session.flush_audio())
+                    audio = session.flush_audio()
+                    if active_streaming_asr is not None:
+                        await active_streaming_asr.flush()
+                    else:
+                        await transcribe_item(audio)
                 elif event_type == "input_audio_buffer.commit":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    await transcribe_item(session.commit_audio())
+                    audio = session.commit_audio()
+                    if active_streaming_asr is not None:
+                        await active_streaming_asr.commit()
+                        if streaming_reader is not None:
+                            await streaming_reader
+                    else:
+                        await transcribe_item(audio)
                     await websocket.send_json(session.session_completed())
                     await websocket.close()
                     return
@@ -867,6 +946,12 @@ def create_app(
                 active_synthesis.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await active_synthesis
+            if streaming_reader is not None and not streaming_reader.done():
+                streaming_reader.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await streaming_reader
+            if active_streaming_asr is not None:
+                await active_streaming_asr.close()
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:
