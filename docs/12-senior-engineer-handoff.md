@@ -14,14 +14,15 @@ date: 2026-08-31
 
 必须修改项已进入[最终设计规格](superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)、
 [Realtime v2 设计契约](../contracts/realtime-v2.md)和 [ADR-0006](decisions/0006-public-asr-tts-runtime.md)。
-这些文件仍不授权下载模型、修改客户端、安装服务或实现 v2/TTS/job。
+这些文件不授权下载模型、修改客户端、安装服务或执行真实模型/客户端 smoke；后续代码实现必须
+保持这些运行门禁。
 
 ## 一页结论
 
-- 当前 `main` 已实现并本机验证：Qwen3-ASR batch REST、基础 WebSocket、离线 worker、
-  QwenPaw 转写 smoke。
-- 当前 `main` 尚未实现：真实 streaming ASR、TTS、异步 job、Realtime v2、
-  `voice-realtime` adapter、完整 WLK `/asr` parity。
+- 代码实现已具备：Qwen3-ASR batch REST、v2 ASR/TTS state machine、受监督 TTS worker、
+  durable jobs、可选 WLK streaming transport 与 `voice-realtime` 的两个 opt-in adapter。
+- 真实 streaming ASR、真实 TTS、jobs 的业务 `input_ref` resolver、QwenPaw/Hermes/
+  `voice-realtime` 影子与切换 smoke 均尚未获授权或验收。
 - 已接受的目标：SpeechRail 只做实时/批量 ASR 和 TTS；不做端到端语音对话、LLM、播放、
   会议、UI 或持久化。
 - 迁移主线：`voice-realtime` 通过一个共享 Realtime client 和两个窄端口 adapter 接入
@@ -109,8 +110,8 @@ Realtime v2 不是 OpenAI 的完整对话协议：它不携带 LLM response、to
 
 ### 模型策略
 
-- 继续使用当前 Qwen3-ASR profile；必须补足真正的 streaming adapter，不能把 batch 结果
-  伪装成 partial。
+- 继续使用当前 Qwen3-ASR profile；已提供可选 WLK streaming transport，但必须经过真实
+  streaming 验收，不能把 batch 结果伪装成 partial。
 - TTS 优先评估 Qwen3-TTS；Kyutai TTS/MLX 是低延迟 Apple Silicon 备选。Qwen3-TTS 在 MPS
   可行性门通过前只是候选，不是默认实现承诺。
 - 上述 TTS 候选均未下载、加载或基准验证。模型来源、版本、许可、量化、MPS 兼容性和质量
@@ -131,12 +132,9 @@ AudioHub PCM
 也不接管其会议、AudioHub、TTS bridge、UI 或数据库。实施计划应按以下依赖顺序拆分：
 
 1. 真实 streaming/resource 可行性门，确定 worker 拓扑和预算；
-2. v2 ASR item/session 契约与 fake backend 测试；
-3. SpeechRail 真实 streaming worker；
-4. `voice-realtime` 共享 client 与两个端口 adapter；
-5. 同一 PCM 的受控影子比对；
-6. 语音助手和完整会议分别冒烟；
-7. 切换、回滚演练、退役旧 WLK / `/asr`。
+2. 同一 PCM 的受控影子比对；
+3. 语音助手和完整会议分别冒烟；
+4. 切换、回滚演练、退役旧 WLK / `/asr`。
 
 TTS 不阻塞 ASR 迁移。`voice-realtime` 可先保留自己的播放/TTS bridge，待 SpeechRail
 `speech` 会话稳定后再改为消费公共 TTS audio chunk。

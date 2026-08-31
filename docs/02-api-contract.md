@@ -13,6 +13,10 @@ date: 2026-08-31
 [Realtime v2 契约](../contracts/realtime-v2.md)。没有已授权并通过 smoke 的真实 worker 时，
 该端点不得被表述为模型可用。
 
+ASR v2 默认仍可使用受限 batch backend 在 flush/commit 后产出结果。仅在明确设置
+`SPEECHRAIL_WLK_STREAMING_URL` 时，它才连接已存在的本地 WLK endpoint 并在 commit 前产出
+持续 partial/completed；该配置不会启动或下载 sidecar。
+
 ## 地址、身份和版本
 
 服务根地址默认是 `http://127.0.0.1:8201`；OpenAI SDK / QwenPaw 的 base URL 是

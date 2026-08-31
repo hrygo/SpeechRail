@@ -1,8 +1,8 @@
 # SpeechRail Realtime v2 设计契约
 
 状态：**部分实现，尚未完成真实后端验收**。`/v2/realtime` 的 ASR/TTS session 状态机、
-手动 PCM 提交、ordered audio delta、TTS response 取消和基础容量隔离已有 deterministic
-fake-backend 测试。没有已授权且通过 smoke 的本地流式 ASR/TTS worker 时，服务仍会返回
+手动 PCM 提交、可选 WLK 连续 ASR、ordered audio delta、TTS response 取消和基础容量隔离已有
+deterministic fake-backend 测试。没有已授权且通过 smoke 的本地流式 ASR/TTS worker 时，服务仍会返回
 `backend_not_ready`；客户端正式切换和端口退役仍须另行授权。
 
 `WS /v2/realtime` 只承载 ASR 与 TTS，不承载 LLM response、tool call、播放、会议状态或
@@ -86,6 +86,11 @@ fake-backend 测试。没有已授权且通过 smoke 的本地流式 ASR/TTS wor
 - `server_vad`：服务端拥有语句切分；检测到稳定边界时自动产生逐句 `transcription.completed`。
   这是会议和连续字幕的默认模式。
 - `manual`：只有客户端发送 `input_audio_buffer.flush` 或 `commit` 才确认当前 item。
+
+当前 WLK transport 保留自身连续识别语义：当并且仅当服务显式配置
+`SPEECHRAIL_WLK_STREAMING_URL`，它会在 `append` 后把 WLK snapshot 归一化为本契约的 delta /
+completed。未配置该 endpoint 时，受限 batch ASR 仅在 flush/commit 后产生 completed；它不是
+server VAD 的等价实现。
 
 服务端返回 `session.created`，回显实际 model、language、audio format、endpointing 和运行限制。
 创建成功后才可 append PCM。
