@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
-from speechrail.domain.ports import TranscriptionRequest
-from speechrail.realtime.v2_session import PCM16
+from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
+from speechrail.realtime.v2_session import PCM16, PCM16_24K
 
 
 class FakeTranscriber:
@@ -22,11 +22,21 @@ class FakeTranscriber:
         )
 
 
+class FakeSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            assert request.text == "你好"
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
 def _client() -> TestClient:
     return TestClient(
         create_app(
             Settings(qwen3_model_dir=None, qwen3_python=None),
             v2_transcriber=FakeTranscriber(),
+            tts_synthesizer=FakeSpeechSynthesizer(),
         )
     )
 
@@ -83,6 +93,35 @@ def test_v2_rejects_audio_before_session_update() -> None:
 
         assert error["type"] == "error"
         assert error["error"]["code"] == "invalid_state"
+
+
+def test_v2_speech_streams_ordered_audio_and_completes_on_commit() -> None:
+    client = _client()
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "speech",
+                    "model": "speechrail/qwen3-tts",
+                    "voice": "default",
+                    "audio_format": PCM16_24K,
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "speech_input.append", "text": "你好"})
+        socket.send_json({"type": "speech_input.commit"})
+
+        created = socket.receive_json()
+        delta = socket.receive_json()
+        completed = socket.receive_json()
+        terminal = socket.receive_json()
+
+        assert created["type"] == "response.created"
+        assert delta["type"] == "response.audio.delta"
+        assert completed["type"] == "response.audio.completed"
+        assert terminal["type"] == "session.completed"
 
 
 def _pcm16(value: bytes) -> str:

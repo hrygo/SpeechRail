@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
+    tts_model_id: str = "speechrail/qwen3-tts"
     compatibility_model_ids: tuple[str, ...] = (
         "Qwen3-ASR-1.7B",
         "qwen3-asr-1.7b",

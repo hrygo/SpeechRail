@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
@@ -85,13 +86,21 @@ class ResourceGovernor:
         deadline: float | None = None,
     ) -> T:
         """Run work after capacity admission, respecting an optional deadline."""
+        async with self.reserve(work_class, deadline=deadline):
+            return await operation()
+
+    @asynccontextmanager
+    async def reserve(
+        self, work_class: WorkClass, *, deadline: float | None = None
+    ) -> AsyncIterator[None]:
+        """Hold one resource lane while an operation yields streamed output."""
         if deadline is None:
             await self._acquire(work_class)
         else:
             async with asyncio.timeout(deadline):
                 await self._acquire(work_class)
         try:
-            return await operation()
+            yield
         finally:
             await self._release(work_class)
 

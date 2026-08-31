@@ -5,7 +5,7 @@ import base64
 import pytest
 
 from speechrail.domain.realtime_v2 import RealtimeV2Error
-from speechrail.realtime.v2_session import PCM16, SpeechSession, TranscriptionSession
+from speechrail.realtime.v2_session import PCM16, PCM16_24K, SpeechSession, TranscriptionSession
 
 
 def _pcm16(data: bytes) -> str:
@@ -59,7 +59,7 @@ def test_transcription_flush_preserves_session_and_commit_is_terminal() -> None:
 
 def test_speech_session_enforces_one_active_response_and_chunk_order() -> None:
     session = SpeechSession(max_text_chars=16)
-    session.configure({"type": "speech", "voice": "alloy", "audio_format": PCM16})
+    session.configure({"type": "speech", "voice": "alloy", "audio_format": PCM16_24K})
     session.append_text("你好")
 
     created = session.response_created(response_id="response-1")
@@ -77,7 +77,7 @@ def test_speech_session_enforces_one_active_response_and_chunk_order() -> None:
 
 def test_speech_response_cancel_is_idempotent_and_session_cancel_is_terminal() -> None:
     session = SpeechSession(max_text_chars=16)
-    session.configure({"type": "speech", "voice": "alloy", "audio_format": PCM16})
+    session.configure({"type": "speech", "voice": "alloy", "audio_format": PCM16_24K})
     session.response_created(response_id="response-1")
 
     cancelled = session.response_cancel(response_id="response-1")

@@ -22,6 +22,7 @@ PCM16: dict[str, int | str] = {
     "channels": 1,
     "sample_width": 2,
 }
+PCM16_24K: dict[str, int | str] = {**PCM16, "rate": 24_000}
 
 
 class SessionState(StrEnum):
@@ -244,12 +245,17 @@ class SpeechSession(_BaseSession):
             raise ValueError("max_text_chars must be positive")
         self._max_text_chars = max_text_chars
         self._text_parts: list[str] = []
+        self._input_committed = False
         self._active_response_id: str | None = None
         self._next_chunk_index = 0
         self._cancelled_responses: set[str] = set()
+        self.voice = ""
+        self.audio_format: dict[str, int | str] = dict(PCM16_24K)
 
     def append_text(self, text: str) -> None:
         self._ensure_active()
+        if self._input_committed:
+            raise RealtimeV2Error("speech input has committed", code="invalid_state")
         if not text:
             raise RealtimeV2Error("text must not be empty", code="invalid_text")
         if len(self.text) + len(text) > self._max_text_chars:
@@ -262,12 +268,16 @@ class SpeechSession(_BaseSession):
 
     def flush_text(self) -> str:
         self._ensure_active()
+        if self._input_committed:
+            raise RealtimeV2Error("speech input has committed", code="invalid_state")
         return self._drain_text()
 
     def commit_text(self) -> str:
         self._ensure_active()
+        if self._input_committed:
+            raise RealtimeV2Error("speech input has committed", code="invalid_state")
         text = self._drain_text()
-        self.state = SessionState.COMMITTED
+        self._input_committed = True
         return text
 
     def response_created(self, *, response_id: str | None = None) -> dict[str, Any]:
@@ -279,7 +289,12 @@ class SpeechSession(_BaseSession):
             raise RealtimeV2Error("response id may not be reused", code="invalid_response")
         self._active_response_id = resolved_response_id
         self._next_chunk_index = 0
-        return self._event("response.created", response_id=resolved_response_id)
+        return self._event(
+            "response.created",
+            response_id=resolved_response_id,
+            voice=self.voice,
+            audio_format=self.audio_format,
+        )
 
     def audio_delta(self, *, response_id: str, chunk_index: int, audio: bytes) -> dict[str, Any]:
         self._ensure_active()
@@ -300,7 +315,19 @@ class SpeechSession(_BaseSession):
         self._ensure_active()
         self._require_active_response(response_id)
         self._active_response_id = None
-        return self._event("response.audio.completed", response_id=response_id)
+        return self._event(
+            "response.audio.completed",
+            response_id=response_id,
+            total_chunks=self._next_chunk_index,
+        )
+
+    def complete_if_input_committed(self) -> dict[str, Any] | None:
+        if self.state is SessionState.COMMITTED:
+            return None
+        if not self._input_committed or self._active_response_id is not None:
+            return None
+        self.state = SessionState.COMMITTED
+        return self.session_completed()
 
     def response_cancel(self, *, response_id: str) -> dict[str, Any]:
         if response_id in self._cancelled_responses:
@@ -314,7 +341,9 @@ class SpeechSession(_BaseSession):
     def _validate_configure(self, session: Mapping[str, Any]) -> None:
         if not isinstance(session.get("voice"), str) or not session["voice"].strip():
             raise RealtimeV2Error("speech sessions require a voice", code="invalid_session")
-        _validate_pcm16(session.get("audio_format"))
+        _validate_pcm16(session.get("audio_format"), expected=PCM16_24K)
+        self.voice = session["voice"].strip()
+        self.audio_format = dict(PCM16_24K)
 
     def _require_active_response(self, response_id: str) -> None:
         if self._active_response_id != response_id:
@@ -342,6 +371,6 @@ def _decode_pcm16(encoded_audio: object) -> bytes:
     return audio
 
 
-def _validate_pcm16(value: object) -> None:
-    if not isinstance(value, Mapping) or dict(value) != PCM16:
+def _validate_pcm16(value: object, *, expected: Mapping[str, int | str] = PCM16) -> None:
+    if not isinstance(value, Mapping) or dict(value) != expected:
         raise RealtimeV2Error("only 16 kHz mono PCM16 is supported", code="invalid_audio_format")

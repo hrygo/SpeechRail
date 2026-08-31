@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
@@ -23,11 +24,16 @@ from speechrail.backends.qwen3_native import (
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
-from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
+from speechrail.domain.ports import (
+    BatchTranscriber,
+    SpeechRequest,
+    SpeechSynthesizer,
+    TranscriptionRequest,
+)
 from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.realtime.events import RealtimeSession, SessionError
-from speechrail.realtime.v2_session import TranscriptionSession
+from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
 from speechrail.runtime.admission import AdmissionQueue, QueueFullError
 from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
 
@@ -46,6 +52,23 @@ class _CallableBatchTranscriber(BatchTranscriber):
         return result.model_copy(
             update={"request_id": request.request_id, "model_id": self._model_id}
         )
+
+
+class _SpeechHTTPBody(BaseModel):
+    """OpenAI-compatible subset for the public sentence TTS endpoint."""
+
+    model: str = Field(min_length=1, max_length=200)
+    input: str = Field(min_length=1, max_length=100_000)
+    voice: str = Field(min_length=1, max_length=200)
+    response_format: Literal["pcm", "wav"] = "wav"
+
+    @field_validator("input", "voice")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
 
 
 def _error(
@@ -149,6 +172,7 @@ def create_app(
     *,
     transcribe: Transcribe | None = None,
     v2_transcriber: BatchTranscriber | None = None,
+    tts_synthesizer: SpeechSynthesizer | None = None,
 ) -> FastAPI:
     resolved = settings or Settings()
     worker: Qwen3Worker | None = None
@@ -226,7 +250,11 @@ def create_app(
             "object": "list",
             "data": [
                 {"id": item, "object": "model", "owned_by": "speechrail"}
-                for item in (resolved.model_id, *resolved.compatibility_model_ids)
+                for item in (
+                    resolved.model_id,
+                    resolved.tts_model_id,
+                    *resolved.compatibility_model_ids,
+                )
             ],
         }
 
@@ -323,6 +351,57 @@ def create_app(
             return PlainTextResponse(format_srt(result), media_type="application/x-subrip")
         return PlainTextResponse(format_vtt(result), media_type="text/vtt")
 
+    @app.post("/v1/audio/speech")
+    async def speech(request: Request, body: _SpeechHTTPBody) -> Response:
+        request_id = request.state.request_id
+        if (
+            resolved.api_key is not None
+            and request.headers.get("Authorization", "") != f"Bearer {resolved.api_key}"
+        ):
+            return JSONResponse(
+                status_code=401,
+                content=_error(
+                    message="Invalid or missing API key",
+                    error_type="authentication_error",
+                    code="invalid_api_key",
+                    request_id=request_id,
+                    retryable=False,
+                ),
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if body.model != resolved.tts_model_id:
+            return _error_response(
+                400,
+                request_id,
+                "model_not_found",
+                f"Unknown TTS model: {body.model}",
+                param="model",
+            )
+        if tts_synthesizer is None:
+            return _error_response(
+                503,
+                request_id,
+                "backend_not_ready",
+                "SpeechRail TTS backend is not ready",
+                retryable=True,
+            )
+        synthesis = SpeechRequest(
+            text=body.input,
+            voice=body.voice,
+            output_format="pcm16" if body.response_format == "pcm" else "wav",
+        )
+
+        async def audio_stream() -> AsyncIterator[bytes]:
+            expected_chunk = 0
+            async for chunk in tts_synthesizer.synthesize(synthesis):
+                if chunk.chunk_index != expected_chunk:
+                    raise RuntimeError("tts_chunk_order_invalid")
+                expected_chunk += 1
+                yield chunk.audio
+
+        media_type = "audio/x-pcm" if body.response_format == "pcm" else "audio/wav"
+        return StreamingResponse(audio_stream(), media_type=media_type)
+
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
         if transcribe is None:
@@ -385,8 +464,8 @@ def create_app(
 
     @app.websocket("/v2/realtime")
     async def realtime_v2(websocket: WebSocket) -> None:
-        if resolved_v2_transcriber is None:
-            await websocket.close(code=1013, reason="SpeechRail ASR backend is not ready")
+        if resolved_v2_transcriber is None and tts_synthesizer is None:
+            await websocket.close(code=1013, reason="SpeechRail inference backend is not ready")
             return
         if (
             resolved.api_key is not None
@@ -395,7 +474,7 @@ def create_app(
             await websocket.close(code=1008, reason="Invalid API key")
             return
         await websocket.accept()
-        session = TranscriptionSession(
+        session: TranscriptionSession | SpeechSession = TranscriptionSession(
             max_audio_bytes=resolved.max_realtime_buffer_bytes,
             max_frame_bytes=resolved.max_realtime_frame_bytes,
         )
@@ -403,6 +482,8 @@ def create_app(
         async def transcribe_item(audio: bytes) -> None:
             if not audio:
                 return
+            if not isinstance(session, TranscriptionSession) or resolved_v2_transcriber is None:
+                raise RealtimeV2Error("ASR backend is not ready", code="backend_not_ready")
             request = TranscriptionRequest(
                 request_id=session.request_id,
                 audio=audio,
@@ -423,34 +504,120 @@ def create_app(
                 )
             )
 
+        async def synthesize_text(text: str) -> None:
+            if not text:
+                return
+            if not isinstance(session, SpeechSession) or tts_synthesizer is None:
+                raise RealtimeV2Error("TTS backend is not ready", code="backend_not_ready")
+            created = session.response_created()
+            response_id = str(created["response_id"])
+            await websocket.send_json(created)
+            request = SpeechRequest(
+                text=text,
+                voice=session.voice,
+                output_format="pcm16",
+                sample_rate=24_000,
+            )
+            async with governor.reserve(
+                WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
+            ):
+                async for chunk in tts_synthesizer.synthesize(request):
+                    await websocket.send_json(
+                        session.audio_delta(
+                            response_id=response_id,
+                            chunk_index=chunk.chunk_index,
+                            audio=chunk.audio,
+                        )
+                    )
+            await websocket.send_json(session.response_completed(response_id=response_id))
+            completed = session.complete_if_input_committed()
+            if completed is not None:
+                await websocket.send_json(completed)
+
         try:
             while True:
                 event = await websocket.receive_json()
                 event_type = event.get("type") if isinstance(event, dict) else None
                 if event_type == "session.update":
                     configured = event.get("session")
-                    if (
-                        not isinstance(configured, dict)
-                        or configured.get("type") != "transcription"
-                    ):
+                    if not isinstance(configured, dict):
                         raise RealtimeV2Error(
-                            "only transcription is available in this deployment",
-                            code="capability_not_supported",
+                            "session must be an object", code="invalid_session"
                         )
-                    model = configured.get("model", resolved.model_id)
-                    if model not in {resolved.model_id, *resolved.compatibility_model_ids}:
-                        raise RealtimeV2Error("unknown model", code="model_not_found")
-                    await websocket.send_json(session.configure(configured))
+                    if configured.get("type") == "transcription":
+                        if resolved_v2_transcriber is None:
+                            raise RealtimeV2Error(
+                                "ASR backend is not ready", code="backend_not_ready"
+                            )
+                        model = configured.get("model", resolved.model_id)
+                        if model not in {resolved.model_id, *resolved.compatibility_model_ids}:
+                            raise RealtimeV2Error("unknown model", code="model_not_found")
+                        await websocket.send_json(session.configure(configured))
+                    elif configured.get("type") == "speech":
+                        if tts_synthesizer is None:
+                            raise RealtimeV2Error(
+                                "TTS backend is not ready", code="backend_not_ready"
+                            )
+                        model = configured.get("model", resolved.tts_model_id)
+                        if model != resolved.tts_model_id:
+                            raise RealtimeV2Error("unknown model", code="model_not_found")
+                        session = SpeechSession(
+                            max_text_chars=100_000, request_id=session.request_id
+                        )
+                        await websocket.send_json(session.configure(configured))
+                    else:
+                        raise RealtimeV2Error(
+                            "unsupported session type", code="capability_not_supported"
+                        )
                 elif event_type == "input_audio_buffer.append":
+                    if not isinstance(session, TranscriptionSession):
+                        raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
                     session.append_audio(event.get("audio"))
                     await websocket.send_json(session.audio_ack())
                 elif event_type == "input_audio_buffer.flush":
+                    if not isinstance(session, TranscriptionSession):
+                        raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
                     await transcribe_item(session.flush_audio())
                 elif event_type == "input_audio_buffer.commit":
+                    if not isinstance(session, TranscriptionSession):
+                        raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
                     await transcribe_item(session.commit_audio())
                     await websocket.send_json(session.session_completed())
                     await websocket.close()
                     return
+                elif event_type == "speech_input.append":
+                    if not isinstance(session, SpeechSession):
+                        raise RealtimeV2Error(
+                            "event is not valid for transcription", code="invalid_event"
+                        )
+                    text = event.get("text")
+                    if not isinstance(text, str):
+                        raise RealtimeV2Error("text is required", code="invalid_event")
+                    session.append_text(text)
+                elif event_type == "speech_input.flush":
+                    if not isinstance(session, SpeechSession):
+                        raise RealtimeV2Error(
+                            "event is not valid for transcription", code="invalid_event"
+                        )
+                    await synthesize_text(session.flush_text())
+                elif event_type == "speech_input.commit":
+                    if not isinstance(session, SpeechSession):
+                        raise RealtimeV2Error(
+                            "event is not valid for transcription", code="invalid_event"
+                        )
+                    await synthesize_text(session.commit_text())
+                    if session.state == "committed":
+                        await websocket.close()
+                        return
+                elif event_type == "response.cancel":
+                    if not isinstance(session, SpeechSession):
+                        raise RealtimeV2Error(
+                            "event is not valid for transcription", code="invalid_event"
+                        )
+                    response_id = event.get("response_id")
+                    if not isinstance(response_id, str):
+                        raise RealtimeV2Error("response_id is required", code="invalid_event")
+                    await websocket.send_json(session.response_cancel(response_id=response_id))
                 elif event_type == "session.cancel":
                     await websocket.send_json(session.cancel())
                     await websocket.close()
