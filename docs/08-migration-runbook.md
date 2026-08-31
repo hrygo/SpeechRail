@@ -28,6 +28,17 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 重启 Hermes 后，验证一条语音消息以及聊天模型正常性。若任一失败，删除/恢复这两个 STT
 键并重启，不修改全局 `OPENAI_BASE_URL`。本阶段完成前不得宣称 Hermes 集成已验证。
 
+## 本机唯一 ASR 切换记录（2026-08-31）
+
+本机 SpeechRail 已以仓库外 ModelScope `Qwen/Qwen3-ASR-1.7B` snapshot、MPS/float16 和
+专用离线 Python worker 在 `127.0.0.1:8201` 启动；legacy `/asr` 已禁用，未配置 WLK sidecar。
+QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:8201/v1`，模型为
+`speechrail/qwen3-asr-1.7b`。voice-realtime 的字幕/会议与交互均显式配置
+`speechrail-realtime-v2` 和 `ws://127.0.0.1:8201/v2/realtime`。
+
+已完成 REST、QwenPaw workspace 转写、Realtime session commit 和 Pipecat VAD turn 的本机真实
+模型冒烟。验收只记录成功状态、request ID、时延和非空断言；不保存音频或转写正文。
+
 ## `voice-realtime`：adapter 已实现，运行切换待授权
 
 当前 `/asr` 不做转写，故不可切换旧 WLK `8001`。主路线已经由 ADR-0006 固定为
