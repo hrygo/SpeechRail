@@ -1,9 +1,4 @@
-"""Contract-first FastAPI application for SpeechRail.
-
-The current release exposes the public surface and safe failure semantics.
-Inference adapters are deliberately not bundled into this foundation commit;
-the implementation plan describes the Qwen3-ASR and WhisperLiveKit ports.
-"""
+"""Contract-first FastAPI application with bounded ASR execution edges."""
 
 from __future__ import annotations
 
@@ -13,12 +8,18 @@ from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, Request, UploadFile, WebSocket
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from speechrail import __version__
+from speechrail.compatibility.presenters import legacy_config
 from speechrail.config import Settings
+from speechrail.domain.contracts import TranscriptResult
+from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
+from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+
+Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
 
 
 def _error(
@@ -30,9 +31,7 @@ def _error(
     retryable: bool,
     param: str | None = None,
 ) -> dict[str, Any]:
-    """Build the single OpenAI-compatible error envelope."""
-
-    payload: dict[str, Any] = {
+    value: dict[str, Any] = {
         "message": message,
         "type": error_type,
         "code": code,
@@ -40,17 +39,13 @@ def _error(
         "retryable": retryable,
     }
     if param is not None:
-        payload["param"] = param
-    return {"error": payload}
+        value["param"] = param
+    return {"error": value}
 
 
 class RequestIdMiddleware(BaseHTTPMiddleware):
-    """Attach a request ID without logging request bodies or credentials."""
-
     async def dispatch(
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         request_id = request.headers.get("X-Request-ID") or f"req_{uuid4().hex}"
         request.state.request_id = request_id
@@ -60,53 +55,59 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
         return response
 
 
-def _authorized(request: Request, settings: Settings) -> bool:
-    """Validate an optional Bearer key; loopback defaults remain keyless."""
-
-    if settings.api_key is None:
-        return True
-    authorization = request.headers.get("Authorization", "")
-    return authorization == f"Bearer {settings.api_key}"
-
-
-def _model_known(model: str, settings: Settings) -> bool:
-    """Accept the canonical model and explicit compatibility aliases."""
-
-    requested = model.strip()
-    return not requested or requested in {settings.model_id, *settings.compatibility_model_ids}
-
-
-def create_app(settings: Settings | None = None) -> FastAPI:
-    """Create an isolated SpeechRail ASGI application."""
-
-    resolved = settings or Settings()
-    app = FastAPI(
-        title="SpeechRail API",
-        version=resolved.version,
-        description=(
-            "Local-first shared speech recognition API. The foundation release "
-            "publishes the stable contract before inference adapters are enabled."
+def _error_response(
+    status: int,
+    request_id: str,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    param: str | None = None,
+) -> JSONResponse:
+    error_type = "server_error" if retryable else "invalid_request_error"
+    return JSONResponse(
+        status_code=status,
+        content=_error(
+            message=message,
+            error_type=error_type,
+            code=code,
+            request_id=request_id,
+            retryable=retryable,
+            param=param,
         ),
     )
+
+
+async def _read_upload(file: UploadFile, limit: int) -> bytes:
+    if not (file.content_type or "").startswith("audio/"):
+        raise ValueError("unsupported_audio_type")
+    content = bytearray()
+    while chunk := await file.read(64 * 1024):
+        content.extend(chunk)
+        if len(content) > limit:
+            raise OverflowError
+    if not content:
+        raise ValueError("empty_audio")
+    return bytes(content)
+
+
+def create_app(
+    settings: Settings | None = None, *, transcribe: Transcribe | None = None
+) -> FastAPI:
+    resolved = settings or Settings()
+    admission = AdmissionQueue(resolved.max_queue_size)
+    app = FastAPI(title="SpeechRail API", version=resolved.version)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error_handler(
-        request: Request,
-        exc: RequestValidationError,
-    ) -> JSONResponse:
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         del exc
-        request_id = getattr(request.state, "request_id", f"req_{uuid4().hex}")
-        return JSONResponse(
-            status_code=422,
-            content=_error(
-                message="Request validation failed",
-                error_type="invalid_request_error",
-                code="validation_error",
-                request_id=request_id,
-                retryable=False,
-            ),
+        return _error_response(
+            422,
+            getattr(request.state, "request_id", f"req_{uuid4().hex}"),
+            "validation_error",
+            "Request validation failed",
         )
 
     @app.get("/health")
@@ -116,52 +117,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "service": resolved.service_name,
             "version": resolved.version,
             "backend": "qwen3-asr-1.7b",
-            "ready": resolved.backend_ready,
+            "ready": transcribe is not None or resolved.backend_ready,
         }
 
     @app.get("/readyz")
     async def readyz(request: Request) -> JSONResponse:
-        request_id = getattr(request.state, "request_id", f"req_{uuid4().hex}")
-        if resolved.backend_ready:
+        if transcribe is not None or resolved.backend_ready:
             return JSONResponse(status_code=200, content={"ready": True})
-        return JSONResponse(
-            status_code=503,
-            content=_error(
-                message="SpeechRail inference backend is not ready",
-                error_type="server_error",
-                code="backend_not_ready",
-                request_id=request_id,
-                retryable=True,
-            ),
+        return _error_response(
+            503,
+            request.state.request_id,
+            "backend_not_ready",
+            "SpeechRail inference backend is not ready",
+            retryable=True,
         )
 
     @app.get("/v1/models")
-    async def list_models() -> dict[str, Any]:
-        ids = [resolved.model_id, *resolved.compatibility_model_ids]
+    async def models() -> dict[str, Any]:
         return {
             "object": "list",
             "data": [
-                {
-                    "id": model_id,
-                    "object": "model",
-                    "owned_by": "speechrail",
-                }
-                for model_id in ids
+                {"id": item, "object": "model", "owned_by": "speechrail"}
+                for item in (resolved.model_id, *resolved.compatibility_model_ids)
             ],
         }
 
     @app.post("/v1/audio/transcriptions")
-    async def create_transcription(
+    async def transcription(
         request: Request,
-        file: UploadFile = File(...),  # noqa: B008 - FastAPI requires a parameter marker here.
+        file: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.
         model: str = Form(default=""),
         language: str | None = Form(default=None),
         prompt: str = Form(default=""),
         response_format: str = Form(default="json"),
-    ) -> JSONResponse:
-        del file, language, prompt, response_format
-        request_id = getattr(request.state, "request_id", f"req_{uuid4().hex}")
-        if not _authorized(request, resolved):
+    ) -> Response:
+        request_id = request.state.request_id
+        if (
+            resolved.api_key is not None
+            and request.headers.get("Authorization", "") != f"Bearer {resolved.api_key}"
+        ):
             return JSONResponse(
                 status_code=401,
                 content=_error(
@@ -173,28 +167,71 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 ),
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        if not _model_known(model, resolved):
-            return JSONResponse(
-                status_code=400,
-                content=_error(
-                    message=f"Unknown model: {model}",
-                    error_type="invalid_request_error",
-                    code="model_not_found",
-                    request_id=request_id,
-                    retryable=False,
-                    param="model",
-                ),
+        if model.strip() and model.strip() not in {
+            resolved.model_id,
+            *resolved.compatibility_model_ids,
+        }:
+            return _error_response(
+                400, request_id, "model_not_found", f"Unknown model: {model}", param="model"
             )
-        return JSONResponse(
-            status_code=503,
-            content=_error(
-                message="SpeechRail inference backend is not ready",
-                error_type="server_error",
-                code="backend_not_ready",
-                request_id=request_id,
+        if response_format not in {"json", "verbose_json", "text", "srt", "vtt"}:
+            return _error_response(
+                422,
+                request_id,
+                "invalid_response_format",
+                "Unsupported response format",
+                param="response_format",
+            )
+        if len(prompt) > 2000:
+            return _error_response(
+                422, request_id, "prompt_too_long", "Prompt is too long", param="prompt"
+            )
+        try:
+            audio = await _read_upload(file, resolved.max_upload_bytes)
+        except OverflowError:
+            return _error_response(413, request_id, "audio_too_large", "Audio exceeds upload limit")
+        except ValueError as exc:
+            return _error_response(
+                422, request_id, str(exc), "Unsupported audio upload", param="file"
+            )
+        if transcribe is None:
+            return _error_response(
+                503,
+                request_id,
+                "backend_not_ready",
+                "SpeechRail inference backend is not ready",
                 retryable=True,
-            ),
-        )
+            )
+        try:
+            result = await admission.run(
+                lambda: transcribe(audio, language, prompt),
+                deadline=resolved.request_timeout_seconds,
+            )
+        except QueueFullError:
+            return JSONResponse(
+                status_code=429,
+                content=_error(
+                    message="Inference queue is full",
+                    error_type="server_error",
+                    code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except TimeoutError:
+            return _error_response(
+                503, request_id, "backend_timeout", "Inference timed out", retryable=True
+            )
+        if response_format == "json":
+            return JSONResponse(format_json(result))
+        if response_format == "verbose_json":
+            return JSONResponse(format_verbose(result))
+        if response_format == "text":
+            return PlainTextResponse(result.text)
+        if response_format == "srt":
+            return PlainTextResponse(format_srt(result), media_type="application/x-subrip")
+        return PlainTextResponse(format_vtt(result), media_type="text/vtt")
 
     @app.websocket("/v1/realtime")
     async def realtime(websocket: WebSocket) -> None:
@@ -202,6 +239,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.websocket("/asr")
     async def legacy_asr(websocket: WebSocket) -> None:
+        if not resolved.legacy_wlk_enabled:
+            await websocket.close(code=1008, reason="Legacy endpoint disabled")
+            return
+        await websocket.accept()
+        await websocket.send_json(legacy_config())
         await websocket.close(code=1013, reason="SpeechRail backend is not ready")
 
     return app
