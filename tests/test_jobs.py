@@ -6,7 +6,7 @@ from speechrail.runtime.jobs import JobRepository
 
 
 def test_job_repository_scopes_records_to_owner_and_cancels_queued_work(tmp_path: Path) -> None:
-    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"})
 
     assert repository.get(job.id, owner="owner-b") is None
@@ -20,7 +20,7 @@ def test_job_repository_scopes_records_to_owner_and_cancels_queued_work(tmp_path
 def test_job_repository_claim_is_atomic_and_restart_marks_running_work_failed(
     tmp_path: Path,
 ) -> None:
-    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(kind="transcription", owner="owner-a", request={"input_ref": "opaque"})
 
     assert repository.claim_next() is not None
@@ -36,7 +36,7 @@ def test_job_repository_claim_is_atomic_and_restart_marks_running_work_failed(
 def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
     tmp_path: Path,
 ) -> None:
-    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"})
     claimed = repository.claim_next()
     assert claimed is not None
@@ -58,7 +58,7 @@ def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
 def test_cancelling_a_completed_job_releases_its_result_without_rewriting_state(
     tmp_path: Path,
 ) -> None:
-    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(kind="speech", owner="owner-a", request={"input_ref": "opaque"})
     assert repository.claim_next() is not None
     repository.complete(job.id, result_ref="result.wav")
@@ -71,7 +71,7 @@ def test_cancelling_a_completed_job_releases_its_result_without_rewriting_state(
 
 
 def test_job_repository_records_a_bounded_failure_code(tmp_path: Path) -> None:
-    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(kind="transcription", owner="owner-a", request={"input_ref": "opaque"})
     assert repository.claim_next() is not None
 

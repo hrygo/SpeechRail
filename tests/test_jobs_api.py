@@ -13,7 +13,7 @@ def test_jobs_api_creates_reads_and_cancels_owner_scoped_job(tmp_path) -> None:
     client = TestClient(
         create_app(
             Settings(qwen3_model_dir=None, qwen3_python=None),
-            job_repository=JobRepository(tmp_path.parent / "speechrail-job-spool"),
+            job_repository=JobRepository(tmp_path / "speechrail-job-spool"),
         )
     )
 
@@ -35,7 +35,7 @@ def test_jobs_api_requires_bearer_key_when_configured(tmp_path) -> None:
     client = TestClient(
         create_app(
             Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None),
-            job_repository=JobRepository(tmp_path.parent / "speechrail-job-spool"),
+            job_repository=JobRepository(tmp_path / "speechrail-job-spool"),
         )
     )
 
@@ -46,7 +46,7 @@ def test_jobs_api_requires_bearer_key_when_configured(tmp_path) -> None:
 
 
 def test_jobs_api_delete_releases_a_completed_owner_scoped_result(tmp_path) -> None:
-    repository = JobRepository(tmp_path.parent / "speechrail-job-spool")
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
     job = repository.create(
         kind="speech",
         owner="loopback",
@@ -69,7 +69,7 @@ def test_jobs_api_delete_releases_a_completed_owner_scoped_result(tmp_path) -> N
 
 
 def test_configured_job_spool_recovers_interrupted_jobs_on_startup(tmp_path) -> None:
-    spool_dir = tmp_path.parent / "speechrail-job-spool"
+    spool_dir = tmp_path / "speechrail-job-spool"
     repository = JobRepository(spool_dir)
     job = repository.create(
         kind="speech",
@@ -100,7 +100,7 @@ def test_configured_job_processor_executes_new_jobs_in_the_background(tmp_path) 
             assert job.request["input_ref"] == "external/input"
             return "result://speech/1"
 
-    spool_dir = tmp_path.parent / "speechrail-job-spool"
+    spool_dir = tmp_path / "speechrail-job-spool"
     with TestClient(
         create_app(
             Settings(
