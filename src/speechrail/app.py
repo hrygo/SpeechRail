@@ -26,6 +26,7 @@ from speechrail.backends.qwen3_native import (
     Qwen3Worker,
 )
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
+from speechrail.backends.wlk_streaming import WlkRealtimeFactory
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
@@ -240,6 +241,8 @@ def create_app(
             )
         )
         tts_synthesizer = tts_worker
+    if realtime_asr_factory is None and resolved.wlk_streaming_url is not None:
+        realtime_asr_factory = WlkRealtimeFactory(url=resolved.wlk_streaming_url)
     admission = AdmissionQueue(resolved.max_queue_size)
     governor = ResourceGovernor(resolved.governor_limits)
     if job_repository is not None and job_processor is not None:

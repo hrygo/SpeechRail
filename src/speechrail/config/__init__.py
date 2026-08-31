@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,7 @@ class Settings(BaseSettings):
     qwen3_tts_python: Path | None = None
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
+    wlk_streaming_url: str | None = None
     job_spool_dir: Path | None = None
     job_poll_seconds: float = Field(default=0.1, gt=0, le=60)
     compatibility_model_ids: tuple[str, ...] = (
@@ -67,6 +69,22 @@ class Settings(BaseSettings):
         if value is not None and not value.is_absolute():
             raise ValueError("job_spool_dir must be an external absolute path")
         return value
+
+    @field_validator("wlk_streaming_url")
+    @classmethod
+    def validate_wlk_streaming_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().rstrip("/")
+        parsed = urlsplit(normalized)
+        if (
+            parsed.scheme not in {"ws", "wss"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("wlk_streaming_url must be a credential-free ws(s) URL")
+        return normalized
 
     @model_validator(mode="after")
     def validate_exposure(self) -> Settings:

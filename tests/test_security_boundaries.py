@@ -20,6 +20,15 @@ def test_job_spool_requires_an_external_absolute_path() -> None:
         )
 
 
+def test_wlk_streaming_url_rejects_credentials() -> None:
+    with pytest.raises(ValidationError, match="wlk_streaming_url"):
+        Settings(
+            wlk_streaming_url="ws://token@127.0.0.1:8001",
+            qwen3_model_dir=None,
+            qwen3_python=None,
+        )
+
+
 def test_api_key_is_not_accepted_from_query_or_wrong_bearer() -> None:
     client = TestClient(
         create_app(Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None))
