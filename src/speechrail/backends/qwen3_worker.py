@@ -182,7 +182,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
     def __init__(self, model_dir: Path, device: Literal["mps", "cpu"], max_new_tokens: int) -> None:
         if any(not (model_dir / name).is_file() for name in MODEL_FILES):
             raise ValueError("model snapshot is incomplete")
-        import torch  # type: ignore[import-not-found]
+        import torch
         from qwen_asr import Qwen3ASRModel  # type: ignore[import-not-found]
 
         if device == "mps":
@@ -206,7 +206,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         self.identity = WorkerIdentity(device, str(parameters[0].dtype).removeprefix("torch."))
 
     def transcribe(self, audio: bytes, *, language: str, prompt: str) -> tuple[str, str]:
-        import numpy as np  # type: ignore[import-not-found]
+        import numpy as np
 
         waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
         results = self._model.transcribe(
