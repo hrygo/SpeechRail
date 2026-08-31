@@ -41,8 +41,9 @@ SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 
 `SPEECHRAIL_JOB_SPOOL_DIR` 可选；目录必须在仓库外且由当前运行账户私有。设置后服务会在
 启动时恢复任务元数据，并将上次异常中断的 `running` 任务标记为
-`failed(worker_interrupted)`。这不会安装或启动 batch executor，`queued` 任务在该阶段
-仍不会自动执行。
+`failed(worker_interrupted)`。仅当部署代码显式注入受信任 `JobProcessor` 时才启动 batch
+executor；该 processor 和 realtime 共用 Resource Governor。默认没有 `input_ref` 的路径/URL
+resolver，`queued` 不会被自动解释为可读取的模型输入。
 
 ## 启动、停止与验收
 

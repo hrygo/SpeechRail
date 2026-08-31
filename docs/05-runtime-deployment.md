@@ -61,7 +61,8 @@ ASR 模型或 `voice-realtime` 组件。
 启用 job spool 时，目录须是项目外的绝对路径，并由运行账户独占。服务以 `0700` 创建目录、
 以 `0600` 创建数据库，保存的仅是 owner 指纹、任务状态和不透明输入/结果引用；不保存原始
 音频或完整转写。重启会将未完成的 `running` 任务标为 `failed(worker_interrupted)`。当前
-foundation 尚未启动 batch executor，故 `queued` 任务不会自行调用模型。
+foundation 仅在部署代码显式注入受信任 `JobProcessor` 时启动 batch executor；它和 realtime
+共用 Resource Governor。没有内建的 `input_ref` 路径/URL resolver，默认不读取外部引用。
 
 ## 端口与进程策略
 

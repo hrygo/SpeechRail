@@ -76,7 +76,9 @@ Content-Type: multipart/form-data
 仅当设置绝对路径 `SPEECHRAIL_JOB_SPOOL_DIR` 时才启用该资源；未设置时返回
 `503 backend_not_ready`。启动时残留的 `running` 记录会标记为
 `failed / worker_interrupted`。当前 `0.1.0 foundation` 已有元数据生命周期与 TTL
-原语，但尚未连接实际 batch executor；调用方不得把 `queued` 视为模型任务已经执行。
+原语。部署代码可显式注入受信任的 `JobProcessor` 后启动 batch runner；它与 realtime 共用
+Resource Governor。首发没有内建的 `input_ref` 路径/URL resolver，因此默认部署不会把
+`queued` 自动解释为可读取的模型输入。
 
 ## 响应与错误
 
