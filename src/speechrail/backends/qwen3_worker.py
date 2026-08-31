@@ -162,7 +162,7 @@ def serve(
             )
 
 
-class Qwen3Engine:
+class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and isolated runtime.
     def __init__(self, model_dir: Path, device: Literal["mps", "cpu"], max_new_tokens: int) -> None:
         if any(not (model_dir / name).is_file() for name in MODEL_FILES):
             raise ValueError("model snapshot is incomplete")
@@ -208,7 +208,7 @@ class Qwen3Engine:
         return text.strip(), detected
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.
     parser = argparse.ArgumentParser(description="SpeechRail Qwen3-ASR worker")
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--device", choices=("mps", "cpu"), required=True)
