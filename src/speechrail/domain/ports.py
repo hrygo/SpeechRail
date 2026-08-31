@@ -30,6 +30,7 @@ class SpeechRequest(BaseModel):
     voice: str = Field(min_length=1, max_length=200)
     output_format: Literal["pcm16", "wav"] = "pcm16"
     sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
     instructions: str | None = Field(default=None, max_length=10_000)
 
 

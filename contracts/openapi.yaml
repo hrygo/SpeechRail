@@ -269,6 +269,11 @@ components:
           type: string
           enum: [pcm, wav]
           default: wav
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
     Usage:
       type: object
       required: [type, seconds]

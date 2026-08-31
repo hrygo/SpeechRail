@@ -87,3 +87,25 @@ def test_speech_endpoint_rejects_unknown_model_before_synthesis() -> None:
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "model_not_found"
+
+
+def test_speech_endpoint_validates_speed_at_the_public_boundary() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "speed": 9.0,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"

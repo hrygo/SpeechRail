@@ -61,6 +61,7 @@ class _SpeechHTTPBody(BaseModel):
     input: str = Field(min_length=1, max_length=100_000)
     voice: str = Field(min_length=1, max_length=200)
     response_format: Literal["pcm", "wav"] = "wav"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
 
     @field_validator("input", "voice")
     @classmethod
@@ -389,6 +390,7 @@ def create_app(
             text=body.input,
             voice=body.voice,
             output_format="pcm16" if body.response_format == "pcm" else "wav",
+            speed=body.speed,
         )
 
         async def audio_stream() -> AsyncIterator[bytes]:
