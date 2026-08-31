@@ -1,7 +1,9 @@
 # SpeechRail Realtime v2 设计契约
 
-状态：**设计已审查，尚未实现**。当前可运行事实仍以
-[Realtime v1 契约](realtime.md) 为准。v2 实现、客户端切换和端口退役必须另行授权。
+状态：**部分实现，尚未完成真实后端验收**。`/v2/realtime` 的 ASR/TTS session 状态机、
+手动 PCM 提交、ordered audio delta、TTS response 取消和基础容量隔离已有 deterministic
+fake-backend 测试。没有已授权且通过 smoke 的本地流式 ASR/TTS worker 时，服务仍会返回
+`backend_not_ready`；客户端正式切换和端口退役仍须另行授权。
 
 `WS /v2/realtime` 只承载 ASR 与 TTS，不承载 LLM response、tool call、播放、会议状态或
 应用打断策略。连接建立后，客户端必须用一次 `session.update` 选择

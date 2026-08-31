@@ -8,9 +8,10 @@ date: 2026-08-31
 # SpeechRail 公共 API 契约
 
 机器可读 REST 事实来源是 [OpenAPI 3.1](../contracts/openapi.yaml)。本页解释客户端应如何
-使用当前实现；WebSocket 的事件详情以 [Realtime 契约](../contracts/realtime.md) 为准。
-已审查但尚未实现的 `/v2/realtime` 目标见
-[Realtime v2 设计契约](../contracts/realtime-v2.md)，不得把该设计当作当前可用 API。
+使用当前实现；`/v1/realtime` 的事件详情以 [Realtime v1 契约](../contracts/realtime.md) 为准。
+`/v2/realtime` 已有可测试的 ASR/TTS state-machine 实现，完整事件与已知运行时边界见
+[Realtime v2 契约](../contracts/realtime-v2.md)。没有已授权并通过 smoke 的真实 worker 时，
+该端点不得被表述为模型可用。
 
 ## 地址、身份和版本
 
