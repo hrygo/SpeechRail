@@ -7,5 +7,6 @@
 | [0003](0003-runtime-isolation.md) | 模型运行时隔离与离线准入 | Accepted |
 | [0004](0004-wlk-legacy-compatibility.md) | 保留 WLK legacy `/asr` | Accepted |
 | [0005](0005-application-ownership.md) | 会议/音频/LLM 所有权留在 voice-realtime | Accepted |
+| [0006](0006-public-asr-tts-runtime.md) | 公共 ASR/TTS runtime 与 Realtime v2 直迁移 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

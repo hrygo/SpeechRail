@@ -83,6 +83,7 @@ WebSocket 的真实状态机与限制以 [Realtime 契约](contracts/realtime.md
 - 开发服务、测试或变更契约：[开发指南](docs/10-development-guide.md)
 - 安装、运行、排障、升级或回滚：[运维 Runbook](docs/11-operations-runbook.md)
 - 了解能力边界与未完成迁移：[当前边界](docs/09-open-questions.md)
+- 查看已接受的 ASR/TTS 目标架构：[最终设计](docs/superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)
 - 浏览全部资料：[文档中心](docs/README.md)
 
 ## 安全与数据边界

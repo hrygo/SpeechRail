@@ -47,6 +47,8 @@
 
 ## 迁移与历史记录
 
+- [公共 ASR/TTS 运行时最终设计](superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)：
+  已接受的目标架构、v2 契约方向、模型策略与 voice-realtime 直迁移方案。
 - [voice-realtime 吸收方案](03-voice-realtime-absorption.md)：目标模块边界，非实施完成记录。
 - [分阶段迁移 Runbook](08-migration-runbook.md)：未来 Hermes / `voice-realtime` 切换的门禁与回退。
 - [当前边界](09-open-questions.md)：未验证项、限制与发布门。
