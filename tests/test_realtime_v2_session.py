@@ -4,6 +4,7 @@ import base64
 
 import pytest
 
+from speechrail.domain.diarization import DiarizationUpdate
 from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.realtime.v2_session import PCM16, PCM16_24K, SpeechSession, TranscriptionSession
 
@@ -104,3 +105,35 @@ def test_v2_session_rejects_wrong_session_type_and_audio_format() -> None:
                 "audio_format": {**PCM16, "rate": 48_000},
             }
         )
+
+
+def test_transcription_session_exposes_opt_in_diarization_and_emits_commit_remap() -> None:
+    session = TranscriptionSession(max_audio_bytes=16, request_id="req-test")
+
+    created = session.configure(
+        {
+            "type": "transcription",
+            "audio_format": PCM16,
+            "diarization": {"enabled": True, "speaker_count_hint": 4, "finalize": True},
+        }
+    )
+    session.append_audio(_pcm16(b"\x00\x00"))
+    session.commit_audio()
+    completed = session.diarization_completed(DiarizationUpdate(mapping={"spk_02": "spk_01"}))
+
+    assert created["session"]["diarization"]["enabled"] is True
+    assert session.diarization.enabled is True
+    assert completed == {
+        **{key: completed[key] for key in ("event_id", "sequence", "session_id", "request_id")},
+        "type": "transcription.diarization.completed",
+        "mapping": {"spk_02": "spk_01"},
+    }
+
+
+def test_transcription_session_rejects_diarization_completion_when_not_requested() -> None:
+    session = TranscriptionSession(max_audio_bytes=16)
+    session.configure({"type": "transcription", "audio_format": PCM16})
+    session.commit_audio()
+
+    with pytest.raises(RealtimeV2Error, match="diarization was not requested"):
+        session.diarization_completed(DiarizationUpdate())

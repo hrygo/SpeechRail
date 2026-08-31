@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
+from speechrail.domain.diarization import DiarizationConfig, DiarizationUpdate
 
 
 class TranscriptionRequest(BaseModel):
@@ -88,3 +89,19 @@ class RealtimeAsrFactory(Protocol):
     """Creates a new backend session after the public v2 session is configured."""
 
     def create(self, *, language: str | None, prompt: str) -> RealtimeAsrSession: ...
+
+
+class DiarizationSession(Protocol):
+    """One bounded acoustic attribution session owned by a public runtime."""
+
+    async def annotate(self, segments: tuple[TranscriptSegment, ...]) -> DiarizationUpdate: ...
+
+    async def finalize(self) -> DiarizationUpdate: ...
+
+    async def close(self) -> None: ...
+
+
+class DiarizationEngine(Protocol):
+    """Creates a session-local diarization stream after input validation."""
+
+    def create(self, *, config: DiarizationConfig) -> DiarizationSession: ...

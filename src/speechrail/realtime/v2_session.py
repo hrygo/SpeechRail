@@ -14,6 +14,9 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
+from pydantic import ValidationError
+
+from speechrail.domain.diarization import DiarizationConfig, DiarizationUpdate
 from speechrail.domain.realtime_v2 import RealtimeV2Error
 
 PCM16: dict[str, int | str] = {
@@ -123,6 +126,7 @@ class TranscriptionSession(_BaseSession):
         self._completed_items: set[str] = set()
         self.language: str | None = None
         self.prompt = ""
+        self.diarization = DiarizationConfig()
 
     def append_audio(self, encoded_audio: object) -> bytes:
         self._ensure_active()
@@ -210,6 +214,20 @@ class TranscriptionSession(_BaseSession):
             segments=[dict(segment) for segment in segments],
         )
 
+    def diarization_completed(self, update: DiarizationUpdate) -> dict[str, Any]:
+        """Emit the immutable reconciliation event after transcription commit."""
+        if self.state is not SessionState.COMMITTED:
+            raise RealtimeV2Error(
+                "diarization completion requires committed input", code="invalid_state"
+            )
+        if not self.diarization.enabled or not self.diarization.finalize:
+            raise RealtimeV2Error(
+                "diarization was not requested for this session", code="invalid_event"
+            )
+        return self._event(
+            "transcription.diarization.completed", mapping=dict(update.canonical_mapping())
+        )
+
     def _validate_configure(self, session: Mapping[str, Any]) -> None:
         _validate_pcm16(session.get("audio_format"))
         language = session.get("language")
@@ -224,6 +242,17 @@ class TranscriptionSession(_BaseSession):
             "manual",
         }:
             raise RealtimeV2Error("invalid endpointing mode", code="invalid_session")
+        diarization = session.get("diarization")
+        try:
+            self.diarization = (
+                DiarizationConfig()
+                if diarization is None
+                else DiarizationConfig.model_validate(diarization)
+            )
+        except ValidationError as exc:
+            raise RealtimeV2Error(
+                "invalid diarization configuration", code="invalid_session"
+            ) from exc
         self.language = language
         self.prompt = prompt
 
