@@ -35,17 +35,23 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 
 ## 待执行：`voice-realtime`
 
-当前 `/asr` 不做转写，故不可切换旧 WLK `8001`。迁移只能在独立的
-`voice-realtime` 分支实施，并选择以下之一：
+当前 `/asr` 不做转写，故不可切换旧 WLK `8001`。主路线已经由 ADR-0006 固定为
+`/v2/realtime` 直迁移，不再以完整 WLK parity 为前置条件。
 
-- 实现 `SpeechRailRealtimeAdapter`：将 AudioHub 的 PCM 转为 update/append/commit，消费
-  一次 completed；它目前不适合要求 partial 字幕的会议体验。
-- 先在 SpeechRail 实现真实 legacy `/asr` adapter，使用旧 consumer fixtures 验收
-  `lines`、`buffer_transcription`、EOF、错误和认证，再安排端口切换。
+迁移在独立的 `voice-realtime` 分支实施：
 
-无论路线，至少完成字幕、会议开始/结束、SRT、数据库 confirmed 文本、断线、资源释放和
-旧端口回退演练，才可停止旧 WLK。SpeechRail 不会修改该项目的 AudioHub、TTS、会议、
-PostgreSQL 或 UI。
+1. 增加共享 `SpeechRailRealtimeClient`，只负责 Bearer、握手、事件解析、背压和关闭；
+2. 增加 `SpeechRailStreamingTranscriber`，把逐句 completed 累积为会议/字幕 snapshot，把
+   session completed 映射为 EOF final；
+3. 增加 `SpeechRailConversationSTTFactory`，为语音助手创建现有 Pipecat 管道需要的 processor；
+4. 断线时不续传旧 session：建立新 source epoch，按应用现有语义记录 gap；
+5. 分别保留会议 WLK 和语音助手当前 STT 配置，两个端口独立切换、独立回滚。
+
+会议端至少验收字幕、会议开始/结束、SRT、数据库 confirmed 文本、EOF、断线 gap、资源释放和
+旧 WLK 回退。语音助手端至少验收 VAD/turn-taking、文本进入 LLM、原 TTS bridge、barge-in、
+断线和原 STT 回退。SpeechRail 不会修改或接管 AudioHub、TTS、会议、PostgreSQL 或 UI。
+
+影子比对只能在应用内受控复制 PCM；SpeechRail 结果不得写入正式 SRT/数据库或重复触发 LLM。
 
 ## 通用回滚
 

@@ -1,5 +1,9 @@
 # SpeechRail Foundation Implementation Plan
 
+> **Status:** historical foundation plan. The ASR/TTS target architecture, Realtime v2 contract and
+> `voice-realtime` migration details are superseded by the final runtime design, ADR-0006 and
+> `contracts/realtime-v2.md`; do not execute future-integration wording here as the current plan.
+
 > **For agentic workers:** Execute the tasks in order. Keep the public contract and the
 > application ownership boundaries in the design spec. Do not modify the original
 > `voice-realtime` working tree during this plan; its integration patch is a separately
@@ -192,8 +196,8 @@ uv run ruff check src tests
 **Separate `voice-realtime` branch changes:**
 
 - Add `VR_SUBTITLE_EXTERNAL_URL` and `VR_SUBTITLE_MANAGED` to subtitle settings.
-- Add a `SpeechRailRealtimeAdapter` that maps delta/completed to existing subtitle/meeting
-  events while keeping `SubtitleProxy` as application coordinator.
+- Add a shared `SpeechRailRealtimeClient`, a meeting/subtitle `SpeechRailStreamingTranscriber`, and
+  a voice-assistant `SpeechRailConversationSTTFactory`; keep `SubtitleProxy` as application coordinator.
 - Make `run-all.sh` skip the child WLK server when `VR_SUBTITLE_MANAGED=false`.
 - Keep `/asr` mode as rollback until full modern Realtime acceptance passes.
 
@@ -258,4 +262,3 @@ uv run ruff check src tests
 uv run mypy src
 npx @redocly/cli lint contracts/openapi.yaml
 ```
-

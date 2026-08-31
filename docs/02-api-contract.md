@@ -9,6 +9,8 @@ date: 2026-08-31
 
 机器可读 REST 事实来源是 [OpenAPI 3.1](../contracts/openapi.yaml)。本页解释客户端应如何
 使用当前实现；WebSocket 的事件详情以 [Realtime 契约](../contracts/realtime.md) 为准。
+已审查但尚未实现的 `/v2/realtime` 目标见
+[Realtime v2 设计契约](../contracts/realtime-v2.md)，不得把该设计当作当前可用 API。
 
 ## 地址、身份和版本
 

@@ -1,5 +1,8 @@
 # SpeechRail Realtime WebSocket 契约
 
+本文件只描述当前已实现的 v1。已审查但尚未实现的目标协议见
+[Realtime v2 设计契约](realtime-v2.md)；客户端不得在 v2 上线前依赖该设计契约。
+
 `WS /v1/realtime` 是面向新客户端的 PCM 转写协议。事件名称参考 OpenAI Realtime
 transcription，但本版本的语义是“收集音频后一次 batch 转写”，不是持续 partial streaming。
 
