@@ -1,0 +1,37 @@
+# Reference configuration. The environment-backed .env example is the launch path for 0.1.0.
+# Values are placeholders; never put API keys, model weights, audio, or full transcripts here.
+service:
+  name: speechrail
+  version: 0.1.0
+  host: 127.0.0.1
+  port: 8201
+
+model:
+  id: speechrail/qwen3-asr-1.7b
+  aliases:
+    - Qwen3-ASR-1.7B
+    - qwen3-asr-1.7b
+    - whisper-1
+  source: Qwen/Qwen3-ASR-1.7B
+  revision: master
+  snapshot_dir: /absolute/path/outside/SpeechRail/Qwen3-ASR-1.7B
+  allow_downloads: false
+  device: mps
+  dtype: float16
+
+limits:
+  max_queue_size: 8
+  max_upload_bytes: 536870912
+  max_audio_seconds: 3600
+  max_realtime_frame_bytes: 160000
+  max_realtime_buffer_bytes: 8388608
+  request_timeout_seconds: 120
+
+compatibility:
+  legacy_wlk_enabled: true
+  legacy_query_token_enabled: false
+
+security:
+  api_key_env: SPEECHRAIL_API_KEY
+  allowed_origins: []
+  require_bearer_for_non_loopback: true

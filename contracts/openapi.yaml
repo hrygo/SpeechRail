@@ -1,0 +1,361 @@
+openapi: 3.1.0
+info:
+  title: SpeechRail API
+  version: 0.1.0
+  description: |
+    Local-first shared speech recognition service.
+
+    The /v1/audio/transcriptions endpoint follows the OpenAI-compatible
+    multipart shape so existing SDK clients can be reused. The realtime
+    WebSocket contract is documented in contracts/realtime.md.
+  license:
+    name: MIT
+    identifier: MIT
+servers:
+  - url: http://127.0.0.1:8201
+    description: Local development
+  - url: http://127.0.0.1:8001
+    description: Migration cutover compatibility port
+tags:
+  - name: health
+    description: Process and model readiness
+  - name: models
+    description: Exposed model identities
+  - name: transcription
+    description: OpenAI-compatible audio transcription
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [health]
+      summary: Check process health
+      security: [{}]
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                service: speechrail
+                version: 0.1.0
+                backend: qwen3-asr-1.7b
+                ready: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [health]
+      summary: Check model readiness
+      security: [{}]
+      responses:
+        '200':
+          description: Model runtime can accept inference
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ready]
+                properties:
+                  ready:
+                    type: boolean
+                    const: true
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/models:
+    get:
+      operationId: listModels
+      tags: [models]
+      summary: List canonical model and compatibility aliases
+      security: [{}]
+      responses:
+        '200':
+          description: Model list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelList'
+              example:
+                object: list
+                data:
+                  - id: speechrail/qwen3-asr-1.7b
+                    object: model
+                    owned_by: speechrail
+                  - id: Qwen3-ASR-1.7B
+                    object: model
+                    owned_by: speechrail
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/audio/transcriptions:
+    post:
+      operationId: createTranscription
+      tags: [transcription]
+      summary: Transcribe an audio file
+      description: |
+        Accepts multipart/form-data. The model defaults to
+        speechrail/qwen3-asr-1.7b. For realtime partial results use the
+        WebSocket contract in contracts/realtime.md instead.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/TranscriptionRequest'
+            encoding:
+              file:
+                contentType: audio/*
+      responses:
+        '200':
+          description: Transcription result
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: '#/components/schemas/TranscriptionResponse'
+                  - $ref: '#/components/schemas/VerboseTranscriptionResponse'
+            text/plain:
+              schema:
+                type: string
+            text/vtt:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/AudioTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+      description: Required when the service is not loopback-only.
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version, backend, ready]
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: speechrail
+        version:
+          type: string
+        backend:
+          type: string
+          example: qwen3-asr-1.7b
+        ready:
+          type: boolean
+    Model:
+      type: object
+      required: [id, object, owned_by]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: model
+        owned_by:
+          type: string
+          const: speechrail
+    ModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Model'
+    TranscriptionRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        model:
+          type: string
+          default: speechrail/qwen3-asr-1.7b
+        language:
+          type: string
+          description: BCP-47-style or provider-compatible language hint.
+          example: zh
+        prompt:
+          type: string
+          maxLength: 2000
+          description: Domain vocabulary hint, not an instruction channel.
+        response_format:
+          type: string
+          enum: [json, verbose_json, text, srt, vtt]
+          default: json
+        timestamp_granularities:
+          type: array
+          items:
+            type: string
+            enum: [segment, word]
+          default: [segment]
+        stream:
+          type: boolean
+          default: false
+    Usage:
+      type: object
+      required: [type, seconds]
+      properties:
+        type:
+          type: string
+          const: duration
+        seconds:
+          type: number
+          minimum: 0
+    TranscriptionResponse:
+      type: object
+      required: [text, usage]
+      properties:
+        text:
+          type: string
+        usage:
+          $ref: '#/components/schemas/Usage'
+    TranscriptSegment:
+      type: object
+      required: [id, start, end, text]
+      properties:
+        id:
+          type: string
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        speaker:
+          type: [string, "null"]
+    TranscriptWord:
+      type: object
+      required: [word, start, end]
+      properties:
+        word:
+          type: string
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+    VerboseTranscriptionResponse:
+      type: object
+      required: [task, language, duration, text, segments, words, usage]
+      properties:
+        task:
+          type: string
+          const: transcribe
+        language:
+          type: string
+        duration:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/TranscriptSegment'
+        words:
+          type: array
+          items:
+            $ref: '#/components/schemas/TranscriptWord'
+        usage:
+          $ref: '#/components/schemas/Usage'
+    ErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+    Error:
+      type: object
+      required: [message, type, code, request_id, retryable]
+      properties:
+        message:
+          type: string
+        type:
+          type: string
+          enum: [invalid_request_error, authentication_error, server_error]
+        param:
+          type: [string, "null"]
+        code:
+          type: string
+        request_id:
+          type: string
+        retryable:
+          type: boolean
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Unauthorized:
+      description: Authentication failed
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    AudioTooLarge:
+      description: Audio exceeds configured limits
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    ValidationError:
+      description: Multipart validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    QueueFull:
+      description: Bounded inference queue is full
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    BackendNotReady:
+      description: Model runtime is not ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
