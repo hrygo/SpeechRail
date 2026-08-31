@@ -1,6 +1,12 @@
+from pathlib import Path
+from sys import executable
+
+import pytest
 from fastapi.testclient import TestClient
 
+import speechrail.app as app_module
 from speechrail.app import create_app
+from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
 
 
@@ -86,6 +92,42 @@ def test_readyz_is_200_when_runtime_reports_ready() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"ready": True}
+
+
+def test_configured_worker_lifecycle_does_not_depend_on_local_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-snapshot"
+    snapshot.mkdir(exist_ok=True)
+    for filename in MODEL_FILES:
+        (snapshot / filename).touch()
+    lifecycle: list[str] = []
+
+    class FakeWorker:
+        def __init__(self, config: object) -> None:
+            del config
+
+        async def start(self) -> None:
+            lifecycle.append("start")
+
+        async def close(self) -> None:
+            lifecycle.append("close")
+
+        async def transcribe(self, audio: bytes, language: str | None, prompt: str) -> object:
+            del audio, language, prompt
+            raise AssertionError("transcribe is not expected in this lifecycle test")
+
+    monkeypatch.setattr(app_module, "Qwen3Worker", FakeWorker)
+    settings = Settings(
+        qwen3_model_dir=snapshot,
+        qwen3_python=Path(executable),
+        backend_ready=False,
+    )
+
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/readyz").json() == {"ready": True}
+
+    assert lifecycle == ["start", "close"]
 
 
 def test_api_key_and_model_errors_are_distinct() -> None:
