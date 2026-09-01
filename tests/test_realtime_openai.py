@@ -154,6 +154,37 @@ def test_openai_append_commit_produces_transcription_completed() -> None:
         assert completed["transcript"] == "你好"
         assert len(factory.sessions) == 1
         assert factory.sessions[0].language is None
+        assert len(factory.released) == 1
+
+
+def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1", "turn_detection": None},
+            }
+        )
+        socket.receive_json()
+
+        def commit_round() -> None:
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            )
+            socket.send_json({"type": "input_audio_buffer.commit"})
+            while socket.receive_json()["type"] != (
+                "conversation.item.input_audio_transcription.completed"
+            ):
+                pass
+
+        commit_round()
+        assert len(factory.released) == 1
+        commit_round()
+        assert len(factory.sessions) == 2
+        assert len(factory.released) == 2
 
 
 def test_openai_model_alias_resolves_to_asr_profile() -> None:
