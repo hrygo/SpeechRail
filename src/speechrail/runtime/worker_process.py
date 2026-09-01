@@ -39,6 +39,9 @@ class WorkerProcessSpec:
 def offline_environment(repository_root: Path) -> dict[str, str]:
     """Build the controlled offline env; only allowlisted keys are inherited."""
 
+    import_root = repository_root / "src"
+    if not import_root.is_dir():
+        import_root = repository_root
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -46,7 +49,7 @@ def offline_environment(repository_root: Path) -> dict[str, str]:
     }
     environment.update(
         {
-            "PYTHONPATH": str(repository_root / "src"),
+            "PYTHONPATH": str(import_root),
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
             "HF_DATASETS_OFFLINE": "1",

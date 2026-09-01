@@ -47,6 +47,15 @@ def test_offline_environment_inherits_only_allowlisted_keys() -> None:
     assert environment["TOKENIZERS_PARALLELISM"] == "false"
 
 
+def test_offline_environment_accepts_installed_package_root(tmp_path: Path) -> None:
+    package_root = tmp_path / "site-packages"
+    package_root.mkdir()
+
+    environment = offline_environment(package_root)
+
+    assert environment["PYTHONPATH"] == str(package_root)
+
+
 def test_send_and_receive_require_a_started_process(tmp_path: Path) -> None:
     transport = AsyncFramedWorkerProcess(_spec(tmp_path))
 

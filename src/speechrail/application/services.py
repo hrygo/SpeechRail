@@ -34,6 +34,11 @@ from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
 
 
+def _package_root() -> Path:
+    """Return the import root for source checkouts and installed wheels alike."""
+    return Path(__file__).resolve().parents[2]
+
+
 class _CallableBatchTranscriber(BatchTranscriber):
     """Bridge the v1 callable seam while v2 adopts typed backend ports."""
 
@@ -115,7 +120,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     ):
         asr_worker = Qwen3Worker(
             Qwen3BackendConfig(
-                repository_root=Path(__file__).parents[3],
+                repository_root=_package_root(),
                 python_executable=settings.qwen3_python,
                 model_dir=settings.qwen3_model_dir,
                 device=settings.device,
@@ -135,7 +140,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     ):
         tts_worker = Qwen3TtsWorker(
             Qwen3TtsBackendConfig(
-                repository_root=Path(__file__).parents[3],
+                repository_root=_package_root(),
                 python_executable=settings.qwen3_tts_python,
                 model_dir=settings.qwen3_tts_model_dir,
                 device=settings.device,
