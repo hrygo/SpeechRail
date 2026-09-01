@@ -1,7 +1,9 @@
 import base64
 from collections.abc import Awaitable
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from speechrail.app import create_app
 from speechrail.config import Settings
@@ -56,3 +58,71 @@ def test_legacy_websocket_emits_config_then_ready_to_stop_for_empty_eof() -> Non
         assert socket.receive_json() == {"type": "config", "mode": "full"}
         socket.send_bytes(b"")
         assert socket.receive_json() == {"type": "ready_to_stop"}
+
+
+def test_v1_realtime_closes_1013_when_no_backend_is_configured() -> None:
+    client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/v1/realtime"):
+            pass
+
+    assert exc_info.value.code == 1013
+
+
+def test_v1_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
+    client = TestClient(
+        create_app(
+            Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None),
+            transcribe=_backend,
+        )
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/v1/realtime"):
+            pass
+
+    assert exc_info.value.code == 1008
+
+
+def test_v2_realtime_closes_1013_without_any_inference_capability() -> None:
+    client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/v2/realtime"):
+            pass
+
+    assert exc_info.value.code == 1013
+
+
+def test_v2_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
+    class ReadyTts:
+        ready = True
+
+    client = TestClient(
+        create_app(
+            Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=ReadyTts(),  # type: ignore[arg-type]
+        )
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/v2/realtime"):
+            pass
+
+    assert exc_info.value.code == 1008
+
+
+def test_legacy_websocket_closes_1008_when_disabled() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None, legacy_wlk_enabled=False),
+            transcribe=_backend,
+        )
+    )
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/asr"):
+            pass
+
+    assert exc_info.value.code == 1008
