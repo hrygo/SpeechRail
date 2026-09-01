@@ -25,7 +25,7 @@ class TranscriptionRequest(BaseModel):
 class SpeechRequest(BaseModel):
     """Validated TTS request independent of a vendor voice implementation."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     text: str = Field(min_length=1, max_length=100_000)
     voice: str = Field(min_length=1, max_length=200)
@@ -33,7 +33,6 @@ class SpeechRequest(BaseModel):
     sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
-    instructions: str | None = Field(default=None, max_length=10_000)
 
 
 class AudioChunk(BaseModel):

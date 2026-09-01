@@ -6,9 +6,10 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
+from pydantic import ValidationError
 
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
-from speechrail.domain.ports import AudioChunk
+from speechrail.domain.ports import AudioChunk, SpeechRequest
 
 
 def _chunks(*chunks: AudioChunk) -> AsyncIterator[AudioChunk]:
@@ -183,3 +184,12 @@ def test_wrapped_stream_exposes_the_original_chunks() -> None:
     chunks: list[AudioChunk] = asyncio.run(scenario())
 
     assert [chunk.audio for chunk in chunks] == [b"\x00\x00", b"\x01\x00"]
+
+
+def test_speech_request_rejects_unknown_instructions() -> None:
+    with pytest.raises(ValidationError):
+        SpeechRequest(
+            text="hello",
+            voice="vivian",
+            instructions="must not cross the internal port",  # type: ignore[call-arg]
+        )
