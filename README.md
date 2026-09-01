@@ -24,7 +24,7 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `WS /asr` | 兼容骨架 | 只保留握手 `config` 与空 PCM EOF → `ready_to_stop`，尚不能替代旧 WLK 转写 |
 | QwenPaw、Hermes Agent | 未在本分支复验 | REST 接入方法已文档化；不得据此改动当前客户端配置 |
 | `voice-realtime` | adapter 已实现 | 会议/字幕、语音助手和 TTS 均通过 v2；确定性回归已覆盖，真实模型闭环需部署验收 |
-| `launchd` 服务安装 | 提供操作步骤 | 尚未在本机自动安装或启用 |
+| `launchd` 服务安装 | 可用 | `speechrail service` 管理用户级 LaunchAgent；安装与启用均为显式操作 |
 
 不要把 `whisper-1` 兼容别名误认为后端模型；新配置使用
 `speechrail/qwen3-asr-1.7b`。
@@ -42,6 +42,16 @@ cp configs/speechrail.example.env .env
 # 编辑 .env：填写本机外部模型 snapshot 与专用 Python 的绝对路径。
 uv run speechrail
 ```
+
+将服务注册为登录后常驻的 macOS 用户服务时，先完成 `.env` 配置，再执行：
+
+```bash
+uv run speechrail service install
+uv run speechrail service enable
+```
+
+`install` 只生成当前用户的 LaunchAgent plist，`enable` 才会启动模型进程。服务操作与回滚见
+[运维 Runbook](docs/operations/operations-runbook.md)。
 
 `SPEECHRAIL_QWEN3_MODEL_DIR` 和 `SPEECHRAIL_QWEN3_PYTHON` 同时配置后，服务会在启动阶段
 预检并加载 ASR worker；TTS 对应配置为 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` /

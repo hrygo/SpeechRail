@@ -68,7 +68,9 @@ foundation 仅在部署代码显式注入受信任 `JobProcessor` 时启动 batc
 
 默认端口 `8201` 供 SpeechRail 与旧 WLK `8001` 并行存在。未完成
 `voice-realtime` legacy parity 前，禁止把 SpeechRail 切换到 `8001`。一次只启动一个
-SpeechRail 进程和一个 worker；多 worker 进程会产生多份模型载入和不可控内存压力。
+SpeechRail 进程；每个已配置 profile 只启动一个对应 worker。多 ASGI worker 或重复服务实例
+会产生多份模型载入和不可控内存压力。
 
 需要常驻运行时使用 macOS `LaunchAgent`，而不是将 MPS 服务作为系统级 `LaunchDaemon`。
-模板、安装步骤和卸载步骤见[运维 Runbook](11-operations-runbook.md)。
+通过 `speechrail service install`、`enable`、`status`、`restart`、`disable` 和 `uninstall`
+管理；`install` 不会启动模型。模板、安装步骤和回滚顺序见[运维 Runbook](operations-runbook.md)。

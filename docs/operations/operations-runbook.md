@@ -119,35 +119,42 @@ PCM 的上限由 `SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` 强制；超过上限
 
 ## macOS `launchd` 常驻安装
 
-项目提供 [plist 模板](../deploy/macos/com.speechrail.plist.example)。它不是安装文件：先将
-项目目录、`uv` 可执行文件和两个日志文件的 `<...>` 占位符替换为当前用户绝对路径，并
-确认 `.env` 位于项目目录。然后执行：
+SpeechRail 提供 `LaunchAgent` CLI；它只管理当前登录用户的 GUI session，适合 MPS 本机服务，
+不是 root `LaunchDaemon`，也不在登录前运行。先确认项目目录中的 `.env` 已配置并且当前
+`.venv` 已通过 `uv sync` 创建。安装命令使用当前 `.venv` 的 Python 和当前目录作为工作目录，
+不把 `.env`、API key、模型路径或音频复制进 plist：
 
 ```bash
-mkdir -p "$HOME/Library/Logs/SpeechRail"
-cp deploy/macos/com.speechrail.plist.example "$HOME/Library/LaunchAgents/com.speechrail.plist"
-# 编辑复制后的 plist，替换所有 <...> 占位符。
+cd <path-to-SpeechRail>
+uv run speechrail service install
+```
+
+`install` 仅写入 `$HOME/Library/LaunchAgents/com.speechrail.plist` 和私有日志目录，**不会**
+启动服务或加载模型。完成 plist 检查后显式启用：
+
+```bash
 plutil -lint "$HOME/Library/LaunchAgents/com.speechrail.plist"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.speechrail.plist"
-launchctl kickstart -k "gui/$(id -u)/com.speechrail"
+uv run speechrail service enable
+uv run speechrail service status
 ```
 
-查看状态与日志：
+日常状态、重启、停用和卸载：
 
 ```bash
-launchctl print "gui/$(id -u)/com.speechrail"
-tail -f "$HOME/Library/Logs/SpeechRail/stdout.log"
-tail -f "$HOME/Library/Logs/SpeechRail/stderr.log"
+uv run speechrail service status
+uv run speechrail service restart
+uv run speechrail service disable       # 停止但保留已生成的 plist
+uv run speechrail service uninstall     # 停止、卸载并删除 plist
 ```
 
-停用但保留 plist：
+服务日志位于 `$HOME/Library/Logs/SpeechRail/stdout.log` 和 `stderr.log`。当升级依赖、移动
+工作目录或重建 `.venv` 时，执行 `disable` → 在新工作目录运行 `install` → `enable`，以免
+已加载的 launchd job 继续引用旧 Python。`launchctl print "gui/$(id -u)/com.speechrail"` 仅用于
+CLI 无法提供足够诊断时的恢复排障。每次服务进程重启都会重新加载已配置模型。
 
-```bash
-launchctl bootout "gui/$(id -u)/com.speechrail"
-```
-
-`LaunchAgent` 仅在用户登录后的 GUI session 运行，适合 MPS 本机服务；每次 Agent
-重启都会重新加载模型。
+项目仍保留 [plist 模板](../../deploy/macos/com.speechrail.plist.example) 供审计或手工恢复；
+模板中的占位符必须替换为当前账户绝对路径，且其 `ProgramArguments` 必须使用 Python module
+入口，不能恢复为 shell 或 `uv run`。
 
 ## 故障定位
 
