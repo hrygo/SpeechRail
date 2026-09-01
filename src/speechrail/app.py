@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import math
+import shutil
 import struct
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -176,6 +177,7 @@ _OPENAI_AUDIO_EXTENSIONS = frozenset(
 _AUDIO_CONTAINER_MIME_TYPES = frozenset(
     {"video/mp4", "video/mpeg", "video/webm", "application/ogg", "application/octet-stream"}
 )
+_FFMPEG_FALLBACKS = (Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"))
 
 
 def _has_supported_audio_hint(file: UploadFile) -> bool:
@@ -200,11 +202,21 @@ async def _read_upload(file: UploadFile, limit: int) -> bytes:
     return bytes(content)
 
 
+def _resolve_ffmpeg() -> str:
+    executable = shutil.which("ffmpeg")
+    if executable:
+        return executable
+    for candidate in _FFMPEG_FALLBACKS:
+        if candidate.is_file():
+            return str(candidate)
+    raise ValueError("audio_decode_failed")
+
+
 async def _decode_pcm(audio: bytes) -> bytes:
     """Decode any supported local upload with fixed ffmpeg argv, never a shell."""
 
     process = await asyncio.create_subprocess_exec(
-        "ffmpeg",
+        _resolve_ffmpeg(),
         "-nostdin",
         "-v",
         "error",

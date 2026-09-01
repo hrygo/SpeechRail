@@ -1,8 +1,10 @@
 from collections.abc import Awaitable
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+import speechrail.app as app_module
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
@@ -47,6 +49,17 @@ def test_transcription_formats_results_from_one_domain_result() -> None:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith(content_type)
         assert expected in response.text
+
+
+def test_ffmpeg_resolution_uses_absolute_fallback_without_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ffmpeg = tmp_path / "ffmpeg"
+    ffmpeg.touch()
+    monkeypatch.setattr(app_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(app_module, "_FFMPEG_FALLBACKS", (ffmpeg,))
+
+    assert app_module._resolve_ffmpeg() == str(ffmpeg)
 
 
 @pytest.mark.parametrize(
