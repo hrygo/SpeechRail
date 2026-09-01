@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         """Load settings from an explicit file or preserve the development default."""
         if env_file is None:
             return cls()
-        return cls(_env_file=env_file)
+        return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
     version: str = "0.1.0"

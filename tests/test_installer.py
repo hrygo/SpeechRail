@@ -66,6 +66,32 @@ def test_install_wheel_stages_new_runtime_and_switches_current_atomically(
     assert not any("launchctl" in part for command in calls for part in command)
 
 
+def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    calls: list[tuple[str, ...]] = []
+
+    result = install_macos.run_preflight(
+        tmp_path / "runtime" / "bin" / "python",
+        install_macos.InstallLayout.for_app_home(layout.app_home),
+        require_tts=False,
+        runner=_runner_that_creates_python(calls),
+    )
+
+    assert result.ok is True
+    assert calls == [
+        (
+            str(tmp_path / "runtime" / "bin" / "python"),
+            "-m",
+            "speechrail",
+            "service",
+            "preflight",
+            "--app-home",
+            str(layout.app_home),
+            "--asr-only",
+        )
+    ]
+
+
 def test_install_wheel_does_not_overwrite_existing_configuration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

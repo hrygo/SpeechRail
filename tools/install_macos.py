@@ -66,6 +66,11 @@ class InstallResult:
     enabled: bool
 
 
+@dataclass(frozen=True)
+class PreflightOutcome:
+    ok: bool
+
+
 def _runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
@@ -81,11 +86,30 @@ def _run(command: tuple[str, ...], runner: CommandRunner) -> None:
         raise InstallerError("installed service command failed")
 
 
-def run_preflight(layout: InstallLayout, *, require_tts: bool, runner: CommandRunner):
-    """Resolve the installed package's preflight after wheel installation."""
-    from speechrail.service.preflight import run_preflight as package_preflight
-
-    return package_preflight(layout, require_tts=require_tts, runner=runner)
+def run_preflight(
+    runtime_python: Path,
+    layout: InstallLayout,
+    *,
+    require_tts: bool,
+    runner: CommandRunner,
+) -> PreflightOutcome:
+    """Run preflight through the newly installed wheel, not the source tree."""
+    command = (
+        str(runtime_python),
+        "-m",
+        "speechrail",
+        "service",
+        "preflight",
+        "--app-home",
+        str(layout.app_home),
+    )
+    if not require_tts:
+        command += ("--asr-only",)
+    try:
+        completed = runner(command)
+    except OSError as exc:
+        raise InstallerError("installed wheel preflight could not be executed") from exc
+    return PreflightOutcome(ok=completed.returncode == 0)
 
 
 def _copy_config(source: Path, destination: Path) -> None:
@@ -162,7 +186,9 @@ def install_wheel(
     try:
         _run((uv_executable, "venv", "--python", "3.12", str(venv_dir)), runner)
         _run((uv_executable, "pip", "install", "--python", str(runtime_python), str(wheel)), runner)
-        result = run_preflight(layout, require_tts=require_tts, runner=runner)
+        result = run_preflight(
+            runtime_python, layout, require_tts=require_tts, runner=runner
+        )
         if not result.ok:
             raise InstallerError("preflight failed; service was not enabled")
 
