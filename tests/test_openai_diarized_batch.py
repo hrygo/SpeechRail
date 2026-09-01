@@ -10,6 +10,7 @@ from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     DiarizationAssignment,
+    DiarizationError,
     DiarizationSpeaker,
     DiarizationUpdate,
 )
@@ -64,6 +65,16 @@ class FakeDiarizationEngine:
         return FakeDiarizationSession()
 
 
+class FailingDiarizationSession(FakeDiarizationSession):
+    async def annotate(self, segments):
+        raise DiarizationError("invalid diarization output", code="diarization_invalid_output")
+
+
+class FailingDiarizationEngine(FakeDiarizationEngine):
+    def create(self, *, config):
+        return FailingDiarizationSession()
+
+
 def _client(*, diarization_engine=None, include_system: bool = False) -> TestClient:
     settings = Settings(
         qwen3_model_dir=None,
@@ -109,6 +120,17 @@ def test_batch_diarized_json_fails_closed_without_profile() -> None:
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "diarization_not_available"
+
+
+def test_batch_diarization_backend_output_uses_stable_error_envelope() -> None:
+    response = _client(diarization_engine=FailingDiarizationEngine()).post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        data={"model": "gpt-4o-transcribe-diarize", "response_format": "diarized_json"},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "diarization_invalid_output"
 
 
 def test_models_advertise_diarized_alias_only_with_profile() -> None:

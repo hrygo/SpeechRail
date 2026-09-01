@@ -77,6 +77,12 @@ def test_request_id_is_returned_without_caching() -> None:
     assert response.headers["Cache-Control"] == "no-store"
 
 
+def test_private_realtime_v2_endpoint_is_removed() -> None:
+    response = _client().get("/v2/realtime")
+
+    assert response.status_code == 404
+
+
 def test_readyz_returns_retryable_error_until_backend_is_ready() -> None:
     response = _client().get("/readyz")
 

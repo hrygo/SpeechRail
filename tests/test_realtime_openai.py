@@ -19,6 +19,7 @@ from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     DiarizationAssignment,
+    DiarizationError,
     DiarizationSpeaker,
     DiarizationUpdate,
 )
@@ -29,7 +30,6 @@ from speechrail.domain.ports import (
     StreamingAsrEvent,
     TranscriptionRequest,
 )
-from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 
 
@@ -177,7 +177,7 @@ class FakeDiarizationEngine:
 
 class FailingDiarizationSession(FakeDiarizationSession):
     async def annotate(self, segments):
-        raise RealtimeV2Error("invalid diarization output", code="diarization_invalid_output")
+        raise DiarizationError("invalid diarization output", code="diarization_invalid_output")
 
 
 class FailingDiarizationEngine:
@@ -325,6 +325,56 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
             if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
         assert len(factory.sessions) == 1
+
+
+def test_openai_diarized_model_alias_enables_diarization() -> None:
+    engine = FakeDiarizationEngine()
+    segment = TranscriptSegment(id="seg_1", start_ms=0, end_ms=500, text="你好")
+    client, _ = _client(segments=(segment,), diarization_engine=engine)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "gpt-4o-transcribe-diarize"},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    assert len(engine.sessions) == 1
+    assert any(event["type"].endswith(".segment") for event in events)
+
+
+def test_openai_realtime_rejects_a_frame_over_the_configured_limit() -> None:
+    factory_client, _ = _client()
+    with factory_client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1"},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80_001)}
+        )
+        error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "frame_too_large"
 
 
 def test_openai_tts_model_alias_resolves_in_session_update() -> None:

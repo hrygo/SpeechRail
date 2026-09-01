@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from speechrail.backends.camplus import CamPlusEmbeddingExtractor
-from speechrail.domain.realtime_v2 import RealtimeV2Error
+from speechrail.domain.diarization import DiarizationError
 
 
 def test_camplus_validates_injected_embedding_without_loading_a_model() -> None:
@@ -23,7 +23,7 @@ def test_camplus_rejects_non_finite_embedding() -> None:
         model_path="/unused/model.onnx", extract=lambda audio: (float("nan"),)
     )
 
-    with pytest.raises(RealtimeV2Error, match="speaker embedding is invalid"):
+    with pytest.raises(DiarizationError, match="speaker embedding is invalid"):
         extractor(b"pcm")
 
 
@@ -91,5 +91,5 @@ def test_camplus_runs_onnx_with_the_official_fbank_shape(
 def test_camplus_fails_closed_when_local_model_is_missing() -> None:
     extractor = CamPlusEmbeddingExtractor(model_path="/missing/campplus.onnx")
 
-    with pytest.raises(RealtimeV2Error, match="model is not available"):
+    with pytest.raises(DiarizationError, match="model is not available"):
         extractor(b"\x00\x00" * 4_000)

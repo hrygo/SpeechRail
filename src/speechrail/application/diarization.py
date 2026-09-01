@@ -1,11 +1,10 @@
-"""Bounded application service joining diarization output to ASR segments."""
+"""Application service for attaching anonymous diarization to transcript segments."""
 
 from __future__ import annotations
 
 from speechrail.domain.contracts import TranscriptSegment
-from speechrail.domain.diarization import DiarizationUpdate
+from speechrail.domain.diarization import DiarizationError, DiarizationUpdate
 from speechrail.domain.ports import DiarizationSession
-from speechrail.domain.realtime_v2 import RealtimeV2Error
 
 
 class DiarizationCoordinator:
@@ -26,7 +25,7 @@ class DiarizationCoordinator:
         assignments = {assignment.segment_id: assignment for assignment in update.assignments}
         unknown_ids = assignments.keys() - {segment.id for segment in segments}
         if unknown_ids:
-            raise RealtimeV2Error(
+            raise DiarizationError(
                 "diarization returned an unknown segment", code="diarization_invalid_output"
             )
         return tuple(

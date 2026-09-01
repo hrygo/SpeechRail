@@ -17,10 +17,10 @@ from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import (
     DiarizationAssignment,
     DiarizationConfig,
+    DiarizationError,
     DiarizationSpeaker,
     DiarizationUpdate,
 )
-from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 
 NativeDiarize = Callable[[Sequence[float]], list[list[str]]]
@@ -61,7 +61,7 @@ class NemoSortformerEngine:
 
     def _load_local_model(self, samples: Sequence[float]) -> list[list[str]]:
         if not self._model_path.is_file():
-            raise RealtimeV2Error(
+            raise DiarizationError(
                 "diarization model is not available", code="diarization_not_available"
             )
         try:
@@ -70,7 +70,7 @@ class NemoSortformerEngine:
                 SortformerEncLabelModel,
             )
         except ImportError as exc:
-            raise RealtimeV2Error(
+            raise DiarizationError(
                 "diarization runtime is not installed", code="diarization_not_available"
             ) from exc
         if self._model is None:
@@ -99,7 +99,9 @@ class _NemoSortformerSession:
 
     async def append_audio(self, audio: bytes) -> None:
         if len(self._audio) + len(audio) > self._max_buffer_bytes:
-            raise RealtimeV2Error("diarization buffer limit exceeded", code="buffer_limit_exceeded")
+            raise DiarizationError(
+                "diarization buffer limit exceeded", code="buffer_limit_exceeded"
+            )
         self._audio.extend(audio)
 
     async def annotate(self, segments: tuple[TranscriptSegment, ...]) -> DiarizationUpdate:
@@ -177,7 +179,7 @@ class _NemoSortformerSession:
                             embedding=embedding,
                         )
                     except ValueError as exc:
-                        raise RealtimeV2Error(
+                        raise DiarizationError(
                             "speaker embedding is invalid", code="diarization_invalid_output"
                         ) from exc
                     self._canonical_labels[speaker.id] = canonical
@@ -188,7 +190,7 @@ class _NemoSortformerSession:
 
 def _pcm16_samples(audio: bytes) -> list[float]:
     if len(audio) % 2:
-        raise RealtimeV2Error("diarization requires PCM16 audio", code="invalid_audio")
+        raise DiarizationError("diarization requires PCM16 audio", code="invalid_audio")
     return [
         int.from_bytes(audio[index : index + 2], "little", signed=True) / 32768
         for index in range(0, len(audio), 2)
@@ -199,7 +201,7 @@ def _parse_activities(
     raw: list[list[str]], hint: int | None, *, offset_ms: int
 ) -> tuple[tuple[int, int, int], ...]:
     if len(raw) != 1:
-        raise RealtimeV2Error(
+        raise DiarizationError(
             "diarization returned an invalid batch", code="diarization_invalid_output"
         )
     activities: list[tuple[int, int, int]] = []
@@ -210,7 +212,7 @@ def _parse_activities(
             end_ms = int(float(end) * 1000)
             speaker_index = int(speaker)
         except (SyntaxError, TypeError, ValueError) as exc:
-            raise RealtimeV2Error(
+            raise DiarizationError(
                 "diarization returned an invalid activity", code="diarization_invalid_output"
             ) from exc
         if (

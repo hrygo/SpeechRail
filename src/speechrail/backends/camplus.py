@@ -8,7 +8,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from speechrail.domain.realtime_v2 import RealtimeV2Error
+from speechrail.domain.diarization import DiarizationError
 
 NativeEmbedding = Callable[[bytes], Sequence[float] | None]
 
@@ -35,7 +35,7 @@ class CamPlusEmbeddingExtractor:
 
     def _extract_local(self, audio: bytes) -> tuple[float, ...] | None:
         if not self._model_path.is_file():
-            raise RealtimeV2Error(
+            raise DiarizationError(
                 "speaker embedding model is not available", code="diarization_not_available"
             )
         try:
@@ -43,7 +43,7 @@ class CamPlusEmbeddingExtractor:
             import numpy as np
             import onnxruntime as ort  # type: ignore[import-untyped]
         except ImportError as exc:
-            raise RealtimeV2Error(
+            raise DiarizationError(
                 "speaker embedding runtime is not installed", code="diarization_not_available"
             ) from exc
 
@@ -60,7 +60,7 @@ class CamPlusEmbeddingExtractor:
                     metadata.get("sample_rate") != "16000"
                     or metadata.get("feature_normalize_type") != "global-mean"
                 ):
-                    raise RealtimeV2Error(
+                    raise DiarizationError(
                         "speaker embedding model metadata is unsupported",
                         code="diarization_not_available",
                     )
@@ -101,7 +101,7 @@ def _validated_embedding(values: Sequence[float] | None) -> tuple[float, ...] | 
         return None
     embedding = tuple(float(value) for value in values)
     if not embedding or not all(math.isfinite(value) for value in embedding):
-        raise RealtimeV2Error("speaker embedding is invalid", code="diarization_invalid_output")
+        raise DiarizationError("speaker embedding is invalid", code="diarization_invalid_output")
     if math.sqrt(sum(value * value for value in embedding)) <= 1e-12:
         return None
     return embedding

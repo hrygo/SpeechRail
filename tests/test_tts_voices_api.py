@@ -7,7 +7,6 @@ from fastapi.testclient import TestClient
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.realtime.v2_session import PCM16_24K
 
 
 class CapturingSpeechSynthesizer:
@@ -63,28 +62,3 @@ def test_rest_speech_forwards_language_to_the_typed_synthesizer() -> None:
     assert response.status_code == 200
     assert synthesizer.requests[0].language == "zh"
 
-
-def test_speech_session_rejects_a_voice_outside_the_server_registry() -> None:
-    client = TestClient(
-        create_app(
-            Settings(qwen3_model_dir=None, qwen3_python=None),
-            tts_synthesizer=CapturingSpeechSynthesizer(),
-        )
-    )
-    with client.websocket_connect("/v2/realtime") as socket:
-        socket.send_json(
-            {
-                "type": "session.update",
-                "session": {
-                    "type": "speech",
-                    "model": "speechrail/qwen3-tts",
-                    "voice": "not-registered",
-                    "audio_format": PCM16_24K,
-                },
-            }
-        )
-
-        error = socket.receive_json()
-
-    assert error["type"] == "error"
-    assert error["error"]["code"] == "voice_not_found"

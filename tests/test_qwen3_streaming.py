@@ -7,10 +7,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from speechrail.app import create_app
 from speechrail.backends.qwen3_streaming import (
     NativeRealtimeFactory,
     Qwen3StreamingBackendConfig,
@@ -18,7 +16,6 @@ from speechrail.backends.qwen3_streaming import (
 )
 from speechrail.config import Settings
 from speechrail.domain.ports import StreamingAsrEvent
-from speechrail.realtime.v2_session import PCM16
 
 
 class FakeStreamingWorker:
@@ -215,83 +212,3 @@ def test_session_maps_worker_error_to_error_event() -> None:
 
     asyncio.run(scenario())
 
-
-def test_v2_route_streams_native_completed_events_without_shape_change() -> None:
-    """The v2 route consumes the native session exactly like the WLK one."""
-
-    class SequencingWorker(FakeStreamingWorker):
-        def __init__(self) -> None:
-            super().__init__()
-            self.opened = False
-            self._wake = asyncio.Event()
-
-        async def receive(self) -> dict[str, object]:
-            if not self.opened:
-                self.opened = True
-                return {"type": "session.opened", "language": "zh"}
-            while not self._responses:
-                self._wake.clear()
-                await self._wake.wait()
-            return self._responses.pop(0)
-
-        def push(self, frame: dict[str, object]) -> None:
-            self._responses.append(frame)
-            self._wake.set()
-
-    worker = SequencingWorker()
-    factory = NativeRealtimeFactory(
-        worker=worker,  # type: ignore[arg-type]
-        mode="windowed",
-        next_session_id=lambda: "sess_test",
-    )
-    client = TestClient(
-        create_app(
-            Settings(qwen3_model_dir=None, qwen3_python=None),
-            realtime_asr_factory=factory,
-        )
-    )
-    with client.websocket_connect("/v2/realtime") as socket:
-        socket.send_json(
-            {
-                "type": "session.update",
-                "session": {
-                    "type": "transcription",
-                    "language": "zh",
-                    "audio_format": PCM16,
-                    "endpointing": {"mode": "manual"},
-                },
-            }
-        )
-        assert socket.receive_json()["type"] == "session.created"
-        socket.send_json(
-            {
-                "type": "input_audio_buffer.append",
-                "audio": _pcm16(b"\x00\x00"),
-            }
-        )
-        assert socket.receive_json()["type"] == "input_audio_buffer.ack"
-        worker.push(
-            {
-                "type": "event",
-                "kind": "completed",
-                "text": "正在 讲话",
-                "segments": [
-                    {"text": "正在", "start_ms": 0, "end_ms": 500},
-                    {"text": "讲话", "start_ms": 500, "end_ms": 1000},
-                ],
-            }
-        )
-        worker.push({"type": "finished", "final": True})
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        completed = socket.receive_json()
-        terminal = socket.receive_json()
-        assert completed["type"] == "transcription.completed"
-        assert completed["text"] == "正在 讲话"
-        assert completed["segments"][0]["text"] == "正在"
-        assert terminal["type"] == "session.completed"
-
-
-def _pcm16(value: bytes) -> str:
-    import base64
-
-    return base64.b64encode(value).decode("ascii")

@@ -1,8 +1,6 @@
 from collections.abc import Awaitable
 
-import pytest
 from fastapi.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 from speechrail.app import create_app
 from speechrail.config import Settings
@@ -22,33 +20,15 @@ def _backend(_: bytes, __: str | None, ___: str) -> Awaitable[TranscriptResult]:
     return result()
 
 
-def test_v2_realtime_closes_1013_without_any_inference_capability() -> None:
+def test_private_realtime_v2_endpoint_is_not_registered() -> None:
     client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
 
-    with (
-        pytest.raises(WebSocketDisconnect) as exc_info,
-        client.websocket_connect("/v2/realtime"),
-    ):
-        pass
-
-    assert exc_info.value.code == 1013
+    assert client.get("/v2/realtime").status_code == 404
 
 
-def test_v2_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
-    class ReadyTts:
-        ready = True
+def test_openai_realtime_endpoint_remains_registered() -> None:
+    client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
 
-    client = TestClient(
-        create_app(
-            Settings(api_key="secret", qwen3_model_dir=None, qwen3_python=None),
-            tts_synthesizer=ReadyTts(),  # type: ignore[arg-type]
-        )
-    )
+    response = client.get("/v1/realtime")
 
-    with (
-        pytest.raises(WebSocketDisconnect) as exc_info,
-        client.websocket_connect("/v2/realtime"),
-    ):
-        pass
-
-    assert exc_info.value.code == 1008
+    assert response.status_code == 404

@@ -15,6 +15,14 @@ _SPEAKER_ID = re.compile(r"^spk_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _GROUP_ID = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
+class DiarizationError(ValueError):
+    """Stable, protocol-neutral failure from the diarization boundary."""
+
+    def __init__(self, message: str, *, code: str = "diarization_error") -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class DiarizationConfig(BaseModel):
     """An opt-in request for session-local speaker attribution."""
 

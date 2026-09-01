@@ -13,19 +13,19 @@ from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
     canonical_tts_model,
 )
-from speechrail.domain.diarization import DiarizationConfig
+from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import SpeechRequest
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.runtime.admission import QueueFullError
-from speechrail.runtime.diarization import DiarizationCoordinator
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
@@ -303,6 +303,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 await coordinator.append_audio(audio)
                 segments = await coordinator.annotate(result.segments)
                 result = result.model_copy(update={"segments": segments})
+            except DiarizationError as exc:
+                return error_response(
+                    502,
+                    request_id,
+                    exc.code,
+                    "Diarization backend returned an invalid result",
+                    retryable=True,
+                )
             finally:
                 await coordinator.close()
         if response_format == "json":

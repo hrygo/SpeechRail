@@ -497,6 +497,7 @@ def apply_session_update(
     diarization: dict[str, Any] | None = None
     known_speaker_names: list[str] | None = None
     known_speaker_references: list[str] | None = None
+    raw_diarization: object = session.get("diarization")
     if transcription_obj is not None:
         language = transcription_obj.get("language")
         if language is not None and not isinstance(language, str):
@@ -513,18 +514,22 @@ def apply_session_update(
                 "invalid_timestamp_granularities",
                 "timestamp_granularities must contain only word or segment",
             )
-        raw_diarization = transcription_obj.get("diarization", session.get("diarization"))
-        if raw_diarization is not None:
-            if not isinstance(raw_diarization, dict):
-                raise RealtimeAdapterError("invalid_diarization", "diarization must be an object")
-            try:
-                diarization = DiarizationConfig.model_validate(raw_diarization).model_dump(
-                    mode="json"
-                )
-            except ValueError as exc:
-                raise RealtimeAdapterError("invalid_diarization", str(exc)) from exc
+        raw_diarization = transcription_obj.get("diarization", raw_diarization)
         if language is None and languages:
             language = languages[0]
+    if model == "gpt-4o-transcribe-diarize" and raw_diarization is None:
+        raw_diarization = {"enabled": True}
+    if raw_diarization is not None:
+        if not isinstance(raw_diarization, dict):
+            raise RealtimeAdapterError("invalid_diarization", "diarization must be an object")
+        try:
+            diarization = DiarizationConfig.model_validate(raw_diarization).model_dump(mode="json")
+        except ValueError as exc:
+            raise RealtimeAdapterError("invalid_diarization", str(exc)) from exc
+        if model == "gpt-4o-transcribe-diarize" and not diarization["enabled"]:
+            raise RealtimeAdapterError(
+                "invalid_diarization", "gpt-4o-transcribe-diarize requires diarization"
+            )
 
     voice = session.get("voice")
     if voice is not None and not isinstance(voice, str):
@@ -583,7 +588,13 @@ def parse_text_item(event: dict[str, Any]) -> str:
     return text
 
 
-def validate_append(event: dict[str, Any]) -> bytes:
+def validate_append(
+    event: dict[str, Any],
+    *,
+    max_frame_bytes: int | None = None,
+    buffered_bytes: int = 0,
+    max_buffer_bytes: int | None = None,
+) -> bytes:
     """Return the decoded PCM16 bytes from an input_audio_buffer.append."""
     audio = event.get("audio")
     if not isinstance(audio, str) or not audio:
@@ -596,6 +607,10 @@ def validate_append(event: dict[str, Any]) -> bytes:
         raise RealtimeAdapterError("invalid_audio", "audio is not valid base64") from exc
     if not payload or len(payload) % 2:
         raise RealtimeAdapterError("invalid_audio", "audio must be non-empty even-length PCM16")
+    if max_frame_bytes is not None and len(payload) > max_frame_bytes:
+        raise RealtimeAdapterError("frame_too_large", "audio frame exceeds the configured limit")
+    if max_buffer_bytes is not None and buffered_bytes + len(payload) > max_buffer_bytes:
+        raise RealtimeAdapterError("buffer_too_large", "audio buffer exceeds the configured limit")
     return payload
 
 

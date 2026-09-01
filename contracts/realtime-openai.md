@@ -73,6 +73,5 @@ ws://127.0.0.1:8201/v1/realtime
 可靠产出 partial 时发送；windowed 后端的手动 flush 可能无 delta，客户端必须依赖
 `commit` 后的 `completed` 作为最终结果，这与 OpenAI 的 manual turn detection 语义一致。
 
-`/v2/realtime` 是 SpeechRail-native 兼容入口，当前保留用于迁移回退并标记 deprecated；
-voice-realtime 完成 `/v1/realtime` 联调后再移除其客户端适配，不应依赖 v2 私有事件作为
-`/v1/realtime` 的隐式降级路径。
+`/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
+已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。
