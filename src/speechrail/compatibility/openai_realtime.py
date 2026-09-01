@@ -75,7 +75,8 @@ def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str
             "modalities": ["text", "audio"],
             "instructions": "",
             "voice": "default" if tts_ready else None,
-            "audio": {"input": {"format": _PCM16_FORMAT}, "output": {"format": _PCM16_FORMAT}},
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
             "turn_detection": None,
             "tools": [],
             "tool_choice": "none",
@@ -94,6 +95,8 @@ def session_updated(*, session_id: str, model: str) -> dict[str, object]:
             "id": session_id,
             "model": model,
             "modalities": ["text", "audio"],
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
             "turn_detection": None,
             "tools": [],
             "tool_choice": "none",
@@ -132,6 +135,7 @@ def conversation_item_created(*, session_id: str, transcript: str) -> dict[str, 
         "previous_item_id": None,
         "item": {
             "id": f"item_{session_id}_input",
+            "object": "realtime.item",
             "type": "message",
             "role": "user",
             "content": [
@@ -145,6 +149,33 @@ def conversation_item_created(*, session_id: str, transcript: str) -> dict[str, 
     }
 
 
+def conversation_text_item_created(
+    *, session_id: str, item_id: str, text: str
+) -> dict[str, object]:
+    return {
+        "type": "conversation.item.created",
+        "event_id": f"event_{session_id}_text_item",
+        "previous_item_id": None,
+        "item": {
+            "id": item_id,
+            "object": "realtime.item",
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}],
+        },
+    }
+
+
+def transcription_delta(*, session_id: str, delta: str) -> dict[str, object]:
+    return {
+        "type": "conversation.item.input_audio_transcription.delta",
+        "event_id": f"event_{session_id}_transcription_delta",
+        "item_id": f"item_{session_id}_input",
+        "content_index": 0,
+        "delta": delta,
+    }
+
+
 def transcription_completed(*, session_id: str, transcript: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.completed",
@@ -152,6 +183,12 @@ def transcription_completed(*, session_id: str, transcript: str) -> dict[str, ob
         "item_id": f"item_{session_id}_input",
         "content_index": 0,
         "transcript": transcript,
+        "usage": {
+            "type": "transcript_text_usage_tokens",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        },
     }
 
 
@@ -190,6 +227,7 @@ def response_output_item_added(
         "output_index": 0,
         "item": {
             "id": item_id,
+            "object": "realtime.item",
             "type": "message",
             "role": "assistant",
             "content": [{"type": "output_audio", "transcript": None, "audio": None}],
@@ -197,38 +235,103 @@ def response_output_item_added(
     }
 
 
+def response_output_item_done(
+    *, session_id: str, response_id: str, item_id: str, transcript: str
+) -> dict[str, object]:
+    return {
+        "type": "response.output_item.done",
+        "event_id": f"event_{session_id}_output_item_done",
+        "response_id": response_id,
+        "output_index": 0,
+        "item": {
+            "id": item_id,
+            "object": "realtime.item",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_audio", "transcript": transcript, "audio": None}],
+        },
+    }
+
+
+def response_content_part_added(
+    *, session_id: str, response_id: str, item_id: str
+) -> dict[str, object]:
+    return {
+        "type": "response.content_part.added",
+        "event_id": f"event_{session_id}_part_added",
+        "response_id": response_id,
+        "output_index": 0,
+        "item_id": item_id,
+        "content_index": 0,
+        "part": {"type": "audio", "transcript": None, "audio": None},
+    }
+
+
+def response_content_part_done(
+    *, session_id: str, response_id: str, item_id: str, transcript: str
+) -> dict[str, object]:
+    return {
+        "type": "response.content_part.done",
+        "event_id": f"event_{session_id}_part_done",
+        "response_id": response_id,
+        "output_index": 0,
+        "item_id": item_id,
+        "content_index": 0,
+        "part": {"type": "audio", "transcript": transcript, "audio": None},
+    }
+
+
 def response_output_audio_delta(
-    *, session_id: str, response_id: str, delta: str
+    *, session_id: str, response_id: str, item_id: str, delta: str
 ) -> dict[str, object]:
     return {
         "type": "response.output_audio.delta",
         "event_id": f"event_{session_id}_audio_delta",
         "response_id": response_id,
         "output_index": 0,
-        "item_id": f"item_{session_id}_output",
+        "item_id": item_id,
+        "content_index": 0,
         "delta": delta,
     }
 
 
-def response_output_audio_done(*, session_id: str, response_id: str) -> dict[str, object]:
+def response_output_audio_done(
+    *, session_id: str, response_id: str, item_id: str
+) -> dict[str, object]:
     return {
         "type": "response.output_audio.done",
         "event_id": f"event_{session_id}_audio_done",
         "response_id": response_id,
         "output_index": 0,
-        "item_id": f"item_{session_id}_output",
+        "item_id": item_id,
+        "content_index": 0,
+    }
+
+
+def response_output_audio_transcript_delta(
+    *, session_id: str, response_id: str, item_id: str, delta: str
+) -> dict[str, object]:
+    return {
+        "type": "response.output_audio_transcript.delta",
+        "event_id": f"event_{session_id}_transcript_delta",
+        "response_id": response_id,
+        "output_index": 0,
+        "item_id": item_id,
+        "content_index": 0,
+        "delta": delta,
     }
 
 
 def response_output_audio_transcript_done(
-    *, session_id: str, response_id: str, transcript: str
+    *, session_id: str, response_id: str, item_id: str, transcript: str
 ) -> dict[str, object]:
     return {
         "type": "response.output_audio_transcript.done",
         "event_id": f"event_{session_id}_transcript_done",
         "response_id": response_id,
         "output_index": 0,
-        "item_id": f"item_{session_id}_output",
+        "item_id": item_id,
+        "content_index": 0,
         "transcript": transcript,
     }
 
@@ -310,7 +413,18 @@ def apply_session_update(
     if tools:
         raise RealtimeAdapterError("unsupported_tools", "tools are not supported")
 
-    config: dict[str, Any] = {"model": resolved_asr, "language": session.get("language")}
+    # Accept both OpenAI-standard audio format fields and the legacy nested
+    # "audio" object; anything else fails closed.
+    input_format = session.get("input_audio_format")
+    if input_format not in (None, "pcm16"):
+        raise RealtimeAdapterError(
+            "unsupported_audio_format", "only pcm16 audio input is supported"
+        )
+    output_format = session.get("output_audio_format")
+    if output_format not in (None, "pcm16"):
+        raise RealtimeAdapterError(
+            "unsupported_audio_format", "only pcm16 audio output is supported"
+        )
     if "audio" in session:
         audio = _require_object(session, "audio")
         if "input" in audio:
@@ -319,6 +433,24 @@ def apply_session_update(
                 raise RealtimeAdapterError(
                     "unsupported_audio_format", "only pcm16 audio input is supported"
                 )
+
+    language: str | None = None
+    transcription = session.get("input_audio_transcription")
+    if transcription is not None:
+        transcription_obj = _require_object(session, "input_audio_transcription")
+        language = transcription_obj.get("language")
+        if language is not None and not isinstance(language, str):
+            raise RealtimeAdapterError("invalid_language", "language must be a string")
+
+    voice = session.get("voice")
+    if voice is not None and not isinstance(voice, str):
+        raise RealtimeAdapterError("invalid_voice", "voice must be a string")
+
+    config: dict[str, Any] = {
+        "model": resolved_asr,
+        "language": language or session.get("language"),
+        "voice": voice,
+    }
     return session_updated(session_id=session_id, model=model), config
 
 

@@ -18,19 +18,25 @@ from speechrail.compatibility.openai_realtime import (
     apply_session_update,
     conversation_created,
     conversation_item_created,
+    conversation_text_item_created,
     error_event,
     input_audio_buffer_cleared,
     input_audio_buffer_committed,
     parse_text_item,
     reject_unsupported,
+    response_content_part_added,
+    response_content_part_done,
     response_created,
     response_done,
     response_output_audio_delta,
     response_output_audio_done,
+    response_output_audio_transcript_delta,
     response_output_audio_transcript_done,
     response_output_item_added,
+    response_output_item_done,
     session_created,
     transcription_completed,
+    transcription_delta,
     transcription_failed,
     validate_append,
 )
@@ -72,6 +78,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         asr_session: RealtimeAsrSession | None = None
         asr_reader: asyncio.Task[None] | None = None
         tts_task: asyncio.Task[None] | None = None
+        pending_text: str | None = None
         config: dict[str, Any] = {"model": resolved.model_id, "language": None}
 
         async def drain_asr_events() -> None:
@@ -79,8 +86,10 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 return
             async for event in asr_session.events():
                 if event.kind == "partial":
-                    continue
-                if event.kind == "completed":
+                    await websocket.send_json(
+                        transcription_delta(session_id=session_id, delta=event.text)
+                    )
+                elif event.kind == "completed":
                     await websocket.send_json(
                         conversation_item_created(session_id=session_id, transcript=event.text)
                     )
@@ -103,13 +112,18 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 )
                 return
             response_id = f"resp_{uuid4().hex[:12]}"
-            item_id = f"item_{uuid4().hex[:12]}"
+            out_item_id = f"item_{uuid4().hex[:12]}"
             await websocket.send_json(
                 response_created(session_id=session_id, response_id=response_id)
             )
             await websocket.send_json(
                 response_output_item_added(
-                    session_id=session_id, response_id=response_id, item_id=item_id
+                    session_id=session_id, response_id=response_id, item_id=out_item_id
+                )
+            )
+            await websocket.send_json(
+                response_content_part_added(
+                    session_id=session_id, response_id=response_id, item_id=out_item_id
                 )
             )
             request = SpeechRequest(
@@ -126,6 +140,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         response_output_audio_delta(
                             session_id=session_id,
                             response_id=response_id,
+                            item_id=out_item_id,
                             delta=base64.b64encode(chunk.audio).decode("ascii"),
                         )
                     )
@@ -135,12 +150,41 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 )
             finally:
                 await websocket.send_json(
-                    response_output_audio_transcript_done(
-                        session_id=session_id, response_id=response_id, transcript=text
+                    response_output_audio_transcript_delta(
+                        session_id=session_id,
+                        response_id=response_id,
+                        item_id=out_item_id,
+                        delta=text,
                     )
                 )
                 await websocket.send_json(
-                    response_output_audio_done(session_id=session_id, response_id=response_id)
+                    response_output_audio_transcript_done(
+                        session_id=session_id,
+                        response_id=response_id,
+                        item_id=out_item_id,
+                        transcript=text,
+                    )
+                )
+                await websocket.send_json(
+                    response_output_audio_done(
+                        session_id=session_id, response_id=response_id, item_id=out_item_id
+                    )
+                )
+                await websocket.send_json(
+                    response_content_part_done(
+                        session_id=session_id,
+                        response_id=response_id,
+                        item_id=out_item_id,
+                        transcript=text,
+                    )
+                )
+                await websocket.send_json(
+                    response_output_item_done(
+                        session_id=session_id,
+                        response_id=response_id,
+                        item_id=out_item_id,
+                        transcript=text,
+                    )
                 )
                 await websocket.send_json(
                     response_done(session_id=session_id, response_id=response_id)
@@ -212,24 +256,33 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             raise RealtimeAdapterError(
                                 "backend_not_ready", "TTS backend is not ready"
                             )
+                        item_id = f"item_{uuid4().hex[:12]}"
+                        pending_text = text
+                        await websocket.send_json(
+                            conversation_text_item_created(
+                                session_id=session_id, item_id=item_id, text=text
+                            )
+                        )
+                    elif event_type == "response.create":
+                        if pending_text is None:
+                            raise RealtimeAdapterError(
+                                "invalid_state",
+                                "response.create requires a preceding "
+                                "conversation.item.create text input",
+                            )
                         if tts_task is None or tts_task.done():
                             tts_task = asyncio.create_task(
                                 synthesize_tts(
-                                    text,
+                                    pending_text,
                                     voice=str(config.get("voice") or "default"),
                                     language=str(config.get("language") or "auto"),
                                 )
                             )
+                            pending_text = None
                         else:
                             raise RealtimeAdapterError(
                                 "invalid_state", "a TTS response is already in progress"
                             )
-                    elif event_type == "response.create":
-                        raise RealtimeAdapterError(
-                            "unsupported_operation",
-                            "response.create requires a preceding "
-                            "conversation.item.create text input",
-                        )
                     elif event_type == "response.cancel":
                         if tts_task is not None and not tts_task.done():
                             tts_task.cancel()

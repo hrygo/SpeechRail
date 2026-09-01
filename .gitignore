@@ -30,3 +30,6 @@ secrets/
 *.mp3
 *.m4a
 *.flac
+
+# Local opencode tooling directory
+.opencode/

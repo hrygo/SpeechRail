@@ -269,17 +269,35 @@ def test_openai_text_item_triggers_tts_response() -> None:
                 },
             }
         )
+        item_created = socket.receive_json()
+        assert item_created["type"] == "conversation.item.created"
+        assert item_created["item"]["content"][0]["type"] == "input_text"
+        socket.send_json({"type": "response.create"})
         events: list[str] = []
-        for _ in range(8):
+        for _ in range(16):
             event = socket.receive_json()
             events.append(event["type"])
             if event["type"] == "response.done":
                 break
         assert "response.created" in events
         assert "response.output_item.added" in events
+        assert "response.content_part.added" in events
         assert "response.output_audio.delta" in events
         assert "response.output_audio.done" in events
+        assert "response.content_part.done" in events
+        assert "response.output_item.done" in events
         assert events[-1] == "response.done"
+
+
+def test_openai_response_create_without_item_fails_closed() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_state"
 
 
 def test_openai_text_item_requires_nonempty_text() -> None:
