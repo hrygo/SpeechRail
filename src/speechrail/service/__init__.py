@@ -9,6 +9,7 @@ from speechrail.service.launchd import (
     UnsupportedPlatformError,
     create_launch_agent_manager,
 )
+from speechrail.service.paths import ServiceLayout
 
 __all__ = [
     "SERVICE_LABEL",
@@ -18,4 +19,5 @@ __all__ = [
     "ServiceError",
     "UnsupportedPlatformError",
     "create_launch_agent_manager",
+    "ServiceLayout",
 ]

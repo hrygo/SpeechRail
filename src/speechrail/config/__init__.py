@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     """Validated, environment-backed service configuration."""
 
     model_config = SettingsConfigDict(env_prefix="SPEECHRAIL_", env_file=".env", extra="ignore")
+
+    @classmethod
+    def from_env_file(cls, env_file: Path | None = None) -> Self:
+        """Load settings from an explicit file or preserve the development default."""
+        if env_file is None:
+            return cls()
+        return cls(_env_file=env_file)
 
     service_name: str = "speechrail"
     version: str = "0.1.0"
