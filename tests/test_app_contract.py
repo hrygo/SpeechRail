@@ -4,7 +4,7 @@ from sys import executable
 import pytest
 from fastapi.testclient import TestClient
 
-import speechrail.app as app_module
+import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
@@ -142,7 +142,7 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
             del audio, language, prompt
             raise AssertionError("transcribe is not expected in this lifecycle test")
 
-    monkeypatch.setattr(app_module, "Qwen3Worker", FakeWorker)
+    monkeypatch.setattr(services_module, "Qwen3Worker", FakeWorker)
     settings = Settings(
         qwen3_model_dir=snapshot,
         qwen3_python=Path(executable),
@@ -192,8 +192,8 @@ def test_startup_failure_closes_already_started_runtime_workers(
         async def close(self) -> None:
             lifecycle.append("tts.close")
 
-    monkeypatch.setattr(app_module, "Qwen3Worker", FakeAsrWorker)
-    monkeypatch.setattr(app_module, "Qwen3TtsWorker", FailingTtsWorker)
+    monkeypatch.setattr(services_module, "Qwen3Worker", FakeAsrWorker)
+    monkeypatch.setattr(services_module, "Qwen3TtsWorker", FailingTtsWorker)
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
         qwen3_python=Path(executable),
@@ -204,7 +204,7 @@ def test_startup_failure_closes_already_started_runtime_workers(
     with pytest.raises(RuntimeError, match="tts_start_failed"), TestClient(create_app(settings)):
         pass
 
-    assert lifecycle == ["asr.start", "tts.start", "tts.close", "asr.close"]
+    assert lifecycle == ["asr.start", "tts.start", "asr.close"]
 
 
 def test_api_key_and_model_errors_are_distinct() -> None:

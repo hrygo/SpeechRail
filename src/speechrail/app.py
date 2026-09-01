@@ -22,15 +22,11 @@ from starlette.responses import Response
 from starlette.websockets import WebSocketDisconnect
 
 from speechrail import __version__
-from speechrail.backends.camplus import CamPlusEmbeddingExtractor
-from speechrail.backends.nemo_sortformer import NemoSortformerEngine
-from speechrail.backends.qwen3_native import (
-    Qwen3BackendConfig,
-    Qwen3BatchTranscriber,
-    Qwen3Worker,
+from speechrail.application.services import (
+    AppOverrides,
+    Transcribe,
+    build_app_services,
 )
-from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
-from speechrail.backends.wlk_streaming import WlkRealtimeFactory
 from speechrail.compatibility.presenters import legacy_config, legacy_ready_to_stop
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
@@ -49,28 +45,11 @@ from speechrail.http.formatters import format_json, format_srt, format_verbose, 
 from speechrail.realtime.events import RealtimeSession, SessionError
 from speechrail.realtime.outbound import BoundedOutboundEventPump, SlowConsumerError
 from speechrail.realtime.v2_session import SpeechSession, TranscriptionSession
-from speechrail.runtime.admission import AdmissionQueue, QueueFullError
+from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.diarization import DiarizationCoordinator
-from speechrail.runtime.job_runner import JobProcessor, JobRunner
+from speechrail.runtime.job_runner import JobProcessor
 from speechrail.runtime.jobs import JobRecord, JobRepository
-from speechrail.runtime.resource_governor import GovernorQueueFullError, ResourceGovernor, WorkClass
-from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
-
-Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
-
-
-class _CallableBatchTranscriber(BatchTranscriber):
-    """Bridge the v1 callable seam while v2 adopts typed backend ports."""
-
-    def __init__(self, transcribe: Transcribe, model_id: str) -> None:
-        self._transcribe = transcribe
-        self._model_id = model_id
-
-    async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
-        result = await self._transcribe(request.audio, request.language, request.prompt)
-        return result.model_copy(
-            update={"request_id": request.request_id, "model_id": self._model_id}
-        )
+from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 
 class _SpeechHTTPBody(BaseModel):
@@ -239,13 +218,6 @@ async def _decode_pcm(audio: bytes) -> bytes:
     return pcm
 
 
-async def _run_job_runner(runner: JobRunner, *, poll_seconds: float) -> None:
-    """Run one durable job at a time; idle waits prevent a busy loop."""
-    while True:
-        if not await runner.run_once():
-            await asyncio.sleep(poll_seconds)
-
-
 def create_app(
     settings: Settings | None = None,
     *,
@@ -257,106 +229,37 @@ def create_app(
     job_repository: JobRepository | None = None,
     job_processor: JobProcessor | None = None,
 ) -> FastAPI:
-    resolved = settings or Settings()
-    if job_repository is None and resolved.job_spool_dir is not None:
-        job_repository = JobRepository(resolved.job_spool_dir)
-    job_runner: JobRunner | None = None
-    worker: Qwen3Worker | None = None
-    tts_worker: Qwen3TtsWorker | None = None
-    if (
-        transcribe is None
-        and resolved.qwen3_model_dir is not None
-        and resolved.qwen3_python is not None
-    ):
-        worker = Qwen3Worker(
-            Qwen3BackendConfig(
-                repository_root=Path(__file__).parents[2],
-                python_executable=resolved.qwen3_python,
-                model_dir=resolved.qwen3_model_dir,
-                device=resolved.device,
-                dtype=resolved.dtype,
-                timeout_seconds=resolved.request_timeout_seconds,
-            )
-        )
-        transcribe = worker.transcribe
-        v2_transcriber = Qwen3BatchTranscriber(worker=worker, model_id=resolved.model_id)
-    if (
-        tts_synthesizer is None
-        and resolved.qwen3_tts_model_dir is not None
-        and resolved.qwen3_tts_python is not None
-    ):
-        tts_worker = Qwen3TtsWorker(
-            Qwen3TtsBackendConfig(
-                repository_root=Path(__file__).parents[2],
-                python_executable=resolved.qwen3_tts_python,
-                model_dir=resolved.qwen3_tts_model_dir,
-                device=resolved.device,
-                dtype=resolved.dtype,
-                sample_rate=resolved.tts_sample_rate,
-                timeout_seconds=resolved.request_timeout_seconds,
-                chunk_ms=resolved.tts_chunk_ms,
-                repetition_penalty=resolved.tts_repetition_penalty,
-                temperature=resolved.tts_temperature,
-                top_p=resolved.tts_top_p,
-                warmup_on_start=resolved.tts_warmup_on_start,
-            )
-        )
-        tts_synthesizer = tts_worker
-    if realtime_asr_factory is None and resolved.wlk_streaming_url is not None:
-        realtime_asr_factory = WlkRealtimeFactory(url=resolved.wlk_streaming_url)
-    if diarization_engine is None and resolved.diarization_model_path is not None:
-        embedding = (
-            None
-            if resolved.diarization_embedding_model_path is None
-            else CamPlusEmbeddingExtractor(model_path=resolved.diarization_embedding_model_path)
-        )
-        centroids = (
-            None
-            if embedding is None
-            else SpeakerCentroidStore(
-                max_groups=resolved.diarization_max_groups,
-                ttl_seconds=resolved.diarization_group_ttl_seconds,
-                similarity_threshold=resolved.diarization_similarity_threshold,
-            )
-        )
-        diarization_engine = NemoSortformerEngine(
-            model_path=resolved.diarization_model_path,
-            max_buffer_bytes=resolved.diarization_max_buffer_bytes,
-            embedding=embedding,
-            centroids=centroids,
-        )
-    admission = AdmissionQueue(resolved.max_queue_size)
-    governor = ResourceGovernor(resolved.governor_limits)
-    if job_repository is not None and job_processor is not None:
-        job_runner = JobRunner(
-            repository=job_repository,
-            governor=governor,
-            processor=job_processor,
-            deadline_seconds=resolved.request_timeout_seconds,
-        )
-    resolved_v2_transcriber = v2_transcriber
-    if resolved_v2_transcriber is None and transcribe is not None:
-        resolved_v2_transcriber = _CallableBatchTranscriber(transcribe, resolved.model_id)
+    resolved_settings = settings or Settings()
+    overrides = AppOverrides(
+        transcribe=transcribe,
+        v2_transcriber=v2_transcriber,
+        realtime_asr_factory=realtime_asr_factory,
+        diarization_engine=diarization_engine,
+        tts_synthesizer=tts_synthesizer,
+        job_repository=job_repository,
+        job_processor=job_processor,
+    )
+    services = build_app_services(resolved_settings, overrides)
+    resolved = services.settings
+    transcribe = services.transcribe
+    worker = services.asr_worker
+    tts_synthesizer = services.tts_synthesizer
+    job_repository = services.job_repository
+    admission = services.admission
+    governor = services.governor
+    resolved_v2_transcriber = services.v2_transcriber
+    realtime_asr_factory = services.realtime_asr_factory
+    diarization_engine = services.diarization_engine
 
-    def component_ready(component: object | None) -> bool:
-        """Treat injected components as ready unless they explicitly report otherwise."""
-        if component is None:
-            return False
-        state = getattr(component, "ready", None)
-        return True if state is None else bool(state)
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        await services.lifecycle.start()
+        try:
+            yield
+        finally:
+            await services.lifecycle.close()
 
-    def asr_ready() -> bool:
-        return (
-            transcribe is not None
-            or resolved_v2_transcriber is not None
-            or realtime_asr_factory is not None
-            or resolved.backend_ready
-        )
-
-    def tts_ready() -> bool:
-        return component_ready(tts_synthesizer)
-
-    app = FastAPI(title="SpeechRail API", version=resolved.version)
+    app = FastAPI(title="SpeechRail API", version=resolved.version, lifespan=lifespan)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
 
@@ -392,49 +295,6 @@ def create_app(
             "result_ref": job.result_ref,
         }
 
-    job_runner_task: asyncio.Task[None] | None = None
-
-    async def stop_runtime() -> None:
-        """Stop partially or fully initialized local runtimes in reverse order."""
-        if job_runner_task is not None:
-            job_runner_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await job_runner_task
-        for runtime in (tts_worker, worker):
-            if runtime is not None:
-                with contextlib.suppress(Exception):
-                    await runtime.close()
-
-    if (
-        worker is not None
-        or tts_worker is not None
-        or job_repository is not None
-        or job_runner is not None
-    ):
-
-        @app.on_event("startup")
-        async def start_runtime() -> None:
-            nonlocal job_runner_task
-            try:
-                if job_repository is not None:
-                    job_repository.recover_interrupted()
-                if worker is not None:
-                    await worker.start()
-                if tts_worker is not None:
-                    await tts_worker.start()
-                if job_runner is not None:
-                    job_runner_task = asyncio.create_task(
-                        _run_job_runner(job_runner, poll_seconds=resolved.job_poll_seconds)
-                    )
-            except BaseException:
-                await stop_runtime()
-                raise
-
-    if worker is not None or tts_worker is not None or job_runner is not None:
-        @app.on_event("shutdown")
-        async def stop_worker() -> None:
-            await stop_runtime()
-
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
         del exc
@@ -452,14 +312,14 @@ def create_app(
             "service": resolved.service_name,
             "version": resolved.version,
             "backend": "qwen3-asr-1.7b",
-            "asr_ready": asr_ready(),
-            "tts_ready": tts_ready(),
-            "ready": asr_ready() or tts_ready(),
+            "asr_ready": services.asr_ready,
+            "tts_ready": services.tts_ready,
+            "ready": services.asr_ready or services.tts_ready,
         }
 
     @app.get("/readyz")
     async def readyz(request: Request) -> JSONResponse:
-        if asr_ready() or tts_ready():
+        if services.asr_ready or services.tts_ready:
             return JSONResponse(status_code=200, content={"ready": True})
         return _error_response(
             503,
@@ -493,7 +353,7 @@ def create_app(
                     "id": voice_id,
                     "description": VOICE_PROFILES[voice_id].description,
                     "is_default": VOICE_PROFILES[voice_id].is_default,
-                    "available": tts_ready(),
+                    "available": services.tts_ready,
                 }
                 for voice_id in resolved.tts_voice_ids
             ],
@@ -627,7 +487,7 @@ def create_app(
                 param="voice",
             )
         synthesizer = tts_synthesizer
-        if synthesizer is None or not component_ready(synthesizer):
+        if synthesizer is None or not services.tts_ready:
             return _error_response(
                 503,
                 request_id,
@@ -777,7 +637,7 @@ def create_app(
         if (
             resolved_v2_transcriber is None
             and realtime_asr_factory is None
-            and not tts_ready()
+            and not services.tts_ready
         ):
             await websocket.close(code=1013, reason="SpeechRail inference backend is not ready")
             return
@@ -887,7 +747,7 @@ def create_app(
             if (
                 not isinstance(session, SpeechSession)
                 or synthesizer is None
-                or not component_ready(synthesizer)
+                or not services.tts_ready
             ):
                 raise RealtimeV2Error("TTS backend is not ready", code="backend_not_ready")
             created = session.response_created()
@@ -978,7 +838,7 @@ def create_app(
                             await active_streaming_asr.connect()
                             streaming_reader = asyncio.create_task(consume_streaming_asr_events())
                     elif configured.get("type") == "speech":
-                        if not tts_ready():
+                        if not services.tts_ready:
                             raise RealtimeV2Error(
                                 "TTS backend is not ready", code="backend_not_ready"
                             )

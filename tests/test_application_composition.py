@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -11,7 +10,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-import speechrail.app as app_module
+import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
@@ -58,7 +57,7 @@ def test_lifespan_rolls_back_started_components() -> None:
 
     def scenario() -> None:
         async def run() -> None:
-            with pytest.raises(RuntimeError, match="tts.start"):
+            with pytest.raises(RuntimeError, match=r"tts\.start"):
                 async with lifecycle.run():
                     pass
 
@@ -104,8 +103,8 @@ def test_fake_overrides_never_construct_real_qwen_workers(
     class ReadySynthesizer:
         ready = True
 
-    monkeypatch.setattr(app_module, "Qwen3Worker", _forbidden)
-    monkeypatch.setattr(app_module, "Qwen3TtsWorker", _forbidden)
+    monkeypatch.setattr(services_module, "Qwen3Worker", _forbidden)
+    monkeypatch.setattr(services_module, "Qwen3TtsWorker", _forbidden)
 
     def fake_transcribe(audio: bytes, language: str | None, prompt: str) -> object:
         del audio, language, prompt
