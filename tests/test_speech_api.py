@@ -6,7 +6,7 @@ from sys import executable
 
 from fastapi.testclient import TestClient
 
-import speechrail.app as app_module
+import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.ports import AudioChunk, SpeechRequest
@@ -183,7 +183,7 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
 
             return chunks()
 
-    monkeypatch.setattr(app_module, "Qwen3TtsWorker", FakeConfiguredWorker)
+    monkeypatch.setattr(services_module, "Qwen3TtsWorker", FakeConfiguredWorker)
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,

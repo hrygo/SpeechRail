@@ -63,9 +63,11 @@ def test_legacy_websocket_emits_config_then_ready_to_stop_for_empty_eof() -> Non
 def test_v1_realtime_closes_1013_when_no_backend_is_configured() -> None:
     client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
 
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/v1/realtime"):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/v1/realtime"),
+    ):
+        pass
 
     assert exc_info.value.code == 1013
 
@@ -78,9 +80,11 @@ def test_v1_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
         )
     )
 
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/v1/realtime"):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/v1/realtime"),
+    ):
+        pass
 
     assert exc_info.value.code == 1008
 
@@ -88,9 +92,11 @@ def test_v1_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
 def test_v2_realtime_closes_1013_without_any_inference_capability() -> None:
     client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
 
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/v2/realtime"):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/v2/realtime"),
+    ):
+        pass
 
     assert exc_info.value.code == 1013
 
@@ -106,9 +112,11 @@ def test_v2_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
         )
     )
 
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/v2/realtime"):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/v2/realtime"),
+    ):
+        pass
 
     assert exc_info.value.code == 1008
 
@@ -121,8 +129,10 @@ def test_legacy_websocket_closes_1008_when_disabled() -> None:
         )
     )
 
-    with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect("/asr"):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect) as exc_info,
+        client.websocket_connect("/asr"),
+    ):
+        pass
 
     assert exc_info.value.code == 1008

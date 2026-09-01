@@ -12,8 +12,52 @@ from fastapi.testclient import TestClient
 
 import speechrail.application.services as services_module
 from speechrail.app import create_app
+from speechrail.application.lifecycle import RuntimeLifecycle
+from speechrail.application.services import AppServices
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
+
+
+@pytest.fixture
+def fake_services() -> AppServices:
+    settings = Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)
+    return AppServices(
+        settings=settings,
+        transcribe=None,
+        v2_transcriber=None,
+        realtime_asr_factory=None,
+        diarization_engine=None,
+        tts_synthesizer=None,
+        job_repository=None,
+        asr_worker=None,
+        admission=services_module.AdmissionQueue(settings.max_queue_size),
+        governor=services_module.ResourceGovernor(settings.governor_limits),
+        lifecycle=RuntimeLifecycle(),
+    )
+
+
+def test_audio_router_can_be_built_from_fake_services(fake_services: AppServices) -> None:
+    from speechrail.http.routes.audio import create_audio_router
+
+    router = create_audio_router(fake_services)
+
+    assert {route.path for route in router.routes} == {
+        "/v1/audio/transcriptions",
+        "/v1/audio/speech",
+    }
+
+
+def test_system_router_can_be_built_from_fake_services(fake_services: AppServices) -> None:
+    from speechrail.http.routes.system import create_system_router
+
+    router = create_system_router(fake_services)
+
+    assert {route.path for route in router.routes} == {
+        "/health",
+        "/readyz",
+        "/v1/models",
+        "/v1/voices",
+    }
 
 
 class _FakeRepository:

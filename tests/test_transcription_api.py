@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import speechrail.app as app_module
+import speechrail.http.routes.audio as audio_module
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
@@ -56,10 +56,10 @@ def test_ffmpeg_resolution_uses_absolute_fallback_without_path(
 ) -> None:
     ffmpeg = tmp_path / "ffmpeg"
     ffmpeg.touch()
-    monkeypatch.setattr(app_module.shutil, "which", lambda _: None)
-    monkeypatch.setattr(app_module, "_FFMPEG_FALLBACKS", (ffmpeg,))
+    monkeypatch.setattr(audio_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(audio_module, "_FFMPEG_FALLBACKS", (ffmpeg,))
 
-    assert app_module._resolve_ffmpeg() == str(ffmpeg)
+    assert audio_module._resolve_ffmpeg() == str(ffmpeg)
 
 
 @pytest.mark.parametrize(
