@@ -176,6 +176,17 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
         assert len(factory.sessions) == 1
 
 
+def test_openai_tts_model_alias_resolves_in_session_update() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "session.update", "session": {"model": "tts-1"}})
+        updated = socket.receive_json()
+        assert updated["type"] == "session.updated"
+        assert updated["session"]["model"] == "tts-1"
+
+
 def test_openai_rejects_unknown_model() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:

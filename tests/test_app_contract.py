@@ -35,9 +35,14 @@ def test_models_exposes_canonical_model_and_compatibility_aliases() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["object"] == "list"
-    ids = {item["id"] for item in payload["data"]}
-    assert "speechrail/qwen3-asr-1.7b" in ids
-    assert "Qwen3-ASR-1.7B" in ids
+    by_id = {item["id"]: item for item in payload["data"]}
+    assert "speechrail/qwen3-asr-1.7b" in by_id
+    assert "Qwen3-ASR-1.7B" in by_id
+    assert by_id["whisper-1"]["resolves_to"] == "speechrail/qwen3-asr-1.7b"
+    assert by_id["gpt-4o-transcribe"]["resolves_to"] == "speechrail/qwen3-asr-1.7b"
+    assert by_id["tts-1"]["resolves_to"] == "speechrail/qwen3-tts"
+    assert by_id["tts-1-hd"]["resolves_to"] == "speechrail/qwen3-tts"
+    assert by_id["gpt-4o-mini-tts"]["resolves_to"] == "speechrail/qwen3-tts"
 
 
 def test_transcription_returns_openai_compatible_not_ready_error() -> None:
