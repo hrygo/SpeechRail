@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -345,5 +346,28 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
         with pytest.raises(asyncio.CancelledError):
             await task
         assert fake.abort_count == 1
+
+    asyncio.run(scenario())
+
+
+def test_close_terminates_worker_without_waiting_for_the_active_stream(tmp_path: Path) -> None:
+    worker, fake = _worker(tmp_path)
+    started = asyncio.Event()
+
+    async def blocked_receive() -> dict[str, Any]:
+        started.set()
+        await asyncio.Event().wait()  # never released: stream holds the worker lock
+
+    fake.receive = blocked_receive  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        stream = worker.synthesize(SpeechRequest(text="关闭", voice="default"))
+        task = asyncio.ensure_future(stream.__anext__())
+        await started.wait()
+        await asyncio.wait_for(worker.close(), timeout=1.0)
+        assert fake.abort_count == 1
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     asyncio.run(scenario())

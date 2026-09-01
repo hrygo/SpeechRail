@@ -221,6 +221,6 @@ class Qwen3TtsWorker:
             raise RuntimeError("worker_frame_invalid") from exc
 
     async def close(self) -> None:
-        async with self._lock:
-            self._started = False
-            await self._transport.close()
+        """Terminate the worker immediately without waiting for an active stream."""
+        self._started = False
+        await self._transport.abort()

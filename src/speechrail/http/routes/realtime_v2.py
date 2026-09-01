@@ -12,7 +12,7 @@ from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from speechrail.application.services import AppServices
-from speechrail.application.tts_delivery import iter_validated_audio
+from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import (
     RealtimeAsrSession,
@@ -179,6 +179,15 @@ def create_realtime_v2_router(services: AppServices) -> APIRouter:
                 send=websocket.send_json,
             )
             await output.start()
+
+            async def fail_response(*, code: str, message: str) -> None:
+                with contextlib.suppress(SlowConsumerError):
+                    await output.publish(
+                        session.protocol_error(code=code, message=message, retryable=True)
+                    )
+                    await output.finish()
+                await websocket.close(code=1013)
+
             finished = False
             try:
                 async with governor.reserve(
@@ -207,6 +216,19 @@ def create_realtime_v2_router(services: AppServices) -> APIRouter:
                     )
                 )
                 await websocket.close(code=1013)
+            except TTSDeliveryError as exc:
+                await fail_response(
+                    code=exc.code,
+                    message="TTS backend delivered an invalid audio stream",
+                )
+            except GovernorQueueFullError:
+                await fail_response(
+                    code="queue_full", message="Realtime inference queue is full"
+                )
+            except TimeoutError:
+                await fail_response(
+                    code="backend_timeout", message="Realtime inference timed out"
+                )
             finally:
                 if not finished:
                     await output.abort()

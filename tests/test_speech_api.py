@@ -67,6 +67,36 @@ def test_speech_endpoint_wraps_wav_after_collecting_pcm() -> None:
     assert response.content[44:] == b"\x00\x00\x01\x00"
 
 
+class InvalidDeliverySynthesizer:
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(response_id="resp-test", chunk_index=0, audio=b"\x00\x00")
+            yield AudioChunk(response_id="resp-test", chunk_index=2, audio=b"\x01\x00")
+
+        return chunks()
+
+
+def test_speech_endpoint_maps_invalid_delivery_to_unified_error_envelope() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=InvalidDeliverySynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+    )
+
+    assert response.status_code == 502
+    error = response.json()["error"]
+    assert error["code"] == "tts_chunk_order_invalid"
+    assert error["type"] == "server_error"
+    assert error["retryable"] is True
+    assert error["request_id"]
+
+
 def test_speech_endpoint_returns_stable_not_ready_error_without_backend() -> None:
     client = TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None)))
 

@@ -4,7 +4,9 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 
+import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from speechrail.app import create_app
 from speechrail.config import Settings
@@ -49,6 +51,15 @@ class SlowSpeechSynthesizer:
             assert request.text == "请取消"
             await asyncio.sleep(1)
             yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
+class InvalidDeliverySynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+            yield AudioChunk(response_id="internal", chunk_index=3, audio=b"\x01\x00")
 
         return chunks()
 
@@ -456,6 +467,42 @@ def test_v2_speech_cancel_after_commit_still_completes_the_session() -> None:
         assert created["type"] == "response.created"
         assert cancelled["type"] == "response.audio.cancelled"
         assert completed["type"] == "session.completed"
+
+
+def test_v2_speech_delivery_violation_sends_error_event_and_closes() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=InvalidDeliverySynthesizer(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "speech",
+                    "model": "speechrail/qwen3-tts",
+                    "voice": "default",
+                    "audio_format": PCM16_24K,
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "speech_input.append", "text": "你好"})
+        socket.send_json({"type": "speech_input.commit"})
+
+        created = socket.receive_json()
+        delta = socket.receive_json()
+        failure = socket.receive_json()
+
+        assert created["type"] == "response.created"
+        assert delta["type"] == "response.audio.delta"
+        assert failure["type"] == "error"
+        assert failure["error"]["code"] == "tts_chunk_order_invalid"
+        assert failure["error"]["retryable"] is True
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_json()
 
 
 def _pcm16(value: bytes) -> str:

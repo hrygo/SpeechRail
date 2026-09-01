@@ -197,6 +197,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '502':
+          $ref: '#/components/responses/BackendDeliveryInvalid'
         '503':
           $ref: '#/components/responses/BackendNotReady'
   /v1/jobs:
@@ -598,6 +600,12 @@ components:
             $ref: '#/components/schemas/ErrorBody'
     BackendNotReady:
       description: Model runtime is not ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    BackendDeliveryInvalid:
+      description: TTS worker delivered an invalid audio stream
       content:
         application/json:
           schema:

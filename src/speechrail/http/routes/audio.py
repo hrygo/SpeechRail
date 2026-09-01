@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 from pydantic import BaseModel, Field, field_validator
 
 from speechrail.application.services import AppServices
-from speechrail.application.tts_delivery import iter_validated_audio
+from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.domain.ports import SpeechRequest
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
@@ -269,8 +269,17 @@ def create_audio_router(services: AppServices) -> APIRouter:
 
         if body.response_format == "wav":
             pcm = bytearray()
-            async for chunk in audio_stream():
-                pcm.extend(chunk)
+            try:
+                async for chunk in audio_stream():
+                    pcm.extend(chunk)
+            except TTSDeliveryError as exc:
+                return error_response(
+                    502,
+                    request_id,
+                    exc.code,
+                    "TTS backend delivered an invalid audio stream",
+                    retryable=True,
+                )
             return Response(
                 content=_wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate),
                 media_type="audio/wav",
