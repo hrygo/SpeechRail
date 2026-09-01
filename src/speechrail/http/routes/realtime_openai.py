@@ -242,10 +242,18 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         if asr_reader is not None:
                             await asr_reader
                             asr_reader = None
-                        asr_session = None
+                        if asr_session is not None:
+                            with contextlib.suppress(Exception):
+                                await asr_session.close()
+                            if realtime_asr_factory is not None:
+                                realtime_asr_factory.release(asr_session)
+                            asr_session = None
                     elif event_type == "input_audio_buffer.clear":
                         if asr_session is not None:
-                            await asr_session.close()
+                            with contextlib.suppress(Exception):
+                                await asr_session.close()
+                            if realtime_asr_factory is not None:
+                                realtime_asr_factory.release(asr_session)
                             asr_session = None
                         await websocket.send_json(
                             input_audio_buffer_cleared(session_id=session_id)
@@ -313,13 +321,22 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     )
         except WebSocketDisconnect:
             pass
+        except RuntimeError as exc:
+            with contextlib.suppress(Exception):
+                await websocket.send_json(
+                    error_event(
+                        code="backend_busy",
+                        message=str(exc),
+                    )
+                )
         finally:
             if asr_reader is not None and not asr_reader.done():
                 asr_reader.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await asr_reader
             if asr_session is not None:
-                await asr_session.close()
+                with contextlib.suppress(Exception):
+                    await asr_session.close()
                 if realtime_asr_factory is not None:
                     realtime_asr_factory.release(asr_session)
             if tts_task is not None and not tts_task.done():
