@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 from pydantic import BaseModel, Field, field_validator
 
 from speechrail.application.services import AppServices
+from speechrail.application.tts_delivery import iter_validated_audio
 from speechrail.domain.ports import SpeechRequest
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
@@ -263,11 +264,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         )
 
         async def audio_stream() -> AsyncIterator[bytes]:
-            expected_chunk = 0
-            async for chunk in synthesizer.synthesize(synthesis):
-                if chunk.chunk_index != expected_chunk:
-                    raise RuntimeError("tts_chunk_order_invalid")
-                expected_chunk += 1
+            async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
                 yield chunk.audio
 
         if body.response_format == "wav":

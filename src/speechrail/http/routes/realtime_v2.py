@@ -12,6 +12,7 @@ from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from speechrail.application.services import AppServices
+from speechrail.application.tts_delivery import iter_validated_audio
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import (
     RealtimeAsrSession,
@@ -183,7 +184,7 @@ def create_realtime_v2_router(services: AppServices) -> APIRouter:
                 async with governor.reserve(
                     WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
                 ):
-                    async for chunk in synthesizer.synthesize(request):
+                    async for chunk in iter_validated_audio(synthesizer.synthesize(request)):
                         await output.publish(
                             session.audio_delta(
                                 response_id=response_id,
