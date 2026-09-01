@@ -45,6 +45,15 @@ class FakeSpeechSynthesizer:
         return chunks()
 
 
+class BlockingSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+            await asyncio.sleep(60)
+
+        return chunks()
+
+
 class FakeStreamingSession:
     def __init__(
         self,
@@ -143,7 +152,7 @@ class FakeDiarizationEngine:
 
 
 def _client(
-    *, segments: tuple[object, ...] = (), diarization_engine=None
+    *, segments: tuple[object, ...] = (), diarization_engine=None, tts_synthesizer=None
 ) -> tuple[TestClient, FakeStreamingFactory]:
     factory = FakeStreamingFactory(segments=segments)
     settings = Settings(
@@ -156,7 +165,7 @@ def _client(
         settings,
         AppOverrides(
             v2_transcriber=FakeTranscriber(),
-            tts_synthesizer=FakeSpeechSynthesizer(),
+            tts_synthesizer=tts_synthesizer or FakeSpeechSynthesizer(),
             realtime_asr_factory=factory,
             diarization_engine=diarization_engine,
         ),
@@ -570,3 +579,30 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
 
     assert error["type"] == "error"
     assert error["error"]["code"] == "diarization_not_available"
+
+
+def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() -> None:
+    client, _ = _client(tts_synthesizer=BlockingSpeechSynthesizer())
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        response_events = [socket.receive_json() for _ in range(4)]
+        assert response_events[-1]["type"] == "response.output_audio.delta"
+
+        socket.send_json({"type": "response.cancel"})
+        cancelled = socket.receive_json()
+
+    assert cancelled["type"] == "response.done"
+    assert cancelled["response"]["status"] == "cancelled"
