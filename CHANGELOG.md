@@ -1,20 +1,39 @@
 # Changelog
 
-## [Unreleased] - 2026-09-01
+## [Unreleased]
+
+## [1.0.0] - 2026-09-02
 
 ### Added
 
-- 增加独立的 Qwen3-TTS VoiceDesign worker、`/v1/audio/speech`、`/v1/voices` 和 Realtime v2 speech 会话能力。
-- 增加可选、匿名且有界的 Realtime v2 diarization profile 与最终 label remap。
+- OpenAI Realtime 兼容端点 `/v1/realtime`（ASR/TTS 子集）：标准 `openai` SDK 的
+  `client.realtime.connect(model="whisper-1")` 可直接接入，连续会话已通过本机真实 smoke。
+- 模型名统一：`/v1/models` 列出 canonical 与全部 OpenAI 标准 alias（`whisper-1`、
+  `tts-1`、`gpt-4o-transcribe`、`gpt-4o-mini-tts` 等），alias 带 `resolves_to` 标注。
+- `/v1/realtime` `response.create` 支持 response 参数体中的 `voice` 选择。
+- 性能基准脚本目录 `examples/perf/`（generate_audio、bench_asr/tts/realtime、probe_queue、
+  sample_resources），并记录本机实测基准（REST ASR RTF 0.06-0.09x、TTS RTF 0.34-0.36x、
+  Realtime 连续会话、worker 内存 1.96/1.96/4.76 GB）。
 
 ### Changed
 
-- 正式文档按架构、用户、开发者和运维职责分层；实施计划、设计规格、审查交接和已取代方案移至 `docs/archive/process/`。
+- 移除 legacy `WS /asr` 与 `WS /v1/realtime/legacy` 端点及相关代码、契约、配置和测试；
+  对应契约归档到 `docs/archive/realtime-legacy-contract.md`。
+- 移除外部 WLK streaming 后端（`SPEECHRAIL_WLK_STREAMING_URL`、
+  `realtime_asr_backend=wlk`）；实时流式 ASR 只使用本地 Qwen3 `native` 后端。
+- 正式文档改写为终态、正向陈述，以实测证据替代待验收表述；能力矩阵与边界文档同步。
+- AGENTS.md 新增文档 metadata 规则：`version`/`date` 仅随正文实质变更更新。
+
+### Fixed
+
+- Realtime v1/v2 流式 ASR 会话结束后释放 backend slot，修复连续会话
+  `realtime streaming backend busy` 断连问题。
 
 ### Known limitations
 
-- 真实 TTS/diarization worker 的质量、时延、峰值内存和客户端闭环仍需按运维/验收文档单独确认。
-- 非 loopback 的 TLS、CORS、Origin、网段限制、速率限制和 legacy auth 仍未完整实现。
+- `/v2/realtime` 即将废弃，仅保留 OpenAI Realtime 兼容 `/v1/realtime` 作为标准接入面。
+- 真实 TTS/diarization 的质量、时延、峰值内存和客户端闭环需按运维/验收文档单独确认。
+- 非 loopback 的 TLS、CORS、Origin、网段限制和速率限制仍未完整实现。
 
 ## [0.1.0] - 2026-08-31
 
