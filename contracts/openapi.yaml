@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 0.1.0
+  version: 1.0.0
   description: |
     Local-first shared ASR and TTS service.
 
@@ -44,7 +44,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 0.1.0
+                version: 1.0.0
                 backend: qwen3-asr-1.7b
                 asr_ready: true
                 tts_ready: true
@@ -402,8 +402,9 @@ components:
           description: Domain vocabulary hint, not an instruction channel.
         response_format:
           type: string
-          enum: [json, verbose_json, text, srt, vtt]
+          enum: [json, verbose_json, diarized_json, text, srt, vtt]
           default: json
+          description: Use diarized_json with gpt-4o-transcribe-diarize when a diarization profile is available.
         temperature:
           type: number
           minimum: 0
