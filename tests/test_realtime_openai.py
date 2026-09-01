@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
+from speechrail.compatibility.openai_realtime import apply_session_update, transcription_segment
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.ports import (
@@ -373,3 +374,59 @@ def test_openai_session_release_called_on_disconnect() -> None:
     # after context exit the session should be released
     assert len(factory.sessions) == 1
     assert len(factory.released) == 1
+
+
+def test_openai_segment_formatter_uses_standard_fields() -> None:
+    event = transcription_segment(
+        session_id="realtime_test",
+        item_id="item_test",
+        segment_id="seg_test",
+        text="你好",
+        speaker="spk_01",
+        start_ms=0,
+        end_ms=1200,
+    )
+
+    assert event["type"] == "conversation.item.input_audio_transcription.segment"
+    assert event["item_id"] == "item_test"
+    assert event["content_index"] == 0
+    assert event["id"] == "seg_test"
+    assert event["text"] == "你好"
+    assert event["speaker"] == "spk_01"
+    assert event["start"] == 0.0
+    assert event["end"] == 1.2
+
+
+def test_openai_session_update_preserves_diarization_and_standard_hints() -> None:
+    _, config = apply_session_update(
+        {
+            "type": "session.update",
+            "session": {
+                "input_audio_transcription": {
+                    "model": "gpt-4o-transcribe-diarize",
+                    "language": "zh",
+                    "languages": ["zh", "en"],
+                    "keywords": ["SpeechRail"],
+                    "timestamp_granularities": ["segment"],
+                    "diarization": {"enabled": True, "speaker_count_hint": 2},
+                    "known_speaker_names": ["Alice"],
+                    "known_speaker_references": ["ref_opaque"],
+                }
+            },
+        },
+        session_id="realtime_test",
+        asr_model="speechrail/qwen3-asr-1.7b",
+        tts_model="speechrail/qwen3-tts",
+        tts_ready=True,
+        registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+        registered_tts=frozenset({"speechrail/qwen3-tts"}),
+    )
+
+    assert config["language"] == "zh"
+    assert config["languages"] == ["zh", "en"]
+    assert config["keywords"] == ["SpeechRail"]
+    assert config["timestamp_granularities"] == ["segment"]
+    assert config["diarization"]["enabled"] is True
+    assert config["diarization"]["speaker_count_hint"] == 2
+    assert config["known_speaker_names"] == ["Alice"]
+    assert config["known_speaker_references"] == ["ref_opaque"]

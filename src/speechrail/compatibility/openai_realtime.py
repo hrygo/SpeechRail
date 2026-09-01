@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from speechrail.domain.diarization import DiarizationConfig
+
 _PROTOCOL_VERSION = "realtime=v1"
 _ASR_MODEL_ALIASES = {
     "whisper-1": "speechrail/qwen3-asr-1.7b",
@@ -21,6 +23,7 @@ _ASR_MODEL_ALIASES = {
     "gpt-4o-mini-transcribe": "speechrail/qwen3-asr-1.7b",
     "gpt-transcribe": "speechrail/qwen3-asr-1.7b",
     "gpt-live-transcribe": "speechrail/qwen3-asr-1.7b",
+    "gpt-4o-transcribe-diarize": "speechrail/qwen3-asr-1.7b",
 }
 _TTS_MODEL_ALIASES = {
     "tts-1": "speechrail/qwen3-tts",
@@ -205,6 +208,30 @@ def transcription_completed(*, session_id: str, transcript: str) -> dict[str, ob
             "output_tokens": 0,
             "total_tokens": 0,
         },
+    }
+
+
+def transcription_segment(
+    *,
+    session_id: str,
+    item_id: str,
+    segment_id: str,
+    text: str,
+    speaker: str | None,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, object]:
+    """Render one OpenAI-compatible immutable transcription segment."""
+    return {
+        "type": "conversation.item.input_audio_transcription.segment",
+        "event_id": f"event_{session_id}_segment_{segment_id}",
+        "item_id": item_id,
+        "content_index": 0,
+        "id": segment_id,
+        "text": text,
+        "speaker": speaker,
+        "start": start_ms / 1000,
+        "end": end_ms / 1000,
     }
 
 
@@ -399,7 +426,15 @@ def apply_session_update(
     The returned config is a SpeechRail-internal dict consumed by the route.
     """
     session = _require_object(event, "session")
-    model = str(session.get("model") or asr_model)
+    transcription = session.get("input_audio_transcription")
+    transcription_obj: dict[str, Any] | None = None
+    if transcription is not None:
+        transcription_obj = _require_object(session, "input_audio_transcription")
+    model = str(
+        session.get("model")
+        or (transcription_obj or {}).get("model")
+        or asr_model
+    )
     resolved_asr = canonical_asr_model(model, registered=registered_asr)
     if resolved_asr is None and canonical_tts_model(model, registered=registered_tts) is None:
         raise RealtimeAdapterError("model_not_found", f"unknown model: {model}")
@@ -451,12 +486,40 @@ def apply_session_update(
                 )
 
     language: str | None = None
-    transcription = session.get("input_audio_transcription")
-    if transcription is not None:
-        transcription_obj = _require_object(session, "input_audio_transcription")
+    languages: list[str] | None = None
+    keywords: list[str] | None = None
+    timestamp_granularities: list[str] | None = None
+    diarization: dict[str, Any] | None = None
+    known_speaker_names: list[str] | None = None
+    known_speaker_references: list[str] | None = None
+    if transcription_obj is not None:
         language = transcription_obj.get("language")
         if language is not None and not isinstance(language, str):
             raise RealtimeAdapterError("invalid_language", "language must be a string")
+        languages = _string_list(transcription_obj, "languages")
+        keywords = _string_list(transcription_obj, "keywords")
+        known_speaker_names = _string_list(transcription_obj, "known_speaker_names")
+        known_speaker_references = _string_list(transcription_obj, "known_speaker_references")
+        timestamp_granularities = _string_list(transcription_obj, "timestamp_granularities")
+        if timestamp_granularities is not None and any(
+            value not in {"word", "segment"} for value in timestamp_granularities
+        ):
+            raise RealtimeAdapterError(
+                "invalid_timestamp_granularities",
+                "timestamp_granularities must contain only word or segment",
+            )
+        raw_diarization = transcription_obj.get("diarization", session.get("diarization"))
+        if raw_diarization is not None:
+            if not isinstance(raw_diarization, dict):
+                raise RealtimeAdapterError("invalid_diarization", "diarization must be an object")
+            try:
+                diarization = DiarizationConfig.model_validate(raw_diarization).model_dump(
+                    mode="json"
+                )
+            except ValueError as exc:
+                raise RealtimeAdapterError("invalid_diarization", str(exc)) from exc
+        if language is None and languages:
+            language = languages[0]
 
     voice = session.get("voice")
     if voice is not None and not isinstance(voice, str):
@@ -467,7 +530,30 @@ def apply_session_update(
         "language": language or session.get("language"),
         "voice": voice,
     }
+    for key, value in (
+        ("languages", languages),
+        ("keywords", keywords),
+        ("timestamp_granularities", timestamp_granularities),
+        ("diarization", diarization),
+        ("known_speaker_names", known_speaker_names),
+        ("known_speaker_references", known_speaker_references),
+    ):
+        if value is not None:
+            config[key] = value
     return session_updated(session_id=session_id, model=model), config
+
+
+def _string_list(session: dict[str, Any], field: str) -> list[str] | None:
+    value = session.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise RealtimeAdapterError("invalid_session", f"{field} must be a string array")
+    if any(not item.strip() for item in value):
+        raise RealtimeAdapterError("invalid_session", f"{field} must not contain blank values")
+    if len(value) > 128 or any(len(item) > 1_000 for item in value):
+        raise RealtimeAdapterError("invalid_session", f"{field} exceeds its size limit")
+    return list(value)
 
 
 def parse_text_item(event: dict[str, Any]) -> str:
