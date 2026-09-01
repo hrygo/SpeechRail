@@ -39,6 +39,8 @@ class _SpeechHTTPBody(BaseModel):
     response_format: Literal["pcm", "wav"] = "wav"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
+    instructions: str | None = Field(default=None, max_length=100_000)
+    stream_format: str | None = Field(default=None, max_length=16)
 
     @field_validator("input", "voice")
     @classmethod
@@ -150,10 +152,17 @@ def create_audio_router(services: AppServices) -> APIRouter:
         file: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.
         model: str = Form(default=""),
         language: str | None = Form(default=None),
+        languages: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
         prompt: str = Form(default=""),
         response_format: str = Form(default="json"),
         temperature: float | None = Form(default=None),
         timestamp_granularities: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        stream: bool = Form(default=False),
+        chunking_strategy: str | None = Form(default=None),
+        include: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        keywords: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        known_speaker_names: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        known_speaker_references: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
     ) -> Response:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
@@ -172,6 +181,22 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "invalid_response_format",
                 "Unsupported response format",
                 param="response_format",
+            )
+        if stream:
+            return error_response(
+                422,
+                request_id,
+                "stream_unsupported",
+                "SpeechRail does not support streaming file transcription",
+                param="stream",
+            )
+        if chunking_strategy is not None:
+            return error_response(
+                422,
+                request_id,
+                "chunking_strategy_unsupported",
+                "SpeechRail transcribes whole files without chunking",
+                param="chunking_strategy",
             )
         if temperature is not None and not 0 <= temperature <= 2:
             return error_response(
@@ -203,6 +228,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return error_response(
                 422, request_id, "prompt_too_long", "Prompt is too long", param="prompt"
             )
+        if language is None and languages:
+            language = languages[0]
         try:
             audio = await _read_upload(file, resolved.max_upload_bytes)
             if services.asr_worker is not None:
@@ -274,6 +301,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "voice_not_found",
                 f"Unknown preset voice: {body.voice}",
                 param="voice",
+            )
+        if body.stream_format not in (None, "audio"):
+            return error_response(
+                422,
+                request_id,
+                "stream_format_unsupported",
+                "SpeechRail returns a complete audio body; stream_format is not supported",
+                param="stream_format",
             )
         synthesizer = services.tts_synthesizer
         if synthesizer is None or not services.tts_ready:
