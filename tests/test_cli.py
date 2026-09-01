@@ -81,4 +81,6 @@ def test_service_error_is_redacted_and_returns_nonzero(
     monkeypatch.setattr(cli, "create_launch_agent_manager", FailingManager)
 
     assert cli.main(["service", "enable"]) == 1
-    assert capsys.readouterr().err == "SpeechRail service: launchctl operation failed with exit code 1\n"
+    assert capsys.readouterr().err == (
+        "SpeechRail service: launchctl operation failed with exit code 1\n"
+    )

@@ -20,7 +20,9 @@ def run_server() -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="speechrail", description="SpeechRail local ASR/TTS runtime")
+    parser = argparse.ArgumentParser(
+        prog="speechrail", description="SpeechRail local ASR/TTS runtime"
+    )
     subcommands = parser.add_subparsers(dest="command")
     subcommands.add_parser("serve", help="start one SpeechRail ASGI process")
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
