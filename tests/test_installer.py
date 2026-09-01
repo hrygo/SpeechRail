@@ -114,6 +114,7 @@ def test_preflight_failure_does_not_switch_current_or_enable(
         )
 
     assert layout.current_runtime.resolve() == old_release.resolve()
+    assert not layout.config_file.exists()
     assert not any("launchctl" in part for command in calls for part in command)
 
 

@@ -143,14 +143,18 @@ def install_wheel(
 
     layout = InstallLayout.for_app_home(app_home)
     layout.ensure_directories()
+    config_created = False
     if layout.config_file.exists():
         if layout.config_file.absolute() != env_file.absolute():
             raise InstallerError("configuration already exists and will not be overwritten")
     else:
         _copy_config(env_file, layout.config_file)
+        config_created = True
 
     release_dir = layout.runtime_root / "releases" / _release_id(wheel)
     if release_dir.exists():
+        if config_created:
+            layout.config_file.unlink(missing_ok=True)
         raise InstallerError("this wheel is already staged")
     release_dir.mkdir(parents=True)
     venv_dir = release_dir / ".venv"
@@ -206,6 +210,8 @@ def install_wheel(
         ):
             layout.current_runtime.unlink()
         shutil.rmtree(release_dir, ignore_errors=True)
+        if config_created:
+            layout.config_file.unlink(missing_ok=True)
         raise
 
 
