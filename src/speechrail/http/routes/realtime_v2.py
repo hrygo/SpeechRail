@@ -310,12 +310,15 @@ def create_realtime_v2_router(services: AppServices) -> APIRouter:
                 elif event_type == "input_audio_buffer.commit":
                     if not isinstance(session, TranscriptionSession):
                         raise RealtimeV2Error("event is not valid for speech", code="invalid_event")
-                    audio = session.commit_audio()
                     if active_streaming_asr is not None:
+                        # Drain final delta/completed before COMMITTED flips the
+                        # session terminal, or the reader's events are rejected.
                         await active_streaming_asr.commit()
                         if streaming_reader is not None:
                             await streaming_reader
+                        session.commit_audio()
                     else:
+                        audio = session.commit_audio()
                         await transcribe_item(audio)
                     if active_diarization is not None and session.diarization.finalize:
                         await websocket.send_json(

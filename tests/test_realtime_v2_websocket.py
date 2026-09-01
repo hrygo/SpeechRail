@@ -201,6 +201,141 @@ def test_v2_streaming_asr_backend_emits_partial_and_completed_before_commit() ->
         assert factory.session.received == [b"\x00\x00"]
 
 
+def test_v2_streaming_asr_emits_results_during_commit_before_session_completed() -> None:
+    """WLK can deliver partial/completed after the commit frame; the reader must
+    drain them while the session is still ACTIVE, then commit and complete."""
+
+    class CommitStreamingSession:
+        def __init__(self) -> None:
+            self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
+
+        async def connect(self) -> None:
+            return None
+
+        async def append_audio(self, audio: bytes) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            await self.events_queue.put(StreamingAsrEvent(kind="partial", text="正在"))
+            await self.events_queue.put(
+                StreamingAsrEvent(kind="completed", text="正在讲话", language="zh")
+            )
+            await self.events_queue.put(None)
+
+        def events(self) -> AsyncIterator[StreamingAsrEvent]:
+            async def iterator() -> AsyncIterator[StreamingAsrEvent]:
+                while (event := await self.events_queue.get()) is not None:
+                    yield event
+
+            return iterator()
+
+        async def close(self) -> None:
+            return None
+
+    class CommitStreamingFactory:
+        def __init__(self) -> None:
+            self.session = CommitStreamingSession()
+
+        def create(self, *, language: str | None, prompt: str) -> CommitStreamingSession:
+            return self.session
+
+    factory = CommitStreamingFactory()
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None), realtime_asr_factory=factory
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "language": "zh",
+                    "audio_format": PCM16,
+                    "endpointing": {"mode": "manual"},
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        assert socket.receive_json()["type"] == "input_audio_buffer.ack"
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        partial = socket.receive_json()
+        completed = socket.receive_json()
+        terminal = socket.receive_json()
+        assert partial["type"] == "transcription.delta"
+        assert partial["text"] == "正在"
+        assert completed["type"] == "transcription.completed"
+        assert completed["text"] == "正在讲话"
+        assert terminal["type"] == "session.completed"
+
+
+def test_v2_streaming_asr_commit_with_no_results_completes_without_empty_item() -> None:
+    """WLK commit may deliver only EOF; the session still completes normally."""
+
+    class EmptyCommitSession:
+        def __init__(self) -> None:
+            self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
+
+        async def connect(self) -> None:
+            return None
+
+        async def append_audio(self, audio: bytes) -> None:
+            return None
+
+        async def flush(self) -> None:
+            return None
+
+        async def commit(self) -> None:
+            await self.events_queue.put(None)
+
+        def events(self) -> AsyncIterator[StreamingAsrEvent]:
+            async def iterator() -> AsyncIterator[StreamingAsrEvent]:
+                while (event := await self.events_queue.get()) is not None:
+                    yield event
+
+            return iterator()
+
+        async def close(self) -> None:
+            return None
+
+    class EmptyCommitFactory:
+        def __init__(self) -> None:
+            self.session = EmptyCommitSession()
+
+        def create(self, *, language: str | None, prompt: str) -> EmptyCommitSession:
+            return self.session
+
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            realtime_asr_factory=EmptyCommitFactory(),
+        )
+    )
+    with client.websocket_connect("/v2/realtime") as socket:
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "language": "zh",
+                    "audio_format": PCM16,
+                    "endpointing": {"mode": "manual"},
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        assert socket.receive_json()["type"] == "input_audio_buffer.ack"
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        terminal = socket.receive_json()
+        assert terminal["type"] == "session.completed"
+
+
 def test_v2_streaming_asr_backend_error_is_sent_without_waiting_for_commit() -> None:
     class ErrorStreamingSession:
         async def connect(self) -> None:
