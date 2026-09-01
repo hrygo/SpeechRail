@@ -78,13 +78,14 @@ def test_backend_config_rejects_unknown_mode(tmp_path: Path) -> None:
 
 
 def test_settings_native_backend_fails_closed_without_python_or_model() -> None:
-    with pytest.raises(ValidationError, match="qwen3_streaming_python"):
-        Settings(realtime_asr_backend="native")
+    with pytest.raises(ValidationError, match="qwen3_python"):
+        Settings(realtime_asr_backend="native", _env_file=None)  # type: ignore[call-arg]
     with pytest.raises(ValidationError, match="qwen3_model_dir"):
-        Settings(
+        Settings(  # type: ignore[call-arg]
             realtime_asr_backend="native",
-            qwen3_streaming_python=Path("/usr/bin/python3"),
+            qwen3_python=Path("/usr/bin/python3"),
             qwen3_model_dir=None,
+            _env_file=None,
         )
 
 

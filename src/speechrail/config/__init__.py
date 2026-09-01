@@ -43,7 +43,6 @@ class Settings(BaseSettings):
     tts_warmup_on_start: bool = True
     wlk_streaming_url: str | None = None
     realtime_asr_backend: Literal["disabled", "native", "wlk"] = "disabled"
-    qwen3_streaming_python: Path | None = None
     qwen3_streaming_mode: Literal["windowed", "causal"] = "windowed"
     qwen3_streaming_chunk_sec: float = Field(default=2.0, gt=0, le=30)
     qwen3_streaming_left_context_sec: float = Field(default=12.0, ge=0, le=60)
@@ -131,9 +130,9 @@ class Settings(BaseSettings):
         if self.device == "cpu" and self.dtype != "float32":
             raise ValueError("CPU profile requires float32")
         if self.realtime_asr_backend == "native":
-            if self.qwen3_streaming_python is None:
+            if self.qwen3_python is None:
                 raise ValueError(
-                    "realtime_asr_backend=native requires qwen3_streaming_python"
+                    "realtime_asr_backend=native requires qwen3_python"
                 )
             if self.qwen3_model_dir is None:
                 raise ValueError(

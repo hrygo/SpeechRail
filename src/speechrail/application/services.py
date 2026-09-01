@@ -167,13 +167,13 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     if (
         realtime_asr_factory is None
         and settings.realtime_asr_backend == "native"
-        and settings.qwen3_streaming_python is not None
+        and settings.qwen3_python is not None
         and settings.qwen3_model_dir is not None
     ):
         streaming_worker = Qwen3StreamingWorker(
             Qwen3StreamingBackendConfig(
                 repository_root=_package_root(),
-                python_executable=settings.qwen3_streaming_python,
+                python_executable=settings.qwen3_python,
                 model_dir=settings.qwen3_model_dir,
                 device=settings.device,
                 mode=settings.qwen3_streaming_mode,
