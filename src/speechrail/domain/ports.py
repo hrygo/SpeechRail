@@ -90,6 +90,14 @@ class RealtimeAsrFactory(Protocol):
 
     def create(self, *, language: str | None, prompt: str) -> RealtimeAsrSession: ...
 
+    def release(self, session: RealtimeAsrSession) -> None:
+        """Return a created session to the factory when the caller is done.
+
+        Backends without exclusive resources (e.g. a per-session WLK
+        connection) implement this as a no-op.
+        """
+        del session
+
 
 class DiarizationSession(Protocol):
     """One bounded acoustic attribution session owned by a public runtime."""

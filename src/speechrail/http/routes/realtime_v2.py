@@ -434,6 +434,9 @@ def create_realtime_v2_router(services: AppServices) -> APIRouter:
                     await streaming_reader
             if active_streaming_asr is not None:
                 await active_streaming_asr.close()
+                release = getattr(realtime_asr_factory, "release", None)
+                if release is not None:
+                    release(active_streaming_asr)
             if active_diarization is not None:
                 await active_diarization.close()
 
