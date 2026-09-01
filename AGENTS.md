@@ -125,7 +125,7 @@ embedding 或完整转写正文。
 | `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false`（本机当前全部 `available=true`） | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
 | `WS /v1/realtime` | 收集 PCM，`commit` 后一次 batch final | 不是持续 partial streaming |
-| `WS /v2/realtime` | ASR/TTS 状态机、背压和可选 WLK/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；真实 backend 仍须 smoke |
+| `WS /v2/realtime` | ASR/TTS 状态机、背压和可选原生 Qwen3 流式/WLK/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；windowed 后端 manual flush 可能无 delta，须以 commit 终结 |
 | `WS /asr` | legacy 兼容骨架，当前只保留有限 config/EOF 行为 | 不具备 WLK parity，不得暴露到 LAN/公网 |
 | `diarization` profile | 可选匿名 speaker label、overlap 和 finalize remap | 不提供实名身份、声纹库或跨会议持久身份 |
 | `speechrail service` | macOS 用户级 LaunchAgent 的显式安装/启用/管理 CLI | 不自动安装、启用、下载模型或创建 root 服务 |
@@ -200,6 +200,7 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 | TTS runtime | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR`、`SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选；两条路径同时存在才启动 TTS worker；缺少配置时 `/v1/audio/speech` 返回 `503 backend_not_ready` |
 | diarization | `SPEECHRAIL_DIARIZATION_MODEL_PATH`、`SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` | 可选；模型路径必须是仓库外绝对路径；未通过真实质量/资源门前不进默认配置 |
 | 外部 streaming | `SPEECHRAIL_WLK_STREAMING_URL` | 只连接已运行的 credential-free `ws(s)` endpoint；SpeechRail 不启动 sidecar |
+| 流式 ASR 后端 | `SPEECHRAIL_REALTIME_ASR_BACKEND`（`disabled`/`native`/`wlk`）、`SPEECHRAIL_QWEN3_STREAMING_PYTHON`、`SPEECHRAIL_QWEN3_STREAMING_MODE` | 默认 `disabled`；`native` 需要 `qwen3_streaming_python` 与 `qwen3_model_dir`，worker 复用现有 ASR snapshot；`causal` 模式仅英语；windowed 手动 flush 可能无 delta，须以 `commit` 终结 |
 | 模型身份 | `SPEECHRAIL_MODEL_ID`、`SPEECHRAIL_COMPATIBILITY_MODEL_IDS` | 新配置使用 canonical ID；alias 只做兼容 |
 | 设备与精度 | `SPEECHRAIL_DEVICE`、`SPEECHRAIL_DTYPE` | `mps/float16` 或 `cpu/float32`；禁止静默 CPU fallback |
 | 限制 | `SPEECHRAIL_MAX_QUEUE_SIZE`、`SPEECHRAIL_MAX_UPLOAD_BYTES`、`SPEECHRAIL_MAX_REALTIME_*` | 必须有界；不要通过多 ASGI worker 复制模型 |

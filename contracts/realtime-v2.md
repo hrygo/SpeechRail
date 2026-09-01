@@ -98,6 +98,14 @@ deterministic fake-backend 测试。没有已授权且通过 smoke 的本地流�
 completed。未配置该 endpoint 时，受限 batch ASR 仅在 flush/commit 后产生 completed；它不是
 server VAD 的等价实现。
 
+原生 Qwen3 流式后端（`SPEECHRAIL_REALTIME_ASR_BACKEND=native`）在服务进程内驱动一个常驻
+Qwen3StreamingASR worker。它遵循本契约的事件形状与 manual/`server_vad` 端点模式；windowed
+音频后端受解码节流与 hold-back 提交策略影响，手动 `flush` 可能不产生 delta（不稳定词被
+保留到 `commit` 或后续 chunk），因此使用 manual endpointing 的客户端必须始终以
+`input_audio_buffer.commit` 作为会话终结，不能依赖 flush 必有输出。causal 音频后端仅支持
+英语会话；其他语言在 `session.update` 时返回错误。该 worker 同一时刻只租出一个 session，
+会话结束（`session.completed` 或断线）后服务才会接受下一个 session。
+
 服务端返回 `session.created`，回显实际 model、language、audio format、endpointing 和运行限制。
 创建成功后才可 append PCM。
 
