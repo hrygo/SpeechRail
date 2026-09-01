@@ -6,8 +6,7 @@ date: 2026-08-31
 
 # SpeechRail 运行时与部署
 
-本页说明 `0.1.0` 的实际运行组成；日常操作以[运维 Runbook](operations-runbook.md)
-为准。
+本页说明当前实际运行组成；日常操作以[运维 Runbook](operations-runbook.md) 为准。
 
 ## 运行拓扑
 
@@ -73,6 +72,38 @@ WLK sidecar 仅在明确配置 endpoint 时作为外部 v2 ASR transport；不�
 音频或完整转写。重启会将未完成的 `running` 任务标为 `failed(worker_interrupted)`。当前
 foundation 仅在部署代码显式注入受信任 `JobProcessor` 时启动 batch executor；它和 realtime
 共用 Resource Governor。没有内建的 `input_ref` 路径/URL resolver，默认不读取外部引用。
+
+## wheel 与本地安装器
+
+发布安装与源码开发分开处理。wheel 只包含服务代码和普通依赖；ASR/TTS vendor runtime、模型
+snapshot、`ffmpeg` 和 `.env` 均由本机预先准备。发布目录应同时提供 wheel、`tools/install_macos.py`、
+`configs/speechrail.example.env`、plist 模板和校验文件。
+
+在发布目录中构建并安装：
+
+```bash
+uv build --no-sources --wheel
+python3 tools/install_macos.py \
+  --wheel <wheel-file> \
+  --env-file <private-env-file> \
+  --app-home "$HOME/Library/Application Support/SpeechRail"
+```
+
+安装器默认只创建新 runtime、运行 preflight 和写入 LaunchAgent plist，不启用服务；确认需要常驻
+运行时再追加 `--enable`。完整安装要求 ASR/TTS 两组 runtime 和 snapshot 均通过检查；只部署 ASR
+时必须显式追加 `--asr-only`。安装器不会覆盖已有 `.env`、删除旧 runtime 或下载模型。
+
+验证已安装 wheel，而不是源码工作树：
+
+```bash
+python3 scripts/verify_release.py \
+  --wheel <wheel-file> \
+  --app-home "$HOME/Library/Application Support/SpeechRail"
+```
+
+升级先安装到新的 release runtime，完成 preflight 和真实 ASR/TTS smoke 后才切换
+`runtime/current` 并重启；失败时恢复旧 `current`。README 不固定发布版本，包文件名和 package
+metadata 仍保留用于升级、回滚和审计的版本信息。
 
 ## 端口与进程策略
 

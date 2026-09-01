@@ -67,6 +67,33 @@ resolver，`queued` 不会被自动解释为可读取的模型输入。
 管理该进程。两条 TTS 外部路径同时配置后会启动一个隔离 worker；该 runtime 必须已安装兼容
 依赖并具有完整 local snapshot，服务本身始终设置离线环境变量。
 
+## wheel 本地安装
+
+开发者使用 `uv sync`；分发安装使用 wheel 和仓库外的本地安装器。安装器负责创建用户私有 app
+home、专用 venv、配置副本和 LaunchAgent；它不下载或复制模型，也不覆盖已有 `.env`。
+
+```bash
+cd <release-directory>
+uv build --no-sources --wheel
+python3 tools/install_macos.py \
+  --wheel <wheel-file> \
+  --env-file <private-env-file> \
+  --app-home "$HOME/Library/Application Support/SpeechRail"
+```
+
+安装器默认不启用服务。只有在 preflight 通过后，才使用 `--enable` 让它注册并启动 LaunchAgent；
+若只需要 ASR，必须明确使用 `--asr-only`。安装后使用发布验收脚本检查当前 runtime：
+
+```bash
+python3 scripts/verify_release.py \
+  --wheel <wheel-file> \
+  --app-home "$HOME/Library/Application Support/SpeechRail"
+```
+
+升级必须先在新的 runtime 中安装 wheel、执行 preflight 和真实 ASR/TTS smoke，再切换
+`runtime/current`、重新写入 plist 并执行 `service restart`。若新 runtime 未通过检查，保留旧
+`current` 和已加载服务；回滚只恢复旧 runtime 指针并重启，不删除模型、配置或用户数据。
+
 ## 启动、停止与验收
 
 ```bash

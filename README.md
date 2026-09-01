@@ -100,6 +100,32 @@ curl -X POST http://127.0.0.1:8201/v1/audio/transcriptions \\
 
 完整配置、服务化安装、故障处理和回滚见[运维 Runbook](docs/operations/operations-runbook.md)。
 
+## wheel + 本地安装
+
+需要把服务交给另一台本机时，使用 wheel 和随附的 macOS 安装器。wheel 不包含模型、vendor
+runtime、`.env` 或音频；安装器会创建用户私有 runtime，完成 preflight 后再按参数决定是否启用
+LaunchAgent。
+
+```bash
+uv build --no-sources --wheel
+python3 tools/install_macos.py \
+  --wheel <wheel-file> \
+  --env-file <private-env-file> \
+  --app-home "$HOME/Library/Application Support/SpeechRail" \
+  --enable
+```
+
+安装前应先准备并在 `.env` 中配置 ASR/TTS 的外部绝对路径。只启用 ASR 时显式添加
+`--asr-only`；默认的完整安装要求 ASR 和 TTS 均通过 preflight。安装后执行：
+
+```bash
+python3 scripts/verify_release.py \
+  --wheel <wheel-file> \
+  --app-home "$HOME/Library/Application Support/SpeechRail"
+```
+
+升级和回滚步骤见[运行时与部署](docs/operations/runtime-deployment.md)。
+
 ## API 一览
 
 | 方法 | 路径 | 用途 |

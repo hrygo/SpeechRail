@@ -24,7 +24,20 @@ uv run speechrail
 `503 backend_not_ready`。需要实机推理时，按[运行时与部署](../operations/runtime-deployment.md)
 准备外部 snapshot 与 Python runtime，再在未提交的 `.env` 中设置路径。
 
-## 2. 目录与责任边界
+## 2. wheel 与本地安装器
+
+源码开发的 `uv sync` 不等于发布安装。发布 wheel 时使用：
+
+```bash
+uv build --no-sources --wheel
+```
+
+然后在干净 venv 中安装 wheel，或将 wheel 与 `tools/install_macos.py` 一起交给本机安装器。
+wheel 只包含 `speechrail` 服务包；模型权重、vendor runtime、`.env`、音频和日志必须留在外部。
+安装器必须先完成 preflight，再按用户明确选择决定是否启用 LaunchAgent。不要从源码目录导入
+模块来代替干净 wheel 验收。
+
+## 3. 目录与责任边界
 
 | 目录 | 责任 |
 |---|---|
@@ -40,7 +53,7 @@ uv run speechrail
 SpeechRail 不拥有麦克风、会议、播放、UI、PostgreSQL、LLM chat orchestration 或客户端
 prompt。不要从 `voice-realtime` 复制这些职责进来。
 
-## 3. 当前模型运行方式
+## 4. 当前模型运行方式
 
 当 `SPEECHRAIL_QWEN3_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_PYTHON` 都存在时，
 `create_app()` 创建一个 ASR `Qwen3Worker`；当 TTS model/runtime 两条路径同时存在时，
@@ -58,7 +71,7 @@ prompt。不要从 `voice-realtime` 复制这些职责进来。
 模型路径必须是仓库外绝对路径。`validate_snapshot()` 会检查必须文件；请求路径不会执行
 下载。模型升级和依赖升级先在独立 runtime 做 smoke，再更新运行清单，不能静默替换。
 
-## 4. 契约变更流程
+## 5. 契约变更流程
 
 1. 先更新 `contracts/openapi.yaml`、`contracts/realtime.md` 或 `contracts/realtime-v2.md`，再修改路由/事件代码与测试。
 2. 可选请求字段、可选响应字段和新端点可以作为 `/v1` 的兼容扩展。
@@ -72,7 +85,7 @@ prompt。不要从 `voice-realtime` 复制这些职责进来。
 commit 后结束；v2 可按 backend 能力发送 ASR partial/completed 或 TTS audio delta，但不能
 把未通过真实 smoke 的 backend 写成已验收能力。
 
-## 5. 测试与质量门禁
+## 6. 测试与质量门禁
 
 每次行为或契约变更至少执行：
 
@@ -87,7 +100,7 @@ npx @redocly/cli lint contracts/openapi.yaml
 网络、不提交音频。真实 Qwen3 smoke 是额外验收而不是单元测试前提。详细矩阵见
 [测试与验收](testing-acceptance.md)。
 
-## 6. 文档与提交
+## 7. 文档与提交
 
 - 代码、接口、配置键或运行行为变更必须同步更新 README、相应 `docs/`、契约和
   `CHANGELOG.md`；重大架构决定添加 ADR。

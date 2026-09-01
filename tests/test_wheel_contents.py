@@ -14,7 +14,8 @@ def assert_wheel_contents(wheel_path: Path) -> None:
     assert "speechrail/cli.py" in names
     assert any(name.endswith(".dist-info/METADATA") for name in names)
     assert not any(name.startswith("tests/") for name in names)
-    assert not any(name.endswith(('.env', '.log', '.wav', '.mp3', '.safetensors')) for name in names)
+    forbidden_suffixes = (".env", ".log", ".wav", ".mp3", ".safetensors")
+    assert not any(name.endswith(forbidden_suffixes) for name in names)
     assert not any("/Users/" in name for name in names)
 
 
