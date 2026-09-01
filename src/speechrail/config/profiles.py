@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 class Capability(StrEnum):
     BATCH = "batch"
     REALTIME = "realtime"
-    LEGACY_WLK = "legacy_wlk"
     SEGMENT_TIMESTAMPS = "segment_timestamps"
     WORD_TIMESTAMPS = "word_timestamps"
     DIARIZATION = "diarization"

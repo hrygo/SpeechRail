@@ -5,6 +5,8 @@
 ## 过程材料
 
 - [过程材料索引](process/README.md)：实施计划、设计规格、审查交接和被取代的吸收方案。
+- [Realtime legacy 批量协议契约](realtime-legacy-contract.md)：已退役的
+  `/v1/realtime/legacy` 与 `/asr` 端点协议，v1.0.0 移除端点后归档。
 
 ## 当前替代入口
 

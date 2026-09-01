@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Literal, Self
-from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -41,8 +40,7 @@ class Settings(BaseSettings):
     tts_temperature: float = Field(default=0.85, gt=0.0, le=2.0)
     tts_top_p: float = Field(default=0.95, gt=0.0, le=1.0)
     tts_warmup_on_start: bool = True
-    wlk_streaming_url: str | None = None
-    realtime_asr_backend: Literal["disabled", "native", "wlk"] = "disabled"
+    realtime_asr_backend: Literal["disabled", "native"] = "disabled"
     qwen3_streaming_mode: Literal["windowed", "causal"] = "windowed"
     qwen3_streaming_chunk_sec: float = Field(default=2.0, gt=0, le=30)
     qwen3_streaming_left_context_sec: float = Field(default=12.0, ge=0, le=60)
@@ -83,8 +81,6 @@ class Settings(BaseSettings):
     runtime_max_pending_per_class: int = Field(default=8, ge=1, le=1024)
     batch_aging_seconds: float = Field(default=30, gt=0, le=3600)
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
-    legacy_wlk_enabled: bool = True
-    legacy_query_token_enabled: bool = False
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -105,22 +101,6 @@ class Settings(BaseSettings):
             raise ValueError("diarization model paths must be external absolute paths")
         return value
 
-    @field_validator("wlk_streaming_url")
-    @classmethod
-    def validate_wlk_streaming_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip().rstrip("/")
-        parsed = urlsplit(normalized)
-        if (
-            parsed.scheme not in {"ws", "wss"}
-            or parsed.hostname is None
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("wlk_streaming_url must be a credential-free ws(s) URL")
-        return normalized
-
     @model_validator(mode="after")
     def validate_exposure(self) -> Settings:
         if self.host not in {"127.0.0.1", "::1", "localhost"} and not self.api_key:
@@ -138,8 +118,6 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "realtime_asr_backend=native requires qwen3_model_dir"
                 )
-        elif self.realtime_asr_backend == "wlk" and self.wlk_streaming_url is None:
-            raise ValueError("realtime_asr_backend=wlk requires wlk_streaming_url")
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
         if not self.tts_voice_ids or any(

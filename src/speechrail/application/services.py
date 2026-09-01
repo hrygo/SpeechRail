@@ -21,7 +21,6 @@ from speechrail.backends.qwen3_streaming import (
     Qwen3StreamingWorker,
 )
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
-from speechrail.backends.wlk_streaming import WlkRealtimeFactory
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.ports import (
@@ -111,7 +110,7 @@ class AppServices:
 
 
 def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServices:
-    """Compose concrete Qwen/WLK/NeMo/job components without starting them."""
+    """Compose concrete Qwen/NeMo/job components without starting them."""
     job_repository = overrides.job_repository
     if job_repository is None and settings.job_spool_dir is not None:
         job_repository = JobRepository(settings.job_spool_dir)
@@ -191,12 +190,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             mode=settings.qwen3_streaming_mode,
             next_session_id=lambda: f"sess_{uuid4().hex}",
         )
-    elif (
-        realtime_asr_factory is None
-        and settings.realtime_asr_backend == "wlk"
-        and settings.wlk_streaming_url is not None
-    ):
-        realtime_asr_factory = WlkRealtimeFactory(url=settings.wlk_streaming_url)
 
     diarization_engine = overrides.diarization_engine
     if diarization_engine is None and settings.diarization_model_path is not None:

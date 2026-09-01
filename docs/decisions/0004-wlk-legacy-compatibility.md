@@ -2,11 +2,11 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR-0008](0008-remove-legacy-ws-endpoints.md)
 
 ## Date
 
-2026-08-31
+2026-08-31（2026-09-02 由 ADR-0008 取代）
 
 ## Context
 

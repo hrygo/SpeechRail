@@ -89,11 +89,6 @@ def test_settings_native_backend_fails_closed_without_python_or_model() -> None:
         )
 
 
-def test_settings_wlk_backend_fails_closed_without_url() -> None:
-    with pytest.raises(ValidationError, match="wlk_streaming_url"):
-        Settings(realtime_asr_backend="wlk")
-
-
 def test_settings_defaults_to_disabled_windowed() -> None:
     settings = Settings()
     assert settings.realtime_asr_backend == "disabled"

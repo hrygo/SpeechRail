@@ -27,10 +27,6 @@ limits:
   max_realtime_buffer_bytes: 8388608
   request_timeout_seconds: 120
 
-compatibility:
-  legacy_wlk_enabled: true
-  legacy_query_token_enabled: false
-
 security:
   api_key_env: SPEECHRAIL_API_KEY
   allowed_origins: []

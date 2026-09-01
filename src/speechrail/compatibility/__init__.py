@@ -1,1 +1,1 @@
-"""Narrow compatibility adapters for legacy clients."""
+"""Narrow OpenAI-compatible adapters for standard clients."""

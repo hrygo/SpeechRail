@@ -9,5 +9,6 @@
 | [0005](0005-application-ownership.md) | 会议/音频/LLM 所有权留在 voice-realtime | Accepted |
 | [0006](0006-public-asr-tts-runtime.md) | 公共 ASR/TTS runtime、双端口 adapter 与 Realtime v2 直迁移 | Accepted |
 | [0007](0007-public-speaker-diarization.md) | 公共 Realtime v2 匿名说话人分离与应用侧身份映射 | Accepted |
+| [0008](0008-remove-legacy-ws-endpoints.md) | 移除 legacy WS 端点与外部 WLK streaming 后端 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

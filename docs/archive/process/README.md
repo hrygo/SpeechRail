@@ -6,6 +6,8 @@
 
 - [voice-realtime 吸收方案](voice-realtime-absorption.md)：已取代的早期边界/吸收设计。
 - [高级工程师审查交接](senior-engineer-handoff.md)：2026-08-31 的审查结论、风险和实施前交接。
+- [Realtime legacy 批量协议契约](../realtime-legacy-contract.md)：已退役的
+  `/v1/realtime/legacy` 与 `/asr` 端点协议，v1.0.0 移除端点后归档。
 
 ## Superpowers 过程目录
 
