@@ -119,10 +119,10 @@ embedding 或完整转写正文。
 
 | 能力 | 当前结论 | 不应作出的承诺 |
 |---|---|---|
-| `POST /v1/audio/transcriptions` | Qwen3-ASR batch REST 可用；配置外部 runtime 后可真实推理 | 不要绕过公共 API 直接调用 worker |
+| `POST /v1/audio/transcriptions` | Qwen3-ASR batch REST 可用；配置外部 runtime 后可真实推理（本机已配置并 smoke） | 不要绕过公共 API 直接调用 worker |
 | `GET /health`、`/readyz`、`/v1/models` | 可用的进程、入口配置和模型清单检查 | `readyz=200` 不等于真实音频质量已验收 |
-| `POST /v1/audio/speech` | 契约和隔离 TTS worker 已有；依赖单独外部 TTS runtime | 不要把 TTS runtime 当作 ASR 前置条件 |
-| `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false` | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
+| `POST /v1/audio/speech` | Qwen3-TTS VoiceDesign 整句 TTS 已实现；本机已配置外部 TTS runtime 并实测输出 24 kHz PCM16 | 不要把 TTS runtime 当作 ASR 前置条件 |
+| `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false`（本机当前全部 `available=true`） | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
 | `WS /v1/realtime` | 收集 PCM，`commit` 后一次 batch final | 不是持续 partial streaming |
 | `WS /v2/realtime` | ASR/TTS 状态机、背压和可选 WLK/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；真实 backend 仍须 smoke |

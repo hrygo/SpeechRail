@@ -6,10 +6,11 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 
 ## 当前状态
 
-当前已具备可运行的本地 Qwen3-ASR 文件转写链路；Qwen3-TTS VoiceDesign 的代码与契约已实现，
-配置外部 runtime/snapshot 后可运行。服务按配置分别加载外部 ASR/TTS snapshot 到隔离 worker，Apple Silicon 默认使用 MPS /
-`float16`，请求不会下载模型。TTS 公共模型 ID 固定为 `speechrail/qwen3-tts`，preset
-固定为 `default`、`warm`、`bright`、`calm`。
+当前已具备可运行的本地 Qwen3-ASR 文件转写链路与 Qwen3-TTS VoiceDesign 整句合成链路；
+两者都在本机配置外部 snapshot 与专用 Python runtime 后真实推理（TTS 已通过
+`/v1/audio/speech` 实测输出 24 kHz PCM16）。服务按配置分别加载外部 ASR/TTS snapshot 到
+隔离 worker，Apple Silicon 默认使用 MPS / `float16`，请求不会下载模型。TTS 公共模型 ID
+固定为 `speechrail/qwen3-tts`，preset 固定为 `default`、`warm`、`bright`、`calm`。
 
 下列边界同样重要：
 
@@ -18,7 +19,7 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `POST /v1/audio/transcriptions` | 可用 | 文件转写，支持 `json`、`verbose_json`、`text`、`srt`、`vtt` |
 | `GET /health`、`/readyz`、`/v1/models` | 可用 | 存活、ASR/TTS 独立就绪状态和模型身份检查 |
 | `GET /v1/voices` | 当前代码已注册 | 返回 TTS preset 目录；TTS worker 未就绪时条目可标记 `available=false`。运行态 404 应先核对服务进程、端口/base URL 和重启状态 |
-| `POST /v1/audio/speech` | 已实现（需配置） | OpenAI-compatible 整句 TTS；仅在配置外部 TTS runtime 后可推理 |
+| `POST /v1/audio/speech` | 可用（本机已验证） | OpenAI-compatible 整句 TTS；已配置外部 TTS runtime 时输出 24 kHz PCM16 |
 | `POST/GET/DELETE /v1/jobs` | 可用 | owner-scoped durable job 元数据；执行器需由部署注入受信任 processor |
 | `WS /v2/realtime` | 部分实现 | ASR partial/completed 与 TTS audio delta、取消和背压；真实模型闭环仍需部署验收 |
 | `WS /v1/realtime` | 有限可用 | 收集 PCM 后在一次 `commit` 时批量转写；当前不产生增量 delta |

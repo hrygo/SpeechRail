@@ -18,9 +18,9 @@
 | 范围 | 当前结论 | 证据边界 |
 |---|---|---|
 | Qwen3-ASR 本地 worker | 已实现 | 隔离 Python 子进程、离线 snapshot 预检、MPS/`float16` 身份校验 |
-| Qwen3-TTS VoiceDesign worker | 已实现代码与契约 | 外部 runtime/snapshot 配置后才启动；真实音质、时延和资源仍需部署验收 |
+| Qwen3-TTS VoiceDesign worker | 已实现并可推理 | 本机已配置外部 runtime/snapshot；`/v1/audio/speech` 实测输出 24 kHz PCM16，真实音质、时延和资源仍按部署验收 |
 | REST 文件转写 | 已实现 | OpenAI-compatible `/v1/audio/transcriptions`；真实客户端状态见用户/迁移文档 |
-| REST TTS | 已实现（需配置） | `/v1/audio/speech` 使用登记 preset；无 TTS runtime 时返回 `backend_not_ready` |
+| REST TTS | 已实现并可用（本机已验证） | `/v1/audio/speech` 使用登记 preset；未配置 TTS runtime 时返回 `backend_not_ready` |
 | TTS preset 目录 | 路由已注册 | `/v1/voices` 按当前代码应独立返回目录；TTS worker 未就绪时条目标记 `available=false`，运行态 404 先核对进程、端口/base URL 和重启状态 |
 | Realtime v1 | 有限实现 | append 后一次 commit 最终转写，不输出 partial delta |
 | Realtime v2 | 协议部分实现 | ASR/TTS state machine、背压、取消和 fake-backend 回归已有；真实 worker 闭环仍需验收 |
