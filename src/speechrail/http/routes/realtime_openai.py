@@ -271,10 +271,18 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                                 "conversation.item.create text input",
                             )
                         if tts_task is None or tts_task.done():
+                            response_body = event.get("response")
+                            response_voice = (
+                                str(response_body.get("voice"))
+                                if isinstance(response_body, dict)
+                                and response_body.get("voice")
+                                else None
+                            )
                             tts_task = asyncio.create_task(
                                 synthesize_tts(
                                     pending_text,
-                                    voice=str(config.get("voice") or "default"),
+                                    voice=response_voice
+                                    or str(config.get("voice") or "default"),
                                     language=str(config.get("language") or "auto"),
                                 )
                             )
