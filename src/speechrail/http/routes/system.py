@@ -8,7 +8,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from speechrail.application.services import AppServices
-from speechrail.compatibility.openai_realtime import asr_model_aliases, tts_model_aliases
+from speechrail.compatibility.openai_realtime import (
+    asr_model_aliases,
+    diarization_model_aliases,
+    tts_model_aliases,
+)
 from speechrail.domain.tts import VOICE_PROFILES
 from speechrail.http.errors import error_response
 
@@ -51,6 +55,8 @@ def create_system_router(services: AppServices) -> APIRouter:
             {"id": tts_target, "object": "model", "owned_by": "speechrail"},
         ]
         for alias, target in sorted(asr_model_aliases().items()):
+            if alias in diarization_model_aliases() and services.diarization_engine is None:
+                continue
             data.append(
                 {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}
             )

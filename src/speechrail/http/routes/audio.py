@@ -19,11 +19,13 @@ from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
     canonical_tts_model,
 )
+from speechrail.domain.diarization import DiarizationConfig
 from speechrail.domain.ports import SpeechRequest
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.runtime.admission import QueueFullError
+from speechrail.runtime.diarization import DiarizationCoordinator
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
@@ -177,13 +179,31 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 return error_response(
                     400, request_id, "model_not_found", f"Unknown model: {model}", param="model"
                 )
-        if response_format not in {"json", "verbose_json", "text", "srt", "vtt"}:
+        diarization_requested = (
+            model.strip() == "gpt-4o-transcribe-diarize" or response_format == "diarized_json"
+        )
+        if response_format not in {
+            "json",
+            "verbose_json",
+            "diarized_json",
+            "text",
+            "srt",
+            "vtt",
+        }:
             return error_response(
                 422,
                 request_id,
                 "invalid_response_format",
                 "Unsupported response format",
                 param="response_format",
+            )
+        if diarization_requested and services.diarization_engine is None:
+            return error_response(
+                503,
+                request_id,
+                "diarization_not_available",
+                "diarization profile is not available",
+                retryable=False,
             )
         if stream:
             return error_response(
@@ -273,10 +293,22 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
+        if diarization_requested:
+            coordinator = DiarizationCoordinator(
+                services.diarization_engine.create(config=DiarizationConfig(enabled=True))
+            )
+            try:
+                await coordinator.append_audio(audio)
+                segments = await coordinator.annotate(result.segments)
+                result = result.model_copy(update={"segments": segments})
+            finally:
+                await coordinator.close()
         if response_format == "json":
             return JSONResponse(format_json(result))
-        if response_format == "verbose_json":
+        if response_format in {"verbose_json", "diarized_json"}:
             granularities = frozenset(timestamp_granularities) or frozenset({"segment", "word"})
+            if response_format == "diarized_json":
+                granularities = frozenset({"segment"})
             return JSONResponse(format_verbose(result, granularities=granularities))
         if response_format == "text":
             return PlainTextResponse(result.text)

@@ -75,6 +75,11 @@ def asr_model_aliases() -> dict[str, str]:
     return dict(_ASR_MODEL_ALIASES)
 
 
+def diarization_model_aliases() -> dict[str, str]:
+    """OpenAI aliases whose contract requires a diarization profile."""
+    return {"gpt-4o-transcribe-diarize": _ASR_MODEL_ALIASES["gpt-4o-transcribe-diarize"]}
+
+
 def tts_model_aliases() -> dict[str, str]:
     """All OpenAI-standard TTS aliases mapped to their canonical profile."""
     return dict(_TTS_MODEL_ALIASES)
