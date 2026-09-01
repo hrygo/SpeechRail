@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import speechrail.cli as cli
-from speechrail.service import ServiceError
+from speechrail.service import PreflightCheck, PreflightResult, ServiceError
 
 
 class _FakeManager:
@@ -102,3 +102,16 @@ def test_service_accepts_an_explicit_app_home(
     assert cli.main(["service", "install", "--app-home", str(tmp_path)]) == 0
     assert captured == {"working_directory": tmp_path}
     assert manager.calls == ["install"]
+
+
+def test_service_preflight_reports_failure_without_enabling(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    result = PreflightResult(
+        ok=False,
+        checks=(PreflightCheck(name="tts_config", ok=False, message="TTS is missing"),),
+    )
+    monkeypatch.setattr(cli, "run_preflight", lambda *args, **kwargs: result)
+
+    assert cli.main(["service", "preflight", "--app-home", str(tmp_path)]) == 1
+    assert "FAIL tts_config: TTS is missing" in capsys.readouterr().out
