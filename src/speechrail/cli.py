@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 import uvicorn
 
@@ -28,12 +29,19 @@ def _parser() -> argparse.ArgumentParser:
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
     service_commands = service.add_subparsers(dest="service_command", required=True)
     for command in ("install", "enable", "disable", "restart", "status", "uninstall"):
-        service_commands.add_parser(command)
+        service_commands.add_parser(command).add_argument(
+            "--app-home",
+            type=Path,
+            help="use this installed app home as the service working directory",
+        )
     return parser
 
 
-def _run_service(command: str) -> None:
-    manager = create_launch_agent_manager()
+def _run_service(command: str, app_home: Path | None = None) -> None:
+    if app_home is None:
+        manager = create_launch_agent_manager()
+    else:
+        manager = create_launch_agent_manager(working_directory=app_home)
     if command == "install":
         print(f"Installed LaunchAgent plist: {manager.install()}")
         print("Run 'speechrail service enable' to start SpeechRail.")
@@ -61,7 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_server()
         return 0
     try:
-        _run_service(args.service_command)
+        _run_service(args.service_command, getattr(args, "app_home", None))
     except ServiceError as exc:
         print(f"SpeechRail service: {exc}", file=sys.stderr)
         return 1

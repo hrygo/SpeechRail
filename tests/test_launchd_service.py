@@ -122,6 +122,21 @@ def test_create_manager_preserves_current_python_symlink(
     assert manager.definition.python_executable == python_link.absolute()
 
 
+def test_create_manager_uses_explicit_app_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    python_link = tmp_path / "venv" / "bin" / "python3"
+    python_link.parent.mkdir(parents=True)
+    python_link.touch()
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    monkeypatch.setattr("speechrail.service.launchd.sys.executable", str(python_link))
+
+    manager = create_launch_agent_manager(working_directory=installed)
+
+    assert manager.definition.working_directory == installed.resolve()
+
+
 def test_install_writes_a_private_log_directory_and_idempotent_plist(tmp_path: Path) -> None:
     calls: list[tuple[str, ...]] = []
     manager = _manager(tmp_path, calls)

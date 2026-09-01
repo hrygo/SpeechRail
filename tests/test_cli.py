@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -84,3 +85,20 @@ def test_service_error_is_redacted_and_returns_nonzero(
     assert capsys.readouterr().err == (
         "SpeechRail service: launchctl operation failed with exit code 1\n"
     )
+
+
+def test_service_accepts_an_explicit_app_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manager = _FakeManager()
+    captured: dict[str, Path] = {}
+
+    def create_manager(*, working_directory: Path) -> _FakeManager:
+        captured["working_directory"] = working_directory
+        return manager
+
+    monkeypatch.setattr(cli, "create_launch_agent_manager", create_manager)
+
+    assert cli.main(["service", "install", "--app-home", str(tmp_path)]) == 0
+    assert captured == {"working_directory": tmp_path}
+    assert manager.calls == ["install"]
