@@ -345,7 +345,10 @@ def test_v2_speech_streams_ordered_audio_and_completes_on_commit() -> None:
         terminal = socket.receive_json()
 
         assert created["type"] == "response.created"
+        assert created["response_id"].startswith("resp_")
         assert delta["type"] == "response.audio.delta"
+        assert delta["response_id"] == created["response_id"]
+        assert delta["response_id"] != "internal"
         assert completed["type"] == "response.audio.completed"
         assert terminal["type"] == "session.completed"
 
