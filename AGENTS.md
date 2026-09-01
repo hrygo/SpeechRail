@@ -101,7 +101,8 @@ embedding 或完整转写正文。
 | `src/speechrail/__main__.py` | 模块入口，委派给 `speechrail.cli.main()` | `src/speechrail/cli.py` |
 | `src/speechrail/cli.py` | `serve` 与 `service` 命令树；不承载服务平台细节 | `service/launchd.py` |
 | `src/speechrail/service/` | macOS LaunchAgent 渲染、文件安装和 `launchctl` 适配 | `docs/operations/operations-runbook.md` |
-| `src/speechrail/app.py` | FastAPI 路由、认证、上传解码、生命周期、WS 编排 | `contracts/` |
+| `src/speechrail/app.py` | 组合根、FastAPI middleware/route 注册和 lifespan | `application/`、`contracts/` |
+| `src/speechrail/application/` | 用例依赖组装、worker 生命周期和跨传输交付校验 | `domain/ports.py`、运行时适配器 |
 | `src/speechrail/config/` | `SPEECHRAIL_*` 环境配置和组合校验 | `configs/speechrail.example.env` |
 | `src/speechrail/domain/` | vendor-neutral 结果、请求、事件和 port | 公共契约 |
 | `src/speechrail/backends/` | Qwen3 ASR/TTS、WLK、NeMo Sortformer 适配器 | `domain/ports.py` |
@@ -213,6 +214,18 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 当作已启用的容量安全边界。上传字节上限、Realtime 帧/缓存上限和 worker timeout 也不能
 替代真实性能、峰值内存与长音频基准。
 
+### wheel 安装后的配置边界
+
+- wheel 只包含 `speechrail` Python 包；模型 snapshot、ASR/TTS vendor Python 和
+  `ffmpeg` 必须由本机单独准备。
+- 本地安装器把私有配置放在 `<user-app-home>/config/.env`，权限应为 `0600`；已有配置
+  不会被覆盖。LaunchAgent 的 `WorkingDirectory` 为 `<user-app-home>`，`speechrail serve`
+  会优先发现该目录下的 `config/.env`，也可通过 `serve --env-file` 显式指定。
+- Qwen3 worker 通过受控 `PYTHONPATH` 支持源码 checkout 和已安装 wheel 两种布局；外部
+  vendor Python 只负责模型推理，不得依赖当前源码目录的隐式导入。
+- 安装前的 preflight 只证明配置、snapshot、导入路径和运行时入口可用；它不替代真实
+  ASR/TTS 音频质量、耗时或资源验收。
+
 ## 6. 按任务类型执行
 
 ### 开发
@@ -286,6 +299,39 @@ uv run speechrail service --help
 停用或卸载常驻服务只针对已确认的 `com.speechrail` label；保留可回退的 plist、`.env` 和模型
 snapshot，不删除外部资源。CLI 只支持 macOS 用户级 `LaunchAgent`；其他平台必须明确返回不支持，
 不得伪造 systemd、root 或跨平台服务语义。
+
+#### wheel 安装与切换
+
+wheel 服务与源码前台服务共用 `com.speechrail` label，切换时必须先停用旧实例，再安装和启用
+新 runtime；不要让两个实例同时争用 `8201`。标准流程如下：
+
+```bash
+uv build --no-sources --wheel
+uv run speechrail service disable --app-home <user-app-home>
+python3 tools/install_macos.py \
+  --wheel <wheel-file> \
+  --env-file <private-env-file> \
+  --app-home <user-app-home> \
+  --enable
+```
+
+安装器会在 `runtime/releases/` 下创建独立 virtualenv，先运行新 wheel 的 preflight，再原子切换
+`runtime/current`；默认不下载模型、不写入 plist 环境变量、不要求 root。已有 `<user-app-home>/config/.env`
+不会覆盖，因此升级时可将 `--env-file` 指向该现有配置，或在操作前确认配置迁移范围。
+
+切换后必须核对 `speechrail service status --app-home <user-app-home>` 的 Python、工作目录和
+label，再检查 `/health`、`/readyz`、`/v1/models`、`/v1/voices`。如果 preflight 或启动失败，
+保持服务停用，检查 stderr 和当前 runtime，不要连续 `restart` 掩盖失败原因。
+
+回退是恢复旧 release 和服务定义的组合操作，不等同于 `disable` 或 `uninstall`：
+
+1. 先停用当前 `com.speechrail`，保留旧 `runtime/releases/`、配置和模型。
+2. 将 `runtime/current` 恢复到上一份 release；必要时恢复切换前备份的 plist。
+3. 用目标 runtime 执行 `speechrail service install --app-home <user-app-home>`，再显式 `enable`。
+4. 重新核对服务状态和健康端点，并记录实际运行的 runtime 路径。
+
+`disable` 只停止并保留 plist；`uninstall` 会卸载并删除 plist，都不是 release 回退。回退过程
+不得删除外部模型、用户配置或日志目录。
 
 #### 运维边界
 
@@ -383,6 +429,8 @@ git diff --check
 |---|---|---|
 | 连接被拒绝/无响应 | 进程、监听端口、启动命令、stderr/`launchctl print` | 只启动一个实例；修复服务状态后重试 |
 | `/readyz` 为 503 | 两条 ASR 路径、snapshot 完整性、Python 可执行权限、worker 启动错误 | 修配置；不要用 `SPEECHRAIL_BACKEND_READY=true` 掩盖问题 |
+| wheel 服务已启动但 ASR/TTS 为 false | LaunchAgent 的 `WorkingDirectory`、`<user-app-home>/config/.env`、两条 runtime 配置和 `service preflight` | 不要只检查源码仓库 `.env`；修复配置来源后重新安装/启用 |
+| wheel worker 报 `worker_frame_invalid` | 当前 release 是否包含 worker 包、外部 Python 的导入路径、stderr 和 snapshot | 重新构建并安装完整 wheel；不要把源码目录硬编码进 plist |
 | `422 unsupported_audio_type` | filename、multipart `Content-Type`、容器、`ffmpeg` PATH 和内容 | `webm` 的 `video/webm` 属于兼容输入；最终以固定解码结果为准 |
 | `422 audio_decode_failed` | 文件是否损坏、容器是否支持、`ffmpeg` stderr | 更换/修复音频；不要只改 MIME 绕过内容校验 |
 | `413 audio_too_large` | `SPEECHRAIL_MAX_UPLOAD_BYTES` 和实际文件大小 | 调整客户端切片/压缩或经授权调整上限；不要无界放大 |
