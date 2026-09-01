@@ -9,9 +9,9 @@ date: 2026-08-31
 
 机器可读 REST 事实来源是 [OpenAPI 3.1](../../contracts/openapi.yaml)。本页解释客户端应如何
 使用当前实现；`/v1/realtime` 的事件详情以 [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md) 为准。
-`/v2/realtime` 已有可测试的 ASR/TTS state-machine 实现，完整事件与已知运行时边界见
-[Realtime v2 契约](../../contracts/realtime-v2.md)。真实 worker smoke 通过后，该端点才可
-作为模型可用。
+`/v1/realtime` 提供可测试的 OpenAI Realtime ASR/TTS 子集，完整事件与已知运行时边界见
+[OpenAI Realtime 契约](../../contracts/realtime-openai.md)。真实 worker smoke 通过后，才可
+宣称具体模型 profile 可用。
 
 ASR v2 默认使用受限 batch backend 在 flush/commit 后产出结果；启用
 `SPEECHRAIL_REALTIME_ASR_BACKEND=native` 后使用本地 Qwen3 流式 worker 产出持续
@@ -147,7 +147,7 @@ resolver，因此 `queued` 不会自动解释为可读取的模型输入。
 ## 认证与网络
 
 默认 loopback 且不需要 key。非 loopback host 在 Settings 校验阶段必须有
-`SPEECHRAIL_API_KEY`；REST、`/v1/realtime` 和 `/v2/realtime` 要求
+`SPEECHRAIL_API_KEY`；REST 与 `/v1/realtime` 要求
 `Authorization: Bearer <key>`。
 `allowed_origins` 是预留配置字段，当前版本未安装 CORS middleware；LAN 防护不在当前
 能力范围。legacy `/asr` 不校验 header/query token，仅限 loopback 开发验证。

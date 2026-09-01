@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted; superseded by [ADR-0009](0009-openai-realtime-only.md)
 
 ## Date
 

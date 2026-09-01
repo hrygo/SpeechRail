@@ -44,9 +44,10 @@ wheel 只包含 `speechrail` 服务包；模型权重、vendor runtime、`.env`�
 | `src/speechrail/app.py` | FastAPI 边界、请求验证、认证、音频解码、队列接入与 WS 路由 |
 | `src/speechrail/domain/` | 与客户端无关的 ASR/TTS 结果、请求和校验模型 |
 | `src/speechrail/backends/` | Qwen3 ASR/TTS、WLK/diarization profile、snapshot 预检和私有 worker 协议 |
-| `src/speechrail/realtime/` | `/v1/realtime` 与 `/v2/realtime` 会话状态、帧上限和事件渲染 |
+| `src/speechrail/application/` | Realtime 用例编排、后端生命周期和 diarization 协调 |
+| `src/speechrail/http/routes/` | `/v1/realtime` WebSocket 传输与 JSON 边界 |
 | `src/speechrail/compatibility/` | OpenAI/WLK 等窄兼容序列化；不得污染领域模型 |
-| `src/speechrail/runtime/` | 有界 admission queue、Resource Governor、jobs 与 diarization 协调 |
+| `src/speechrail/runtime/` | 有界 admission queue、Resource Governor、jobs 与 worker 生命周期 |
 | `contracts/` | 公共 REST 与 WebSocket 的事实来源 |
 | `tests/` | 无模型依赖的契约、安全与边界测试 |
 
@@ -66,7 +67,7 @@ prompt。不要从 `voice-realtime` 复制这些职责进来。
 - 上传容器经固定 `ffmpeg` 参数转换为 `s16le` / 16 kHz / 单声道 PCM；
 - 真实 worker 每次只保有一个模型实例。不要通过多 ASGI worker 复制模型。
 - TTS 公共 ID 为 `speechrail/qwen3-tts`，只接受服务器登记的 `default`、`warm`、`bright`、`calm` preset，输出 24 kHz 单声道 PCM16 或 WAV；
-- Realtime v2 的 transcription/speech 使用独立状态机和资源 lane；可选 diarization 只保留有界匿名 session state。
+- `/v1/realtime` 的 transcription/speech 使用 OpenAI 事件协议和独立资源 lane；可选 diarization 只保留有界匿名 session state。
 
 模型路径必须是仓库外绝对路径。`validate_snapshot()` 会检查必须文件；请求路径不会执行
 下载。模型升级和依赖升级先在独立 runtime 做 smoke，再更新运行清单，不能静默替换。

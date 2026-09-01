@@ -125,7 +125,6 @@ embedding 或完整转写正文。
 | `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false`（本机当前全部 `available=true`） | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
 | `WS /v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集）；标准 `openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入 | 不伪装 LLM 对话/工具/历史；`turn_detection` 仅 `null`/`manual`；`server_vad` → `unsupported_turn_detection` |
-| `WS /v2/realtime` | ASR/TTS 状态机、背压和可选原生 Qwen3 流式/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；windowed 后端 manual flush 可能无 delta，须以 commit 终结 |
 | `diarization` profile | 可选匿名 speaker label、overlap 和 finalize remap | 不提供实名身份、声纹库或跨会议持久身份 |
 | `speechrail service` | macOS 用户级 LaunchAgent 的显式安装/启用/管理 CLI | 不自动安装、启用、下载模型或创建 root 服务 |
 | QwenPaw `whisper_api` | 使用标准 OpenAI-compatible `/v1` 路径；`.webm`/`video/webm` 需兼容 | 不要修改聊天模型 endpoint 来排查 STT |
@@ -138,8 +137,7 @@ embedding 或完整转写正文。
 - 对外文件转写 API 使用 OpenAI-compatible 的
   `/v1/audio/transcriptions`。
 - 对外流式接口 `/v1/realtime` 实现 OpenAI Realtime 兼容协议（ASR/TTS 子集）；标准
-  OpenAI 客户端可直接接入；SpeechRail-native 高级流式使用 `/v2/realtime`，均须先通过
-  真实 backend 和客户端 smoke。
+  OpenAI 客户端和 `voice-realtime` 可直接接入，均须先通过真实 backend 和客户端 smoke。
 - 默认绑定 loopback。绑定 LAN 时必须启用 API key，并明确配置允许的
   origin 策略。
 - 模型快照使用外部绝对路径。请求处理期间不得下载模型或静默访问网络。
@@ -170,9 +168,8 @@ embedding 或完整转写正文。
 
 - `contracts/realtime-openai.md` 描述 `/v1/realtime` 的 OpenAI Realtime 兼容子集；
   只承载 ASR/TTS，不伪装 LLM 对话/工具/历史，`turn_detection` 仅 `null`/`manual`。
-- `contracts/realtime-v2.md` 描述 `/v2/realtime` 的 ASR/TTS 状态机、公共事件 envelope、
-  `sequence`、背压、取消和不可恢复 session 规则；它是部分实现，真实 backend 验收另算。
-- v2 只承载 ASR/TTS，不承载 LLM response、tool call、播放、会议和应用打断策略。
+- `/v1/realtime` 只承载 ASR/TTS，不承载 LLM response、tool call、播放、会议和应用打断策略；
+  事件 envelope、背压、取消和不可恢复 session 规则以 `contracts/realtime-openai.md` 为准。
 - 断线后创建新 session/source epoch；服务端不保存、不重放旧音频或事件。
 
 #### Diarization 约束
@@ -353,7 +350,7 @@ Resource Governor、worker frame 协议、snapshot preflight、REST 响应格式
 
 ```bash
 uv run --extra dev pytest tests/test_transcription_api.py -q --no-cov
-uv run --extra dev pytest tests/test_realtime_v2_websocket.py -q --no-cov
+uv run --extra dev pytest tests/test_realtime_openai.py -q --no-cov
 ```
 
 变更 CLI、LaunchAgent 或服务模板时，额外运行：

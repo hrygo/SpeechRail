@@ -34,7 +34,7 @@ SPEECHRAIL_DTYPE=float16
 SPEECHRAIL_BACKEND_READY=false
 # Optional: enables durable owner-scoped job metadata, not model batch execution.
 SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
-# Optional Realtime v2 diarization profile. Sortformer enables online anonymous labels;
+# Optional Realtime diarization profile. Sortformer enables online anonymous labels;
 # CAM++ additionally enables bounded cross-reconnect anonymous remaps.
 # SPEECHRAIL_DIARIZATION_MODEL_PATH=/absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
 # SPEECHRAIL_DIARIZATION_EMBEDDING_MODEL_PATH=/absolute/path/outside/SpeechRail/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
@@ -138,7 +138,7 @@ SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEE
 
 ## 说话人分离 profile
 
-Realtime v2 transcription 客户端显式设置 `diarization.enabled=true` 才启用。Sortformer 缓冲
+Realtime transcription 客户端显式设置 `diarization.enabled=true` 才启用。Sortformer 缓冲
 PCM 的上限由 `SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` 强制；超过上限返回
 `buffer_limit_exceeded`。CAM++ 不保存 embedding；仅当客户端提供不透明 `group_id` 时，服务在
 `MAX_GROUPS` 和 `GROUP_TTL_SECONDS` 限制内保留匿名归一化质心，并在 commit 前发出可选 remap。

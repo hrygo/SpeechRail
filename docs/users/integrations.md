@@ -79,7 +79,7 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 OpenAI-compatible 转写调用形状；真实 Hermes 消息 smoke 尚未在本机完成，实施时先在
 单独配置/进程试运行，再验证聊天功能未受影响。失败时还原这两个 STT 配置并重启 Hermes。
 
-## `voice-realtime`（已接入 v2 客户端边界）
+## `voice-realtime`（已接入 OpenAI Realtime 客户端边界）
 
 `voice-realtime` 使用一个共享 `SpeechRailRealtimeClient` 族和三个窄 adapter：
 
@@ -87,7 +87,7 @@ OpenAI-compatible 转写调用形状；真实 Hermes 消息 smoke 尚未在本�
 2. 语音助手使用 `SpeechRailConversationSTTFactory`，把 VAD turn 映射为 Pipecat 文本帧；
 3. 语音助手 TTS 使用 `SpeechRailTTSService`，把增量文本映射为 24 kHz PCM 播放帧。
 
-当前默认地址为 `ws://127.0.0.1:8201/v2/realtime`，TTS 试听/回放使用
+当前默认地址为 `ws://127.0.0.1:8201/v1/realtime`，TTS 试听/回放使用
 `http://127.0.0.1:8201/v1`。客户端只传入 16 kHz 单声道 ASR PCM 或 UTF-8 TTS 文本，
 不接管 AudioHub、会议、数据库、UI 或 LLM；播放、回声与打断仍由 `voice-realtime` 拥有。
 非 loopback 服务启用 key 时，客户端配置 `speechrail_api_key`，通过 Authorization header
@@ -98,7 +98,7 @@ OpenAI-compatible 转写调用形状；真实 Hermes 消息 smoke 尚未在本�
 
 ## Realtime 客户端限制
 
-新 WebSocket 客户端使用 `/v2/realtime`，发送 `session.update`、0..N 个
-`input_audio_buffer.append` 或 `speech_input.append` 与 flush/commit；持续 streaming backend
-可在 commit 前产生 partial/completed，TTS 会产生 ordered audio delta。完整事件、取消和
-背压规则见 [Realtime v2 契约](../../contracts/realtime-v2.md)。
+新 WebSocket 客户端使用 `/v1/realtime`，发送 `session.update`、0..N 个
+`input_audio_buffer.append` 与 `input_audio_buffer.commit`；native streaming backend
+可在 commit 前产生 partial，commit 后产生 completed，TTS 会产生 ordered audio delta。
+完整事件、取消和背压规则见 [OpenAI Realtime 契约](../../contracts/realtime-openai.md)。

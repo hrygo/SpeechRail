@@ -16,7 +16,7 @@ SpeechRail 是一项本地优先的共享 ASR/TTS 运行时：一次管理外部
 - Qwen3-TTS VoiceDesign snapshot 预检、隔离 worker、preset、设备/dtype 身份和有界推理准入；
 - OpenAI-compatible 文件转写、健康、模型清单及统一错误 envelope；
 - OpenAI-compatible 整句 TTS、preset 目录与 24 kHz PCM/WAV 输出；
-- OpenAI Realtime 兼容 `/v1/realtime` 与 SpeechRail-native `/v2/realtime`；
+- OpenAI Realtime 兼容 `/v1/realtime`，作为唯一实时 ASR/TTS 入口；
 - 认证配置、request ID、无正文的运行诊断边界。
 
 ## 不属于服务的责任
@@ -36,7 +36,7 @@ SpeechRail 是一项本地优先的共享 ASR/TTS 运行时：一次管理外部
 | QwenPaw | 上传录音并获得文本 | 已使用 `whisper_api` 完成本机 smoke |
 | OpenAI-compatible 客户端 | multipart 文件转写 | 已实现 REST 契约并通过真实 smoke |
 | Hermes Agent | 使用独立 STT endpoint | 配置方法已文档化；真实 Hermes smoke 待验收 |
-| `voice-realtime` | ASR 字幕/会议 EOF + TTS 播放 | 已接入 Realtime v2；客户端确定性回归已覆盖，真实模型端到端闭环待部署验收 |
+| `voice-realtime` | ASR 字幕/会议 EOF + TTS 播放 | 已接入 `/v1/realtime`；客户端确定性回归已覆盖，真实模型端到端闭环待部署验收 |
 | 新 WebSocket 客户端 | 发送 PCM 后获得最终文本 | 可用；流式 partial 取决于所配置后端 |
 
 ## 不变的产品约束

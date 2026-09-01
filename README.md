@@ -1,7 +1,7 @@
 # SpeechRail
 
 SpeechRail（声轨）是面向本机应用的独立 ASR/TTS 运行时。它以稳定的 OpenAI-compatible
-REST 与 Realtime v2 接口提供语音转写和文本转语音，并将模型运行、队列、认证与观测从
+REST 与 Realtime 接口提供语音转写和文本转语音，并将模型运行、队列、认证与观测从
 QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 
 ## 当前状态
@@ -21,11 +21,10 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `GET /v1/voices` | 当前代码已注册 | 返回 TTS preset 目录；TTS worker 未就绪时条目可标记 `available=false`。运行态 404 应先核对服务进程、端口/base URL 和重启状态 |
 | `POST /v1/audio/speech` | 可用（本机已验证） | OpenAI-compatible 整句 TTS；已配置外部 TTS runtime 时输出 24 kHz PCM16 |
 | `POST/GET/DELETE /v1/jobs` | 可用 | owner-scoped durable job 元数据；执行器需由部署注入受信任 processor |
-| `WS /v2/realtime` | 可用（本机已验证） | ASR partial/completed 与 TTS audio delta、取消和背压；`SPEECHRAIL_REALTIME_ASR_BACKEND=native` 时驱动常驻 Qwen3 流式 worker（本机 1.7B/MPS windowed 已 smoke）；windowed 手动 flush 可能无 delta，须以 commit 终结 |
-| `WS /v1/realtime` | 可用（OpenAI 兼容） | 标准 OpenAI Realtime 协议的 ASR/TTS 子集；`openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入；连续会话与本机真实 smoke 已验证 |
+| `WS /v1/realtime` | 可用（OpenAI 兼容） | 标准 OpenAI Realtime 协议的 ASR/TTS 子集；`openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入；支持 partial/completed、TTS audio delta、取消、背压与可选匿名 diarization |
 | QwenPaw | 已完成本机 smoke（2026-08-31） | 使用 `whisper_api` 接入 `/v1`；再次切换前须按用户文档复验 |
 | Hermes Agent | 配置方法已文档化 | 提供 STT 专用配置方法；真实 Hermes smoke 待验收，不修改其全局聊天 endpoint |
-| `voice-realtime` | v2/REST adapter 已实现 | ASR 通过 v2，TTS 通过 v2/REST；会议、播放、UI、数据库和 LLM 由调用方拥有，真实端到端闭环待部署验收 |
+| `voice-realtime` | `/v1/realtime` adapter 已实现 | ASR/TTS 通过 OpenAI Realtime 兼容协议；会议、播放、UI、数据库和 LLM 由调用方拥有，真实端到端闭环待部署验收 |
 | `launchd` 服务 CLI | 已实现（macOS） | `speechrail service` 显式管理当前用户 LaunchAgent；不会自动安装或启用 |
 
 客户端可直接使用 OpenAI 标准模型名（`whisper-1`、`tts-1` 等）接入；`/v1/models` 列出
@@ -139,10 +138,9 @@ python3 scripts/verify_release.py \
 | `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS（`wav` / `pcm`） |
 | `POST` / `GET` / `DELETE` | `/v1/jobs` / `/v1/jobs/{id}` | durable ASR/TTS job 生命周期 |
 | `WS` | `/v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集），标准 SDK 可接入 |
-| `WS` | `/v2/realtime` | 新客户端的 ASR/TTS Realtime v2（SpeechRail-native） |
 
-REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/openapi.yaml) 为准；v2 的
-状态机与限制以 [Realtime v2 契约](contracts/realtime-v2.md) 为准。
+REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/openapi.yaml) 为准；Realtime
+事件、状态机与限制以 [OpenAI Realtime 契约](contracts/realtime-openai.md) 为准。
 
 ## 给不同读者的入口
 
@@ -156,7 +154,7 @@ REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/op
 ## 安全与数据边界
 
 - 默认只绑定 `127.0.0.1`；非 loopback 绑定必须配置 Bearer API key。
-- 非 loopback 的 REST 与 `/v2/realtime` WebSocket 都要求 `Authorization: Bearer <key>`；
+- 非 loopback 的 REST 与 `/v1/realtime` WebSocket 都要求 `Authorization: Bearer <key>`；
   key 不进入 URL、配置示例或普通日志。
 - 模型 snapshot 必须是仓库外绝对路径；服务不会在请求中下载模型或访问远程音频 URL。
 - 上传音频只在内存中处理，`ffmpeg` 以固定参数解码；不把音频、完整转写、提示词或密钥写入日志。

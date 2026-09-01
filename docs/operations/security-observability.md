@@ -9,7 +9,7 @@ date: 2026-08-31
 ## 当前安全边界
 
 - 默认仅绑定 `127.0.0.1`。Settings 会拒绝无 API key 的非 loopback host。
-- REST、`/v1/realtime` 与 `/v2/realtime` 在配置 key 后要求 `Authorization: Bearer <key>`；不要把 key
+- REST 与 `/v1/realtime` 在配置 key 后要求 `Authorization: Bearer <key>`；不要把 key
   放进 query string、命令参数、截图、日志或仓库。
 - `allowed_origins` 是配置字段，当前版本未安装 CORS middleware。LAN 访问不在当前能力
   范围；启用前须先实现 CORS、TLS、网段限制和速率限制并更新契约。

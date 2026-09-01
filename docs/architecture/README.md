@@ -12,7 +12,7 @@
 ## 事实来源
 
 - REST 的机器可读事实来源是 [OpenAPI 3.1](../../contracts/openapi.yaml)。
-- WebSocket 的当前事件事实来源是 [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md)（`/v1/realtime`）和 [Realtime v2 契约](../../contracts/realtime-v2.md)（`/v2/realtime`）。
+- WebSocket 的当前事件事实来源是 [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md)（`/v1/realtime`）。
 - 重大架构理由记录在 [ADR](../decisions/README.md)；本目录不复制 ADR 正文。
 
 ## 使用规则

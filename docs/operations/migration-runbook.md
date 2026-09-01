@@ -32,7 +32,7 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 专用离线 Python worker 在 `127.0.0.1:8201` 启动；legacy `/asr` 已禁用，未配置 WLK sidecar。
 QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:8201/v1`，模型为
 `speechrail/qwen3-asr-1.7b`。voice-realtime 的字幕/会议与交互均显式配置
-`speechrail-realtime-v2` 和 `ws://127.0.0.1:8201/v2/realtime`。legacy `/asr` 与
+`speechrail-openai-realtime` 和 `ws://127.0.0.1:8201/v1/realtime`。legacy `/asr` 与
 `/v1/realtime/legacy` 端点在 v1.0.0 已移除。
 
 已完成 REST、QwenPaw workspace 转写、Realtime session commit 和 Pipecat VAD turn 的本机真实
@@ -40,7 +40,7 @@ QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:82
 
 ## `voice-realtime`：已切换并核验
 
-主路线已由 ADR-0006 固定为 `/v2/realtime` 直迁移。当前 SpeechRail legacy `/asr` 已禁用，
+主路线已由 ADR-0009 固定为 `/v1/realtime` OpenAI Realtime 兼容协议。当前 SpeechRail legacy `/asr` 已禁用，
 没有为 SpeechRail 配置 WLK sidecar，也没有活动的 ASR fallback。legacy `/asr` 与
 `/v1/realtime/legacy` 端点在 v1.0.0 已移除。
 
@@ -56,9 +56,9 @@ QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:82
 当前启用配置（旧 backend 开关已删除，以下为实际生效键）：
 
 ```dotenv
-VR_SUBTITLE_SPEECHRAIL_URL=ws://127.0.0.1:8201/v2/realtime
+VR_SUBTITLE_SPEECHRAIL_URL=ws://127.0.0.1:8201/v1/realtime
 
-VR_INTERACTION_SPEECHRAIL_REALTIME_URL=ws://127.0.0.1:8201/v2/realtime
+VR_INTERACTION_SPEECHRAIL_REALTIME_URL=ws://127.0.0.1:8201/v1/realtime
 VR_INTERACTION_SPEECHRAIL_TTS_REST_URL=http://127.0.0.1:8201/v1
 VR_INTERACTION_SPEECHRAIL_TTS_MODEL=speechrail/qwen3-tts
 VR_INTERACTION_TTS_VOICE=default
@@ -66,7 +66,7 @@ VR_INTERACTION_TTS_LANGUAGE=auto
 ```
 
 已使用真实本地 PCM 验证 Realtime `session.update → append → commit → transcription.completed`，
-并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为 SpeechRail v2/REST：
+并通过 Pipecat VAD turn 验证最终文本进入现有语音助手管道。TTS 已迁为 SpeechRail Realtime/REST：
 `voice-realtime` 保留 Pipecat、播放、回声、persona、会议、PostgreSQL 与 UI，仅消费
 SpeechRail 返回的 PCM 和公开 preset。SpeechRail 不接管 AudioHub、LLM、会议、PostgreSQL 或 UI。
 
@@ -77,8 +77,7 @@ SpeechRail 返回的 PCM 和公开 preset。SpeechRail 不接管 AudioHub、LLM�
 短 TTL 内的匿名重连归并，姓名、人工改名和 PostgreSQL 事务仍归 meeting application。
 
 此状态是**运行时唯一切换**；旧 `vr-bridge` 的 console entry、TTS 专属依赖、模型缓存模块和
-旧 TTS 源码已退役。ASR 的历史兼容配置仍按各自 deprecation 计划处理，不影响 SpeechRail
-TTS 的 v2/REST 主链。
+旧 TTS 源码已退役。ASR 的历史兼容配置仍按各自 deprecation 计划处理。
 
 ## 通用回滚
 
