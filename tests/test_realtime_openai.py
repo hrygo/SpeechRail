@@ -4,11 +4,17 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from speechrail.application.services import AppOverrides, build_app_services
-from speechrail.compatibility.openai_realtime import apply_session_update, transcription_segment
+from speechrail.compatibility.openai_realtime import (
+    RealtimeAdapterError,
+    apply_session_update,
+    transcription_segment,
+)
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import (
@@ -54,15 +60,25 @@ class BlockingSpeechSynthesizer:
         return chunks()
 
 
+class InvalidSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00")
+
+        return chunks()
+
+
 class FakeStreamingSession:
     def __init__(
         self,
         *,
         language: str | None,
         segments: tuple[object, ...] = (),
+        partials: tuple[str, ...] = (),
     ) -> None:
         self.language = language
         self.segments = segments
+        self.partials = partials
         self.received: list[bytes] = []
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
         self._finished = asyncio.Event()
@@ -77,6 +93,8 @@ class FakeStreamingSession:
         return None
 
     async def commit(self) -> None:
+        for partial in self.partials:
+            await self.events_queue.put(StreamingAsrEvent(kind="partial", text=partial))
         await self.events_queue.put(
             StreamingAsrEvent(
                 kind="completed", text="你好", language="zh", segments=self.segments
@@ -97,13 +115,18 @@ class FakeStreamingSession:
 
 
 class FakeStreamingFactory:
-    def __init__(self, *, segments: tuple[object, ...] = ()) -> None:
+    def __init__(
+        self, *, segments: tuple[object, ...] = (), partials: tuple[str, ...] = ()
+    ) -> None:
         self.segments = segments
+        self.partials = partials
         self.sessions: list[FakeStreamingSession] = []
         self.released: list[RealtimeAsrSession] = []
 
     def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
-        session = FakeStreamingSession(language=language, segments=self.segments)
+        session = FakeStreamingSession(
+            language=language, segments=self.segments, partials=self.partials
+        )
         self.sessions.append(session)
         return session
 
@@ -152,14 +175,20 @@ class FakeDiarizationEngine:
 
 
 def _client(
-    *, segments: tuple[object, ...] = (), diarization_engine=None, tts_synthesizer=None
+    *,
+    segments: tuple[object, ...] = (),
+    partials: tuple[str, ...] = (),
+    diarization_engine=None,
+    tts_synthesizer=None,
+    api_key: str | None = None,
 ) -> tuple[TestClient, FakeStreamingFactory]:
-    factory = FakeStreamingFactory(segments=segments)
+    factory = FakeStreamingFactory(segments=segments, partials=partials)
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,
         diarization_model_path=None,
         diarization_embedding_model_path=None,
+        api_key=api_key,
     )
     services = build_app_services(
         settings,
@@ -580,6 +609,93 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
 
     assert error["type"] == "error"
     assert error["error"]["code"] == "diarization_not_available"
+
+
+def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None:
+    client, _ = _client(partials=("你", "你好", "你好啊"))
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    assert [event["delta"] for event in events if event["type"].endswith(".delta")] == [
+        "你",
+        "你好",
+        "你好啊",
+    ]
+
+
+def test_openai_session_update_rejects_non_string_language_hints() -> None:
+    with pytest.raises(RealtimeAdapterError, match="languages must be a string array"):
+        apply_session_update(
+            {
+                "type": "session.update",
+                "session": {
+                    "input_audio_transcription": {"languages": ["zh", 1]},
+                },
+            },
+            session_id="realtime_test",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            tts_model="speechrail/qwen3-tts",
+            tts_ready=True,
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+            registered_tts=frozenset({"speechrail/qwen3-tts"}),
+        )
+
+
+def test_openai_realtime_rejects_invalid_api_key_at_handshake() -> None:
+    client, _ = _client(api_key="secret")
+    with pytest.raises(WebSocketDisconnect), client.websocket_connect("/v1/realtime"):
+        pass
+
+
+def test_openai_realtime_rejects_when_no_backend_is_ready() -> None:
+    settings = Settings(
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        diarization_model_path=None,
+        diarization_embedding_model_path=None,
+    )
+    services = build_app_services(settings, AppOverrides())
+    app = FastAPI()
+    app.include_router(create_openai_realtime_router(services))
+
+    with pytest.raises(WebSocketDisconnect), TestClient(app).websocket_connect("/v1/realtime"):
+        pass
+
+
+def test_openai_tts_invalid_audio_emits_stable_error() -> None:
+    client, _ = _client(tts_synthesizer=InvalidSpeechSynthesizer())
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "error":
+                break
+
+    assert event["error"]["code"] == "tts_audio_invalid"
 
 
 def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() -> None:

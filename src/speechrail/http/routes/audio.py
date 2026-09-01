@@ -151,6 +151,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
     """Batch transcription and sentence TTS; auth at the route boundary."""
     router = APIRouter()
     resolved = services.settings
+    diarization_engine = services.diarization_engine
 
     @router.post("/v1/audio/transcriptions")
     async def transcription(
@@ -197,7 +198,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Unsupported response format",
                 param="response_format",
             )
-        if diarization_requested and services.diarization_engine is None:
+        if diarization_requested and diarization_engine is None:
             return error_response(
                 503,
                 request_id,
@@ -294,8 +295,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
         if diarization_requested:
+            assert diarization_engine is not None
             coordinator = DiarizationCoordinator(
-                services.diarization_engine.create(config=DiarizationConfig(enabled=True))
+                diarization_engine.create(config=DiarizationConfig(enabled=True))
             )
             try:
                 await coordinator.append_audio(audio)

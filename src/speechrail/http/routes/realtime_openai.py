@@ -118,7 +118,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         try:
                             segments = await active_diarization.annotate(segments)
                         except RealtimeV2Error as exc:
-                            await send_event(error_event(code=exc.code, message=exc.message))
+                            await send_event(error_event(code=exc.code, message=str(exc)))
                             return
                         for segment in segments:
                             await send_event(
