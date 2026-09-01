@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import os
-import struct
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +18,12 @@ from uuid import uuid4
 
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
+from speechrail.runtime.worker_process import (
+    AsyncFramedWorkerProcess,
+    WorkerProcessSpec,
+    offline_environment,
+)
+from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,58 +98,44 @@ class Qwen3TtsBackendConfig:
         return command
 
 
+    def worker_spec(self) -> WorkerProcessSpec:
+        return WorkerProcessSpec(
+            command=tuple(self.command()),
+            cwd=self.repository_root,
+            env=offline_environment(self.repository_root),
+            io_timeout_seconds=self.timeout_seconds,
+        )
+
+
 class Qwen3TtsWorker:
     """One supervised local Qwen3-TTS worker behind the public TTS port.
 
     The worker owns all vendor imports and model weights.  This parent process
     speaks only the private framed protocol and never passes a model ID, URL,
-    instruction, or arbitrary voice description across that boundary.
+    instruction, or arbitrary voice description across that boundary.  The
+    profile policy stays here: one ready handshake with backend/device/dtype/
+    sample-rate identity, one private response ID per synthesis, a strictly
+    ordered ``audio* → completed`` stream, and abort on any unfinished stream.
     """
 
     def __init__(self, config: Qwen3TtsBackendConfig) -> None:
         self.config = config
-        self._process: asyncio.subprocess.Process | None = None
+        self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
 
     @property
     def ready(self) -> bool:
         """Return whether the supervised worker can accept another request."""
-        return (
-            self._started
-            and self._process is not None
-            and self._process.returncode is None
-        )
+        return self._started and self._transport.alive
 
     async def start(self) -> None:
         async with self._lock:
             if self._started:
                 return
-            environment = {
-                key: value
-                for key, value in os.environ.items()
-                if key in {"PATH", "TMPDIR", "LANG", "LC_ALL"}
-            }
-            environment.update(
-                {
-                    "PYTHONPATH": str(self.config.repository_root / "src"),
-                    "HF_HUB_OFFLINE": "1",
-                    "TRANSFORMERS_OFFLINE": "1",
-                    "HF_DATASETS_OFFLINE": "1",
-                    "PYTORCH_ENABLE_MPS_FALLBACK": "0",
-                    "TOKENIZERS_PARALLELISM": "false",
-                }
-            )
-            self._process = await asyncio.create_subprocess_exec(
-                *self.config.command(),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                cwd=self.config.repository_root,
-                env=environment,
-            )
             try:
-                await self._write(
+                await self._transport.start()
+                await self._transport.send(
                     {
                         "version": PROTOCOL_VERSION,
                         "type": "start",
@@ -155,7 +144,7 @@ class Qwen3TtsWorker:
                         "sample_rate": self.config.sample_rate,
                     }
                 )
-                ready = await self._read()
+                ready = await self._receive_profile_frame()
                 if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
                     raise RuntimeError(str(ready.get("code", "worker_start_failed")))
                 if (
@@ -167,7 +156,7 @@ class Qwen3TtsWorker:
                     raise RuntimeError("backend_identity_mismatch")
                 self._started = True
             except BaseException:
-                await self.close()
+                await self._transport.abort()
                 raise
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
@@ -177,7 +166,7 @@ class Qwen3TtsWorker:
             await self.start()
             async with self._lock:
                 response_id = f"resp_{uuid4().hex}"
-                await self._write(
+                await self._transport.send(
                     {
                         "version": PROTOCOL_VERSION,
                         "type": "synthesize",
@@ -192,7 +181,7 @@ class Qwen3TtsWorker:
                 completed = False
                 try:
                     while True:
-                        frame = await self._read()
+                        frame = await self._receive_profile_frame()
                         if frame.get("request_id") != response_id:
                             raise RuntimeError("worker_response_id_mismatch")
                         if frame.get("type") == "completed":
@@ -220,49 +209,18 @@ class Qwen3TtsWorker:
                         expected_chunk_index += 1
                 finally:
                     if not completed:
-                        await self._abort_process()
+                        self._started = False
+                        await self._transport.abort()
 
         return stream()
 
-    async def _write(self, frame: dict[str, object]) -> None:
-        if self._process is None or self._process.stdin is None:
-            raise RuntimeError("worker_not_started")
-        body = json.dumps(frame, separators=(",", ":")).encode()
-        self._process.stdin.write(struct.pack(">I", len(body)) + body)
-        async with asyncio.timeout(self.config.timeout_seconds):
-            await self._process.stdin.drain()
-
-    async def _read(self) -> dict[str, object]:
-        if self._process is None or self._process.stdout is None:
-            raise RuntimeError("worker_not_started")
-        async with asyncio.timeout(self.config.timeout_seconds):
-            length = struct.unpack(">I", await self._process.stdout.readexactly(4))[0]
-            if not 0 < length <= 64 * 1024 * 1024:
-                raise RuntimeError("worker_frame_invalid")
-            payload = json.loads((await self._process.stdout.readexactly(length)).decode())
-        if not isinstance(payload, dict):
-            raise RuntimeError("worker_frame_invalid")
-        return {str(key): value for key, value in payload.items()}
+    async def _receive_profile_frame(self) -> dict[str, object]:
+        try:
+            return await self._transport.receive()
+        except ProtocolError as exc:
+            raise RuntimeError("worker_frame_invalid") from exc
 
     async def close(self) -> None:
-        process, self._process, self._started = self._process, None, False
-        if process is None:
-            return
-        await self._terminate_process(process)
-
-    async def _abort_process(self) -> None:
-        process, self._process, self._started = self._process, None, False
-        if process is not None:
-            await self._terminate_process(process)
-
-    async def _terminate_process(self, process: asyncio.subprocess.Process) -> None:
-        if process.stdin is not None:
-            process.stdin.close()
-        if process.returncode is None:
-            process.terminate()
-        try:
-            async with asyncio.timeout(2):
-                await process.wait()
-        except TimeoutError:
-            process.kill()
-            await process.wait()
+        async with self._lock:
+            self._started = False
+            await self._transport.close()
