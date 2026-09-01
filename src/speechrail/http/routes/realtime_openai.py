@@ -38,13 +38,17 @@ from speechrail.compatibility.openai_realtime import (
     transcription_completed,
     transcription_delta,
     transcription_failed,
+    transcription_segment,
     validate_append,
 )
+from speechrail.domain.diarization import DiarizationConfig
 from speechrail.domain.ports import (
     RealtimeAsrSession,
     SpeechRequest,
 )
+from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.auth import websocket_is_authorized
+from speechrail.runtime.diarization import DiarizationCoordinator
 
 _PCM16_24K: dict[str, object] = {
     "type": "pcm16",
@@ -59,6 +63,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
     router = APIRouter()
     resolved = services.settings
     realtime_asr_factory = services.realtime_asr_factory
+    diarization_engine = services.diarization_engine
     tts_synthesizer = services.tts_synthesizer
 
     registered_asr = frozenset({resolved.model_id, *resolved.compatibility_model_ids})
@@ -78,26 +83,60 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         asr_session: RealtimeAsrSession | None = None
         asr_reader: asyncio.Task[None] | None = None
         tts_task: asyncio.Task[None] | None = None
+        tts_response_id: str | None = None
+        active_diarization: DiarizationCoordinator | None = None
+        diarization_config: DiarizationConfig | None = None
         pending_text: str | None = None
         config: dict[str, Any] = {"model": resolved.model_id, "language": None}
+        send_lock = asyncio.Lock()
+        sequence = 0
+
+        async def send_event(event: dict[str, object]) -> None:
+            nonlocal sequence
+            async with send_lock:
+                sequence += 1
+                payload = dict(event)
+                payload["event_id"] = f"event_{uuid4().hex}"
+                payload["session_id"] = session_id
+                payload["sequence"] = sequence
+                await websocket.send_json(payload)
 
         async def drain_asr_events() -> None:
             if asr_session is None:
                 return
             async for event in asr_session.events():
                 if event.kind == "partial":
-                    await websocket.send_json(
+                    await send_event(
                         transcription_delta(session_id=session_id, delta=event.text)
                     )
                 elif event.kind == "completed":
-                    await websocket.send_json(
+                    await send_event(
                         conversation_item_created(session_id=session_id, transcript=event.text)
                     )
-                    await websocket.send_json(
+                    segments = event.segments
+                    if active_diarization is not None and segments:
+                        try:
+                            segments = await active_diarization.annotate(segments)
+                        except RealtimeV2Error as exc:
+                            await send_event(error_event(code=exc.code, message=exc.message))
+                            return
+                        for segment in segments:
+                            await send_event(
+                                transcription_segment(
+                                    session_id=session_id,
+                                    item_id=f"item_{session_id}_input",
+                                    segment_id=segment.id,
+                                    text=segment.text,
+                                    speaker=segment.speaker,
+                                    start_ms=segment.start_ms,
+                                    end_ms=segment.end_ms,
+                                )
+                            )
+                    await send_event(
                         transcription_completed(session_id=session_id, transcript=event.text)
                     )
                 elif event.kind == "error":
-                    await websocket.send_json(
+                    await send_event(
                         transcription_failed(
                             session_id=session_id,
                             code=event.error_code or "backend_error",
@@ -106,22 +145,24 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     )
 
         async def synthesize_tts(text: str, *, voice: str, language: str) -> None:
+            nonlocal tts_response_id
             if tts_synthesizer is None:
-                await websocket.send_json(
+                await send_event(
                     error_event(code="backend_not_ready", message="TTS backend is not ready")
                 )
                 return
             response_id = f"resp_{uuid4().hex[:12]}"
+            tts_response_id = response_id
             out_item_id = f"item_{uuid4().hex[:12]}"
-            await websocket.send_json(
+            await send_event(
                 response_created(session_id=session_id, response_id=response_id)
             )
-            await websocket.send_json(
+            await send_event(
                 response_output_item_added(
                     session_id=session_id, response_id=response_id, item_id=out_item_id
                 )
             )
-            await websocket.send_json(
+            await send_event(
                 response_content_part_added(
                     session_id=session_id, response_id=response_id, item_id=out_item_id
                 )
@@ -136,7 +177,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             )
             try:
                 async for chunk in iter_validated_audio(tts_synthesizer.synthesize(request)):
-                    await websocket.send_json(
+                    await send_event(
                         response_output_audio_delta(
                             session_id=session_id,
                             response_id=response_id,
@@ -145,11 +186,13 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         )
                     )
             except TTSDeliveryError as exc:
-                await websocket.send_json(
+                await send_event(
                     error_event(code=exc.code, message="TTS backend delivered invalid audio")
                 )
-            finally:
-                await websocket.send_json(
+            except asyncio.CancelledError:
+                return
+            else:
+                await send_event(
                     response_output_audio_transcript_delta(
                         session_id=session_id,
                         response_id=response_id,
@@ -157,7 +200,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         delta=text,
                     )
                 )
-                await websocket.send_json(
+                await send_event(
                     response_output_audio_transcript_done(
                         session_id=session_id,
                         response_id=response_id,
@@ -165,12 +208,12 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         transcript=text,
                     )
                 )
-                await websocket.send_json(
+                await send_event(
                     response_output_audio_done(
                         session_id=session_id, response_id=response_id, item_id=out_item_id
                     )
                 )
-                await websocket.send_json(
+                await send_event(
                     response_content_part_done(
                         session_id=session_id,
                         response_id=response_id,
@@ -178,7 +221,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         transcript=text,
                     )
                 )
-                await websocket.send_json(
+                await send_event(
                     response_output_item_done(
                         session_id=session_id,
                         response_id=response_id,
@@ -186,19 +229,19 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         transcript=text,
                     )
                 )
-                await websocket.send_json(
+                await send_event(
                     response_done(session_id=session_id, response_id=response_id)
                 )
 
         try:
-            await websocket.send_json(
+            await send_event(
                 session_created(
                     session_id=session_id,
                     model=resolved.model_id,
                     tts_ready=services.tts_ready,
                 )
             )
-            await websocket.send_json(conversation_created(session_id=session_id))
+            await send_event(conversation_created(session_id=session_id))
 
             while True:
                 raw = await websocket.receive_text()
@@ -215,7 +258,24 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             registered_asr=registered_asr,
                             registered_tts=registered_tts,
                         )
-                        await websocket.send_json(updated)
+                        raw_diarization = config.get("diarization")
+                        diarization_config = (
+                            None
+                            if raw_diarization is None
+                            else DiarizationConfig.model_validate(raw_diarization)
+                        )
+                        if diarization_config is not None and diarization_config.enabled:
+                            if diarization_engine is None:
+                                raise RealtimeAdapterError(
+                                    "diarization_not_available",
+                                    "diarization profile is not available",
+                                )
+                            if active_diarization is not None:
+                                await active_diarization.close()
+                            active_diarization = DiarizationCoordinator(
+                                diarization_engine.create(config=diarization_config)
+                            )
+                        await send_event(updated)
                     elif event_type == "input_audio_buffer.append":
                         audio = validate_append(event)
                         if realtime_asr_factory is None:
@@ -229,14 +289,29 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             )
                             await asr_session.connect()
                             asr_reader = asyncio.create_task(drain_asr_events())
+                        if (
+                            active_diarization is None
+                            and diarization_config is not None
+                            and diarization_config.enabled
+                        ):
+                            if diarization_engine is None:
+                                raise RealtimeAdapterError(
+                                    "diarization_not_available",
+                                    "diarization profile is not available",
+                                )
+                            active_diarization = DiarizationCoordinator(
+                                diarization_engine.create(config=diarization_config)
+                            )
                         await asr_session.append_audio(audio)
+                        if active_diarization is not None:
+                            await active_diarization.append_audio(audio)
                     elif event_type == "input_audio_buffer.commit":
                         if asr_session is None:
                             raise RealtimeAdapterError(
                                 "invalid_state", "no audio appended before commit"
                             )
                         await asr_session.commit()
-                        await websocket.send_json(
+                        await send_event(
                             input_audio_buffer_committed(session_id=session_id)
                         )
                         if asr_reader is not None:
@@ -255,7 +330,10 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             if realtime_asr_factory is not None:
                                 realtime_asr_factory.release(asr_session)
                             asr_session = None
-                        await websocket.send_json(
+                        if active_diarization is not None:
+                            await active_diarization.close()
+                            active_diarization = None
+                        await send_event(
                             input_audio_buffer_cleared(session_id=session_id)
                         )
                     elif event_type == "conversation.item.create":
@@ -266,7 +344,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             )
                         item_id = f"item_{uuid4().hex[:12]}"
                         pending_text = text
-                        await websocket.send_json(
+                        await send_event(
                             conversation_text_item_created(
                                 session_id=session_id, item_id=item_id, text=text
                             )
@@ -304,6 +382,15 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             tts_task.cancel()
                             with contextlib.suppress(asyncio.CancelledError):
                                 await tts_task
+                            if tts_response_id is not None:
+                                await send_event(
+                                    response_done(
+                                        session_id=session_id,
+                                        response_id=tts_response_id,
+                                        status="cancelled",
+                                    )
+                                )
+                            tts_response_id = None
                         else:
                             raise RealtimeAdapterError(
                                 "invalid_state", "no active TTS response to cancel"
@@ -316,14 +403,14 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             "unknown_event", f"unsupported event type: {event_type}"
                         )
                 except RealtimeAdapterError as exc:
-                    await websocket.send_json(
+                    await send_event(
                         error_event(code=exc.code, message=exc.message, event_id=exc.event_id)
                     )
         except WebSocketDisconnect:
             pass
         except RuntimeError as exc:
             with contextlib.suppress(Exception):
-                await websocket.send_json(
+                await send_event(
                     error_event(
                         code="backend_busy",
                         message=str(exc),

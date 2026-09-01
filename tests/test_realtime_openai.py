@@ -4,12 +4,18 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from speechrail.app import create_app
+from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import apply_session_update, transcription_segment
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.diarization import (
+    DiarizationAssignment,
+    DiarizationSpeaker,
+    DiarizationUpdate,
+)
 from speechrail.domain.ports import (
     AudioChunk,
     RealtimeAsrSession,
@@ -17,6 +23,7 @@ from speechrail.domain.ports import (
     StreamingAsrEvent,
     TranscriptionRequest,
 )
+from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 
 
 class FakeTranscriber:
@@ -39,8 +46,14 @@ class FakeSpeechSynthesizer:
 
 
 class FakeStreamingSession:
-    def __init__(self, *, language: str | None) -> None:
+    def __init__(
+        self,
+        *,
+        language: str | None,
+        segments: tuple[object, ...] = (),
+    ) -> None:
         self.language = language
+        self.segments = segments
         self.received: list[bytes] = []
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
         self._finished = asyncio.Event()
@@ -55,7 +68,11 @@ class FakeStreamingSession:
         return None
 
     async def commit(self) -> None:
-        await self.events_queue.put(StreamingAsrEvent(kind="completed", text="你好", language="zh"))
+        await self.events_queue.put(
+            StreamingAsrEvent(
+                kind="completed", text="你好", language="zh", segments=self.segments
+            )
+        )
         await self.events_queue.put(None)
         self._finished.set()
 
@@ -71,12 +88,13 @@ class FakeStreamingSession:
 
 
 class FakeStreamingFactory:
-    def __init__(self) -> None:
+    def __init__(self, *, segments: tuple[object, ...] = ()) -> None:
+        self.segments = segments
         self.sessions: list[FakeStreamingSession] = []
         self.released: list[RealtimeAsrSession] = []
 
     def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
-        session = FakeStreamingSession(language=language)
+        session = FakeStreamingSession(language=language, segments=self.segments)
         self.sessions.append(session)
         return session
 
@@ -84,17 +102,69 @@ class FakeStreamingFactory:
         self.released.append(session)
 
 
-def _client() -> tuple[TestClient, FakeStreamingFactory]:
-    factory = FakeStreamingFactory()
-    return (
-        TestClient(
-            create_app(
-                Settings(qwen3_model_dir=None, qwen3_python=None),
-                v2_transcriber=FakeTranscriber(),
-                tts_synthesizer=FakeSpeechSynthesizer(),
-                realtime_asr_factory=factory,
+class FakeDiarizationSession:
+    def __init__(self) -> None:
+        self.received: list[bytes] = []
+        self.closed = False
+
+    async def append_audio(self, audio: bytes) -> None:
+        self.received.append(audio)
+
+    async def annotate(self, segments):
+        return DiarizationUpdate(
+            assignments=tuple(
+                DiarizationAssignment(
+                    segment_id=segment.id,
+                    speakers=(
+                        DiarizationSpeaker(
+                            id=f"spk_{index + 1:02d}", confidence=0.95
+                        ),
+                    ),
+                )
+                for index, segment in enumerate(segments)
             )
+        )
+
+    async def finalize(self) -> DiarizationUpdate:
+        return DiarizationUpdate()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FakeDiarizationEngine:
+    def __init__(self) -> None:
+        self.sessions: list[FakeDiarizationSession] = []
+
+    def create(self, *, config):
+        session = FakeDiarizationSession()
+        self.sessions.append(session)
+        return session
+
+
+def _client(
+    *, segments: tuple[object, ...] = (), diarization_engine=None
+) -> tuple[TestClient, FakeStreamingFactory]:
+    factory = FakeStreamingFactory(segments=segments)
+    settings = Settings(
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        diarization_model_path=None,
+        diarization_embedding_model_path=None,
+    )
+    services = build_app_services(
+        settings,
+        AppOverrides(
+            v2_transcriber=FakeTranscriber(),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+            realtime_asr_factory=factory,
+            diarization_engine=diarization_engine,
         ),
+    )
+    app = FastAPI()
+    app.include_router(create_openai_realtime_router(services))
+    return (
+        TestClient(app),
         factory,
     )
 
@@ -430,3 +500,73 @@ def test_openai_session_update_preserves_diarization_and_standard_hints() -> Non
     assert config["diarization"]["speaker_count_hint"] == 2
     assert config["known_speaker_names"] == ["Alice"]
     assert config["known_speaker_references"] == ["ref_opaque"]
+
+
+def test_openai_realtime_emits_diarized_segments_before_completed_with_ordered_events() -> None:
+    from speechrail.domain.contracts import TranscriptSegment
+
+    segments = (
+        TranscriptSegment(id="seg_1", start_ms=0, end_ms=800, text="你好"),
+        TranscriptSegment(id="seg_2", start_ms=800, end_ms=1600, text="世界"),
+    )
+    diarization = FakeDiarizationEngine()
+    client, _ = _client(segments=segments, diarization_engine=diarization)
+
+    with client.websocket_connect("/v1/realtime") as socket:
+        events = [socket.receive_json(), socket.receive_json()]
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "input_audio_transcription": {
+                        "model": "gpt-4o-transcribe-diarize",
+                        "diarization": {"enabled": True},
+                    }
+                },
+            }
+        )
+        events.append(socket.receive_json())
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    types = [event["type"] for event in events]
+    segment_types = "conversation.item.input_audio_transcription.segment"
+    assert types.count(segment_types) == 2
+    segment_events = [event for event in events if event["type"] == segment_types]
+    assert [event["speaker"] for event in segment_events] == ["spk_01", "spk_02"]
+    assert [event["start"] for event in segment_events] == [0.0, 0.8]
+    assert types.index(segment_types) < types.index(
+        "conversation.item.input_audio_transcription.completed"
+    )
+    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
+    assert len({event["event_id"] for event in events}) == len(events)
+    assert {event["session_id"] for event in events} == {events[0]["session_id"]}
+    assert diarization.sessions[0].received == [b"\x00\x00"]
+
+
+def test_openai_realtime_rejects_diarization_without_profile() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "input_audio_transcription": {
+                        "diarization": {"enabled": True},
+                    }
+                },
+            }
+        )
+        error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "diarization_not_available"
