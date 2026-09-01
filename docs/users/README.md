@@ -11,9 +11,12 @@
 
 ## 当前公共身份
 
-| 能力 | canonical model ID | 公共入口 |
-|---|---|---|
-| ASR | `speechrail/qwen3-asr-1.7b` | `/v1/audio/transcriptions`、`/v2/realtime` transcription |
-| TTS | `speechrail/qwen3-tts` | `/v1/audio/speech`、`/v2/realtime` speech |
+| 能力 | canonical model ID | OpenAI 标准名（alias） | 公共入口 |
+|---|---|---|---|
+| ASR | `speechrail/qwen3-asr-1.7b` | `whisper-1`、`gpt-4o-transcribe`、`gpt-4o-mini-transcribe` | `/v1/audio/transcriptions`、`/v2/realtime` transcription |
+| TTS | `speechrail/qwen3-tts` | `tts-1`、`tts-1-hd`、`gpt-4o-mini-tts` | `/v1/audio/speech`、`/v2/realtime` speech |
 
-`whisper-1` 等名称只是兼容 alias，不代表服务加载 Whisper。服务是否具备真实推理能力，仍以对应 profile 配置和短音频/短文本 smoke 为准。
+客户端可直接使用 OpenAI 标准模型名（如 `whisper-1`、`tts-1`），无需知道底层模型细节；
+`/v1/models` 列出 canonical 与全部 alias，alias 条目带 `resolves_to` 标注其 canonical
+profile。标准名不代表服务加载 OpenAI 模型，实际推理仍以对应 profile 配置和短音频/短文本
+smoke 为准。

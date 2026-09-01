@@ -92,9 +92,21 @@ paths:
                   - id: speechrail/qwen3-asr-1.7b
                     object: model
                     owned_by: speechrail
-                  - id: Qwen3-ASR-1.7B
+                  - id: speechrail/qwen3-tts
                     object: model
                     owned_by: speechrail
+                  - id: whisper-1
+                    object: model
+                    owned_by: speechrail
+                    resolves_to: speechrail/qwen3-asr-1.7b
+                  - id: gpt-4o-transcribe
+                    object: model
+                    owned_by: speechrail
+                    resolves_to: speechrail/qwen3-asr-1.7b
+                  - id: tts-1
+                    object: model
+                    owned_by: speechrail
+                    resolves_to: speechrail/qwen3-tts
         '400':
           $ref: '#/components/responses/BadRequest'
   /v1/audio/transcriptions:
@@ -324,6 +336,11 @@ components:
         owned_by:
           type: string
           const: speechrail
+        resolves_to:
+          type: string
+          description: |
+            Canonical profile this OpenAI-standard alias resolves to. Present
+            only on alias entries; canonical entries omit it.
     ModelList:
       type: object
       required: [object, data]

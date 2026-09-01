@@ -29,8 +29,9 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `voice-realtime` | v2/REST adapter 已实现 | ASR 通过 v2，TTS 通过 v2/REST；会议、播放、UI、数据库和 LLM 仍由调用方拥有，真实闭环需部署验收 |
 | `launchd` 服务 CLI | 已实现（macOS） | `speechrail service` 显式管理当前用户 LaunchAgent；不会自动安装或启用 |
 
-不要把 `whisper-1` 兼容别名误认为后端模型；新配置使用
-`speechrail/qwen3-asr-1.7b`。
+客户端可直接使用 OpenAI 标准模型名（`whisper-1`、`tts-1` 等）接入；`/v1/models` 列出
+canonical 与全部兼容 alias，alias 条目带 `resolves_to` 标注其 canonical profile。标准名
+不代表服务加载 OpenAI 模型，实际推理能力以对应 profile 配置和 smoke 为准。
 
 ## 快速开始
 

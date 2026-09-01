@@ -27,8 +27,10 @@ ASR: speechrail/qwen3-asr-1.7b
 TTS: speechrail/qwen3-tts
 ```
 
-`Qwen3-ASR-1.7B`、`qwen3-asr-1.7b`、`whisper-1` 为 `0.x` 兼容别名；最后一个不代表
-服务使用 Whisper。新配置一律使用 canonical ID。
+客户端可直接使用 OpenAI 标准模型名（`whisper-1`、`tts-1`、`gpt-4o-transcribe`、
+`gpt-4o-mini-tts` 等）或 canonical ID 接入；`/v1/models` 列出 canonical 与全部 alias，
+alias 条目带 `resolves_to` 标注其 canonical profile。标准名不代表服务加载 OpenAI 模型，
+实际推理能力以对应 profile 配置和 smoke 为准。
 
 删除字段、改变字段类型、错误码语义或 WebSocket 状态机属于破坏性变更，必须进入 `/v2`
 并附迁移说明。`/asr` 不承诺稳定新功能。

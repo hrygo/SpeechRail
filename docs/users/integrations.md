@@ -62,8 +62,9 @@ with open("sample.wav", "rb") as audio:
 print(result.text)
 ```
 
-客户端应捕获 HTTP 错误 envelope，只对 `retryable=true` 做指数退避。不要无界重试 429/503，
-也不要依赖 `whisper-1` 作为新配置。
+客户端应捕获 HTTP 错误 envelope，只对 `retryable=true` 做指数退避。不要无界重试 429/503；
+`whisper-1`/`tts-1` 等 OpenAI 标准名可直接作为模型参数使用，它们归一化到
+`speechrail/qwen3-asr-1.7b`/`speechrail/qwen3-tts`。
 
 ## Hermes Agent（配置方法，未验收）
 

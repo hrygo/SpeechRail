@@ -20,9 +20,13 @@ ws://127.0.0.1:8201/v1/realtime
 - `?model=` 查询参数与 `session.update.session.model` 同样生效，归一化到 SpeechRail
   canonical profile：
   - `speechrail/qwen3-asr-1.7b`（canonical）
-  - `whisper-1`、`gpt-4o-transcribe`、`gpt-4o-mini-transcribe` → ASR 兼容 alias
+  - `whisper-1`、`gpt-4o-transcribe`、`gpt-4o-mini-transcribe`、`gpt-transcribe`、
+    `gpt-live-transcribe` → ASR 兼容 alias
   - `speechrail/qwen3-tts`（canonical，需 TTS backend ready）
+  - `tts-1`、`tts-1-hd`、`gpt-4o-mini-tts` → TTS 兼容 alias
   - 未登记模型返回 `model_not_found`。
+- `/v1/models` 列出 canonical 与全部兼容 alias，alias 条目带 `resolves_to` 标注其
+  canonical profile。
 
 ## 支持的客户端事件
 
