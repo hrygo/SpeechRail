@@ -558,6 +558,7 @@ def test_openai_realtime_emits_diarized_segments_before_completed_with_ordered_e
     assert len({event["event_id"] for event in events}) == len(events)
     assert {event["session_id"] for event in events} == {events[0]["session_id"]}
     assert diarization.sessions[0].received == [b"\x00\x00"]
+    assert diarization.sessions[0].closed is True
 
 
 def test_openai_realtime_rejects_diarization_without_profile() -> None:

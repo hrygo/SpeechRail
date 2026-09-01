@@ -426,6 +426,9 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     await asr_session.close()
                 if realtime_asr_factory is not None:
                     realtime_asr_factory.release(asr_session)
+            if active_diarization is not None:
+                with contextlib.suppress(Exception):
+                    await active_diarization.close()
             if tts_task is not None and not tts_task.done():
                 tts_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
