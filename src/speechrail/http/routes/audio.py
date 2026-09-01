@@ -152,6 +152,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
         language: str | None = Form(default=None),
         prompt: str = Form(default=""),
         response_format: str = Form(default="json"),
+        temperature: float | None = Form(default=None),
+        timestamp_granularities: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
     ) -> Response:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
@@ -171,6 +173,32 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Unsupported response format",
                 param="response_format",
             )
+        if temperature is not None and not 0 <= temperature <= 2:
+            return error_response(
+                422,
+                request_id,
+                "invalid_temperature",
+                "Temperature must be in [0, 2]",
+                param="temperature",
+            )
+        if timestamp_granularities:
+            unknown = set(timestamp_granularities) - {"word", "segment"}
+            if unknown:
+                return error_response(
+                    422,
+                    request_id,
+                    "invalid_timestamp_granularities",
+                    "Only 'word' and 'segment' are supported",
+                    param="timestamp_granularities",
+                )
+            if response_format != "verbose_json":
+                return error_response(
+                    422,
+                    request_id,
+                    "timestamp_granularities_requires_verbose_json",
+                    "timestamp_granularities requires response_format=verbose_json",
+                    param="timestamp_granularities",
+                )
         if len(prompt) > 2000:
             return error_response(
                 422, request_id, "prompt_too_long", "Prompt is too long", param="prompt"
@@ -218,7 +246,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if response_format == "json":
             return JSONResponse(format_json(result))
         if response_format == "verbose_json":
-            return JSONResponse(format_verbose(result))
+            granularities = frozenset(timestamp_granularities) or frozenset({"segment", "word"})
+            return JSONResponse(format_verbose(result, granularities=granularities))
         if response_format == "text":
             return PlainTextResponse(result.text)
         if response_format == "srt":

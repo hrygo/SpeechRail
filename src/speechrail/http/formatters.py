@@ -12,13 +12,18 @@ def format_json(result: TranscriptResult) -> dict[str, object]:
     }
 
 
-def format_verbose(result: TranscriptResult) -> dict[str, object]:
-    return {
+def format_verbose(
+    result: TranscriptResult, *, granularities: frozenset[str] = frozenset({"segment", "word"})
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "task": "transcribe",
         "language": result.language or "",
         "duration": result.duration_ms / 1000,
         "text": result.text,
-        "segments": [
+        "usage": {"type": "duration", "seconds": result.duration_ms / 1000},
+    }
+    if "segment" in granularities:
+        payload["segments"] = [
             {
                 "id": s.id,
                 "start": s.start_ms / 1000,
@@ -29,13 +34,13 @@ def format_verbose(result: TranscriptResult) -> dict[str, object]:
                 "speaker_revision": s.speaker_revision,
             }
             for s in result.segments
-        ],
-        "words": [
+        ]
+    if "word" in granularities:
+        payload["words"] = [
             {"word": w.word, "start": w.start_ms / 1000, "end": w.end_ms / 1000}
             for w in result.words
-        ],
-        "usage": {"type": "duration", "seconds": result.duration_ms / 1000},
-    }
+        ]
+    return payload
 
 
 def _stamp(milliseconds: int, separator: str) -> str:
