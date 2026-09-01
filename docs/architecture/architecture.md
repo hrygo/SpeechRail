@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 总体架构"
 status: active
-version: "0.1.0"
-date: 2026-08-31
+version: "1.0.0"
+date: 2026-09-01
 ---
 
 # SpeechRail 总体架构
@@ -49,11 +49,11 @@ ordered audio delta；两类会话共享 auth、sequence、backpressure 和 canc
 
 Legacy：连接 → `config` → 空二进制帧 → `ready_to_stop`。当前不转写，也不认证。
 
-## 未来目标（非当前行为）
+## 范围外能力
 
-持久化 metrics、解码后时长限制和完整 LAN CORS/Origin 防护仍属于后续工作。它们不能从架构图
-或早期设计推断为已启用；具体门禁见
-[当前边界](current-boundaries.md) 与 [迁移 Runbook](../operations/migration-runbook.md)。
+持久化 metrics 导出、解码后音频时长限制和完整 LAN CORS/Origin 防护不在当前能力范围；
+它们不能从架构图或早期设计推断为已启用。启用前须先实现、测试并更新契约与边界文档，
+门禁见[当前边界](current-boundaries.md) 与 [迁移 Runbook](../operations/migration-runbook.md)。
 
 `voice-realtime` 继续拥有 AudioHub、会议、播放、数据库、UI 与 LM Studio；SpeechRail
 拥有 ASR/TTS API/runtime，但不接管这些应用职责。

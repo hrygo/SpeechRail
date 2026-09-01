@@ -31,14 +31,13 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录不在仓库内，请
 
 | profile | 模型 | device / dtype | 启动行为 |
 |---|---|---|---|
-| 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` | 启动时加载一份，拒绝 CPU fallback |
-| 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` | 启动时加载一份，性能需单独验收 |
-| 未配置 runtime | 无 | 无 | 进程可启动；推理为 `503 backend_not_ready` |
-| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32` | 独立加载一份；TTS 未就绪不阻塞 ASR |
+| 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` | 启动时加载一份，拒绝 CPU fallback；本机已验证 |
+| 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` | 启动时加载一份；性能基准待对应硬件验收 |
+| 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
+| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证 |
 | diarization profile | Sortformer（可选 CAM++） | 由 profile/runtime 决定 | Realtime v2 opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `voice-realtime` 组件。
-WLK sidecar 仅在明确配置 endpoint 时作为外部 v2 ASR transport；不会由 SpeechRail 启动。
 
 ## 配置
 
@@ -58,20 +57,18 @@ WLK sidecar 仅在明确配置 endpoint 时作为外部 v2 ASR transport；不�
 | `SPEECHRAIL_MAX_REALTIME_*` | WebSocket 单帧和缓存字节上限 |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | 一个 worker 调用的 deadline |
 | `SPEECHRAIL_JOB_SPOOL_DIR` | 可选、仓库外绝对 SQLite spool；启用 `/v1/jobs` 元数据与启动恢复 |
-| `SPEECHRAIL_WLK_STREAMING_URL` | 可选、无凭据的外部 `ws(s)` endpoint；SpeechRail 不启动 sidecar |
 | `SPEECHRAIL_DIARIZATION_*` | 可选的 Sortformer/CAM++ profile；路径外置，状态有界且匿名 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
-| `SPEECHRAIL_LEGACY_WLK_ENABLED` | 是否暴露当前有限 `/asr` 兼容路径 |
 
 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS` 必须为 `false`。`allowed_origins` 与
-`SPEECHRAIL_MAX_AUDIO_SECONDS` 当前为预留配置，尚未分别连接到 CORS middleware 和解码后
-时长拒绝逻辑；不要把它们视为已启用的安全/容量控制。
+`SPEECHRAIL_MAX_AUDIO_SECONDS` 是预留配置字段：CORS middleware 与解码后时长拒绝逻辑
+不在当前能力范围，不应视为已启用的安全/容量控制。
 
 启用 job spool 时，目录须是项目外的绝对路径，并由运行账户独占。服务以 `0700` 创建目录、
 以 `0600` 创建数据库，保存的仅是 owner 指纹、任务状态和不透明输入/结果引用；不保存原始
-音频或完整转写。重启会将未完成的 `running` 任务标为 `failed(worker_interrupted)`。当前
-foundation 仅在部署代码显式注入受信任 `JobProcessor` 时启动 batch executor；它和 realtime
-共用 Resource Governor。没有内建的 `input_ref` 路径/URL resolver，默认不读取外部引用。
+音频或完整转写。重启会将未完成的 `running` 任务标为 `failed(worker_interrupted)`。部署
+代码可显式注入受信任 `JobProcessor` 后启动 batch executor；它和 realtime 共用 Resource
+Governor。默认部署不包含内建的 `input_ref` 路径/URL resolver，不自动读取外部引用。
 
 ## wheel 与本地安装器
 
@@ -107,8 +104,7 @@ metadata 仍保留用于升级、回滚和审计的版本信息。
 
 ## 端口与进程策略
 
-默认端口 `8201` 供 SpeechRail 与旧 WLK `8001` 并行存在。未完成
-`voice-realtime` legacy parity 前，禁止把 SpeechRail 切换到 `8001`。一次只启动一个
+默认端口 `8201` 供 SpeechRail 使用。一次只启动一个
 SpeechRail 进程；每个已配置 profile 只启动一个对应 worker。多 ASGI worker 或重复服务实例
 会产生多份模型载入和不可控内存压力。
 

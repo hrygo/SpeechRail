@@ -17,7 +17,7 @@ SpeechRail 是供 QwenPaw、`voice-realtime`、Hermes Agent 及未来应用共�
 
 - **本地优先**：默认 loopback、外部模型快照、请求期间处理音频，不把本机服务当作公网平台。
 - **单人但允许有界并行**：队列、Resource Governor、超时和背压用于保护本机资源，不代表多租户或分布式需求。
-- **能力按需启用**：TTS、`jobs`、diarization、WLK streaming 和 LAN 暴露均须有明确消费者与验收证据，默认关闭或保持最小边界。
+- **能力按需启用**：TTS、`jobs`、diarization 和 LAN 暴露均须有明确消费者与验收证据，默认关闭或保持最小边界。
 - **职责不外溢**：不把 `voice-realtime` 的会议、数据库、UI、播放或 LLM 编排移入 SpeechRail。
 
 ### 设计决策过滤器
@@ -43,8 +43,7 @@ SpeechRail 是供 QwenPaw、`voice-realtime`、Hermes Agent 及未来应用共�
 ### 事实来源层级
 
 1. 当前代码、测试和实际运行结果；
-2. `contracts/openapi.yaml`、`contracts/realtime.md`、`contracts/realtime-openai.md`、
-   `contracts/realtime-v2.md`；
+2. `contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/realtime-v2.md`；
 3. 状态为 active 的架构、用户、开发者、运维文档和 ADR；
 4. `docs/archive/` 中的计划、设计和审查材料只用于历史追溯。
 
@@ -86,11 +85,11 @@ FastAPI app（认证、request ID、输入校验、协议状态机、格式化�
           │
           ├─ BatchTranscriber / RealtimeAsrFactory / SpeechSynthesizer
           ├─ 可选 DiarizationEngine（仅匿名 session state）
-          └─ Qwen3 ASR/TTS worker 或外部 WLK streaming endpoint
+          └─ Qwen3 ASR/TTS worker
 ```
 
-主进程负责公共边界和调度；Qwen3/TTS 的模型 SDK 与权重留在隔离的专用 Python worker，
-WLK 是明确配置的外部 sidecar。当前可选 NeMo diarization adapter 是例外：它由
+主进程负责公共边界和调度；Qwen3/TTS 的模型 SDK 与权重留在隔离的专用 Python worker。
+当前可选 NeMo diarization adapter 是例外：它由
 `diarization` extra 提供依赖，并在服务进程中按需加载仓库外模型；它仍必须保持有界、
 匿名且不进入 domain。请求路径不下载模型、不读取远程音频 URL，默认不持久化音频、PCM、
 embedding 或完整转写正文。
@@ -106,10 +105,10 @@ embedding 或完整转写正文。
 | `src/speechrail/application/` | 用例依赖组装、worker 生命周期和跨传输交付校验 | `domain/ports.py`、运行时适配器 |
 | `src/speechrail/config/` | `SPEECHRAIL_*` 环境配置和组合校验 | `configs/speechrail.example.env` |
 | `src/speechrail/domain/` | vendor-neutral 结果、请求、事件和 port | 公共契约 |
-| `src/speechrail/backends/` | Qwen3 ASR/TTS、WLK、NeMo Sortformer 适配器 | `domain/ports.py` |
+| `src/speechrail/backends/` | Qwen3 ASR/TTS、NeMo Sortformer 适配器 | `domain/ports.py` |
 | `src/speechrail/runtime/` | admission queue、Resource Governor、jobs、worker IPC、diarization 协调 | 资源限制 |
 | `src/speechrail/realtime/` | Realtime v1/v2 状态机和事件生命周期 | `contracts/realtime*.md` |
-| `src/speechrail/compatibility/` | OpenAI/WLK 等窄兼容呈现和归一化 | 兼容边界 |
+| `src/speechrail/compatibility/` | OpenAI 等窄兼容呈现和归一化 | 兼容边界 |
 | `contracts/` | OpenAPI 与 WebSocket 事实来源 | 任何公共接口变更前 |
 | `tests/` | fake backend、契约、安全、边界和协议回归 | `docs/developers/testing-acceptance.md` |
 | `examples/` | 不含凭据的 curl、OpenAI SDK、Realtime、QwenPaw 示例 | `docs/users/integrations.md` |
@@ -126,9 +125,7 @@ embedding 或完整转写正文。
 | `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false`（本机当前全部 `available=true`） | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
 | `WS /v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集）；标准 `openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入 | 不伪装 LLM 对话/工具/历史；`turn_detection` 仅 `null`/`manual`；`server_vad` → `unsupported_turn_detection` |
-| `WS /v1/realtime/legacy` | 已迁移的旧 batch 协议（`transcription_session.update → append → commit`），deprecated | 不是持续 partial streaming；仅存量消费者迁移期使用 |
-| `WS /v2/realtime` | ASR/TTS 状态机、背压和可选原生 Qwen3 流式/WLK/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；windowed 后端 manual flush 可能无 delta，须以 commit 终结 |
-| `WS /asr` | legacy 兼容骨架，当前只保留有限 config/EOF 行为 | 不具备 WLK parity，不得暴露到 LAN/公网 |
+| `WS /v2/realtime` | ASR/TTS 状态机、背压和可选原生 Qwen3 流式/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；windowed 后端 manual flush 可能无 delta，须以 commit 终结 |
 | `diarization` profile | 可选匿名 speaker label、overlap 和 finalize remap | 不提供实名身份、声纹库或跨会议持久身份 |
 | `speechrail service` | macOS 用户级 LaunchAgent 的显式安装/启用/管理 CLI | 不自动安装、启用、下载模型或创建 root 服务 |
 | QwenPaw `whisper_api` | 使用标准 OpenAI-compatible `/v1` 路径；`.webm`/`video/webm` 需兼容 | 不要修改聊天模型 endpoint 来排查 STT |
@@ -141,10 +138,8 @@ embedding 或完整转写正文。
 - 对外文件转写 API 使用 OpenAI-compatible 的
   `/v1/audio/transcriptions`。
 - 对外流式接口 `/v1/realtime` 实现 OpenAI Realtime 兼容协议（ASR/TTS 子集）；标准
-  OpenAI 客户端可直接接入。旧 batch 协议迁至 `/v1/realtime/legacy`（deprecated）；
-  SpeechRail-native 高级流式使用 `/v2/realtime`，均须先通过真实 backend 和客户端 smoke。
-- `/asr` 只是 loopback 下的 legacy 兼容骨架；它不提供 WLK parity，不能替代旧客户端的
-  真实转写路径。
+  OpenAI 客户端可直接接入；SpeechRail-native 高级流式使用 `/v2/realtime`，均须先通过
+  真实 backend 和客户端 smoke。
 - 默认绑定 loopback。绑定 LAN 时必须启用 API key，并明确配置允许的
   origin 策略。
 - 模型快照使用外部绝对路径。请求处理期间不得下载模型或静默访问网络。
@@ -173,9 +168,6 @@ embedding 或完整转写正文。
 
 #### Realtime 约束
 
-- `contracts/realtime.md` 描述已迁移到 `/v1/realtime/legacy` 的旧 batch 协议
-  （`transcription_session.update → append* → commit → completed → close`，不产生 delta，
-  deprecated）。
 - `contracts/realtime-openai.md` 描述 `/v1/realtime` 的 OpenAI Realtime 兼容子集；
   只承载 ASR/TTS，不伪装 LLM 对话/工具/历史，`turn_detection` 仅 `null`/`manual`。
 - `contracts/realtime-v2.md` 描述 `/v2/realtime` 的 ASR/TTS 状态机、公共事件 envelope、
@@ -205,15 +197,14 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 | ASR runtime | `SPEECHRAIL_QWEN3_MODEL_DIR`、`SPEECHRAIL_QWEN3_PYTHON` | 必须同时配置；均为仓库外绝对路径/可执行文件 |
 | TTS runtime | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR`、`SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选；两条路径同时存在才启动 TTS worker；缺少配置时 `/v1/audio/speech` 返回 `503 backend_not_ready` |
 | diarization | `SPEECHRAIL_DIARIZATION_MODEL_PATH`、`SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` | 可选；模型路径必须是仓库外绝对路径；未通过真实质量/资源门前不进默认配置 |
-| 外部 streaming | `SPEECHRAIL_WLK_STREAMING_URL` | 只连接已运行的 credential-free `ws(s)` endpoint；SpeechRail 不启动 sidecar |
-| 流式 ASR 后端 | `SPEECHRAIL_REALTIME_ASR_BACKEND`（`disabled`/`native`/`wlk`）、`SPEECHRAIL_QWEN3_STREAMING_MODE` | 默认 `disabled`；`native` 复用现有 ASR runtime（`qwen3_python`）与 snapshot（`qwen3_model_dir`），不再单独配置 streaming Python；`causal` 模式仅英语；windowed 手动 flush 可能无 delta，须以 `commit` 终结 |
+| 流式 ASR 后端 | `SPEECHRAIL_REALTIME_ASR_BACKEND`（`disabled`/`native`）、`SPEECHRAIL_QWEN3_STREAMING_MODE` | 默认 `disabled`；`native` 复用现有 ASR runtime（`qwen3_python`）与 snapshot（`qwen3_model_dir`），不再单独配置 streaming Python；`causal` 模式仅英语；windowed 手动 flush 可能无 delta，须以 `commit` 终结 |
 | 模型身份 | `SPEECHRAIL_MODEL_ID`、`SPEECHRAIL_COMPATIBILITY_MODEL_IDS` | canonical ID 是配置事实来源；对外入口接受 OpenAI 标准名（`whisper-1`/`tts-1` 等）alias，`/v1/models` 列出 canonical 与 alias 并标注 `resolves_to` |
 | 设备与精度 | `SPEECHRAIL_DEVICE`、`SPEECHRAIL_DTYPE` | `mps/float16` 或 `cpu/float32`；禁止静默 CPU fallback |
 | 限制 | `SPEECHRAIL_MAX_QUEUE_SIZE`、`SPEECHRAIL_MAX_UPLOAD_BYTES`、`SPEECHRAIL_MAX_REALTIME_*` | 必须有界；不要通过多 ASGI worker 复制模型 |
 | 调度 | `SPEECHRAIL_RUNTIME_*`、`SPEECHRAIL_REALTIME_RESERVED_CAPACITY` | realtime 预留容量，batch 使用剩余容量并受 aging/队列限制 |
 | 超时 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | worker/inference deadline；失败要映射稳定错误 |
 | Jobs | `SPEECHRAIL_JOB_SPOOL_DIR`、`SPEECHRAIL_JOB_POLL_SECONDS` | 可选、仓库外绝对目录；只保存 opaque reference 和状态 |
-| 安全 | `SPEECHRAIL_API_KEY`、`SPEECHRAIL_ALLOWED_ORIGINS` | 非 loopback 必须有 key；当前 CORS/legacy auth 能力不足，不能直接公网暴露 |
+| 安全 | `SPEECHRAIL_API_KEY`、`SPEECHRAIL_ALLOWED_ORIGINS` | 非 loopback 必须有 key；当前 CORS 能力不足，不能直接公网暴露 |
 | 开关 | `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS`、`SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；服务不下载模型 |
 | 测试模拟 | `SPEECHRAIL_BACKEND_READY` | 仅无真实 backend 的契约测试使用；真实部署不得用它掩盖配置问题 |
 
@@ -344,8 +335,7 @@ label，再检查 `/health`、`/readyz`、`/v1/models`、`/v1/voices`。如果 p
 
 - 默认只监听 loopback。非 loopback 需要 API key；v2 LAN 暴露还必须有 TLS、WebSocket
   `Origin` allowlist、HTTP CORS、网段策略和限速。
-- 当前 `/asr` 不具备认证和真实 WLK parity；不得暴露到 LAN/公网，也不得用它替代旧 WLK。
-- `SPEECHRAIL_WLK_STREAMING_URL`、TTS 和 diarization 都是外部/可选 profile；SpeechRail
+- TTS 和 diarization 都是外部/可选 profile；SpeechRail
   不下载、安装、启动或移动这些 runtime/model。
 - 升级按可回退版本目录/commit 执行：先测试和真实 smoke，再切换服务；不要覆盖旧 `.env`
   和 snapshot，不使用破坏性 Git 命令回滚配置。
@@ -357,7 +347,7 @@ label，再检查 `/health`、`/readyz`、`/v1/models`、`/v1/voices`。如果 p
 测试默认使用 fake backend、构造 PCM 和脱敏 fixture；不加载真实模型、不访问网络、不写入
 真实音频。应覆盖 model alias、统一错误 envelope、request ID、上传/帧/缓存限制、队列与
 Resource Governor、worker frame 协议、snapshot preflight、REST 响应格式、Realtime 事件
-顺序、cancel/背压、legacy 边界以及 diarization fail-closed。
+顺序、cancel/背压以及 diarization fail-closed。
 
 行为变更先跑针对性测试：
 
@@ -446,7 +436,6 @@ git diff --check
 | MPS/dtype 不匹配 | `SPEECHRAIL_DEVICE`、`SPEECHRAIL_DTYPE`、worker ready identity | `mps/float16` 或 `cpu/float32` 成对修复；禁止静默 fallback |
 | `diarization_not_available` | `SPEECHRAIL_DIARIZATION_MODEL_PATH`、NeMo runtime、session 是否 opt-in | fail-closed；不要生成伪造的 `speaker` |
 | QwenPaw 失败 | SpeechRail 三个健康端点、REST curl、provider base URL/model、完整重启 | 先证明 REST，再检查 QwenPaw；不要改 LLM 配置 |
-| `/asr` 不能转写 | 这是当前设计限制 | 使用 REST 或 `/v1/realtime`（OpenAI 兼容）/`/v2/realtime`；不能据此宣布 WLK 迁移完成 |
 
 排障记录只保留时间、版本、request ID、错误码、状态码、耗时、字节/时长摘要、
 设备/dtype 和资源摘要。禁止收集 API key、Authorization、音频、Base64、完整 prompt、
@@ -458,8 +447,7 @@ git diff --check
 
 1. `README.md`：当前能力矩阵、快速启动和 API 一览。
 2. `docs/architecture/README.md`：产品范围、数据流、边界和 ADR 导航。
-3. `contracts/openapi.yaml`、`contracts/realtime.md`、`contracts/realtime-openai.md`、
-   `contracts/realtime-v2.md`：事实契约。
+3. `contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/realtime-v2.md`：事实契约。
 4. `docs/users/README.md`：客户端接入和错误语义。
 5. `docs/developers/README.md`：开发、测试和契约变更。
 6. `docs/operations/README.md`：配置、运行、验收和运维。
@@ -469,6 +457,12 @@ git diff --check
 
 代码、契约、文档冲突时，先确认当前实测和 Git 状态，再最小范围修正；不要批量改写
 无关文档或把未验收目标标成已完成。
+
+正式文档 front-matter 中的 `version`/`date` 是文档自身的 metadata：`version` 表示该文档
+最后一次实质更新的发布版本号，`date` 表示该次更新的日期。文档正文没有变化时，不随
+服务版本或日历日期同步更新这两个字段；只有正文实质变更（内容、边界或契约描述改变）
+才需要同步更新 metadata。历史版本号只说明文档最后一次更新的时点，不代表文档描述的能力
+随每次发布自动升级。
 
 ## 10. 交付、并行与数据保护
 

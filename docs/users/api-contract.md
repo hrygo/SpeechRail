@@ -8,14 +8,14 @@ date: 2026-08-31
 # SpeechRail 公共 API 契约
 
 机器可读 REST 事实来源是 [OpenAPI 3.1](../../contracts/openapi.yaml)。本页解释客户端应如何
-使用当前实现；`/v1/realtime` 的事件详情以 [Realtime v1 契约](../../contracts/realtime.md) 为准。
+使用当前实现；`/v1/realtime` 的事件详情以 [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md) 为准。
 `/v2/realtime` 已有可测试的 ASR/TTS state-machine 实现，完整事件与已知运行时边界见
-[Realtime v2 契约](../../contracts/realtime-v2.md)。没有已授权并通过 smoke 的真实 worker 时，
-该端点不得被表述为模型可用。
+[Realtime v2 契约](../../contracts/realtime-v2.md)。真实 worker smoke 通过后，该端点才可
+作为模型可用。
 
-ASR v2 默认仍可使用受限 batch backend 在 flush/commit 后产出结果。仅在明确设置
-`SPEECHRAIL_WLK_STREAMING_URL` 时，它才连接已存在的本地 WLK endpoint 并在 commit 前产出
-持续 partial/completed；该配置不会启动或下载 sidecar。
+ASR v2 默认使用受限 batch backend 在 flush/commit 后产出结果；启用
+`SPEECHRAIL_REALTIME_ASR_BACKEND=native` 后使用本地 Qwen3 流式 worker 产出持续
+partial/completed。外部 WLK streaming endpoint 不再受支持。
 
 ## 地址、身份和版本
 
@@ -29,8 +29,8 @@ TTS: speechrail/qwen3-tts
 
 客户端可直接使用 OpenAI 标准模型名（`whisper-1`、`tts-1`、`gpt-4o-transcribe`、
 `gpt-4o-mini-tts` 等）或 canonical ID 接入；`/v1/models` 列出 canonical 与全部 alias，
-alias 条目带 `resolves_to` 标注其 canonical profile。标准名不代表服务加载 OpenAI 模型，
-实际推理能力以对应 profile 配置和 smoke 为准。
+alias 条目带 `resolves_to` 标注其 canonical profile。标准名归一化到对应 canonical
+profile，不代表服务加载 OpenAI 模型。
 
 删除字段、改变字段类型、错误码语义或 WebSocket 状态机属于破坏性变更，必须进入 `/v2`
 并附迁移说明。`/asr` 不承诺稳定新功能。
@@ -40,7 +40,7 @@ alias 条目带 `resolves_to` 标注其 canonical profile。标准名不代表�
 | 方法 | 路径 | 实际行为 |
 |---|---|---|
 | `GET` | `/health` | 返回进程、版本及 `asr_ready`/`tts_ready` 独立状态 |
-| `GET` | `/readyz` | 至少一个已配置 ASR/TTS 推理入口可接受请求；真实模型仍需 smoke |
+| `GET` | `/readyz` | 至少一个已配置 ASR/TTS 推理入口可接受请求 |
 | `GET` | `/v1/models` | canonical ASR/TTS ID 与兼容 aliases |
 | `GET` | `/v1/voices` | 登记的 TTS preset 目录；TTS worker 未就绪时仍可返回目录并标记 `available=false` |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
@@ -49,7 +49,7 @@ alias 条目带 `resolves_to` 标注其 canonical profile。标准名不代表�
 | `GET` | `/v1/jobs/{job_id}` | 读取同 owner 的任务状态与可选结果引用 |
 | `DELETE` | `/v1/jobs/{job_id}` | 取消 queued 任务，或清除 completed 任务的结果引用 |
 | `WS` | `/v1/realtime` | PCM append 后在一次 commit 做最终转写 |
-| `WS` | `/asr` | 仅 `config` / 空帧 EOF 行为，尚无 legacy ASR |
+| `WS` | `/asr` | 仅 `config` / 空帧 EOF 行为，不提供 legacy ASR |
 
 ## 文件转写
 
@@ -71,8 +71,7 @@ Content-Type: multipart/form-data
 包含 segment 结果；Qwen3 当前不生成 word-level timestamps，`words` 为空。
 
 上传字节数由 `SPEECHRAIL_MAX_UPLOAD_BYTES` 强制限制。`SPEECHRAIL_MAX_AUDIO_SECONDS`
-已是配置字段，但 `0.1.0` 尚未在解码后强制按时长拒绝，因此运营上应同时控制客户端
-音频时长和上传字节数。
+是配置字段，当前不在解码后强制按时长拒绝；运营上应同时控制客户端音频时长和上传字节数。
 
 ## 文本转语音
 
@@ -117,10 +116,9 @@ PCM16。`speed` 范围为 `0.25..4.0`，`language` 默认为 `auto`。没有配�
 
 仅当设置绝对路径 `SPEECHRAIL_JOB_SPOOL_DIR` 时才启用该资源；未设置时返回
 `503 backend_not_ready`。启动时残留的 `running` 记录会标记为
-`failed / worker_interrupted`。当前 `0.1.0 foundation` 已有元数据生命周期与 TTL
-原语。部署代码可显式注入受信任的 `JobProcessor` 后启动 batch runner；它与 realtime 共用
-Resource Governor。首发没有内建的 `input_ref` 路径/URL resolver，因此默认部署不会把
-`queued` 自动解释为可读取的模型输入。
+`failed / worker_interrupted`。部署代码可显式注入受信任的 `JobProcessor` 后启动 batch
+runner；它与 realtime 共用 Resource Governor。默认部署不包含内建的 `input_ref` 路径/URL
+resolver，因此 `queued` 不会自动解释为可读取的模型输入。
 
 ## 响应与错误
 
@@ -151,5 +149,5 @@ Resource Governor。首发没有内建的 `input_ref` 路径/URL resolver，因�
 默认 loopback 且不需要 key。非 loopback host 在 Settings 校验阶段必须有
 `SPEECHRAIL_API_KEY`；REST、`/v1/realtime` 和 `/v2/realtime` 要求
 `Authorization: Bearer <key>`。
-`allowed_origins` 是预留配置，当前版本未安装 CORS middleware；不要把它当作 LAN 防护。
-legacy `/asr` 目前也不校验 header/query token，因此只能用于 loopback 开发验证。
+`allowed_origins` 是预留配置字段，当前版本未安装 CORS middleware；LAN 防护不在当前
+能力范围。legacy `/asr` 不校验 header/query token，仅限 loopback 开发验证。

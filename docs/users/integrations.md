@@ -66,9 +66,9 @@ print(result.text)
 `whisper-1`/`tts-1` 等 OpenAI 标准名可直接作为模型参数使用，它们归一化到
 `speechrail/qwen3-asr-1.7b`/`speechrail/qwen3-tts`。
 
-## Hermes Agent（配置方法，未验收）
+## Hermes Agent（配置方法已文档化，真实 smoke 待验收）
 
-Hermes 的 STT 配置应与聊天模型 endpoint 分离。建议设置其 STT 专用配置：
+Hermes 的 STT 配置与聊天模型 endpoint 分离。设置其 STT 专用配置：
 
 ```dotenv
 STT_OPENAI_BASE_URL=http://127.0.0.1:8201/v1
@@ -76,7 +76,7 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 ```
 
 不要为了 STT 修改全局 `OPENAI_BASE_URL`，否则可能改变 Hermes 聊天流量。此方法依据其
-OpenAI-compatible 转写调用形状，但尚未在当前环境完成真实 Hermes 消息 smoke；实施时先在
+OpenAI-compatible 转写调用形状；真实 Hermes 消息 smoke 尚未在本机完成，实施时先在
 单独配置/进程试运行，再验证聊天功能未受影响。失败时还原这两个 STT 配置并重启 Hermes。
 
 ## `voice-realtime`（已接入 v2 客户端边界）

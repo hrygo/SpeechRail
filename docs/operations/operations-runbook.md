@@ -34,8 +34,6 @@ SPEECHRAIL_DTYPE=float16
 SPEECHRAIL_BACKEND_READY=false
 # Optional: enables durable owner-scoped job metadata, not model batch execution.
 SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
-# Optional external local WLK sidecar; leave commented until its independent smoke passes.
-# SPEECHRAIL_WLK_STREAMING_URL=ws://127.0.0.1:8001
 # Optional Realtime v2 diarization profile. Sortformer enables online anonymous labels;
 # CAM++ additionally enables bounded cross-reconnect anonymous remaps.
 # SPEECHRAIL_DIARIZATION_MODEL_PATH=/absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
@@ -52,8 +50,8 @@ SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 # SPEECHRAIL_TTS_WARMUP_ON_START=true
 ```
 
-非 loopback 绑定必须配置强随机 `SPEECHRAIL_API_KEY`。当前没有 CORS 实现，且 `/asr`
-无认证，因此禁止将服务或该兼容路径直接暴露到 LAN / 公网。`BACKEND_READY` 不是模型
+非 loopback 绑定必须配置强随机 `SPEECHRAIL_API_KEY`。当前没有 CORS 实现，
+因此禁止将服务直接暴露到 LAN / 公网。`BACKEND_READY` 不是模型
 开关；真实部署保持 `false`，由各 profile 成对配置的外部路径触发 worker startup。
 
 `SPEECHRAIL_JOB_SPOOL_DIR` 可选；目录必须在仓库外且由当前运行账户私有。设置后服务会在
@@ -62,9 +60,9 @@ SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 executor；该 processor 和 realtime 共用 Resource Governor。默认没有 `input_ref` 的路径/URL
 resolver，`queued` 不会被自动解释为可读取的模型输入。
 
-`SPEECHRAIL_WLK_STREAMING_URL` 也是可选项。配置后，`/v2/realtime` transcription session
-会连接已运行的外部 WLK endpoint，并在服务内归一化 partial/completed 事件；SpeechRail 不
-管理该进程。两条 TTS 外部路径同时配置后会启动一个隔离 worker；该 runtime 必须已安装兼容
+`SPEECHRAIL_WLK_STREAMING_URL` 不再受支持；实时流式 ASR 只使用
+`SPEECHRAIL_REALTIME_ASR_BACKEND=native`。两条 TTS 外部路径同时配置后会启动一个隔离
+worker；该 runtime 必须已安装兼容
 依赖并具有完整 local snapshot，服务本身始终设置离线环境变量。
 
 ## wheel 本地安装
@@ -129,7 +127,6 @@ SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEE
 |---|---|
 | `Qwen/Qwen3-ASR-1.7B` snapshot | 配置 ASR 路径时加载一份到隔离 Qwen3 worker |
 | MLX Qwen3-TTS VoiceDesign snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker；公开 preset 为 `default`、`warm`、`bright`、`calm` |
-| WLK sidecar | 从不由 SpeechRail 启动；仅配置 endpoint 时作为 v2 流式 ASR transport |
 | Sortformer diarization snapshot | 仅配置 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 后按首个 diarization session 惰性载入；仅产生匿名 label |
 | CAM++ embedding snapshot | 仅同时配置 CAM++ 路径和 Sortformer profile 时，按首次需要短片段 embedding 的请求惰性载入；只保留有界短期匿名质心 |
 | PyTorch + `qwen-asr` | 仅专用 worker Python runtime |
@@ -215,5 +212,4 @@ API key、Authorization、音频、Base64、完整 prompt 或转写正文。
 
 服务回滚为：停止新进程，恢复上一个已验证版本工作目录与 `.env`，启动后完成 REST smoke。
 QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。`voice-realtime` adapter
-已经实现但未完成真实切换；启用、影子、回滚均须使用[迁移 Runbook](migration-runbook.md)，
-不能假定 `/asr` 已有 WLK 转写 parity。
+已经实现；启用、影子、回滚均须使用[迁移 Runbook](migration-runbook.md)。

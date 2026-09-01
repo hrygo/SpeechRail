@@ -6,15 +6,17 @@
 
 1. [产品范围](product-scope.md)：确认 SpeechRail 拥有什么、不拥有什么，以及各类调用方的适配度。
 2. [总体架构](architecture.md)：了解请求数据流、进程边界、目录职责和当前/目标行为的区别。
-3. [当前边界与剩余风险](current-boundaries.md)：确认哪些能力已验证、哪些仍需真实验收或实现。
+3. [当前边界与剩余风险](current-boundaries.md)：确认已验证能力与未完成的验收门。
 4. [架构决策记录](../decisions/README.md)：阅读重大设计选择及其替代方案。
 
 ## 事实来源
 
 - REST 的机器可读事实来源是 [OpenAPI 3.1](../../contracts/openapi.yaml)。
-- WebSocket 的当前 v1 与 v2 事件事实来源是 [Realtime v1](../../contracts/realtime.md) 和 [Realtime v2](../../contracts/realtime-v2.md)。
+- WebSocket 的当前事件事实来源是 [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md)（`/v1/realtime`）和 [Realtime v2 契约](../../contracts/realtime-v2.md)（`/v2/realtime`）。
 - 重大架构理由记录在 [ADR](../decisions/README.md)；本目录不复制 ADR 正文。
 
 ## 使用规则
 
-当前代码和契约优先于历史设计。文档中的“目标”“待验收”或“未来”不代表能力已经上线；需要发布判断时，同时核对[开发者测试与验收](../developers/testing-acceptance.md)和[运维 Runbook](../operations/operations-runbook.md)。
+当前代码和契约优先于历史设计。文档中的“验收门”“范围外”或“待实现”表示能力尚未上线；
+需要发布判断时，同时核对[开发者测试与验收](../developers/testing-acceptance.md)和
+[运维 Runbook](../operations/operations-runbook.md)。

@@ -21,17 +21,16 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `GET /v1/voices` | 当前代码已注册 | 返回 TTS preset 目录；TTS worker 未就绪时条目可标记 `available=false`。运行态 404 应先核对服务进程、端口/base URL 和重启状态 |
 | `POST /v1/audio/speech` | 可用（本机已验证） | OpenAI-compatible 整句 TTS；已配置外部 TTS runtime 时输出 24 kHz PCM16 |
 | `POST/GET/DELETE /v1/jobs` | 可用 | owner-scoped durable job 元数据；执行器需由部署注入受信任 processor |
-| `WS /v2/realtime` | 可用（本机已验证 native） | ASR partial/completed 与 TTS audio delta、取消和背压；`SPEECHRAIL_REALTIME_ASR_BACKEND=native` 时驱动常驻 Qwen3 流式 worker（本机 1.7B/MPS windowed 已 smoke）；windowed 手动 flush 可能无 delta，须以 commit 终结 |
-| `WS /v1/realtime` | 可用（OpenAI 兼容） | 标准 OpenAI Realtime 协议的 ASR/TTS 子集；`openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入；旧 batch 协议迁移到 `/v1/realtime/legacy`（deprecated） |
-| `WS /asr` | 兼容骨架 | 只保留握手 `config` 与空 PCM EOF → `ready_to_stop`，尚不能替代旧 WLK 转写 |
-| QwenPaw | 已完成本机 smoke（2026-08-31） | 使用 `whisper_api` 接入 `/v1`；再次切换前仍须按用户文档复验 |
-| Hermes Agent | 未验收 | 已提供 STT 专用配置方法；不得修改其全局聊天 endpoint |
-| `voice-realtime` | v2/REST adapter 已实现 | ASR 通过 v2，TTS 通过 v2/REST；会议、播放、UI、数据库和 LLM 仍由调用方拥有，真实闭环需部署验收 |
+| `WS /v2/realtime` | 可用（本机已验证） | ASR partial/completed 与 TTS audio delta、取消和背压；`SPEECHRAIL_REALTIME_ASR_BACKEND=native` 时驱动常驻 Qwen3 流式 worker（本机 1.7B/MPS windowed 已 smoke）；windowed 手动 flush 可能无 delta，须以 commit 终结 |
+| `WS /v1/realtime` | 可用（OpenAI 兼容） | 标准 OpenAI Realtime 协议的 ASR/TTS 子集；`openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入；连续会话与本机真实 smoke 已验证 |
+| QwenPaw | 已完成本机 smoke（2026-08-31） | 使用 `whisper_api` 接入 `/v1`；再次切换前须按用户文档复验 |
+| Hermes Agent | 配置方法已文档化 | 提供 STT 专用配置方法；真实 Hermes smoke 待验收，不修改其全局聊天 endpoint |
+| `voice-realtime` | v2/REST adapter 已实现 | ASR 通过 v2，TTS 通过 v2/REST；会议、播放、UI、数据库和 LLM 由调用方拥有，真实端到端闭环待部署验收 |
 | `launchd` 服务 CLI | 已实现（macOS） | `speechrail service` 显式管理当前用户 LaunchAgent；不会自动安装或启用 |
 
 客户端可直接使用 OpenAI 标准模型名（`whisper-1`、`tts-1` 等）接入；`/v1/models` 列出
 canonical 与全部兼容 alias，alias 条目带 `resolves_to` 标注其 canonical profile。标准名
-不代表服务加载 OpenAI 模型，实际推理能力以对应 profile 配置和 smoke 为准。
+表示归一化到对应 canonical profile，不代表服务加载 OpenAI 模型。
 
 ## 快速开始
 
@@ -141,8 +140,6 @@ python3 scripts/verify_release.py \
 | `POST` / `GET` / `DELETE` | `/v1/jobs` / `/v1/jobs/{id}` | durable ASR/TTS job 生命周期 |
 | `WS` | `/v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集），标准 SDK 可接入 |
 | `WS` | `/v2/realtime` | 新客户端的 ASR/TTS Realtime v2（SpeechRail-native） |
-| `WS` | `/v1/realtime/legacy` | 已废弃的 commit 后批量转写协议 |
-| `WS` | `/asr` | 仅旧客户端迁移期间的有限 EOF 协议 |
 
 REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/openapi.yaml) 为准；v2 的
 状态机与限制以 [Realtime v2 契约](contracts/realtime-v2.md) 为准。
@@ -163,13 +160,10 @@ REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/op
   key 不进入 URL、配置示例或普通日志。
 - 模型 snapshot 必须是仓库外绝对路径；服务不会在请求中下载模型或访问远程音频 URL。
 - 上传音频只在内存中处理，`ffmpeg` 以固定参数解码；不把音频、完整转写、提示词或密钥写入日志。
-- `/asr` 当前未实现认证，禁止将其暴露到 LAN 或公网。
 
 ## 兼容策略
 
-REST 接口优先保持向后兼容；破坏性 API 变更使用 `/v2` 并提供迁移说明。`/asr`
-是临时兼容面，不是新客户端接口，也没有确定的删除日期——删除必须以
-`voice-realtime` 完成替代方案与回滚演练为前提。
+REST 接口优先保持向后兼容；破坏性 API 变更使用 `/v2` 并提供迁移说明。
 
 ## 许可与变更记录
 

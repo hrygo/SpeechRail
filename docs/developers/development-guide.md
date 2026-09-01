@@ -73,7 +73,7 @@ prompt。不要从 `voice-realtime` 复制这些职责进来。
 
 ## 5. 契约变更流程
 
-1. 先更新 `contracts/openapi.yaml`、`contracts/realtime.md` 或 `contracts/realtime-v2.md`，再修改路由/事件代码与测试。
+1. 先更新 `contracts/openapi.yaml`、`contracts/realtime-openai.md` 或 `contracts/realtime-v2.md`，再修改路由/事件代码与测试。
 2. 可选请求字段、可选响应字段和新端点可以作为 `/v1` 的兼容扩展。
 3. 删除字段、改变类型、错误码语义或 WS 状态机需要 `/v2`、迁移说明与兼容期。
 4. 所有公共错误保持 `error.message/type/code/request_id/retryable` envelope；不要暴露

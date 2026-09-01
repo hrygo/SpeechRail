@@ -32,7 +32,8 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 专用离线 Python worker 在 `127.0.0.1:8201` 启动；legacy `/asr` 已禁用，未配置 WLK sidecar。
 QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:8201/v1`，模型为
 `speechrail/qwen3-asr-1.7b`。voice-realtime 的字幕/会议与交互均显式配置
-`speechrail-realtime-v2` 和 `ws://127.0.0.1:8201/v2/realtime`。
+`speechrail-realtime-v2` 和 `ws://127.0.0.1:8201/v2/realtime`。legacy `/asr` 与
+`/v1/realtime/legacy` 端点在 v1.0.0 已移除。
 
 已完成 REST、QwenPaw workspace 转写、Realtime session commit 和 Pipecat VAD turn 的本机真实
 模型冒烟。验收只记录成功状态、request ID、时延和非空断言；不保存音频或转写正文。
@@ -40,7 +41,8 @@ QwenPaw 保持 `whisper_api`，其唯一转写 endpoint 为 `http://127.0.0.1:82
 ## `voice-realtime`：已切换并核验
 
 主路线已由 ADR-0006 固定为 `/v2/realtime` 直迁移。当前 SpeechRail legacy `/asr` 已禁用，
-没有为 SpeechRail 配置 WLK sidecar，也没有活动的 ASR fallback。
+没有为 SpeechRail 配置 WLK sidecar，也没有活动的 ASR fallback。legacy `/asr` 与
+`/v1/realtime/legacy` 端点在 v1.0.0 已移除。
 
 `voice-realtime` 使用以下已实现的边界：
 
