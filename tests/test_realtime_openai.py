@@ -16,7 +16,7 @@ from speechrail.compatibility.openai_realtime import (
     transcription_segment,
 )
 from speechrail.config import Settings
-from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     DiarizationAssignment,
     DiarizationSpeaker,
@@ -29,6 +29,7 @@ from speechrail.domain.ports import (
     StreamingAsrEvent,
     TranscriptionRequest,
 )
+from speechrail.domain.realtime_v2 import RealtimeV2Error
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 
 
@@ -172,6 +173,16 @@ class FakeDiarizationEngine:
         session = FakeDiarizationSession()
         self.sessions.append(session)
         return session
+
+
+class FailingDiarizationSession(FakeDiarizationSession):
+    async def annotate(self, segments):
+        raise RealtimeV2Error("invalid diarization output", code="diarization_invalid_output")
+
+
+class FailingDiarizationEngine:
+    def create(self, *, config):
+        return FailingDiarizationSession()
 
 
 def _client(
@@ -611,6 +622,70 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
     assert error["error"]["code"] == "diarization_not_available"
 
 
+def test_openai_realtime_reports_diarization_backend_error() -> None:
+    client, _ = _client(
+        segments=(TranscriptSegment(id="seg_1", start_ms=0, end_ms=100, text="你好"),),
+        diarization_engine=FailingDiarizationEngine(),
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"diarization": {"enabled": True}}},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "error":
+                break
+
+    assert event["error"]["code"] == "diarization_invalid_output"
+
+
+def test_openai_realtime_clear_discards_active_audio_session() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        cleared = socket.receive_json()
+
+    assert cleared["type"] == "input_audio_buffer.cleared"
+    assert len(factory.released) == 1
+
+
+def test_openai_realtime_clear_closes_diarization_session() -> None:
+    diarization = FakeDiarizationEngine()
+    client, _ = _client(diarization_engine=diarization)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"diarization": {"enabled": True}}},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        assert socket.receive_json()["type"] == "input_audio_buffer.cleared"
+
+    assert diarization.sessions[0].closed is True
+
+
 def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None:
     client, _ = _client(partials=("你", "你好", "你好啊"))
     with client.websocket_connect("/v1/realtime") as socket:
@@ -652,6 +727,44 @@ def test_openai_session_update_rejects_non_string_language_hints() -> None:
         )
 
 
+def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
+    with pytest.raises(RealtimeAdapterError, match="timestamp_granularities"):
+        apply_session_update(
+            {
+                "type": "session.update",
+                "session": {
+                    "input_audio_transcription": {"timestamp_granularities": ["character"]},
+                },
+            },
+            session_id="realtime_test",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            tts_model="speechrail/qwen3-tts",
+            tts_ready=True,
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+            registered_tts=frozenset({"speechrail/qwen3-tts"}),
+        )
+
+
+def test_openai_session_update_rejects_invalid_diarization_config() -> None:
+    with pytest.raises(RealtimeAdapterError, match="speaker_count_hint"):
+        apply_session_update(
+            {
+                "type": "session.update",
+                "session": {
+                    "input_audio_transcription": {
+                        "diarization": {"enabled": True, "speaker_count_hint": 9},
+                    },
+                },
+            },
+            session_id="realtime_test",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            tts_model="speechrail/qwen3-tts",
+            tts_ready=True,
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+            registered_tts=frozenset({"speechrail/qwen3-tts"}),
+        )
+
+
 def test_openai_realtime_rejects_invalid_api_key_at_handshake() -> None:
     client, _ = _client(api_key="secret")
     with pytest.raises(WebSocketDisconnect), client.websocket_connect("/v1/realtime"):
@@ -671,6 +784,39 @@ def test_openai_realtime_rejects_when_no_backend_is_ready() -> None:
 
     with pytest.raises(WebSocketDisconnect), TestClient(app).websocket_connect("/v1/realtime"):
         pass
+
+
+def test_openai_realtime_rejects_text_item_when_tts_is_not_ready() -> None:
+    factory = FakeStreamingFactory()
+    settings = Settings(
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        diarization_model_path=None,
+        diarization_embedding_model_path=None,
+    )
+    services = build_app_services(
+        settings,
+        AppOverrides(v2_transcriber=FakeTranscriber(), realtime_asr_factory=factory),
+    )
+    app = FastAPI()
+    app.include_router(create_openai_realtime_router(services))
+
+    with TestClient(app).websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        error = socket.receive_json()
+
+    assert error["error"]["code"] == "backend_not_ready"
 
 
 def test_openai_tts_invalid_audio_emits_stable_error() -> None:
