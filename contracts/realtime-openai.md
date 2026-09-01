@@ -28,31 +28,34 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 语义 |
 |---|---|
-| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 只支持 `null`/`manual`（`server_vad`/`semantic_vad` → `unsupported_turn_detection`）；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`。返回 `session.updated` |
+| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 只支持 `null`/`manual`（`server_vad`/`semantic_vad` → `unsupported_turn_detection`）；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；语言通过 OpenAI 标准 `input_audio_transcription.language` 或旧 `language` 字段。返回 `session.updated` |
 | `input_audio_buffer.append` | 追加 base64 PCM16；返回 `input_audio_buffer.committed` 只在 commit 时 |
-| `input_audio_buffer.commit` | 触发流式转写终态；发送 `input_audio_buffer.committed` + `conversation.item.created` + `conversation.item.input_audio_transcription.completed`/`failed` |
+| `input_audio_buffer.commit` | 触发流式转写终态；发送 `input_audio_buffer.committed` + `conversation.item.created` + `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）+ `completed`/`failed` |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；返回 `input_audio_buffer.cleared` |
-| `conversation.item.create` | 仅接受单个 `role=user` 的 `input_text` 内容，作为 TTS 输入（需 TTS ready） |
+| `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
+| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 合成；无待处理文本 → `invalid_state` |
 | `response.cancel` | 取消进行中的 TTS response |
 
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
-`conversation.item.truncate`、`response.create`（除非通过
-`conversation.item.create` 文本项驱动 TTS）。
+`conversation.item.truncate`。
 
 ## 服务端事件
 
 | 事件 | 说明 |
 |---|---|
-| `session.created` | 连接建立后立即发送；声明实际能力（modalities、16 kHz PCM16、`turn_detection: null`）与 `capabilities` 列表 |
+| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）与 `capabilities` 列表 |
 | `conversation.created` | 会话容器；SpeechRail 不实现可查询/可编辑的消息历史 |
 | `session.updated` | `session.update` 的确认 |
-| `input_audio_buffer.committed` / `cleared` | 缓冲状态变化 |
-| `conversation.item.created` | 每次 committed 输入创建临时 item（item ID 仅当前 WebSocket 会话有效） |
-| `conversation.item.input_audio_transcription.completed` / `failed` | ASR 终态；`completed` 在 commit 后必然发送 |
-| `response.created` / `response.output_item.added` | TTS response 开始 |
-| `response.output_audio.delta` / `done` | TTS 音频块（base64）；输出为 24 kHz PCM16 |
-| `response.output_audio_transcript.done` | TTS 输入文本回显；不代表 ASR 结果 |
-| `response.done` | TTS response 终态 |
+| `input_audio_buffer.committed` / `cleared` | 缓冲状态变化；`committed` 携带 `item_id` |
+| `conversation.item.created` | 每次 committed 输入或文本 item 创建（item ID 仅当前 WebSocket 会话有效）；item 含 `object: "realtime.item"` |
+| `conversation.item.input_audio_transcription.delta` | partial 转写（native 流式后端产出时）；携带 `item_id`/`content_index`/`delta` |
+| `conversation.item.input_audio_transcription.completed` / `failed` | ASR 终态；`completed` 携带 `item_id`/`content_index`/`transcript`/`usage`，在 commit 后必然发送 |
+| `response.created` | TTS response 开始；`response.id` 用于关联后续事件 |
+| `response.output_item.added` / `done` | TTS 输出 item 生命周期 |
+| `response.content_part.added` / `done` | TTS 输出音频 part 生命周期 |
+| `response.output_audio.delta` / `done` | TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
+| `response.output_audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
+| `response.done` | TTS response 终态（`status: completed`） |
 | `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "..."}}` |
 
 ## 转写语义

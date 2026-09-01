@@ -374,6 +374,11 @@ components:
           type: string
           description: BCP-47-style or provider-compatible language hint.
           example: zh
+        languages:
+          type: array
+          items:
+            type: string
+          description: Multi-language hint list; the first entry is used when language is absent.
         prompt:
           type: string
           maxLength: 2000
@@ -382,6 +387,44 @@ components:
           type: string
           enum: [json, verbose_json, text, srt, vtt]
           default: json
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          description: Sampling temperature hint; accepted for OpenAI parity.
+        timestamp_granularities:
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+          description: Only meaningful with response_format=verbose_json.
+        stream:
+          type: boolean
+          default: false
+          description: Rejected with stream_unsupported; SpeechRail returns whole bodies.
+        chunking_strategy:
+          type: string
+          description: Rejected with chunking_strategy_unsupported; SpeechRail transcribes whole files.
+        include:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+        keywords:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+        known_speaker_names:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+        known_speaker_references:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
     SpeechRequest:
       type: object
       required: [model, input, voice]
@@ -411,6 +454,14 @@ components:
           minLength: 1
           maxLength: 64
           default: auto
+        instructions:
+          type: string
+          maxLength: 100000
+          description: Accepted and ignored for OpenAI SDK parity; Qwen3-TTS has no instruction channel.
+        stream_format:
+          type: string
+          enum: [audio]
+          description: Only audio is accepted; other values are rejected with stream_format_unsupported.
     JobCreateRequest:
       type: object
       additionalProperties: false
