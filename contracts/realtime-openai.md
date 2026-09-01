@@ -22,23 +22,24 @@ ws://127.0.0.1:8201/v1/realtime
   - `speechrail/qwen3-asr-1.7b`（canonical）
   - `whisper-1`、`gpt-4o-transcribe`、`gpt-4o-mini-transcribe`、`gpt-transcribe`、
     `gpt-live-transcribe` → ASR 兼容 alias
+  - `gpt-4o-transcribe-diarize` → 需要可用 diarization profile 的 ASR alias
   - `speechrail/qwen3-tts`（canonical，需 TTS backend ready）
   - `tts-1`、`tts-1-hd`、`gpt-4o-mini-tts` → TTS 兼容 alias
   - 未登记模型返回 `model_not_found`。
-- `/v1/models` 列出 canonical 与全部兼容 alias，alias 条目带 `resolves_to` 标注其
-  canonical profile。
+- `/v1/models` 列出 canonical 与当前可用的兼容 alias，alias 条目带 `resolves_to` 标注其
+  canonical profile；`gpt-4o-transcribe-diarize` 仅在 diarization profile 可用时出现。
 
 ## 支持的客户端事件
 
 | 事件 | 语义 |
 |---|---|
-| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 只支持 `null`/`manual`（`server_vad`/`semantic_vad` → `unsupported_turn_detection`）；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；语言通过 OpenAI 标准 `input_audio_transcription.language` 或旧 `language` 字段。返回 `session.updated` |
+| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 只支持 `null`/`manual`（`server_vad`/`semantic_vad` → `unsupported_turn_detection`）；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`keywords`、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。返回 `session.updated` |
 | `input_audio_buffer.append` | 追加 base64 PCM16；返回 `input_audio_buffer.committed` 只在 commit 时 |
 | `input_audio_buffer.commit` | 触发流式转写终态；发送 `input_audio_buffer.committed` + `conversation.item.created` + `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）+ `completed`/`failed` |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
 | `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 合成；无待处理文本 → `invalid_state` |
-| `response.cancel` | 取消进行中的 TTS response |
+| `response.cancel` | 取消进行中的 TTS response；丢弃未发送音频并返回 `response.done`（`status: cancelled`） |
 
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
 `conversation.item.truncate`。
@@ -53,17 +54,25 @@ ws://127.0.0.1:8201/v1/realtime
 | `input_audio_buffer.committed` / `cleared` | 缓冲状态变化；`committed` 携带 `item_id` |
 | `conversation.item.created` | 每次 committed 输入或文本 item 创建（item ID 仅当前 WebSocket 会话有效）；item 含 `object: "realtime.item"` |
 | `conversation.item.input_audio_transcription.delta` | partial 转写（native 流式后端产出时）；携带 `item_id`/`content_index`/`delta` |
+| `conversation.item.input_audio_transcription.segment` | 启用 diarization 且 backend 返回已验证 segment 时发送；携带 `id`/`text`/`speaker`/`start`/`end`/`item_id`/`content_index`，时间单位为秒；未启用时不伪造 speaker |
 | `conversation.item.input_audio_transcription.completed` / `failed` | ASR 终态；`completed` 携带 `item_id`/`content_index`/`transcript`/`usage`，在 commit 后必然发送 |
 | `response.created` | TTS response 开始；`response.id` 用于关联后续事件 |
 | `response.output_item.added` / `done` | TTS 输出 item 生命周期 |
 | `response.content_part.added` / `done` | TTS 输出音频 part 生命周期 |
 | `response.output_audio.delta` / `done` | TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
 | `response.output_audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
-| `response.done` | TTS response 终态（`status: completed`） |
-| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "..."}}` |
+| `response.done` | TTS response 终态（`status: completed` 或 `cancelled`） |
+| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "..."}}`；分人 profile 不可用时 `code=diarization_not_available` |
+
+每个服务端事件还带顶层 `event_id`、`session_id` 和从 1 开始单调递增的 `sequence`。
+`event_id` 在一个连接内唯一；断线不会恢复旧事件，重连会创建新的 session。
 
 ## 转写语义
 
 `conversation.item.input_audio_transcription.delta`（partial）仅在 native 流式后端
 可靠产出 partial 时发送；windowed 后端的手动 flush 可能无 delta，客户端必须依赖
 `commit` 后的 `completed` 作为最终结果，这与 OpenAI 的 manual turn detection 语义一致。
+
+`/v2/realtime` 是 SpeechRail-native 兼容入口，当前保留用于迁移回退并标记 deprecated；
+voice-realtime 完成 `/v1/realtime` 联调后再移除其客户端适配，不应依赖 v2 私有事件作为
+`/v1/realtime` 的隐式降级路径。
