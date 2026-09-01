@@ -6,7 +6,7 @@
 
 1. [用户与客户端接入](integrations.md)：按 QwenPaw、OpenAI SDK、Hermes 和 `voice-realtime` 选择接入方式。
 2. [公共 API 契约](api-contract.md)：确认模型 ID、端点、请求字段、错误和认证行为。
-3. [Realtime v1 契约](../../contracts/realtime.md)或 [Realtime v2 契约](../../contracts/realtime-v2.md)：需要 WebSocket 时阅读完整事件顺序和限制。
+3. [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md)（标准客户端接入 `/v1/realtime`）、[Realtime 契约](../../contracts/realtime.md)（legacy）或 [Realtime v2 契约](../../contracts/realtime-v2.md)：需要 WebSocket 时阅读完整事件顺序和限制。
 4. 接入前先完成[运维 Runbook 的健康检查与 smoke](../operations/operations-runbook.md)。
 
 ## 当前公共身份

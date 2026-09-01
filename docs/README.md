@@ -31,7 +31,7 @@
 ## 事实来源层级
 
 1. 当前代码、测试和实际运行结果。
-2. [OpenAPI 契约](../contracts/openapi.yaml)与 [Realtime 契约](../contracts/realtime.md)、[Realtime v2 契约](../contracts/realtime-v2.md)。
+2. [OpenAPI 契约](../contracts/openapi.yaml)与 [Realtime 契约](../contracts/realtime.md)、[OpenAI Realtime 兼容契约](../contracts/realtime-openai.md)、[Realtime v2 契约](../contracts/realtime-v2.md)。
 3. [正式架构/用户/开发/运维文档](#先按角色进入)和 [ADR](decisions/README.md)。
 4. [归档过程材料](archive/README.md)仅用于历史追溯。
 

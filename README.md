@@ -22,7 +22,7 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `POST /v1/audio/speech` | 可用（本机已验证） | OpenAI-compatible 整句 TTS；已配置外部 TTS runtime 时输出 24 kHz PCM16 |
 | `POST/GET/DELETE /v1/jobs` | 可用 | owner-scoped durable job 元数据；执行器需由部署注入受信任 processor |
 | `WS /v2/realtime` | 可用（本机已验证 native） | ASR partial/completed 与 TTS audio delta、取消和背压；`SPEECHRAIL_REALTIME_ASR_BACKEND=native` 时驱动常驻 Qwen3 流式 worker（本机 1.7B/MPS windowed 已 smoke）；windowed 手动 flush 可能无 delta，须以 commit 终结 |
-| `WS /v1/realtime` | 有限可用 | 收集 PCM 后在一次 `commit` 时批量转写；当前不产生增量 delta |
+| `WS /v1/realtime` | 可用（OpenAI 兼容） | 标准 OpenAI Realtime 协议的 ASR/TTS 子集；`openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入；旧 batch 协议迁移到 `/v1/realtime/legacy`（deprecated） |
 | `WS /asr` | 兼容骨架 | 只保留握手 `config` 与空 PCM EOF → `ready_to_stop`，尚不能替代旧 WLK 转写 |
 | QwenPaw | 已完成本机 smoke（2026-08-31） | 使用 `whisper_api` 接入 `/v1`；再次切换前仍须按用户文档复验 |
 | Hermes Agent | 未验收 | 已提供 STT 专用配置方法；不得修改其全局聊天 endpoint |
@@ -138,8 +138,9 @@ python3 scripts/verify_release.py \
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS（`wav` / `pcm`） |
 | `POST` / `GET` / `DELETE` | `/v1/jobs` / `/v1/jobs/{id}` | durable ASR/TTS job 生命周期 |
-| `WS` | `/v2/realtime` | 新客户端的 ASR/TTS Realtime v2 |
-| `WS` | `/v1/realtime` | 16 kHz/单声道/PCM16 的 commit 后批量转写 |
+| `WS` | `/v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集），标准 SDK 可接入 |
+| `WS` | `/v2/realtime` | 新客户端的 ASR/TTS Realtime v2（SpeechRail-native） |
+| `WS` | `/v1/realtime/legacy` | 已废弃的 commit 后批量转写协议 |
 | `WS` | `/asr` | 仅旧客户端迁移期间的有限 EOF 协议 |
 
 REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/openapi.yaml) 为准；v2 的

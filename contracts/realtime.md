@@ -1,15 +1,17 @@
 # SpeechRail Realtime WebSocket 契约
 
-本文件只描述当前已实现的 v1。已审查但尚未实现的目标协议见
-[Realtime v2 设计契约](realtime-v2.md)；客户端不得在 v2 上线前依赖该设计契约。
+本文件描述已迁移到 `/v1/realtime/legacy` 的旧 batch 协议（deprecated）以及
+[Realtime v2 设计契约](realtime-v2.md)。标准 OpenAI Realtime 接入见
+[OpenAI Realtime 兼容契约](realtime-openai.md)。
 
-`WS /v1/realtime` 是面向新客户端的 PCM 转写协议。事件名称参考 OpenAI Realtime
+`WS /v1/realtime/legacy` 是面向旧客户端的 PCM 转写协议。事件名称参考 OpenAI Realtime
 transcription，但本版本的语义是“收集音频后一次 batch 转写”，不是持续 partial streaming。
+该路径已废弃：`/v1/realtime` 现在承载 OpenAI Realtime-compatible 协议。
 
 ## 连接与认证
 
 ```text
-ws://127.0.0.1:8201/v1/realtime
+ws://127.0.0.1:8201/v1/realtime/legacy
 ```
 
 若配置了 API key，握手必须携带 `Authorization: Bearer <key>`。仅接受 JSON 文本事件；
