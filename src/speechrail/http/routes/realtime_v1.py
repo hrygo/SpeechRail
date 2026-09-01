@@ -1,4 +1,9 @@
-"""Realtime v1 WebSocket route: append-then-commit batch transcription."""
+"""Realtime v1 WebSocket route: append-then-commit batch transcription.
+
+Deprecated: /v1/realtime now carries the OpenAI Realtime-compatible protocol.
+This legacy batch protocol moved to /v1/realtime/legacy and is kept only for
+existing consumers until they migrate.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ def create_realtime_v1_router(services: AppServices) -> APIRouter:
     transcribe = services.transcribe
     admission = services.admission
 
-    @router.websocket("/v1/realtime")
+    @router.websocket("/v1/realtime/legacy")
     async def realtime(websocket: WebSocket) -> None:
         if transcribe is None:
             await websocket.close(code=1013, reason="SpeechRail backend is not ready")

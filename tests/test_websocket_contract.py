@@ -30,7 +30,7 @@ def test_realtime_websocket_accepts_ordered_events_and_completes_once() -> None:
             transcribe=_backend,
         )
     )
-    with client.websocket_connect("/v1/realtime") as socket:
+    with client.websocket_connect("/v1/realtime/legacy") as socket:
         socket.send_json(
             {
                 "type": "transcription_session.update",
@@ -65,7 +65,7 @@ def test_v1_realtime_closes_1013_when_no_backend_is_configured() -> None:
 
     with (
         pytest.raises(WebSocketDisconnect) as exc_info,
-        client.websocket_connect("/v1/realtime"),
+        client.websocket_connect("/v1/realtime/legacy"),
     ):
         pass
 
@@ -82,7 +82,7 @@ def test_v1_realtime_closes_1008_when_bearer_key_is_invalid() -> None:
 
     with (
         pytest.raises(WebSocketDisconnect) as exc_info,
-        client.websocket_connect("/v1/realtime"),
+        client.websocket_connect("/v1/realtime/legacy"),
     ):
         pass
 
