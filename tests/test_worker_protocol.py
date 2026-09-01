@@ -4,7 +4,14 @@ from pathlib import Path
 import pytest
 
 from speechrail.backends.qwen3_worker import WorkerIdentity, serve
-from speechrail.runtime.worker_protocol import ProtocolError, read_frame, write_frame
+from speechrail.runtime.worker_protocol import (
+    MAX_FRAME_BYTES,
+    ProtocolError,
+    decode_frame_body,
+    encode_frame,
+    read_frame,
+    write_frame,
+)
 
 
 class _FakeEngine:
@@ -30,6 +37,41 @@ def test_framed_protocol_rejects_bad_length_and_eof() -> None:
         read_frame(BytesIO(b"\x00\x00"))
     with pytest.raises(ProtocolError, match="size"):
         read_frame(BytesIO(b"\xff\xff\xff\xff"))
+
+
+def test_codec_round_trips_an_object_payload() -> None:
+    frame = encode_frame({"version": 1, "type": "transcribe"})
+
+    assert decode_frame_body(frame[4:]) == {"version": 1, "type": "transcribe"}
+    assert len(frame) == 4 + len(frame[4:])
+
+
+def test_codec_rejects_non_object_json() -> None:
+    with pytest.raises(ProtocolError, match="object"):
+        decode_frame_body(b"[1, 2, 3]")
+
+
+def test_codec_rejects_empty_body() -> None:
+    with pytest.raises(ProtocolError, match="size"):
+        decode_frame_body(b"")
+
+
+def test_codec_rejects_oversize_body() -> None:
+    oversize = b"x" * (MAX_FRAME_BYTES + 1)
+    with pytest.raises(ProtocolError, match="size"):
+        decode_frame_body(oversize)
+    with pytest.raises(ProtocolError, match="size"):
+        encode_frame({"blob": "x" * (MAX_FRAME_BYTES + 1)})
+
+
+def test_codec_rejects_invalid_utf8() -> None:
+    with pytest.raises(ProtocolError, match="JSON"):
+        decode_frame_body(b"\xff\xfe\xff")
+
+
+def test_codec_rejects_truncated_json_body() -> None:
+    with pytest.raises(ProtocolError, match="JSON"):
+        decode_frame_body(b'{"type": "transcri')
 
 
 def test_worker_reuses_one_loaded_engine_for_framed_requests() -> None:
