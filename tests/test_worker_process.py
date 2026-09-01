@@ -1,0 +1,187 @@
+"""Fault-matrix tests for the shared async framed worker transport."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+from collections.abc import Callable, Coroutine
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from speechrail.runtime.worker_process import (
+    AsyncFramedWorkerProcess,
+    WorkerProcessSpec,
+    offline_environment,
+)
+from speechrail.runtime.worker_protocol import ProtocolError
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+FAKE_WORKER = Path(__file__).resolve().parent / "fixtures" / "fake_framed_worker.py"
+
+
+def _spec(
+    tmp_path: Path, *, io_timeout: float = 5.0, shutdown_timeout: float = 2.0
+) -> WorkerProcessSpec:
+    del tmp_path
+    return WorkerProcessSpec(
+        command=(sys.executable, str(FAKE_WORKER)),
+        cwd=REPOSITORY_ROOT,
+        env=offline_environment(REPOSITORY_ROOT),
+        io_timeout_seconds=io_timeout,
+        shutdown_timeout_seconds=shutdown_timeout,
+    )
+
+
+def _run(coro_factory: Callable[[], Coroutine[Any, Any, None]]) -> None:
+    asyncio.run(coro_factory())
+
+
+def test_offline_environment_inherits_only_allowlisted_keys() -> None:
+    environment = offline_environment(REPOSITORY_ROOT)
+
+    assert environment["PYTHONPATH"].endswith("src")
+    assert environment["HF_HUB_OFFLINE"] == "1"
+    assert environment["PYTORCH_ENABLE_MPS_FALLBACK"] == "0"
+    assert environment["TOKENIZERS_PARALLELISM"] == "false"
+
+
+def test_send_and_receive_require_a_started_process(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="worker_not_started"):
+            await transport.send({"action": "echo"})
+        with pytest.raises(RuntimeError, match="worker_not_started"):
+            await transport.receive()
+
+    _run(scenario)
+
+
+def test_start_is_idempotent_and_frames_round_trip(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            first = transport._process
+            await transport.start()
+            assert transport._process is first
+            await transport.send({"action": "echo", "text": "hello"})
+            assert await transport.receive() == {"type": "echo", "text": "hello"}
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_receive_times_out_when_child_never_answers(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.3))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "hang"})
+            with pytest.raises(TimeoutError):
+                await transport.receive()
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_send_times_out_when_child_stops_draining_stdin(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.3))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "hang"})
+            payload = {"action": "echo", "text": "x" * (512 * 1024)}
+            with pytest.raises(TimeoutError):
+                for _ in range(4):
+                    await transport.send(payload)
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_receive_rejects_a_malformed_frame(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "malformed"})
+            with pytest.raises(ProtocolError, match="worker frame"):
+                await transport.receive()
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_child_exit_closes_the_stream_without_orphan_frames(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "exit"})
+            with pytest.raises(ProtocolError, match="truncated worker frame"):
+                await transport.receive()
+            with pytest.raises((BrokenPipeError, ConnectionResetError, RuntimeError)):
+                await transport.send({"action": "echo", "text": "late"})
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_close_is_idempotent_and_terminates_the_child(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        await transport.start()
+        process = transport._process
+        assert process is not None
+        await transport.close()
+        assert transport._process is None
+        assert process.returncode is not None
+        await transport.close()
+        assert not transport.alive
+
+    _run(scenario)
+
+
+def test_abort_then_restart_does_not_leak_old_frames(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "echo", "text": "stale"})
+            await transport.abort()
+            await transport.start()
+            await transport.send({"action": "echo", "text": "fresh"})
+            assert await transport.receive() == {"type": "echo", "text": "fresh"}
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_terminate_timeout_falls_back_to_kill(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path, shutdown_timeout=0.3))
+
+    async def scenario() -> None:
+        await transport.start()
+        await transport.send({"action": "stubborn"})
+        process = transport._process
+        assert process is not None
+        await transport.close()
+        assert process.returncode is not None
+
+    _run(scenario)
