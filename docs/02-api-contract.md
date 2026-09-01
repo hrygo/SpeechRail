@@ -36,9 +36,10 @@ speechrail/qwen3-asr-1.7b
 
 | 方法 | 路径 | 实际行为 |
 |---|---|---|
-| `GET` | `/health` | 返回进程、版本、后端名称和是否有配置的推理入口 |
-| `GET` | `/readyz` | 无推理入口时为 503；有入口时为 200，仍须用真实音频验收 worker |
-| `GET` | `/v1/models` | canonical ID 与兼容 aliases |
+| `GET` | `/health` | 返回进程、版本及 `asr_ready`/`tts_ready` 独立状态 |
+| `GET` | `/readyz` | 至少一个已配置 ASR/TTS 推理入口可接受请求；真实模型仍需 smoke |
+| `GET` | `/v1/models` | canonical ASR/TTS ID 与兼容 aliases |
+| `GET` | `/v1/voices` | 登记的 TTS preset 目录 |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS；当前支持 `wav` 与 `pcm` |
 | `POST` | `/v1/jobs` | 创建 owner-scoped 异步语音任务元数据（需配置 spool） |
@@ -111,6 +112,7 @@ Resource Governor。首发没有内建的 `input_ref` 路径/URL resolver，因�
 ## 认证与网络
 
 默认 loopback 且不需要 key。非 loopback host 在 Settings 校验阶段必须有
-`SPEECHRAIL_API_KEY`；REST 和 `/v1/realtime` 要求 `Authorization: Bearer <key>`。
+`SPEECHRAIL_API_KEY`；REST、`/v1/realtime` 和 `/v2/realtime` 要求
+`Authorization: Bearer <key>`。
 `allowed_origins` 是预留配置，当前版本未安装 CORS middleware；不要把它当作 LAN 防护。
 legacy `/asr` 目前也不校验 header/query token，因此只能用于 loopback 开发验证。

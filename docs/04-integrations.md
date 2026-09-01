@@ -14,7 +14,8 @@ date: 2026-08-31
 ```text
 服务根地址：  http://127.0.0.1:8201
 SDK base URL： http://127.0.0.1:8201/v1
-模型：        speechrail/qwen3-asr-1.7b
+ASR 模型：    speechrail/qwen3-asr-1.7b
+TTS 模型：    speechrail/qwen3-tts
 ```
 
 loopback 模式不需 API key；非 loopback 模式将 key 放在客户端安全配置中并通过
@@ -77,25 +78,26 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 OpenAI-compatible 转写调用形状，但尚未在当前环境完成真实 Hermes 消息 smoke；实施时先在
 单独配置/进程试运行，再验证聊天功能未受影响。失败时还原这两个 STT 配置并重启 Hermes。
 
-## `voice-realtime`（adapter 已实现，尚未切换）
+## `voice-realtime`（已接入 v2 客户端边界）
 
-`voice-realtime` 独立分支已有一个共享 `SpeechRailRealtimeClient` 和两个 opt-in adapter：
+`voice-realtime` 使用一个共享 `SpeechRailRealtimeClient` 族和三个窄 adapter：
 
-1. 会议/字幕设置 `VR_SUBTITLE_BACKEND=speechrail-realtime-v2`，并设置
-   `VR_SUBTITLE_SPEECHRAIL_URL=ws://127.0.0.1:8201/v2/realtime`；
-2. 语音助手设置 `VR_INTERACTION_STT_BACKEND=speechrail-realtime-v2`，并设置
-   `VR_INTERACTION_SPEECHRAIL_REALTIME_URL=ws://127.0.0.1:8201/v2/realtime`。
+1. 字幕/会议使用 `SpeechRailStreamingTranscriber`，消费 ASR snapshot/completed 与 EOF；
+2. 语音助手使用 `SpeechRailConversationSTTFactory`，把 VAD turn 映射为 Pipecat 文本帧；
+3. 语音助手 TTS 使用 `SpeechRailTTSService`，把增量文本映射为 24 kHz PCM 播放帧。
 
-两项默认均不启用，且可独立回退到原 WLK / SenseVoice 设置。它们只传入 16 kHz 单声道
-PCM 并消费 v2 的 partial/completed 事件；不接管 AudioHub、会议、TTS、数据库、UI 或 LLM。
-不要通过 `/asr` 或占用旧 `8001` 端口迁移。
+当前默认地址为 `ws://127.0.0.1:8201/v2/realtime`，TTS 试听/回放使用
+`http://127.0.0.1:8201/v1`。客户端只传入 16 kHz 单声道 ASR PCM 或 UTF-8 TTS 文本，
+不接管 AudioHub、会议、数据库、UI 或 LLM；播放、回声与打断仍由 `voice-realtime` 拥有。
+非 loopback 服务启用 key 时，客户端配置 `speechrail_api_key`，通过 Authorization header
+发送，绝不把 key 放入 URL。
 
-在真实 backend 已授权并通过基础 PCM smoke 前，不得开启任何客户端开关。之后按
-[迁移 Runbook](08-migration-runbook.md)先做影子比对，再逐端口切换与回滚演练。
+旧 `vr-bridge` 已从 voice-realtime 的运行脚本、console entry point、TTS 专属依赖和源代码中
+退役；`BridgeSettings`/`tts_bridge_url` 仅作为配置文件兼容字段保留至 2026-10-31。
 
 ## Realtime 客户端限制
 
 新 WebSocket 客户端使用 `/v2/realtime`，发送 `session.update`、0..N 个
-`input_audio_buffer.append` 与 flush/commit；持续 streaming backend 可在 commit 前产生
-partial/completed，受限 batch backend 只在 flush/commit 后产生 completed。完整事件、取消和
+`input_audio_buffer.append` 或 `speech_input.append` 与 flush/commit；持续 streaming backend
+可在 commit 前产生 partial/completed，TTS 会产生 ordered audio delta。完整事件、取消和
 背压规则见 [Realtime v2 契约](../contracts/realtime-v2.md)。

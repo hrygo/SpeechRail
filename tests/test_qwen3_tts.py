@@ -194,7 +194,9 @@ def test_tts_worker_starts_offline_process_and_checks_ready_identity(
 
     async def start_and_close() -> None:
         await worker.start()
+        assert worker.ready is True
         await worker.close()
+        assert worker.ready is False
 
     asyncio.run(start_and_close())
 

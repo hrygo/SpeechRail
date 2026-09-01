@@ -23,6 +23,8 @@ def test_health_reports_contract_shell_without_backend() -> None:
         "service": "speechrail",
         "version": "0.1.0",
         "backend": "qwen3-asr-1.7b",
+        "asr_ready": False,
+        "tts_ready": False,
         "ready": False,
     }
 
@@ -92,6 +94,29 @@ def test_readyz_is_200_when_runtime_reports_ready() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"ready": True}
+
+
+def test_tts_only_runtime_reports_independent_readiness() -> None:
+    class ReadyTts:
+        ready = True
+
+    client = TestClient(
+        create_app(
+            Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=ReadyTts(),  # type: ignore[arg-type]
+        )
+    )
+
+    assert client.get("/health").json() == {
+        "status": "ok",
+        "service": "speechrail",
+        "version": "0.1.0",
+        "backend": "qwen3-asr-1.7b",
+        "asr_ready": False,
+        "tts_ready": True,
+        "ready": True,
+    }
+    assert client.get("/readyz").json() == {"ready": True}
 
 
 def test_configured_worker_lifecycle_does_not_depend_on_local_env(

@@ -325,6 +325,25 @@ def create_app(
     resolved_v2_transcriber = v2_transcriber
     if resolved_v2_transcriber is None and transcribe is not None:
         resolved_v2_transcriber = _CallableBatchTranscriber(transcribe, resolved.model_id)
+
+    def component_ready(component: object | None) -> bool:
+        """Treat injected components as ready unless they explicitly report otherwise."""
+        if component is None:
+            return False
+        state = getattr(component, "ready", None)
+        return True if state is None else bool(state)
+
+    def asr_ready() -> bool:
+        return (
+            transcribe is not None
+            or resolved_v2_transcriber is not None
+            or realtime_asr_factory is not None
+            or resolved.backend_ready
+        )
+
+    def tts_ready() -> bool:
+        return component_ready(tts_synthesizer)
+
     app = FastAPI(title="SpeechRail API", version=resolved.version)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
@@ -421,12 +440,14 @@ def create_app(
             "service": resolved.service_name,
             "version": resolved.version,
             "backend": "qwen3-asr-1.7b",
-            "ready": transcribe is not None or resolved.backend_ready,
+            "asr_ready": asr_ready(),
+            "tts_ready": tts_ready(),
+            "ready": asr_ready() or tts_ready(),
         }
 
     @app.get("/readyz")
     async def readyz(request: Request) -> JSONResponse:
-        if transcribe is not None or resolved.backend_ready:
+        if asr_ready() or tts_ready():
             return JSONResponse(status_code=200, content={"ready": True})
         return _error_response(
             503,
@@ -460,7 +481,7 @@ def create_app(
                     "id": voice_id,
                     "description": VOICE_PROFILES[voice_id].description,
                     "is_default": VOICE_PROFILES[voice_id].is_default,
-                    "available": tts_synthesizer is not None,
+                    "available": tts_ready(),
                 }
                 for voice_id in resolved.tts_voice_ids
             ],
@@ -593,7 +614,8 @@ def create_app(
                 f"Unknown preset voice: {body.voice}",
                 param="voice",
             )
-        if tts_synthesizer is None:
+        synthesizer = tts_synthesizer
+        if synthesizer is None or not component_ready(synthesizer):
             return _error_response(
                 503,
                 request_id,
@@ -611,7 +633,7 @@ def create_app(
 
         async def audio_stream() -> AsyncIterator[bytes]:
             expected_chunk = 0
-            async for chunk in tts_synthesizer.synthesize(synthesis):
+            async for chunk in synthesizer.synthesize(synthesis):
                 if chunk.chunk_index != expected_chunk:
                     raise RuntimeError("tts_chunk_order_invalid")
                 expected_chunk += 1
@@ -743,7 +765,7 @@ def create_app(
         if (
             resolved_v2_transcriber is None
             and realtime_asr_factory is None
-            and tts_synthesizer is None
+            and not tts_ready()
         ):
             await websocket.close(code=1013, reason="SpeechRail inference backend is not ready")
             return
@@ -849,7 +871,12 @@ def create_app(
         async def synthesize_text(text: str, *, speed: float = 1.0) -> None:
             if not text:
                 return
-            if not isinstance(session, SpeechSession) or tts_synthesizer is None:
+            synthesizer = tts_synthesizer
+            if (
+                not isinstance(session, SpeechSession)
+                or synthesizer is None
+                or not component_ready(synthesizer)
+            ):
                 raise RealtimeV2Error("TTS backend is not ready", code="backend_not_ready")
             created = session.response_created()
             response_id = str(created["response_id"])
@@ -872,7 +899,7 @@ def create_app(
                 async with governor.reserve(
                     WorkClass.REALTIME_TTS, deadline=resolved.request_timeout_seconds
                 ):
-                    async for chunk in tts_synthesizer.synthesize(request):
+                    async for chunk in synthesizer.synthesize(request):
                         await output.publish(
                             session.audio_delta(
                                 response_id=response_id,
@@ -939,7 +966,7 @@ def create_app(
                             await active_streaming_asr.connect()
                             streaming_reader = asyncio.create_task(consume_streaming_asr_events())
                     elif configured.get("type") == "speech":
-                        if tts_synthesizer is None:
+                        if not tts_ready():
                             raise RealtimeV2Error(
                                 "TTS backend is not ready", code="backend_not_ready"
                             )

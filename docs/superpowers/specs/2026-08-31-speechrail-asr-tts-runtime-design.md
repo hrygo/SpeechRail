@@ -102,7 +102,7 @@ TTS 路径。[Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) 与
 启用分别需要明确授权。
 
 公开模型身份保持稳定：ASR 使用 `speechrail/qwen3-asr-1.7b`；TTS 首发使用
-`speechrail/tts-default-zh`。后端从 Qwen3-TTS 切到其他合格 profile 时不强制客户端更名。
+`speechrail/qwen3-tts`。后端从 Qwen3-TTS 切到其他合格 profile 时不强制客户端更名。
 
 ## 5. 公共 API
 
@@ -247,8 +247,8 @@ SpeechRail 不 import `voice-realtime`，也不写其数据库。
    可回滚配置。
 7. **退役阶段**：v2 持续稳定后删除 `/asr` 兼容路径与旧 WLK 启动依赖。
 
-TTS 迁移独立于 ASR：`voice-realtime` 可以先继续使用其现有 TTS bridge；当 `speech` 会话
-验收后，再让其把文本增量发往 SpeechRail 并自行播放返回 chunk。
+TTS 迁移独立于 ASR：`voice-realtime` 的交互 pipeline 通过共享 Realtime v2 transport
+把文本增量发往 SpeechRail，并自行负责播放返回的 24 kHz PCM chunk；REST 仅用于试听/回放。
 
 ## 8. 验收与发布门
 

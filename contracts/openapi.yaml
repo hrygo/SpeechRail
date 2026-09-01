@@ -46,6 +46,8 @@ paths:
                 service: speechrail
                 version: 0.1.0
                 backend: qwen3-asr-1.7b
+                asr_ready: true
+                tts_ready: true
                 ready: true
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -289,7 +291,7 @@ components:
   schemas:
     HealthResponse:
       type: object
-      required: [status, service, version, backend, ready]
+      required: [status, service, version, backend, asr_ready, tts_ready, ready]
       properties:
         status:
           type: string
@@ -302,6 +304,10 @@ components:
         backend:
           type: string
           example: qwen3-asr-1.7b
+        asr_ready:
+          type: boolean
+        tts_ready:
+          type: boolean
         ready:
           type: boolean
     Model:

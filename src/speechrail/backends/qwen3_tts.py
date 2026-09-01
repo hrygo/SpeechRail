@@ -109,6 +109,15 @@ class Qwen3TtsWorker:
         self._lock = asyncio.Lock()
         self._started = False
 
+    @property
+    def ready(self) -> bool:
+        """Return whether the supervised worker can accept another request."""
+        return (
+            self._started
+            and self._process is not None
+            and self._process.returncode is None
+        )
+
     async def start(self) -> None:
         async with self._lock:
             if self._started:
