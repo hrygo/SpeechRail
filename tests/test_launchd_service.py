@@ -87,6 +87,41 @@ def test_definition_rejects_relative_or_missing_runtime_paths(tmp_path: Path) ->
         )
 
 
+def test_launch_agent_preserves_python_venv_symlink_path(tmp_path: Path) -> None:
+    python_target = tmp_path / "uv" / "python3.12"
+    python_target.parent.mkdir(parents=True)
+    python_target.touch()
+    python_link = tmp_path / "venv" / "bin" / "python"
+    python_link.parent.mkdir(parents=True)
+    python_link.symlink_to(python_target)
+    definition = LaunchAgentDefinition(
+        working_directory=tmp_path,
+        python_executable=python_link,
+        stdout_path=tmp_path / "stdout.log",
+        stderr_path=tmp_path / "stderr.log",
+    )
+
+    plist = plistlib.loads(definition.to_plist())
+
+    assert plist["ProgramArguments"][0] == str(python_link.absolute())
+
+
+def test_create_manager_preserves_current_python_symlink(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    python_target = tmp_path / "uv" / "python3.12"
+    python_target.parent.mkdir(parents=True)
+    python_target.touch()
+    python_link = tmp_path / "venv" / "bin" / "python3"
+    python_link.parent.mkdir(parents=True)
+    python_link.symlink_to(python_target)
+    monkeypatch.setattr("speechrail.service.launchd.sys.executable", str(python_link))
+
+    manager = create_launch_agent_manager(working_directory=tmp_path)
+
+    assert manager.definition.python_executable == python_link.absolute()
+
+
 def test_install_writes_a_private_log_directory_and_idempotent_plist(tmp_path: Path) -> None:
     calls: list[tuple[str, ...]] = []
     manager = _manager(tmp_path, calls)

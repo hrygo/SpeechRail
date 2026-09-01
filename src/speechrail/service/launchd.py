@@ -31,6 +31,13 @@ def _require_absolute(path: Path, *, name: str) -> Path:
     return path.resolve()
 
 
+def _require_absolute_preserving_symlink(path: Path, *, name: str) -> Path:
+    """Validate an absolute path without losing a virtualenv launcher symlink."""
+    if not path.is_absolute():
+        raise ServiceError(f"{name} must be an absolute path")
+    return path.absolute()
+
+
 @dataclass(frozen=True)
 class LaunchAgentDefinition:
     """All non-secret values rendered into a LaunchAgent plist."""
@@ -42,7 +49,9 @@ class LaunchAgentDefinition:
 
     def __post_init__(self) -> None:
         working_directory = _require_absolute(self.working_directory, name="working directory")
-        python_executable = _require_absolute(self.python_executable, name="python executable")
+        python_executable = _require_absolute_preserving_symlink(
+            self.python_executable, name="python executable"
+        )
         stdout_path = _require_absolute(self.stdout_path, name="stdout path")
         stderr_path = _require_absolute(self.stderr_path, name="stderr path")
         if not working_directory.is_dir():
@@ -193,7 +202,7 @@ def create_launch_agent_manager(*, working_directory: Path | None = None) -> Lau
     log_directory = home / "Library" / "Logs" / "SpeechRail"
     definition = LaunchAgentDefinition(
         working_directory=root,
-        python_executable=Path(sys.executable).resolve(),
+        python_executable=Path(sys.executable),
         stdout_path=log_directory / "stdout.log",
         stderr_path=log_directory / "stderr.log",
     )
