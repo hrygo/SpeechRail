@@ -1,8 +1,60 @@
+import base64
 from pathlib import Path
+from sys import executable
+from typing import Any
 
 import pytest
 
-from speechrail.backends.qwen3_native import Qwen3BackendConfig, validate_snapshot
+from speechrail.backends.qwen3_native import (
+    MODEL_FILES,
+    Qwen3BackendConfig,
+    Qwen3Worker,
+    validate_snapshot,
+)
+
+
+class _FakeTransport:
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = responses
+        self.sends: list[dict[str, Any]] = []
+        self.aborted = False
+
+    alive = True
+
+    async def start(self) -> None:
+        return None
+
+    async def send(self, payload: dict[str, Any]) -> None:
+        self.sends.append(payload)
+
+    async def receive(self) -> dict[str, Any]:
+        if not self.responses:
+            raise AssertionError("fake transport ran out of canned responses")
+        return self.responses.pop(0)
+
+    async def abort(self) -> None:
+        self.aborted = True
+
+    async def close(self) -> None:
+        self.aborted = True
+
+
+def _worker(tmp_path: Path, responses: list[dict[str, Any]]) -> tuple[Qwen3Worker, _FakeTransport]:
+    snapshot = tmp_path.parent / "external-qwen3-asr-profile"
+    snapshot.mkdir(exist_ok=True)
+    for filename in MODEL_FILES:
+        (snapshot / filename).touch()
+    config = Qwen3BackendConfig(
+        repository_root=Path(__file__).resolve().parents[1],
+        python_executable=Path(executable),
+        model_dir=snapshot,
+        device="mps",
+        dtype="float16",
+    )
+    worker = Qwen3Worker(config)
+    fake = _FakeTransport(responses)
+    worker._transport = fake  # type: ignore[assignment]
+    return worker, fake
 
 
 def test_snapshot_preflight_rejects_missing_or_repository_local_models(tmp_path: Path) -> None:
@@ -28,3 +80,91 @@ def test_backend_config_rejects_cpu_fallback_for_mps_profile(tmp_path: Path) -> 
             device="mps",
             dtype="float32",
         )
+
+
+def test_start_payload_declares_snapshot_and_device(tmp_path: Path) -> None:
+    worker, fake = _worker(
+        tmp_path,
+        [{"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"}],
+    )
+
+    worker._transport = fake  # keep the fake after construction
+    import asyncio
+
+    asyncio.run(worker.start())
+
+    assert fake.sends[0]["type"] == "start"
+    assert fake.sends[0]["device"] == "mps"
+    assert fake.sends[0]["model_dir"].endswith("external-qwen3-asr-profile")
+
+
+def test_ready_identity_mismatch_aborts_the_worker(tmp_path: Path) -> None:
+    worker, fake = _worker(
+        tmp_path,
+        [{"type": "ready", "model_loaded": True, "device": "cpu", "dtype": "float32"}],
+    )
+    import asyncio
+
+    with pytest.raises(RuntimeError, match="backend_identity_mismatch"):
+        asyncio.run(worker.start())
+
+    assert fake.aborted is True
+
+
+def test_transcribe_request_is_single_pcm16_frame_with_stable_request_id(tmp_path: Path) -> None:
+    worker, fake = _worker(
+        tmp_path,
+        [
+            {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"},
+            {"type": "result", "request_id": "req_x", "text": "hello", "language": "Chinese"},
+        ],
+    )
+    import asyncio
+
+    result = asyncio.run(worker.transcribe(b"\x00\x00", "zh", "names", request_id="req_x"))
+
+    request = fake.sends[1]
+    assert request["type"] == "transcribe"
+    assert request["request_id"] == "req_x"
+    assert request["sample_rate"] == 16000
+    assert request["channels"] == 1
+    assert request["sample_width_bytes"] == 2
+    assert base64.b64decode(str(request["pcm_b64"])) == b"\x00\x00"
+    assert result.request_id == "req_x"
+    assert result.text == "hello"
+
+
+def test_transcribe_rejects_non_result_or_mismatched_request_id(tmp_path: Path) -> None:
+    for response in (
+        {"type": "progress", "request_id": "req_x"},
+        {"type": "result", "request_id": "req_other", "text": "hello", "language": "zh"},
+    ):
+        worker, _ = _worker(
+            tmp_path,
+            [
+                {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"},
+                response,
+            ],
+        )
+        import asyncio
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(worker.transcribe(b"\x00\x00", None, ""))
+
+
+def test_transcribe_rejects_invalid_text_or_language(tmp_path: Path) -> None:
+    for response in (
+        {"type": "result", "request_id": "req_x", "text": 123, "language": "zh"},
+        {"type": "result", "request_id": "req_x", "text": "hello", "language": 456},
+    ):
+        worker, _ = _worker(
+            tmp_path,
+            [
+                {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"},
+                response,
+            ],
+        )
+        import asyncio
+
+        with pytest.raises(RuntimeError, match="worker_result_invalid"):
+            asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
