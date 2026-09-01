@@ -9,7 +9,6 @@ from pathlib import Path
 
 import uvicorn
 
-from speechrail.app import app
 from speechrail.config import Settings
 from speechrail.service import (
     PreflightResult,
@@ -20,10 +19,18 @@ from speechrail.service import (
 )
 
 
-def run_server() -> None:
-    """Run one ASGI process with the configured loopback-first settings."""
-    settings = Settings()
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level="info")
+def _discover_env_file() -> Path | None:
+    """Prefer the private installed config while keeping source checkout behavior."""
+    candidate = Path.cwd() / "config" / ".env"
+    return candidate if candidate.is_file() else None
+
+
+def run_server(env_file: Path | None = None) -> None:
+    """Run one ASGI process with an explicit or app-home configuration file."""
+    settings = Settings.from_env_file(env_file or _discover_env_file())
+    from speechrail.app import create_app
+
+    uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level="info")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -31,7 +38,8 @@ def _parser() -> argparse.ArgumentParser:
         prog="speechrail", description="SpeechRail local ASR/TTS runtime"
     )
     subcommands = parser.add_subparsers(dest="command")
-    subcommands.add_parser("serve", help="start one SpeechRail ASGI process")
+    serve = subcommands.add_parser("serve", help="start one SpeechRail ASGI process")
+    serve.add_argument("--env-file", type=Path, help="load configuration from this file")
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
     service_commands = service.add_subparsers(dest="service_command", required=True)
     for command in ("install", "enable", "disable", "restart", "status", "uninstall", "preflight"):
@@ -91,8 +99,11 @@ def _run_service(command: str, app_home: Path | None = None, asr_only: bool = Fa
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the console command and return a shell-compatible exit status."""
     args = _parser().parse_args(list(argv) if argv is not None else None)
-    if args.command in {None, "serve"}:
+    if args.command is None:
         run_server()
+        return 0
+    if args.command == "serve":
+        run_server(args.env_file)
         return 0
     try:
         _run_service(
