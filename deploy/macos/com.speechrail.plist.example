@@ -8,14 +8,20 @@
   <string>&lt;absolute-path-to-SpeechRail&gt;</string>
   <key>ProgramArguments</key>
   <array>
-    <string>&lt;absolute-path-to-uv&gt;</string>
-    <string>run</string>
+    <string>&lt;absolute-path-to-python&gt;</string>
+    <string>-m</string>
     <string>speechrail</string>
+    <string>serve</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
   <key>StandardOutPath</key>

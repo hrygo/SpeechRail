@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import plistlib
 import subprocess
 from pathlib import Path
@@ -73,7 +72,7 @@ def test_launch_agent_plist_uses_current_python_and_never_serializes_environment
 def test_definition_rejects_relative_or_missing_runtime_paths(tmp_path: Path) -> None:
     with pytest.raises(ServiceError, match="absolute"):
         LaunchAgentDefinition(
-            working_directory=Path("."),
+            working_directory=Path(),
             python_executable=tmp_path / "python",
             stdout_path=tmp_path / "stdout.log",
             stderr_path=tmp_path / "stderr.log",
@@ -94,7 +93,7 @@ def test_install_writes_a_private_log_directory_and_idempotent_plist(tmp_path: P
 
     installed = manager.install()
     first = installed.read_bytes()
-    os.chmod(manager.paths.log_directory, 0o755)
+    manager.paths.log_directory.chmod(0o755)
     manager.install()
 
     assert installed == manager.paths.plist_path
@@ -146,3 +145,20 @@ def test_create_manager_rejects_non_macos_before_touching_files(
 
     with pytest.raises(UnsupportedPlatformError, match="macOS"):
         create_launch_agent_manager(working_directory=tmp_path)
+
+
+def test_checked_in_launchagent_template_matches_managed_safety_policy() -> None:
+    root = Path(__file__).parents[1]
+    with (root / "deploy" / "macos" / "com.speechrail.plist.example").open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["ProgramArguments"] == [
+        "<absolute-path-to-python>",
+        "-m",
+        "speechrail",
+        "serve",
+    ]
+    assert plist["ProcessType"] == "Interactive"
+    assert plist["KeepAlive"] == {"SuccessfulExit": False}
+    assert plist["ThrottleInterval"] == 10
+    assert "EnvironmentVariables" not in plist

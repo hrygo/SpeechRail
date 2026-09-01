@@ -86,8 +86,12 @@ class LaunchAgentPaths:
     log_directory: Path
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "plist_path", _require_absolute(self.plist_path, name="plist path"))
-        object.__setattr__(self, "log_directory", _require_absolute(self.log_directory, name="log directory"))
+        object.__setattr__(
+            self, "plist_path", _require_absolute(self.plist_path, name="plist path")
+        )
+        object.__setattr__(
+            self, "log_directory", _require_absolute(self.log_directory, name="log directory")
+        )
 
 
 def _run_subprocess(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -174,7 +178,7 @@ class LaunchAgentManager:
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary_path.chmod(0o644)
-            os.replace(temporary_path, self.paths.plist_path)
+            temporary_path.replace(self.paths.plist_path)
         except Exception:
             temporary_path.unlink(missing_ok=True)
             raise
