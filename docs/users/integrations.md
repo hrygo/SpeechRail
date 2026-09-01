@@ -7,7 +7,7 @@ date: 2026-08-31
 # SpeechRail 用户与客户端接入
 
 客户端只调用 SpeechRail 的公共 HTTP / WebSocket 接口，绝不直接访问模型目录、Qwen SDK
-或 worker。接入前先完成 [运维 Runbook](11-operations-runbook.md) 的 REST smoke。
+或 worker。接入前先完成 [运维 Runbook](../operations/operations-runbook.md) 的 REST smoke。
 
 ## 通用约定
 
@@ -100,4 +100,4 @@ OpenAI-compatible 转写调用形状，但尚未在当前环境完成真实 Herm
 新 WebSocket 客户端使用 `/v2/realtime`，发送 `session.update`、0..N 个
 `input_audio_buffer.append` 或 `speech_input.append` 与 flush/commit；持续 streaming backend
 可在 commit 前产生 partial/completed，TTS 会产生 ordered audio delta。完整事件、取消和
-背压规则见 [Realtime v2 契约](../contracts/realtime-v2.md)。
+背压规则见 [Realtime v2 契约](../../contracts/realtime-v2.md)。

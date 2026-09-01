@@ -53,7 +53,7 @@ Legacy：连接 → `config` → 空二进制帧 → `ready_to_stop`。当前不
 
 持久化 metrics、解码后时长限制和完整 LAN CORS/Origin 防护仍属于后续工作。它们不能从架构图
 或早期设计推断为已启用；具体门禁见
-[当前边界](09-open-questions.md) 与 [迁移 Runbook](08-migration-runbook.md)。
+[当前边界](current-boundaries.md) 与 [迁移 Runbook](../operations/migration-runbook.md)。
 
 `voice-realtime` 继续拥有 AudioHub、会议、播放、数据库、UI 与 LM Studio；SpeechRail
 拥有 ASR/TTS API/runtime，但不接管这些应用职责。

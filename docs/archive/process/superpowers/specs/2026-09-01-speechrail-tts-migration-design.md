@@ -376,6 +376,6 @@ SpeechRail ready
    registry、契约、UI 和验收，不修改既有 voice 的含义。
 
 本规格与 [SpeechRail 公共 ASR/TTS 运行时设计](2026-08-31-speechrail-asr-tts-runtime-design.md)、
-[OpenAPI 契约](../../../contracts/openapi.yaml)、[Realtime v2 契约](../../../contracts/realtime-v2.md)
-和 [ADR-0006](../../decisions/0006-public-asr-tts-runtime.md) 配套使用。规格审阅通过后，
+[OpenAPI 契约](../../../../../contracts/openapi.yaml)、[Realtime v2 契约](../../../../../contracts/realtime-v2.md)
+和 [ADR-0006](../../../../decisions/0006-public-asr-tts-runtime.md) 配套使用。规格审阅通过后，
 按阶段创建实施计划；实现完成前不得把本文件的目标状态当作当前运行状态。

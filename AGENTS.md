@@ -4,7 +4,32 @@
 > 选择开发/运维/测试模式、保护并行工作和给出可复核的交接结果。详细事实以当前代码、
 > `contracts/` 和状态为 active 的文档为准。
 
-## Agent 启动协议
+## 1. 项目画像与设计原则
+
+SpeechRail 是供 QwenPaw、`voice-realtime`、Hermes Agent 及未来应用共享的
+独立本地语音识别与合成服务。它提供稳定的 ASR/TTS 公共接口、运行时生命周期、模型适配器、
+资源边界和兼容性边界；调用方仍拥有麦克风、播放、会议、UI、会话和应用编排。
+
+本应用为本机单人使用，默认只有一个本机部署目标。架构设计需避免过度设计：优先可理解、可回退、
+能被当前消费者验证的最小实现，不为假设的多用户、云部署或平台化需求预留复杂基础设施。
+
+### 设计原则
+
+- **本地优先**：默认 loopback、外部模型快照、请求期间处理音频，不把本机服务当作公网平台。
+- **单人但允许有界并行**：队列、Resource Governor、超时和背压用于保护本机资源，不代表多租户或分布式需求。
+- **能力按需启用**：TTS、`jobs`、diarization、WLK streaming 和 LAN 暴露均须有明确消费者与验收证据，默认关闭或保持最小边界。
+- **职责不外溢**：不把 `voice-realtime` 的会议、数据库、UI、播放或 LLM 编排移入 SpeechRail。
+
+### 设计决策过滤器
+
+新增组件、持久化、网络边界或调度机制前，依次确认：
+
+1. 是否解决当前单人本机的真实需求；没有明确消费者时不新增能力。
+2. 是否可以用现有进程、worker、配置和契约完成；优先最小、可回退的实现。
+3. 是否引入了多租户、分布式队列、服务网格、HA、云控制面或跨服务编排；若是，必须先证明单人本机需求无法用更简单的方案满足。
+4. 是否有契约、测试、观测和回退路径；没有就留在正式设计文档或归档材料，不进入实现。
+
+## 2. 任务启动与证据规则
 
 收到任务后先完成以下步骤，再决定是否修改文件：
 
@@ -15,30 +40,38 @@
 5. 先做只读检查，再执行有副作用的操作；操作前记录目标、风险和回退方式。
 6. 完成后运行与风险相称的验证，并报告实测结果、未验证项和未触碰的并行改动。
 
-如果当前环境提供 `codebase-memory`，结构探索优先使用 `list_projects`/`index_status`、
-`get_architecture`、`search_graph`、`trace_path` 和 `get_code_snippet`；字符串、配置、
-文档和日志搜索使用 `rg`。图谱覆盖是最佳努力信号，不能替代对标记为 partial 的源码
-直接核对。
+### 事实来源层级
 
-## 语言与沟通
+1. 当前代码、测试和实际运行结果；
+2. `contracts/openapi.yaml`、`contracts/realtime.md`、`contracts/realtime-v2.md`；
+3. 状态为 active 的架构、用户、开发者、运维文档和 ADR；
+4. `docs/archive/` 中的计划、设计和审查材料只用于历史追溯。
+
+发现代码、契约、文档和历史记录冲突时，报告差异并以当前实测为准；不要把计划、配置存在
+或 `readyz=200` 当作真实模型质量验收。
+
+### 沟通规则
 
 - Agent 沟通、任务摘要、注释和项目文档默认使用简洁中文。
 - 命令、路径、配置键、API 字段、协议事件、错误码、模型 ID、类名和函数名保留原文。
 - 外部协议名和厂商名保持准确；用中文解释，不翻译标识符本身。
 - 报告必须区分“已实测”“文档规定”“历史记录”和“推断”，不能把计划写成完成事实。
 
-## 项目范围
+## 3. 服务边界与系统地图
 
-SpeechRail 是供 QwenPaw、`voice-realtime`、Hermes Agent 及未来应用共享的
-独立本地语音识别服务。它负责对外 ASR API、运行时生命周期、模型适配器、
-队列、认证、可观测性和兼容性边界。
+### 服务职责
 
-它不负责麦克风、扬声器、TTS、会议持久化、UI 状态、LM Studio 对话编排或
-应用专属提示词；这些职责属于调用方应用。
+服务层负责对外 ASR/TTS API、运行时生命周期、模型适配器、队列、认证、可观测性和兼容性边界。
 
-## 系统地图
+### 职责边界
 
-### 请求与运行时数据流
+它不负责麦克风、扬声器、播放、会议持久化、UI 状态、LM Studio 对话编排或
+应用专属提示词；这些职责属于调用方应用。SpeechRail 负责公共 ASR/TTS 推理，
+但不负责应用侧的语音交互编排或音频输出。
+
+### 系统地图
+
+#### 请求与运行时数据流
 
 ```text
 QwenPaw / OpenAI SDK / 应用客户端
@@ -61,11 +94,13 @@ WLK 是明确配置的外部 sidecar。当前可选 NeMo diarization adapter 是
 匿名且不进入 domain。请求路径不下载模型、不读取远程音频 URL，默认不持久化音频、PCM、
 embedding 或完整转写正文。
 
-### 目录职责
+#### 目录职责
 
 | 路径 | 责任 | 修改时先看 |
 |---|---|---|
-| `src/speechrail/__main__.py` | `speechrail` CLI，读取 `Settings` 并启动 Uvicorn | `pyproject.toml` |
+| `src/speechrail/__main__.py` | 模块入口，委派给 `speechrail.cli.main()` | `src/speechrail/cli.py` |
+| `src/speechrail/cli.py` | `serve` 与 `service` 命令树；不承载服务平台细节 | `service/launchd.py` |
+| `src/speechrail/service/` | macOS LaunchAgent 渲染、文件安装和 `launchctl` 适配 | `docs/operations/operations-runbook.md` |
 | `src/speechrail/app.py` | FastAPI 路由、认证、上传解码、生命周期、WS 编排 | `contracts/` |
 | `src/speechrail/config/` | `SPEECHRAIL_*` 环境配置和组合校验 | `configs/speechrail.example.env` |
 | `src/speechrail/domain/` | vendor-neutral 结果、请求、事件和 port | 公共契约 |
@@ -74,28 +109,30 @@ embedding 或完整转写正文。
 | `src/speechrail/realtime/` | Realtime v1/v2 状态机和事件生命周期 | `contracts/realtime*.md` |
 | `src/speechrail/compatibility/` | OpenAI/WLK 等窄兼容呈现和归一化 | 兼容边界 |
 | `contracts/` | OpenAPI 与 WebSocket 事实来源 | 任何公共接口变更前 |
-| `tests/` | fake backend、契约、安全、边界和协议回归 | `docs/07-testing-acceptance.md` |
-| `examples/` | 不含凭据的 curl、OpenAI SDK、Realtime、QwenPaw 示例 | `docs/04-integrations.md` |
-| `deploy/macos/` | `launchd` 模板；不是自动安装器 | `docs/11-operations-runbook.md` |
-| `docs/` | 产品、架构、API、开发、运维、迁移和 ADR | `docs/README.md` |
+| `tests/` | fake backend、契约、安全、边界和协议回归 | `docs/developers/testing-acceptance.md` |
+| `examples/` | 不含凭据的 curl、OpenAI SDK、Realtime、QwenPaw 示例 | `docs/users/integrations.md` |
+| `deploy/macos/` | `launchd` 模板；不是自动安装器 | `docs/operations/operations-runbook.md` |
+| `docs/` | 架构、用户、开发者、运维正式文档、ADR 与归档过程材料 | `docs/README.md` |
 
-### 当前能力矩阵
+#### 当前能力矩阵
 
 | 能力 | 当前结论 | 不应作出的承诺 |
 |---|---|---|
 | `POST /v1/audio/transcriptions` | Qwen3-ASR batch REST 可用；配置外部 runtime 后可真实推理 | 不要绕过公共 API 直接调用 worker |
 | `GET /health`、`/readyz`、`/v1/models` | 可用的进程、入口配置和模型清单检查 | `readyz=200` 不等于真实音频质量已验收 |
 | `POST /v1/audio/speech` | 契约和隔离 TTS worker 已有；依赖单独外部 TTS runtime | 不要把 TTS runtime 当作 ASR 前置条件 |
+| `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false` | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
 | `WS /v1/realtime` | 收集 PCM，`commit` 后一次 batch final | 不是持续 partial streaming |
 | `WS /v2/realtime` | ASR/TTS 状态机、背压和可选 WLK/diarization 部分实现 | 不是 LLM 对话、播放或会议状态；真实 backend 仍须 smoke |
 | `WS /asr` | legacy 兼容骨架，当前只保留有限 config/EOF 行为 | 不具备 WLK parity，不得暴露到 LAN/公网 |
 | `diarization` profile | 可选匿名 speaker label、overlap 和 finalize remap | 不提供实名身份、声纹库或跨会议持久身份 |
+| `speechrail service` | macOS 用户级 LaunchAgent 的显式安装/启用/管理 CLI | 不自动安装、启用、下载模型或创建 root 服务 |
 | QwenPaw `whisper_api` | 使用标准 OpenAI-compatible `/v1` 路径；`.webm`/`video/webm` 需兼容 | 不要修改聊天模型 endpoint 来排查 STT |
 
 目标设计、实施计划和历史审查材料只说明意图；以当前代码、契约和能力矩阵为准。
 
-## 不可妥协的边界
+## 4. 稳定契约与运行边界
 
 - Python 版本必须满足 `>=3.12,<3.13`；使用 `uv` 和 PEP 621 元数据。
 - 对外文件转写 API 使用 OpenAI-compatible 的
@@ -114,7 +151,7 @@ embedding 或完整转写正文。
 - 不要把 `voice-realtime` 的会议、UI、TTS、LM Studio 或 PostgreSQL 职责
   移入本仓库。
 
-## 契约规则
+### 公共契约规则
 
 - 实现前先以 `contracts/openapi.yaml` 和 realtime 事件契约为准。
 - 所有对外 endpoint 使用统一且稳定的错误 envelope，并包含 request ID。
@@ -130,7 +167,7 @@ embedding 或完整转写正文。
   `base_url` 和已登记的 `whisper-1` alias。兼容性问题应根据实际 multipart
   请求和稳定错误 envelope 诊断，不要依据客户端对 MIME 的假设判断。
 
-### Realtime 约束
+#### Realtime 约束
 
 - `contracts/realtime.md` 描述当前 `/v1/realtime`：
   `transcription_session.update → append* → commit → completed → close`，不产生 delta。
@@ -139,7 +176,7 @@ embedding 或完整转写正文。
 - v2 只承载 ASR/TTS，不承载 LLM response、tool call、播放、会议和应用打断策略。
 - 断线后创建新 session/source epoch；服务端不保存、不重放旧音频或事件。
 
-### Diarization 约束
+#### Diarization 约束
 
 - `session.update.session.diarization` 是 transcription session 的可选能力；未启用时维持
   既有事件形状，启用但没有 profile 时必须返回 `diarization_not_available`。
@@ -148,7 +185,7 @@ embedding 或完整转写正文。
 - `voice-realtime` 负责 `speaker_id → display_name`、人工修正、事务性 remap、会议和数据库。
   SpeechRail 不加载 CAM++、不管理声纹库、不保存 PCM/embedding、不伪造单一 speaker。
 
-## 配置与运行前提
+## 5. 配置与运行前提
 
 项目固定使用 Python `>=3.12,<3.13`、`uv`、PEP 621。主服务使用仓库 `.venv`；真实
 Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diarization` extra
@@ -159,7 +196,7 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 |---|---|---|
 | 服务 | `SPEECHRAIL_HOST`、`SPEECHRAIL_PORT` | 默认 `127.0.0.1:8201`；不要与旧 WLK `8001` 混用 |
 | ASR runtime | `SPEECHRAIL_QWEN3_MODEL_DIR`、`SPEECHRAIL_QWEN3_PYTHON` | 必须同时配置；均为仓库外绝对路径/可执行文件 |
-| TTS runtime | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR`、`SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选；两条路径同时存在才启动 TTS worker |
+| TTS runtime | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR`、`SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选；两条路径同时存在才启动 TTS worker；缺少配置时 `/v1/audio/speech` 返回 `503 backend_not_ready` |
 | diarization | `SPEECHRAIL_DIARIZATION_MODEL_PATH`、`SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` | 可选；模型路径必须是仓库外绝对路径；未通过真实质量/资源门前不进默认配置 |
 | 外部 streaming | `SPEECHRAIL_WLK_STREAMING_URL` | 只连接已运行的 credential-free `ws(s)` endpoint；SpeechRail 不启动 sidecar |
 | 模型身份 | `SPEECHRAIL_MODEL_ID`、`SPEECHRAIL_COMPATIBILITY_MODEL_IDS` | 新配置使用 canonical ID；alias 只做兼容 |
@@ -176,9 +213,9 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 当作已启用的容量安全边界。上传字节上限、Realtime 帧/缓存上限和 worker timeout 也不能
 替代真实性能、峰值内存与长音频基准。
 
-## 开发模式
+## 6. 按任务类型执行
 
-### 启动开发环境
+### 开发
 
 ```bash
 cd <path-to-SpeechRail>
@@ -192,19 +229,20 @@ uv run speechrail
 使用 fake backend，不应下载模型。真实服务一次只运行一个 SpeechRail 进程、一个 ASGI
 worker 和每个 profile 一个隔离 worker。
 
-### 变更流程
+#### 变更流程
 
 1. 先锁定 `contracts/`、实现文件、测试和文档的最小写入范围。
 2. 公共行为先写失败的契约/回归测试，再做最小实现；适配器边界校验 vendor 响应。
 3. 不把模型 SDK、会议业务、UI、数据库或客户端 prompt 引入公共 domain。
 4. 更新受影响的 README、`docs/`、OpenAPI/WebSocket 契约和必要的 `CHANGELOG.md`。
 5. 按单一主题检查 staged diff；不暂存 `.env`、模型、音频、缓存、日志或外部 runtime。
-6. 使用短生命周期 feature branch/worktree；共享工作树中发现同文件并行改动时，只做不
-   重叠的 hunk，无法安全分离就停下并报告，不覆盖或回退他人修改。
+6. 单人本机的小范围低风险修改可留在当前分支；跨文件、高风险或明确并行的任务再使用短生命周期
+   feature branch/worktree。共享工作树中发现同文件并行改动时，只做不重叠的 hunk，无法安全分离就停下并报告，
+   不覆盖或回退他人修改。
 
-## 运维模式
+### 运维
 
-### 启动与健康检查
+#### 启动与健康检查
 
 ```bash
 cd <path-to-SpeechRail>
@@ -225,24 +263,31 @@ curl http://127.0.0.1:8201/v1/models
 HTTP 200、非空文本和 `X-Request-ID`。
 
 前台服务使用 `Ctrl-C` 停止。不要用 `pkill` 或模糊进程匹配杀掉未知服务；先确认端口、
-PID、工作目录和启动者。macOS 常驻服务只使用已审查的 `deploy/macos/` `LaunchAgent`
-模板；不要把 MPS worker 安装成 `LaunchDaemon`。
+PID、工作目录和启动者。macOS 常驻服务只使用已审查的 `speechrail service` CLI 和
+`deploy/macos/` `LaunchAgent` 模板；不要把 MPS worker 安装成 `LaunchDaemon`。
 
-### macOS `launchd`
+#### macOS `launchd`
 
-详细步骤见 `docs/11-operations-runbook.md`。执行 `bootstrap`、`kickstart` 或 `bootout`
-前，先确认 plist、label、项目路径、日志路径和当前用户；所有 `<...>` 占位符必须替换
-为本机值，不能把本机路径回写到项目文档。
+详细步骤见 `docs/operations/operations-runbook.md`。默认使用 `uv run speechrail service
+install|enable|disable|restart|status|uninstall`；`install` 仅写入当前用户的 plist 和私有日志目录，
+`enable`、`restart` 和 `uninstall` 会改变运行态。除非用户明确要求，Agent 只可实现或检查服务
+能力，不得安装、启用、停用、重启或卸载本机服务。
+
+执行有副作用的 service 命令前，先确认当前目录是目标部署目录、`.env` 已配置、当前 `.venv`
+可用、目标 label 为 `com.speechrail`，并说明模型会在服务启动/重启时重新加载。`launchctl`
+手工命令仅用于 CLI 无法提供足够诊断时的恢复排障；不得把本机路径或 `.env` 内容回写到项目文档。
 
 ```bash
 plutil -lint deploy/macos/com.speechrail.plist.example
-launchctl print "gui/$(id -u)/com.speechrail"
+uv run speechrail --help
+uv run speechrail service --help
 ```
 
-停用常驻服务只针对已确认的 `com.speechrail` label；保留可回退的 plist、`.env` 和模型
-snapshot，不删除外部资源。
+停用或卸载常驻服务只针对已确认的 `com.speechrail` label；保留可回退的 plist、`.env` 和模型
+snapshot，不删除外部资源。CLI 只支持 macOS 用户级 `LaunchAgent`；其他平台必须明确返回不支持，
+不得伪造 systemd、root 或跨平台服务语义。
 
-### 运维边界
+#### 运维边界
 
 - 默认只监听 loopback。非 loopback 需要 API key；v2 LAN 暴露还必须有 TLS、WebSocket
   `Origin` allowlist、HTTP CORS、网段策略和限速。
@@ -252,9 +297,9 @@ snapshot，不删除外部资源。
 - 升级按可回退版本目录/commit 执行：先测试和真实 smoke，再切换服务；不要覆盖旧 `.env`
   和 snapshot，不使用破坏性 Git 命令回滚配置。
 
-## 测试模式
+### 测试
 
-### 自动化测试
+#### 自动化测试
 
 测试默认使用 fake backend、构造 PCM 和脱敏 fixture；不加载真实模型、不访问网络、不写入
 真实音频。应覆盖 model alias、统一错误 envelope、request ID、上传/帧/缓存限制、队列与
@@ -268,7 +313,19 @@ uv run --extra dev pytest tests/test_transcription_api.py -q --no-cov
 uv run --extra dev pytest tests/test_realtime_v2_websocket.py -q --no-cov
 ```
 
-### 真实模型与客户端 smoke
+变更 CLI、LaunchAgent 或服务模板时，额外运行：
+
+```bash
+uv run --extra dev pytest tests/test_cli.py tests/test_launchd_service.py -q --no-cov
+plutil -lint deploy/macos/com.speechrail.plist.example
+uv run speechrail --help
+uv run speechrail service --help
+```
+
+测试必须验证 plist 不写入 `EnvironmentVariables`、服务进程使用单一 Python module 入口、
+`KeepAlive.SuccessfulExit=false`、重启节流、原子安装、`gui/<uid>` 域和非 macOS fail-closed。
+
+#### 真实模型与客户端 smoke
 
 只有在外部 snapshot、专用 runtime 和授权均具备时才执行真实 smoke：
 
@@ -288,9 +345,22 @@ Realtime 客户端只发送 16 kHz、单声道、16-bit little-endian PCM。先�
 terminal event，再评估真实 partial、RTF、并发、峰值内存和断线重建。真实 diarization
 还要单独验证 DER/JER、label 稳定性、overlap、finalize remap 和匿名数据清理。
 
-## 项目级验证门禁
+## 7. 验证与交接
 
-在声明改动完成前，先运行针对性测试，再执行以下项目级 gate：
+### 风险分级验证
+
+验证强度与变更范围匹配，不因文档或规则文件变更强制执行运行态操作：
+
+| 变更范围 | 必做验证 | 额外验证 |
+|---|---|---|
+| `AGENTS.md`、README 或正式文档 | 重新读取受影响文件；检查标题层级、仓库路径、Markdown 链接、敏感信息和 `git diff --check` | 文档中的命令或契约发生变化时，再执行对应命令/契约 gate |
+| 代码或测试 | 先跑相关测试、`ruff` 和 `mypy` | 涉及公共行为或跨模块时执行完整代码 gate |
+| OpenAPI/WebSocket 契约 | 契约测试和对应 lint | 影响实现时执行完整代码 gate |
+| 配置、服务或客户端集成 | 配置/模板静态检查和帮助命令 | 只有具备外部 runtime、授权且用户要求时，才做服务、客户端或真实模型 smoke |
+
+### 完整代码 gate
+
+当变更涉及代码、测试、公共契约或多个运行模块时执行：
 
 ```bash
 uv run --extra dev pytest
@@ -307,7 +377,7 @@ git diff --check
 只在其他并行任务修改的文件中失败，不得回退、屏蔽或静默修复这些改动；应报告准确
 路径、错误码，并将本任务的验证证据与其分开。
 
-## 故障定位矩阵
+## 8. 运维排障与安全
 
 | 现象 | 先确认 | 处理原则 |
 |---|---|---|
@@ -327,24 +397,24 @@ git diff --check
 设备/dtype 和资源摘要。禁止收集 API key、Authorization、音频、Base64、完整 prompt、
 完整转写、embedding、姓名和绝对模型路径。
 
-## 文档导航与系统掌握顺序
+## 9. 文档与归档
 
 按任务选择最小阅读集；遇到架构或跨服务问题再扩大范围：
 
 1. `README.md`：当前能力矩阵、快速启动和 API 一览。
-2. `docs/00-product-scope.md`、`docs/01-architecture.md`：所有权、数据流和边界。
+2. `docs/architecture/README.md`：产品范围、数据流、边界和 ADR 导航。
 3. `contracts/openapi.yaml`、`contracts/realtime.md`、`contracts/realtime-v2.md`：事实契约。
-4. `docs/02-api-contract.md`、`docs/04-integrations.md`：客户端接入和错误语义。
-5. `docs/05-runtime-deployment.md`、`docs/10-development-guide.md`：配置、开发和 runtime。
-6. `docs/07-testing-acceptance.md`、`docs/11-operations-runbook.md`：验收和运维。
-7. `docs/09-open-questions.md`、`docs/decisions/README.md`：风险、限制和 ADR 决策。
-8. `docs/superpowers/specs/` 与 `docs/superpowers/plans/`：目标设计/历史计划，不能单独
+4. `docs/users/README.md`：客户端接入和错误语义。
+5. `docs/developers/README.md`：开发、测试和契约变更。
+6. `docs/operations/README.md`：配置、运行、验收和运维。
+7. `docs/architecture/current-boundaries.md`、`docs/decisions/README.md`：风险、限制和 ADR 决策。
+8. `docs/archive/README.md`：目标设计、实施计划、审查交接和其他过程材料；不能单独
    作为当前行为证据。
 
 代码、契约、文档冲突时，先确认当前实测和 Git 状态，再最小范围修正；不要批量改写
 无关文档或把未验收目标标成已完成。
 
-## 提交与交接
+## 10. 交付、并行与数据保护
 
 - 一个 commit 只表达一个逻辑主题，提交信息使用 `<type>: <why>`，例如
   `fix: accept OpenAI audio container uploads`。
@@ -365,7 +435,7 @@ git diff --check
 回退：如何恢复本次变更，不删除外部模型、配置或用户数据
 ```
 
-## 敏感数据
+### 敏感数据
 
 严禁提交 API key、本地凭据文件、完整环境变量文件、音频、模型权重或未脱敏
 的转写 fixture。示例中使用占位符。

@@ -109,7 +109,7 @@ transcription_session.update
 ```
 
 `delta` 是易失 partial；`completed` 才是客户端可以持久化的最终结果。会话中不切换
-模型和设备 profile。详细字段见 [`contracts/realtime.md`](../../../contracts/realtime.md)。
+模型和设备 profile。详细字段见 [`contracts/realtime.md`](../../../../../contracts/realtime.md)。
 
 ### 5.3 Legacy WLK
 

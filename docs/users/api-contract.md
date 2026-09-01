@@ -7,10 +7,10 @@ date: 2026-08-31
 
 # SpeechRail 公共 API 契约
 
-机器可读 REST 事实来源是 [OpenAPI 3.1](../contracts/openapi.yaml)。本页解释客户端应如何
-使用当前实现；`/v1/realtime` 的事件详情以 [Realtime v1 契约](../contracts/realtime.md) 为准。
+机器可读 REST 事实来源是 [OpenAPI 3.1](../../contracts/openapi.yaml)。本页解释客户端应如何
+使用当前实现；`/v1/realtime` 的事件详情以 [Realtime v1 契约](../../contracts/realtime.md) 为准。
 `/v2/realtime` 已有可测试的 ASR/TTS state-machine 实现，完整事件与已知运行时边界见
-[Realtime v2 契约](../contracts/realtime-v2.md)。没有已授权并通过 smoke 的真实 worker 时，
+[Realtime v2 契约](../../contracts/realtime-v2.md)。没有已授权并通过 smoke 的真实 worker 时，
 该端点不得被表述为模型可用。
 
 ASR v2 默认仍可使用受限 batch backend 在 flush/commit 后产出结果。仅在明确设置
@@ -23,7 +23,8 @@ ASR v2 默认仍可使用受限 batch backend 在 flush/commit 后产出结果�
 `http://127.0.0.1:8201/v1`。公共 canonical model ID：
 
 ```text
-speechrail/qwen3-asr-1.7b
+ASR: speechrail/qwen3-asr-1.7b
+TTS: speechrail/qwen3-tts
 ```
 
 `Qwen3-ASR-1.7B`、`qwen3-asr-1.7b`、`whisper-1` 为 `0.x` 兼容别名；最后一个不代表
@@ -39,7 +40,7 @@ speechrail/qwen3-asr-1.7b
 | `GET` | `/health` | 返回进程、版本及 `asr_ready`/`tts_ready` 独立状态 |
 | `GET` | `/readyz` | 至少一个已配置 ASR/TTS 推理入口可接受请求；真实模型仍需 smoke |
 | `GET` | `/v1/models` | canonical ASR/TTS ID 与兼容 aliases |
-| `GET` | `/v1/voices` | 登记的 TTS preset 目录 |
+| `GET` | `/v1/voices` | 登记的 TTS preset 目录；TTS worker 未就绪时仍可返回目录并标记 `available=false` |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS；当前支持 `wav` 与 `pcm` |
 | `POST` | `/v1/jobs` | 创建 owner-scoped 异步语音任务元数据（需配置 spool） |
@@ -70,6 +71,40 @@ Content-Type: multipart/form-data
 上传字节数由 `SPEECHRAIL_MAX_UPLOAD_BYTES` 强制限制。`SPEECHRAIL_MAX_AUDIO_SECONDS`
 已是配置字段，但 `0.1.0` 尚未在解码后强制按时长拒绝，因此运营上应同时控制客户端
 音频时长和上传字节数。
+
+## 文本转语音
+
+先用 `GET /v1/voices` 获取服务器登记的 preset；成功响应的形状为
+`{"object":"list","data":[...]}`。首发 preset 为 `default`、`warm`、`bright` 和
+`calm`，客户端不得上传 voice sample、clone prompt、文件或 URL。
+
+`/v1/voices` 只负责返回服务端登记的目录，不以 TTS worker ready 作为路由前置条件。按当前代码，未配置
+外部 TTS runtime 时也应返回目录，条目标记为 `available=false`；如果实际返回 404，应先核对客户端的
+base URL、服务端口和运行中的进程是否为当前代码，再重启服务。Creator 等客户端要执行真正的 TTS 合成，
+必须在 SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 和
+`SPEECHRAIL_QWEN3_TTS_PYTHON`，然后重启服务；缺少配置时 `/v1/audio/speech` 的预期错误是
+`503 backend_not_ready`，不是 `/v1/voices` 404。
+
+```http
+POST /v1/audio/speech
+Authorization: Bearer <key-if-configured>
+Content-Type: application/json
+```
+
+```json
+{
+  "model": "speechrail/qwen3-tts",
+  "input": "SpeechRail smoke test.",
+  "voice": "default",
+  "response_format": "pcm",
+  "speed": 1.0,
+  "language": "auto"
+}
+```
+
+`response_format` 支持 `pcm` 和 `wav`；公共 PCM 输出是 24 kHz、单声道、signed little-endian
+PCM16。`speed` 范围为 `0.25..4.0`，`language` 默认为 `auto`。没有配置外部 TTS runtime
+时，端点返回稳定的 `503 backend_not_ready`；TTS 未就绪不应被客户端当作 ASR 不可用。
 
 ## 异步 Jobs
 

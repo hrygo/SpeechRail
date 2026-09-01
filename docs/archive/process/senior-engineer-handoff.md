@@ -13,7 +13,7 @@ date: 2026-08-31
 重连、资源准入、TTS 取消、job 生命周期和 LAN WebSocket 安全的定义不足。
 
 必须修改项已进入[最终设计规格](superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)、
-[Realtime v2 设计契约](../contracts/realtime-v2.md)和 [ADR-0006](decisions/0006-public-asr-tts-runtime.md)。
+[Realtime v2 设计契约](../../../contracts/realtime-v2.md)和 [ADR-0006](../../decisions/0006-public-asr-tts-runtime.md)。
 这些文件不授权下载模型、修改客户端、安装服务或执行真实模型/客户端 smoke；后续代码实现必须
 保持这些运行门禁。
 
@@ -31,7 +31,7 @@ date: 2026-08-31
 - 默认 profile、worker 数和并发配置必须先通过真实 streaming、RTF、内存与资源隔离基准门。
 
 目标设计与理由见[最终设计规格](superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)
-及 [ADR-0006](decisions/0006-public-asr-tts-runtime.md)。
+及 [ADR-0006](../../decisions/0006-public-asr-tts-runtime.md)。
 
 ## 仓库与提交状态
 
@@ -167,13 +167,13 @@ TTS 不阻塞 ASR 迁移。`voice-realtime` 可先保留自己的播放/TTS brid
 ## 审查材料导航
 
 - [最终架构规格](superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)
-- [现行 API 契约](02-api-contract.md)、[Realtime v1 契约](../contracts/realtime.md)与
-  [Realtime v2 设计契约](../contracts/realtime-v2.md)
-- [运行时与部署](05-runtime-deployment.md)
-- [测试与验收](07-testing-acceptance.md)
-- [迁移 Runbook](08-migration-runbook.md)
-- [当前边界](09-open-questions.md)
-- [ADR 索引](decisions/README.md)
+- [现行 API 契约](../../users/api-contract.md)、[Realtime v1 契约](../../../contracts/realtime.md)与
+  [Realtime v2 设计契约](../../../contracts/realtime-v2.md)
+- [运行时与部署](../../operations/runtime-deployment.md)
+- [测试与验收](../../developers/testing-acceptance.md)
+- [迁移 Runbook](../../operations/migration-runbook.md)
+- [当前边界](../../architecture/current-boundaries.md)
+- [ADR 索引](../../decisions/README.md)
 
 ## 下一道门
 

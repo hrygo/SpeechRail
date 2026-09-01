@@ -6,11 +6,11 @@ date: 2026-08-31
 
 # 吸收 `voice-realtime` 的方案
 
-> 状态说明：本文保留 2026-08-31 的原始吸收设计，已被 [ADR-0007](decisions/0007-public-speaker-diarization.md)
-> 与[迁移 Runbook](08-migration-runbook.md)取代；其中“Sortformer 留在 `voice-realtime`”的结论不再有效。
+> 状态说明：本文保留 2026-08-31 的原始吸收设计，已被 [ADR-0007](../../decisions/0007-public-speaker-diarization.md)
+> 与[迁移 Runbook](../../operations/migration-runbook.md)取代；其中“Sortformer 留在 `voice-realtime`”的结论不再有效。
 > Qwen3 native worker 已独立实现；WLK streaming adapter、legacy snapshot parity 和
 > `voice-realtime` 侧的改动均尚未实施。当前 `/asr` 仅支持 config/EOF 骨架，不能据此切换
-> 旧服务。实际执行顺序见 [迁移 Runbook](08-migration-runbook.md)。
+> 旧服务。实际执行顺序见 [迁移 Runbook](../../operations/migration-runbook.md)。
 
 ## 1. 核心结论
 

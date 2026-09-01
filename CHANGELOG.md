@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased] - 2026-09-01
+
+### Added
+
+- 增加独立的 Qwen3-TTS VoiceDesign worker、`/v1/audio/speech`、`/v1/voices` 和 Realtime v2 speech 会话能力。
+- 增加可选、匿名且有界的 Realtime v2 diarization profile 与最终 label remap。
+
+### Changed
+
+- 正式文档按架构、用户、开发者和运维职责分层；实施计划、设计规格、审查交接和已取代方案移至 `docs/archive/process/`。
+
+### Known limitations
+
+- 真实 TTS/diarization worker 的质量、时延、峰值内存和客户端闭环仍需按运维/验收文档单独确认。
+- 非 loopback 的 TLS、CORS、Origin、网段限制、速率限制和 legacy auth 仍未完整实现。
+
 ## [0.1.0] - 2026-08-31
 
 ### Added

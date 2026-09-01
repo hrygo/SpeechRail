@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-date: 2026-08-31
+date: 2026-09-01
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -23,7 +23,7 @@ date: 2026-08-31
 - `/health` 分别反映 ASR/TTS worker readiness，`/readyz` 在至少一个能力可接受请求时返回 200；
   真实 worker 质量仍需短音频/短文本 smoke 确认。
 - 上传字节数受限；解码后音频时长、CORS、速率限制、指标导出与 legacy auth 尚未实现。
-- 常驻运行仅提供 `launchd` 安装模板/操作手册，尚未在本机自动安装。
+- 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；当前未在本机自动安装或启用。
 
 ## 待验收或待实现
 

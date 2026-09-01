@@ -47,6 +47,7 @@ SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
 # Optional external TTS runtime; both paths are required before its worker starts.
 # SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-TTS-VoiceDesign
 # SPEECHRAIL_QWEN3_TTS_PYTHON=/absolute/path/to/qwen3-tts-runtime/bin/python
+# SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS=false
 # SPEECHRAIL_TTS_VOICE_IDS=["default","warm","bright","calm"]
 # SPEECHRAIL_TTS_WARMUP_ON_START=true
 ```
@@ -81,13 +82,19 @@ uv run speechrail
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
 curl http://127.0.0.1:8201/v1/models
-curl http://127.0.0.1:8201/v1/voices
+curl -i http://127.0.0.1:8201/v1/voices
 ```
 
 `/readyz` 为 200 仅说明推理入口已配置；发布前还要用操作者拥有的非敏感短音频完成一次
 REST ASR smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音频。启用 TTS 后，使用
 `POST /v1/audio/speech` 请求 `speechrail/qwen3-tts`、登记 voice 和 `response_format=pcm`，确认
 HTTP 200、非空且偶数字节的 24 kHz PCM16；不得记录输入文本或输出音频。
+
+`/v1/voices` 是独立的 preset 目录路由；按当前代码，即使 TTS worker 未 ready 也应返回 HTTP 200，
+并在条目中标记 `available=false`。如果运行态返回 404，先核对请求的 base URL、`8201` 端口、运行中的进程
+和服务是否已重启；这不是缺少 TTS runtime 配置的直接表现。Creator 等客户端要完成 TTS 合成，必须在
+SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_TTS_PYTHON`，
+然后重启服务；缺少任一配置时，`/v1/audio/speech` 预期返回 `503 backend_not_ready`。
 
 ## 启动时加载的模型
 
@@ -181,5 +188,5 @@ API key、Authorization、音频、Base64、完整 prompt 或转写正文。
 
 服务回滚为：停止新进程，恢复上一个已验证版本工作目录与 `.env`，启动后完成 REST smoke。
 QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。`voice-realtime` adapter
-已经实现但未完成真实切换；启用、影子、回滚均须使用[迁移 Runbook](08-migration-runbook.md)，
+已经实现但未完成真实切换；启用、影子、回滚均须使用[迁移 Runbook](migration-runbook.md)，
 不能假定 `/asr` 已有 WLK 转写 parity。

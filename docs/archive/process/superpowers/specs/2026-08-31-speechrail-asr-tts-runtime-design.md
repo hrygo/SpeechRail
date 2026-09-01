@@ -144,7 +144,7 @@ OpenAI Batches API；它以独立资源和明确语义供所有客户端使用�
 
 现有 `/v1/realtime` 语义冻结：它仍是一次 commit 后返回一次最终转写的兼容实现。目标实时
 协议使用 `WS /v2/realtime`，避免让已有客户端因新增事件或 session 语义而失效。完整事件、
-终态和映射规则以 [Realtime v2 设计契约](../../../contracts/realtime-v2.md) 为准；v2 实现前，
+终态和映射规则以 [Realtime v2 设计契约](../../../../../contracts/realtime-v2.md) 为准；v2 实现前，
 该文件只是一份已审查设计，不是可调用能力。
 
 握手使用 Bearer token；成功后客户端发送 `session.update`，其中 `session.type` 只能为
