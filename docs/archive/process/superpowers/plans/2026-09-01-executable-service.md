@@ -27,10 +27,10 @@
 
 **Interfaces:** `LaunchAgentDefinition.to_plist() -> bytes`; `LaunchAgentManager.install() -> Path`; lifecycle methods `enable`, `disable`, `restart`, `status`, and `uninstall` that use an injected command runner.
 
-- [ ] Write failing tests asserting XML-safe plist output, absolute paths, current-Python `ProgramArguments`, absence of `EnvironmentVariables`, restart policy, atomic/idempotent install, exact `gui/<uid>` commands, and platform rejection.
-- [ ] Run `uv run --extra dev pytest tests/test_launchd_service.py -q --no-cov`; confirm it fails because the adapter is absent.
-- [ ] Implement the smallest adapter. Render `Label=com.speechrail`, `ProgramArguments=[python, "-m", "speechrail", "serve"]`, `RunAtLoad=true`, `KeepAlive={"SuccessfulExit": false}`, `ThrottleInterval=10`, `ProcessType="Interactive"`, and explicit stdout/stderr paths with `plistlib`.
-- [ ] Re-run the focused suite; commit as `feat: add macos launchagent service adapter`.
+- [x] Write failing tests asserting XML-safe plist output, absolute paths, current-Python `ProgramArguments`, absence of `EnvironmentVariables`, restart policy, atomic/idempotent install, exact `gui/<uid>` commands, and platform rejection.
+- [x] Run `uv run --extra dev pytest tests/test_launchd_service.py -q --no-cov`; confirm it fails because the adapter is absent.
+- [x] Implement the smallest adapter. Render `Label=com.speechrail`, `ProgramArguments=[python, "-m", "speechrail", "serve"]`, `RunAtLoad=true`, `KeepAlive={"SuccessfulExit": false}`, `ThrottleInterval=10`, `ProcessType="Interactive"`, and explicit stdout/stderr paths with `plistlib`.
+- [x] Re-run the focused suite; commit as `feat: add macos launchagent service adapter`.
 
 ### Task 2: Executable CLI
 
@@ -38,23 +38,23 @@
 
 **Interfaces:** `main(argv: Sequence[str] | None = None) -> int`; commands `serve` and `service install|enable|disable|restart|status|uninstall`; omitted command remains backward-compatible with `serve`.
 
-- [ ] Write failing tests with a fake manager: `service install` calls only `install`; lifecycle commands delegate exactly once; `serve` calls Uvicorn with the `Settings` host/port; expected service/config errors return `1` with a redacted stderr message.
-- [ ] Run `uv run --extra dev pytest tests/test_cli.py -q --no-cov`; confirm RED.
-- [ ] Implement an `argparse` command tree and dependency seam. Do not catch `KeyboardInterrupt`; do not start models during help or service management.
-- [ ] Run both focused suites; commit as `feat: add speechrail service cli`.
+- [x] Write failing tests with a fake manager: `service install` calls only `install`; lifecycle commands delegate exactly once; `serve` calls Uvicorn with the `Settings` host/port; expected service/config errors return `1` with a redacted stderr message.
+- [x] Run `uv run --extra dev pytest tests/test_cli.py -q --no-cov`; confirm RED.
+- [x] Implement an `argparse` command tree and dependency seam. Do not catch `KeyboardInterrupt`; do not start models during help or service management.
+- [x] Run both focused suites; commit as `feat: add speechrail service cli`.
 
 ### Task 3: Templates and documentation
 
 **Files:** Modify `deploy/macos/com.speechrail.plist.example`, `README.md`, `docs/operations/operations-runbook.md`, `docs/operations/runtime-deployment.md`, and `docs/developers/testing-acceptance.md`.
 
-- [ ] Add a failing structural template test that parses the checked-in plist and asserts the same process, restart, and interactive policies as the managed service.
-- [ ] Run the focused test and confirm RED because the existing template has unconditional `KeepAlive` and no throttle.
-- [ ] Align the template and document portable `speechrail service install`, explicit `enable`, health smoke, `status`, `restart`, `disable`, and `uninstall`. State that install only writes the plist and enabling starts the model process; retain manual `launchctl` only for recovery diagnostics.
-- [ ] Run focused tests and `git diff --check`; commit as `docs: document managed speechrail service lifecycle`.
+- [x] Add a failing structural template test that parses the checked-in plist and asserts the same process, restart, and interactive policies as the managed service.
+- [x] Run the focused test and confirm RED because the existing template has unconditional `KeepAlive` and no throttle.
+- [x] Align the template and document portable `speechrail service install`, explicit `enable`, health smoke, `status`, `restart`, `disable`, and `uninstall`. State that install only writes the plist and enabling starts the model process; retain manual `launchctl` only for recovery diagnostics.
+- [x] Run focused tests and `git diff --check`; commit as `docs: document managed speechrail service lifecycle`.
 
 ### Task 4: Quality gate
 
-- [ ] Review all changes for secrets, shell interpolation, root service behavior, multiple ASGI workers, and public-contract drift.
-- [ ] Run `uv run --extra dev pytest`, `uv run --extra dev ruff check src tests`, `uv run --extra dev mypy src`, `npx @redocly/cli lint contracts/openapi.yaml`, and `git diff --check`.
-- [ ] Run `uv run speechrail --help` and `uv run speechrail service --help`; confirm they render without starting a model worker.
-- [ ] Commit only corrections required by review/verification.
+- [x] Review all changes for secrets, shell interpolation, root service behavior, multiple ASGI workers, and public-contract drift.
+- [x] Run `uv run --extra dev pytest`, `uv run --extra dev ruff check src tests`, `uv run --extra dev mypy src`, `npx @redocly/cli lint contracts/openapi.yaml`, and `git diff --check`.
+- [x] Run `uv run speechrail --help` and `uv run speechrail service --help`; confirm they render without starting a model worker.
+- [x] Commit only corrections required by review/verification.
