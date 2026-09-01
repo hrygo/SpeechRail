@@ -1,7 +1,7 @@
 """Host-service adapters for the local SpeechRail runtime."""
 
+from speechrail.service.constants import SERVICE_LABEL
 from speechrail.service.launchd import (
-    SERVICE_LABEL,
     LaunchAgentDefinition,
     LaunchAgentManager,
     LaunchAgentPaths,

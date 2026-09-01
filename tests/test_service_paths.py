@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from speechrail.config import Settings
+from speechrail.service.constants import SERVICE_LABEL
 from speechrail.service.paths import ServiceLayout
 
 
@@ -19,7 +20,7 @@ def test_layout_uses_private_app_home_and_stable_runtime_paths(tmp_path: Path) -
     assert layout.config_file == app_home / "config" / ".env"
     assert layout.log_directory == tmp_path / "User" / "Library" / "Logs" / "SpeechRail"
     assert layout.plist_path == (
-        tmp_path / "User" / "Library" / "LaunchAgents" / "com.speechrail.plist"
+        tmp_path / "User" / "Library" / "LaunchAgents" / f"{SERVICE_LABEL}.plist"
     )
 
 

@@ -5,12 +5,17 @@ import asyncio
 import pytest
 
 from speechrail.config import Settings
+from speechrail.domain.resource_limits import GovernorLimits as DomainGovernorLimits
 from speechrail.runtime.resource_governor import (
     GovernorLimits,
     GovernorQueueFullError,
     ResourceGovernor,
     WorkClass,
 )
+
+
+def test_runtime_reexports_the_domain_limits_value_object() -> None:
+    assert GovernorLimits is DomainGovernorLimits
 
 
 def test_realtime_slot_remains_available_when_batch_lane_is_saturated() -> None:

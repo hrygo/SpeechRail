@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
 
+from speechrail.domain.resource_limits import GovernorLimits
+
 T = TypeVar("T")
 
 
@@ -26,21 +28,6 @@ class WorkClass(StrEnum):
 
 class GovernorQueueFullError(RuntimeError):
     """The bounded waiting queue for a work class is full."""
-
-
-@dataclass(frozen=True, slots=True)
-class GovernorLimits:
-    total_capacity: int
-    realtime_reserved_capacity: int
-    max_pending_per_class: int
-
-    def __post_init__(self) -> None:
-        if self.total_capacity < 2:
-            raise ValueError("total_capacity must be at least two")
-        if not 1 <= self.realtime_reserved_capacity < self.total_capacity:
-            raise ValueError("realtime_reserved_capacity must be between one and total_capacity")
-        if self.max_pending_per_class < 1:
-            raise ValueError("max_pending_per_class must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,3 +142,12 @@ class ResourceGovernor:
 
     def _waiters_for(self, work_class: WorkClass) -> deque[_Waiter]:
         return self._realtime_waiters if work_class.is_realtime else self._batch_waiters
+
+
+__all__ = [
+    "GovernorLimits",
+    "GovernorQueueFullError",
+    "GovernorSnapshot",
+    "ResourceGovernor",
+    "WorkClass",
+]

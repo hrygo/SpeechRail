@@ -11,7 +11,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-SERVICE_LABEL = "com.speechrail"
+from speechrail.service.constants import SERVICE_LABEL
+
 _THROTTLE_SECONDS = 10
 
 Runner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]

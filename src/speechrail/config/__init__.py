@@ -9,8 +9,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.domain.tts import VOICE_PROFILES
-from speechrail.runtime.resource_governor import GovernorLimits
 
 
 class Settings(BaseSettings):

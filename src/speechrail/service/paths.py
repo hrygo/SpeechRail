@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from speechrail.service.launchd import SERVICE_LABEL
+from speechrail.service.constants import SERVICE_LABEL
 
 
 def _absolute(path: Path, *, name: str) -> Path:
