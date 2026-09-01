@@ -15,6 +15,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
+from speechrail.compatibility.openai_realtime import (
+    canonical_asr_model,
+    canonical_tts_model,
+)
 from speechrail.domain.ports import SpeechRequest
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
@@ -167,13 +171,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        if model.strip() and model.strip() not in {
-            resolved.model_id,
-            *resolved.compatibility_model_ids,
-        }:
-            return error_response(
-                400, request_id, "model_not_found", f"Unknown model: {model}", param="model"
-            )
+        if model.strip():
+            registered = frozenset({resolved.model_id, *resolved.compatibility_model_ids})
+            if canonical_asr_model(model.strip(), registered=registered) is None:
+                return error_response(
+                    400, request_id, "model_not_found", f"Unknown model: {model}", param="model"
+                )
         if response_format not in {"json", "verbose_json", "text", "srt", "vtt"}:
             return error_response(
                 422,
@@ -286,7 +289,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        if body.model != resolved.tts_model_id:
+        if canonical_tts_model(
+            body.model, registered=frozenset({resolved.tts_model_id})
+        ) is None:
             return error_response(
                 400,
                 request_id,

@@ -19,8 +19,14 @@ _ASR_MODEL_ALIASES = {
     "whisper-1": "speechrail/qwen3-asr-1.7b",
     "gpt-4o-transcribe": "speechrail/qwen3-asr-1.7b",
     "gpt-4o-mini-transcribe": "speechrail/qwen3-asr-1.7b",
+    "gpt-transcribe": "speechrail/qwen3-asr-1.7b",
+    "gpt-live-transcribe": "speechrail/qwen3-asr-1.7b",
 }
-_TTS_MODEL_ALIASES: dict[str, str] = {}
+_TTS_MODEL_ALIASES = {
+    "tts-1": "speechrail/qwen3-tts",
+    "tts-1-hd": "speechrail/qwen3-tts",
+    "gpt-4o-mini-tts": "speechrail/qwen3-tts",
+}
 
 _PCM16_FORMAT: dict[str, object] = {
     "type": "pcm16",
@@ -59,6 +65,16 @@ def canonical_tts_model(model: str, *, registered: frozenset[str]) -> str | None
     if model in registered:
         return model
     return _TTS_MODEL_ALIASES.get(model)
+
+
+def asr_model_aliases() -> dict[str, str]:
+    """All OpenAI-standard ASR aliases mapped to their canonical profile."""
+    return dict(_ASR_MODEL_ALIASES)
+
+
+def tts_model_aliases() -> dict[str, str]:
+    """All OpenAI-standard TTS aliases mapped to their canonical profile."""
+    return dict(_TTS_MODEL_ALIASES)
 
 
 def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str, object]:
@@ -447,7 +463,7 @@ def apply_session_update(
         raise RealtimeAdapterError("invalid_voice", "voice must be a string")
 
     config: dict[str, Any] = {
-        "model": resolved_asr,
+        "model": resolved_asr or asr_model,
         "language": language or session.get("language"),
         "voice": voice,
     }

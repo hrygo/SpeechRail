@@ -8,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from speechrail.application.services import AppServices
+from speechrail.compatibility.openai_realtime import asr_model_aliases, tts_model_aliases
 from speechrail.domain.tts import VOICE_PROFILES
 from speechrail.http.errors import error_response
 
@@ -43,17 +44,34 @@ def create_system_router(services: AppServices) -> APIRouter:
 
     @router.get("/v1/models")
     async def models() -> dict[str, Any]:
-        return {
-            "object": "list",
-            "data": [
-                {"id": item, "object": "model", "owned_by": "speechrail"}
-                for item in (
-                    resolved.model_id,
-                    resolved.tts_model_id,
-                    *resolved.compatibility_model_ids,
-                )
-            ],
-        }
+        asr_target = resolved.model_id
+        tts_target = resolved.tts_model_id
+        data: list[dict[str, Any]] = [
+            {"id": asr_target, "object": "model", "owned_by": "speechrail"},
+            {"id": tts_target, "object": "model", "owned_by": "speechrail"},
+        ]
+        for alias, target in sorted(asr_model_aliases().items()):
+            data.append(
+                {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}
+            )
+        for alias, target in sorted(tts_model_aliases().items()):
+            data.append(
+                {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}
+            )
+        for compat in resolved.compatibility_model_ids:
+            if compat in {asr_target, tts_target} or any(
+                d["id"] == compat for d in data
+            ):
+                continue
+            data.append(
+                {
+                    "id": compat,
+                    "object": "model",
+                    "owned_by": "speechrail",
+                    "resolves_to": asr_target,
+                }
+            )
+        return {"object": "list", "data": data}
 
     @router.get("/v1/voices")
     async def voices() -> dict[str, Any]:
