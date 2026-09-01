@@ -46,12 +46,13 @@ class RuntimeLifecycle:
         repository: RecoveryRepository | None = None,
         asr: StartableComponent | None = None,
         tts: StartableComponent | None = None,
+        streaming: StartableComponent | None = None,
         runner: JobRunner | None = None,
         poll_seconds: float = 1.0,
     ) -> None:
         self._repository = repository
         self._pending: tuple[StartableComponent, ...] = tuple(
-            component for component in (asr, tts) if component is not None
+            component for component in (asr, tts, streaming) if component is not None
         )
         self._runner = runner
         self._poll_seconds = poll_seconds

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.backends.camplus import CamPlusEmbeddingExtractor
@@ -13,6 +14,11 @@ from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
     Qwen3Worker,
+)
+from speechrail.backends.qwen3_streaming import (
+    NativeRealtimeFactory,
+    Qwen3StreamingBackendConfig,
+    Qwen3StreamingWorker,
 )
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.backends.wlk_streaming import WlkRealtimeFactory
@@ -157,7 +163,39 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         tts_synthesizer = tts_worker
 
     realtime_asr_factory = overrides.realtime_asr_factory
-    if realtime_asr_factory is None and settings.wlk_streaming_url is not None:
+    streaming_worker: Qwen3StreamingWorker | None = None
+    if (
+        realtime_asr_factory is None
+        and settings.realtime_asr_backend == "native"
+        and settings.qwen3_streaming_python is not None
+        and settings.qwen3_model_dir is not None
+    ):
+        streaming_worker = Qwen3StreamingWorker(
+            Qwen3StreamingBackendConfig(
+                repository_root=_package_root(),
+                python_executable=settings.qwen3_streaming_python,
+                model_dir=settings.qwen3_model_dir,
+                device=settings.device,
+                mode=settings.qwen3_streaming_mode,
+                chunk_sec=settings.qwen3_streaming_chunk_sec,
+                left_context_sec=settings.qwen3_streaming_left_context_sec,
+                right_context_ms=settings.qwen3_streaming_right_context_ms,
+                hold_back_words=settings.qwen3_streaming_hold_back_words,
+                stable_iterations=settings.qwen3_streaming_stable_iterations,
+                max_new_tokens=settings.qwen3_streaming_max_new_tokens,
+                timeout_seconds=settings.request_timeout_seconds,
+            )
+        )
+        realtime_asr_factory = NativeRealtimeFactory(
+            worker=streaming_worker,
+            mode=settings.qwen3_streaming_mode,
+            next_session_id=lambda: f"sess_{uuid4().hex}",
+        )
+    elif (
+        realtime_asr_factory is None
+        and settings.realtime_asr_backend == "wlk"
+        and settings.wlk_streaming_url is not None
+    ):
         realtime_asr_factory = WlkRealtimeFactory(url=settings.wlk_streaming_url)
 
     diarization_engine = overrides.diarization_engine
@@ -200,6 +238,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         repository=job_repository,
         asr=asr_worker,
         tts=tts_worker,
+        streaming=streaming_worker,
         runner=job_runner,
         poll_seconds=settings.job_poll_seconds,
     )

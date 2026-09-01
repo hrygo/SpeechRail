@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     tts_top_p: float = Field(default=0.95, gt=0.0, le=1.0)
     tts_warmup_on_start: bool = True
     wlk_streaming_url: str | None = None
+    realtime_asr_backend: Literal["disabled", "native", "wlk"] = "disabled"
+    qwen3_streaming_python: Path | None = None
+    qwen3_streaming_mode: Literal["windowed", "causal"] = "windowed"
+    qwen3_streaming_chunk_sec: float = Field(default=2.0, gt=0, le=30)
+    qwen3_streaming_left_context_sec: float = Field(default=12.0, ge=0, le=60)
+    qwen3_streaming_right_context_ms: int = Field(default=640, ge=0, le=10_000)
+    qwen3_streaming_hold_back_words: int = Field(default=6, ge=0, le=64)
+    qwen3_streaming_stable_iterations: int = Field(default=2, ge=1, le=16)
+    qwen3_streaming_max_new_tokens: int = Field(default=256, ge=32, le=2048)
+    qwen3_streaming_context: str = ""
     diarization_model_path: Path | None = None
     diarization_embedding_model_path: Path | None = None
     diarization_max_buffer_bytes: int = Field(default=8_388_608, ge=2, le=64_000_000)
@@ -120,6 +130,17 @@ class Settings(BaseSettings):
             raise ValueError("MPS profile requires float16")
         if self.device == "cpu" and self.dtype != "float32":
             raise ValueError("CPU profile requires float32")
+        if self.realtime_asr_backend == "native":
+            if self.qwen3_streaming_python is None:
+                raise ValueError(
+                    "realtime_asr_backend=native requires qwen3_streaming_python"
+                )
+            if self.qwen3_model_dir is None:
+                raise ValueError(
+                    "realtime_asr_backend=native requires qwen3_model_dir"
+                )
+        elif self.realtime_asr_backend == "wlk" and self.wlk_streaming_url is None:
+            raise ValueError("realtime_asr_backend=wlk requires wlk_streaming_url")
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
         if not self.tts_voice_ids or any(
