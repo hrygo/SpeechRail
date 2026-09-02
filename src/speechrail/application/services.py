@@ -187,7 +187,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 python_executable=settings.qwen3_tts_python,
                 model_dir=settings.qwen3_tts_model_dir,
                 device=settings.device,
-                dtype=settings.dtype,
+                dtype="float16" if settings.device == "mps" else "float32",
                 sample_rate=settings.tts_sample_rate,
                 timeout_seconds=settings.request_timeout_seconds,
                 chunk_ms=settings.tts_chunk_ms,

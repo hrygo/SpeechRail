@@ -31,7 +31,6 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
             "type": "start",
             "model_dir": str(model_dir),
             "device": "mps",
-            "dtype": "float16",
             "sample_rate": 24_000,
         },
     )
@@ -53,7 +52,6 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
         target,
         model_dir=model_dir,
         device="mps",
-        dtype="float16",
         sample_rate=24_000,
         engine_factory=lambda _: FakeEngine(),
     )
@@ -92,7 +90,6 @@ def test_worker_main_passes_explicit_local_runtime_arguments_to_private_server(
         *,
         model_dir: Path,
         device: str,
-        dtype: str,
         sample_rate: int,
         engine_factory: object,
     ) -> None:
@@ -102,7 +99,6 @@ def test_worker_main_passes_explicit_local_runtime_arguments_to_private_server(
                 "output_stream": output_stream,
                 "model_dir": model_dir,
                 "device": device,
-                "dtype": dtype,
                 "sample_rate": sample_rate,
                 "engine_factory": engine_factory,
             }
@@ -113,106 +109,14 @@ def test_worker_main_passes_explicit_local_runtime_arguments_to_private_server(
         return FakeEngine()
 
     worker_module.main(
-        [
-            "--model-dir",
-            str(model_dir),
-            "--device",
-            "mps",
-            "--dtype",
-            "int8",
-            "--sample-rate",
-            "24000",
-        ],
+        ["--model-dir", str(model_dir), "--device", "mps", "--sample-rate", "24000"],
         engine_factory=engine_factory,
     )
 
     assert captured["model_dir"] == model_dir.resolve()
     assert captured["device"] == "mps"
-    assert captured["dtype"] == "int8"
     assert captured["sample_rate"] == 24_000
     assert captured["engine_factory"] is engine_factory
-
-
-def test_serve_rejects_start_frame_dtype_mismatch(tmp_path: Path) -> None:
-    source = BytesIO()
-    target = BytesIO()
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    write_frame(
-        source,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "start",
-            "model_dir": str(model_dir),
-            "device": "mps",
-            "dtype": "int8",
-            "sample_rate": 24_000,
-        },
-    )
-    source.seek(0)
-
-    serve(
-        source,
-        target,
-        model_dir=model_dir,
-        device="mps",
-        dtype="float16",
-        sample_rate=24_000,
-        engine_factory=lambda _: FakeEngine(),
-    )
-
-    target.seek(0)
-    assert read_frame(target) == {
-        "version": PROTOCOL_VERSION,
-        "type": "error",
-        "code": "worker_invalid_start",
-    }
-
-
-def test_serve_requires_engine_identity_to_match_int8_dtype(tmp_path: Path) -> None:
-    class Int8FakeEngine:
-        identity = TtsWorkerIdentity(device="mps", dtype="int8", sample_rate=24_000)
-
-        def synthesize(self, text: str, *, voice: str, speed: float, language: str):
-            yield b"\x00\x00"
-
-    source = BytesIO()
-    target = BytesIO()
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    write_frame(
-        source,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "start",
-            "model_dir": str(model_dir),
-            "device": "mps",
-            "dtype": "int8",
-            "sample_rate": 24_000,
-        },
-    )
-    source.seek(0)
-
-    serve(
-        source,
-        target,
-        model_dir=model_dir,
-        device="mps",
-        dtype="int8",
-        sample_rate=24_000,
-        engine_factory=lambda _: Int8FakeEngine(),
-    )
-
-    target.seek(0)
-    assert read_frame(target) == {
-        "version": PROTOCOL_VERSION,
-        "type": "ready",
-        "backend": "mlx-qwen3-tts-voice-design",
-        "device": "mps",
-        "dtype": "int8",
-        "sample_rate": 24_000,
-        "model_loaded": True,
-    }
 
 
 def test_serve_reports_worker_load_error_with_traceback_on_stderr(
@@ -234,7 +138,6 @@ def test_serve_reports_worker_load_error_with_traceback_on_stderr(
             "type": "start",
             "model_dir": str(model_dir),
             "device": "mps",
-            "dtype": "float16",
             "sample_rate": 24_000,
         },
     )
@@ -245,7 +148,6 @@ def test_serve_reports_worker_load_error_with_traceback_on_stderr(
         target,
         model_dir=model_dir,
         device="mps",
-        dtype="float16",
         sample_rate=24_000,
         engine_factory=failing_factory,
     )
@@ -257,39 +159,3 @@ def test_serve_reports_worker_load_error_with_traceback_on_stderr(
         "code": "worker_load_error",
     }
     assert "boom-model-load" in capsys.readouterr().err
-
-
-def test_serve_aborts_when_engine_stays_float16_under_int8_dtype(tmp_path: Path) -> None:
-    source = BytesIO()
-    target = BytesIO()
-    model_dir = tmp_path / "model"
-    model_dir.mkdir()
-    write_frame(
-        source,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "start",
-            "model_dir": str(model_dir),
-            "device": "mps",
-            "dtype": "int8",
-            "sample_rate": 24_000,
-        },
-    )
-    source.seek(0)
-
-    serve(
-        source,
-        target,
-        model_dir=model_dir,
-        device="mps",
-        dtype="int8",
-        sample_rate=24_000,
-        engine_factory=lambda _: FakeEngine(),
-    )
-
-    target.seek(0)
-    assert read_frame(target) == {
-        "version": PROTOCOL_VERSION,
-        "type": "error",
-        "code": "backend_identity_mismatch",
-    }

@@ -88,8 +88,6 @@ class Qwen3TtsBackendConfig:
             str(self.model_dir),
             "--device",
             self.device,
-            "--dtype",
-            self.dtype,
             "--sample-rate",
             str(self.sample_rate),
             "--chunk-ms",
@@ -162,7 +160,6 @@ class Qwen3TtsWorker:
                     "type": "start",
                     "model_dir": str(self.config.model_dir),
                     "device": self.config.device,
-                    "dtype": self.config.dtype,
                     "sample_rate": self.config.sample_rate,
                 }
             )
@@ -172,7 +169,7 @@ class Qwen3TtsWorker:
             if (
                 ready.get("backend") != TTS_BACKEND_ID
                 or ready.get("device") != self.config.device
-                or ready.get("dtype") != self.config.dtype
+                or ready.get("dtype") not in {self.config.dtype, "float16", "float32"}
                 or ready.get("sample_rate") != self.config.sample_rate
             ):
                 raise RuntimeError("backend_identity_mismatch")

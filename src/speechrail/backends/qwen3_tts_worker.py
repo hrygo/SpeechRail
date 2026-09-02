@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import sys
 import traceback
 from collections.abc import Callable, Iterator
@@ -54,41 +53,6 @@ def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> 
         pass
 
 
-def _default_int8_quantize(model: Any, model_dir: Path) -> Any:
-    """Quantize TTS weights to 8-bit in memory (W8A16, affine, group 64).
-
-    The quantitative layers live under ``model.talker``; embeddings / codec /
-    speech-tokenizer parts are kept native (see ``model_quant_predicate``).
-    The full-tree ``nn.quantize`` walk crashes on ``mlx.gc_func`` attributes in
-    mlx-audio's tokenizer tree (mlx 0.32 / mlx-audio 0.4.8), so only the talker
-    subtree is quantized.  No new snapshot file is written.
-    """
-    import mlx.nn as nn
-
-    talker = getattr(model, "talker", None)
-    if talker is None or not hasattr(talker, "leaf_modules"):
-        raise RuntimeError("unsupported_tts_model_for_int8")
-    skip_predicate = getattr(model, "model_quant_predicate", None)
-
-    def predicate(path: str, module: Any) -> bool:
-        if not hasattr(module, "to_quantized"):
-            return False
-        if module.weight.shape[-1] % 64 != 0:
-            return False
-        return skip_predicate is None or skip_predicate(path, module)
-
-    with contextlib.redirect_stdout(sys.stderr):
-        nn.quantize(
-            talker,
-            group_size=64,
-            bits=8,
-            mode="affine",
-            class_predicate=predicate,
-        )
-    return model
-
-
-
 @dataclass(frozen=True, slots=True)
 class TtsWorkerIdentity:
     device: str
@@ -107,7 +71,6 @@ class TtsWorkerEngine(Protocol):
 
 EngineFactory = Callable[[Path], TtsWorkerEngine]
 ModelLoader = Callable[[str], Any]
-ModelQuantizer = Callable[[Any, Path], Any]
 
 
 class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized model runtime.
@@ -118,14 +81,12 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         model_dir: Path,
         *,
         device: Literal["mps", "cpu"],
-        dtype: str = "float16",
         sample_rate: int = 24_000,
         chunk_ms: int = 100,
         repetition_penalty: float = 1.25,
         temperature: float = 0.85,
         top_p: float = 0.95,
         load_fn: ModelLoader | None = None,
-        quantize_fn: ModelQuantizer | None = None,
         numpy_module: Any | None = None,
         warmup: bool = True,
     ) -> None:
@@ -135,21 +96,16 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
 
                 load_fn = load
             self._numpy = numpy_module or __import__("numpy")
-            model = load_fn(str(model_dir))
+            self._model = load_fn(str(model_dir))
         except Exception as exc:
             raise RuntimeError("mlx_qwen3_tts_runtime_unavailable") from exc
-        model_type = getattr(getattr(model, "config", None), "tts_model_type", None)
+        model_type = getattr(getattr(self._model, "config", None), "tts_model_type", None)
         if model_type != "voice_design":
             raise RuntimeError("unsupported_tts_model_type")
         if sample_rate != 24_000:
             raise RuntimeError("qwen3_tts_output_invalid")
         if chunk_ms <= 0:
             raise ValueError("chunk_ms must be positive")
-        if dtype == "int8":
-            quantize_fn = quantize_fn or _default_int8_quantize
-            model = quantize_fn(model, model_dir)
-        resolved_dtype = dtype if dtype in {"int8", "float16", "float32"} else "float16"
-        self._model = model
         self._sample_rate = sample_rate
         self._chunk_ms = chunk_ms
         self._repetition_penalty = repetition_penalty
@@ -157,7 +113,7 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         self._top_p = top_p
         self.identity = TtsWorkerIdentity(
             device=device,
-            dtype=resolved_dtype,
+            dtype="float16" if device == "mps" else "float32",
             sample_rate=sample_rate,
         )
         if warmup:
@@ -220,7 +176,6 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
 def _default_engine_factory(  # pragma: no cover - requires separately authorized model runtime.
     device: Literal["mps", "cpu"],
     *,
-    dtype: str = "float16",
     sample_rate: int,
     chunk_ms: int,
     repetition_penalty: float,
@@ -231,7 +186,6 @@ def _default_engine_factory(  # pragma: no cover - requires separately authorize
     return lambda model_dir: MlxVoiceDesignEngine(
         model_dir,
         device=device,
-        dtype=dtype,
         sample_rate=sample_rate,
         chunk_ms=chunk_ms,
         repetition_penalty=repetition_penalty,
@@ -247,7 +201,6 @@ def serve(
     *,
     model_dir: Path,
     device: Literal["mps", "cpu"],
-    dtype: str = "float16",
     sample_rate: int,
     engine_factory: EngineFactory,
 ) -> None:
@@ -259,7 +212,6 @@ def serve(
         or start.get("type") != "start"
         or start.get("model_dir") != str(model_dir)
         or start.get("device") != device
-        or start.get("dtype") != dtype
         or start.get("sample_rate") != sample_rate
     ):
         write_frame(
@@ -277,7 +229,7 @@ def serve(
         )
         return
     identity = engine.identity
-    expected_dtype = dtype or ("float16" if device == "mps" else "float32")
+    expected_dtype = "float16" if device == "mps" else "float32"
     if (
         identity.device != device
         or identity.dtype != expected_dtype
@@ -380,7 +332,6 @@ def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None 
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--device", choices=("mps", "cpu"), required=True)
-    parser.add_argument("--dtype", choices=("float16", "float32", "int8"), default="float16")
     parser.add_argument("--sample-rate", type=int, required=True)
     parser.add_argument("--chunk-ms", type=int, default=100)
     parser.add_argument("--repetition-penalty", type=float, default=1.25)
@@ -395,7 +346,6 @@ def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None 
     device: Literal["mps", "cpu"] = args.device
     selected_factory = engine_factory or _default_engine_factory(
         device,
-        dtype=args.dtype,
         sample_rate=args.sample_rate,
         chunk_ms=args.chunk_ms,
         repetition_penalty=args.repetition_penalty,
@@ -408,7 +358,6 @@ def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None 
         sys.stdout.buffer,
         model_dir=model_dir,
         device=device,
-        dtype=args.dtype,
         sample_rate=args.sample_rate,
         engine_factory=selected_factory,
     )
