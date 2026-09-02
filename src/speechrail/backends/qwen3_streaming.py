@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +123,7 @@ class Qwen3StreamingWorker:
         self._write_lock = asyncio.Lock()
         self._ready = False
         self._active_session: Qwen3StreamingSession | None = None
+        self.last_active: float = time.monotonic()
 
     @property
     def alive(self) -> bool:
@@ -144,15 +146,19 @@ class Qwen3StreamingWorker:
                 error_frame_message(ready, "streaming worker failed to become ready")
             )
         self._ready = True
+        self.last_active = time.monotonic()
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None:
         async with self._write_lock:
             await self._transport.send(payload, binary_payload=binary_payload)
+        self.last_active = time.monotonic()
 
     async def receive(self) -> dict[str, object]:
-        return await self._transport.receive()
+        frame = await self._transport.receive()
+        self.last_active = time.monotonic()
+        return frame
 
     async def exchange(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None

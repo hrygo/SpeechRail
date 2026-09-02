@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -19,6 +21,8 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.domain.diarization import DiarizationError
 from speechrail.http.auth import websocket_is_authorized
+
+logger = logging.getLogger(__name__)
 
 HANDSHAKE_MODEL_CLOSE_CODE = 4004
 
@@ -80,12 +84,25 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             model=model,
             display_model=display_model,
         )
-        try:
-            await session.start()
+        client_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+        async def receive_loop() -> None:
+            try:
+                while True:
+                    event = _decode(await websocket.receive_text())
+                    client_events.put_nowait(event)
+            except WebSocketDisconnect:
+                pass
+            finally:
+                client_events.put_nowait(None)
+
+        async def handle_loop() -> None:
             while True:
+                event = await client_events.get()
+                if event is None:
+                    return
                 client_event_id: str | None = None
                 try:
-                    event = _decode(await websocket.receive_text())
                     raw_event_id = event.get("event_id")
                     if isinstance(raw_event_id, str) and raw_event_id.strip():
                         client_event_id = raw_event_id
@@ -104,9 +121,36 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                             code=exc.code, message=str(exc), client_event_id=client_event_id
                         )
                     )
-        except WebSocketDisconnect:
-            pass
+                except Exception as exc:
+                    # Do not let the task die with the slot still acquired: the
+                    # factory releases the session in close() below, which only
+                    # runs after both tasks complete normally or are cancelled.
+                    logger.exception("realtime event handler failed: %s", exc)
+                    await send_event(
+                        error_event(
+                            code="backend_error",
+                            message=str(exc) or "internal backend error",
+                            client_event_id=client_event_id,
+                        )
+                    )
+
+        recv_task = asyncio.create_task(receive_loop())
+        handle_task = asyncio.create_task(handle_loop())
+        try:
+            await session.start()
+            # Finish when either side completes; the other is cancelled below so a
+            # client disconnect interrupts a blocking handle instead of leaking
+            # the ASR factory slot until the backend answers.
+            await asyncio.wait(
+                {recv_task, handle_task}, return_when=asyncio.FIRST_COMPLETED
+            )
         finally:
+            recv_task.cancel()
+            handle_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await recv_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await handle_task
             await session.close()
 
     return router

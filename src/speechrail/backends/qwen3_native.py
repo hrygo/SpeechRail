@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -170,6 +171,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._identity: tuple[str, str] | None = None
+        self.last_active: float = time.monotonic()
 
     @property
     def alive(self) -> bool:
@@ -203,18 +205,23 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None:
         await self._transport.send(payload, binary_payload=binary_payload)
+        self.last_active = time.monotonic()
 
     async def receive(self) -> dict[str, object]:
-        return await self._transport.receive()
+        frame = await self._transport.receive()
+        self.last_active = time.monotonic()
+        return frame
 
     async def exchange(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> dict[str, object]:
         """Send one request and read its response atomically on the shared transport."""
         try:
-            return await self._transport.exchange(payload, binary_payload=binary_payload)
+            frame = await self._transport.exchange(payload, binary_payload=binary_payload)
         except ProtocolError as exc:
             raise RuntimeError("worker_frame_invalid") from exc
+        self.last_active = time.monotonic()
+        return frame
 
     async def transcribe(
         self,

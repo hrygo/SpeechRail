@@ -106,6 +106,30 @@ def test_streaming_worker_start_failure_embeds_worker_stderr_tail(tmp_path: Path
     asyncio.run(scenario())
 
 
+def test_streaming_worker_refreshes_last_active_on_io(tmp_path: Path) -> None:
+    """Active sessions must keep the worker out of the idle evictor: every
+    frame received by the session's read loop refreshes last_active."""
+
+    worker = Qwen3StreamingWorker(
+        Qwen3StreamingBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path("/usr/bin/python3"),
+            model_dir=tmp_path,
+            device="mps",
+        )
+    )
+    fake = _FakeTransport({"type": "session.opened"})
+    worker._transport = fake  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        before = worker.last_active
+        await asyncio.sleep(0.01)
+        await worker.receive()
+        assert worker.last_active > before
+
+    asyncio.run(scenario())
+
+
 def test_backend_config_requires_absolute_existing_paths(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="python_executable"):
         Qwen3StreamingBackendConfig(

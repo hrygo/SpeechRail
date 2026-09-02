@@ -157,6 +157,25 @@ def test_transcribe_request_is_single_pcm16_frame_with_stable_request_id(tmp_pat
     assert request["_binary"] == b"\x00\x00"
     assert result.request_id == "req_x"
     assert result.text == "hello"
+    assert worker.last_active > 0
+
+
+def test_transcribe_refreshes_last_active(tmp_path: Path) -> None:
+    """Batch activity must keep the worker out of the idle evictor."""
+    import asyncio
+    import time
+
+    worker, _ = _worker(
+        tmp_path,
+        [
+            {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"},
+            {"type": "result", "request_id": "req_x", "text": "hi", "language": "zh"},
+        ],
+    )
+    before = worker.last_active
+    time.sleep(0.01)
+    asyncio.run(worker.transcribe(b"\x00\x00", "zh", "names", request_id="req_x"))
+    assert worker.last_active > before
 
 
 def test_transcribe_rejects_non_result_or_mismatched_request_id(tmp_path: Path) -> None:

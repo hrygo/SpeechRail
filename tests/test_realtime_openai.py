@@ -577,6 +577,40 @@ def test_openai_session_release_called_on_disconnect() -> None:
     assert len(factory.released) == 1
 
 
+class _BlockedCommitSession(FakeStreamingSession):
+    """A streaming session whose commit() never completes on its own."""
+
+    async def connect(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        await asyncio.Event().wait()
+
+
+class _BlockedCommitFactory(FakeStreamingFactory):
+    def session_class(self) -> type[FakeStreamingSession]:
+        return _BlockedCommitSession
+
+
+def test_openai_disconnect_releases_slot_even_when_commit_blocks() -> None:
+    """A client disconnect must release the ASR factory slot promptly even when
+    the backend handler is parked inside commit(), instead of leaking it until
+    the backend answers (or forever)."""
+
+    client, factory = _client(factory=_BlockedCommitFactory())
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.receive_json()  # input_audio_buffer.committed (sent before commit)
+
+    assert len(factory.sessions) == 1
+    assert len(factory.released) == 1
+
+
 def test_openai_segment_formatter_uses_standard_fields() -> None:
     event = transcription_segment(
         session_id="realtime_test",
