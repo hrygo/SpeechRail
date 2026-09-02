@@ -22,6 +22,11 @@ from speechrail.runtime.worker_protocol import (
 )
 
 MAX_PCM_BYTES = 40 * 1024 * 1024
+# Defense-in-depth bound for concurrent streaming sessions inside one worker
+# process. The main-process NativeRealtimeFactory enforces the configurable
+# SPEECHRAIL_REALTIME_MAX_SESSIONS (default 2) before frames reach the worker;
+# this constant only guards against a misbehaving protocol peer.
+MAX_ACTIVE_STREAMING_SESSIONS = 8
 LANGUAGES = {
     "auto": "auto",
     "zh": "Chinese", "chinese": "Chinese",
@@ -110,6 +115,7 @@ class WorkerEngine(Protocol):
     def open_session(
         self,
         *,
+        session_id: str,
         language: str,
         context: str,
         chunk_sec: float = 2.0,
@@ -118,13 +124,17 @@ class WorkerEngine(Protocol):
         max_new_tokens: int = 256,
     ) -> None: ...
 
-    def append_audio(self, audio: bytes) -> str: ...
+    def append_audio(self, session_id: str, audio: bytes) -> str: ...
 
-    def partial_text(self) -> str: ...
+    def partial_text(self, session_id: str) -> str: ...
 
-    def finish_streaming(self) -> tuple[str, str]: ...
+    def finish_streaming(self, session_id: str) -> tuple[str, str]: ...
 
-    def close_session(self) -> None: ...
+    def close_session(self, session_id: str) -> None: ...
+
+    def active_session_count(self) -> int: ...
+
+    def has_session(self, session_id: str) -> bool: ...
 
 
 EngineFactory = Callable[[Path, str, str, int], WorkerEngine]
@@ -214,17 +224,42 @@ def _handle_transcribe(
         )
 
 
+def _session_id_of(frame: dict[str, object]) -> str | None:
+    raw = frame.get("session_id")
+    return raw if isinstance(raw, str) and raw else None
+
+
+def _write_error(
+    output_stream: BinaryIO,
+    code: str,
+    *,
+    session_id: str | None = None,
+) -> None:
+    payload: dict[str, object] = {
+        "version": PROTOCOL_VERSION,
+        "type": "error",
+        "code": code,
+    }
+    if session_id is not None:
+        payload["session_id"] = session_id
+    write_frame(output_stream, payload)
+
+
 def _handle_session_open(
     frame: dict[str, object],
     output_stream: BinaryIO,
     engine: WorkerEngine,
 ) -> None:
+    session_id = _session_id_of(frame)
+    if session_id is None:
+        _write_error(output_stream, "session_open_failed")
+        return
     language = frame.get("language")
     if not isinstance(language, str):
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "session_open_failed"},
-        )
+        _write_error(output_stream, "session_open_failed", session_id=session_id)
+        return
+    if engine.active_session_count() >= MAX_ACTIVE_STREAMING_SESSIONS:
+        _write_error(output_stream, "session_limit_reached", session_id=session_id)
         return
     raw_context = frame.get("context")
     context = raw_context if isinstance(raw_context, str) else ""
@@ -238,6 +273,7 @@ def _handle_session_open(
     max_new_tokens = int(raw_max_tokens) if isinstance(raw_max_tokens, (int, float, str)) else 256
     try:
         engine.open_session(
+            session_id=session_id,
             language=language,
             context=context,
             chunk_sec=chunk_sec,
@@ -247,14 +283,16 @@ def _handle_session_open(
         )
     except Exception:
         traceback.print_exc(file=sys.stderr)
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "session_open_failed"},
-        )
+        _write_error(output_stream, "session_open_failed", session_id=session_id)
         return
     write_frame(
         output_stream,
-        {"version": PROTOCOL_VERSION, "type": "session.opened", "language": language},
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "session.opened",
+            "session_id": session_id,
+            "language": language,
+        },
     )
 
 
@@ -263,6 +301,10 @@ def _handle_audio_append(
     output_stream: BinaryIO,
     engine: WorkerEngine,
 ) -> None:
+    session_id = _session_id_of(frame)
+    if session_id is None:
+        _write_error(output_stream, "session_invalid")
+        return
     raw_binary = frame.get("_binary")
     encoded = frame.get("pcm_b64")
     audio: bytes
@@ -272,35 +314,28 @@ def _handle_audio_append(
         try:
             audio = base64.b64decode(encoded, validate=True)
         except Exception:
-            write_frame(
-                output_stream,
-                {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
-            )
+            _write_error(output_stream, "session_invalid", session_id=session_id)
             return
     else:
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
-        )
+        _write_error(output_stream, "session_invalid", session_id=session_id)
         return
     if not audio or len(audio) % 2 or len(audio) > MAX_PCM_BYTES:
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
-        )
+        _write_error(output_stream, "session_invalid", session_id=session_id)
         return
     try:
-        engine.append_audio(audio)
+        engine.append_audio(session_id, audio)
     except Exception:
         traceback.print_exc(file=sys.stderr)
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
-        )
+        _write_error(output_stream, "session_invalid", session_id=session_id)
         return
     write_frame(
         output_stream,
-        {"version": PROTOCOL_VERSION, "type": "audio.acked", "bytes": len(audio)},
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "audio.acked",
+            "session_id": session_id,
+            "bytes": len(audio),
+        },
     )
 
 
@@ -309,14 +344,15 @@ def _handle_flush(
     output_stream: BinaryIO,
     engine: WorkerEngine,
 ) -> None:
+    session_id = _session_id_of(frame)
+    if session_id is None or not engine.has_session(session_id):
+        _write_error(output_stream, "session_invalid", session_id=session_id)
+        return
     try:
-        text = engine.partial_text()
+        text = engine.partial_text(session_id)
     except Exception:
         traceback.print_exc(file=sys.stderr)
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_inference_error"},
-        )
+        _write_error(output_stream, "worker_inference_error", session_id=session_id)
         return
     if not text:
         return
@@ -325,6 +361,7 @@ def _handle_flush(
         {
             "version": PROTOCOL_VERSION,
             "type": "event",
+            "session_id": session_id,
             "kind": "partial",
             "text": text,
             "language": None,
@@ -338,14 +375,15 @@ def _handle_commit(
     output_stream: BinaryIO,
     engine: WorkerEngine,
 ) -> None:
+    session_id = _session_id_of(frame)
+    if session_id is None or not engine.has_session(session_id):
+        _write_error(output_stream, "session_invalid", session_id=session_id)
+        return
     try:
-        text, language = engine.finish_streaming()
+        text, language = engine.finish_streaming(session_id)
     except Exception:
         traceback.print_exc(file=sys.stderr)
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_inference_error"},
-        )
+        _write_error(output_stream, "worker_inference_error", session_id=session_id)
         return
     if text:
         write_frame(
@@ -353,6 +391,7 @@ def _handle_commit(
             {
                 "version": PROTOCOL_VERSION,
                 "type": "event",
+                "session_id": session_id,
                 "kind": "completed",
                 "text": text,
                 "language": language or None,
@@ -361,7 +400,12 @@ def _handle_commit(
         )
     write_frame(
         output_stream,
-        {"version": PROTOCOL_VERSION, "type": "finished", "final": True},
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "finished",
+            "session_id": session_id,
+            "final": True,
+        },
     )
 
 
@@ -448,7 +492,9 @@ def serve(
             _handle_commit(frame, output_stream, engine)
             _clear_metal_cache()
         elif kind == "cancel":
-            engine.close_session()
+            session_id = _session_id_of(frame)
+            if session_id is not None:
+                engine.close_session(session_id)
             _clear_metal_cache()
         else:
             write_frame(
@@ -512,7 +558,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         resolved_dtype = "int8" if dtype == "int8" else (loaded_dtype or dtype or default_dtype)
         self._max_new_tokens = max_new_tokens
         self.identity = WorkerIdentity(device, resolved_dtype)
-        self._streaming_state: object | None = None
+        self._streaming_states: dict[str, object] = {}
         _clear_metal_cache()
 
     def transcribe(
@@ -544,6 +590,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
     def open_session(
         self,
         *,
+        session_id: str,
         language: str,
         context: str,
         chunk_sec: float = 2.0,
@@ -551,9 +598,13 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         right_context_ms: int = 640,
         max_new_tokens: int = 256,
     ) -> None:
+        if not session_id:
+            raise ValueError("session_id is required")
+        if session_id in self._streaming_states:
+            raise RuntimeError(f"session already open: {session_id}")
         streaming_language = None if language in {"auto", ""} else language
         max_context_sec = left_context_sec + right_context_ms / 1000.0
-        self._streaming_state = self._session.init_streaming(
+        self._streaming_states[session_id] = self._session.init_streaming(
             context=context,
             language=streaming_language,
             chunk_size_sec=chunk_sec,
@@ -561,35 +612,45 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             max_new_tokens=max_new_tokens,
         )
 
-    def append_audio(self, audio: bytes) -> str:
+    def append_audio(self, session_id: str, audio: bytes) -> str:
         import numpy as np
 
-        if self._streaming_state is None:
-            raise RuntimeError("no active session")
+        state = self._streaming_states.get(session_id)
+        if state is None:
+            raise RuntimeError(f"no active session: {session_id}")
         waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
-        self._streaming_state = self._session.feed_audio(waveform, self._streaming_state)
-        current = getattr(self._streaming_state, "text", "") or ""
+        state = self._session.feed_audio(waveform, state)
+        self._streaming_states[session_id] = state
+        current = getattr(state, "text", "") or ""
         return current if isinstance(current, str) else ""
 
-    def partial_text(self) -> str:
-        if self._streaming_state is None:
-            raise RuntimeError("no active session")
-        text = getattr(self._streaming_state, "text", "") or ""
+    def partial_text(self, session_id: str) -> str:
+        state = self._streaming_states.get(session_id)
+        if state is None:
+            raise RuntimeError(f"no active session: {session_id}")
+        text = getattr(state, "text", "") or ""
         return text if isinstance(text, str) else ""
 
-    def finish_streaming(self) -> tuple[str, str]:
-        if self._streaming_state is None:
-            raise RuntimeError("no active session")
-        final = self._session.finish_streaming(self._streaming_state)
-        self._streaming_state = None
+    def finish_streaming(self, session_id: str) -> tuple[str, str]:
+        state = self._streaming_states.get(session_id)
+        if state is None:
+            raise RuntimeError(f"no active session: {session_id}")
+        final = self._session.finish_streaming(state)
+        del self._streaming_states[session_id]
         text = getattr(final, "text", "") or ""
         language = getattr(final, "language", None) or ""
         return (text if isinstance(text, str) else ""), (
             language if isinstance(language, str) else ""
         )
 
-    def close_session(self) -> None:
-        self._streaming_state = None
+    def close_session(self, session_id: str) -> None:
+        self._streaming_states.pop(session_id, None)
+
+    def active_session_count(self) -> int:
+        return len(self._streaming_states)
+
+    def has_session(self, session_id: str) -> bool:
+        return session_id in self._streaming_states
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.

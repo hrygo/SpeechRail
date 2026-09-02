@@ -209,10 +209,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         and settings.qwen3_python is not None
         and settings.qwen3_model_dir is not None
     ):
-        # Dedicated streaming worker: a realtime session's read loop parks on the
-        # transport between frames, so it must never share a pipe with batch
-        # transcriptions (worker session frames carry no routing id, making one
-        # concurrent reader crash readexactly and a locked one deadlock).
+        # Dedicated streaming worker: concurrent realtime sessions multiplex one
+        # pipe via session_id frame routing (the worker, not batch, owns the
+        # streaming read side). Keeping batch on a separate worker bounds batch
+        # latency from delaying realtime frames.
         streaming_worker = Qwen3StreamingWorker(
             Qwen3StreamingBackendConfig(
                 repository_root=_package_root(),
@@ -233,6 +233,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             worker=streaming_worker,
             mode=settings.qwen3_streaming_mode,
             next_session_id=lambda: f"sess_{uuid4().hex}",
+            max_sessions=settings.realtime_max_sessions,
         )
 
     diarization_engine = overrides.diarization_engine

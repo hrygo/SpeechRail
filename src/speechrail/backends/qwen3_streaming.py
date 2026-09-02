@@ -39,22 +39,25 @@ _SUPPORTED_LANGUAGES = {
 
 
 class StreamingWorkerProtocol(Protocol):
-    """Narrow interface required by streaming sessions from an ASR worker."""
+    """Narrow multiplexed interface required by streaming sessions from an ASR worker."""
 
     @property
     def alive(self) -> bool: ...
 
+    @property
+    def timeout_seconds(self) -> float: ...
+
     async def start(self) -> None: ...
+
+    def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]: ...
+
+    def unregister_session(self, session_id: str) -> None: ...
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None: ...
 
-    async def receive(self) -> dict[str, object]: ...
-
-    async def exchange(
-        self, payload: Mapping[str, object], binary_payload: bytes | None = None
-    ) -> dict[str, object]: ...
+    async def close(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,19 +118,39 @@ class Qwen3StreamingBackendConfig:
 
 
 class Qwen3StreamingWorker:
-    """One supervised, offline streaming worker shared by sequential sessions."""
+    """One supervised offline streaming worker shared by concurrent sessions.
+
+    A single dispatcher task owns the transport's read side and routes every
+    frame to the per-session queue registered for its ``session_id``, so N
+    sessions can multiplex one pipe without stealing each other's frames.
+    """
 
     def __init__(self, config: Qwen3StreamingBackendConfig) -> None:
         self.config = config
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._write_lock = asyncio.Lock()
         self._ready = False
-        self._active_session: Qwen3StreamingSession | None = None
+        self._queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
+        self._dispatcher: asyncio.Task[None] | None = None
         self.last_active: float = time.monotonic()
 
     @property
     def alive(self) -> bool:
         return self._transport.alive
+
+    @property
+    def timeout_seconds(self) -> float:
+        return self.config.timeout_seconds
+
+    def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]:
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        self._queues[session_id] = queue
+        self.last_active = time.monotonic()
+        return queue
+
+    def unregister_session(self, session_id: str) -> None:
+        self._queues.pop(session_id, None)
+        self.last_active = time.monotonic()
 
     async def start(self) -> None:
         if self._ready:
@@ -147,6 +170,7 @@ class Qwen3StreamingWorker:
             )
         self._ready = True
         self.last_active = time.monotonic()
+        self._dispatcher = asyncio.create_task(self._dispatch_loop())
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
@@ -155,18 +179,33 @@ class Qwen3StreamingWorker:
             await self._transport.send(payload, binary_payload=binary_payload)
         self.last_active = time.monotonic()
 
-    async def receive(self) -> dict[str, object]:
-        frame = await self._transport.receive()
-        self.last_active = time.monotonic()
-        return frame
-
-    async def exchange(
-        self, payload: Mapping[str, object], binary_payload: bytes | None = None
-    ) -> dict[str, object]:
-        """Send one request and read its response atomically on the transport."""
-        return await self._transport.exchange(payload, binary_payload=binary_payload)
+    async def _dispatch_loop(self) -> None:
+        try:
+            while True:
+                frame = await self._transport.receive()
+                self.last_active = time.monotonic()
+                session_id = frame.get("session_id")
+                queue = (
+                    self._queues.get(session_id)
+                    if isinstance(session_id, str)
+                    else None
+                )
+                if queue is not None:
+                    await queue.put(frame)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            for queue in tuple(self._queues.values()):
+                queue.put_nowait({"type": "error", "code": "worker_unavailable"})
+            raise
 
     async def close(self) -> None:
+        if self._dispatcher is not None:
+            self._dispatcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._dispatcher
+            self._dispatcher = None
+        self._queues.clear()
         await self._transport.close()
         self._ready = False
 
@@ -186,25 +225,42 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._language = language
         self._prompt = prompt
         self._session_id = session_id
+        self._queue: asyncio.Queue[dict[str, object]] | None = None
         self._events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
         self._reader: asyncio.Task[None] | None = None
         self._connected = False
         self._finished = asyncio.Event()
 
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
     async def connect(self) -> None:
         if self._connected:
             return
         await self._worker.start()
-        opened = await self._worker.exchange(
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "session.open",
-                "session_id": self._session_id,
-                "language": self._language,
-                "context": self._prompt,
-            }
-        )
+        self._queue = self._worker.register_session(self._session_id)
+        try:
+            await self._worker.send(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "session.open",
+                    "session_id": self._session_id,
+                    "language": self._language,
+                    "context": self._prompt,
+                }
+            )
+            opened = await asyncio.wait_for(
+                self._queue.get(),
+                timeout=max(self._worker.timeout_seconds, 1.0),
+            )
+        except Exception:
+            self._worker.unregister_session(self._session_id)
+            self._queue = None
+            raise
         if opened.get("type") != "session.opened":
+            self._worker.unregister_session(self._session_id)
+            self._queue = None
             raise RuntimeError("streaming session.open failed")
         self._connected = True
         self._reader = asyncio.create_task(self._read_loop())
@@ -253,11 +309,14 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                 {"version": PROTOCOL_VERSION, "type": "cancel", "session_id": self._session_id}
             )
             self._connected = False
+        if self._queue is not None:
+            self._worker.unregister_session(self._session_id)
+            self._queue = None
 
     async def _read_loop(self) -> None:
         try:
             while True:
-                frame = await self._worker.receive()
+                frame = await self._queue.get()  # type: ignore[union-attr]
                 kind = frame.get("type")
                 if kind == "event":
                     await self._events_queue.put(_to_event(frame))
@@ -324,7 +383,7 @@ def _language(value: object) -> str | None:
 
 
 class NativeRealtimeFactory(RealtimeAsrFactory):
-    """Creates one streaming session at a time on the shared native worker."""
+    """Creates bounded concurrent streaming sessions on one shared native worker."""
 
     def __init__(
         self,
@@ -332,11 +391,13 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
         worker: StreamingWorkerProtocol,
         mode: Literal["windowed", "causal"],
         next_session_id: Callable[[], str],
+        max_sessions: int = 2,
     ) -> None:
         self._worker = worker
         self._mode = mode
         self._next_session_id = next_session_id
-        self._active: Qwen3StreamingSession | None = None
+        self._max_sessions = max_sessions
+        self._sessions: dict[str, Qwen3StreamingSession] = {}
 
     def create(self, *, language: str | None, prompt: str) -> Qwen3StreamingSession:
         resolved = (language or "auto").strip().lower()
@@ -344,7 +405,7 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
             raise _unsupported_language(resolved)
         if resolved not in _SUPPORTED_LANGUAGES and resolved != "auto":
             raise _unsupported_language(resolved)
-        if self._active is not None:
+        if len(self._sessions) >= self._max_sessions:
             raise RuntimeError("realtime streaming backend busy")
         session = Qwen3StreamingSession(
             worker=self._worker,
@@ -352,12 +413,12 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
             prompt=prompt,
             session_id=self._next_session_id(),
         )
-        self._active = session
+        self._sessions[session.session_id] = session
         return session
 
     def release(self, session: RealtimeAsrSession) -> None:
-        if self._active is session:
-            self._active = None
+        if isinstance(session, Qwen3StreamingSession):
+            self._sessions.pop(session.session_id, None)
 
 
 def _unsupported_language(language: str) -> RuntimeError:
