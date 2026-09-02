@@ -2,7 +2,7 @@
 # Values are placeholders; never put API keys, model weights, audio, or full transcripts here.
 service:
   name: speechrail
-  version: 1.2.0
+  version: 1.5.1
   host: 127.0.0.1
   port: 8201
 
