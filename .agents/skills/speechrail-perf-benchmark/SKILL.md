@@ -121,9 +121,18 @@ Execute end-to-end continuous resource monitoring during load:
 python3 examples/perf/sample_resources.py --audio /tmp/audio_30s.wav --mode all --n 5 --warmup
 ```
 
+## 3. Bundled Benchmark Scripts
+
+This skill bundles turnkey execution scripts located in `scripts/`:
+
+| 脚本文件 | 用途 | 运行命令示例 |
+|---|---|---|
+| **`scripts/prepare_fixtures.py`** | 自动通过本地 TTS 合成 3s、10s、30s、60s 标准 16kHz WAV 和 PCM 样本 | `python3 .agents/skills/speechrail-perf-benchmark/scripts/prepare_fixtures.py` |
+| **`scripts/run_all_benchmarks.py`** | 一键全自动串行执行全部 7 项标准性能与资源压测流水线 | `python3 .agents/skills/speechrail-perf-benchmark/scripts/run_all_benchmarks.py` |
+
 ---
 
-## 3. Reporting & Baseline Maintenance
+## 4. Reporting & Baseline Maintenance
 
 When completing a benchmark run:
 1. **Archive Full Report**: Write the comprehensive baseline document to `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`.
