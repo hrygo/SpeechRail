@@ -95,6 +95,8 @@ exclude = ["tests/"]
 
 [[tool.mypy.overrides]]
 module = [
+    "numpy",
+    "numpy.*",
     "kaldi_native_fbank",
     "kaldi_native_fbank.*",
     "nemo",
