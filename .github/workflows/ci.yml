@@ -6,36 +6,47 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: Lint, Type Check & Test (Python ${{ matrix.python-version }})
+    name: Lint, Type Check & Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest]
+        os: [ubuntu-latest, macos-14]
         python-version: ["3.12"]
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (Linux)
+      - name: Install ffmpeg (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Install system dependencies (macOS)
+      - name: Install ffmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg
+          if ! command -v ffmpeg &> /dev/null; then
+            brew install ffmpeg
+          fi
 
-      - name: Install uv
+      - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}

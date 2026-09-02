@@ -8,25 +8,31 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-release:
     name: Build Wheel & Create Release
-    runs-on: macos-14
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install uv
+      - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
           enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      - name: Install build tools
+      - name: Install build dependencies
         run: uv sync --extra dev
 
       - name: Build wheel package
@@ -35,9 +41,9 @@ jobs:
       - name: Verify build artifacts
         run: |
           ls -lh dist/
-          tar -ztvf dist/*.whl 2>/dev/null || unzip -l dist/*.whl
+          unzip -l dist/*.whl
 
-      - name: Create GitHub Release
+      - name: Create or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.whl
