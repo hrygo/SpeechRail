@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import numpy as np
-import pytest
 
 from speechrail.backends.vad import VadConfig, VoiceActivityDetector
 from test_realtime_openai import BlockingSpeechSynthesizer, _client, _pcm16
@@ -143,7 +141,10 @@ def test_realtime_bargein_cancels_active_tts_response() -> None:
 def test_bargein_session_isolation() -> None:
     """Verify that Barge-in interruption in Session A does NOT cancel Session B."""
     client, _ = _client(tts_synthesizer=BlockingSpeechSynthesizer())
-    with client.websocket_connect("/v1/realtime") as socket_a, client.websocket_connect("/v1/realtime") as socket_b:
+    with (
+        client.websocket_connect("/v1/realtime") as socket_a,
+        client.websocket_connect("/v1/realtime") as socket_b,
+    ):
         socket_a.receive_json()
         socket_a.receive_json()
         socket_b.receive_json()

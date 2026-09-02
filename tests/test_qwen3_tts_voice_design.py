@@ -49,7 +49,7 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
         {
             "text": "你好。",
             "voice": None,
-            "instruct": "温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",  # noqa: RUF001
+            "instruct": "温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",
             "speed": 1.25,
             "lang_code": "zh",
             "max_tokens": 39,

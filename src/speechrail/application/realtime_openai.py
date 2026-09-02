@@ -179,7 +179,11 @@ class OpenAIRealtimeSession:
                     silence_duration_ms=silence_duration,
                 )
             )
-        elif turn_detection is None or (isinstance(turn_detection, dict) and turn_detection.get("type") is None) or turn_detection == "manual":
+        elif (
+            turn_detection is None
+            or (isinstance(turn_detection, dict) and turn_detection.get("type") is None)
+            or turn_detection == "manual"
+        ):
             self._vad = None
 
         self._config = config
@@ -417,7 +421,6 @@ class OpenAIRealtimeSession:
 
             from speechrail.domain.tts import (
                 StreamingSentenceSplitter,
-                apply_crossfade,
                 create_breath_pause,
             )
 
@@ -467,7 +470,9 @@ class OpenAIRealtimeSession:
                 )
                 await self._send(error_event(code=code, message="TTS response failed"))
                 await self._send(
-                    response_done(session_id=self._session_id, response_id=response_id, status="failed")
+                    response_done(
+                        session_id=self._session_id, response_id=response_id, status="failed"
+                    )
                 )
                 return
 

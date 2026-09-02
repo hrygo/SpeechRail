@@ -493,14 +493,26 @@ def apply_session_update(
             )
         if mode == "server_vad":
             threshold = turn_detection.get("threshold")
-            if threshold is not None and (not isinstance(threshold, (int, float)) or not (0.0 <= threshold <= 1.0)):
-                raise RealtimeAdapterError("invalid_turn_detection", "threshold must be a float between 0.0 and 1.0")
+            if threshold is not None and (
+                not isinstance(threshold, (int, float)) or not (0.0 <= threshold <= 1.0)
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_turn_detection", "threshold must be a float between 0.0 and 1.0"
+                )
             prefix_padding = turn_detection.get("prefix_padding_ms")
-            if prefix_padding is not None and (not isinstance(prefix_padding, int) or prefix_padding < 0):
-                raise RealtimeAdapterError("invalid_turn_detection", "prefix_padding_ms must be a non-negative integer")
+            if prefix_padding is not None and (
+                not isinstance(prefix_padding, int) or prefix_padding < 0
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_turn_detection", "prefix_padding_ms must be a non-negative integer"
+                )
             silence_duration = turn_detection.get("silence_duration_ms")
-            if silence_duration is not None and (not isinstance(silence_duration, int) or silence_duration < 0):
-                raise RealtimeAdapterError("invalid_turn_detection", "silence_duration_ms must be a non-negative integer")
+            if silence_duration is not None and (
+                not isinstance(silence_duration, int) or silence_duration < 0
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_turn_detection", "silence_duration_ms must be a non-negative integer"
+                )
     elif turn_detection not in _SUPPORTED_TURN_DETECTION:
         raise RealtimeAdapterError(
             "unsupported_turn_detection",
@@ -610,7 +622,10 @@ def apply_session_update(
     ):
         if value is not None:
             config[key] = value
-    return session_updated(session_id=session_id, model=model, turn_detection=turn_detection_val), config
+    response = session_updated(
+        session_id=session_id, model=model, turn_detection=turn_detection_val
+    )
+    return response, config
 
 
 def _string_list(session: dict[str, Any], field: str) -> list[str] | None:

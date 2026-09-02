@@ -1,17 +1,51 @@
-# 开发者文档
+---
+title: "SpeechRail 开发者文档中心"
+status: active
+audience: "核心开发者、开源贡献者"
+version: "1.4.0"
+date: 2026-09-02
+---
 
-本目录面向修改 SpeechRail、扩展公共契约或维护测试门禁的开发者。公共行为先看契约，再看实现和测试；不要把调用方应用的会议、播放、UI、数据库或 LLM 责任搬入本仓库。
+# 🛠️ SpeechRail 开发者文档
 
-## 推荐阅读顺序
+欢迎查阅 SpeechRail 开发者文档。本目录面向参与代码开发、架构重构、Worker 协议扩展以及测试门禁维护的工程师与贡献者。
 
-1. [开发指南](development-guide.md)：本地环境、目录职责、契约变更和提交要求。
-2. [公共 API 契约说明](../users/api-contract.md)以及仓库根目录的 [OpenAPI](../../contracts/openapi.yaml) 和 [Realtime 契约](../../contracts/realtime-openai.md)。
-3. [测试与验收](testing-acceptance.md)：确定性测试、真实 worker smoke 和集成验收矩阵。
-4. [架构决策记录](../decisions/README.md)：了解不能在实现阶段重复决策的边界。
+---
 
-## 变更边界
+## 📑 推荐阅读路径
 
-- `/v1` 的兼容扩展必须同步更新契约、实现、测试和用户文档。
-- 当前 Realtime 公共入口只有 `/v1/realtime`；破坏性 REST/WS 行为必须先完成兼容设计、迁移说明和回滚路径。
-- 模型、音频、prompt、凭据和完整转写不得进入仓库、日志或测试 fixture。
-- 归档的实施计划只提供历史上下文，不是当前实现清单；当前能力以代码、契约和正式文档为准。
+```mermaid
+graph TD
+    A[🚀 1. 开发上手与工作流<br/>development-guide.md] --> B[🧪 2. 测试金字塔与验收门禁<br/>testing-acceptance.md]
+    B --> C[📡 3. 公共 API 契约设计<br/>../users/api-contract.md]
+    C --> D[📜 4. 架构决策记录<br/>../decisions/README.md]
+```
+
+1. **[🚀 开发者上手指南 (development-guide.md)](development-guide.md)**：开发环境搭建、5分钟本地启动、目录代码规范与 Worker 扩展流程。
+2. **[🧪 测试与质量验收规范 (testing-acceptance.md)](testing-acceptance.md)**：确定性测试、Fake Backend 模式、真实模型 Smoke 与质量门禁。
+3. **[📡 公共 API 契约手册](../users/api-contract.md)**：REST 端点定义、WebSocket 协议与 OpenAI 兼容层实现标准。
+4. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：关键技术选型与设计原则约束。
+
+---
+
+## ⚡ 快速开发命令速查
+
+```bash
+# 1. 同步开发环境依赖
+uv sync --extra dev
+
+# 2. 本地前台启动服务（无模型时亦可启动进行契约测试）
+uv run speechrail serve
+
+# 3. 执行自动化测试套件
+uv run --extra dev pytest tests/ -q --no-cov
+
+# 4. 代码风格与类型检查门禁
+uv run --extra dev ruff check src tests
+uv run --extra dev mypy src
+```
+
+---
+
+> [!TIP]
+> 准备提交代码？请确保已阅读 [CONTRIBUTING.md](../../CONTRIBUTING.md) 并通过所有本地质量门禁。

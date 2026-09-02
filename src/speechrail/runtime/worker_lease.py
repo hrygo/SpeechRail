@@ -6,12 +6,12 @@ import asyncio
 import contextlib
 import enum
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Protocol
 
 
-class WorkerLifecycleState(str, enum.Enum):
+class WorkerLifecycleState(enum.StrEnum):
     ACTIVE = "active"
     WARM_STANDBY = "warm_standby"
     COLD_EVICTED = "cold_evicted"
@@ -43,7 +43,7 @@ class WorkerLeaseLock:
         return self._generation
 
     @asynccontextmanager
-    async def lease(self):
+    async def lease(self) -> AsyncIterator[int]:
         async with self._lock:
             self._active_leases += 1
             self._generation += 1

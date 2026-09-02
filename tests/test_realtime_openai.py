@@ -1277,7 +1277,9 @@ def test_realtime_multi_sentence_stream_in_tts() -> None:
                 "item": {
                     "type": "message",
                     "role": "user",
-                    "content": [{"type": "input_text", "text": "你好！今天天气真好，我们去散步吧。"}],
+                    "content": [
+                        {"type": "input_text", "text": "你好！今天天气真好，我们去散步吧。"}
+                    ],
                 },
             }
         )

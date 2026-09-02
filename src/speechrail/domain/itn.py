@@ -117,9 +117,7 @@ def apply_light_itn(text: str) -> str:
     unit_pattern = re.compile(
         r"([零一二两三四五六七八九十百千万亿]+)(元|美元|米|公里|岁|号|楼|月|日|倍|个|人|次|天|分|秒|点)"
     )
-    text = unit_pattern.sub(_convert_with_unit, text)
-
-    return text
+    return unit_pattern.sub(_convert_with_unit, text)
 
 
 def compose_hotword_prompt(prompt: str, keywords: Sequence[str] | None) -> str:

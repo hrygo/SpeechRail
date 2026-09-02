@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
-import math
+
 import numpy as np
 
 
@@ -96,9 +97,8 @@ class VoiceActivityDetector:
                 self._speech_debounce_count += 1
                 if self._speech_debounce_count >= self._config.debounce_frames:
                     self._in_speech = True
-                    self._speech_start_ms = max(
-                        0, self._total_processed_ms - (self._config.debounce_frames * self._frame_duration_ms)
-                    )
+                    debounce_ms = self._config.debounce_frames * self._frame_duration_ms
+                    self._speech_start_ms = max(0, self._total_processed_ms - debounce_ms)
                     pre_audio = b"".join(self._prefix_ring)
                     return VadEvent(
                         is_speech=True,
@@ -154,7 +154,7 @@ class VoiceActivityDetector:
         # Baseline noise floor threshold around RMS 120 (~ -46 dBFS)
         if rms < 120:
             return 0.0
-        
+
         # Sigmoid scoring
         energy_score = 1.0 / (1.0 + math.exp(-((rms - 250.0) / 100.0)))
         # Speech typical zero crossings fall between 0.01 and 0.50

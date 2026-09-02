@@ -26,20 +26,20 @@ VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
     {
         "default": VoiceProfile(
             id="default",
-            instruction="自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",  # noqa: RUF001
+            instruction="自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
             is_default=True,
         ),
         "warm": VoiceProfile(
             id="warm",
-            instruction="温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",  # noqa: RUF001
+            instruction="温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",
         ),
         "bright": VoiceProfile(
             id="bright",
-            instruction="明亮活泼的中文女声，音调偏高，语气轻快，适合播报与讲解。",  # noqa: RUF001
+            instruction="明亮活泼的中文女声，音调偏高，语气轻快，适合播报与讲解。",
         ),
         "calm": VoiceProfile(
             id="calm",
-            instruction="沉稳平静的中文男声，语速平稳，语气专业，适合资讯播报。",  # noqa: RUF001
+            instruction="沉稳平静的中文男声，语速平稳，语气专业，适合资讯播报。",
         ),
     }
 )
@@ -213,16 +213,17 @@ class StreamingSentenceSplitter:
                 if not is_enclosed or i >= 30:
                     return i + 1
 
-            if char in _MAIN_PUNCTS:
-                if not is_enclosed or i >= 30:
-                    return i + 1
+            if char in _MAIN_PUNCTS and (not is_enclosed or i >= 30):
+                return i + 1
 
-            if char in _SECONDARY_PUNCTS and i >= self._min_secondary_chars:
-                if not is_enclosed or i >= 40:
-                    return i + 1
+            if (
+                char in _SECONDARY_PUNCTS
+                and i >= self._min_secondary_chars
+                and (not is_enclosed or i >= 40)
+            ):
+                return i + 1
 
         return None
-
 
 
 def apply_crossfade(
@@ -264,9 +265,9 @@ def create_breath_pause(sample_rate: int = 24_000, pause_ms: int = 100) -> bytes
 
 __all__ = [
     "DEFAULT_VOICE_ID",
-    "StreamingSentenceSplitter",
     "VOICE_ALIASES",
     "VOICE_PROFILES",
+    "StreamingSentenceSplitter",
     "VoiceProfile",
     "apply_crossfade",
     "create_breath_pause",

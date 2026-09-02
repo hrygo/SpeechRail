@@ -149,7 +149,7 @@ def _try_fast_decode_wav(audio: bytes) -> bytes | None:
                 samples = samples.reshape(-1, 2).mean(axis=1)
 
             if sample_rate != 16_000 and sample_rate is not None and sample_rate > 0:
-                num_out = int(round(len(samples) * 16_000.0 / sample_rate))
+                num_out = round(len(samples) * 16_000.0 / sample_rate)
                 if num_out <= 0:
                     return None
                 x_old = np.arange(len(samples), dtype=np.float32)

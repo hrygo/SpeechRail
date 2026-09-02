@@ -1,22 +1,55 @@
-# 运维文档
+---
+title: "SpeechRail 运维与 SRE 文档中心"
+status: active
+audience: "运维工程师、SRE、系统管理员"
+version: "1.4.0"
+date: 2026-09-02
+---
 
-本目录面向部署、启动、排障、升级和回滚 SpeechRail 的操作者。首发运行模型是 macOS 本机单服务进程、单 ASGI worker、每个已配置 profile 一个隔离 worker；服务不会下载或搬运模型。
+# 📦 SpeechRail 运维与 SRE 文档
 
-## 推荐阅读顺序
+欢迎查阅 SpeechRail 运维文档。本目录面向负责 macOS 本机部署、LaunchAgent 常驻服务生命周期管理、版本升级与回滚、监控诊断以及故障排查的 SRE 与运维人员。
 
-1. [运行时与部署](runtime-deployment.md)：确认外部 snapshot/runtime、配置键、端口和进程拓扑。
-2. [运维 Runbook](operations-runbook.md)：按上线、启动、健康检查、`launchd`、故障处理和回滚执行。
-3. [安全与可观测性](security-observability.md)：确认网络、敏感数据、日志和容量边界。
-4. [迁移 Runbook](migration-runbook.md)：执行客户端切换、影子验证、回滚和旧路径退役。
-5. [当前边界与剩余风险](../architecture/current-boundaries.md)：发布前核对验收门。
-6. [运行时评估](runtime-evaluation.md)：基于 mlx-qwen3-asr 的端到端、性能与清理实测（2026-09-02）。
+---
 
-## 运行入口
+## 📑 推荐阅读路径
 
-- 环境模板：[configs/speechrail.example.env](../../configs/speechrail.example.env)
-- macOS 模板：[LaunchAgent plist](../../deploy/macos/com.speechrail.plist.example)
-- 健康端点：`/health`、`/readyz`、`/v1/models`、`/v1/voices`
-- 默认服务地址：`http://127.0.0.1:8201`
+```mermaid
+graph TD
+    A[🚀 1. 运行时与环境部署<br/>runtime-deployment.md] --> B[📖 2. 运维操作手册 (Runbook)<br/>operations-runbook.md]
+    B --> C[🔒 3. 安全防护与可观测性<br/>security-observability.md]
+    C --> D[🔄 4. 客户端迁移与平滑回滚<br/>migration-runbook.md]
+```
 
-健康端点返回 200 表示推理入口就绪；音频质量、并发、峰值内存与客户端迁移的验收以对应
-smoke、性能基准和回滚演练为准。
+1. **[🚀 运行时与环境部署 (runtime-deployment.md)](runtime-deployment.md)**：外部模型 Snapshot 目录规范、隔离 Python 虚拟环境配置与端口规划。
+2. **[📖 运维操作手册 (operations-runbook.md)](operations-runbook.md)**：macOS `launchd` 用户级服务管理、原子化升级/回滚流程与故障排查决策树。
+3. **[🔒 安全防护与可观测性 (security-observability.md)](security-observability.md)**：网络访问控制、日志脱敏规范、内存配额与健康探针标准。
+4. **[🔄 客户端迁移与平滑回滚 (migration-runbook.md)](migration-runbook.md)**：QwenPaw 与 Sona 的平滑切换、影子流量验证与旧端点退役流程。
+
+---
+
+## 🛠️ macOS 服务常用操作速查
+
+```bash
+# 1. 安装当前用户的 LaunchAgent 配置文件
+uv run speechrail service install
+
+# 2. 启用常驻后台服务
+uv run speechrail service enable
+
+# 3. 实时查看服务运行状态与 PID
+uv run speechrail service status
+
+# 4. 重启服务（重新加载模型）
+uv run speechrail service restart
+
+# 5. 停用服务 / 完全卸载
+uv run speechrail service disable
+uv run speechrail service uninstall
+```
+
+---
+
+> [!IMPORTANT]
+> - SpeechRail 专为 **macOS (Apple Silicon)** 设计，默认绑定 `127.0.0.1:8201`。
+> - 禁止以 `root` 权限或作为系统级 `LaunchDaemon` 运行，必须作为当前登录用户的 `LaunchAgent` 托管。

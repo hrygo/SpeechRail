@@ -1,226 +1,156 @@
 ---
-title: "SpeechRail 运维 Runbook"
+title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
-date: 2026-08-31
+audience: "运维工程师、SRE、系统管理员"
+version: "1.5.0"
+date: 2026-09-02
 ---
 
-# SpeechRail 运维 Runbook
+# 📖 SpeechRail 运维操作实战手册 (Runbook)
 
-本 Runbook 面向在 macOS 本机运行 SpeechRail 的操作者。首发部署只支持一台机器、一个
-服务进程、每个已配置 profile 一个隔离 worker。它不自动安装系统服务，也不会下载或移动模型。
+> 本 Runbook 规定了在 macOS 本机环境下部署、启动、维护、排障与回滚 SpeechRail 的标准化操作流程。
 
-## 上线前清单
+---
 
-确认 Python 3.12、`uv`、`ffmpeg`、完整的仓库外 Qwen3-ASR snapshot，以及包含
-`mlx-qwen3-asr` 的 Apple Silicon MLX ASR runtime（无需 PyTorch/transformers）。启用 TTS 另需一个可导入 `mlx_audio` 的专用
-Python runtime 与本机 MLX Qwen3-TTS VoiceDesign snapshot。`.env` 只能由当前账户读取，且不应
-进入 Git。
+## 1. 生产上线前就绪检查清单 (Pre-flight Checklist)
 
-```bash
-cd <path-to-SpeechRail>
-cp configs/speechrail.example.env .env
-chmod 600 .env
+```mermaid
+graph TD
+    A[🔍 1. 系统与依赖检查] -->|Python 3.12, ffmpeg, uv| B[📂 2. 外部模型 Snapshot 完整性]
+    B -->|Qwen3-ASR / TTS 目录存在且文件齐全| C[🐍 3. 隔离 Worker Python 虚拟环境]
+    C -->|可正常导入 MLX / 模型 SDK| D[⚙️ 4. 准备未提交的私有 .env]
+    D -->|权限设置为 chmod 600| E[🚀 5. 执行 Pre-flight 验证]
 ```
 
-最小真实运行配置（路径必须替换为本机实际值，不能提交）：
+- [ ] **系统依赖**：`python3 --version` (3.12.x)、`ffmpeg -version` (在系统 `PATH` 中)、`uv --version`。
+- [ ] **ASR 运行时**：外部绝对路径 `SPEECHRAIL_QWEN3_MODEL_DIR` 与专用 `SPEECHRAIL_QWEN3_PYTHON` 均存在且具备执行权限。
+- [ ] **TTS 运行时 (可选)**：外部绝对路径 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与专用 `SPEECHRAIL_QWEN3_TTS_PYTHON` 配置完整。
+- [ ] **安全边界**：`.env` 文件权限已设为 `chmod 600 .env`，且 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false`。
 
-```dotenv
-SPEECHRAIL_HOST=127.0.0.1
-SPEECHRAIL_PORT=8201
-SPEECHRAIL_QWEN3_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-ASR-1.7B
-SPEECHRAIL_QWEN3_PYTHON=/absolute/path/to/qwen3-runtime/bin/python
-SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false
-SPEECHRAIL_DEVICE=mps
-SPEECHRAIL_DTYPE=float16
-SPEECHRAIL_BACKEND_READY=false
-# Optional: enables durable owner-scoped job metadata, not model batch execution.
-SPEECHRAIL_JOB_SPOOL_DIR=/absolute/path/outside/SpeechRail/job-spool
-# Optional Realtime diarization profile. Sortformer enables online anonymous labels;
-# CAM++ additionally enables bounded cross-reconnect anonymous remaps.
-# SPEECHRAIL_DIARIZATION_MODEL_PATH=/absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
-# SPEECHRAIL_DIARIZATION_EMBEDDING_MODEL_PATH=/absolute/path/outside/SpeechRail/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
-# SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES=8388608
-# SPEECHRAIL_DIARIZATION_MAX_GROUPS=64
-# SPEECHRAIL_DIARIZATION_GROUP_TTL_SECONDS=900
-# SPEECHRAIL_DIARIZATION_SIMILARITY_THRESHOLD=0.8
-# Optional external TTS runtime; both paths are required before its worker starts.
-# SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/absolute/path/outside/SpeechRail/Qwen3-TTS-VoiceDesign
-# SPEECHRAIL_QWEN3_TTS_PYTHON=/absolute/path/to/qwen3-tts-runtime/bin/python
-# SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS=false
-# SPEECHRAIL_TTS_VOICE_IDS=["default","warm","bright","calm"]
-# SPEECHRAIL_TTS_WARMUP_ON_START=true
-```
+---
 
-非 loopback 绑定必须配置强随机 `SPEECHRAIL_API_KEY`。当前没有 CORS 实现，
-因此禁止将服务直接暴露到 LAN / 公网。`BACKEND_READY` 不是模型
-开关；真实部署保持 `false`，由各 profile 成对配置的外部路径触发 worker startup。
+## 2. 生产运行与健康探针 (Health Probes)
 
-`SPEECHRAIL_JOB_SPOOL_DIR` 可选；目录必须在仓库外且由当前运行账户私有。设置后服务会在
-启动时恢复任务元数据，并将上次异常中断的 `running` 任务标记为
-`failed(worker_interrupted)`。仅当部署代码显式注入受信任 `JobProcessor` 时才启动 batch
-executor；该 processor 和 realtime 共用 Resource Governor。默认没有 `input_ref` 的路径/URL
-resolver，`queued` 不会被自动解释为可读取的模型输入。
-
-`SPEECHRAIL_WLK_STREAMING_URL` 不再受支持；实时流式 ASR 只使用
-`SPEECHRAIL_REALTIME_ASR_BACKEND=native`。两条 TTS 外部路径同时配置后会启动一个隔离
-worker；该 runtime 必须已安装兼容
-依赖并具有完整 local snapshot，服务本身始终设置离线环境变量。
-
-## wheel 本地安装
-
-开发者使用 `uv sync`；分发安装使用 wheel 和仓库外的本地安装器。安装器负责创建用户私有 app
-home、专用 venv、配置副本和 LaunchAgent；它不下载或复制模型，也不覆盖已有 `.env`。
+服务启动后，通过以下探针确认系统就绪：
 
 ```bash
-cd <release-directory>
+# 1. 进程存活检查 (Liveness Probe)
+curl -s http://127.0.0.1:8201/health | jq .
+
+# 2. 推理就绪检查 (Readiness Probe)
+curl -s -i http://127.0.0.1:8201/readyz
+
+# 3. 模型注册清单
+curl -s http://127.0.0.1:8201/v1/models | jq .
+
+# 4. 音色注册清单
+curl -s http://127.0.0.1:8201/v1/voices | jq .
+```
+
+> [!NOTE]
+> `/readyz` 返回 HTTP 200 表示至少一个 ASR/TTS 模型 Worker 已完成 Snapshot 预检并准备好接收流量。
+
+---
+
+## 3. macOS LaunchAgent 常驻服务管理
+
+SpeechRail 内建了专为 macOS 设计的非 root 用户级服务管理工具：
+
+```bash
+# 1. 生成并安装 LaunchAgent 配置文件 (~/Library/LaunchAgents/com.speechrail.plist)
+uv run speechrail service install
+
+# 2. 校验 Plist 格式
+plutil -lint ~/Library/LaunchAgents/com.speechrail.plist
+
+# 3. 启动并启用常驻服务
+uv run speechrail service enable
+
+# 4. 查询服务运行状态与 PID
+uv run speechrail service status
+
+# 5. 重启服务（重新加载外部模型）
+uv run speechrail service restart
+
+# 6. 停用服务（保留配置文件）
+uv run speechrail service disable
+
+# 7. 完全卸载服务（删除 Plist 文件）
+uv run speechrail service uninstall
+```
+
+---
+
+## 4. 故障定位决策树 (Troubleshooting Decision Tree)
+
+```mermaid
+flowchart TD
+    Issue[🚨 遇到异常或请求报错] --> CheckHealth{检查 curl /health}
+
+    CheckHealth -->|无响应 / 拒绝连接| CheckProcess[检查端口 8201 占用与 launchctl status]
+    CheckHealth -->|返回 200| CheckReadyz{检查 curl /readyz}
+
+    CheckReadyz -->|返回 503 backend_not_ready| CheckWorker[检查 Worker Python 路径与 Snapshot 完整性]
+    CheckReadyz -->|返回 200| CheckReqType{判断请求类型}
+
+    CheckReqType -->|ASR 文件转写报错 422| CheckAudio[检查音频容器格式与 ffmpeg PATH]
+    CheckReqType -->|ASR 报错 429 / 队列满| CheckQueue[检查并发数，施加客户端指数退避]
+    CheckReqType -->|TTS 报错 503| CheckTTSPaths[确认 TTS 权重与专用 Python 路径已配对]
+    CheckReqType -->|WebSocket 异常断开| CheckWSLog[检查 Realtime 事件日志与 Token/VAD 配置]
+```
+
+### 常见故障速查与处理办法
+
+| 故障现象 | 根因定位 | 处理方案 |
+|---|---|---|
+| `/health` 连接拒绝 | 服务未启动或端口被占用 | 检查 `lsof -i :8201`，确保只有一个服务实例在运行 |
+| `/readyz` 返回 503 | 外部 Snapshot 缺失关键权重文件或 Python 环境异常 | 校验 `validate_snapshot` 报错日志，补齐模型文件 |
+| 转写请求返回 422 | 上传文件不是合法音频或系统缺失 `ffmpeg` | 确认系统 `ffmpeg` 存在，并尝试使用标准 WAV/MP3 重试 |
+| 请求返回 429 `queue_full` | 并发请求超出 `MAX_QUEUE_SIZE` 配额 | 检查客户端是否发起了无界请求，按 `Retry-After` 指数退避 |
+| TTS 提示 503 `backend_not_ready` | 未同时配置 TTS 模型目录与 Dedicated Python | 检查 `.env` 中 `SPEECHRAIL_QWEN3_TTS_*` 两项配置并重启服务 |
+
+---
+
+## 5. 原子化升级与安全回滚 (Upgrade & Rollback)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant SRE as 运维人员
+    participant Old as 旧版本 Runtime
+    participant New as 新版本 Runtime
+    participant Agent as LaunchAgent (8201)
+
+    SRE->>Old: 1. 停用当前服务 (service disable)
+    SRE->>New: 2. 安装新 Wheel 至隔离 Release 目录
+    SRE->>New: 3. 执行 Pre-flight 静态与 Smoke 验证
+    alt 验证通过
+        SRE->>Agent: 4. 原子切换 runtime/current 指针
+        SRE->>Agent: 5. 重新生成 Plist 并 service enable
+        SRE->>New: 6. 验证 /health, /readyz 为 200
+    else 验证失败 (触发回滚)
+        SRE->>Old: 回滚至旧版本 runtime/current 指针
+        SRE->>Agent: 重新启用旧版本 LaunchAgent
+        Note over SRE,Old: 零数据丢失，服务立即恢复
+    end
+```
+
+### 标准发布升级步骤：
+```bash
+# 1. 停用当前旧服务
+uv run speechrail service disable
+
+# 2. 构建新版本 Wheel
 uv build --no-sources --wheel
+
+# 3. 执行本地安装器部署（指向专用 app-home）
 python3 tools/install_macos.py \
-  --wheel <wheel-file> \
-  --env-file <private-env-file> \
-  --app-home "$HOME/Library/Application Support/SpeechRail"
-```
+  --wheel dist/speechrail-x.y.z-py3-none-any.whl \
+  --env-file /path/to/private/.env \
+  --app-home "$HOME/Library/Application Support/SpeechRail" \
+  --enable
 
-安装器默认不启用服务。只有在 preflight 通过后，才使用 `--enable` 让它注册并启动 LaunchAgent；
-若只需要 ASR，必须明确使用 `--asr-only`。安装后使用发布验收脚本检查当前 runtime：
-
-```bash
-python3 scripts/verify_release.py \
-  --wheel <wheel-file> \
-  --app-home "$HOME/Library/Application Support/SpeechRail"
-```
-
-升级必须先在新的 runtime 中安装 wheel、执行 preflight 和真实 ASR/TTS smoke，再切换
-`runtime/current`、重新写入 plist 并执行 `service restart`。若新 runtime 未通过检查，保留旧
-`current` 和已加载服务；回滚只恢复旧 runtime 指针并重启，不删除模型、配置或用户数据。
-
-## 启动、停止与验收
-
-```bash
-cd <path-to-SpeechRail>
-uv sync --extra dev --extra diarization
-uv run speechrail
-```
-
-正常停止前台进程使用 `Ctrl-C`；不要运行多个服务实例或多个 ASGI worker，以免复制模型。
-另开终端检查：
-
-```bash
+# 4. 验证新版本端点
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
-curl http://127.0.0.1:8201/v1/models
-curl -i http://127.0.0.1:8201/v1/voices
 ```
-
-`/readyz` 为 200 仅说明 ASR/TTS 推理入口已配置；响应中的 `diarization` 是可选 profile 的独立状态，
-不影响 ASR/TTS readiness。发布前还要用操作者拥有的非敏感短音频完成一次
-REST ASR smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音频。启用 TTS 后，使用
-`POST /v1/audio/speech` 请求 `speechrail/qwen3-tts`、登记 voice 和 `response_format=pcm`，确认
-HTTP 200、非空且偶数字节的 24 kHz PCM16；不得记录输入文本或输出音频。
-
-`/v1/voices` 是独立的 preset 目录路由；按当前代码，即使 TTS worker 未 ready 也应返回 HTTP 200，
-并在条目中标记 `available=false`。如果运行态返回 404，先核对请求的 base URL、`8201` 端口、运行中的进程
-和服务是否已重启；这不是缺少 TTS runtime 配置的直接表现。Creator 等客户端要完成 TTS 合成，必须在
-SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_TTS_PYTHON`，
-然后重启服务；缺少任一配置时，`/v1/audio/speech` 预期返回 `503 backend_not_ready`。
-
-启动前的 preflight 会在配置了 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 时额外检查
-`diarization_config`、`diarization_snapshot` 和 `diarization_runtime`；配置 CAM++ 时还检查
-`diarization_embedding_snapshot` 与 `diarization_embedding_runtime`。这些检查只验证外部文件和
-当前服务 Python 的导入能力，不会下载模型或提前加载权重。配置错误会阻止 preflight，通过后模型
-仍在第一个 diarization session 惰性加载。
-
-## 启动时加载的模型
-
-| 项目 | 行为 |
-|---|---|
-| `Qwen/Qwen3-ASR-1.7B` snapshot | 配置 ASR 路径时加载一份到隔离 Qwen3 worker |
-| MLX Qwen3-TTS VoiceDesign snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker；公开 preset 为 `default`、`warm`、`bright`、`calm` |
-| Sortformer diarization snapshot | 仅配置 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 后按首个 diarization session 惰性载入；仅产生匿名 label |
-| CAM++ embedding snapshot | 仅同时配置 CAM++ 路径和 Sortformer profile 时，按首次需要短片段 embedding 的请求惰性载入；只保留有界短期匿名质心 |
-| MLX `mlx-qwen3-asr` | 仅专用 worker Python runtime（Apple Silicon MLX；batch 与 streaming 共用） |
-| Apple Silicon device | MPS / `float16`；不允许自动 CPU fallback |
-| HTTP 服务依赖 | 主 `uv` 环境中的 FastAPI 等，不加载模型权重 |
-
-它不会加载 Whisper、LM Studio chat/embedding 模型或 `sona` 的会议组件。未配置
-对应 snapshot/runtime 时不会加载该 profile；`/health` 会返回可诊断的 `diarization` 状态，
-`/v1/models` 不会宣称 `gpt-4o-transcribe-diarize` 可用，启用该模型的 Realtime session 会在
-`session.update` 阶段返回 `diarization_not_available`，而不是等到 `commit` 才失败。
-
-## 说话人分离 profile
-
-Realtime transcription 客户端显式设置 `diarization.enabled=true` 才启用。Sortformer 缓冲
-PCM 的上限由 `SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` 强制；超过上限返回
-`buffer_limit_exceeded`。CAM++ 不保存 embedding；仅当客户端提供不透明 `group_id` 时，服务在
-`MAX_GROUPS` 和 `GROUP_TTL_SECONDS` 限制内保留匿名归一化质心，并在 commit 前发出可选 remap。
-不要把 `group_id` 设置为姓名、邮箱、会议标题或数据库主键。
-
-真实模型验收必须使用操作者有权处理的评测音频，至少记录实时延迟、DER/JER、重连 label
-稳定率与人工更正率；不把音频、embedding、转写原文或 group ID 写入日志。发现质量退化时，
-先移除两条 diarization 模型路径并重启服务；此操作只关闭该可选 profile，不影响 ASR/TTS。
-恢复 profile 同样需要重新执行 preflight 并重启服务，使外部配置重新组合。
-
-## macOS `launchd` 常驻安装
-
-SpeechRail 提供 `LaunchAgent` CLI；它只管理当前登录用户的 GUI session，适合 MPS 本机服务，
-不是 root `LaunchDaemon`，也不在登录前运行。先确认项目目录中的 `.env` 已配置并且当前
-`.venv` 已通过 `uv sync` 创建。安装命令使用当前 `.venv` 的 Python 和当前目录作为工作目录，
-不把 `.env`、API key、模型路径或音频复制进 plist：
-
-```bash
-cd <path-to-SpeechRail>
-uv run speechrail service install
-```
-
-`install` 仅写入 `$HOME/Library/LaunchAgents/com.speechrail.plist` 和私有日志目录，**不会**
-启动服务或加载模型。完成 plist 检查后显式启用：
-
-```bash
-plutil -lint "$HOME/Library/LaunchAgents/com.speechrail.plist"
-uv run speechrail service enable
-uv run speechrail service status
-```
-
-日常状态、重启、停用和卸载：
-
-```bash
-uv run speechrail service status
-uv run speechrail service restart
-uv run speechrail service disable       # 停止但保留已生成的 plist
-uv run speechrail service uninstall     # 停止、卸载并删除 plist
-```
-
-服务日志位于 `$HOME/Library/Logs/SpeechRail/stdout.log` 和 `stderr.log`。当升级依赖、移动
-工作目录或重建 `.venv` 时，执行 `disable` → 在新工作目录运行 `install` → `enable`，以免
-已加载的 launchd job 继续引用旧 Python。`launchctl print "gui/$(id -u)/com.speechrail"` 仅用于
-CLI 无法提供足够诊断时的恢复排障。每次服务进程重启都会重新加载已配置模型。
-
-项目仍保留 [plist 模板](../../deploy/macos/com.speechrail.plist.example) 供审计或手工恢复；
-模板中的占位符必须替换为当前账户绝对路径，且其 `ProgramArguments` 必须使用 Python module
-入口，不能恢复为 shell 或 `uv run`。
-
-## 故障定位
-
-| 现象 | 首先检查 | 处理 |
-|---|---|---|
-| `/health` 无响应 | 进程、`launchctl print`、端口、stderr | 修正端口/服务配置后仅启动一个实例 |
-| `/readyz` 为 503 | snapshot/Python 路径、权限、worker stderr | 修正外部路径；不要用 `BACKEND_READY=true` 掩盖问题 |
-| snapshot 不完整 | 是否仓库外、必要文件是否齐全 | 重新获取完整同一 revision 的 snapshot |
-| MPS/dtype 报错 | MPS 可用性、`mps` + `float16` 配对 | 修复 runtime；CPU 部署要同时用 `cpu` + `float32` |
-| 转写 422 | 音频 Content-Type、容器、ffmpeg PATH | 使用音频文件并修复 ffmpeg 环境 |
-| 转写 429/503 | 队列、worker stderr、资源压力 | 按 `retryable` / `Retry-After` 有界重试，不复制模型 |
-| QwenPaw 失败 | provider URL/model、完整重启、REST curl | 先使 REST smoke 通过再检查客户端 |
-| diarization 不可用 | Sortformer/CAM++ 路径、`uv sync --extra diarization`、stderr | 修复外部路径或依赖；不要以单 speaker 结果替代失败 |
-| label 重连不稳定 | group TTL/容量、短片段比例、评测指标 | 调整受控阈值并重新评测；不要扩大 PCM/embedding 留存 |
-
-排障记录只保留时间、版本、request ID、错误码、耗时、设备/dtype 与资源摘要；不要收集
-API key、Authorization、音频、Base64、完整 prompt 或转写正文。
-
-## 升级与回滚
-
-升级以可回退的版本目录/提交为单位：停止前台服务或 `launchctl bootout`，在新版本运行
-测试和真实 worker smoke，再更新服务指向并验证三项健康端点与客户端。保留原 `.env` 和
-模型 snapshot；不要通过 `git reset --hard` 丢弃配置。
-
-服务回滚为：停止新进程，恢复上一个已验证版本工作目录与 `.env`，启动后完成 REST smoke。
-QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。`sona` adapter
-已经实现；启用、影子、回滚均须使用[迁移 Runbook](migration-runbook.md)。

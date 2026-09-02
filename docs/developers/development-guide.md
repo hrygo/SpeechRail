@@ -1,112 +1,102 @@
 ---
-title: "SpeechRail 开发指南"
+title: "SpeechRail 开发者实战指南"
 status: active
-date: 2026-08-31
+audience: "核心开发者、开源贡献者"
+version: "1.5.0"
+date: 2026-09-02
 ---
 
-# SpeechRail 开发指南
+# 🛠️ SpeechRail 开发者实战指南
 
-本指南面向修改 SpeechRail 本身的开发者。它不包含模型权重、本机 `.env`、音频或任何
-客户端私有配置。
+> 本指南将引导您在 5 分钟内搭建本地开发环境、理解代码架构分层、掌握 Worker 二进制 IPC 协议扩展流程，并遵循严苛的质量门禁。
 
-## 1. 开发前提与本地启动
+---
 
-项目固定使用 Python `>=3.12,<3.13` 与 `uv`。HTTP 服务依赖仓库的 `uv` 环境；真实
-Qwen3-ASR/TTS 运行在各自配置的独立 Python 中，隔离模型厂商依赖。
+## 1. 快速开始与环境搭建
+
+SpeechRail 固定基于 **Python 3.12** 与现代包管理工具 **`uv`** 构建：
 
 ```bash
-cd <path-to-SpeechRail>
+# 1. 克隆代码仓库
+git clone https://github.com/hrygo/SpeechRail.git
+cd SpeechRail
+
+# 2. 一键同步主环境依赖（包含开发与测试依赖）
 uv sync --extra dev
-uv run speechrail
+
+# 3. 准备未提交的本地配置文件
+cp configs/speechrail.example.env .env
+chmod 600 .env
+
+# 4. 启动本地服务
+uv run speechrail serve
 ```
 
-无真实模型配置时，应用仍可启动，且可运行所有确定性契约测试；推理接口将返回
-`503 backend_not_ready`。需要实机推理时，按[运行时与部署](../operations/runtime-deployment.md)
-准备外部 snapshot 与 Python runtime，再在未提交的 `.env` 中设置路径。
+> [!NOTE]
+> 在未配置外部模型路径时，服务依然可以正常启动，并能通过所有 Fake Backend 的确定性契约测试。此时向推理接口发送请求将返回标准的 `503 backend_not_ready` 错误。
 
-## 2. wheel 与本地安装器
+---
 
-源码开发的 `uv sync` 不等于发布安装。发布 wheel 时使用：
+## 2. 代码分层与目录拓扑
 
-```bash
-uv build --no-sources --wheel
+SpeechRail 遵循清晰的**整洁架构 (Clean Architecture)** 与 **DRY / SOLID** 原则：
+
+```mermaid
+graph TD
+    A["src/speechrail/http/routes/<br/>(REST & WebSocket 传输控制器)"] --> B["src/speechrail/application/<br/>(用例编排与跨传输状态流)"]
+    B --> C["src/speechrail/domain/<br/>(纯净领域模型 & Ports 接口)"]
+    D["src/speechrail/runtime/<br/>(Governor 调度 / WorkerLeaseLock / IPC)"] --> C
+    E["src/speechrail/backends/<br/>(Qwen3 / Sortformer 适配器)"] --> C
+    A --> D
 ```
 
-然后在干净 venv 中安装 wheel，或将 wheel 与 `tools/install_macos.py` 一起交给本机安装器。
-wheel 只包含 `speechrail` 服务包；模型权重、vendor runtime、`.env`、音频和日志必须留在外部。
-安装器必须先完成 preflight，再按用户明确选择决定是否启用 LaunchAgent。不要从源码目录导入
-模块来代替干净 wheel 验收。
+| 核心代码目录 | 职责与规范 | 重点约束 |
+|---|---|---|
+| `src/speechrail/domain/` | 纯净领域对象（如 `TranscriptionResult`、`SpeechSegment`、`ports.py`） | 严禁依赖 FastAPI、PyTorch 或外部模型 SDK |
+| `src/speechrail/application/` | 业务用例（Realtime 会话管理、VAD 状态机编排） | 仅面向 Domain Ports 编程 |
+| `src/speechrail/runtime/` | 有界队列、Resource Governor、Worker 进程生命周期 | 确保多协程并发下的绝对内存安全与顺序一致性 |
+| `src/speechrail/backends/` | Qwen3-ASR/TTS 驱动、Sortformer 引擎、离线 Snapshot 预检 | 严格在隔离 Worker 子进程中运行 |
+| `src/speechrail/http/routes/` | FastAPI 路由控制、OpenAI 协议序列化与反序列化 | 负责输入合法性校验与统一错误封送 |
+| `src/speechrail/compatibility/` | OpenAI 模型别名映射（如 `whisper-1` → `canonical`） | 保持窄依赖，禁止污染核心领域模型 |
 
-## 3. 目录与责任边界
+---
 
-| 目录 | 责任 |
-|---|---|
-| `src/speechrail/app.py` | FastAPI 边界、请求验证、认证、音频解码、队列接入与 WS 路由 |
-| `src/speechrail/domain/` | 与客户端无关的 ASR/TTS 结果、请求和校验模型 |
-| `src/speechrail/backends/` | Qwen3 ASR/TTS、WLK/diarization profile、snapshot 预检和私有 worker 协议 |
-| `src/speechrail/application/` | Realtime 用例编排、后端生命周期和 diarization 协调 |
-| `src/speechrail/http/routes/` | `/v1/realtime` WebSocket 传输与 JSON 边界 |
-| `src/speechrail/compatibility/` | OpenAI/WLK 等窄兼容序列化；不得污染领域模型 |
-| `src/speechrail/runtime/` | 有界 admission queue、Resource Governor、jobs 与 worker 生命周期 |
-| `contracts/` | 公共 REST 与 WebSocket 的事实来源 |
-| `tests/` | 无模型依赖的契约、安全与边界测试 |
+## 3. Worker 二进制 IPC 协议与扩展指南
 
-SpeechRail 不拥有麦克风、会议、播放、UI、PostgreSQL、LLM chat orchestration 或客户端
-prompt。不要从 `sona` 复制这些职责进来。
+主服务与推理 Worker 之间通过 `stdin`/`stdout` 进行二进制通信。新增推理后端时需遵循以下协议帧格式：
 
-## 4. 当前模型运行方式
+```text
++---------------+---------------+-------------------+------------------------------------+
+| Magic (2B)    | MsgType (1B)  | PayloadLen (4B)   | Payload (MsgPack 结构 / Raw PCM)   |
+| 0x53 0x52     | 0x01 (Req)    | Big-Endian uint32 | Binary Data                        |
++---------------+---------------+-------------------+------------------------------------+
+```
 
-当 `SPEECHRAIL_QWEN3_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_PYTHON` 都存在时，
-`create_app()` 创建一个 ASR `Qwen3Worker`；当 TTS model/runtime 两条路径同时存在时，
-再创建一个独立 TTS worker。ASGI startup 分别启动并校验它们；worker 在启动帧中检查
-完整 snapshot、离线环境、设备和 dtype，随后顺序执行各自请求。当前 profile：
+### 扩展新 Worker 步骤：
+1. **定义 Domain Port**：在 `domain/ports.py` 中声明抽象接口（继承 `Protocol`）。
+2. **实现 Worker 适配器**：在 `backends/` 中创建对应的 Client 与独立运行的 Worker 脚本。
+3. **注册至 Governor**：在 `runtime/` 中注册生命周期钩子，确保其受 `WorkerLeaseLock` 与待机驱逐管理。
+4. **编写确定性测试**：在 `tests/` 中编写使用 Fake Worker 的单元测试，确保不依赖真实 GPU。
 
-- 模型：`Qwen/Qwen3-ASR-1.7B`，公共 ID `speechrail/qwen3-asr-1.7b`；
-- Apple Silicon：`mps` + `float16`；worker 明确禁止 MPS 自动回退 CPU；
-- CPU：仅 `cpu` + `float32`；
-- 上传容器经固定 `ffmpeg` 参数转换为 `s16le` / 16 kHz / 单声道 PCM；
-- 真实 worker 每次只保有一个模型实例。不要通过多 ASGI worker 复制模型。
-- TTS 公共 ID 为 `speechrail/qwen3-tts`，只接受服务器登记的 `default`、`warm`、`bright`、`calm` preset，输出 24 kHz 单声道 PCM16 或 WAV；
-- `/v1/realtime` 的 transcription/speech 使用 OpenAI 事件协议和独立资源 lane；可选 diarization 只保留有界匿名 session state。
+---
 
-模型路径必须是仓库外绝对路径。`validate_snapshot()` 会检查必须文件；请求路径不会执行
-下载。模型升级和依赖升级先在独立 runtime 做 smoke，再更新运行清单，不能静默替换。
+## 4. 质量门禁与提交前检查
 
-## 5. 契约变更流程
-
-1. 先更新 `contracts/openapi.yaml` 或 `contracts/realtime-openai.md`，再修改路由/事件代码与测试。
-2. 可选请求字段、可选响应字段和新端点可以作为 `/v1` 的兼容扩展。
-3. 删除字段、改变类型、错误码语义或 WS 状态机需要兼容设计、迁移说明与兼容期；当前只有一个 Realtime 公共入口。
-4. 所有公共错误保持 `error.message/type/code/request_id/retryable` envelope；不要暴露
-   traceback、路径、密钥、音频或完整文本。
-5. alias 只能映射到同一后端 profile。新客户端必须使用 canonical model ID；不要把
-   `whisper-1` 当作真实模型。
-
-更新 realtime 文档时务必区分目标协议与当前行为。`/v1/realtime` 按 OpenAI 兼容子集提供
-ASR/TTS 事件；当前 batch backend 在 commit 后产出最终结果，native streaming backend
-可按能力产出 partial/completed 或 TTS audio delta，但不能把未通过真实 smoke 的 backend
-写成已验收能力。
-
-## 6. 测试与质量门禁
-
-每次行为或契约变更至少执行：
+在提交代码前，必须在本地依次执行并全部通过以下门禁：
 
 ```bash
-uv run --extra dev pytest
+# 1. 运行全部单元测试与契约测试
+uv run --extra dev pytest tests/ -q --no-cov
+
+# 2. 代码风格与规范检查
 uv run --extra dev ruff check src tests
+
+# 3. 静态强类型检查（Strict 模式）
 uv run --extra dev mypy src
+
+# 4. OpenAPI 契约格式验证
 npx @redocly/cli lint contracts/openapi.yaml
 ```
 
-测试须保持确定性：使用 fake backend、构造的 PCM 或脱敏 fixture，不下载模型、不访问
-网络、不提交音频。真实 Qwen3 smoke 是额外验收而不是单元测试前提。详细矩阵见
-[测试与验收](testing-acceptance.md)。
-
-## 7. 文档与提交
-
-- 代码、接口、配置键或运行行为变更必须同步更新 README、相应 `docs/`、契约和
-  `CHANGELOG.md`；重大架构决定添加 ADR。
-- 文档示例用 `<path-to-SpeechRail>`、`/absolute/path/outside/SpeechRail/...` 等占位符，
-  不写本机路径、wrapper、token 或终端历史。
-- 提交前检查工作树，避免把 `.env`、模型文件、音频、转写、缓存和外部 runtime 纳入 Git。
-- 以单一主题组织提交；完成前以 `git diff --check` 与上述门禁验证实际变更。
+> [!IMPORTANT]
+> 自动化测试必须保持 **100% 确定性**：严禁在单元测试中联网下载权重、调用外部云端 API 或使用真实敏感音频。
