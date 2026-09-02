@@ -92,7 +92,6 @@ def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str
         capabilities.append("speech")
     return {
         "type": "session.created",
-        "event_id": f"event_{session_id}_created",
         "session": {
             "id": session_id,
             "model": model,
@@ -114,7 +113,6 @@ def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str
 def session_updated(*, session_id: str, model: str) -> dict[str, object]:
     return {
         "type": "session.updated",
-        "event_id": f"event_{session_id}_updated",
         "session": {
             "id": session_id,
             "model": model,
@@ -131,7 +129,6 @@ def session_updated(*, session_id: str, model: str) -> dict[str, object]:
 def conversation_created(*, session_id: str) -> dict[str, object]:
     return {
         "type": "conversation.created",
-        "event_id": f"event_{session_id}_conversation",
         "conversation": {"id": f"conv_{session_id}"},
     }
 
@@ -139,7 +136,6 @@ def conversation_created(*, session_id: str) -> dict[str, object]:
 def input_audio_buffer_committed(*, session_id: str) -> dict[str, object]:
     return {
         "type": "input_audio_buffer.committed",
-        "event_id": f"event_{session_id}_committed",
         "previous_item_id": None,
         "item_id": f"item_{session_id}_input",
     }
@@ -148,14 +144,12 @@ def input_audio_buffer_committed(*, session_id: str) -> dict[str, object]:
 def input_audio_buffer_cleared(*, session_id: str) -> dict[str, object]:
     return {
         "type": "input_audio_buffer.cleared",
-        "event_id": f"event_{session_id}_cleared",
     }
 
 
 def conversation_item_created(*, session_id: str, transcript: str) -> dict[str, object]:
     return {
         "type": "conversation.item.created",
-        "event_id": f"event_{session_id}_item",
         "previous_item_id": None,
         "item": {
             "id": f"item_{session_id}_input",
@@ -178,7 +172,6 @@ def conversation_text_item_created(
 ) -> dict[str, object]:
     return {
         "type": "conversation.item.created",
-        "event_id": f"event_{session_id}_text_item",
         "previous_item_id": None,
         "item": {
             "id": item_id,
@@ -193,7 +186,6 @@ def conversation_text_item_created(
 def transcription_delta(*, session_id: str, delta: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.delta",
-        "event_id": f"event_{session_id}_transcription_delta",
         "item_id": f"item_{session_id}_input",
         "content_index": 0,
         "delta": delta,
@@ -203,7 +195,6 @@ def transcription_delta(*, session_id: str, delta: str) -> dict[str, object]:
 def transcription_completed(*, session_id: str, transcript: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.completed",
-        "event_id": f"event_{session_id}_transcription",
         "item_id": f"item_{session_id}_input",
         "content_index": 0,
         "transcript": transcript,
@@ -229,7 +220,6 @@ def transcription_segment(
     """Render one OpenAI-compatible immutable transcription segment."""
     return {
         "type": "conversation.item.input_audio_transcription.segment",
-        "event_id": f"event_{session_id}_segment_{segment_id}",
         "item_id": item_id,
         "content_index": 0,
         "id": segment_id,
@@ -243,7 +233,6 @@ def transcription_segment(
 def transcription_failed(*, session_id: str, code: str, message: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.failed",
-        "event_id": f"event_{session_id}_transcription_failed",
         "item_id": f"item_{session_id}_input",
         "content_index": 0,
         "error": {"type": "transcription_error", "code": code, "message": message},
@@ -253,7 +242,6 @@ def transcription_failed(*, session_id: str, code: str, message: str) -> dict[st
 def response_created(*, session_id: str, response_id: str) -> dict[str, object]:
     return {
         "type": "response.created",
-        "event_id": f"event_{session_id}_response_created",
         "response": {
             "id": response_id,
             "object": "realtime.response",
@@ -270,7 +258,6 @@ def response_output_item_added(
 ) -> dict[str, object]:
     return {
         "type": "response.output_item.added",
-        "event_id": f"event_{session_id}_output_item",
         "response_id": response_id,
         "output_index": 0,
         "item": {
@@ -288,7 +275,6 @@ def response_output_item_done(
 ) -> dict[str, object]:
     return {
         "type": "response.output_item.done",
-        "event_id": f"event_{session_id}_output_item_done",
         "response_id": response_id,
         "output_index": 0,
         "item": {
@@ -306,7 +292,6 @@ def response_content_part_added(
 ) -> dict[str, object]:
     return {
         "type": "response.content_part.added",
-        "event_id": f"event_{session_id}_part_added",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -320,7 +305,6 @@ def response_content_part_done(
 ) -> dict[str, object]:
     return {
         "type": "response.content_part.done",
-        "event_id": f"event_{session_id}_part_done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -334,7 +318,6 @@ def response_output_audio_delta(
 ) -> dict[str, object]:
     return {
         "type": "response.output_audio.delta",
-        "event_id": f"event_{session_id}_audio_delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -348,7 +331,6 @@ def response_output_audio_done(
 ) -> dict[str, object]:
     return {
         "type": "response.output_audio.done",
-        "event_id": f"event_{session_id}_audio_done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -361,7 +343,6 @@ def response_output_audio_transcript_delta(
 ) -> dict[str, object]:
     return {
         "type": "response.output_audio_transcript.delta",
-        "event_id": f"event_{session_id}_transcript_delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -375,7 +356,6 @@ def response_output_audio_transcript_done(
 ) -> dict[str, object]:
     return {
         "type": "response.output_audio_transcript.done",
-        "event_id": f"event_{session_id}_transcript_done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -389,7 +369,6 @@ def response_done(
 ) -> dict[str, object]:
     return {
         "type": "response.done",
-        "event_id": f"event_{session_id}_response_done",
         "response": {
             "id": response_id,
             "object": "realtime.response",
@@ -401,12 +380,39 @@ def response_done(
     }
 
 
-def error_event(*, code: str, message: str, event_id: str | None = None) -> dict[str, object]:
-    return {
-        "type": "error",
-        "event_id": f"event_{event_id or 'unknown'}_error",
-        "error": {"type": "invalid_request_error", "code": code, "message": message},
+def error_event(
+    *, code: str, message: str, client_event_id: str | None = None
+) -> dict[str, object]:
+    error: dict[str, object] = {
+        "type": "invalid_request_error",
+        "code": code,
+        "message": message,
     }
+    if client_event_id:
+        error["event_id"] = client_event_id
+    return {"type": "error", "error": error}
+
+
+def resolve_handshake_model(
+    model: str,
+    *,
+    asr_model: str,
+    registered_asr: frozenset[str],
+    registered_tts: frozenset[str],
+    diarization_ready: bool,
+) -> str:
+    """Resolve the ``?model=`` handshake value to an internal ASR profile id."""
+    resolved = canonical_asr_model(model, registered=registered_asr)
+    if resolved is None:
+        if canonical_tts_model(model, registered=registered_tts) is None:
+            raise RealtimeAdapterError("model_not_found", f"unknown model: {model}")
+        resolved = asr_model
+    if model == "gpt-4o-transcribe-diarize" and not diarization_ready:
+        raise RealtimeAdapterError(
+            "model_not_found",
+            "gpt-4o-transcribe-diarize requires an available diarization profile",
+        )
+    return resolved
 
 
 def _require_object(event: dict[str, Any], field: str) -> dict[str, Any]:
@@ -493,6 +499,7 @@ def apply_session_update(
     language: str | None = None
     languages: list[str] | None = None
     keywords: list[str] | None = None
+    prompt: str | None = None
     timestamp_granularities: list[str] | None = None
     diarization: dict[str, Any] | None = None
     known_speaker_names: list[str] | None = None
@@ -502,6 +509,11 @@ def apply_session_update(
         language = transcription_obj.get("language")
         if language is not None and not isinstance(language, str):
             raise RealtimeAdapterError("invalid_language", "language must be a string")
+        prompt = transcription_obj.get("prompt")
+        if prompt is not None and not isinstance(prompt, str):
+            raise RealtimeAdapterError("invalid_prompt", "prompt must be a string")
+        if prompt is not None and len(prompt) > 2000:
+            raise RealtimeAdapterError("prompt_too_long", "prompt exceeds 2000 characters")
         languages = _string_list(transcription_obj, "languages")
         keywords = _string_list(transcription_obj, "keywords")
         known_speaker_names = _string_list(transcription_obj, "known_speaker_names")
@@ -538,6 +550,7 @@ def apply_session_update(
     config: dict[str, Any] = {
         "model": resolved_asr or asr_model,
         "language": language or session.get("language"),
+        "prompt": prompt or "",
         "voice": voice,
     }
     for key, value in (

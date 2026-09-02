@@ -55,11 +55,21 @@ class OpenAIRealtimeSession:
     compatibility events to domain ports.
     """
 
-    def __init__(self, services: AppServices, *, session_id: str, send: SendEvent) -> None:
+    def __init__(
+        self,
+        services: AppServices,
+        *,
+        session_id: str,
+        send: SendEvent,
+        model: str | None = None,
+        display_model: str | None = None,
+    ) -> None:
         self._services = services
         self._settings = services.settings
         self._session_id = session_id
         self._send = send
+        self._initial_model = model or self._settings.model_id
+        self._display_model = display_model or self._initial_model
         self._asr_factory = services.realtime_asr_factory
         self._diarization_engine = services.diarization_engine
         self._tts = services.tts_synthesizer
@@ -76,13 +86,17 @@ class OpenAIRealtimeSession:
         self._diarization_config: DiarizationConfig | None = None
         self._pending_text: str | None = None
         self._buffered_audio_bytes = 0
-        self._config: dict[str, Any] = {"model": self._settings.model_id, "language": None}
+        self._config: dict[str, Any] = {
+            "model": self._initial_model,
+            "language": None,
+            "prompt": "",
+        }
 
     async def start(self) -> None:
         await self._send(
             session_created(
                 session_id=self._session_id,
-                model=self._settings.model_id,
+                model=self._display_model,
                 tts_ready=self._services.tts_ready,
             )
         )
@@ -158,11 +172,22 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
         if self._asr is None:
             await self._reserve_asr()
-            self._asr = self._asr_factory.create(
-                language=self._config.get("language"),
-                prompt="",
-            )
-            await self._asr.connect()
+            try:
+                asr = self._asr_factory.create(
+                    language=self._config.get("language"),
+                    prompt=str(self._config.get("prompt") or ""),
+                )
+                await asr.connect()
+            except RuntimeError as exc:
+                await self._release_asr()
+                message = str(exc)
+                code = (
+                    "language_not_supported"
+                    if message.startswith("language_not_supported")
+                    else "backend_busy"
+                )
+                raise RealtimeAdapterError(code, message) from exc
+            self._asr = asr
             self._asr_reader = asyncio.create_task(self._drain_asr_events())
         await self._ensure_diarization()
         await self._asr.append_audio(audio)
@@ -173,8 +198,8 @@ class OpenAIRealtimeSession:
     async def _commit_audio(self) -> None:
         if self._asr is None:
             raise RealtimeAdapterError("invalid_state", "no audio appended before commit")
-        await self._asr.commit()
         await self._send(input_audio_buffer_committed(session_id=self._session_id))
+        await self._asr.commit()
         if self._asr_reader is not None:
             await self._asr_reader
             self._asr_reader = None

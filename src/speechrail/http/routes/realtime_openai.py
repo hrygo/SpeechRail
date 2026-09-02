@@ -12,9 +12,15 @@ from starlette.websockets import WebSocketDisconnect
 
 from speechrail.application.realtime_openai import OpenAIRealtimeSession
 from speechrail.application.services import AppServices
-from speechrail.compatibility.openai_realtime import RealtimeAdapterError, error_event
+from speechrail.compatibility.openai_realtime import (
+    RealtimeAdapterError,
+    error_event,
+    resolve_handshake_model,
+)
 from speechrail.domain.diarization import DiarizationError
 from speechrail.http.auth import websocket_is_authorized
+
+HANDSHAKE_MODEL_CLOSE_CODE = 4004
 
 
 def create_openai_realtime_router(services: AppServices) -> APIRouter:
@@ -30,6 +36,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         if not websocket_is_authorized(websocket, settings):
             await websocket.close(code=1008, reason="Invalid API key")
             return
+        requested_model = websocket.query_params.get("model")
         await websocket.accept()
 
         session_id = f"realtime_{uuid4().hex[:12]}"
@@ -46,19 +53,57 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 payload["sequence"] = sequence
                 await websocket.send_json(payload)
 
-        session = OpenAIRealtimeSession(services, session_id=session_id, send=send_event)
+        registered_asr = frozenset({settings.model_id, *settings.compatibility_model_ids})
+        registered_tts = frozenset({settings.tts_model_id})
+        try:
+            if requested_model:
+                model = resolve_handshake_model(
+                    requested_model,
+                    asr_model=settings.model_id,
+                    registered_asr=registered_asr,
+                    registered_tts=registered_tts,
+                    diarization_ready=services.diarization_ready,
+                )
+                display_model = requested_model
+            else:
+                model = settings.model_id
+                display_model = settings.model_id
+        except RealtimeAdapterError as exc:
+            await send_event(error_event(code=exc.code, message=exc.message))
+            await websocket.close(code=HANDSHAKE_MODEL_CLOSE_CODE)
+            return
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id=session_id,
+            send=send_event,
+            model=model,
+            display_model=display_model,
+        )
         try:
             await session.start()
             while True:
+                client_event_id: str | None = None
                 try:
                     event = _decode(await websocket.receive_text())
+                    raw_event_id = event.get("event_id")
+                    if isinstance(raw_event_id, str) and raw_event_id.strip():
+                        client_event_id = raw_event_id
                     await session.handle(event)
                 except RealtimeAdapterError as exc:
                     await send_event(
-                        error_event(code=exc.code, message=exc.message, event_id=exc.event_id)
+                        error_event(
+                            code=exc.code,
+                            message=exc.message,
+                            client_event_id=exc.event_id or client_event_id,
+                        )
                     )
                 except DiarizationError as exc:
-                    await send_event(error_event(code=exc.code, message=str(exc)))
+                    await send_event(
+                        error_event(
+                            code=exc.code, message=str(exc), client_event_id=client_event_id
+                        )
+                    )
         except WebSocketDisconnect:
             pass
         finally:

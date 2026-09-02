@@ -63,6 +63,25 @@ def test_models_exposes_canonical_model_and_compatibility_aliases() -> None:
     assert by_id["gpt-4o-mini-tts"]["resolves_to"] == "speechrail/qwen3-tts"
 
 
+def test_models_hides_diarize_alias_injected_via_compatibility_ids_without_profile() -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                api_key=None,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                diarization_model_path=None,
+                diarization_embedding_model_path=None,
+                compatibility_model_ids=("gpt-4o-transcribe-diarize",),
+            )
+        )
+    )
+
+    ids = {item["id"] for item in client.get("/v1/models").json()["data"]}
+
+    assert "gpt-4o-transcribe-diarize" not in ids
+
+
 def test_transcription_returns_openai_compatible_not_ready_error() -> None:
     response = _client().post(
         "/v1/audio/transcriptions",

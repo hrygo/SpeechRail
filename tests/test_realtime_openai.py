@@ -74,10 +74,12 @@ class FakeStreamingSession:
         self,
         *,
         language: str | None,
+        prompt: str = "",
         segments: tuple[object, ...] = (),
         partials: tuple[str, ...] = (),
     ) -> None:
         self.language = language
+        self.prompt = prompt
         self.segments = segments
         self.partials = partials
         self.received: list[bytes] = []
@@ -124,15 +126,44 @@ class FakeStreamingFactory:
         self.sessions: list[FakeStreamingSession] = []
         self.released: list[RealtimeAsrSession] = []
 
+    def session_class(self) -> type[FakeStreamingSession]:
+        return FakeStreamingSession
+
     def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
-        session = FakeStreamingSession(
-            language=language, segments=self.segments, partials=self.partials
+        session = self.session_class()(
+            language=language, prompt=prompt, segments=self.segments, partials=self.partials
         )
         self.sessions.append(session)
         return session
 
     def release(self, session: RealtimeAsrSession) -> None:
         self.released.append(session)
+
+
+class RejectingLanguageStreamingFactory(FakeStreamingFactory):
+    """Mirrors the native factory that raises RuntimeError for unsupported languages."""
+
+    def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
+        resolved = (language or "auto").strip().lower()
+        if resolved.startswith("xx"):
+            raise RuntimeError(f"language_not_supported: {resolved}")
+        return super().create(language=language, prompt=prompt)
+
+
+class _EarlyCompletionSession(FakeStreamingSession):
+    """Emits final events while commit() is still awaiting the backend ack."""
+
+    async def commit(self) -> None:
+        await self.events_queue.put(
+            StreamingAsrEvent(kind="completed", text="你好", language="zh", segments=self.segments)
+        )
+        await self.events_queue.put(None)
+        await asyncio.sleep(0.05)
+
+
+class EarlyCompletionStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[FakeStreamingSession]:
+        return _EarlyCompletionSession
 
 
 class FakeDiarizationSession:
@@ -192,8 +223,9 @@ def _client(
     diarization_engine=None,
     tts_synthesizer=None,
     api_key: str | None = None,
+    factory: FakeStreamingFactory | None = None,
 ) -> tuple[TestClient, FakeStreamingFactory]:
-    factory = FakeStreamingFactory(segments=segments, partials=partials)
+    streaming_factory = factory or FakeStreamingFactory(segments=segments, partials=partials)
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,
@@ -206,7 +238,7 @@ def _client(
         AppOverrides(
             batch_transcriber=FakeTranscriber(),
             tts_synthesizer=tts_synthesizer or FakeSpeechSynthesizer(),
-            realtime_asr_factory=factory,
+            realtime_asr_factory=streaming_factory,
             diarization_engine=diarization_engine,
         ),
     )
@@ -214,7 +246,7 @@ def _client(
     app.include_router(create_openai_realtime_router(services))
     return (
         TestClient(app),
-        factory,
+        streaming_factory,
     )
 
 
@@ -919,3 +951,161 @@ def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() 
 
     assert cancelled["type"] == "response.done"
     assert cancelled["response"]["status"] == "cancelled"
+
+
+def test_openai_query_model_echoed_in_session_created() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime?model=whisper-1") as socket:
+        created = socket.receive_json()
+        assert created["type"] == "session.created"
+        assert created["session"]["model"] == "whisper-1"
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+    assert len(factory.sessions) == 1
+
+
+def test_openai_query_model_unknown_rejected_with_error_then_close_4004() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime?model=does-not-exist-xyz") as socket:
+        event = socket.receive_json()
+        assert event["type"] == "error"
+        assert event["error"]["code"] == "model_not_found"
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            socket.receive_json()
+    assert excinfo.value.code == 4004
+    assert factory.sessions == []
+
+
+def test_openai_query_diarize_alias_requires_ready_profile() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime?model=gpt-4o-transcribe-diarize") as socket:
+        event = socket.receive_json()
+        assert event["type"] == "error"
+        assert event["error"]["code"] == "model_not_found"
+        with pytest.raises(WebSocketDisconnect):
+            socket.receive_json()
+
+
+def test_openai_query_diarize_alias_accepted_when_profile_ready() -> None:
+    client, _ = _client(diarization_engine=FakeDiarizationEngine())
+    with client.websocket_connect("/v1/realtime?model=gpt-4o-transcribe-diarize") as socket:
+        created = socket.receive_json()
+    assert created["type"] == "session.created"
+    assert created["session"]["model"] == "gpt-4o-transcribe-diarize"
+
+
+def test_openai_error_event_correlates_client_event_id() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "definitely-unknown", "event_id": "evt_client_42"})
+        error = socket.receive_json()
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "unknown_event"
+    assert error["error"]["event_id"] == "evt_client_42"
+    assert error["event_id"] != "evt_client_42"
+    assert error["event_id"].startswith("event_")
+
+
+def test_openai_unsupported_language_surfaces_error_event_and_recovers() -> None:
+    factory = RejectingLanguageStreamingFactory()
+    client, _ = _client(factory=factory)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"language": "xx-qq"}},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "language_not_supported"
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"language": "zh"}},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+    assert len(factory.sessions) == 1
+
+
+def test_openai_committed_precedes_transcription_completion() -> None:
+    factory = EarlyCompletionStreamingFactory()
+    client, _ = _client(factory=factory)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        types: list[str] = []
+        while True:
+            event = socket.receive_json()
+            types.append(event["type"])
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+    assert types[0] == "input_audio_buffer.committed"
+    assert "conversation.item.created" in types
+
+
+def test_openai_transcription_prompt_forwarded_to_streaming_session() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"prompt": "医疗术语"}},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+    assert factory.sessions[0].prompt == "医疗术语"
+
+
+def test_openai_rejects_oversized_transcription_prompt() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"prompt": "x" * 2001}},
+            }
+        )
+        error = socket.receive_json()
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "prompt_too_long"

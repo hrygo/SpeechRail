@@ -70,6 +70,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                 {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}
             )
         for compat in resolved.compatibility_model_ids:
+            if compat in diarization_model_aliases() and not services.diarization_ready:
+                continue
             if compat in {asr_target, tts_target} or any(
                 d["id"] == compat for d in data
             ):
