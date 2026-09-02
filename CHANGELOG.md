@@ -21,6 +21,26 @@
 - **多会话冒烟示例**：`examples/perf/concurrent_realtime_smoke.py` 可同时打开
   N 个 realtime 会话并验证路由隔离与 batch 同期可用。
 
+### Fixed
+
+- **streaming dispatcher 空闲超时不再判死**：`Qwen3StreamingWorker._dispatch_loop`
+  调用 `receive()` 底层受 `io_timeout`（默认等于 `request_timeout_seconds`=120s）约束，
+  共享 streaming worker 空闲超过该窗口读超时后，dispatcher 会把空闲静默误判为
+  worker 故障并广播 `worker_unavailable` 且自身永久退出；`_ready` 仍为 True 导致
+  `start()` 无法重建，此后所有新会话的 `session.open` 应答无人路由，`connect()`
+  挂起至超时、客户端最终得到空结果。现在空闲读超时按正常静默处理（继续分发），
+  仅真实 worker 故障（EOF/协议错误）才退出并重置就绪标志。
+- **断开/取消不再泄漏 realtime 会话槽**：`realtime_openai.py` 的
+  `input_audio_buffer.append` 路径此前只在 `except Exception` 中释放 governor 预留
+  与 factory 槽位，`CancelledError`（客户端断开时取消挂起的 `connect()`）会直接穿透
+  ——槽位被永久占用（尚未赋值 `self._asr` 时 `session.close()` 也无法回收），累计 2
+  个泄漏会话后所有后续会话 `backend_busy`。现在清理路径捕获 `BaseException`（含
+  `CancelledError`），先释放资源再原样向上传递；`Qwen3StreamingSession.connect()`
+  同样在取消时注销会话队列。
+- **基准工具修正**：`bench_realtime`/冒烟不稳定抖动导致 4 次误判死锁；`wait_for_idle.py`
+  新增 GPU 感知的空闲等待门，`sample_resources.py` 解析 `vm_stat` 页大小不再硬编码
+  4096。
+
 ## [1.5.2] - 2026-09-03
 
 ### Fixed
