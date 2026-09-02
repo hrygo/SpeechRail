@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-09-03
+
+### Fixed
+
+- **Realtime 会话槽位永不泄漏**：此前 `input_audio_buffer.append` 触发 `connect()`
+  失败（如 worker 管道 BrokenPipe）时，只有 `RuntimeError` 会触发槽位清理，
+  `BrokenPipeError`/`OSError` 直接穿透导致 `NativeRealtimeFactory` 的单一会话槽
+  和 governor 预留容量永久占用，后续所有 realtime 会话持续 `backend_busy` 直到
+  进程重启。`create()`/`connect()` 现在捕获全部异常并总是释放槽位与容量。
+- **Realtime 断开立即释放槽位**：WS 路由由单循环串行处理改为 receive/handle
+  双 task；客户端在后台 `commit()` 阻塞期间断线时，被阻塞的 handler 会被取消，
+  `session.close()` 与工厂释放必然执行，不再等到后端应答才释放槽位；意外 handler
+  异常转为 `backend_error` 事件而非静默泄漏。
+- **streaming worker 活跃会话不再被空闲回收**：`Qwen3StreamingWorker` 与
+  `Qwen3Worker` 此前不维护 `last_active`，`WorkerIdleEvictor` 会在会话持有期间把
+  worker 当作空闲收回，下一个 `commit` 得到 `worker_not_started`。两者现在在每次
+  帧 IO 刷新 `last_active`，活跃会话的读循环持续续期。
+- **worker 传输读写锁分离，消除 parked-reader 死锁**：`AsyncFramedWorkerProcess`
+  原先单一锁同时保护读写；streaming 会话的读循环持有锁停在 `readexactly` 等待
+  下一帧时，同会话的 `append`/`commit` 写入会等同一把锁永久阻塞（batch 与 realtime
+  叠加必现、realtime-only 偶发）。读/写改用独立锁，`exchange` 仅在单个请求/响应
+  期间短持双锁。
+
 ## [1.5.1] - 2026-09-02
 
 ### Fixed
