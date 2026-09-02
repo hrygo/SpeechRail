@@ -187,8 +187,9 @@ paths:
       tags: [speech]
       summary: Synthesize a sentence as audio
       description: |
-        OpenAI-compatible JSON request shape. The initial runtime supports WAV
-        and signed 16-bit little-endian PCM streaming responses.
+        OpenAI-compatible JSON request shape. Responses are returned as mp3
+        (default), opus, aac, flac or wav containers; `pcm` streams raw signed
+        16-bit little-endian mono samples as they are produced.
       security:
         - BearerAuth: []
         - {}
@@ -202,6 +203,22 @@ paths:
         '200':
           description: Synthesized audio stream
           content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/opus:
+              schema:
+                type: string
+                format: binary
+            audio/aac:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
             audio/wav:
               schema:
                 type: string
@@ -382,13 +399,18 @@ components:
             $ref: '#/components/schemas/Model'
     VoiceProfile:
       type: object
-      required: [id, description, is_default, available]
+      required: [id, description, aliases, is_default, available]
       properties:
         id:
           type: string
           enum: [default, warm, bright, calm]
         description:
           type: string
+        aliases:
+          type: array
+          description: OpenAI standard voice names accepted for this preset.
+          items:
+            type: string
         is_default:
           type: boolean
         available:
@@ -480,15 +502,20 @@ components:
         input:
           type: string
           minLength: 1
-          maxLength: 100000
+          maxLength: 4096
         voice:
           type: string
           minLength: 1
           maxLength: 200
+          description: |
+            Server preset voices (default, warm, bright, calm) and the OpenAI
+            standard names (alloy, ash, ballad, cedar, coral, echo, fable,
+            marin, nova, onyx, sage, shimmer, verse) are accepted; standard
+            names map to the nearest preset.
         response_format:
           type: string
-          enum: [pcm, wav]
-          default: wav
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: mp3
         speed:
           type: number
           minimum: 0.25
@@ -564,7 +591,22 @@ components:
       required: [id, start, end, text]
       properties:
         id:
-          type: string
+          type: integer
+          minimum: 0
+        seek:
+          type: [number, "null"]
+        tokens:
+          type: ["array", "null"]
+          items:
+            type: integer
+        temperature:
+          type: [number, "null"]
+        avg_logprob:
+          type: [number, "null"]
+        compression_ratio:
+          type: [number, "null"]
+        no_speech_prob:
+          type: [number, "null"]
         start:
           type: number
           minimum: 0
@@ -615,6 +657,7 @@ components:
           const: transcribe
         language:
           type: string
+          description: Lowercased detected language, or empty when undetected.
         duration:
           type: number
           minimum: 0

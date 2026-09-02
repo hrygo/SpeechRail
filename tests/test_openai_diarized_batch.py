@@ -32,8 +32,8 @@ def _backend(
             language="zh",
             duration_ms=1600,
             segments=(
-                TranscriptSegment(id="seg_1", start_ms=0, end_ms=800, text="你好"),
-                TranscriptSegment(id="seg_2", start_ms=800, end_ms=1600, text="世界"),
+                TranscriptSegment(id=0, start_ms=0, end_ms=800, text="你好"),
+                TranscriptSegment(id=1, start_ms=800, end_ms=1600, text="世界"),
             ),
         )
 

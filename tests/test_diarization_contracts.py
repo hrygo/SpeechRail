@@ -21,7 +21,7 @@ def test_diarization_contract_accepts_anonymous_overlap_and_canonical_mapping() 
     update = DiarizationUpdate(
         assignments=(
             DiarizationAssignment(
-                segment_id="seg-1",
+                segment_id=0,
                 speakers=(
                     DiarizationSpeaker(id="spk_01", confidence=0.91),
                     DiarizationSpeaker(id="spk_02", confidence=0.73),
@@ -58,7 +58,7 @@ def test_diarization_update_rejects_noncanonical_mapping_and_duplicate_speakers(
 
     with pytest.raises(ValidationError, match="unique"):
         DiarizationAssignment(
-            segment_id="seg-1",
+            segment_id=0,
             speakers=(
                 DiarizationSpeaker(id="spk_01", confidence=0.9),
                 DiarizationSpeaker(id="spk_01", confidence=0.8),

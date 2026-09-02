@@ -72,7 +72,7 @@ class DiarizationAssignment(BaseModel):
 
     model_config = ConfigDict(frozen=True, strict=True)
 
-    segment_id: str = Field(min_length=1, max_length=200)
+    segment_id: int = Field(ge=0)
     speakers: tuple[DiarizationSpeaker, ...] = Field(min_length=1, max_length=8)
     revision: int = Field(default=1, ge=1)
 

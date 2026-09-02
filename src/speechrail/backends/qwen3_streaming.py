@@ -291,7 +291,7 @@ def _segments(value: object) -> tuple[TranscriptSegment, ...]:
             continue
         result.append(
             TranscriptSegment(
-                id=f"seg_{index}",
+                id=index,
                 start_ms=int(raw.get("start_ms") or 0),
                 end_ms=int(raw.get("end_ms") or 0),
                 text=text,

@@ -39,6 +39,59 @@ def test_voice_catalog_exposes_the_configured_preset_profiles() -> None:
     assert body["data"][0]["is_default"] is True
 
 
+def test_voice_catalog_exposes_openai_standard_voice_aliases() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    body = client.get("/v1/voices").json()
+    aliases = {voice["id"]: set(voice["aliases"]) for voice in body["data"]}
+
+    assert "alloy" in aliases["default"]
+    assert aliases["calm"] == {"fable", "shimmer"}
+    assert set().union(*aliases.values()) == {
+        "alloy",
+        "ash",
+        "ballad",
+        "cedar",
+        "coral",
+        "echo",
+        "fable",
+        "marin",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+    }
+
+
+def test_rest_speech_resolves_standard_voice_alias_to_preset() -> None:
+    synthesizer = CapturingSpeechSynthesizer()
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=synthesizer,
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "nova",
+            "response_format": "pcm",
+        },
+    )
+
+    assert response.status_code == 200
+    assert synthesizer.requests[0].voice == "bright"
+
+
 def test_rest_speech_forwards_language_to_the_typed_synthesizer() -> None:
     synthesizer = CapturingSpeechSynthesizer()
     client = TestClient(

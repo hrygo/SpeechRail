@@ -20,8 +20,8 @@ def test_nemo_sortformer_assigns_anonymous_label_by_maximum_time_overlap() -> No
         await session.append_audio(b"\x00\x00" * 16_000)
         update = await session.annotate(
             (
-                TranscriptSegment(id="first", start_ms=0, end_ms=400, text="第一位"),
-                TranscriptSegment(id="second", start_ms=500, end_ms=900, text="第二位"),
+                TranscriptSegment(id=0, start_ms=0, end_ms=400, text="第一位"),
+                TranscriptSegment(id=1, start_ms=500, end_ms=900, text="第二位"),
             )
         )
 
@@ -42,18 +42,18 @@ def test_nemo_sortformer_remaps_reconnected_raw_labels_within_a_group() -> None:
         centroids=store,
     )
 
-    async def annotate(raw_label: str) -> tuple[str, dict[str, str]]:
+    async def annotate(segment_id: int) -> tuple[str, dict[str, str]]:
         session = engine.create(
             config=DiarizationConfig(enabled=True, group_id="a" * 64, speaker_count_hint=2)
         )
         await session.append_audio(b"\x00\x00" * 16_000)
         update = await session.annotate(
-            (TranscriptSegment(id=raw_label, start_ms=0, end_ms=1000, text="讲话"),)
+            (TranscriptSegment(id=segment_id, start_ms=0, end_ms=1000, text="讲话"),)
         )
         return update.assignments[0].primary_speaker_id, dict((await session.finalize()).mapping)
 
-    first_label, first_mapping = asyncio.run(annotate("first"))
-    second_label, second_mapping = asyncio.run(annotate("second"))
+    first_label, first_mapping = asyncio.run(annotate(7))
+    second_label, second_mapping = asyncio.run(annotate(8))
 
     assert first_label == "spk_01"
     assert first_mapping == {}
@@ -72,11 +72,11 @@ def test_nemo_sortformer_translates_local_model_offsets_to_stream_timeline() -> 
         session = engine.create(config=DiarizationConfig(enabled=True))
         await session.append_audio(b"\x00\x00" * 16_000)
         first = await session.annotate(
-            (TranscriptSegment(id="first", start_ms=0, end_ms=1000, text="第一段"),)
+            (TranscriptSegment(id=0, start_ms=0, end_ms=1000, text="第一段"),)
         )
         await session.append_audio(b"\x00\x00" * 16_000)
         second = await session.annotate(
-            (TranscriptSegment(id="second", start_ms=1000, end_ms=2000, text="第二段"),)
+            (TranscriptSegment(id=1, start_ms=1000, end_ms=2000, text="第二段"),)
         )
 
         assert first.assignments[0].primary_speaker_id == "spk_01"

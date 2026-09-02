@@ -60,7 +60,7 @@ def _build_timed_result(
             continue
         segments.append(
             TranscriptSegment(
-                id=f"seg_{index}",
+                id=index,
                 start_ms=start_ms,
                 end_ms=end_ms,
                 text=cleaned,

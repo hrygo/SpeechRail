@@ -13,7 +13,7 @@ from speechrail.compatibility.openai_realtime import (
     diarization_model_aliases,
     tts_model_aliases,
 )
-from speechrail.domain.tts import VOICE_PROFILES
+from speechrail.domain.tts import VOICE_ALIASES, VOICE_PROFILES
 from speechrail.http.errors import error_response
 
 
@@ -95,6 +95,9 @@ def create_system_router(services: AppServices) -> APIRouter:
                 {
                     "id": voice_id,
                     "description": VOICE_PROFILES[voice_id].description,
+                    "aliases": sorted(
+                        alias for alias, preset in VOICE_ALIASES.items() if preset == voice_id
+                    ),
                     "is_default": VOICE_PROFILES[voice_id].is_default,
                     "available": services.tts_ready,
                 }

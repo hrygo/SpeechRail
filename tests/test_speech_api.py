@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from sys import executable
 
+import pytest
 from fastapi.testclient import TestClient
 
 import speechrail.application.services as services_module
@@ -56,7 +57,12 @@ def test_speech_endpoint_wraps_wav_after_collecting_pcm() -> None:
 
     response = client.post(
         "/v1/audio/speech",
-        json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "wav",
+        },
     )
 
     assert response.status_code == 200
@@ -65,6 +71,96 @@ def test_speech_endpoint_wraps_wav_after_collecting_pcm() -> None:
     assert response.content[8:12] == b"WAVE"
     assert response.content[40:44] == (4).to_bytes(4, "little")
     assert response.content[44:] == b"\x00\x00\x01\x00"
+
+
+class EchoSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(
+                response_id="resp-test", chunk_index=0, audio=bytes(24_000 * 2 // 10)
+            )
+
+        return chunks()
+
+
+def _speech_client() -> TestClient:
+    return TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=EchoSpeechSynthesizer(),
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("response_format", "content_type", "magic"),
+    [
+        ("mp3", "audio/mpeg", None),
+        ("opus", "audio/opus", b"OggS"),
+        ("aac", "audio/aac", None),
+        ("flac", "audio/flac", b"fLaC"),
+    ],
+)
+def test_speech_endpoint_supports_openai_container_formats(
+    response_format: str, content_type: str, magic: bytes | None
+) -> None:
+    response = _speech_client().post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": response_format,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(content_type)
+    body = response.content
+    assert body
+    if magic is not None:
+        assert body[: len(magic)] == magic
+    elif response_format == "mp3":
+        assert body[:3] == b"ID3" or (body[0] == 0xFF and body[1] & 0xE0 == 0xE0)
+    else:  # aac / ADTS
+        assert body[0] == 0xFF and body[1] & 0xF6 == 0xF0
+
+
+def test_speech_endpoint_defaults_to_mp3_for_openai_parity() -> None:
+    response = _speech_client().post(
+        "/v1/audio/speech",
+        json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/mpeg")
+
+
+def test_speech_endpoint_caps_input_at_openai_limit() -> None:
+    client = _speech_client()
+
+    ok = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "啊" * 4096,
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+    too_long = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "啊" * 4097,
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+
+    assert ok.status_code == 200
+    assert too_long.status_code == 422
+    assert too_long.json()["error"]["code"] == "validation_error"
 
 
 class InvalidDeliverySynthesizer:
@@ -224,7 +320,12 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
     with TestClient(create_app(settings)) as client:
         response = client.post(
             "/v1/audio/speech",
-            json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+            json={
+                "model": "speechrail/qwen3-tts",
+                "input": "你好",
+                "voice": "default",
+                "response_format": "wav",
+            },
         )
         assert response.status_code == 200
         assert response.content[:4] == b"RIFF"

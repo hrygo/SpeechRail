@@ -46,6 +46,24 @@ VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
 
 DEFAULT_VOICE_ID = "default"
 
+VOICE_ALIASES: Mapping[str, str] = MappingProxyType(
+    {
+        "alloy": "default",
+        "ash": "default",
+        "echo": "default",
+        "onyx": "default",
+        "coral": "warm",
+        "sage": "warm",
+        "marin": "warm",
+        "nova": "bright",
+        "ballad": "bright",
+        "verse": "bright",
+        "cedar": "bright",
+        "fable": "calm",
+        "shimmer": "calm",
+    }
+)
+
 _MARKDOWN_CLEANUP_RE = re.compile(r"[*#`~_>]+")
 _EMOJI_RE = re.compile(
     r"[\U00010000-\U0010FFFF\u2600-\u27BF\u2300-\u23FF\u2B50-\u2B55\u200d\ufe0f]+"
@@ -96,11 +114,18 @@ def get_voice_profile(voice: str) -> VoiceProfile:
         raise ValueError(f"unknown preset voice: {voice}") from exc
 
 
+def resolve_voice(voice: str) -> str:
+    """Map an OpenAI standard voice name onto the nearest server preset."""
+    return VOICE_ALIASES.get(voice, voice)
+
+
 __all__ = [
     "DEFAULT_VOICE_ID",
+    "VOICE_ALIASES",
     "VOICE_PROFILES",
     "VoiceProfile",
     "generation_token_budget",
     "get_voice_profile",
     "normalize_tts_text",
+    "resolve_voice",
 ]

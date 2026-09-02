@@ -17,7 +17,7 @@ def format_verbose(
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "task": "transcribe",
-        "language": result.language or "",
+        "language": (result.language or "").strip().lower(),
         "duration": result.duration_ms / 1000,
         "text": result.text,
         "usage": {"type": "duration", "seconds": result.duration_ms / 1000},
@@ -26,6 +26,15 @@ def format_verbose(
         payload["segments"] = [
             {
                 "id": s.id,
+                # Whisper-style confidence fields the Qwen3 runtime cannot
+                # produce; emitted as explicit nulls so the OpenAI verbose
+                # field set stays intact without fabricating values.
+                "seek": None,
+                "tokens": None,
+                "temperature": None,
+                "avg_logprob": None,
+                "compression_ratio": None,
+                "no_speech_prob": None,
                 "start": s.start_ms / 1000,
                 "end": s.end_ms / 1000,
                 "text": s.text,

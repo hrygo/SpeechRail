@@ -22,6 +22,7 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import SpeechRequest
+from speechrail.domain.tts import resolve_voice
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
@@ -40,9 +41,9 @@ class _SpeechHTTPBody(BaseModel):
     """OpenAI-compatible subset for the public sentence TTS endpoint."""
 
     model: str = Field(min_length=1, max_length=200)
-    input: str = Field(min_length=1, max_length=100_000)
+    input: str = Field(min_length=1, max_length=4_096)
     voice: str = Field(min_length=1, max_length=200)
-    response_format: Literal["pcm", "wav"] = "wav"
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
     instructions: str | None = Field(default=None, max_length=100_000)
@@ -200,6 +201,42 @@ def _wav_pcm16(pcm: bytes, *, sample_rate: int) -> bytes:
         len(pcm),
     )
     return header + pcm
+
+
+_TTS_CONTAINER_ENCODERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "mp3": ("audio/mpeg", ("-c:a", "libmp3lame", "-b:a", "128k", "-f", "mp3")),
+    "opus": ("audio/opus", ("-c:a", "libopus", "-f", "ogg")),
+    "aac": ("audio/aac", ("-c:a", "aac", "-f", "adts")),
+    "flac": ("audio/flac", ("-c:a", "flac", "-f", "flac")),
+}
+
+
+async def _encode_container(pcm: bytes, *, sample_rate: int, response_format: str) -> bytes:
+    """Remux complete PCM16 into an OpenAI container with fixed ffmpeg argv, never a shell."""
+    _, args = _TTS_CONTAINER_ENCODERS[response_format]
+    process = await asyncio.create_subprocess_exec(
+        _resolve_ffmpeg(),
+        "-nostdin",
+        "-v",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        *args,
+        "pipe:1",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    encoded, _ = await process.communicate(pcm)
+    if process.returncode != 0 or not encoded:
+        raise ValueError("audio_encode_failed")
+    return encoded
 
 
 def create_audio_router(services: AppServices) -> APIRouter:
@@ -401,7 +438,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
-        if body.voice not in resolved.tts_voice_ids:
+        preset_voice = resolve_voice(body.voice)
+        if preset_voice not in resolved.tts_voice_ids:
             return error_response(
                 400,
                 request_id,
@@ -428,8 +466,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         synthesis = SpeechRequest(
             text=body.input,
-            voice=body.voice,
-            output_format="pcm16" if body.response_format == "pcm" else "wav",
+            voice=preset_voice,
+            output_format="pcm16",
             speed=body.speed,
             language=body.language,
         )
@@ -438,23 +476,39 @@ def create_audio_router(services: AppServices) -> APIRouter:
             async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
                 yield chunk.audio
 
-        if body.response_format == "wav":
-            pcm = bytearray()
-            try:
-                async for chunk in audio_stream():
-                    pcm.extend(chunk)
-            except TTSDeliveryError as exc:
-                return error_response(
-                    502,
-                    request_id,
-                    exc.code,
-                    "TTS backend delivered an invalid audio stream",
-                    retryable=True,
-                )
-            return Response(
-                content=_wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate),
-                media_type="audio/wav",
+        if body.response_format == "pcm":
+            return StreamingResponse(audio_stream(), media_type="audio/x-pcm")
+        pcm = bytearray()
+        try:
+            async for chunk in audio_stream():
+                pcm.extend(chunk)
+        except TTSDeliveryError as exc:
+            return error_response(
+                502,
+                request_id,
+                exc.code,
+                "TTS backend delivered an invalid audio stream",
+                retryable=True,
             )
-        return StreamingResponse(audio_stream(), media_type="audio/x-pcm")
+        try:
+            if body.response_format == "wav":
+                content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
+                media_type = "audio/wav"
+            else:
+                media_type, _ = _TTS_CONTAINER_ENCODERS[body.response_format]
+                content = await _encode_container(
+                    bytes(pcm),
+                    sample_rate=resolved.tts_sample_rate,
+                    response_format=body.response_format,
+                )
+        except ValueError:
+            return error_response(
+                502,
+                request_id,
+                "audio_encode_failed",
+                "Failed to encode the synthesized audio",
+                retryable=True,
+            )
+        return Response(content=content, media_type=media_type)
 
     return router

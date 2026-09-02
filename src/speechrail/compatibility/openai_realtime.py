@@ -211,7 +211,7 @@ def transcription_segment(
     *,
     session_id: str,
     item_id: str,
-    segment_id: str,
+    segment_id: int,
     text: str,
     speaker: str | None,
     start_ms: int,

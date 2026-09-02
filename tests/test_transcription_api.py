@@ -20,7 +20,7 @@ def _backend(
             text="hello",
             language="en",
             duration_ms=1000,
-            segments=(TranscriptSegment(id="seg_1", start_ms=0, end_ms=1000, text="hello"),),
+            segments=(TranscriptSegment(id=0, start_ms=0, end_ms=1000, text="hello"),),
         )
 
     return result()

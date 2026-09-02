@@ -199,7 +199,7 @@ class _NemoSortformerSession:
     async def _track_remap(
         self,
         assignments: tuple[DiarizationAssignment, ...],
-        segments: dict[str, TranscriptSegment],
+        segments: dict[int, TranscriptSegment],
         activities: tuple[tuple[int, int, int], ...],
         audio: bytes,
         audio_start_ms: int,

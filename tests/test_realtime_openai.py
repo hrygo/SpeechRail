@@ -361,7 +361,7 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
 
 def test_openai_diarized_model_alias_enables_diarization() -> None:
     engine = FakeDiarizationEngine()
-    segment = TranscriptSegment(id="seg_1", start_ms=0, end_ms=500, text="你好")
+    segment = TranscriptSegment(id=1, start_ms=0, end_ms=500, text="你好")
     client, _ = _client(segments=(segment,), diarization_engine=engine)
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
@@ -581,7 +581,7 @@ def test_openai_segment_formatter_uses_standard_fields() -> None:
     event = transcription_segment(
         session_id="realtime_test",
         item_id="item_test",
-        segment_id="seg_test",
+        segment_id=7,
         text="你好",
         speaker="spk_01",
         start_ms=0,
@@ -591,7 +591,7 @@ def test_openai_segment_formatter_uses_standard_fields() -> None:
     assert event["type"] == "conversation.item.input_audio_transcription.segment"
     assert event["item_id"] == "item_test"
     assert event["content_index"] == 0
-    assert event["id"] == "seg_test"
+    assert event["id"] == 7
     assert event["text"] == "你好"
     assert event["speaker"] == "spk_01"
     assert event["start"] == 0.0
@@ -637,8 +637,8 @@ def test_openai_realtime_emits_diarized_segments_before_completed_with_ordered_e
     from speechrail.domain.contracts import TranscriptSegment
 
     segments = (
-        TranscriptSegment(id="seg_1", start_ms=0, end_ms=800, text="你好"),
-        TranscriptSegment(id="seg_2", start_ms=800, end_ms=1600, text="世界"),
+        TranscriptSegment(id=1, start_ms=0, end_ms=800, text="你好"),
+        TranscriptSegment(id=2, start_ms=800, end_ms=1600, text="世界"),
     )
     diarization = FakeDiarizationEngine()
     client, _ = _client(segments=segments, diarization_engine=diarization)
@@ -706,7 +706,7 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
 
 def test_openai_realtime_reports_diarization_backend_error() -> None:
     client, _ = _client(
-        segments=(TranscriptSegment(id="seg_1", start_ms=0, end_ms=100, text="你好"),),
+        segments=(TranscriptSegment(id=1, start_ms=0, end_ms=100, text="你好"),),
         diarization_engine=FailingDiarizationEngine(),
     )
     with client.websocket_connect("/v1/realtime") as socket:

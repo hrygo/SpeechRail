@@ -24,7 +24,7 @@ class TranscriptWord(BaseModel):
 class TranscriptSegment(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    id: str = Field(min_length=1, max_length=200)
+    id: int = Field(ge=0)
     start_ms: int = Field(ge=0)
     end_ms: int = Field(ge=0)
     text: str = Field(min_length=1, max_length=100_000)
