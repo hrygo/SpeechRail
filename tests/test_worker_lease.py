@@ -91,6 +91,7 @@ def test_runtime_lifecycle_eager_load_starts_immediately() -> None:
     asyncio.run(run())
 
 
+<<<<<<< HEAD
 def test_evictor_close_is_blocked_while_worker_lock_is_held() -> None:
     """When close() acquires a lock, evictor's close() call blocks until lock is released."""
 
@@ -146,6 +147,7 @@ def test_evictor_respects_worker_last_active_attribute() -> None:
     class _ActiveWorker:
         def __init__(self) -> None:
             import time
+
             self.alive = True
             self.closed = False
             self.last_active: float = time.monotonic()
@@ -156,6 +158,7 @@ def test_evictor_respects_worker_last_active_attribute() -> None:
 
     async def run() -> None:
         import time
+
         worker = _ActiveWorker()
         evictor = WorkerIdleEvictor(
             (worker,), idle_timeout_seconds=0.08, check_interval_seconds=0.02
@@ -216,3 +219,72 @@ def test_evictor_resets_idle_timer_after_close() -> None:
 
     asyncio.run(run())
 
+
+def test_two_stage_standby_and_eviction() -> None:
+    from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    class _TrimWorker(_FakeWorker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.trimmed = False
+
+        def trim_memory(self) -> None:
+            self.trimmed = True
+
+    async def run() -> None:
+        worker = _TrimWorker()
+        evictor = WorkerIdleEvictor(
+            (worker,),
+            warm_standby_timeout_seconds=0.03,
+            idle_timeout_seconds=0.08,
+            check_interval_seconds=0.01,
+        )
+        await evictor.start()
+        try:
+            assert evictor.state_of(worker) == WorkerLifecycleState.ACTIVE
+            # 1. Wait for warm standby
+            await asyncio.sleep(0.04)
+            assert evictor.state_of(worker) == WorkerLifecycleState.WARM_STANDBY
+            assert worker.trimmed is True
+            assert worker.closed is False
+
+            # 2. Wait for cold eviction
+            await asyncio.sleep(0.06)
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+            assert worker.closed is True
+        finally:
+            await evictor.close()
+
+    asyncio.run(run())
+
+
+def test_lease_lock_protects_against_eviction() -> None:
+    from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    async def run() -> None:
+        worker = _FakeWorker()
+        evictor = WorkerIdleEvictor(
+            (worker,),
+            warm_standby_timeout_seconds=0.02,
+            idle_timeout_seconds=0.04,
+            check_interval_seconds=0.01,
+        )
+        lease_lock = evictor.lease_lock_of(worker)
+        await evictor.start()
+        try:
+            async with lease_lock.lease() as gen:
+                assert gen == 1
+                assert lease_lock.active_leases == 1
+                # Wait past eviction timeout while lease held
+                await asyncio.sleep(0.06)
+                assert worker.closed is False
+                assert evictor.state_of(worker) == WorkerLifecycleState.ACTIVE
+
+            # After lease release, eviction proceeds
+            await asyncio.sleep(0.06)
+            assert worker.closed is True
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+        finally:
+            await evictor.close()
+
+    asyncio.run(run())
