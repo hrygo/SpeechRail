@@ -88,6 +88,7 @@ class OpenAIRealtimeSession:
         self._diarization_config: DiarizationConfig | None = None
         self._pending_text: str | None = None
         self._buffered_audio_bytes = 0
+        self._vad = None
         self._config: dict[str, Any] = {
             "model": self._initial_model,
             "language": None,
@@ -139,6 +140,8 @@ class OpenAIRealtimeSession:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._tts_task
         self._tts_task = None
+        if self._vad is not None:
+            self._vad.reset()
 
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
@@ -161,6 +164,24 @@ class OpenAIRealtimeSession:
             await self._ensure_diarization()
         else:
             await self._close_diarization()
+
+        turn_detection = config.get("turn_detection")
+        if isinstance(turn_detection, dict) and turn_detection.get("type") == "server_vad":
+            from speechrail.backends.vad import VadConfig, VoiceActivityDetector
+
+            threshold = float(turn_detection.get("threshold", 0.5))
+            prefix_padding = int(turn_detection.get("prefix_padding_ms", 300))
+            silence_duration = int(turn_detection.get("silence_duration_ms", 400))
+            self._vad = VoiceActivityDetector(
+                VadConfig(
+                    threshold=threshold,
+                    prefix_padding_ms=prefix_padding,
+                    silence_duration_ms=silence_duration,
+                )
+            )
+        elif turn_detection is None or (isinstance(turn_detection, dict) and turn_detection.get("type") is None) or turn_detection == "manual":
+            self._vad = None
+
         self._config = config
         await self._send(updated)
 
@@ -173,6 +194,38 @@ class OpenAIRealtimeSession:
         )
         if self._asr_factory is None:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
+
+        if self._vad is not None:
+            from speechrail.compatibility.openai_realtime import (
+                input_audio_buffer_speech_started,
+                input_audio_buffer_speech_stopped,
+            )
+
+            vad_events = self._vad.process_chunk(audio)
+            for v_event in vad_events:
+                if v_event.speech_started:
+                    # Barge-in: immediately cancel in-progress TTS response
+                    if self._tts_task is not None and not self._tts_task.done():
+                        await self._cancel_response()
+                    await self._send(
+                        input_audio_buffer_speech_started(
+                            session_id=self._session_id,
+                            audio_start_ms=v_event.audio_start_ms,
+                            item_id=f"item_{self._session_id}_input",
+                        )
+                    )
+                elif v_event.speech_ended:
+                    await self._send(
+                        input_audio_buffer_speech_stopped(
+                            session_id=self._session_id,
+                            audio_end_ms=v_event.audio_end_ms,
+                            item_id=f"item_{self._session_id}_input",
+                        )
+                    )
+                    if self._asr is not None:
+                        await self._commit_audio()
+                        return
+
         if self._asr is None:
             await self._reserve_asr()
             asr: RealtimeAsrSession | None = None
@@ -216,6 +269,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
 
     async def _clear_audio(self) -> None:
+        if self._vad is not None:
+            self._vad.reset()
         await self._stop_asr_reader()
         await self._close_asr_session()
         await self._release_asr()

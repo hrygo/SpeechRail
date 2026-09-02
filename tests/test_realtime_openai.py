@@ -433,7 +433,7 @@ def test_openai_rejects_unknown_model() -> None:
         assert error["error"]["code"] == "model_not_found"
 
 
-def test_openai_rejects_server_vad_turn_detection() -> None:
+def test_openai_rejects_unsupported_turn_detection() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
@@ -441,7 +441,7 @@ def test_openai_rejects_server_vad_turn_detection() -> None:
         socket.send_json(
             {
                 "type": "session.update",
-                "session": {"turn_detection": {"type": "server_vad"}},
+                "session": {"turn_detection": {"type": "unsupported_mode"}},
             }
         )
         error = socket.receive_json()

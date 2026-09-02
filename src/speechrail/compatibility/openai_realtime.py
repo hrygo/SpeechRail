@@ -39,7 +39,7 @@ _PCM16_FORMAT: dict[str, object] = {
     "bits_per_sample": 16,
 }
 
-_SUPPORTED_TURN_DETECTION: frozenset[str | None] = frozenset({None, "manual"})
+_SUPPORTED_TURN_DETECTION: frozenset[str | None] = frozenset({None, "manual", "server_vad"})
 _SUPPORTED_MODALITIES: frozenset[str] = frozenset({"text", "audio"})
 
 _UNSUPPORTED_CLIENT_EVENTS: frozenset[str] = frozenset(
@@ -111,7 +111,9 @@ def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str
     }
 
 
-def session_updated(*, session_id: str, model: str) -> dict[str, object]:
+def session_updated(
+    *, session_id: str, model: str, turn_detection: dict[str, object] | None = None
+) -> dict[str, object]:
     return {
         "type": "session.updated",
         "session": {
@@ -120,7 +122,7 @@ def session_updated(*, session_id: str, model: str) -> dict[str, object]:
             "modalities": ["text", "audio"],
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
-            "turn_detection": None,
+            "turn_detection": turn_detection,
             "tools": [],
             "tool_choice": "none",
         },
@@ -237,6 +239,26 @@ def transcription_failed(*, session_id: str, code: str, message: str) -> dict[st
         "item_id": f"item_{session_id}_input",
         "content_index": 0,
         "error": {"type": "transcription_error", "code": code, "message": message},
+    }
+
+
+def input_audio_buffer_speech_started(
+    *, session_id: str, audio_start_ms: int, item_id: str
+) -> dict[str, object]:
+    return {
+        "type": "input_audio_buffer.speech_started",
+        "audio_start_ms": audio_start_ms,
+        "item_id": item_id,
+    }
+
+
+def input_audio_buffer_speech_stopped(
+    *, session_id: str, audio_end_ms: int, item_id: str
+) -> dict[str, object]:
+    return {
+        "type": "input_audio_buffer.speech_stopped",
+        "audio_end_ms": audio_end_ms,
+        "item_id": item_id,
     }
 
 
@@ -462,15 +484,27 @@ def apply_session_update(
         )
 
     turn_detection = session.get("turn_detection")
-    mode = (
-        turn_detection.get("type")
-        if isinstance(turn_detection, dict)
-        else turn_detection
-    )
-    if mode not in _SUPPORTED_TURN_DETECTION:
+    if isinstance(turn_detection, dict):
+        mode = turn_detection.get("type")
+        if mode not in _SUPPORTED_TURN_DETECTION:
+            raise RealtimeAdapterError(
+                "unsupported_turn_detection",
+                f"unsupported turn_detection type: {mode}",
+            )
+        if mode == "server_vad":
+            threshold = turn_detection.get("threshold")
+            if threshold is not None and (not isinstance(threshold, (int, float)) or not (0.0 <= threshold <= 1.0)):
+                raise RealtimeAdapterError("invalid_turn_detection", "threshold must be a float between 0.0 and 1.0")
+            prefix_padding = turn_detection.get("prefix_padding_ms")
+            if prefix_padding is not None and (not isinstance(prefix_padding, int) or prefix_padding < 0):
+                raise RealtimeAdapterError("invalid_turn_detection", "prefix_padding_ms must be a non-negative integer")
+            silence_duration = turn_detection.get("silence_duration_ms")
+            if silence_duration is not None and (not isinstance(silence_duration, int) or silence_duration < 0):
+                raise RealtimeAdapterError("invalid_turn_detection", "silence_duration_ms must be a non-negative integer")
+    elif turn_detection not in _SUPPORTED_TURN_DETECTION:
         raise RealtimeAdapterError(
             "unsupported_turn_detection",
-            "only manual turn detection is supported; send input_audio_buffer.commit",
+            "only manual or server_vad turn detection is supported",
         )
 
     tools = session.get("tools")
@@ -562,6 +596,10 @@ def apply_session_update(
         "prompt": prompt or "",
         "voice": voice,
     }
+    turn_detection_val = session.get("turn_detection")
+    if turn_detection_val is not None:
+        config["turn_detection"] = turn_detection_val
+
     for key, value in (
         ("languages", languages),
         ("keywords", keywords),
@@ -572,7 +610,7 @@ def apply_session_update(
     ):
         if value is not None:
             config[key] = value
-    return session_updated(session_id=session_id, model=model), config
+    return session_updated(session_id=session_id, model=model, turn_detection=turn_detection_val), config
 
 
 def _string_list(session: dict[str, Any], field: str) -> list[str] | None:
