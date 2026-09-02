@@ -26,7 +26,7 @@ import urllib.request
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
-REPO_ROOT = SKILL_DIR.parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[4]
 EXAMPLES_PERF = REPO_ROOT / "examples" / "perf"
 
 
