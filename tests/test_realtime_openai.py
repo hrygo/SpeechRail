@@ -1264,3 +1264,41 @@ def test_realtime_prompt_exactly_at_limit_forwards_to_session() -> None:
             if event["type"] == "input_audio_buffer.committed":
                 break
     assert factory.sessions[0].prompt == "p" * 2000
+
+
+def test_realtime_multi_sentence_stream_in_tts() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好！今天天气真好，我们去散步吧。"}],
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "conversation.item.created"
+        socket.send_json({"type": "response.create"})
+        events: list[str] = []
+        deltas: list[dict[str, object]] = []
+        for _ in range(32):
+            event = socket.receive_json()
+            events.append(event["type"])
+            if event["type"] == "response.audio.delta":
+                deltas.append(event)
+            if event["type"] == "response.done":
+                break
+
+        assert "response.created" in events
+        assert "response.output_item.added" in events
+        assert "response.content_part.added" in events
+        assert len(deltas) >= 2  # multiple sentences with breath pauses
+        assert "response.audio_transcript.delta" in events
+        assert "response.audio_transcript.done" in events
+        assert "response.audio.done" in events
+        assert events[-1] == "response.done"
+

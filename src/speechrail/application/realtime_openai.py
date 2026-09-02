@@ -331,92 +331,128 @@ class OpenAIRealtimeSession:
         response_id: str,
         item_id: str,
     ) -> None:
+        import sys
+        import traceback
         if self._tts is None:
             await self._send(
                 error_event(code="backend_not_ready", message="TTS backend is not ready")
             )
             return
-        await self._send(response_created(session_id=self._session_id, response_id=response_id))
-        await self._send(
-            response_output_item_added(
-                session_id=self._session_id, response_id=response_id, item_id=item_id
-            )
-        )
-        await self._send(
-            response_content_part_added(
-                session_id=self._session_id, response_id=response_id, item_id=item_id
-            )
-        )
-        request = SpeechRequest(
-            text=text,
-            voice=voice,
-            output_format="pcm16",
-            sample_rate=24_000,
-            speed=1.0,
-            language=language,
-        )
         try:
-            async with self._services.governor.reserve(
-                WorkClass.REALTIME_TTS, deadline=self._settings.request_timeout_seconds
-            ):
-                async for chunk in iter_validated_audio(self._tts.synthesize(request)):
-                    await self._send(
-                        response_audio_delta(
-                            session_id=self._session_id,
-                            response_id=response_id,
-                            item_id=item_id,
-                            delta=base64.b64encode(chunk.audio).decode("ascii"),
+            await self._send(response_created(session_id=self._session_id, response_id=response_id))
+            await self._send(
+                response_output_item_added(
+                    session_id=self._session_id, response_id=response_id, item_id=item_id
+                )
+            )
+            await self._send(
+                response_content_part_added(
+                    session_id=self._session_id, response_id=response_id, item_id=item_id
+                )
+            )
+
+            from speechrail.domain.tts import (
+                StreamingSentenceSplitter,
+                apply_crossfade,
+                create_breath_pause,
+            )
+
+            splitter = StreamingSentenceSplitter()
+            sentences = splitter.feed(text) + splitter.flush()
+            if not sentences:
+                sentences = [text]
+
+            try:
+                async with self._services.governor.reserve(
+                    WorkClass.REALTIME_TTS, deadline=self._settings.request_timeout_seconds
+                ):
+                    for s_idx, sentence in enumerate(sentences):
+                        request = SpeechRequest(
+                            text=sentence,
+                            voice=voice,
+                            output_format="pcm16",
+                            sample_rate=24_000,
+                            speed=1.0,
+                            language=language,
                         )
-                    )
+                        async for chunk in iter_validated_audio(self._tts.synthesize(request)):
+                            await self._send(
+                                response_audio_delta(
+                                    session_id=self._session_id,
+                                    response_id=response_id,
+                                    item_id=item_id,
+                                    delta=base64.b64encode(chunk.audio).decode("ascii"),
+                                )
+                            )
+                        if s_idx < len(sentences) - 1:
+                            pause_pcm = create_breath_pause(sample_rate=24_000, pause_ms=80)
+                            if pause_pcm:
+                                await self._send(
+                                    response_audio_delta(
+                                        session_id=self._session_id,
+                                        response_id=response_id,
+                                        item_id=item_id,
+                                        delta=base64.b64encode(pause_pcm).decode("ascii"),
+                                    )
+                                )
+            except asyncio.CancelledError:
+                raise
+            except (TTSDeliveryError, GovernorQueueFullError, TimeoutError) as exc:
+                code = getattr(exc, "code", None) or (
+                    "queue_full" if isinstance(exc, GovernorQueueFullError) else "backend_timeout"
+                )
+                await self._send(error_event(code=code, message="TTS response failed"))
+                await self._send(
+                    response_done(session_id=self._session_id, response_id=response_id, status="failed")
+                )
+                return
+
+            await self._send(
+                response_audio_transcript_delta(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    delta=text,
+                )
+            )
+            await self._send(
+                response_audio_transcript_done(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    transcript=text,
+                )
+            )
+            await self._send(
+                response_audio_done(
+                    session_id=self._session_id, response_id=response_id, item_id=item_id
+                )
+            )
+            await self._send(
+                response_content_part_done(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    transcript=text,
+                )
+            )
+            await self._send(
+                response_output_item_done(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    transcript=text,
+                )
+            )
+            await self._send(response_done(session_id=self._session_id, response_id=response_id))
         except asyncio.CancelledError:
             raise
-        except (TTSDeliveryError, GovernorQueueFullError, TimeoutError) as exc:
-            code = getattr(exc, "code", None) or (
-                "queue_full" if isinstance(exc, GovernorQueueFullError) else "backend_timeout"
-            )
-            await self._send(error_event(code=code, message="TTS response failed"))
+        except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
+            await self._send(error_event(code="tts_error", message=str(exc)))
             await self._send(
                 response_done(session_id=self._session_id, response_id=response_id, status="failed")
             )
-            return
-        await self._send(
-            response_audio_transcript_delta(
-                session_id=self._session_id,
-                response_id=response_id,
-                item_id=item_id,
-                delta=text,
-            )
-        )
-        await self._send(
-            response_audio_transcript_done(
-                session_id=self._session_id,
-                response_id=response_id,
-                item_id=item_id,
-                transcript=text,
-            )
-        )
-        await self._send(
-            response_audio_done(
-                session_id=self._session_id, response_id=response_id, item_id=item_id
-            )
-        )
-        await self._send(
-            response_content_part_done(
-                session_id=self._session_id,
-                response_id=response_id,
-                item_id=item_id,
-                transcript=text,
-            )
-        )
-        await self._send(
-            response_output_item_done(
-                session_id=self._session_id,
-                response_id=response_id,
-                item_id=item_id,
-                transcript=text,
-            )
-        )
-        await self._send(response_done(session_id=self._session_id, response_id=response_id))
 
     async def _reserve_asr(self) -> None:
         self._asr_resources = AsyncExitStack()
