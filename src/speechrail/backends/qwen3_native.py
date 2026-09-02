@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 from uuid import uuid4
 
-from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
@@ -32,6 +32,38 @@ MODEL_FILES = (
     "model-00001-of-00002.safetensors",
     "model-00002-of-00002.safetensors",
 )
+
+
+def _build_timed_result(
+    raw: object,
+) -> tuple[tuple[TranscriptSegment, ...], tuple[TranscriptWord, ...]]:
+    if not isinstance(raw, list):
+        return (), ()
+    segments: list[TranscriptSegment] = []
+    words: list[TranscriptWord] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        start = item.get("start")
+        end = item.get("end")
+        if (
+            not isinstance(text, str)
+            or not text.strip()
+            or not isinstance(start, (int, float))
+            or not isinstance(end, (int, float))
+        ):
+            continue
+        start_ms = max(0, round(float(start) * 1000))
+        end_ms = max(0, round(float(end) * 1000))
+        clean = text.strip()
+        segments.append(
+            TranscriptSegment(
+                id=f"seg_{index}", start_ms=start_ms, end_ms=end_ms, text=clean
+            )
+        )
+        words.append(TranscriptWord(word=clean, start_ms=start_ms, end_ms=end_ms))
+    return tuple(segments), tuple(words)
 
 
 def validate_snapshot(model_dir: Path, *, repository_root: Path) -> Path:
@@ -149,7 +181,13 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 raise
 
     async def transcribe(
-        self, pcm: bytes, language: str | None, prompt: str, *, request_id: str | None = None
+        self,
+        pcm: bytes,
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool = False,
+        *,
+        request_id: str | None = None,
     ) -> TranscriptResult:
         await self.start()
         async with self._lock:
@@ -164,6 +202,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                     "sample_width_bytes": 2,
                     "language": language or "auto",
                     "prompt": prompt,
+                    "include_timestamps": include_timestamps,
                     "pcm_b64": base64.b64encode(pcm).decode("ascii"),
                 }
             )
@@ -173,12 +212,15 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         text, detected = result.get("text"), result.get("language")
         if not isinstance(text, str) or not isinstance(detected, str):
             raise RuntimeError("worker_result_invalid")
+        segments, words = _build_timed_result(result.get("segments"))
         return TranscriptResult(
             request_id=resolved_request_id,
             model_id="speechrail/qwen3-asr-1.7b",
             text=text,
             language=detected,
             duration_ms=round(len(pcm) * 1000 / 32000),
+            segments=segments,
+            words=words,
         )
 
     async def _receive_profile_frame(self) -> dict[str, object]:
@@ -195,7 +237,13 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
 
 class _Qwen3TranscriptionWorker(Protocol):
     async def transcribe(
-        self, pcm: bytes, language: str | None, prompt: str, *, request_id: str | None = None
+        self,
+        pcm: bytes,
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool = False,
+        *,
+        request_id: str | None = None,
     ) -> TranscriptResult: ...
 
 
@@ -208,7 +256,11 @@ class Qwen3BatchTranscriber(BatchTranscriber):
 
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
         result = await self._worker.transcribe(
-            request.audio, request.language, request.prompt, request_id=request.request_id
+            request.audio,
+            request.language,
+            request.prompt,
+            request_id=request.request_id,
+            include_timestamps=request.include_timestamps,
         )
         return result.model_copy(
             update={"request_id": request.request_id, "model_id": self._model_id}

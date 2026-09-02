@@ -274,8 +274,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         try:
+            want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
             result = await services.admission.run(
-                lambda: transcribe(audio, language, prompt),
+                lambda: transcribe(audio, language, prompt, want_timestamps),
                 deadline=resolved.request_timeout_seconds,
             )
         except QueueFullError:

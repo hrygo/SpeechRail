@@ -121,7 +121,7 @@ def test_factory_rejects_unknown_language_in_windowed_mode() -> None:
         next_session_id=lambda: "sess_test",
     )
     with pytest.raises(RuntimeError, match="language_not_supported"):
-        factory.create(language="fr", prompt="")
+        factory.create(language="sw", prompt="")
 
 
 def test_factory_enforces_single_active_session() -> None:

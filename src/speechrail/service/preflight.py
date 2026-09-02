@@ -178,7 +178,7 @@ def run_preflight(
     )
     if asr_configured:
         checks.append(_snapshot_check("asr_snapshot", settings.qwen3_model_dir, MODEL_FILES))
-        checks.append(_runtime_check("asr_runtime", settings.qwen3_python, "qwen_asr", runner))
+        checks.append(_runtime_check("asr_runtime", settings.qwen3_python, "mlx_qwen3_asr", runner))
     else:
         checks.extend(
             [

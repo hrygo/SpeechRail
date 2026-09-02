@@ -34,7 +34,7 @@ canonical 与全部兼容 alias，alias 条目带 `resolves_to` 标注其 canoni
 ## 快速开始
 
 前提：Python 3.12、`uv`、`ffmpeg`、完整的外部 Qwen3-ASR snapshot，以及包含
-`qwen-asr` 与 PyTorch 的专用 ASR Python runtime。启用 TTS 时，另需包含 `mlx_audio`
+`mlx-qwen3-asr` 的专用 ASR Python runtime（Apple Silicon MLX，无需 PyTorch/transformers）。启用 TTS 时，另需包含 `mlx_audio`
 的专用 TTS Python runtime 和完整 VoiceDesign snapshot。模型与 runtime 均不进入本仓库。
 
 ```bash

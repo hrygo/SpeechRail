@@ -10,7 +10,9 @@ from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 
 
-def _backend(_: bytes, __: str | None, ___: str) -> Awaitable[TranscriptResult]:
+def _backend(
+    _: bytes, __: str | None, ___: str, ____: bool = False
+) -> Awaitable[TranscriptResult]:
     async def result() -> TranscriptResult:
         return TranscriptResult(
             request_id="backend",
@@ -132,7 +134,9 @@ def test_transcription_rejects_stream_and_chunking_strategy() -> None:
 def test_transcription_languages_falls_back_to_first_language() -> None:
     seen: list[str | None] = []
 
-    async def backend(audio: bytes, language: str | None, prompt: str) -> TranscriptResult:
+    async def backend(
+        audio: bytes, language: str | None, prompt: str, include_timestamps: bool = False
+    ) -> TranscriptResult:
         seen.append(language)
         return TranscriptResult(
             request_id="backend",

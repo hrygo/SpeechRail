@@ -21,7 +21,9 @@ from speechrail.http.routes.audio import create_audio_router
 from speechrail.http.routes.system import create_system_router
 
 
-def _backend(_: bytes, __: str | None, ___: str) -> Awaitable[TranscriptResult]:
+def _backend(
+    _: bytes, __: str | None, ___: str, ____: bool = False
+) -> Awaitable[TranscriptResult]:
     async def result() -> TranscriptResult:
         return TranscriptResult(
             request_id="backend",

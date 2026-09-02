@@ -20,6 +20,7 @@ class TranscriptionRequest(BaseModel):
     audio: bytes = Field(min_length=2, max_length=40 * 1024 * 1024)
     language: str | None = Field(default=None, max_length=64)
     prompt: str = Field(default="", max_length=10_000)
+    include_timestamps: bool = False
 
 
 class SpeechRequest(BaseModel):

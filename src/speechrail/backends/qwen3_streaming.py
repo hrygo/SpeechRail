@@ -26,7 +26,16 @@ from speechrail.runtime.worker_process import (
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
 
 _MODE_NAMES = ("windowed", "causal")
-_SUPPORTED_LANGUAGES = {"zh", "en", "chinese", "english"}
+_SUPPORTED_LANGUAGES = {
+    "zh", "en", "yue", "ar", "de", "fr", "es", "pt", "id", "it", "ko",
+    "ru", "th", "vi", "ja", "tr", "hi", "ms", "nl", "sv", "da", "fi",
+    "pl", "cs", "fil", "fa", "el", "hu", "mk", "ro",
+    "chinese", "english", "cantonese", "arabic", "german", "french",
+    "spanish", "portuguese", "indonesian", "italian", "korean", "russian",
+    "thai", "vietnamese", "japanese", "turkish", "hindi", "malay", "dutch",
+    "swedish", "danish", "finnish", "polish", "czech", "filipino", "persian",
+    "greek", "romanian", "hungarian", "macedonian",
+}
 
 
 @dataclass(frozen=True, slots=True)

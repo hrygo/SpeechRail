@@ -17,11 +17,18 @@ from speechrail.runtime.worker_protocol import (
 class _FakeEngine:
     identity = WorkerIdentity(device="mps", dtype="float16")
 
-    def transcribe(self, audio: bytes, *, language: str, prompt: str) -> tuple[str, str]:
+    def transcribe(
+        self,
+        audio: bytes,
+        *,
+        language: str,
+        prompt: str,
+        include_timestamps: bool = False,
+    ) -> tuple[str, str, list[dict[str, object]]]:
         assert audio == b"\x00\x00"
         assert language == "Chinese"
         assert prompt == "names"
-        return "hello", language
+        return "hello", language, []
 
 
 def test_framed_protocol_round_trips_versioned_request() -> None:
@@ -111,6 +118,7 @@ def test_worker_reuses_one_loaded_engine_for_framed_requests() -> None:
         "request_id": "req_1",
         "text": "hello",
         "language": "Chinese",
+        "segments": [],
         "device": "mps",
         "dtype": "float16",
     }

@@ -19,7 +19,7 @@ import sys
 import traceback
 from collections.abc import Sequence
 from pathlib import Path
-from typing import BinaryIO, Protocol, cast
+from typing import BinaryIO
 
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
@@ -30,120 +30,80 @@ from speechrail.runtime.worker_protocol import (
 
 _MAX_PCM_BYTES = 40 * 1024 * 1024
 _MODE_NAMES = ("windowed", "causal")
-# qwen3_asr_causal refuses lan="auto" at construction ("flips accented audio
-# to the wrong language mid-stream"); per-session language is applied in
-# open_session() before the processor is built, so this is only a placeholder.
-_DEFAULT_LANGUAGE = "zh"
-
-
-class _AsrHolder(Protocol):
-    device: object
-    original_language: str
-    _session_language: str
-    qwen3_streaming_context: str
-
-
-class _Token(Protocol):
-    text: str
-    start: float
-    end: float
-    detected_language: str | None
-
-
-class _Processor(Protocol):
-    end: float
-
-    def insert_audio_chunk(self, audio: object, audio_stream_end_time: float) -> None: ...
-
-    def process_iter(self, *, is_last: bool) -> tuple[list[_Token], float]: ...
-
-    def finish(self) -> tuple[list[_Token], float]: ...
-
-
-def _asr_factory(**kwargs: object) -> _AsrHolder:
-    """Import and construct the causal-streaming model holder lazily (offline)."""
-    from qwen3_asr_causal import Qwen3StreamingASR  # type: ignore[import-not-found]
-
-    return cast(_AsrHolder, Qwen3StreamingASR(**kwargs))
-
-
-def _processor_factory(asr: _AsrHolder) -> _Processor:
-    from qwen3_asr_causal import Qwen3StreamingOnlineProcessor
-
-    return cast(_Processor, Qwen3StreamingOnlineProcessor(asr))
-
-
-def _pcm16(audio: bytes) -> object:
-    import numpy as np
-
-    return np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
 
 
 class StreamingEngine:
-    """One loaded Qwen3StreamingASR plus a current online processor."""
+    """One MLX ``mlx_qwen3_asr.Session`` plus a current streaming state.
+
+    ``mlx-qwen3-asr`` provides a native Apple-Silicon streaming ASR runtime
+    (no PyTorch, no ``qwen_asr``/``qwen3_asr_causal``); the worker keeps a
+    single long-lived ``Session`` and a ``StreamingState`` per open session.
+    """
 
     def __init__(
         self, *, model_dir: Path, device: str, mode: str, kwargs: dict[str, object]
     ) -> None:
-        import torch
+        import mlx_qwen3_asr  # type: ignore[import-not-found]
 
         if mode not in _MODE_NAMES:
             raise ValueError("invalid streaming mode")
-        dtype = "float16" if device == "mps" else "float32"
-        self._asr = _asr_factory(
-            lan=_DEFAULT_LANGUAGE,
-            model_size=str(model_dir),
-            qwen3_streaming_audio_backend=mode,
-            qwen3_streaming_device=device,
-            qwen3_streaming_dtype=dtype,
-            **kwargs,
-        )
-        self._asr.device = torch.device(device)
-        self.identity = (device, dtype)
-        self._processor: _Processor | None = None
+        self._session = mlx_qwen3_asr.Session(model=str(model_dir))
+        chunk_sec = kwargs.get("qwen3_streaming_chunk_sec", 2.0)
+        left = kwargs.get("qwen3_streaming_left_context_sec", 12.0)
+        right_ms = kwargs.get("qwen3_streaming_right_context_ms", 640)
+        max_new = kwargs.get("qwen3_streaming_max_new_tokens", 256)
+        self._chunk_size_sec = float(chunk_sec) if isinstance(chunk_sec, (int, float)) else 2.0
+        left_f = float(left) if isinstance(left, (int, float)) else 12.0
+        right_f = int(right_ms) if isinstance(right_ms, (int, float)) else 640
+        self._max_context_sec = left_f + right_f / 1000.0
+        self._max_new_tokens = int(max_new) if isinstance(max_new, (int, float)) else 256
+        self._state: object | None = None
+        self.identity = (device, "float16" if device == "mps" else "float32")
 
     def open_session(self, *, language: str, context: str) -> None:
-        if self._processor is not None:
-            raise RuntimeError("active session already open")
-        self._asr.original_language = language
-        self._asr._session_language = language
-        self._asr.qwen3_streaming_context = context
-        self._processor = _processor_factory(self._asr)
+        streaming_language = None if language in {"auto", ""} else language
+        self._state = self._session.init_streaming(
+            context=context,
+            language=streaming_language,
+            chunk_size_sec=self._chunk_size_sec,
+            max_context_sec=self._max_context_sec,
+            max_new_tokens=self._max_new_tokens,
+        )
 
-    def append_audio(self, audio: bytes) -> None:
-        processor = self._require_processor()
-        samples = _pcm16(audio)
-        end = processor.end + len(audio) / 16_000
-        processor.insert_audio_chunk(samples, end)
+    def append_audio(self, audio: bytes) -> str:
+        import numpy as np
 
-    def process(self, *, is_last: bool = False) -> list[dict[str, object]]:
-        tokens, _ = self._require_processor().process_iter(is_last=is_last)
-        return [_token_dict(t) for t in tokens]
+        state = self._require_state()
+        waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
+        self._state = self._session.feed_audio(waveform, state)
+        current = getattr(self._state, "text", "") or ""
+        return current if isinstance(current, str) else ""
 
-    def finish(self) -> tuple[list[dict[str, object]], str]:
-        tokens, _ = self._require_processor().finish()
-        return [_token_dict(t) for t in tokens], ""
+    def partial_text(self) -> str:
+        state = self._require_state()
+        text = getattr(state, "text", "") or ""
+        return text if isinstance(text, str) else ""
 
-    def _require_processor(self) -> _Processor:
-        processor = self._processor
-        if processor is None:
+    def finish(self) -> tuple[str, str]:
+        state = self._require_state()
+        final = self._session.finish_streaming(state)
+        self._state = final
+        text = getattr(final, "text", "") or ""
+        language = getattr(final, "language", None) or ""
+        return (text if isinstance(text, str) else ""), (
+            language if isinstance(language, str) else ""
+        )
+
+    def _require_state(self) -> object:
+        if self._state is None:
             raise RuntimeError("no active session")
-        return processor
+        return self._state
 
     def close_session(self) -> None:
-        self._processor = None
+        self._state = None
 
     def close(self) -> None:
         self.close_session()
-
-
-def _token_dict(token: _Token) -> dict[str, object]:
-    return {
-        "text": token.text or "",
-        "start": token.start if token.start is not None else 0.0,
-        "end": token.end if token.end is not None else 0.0,
-        "language": token.detected_language,
-    }
 
 
 def _valid_start(frame: dict[str, object] | None, *, model_dir: Path, device: str) -> bool:
@@ -293,14 +253,26 @@ def _handle_flush(
     engine: StreamingEngine,
 ) -> None:
     try:
-        tokens = engine.process(is_last=False)
+        text = engine.partial_text()
     except Exception:
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_inference_error"},
         )
         return
-    _emit_events(output_stream, tokens)
+    if not text:
+        return
+    write_frame(
+        output_stream,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "event",
+            "kind": "partial",
+            "text": text,
+            "language": None,
+            "segments": [],
+        },
+    )
 
 
 def _handle_commit(
@@ -309,56 +281,29 @@ def _handle_commit(
     engine: StreamingEngine,
 ) -> None:
     try:
-        tokens, _ = engine.finish()
+        text, language = engine.finish()
     except Exception:
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_inference_error"},
         )
         return
-    _emit_events(output_stream, tokens)
+    if text:
+        write_frame(
+            output_stream,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "event",
+                "kind": "completed",
+                "text": text,
+                "language": language or None,
+                "segments": [],
+            },
+        )
     write_frame(
         output_stream,
         {"version": PROTOCOL_VERSION, "type": "finished", "final": True},
     )
-
-
-def _emit_events(output_stream: BinaryIO, tokens: list[dict[str, object]]) -> None:
-    if not tokens:
-        return
-    texts: list[str] = []
-    segments: list[dict[str, object]] = []
-    for tok in tokens:
-        text = tok.get("text")
-        if not isinstance(text, str) or not text.strip():
-            continue
-        texts.append(text)
-        start = tok.get("start")
-        end = tok.get("end")
-        start_ms = max(0, round(float(start) * 1000)) if isinstance(start, (int, float)) else 0
-        end_ms = max(0, round(float(end) * 1000)) if isinstance(end, (int, float)) else 0
-        segments.append({"text": text, "start_ms": start_ms, "end_ms": end_ms})
-    text = " ".join(texts).strip()
-    if not text:
-        return
-    write_frame(
-        output_stream,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "event",
-            "kind": "completed",
-            "text": text,
-            "language": _first_language(tokens),
-            "segments": segments,
-        },
-    )
-
-
-def _first_language(tokens: list[dict[str, object]]) -> str | None:
-    for tok in tokens:
-        if tok.get("language"):
-            return str(tok["language"])
-    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.

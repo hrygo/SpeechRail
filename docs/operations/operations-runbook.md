@@ -12,7 +12,7 @@ date: 2026-08-31
 ## 上线前清单
 
 确认 Python 3.12、`uv`、`ffmpeg`、完整的仓库外 Qwen3-ASR snapshot，以及包含
-`qwen-asr`、PyTorch、NumPy 的 ASR runtime。启用 TTS 另需一个可导入 `mlx_audio` 的专用
+`mlx-qwen3-asr` 的 Apple Silicon MLX ASR runtime（无需 PyTorch/transformers）。启用 TTS 另需一个可导入 `mlx_audio` 的专用
 Python runtime 与本机 MLX Qwen3-TTS VoiceDesign snapshot。`.env` 只能由当前账户读取，且不应
 进入 Git。
 
@@ -137,7 +137,7 @@ SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEE
 | MLX Qwen3-TTS VoiceDesign snapshot | 仅在两条 TTS 外部路径都配置时加载一份到隔离 worker；公开 preset 为 `default`、`warm`、`bright`、`calm` |
 | Sortformer diarization snapshot | 仅配置 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 后按首个 diarization session 惰性载入；仅产生匿名 label |
 | CAM++ embedding snapshot | 仅同时配置 CAM++ 路径和 Sortformer profile 时，按首次需要短片段 embedding 的请求惰性载入；只保留有界短期匿名质心 |
-| PyTorch + `qwen-asr` | 仅专用 worker Python runtime |
+| MLX `mlx-qwen3-asr` | 仅专用 worker Python runtime（Apple Silicon MLX；batch 与 streaming 共用） |
 | Apple Silicon device | MPS / `float16`；不允许自动 CPU fallback |
 | HTTP 服务依赖 | 主 `uv` 环境中的 FastAPI 等，不加载模型权重 |
 

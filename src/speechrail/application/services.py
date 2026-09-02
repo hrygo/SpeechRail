@@ -37,7 +37,7 @@ from speechrail.runtime.jobs import JobRepository
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 
-Transcribe = Callable[[bytes, str | None, str], Awaitable[TranscriptResult]]
+Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
 
 
 def _package_root() -> Path:
@@ -53,7 +53,9 @@ class _CallableBatchTranscriber(BatchTranscriber):
         self._model_id = model_id
 
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
-        result = await self._transcribe(request.audio, request.language, request.prompt)
+        result = await self._transcribe(
+            request.audio, request.language, request.prompt, request.include_timestamps
+        )
         return result.model_copy(
             update={"request_id": request.request_id, "model_id": self._model_id}
         )

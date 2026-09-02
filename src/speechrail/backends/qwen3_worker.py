@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Literal, Protocol
+from typing import BinaryIO, Literal, Protocol
 
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.runtime.worker_protocol import (
@@ -23,16 +23,36 @@ from speechrail.runtime.worker_protocol import (
 MAX_PCM_BYTES = 40 * 1024 * 1024
 LANGUAGES = {
     "auto": "auto",
-    "zh": "Chinese",
-    "chinese": "Chinese",
-    "en": "English",
-    "english": "English",
-    "yue": "Cantonese",
-    "cantonese": "Cantonese",
-    "ja": "Japanese",
-    "japanese": "Japanese",
-    "ko": "Korean",
-    "korean": "Korean",
+    "zh": "Chinese", "chinese": "Chinese",
+    "en": "English", "english": "English",
+    "yue": "Cantonese", "cantonese": "Cantonese",
+    "ja": "Japanese", "japanese": "Japanese",
+    "ko": "Korean", "korean": "Korean",
+    "ar": "Arabic", "arabic": "Arabic",
+    "de": "German", "german": "German",
+    "fr": "French", "french": "French",
+    "es": "Spanish", "spanish": "Spanish",
+    "pt": "Portuguese", "portuguese": "Portuguese",
+    "id": "Indonesian", "indonesian": "Indonesian",
+    "it": "Italian", "italian": "Italian",
+    "ru": "Russian", "russian": "Russian",
+    "th": "Thai", "thai": "Thai",
+    "vi": "Vietnamese", "vietnamese": "Vietnamese",
+    "tr": "Turkish", "turkish": "Turkish",
+    "hi": "Hindi", "hindi": "Hindi",
+    "ms": "Malay", "malay": "Malay",
+    "nl": "Dutch", "dutch": "Dutch",
+    "sv": "Swedish", "swedish": "Swedish",
+    "da": "Danish", "danish": "Danish",
+    "fi": "Finnish", "finnish": "Finnish",
+    "pl": "Polish", "polish": "Polish",
+    "cs": "Czech", "czech": "Czech",
+    "fil": "Filipino", "filipino": "Filipino",
+    "fa": "Persian", "persian": "Persian",
+    "el": "Greek", "greek": "Greek",
+    "hu": "Hungarian", "hungarian": "Hungarian",
+    "mk": "Macedonian", "macedonian": "Macedonian",
+    "ro": "Romanian", "romanian": "Romanian",
 }
 
 
@@ -45,17 +65,25 @@ class WorkerIdentity:
 class WorkerEngine(Protocol):
     identity: WorkerIdentity
 
-    def transcribe(self, audio: bytes, *, language: str, prompt: str) -> tuple[str, str]: ...
+    def transcribe(
+        self,
+        audio: bytes,
+        *,
+        language: str,
+        prompt: str,
+        include_timestamps: bool = False,
+    ) -> tuple[str, str, list[dict[str, object]]]: ...
 
 
 EngineFactory = Callable[[Path, Literal["mps", "cpu"], int], WorkerEngine]
 
 
-def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str]:
+def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str, bool]:
     request_id = frame.get("request_id")
     encoded = frame.get("pcm_b64")
     language = frame.get("language")
     prompt = frame.get("prompt")
+    raw_timestamps = frame.get("include_timestamps", False)
     if (
         not isinstance(request_id, str)
         or not request_id
@@ -65,6 +93,7 @@ def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str]:
         or not isinstance(encoded, str)
         or not isinstance(language, str)
         or not isinstance(prompt, str)
+        or not isinstance(raw_timestamps, bool)
     ):
         raise ProtocolError("invalid transcribe request")
     try:
@@ -76,7 +105,7 @@ def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str]:
     canonical_language = LANGUAGES.get(language.strip().lower())
     if canonical_language is None:
         raise ProtocolError("unsupported language")
-    return request_id, pcm, canonical_language, prompt
+    return request_id, pcm, canonical_language, prompt, raw_timestamps
 
 
 def serve(
@@ -142,8 +171,10 @@ def serve(
         try:
             if frame.get("version") != PROTOCOL_VERSION or frame.get("type") != "transcribe":
                 raise ProtocolError("invalid request")
-            request_id, pcm, language, prompt = _decode_request(frame)
-            text, detected_language = engine.transcribe(pcm, language=language, prompt=prompt)
+            request_id, pcm, language, prompt, include_timestamps = _decode_request(frame)
+            text, detected_language, segments = engine.transcribe(
+                pcm, language=language, prompt=prompt, include_timestamps=include_timestamps
+            )
             write_frame(
                 output_stream,
                 {
@@ -152,6 +183,7 @@ def serve(
                     "request_id": request_id,
                     "text": text,
                     "language": detected_language,
+                    "segments": segments,
                     "device": identity.device,
                     "dtype": identity.dtype,
                 },
@@ -178,79 +210,74 @@ def serve(
             )
 
 
+def _segments(result: object) -> list[dict[str, object]]:
+    raw = getattr(result, "segments", None)
+    segments: list[dict[str, object]] = []
+    if not isinstance(raw, list):
+        return segments
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        segments.append(
+            {
+                "text": text.strip(),
+                "start": float(item.get("start") or 0),
+                "end": float(item.get("end") or 0),
+            }
+        )
+    return segments
+
+
 class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and isolated runtime.
+    """Native MLX Qwen3-ASR engine via ``mlx_qwen3_asr.Session``.
+
+    ``mlx-qwen3-asr`` is a standalone Apple-Silicon MLX runtime (no PyTorch or
+    vendor ``qwen-asr`` package).  ``load_model`` converts the ``thinker.*``
+    checkpoint to MLX on load, so the worker never imports ``qwen_asr`` or
+    transformers.  The main process never imports the vendor runtime.
+    """
+
     def __init__(self, model_dir: Path, device: Literal["mps", "cpu"], max_new_tokens: int) -> None:
         if any(not (model_dir / name).is_file() for name in MODEL_FILES):
             raise ValueError("model snapshot is incomplete")
-        import torch
+        import mlx_qwen3_asr  # type: ignore[import-not-found]
 
-        qwen3_asr_model = _load_qwen3_asr_model()
+        self._session = mlx_qwen3_asr.Session(model=str(model_dir))
+        info = getattr(self._session, "model_info", None) or {}
+        loaded_dtype = str(info.get("dtype", ""))
+        if loaded_dtype.startswith("mlx.core."):
+            loaded_dtype = loaded_dtype.removeprefix("mlx.core.")
+        loaded_dtype = loaded_dtype or ("float16" if device == "mps" else "float32")
+        self._max_new_tokens = max_new_tokens
+        self.identity = WorkerIdentity(device, loaded_dtype)
 
-        if device == "mps":
-            if not torch.backends.mps.is_available() or not torch.backends.mps.is_built():
-                raise RuntimeError("MPS unavailable")
-            dtype = torch.float16
-        else:
-            dtype = torch.float32
-        model = qwen3_asr_model.from_pretrained(
-            str(model_dir),
-            dtype=dtype,
-            max_inference_batch_size=1,
-            max_new_tokens=max_new_tokens,
-            local_files_only=True,
-        )
-        model.model.to(torch.device(device), dtype=dtype).eval()
-        parameters = tuple(model.model.parameters())
-        if not parameters or any(parameter.device.type != device for parameter in parameters):
-            raise RuntimeError("model device mismatch")
-        self._model = model
-        self.identity = WorkerIdentity(device, str(parameters[0].dtype).removeprefix("torch."))
-
-    def transcribe(self, audio: bytes, *, language: str, prompt: str) -> tuple[str, str]:
+    def transcribe(
+        self,
+        audio: bytes,
+        *,
+        language: str,
+        prompt: str,
+        include_timestamps: bool = False,
+    ) -> tuple[str, str, list[dict[str, object]]]:
         import numpy as np
 
         waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
-        results = self._model.transcribe(
-            audio=(waveform, 16_000),
-            context=prompt,
-            language=None if language == "auto" else language,
-            return_time_stamps=False,
-        )
-        if not results:
-            return "", language
-        result = results[0]
-        text, detected = getattr(result, "text", None), getattr(result, "language", None)
-        if not isinstance(text, str) or not isinstance(detected, str):
-            raise RuntimeError("invalid Qwen3 response")
-        return text.strip(), detected
-
-
-def _load_qwen3_asr_model() -> Any:
-    """Import qwen-asr across its known Transformers decorator mismatch.
-
-    qwen-asr 0.0.6 uses ``@check_model_inputs()`` while the published
-    Transformers 4.57.x helper also accepts the bare decorator form.  The
-    upstream package currently fails during import on the former spelling;
-    normalize that call in this isolated worker process before importing the
-    vendor package.  No global service process state is changed.
-    """
-    import transformers.utils.generic as transformers_generic
-
-    original: Any = transformers_generic.check_model_inputs
-
-    def compatible_check_model_inputs(
-        func: Any = None, *, tie_last_hidden_states: bool = True
-    ) -> Any:
-        if func is None:
-            return lambda decorated: original(
-                decorated, tie_last_hidden_states=tie_last_hidden_states
-            )
-        return original(func, tie_last_hidden_states=tie_last_hidden_states)
-
-    transformers_generic.check_model_inputs = compatible_check_model_inputs
-    from qwen_asr import Qwen3ASRModel  # type: ignore[import-not-found]
-
-    return Qwen3ASRModel
+        kwargs: dict[str, object] = {"context": prompt}
+        if language != "auto":
+            kwargs["language"] = language
+        if self._max_new_tokens:
+            kwargs["max_new_tokens"] = self._max_new_tokens
+        if include_timestamps:
+            kwargs["return_timestamps"] = True
+        result = self._session.transcribe((waveform, 16_000), **kwargs)
+        text = getattr(result, "text", "") or ""
+        text = text.strip() if isinstance(text, str) else ""
+        detected = getattr(result, "language", None) or ("" if language == "auto" else language)
+        detected = str(detected) if detected else ""
+        return text, detected, _segments(result)
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.

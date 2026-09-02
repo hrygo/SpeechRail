@@ -17,7 +17,13 @@ from speechrail.domain.ports import (
 
 class FakeQwenWorker:
     async def transcribe(
-        self, pcm: bytes, language: str | None, prompt: str, *, request_id: str | None = None
+        self,
+        pcm: bytes,
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool = False,
+        *,
+        request_id: str | None = None,
     ) -> TranscriptResult:
         assert pcm == b"\x00\x00"
         assert language == "zh"

@@ -9,6 +9,7 @@
 3. [安全与可观测性](security-observability.md)：确认网络、敏感数据、日志和容量边界。
 4. [迁移 Runbook](migration-runbook.md)：执行客户端切换、影子验证、回滚和旧路径退役。
 5. [当前边界与剩余风险](../architecture/current-boundaries.md)：发布前核对验收门。
+6. [运行时评估](runtime-evaluation.md)：基于 mlx-qwen3-asr 的端到端、性能与清理实测（2026-09-02）。
 
 ## 运行入口
 
