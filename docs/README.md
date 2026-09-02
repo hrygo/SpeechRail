@@ -79,7 +79,7 @@ flowchart TD
 |---|---|---|---|---|
 | **批量语音识别 (ASR)** | 🟢 生产就绪 | `POST /v1/audio/transcriptions` | OpenAI 格式全兼容，WAV 零开销 Fast-path 直读，支持 `verbose_json`、`srt`、`vtt` | 真实短音频与长音频基准测试通过 |
 | **高保真语音合成 (TTS)** | 🟢 生产就绪 | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 输出，预设音色路由 (`default`, `warm`, `calm` 等) | 真实合成端到端验证通过 |
-| **实时全双工流式 (Realtime)** | 🟢 生产就绪 | `WS /v1/realtime` | 纯净 ASR/TTS 子集，支持 Server VAD、打断 (Barge-in)、逐句流式 TTS | OpenAI SDK 与 Sona 接入实测完成 |
+| **实时全双工流式 (Realtime)** | 🟢 生产就绪 | `WS /v1/realtime` | 纯净 ASR/TTS 子集，支持 Server VAD、打断 (Barge-in)、逐句流式 TTS；多会话按 `session_id` 路由共享单个 streaming worker（`SPEECHRAIL_REALTIME_MAX_SESSIONS`，默认 2） | OpenAI SDK 与 Sona 接入实测完成；并发多会话冒烟通过 |
 | **说话人分离 (Diarization)** | 🟡 可选就绪 | Realtime session 参数扩展 | Sortformer 在线匿名说话人分离，CAM++ 短期声学重连聚类 | 匿名状态机与有界内存测试通过 |
 | **macOS 常驻运维服务** | 🟢 生产就绪 | `speechrail service` CLI | 用户级 LaunchAgent 管理，支持原子安装、状态感知与一键回滚 | 自动化测试与实机验证通过 |
 

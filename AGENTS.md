@@ -124,7 +124,7 @@ embedding 或完整转写正文。
 | `POST /v1/audio/speech` | Qwen3-TTS VoiceDesign 整句 TTS 已实现；本机已配置外部 TTS runtime 并实测输出 24 kHz PCM16 | 不要把 TTS runtime 当作 ASR 前置条件 |
 | `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false`（本机当前全部 `available=true`） | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
-| `WS /v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集）；标准 `openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入 | 不伪装 LLM 对话/工具/历史；`turn_detection` 支持 `null`/`manual`/`server_vad`；Barge-in 打断严格限制于单会话内部 |
+| `WS /v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集）；支持并发多会话共享单个 streaming worker（`SPEECHRAIL_REALTIME_MAX_SESSIONS`，默认 `2`）；标准 `openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入 | 不伪装 LLM 对话/工具/历史；`turn_detection` 支持 `null`/`manual`/`server_vad`；Barge-in 打断严格限制于单会话内部；达到并发上限时新会话的 append 返回 `backend_busy`（session 保持可用） |
 | `diarization` profile | 可选匿名 speaker label、overlap 和 finalize remap | 不提供实名身份、声纹库或跨会议持久身份 |
 | `speechrail service` | macOS 用户级 LaunchAgent 的显式安装/启用/管理 CLI | 不自动安装、启用、下载模型或创建 root 服务 |
 | QwenPaw `whisper_api` | 使用标准 OpenAI-compatible `/v1` 路径；`.webm`/`video/webm` 需兼容 | 不要修改聊天模型 endpoint 来排查 STT |
@@ -194,7 +194,7 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 | ASR runtime | `SPEECHRAIL_QWEN3_MODEL_DIR`、`SPEECHRAIL_QWEN3_PYTHON` | 必须同时配置；均为仓库外绝对路径/可执行文件 |
 | TTS runtime | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR`、`SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选；两条路径同时存在才启动 TTS worker；缺少配置时 `/v1/audio/speech` 返回 `503 backend_not_ready` |
 | diarization | `SPEECHRAIL_DIARIZATION_MODEL_PATH`、`SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` | 可选；模型路径必须是仓库外绝对路径；未通过真实质量/资源门前不进默认配置 |
-| 流式 ASR 后端 | `SPEECHRAIL_REALTIME_ASR_BACKEND`（`disabled`/`native`）、`SPEECHRAIL_QWEN3_STREAMING_MODE` | 默认 `disabled`；`native` 复用现有 ASR runtime（`qwen3_python`）与 snapshot（`qwen3_model_dir`），不再单独配置 streaming Python；`causal` 模式仅英语；windowed 手动 flush 可能无 delta，须以 `commit` 终结 |
+| 流式 ASR 后端 | `SPEECHRAIL_REALTIME_ASR_BACKEND`（`disabled`/`native`）、`SPEECHRAIL_QWEN3_STREAMING_MODE`、`SPEECHRAIL_REALTIME_MAX_SESSIONS` | 默认 `disabled`；`native` 复用现有 ASR runtime（`qwen3_python`）与 snapshot（`qwen3_model_dir`），不再单独配置 streaming Python；`causal` 模式仅英语；windowed 手动 flush 可能无 delta，须以 `commit` 终结；`realtime_max_sessions` 默认 `2`（范围 `1-8`），限制共享 streaming worker 上同时活跃的 backend ASR 会话数 |
 | 模型身份 | `SPEECHRAIL_MODEL_ID`、`SPEECHRAIL_COMPATIBILITY_MODEL_IDS` | canonical ID 是配置事实来源；对外入口接受 OpenAI 标准名（`whisper-1`/`tts-1` 等）alias，`/v1/models` 列出 canonical 与 alias 并标注 `resolves_to` |
 | 设备与精度 | `SPEECHRAIL_DEVICE`、`SPEECHRAIL_DTYPE` | `mps` (支持 `float16` 默认 / `int8` 优化) 或 `cpu` (支持 `float32` / `int8`)；禁止静默 CPU fallback |
 | 限制 | `SPEECHRAIL_MAX_QUEUE_SIZE`、`SPEECHRAIL_MAX_UPLOAD_BYTES`、`SPEECHRAIL_MAX_REALTIME_*` | 必须有界；不要通过多 ASGI worker 复制模型 |

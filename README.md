@@ -44,7 +44,7 @@
 - 🔌 **开箱即用的 OpenAI 协议兼容**：
   - **文件转写**：`POST /v1/audio/transcriptions`（无缝支持 OpenAI 官方 SDK、`whisper-1` 等标准别名）。
   - **语音合成**：`POST /v1/audio/speech`（支持 `tts-1` 别名，输出 24 kHz 高品质音频）。
-  - **双向流式**：`WS /v1/realtime`（标准 OpenAI Realtime WebSocket 协议，支持 `client.realtime.connect`）。
+  - **双向流式**：`WS /v1/realtime`（标准 OpenAI Realtime WebSocket 协议，支持 `client.realtime.connect`；多 WebSocket 会话按 `session_id` 路由共享单个 streaming worker，`SPEECHRAIL_REALTIME_MAX_SESSIONS` 控制并发上限）。
 - ⏱️ **端到端高精度时间戳**：原生输出句子级与词级对齐时间戳，支持 `verbose_json`、`srt`、`vtt` 及 `timestamp_granularities`，无需额外挂载外置对齐器。
 - 👥 **实时声纹分割（Speaker Diarization）**：可选集成 Sortformer 与 CAM++，支持实时会议场景下的匿名说话人分离与重连声学聚类。
 - 🛡️ **进程隔离与资源守护（Resource Governor）**：主服务（FastAPI）与推理后端通过二进制零拷贝 IPC 协议进行进程级隔离；内置配额管控与背压机制，多任务并发不争抢、不崩溃。
@@ -316,6 +316,7 @@ response.stream_to_file("output.mp3")
 | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` | *(可选)* | 本地 Qwen3-TTS 权重目录绝对路径 |
 | `SPEECHRAIL_QWEN3_TTS_PYTHON` | *(可选)* | TTS Worker 独立的 Python 解释器绝对路径 |
 | `SPEECHRAIL_REALTIME_ASR_BACKEND` | `disabled` | 流式后端：`disabled` 或 `native` (原生 MLX 运行时) |
+| `SPEECHRAIL_REALTIME_MAX_SESSIONS` | `2` | 并发 realtime 会话数上限（`1-8`）；多个 WebSocket 共享一个 streaming worker，按 `session_id` 路由隔离，超出返回 `backend_busy` |
 | `SPEECHRAIL_DIARIZATION_MODEL_PATH` | *(可选)* | Sortformer 声纹分割模型 `.nemo` 本地路径 |
 | `SPEECHRAIL_MAX_QUEUE_SIZE` | `8` | 最大等待并发任务队列数 |
 | `SPEECHRAIL_MAX_UPLOAD_BYTES` | `536870912` (512MB) | 单次文件上传最大体积限制 |

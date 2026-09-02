@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-03
+
+### Added
+
+- **Realtime 多会话并发（共享权重引擎）**：`/v1/realtime` 现在支持同时多个
+  WebSocket 会话共享单个 streaming worker。worker 引擎从单会话状态升级为
+  `dict[session_id, StreamingState]`（`mlx_qwen3_asr.Session` 的流式 API 为
+  纯函数式，`init_streaming`/`feed_audio`/`finish_streaming` 均显式传递 state，
+  权重只加载一次、各会话状态完全隔离）；worker 所有会话响应帧回声
+  `session_id`，主进程侧 `Qwen3StreamingWorker` 增加单 reader dispatcher 按
+  `session_id` 将帧路由到各会话队列——两条会话读循环不再互相偷帧。
+- **Realtime 并发上限可配置**：新增 `SPEECHRAIL_REALTIME_MAX_SESSIONS`
+  （默认 `2`，范围 `1-8`）。`NativeRealtimeFactory` 由单 `_active` 槽位改为
+  会话 dict + 上限；达到上限时新会话的 `input_audio_buffer.append` 返回
+  `backend_busy`（错误语义沿用既有契约，session 保持可用）。worker 侧另有
+  `MAX_ACTIVE_STREAMING_SESSIONS=8` 的协议级防御上限。
+- **多会话冒烟示例**：`examples/perf/concurrent_realtime_smoke.py` 可同时打开
+  N 个 realtime 会话并验证路由隔离与 batch 同期可用。
+
 ## [1.5.2] - 2026-09-03
 
 ### Fixed

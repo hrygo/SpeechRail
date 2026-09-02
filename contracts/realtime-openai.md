@@ -15,6 +15,12 @@ ws://127.0.0.1:8201/v1/realtime
 
 - 认证：配置 API key 时握手必须携带 `Authorization: Bearer <key>`；失败以
   `1008` 关闭。
+- **并发会话**：多个 WebSocket 连接可同时存在，共享同一 streaming worker。
+  worker 帧按 `session_id` 路由到独立会话状态，互不干扰；同时活跃的
+  backend ASR 会话数由 `SPEECHRAIL_REALTIME_MAX_SESSIONS` 限制
+  （默认 `2`，范围 `1-8`）。达到上限后，触发 backend 会话创建的
+  `input_audio_buffer.append` 返回 `error`（`backend_busy`），该连接自身的
+  session 保持可用并可在其他会话释放后继续。
 - 仅接受 JSON 文本事件；音频放在 Base64 字段，**ASR 输入固定为 16 kHz、单声道、
   16-bit little-endian PCM**。
 - `?model=` 查询参数在握手即生效（对应标准 `client.realtime.connect(model=...)`）：已知模型在
