@@ -42,6 +42,7 @@ dev = [
     "mypy>=1.14",
     "jsonschema>=4.23",
     "pyyaml>=6.0",
+    "numpy>=1.26,<3.0",
 ]
 diarization = [
     "kaldi-native-fbank>=1.22",

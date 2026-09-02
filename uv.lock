@@ -2177,6 +2177,7 @@ dependencies = [
 dev = [
     { name = "jsonschema" },
     { name = "mypy" },
+    { name = "numpy" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pyyaml" },
@@ -2197,6 +2198,7 @@ requires-dist = [
     { name = "kaldi-native-fbank", marker = "extra == 'diarization'", specifier = ">=1.22" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "nemo-toolkit", extras = ["asr"], marker = "extra == 'diarization'", specifier = ">=2.0" },
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.26,<3.0" },
     { name = "numpy", marker = "extra == 'diarization'", specifier = ">=1.26,<2.0" },
     { name = "onnxruntime", marker = "extra == 'diarization'", specifier = ">=1.20" },
     { name = "pydantic", specifier = ">=2.10" },
