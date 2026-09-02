@@ -1,8 +1,8 @@
-# Reference configuration. The environment-backed .env example is the launch path for 0.1.0.
+# Reference configuration. The environment-backed .env example is the launch path for 1.1.0.
 # Values are placeholders; never put API keys, model weights, audio, or full transcripts here.
 service:
   name: speechrail
-  version: 1.0.0
+  version: 1.1.0
   host: 127.0.0.1
   port: 8201
 
@@ -26,6 +26,15 @@ limits:
   max_realtime_frame_bytes: 160000
   max_realtime_buffer_bytes: 8388608
   request_timeout_seconds: 120
+
+diarization:
+  # Optional external snapshots; configure Sortformer before CAM++.
+  model_path: /absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
+  embedding_model_path: /absolute/path/outside/SpeechRail/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+  max_buffer_bytes: 8388608
+  max_groups: 64
+  group_ttl_seconds: 900
+  similarity_threshold: 0.8
 
 security:
   api_key_env: SPEECHRAIL_API_KEY

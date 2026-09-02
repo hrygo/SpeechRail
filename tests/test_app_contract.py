@@ -11,7 +11,17 @@ from speechrail.config import Settings
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)))
+    return TestClient(
+        create_app(
+            Settings(
+                api_key=None,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                diarization_model_path=None,
+                diarization_embedding_model_path=None,
+            )
+        )
+    )
 
 
 def test_health_reports_contract_shell_without_backend() -> None:
@@ -21,10 +31,18 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "backend": "qwen3-asr-1.7b",
         "asr_ready": False,
         "tts_ready": False,
+        "diarization_ready": False,
+        "diarization": {
+            "configured": False,
+            "ready": False,
+            "code": "diarization_not_configured",
+            "message": "diarization profile is not configured",
+            "profile": None,
+        },
         "ready": False,
     }
 
@@ -99,12 +117,28 @@ def test_readyz_returns_retryable_error_until_backend_is_ready() -> None:
 def test_readyz_is_200_when_runtime_reports_ready() -> None:
     response = TestClient(
         create_app(
-            Settings(api_key=None, backend_ready=True, qwen3_model_dir=None, qwen3_python=None)
+            Settings(
+                api_key=None,
+                backend_ready=True,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                diarization_model_path=None,
+                diarization_embedding_model_path=None,
+            )
         )
     ).get("/readyz")
 
     assert response.status_code == 200
-    assert response.json() == {"ready": True}
+    assert response.json() == {
+        "ready": True,
+        "diarization": {
+            "configured": False,
+            "ready": False,
+            "code": "diarization_not_configured",
+            "message": "diarization profile is not configured",
+            "profile": None,
+        },
+    }
 
 
 def test_tts_only_runtime_reports_independent_readiness() -> None:
@@ -113,7 +147,13 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
 
     client = TestClient(
         create_app(
-            Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None),
+            Settings(
+                api_key=None,
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                diarization_model_path=None,
+                diarization_embedding_model_path=None,
+            ),
             tts_synthesizer=ReadyTts(),  # type: ignore[arg-type]
         )
     )
@@ -121,13 +161,30 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "backend": "qwen3-asr-1.7b",
         "asr_ready": False,
         "tts_ready": True,
+        "diarization_ready": False,
+        "diarization": {
+            "configured": False,
+            "ready": False,
+            "code": "diarization_not_configured",
+            "message": "diarization profile is not configured",
+            "profile": None,
+        },
         "ready": True,
     }
-    assert client.get("/readyz").json() == {"ready": True}
+    assert client.get("/readyz").json() == {
+        "ready": True,
+        "diarization": {
+            "configured": False,
+            "ready": False,
+            "code": "diarization_not_configured",
+            "message": "diarization profile is not configured",
+            "profile": None,
+        },
+    }
 
 
 def test_configured_worker_lifecycle_does_not_depend_on_local_env(
@@ -158,10 +215,21 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
         qwen3_model_dir=snapshot,
         qwen3_python=Path(executable),
         backend_ready=False,
+        diarization_model_path=None,
+        diarization_embedding_model_path=None,
     )
 
     with TestClient(create_app(settings)) as client:
-        assert client.get("/readyz").json() == {"ready": True}
+        assert client.get("/readyz").json() == {
+            "ready": True,
+            "diarization": {
+                "configured": False,
+                "ready": False,
+                "code": "diarization_not_configured",
+                "message": "diarization profile is not configured",
+                "profile": None,
+            },
+        }
 
     assert lifecycle == ["start", "close"]
 

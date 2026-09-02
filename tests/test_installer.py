@@ -31,7 +31,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
-    wheel = tmp_path / "speechrail-1.0.0-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-1.1.0-py3-none-any.whl"
     wheel.touch()
     env_file = tmp_path / "source.env"
     env_file.write_text("SPEECHRAIL_HOST=127.0.0.1\n", encoding="utf-8")
@@ -64,6 +64,33 @@ def test_install_wheel_stages_new_runtime_and_switches_current_atomically(
     assert layout.current_runtime.resolve() == result.runtime_python.parents[2].resolve()
     assert layout.config_file.read_text(encoding="utf-8") == env_file.read_text(encoding="utf-8")
     assert not any("launchctl" in part for command in calls for part in command)
+
+
+def test_install_wheel_installs_diarization_extra_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, env_file, app_home = _inputs(tmp_path)
+    env_file.write_text(
+        "SPEECHRAIL_HOST=127.0.0.1\n"
+        "SPEECHRAIL_DIARIZATION_MODEL_PATH=/external/sortformer.nemo\n",
+        encoding="utf-8",
+    )
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    install_macos.install_wheel(
+        wheel,
+        app_home=app_home,
+        env_file=env_file,
+        runner=_runner_that_creates_python(calls),
+    )
+
+    install_command = next(command for command in calls if command[:2] == ("uv", "pip"))
+    assert install_command[-1] == f"{wheel}[diarization]"
 
 
 def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:

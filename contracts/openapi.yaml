@@ -1,21 +1,19 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     Local-first shared ASR and TTS service.
 
     The /v1/audio/transcriptions endpoint follows the OpenAI-compatible
     multipart shape so existing SDK clients can be reused. The realtime
-    WebSocket contract is documented in contracts/realtime-v2.md.
+    WebSocket contract is documented in contracts/realtime-openai.md.
   license:
     name: MIT
     identifier: MIT
 servers:
   - url: http://127.0.0.1:8201
     description: Local development
-  - url: http://127.0.0.1:8001
-    description: Migration cutover compatibility port
 tags:
   - name: health
     description: Process and model readiness
@@ -44,10 +42,17 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 1.0.0
+                version: 1.1.0
                 backend: qwen3-asr-1.7b
                 asr_ready: true
                 tts_ready: true
+                diarization_ready: false
+                diarization:
+                  configured: false
+                  ready: false
+                  code: diarization_not_configured
+                  message: diarization profile is not configured
+                  profile: null
                 ready: true
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -59,16 +64,18 @@ paths:
       security: [{}]
       responses:
         '200':
-          description: Model runtime can accept inference
+          description: ASR/TTS runtime can accept inference; optional diarization status is informational
           content:
             application/json:
               schema:
                 type: object
-                required: [ready]
+                required: [ready, diarization]
                 properties:
                   ready:
                     type: boolean
                     const: true
+                  diarization:
+                    $ref: '#/components/schemas/DiarizationStatus'
         '503':
           $ref: '#/components/responses/BackendNotReady'
         '400':
@@ -117,7 +124,7 @@ paths:
       description: |
         Accepts multipart/form-data. The model defaults to
         speechrail/qwen3-asr-1.7b. For realtime audio-buffer commits use the
-        WebSocket contract in contracts/realtime.md instead. The file may use
+          WebSocket contract in contracts/realtime-openai.md instead. The file may use
         the OpenAI-compatible audio containers flac, mp3, mp4, mpeg, mpga, m4a,
         ogg, wav, or webm. The multipart Content-Type and filename are format
         hints; the service validates and decodes the uploaded content.
@@ -305,7 +312,7 @@ components:
   schemas:
     HealthResponse:
       type: object
-      required: [status, service, version, backend, asr_ready, tts_ready, ready]
+      required: [status, service, version, backend, asr_ready, tts_ready, diarization_ready, diarization, ready]
       properties:
         status:
           type: string
@@ -322,8 +329,28 @@ components:
           type: boolean
         tts_ready:
           type: boolean
+        diarization_ready:
+          type: boolean
+        diarization:
+          $ref: '#/components/schemas/DiarizationStatus'
         ready:
           type: boolean
+    DiarizationStatus:
+      type: object
+      required: [configured, ready, code, message, profile]
+      properties:
+        configured:
+          type: boolean
+        ready:
+          type: boolean
+        code:
+          type: [string, 'null']
+          description: Stable diagnostic code; null when the profile is ready.
+        message:
+          type: string
+        profile:
+          type: [string, 'null']
+          enum: [sortformer, camplus, null]
     Model:
       type: object
       required: [id, object, owned_by]
