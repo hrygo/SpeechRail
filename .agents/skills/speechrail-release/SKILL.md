@@ -1,6 +1,6 @@
 ---
 name: speechrail-release
-description: SpeechRail 版本发布流程。Use when cutting a SpeechRail release: bumping version across all files, updating CHANGELOG and docs metadata, building the wheel, installing/upgrading the launchd service, and running the version-consistency gate plus full verification gates. Covers the exact file/location list carrying the version, the 4-step gate, wheel build/install commands, health/model/voice verification, and rollback. Triggers: 发布, release, 版本号, bump version, 构建 wheel, 安装新版本, tag, git tag, speechrail 发布.
+description: "SpeechRail 版本发布流程。Use when cutting a SpeechRail release: bumping version across all files, updating CHANGELOG and docs metadata, building the wheel, installing/upgrading the launchd service, and running the version-consistency gate plus full verification gates. Covers the exact file/location list carrying the version, the 4-step gate, wheel build/install commands, health/model/voice verification, and rollback. Triggers: 发布, release, 版本号, bump version, 构建 wheel, 安装新版本, tag, git tag, speechrail 发布."
 ---
 
 # SpeechRail 版本发布
@@ -79,8 +79,8 @@ uv run --extra dev python -c "from speechrail.config import Settings; print(Sett
 
 ```bash
 rtk grep -rn "<旧版本号>" pyproject.toml src/ contracts/ configs/ tests/ uv.lock
-# 允许的残留仅有：CHANGELOG 历史 "[X.Y.Z]" 标题、docs 中显式历史引用注释
-# 其余任何出现都视为漏更
+# 允许的残留仅有：CHANGELOG 历史 "[X.Y.Z]" 标题、docs/测试夹具中的历史版本引用
+# 其余任何出现都视为漏更（以 scripts/check_version_consistency.py exit 0 为最终判定）
 ```
 
 ### Step 3 — 门禁（完整代码 gate）
