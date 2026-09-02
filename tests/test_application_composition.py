@@ -24,7 +24,7 @@ def fake_services() -> AppServices:
     return AppServices(
         settings=settings,
         transcribe=None,
-        v2_transcriber=None,
+        batch_transcriber=None,
         realtime_asr_factory=None,
         diarization_engine=None,
         tts_synthesizer=None,

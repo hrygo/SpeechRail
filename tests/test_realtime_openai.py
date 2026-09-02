@@ -204,7 +204,7 @@ def _client(
     services = build_app_services(
         settings,
         AppOverrides(
-            v2_transcriber=FakeTranscriber(),
+            batch_transcriber=FakeTranscriber(),
             tts_synthesizer=tts_synthesizer or FakeSpeechSynthesizer(),
             realtime_asr_factory=factory,
             diarization_engine=diarization_engine,
@@ -846,7 +846,7 @@ def test_openai_realtime_rejects_text_item_when_tts_is_not_ready() -> None:
     )
     services = build_app_services(
         settings,
-        AppOverrides(v2_transcriber=FakeTranscriber(), realtime_asr_factory=factory),
+        AppOverrides(batch_transcriber=FakeTranscriber(), realtime_asr_factory=factory),
     )
     app = FastAPI()
     app.include_router(create_openai_realtime_router(services))

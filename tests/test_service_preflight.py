@@ -135,3 +135,25 @@ def test_preflight_uses_absolute_ffmpeg_fallback(
     result = run_preflight(layout, require_tts=False, runner=_successful_runner)
 
     assert next(check for check in result.checks if check.name == "ffmpeg").ok is True
+
+
+def test_preflight_checks_configured_diarization_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    sortformer = tmp_path / "sortformer.nemo"
+    sortformer.touch()
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_DIARIZATION_MODEL_PATH={sortformer}\n")
+
+    result = run_preflight(layout, require_tts=False, runner=_successful_runner)
+
+    assert result.ok is True
+    assert next(check for check in result.checks if check.name == "diarization_config").ok is True
+    assert next(check for check in result.checks if check.name == "diarization_snapshot").ok is True
+    assert next(check for check in result.checks if check.name == "diarization_runtime").ok is True

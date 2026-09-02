@@ -126,6 +126,15 @@ def _copy_config(source: Path, destination: Path) -> None:
         raise
 
 
+def _config_enables_diarization(env_file: Path) -> bool:
+    """Detect an opted-in diarization profile without logging configuration values."""
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("SPEECHRAIL_DIARIZATION_MODEL_PATH="):
+            return bool(line.partition("=")[2].strip())
+    return False
+
+
 def _switch_current(layout: InstallLayout, release_dir: Path) -> Path | None:
     if layout.current_runtime.exists() and not layout.current_runtime.is_symlink():
         raise InstallerError("runtime/current must be a symlink")
@@ -183,9 +192,22 @@ def install_wheel(
     release_dir.mkdir(parents=True)
     venv_dir = release_dir / ".venv"
     runtime_python = venv_dir / "bin" / "python"
+    wheel_requirement = str(wheel)
+    if _config_enables_diarization(env_file):
+        wheel_requirement += "[diarization]"
     try:
         _run((uv_executable, "venv", "--python", "3.12", str(venv_dir)), runner)
-        _run((uv_executable, "pip", "install", "--python", str(runtime_python), str(wheel)), runner)
+        _run(
+            (
+                uv_executable,
+                "pip",
+                "install",
+                "--python",
+                str(runtime_python),
+                wheel_requirement,
+            ),
+            runner,
+        )
         result = run_preflight(
             runtime_python, layout, require_tts=require_tts, runner=runner
         )

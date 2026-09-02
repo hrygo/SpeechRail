@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.backends.nemo_sortformer import NemoSortformerEngine
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
@@ -142,3 +144,18 @@ def test_models_advertise_diarized_alias_only_with_profile() -> None:
 
     assert "gpt-4o-transcribe-diarize" in available_ids
     assert "gpt-4o-transcribe-diarize" not in unavailable_ids
+
+
+def test_models_hide_diarized_alias_when_runtime_preflight_fails(tmp_path: Path) -> None:
+    engine = NemoSortformerEngine(
+        model_path=tmp_path / "missing.nemo",
+        max_buffer_bytes=32_000,
+    )
+    client = _client(diarization_engine=engine, include_system=True)
+
+    response = client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert "gpt-4o-transcribe-diarize" not in {
+        item["id"] for item in response.json()["data"]
+    }

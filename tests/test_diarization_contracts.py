@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
+from speechrail.config import Settings
 from speechrail.domain.diarization import (
     DiarizationAssignment,
     DiarizationConfig,
@@ -60,4 +63,12 @@ def test_diarization_update_rejects_noncanonical_mapping_and_duplicate_speakers(
                 DiarizationSpeaker(id="spk_01", confidence=0.9),
                 DiarizationSpeaker(id="spk_01", confidence=0.8),
             ),
+        )
+
+
+def test_settings_require_sortformer_when_camplus_is_configured() -> None:
+    with pytest.raises(ValueError, match="requires diarization_model_path"):
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            diarization_embedding_model_path=Path("/external/campplus.onnx"),
         )
