@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查"
 status: active
-version: "1.3.0"
+version: "1.4.0"
 date: 2026-09-02
 ---
 
@@ -16,6 +16,9 @@ openai-python `main` 分支生成模型与 `RealtimeServerEvent` union 一手源
 live 复跑本机服务与 sona 消费者代码。修正 6 处过时/错误判断（§一、§三、§4.4 #3~#6、
 §五、附录 B），并将 §七 升级为按产品画像——**本机部署语音基座 × 多应用按 OpenAI 标准
 接入**——裁定的**最终整改方案（落盘）**。被审计的服务版本仍为 v1.2.0。
+
+**v1.4 执行关闭（2026-09-02）**：§七 全部批次已在分支 `feat/openai-conformance` 实施并通过
+全量 gate 与 :8202 live smoke，详见 §九；本报告此前的"只读评估"表述仅适用于 v1.0–v1.3。
 
 ## 结论摘要
 
@@ -243,7 +246,7 @@ TTS alias（→qwen3-tts）：`tts-1`、`tts-1-hd`、`gpt-4o-mini-tts`。均带 
   22 种内部 code 字符串（`unsupported_*`、`unknown_event`、`invalid_state`、`model_not_found`、
   `frame_too_large`、`buffer_too_large`、`backend_not_ready`、`queue_full`、`backend_timeout` 等）。
 
-## 七、最终整改方案（v1.3 复核裁定，落盘待执行）
+## 七、最终整改方案（v1.3 复核裁定；v1.4 已执行关闭，见 §九）
 
 **裁定过滤器（产品画像）**：本机部署的语音基座，供多个应用按 OpenAI 标准接入。
 判据：标准客户端（照现行 OpenAI 文档/SDK 编写）接入时真会坏的才实现；伪造本机后端
@@ -333,6 +336,43 @@ TTS alias（→qwen3-tts）：`tts-1`、`tts-1-hd`、`gpt-4o-mini-tts`。均带 
 - **并行改动**：v1.3 复核与修订期间，工作树存在其他任务对 `README.md` 等文件的改动；本报告
   修订全程仅触及本文件，README 的 mp3 宣称按其当时工作树内容引用。
 
+## 九、执行关闭记录（v1.4，2026-09-02）
+
+在独立 worktree 分支 `feat/openai-conformance` 上按 `A → B →（sona lockstep 确认后）C → D` 执行完毕：
+
+| Batch | Commit | 内容 | 验证 |
+|---|---|---|---|
+| A | `cb2cd56` | 握手 `?model=`/close 4004、语言与 busy 错误包装并释放预留、`committed` 事件序、`prompt` 透传、error `client_event_id`、`/v1/models` diarize 过滤、realtime 契约标注 | 定向 55+9 测试 GREEN |
+| B | `c1d9ba3` | segment `id` 整数化（domain/backends/nemo/compat）、verbose honest-null 字段族、`language` 小写、TTS 六格式 + 默认 `mp3`（固定 ffmpeg argv remux）、13 voice 别名 + `/v1/voices.aliases`、`input` ≤4096、`openapi.yaml` 锁定 | 全量 gate：pytest 通过（coverage 81.23% ≥ 80）、ruff、mypy（56 files）、redocly valid |
+| C | `ed69f8e` | `response.output_audio.*` → `response.audio.*`（含 transcript 对）、content part `output_audio` → `audio`；builders/tests/bench/契约同步 | 定向 GREEN；sona lockstep（`tts.py` 与其测试改名，`5 passed`；sona 侧保留未提交待其发布窗口）|
+| D | 本提交 | CHANGELOG `[Unreleased]`、README、`docs/users/api-contract.md`、docs 能力矩阵同步、本报告 v1.4 | 全量 gate 复跑全绿；:8202 ephemeral live smoke |
+
+Live smoke（临时实例 :8202，真实 ASR/TTS/diarization runtime；合成非敏感音频 TTS→ASR 闭环）：
+
+- REST 17/17 PASS：默认 `mp3` 魔数、`wav/opus/flac/aac/pcm` 真实容器输出、`voice=alloy` 走别名、
+  4096 过字段校验 / 4097 → 422、`verbose_json` `id=0` 整数 + honest nulls + `language="chinese"`、
+  转写文本闭环（`语音合规冒烟测试。` 原样回环）。
+- WS 14/15 PASS：`?model=nope-xyz` → `model_not_found` + close 4004；`session.created` 回显
+  `whisper-1` 且服务端 `event_id` 生成；TTS 腿 live 仅见 `response.audio.*` /
+  `response.audio_transcript.*`（零 `output_audio.*`）；`klingon` → `language_not_supported`
+  错误事件且会话存活；`committed` 先于终结事件。
+- 唯一非通过项为**冒烟断言超出现有后端能力**，非回归：`qwen3_worker._handle_commit` 的 completed
+  帧恒 `segments: []`（native streaming 无分段；`include_timestamps` 仅 batch 路径消费），realtime
+  segment 事件 live 无法产生；segment `id` 整数契约由单测（`segment_id=7`）与 REST live（`id=0`）
+  双重证实。
+
+执行期发现的两个**先前存在**的运维边界（超出本整改范围，另行处理）：
+
+1. `SPEECHRAIL_DEVICE=mps` + `SPEECHRAIL_DTYPE=int8` 组合下 TTS 身份握手恒不匹配
+   （`qwen3_tts_worker.py` 身份硬编码 `float16`，而 `qwen3_tts.py` 比较 `config.dtype`），服务启动
+   即 `backend_identity_mismatch` 中止。常驻 :8201 因早于 int8 写入配置而存活；**下次重启会失败**，
+   需先修身份透传或在 `.env` 回退 `float16`。
+2. TTS 流被客户端中途断开时按既有 fail-closed 设计（"abort on any unfinished stream"）终止 worker，
+   且 `tts_ready` 不再自动恢复；重拉语义建议与上一条一并评估。
+
+边界披露：真实 `openai` SDK 解析测试未执行（worktree venv 无 `openai` 包），以逐字段 JSON 断言替代；
+A6 `prompt` 透传与 `rate_limits` 语义仅单元/契约层证实，live 未单独观测。
+
 ## 附录 A：Realtime TTS OpenAI 官方参数（🟡 已带链接确认）
 
 来源：platform.openai.com/docs/api-reference/audio/createSpeech、
@@ -350,8 +390,8 @@ github.com/openai/openai-python（`resources/audio/speech.py`）。
 
 | OpenAI 现行事件 | SpeechRail | 备注 |
 |---|---|---|
-| `response.audio.delta`/`done` | **`response.output_audio.delta`/`done`** | ⚠️ 旧版命名（一手已证 union 无 output_audio.*；Batch C 改名）|
-| `response.audio_transcript.delta`/`done` | **`response.output_audio_transcript.*`** | ⚠️ 同上（Batch C）|
+| `response.audio.delta`/`done` | `response.audio.delta`/`done` | ✅ v1.4 已对齐（Batch C `ed69f8e`，live 验证）|
+| `response.audio_transcript.delta`/`done` | 同名 | ✅ v1.4 已对齐（Batch C，live 验证）|
 | `conversation.item.input_audio_transcription.delta`/`completed`/`failed` | 同名 | ✅ 现行命名 |
 | `conversation.item.input_audio_transcription.segment` | 同名 emit | ✅ **v1.3 更正**：该事件在现行 union 中，命名与 OpenAI 对齐；字段含 SpeechRail diar 扩展 |
 | `input_audio_buffer.speech_started`/`stopped` | 不 emit | 无 VAD（有意，ADR-0009；§七不做清单）|

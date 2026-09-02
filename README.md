@@ -223,9 +223,9 @@ response.stream_to_file("output.mp3")
 | `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息 |
 | `GET` | `/readyz` | 推理就绪状态检查 | 确认 ASR/TTS 引擎已预热并可接受流量 (HTTP 200) |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
-| `GET` | `/v1/voices` | 注册的 TTS 音色列表 | 返回 `default`, `warm`, `bright`, `calm` 及可用性 |
+| `GET` | `/v1/voices` | 注册的 TTS 音色列表 | 返回 `default`, `warm`, `bright`, `calm` 及可用性；条目含 `aliases`（OpenAI 标准名映射） |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
-| `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`, `wav`, `pcm` (24kHz 16-bit Mono) |
+| `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写、合成与说话人分割 |
 

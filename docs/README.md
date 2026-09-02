@@ -21,7 +21,7 @@
 | Qwen3-TTS VoiceDesign worker | 已实现并可推理 | `/v1/audio/speech` 实测输出 24 kHz PCM16，本机真实 smoke 通过 |
 | REST 文件转写 | 已实现并可推理 | OpenAI-compatible `/v1/audio/transcriptions`；本机真实 smoke 与性能基准完成 |
 | REST TTS | 已实现并可推理 | `/v1/audio/speech` 使用登记 preset；未配置 TTS runtime 时返回 `backend_not_ready` |
-| TTS preset 目录 | 已实现 | `/v1/voices` 返回登记目录；TTS worker 未就绪时条目标记 `available=false` |
+| TTS preset 目录 | 已实现 | `/v1/voices` 返回登记目录，条目含 `aliases`（OpenAI 标准名 → preset）；TTS worker 未就绪时条目标记 `available=false` |
 | Realtime v1（OpenAI 兼容） | 已实现并可推理 | `/v1/realtime` 标准 SDK 可接入；ASR/TTS 真实 smoke 与连续会话验证完成 |
 | Realtime `/v1`（OpenAI 兼容） | 已实现 | ASR/TTS 事件、背压、取消、native streaming 与匿名 diarization 边界已覆盖 |
 | `sona` | 客户端边界已接入 | 会议、播放、UI、数据库和 LLM 由调用方拥有；真实端到端发布门待验收 |

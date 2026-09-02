@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **OpenAI Realtime 端点对齐**：握手解析 `?model=` 并在 `session.created` 回显，未知模型或
+  diarize 无 profile 时以 `model_not_found` + close 4004 拒绝；流式后端 `RuntimeError`
+  （不支持语言 / busy）包装为稳定 error 事件并释放预留容量；`input_audio_buffer.committed`
+  先于转写终结事件下发；`input_audio_transcription.prompt`（≤2000）透传至流式会话；
+  服务端事件 `event_id` 统一生成，error envelope 透传触发方 `client_event_id`；
+  compat 注入的 `gpt-4o-transcribe-diarize` 不再出现在 `/v1/models`。
+- **Realtime TTS 事件名对齐 OpenAI 标准**：`response.output_audio.{delta,done}` 与
+  `response.output_audio_transcript.{delta,done}` 更名为 `response.audio.*` /
+  `response.audio_transcript.*`，assistant 输出 content part 类型由自造的
+  `output_audio` 改为标准 `audio`。消费方（sona `tts.py`）需与新版本同步部署。
+
+### Changed
+
+- **REST transcription `verbose_json` 合规**：segment `id` 由自造字符串改为整数序号；
+  Whisper 风格置信度字段（`seek`/`tokens`/`temperature`/`avg_logprob`/`compression_ratio`/
+  `no_speech_prob`）以显式 `null` 输出而非伪造值；`language` 统一小写。领域契约
+  `TranscriptSegment.id` 与 `DiarizationAssignment.segment_id` 同步改为非负整数。
+- **`/v1/audio/speech` 格式对齐**：`response_format` 默认值由 `wav` 改为 `mp3`（OpenAI 默认），
+  新增 `mp3`/`opus`/`aac`/`flac` 容器（固定 ffmpeg argv remux）；`pcm` 保持流式，
+  `wav` 保持进程内包头；`input` 长度上限按 OpenAI 标准收紧为 4096 字符。
+
+### Added
+
+- **OpenAI 标准 voice 别名**：接受 13 个 OpenAI 标准 voice 名（`alloy`/`ash`/`ballad`/`cedar`/
+  `coral`/`echo`/`fable`/`marin`/`nova`/`onyx`/`sage`/`shimmer`/`verse`），映射到 4 个服务端
+  preset；`/v1/voices` 新增 `aliases` 字段公布映射关系。
+- `contracts/openapi.yaml` 同步锁定以上契约形状。
+
 ## [1.3.1] - 2026-09-02
 
 ### Added

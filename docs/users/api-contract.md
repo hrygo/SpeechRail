@@ -44,7 +44,7 @@ WebSocket 状态机需要单独的兼容设计和迁移说明。`/asr` 不承诺
 | `GET` | `/v1/models` | canonical ASR/TTS ID 与兼容 aliases；diarized alias 仅在 profile ready 时出现 |
 | `GET` | `/v1/voices` | 登记的 TTS preset 目录；TTS worker 未就绪时仍可返回目录并标记 `available=false` |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
-| `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS；当前支持 `wav` 与 `pcm` |
+| `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS；支持 `mp3`（默认）、`opus`、`aac`、`flac`、`wav` 与 `pcm` |
 | `POST` | `/v1/jobs` | 创建 owner-scoped 异步语音任务元数据（需配置 spool） |
 | `GET` | `/v1/jobs/{job_id}` | 读取同 owner 的任务状态与可选结果引用 |
 | `DELETE` | `/v1/jobs/{job_id}` | 取消 queued 任务，或清除 completed 任务的结果引用 |
@@ -68,7 +68,8 @@ Content-Type: multipart/form-data
 | `response_format` | 可选 | `json`、`verbose_json`、`text`、`srt`、`vtt` |
 
 当前路由不接收 `stream` 或 `timestamp_granularities[]`；不要依赖它们。`verbose_json`
-包含 segment 结果；Qwen3 当前不生成 word-level timestamps，`words` 为空。
+包含 segment 结果（`id` 为整数序号，Qwen3 无法产生的 Whisper 风格置信度字段以显式 `null`
+输出，`language` 为小写）；Qwen3 当前不生成 word-level timestamps，`words` 为空。
 
 上传字节数由 `SPEECHRAIL_MAX_UPLOAD_BYTES` 强制限制。`SPEECHRAIL_MAX_AUDIO_SECONDS`
 是配置字段，当前不在解码后强制按时长拒绝；运营上应同时控制客户端音频时长和上传字节数。
@@ -77,7 +78,9 @@ Content-Type: multipart/form-data
 
 先用 `GET /v1/voices` 获取服务器登记的 preset；成功响应的形状为
 `{"object":"list","data":[...]}`。首发 preset 为 `default`、`warm`、`bright` 和
-`calm`，客户端不得上传 voice sample、clone prompt、文件或 URL。
+`calm`；每个条目的 `aliases` 列出可替代的 OpenAI 标准 voice 名（如 `alloy` → `default`），
+`/v1/audio/speech` 的 `voice` 接受 preset 名或任一标准名，标准名归一化到最近的 preset。
+客户端不得上传 voice sample、clone prompt、文件或 URL。
 
 `/v1/voices` 只负责返回服务端登记的目录，不以 TTS worker ready 作为路由前置条件。按当前代码，未配置
 外部 TTS runtime 时也应返回目录，条目标记为 `available=false`；如果实际返回 404，应先核对客户端的
@@ -103,8 +106,9 @@ Content-Type: application/json
 }
 ```
 
-`response_format` 支持 `pcm` 和 `wav`；公共 PCM 输出是 24 kHz、单声道、signed little-endian
-PCM16。`speed` 范围为 `0.25..4.0`，`language` 默认为 `auto`。没有配置外部 TTS runtime
+`response_format` 支持 `mp3`（默认）、`opus`、`aac`、`flac`、`wav` 与 `pcm`；`pcm` 是
+24 kHz、单声道、signed little-endian PCM16 无头流式输出，容器格式由固定 `ffmpeg` 转封装。
+`input` 上限为 4096 字符。`speed` 范围为 `0.25..4.0`，`language` 默认为 `auto`。没有配置外部 TTS runtime
 时，端点返回稳定的 `503 backend_not_ready`；TTS 未就绪不应被客户端当作 ASR 不可用。
 
 ## 异步 Jobs
