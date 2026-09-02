@@ -54,6 +54,9 @@ jobs:
       - name: Install project dependencies
         run: uv sync --extra dev
 
+      - name: Build wheel package
+        run: uv build --no-sources --wheel
+
       - name: Code style check (Ruff)
         run: uv run ruff check src tests
 

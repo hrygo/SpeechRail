@@ -12,7 +12,7 @@
 
 ## 执行边界
 
-- 工作目录：`/Users/hrygo/Documents/SpeechRail`
+- 工作目录：`<path-to-SpeechRail>`
 - 先执行：无；这是 SpeechRail DRY/SOLID 总控计划的第一阶段。
 - 后续依赖：`2026-09-01-speechrail-tts-delivery-refactor.md` 依赖本计划创建的 `http/routes/audio.py` 与 `http/routes/realtime_v2.py`。
 - 公共入口必须保持以下签名兼容：

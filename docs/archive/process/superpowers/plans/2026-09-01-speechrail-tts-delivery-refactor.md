@@ -12,7 +12,7 @@
 
 ## 执行边界
 
-- 工作目录：`/Users/hrygo/Documents/SpeechRail`
+- 工作目录：`<path-to-SpeechRail>`
 - 前置：完成 `2026-09-01-speechrail-app-composition-refactor.md`，确认 `http/routes/audio.py` 与 `http/routes/realtime_v2.py` 已存在。
 - `SpeechRequest` 是内部 domain port，不出现在 `contracts/openapi.yaml` 或 Realtime wire contract；当前源码和测试除字段声明外没有 `instructions` 使用点。
 - 本计划不改 `/v1/audio/speech` body、`session.update` 字段、voice ID、24 kHz mono PCM16、WAV rendering 或 error envelope。

@@ -46,9 +46,9 @@
 ### Task 3: Migrate the meeting client and remove ineffective acoustic ownership
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/sona/src/sona/asr/adapters/speechrail_realtime.py`, `src/sona/meeting/session.py`, `src/sona/ui/server.py`, `src/sona/config.py`
+- Modify: `../sona/src/sona/asr/adapters/speechrail_realtime.py`, `src/sona/meeting/session.py`, `src/sona/ui/server.py`, `src/sona/config.py`
 - Delete: `src/sona/meeting/voiceprint.py` and its tests after confirming no remaining references
-- Test: `/Users/hrygo/Documents/sona/tests/asr/test_speechrail_realtime.py`, `tests/test_meeting_session.py`, `tests/test_config.py`
+- Test: `../sona/tests/asr/test_speechrail_realtime.py`, `tests/test_meeting_session.py`, `tests/test_config.py`
 
 - [x] Write failing adapter tests for multi-speaker mapping, overlap primary selection and fail-closed meeting startup.
 - [x] Implement event parsing and remap propagation through the meeting port; retain only application-level smoothing and identity mapping.
@@ -58,7 +58,7 @@
 ### Task 4: Integrate, document and verify
 
 **Files:**
-- Modify: `contracts/openapi.yaml`, `docs/08-migration-runbook.md`, `docs/11-operations-runbook.md`, `/Users/hrygo/Documents/sona/README.md`
+- Modify: `contracts/openapi.yaml`, `docs/08-migration-runbook.md`, `docs/11-operations-runbook.md`, `../sona/README.md`
 - Test: both repositories’ complete suites plus static and frontend gates
 
 - [x] Update contract and operations docs with profile configuration, resource limits, privacy guarantees, known real-model gate and rollback.

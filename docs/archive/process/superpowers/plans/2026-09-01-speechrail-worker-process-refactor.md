@@ -12,7 +12,7 @@
 
 ## 执行边界
 
-- 工作目录：`/Users/hrygo/Documents/SpeechRail`
+- 工作目录：`<path-to-SpeechRail>`
 - 可在 app composition 计划之后执行；不得与其他任务同时修改 `qwen3_native.py` 或 `qwen3_tts.py`。
 - 不改变 worker command、离线环境键、64 MiB frame 上限、单进程串行请求、2 秒 terminate→kill 收口或外部 Python/snapshot 配置。
 - 不自动重启失败中的请求，不把旧 stdout frame 交给新请求，不记录 payload、PCM、文本、模型绝对路径或凭据。

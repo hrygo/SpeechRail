@@ -24,9 +24,9 @@
 ### Task 1: Add SpeechRail TTS policy and voice registry
 
 **Files:**
-- Create: `/Users/hrygo/Documents/SpeechRail/src/speechrail/domain/tts.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/src/speechrail/domain/ports.py`
-- Create: `/Users/hrygo/Documents/SpeechRail/tests/test_tts_policy.py`
+- Create: `src/speechrail/domain/tts.py`
+- Modify: `src/speechrail/domain/ports.py`
+- Create: `tests/test_tts_policy.py`
 
 **Interfaces:**
 - Produces `VoiceProfile(id: str, instruction: str, is_default: bool)` and an immutable `VOICE_PROFILES` registry.
@@ -55,11 +55,11 @@ def test_generation_budget_is_bounded():
 ### Task 2: Replace the SpeechRail worker engine with MLX VoiceDesign
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/SpeechRail/src/speechrail/backends/qwen3_tts.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/src/speechrail/backends/qwen3_tts_worker.py`
-- Create: `/Users/hrygo/Documents/SpeechRail/tests/test_qwen3_tts_voice_design.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/tests/test_qwen3_tts.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/tests/test_qwen3_tts_worker.py`
+- Modify: `src/speechrail/backends/qwen3_tts.py`
+- Modify: `src/speechrail/backends/qwen3_tts_worker.py`
+- Create: `tests/test_qwen3_tts_voice_design.py`
+- Modify: `tests/test_qwen3_tts.py`
+- Modify: `tests/test_qwen3_tts_worker.py`
 
 **Interfaces:**
 - `Qwen3TtsWorker` remains the `SpeechSynthesizer` implementation and continues to accept only a validated local snapshot and configured worker Python executable.
@@ -76,12 +76,12 @@ def test_generation_budget_is_bounded():
 ### Task 3: Complete SpeechRail REST and Realtime v2 TTS lifecycle
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/SpeechRail/src/speechrail/app.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/src/speechrail/config/__init__.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/src/speechrail/realtime/v2_session.py`
-- Create: `/Users/hrygo/Documents/SpeechRail/tests/test_tts_voices_api.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/tests/test_speech_api.py`
-- Modify: `/Users/hrygo/Documents/SpeechRail/tests/test_realtime_v2_websocket.py`
+- Modify: `src/speechrail/app.py`
+- Modify: `src/speechrail/config/__init__.py`
+- Modify: `src/speechrail/realtime/v2_session.py`
+- Create: `tests/test_tts_voices_api.py`
+- Modify: `tests/test_speech_api.py`
+- Modify: `tests/test_realtime_v2_websocket.py`
 
 **Interfaces:**
 - Adds `GET /v1/voices` returning `{object: "list", data: [{id, description, is_default, available}]}`.
@@ -99,12 +99,12 @@ def test_generation_budget_is_bounded():
 ### Task 4: Create the neutral `sona` SpeechRail outbound adapter
 
 **Files:**
-- Create: `/Users/hrygo/Documents/sona/src/sona/speechrail/__init__.py`
-- Create: `/Users/hrygo/Documents/sona/src/sona/speechrail/transport.py`
-- Create: `/Users/hrygo/Documents/sona/src/sona/speechrail/tts.py`
-- Modify: `/Users/hrygo/Documents/sona/src/sona/asr/adapters/speechrail_realtime.py`
-- Create: `/Users/hrygo/Documents/sona/tests/test_speechrail_tts.py`
-- Modify: `/Users/hrygo/Documents/sona/tests/asr/test_speechrail_realtime.py`
+- Create: `../sona/src/sona/speechrail/__init__.py`
+- Create: `../sona/src/sona/speechrail/transport.py`
+- Create: `../sona/src/sona/speechrail/tts.py`
+- Modify: `../sona/src/sona/asr/adapters/speechrail_realtime.py`
+- Create: `../sona/tests/test_speechrail_tts.py`
+- Modify: `../sona/tests/asr/test_speechrail_realtime.py`
 
 **Interfaces:**
 - `SpeechRailV2Transport` validates JSON object shape, `session_id`, `request_id`, and monotonically increasing `sequence`; it supports `connect`, `send_event`, `receive`, and `close` and is reusable by ASR and TTS adapters.
@@ -120,12 +120,12 @@ def test_generation_budget_is_bounded():
 ### Task 5: Replace the Pipecat local bridge with a Realtime v2 TTS service
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/sona/src/sona/interaction/tts.py`
-- Modify: `/Users/hrygo/Documents/sona/src/sona/interaction/pipeline.py`
-- Modify: `/Users/hrygo/Documents/sona/src/sona/config.py`
-- Create: `/Users/hrygo/Documents/sona/tests/test_speechrail_tts_service.py`
-- Modify: `/Users/hrygo/Documents/sona/tests/test_pipeline.py`
-- Modify: `/Users/hrygo/Documents/sona/tests/test_local_tts.py`
+- Modify: `../sona/src/sona/interaction/tts.py`
+- Modify: `../sona/src/sona/interaction/pipeline.py`
+- Modify: `../sona/src/sona/config.py`
+- Create: `../sona/tests/test_speechrail_tts_service.py`
+- Modify: `../sona/tests/test_pipeline.py`
+- Modify: `../sona/tests/test_local_tts.py`
 
 **Interfaces:**
 - `SpeechRailTTSService(TTSService)` consumes aggregated LLM text, opens a v2 speech session per bounded clause, yields `TTSAudioRawFrame(audio, 24000, 1, context_id)`, and closes/cancels the client in every exit path.
@@ -141,15 +141,15 @@ def test_generation_budget_is_bounded():
 ### Task 6: Move UI health, voice selection, and REST audition to SpeechRail
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/sona/src/sona/ui/server.py`
-- Modify: `/Users/hrygo/Documents/sona/src/sona/ui/control.py`
-- Modify: `/Users/hrygo/Documents/sona/src/sona/ui/runtime.py`
-- Modify: `/Users/hrygo/Documents/sona/ui/src/components/AssistantPanel.tsx`
-- Modify: `/Users/hrygo/Documents/sona/ui/src/components/StatusBar.tsx`
-- Modify: `/Users/hrygo/Documents/sona/ui/src/components/assistantPresentation.ts`
-- Create: `/Users/hrygo/Documents/sona/tests/test_ui_speechrail_tts.py`
-- Modify: `/Users/hrygo/Documents/sona/tests/test_ui_server.py`
-- Modify: `/Users/hrygo/Documents/sona/tests/test_control.py`
+- Modify: `../sona/src/sona/ui/server.py`
+- Modify: `../sona/src/sona/ui/control.py`
+- Modify: `../sona/src/sona/ui/runtime.py`
+- Modify: `../sona/ui/src/components/AssistantPanel.tsx`
+- Modify: `../sona/ui/src/components/StatusBar.tsx`
+- Modify: `../sona/ui/src/components/assistantPresentation.ts`
+- Create: `../sona/tests/test_ui_speechrail_tts.py`
+- Modify: `../sona/tests/test_ui_server.py`
+- Modify: `../sona/tests/test_control.py`
 
 **Interfaces:**
 - UI proxy routes call SpeechRail REST derived from the configured SpeechRail endpoint, preserve upstream content type and structured error bodies, and never call port `8765`.
@@ -165,14 +165,14 @@ def test_generation_budget_is_bounded():
 ### Task 7: Retire the old bridge active path and update deployment documentation
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/sona/scripts/run-all.sh`
-- Modify: `/Users/hrygo/Documents/sona/pyproject.toml`
-- Modify: `/Users/hrygo/Documents/sona/tests/test_run_all_script.py`
-- Modify: `/Users/hrygo/Documents/sona/README.md`
-- Modify: `/Users/hrygo/Documents/SpeechRail/configs/speechrail.example.env`
-- Modify: `/Users/hrygo/Documents/SpeechRail/docs/11-operations-runbook.md`
-- Modify: `/Users/hrygo/Documents/SpeechRail/docs/03-sona-absorption.md`
-- Modify: `/Users/hrygo/Documents/SpeechRail/docs/08-migration-runbook.md`
+- Modify: `../sona/scripts/run-all.sh`
+- Modify: `../sona/pyproject.toml`
+- Modify: `../sona/tests/test_run_all_script.py`
+- Modify: `../sona/README.md`
+- Modify: `configs/speechrail.example.env`
+- Modify: `docs/11-operations-runbook.md`
+- Modify: `docs/03-sona-absorption.md`
+- Modify: `docs/08-migration-runbook.md`
 
 **Interfaces:**
 - `run-all.sh` starts only `vr-ui` and verifies the independently managed SpeechRail endpoint; it does not spawn `vr-bridge` or download TTS weights.
@@ -188,7 +188,7 @@ def test_generation_budget_is_bounded():
 
 **Files:**
 - Modify only files required by failing verification; do not alter unrelated parallel staged files.
-- Create: `/Users/hrygo/Documents/SpeechRail/tests/test_tts_closed_loop_contract.py` if a missing deterministic cross-boundary case is found.
+- Create: `tests/test_tts_closed_loop_contract.py` if a missing deterministic cross-boundary case is found.
 
 - [ ] **Step 1: Run SpeechRail focused TTS tests, then the full `uv run pytest`, `uv run ruff check`, `uv run mypy`, OpenAPI validation, and Realtime contract validation.**
 - [ ] **Step 2: Run `sona` focused TTS/adapter/UI tests, then full backend pytest, `uv run ruff check`, `uv run mypy`, UI tests, and UI build.**

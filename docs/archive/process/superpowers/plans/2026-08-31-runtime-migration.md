@@ -23,9 +23,9 @@
 ### Task 1: 建立可恢复的运行配置基线（已完成）
 
 **Files:**
-- Create: `/Users/hrygo/Documents/SpeechRail/.env`（gitignore，私有运行配置）
-- Modify: `/Users/hrygo/.qwenpaw/config.json`（私有运行配置）
-- Modify: `/Users/hrygo/Documents/sona/.env`（gitignore，私有运行配置）
+- Create: `.env`（gitignore，私有运行配置）
+- Modify: `~/.qwenpaw/config.json`（私有运行配置）
+- Modify: `../sona/.env`（gitignore，私有运行配置）
 - Modify: `docs/08-migration-runbook.md`
 
 - [x] **Step 1: 只读取非敏感配置键，记录当前 endpoint、model 和默认值。**
@@ -38,7 +38,7 @@
 ### Task 2: 启动并验证 SpeechRail 真实本地 worker（已完成）
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/SpeechRail/.env`
+- Modify: `.env`
 - Test: `/health`、`/readyz`、`/v1/models`、`/v1/audio/transcriptions`
 
 - [x] **Step 1: 验证 Qwen3-ASR snapshot 必要文件与专用 Python 的 `qwen_asr` import；不联网。**
@@ -49,8 +49,8 @@
 ### Task 3: QwenPaw 与 sona 端到端验收（已完成）
 
 **Files:**
-- Modify: `/Users/hrygo/.qwenpaw/config.json`
-- Modify: `/Users/hrygo/Documents/sona/.env`
+- Modify: `~/.qwenpaw/config.json`
+- Modify: `../sona/.env`
 - Test: QwenPaw `/api/workspace/transcribe`、sona Realtime v2 字幕与 VAD turn
 
 - [x] **Step 1: 完整重启 QwenPaw；调用其转写 API 并验证由 SpeechRail 返回。**

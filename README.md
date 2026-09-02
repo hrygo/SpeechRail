@@ -257,7 +257,7 @@ response.stream_to_file("output.mp3")
 | `SPEECHRAIL_MAX_UPLOAD_BYTES` | `536870912` (512MB) | 单次文件上传最大体积限制 |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | `120` | 单次推理 Worker 超时硬截断（秒） |
 
-完整配置字段请参考 [`configs/speechrail.example.env`](file:///Users/hrygo/Documents/SpeechRail/configs/speechrail.example.env)。
+完整配置字段请参考 [`configs/speechrail.example.env`](configs/speechrail.example.env)。
 
 ---
 

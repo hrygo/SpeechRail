@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from zipfile import ZipFile
-
-import pytest
 
 
 def assert_wheel_contents(wheel_path: Path) -> None:
@@ -22,5 +21,7 @@ def assert_wheel_contents(wheel_path: Path) -> None:
 def test_built_wheel_contains_runtime_only() -> None:
     wheels = sorted(Path("dist").glob("*.whl"))
     if not wheels:
-        pytest.fail("build a wheel with 'uv build --no-sources --wheel' before this test")
+        subprocess.run(["uv", "build", "--no-sources", "--wheel"], check=True)
+        wheels = sorted(Path("dist").glob("*.whl"))
+    assert wheels, "failed to locate built wheel in dist/"
     assert_wheel_contents(wheels[-1])

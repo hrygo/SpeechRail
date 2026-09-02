@@ -130,12 +130,13 @@ def warm_up(mode: str, base_host: str, audio_path: Path | None) -> None:
 def check_sanity(key: str, memory_mb: float, metric: str) -> None:
     """Verifies that 1.7B parameter models have physically plausible memory footprints."""
     if key in ("batch-asr", "streaming-asr", "tts") and memory_mb < 1500:
-        print(
+        msg = (
             f"   [SANITY_WARNING] {key} memory is only {memory_mb:.1f} MB ({metric})! "
             f"A 1.7B model should typically occupy ≥ 1,800 MB (INT8) or ≥ 3,400 MB (FP16). "
-            f"The worker may be uninitialized, using a fake backend, or weights are not yet resident.",
-            file=sys.stderr,
+            f"The worker may be uninitialized, using a fake backend, "
+            f"or weights are not yet resident."
         )
+        print(msg, file=sys.stderr)
 
 
 def main() -> None:
@@ -145,7 +146,9 @@ def main() -> None:
     parser.add_argument("--mode", choices=("batch", "tts", "all"), default="batch")
     parser.add_argument("--host", default="http://127.0.0.1:8201", help="SpeechRail base URL")
     parser.add_argument("--model", default="speechrail/qwen3-asr-1.7b")
-    parser.add_argument("--warmup", action="store_true", help="Perform 1 warm-up round before sampling")
+    parser.add_argument(
+        "--warmup", action="store_true", help="Perform 1 warm-up round before sampling"
+    )
     args = parser.parse_args()
 
     audio_path = Path(args.audio) if args.audio else None
@@ -182,7 +185,11 @@ def main() -> None:
 
     # 4. Continuous background sampler during load
     peaks: dict[str, tuple[float, float, str]] = {
-        key: (0.0, idle_mem.get(key, (0.0, "Footprint"))[0], idle_mem.get(key, (0.0, "Footprint"))[1])
+        key: (
+            0.0,
+            idle_mem.get(key, (0.0, "Footprint"))[0],
+            idle_mem.get(key, (0.0, "Footprint"))[1],
+        )
         for key in pids
     }
     stop = threading.Event()
@@ -207,11 +214,13 @@ def main() -> None:
     ok_count = 0
     for i in range(args.n):
         if args.mode in ("batch", "all") and audio_path and audio_path.exists():
-            status, text = transcribe_batch(f"{args.host}/v1/audio/transcriptions", audio_path, args.model)
+            status, text = transcribe_batch(
+                f"{args.host}/v1/audio/transcriptions", audio_path, args.model
+            )
             if status is not None and text is not None:
                 ok_count += 1
         elif args.mode == "tts":
-            elapsed, nbytes = synthesize_tts(
+            _elapsed, nbytes = synthesize_tts(
                 f"{args.host}/v1/audio/speech",
                 text=f"这是第 {i + 1} 次并发性能压测样本。",
                 voice="default",
@@ -228,7 +237,11 @@ def main() -> None:
     print("\n" + "=" * 80)
     print(" SpeechRail 真实资源占用与压测基线汇总 (Resource Baseline Summary)")
     print("=" * 80)
-    print(f"{'组件 (Component)':<20} | {'PID':<8} | {'冷启待机':<12} | {'预热常驻 (Idle)':<16} | {'压测峰值 (Peak)':<16} | {'峰值 CPU':<10}")
+    hdr = (
+        f"{'组件 (Component)':<20} | {'PID':<8} | {'冷启待机':<12} | "
+        f"{'预热常驻 (Idle)':<16} | {'压测峰值 (Peak)':<16} | {'峰值 CPU':<10}"
+    )
+    print(hdr)
     print("-" * 80)
 
     total_idle = 0.0
@@ -247,7 +260,11 @@ def main() -> None:
         )
 
     print("-" * 80)
-    print(f"{'总物理常驻 (Total)':<20} | {'--':<8} | {'--':<12} | {total_idle:>7.1f} MB        | {total_peak:>7.1f} MB        | {'--':<10}")
+    total_row = (
+        f"{'总物理常驻 (Total)':<20} | {'--':<8} | {'--':<12} | "
+        f"{total_idle:>7.1f} MB        | {total_peak:>7.1f} MB        | {'--':<10}"
+    )
+    print(total_row)
     print("=" * 80 + "\n")
 
 
