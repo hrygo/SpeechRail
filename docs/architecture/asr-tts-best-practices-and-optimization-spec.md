@@ -13,7 +13,7 @@ date: 2026-09-02
 
 ## 一、 核心设计准则与决策过滤器 (Core Principles)
 
-本规范遵循 [AGENTS.md](file:///Users/hrygo/Documents/SpeechRail/AGENTS.md) 确立的四大架构过滤器：
+本规范遵循 [AGENTS.md](../../AGENTS.md) 确立的四大架构过滤器：
 
 1. **单机单人真实需求驱动**：所有优化针对解决本地实时对话与转写的延迟、显存与体验瓶颈；不预留任何多租户、分布式控制面或云平台基础设施；
 2. **全面 OpenAI 契约兼容**：
