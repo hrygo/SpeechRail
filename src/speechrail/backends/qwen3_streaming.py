@@ -1,9 +1,8 @@
 """Native Qwen3 causal-streaming ASR backend (main-process adapter).
 
 The main process never imports qwen3_asr_causal.  It proxies framed PCM/events
-to and from the isolated ``qwen3_streaming_worker`` subprocess and implements
-the existing ``RealtimeAsrSession`` port so the OpenAI Realtime route consumes the same
-partial/completed events as the legacy WLK path.
+to and from the isolated worker process and implements the existing
+``RealtimeAsrSession`` port.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import contextlib
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, StreamingAsrEvent
@@ -36,6 +35,19 @@ _SUPPORTED_LANGUAGES = {
     "swedish", "danish", "finnish", "polish", "czech", "filipino", "persian",
     "greek", "romanian", "hungarian", "macedonian",
 }
+
+
+class StreamingWorkerProtocol(Protocol):
+    """Narrow interface required by streaming sessions from an ASR worker."""
+
+    @property
+    def alive(self) -> bool: ...
+
+    async def start(self) -> None: ...
+
+    async def send(self, payload: Mapping[str, object]) -> None: ...
+
+    async def receive(self) -> dict[str, object]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,23 +89,11 @@ class Qwen3StreamingBackendConfig:
         return [
             str(self.python_executable),
             "-m",
-            "speechrail.backends.qwen3_streaming_worker",
+            "speechrail.backends.qwen3_worker",
             "--model-dir",
             str(self.model_dir),
             "--device",
             self.device,
-            "--mode",
-            self.mode,
-            "--chunk-sec",
-            str(self.chunk_sec),
-            "--left-context-sec",
-            str(self.left_context_sec),
-            "--right-context-ms",
-            str(self.right_context_ms),
-            "--hold-back-words",
-            str(self.hold_back_words),
-            "--stable-iterations",
-            str(self.stable_iterations),
             "--max-new-tokens",
             str(self.max_new_tokens),
         ]
@@ -108,12 +108,7 @@ class Qwen3StreamingBackendConfig:
 
 
 class Qwen3StreamingWorker:
-    """One supervised, offline streaming worker shared by sequential sessions.
-
-    A write lock serializes outgoing frames; a single reader task drains the
-    worker's event stream into the active session's bounded queue.  Only one
-    session may be active at a time (single-processor model).
-    """
+    """One supervised, offline streaming worker shared by sequential sessions."""
 
     def __init__(self, config: Qwen3StreamingBackendConfig) -> None:
         self.config = config
@@ -136,7 +131,6 @@ class Qwen3StreamingWorker:
                 "type": "start",
                 "model_dir": str(self.config.model_dir),
                 "device": self.config.device,
-                "mode": self.config.mode,
             }
         )
         ready = await self._transport.receive()
@@ -162,7 +156,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
     def __init__(
         self,
         *,
-        worker: Qwen3StreamingWorker,
+        worker: StreamingWorkerProtocol,
         language: str,
         prompt: str,
         session_id: str,
@@ -315,7 +309,7 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
     def __init__(
         self,
         *,
-        worker: Qwen3StreamingWorker,
+        worker: StreamingWorkerProtocol,
         mode: Literal["windowed", "causal"],
         next_session_id: Callable[[], str],
     ) -> None:
@@ -355,4 +349,5 @@ __all__ = [
     "Qwen3StreamingBackendConfig",
     "Qwen3StreamingSession",
     "Qwen3StreamingWorker",
+    "StreamingWorkerProtocol",
 ]

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-09-02
+
+### Changed
+
+- **统一 ASR Worker 架构**：消除 batch 与 streaming 之间的双重 Worker 进程与模型实例重复加载，
+  合并为单例 `Qwen3Worker`，直接削减 ~8.5 GB 物理显存冗余。
+- **MLX Metal 显存治理**：在 ASR / TTS 推理及会话生命周期结束后显式调用 `_clear_metal_cache()`，
+  防止 Apple Silicon 统一内存分配池无节制膨胀。
+
+### Added
+
+- **Worker 动态生命周期治理 (Idle Eviction & Lazy Load)**：引入 `WorkerIdleEvictor`，
+  支持配置 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS`（默认 300s）自动卸载空闲 Worker 释放显存；
+  支持 `SPEECHRAIL_WORKER_LAZY_LOAD` 惰性预热。
+- **8-bit (INT8) 模型量化支持**：配置系统与 Worker 启动协议支持 `SPEECHRAIL_DTYPE=int8`。
+- **真实显存测量工具与基准校准**：升级 `sample_resources.py` 为使用系统级 `footprint` 工具抓取物理显存，
+  并确立 100% 真实真机性能与显存基线。
+
 ## [1.2.0] - 2026-09-02
 
 ### Changed

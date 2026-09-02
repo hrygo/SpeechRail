@@ -1,4 +1,4 @@
-"""Qwen3-ASR subprocess preflight and persistent-worker configuration."""
+"""Native Qwen3-ASR backend adapter (main-process side of the worker boundary)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -49,26 +50,35 @@ def _build_timed_result(
         end = item.get("end")
         if (
             not isinstance(text, str)
-            or not text.strip()
             or not isinstance(start, (int, float))
             or not isinstance(end, (int, float))
         ):
             continue
-        start_ms = max(0, round(float(start) * 1000))
-        end_ms = max(0, round(float(end) * 1000))
-        clean = text.strip()
+        start_ms = round(float(start) * 1000)
+        end_ms = round(float(end) * 1000)
+        cleaned = text.strip()
+        if not cleaned:
+            continue
         segments.append(
             TranscriptSegment(
-                id=f"seg_{index}", start_ms=start_ms, end_ms=end_ms, text=clean
+                id=f"seg_{index}",
+                start_ms=start_ms,
+                end_ms=end_ms,
+                text=cleaned,
             )
         )
-        words.append(TranscriptWord(word=clean, start_ms=start_ms, end_ms=end_ms))
+        words.append(
+            TranscriptWord(
+                word=cleaned,
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
+        )
     return tuple(segments), tuple(words)
 
 
 def validate_snapshot(model_dir: Path, *, repository_root: Path) -> Path:
     """Require a complete external local snapshot; requests never download one."""
-
     if not model_dir.is_absolute():
         raise ValueError("model snapshot must be an absolute path")
     resolved_model = model_dir.resolve(strict=True)
@@ -98,7 +108,9 @@ class Qwen3BackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
-    dtype: Literal["float16", "float32"]
+    dtype: Literal["float16", "float32", "int8"] = "float16"
+    cache_limit_mb: int = 256
+    memory_limit_mb: int = 0
     timeout_seconds: float = 120.0
     max_new_tokens: int = 512
 
@@ -107,12 +119,14 @@ class Qwen3BackendConfig:
         python_executable = self.python_executable.absolute()
         if not python_executable.is_file() or not os.access(python_executable, os.X_OK):
             raise ValueError("python_executable must be an executable local file")
-        if self.device == "mps" and self.dtype != "float16":
-            raise ValueError("MPS requires float16; CPU fallback is not allowed")
-        if self.device == "cpu" and self.dtype != "float32":
-            raise ValueError("CPU requires float32")
+        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
+            raise ValueError("MPS requires float16 or int8; CPU fallback is not allowed")
+        if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
+            raise ValueError("CPU requires float32 or int8")
         if self.timeout_seconds <= 0 or not 32 <= self.max_new_tokens <= 2048:
             raise ValueError("invalid worker timeout or token limit")
+        if self.cache_limit_mb < 0 or self.memory_limit_mb < 0:
+            raise ValueError("memory and cache limits must be non-negative")
         object.__setattr__(self, "repository_root", repository_root)
         object.__setattr__(self, "python_executable", python_executable)
         object.__setattr__(
@@ -120,7 +134,7 @@ class Qwen3BackendConfig:
         )
 
     def command(self) -> list[str]:
-        return [
+        cmd = [
             str(self.python_executable),
             "-m",
             "speechrail.backends.qwen3_worker",
@@ -128,9 +142,16 @@ class Qwen3BackendConfig:
             str(self.model_dir),
             "--device",
             self.device,
+            "--dtype",
+            self.dtype,
             "--max-new-tokens",
             str(self.max_new_tokens),
+            "--cache-limit-mb",
+            str(self.cache_limit_mb),
         ]
+        if self.memory_limit_mb > 0:
+            cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
+        return cmd
 
     def worker_spec(self) -> WorkerProcessSpec:
         return WorkerProcessSpec(
@@ -142,18 +163,17 @@ class Qwen3BackendConfig:
 
 
 class Qwen3Worker:  # pragma: no cover - exercised against an external isolated Qwen runtime.
-    """One supervised, offline worker process shared by sequential batch requests.
-
-    The profile policy lives here: one ready handshake with device/dtype
-    identity and exactly one result frame per transcribe request.  Process
-    transport, framing and termination are delegated to the shared layer.
-    """
+    """One supervised, offline worker process shared by batch and streaming requests."""
 
     def __init__(self, config: Qwen3BackendConfig) -> None:
         self.config = config
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._identity: tuple[str, str] | None = None
+
+    @property
+    def alive(self) -> bool:
+        return self._transport.alive
 
     async def start(self) -> None:
         async with self._lock:
@@ -179,6 +199,12 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             except BaseException:
                 await self._transport.abort()
                 raise
+
+    async def send(self, payload: Mapping[str, object]) -> None:
+        await self._transport.send(payload)
+
+    async def receive(self) -> dict[str, object]:
+        return await self._transport.receive()
 
     async def transcribe(
         self,

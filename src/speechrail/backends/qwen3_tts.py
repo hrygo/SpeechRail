@@ -32,14 +32,16 @@ class Qwen3TtsBackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
-    dtype: Literal["float16", "float32"]
-    sample_rate: int
+    dtype: Literal["float16", "float32", "int8"] = "float16"
+    sample_rate: int = 24_000
     timeout_seconds: float = 120.0
     chunk_ms: int = 100
     repetition_penalty: float = 1.25
     temperature: float = 0.85
     top_p: float = 0.95
     warmup_on_start: bool = True
+    cache_limit_mb: int = 256
+    memory_limit_mb: int = 0
 
     def __post_init__(self) -> None:
         repository_root = self.repository_root.resolve(strict=True)
@@ -53,10 +55,10 @@ class Qwen3TtsBackendConfig:
             raise ValueError("model snapshot must be outside repository")
         if not model_dir.is_dir() or not (model_dir / "config.json").is_file():
             raise ValueError("model snapshot is incomplete")
-        if self.device == "mps" and self.dtype != "float16":
-            raise ValueError("MPS requires float16")
-        if self.device == "cpu" and self.dtype != "float32":
-            raise ValueError("CPU requires float32")
+        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
+            raise ValueError("MPS requires float16 or int8")
+        if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
+            raise ValueError("CPU requires float32 or int8")
         if self.sample_rate != 24_000:
             raise ValueError("Qwen3-TTS public PCM profile requires 24000 Hz")
         if self.timeout_seconds <= 0:
@@ -69,6 +71,8 @@ class Qwen3TtsBackendConfig:
             raise ValueError("temperature must be between 0 and 2")
         if not 0.0 < self.top_p <= 1.0:
             raise ValueError("top_p must be between 0 and 1")
+        if self.cache_limit_mb < 0 or self.memory_limit_mb < 0:
+            raise ValueError("memory and cache limits must be non-negative")
         object.__setattr__(self, "repository_root", repository_root)
         object.__setattr__(self, "python_executable", python_executable)
         object.__setattr__(self, "model_dir", model_dir)
@@ -92,7 +96,11 @@ class Qwen3TtsBackendConfig:
             str(self.temperature),
             "--top-p",
             str(self.top_p),
+            "--cache-limit-mb",
+            str(self.cache_limit_mb),
         ]
+        if self.memory_limit_mb > 0:
+            command.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
         if not self.warmup_on_start:
             command.append("--no-warmup")
         return command
@@ -123,6 +131,10 @@ class Qwen3TtsWorker:
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
+
+    @property
+    def alive(self) -> bool:
+        return self._transport.alive
 
     @property
     def ready(self) -> bool:

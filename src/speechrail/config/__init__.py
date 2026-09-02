@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "1.2.0"
+    version: str = "1.3.0"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
@@ -69,7 +69,11 @@ class Settings(BaseSettings):
     qwen3_python: Path | None = None
     allow_model_downloads: bool = False
     device: Literal["mps", "cpu"] = "mps"
-    dtype: Literal["float16", "float32"] = "float16"
+    dtype: Literal["float16", "float32", "int8"] = "float16"
+    mlx_cache_limit_mb: int = Field(default=256, ge=0, le=65536)
+    mlx_memory_limit_mb: int = Field(default=0, ge=0, le=131072)
+    worker_lazy_load: bool = False
+    worker_idle_timeout_seconds: float = Field(default=300.0, ge=0.0, le=86_400)
     max_queue_size: int = Field(default=8, ge=1, le=1024)
     max_upload_bytes: int = Field(default=536_870_912, ge=1)
     max_audio_seconds: int = Field(default=3600, ge=1)
@@ -105,10 +109,10 @@ class Settings(BaseSettings):
     def validate_exposure(self) -> Settings:
         if self.host not in {"127.0.0.1", "::1", "localhost"} and not self.api_key:
             raise ValueError("api_key is required when binding outside loopback")
-        if self.device == "mps" and self.dtype != "float16":
-            raise ValueError("MPS profile requires float16")
-        if self.device == "cpu" and self.dtype != "float32":
-            raise ValueError("CPU profile requires float32")
+        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
+            raise ValueError("MPS profile requires float16 or int8")
+        if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
+            raise ValueError("CPU profile requires float32 or int8")
         if self.realtime_asr_backend == "native":
             if self.qwen3_python is None:
                 raise ValueError(

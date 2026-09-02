@@ -121,6 +121,8 @@ def test_tts_worker_config_requires_external_snapshot_and_builds_private_command
         "0.85",
         "--top-p",
         "0.95",
+        "--cache-limit-mb",
+        "256",
     ]
 
 

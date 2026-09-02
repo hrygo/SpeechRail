@@ -36,6 +36,7 @@ from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRepository
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
+from speechrail.runtime.worker_lease import WorkerIdleEvictor
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
 
@@ -165,6 +166,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 model_dir=settings.qwen3_model_dir,
                 device=settings.device,
                 dtype=settings.dtype,
+                cache_limit_mb=settings.mlx_cache_limit_mb,
+                memory_limit_mb=settings.mlx_memory_limit_mb,
                 timeout_seconds=settings.request_timeout_seconds,
             )
         )
@@ -192,6 +195,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 temperature=settings.tts_temperature,
                 top_p=settings.tts_top_p,
                 warmup_on_start=settings.tts_warmup_on_start,
+                cache_limit_mb=settings.mlx_cache_limit_mb,
+                memory_limit_mb=settings.mlx_memory_limit_mb,
             )
         )
         tts_synthesizer = tts_worker
@@ -204,27 +209,34 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         and settings.qwen3_python is not None
         and settings.qwen3_model_dir is not None
     ):
-        streaming_worker = Qwen3StreamingWorker(
-            Qwen3StreamingBackendConfig(
-                repository_root=_package_root(),
-                python_executable=settings.qwen3_python,
-                model_dir=settings.qwen3_model_dir,
-                device=settings.device,
+        if asr_worker is not None:
+            realtime_asr_factory = NativeRealtimeFactory(
+                worker=asr_worker,
                 mode=settings.qwen3_streaming_mode,
-                chunk_sec=settings.qwen3_streaming_chunk_sec,
-                left_context_sec=settings.qwen3_streaming_left_context_sec,
-                right_context_ms=settings.qwen3_streaming_right_context_ms,
-                hold_back_words=settings.qwen3_streaming_hold_back_words,
-                stable_iterations=settings.qwen3_streaming_stable_iterations,
-                max_new_tokens=settings.qwen3_streaming_max_new_tokens,
-                timeout_seconds=settings.request_timeout_seconds,
+                next_session_id=lambda: f"sess_{uuid4().hex}",
             )
-        )
-        realtime_asr_factory = NativeRealtimeFactory(
-            worker=streaming_worker,
-            mode=settings.qwen3_streaming_mode,
-            next_session_id=lambda: f"sess_{uuid4().hex}",
-        )
+        else:
+            streaming_worker = Qwen3StreamingWorker(
+                Qwen3StreamingBackendConfig(
+                    repository_root=_package_root(),
+                    python_executable=settings.qwen3_python,
+                    model_dir=settings.qwen3_model_dir,
+                    device=settings.device,
+                    mode=settings.qwen3_streaming_mode,
+                    chunk_sec=settings.qwen3_streaming_chunk_sec,
+                    left_context_sec=settings.qwen3_streaming_left_context_sec,
+                    right_context_ms=settings.qwen3_streaming_right_context_ms,
+                    hold_back_words=settings.qwen3_streaming_hold_back_words,
+                    stable_iterations=settings.qwen3_streaming_stable_iterations,
+                    max_new_tokens=settings.qwen3_streaming_max_new_tokens,
+                    timeout_seconds=settings.request_timeout_seconds,
+                )
+            )
+            realtime_asr_factory = NativeRealtimeFactory(
+                worker=streaming_worker,
+                mode=settings.qwen3_streaming_mode,
+                next_session_id=lambda: f"sess_{uuid4().hex}",
+            )
 
     diarization_engine = overrides.diarization_engine
     if diarization_engine is None and settings.diarization_model_path is not None:
@@ -262,12 +274,25 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
 
+    evictor: WorkerIdleEvictor | None = None
+    if settings.worker_idle_timeout_seconds > 0:
+        evictable = tuple(
+            w for w in (asr_worker, tts_worker, streaming_worker) if w is not None
+        )
+        if evictable:
+            evictor = WorkerIdleEvictor(
+                evictable,
+                idle_timeout_seconds=settings.worker_idle_timeout_seconds,
+            )
+
     lifecycle = RuntimeLifecycle(
         repository=job_repository,
         asr=asr_worker,
         tts=tts_worker,
         streaming=streaming_worker,
         runner=job_runner,
+        evictor=evictor,
+        lazy_load=settings.worker_lazy_load,
         poll_seconds=settings.job_poll_seconds,
     )
     return AppServices(

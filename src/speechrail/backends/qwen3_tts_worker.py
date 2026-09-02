@@ -21,6 +21,39 @@ from speechrail.runtime.worker_protocol import (
 TTS_BACKEND_ID = "mlx-qwen3-tts-voice-design"
 
 
+def _clear_metal_cache() -> None:
+    import gc
+    try:
+        import mlx.core as mx  # type: ignore[import-not-found]
+
+        if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+            mx.metal.clear_cache()
+        elif hasattr(mx, "clear_cache"):
+            mx.clear_cache()
+    except Exception:
+        pass
+    gc.collect()
+
+
+def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> None:
+    try:
+        import mlx.core as mx
+
+        if cache_limit_mb > 0:
+            if hasattr(mx, "metal") and hasattr(mx.metal, "set_cache_limit"):
+                mx.metal.set_cache_limit(cache_limit_mb * 1024 * 1024)
+            elif hasattr(mx, "set_cache_limit"):
+                mx.set_cache_limit(cache_limit_mb * 1024 * 1024)
+        if memory_limit_mb > 0:
+            if hasattr(mx, "metal") and hasattr(mx.metal, "set_memory_limit"):
+                mx.metal.set_memory_limit(memory_limit_mb * 1024 * 1024)
+            elif hasattr(mx, "set_memory_limit"):
+                mx.set_memory_limit(memory_limit_mb * 1024 * 1024)
+    except Exception:
+        pass
+
+
+
 @dataclass(frozen=True, slots=True)
 class TtsWorkerIdentity:
     device: str
@@ -242,6 +275,7 @@ def serve(
                 output_stream,
                 {"version": PROTOCOL_VERSION, "type": "completed", "request_id": request_id},
             )
+            _clear_metal_cache()
         except ProtocolError:
             write_frame(
                 output_stream,
@@ -252,6 +286,7 @@ def serve(
                     "request_id": request_id,
                 },
             )
+            _clear_metal_cache()
         except Exception:
             write_frame(
                 output_stream,
@@ -262,6 +297,7 @@ def serve(
                     "request_id": request_id,
                 },
             )
+            _clear_metal_cache()
 
 
 def _decode_synthesis_request(frame: dict[str, object]) -> tuple[str, str, str, float, str]:
@@ -300,8 +336,11 @@ def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None 
     parser.add_argument("--repetition-penalty", type=float, default=1.25)
     parser.add_argument("--temperature", type=float, default=0.85)
     parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--cache-limit-mb", type=int, default=256)
+    parser.add_argument("--memory-limit-mb", type=int, default=0)
     parser.add_argument("--no-warmup", action="store_true")
     args = parser.parse_args(argv)
+    _apply_metal_limits(args.cache_limit_mb, args.memory_limit_mb)
     model_dir = Path(args.model_dir).resolve(strict=True)
     device: Literal["mps", "cpu"] = args.device
     selected_factory = engine_factory or _default_engine_factory(

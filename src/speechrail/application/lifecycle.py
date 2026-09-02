@@ -1,4 +1,4 @@
-"""Single-owner runtime lifecycle for repository recovery and local workers."""
+"""Single-owner runtime lifecycle for repository recovery, local workers and idle eviction."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from typing import Protocol
 
 from speechrail.runtime.job_runner import JobRunner
+from speechrail.runtime.worker_lease import WorkerIdleEvictor
 
 
 class StartableComponent(Protocol):
@@ -33,10 +34,10 @@ async def run_job_runner(runner: JobRunner, *, poll_seconds: float) -> None:
 
 
 class RuntimeLifecycle:
-    """Own repository recovery, worker start/close and the JobRunner task.
+    """Own repository recovery, worker start/close, idle eviction and JobRunner task.
 
     Startup order is repository recovery → ASR worker → TTS worker → JobRunner
-    task. Failure cleans up only the components that already reported a
+    task → Evictor. Failure cleans up only the components that already reported a
     successful start, and ``close`` is idempotent.
     """
 
@@ -48,6 +49,8 @@ class RuntimeLifecycle:
         tts: StartableComponent | None = None,
         streaming: StartableComponent | None = None,
         runner: JobRunner | None = None,
+        evictor: WorkerIdleEvictor | None = None,
+        lazy_load: bool = False,
         poll_seconds: float = 1.0,
     ) -> None:
         self._repository = repository
@@ -55,6 +58,8 @@ class RuntimeLifecycle:
             component for component in (asr, tts, streaming) if component is not None
         )
         self._runner = runner
+        self._evictor = evictor
+        self._lazy_load = lazy_load
         self._poll_seconds = poll_seconds
         self._started_components: list[StartableComponent] = []
         self._runner_task: asyncio.Task[None] | None = None
@@ -71,18 +76,25 @@ class RuntimeLifecycle:
         try:
             if self._repository is not None:
                 self._repository.recover_interrupted()
-            for component in self._pending:
-                await component.start()
-                self._started_components.append(component)
+            if not self._lazy_load:
+                for component in self._pending:
+                    await component.start()
+                    self._started_components.append(component)
+            else:
+                self._started_components = list(self._pending)
             if self._runner is not None:
                 self._runner_task = asyncio.create_task(
                     run_job_runner(self._runner, poll_seconds=self._poll_seconds)
                 )
+            if self._evictor is not None:
+                await self._evictor.start()
         except BaseException:
             await self._close_started()
             raise
 
     async def close(self) -> None:
+        if self._evictor is not None:
+            await self._evictor.close()
         if self._runner_task is not None:
             self._runner_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
