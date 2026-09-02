@@ -47,7 +47,7 @@ dev = [
 diarization = [
     "kaldi-native-fbank>=1.22",
     "nemo-toolkit[asr]>=2.0",
-    "numpy>=1.26,<2.0",
+    "numpy>=1.26,<3.0",
     "onnxruntime>=1.20",
 ]
 
