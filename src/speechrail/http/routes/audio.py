@@ -96,6 +96,61 @@ def _resolve_ffmpeg() -> str:
     raise ValueError("audio_decode_failed")
 
 
+def _try_fast_decode_wav(audio: bytes) -> bytes | None:
+    """Fast-path decoding for standard 16kHz mono 16-bit PCM WAV without spawning ffmpeg."""
+    if len(audio) < 44 or not audio.startswith(b"RIFF") or audio[8:12] != b"WAVE":
+        return None
+    try:
+        offset = 12
+        audio_format = None
+        num_channels = None
+        sample_rate = None
+        bits_per_sample = None
+        data_bytes: bytes | None = None
+        audio_len = len(audio)
+        while offset + 8 <= audio_len:
+            chunk_id = audio[offset : offset + 4]
+            chunk_size = struct.unpack("<I", audio[offset + 4 : offset + 8])[0]
+            chunk_data_start = offset + 8
+            chunk_data_end = chunk_data_start + chunk_size
+            if chunk_data_end > audio_len:
+                return None
+            if chunk_id == b"fmt " and chunk_size >= 16:
+                fmt_tag, channels, rate, _, _, bits = struct.unpack(
+                    "<HHIIHH", audio[chunk_data_start : chunk_data_start + 16]
+                )
+                audio_format = fmt_tag
+                num_channels = channels
+                sample_rate = rate
+                bits_per_sample = bits
+            elif chunk_id == b"data":
+                data_bytes = audio[chunk_data_start:chunk_data_end]
+                if (
+                    audio_format == 1
+                    and num_channels == 1
+                    and sample_rate == 16_000
+                    and bits_per_sample == 16
+                    and len(data_bytes) % 2 == 0
+                    and len(data_bytes) > 0
+                ):
+                    return data_bytes
+            offset = chunk_data_end + (chunk_size % 2)
+
+        if (
+            audio_format == 1
+            and num_channels == 1
+            and sample_rate == 16_000
+            and bits_per_sample == 16
+            and data_bytes is not None
+            and len(data_bytes) % 2 == 0
+            and len(data_bytes) > 0
+        ):
+            return data_bytes
+    except Exception:
+        return None
+    return None
+
+
 async def _decode_pcm(audio: bytes) -> bytes:
     """Decode any supported local upload with fixed ffmpeg argv, never a shell."""
 
@@ -257,7 +312,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             audio = await _read_upload(file, resolved.max_upload_bytes)
             if services.asr_worker is not None:
-                audio = await _decode_pcm(audio)
+                fast_pcm = _try_fast_decode_wav(audio)
+                if fast_pcm is not None:
+                    audio = fast_pcm
+                else:
+                    audio = await _decode_pcm(audio)
         except OverflowError:
             return error_response(413, request_id, "audio_too_large", "Audio exceeds upload limit")
         except ValueError as exc:

@@ -84,11 +84,13 @@ class AsyncFramedWorkerProcess:
             env=dict(self._spec.env),
         )
 
-    async def send(self, payload: Mapping[str, object]) -> None:
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None:
         process = self._require_process()
         if process.stdin is None:
             raise RuntimeError("worker_transport_invalid")
-        frame = encode_frame(payload)
+        frame = encode_frame(payload, binary_payload=binary_payload)
         async with asyncio.timeout(self._spec.io_timeout_seconds):
             process.stdin.write(frame)
             await process.stdin.drain()

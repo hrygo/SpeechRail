@@ -132,6 +132,7 @@ EngineFactory = Callable[[Path, str, str, int], WorkerEngine]
 
 def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str, bool]:
     request_id = frame.get("request_id")
+    raw_binary = frame.get("_binary")
     encoded = frame.get("pcm_b64")
     language = frame.get("language")
     prompt = frame.get("prompt")
@@ -142,16 +143,21 @@ def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str, boo
         or frame.get("sample_rate") != 16_000
         or frame.get("channels") != 1
         or frame.get("sample_width_bytes") != 2
-        or not isinstance(encoded, str)
         or not isinstance(language, str)
         or not isinstance(prompt, str)
         or not isinstance(raw_timestamps, bool)
     ):
         raise ProtocolError("invalid transcribe request")
-    try:
-        pcm = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise ProtocolError("invalid PCM payload") from exc
+    pcm: bytes
+    if isinstance(raw_binary, bytes) and raw_binary:
+        pcm = raw_binary
+    elif isinstance(encoded, str):
+        try:
+            pcm = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ProtocolError("invalid PCM payload") from exc
+    else:
+        raise ProtocolError("invalid transcribe request")
     if not pcm or len(pcm) % 2 or len(pcm) > MAX_PCM_BYTES:
         raise ProtocolError("invalid PCM length")
     canonical_language = LANGUAGES.get(language.strip().lower())
@@ -256,16 +262,21 @@ def _handle_audio_append(
     output_stream: BinaryIO,
     engine: WorkerEngine,
 ) -> None:
+    raw_binary = frame.get("_binary")
     encoded = frame.get("pcm_b64")
-    if not isinstance(encoded, str):
-        write_frame(
-            output_stream,
-            {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
-        )
-        return
-    try:
-        audio = base64.b64decode(encoded, validate=True)
-    except Exception:
+    audio: bytes
+    if isinstance(raw_binary, bytes) and raw_binary:
+        audio = raw_binary
+    elif isinstance(encoded, str):
+        try:
+            audio = base64.b64decode(encoded, validate=True)
+        except Exception:
+            write_frame(
+                output_stream,
+                {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
+            )
+            return
+    else:
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
@@ -513,8 +524,9 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         kwargs: dict[str, object] = {"context": prompt}
         if language != "auto":
             kwargs["language"] = language
-        if self._max_new_tokens:
-            kwargs["max_new_tokens"] = self._max_new_tokens
+        audio_sec = len(audio) / 32_000.0
+        dynamic_budget = min(self._max_new_tokens or 512, max(32, int(audio_sec * 8) + 16))
+        kwargs["max_new_tokens"] = dynamic_budget
         if include_timestamps:
             kwargs["return_timestamps"] = True
         result = self._session.transcribe((waveform, 16_000), **kwargs)

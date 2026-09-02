@@ -122,3 +122,53 @@ def test_worker_reuses_one_loaded_engine_for_framed_requests() -> None:
         "device": "mps",
         "dtype": "float16",
     }
+
+
+def test_codec_round_trips_binary_payload() -> None:
+    raw_audio = b"\x00\x01\x02\x03\x04\x05"
+    frame = encode_frame(
+        {"version": 1, "type": "audio.append", "session_id": "s1"},
+        binary_payload=raw_audio,
+    )
+    stream = BytesIO(frame)
+    decoded = read_frame(stream)
+    assert decoded is not None
+    assert decoded["version"] == 1
+    assert decoded["type"] == "audio.append"
+    assert decoded["session_id"] == "s1"
+    assert decoded.get("_binary") == raw_audio
+
+
+def test_worker_handles_binary_payload_transcribe() -> None:
+    incoming = BytesIO()
+    write_frame(
+        incoming, {"version": 1, "type": "start", "model_dir": "/external/model", "device": "mps"}
+    )
+    write_frame(
+        incoming,
+        {
+            "version": 1,
+            "type": "transcribe",
+            "request_id": "req_2",
+            "sample_rate": 16000,
+            "channels": 1,
+            "sample_width_bytes": 2,
+            "language": "zh",
+            "prompt": "names",
+        },
+        binary_payload=b"\x00\x00",
+    )
+    incoming.seek(0)
+    outgoing = BytesIO()
+    serve(
+        incoming,
+        outgoing,
+        model_dir=Path("/external/model"),
+        device="mps",
+        max_new_tokens=64,
+        engine_factory=lambda *_: _FakeEngine(),
+    )
+    outgoing.seek(0)
+    assert read_frame(outgoing)["type"] == "ready"
+    assert read_frame(outgoing)["type"] == "result"
+

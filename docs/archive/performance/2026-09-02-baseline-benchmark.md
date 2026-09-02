@@ -23,7 +23,7 @@
 早期版本曾将 ASR Worker 误记为 `874 MB` 和 `321 MB`，经真机排查确认为：
 1. **统计工具口径严重失实**：历史测试直接截取了 `ps aux` 的 `RSS` 列（880MB / 323MB）。在 Apple Silicon 上，`ps rss` 仅统计非 Metal 的匿名脏页，遗漏了 MLX Metal 驱动高达数 GB 的统一内存分配；
 2. **MLX 显存缓存激增**：MLX 默认保留前向计算后的 Metal 显存分配池，若未定期调用 `clear_cache()`，物理显存 Footprint 会急剧膨胀至 6GB~14GB；
-3. **已实施的采样规范升级**：采样工具 [`examples/perf/sample_resources.py`](file:///Users/hrygo/Documents/SpeechRail/examples/perf/sample_resources.py) 现已固定使用 macOS `footprint -f bytes` 精确抓取 `phys_footprint`，并在全量 Warmup 下执行监控，确保数据 100% 真实可复核。
+3. **已实施的采样规范升级**：采样工具 [`examples/perf/sample_resources.py`](../../../examples/perf/sample_resources.py) 现已固定使用 macOS `footprint -f bytes` 精确抓取 `phys_footprint`，并在全量 Warmup 下执行监控，确保数据 100% 真实可复核。
 
 ---
 

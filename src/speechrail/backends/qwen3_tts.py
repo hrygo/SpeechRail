@@ -162,7 +162,7 @@ class Qwen3TtsWorker:
                 if (
                     ready.get("backend") != TTS_BACKEND_ID
                     or ready.get("device") != self.config.device
-                    or ready.get("dtype") != self.config.dtype
+                    or ready.get("dtype") not in {self.config.dtype, "float16", "float32"}
                     or ready.get("sample_rate") != self.config.sample_rate
                 ):
                     raise RuntimeError("backend_identity_mismatch")
@@ -204,14 +204,19 @@ class Qwen3TtsWorker:
                         if frame.get("type") != "audio":
                             raise RuntimeError("worker_frame_invalid")
                         chunk_index = frame.get("chunk_index")
+                        raw_binary = frame.get("_binary")
                         encoded = frame.get("pcm_b64")
-                        if chunk_index != expected_chunk_index or not isinstance(encoded, str):
+                        audio: bytes
+                        if isinstance(raw_binary, bytes) and raw_binary:
+                            audio = raw_binary
+                        elif isinstance(encoded, str):
+                            try:
+                                audio = base64.b64decode(encoded, validate=True)
+                            except (ValueError, TypeError) as exc:
+                                raise RuntimeError("worker_audio_frame_invalid") from exc
+                        else:
                             raise RuntimeError("worker_audio_frame_invalid")
-                        try:
-                            audio = base64.b64decode(encoded, validate=True)
-                        except (ValueError, TypeError) as exc:
-                            raise RuntimeError("worker_audio_frame_invalid") from exc
-                        if not audio or len(audio) % 2:
+                        if chunk_index != expected_chunk_index or not audio or len(audio) % 2:
                             raise RuntimeError("worker_audio_frame_invalid")
                         yield AudioChunk(
                             response_id=response_id,

@@ -33,14 +33,14 @@
 ## ✨ 核心特性
 
 - 🔒 **本地优先与绝对隐私（Local-First & Offline）**：零云端外呼，严格使用仓库外本地模型快照；服务运行期间严禁自动联网下载模型；音频与转写文本仅在内存有界处理，不留存源音频。
-- ⚡ **Apple Silicon 深度优化（MLX & MPS）**：针对 Mac 芯片统一内存架构深度调优，非流式与流式 ASR 采用原生 `mlx-qwen3-asr` 与 MPS (`float16`)，低延迟、低显存占用。
+- ⚡ **Apple Silicon 深度优化（MLX & MPS）**：针对 Mac 芯片统一内存架构深度调优，非流式与流式 ASR 统一采用原生 `mlx-qwen3-asr` 与 MPS (`float16`/`int8`)，具备 WAV 零开销 Fast-path 直读与动态 Token 预算，低延迟、低显存占用。
 - 🔌 **开箱即用的 OpenAI 协议兼容**：
   - 文件转写：`/v1/audio/transcriptions`（支持 OpenAI 官方 SDK、`whisper-1` 别名）。
   - 语音合成：`/v1/audio/speech`（支持 `tts-1` 别名，输出 24 kHz 高品质音频）。
   - 双向流式：`/v1/realtime`（标准 OpenAI Realtime WebSocket 协议，支持 `client.realtime.connect`）。
 - ⏱️ **端到端时间戳对齐**：原生输出句子级与词级对齐时间戳，支持 `verbose_json`、`srt`、`vtt` 及 `timestamp_granularities`，无需额挂载外置 forced-aligner。
 - 👥 **实时声纹分割（Speaker Diarization）**：集成 Sortformer 与 CAM++，支持流式对话场景下的匿名说话人分离与重连声学聚类。
-- 🛡️ **进程隔离与资源守卫（Resource Governor）**：主服务（FastAPI）与推理后端（Worker）通过私有 IPC 协议进行进程级隔离；内置配额管控与背压机制，单机多任务不争抢、不崩溃。
+- 🛡️ **进程隔离与资源守卫（Resource Governor）**：主服务（FastAPI）与推理后端（Worker）通过二进制零拷贝 IPC 协议进行进程级隔离；内置配额管控与背压机制，单机多任务不争抢、不崩溃。
 
 ---
 
@@ -53,12 +53,12 @@ flowchart TD
     subgraph Host ["🚀 SpeechRail 主服务进程 (FastAPI / ASGI :8201)"]
         direction TB
         API["OpenAI 兼容协议层 & Request ID / 统一错误处理"]
-        FFMPEG["ffmpeg 流式音频校验与 16kHz PCM16 格式归一化"]
+        FFMPEG["WAV Fast-path 直读 & ffmpeg 流式格式归一化"]
         Gov["Resource Governor 资源调度器 & 有界队列与背压管理"]
         API --> FFMPEG --> Gov
     end
 
-    subgraph Workers ["🛡️ 独立 Python 隔离运行时 (私有 IPC / 长度前缀 JSON 协议)"]
+    subgraph Workers ["🛡️ 独立 Python 隔离运行时 (二进制零拷贝 IPC 协议)"]
         direction LR
         subgraph ASR_Box ["Qwen3-ASR 推理 Worker (MLX / MPS)"]
             ASR["• Qwen3-ASR-1.7B 外部快照<br/>• 批量转写与端到端时间戳对齐<br/>• 原生 MLX 流式转写 (Realtime)"]

@@ -238,3 +238,24 @@ def test_speech_accepts_openai_standard_model_aliases() -> None:
             json={"model": model, "input": "hello", "voice": "default"},
         )
         assert ok.status_code == 200
+
+
+def test_wav_fast_path_decode() -> None:
+    from speechrail.http.routes.audio import _try_fast_decode_wav, _wav_pcm16
+
+    # 1. Valid 16kHz mono 16bit PCM WAV
+    pcm_data = b"\x00\x00\x10\x00\x20\x00" * 100
+    valid_wav = _wav_pcm16(pcm_data, sample_rate=16_000)
+    assert _try_fast_decode_wav(valid_wav) == pcm_data
+
+    # 2. Invalid sample rate (24000Hz)
+    wav_24k = _wav_pcm16(pcm_data, sample_rate=24_000)
+    assert _try_fast_decode_wav(wav_24k) is None
+
+    # 3. Not a WAV
+    assert _try_fast_decode_wav(b"not a wav file") is None
+    assert _try_fast_decode_wav(b"") is None
+
+    # 4. Truncated WAV header
+    assert _try_fast_decode_wav(valid_wav[:30]) is None
+

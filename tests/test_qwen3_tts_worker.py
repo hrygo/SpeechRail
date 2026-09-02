@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from io import BytesIO
 from pathlib import Path
 
@@ -70,7 +69,7 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
         "sample_rate": 24_000,
         "model_loaded": True,
     }
-    assert base64.b64decode(str(first["pcm_b64"])) == b"\x00\x00"
+    assert first.get("_binary") == b"\x00\x00"
     assert first["chunk_index"] == 0
     assert second["chunk_index"] == 1
     assert completed == {"version": PROTOCOL_VERSION, "type": "completed", "request_id": "req-1"}

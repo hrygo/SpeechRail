@@ -8,7 +8,6 @@ to and from the isolated worker process and implements the existing
 from __future__ import annotations
 
 import asyncio
-import base64
 import contextlib
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
@@ -45,7 +44,9 @@ class StreamingWorkerProtocol(Protocol):
 
     async def start(self) -> None: ...
 
-    async def send(self, payload: Mapping[str, object]) -> None: ...
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None: ...
 
     async def receive(self) -> dict[str, object]: ...
 
@@ -138,9 +139,11 @@ class Qwen3StreamingWorker:
             raise RuntimeError("streaming worker failed to become ready")
         self._ready = True
 
-    async def send(self, payload: Mapping[str, object]) -> None:
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None:
         async with self._write_lock:
-            await self._transport.send(payload)
+            await self._transport.send(payload, binary_payload=binary_payload)
 
     async def receive(self) -> dict[str, object]:
         return await self._transport.receive()
@@ -197,8 +200,8 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                 "version": PROTOCOL_VERSION,
                 "type": "audio.append",
                 "session_id": self._session_id,
-                "pcm_b64": base64.b64encode(audio).decode("ascii"),
-            }
+            },
+            binary_payload=audio,
         )
 
     async def flush(self) -> None:

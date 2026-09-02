@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import os
 from collections.abc import Mapping
@@ -200,8 +199,10 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 await self._transport.abort()
                 raise
 
-    async def send(self, payload: Mapping[str, object]) -> None:
-        await self._transport.send(payload)
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None:
+        await self._transport.send(payload, binary_payload=binary_payload)
 
     async def receive(self) -> dict[str, object]:
         return await self._transport.receive()
@@ -229,8 +230,8 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                     "language": language or "auto",
                     "prompt": prompt,
                     "include_timestamps": include_timestamps,
-                    "pcm_b64": base64.b64encode(pcm).decode("ascii"),
-                }
+                },
+                binary_payload=pcm,
             )
             result = await self._receive_profile_frame()
         if result.get("type") != "result" or result.get("request_id") != resolved_request_id:

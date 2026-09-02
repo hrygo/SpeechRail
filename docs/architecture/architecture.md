@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 总体架构"
 status: active
-version: "1.1.0"
+version: "1.3.1"
 date: 2026-09-02
 ---
 
@@ -15,16 +15,16 @@ QwenPaw / OpenAI SDK ── multipart ──> FastAPI app <── JSON/WS ──
                                    request ID / auth / queue
                               ┌───────────┴───────────┐
                               │                       │
-                       fixed ffmpeg decode      speech session
+                       WAV Fast-path / ffmpeg   speech session
                               │                       │
                        Qwen3 ASR worker        Qwen3 TTS worker
                               │                       │
                     external ASR snapshot   external VoiceDesign snapshot
 ```
 
-主进程负责 HTTP/WS 边界、输入验证、格式化和有界 admission queue。Qwen3 worker 是一个
-长生命周期专用 Python 子进程，经私有长度前缀 JSON 协议顺序处理 PCM 请求。它在启动时
-预检 snapshot、离线设置与设备/dtype；Apple Silicon profile 固定 MPS/`float16`。
+主进程负责 HTTP/WS 边界、输入验证、WAV Fast-path 直读、格式化和有界 admission queue。Qwen3 worker
+是一个长生命周期专用 Python 子进程，经私有二进制零拷贝混合帧协议顺序处理 PCM 请求。它在启动时
+预检 snapshot、离线设置与设备/dtype；Apple Silicon profile 支持 MPS/`float16` 与 `int8` 动态量化。
 
 核心目录：
 

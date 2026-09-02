@@ -1,4 +1,3 @@
-import base64
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -24,7 +23,9 @@ class _FakeTransport:
     async def start(self) -> None:
         return None
 
-    async def send(self, payload: dict[str, Any]) -> None:
+    async def send(self, payload: dict[str, Any], binary_payload: bytes | None = None) -> None:
+        if binary_payload is not None:
+            payload["_binary"] = binary_payload
         self.sends.append(payload)
 
     async def receive(self) -> dict[str, Any]:
@@ -128,8 +129,7 @@ def test_transcribe_request_is_single_pcm16_frame_with_stable_request_id(tmp_pat
     assert request["request_id"] == "req_x"
     assert request["sample_rate"] == 16000
     assert request["channels"] == 1
-    assert request["sample_width_bytes"] == 2
-    assert base64.b64decode(str(request["pcm_b64"])) == b"\x00\x00"
+    assert request["_binary"] == b"\x00\x00"
     assert result.request_id == "req_x"
     assert result.text == "hello"
 

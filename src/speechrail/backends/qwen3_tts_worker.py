@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -268,8 +267,8 @@ def serve(
                         "type": "audio",
                         "request_id": request_id,
                         "chunk_index": index,
-                        "pcm_b64": base64.b64encode(pcm).decode("ascii"),
                     },
+                    binary_payload=pcm,
                 )
             write_frame(
                 output_stream,
