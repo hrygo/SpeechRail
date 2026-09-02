@@ -61,9 +61,16 @@ class WorkerIdleEvictor:
             await asyncio.sleep(self._check_interval)
             now = time.monotonic()
             for worker in self._workers:
+                worker_activity = getattr(worker, "last_active", None)
+                if (
+                    isinstance(worker_activity, (int, float))
+                    and worker_activity > self._last_active.get(worker, 0.0)
+                ):
+                    self._last_active[worker] = worker_activity
                 last_time = self._last_active.get(worker, now)
                 if now - last_time >= self._idle_timeout and (
                     getattr(worker, "alive", False) or getattr(worker, "ready", False)
                 ):
                     with contextlib.suppress(Exception):
                         await worker.close()
+                    self._last_active[worker] = now

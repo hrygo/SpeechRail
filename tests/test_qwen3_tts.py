@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -352,7 +353,8 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
     asyncio.run(scenario())
 
 
-def test_close_terminates_worker_without_waiting_for_the_active_stream(tmp_path: Path) -> None:
+def test_close_waits_for_lock_then_terminates_worker(tmp_path: Path) -> None:
+    """close() acquires the lock, so it waits for any active stream to finish."""
     worker, fake = _worker(tmp_path)
     started = asyncio.Event()
 
@@ -366,10 +368,100 @@ def test_close_terminates_worker_without_waiting_for_the_active_stream(tmp_path:
         stream = worker.synthesize(SpeechRequest(text="关闭", voice="default"))
         task = asyncio.ensure_future(stream.__anext__())
         await started.wait()
-        await asyncio.wait_for(worker.close(), timeout=1.0)
-        assert fake.abort_count == 1
+
+        # close() will block because stream holds the lock — cancel stream first
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        # stream finally aborted the worker (same epoch), releasing the lock
+        assert fake.abort_count == 1
+
+        # Now close() can acquire the lock and abort again (but epoch has advanced
+        # from the finally block, so it sees a fresh transport)
+        fake.alive = True
+        worker._started = True
+        await asyncio.wait_for(worker.close(), timeout=1.0)
+        assert fake.abort_count == 2
 
     asyncio.run(scenario())
+
+
+def test_close_acquires_lock_and_waits_for_active_stream(tmp_path: Path) -> None:
+    """close() must acquire the lock, so it blocks while a stream is active."""
+    worker, fake = _worker(tmp_path)
+    stream_entered = asyncio.Event()
+    close_started = asyncio.Event()
+
+    original_receive = fake.receive
+
+    call_count = 0
+
+    async def gated_receive() -> dict[str, Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            stream_entered.set()
+            # Wait until close has been attempted (it should block on the lock)
+            await close_started.wait()
+            await asyncio.sleep(0.05)
+        return await original_receive()
+
+    fake.receive = gated_receive  # type: ignore[method-assign]
+    fake.push(_chunk_frame("pending", 0, b"\x00\x00"))
+    fake.push({"type": "completed", "request_id": "pending"})
+
+    async def scenario() -> None:
+        # Start streaming
+        stream_task = asyncio.create_task(
+            _collect(worker.synthesize(SpeechRequest(text="关闭", voice="default")))
+        )
+        await stream_entered.wait()
+
+        # Try to close — should block on the lock
+        close_task = asyncio.create_task(worker.close())
+        close_started.set()
+
+        # Stream should complete first
+        chunks = await stream_task
+        assert len(chunks) == 1
+
+        # Then close finishes
+        await asyncio.wait_for(close_task, timeout=2.0)
+        assert fake.abort_count == 1  # only close()'s abort, not stream's (epoch advanced)
+
+    asyncio.run(scenario())
+
+
+def test_epoch_guard_prevents_stale_finally_from_aborting_new_worker(tmp_path: Path) -> None:
+    """When worker epoch has advanced, a stale stream finally must skip abort."""
+    worker, fake = _worker(tmp_path)
+    stream_entered = asyncio.Event()
+
+    async def blocked_receive() -> dict[str, Any]:
+        stream_entered.set()
+        await asyncio.Event().wait()  # block forever
+
+    fake.receive = blocked_receive  # type: ignore[method-assign]
+
+    async def scenario() -> None:
+        stream = worker.synthesize(SpeechRequest(text="epoch", voice="default"))
+        stream_task = asyncio.ensure_future(stream.__anext__())
+        await stream_entered.wait()
+
+        # Advance worker epoch (simulating recycling or epoch bump)
+        worker._epoch += 10
+        fake.abort_count = 0
+
+        # Now cancel the stream — its finally block sees that self._epoch != captured_epoch
+        stream_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stream_task
+
+        # Stale stream must NOT abort the worker because epoch has advanced
+        assert fake.abort_count == 0
+
+    asyncio.run(scenario())
+
+
+async def _collect(source: AsyncIterator[Any]) -> list[Any]:
+    return [item async for item in source]
