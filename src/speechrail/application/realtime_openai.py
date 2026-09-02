@@ -40,6 +40,7 @@ from speechrail.compatibility.openai_realtime import (
     transcription_segment,
     validate_append,
 )
+from speechrail.backends.vad import VoiceActivityDetector
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import resolve_voice
@@ -88,7 +89,7 @@ class OpenAIRealtimeSession:
         self._diarization_config: DiarizationConfig | None = None
         self._pending_text: str | None = None
         self._buffered_audio_bytes = 0
-        self._vad = None
+        self._vad: VoiceActivityDetector | None = None
         self._config: dict[str, Any] = {
             "model": self._initial_model,
             "language": None,

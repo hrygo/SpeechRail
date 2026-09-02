@@ -154,7 +154,7 @@ def _try_fast_decode_wav(audio: bytes) -> bytes | None:
                     return None
                 x_old = np.arange(len(samples), dtype=np.float32)
                 x_new = np.linspace(0, len(samples) - 1, num_out, dtype=np.float32)
-                samples = np.interp(x_new, x_old, samples)
+                samples = np.interp(x_new, x_old, samples).astype(np.float32)
 
             return np.clip(samples, -32768.0, 32767.0).astype("<i2").tobytes()
     except Exception:
