@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-09-02
+
+### Fixed
+
+- 修复 `Qwen3Worker` 与 `Qwen3TtsWorker` 中的 MLX 类型注解与 `EvictableWorker` 接口一致性。
+- 清理冗余的 `qwen3_streaming_worker.py`，保持代码库与测试覆盖率（>81%）整洁统一。
+- 修复 `round()` 整数转换冗余与长行格式规范。
+
 ## [1.3.0] - 2026-09-02
 
 ### Changed
