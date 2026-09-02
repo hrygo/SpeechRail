@@ -31,7 +31,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-PAGE_SIZE = 4096  # vm_stat pages; macOS defaults to 16 KiB but 4 KiB stays valid
+PAGE_SIZE = 16384  # vm_stat page size; macOS (Apple Silicon) reports 16 KiB
 
 
 @dataclass
@@ -47,6 +47,7 @@ class GpuState:
 class Snapshot:
     cpu_pct: float
     free_gb: float
+    compressor_gb: float
     num_cpus: int
     gpu: GpuState
 
@@ -56,7 +57,7 @@ class Snapshot:
     )
 
     def idle(
-        self, cpu_max: float, mem_free_gb: float
+        self, cpu_max: float, mem_free_gb: float, compressor_max_gb: float
     ) -> tuple[bool, str]:
         reason = ""
         ok = True
@@ -66,6 +67,9 @@ class Snapshot:
         elif self.free_gb < mem_free_gb:
             ok = False
             reason = f"free {self.free_gb:.1f}GB < {mem_free_gb:.0f}GB"
+        elif self.compressor_gb > compressor_max_gb:
+            ok = False
+            reason = f"compressor {self.compressor_gb:.1f}GB > {compressor_max_gb:.0f}GB"
         elif self.gpu.queue_busy:
             ok = False
             reason = "gpu queue busy"
@@ -96,10 +100,38 @@ def cpu_pct() -> float:
     return min(100.0, total / num_cpus())
 
 
+def _vm_stat_page_size() -> int:
+    """Parse 'Mach Virtual Memory Statistics: (page size of N bytes)'."""
+    raw = subprocess.run(
+        ["vm_stat"], capture_output=True, text=True, check=True
+    ).stdout
+    match = re.search(r"page size of (\d+) bytes", raw)
+    return int(match.group(1)) if match else PAGE_SIZE  # fall back to default
+
+
 def free_gb() -> float:
     raw = subprocess.run(
         ["vm_stat"], capture_output=True, text=True, check=True
     ).stdout
+    page_size = _vm_stat_page_size()
+    fields = _vm_stat_fields(raw)
+    free = fields.get("pages free", 0)
+    inactive = fields.get("pages inactive", 0)
+    speculative = fields.get("pages speculative", 0)
+    return (free + inactive + speculative) * page_size / (1024**3)
+
+
+def compressor_gb() -> float:
+    """Physical pages occupied by the memory compressor (real pressure signal)."""
+    raw = subprocess.run(
+        ["vm_stat"], capture_output=True, text=True, check=True
+    ).stdout
+    page_size = _vm_stat_page_size()
+    fields = _vm_stat_fields(raw)
+    return fields.get("pages occupied by compressor", 0) * page_size / (1024**3)
+
+
+def _vm_stat_fields(raw: str) -> dict[str, int]:
     fields: dict[str, int] = {}
     for line in raw.splitlines():
         key, _, value = line.partition(":")
@@ -109,10 +141,7 @@ def free_gb() -> float:
                 fields[key.lower()] = int(value)
             except ValueError:
                 continue
-    free = fields.get("pages free", 0)
-    inactive = fields.get("pages inactive", 0)
-    speculative = fields.get("pages speculative", 0)
-    return (free + inactive + speculative) * PAGE_SIZE / (1024**3)
+    return fields
 
 
 def gpu_state() -> GpuState:
@@ -176,13 +205,25 @@ class GpuQuiescence:
 
 
 def snapshot() -> Snapshot:
-    return Snapshot(cpu_pct=cpu_pct(), free_gb=free_gb(), num_cpus=num_cpus(), gpu=gpu_state())
+    return Snapshot(
+        cpu_pct=cpu_pct(),
+        free_gb=free_gb(),
+        compressor_gb=compressor_gb(),
+        num_cpus=num_cpus(),
+        gpu=gpu_state(),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cpu-max", type=float, default=25.0, help="CPU %% max (default 25)")
     parser.add_argument("--mem-free-gb", type=float, default=24.0, help="min free GB (default 24)")
+    parser.add_argument(
+        "--compressor-max-gb",
+        type=float,
+        default=8.0,
+        help="max memory-compressor pages in GB (default 8)",
+    )
     parser.add_argument("--interval", type=float, default=15.0, help="sample interval seconds")
     parser.add_argument("--stable", type=int, default=4, help="consecutive idle/quiet samples")
     parser.add_argument("--timeout", type=float, default=1800.0, help="give up after seconds")
@@ -193,8 +234,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"waiting for idle: cpu<={args.cpu_max:.0f}% mem-free>={args.mem_free_gb:.0f}GB "
-        f"gpu-silent>={args.stable} samples interval={args.interval:.0f}s "
-        f"timeout={args.timeout:.0f}s",
+        f"compressor<={args.compressor_max_gb:.0f}GB gpu-silent>={args.stable} samples "
+        f"interval={args.interval:.0f}s timeout={args.timeout:.0f}s",
         flush=True,
     )
     gpu_gauge = GpuQuiescence(args.stable)
@@ -208,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
             print(Snapshot.COEFFICIENT_WARNING, flush=True)
             warned_gpu = True
         gpu_quiet = gpu_gauge.observe(snap.gpu)
-        idle, reason = snap.idle(args.cpu_max, args.mem_free_gb)
+        idle, reason = snap.idle(args.cpu_max, args.mem_free_gb, args.compressor_max_gb)
         if idle and gpu_quiet:
             stable += 1
             state = "idle"
@@ -225,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             f"[{state:4s}] #{samples:3d} cpu={snap.cpu_pct:5.1f}% "
-            f"free={snap.free_gb:6.1f}GB gpu={gpu_desc:>10s} ({snap.num_cpus} cores) ... {reason}",
+            f"free={snap.free_gb:6.1f}GB comp={snap.compressor_gb:5.1f}GB "
+            f"gpu={gpu_desc:>10s} ({snap.num_cpus} cores) ... {reason}",
             flush=True,
         )
         if stable >= args.stable:
