@@ -1,0 +1,74 @@
+name: 🐛 Bug Report
+description: 提交系统缺陷、异常崩溃或契约不一致问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你帮助我们改进 SpeechRail！提交前请确认已经查阅过相关文档并使用最新版本。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请清晰、简洁地描述遇到的 Bug。
+      placeholder: 在调用 /v1/audio/transcriptions 端点时，遇到了...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 请提供能够稳定复现该问题的最小步骤。
+      placeholder: |
+        1. 启动服务: `uv run speechrail serve`
+        2. 发送请求: `curl -X POST http://127.0.0.1:8201/v1/audio/transcriptions ...`
+        3. 观察到返回错误码...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 期望看到的正常输出或行为是什么？
+      placeholder: 应该返回 HTTP 200 以及符合 OpenAI 规范的 JSON 转写文本。
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 错误日志与响应
+      description: 请粘贴相关日志输出或错误响应（请注意脱敏私有路径与敏感信息）。
+      render: shell
+  - type: dropdown
+    id: environment
+    attributes:
+      label: 运行芯片与设备
+      options:
+        - Apple Silicon (M1 / M2 / M3 / M4)
+        - Intel Mac
+        - Linux / Other
+    validations:
+      required: true
+  - type: input
+    id: os_version
+    attributes:
+      label: 操作系统版本
+      placeholder: macOS 15.3 (Sequoia)
+    validations:
+      required: true
+  - type: input
+    id: speechrail_version
+    attributes:
+      label: SpeechRail 版本
+      placeholder: 1.3.1
+    validations:
+      required: true
+  - type: checkboxes
+    id: checkboxes
+    attributes:
+      label: 检查清单
+      options:
+        - label: 我已确认这不是安全漏洞（安全漏洞请参阅 SECURITY.md 私密报告）
+          required: true
+        - label: 我已阅读并同意遵守行为准则 (Code of Conduct)
+          required: true

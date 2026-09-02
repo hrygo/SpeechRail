@@ -8,7 +8,8 @@
 2. [总体架构](architecture.md)：了解请求数据流、进程边界、目录职责和当前/目标行为的区别。
 3. [当前边界与剩余风险](current-boundaries.md)：确认已验证能力与未完成的验收门。
 4. [OpenAI 标准符合度对标审查](openai-conformance-audit.md)：对外语音接口与 OpenAI Audio/Speech/Realtime 标准的逐项差异、有意裁剪与兼容性风险。
-5. [架构决策记录](../decisions/README.md)：阅读重大设计选择及其替代方案。
+5. [ASR/TTS 专业级最佳实践与深度优化实施规范](asr-tts-best-practices-and-optimization-spec.md)：单人本机与全面 OpenAI 兼容下的低延迟流式、服务端 VAD 与内存优化实施规范。
+6. [架构决策记录](../decisions/README.md)：阅读重大设计选择及其替代方案。
 
 ## 事实来源
 

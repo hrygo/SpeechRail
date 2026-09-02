@@ -5,11 +5,16 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
+  <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=blue&label=version" alt="Latest Release" /></a>
   <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white" alt="Python 3.12" />
   <img src="https://img.shields.io/badge/Platform-macOS%20(Apple%20Silicon)-000000.svg?style=flat&logo=apple&logoColor=white" alt="macOS Apple Silicon" />
   <img src="https://img.shields.io/badge/Accelerators-MLX%20%7C%20MPS-FF6F00.svg?style=flat" alt="MLX & MPS" />
   <img src="https://img.shields.io/badge/API-OpenAI%20Compatible-412991.svg?style=flat&logo=openai&logoColor=white" alt="OpenAI Compatible" />
-  <img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License MIT" />
+  <img src="https://img.shields.io/badge/Code%20Style-Ruff-000000.svg?style=flat&logo=ruff&logoColor=white" alt="Code Style Ruff" />
+  <img src="https://img.shields.io/badge/Type%20Check-Mypy%20Strict-blue.svg?style=flat" alt="Mypy Strict" />
+  <img src="https://img.shields.io/badge/Coverage-80.5%25-success.svg?style=flat" alt="Coverage" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License MIT" /></a>
 </p>
 
 ---
@@ -25,6 +30,7 @@
 - [⚙️ 配置说明](#️-配置说明)
 - [🛠️ macOS 服务常驻与运维](#️-macos-服务常驻与运维)
 - [🔒 安全与隐私边界](#-安全与隐私边界)
+- [🤝 参与贡献与社区规范](#-参与贡献与社区规范)
 - [📚 文档导航](#-文档导航)
 - [📄 开源许可](#-开源许可)
 
@@ -289,6 +295,23 @@ uv run speechrail service uninstall
 
 ---
 
+## 🤝 参与贡献与社区规范
+
+欢迎任何形式的开源贡献！在提交 Issue 或 Pull Request 之前，请参阅：
+
+- 📖 **[贡献者指南 (Contributing Guide)](CONTRIBUTING.md)**：开发环境设置、编码规范、测试门禁与 PR 流程。
+- 🛡️ **[行为准则 (Code of Conduct)](CODE_OF_CONDUCT.md)**：我们致力于构建友好、开放、包容的开源社区。
+- 🔒 **[安全策略 (Security Policy)](SECURITY.md)**：漏洞披露机制与私密通报渠道。
+- 💬 **[支持渠道 (Support Guide)](SUPPORT.md)**：获取帮助与交流答疑。
+
+---
+
+## 🌟 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=hrygo/SpeechRail&type=Date)](https://star-history.com/#hrygo/SpeechRail&Date)
+
+---
+
 ## 📚 文档导航
 
 - 🚀 **[用户与集成指南](docs/users/README.md)**：各客户端集成方案、SDK 示例与常见使用答疑。
@@ -302,3 +325,4 @@ uv run speechrail service uninstall
 ## 📄 开源许可
 
 本项目基于 [MIT License](LICENSE) 开源发布。
+欢迎自由使用、修改与集成。

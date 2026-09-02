@@ -5,11 +5,13 @@ description = "Local-first shared speech recognition service with OpenAI-compati
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
+license-files = ["LICENSE"]
 authors = [{ name = "hrygo" }]
-keywords = ["speech", "asr", "qwen3-asr", "openai-compatible", "realtime"]
+keywords = ["speech", "asr", "tts", "qwen3-asr", "qwen3-tts", "openai-compatible", "realtime", "mlx", "apple-silicon"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Sound/Audio :: Speech",
@@ -24,6 +26,13 @@ dependencies = [
     "httpx>=0.28",
     "websockets>=14",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hrygo/SpeechRail"
+Documentation = "https://github.com/hrygo/SpeechRail#readme"
+Repository = "https://github.com/hrygo/SpeechRail"
+Issues = "https://github.com/hrygo/SpeechRail/issues"
+Changelog = "https://github.com/hrygo/SpeechRail/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

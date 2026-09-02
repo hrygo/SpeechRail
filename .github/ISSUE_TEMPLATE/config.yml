@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 社区提问与部署讨论
+    url: https://github.com/hrygo/SpeechRail/discussions
+    about: 有关于配置、部署、调优或客户端接入的疑问，请在 Discussions 中提问交流。
+  - name: 🔒 私密安全漏洞通报
+    url: https://github.com/hrygo/SpeechRail/blob/main/SECURITY.md
+    about: 报告潜在的安全风险与漏洞，请参阅 SECURITY.md 私密通报流程。

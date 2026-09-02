@@ -1,0 +1,35 @@
+name: ✨ Feature Request
+description: 建议新增功能、优化体验或增加下游生态支持
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        欢迎提出改进 SpeechRail 的新思路！请详细描述你的应用场景与设计构想。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 痛点与需求背景
+      description: 这个新特性解决的是什么具体问题？你的使用场景是什么？
+      placeholder: 在将 SpeechRail 与某客户端（如 Sona / QwenPaw / 自研应用）配合使用时，我希望能够...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: 建议的解决方案
+      description: 请描述你期望的实现方式或接口设计。
+      placeholder: 增加某个配置项或在特定端点支持...
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 是否有任何替代的方案或临时规避手段？
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: 贡献意愿
+      options:
+        - label: 我愿意参与此特性的开发并提交 Pull Request
