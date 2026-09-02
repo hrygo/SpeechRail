@@ -109,6 +109,7 @@ def test_launch_agent_preserves_python_venv_symlink_path(tmp_path: Path) -> None
 def test_create_manager_preserves_current_python_symlink(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr("speechrail.service.launchd.sys.platform", "darwin")
     python_target = tmp_path / "uv" / "python3.12"
     python_target.parent.mkdir(parents=True)
     python_target.touch()
@@ -125,6 +126,7 @@ def test_create_manager_preserves_current_python_symlink(
 def test_create_manager_uses_explicit_app_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setattr("speechrail.service.launchd.sys.platform", "darwin")
     python_link = tmp_path / "venv" / "bin" / "python3"
     python_link.parent.mkdir(parents=True)
     python_link.touch()
