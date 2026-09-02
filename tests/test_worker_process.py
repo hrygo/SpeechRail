@@ -114,6 +114,36 @@ def test_concurrent_exchanges_are_serialized_and_route_frames_correctly(
     _run(scenario)
 
 
+def test_parked_receiver_does_not_block_concurrent_writer(tmp_path: Path) -> None:
+    """A receiver parked on ``receive()`` must not starve a writer on ``send()``.
+
+    The realtime streaming read loop parks on ``receive()`` between frames.
+    With a single shared io lock, the parked reader holds the lock and the
+    next ``append``/``commit`` write deadlocks the session.  Read and write
+    locks are separate, so a concurrent ``send()`` must complete (the child
+    answers and the parked reader then returns the echo).
+    """
+
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            reader = asyncio.create_task(transport.receive())
+            await asyncio.sleep(0.02)  # let the reader park on readexactly
+            await asyncio.wait_for(
+                transport.send({"action": "echo", "text": "while-reader-parked"}),
+                timeout=2.0,
+            )
+            frame = await asyncio.wait_for(reader, timeout=2.0)
+            assert frame.get("type") == "echo"
+            assert frame.get("text") == "while-reader-parked"
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
 def test_receive_times_out_when_child_never_answers(tmp_path: Path) -> None:
     transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.3))
 

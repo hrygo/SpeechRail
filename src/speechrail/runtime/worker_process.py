@@ -84,11 +84,12 @@ def offline_environment(repository_root: Path) -> dict[str, str]:
 class AsyncFramedWorkerProcess:
     """Start one explicit subprocess and speak length-prefixed JSON frames.
 
-    All pipes are guarded by a single operation lock.  ``send``/``receive``
-    serialize individual pipe operations and ``exchange`` holds the lock across
-    one request/response pair, so multiple callers (e.g. batch transcription and
-    a realtime session sharing one ASR worker) cannot interleave frames or run
-    concurrent ``readexactly`` calls on the same ``StreamReader``.
+    Read and write directions have separate locks so a reader parked on
+    ``receive()`` (the realtime read loop) cannot starve a writer sending an
+    ``append``/``commit`` frame on the same transport; ``exchange`` briefly
+    holds both to keep one request/response pair atomic.  Multiple callers can
+    therefore not interleave frames or run concurrent ``readexactly`` calls on
+    the same ``StreamReader``.
     """
 
     def __init__(self, spec: WorkerProcessSpec) -> None:
@@ -98,7 +99,8 @@ class AsyncFramedWorkerProcess:
             maxlen=_STDERR_RING_LINES,
         )
         self._stderr_task: asyncio.Task[None] | None = None
-        self._io_lock = asyncio.Lock()
+        self._read_lock = asyncio.Lock()
+        self._write_lock = asyncio.Lock()
 
     @property
     def alive(self) -> bool:
@@ -140,22 +142,25 @@ class AsyncFramedWorkerProcess:
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None:
-        async with self._io_lock:
+        async with self._write_lock:
             await self._send_unlocked(payload, binary_payload=binary_payload)
 
     async def exchange(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> dict[str, object]:
-        """Send one request frame and read its response under a single lock.
+        """Send one request frame and read its response atomically.
 
-        Request/response pairs (batch transcription, realtime session setup)
-        must be atomic: otherwise a competing reader on a shared transport could
-        consume this caller's response frame or crash with a concurrent
-        ``readexactly`` on the same stream.
+        The write lock and read lock are both held for the pair so a competing
+        reader can never steal this caller's response frame.  A parked streaming
+        ``receive()`` reader holds only the read lock, so a concurrent batch
+        ``send()`` can still write; the single-lock variant deadlocked the
+        dedicated streaming worker because its read loop parks on ``readexactly``
+        while append/commit tries to write on the same lock.
         """
-        async with self._io_lock:
+        async with self._write_lock:
             await self._send_unlocked(payload, binary_payload=binary_payload)
-            return await self._receive_unlocked()
+            async with self._read_lock:
+                return await self._receive_unlocked()
 
     async def _send_unlocked(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
@@ -175,7 +180,7 @@ class AsyncFramedWorkerProcess:
                 await asyncio.sleep(0.01)
 
     async def receive(self) -> dict[str, object]:
-        async with self._io_lock:
+        async with self._read_lock:
             return await self._receive_unlocked()
 
     async def _receive_unlocked(self) -> dict[str, object]:
