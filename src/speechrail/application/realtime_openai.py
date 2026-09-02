@@ -229,10 +229,16 @@ class OpenAIRealtimeSession:
         if self._asr is None:
             await self._reserve_asr()
             asr: RealtimeAsrSession | None = None
+            from speechrail.domain.itn import compose_hotword_prompt
+
+            asr_prompt = compose_hotword_prompt(
+                str(self._config.get("prompt") or ""),
+                self._config.get("keywords"),
+            )
             try:
                 asr = self._asr_factory.create(
                     language=self._config.get("language"),
-                    prompt=str(self._config.get("prompt") or ""),
+                    prompt=asr_prompt,
                 )
                 await asr.connect()
             except RuntimeError as exc:
@@ -339,12 +345,15 @@ class OpenAIRealtimeSession:
     async def _drain_asr_events(self) -> None:
         if self._asr is None:
             return
+        from speechrail.domain.itn import apply_light_itn
+
         async for event in self._asr.events():
             if event.kind == "partial":
                 await self._send(transcription_delta(session_id=self._session_id, delta=event.text))
             elif event.kind == "completed":
+                norm_text = apply_light_itn(event.text)
                 await self._send(
-                    conversation_item_created(session_id=self._session_id, transcript=event.text)
+                    conversation_item_created(session_id=self._session_id, transcript=norm_text)
                 )
                 segments = event.segments
                 if self._diarization is not None and segments:
@@ -359,14 +368,14 @@ class OpenAIRealtimeSession:
                                 session_id=self._session_id,
                                 item_id=f"item_{self._session_id}_input",
                                 segment_id=segment.id,
-                                text=segment.text,
+                                text=apply_light_itn(segment.text),
                                 speaker=segment.speaker,
                                 start_ms=segment.start_ms,
                                 end_ms=segment.end_ms,
                             )
                         )
                 await self._send(
-                    transcription_completed(session_id=self._session_id, transcript=event.text)
+                    transcription_completed(session_id=self._session_id, transcript=norm_text)
                 )
             elif event.kind == "error":
                 await self._send(

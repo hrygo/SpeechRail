@@ -394,10 +394,13 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "SpeechRail inference backend is not ready",
                 retryable=True,
             )
+        from speechrail.domain.itn import apply_light_itn, compose_hotword_prompt
+
+        effective_prompt = compose_hotword_prompt(prompt, keywords)
         try:
             want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
             result = await services.admission.run(
-                lambda: transcribe(audio, language, prompt, want_timestamps),
+                lambda: transcribe(audio, language, effective_prompt, want_timestamps),
                 deadline=resolved.request_timeout_seconds,
             )
         except QueueFullError:
@@ -435,6 +438,17 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             finally:
                 await coordinator.close()
+
+        # Apply Light ITN to output text and segments
+        result = result.model_copy(
+            update={
+                "text": apply_light_itn(result.text),
+                "segments": [
+                    s.model_copy(update={"text": apply_light_itn(s.text)})
+                    for s in result.segments
+                ],
+            }
+        )
         if response_format == "json":
             return JSONResponse(format_json(result))
         if response_format in {"verbose_json", "diarized_json"}:
