@@ -1,8 +1,8 @@
-# Reference configuration. The environment-backed .env example is the launch path for 1.1.0.
+# Reference configuration. The environment-backed .env example is the launch path for 1.2.0.
 # Values are placeholders; never put API keys, model weights, audio, or full transcripts here.
 service:
   name: speechrail
-  version: 1.1.0
+  version: 1.2.0
   host: 127.0.0.1
   port: 8201
 

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-09-02
+
+### Changed
+
+- 迁移 Qwen3-ASR 后端到 Apple Silicon 原生 MLX 运行时 `mlx-qwen3-asr`，移除
+  `qwen-asr`/`qwen3_asr_causal` 依赖并消除与 transformers 的版本冲突；
+  batch 与 realtime worker 均改用 MLX。
+
+### Added
+
+- `srt`/`vtt`/`verbose_json` 按需产出带时间戳 segments（强制对齐器 `Qwen3-ForcedAligner-0.6B`）。
+- batch 与 realtime 支持 mlx 全部 30+ 语言（可强制语言与自动检测）。
+
+### Fixed
+
+- `service preflight` 的 ASR runtime 检查改为导入 `mlx_qwen3_asr`（修复迁移后 qwen-asr
+  死引用导致 wheel 安装 preflight 失败）。
+
 ## [1.1.0] - 2026-09-02
 
 ### Added
