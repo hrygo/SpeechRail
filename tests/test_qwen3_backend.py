@@ -99,6 +99,25 @@ def test_start_payload_declares_snapshot_and_device(tmp_path: Path) -> None:
     assert fake.sends[0]["model_dir"].endswith("external-qwen3-asr-profile")
 
 
+def test_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
+    worker, _ = _worker(
+        tmp_path,
+        [
+            {
+                "type": "error",
+                "code": "worker_load_error",
+                "stderr_tail": "mlx.core: [Metal] failed to allocate model weights",
+            }
+        ],
+    )
+    import asyncio
+
+    with pytest.raises(RuntimeError, match="worker_load_error") as exc_info:
+        asyncio.run(worker.start())
+
+    assert "failed to allocate" in str(exc_info.value)
+
+
 def test_ready_identity_mismatch_aborts_the_worker(tmp_path: Path) -> None:
     worker, fake = _worker(
         tmp_path,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -27,6 +28,8 @@ from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 from speechrail.http.routes.system import create_system_router
 from speechrail.runtime.job_runner import JobProcessor
 from speechrail.runtime.jobs import JobRepository
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(
@@ -56,7 +59,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await services.lifecycle.start()
+        try:
+            await services.lifecycle.start()
+        except BaseException:
+            logger.exception(
+                "SpeechRail startup failed while starting local worker backends; "
+                "the exception chain carries the worker error code and stderr tail"
+            )
+            raise
         try:
             yield
         finally:

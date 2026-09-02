@@ -19,6 +19,7 @@ from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, Stre
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
+    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
@@ -136,7 +137,9 @@ class Qwen3StreamingWorker:
         )
         ready = await self._transport.receive()
         if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-            raise RuntimeError("streaming worker failed to become ready")
+            raise RuntimeError(
+                error_frame_message(ready, "streaming worker failed to become ready")
+            )
         self._ready = True
 
     async def send(

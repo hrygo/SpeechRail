@@ -16,6 +16,7 @@ from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
+    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
@@ -190,7 +191,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 )
                 ready = await self._receive_profile_frame()
                 if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-                    raise RuntimeError(str(ready.get("code", "worker_start_failed")))
+                    raise RuntimeError(error_frame_message(ready, "worker_start_failed"))
                 device, dtype = ready.get("device"), ready.get("dtype")
                 if device != self.config.device or dtype != self.config.dtype:
                     raise RuntimeError("backend_identity_mismatch")
@@ -235,7 +236,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             )
             result = await self._receive_profile_frame()
         if result.get("type") != "result" or result.get("request_id") != resolved_request_id:
-            raise RuntimeError(str(result.get("code", "worker_request_failed")))
+            raise RuntimeError(error_frame_message(result, "worker_request_failed"))
         text, detected = result.get("text"), result.get("language")
         if not isinstance(text, str) or not isinstance(detected, str):
             raise RuntimeError("worker_result_invalid")

@@ -41,6 +41,11 @@ def main() -> None:
             sys.stderr.write("ImportError: No module named 'transformers'\n")
             sys.stderr.flush()
             return
+        elif action == "error_with_stderr":
+            sys.stderr.write("mlx.core: [Metal] failed to allocate model weights\n")
+            sys.stderr.flush()
+            write_frame(stdout, {"type": "error", "code": "worker_load_error"})
+            return
         else:
             write_frame(stdout, {"type": "error", "code": "unknown_action"})
 

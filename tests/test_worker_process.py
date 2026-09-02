@@ -230,3 +230,40 @@ def test_child_exit_without_stderr_reports_no_stderr_captured(tmp_path: Path) ->
             await transport.close()
 
     _run(scenario)
+
+
+def test_error_frame_embeds_worker_stderr_tail(tmp_path: Path) -> None:
+    """A valid error frame still surfaces the worker stderr on the decoded frame."""
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "error_with_stderr"})
+            await asyncio.sleep(0.1)
+            frame = await transport.receive()
+            assert frame["type"] == "error"
+            assert frame["code"] == "worker_load_error"
+            assert "failed to allocate" in str(frame["stderr_tail"])
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_error_frame_without_stderr_reports_no_stderr_captured(tmp_path: Path) -> None:
+    """An error frame with an empty stderr ring carries the explicit placeholder."""
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "unknown-action"})
+            frame = await transport.receive()
+            assert frame["type"] == "error"
+            assert frame["code"] == "unknown_action"
+            assert frame["stderr_tail"] == "(no stderr captured)"
+        finally:
+            await transport.close()
+
+    _run(scenario)

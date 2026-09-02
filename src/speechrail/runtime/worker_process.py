@@ -32,6 +32,20 @@ _TERMINATE_GRACE_SECONDS = 2.0
 _STDERR_RING_LINES: int = 64  # keep last N lines of stderr
 
 
+def error_frame_message(frame: Mapping[str, object], fallback: str) -> str:
+    """Format an error frame for an exception message, embedding the stderr tail.
+
+    The transport injects ``stderr_tail`` into every error frame it decodes, so
+    client exceptions no longer hide the underlying model/load failure.
+    """
+
+    code = str(frame.get("code") or fallback)
+    tail = frame.get("stderr_tail")
+    if isinstance(tail, str) and tail:
+        return f"{code}; worker stderr tail:\n{tail}"
+    return code
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerProcessSpec:
     """Explicit, bounded subprocess launch parameters without request data."""
@@ -159,7 +173,16 @@ class AsyncFramedWorkerProcess:
                     f"truncated worker frame payload (read {len(exc.partial)} of "
                     f"{size} bytes); worker stderr tail:\n{stderr_tail}"
                 ) from exc
-        return decode_frame_body(body)
+        frame = decode_frame_body(body)
+        if frame.get("type") == "error":
+            await self._drain_stderr_tail()
+            frame["stderr_tail"] = self._format_stderr_tail()
+            logger.warning(
+                "worker reported error frame %s; worker stderr tail:\n%s",
+                frame.get("code", "unknown"),
+                frame["stderr_tail"],
+            )
+        return frame
 
     async def abort(self) -> None:
         """Drop the reference first, then terminate so stale frames cannot leak."""

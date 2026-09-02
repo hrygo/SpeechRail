@@ -112,6 +112,8 @@ def test_tts_worker_config_requires_external_snapshot_and_builds_private_command
         str(snapshot.resolve()),
         "--device",
         "mps",
+        "--dtype",
+        "float16",
         "--sample-rate",
         "24000",
         "--chunk-ms",
@@ -204,11 +206,45 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
         assert fake.sends[0]["type"] == "start"
         assert fake.sends[0]["model_dir"].endswith("external-qwen3-tts-start")
         assert fake.sends[0]["device"] == "mps"
+        assert fake.sends[0]["dtype"] == "float16"
         assert fake.sends[0]["sample_rate"] == 24_000
         await worker.close()
         assert worker.ready is False
 
     asyncio.run(start_and_close())
+
+
+def test_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-load-error"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+    fake = _FakeTransport(
+        [
+            {
+                "type": "error",
+                "code": "worker_load_error",
+                "stderr_tail": "mlx.core: [Metal] failed to allocate model weights",
+            }
+        ]
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="worker_load_error") as exc_info:
+            await worker.start()
+        assert "failed to allocate" in str(exc_info.value)
+
+    asyncio.run(scenario())
 
 
 def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
@@ -243,6 +279,60 @@ def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
         asyncio.run(worker.start())
 
     assert fake.abort_count == 1
+
+
+def test_int8_config_builds_command_and_requires_int8_identity(tmp_path: Path) -> None:
+    """SPEECHRAIL_DTYPE=int8 now strictly enforced on the TTS worker (was silent bf16)."""
+    snapshot = tmp_path.parent / "external-qwen3-tts-int8"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+
+    config = Qwen3TtsBackendConfig(
+        repository_root=tmp_path,
+        python_executable=Path(executable),
+        model_dir=snapshot,
+        device="mps",
+        dtype="int8",
+        sample_rate=24_000,
+    )
+    assert "--dtype" in config.command()
+    assert config.command()[config.command().index("--dtype") + 1] == "int8"
+
+    silent_bf16 = _FakeTransport(
+        [
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+            }
+        ]
+    )
+    worker = Qwen3TtsWorker(config)
+    worker._transport = silent_bf16  # type: ignore[assignment]
+    with pytest.raises(RuntimeError, match="backend_identity_mismatch"):
+        asyncio.run(worker.start())
+    assert silent_bf16.abort_count == 1
+    assert silent_bf16.sends[0]["dtype"] == "int8"
+
+    int8_ready = _FakeTransport(
+        [
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "int8",
+                "sample_rate": 24_000,
+            }
+        ]
+    )
+    worker._transport = int8_ready  # type: ignore[assignment]
+    asyncio.run(worker.start())
+    assert worker.ready is True
+    assert int8_ready.abort_count == 0
 
 
 def test_each_synthesis_uses_an_independent_response_id(tmp_path: Path) -> None:

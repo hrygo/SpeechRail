@@ -171,3 +171,48 @@ def test_fake_overrides_never_construct_real_qwen_workers(
     assert health.status_code == 200
     assert health.json()["asr_ready"] is True
     assert health.json()["tts_ready"] is True
+
+
+def test_lifespan_logs_worker_startup_failure_with_stderr_tail(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import speechrail.app as app_module
+    from speechrail.application.lifecycle import RuntimeLifecycle
+
+    class _FailingLifecycle(RuntimeLifecycle):
+        async def start(self) -> None:
+            raise RuntimeError(
+                "worker_load_error; worker stderr tail:\n"
+                "mlx.core: [Metal] failed to allocate model weights"
+            )
+
+    settings = Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)
+    failing_services = AppServices(
+        settings=settings,
+        transcribe=None,
+        batch_transcriber=None,
+        realtime_asr_factory=None,
+        diarization_engine=None,
+        tts_synthesizer=None,
+        job_repository=None,
+        asr_worker=None,
+        admission=services_module.AdmissionQueue(settings.max_queue_size),
+        governor=services_module.ResourceGovernor(settings.governor_limits),
+        lifecycle=_FailingLifecycle(),
+    )
+    monkeypatch.setattr(
+        app_module, "build_app_services", lambda _settings, _overrides: failing_services
+    )
+
+    app = app_module.create_app(settings)
+    with (
+        caplog.at_level(logging.ERROR, logger="speechrail.app"),
+        pytest.raises(RuntimeError, match="worker_load_error"),
+        TestClient(app),
+    ):
+        pass
+
+    assert "speechrail startup failed" in caplog.text.lower()
+    assert "failed to allocate model weights" in caplog.text

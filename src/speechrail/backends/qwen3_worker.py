@@ -202,6 +202,7 @@ def _handle_transcribe(
             },
         )
     except Exception:
+        traceback.print_exc(file=sys.stderr)
         write_frame(
             output_stream,
             {
@@ -291,6 +292,7 @@ def _handle_audio_append(
     try:
         engine.append_audio(audio)
     except Exception:
+        traceback.print_exc(file=sys.stderr)
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "session_invalid"},
@@ -310,6 +312,7 @@ def _handle_flush(
     try:
         text = engine.partial_text()
     except Exception:
+        traceback.print_exc(file=sys.stderr)
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_inference_error"},
@@ -338,6 +341,7 @@ def _handle_commit(
     try:
         text, language = engine.finish_streaming()
     except Exception:
+        traceback.print_exc(file=sys.stderr)
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_inference_error"},
@@ -389,6 +393,7 @@ def serve(
     try:
         engine = engine_factory(model_dir, device, dtype, max_new_tokens)
     except Exception:
+        traceback.print_exc(file=sys.stderr)
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "worker_load_error"},

@@ -13,6 +13,7 @@ from speechrail.backends.qwen3_streaming import (
     NativeRealtimeFactory,
     Qwen3StreamingBackendConfig,
     Qwen3StreamingSession,
+    Qwen3StreamingWorker,
 )
 from speechrail.config import Settings
 from speechrail.domain.ports import StreamingAsrEvent
@@ -44,6 +45,55 @@ class FakeStreamingWorker:
 
     def push(self, frame: dict[str, object]) -> None:
         self._responses.append(frame)
+
+
+class _FakeTransport:
+    """Transport stand-in that replays a single canned handshake frame."""
+
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+
+    async def start(self) -> None:
+        return None
+
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None:
+        del payload, binary_payload
+
+    async def receive(self) -> dict[str, object]:
+        return self.response
+
+    async def close(self) -> None:
+        return None
+
+
+def test_streaming_worker_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-streaming-snapshot"
+    snapshot.mkdir()
+    worker = Qwen3StreamingWorker(
+        Qwen3StreamingBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path("/usr/bin/python3"),
+            model_dir=snapshot,
+            device="mps",
+        )
+    )
+    fake = _FakeTransport(
+        {
+            "type": "error",
+            "code": "worker_load_error",
+            "stderr_tail": "mlx.core: [Metal] failed to allocate model weights",
+        }
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="worker_load_error") as exc_info:
+            await worker.start()
+        assert "failed to allocate" in str(exc_info.value)
+
+    asyncio.run(scenario())
 
 
 def test_backend_config_requires_absolute_existing_paths(tmp_path: Path) -> None:
