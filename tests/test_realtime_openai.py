@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 from collections.abc import AsyncIterator
 
 import pytest
@@ -337,6 +338,42 @@ def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
         commit_round()
         assert len(factory.sessions) == 2
         assert len(factory.released) == 2
+
+
+class _HangingConnectSession(FakeStreamingSession):
+    """Session whose connect() never resolves until the client disconnects."""
+
+    async def connect(self) -> None:
+        await asyncio.Event().wait()
+
+
+class HangingConnectStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[FakeStreamingSession]:
+        return _HangingConnectSession
+
+
+def test_openai_disconnect_releases_slot_while_connect_pending() -> None:
+    """A client disconnect that cancels a pending ASR connect() must still
+    release the factory slot, or the slot leaks until restart and later
+    sessions fail with backend_busy."""
+
+    client, factory = _client(factory=HangingConnectStreamingFactory())
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        deadline = time.monotonic() + 2.0
+        while len(factory.sessions) < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(factory.sessions) == 1
+        assert len(factory.released) == 0
+
+    deadline = time.monotonic() + 2.0
+    while len(factory.released) < 1 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert len(factory.released) == 1
 
 
 def test_openai_model_alias_resolves_to_asr_profile() -> None:

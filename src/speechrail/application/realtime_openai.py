@@ -246,16 +246,20 @@ class OpenAIRealtimeSession:
                     prompt=asr_prompt,
                 )
                 await asr.connect()
-            except Exception as exc:
+            except BaseException as exc:
                 # Any failure (factory RuntimeError, BrokenPipeError/OSError from a
-                # dead worker pipe, ...) must release both the governor reservation
-                # and the factory slot, or the single streaming slot leaks until
-                # restart and every later session gets backend_busy.
-                await self._release_asr()
+                # dead worker pipe, CancelledError from client disconnect, ...)
+                # must release both the governor reservation and the factory slot,
+                # or the single streaming slot leaks until restart and every later
+                # session gets backend_busy.
+                with contextlib.suppress(Exception):
+                    await self._release_asr()
                 if asr is not None:
                     with contextlib.suppress(Exception):
                         await asr.close()
                     self._asr_factory.release(asr)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 message = str(exc)
                 code = (
                     "language_not_supported"

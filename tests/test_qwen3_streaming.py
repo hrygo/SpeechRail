@@ -107,6 +107,47 @@ class _ScriptedTransport:
         self._frames.put_nowait(frame)
 
 
+class _IdleTimeoutThenScriptedTransport:
+    """Raises one idle-read TimeoutError, then behaves like a scripted transport.
+
+    A shared streaming worker legitimately emits no frames while no session is
+    active. The dispatcher's read must treat that silence as normal and keep
+    routing later frames instead of dying permanently (which strands every
+    subsequent session waiting for ``session.opened``).
+    """
+
+    def __init__(self) -> None:
+        self._frames: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        self._idle_fired = False
+
+    async def start(self) -> None:
+        return None
+
+    async def send(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> None:
+        del payload, binary_payload
+
+    async def receive(self) -> dict[str, object]:
+        if not self._idle_fired:
+            self._idle_fired = True
+            raise TimeoutError("idle receive timeout")
+        return await self._frames.get()
+
+    async def exchange(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> dict[str, object]:
+        # The start handshake consumes the ready frame without idle simulation.
+        del payload, binary_payload
+        return await self._frames.get()
+
+    async def close(self) -> None:
+        return None
+
+    def push(self, frame: dict[str, object]) -> None:
+        self._frames.put_nowait(frame)
+
+
 def test_streaming_worker_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
     snapshot = tmp_path.parent / "external-qwen3-streaming-snapshot"
     snapshot.mkdir()
@@ -171,6 +212,67 @@ def test_streaming_worker_dispatches_frames_by_session_id(tmp_path: Path) -> Non
         assert frame.get("session_id") == "sess_a"
         assert worker.last_active > before
         await worker.close()
+
+    asyncio.run(scenario())
+
+
+def test_streaming_worker_dispatcher_survives_idle_receive_timeout(tmp_path: Path) -> None:
+    """An idle read timeout must not kill the dispatcher: a shared streaming
+    worker legitimately emits no frames between sessions, and dispatcher death
+    would strand every later session in connect() waiting for session.opened."""
+
+    worker = Qwen3StreamingWorker(
+        Qwen3StreamingBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path("/usr/bin/python3"),
+            model_dir=tmp_path,
+            device="mps",
+        )
+    )
+    transport = _IdleTimeoutThenScriptedTransport()
+    worker._transport = transport  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        transport.push(
+            {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"}
+        )
+        await worker.start()
+        queue = worker.register_session("sess_a")
+        await asyncio.sleep(0.01)
+        transport.push(
+            {
+                "type": "event",
+                "session_id": "sess_a",
+                "kind": "partial",
+                "text": "你好",
+            }
+        )
+        frame = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert frame.get("kind") == "partial"
+        assert frame.get("session_id") == "sess_a"
+        assert worker._dispatcher is not None
+        assert not worker._dispatcher.done()
+        await worker.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_connect_cancellation_unregisters_its_queue() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        assert session.session_id in worker._queues  # type: ignore[attr-defined]
+        connect.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await connect
+        assert session.session_id not in worker._queues  # type: ignore[attr-defined]
 
     asyncio.run(scenario())
 

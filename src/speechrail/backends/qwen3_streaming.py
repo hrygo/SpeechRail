@@ -182,7 +182,14 @@ class Qwen3StreamingWorker:
     async def _dispatch_loop(self) -> None:
         try:
             while True:
-                frame = await self._transport.receive()
+                try:
+                    frame = await self._transport.receive()
+                except TimeoutError:
+                    # A streaming worker legitimately goes silent between
+                    # sessions; an idle read timeout is not a worker failure.
+                    # Dying here would strand every later session waiting for
+                    # session.opened, so keep dispatching on idle silence.
+                    continue
                 self.last_active = time.monotonic()
                 session_id = frame.get("session_id")
                 queue = (
@@ -195,6 +202,10 @@ class Qwen3StreamingWorker:
         except asyncio.CancelledError:
             raise
         except Exception:
+            # Real worker failure (EOF / protocol error): reset readiness so a
+            # later start() rebuilds the worker and dispatcher instead of
+            # silently leaving every future session stuck in connect().
+            self._ready = False
             for queue in tuple(self._queues.values()):
                 queue.put_nowait({"type": "error", "code": "worker_unavailable"})
             raise
@@ -202,7 +213,7 @@ class Qwen3StreamingWorker:
     async def close(self) -> None:
         if self._dispatcher is not None:
             self._dispatcher.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._dispatcher
             self._dispatcher = None
         self._queues.clear()
@@ -254,7 +265,10 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                 self._queue.get(),
                 timeout=max(self._worker.timeout_seconds, 1.0),
             )
-        except Exception:
+        except BaseException:
+            # CancelledError (client disconnect) must also unregister the
+            # per-session queue, or the dispatch loop keeps routing into a
+            # queue nobody drains until the shared worker is rebuilt.
             self._worker.unregister_session(self._session_id)
             self._queue = None
             raise
