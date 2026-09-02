@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "1.0.0"
+    version: str = "1.1.0"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
@@ -120,6 +120,11 @@ class Settings(BaseSettings):
                 )
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
+        if (
+            self.diarization_embedding_model_path is not None
+            and self.diarization_model_path is None
+        ):
+            raise ValueError("diarization_embedding_model_path requires diarization_model_path")
         if not self.tts_voice_ids or any(
             not voice.strip() or voice not in VOICE_PROFILES for voice in self.tts_voice_ids
         ):

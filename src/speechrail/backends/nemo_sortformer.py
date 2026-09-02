@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import importlib.util
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ from speechrail.domain.diarization import (
     DiarizationAssignment,
     DiarizationConfig,
     DiarizationError,
+    DiarizationReadiness,
     DiarizationSpeaker,
     DiarizationUpdate,
 )
@@ -47,6 +49,12 @@ class NemoSortformerEngine:
         self._diarize = diarize or self._load_local_model
         self._embedding = embedding
         self._centroids = centroids
+        self._readiness = self._check_readiness(diarize=diarize, embedding=embedding)
+
+    @property
+    def readiness(self) -> DiarizationReadiness:
+        """Return startup-checkable status without loading model weights."""
+        return self._readiness
 
     def create(self, *, config: DiarizationConfig) -> _NemoSortformerSession:
         if not config.enabled:
@@ -82,6 +90,57 @@ class NemoSortformerEngine:
             self._model.diarize(
                 np.asarray(samples, dtype=np.float32), sample_rate=16_000, verbose=False
             ),
+        )
+
+    def _check_readiness(
+        self,
+        *,
+        diarize: NativeDiarize | None,
+        embedding: EmbeddingExtractor | None,
+    ) -> DiarizationReadiness:
+        if diarize is not None:
+            return DiarizationReadiness(
+                configured=True,
+                ready=True,
+                code=None,
+                message="injected diarization backend is ready",
+                profile="sortformer",
+            )
+        if not self._model_path.is_file():
+            return DiarizationReadiness(
+                configured=True,
+                ready=False,
+                code="diarization_not_available",
+                message="diarization model is not available",
+                profile="sortformer",
+            )
+        for module in ("numpy", "nemo.collections.asr.models"):
+            try:
+                if importlib.util.find_spec(module) is None:
+                    return DiarizationReadiness(
+                        configured=True,
+                        ready=False,
+                        code="diarization_not_available",
+                        message="diarization runtime is not installed",
+                        profile="sortformer",
+                    )
+            except (ImportError, ModuleNotFoundError):
+                return DiarizationReadiness(
+                    configured=True,
+                    ready=False,
+                    code="diarization_not_available",
+                    message="diarization runtime is not installed",
+                    profile="sortformer",
+                )
+        embedding_readiness = getattr(embedding, "readiness", None)
+        if isinstance(embedding_readiness, DiarizationReadiness) and not embedding_readiness.ready:
+            return embedding_readiness
+        return DiarizationReadiness(
+            configured=True,
+            ready=True,
+            code=None,
+            message="Sortformer diarization profile is ready",
+            profile="sortformer",
         )
 
 

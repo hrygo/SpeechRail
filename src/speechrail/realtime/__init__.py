@@ -1,1 +1,0 @@
-"""Modern realtime transcription protocol."""

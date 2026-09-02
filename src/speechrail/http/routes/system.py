@@ -31,13 +31,18 @@ def create_system_router(services: AppServices) -> APIRouter:
             "backend": "qwen3-asr-1.7b",
             "asr_ready": services.asr_ready,
             "tts_ready": services.tts_ready,
+            "diarization_ready": services.diarization_ready,
+            "diarization": services.diarization_status,
             "ready": services.asr_ready or services.tts_ready,
         }
 
     @router.get("/readyz")
     async def readyz(request: Request) -> JSONResponse:
         if services.asr_ready or services.tts_ready:
-            return JSONResponse(status_code=200, content={"ready": True})
+            return JSONResponse(
+                status_code=200,
+                content={"ready": True, "diarization": services.diarization_status},
+            )
         return error_response(
             503,
             request.state.request_id,
@@ -55,7 +60,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             {"id": tts_target, "object": "model", "owned_by": "speechrail"},
         ]
         for alias, target in sorted(asr_model_aliases().items()):
-            if alias in diarization_model_aliases() and services.diarization_engine is None:
+            if alias in diarization_model_aliases() and not services.diarization_ready:
                 continue
             data.append(
                 {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}

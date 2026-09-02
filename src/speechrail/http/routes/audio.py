@@ -198,7 +198,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Unsupported response format",
                 param="response_format",
             )
-        if diarization_requested and diarization_engine is None:
+        if diarization_requested and not services.diarization_ready:
             return error_response(
                 503,
                 request_id,

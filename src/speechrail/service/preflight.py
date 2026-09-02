@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -70,6 +71,14 @@ def _snapshot_check(
     return _check(name, True, "model snapshot is complete")
 
 
+def _file_check(name: str, model_path: Path | None, *, label: str) -> PreflightCheck:
+    if model_path is None:
+        return _check(name, False, f"{label} path is not configured")
+    if not model_path.is_absolute() or not model_path.is_file():
+        return _check(name, False, f"{label} file is missing")
+    return _check(name, True, f"{label} file is available")
+
+
 def run_preflight(
     layout: ServiceLayout,
     *,
@@ -124,6 +133,13 @@ def run_preflight(
         checks.append(_check("settings", False, "cannot validate settings without configuration"))
         checks.append(_check("asr_config", False, "cannot validate ASR without configuration"))
         checks.append(_check("tts_config", not require_tts, "configuration file is missing"))
+        checks.append(
+            _check(
+                "diarization_config",
+                True,
+                "optional diarization profile is not configured",
+            )
+        )
         return PreflightResult(ok=all(check.ok for check in checks), checks=tuple(checks))
 
     try:
@@ -132,6 +148,13 @@ def run_preflight(
         checks.append(_check("settings", False, "configuration validation failed"))
         checks.append(_check("asr_config", False, "ASR configuration validation failed"))
         checks.append(_check("tts_config", not require_tts, "TTS configuration validation failed"))
+        checks.append(
+            _check(
+                "diarization_config",
+                False,
+                "diarization configuration validation failed",
+            )
+        )
         return PreflightResult(ok=all(check.ok for check in checks), checks=tuple(checks))
 
     checks.append(
@@ -191,6 +214,49 @@ def run_preflight(
                 _check("tts_runtime", False, "TTS runtime cannot be checked"),
             ]
         )
+
+    diarization_configured = settings.diarization_model_path is not None
+    checks.append(
+        _check(
+            "diarization_config",
+            True,
+            "diarization profile is configured"
+            if diarization_configured
+            else "optional diarization profile is not configured",
+        )
+    )
+    if diarization_configured:
+        checks.append(
+            _file_check(
+                "diarization_snapshot",
+                settings.diarization_model_path,
+                label="diarization model",
+            )
+        )
+        checks.append(
+            _runtime_check(
+                "diarization_runtime",
+                Path(sys.executable),
+                "nemo.collections.asr.models",
+                runner,
+            )
+        )
+        if settings.diarization_embedding_model_path is not None:
+            checks.append(
+                _file_check(
+                    "diarization_embedding_snapshot",
+                    settings.diarization_embedding_model_path,
+                    label="diarization embedding model",
+                )
+            )
+            checks.append(
+                _runtime_check(
+                    "diarization_embedding_runtime",
+                    Path(sys.executable),
+                    "onnxruntime",
+                    runner,
+                )
+            )
 
     return PreflightResult(ok=all(check.ok for check in checks), checks=tuple(checks))
 

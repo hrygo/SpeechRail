@@ -86,7 +86,7 @@ class RealtimeAsrSession(Protocol):
 
 
 class RealtimeAsrFactory(Protocol):
-    """Creates a new backend session after the public v2 session is configured."""
+    """Creates a new backend session after the public Realtime session is configured."""
 
     def create(self, *, language: str | None, prompt: str) -> RealtimeAsrSession: ...
 

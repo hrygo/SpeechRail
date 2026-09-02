@@ -427,12 +427,14 @@ class OpenAIRealtimeSession:
             return
         if self._diarization_config is None or not self._diarization_config.enabled:
             return
-        if self._diarization_engine is None:
+        engine = self._diarization_engine
+        if not self._services.diarization_ready or engine is None:
             raise RealtimeAdapterError(
-                "diarization_not_available", "diarization profile is not available"
+                "diarization_not_available",
+                str(self._services.diarization_status["message"]),
             )
         self._diarization = DiarizationCoordinator(
-            self._diarization_engine.create(config=self._diarization_config)
+            engine.create(config=self._diarization_config)
         )
 
     async def _close_diarization(self) -> None:

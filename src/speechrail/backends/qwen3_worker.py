@@ -10,7 +10,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Literal, Protocol
+from typing import Any, BinaryIO, Literal, Protocol
 
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.runtime.worker_protocol import (
@@ -183,7 +183,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if any(not (model_dir / name).is_file() for name in MODEL_FILES):
             raise ValueError("model snapshot is incomplete")
         import torch
-        from qwen_asr import Qwen3ASRModel  # type: ignore[import-not-found]
+
+        qwen3_asr_model = _load_qwen3_asr_model()
 
         if device == "mps":
             if not torch.backends.mps.is_available() or not torch.backends.mps.is_built():
@@ -191,7 +192,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             dtype = torch.float16
         else:
             dtype = torch.float32
-        model = Qwen3ASRModel.from_pretrained(
+        model = qwen3_asr_model.from_pretrained(
             str(model_dir),
             dtype=dtype,
             max_inference_batch_size=1,
@@ -222,6 +223,34 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if not isinstance(text, str) or not isinstance(detected, str):
             raise RuntimeError("invalid Qwen3 response")
         return text.strip(), detected
+
+
+def _load_qwen3_asr_model() -> Any:
+    """Import qwen-asr across its known Transformers decorator mismatch.
+
+    qwen-asr 0.0.6 uses ``@check_model_inputs()`` while the published
+    Transformers 4.57.x helper also accepts the bare decorator form.  The
+    upstream package currently fails during import on the former spelling;
+    normalize that call in this isolated worker process before importing the
+    vendor package.  No global service process state is changed.
+    """
+    import transformers.utils.generic as transformers_generic
+
+    original: Any = transformers_generic.check_model_inputs
+
+    def compatible_check_model_inputs(
+        func: Any = None, *, tie_last_hidden_states: bool = True
+    ) -> Any:
+        if func is None:
+            return lambda decorated: original(
+                decorated, tie_last_hidden_states=tie_last_hidden_states
+            )
+        return original(func, tie_last_hidden_states=tie_last_hidden_states)
+
+    transformers_generic.check_model_inputs = compatible_check_model_inputs
+    from qwen_asr import Qwen3ASRModel  # type: ignore[import-not-found]
+
+    return Qwen3ASRModel
 
 
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - process entry point.

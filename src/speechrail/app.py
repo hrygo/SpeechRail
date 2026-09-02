@@ -33,7 +33,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     transcribe: Transcribe | None = None,
-    v2_transcriber: BatchTranscriber | None = None,
+    batch_transcriber: BatchTranscriber | None = None,
     realtime_asr_factory: RealtimeAsrFactory | None = None,
     diarization_engine: DiarizationEngine | None = None,
     tts_synthesizer: SpeechSynthesizer | None = None,
@@ -44,7 +44,7 @@ def create_app(
     resolved_settings = settings or Settings()
     overrides = AppOverrides(
         transcribe=transcribe,
-        v2_transcriber=v2_transcriber,
+        batch_transcriber=batch_transcriber,
         realtime_asr_factory=realtime_asr_factory,
         diarization_engine=diarization_engine,
         tts_synthesizer=tts_synthesizer,

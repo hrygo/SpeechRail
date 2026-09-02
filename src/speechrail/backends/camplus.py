@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from speechrail.domain.diarization import DiarizationError
+from speechrail.domain.diarization import DiarizationError, DiarizationReadiness
 
 NativeEmbedding = Callable[[bytes], Sequence[float] | None]
 
@@ -25,6 +26,40 @@ class CamPlusEmbeddingExtractor:
         self._input_name: str | None = None
         self._output_name: str | None = None
         self._lock = threading.Lock()
+
+    @property
+    def readiness(self) -> DiarizationReadiness:
+        """Check the optional embedding profile without loading its ONNX session."""
+        if self._extract is not None:
+            return DiarizationReadiness(
+                True, True, None, "injected embedding backend is ready", "camplus"
+            )
+        if not self._model_path.is_file():
+            return DiarizationReadiness(
+                True,
+                False,
+                "diarization_not_available",
+                "speaker embedding model is not available",
+                "camplus",
+            )
+        try:
+            runtime_missing = any(
+                importlib.util.find_spec(module) is None
+                for module in ("numpy", "onnxruntime", "kaldi_native_fbank")
+            )
+        except (ImportError, ModuleNotFoundError, ValueError):
+            runtime_missing = True
+        if runtime_missing:
+            return DiarizationReadiness(
+                True,
+                False,
+                "diarization_not_available",
+                "speaker embedding runtime is not installed",
+                "camplus",
+            )
+        return DiarizationReadiness(
+            True, True, None, "CAM++ embedding profile is ready", "camplus"
+        )
 
     def __call__(self, audio: bytes) -> tuple[float, ...] | None:
         if self._extract is not None:

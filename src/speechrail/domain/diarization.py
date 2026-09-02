@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -21,6 +22,17 @@ class DiarizationError(ValueError):
     def __init__(self, message: str, *, code: str = "diarization_error") -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class DiarizationReadiness:
+    """Safe, path-free readiness information for an optional diarization profile."""
+
+    configured: bool
+    ready: bool
+    code: str | None
+    message: str
+    profile: str | None = None
 
 
 class DiarizationConfig(BaseModel):

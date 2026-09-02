@@ -2,7 +2,7 @@
 
 The main process never imports qwen3_asr_causal.  It proxies framed PCM/events
 to and from the isolated ``qwen3_streaming_worker`` subprocess and implements
-the existing ``RealtimeAsrSession`` port so the v2 route consumes the same
+the existing ``RealtimeAsrSession`` port so the OpenAI Realtime route consumes the same
 partial/completed events as the legacy WLK path.
 """
 

@@ -1,4 +1,4 @@
-"""Public AudioChunk stream validation shared by REST and Realtime v2 routes."""
+"""Public AudioChunk stream validation shared by REST and Realtime routes."""
 
 from __future__ import annotations
 

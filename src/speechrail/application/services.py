@@ -23,6 +23,7 @@ from speechrail.backends.qwen3_streaming import (
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.diarization import DiarizationReadiness
 from speechrail.domain.ports import (
     BatchTranscriber,
     DiarizationEngine,
@@ -45,7 +46,7 @@ def _package_root() -> Path:
 
 
 class _CallableBatchTranscriber(BatchTranscriber):
-    """Bridge the v1 callable seam while v2 adopts typed backend ports."""
+    """Bridge the legacy callable seam to the typed batch-transcription port."""
 
     def __init__(self, transcribe: Transcribe, model_id: str) -> None:
         self._transcribe = transcribe
@@ -71,7 +72,7 @@ class AppOverrides:
     """Explicit caller-provided replacements for composed inference components."""
 
     transcribe: Transcribe | None = None
-    v2_transcriber: BatchTranscriber | None = None
+    batch_transcriber: BatchTranscriber | None = None
     realtime_asr_factory: RealtimeAsrFactory | None = None
     diarization_engine: DiarizationEngine | None = None
     tts_synthesizer: SpeechSynthesizer | None = None
@@ -85,7 +86,7 @@ class AppServices:
 
     settings: Settings
     transcribe: Transcribe | None
-    v2_transcriber: BatchTranscriber | None
+    batch_transcriber: BatchTranscriber | None
     realtime_asr_factory: RealtimeAsrFactory | None
     diarization_engine: DiarizationEngine | None
     tts_synthesizer: SpeechSynthesizer | None
@@ -99,7 +100,7 @@ class AppServices:
     def asr_ready(self) -> bool:
         return (
             self.transcribe is not None
-            or self.v2_transcriber is not None
+            or self.batch_transcriber is not None
             or self.realtime_asr_factory is not None
             or self.settings.backend_ready
         )
@@ -107,6 +108,38 @@ class AppServices:
     @property
     def tts_ready(self) -> bool:
         return component_ready(self.tts_synthesizer)
+
+    @property
+    def diarization_status(self) -> dict[str, object]:
+        """Expose optional profile readiness without filesystem or identity data."""
+        if self.diarization_engine is None:
+            return {
+                "configured": False,
+                "ready": False,
+                "code": "diarization_not_configured",
+                "message": "diarization profile is not configured",
+                "profile": None,
+            }
+        readiness = getattr(self.diarization_engine, "readiness", None)
+        if isinstance(readiness, DiarizationReadiness):
+            return {
+                "configured": readiness.configured,
+                "ready": readiness.ready,
+                "code": readiness.code,
+                "message": readiness.message,
+                "profile": readiness.profile,
+            }
+        return {
+            "configured": True,
+            "ready": True,
+            "code": None,
+            "message": "diarization backend is ready",
+            "profile": None,
+        }
+
+    @property
+    def diarization_ready(self) -> bool:
+        return bool(self.diarization_status["ready"])
 
 
 def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServices:
@@ -117,7 +150,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
 
     asr_worker: Qwen3Worker | None = None
     transcribe = overrides.transcribe
-    v2_transcriber = overrides.v2_transcriber
+    batch_transcriber = overrides.batch_transcriber
     if (
         transcribe is None
         and settings.qwen3_model_dir is not None
@@ -134,7 +167,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             )
         )
         transcribe = asr_worker.transcribe
-        v2_transcriber = Qwen3BatchTranscriber(worker=asr_worker, model_id=settings.model_id)
+        batch_transcriber = Qwen3BatchTranscriber(worker=asr_worker, model_id=settings.model_id)
 
     tts_worker: Qwen3TtsWorker | None = None
     tts_synthesizer = overrides.tts_synthesizer
@@ -224,8 +257,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             processor=overrides.job_processor,
             deadline_seconds=settings.request_timeout_seconds,
         )
-    if v2_transcriber is None and transcribe is not None:
-        v2_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
+    if batch_transcriber is None and transcribe is not None:
+        batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
 
     lifecycle = RuntimeLifecycle(
         repository=job_repository,
@@ -238,7 +271,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     return AppServices(
         settings=settings,
         transcribe=transcribe,
-        v2_transcriber=v2_transcriber,
+        batch_transcriber=batch_transcriber,
         realtime_asr_factory=realtime_asr_factory,
         diarization_engine=diarization_engine,
         tts_synthesizer=tts_synthesizer,
