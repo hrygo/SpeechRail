@@ -40,6 +40,10 @@ class FakeStreamingWorker:
         await asyncio.Event().wait()  # pragma: no cover - never reached
         return {"type": "never"}
 
+    async def exchange(self, payload: Mapping[str, object]) -> dict[str, object]:
+        self.sent.append(payload)
+        return await self.receive()
+
     async def close(self) -> None:
         self._closed = True
 
@@ -62,6 +66,12 @@ class _FakeTransport:
         del payload, binary_payload
 
     async def receive(self) -> dict[str, object]:
+        return self.response
+
+    async def exchange(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> dict[str, object]:
+        del payload, binary_payload
         return self.response
 
     async def close(self) -> None:

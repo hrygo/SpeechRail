@@ -181,7 +181,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 return
             try:
                 await self._transport.start()
-                await self._transport.send(
+                ready = await self.exchange(
                     {
                         "version": PROTOCOL_VERSION,
                         "type": "start",
@@ -189,7 +189,6 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                         "device": self.config.device,
                     }
                 )
-                ready = await self._receive_profile_frame()
                 if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
                     raise RuntimeError(error_frame_message(ready, "worker_start_failed"))
                 device, dtype = ready.get("device"), ready.get("dtype")
@@ -208,6 +207,15 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
     async def receive(self) -> dict[str, object]:
         return await self._transport.receive()
 
+    async def exchange(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> dict[str, object]:
+        """Send one request and read its response atomically on the shared transport."""
+        try:
+            return await self._transport.exchange(payload, binary_payload=binary_payload)
+        except ProtocolError as exc:
+            raise RuntimeError("worker_frame_invalid") from exc
+
     async def transcribe(
         self,
         pcm: bytes,
@@ -220,7 +228,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         await self.start()
         async with self._lock:
             resolved_request_id = request_id or f"req_{uuid4().hex}"
-            await self._transport.send(
+            result = await self.exchange(
                 {
                     "version": PROTOCOL_VERSION,
                     "type": "transcribe",
@@ -234,7 +242,6 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 },
                 binary_payload=pcm,
             )
-            result = await self._receive_profile_frame()
         if result.get("type") != "result" or result.get("request_id") != resolved_request_id:
             raise RuntimeError(error_frame_message(result, "worker_request_failed"))
         text, detected = result.get("text"), result.get("language")
@@ -250,12 +257,6 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             segments=segments,
             words=words,
         )
-
-    async def _receive_profile_frame(self) -> dict[str, object]:
-        try:
-            return await self._transport.receive()
-        except ProtocolError as exc:
-            raise RuntimeError("worker_frame_invalid") from exc
 
     async def close(self) -> None:
         async with self._lock:

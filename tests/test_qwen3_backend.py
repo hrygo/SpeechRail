@@ -33,6 +33,12 @@ class _FakeTransport:
             raise AssertionError("fake transport ran out of canned responses")
         return self.responses.pop(0)
 
+    async def exchange(
+        self, payload: dict[str, Any], binary_payload: bytes | None = None
+    ) -> dict[str, Any]:
+        await self.send(payload, binary_payload=binary_payload)
+        return await self.receive()
+
     async def abort(self) -> None:
         self.aborted = True
 

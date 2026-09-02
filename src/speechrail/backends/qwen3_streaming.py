@@ -51,6 +51,10 @@ class StreamingWorkerProtocol(Protocol):
 
     async def receive(self) -> dict[str, object]: ...
 
+    async def exchange(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> dict[str, object]: ...
+
 
 @dataclass(frozen=True, slots=True)
 class Qwen3StreamingBackendConfig:
@@ -127,7 +131,7 @@ class Qwen3StreamingWorker:
         if self._ready:
             return
         await self._transport.start()
-        await self._transport.send(
+        ready = await self._transport.exchange(
             {
                 "version": PROTOCOL_VERSION,
                 "type": "start",
@@ -135,7 +139,6 @@ class Qwen3StreamingWorker:
                 "device": self.config.device,
             }
         )
-        ready = await self._transport.receive()
         if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
             raise RuntimeError(
                 error_frame_message(ready, "streaming worker failed to become ready")
@@ -150,6 +153,12 @@ class Qwen3StreamingWorker:
 
     async def receive(self) -> dict[str, object]:
         return await self._transport.receive()
+
+    async def exchange(
+        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+    ) -> dict[str, object]:
+        """Send one request and read its response atomically on the transport."""
+        return await self._transport.exchange(payload, binary_payload=binary_payload)
 
     async def close(self) -> None:
         await self._transport.close()
@@ -180,7 +189,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         if self._connected:
             return
         await self._worker.start()
-        await self._worker.send(
+        opened = await self._worker.exchange(
             {
                 "version": PROTOCOL_VERSION,
                 "type": "session.open",
@@ -189,7 +198,6 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                 "context": self._prompt,
             }
         )
-        opened = await self._worker.receive()
         if opened.get("type") != "session.opened":
             raise RuntimeError("streaming session.open failed")
         self._connected = True

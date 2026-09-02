@@ -85,6 +85,35 @@ def test_start_is_idempotent_and_frames_round_trip(tmp_path: Path) -> None:
     _run(scenario)
 
 
+def test_concurrent_exchanges_are_serialized_and_route_frames_correctly(
+    tmp_path: Path,
+) -> None:
+    """Concurrent request/response pairs must not race readexactly nor steal frames.
+
+    This mirrors the batch + realtime sharing one ASR worker transport: without
+    serialization, two coroutines waiting on the same StreamReader raise
+    ``readexactly() called while another coroutine is already waiting`` and
+    every transcript request HTTP 500s.
+    """
+
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+
+            async def echo(index: int) -> str:
+                frame = await transport.exchange({"action": "echo", "text": f"msg-{index}"})
+                return str(frame.get("text"))
+
+            results = await asyncio.gather(*(echo(index) for index in range(6)))
+            assert sorted(results) == [f"msg-{index}" for index in range(6)]
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
 def test_receive_times_out_when_child_never_answers(tmp_path: Path) -> None:
     transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.3))
 
