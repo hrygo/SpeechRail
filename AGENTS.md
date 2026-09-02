@@ -124,7 +124,7 @@ embedding 或完整转写正文。
 | `POST /v1/audio/speech` | Qwen3-TTS VoiceDesign 整句 TTS 已实现；本机已配置外部 TTS runtime 并实测输出 24 kHz PCM16 | 不要把 TTS runtime 当作 ASR 前置条件 |
 | `GET /v1/voices` | 当前代码应返回已登记的 TTS preset；TTS 未就绪时条目仍可返回但 `available=false`（本机当前全部 `available=true`） | 运行态 404 先核对服务进程、端口/base URL 和是否重启了当前代码；不能仅归因于缺少 TTS runtime |
 | `POST/GET/DELETE /v1/jobs` | 可选 owner-scoped 元数据 spool；需受信任 `JobProcessor` 才会执行 | `input_ref` 默认不是路径/URL resolver，不会自动读取音频 |
-| `WS /v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集）；标准 `openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入 | 不伪装 LLM 对话/工具/历史；`turn_detection` 仅 `null`/`manual`；`server_vad` → `unsupported_turn_detection` |
+| `WS /v1/realtime` | OpenAI Realtime 兼容端点（ASR/TTS 子集）；标准 `openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入 | 不伪装 LLM 对话/工具/历史；`turn_detection` 支持 `null`/`manual`/`server_vad`；Barge-in 打断严格限制于单会话内部 |
 | `diarization` profile | 可选匿名 speaker label、overlap 和 finalize remap | 不提供实名身份、声纹库或跨会议持久身份 |
 | `speechrail service` | macOS 用户级 LaunchAgent 的显式安装/启用/管理 CLI | 不自动安装、启用、下载模型或创建 root 服务 |
 | QwenPaw `whisper_api` | 使用标准 OpenAI-compatible `/v1` 路径；`.webm`/`video/webm` 需兼容 | 不要修改聊天模型 endpoint 来排查 STT |
