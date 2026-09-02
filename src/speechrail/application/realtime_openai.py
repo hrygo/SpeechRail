@@ -246,7 +246,11 @@ class OpenAIRealtimeSession:
                     prompt=asr_prompt,
                 )
                 await asr.connect()
-            except RuntimeError as exc:
+            except Exception as exc:
+                # Any failure (factory RuntimeError, BrokenPipeError/OSError from a
+                # dead worker pipe, ...) must release both the governor reservation
+                # and the factory slot, or the single streaming slot leaks until
+                # restart and every later session gets backend_busy.
                 await self._release_asr()
                 if asr is not None:
                     with contextlib.suppress(Exception):
