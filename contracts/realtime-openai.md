@@ -63,8 +63,8 @@ ws://127.0.0.1:8201/v1/realtime
 | `response.created` | TTS response 开始；`response.id` 用于关联后续事件 |
 | `response.output_item.added` / `done` | TTS 输出 item 生命周期 |
 | `response.content_part.added` / `done` | TTS 输出音频 part 生命周期 |
-| `response.output_audio.delta` / `done` | TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
-| `response.output_audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
+| `response.audio.delta` / `done` | TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
+| `response.audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
 | `response.done` | TTS response 终态（`status: completed` 或 `cancelled`） |
 | `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy` |
 

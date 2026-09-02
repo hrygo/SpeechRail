@@ -526,8 +526,8 @@ def test_openai_text_item_triggers_tts_response() -> None:
         assert "response.created" in events
         assert "response.output_item.added" in events
         assert "response.content_part.added" in events
-        assert "response.output_audio.delta" in events
-        assert "response.output_audio.done" in events
+        assert "response.audio.delta" in events
+        assert "response.audio.done" in events
         assert "response.content_part.done" in events
         assert "response.output_item.done" in events
         assert events[-1] == "response.done"
@@ -944,7 +944,7 @@ def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() 
         socket.receive_json()
         socket.send_json({"type": "response.create"})
         response_events = [socket.receive_json() for _ in range(4)]
-        assert response_events[-1]["type"] == "response.output_audio.delta"
+        assert response_events[-1]["type"] == "response.audio.delta"
 
         socket.send_json({"type": "response.cancel"})
         cancelled = socket.receive_json()

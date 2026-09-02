@@ -107,7 +107,7 @@ def run_session(
     recv_until(events, errors, "conversation.item.created", timeout=15)
     t0 = time.monotonic()
     conn.send({"type": "response.create"})
-    recv_until(events, errors, "response.output_audio.delta", timeout=60)
+    recv_until(events, errors, "response.audio.delta", timeout=60)
     first_delta_ms = (time.monotonic() - t0) * 1000
 
     kinds: list[str] = []
@@ -122,7 +122,7 @@ def run_session(
             continue
         k = str(get("type", ev))
         kinds.append(k)
-        if k == "response.output_audio.delta":
+        if k == "response.audio.delta":
             total_bytes += len(get("delta", ev) or b"")
         if k == "response.done":
             break

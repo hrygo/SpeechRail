@@ -265,7 +265,7 @@ def response_output_item_added(
             "object": "realtime.item",
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_audio", "transcript": None, "audio": None}],
+            "content": [{"type": "audio", "transcript": None, "audio": None}],
         },
     }
 
@@ -282,7 +282,7 @@ def response_output_item_done(
             "object": "realtime.item",
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "output_audio", "transcript": transcript, "audio": None}],
+            "content": [{"type": "audio", "transcript": transcript, "audio": None}],
         },
     }
 
@@ -313,11 +313,11 @@ def response_content_part_done(
     }
 
 
-def response_output_audio_delta(
+def response_audio_delta(
     *, session_id: str, response_id: str, item_id: str, delta: str
 ) -> dict[str, object]:
     return {
-        "type": "response.output_audio.delta",
+        "type": "response.audio.delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -326,11 +326,11 @@ def response_output_audio_delta(
     }
 
 
-def response_output_audio_done(
+def response_audio_done(
     *, session_id: str, response_id: str, item_id: str
 ) -> dict[str, object]:
     return {
-        "type": "response.output_audio.done",
+        "type": "response.audio.done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -338,11 +338,11 @@ def response_output_audio_done(
     }
 
 
-def response_output_audio_transcript_delta(
+def response_audio_transcript_delta(
     *, session_id: str, response_id: str, item_id: str, delta: str
 ) -> dict[str, object]:
     return {
-        "type": "response.output_audio_transcript.delta",
+        "type": "response.audio_transcript.delta",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -351,11 +351,11 @@ def response_output_audio_transcript_delta(
     }
 
 
-def response_output_audio_transcript_done(
+def response_audio_transcript_done(
     *, session_id: str, response_id: str, item_id: str, transcript: str
 ) -> dict[str, object]:
     return {
-        "type": "response.output_audio_transcript.done",
+        "type": "response.audio_transcript.done",
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,

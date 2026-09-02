@@ -23,14 +23,14 @@ from speechrail.compatibility.openai_realtime import (
     input_audio_buffer_committed,
     parse_text_item,
     reject_unsupported,
+    response_audio_delta,
+    response_audio_done,
+    response_audio_transcript_delta,
+    response_audio_transcript_done,
     response_content_part_added,
     response_content_part_done,
     response_created,
     response_done,
-    response_output_audio_delta,
-    response_output_audio_done,
-    response_output_audio_transcript_delta,
-    response_output_audio_transcript_done,
     response_output_item_added,
     response_output_item_done,
     session_created,
@@ -346,7 +346,7 @@ class OpenAIRealtimeSession:
             ):
                 async for chunk in iter_validated_audio(self._tts.synthesize(request)):
                     await self._send(
-                        response_output_audio_delta(
+                        response_audio_delta(
                             session_id=self._session_id,
                             response_id=response_id,
                             item_id=item_id,
@@ -365,7 +365,7 @@ class OpenAIRealtimeSession:
             )
             return
         await self._send(
-            response_output_audio_transcript_delta(
+            response_audio_transcript_delta(
                 session_id=self._session_id,
                 response_id=response_id,
                 item_id=item_id,
@@ -373,7 +373,7 @@ class OpenAIRealtimeSession:
             )
         )
         await self._send(
-            response_output_audio_transcript_done(
+            response_audio_transcript_done(
                 session_id=self._session_id,
                 response_id=response_id,
                 item_id=item_id,
@@ -381,7 +381,7 @@ class OpenAIRealtimeSession:
             )
         )
         await self._send(
-            response_output_audio_done(
+            response_audio_done(
                 session_id=self._session_id, response_id=response_id, item_id=item_id
             )
         )
