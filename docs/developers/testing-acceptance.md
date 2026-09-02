@@ -59,7 +59,7 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 | Hermes Agent | 待验收 | STT 专用 base URL/model 生效且不改变聊天 endpoint |
 | `/v1/realtime` | 协议测试 | update → append → commit → 一次 completed；不要求 delta |
 | `/v1/realtime` ASR/TTS | fake backend 协议测试 | OpenAI 事件顺序、取消、背压、terminal event 和 diarization 边界；真实 worker 需另验收 |
-| `voice-realtime` adapter | 确定性边界已覆盖 | ASR/TTS 真实音频、播放和回滚 smoke 通过；不以 legacy `/asr` 作为替换结论 |
+| `sona` adapter | 确定性边界已覆盖 | ASR/TTS 真实音频、播放和回滚 smoke 通过；不以 legacy `/asr` 作为替换结论 |
 
 每次发布保存命令、时间、版本/commit、测试摘要、OpenAPI lint、设备/dtype、request ID 与
 未验证风险。命令退出码不能单独替代 API 响应或客户端行为证据。

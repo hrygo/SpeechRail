@@ -10,7 +10,7 @@ Accepted
 
 ## Context
 
-`voice-realtime` 的 Qwen3 native path 已经验证了独立 Python worker、MPS identity 检查、
+`sona` 的 Qwen3 native path 已经验证了独立 Python worker、MPS identity 检查、
 仓库外模型快照和离线环境的必要性。不同 runtime 的 Python 依赖、设备回退和模型加载
 失败不能直接暴露给客户端。
 

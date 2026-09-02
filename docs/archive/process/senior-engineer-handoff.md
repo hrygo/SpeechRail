@@ -9,7 +9,7 @@ date: 2026-08-31
 ## 审查结论
 
 高级工程师审查结论为：**接受但修改**。公共 ASR/TTS 边界、Realtime v2 隔离、
-`voice-realtime` 直接迁移和 TTS 不阻塞 ASR 的方向成立；原方案对消费端口、confirmed/EOF、
+`sona` 直接迁移和 TTS 不阻塞 ASR 的方向成立；原方案对消费端口、confirmed/EOF、
 重连、资源准入、TTS 取消、job 生命周期和 LAN WebSocket 安全的定义不足。
 
 必须修改项已进入[最终设计规格](superpowers/specs/2026-08-31-speechrail-asr-tts-runtime-design.md)、
@@ -20,12 +20,12 @@ date: 2026-08-31
 ## 一页结论
 
 - 代码实现已具备：Qwen3-ASR batch REST、v2 ASR/TTS state machine、受监督 TTS worker、
-  durable jobs、可选 WLK streaming transport 与 `voice-realtime` 的两个 opt-in adapter。
+  durable jobs、可选 WLK streaming transport 与 `sona` 的两个 opt-in adapter。
 - 真实 streaming ASR、真实 TTS、jobs 的业务 `input_ref` resolver、QwenPaw/Hermes/
-  `voice-realtime` 影子与切换 smoke 均尚未获授权或验收。
+  `sona` 影子与切换 smoke 均尚未获授权或验收。
 - 已接受的目标：SpeechRail 只做实时/批量 ASR 和 TTS；不做端到端语音对话、LLM、播放、
   会议、UI 或持久化。
-- 迁移主线：`voice-realtime` 通过一个共享 Realtime client 和两个窄端口 adapter 接入
+- 迁移主线：`sona` 通过一个共享 Realtime client 和两个窄端口 adapter 接入
   `/v2/realtime`；语音助手与会议助手分别验收，不以完整复刻 WLK `/asr` 为前置条件。
 - Realtime v2.0 不做透明 session 恢复；断线创建新 session/source epoch，由应用记录 gap。
 - 默认 profile、worker 数和并发配置必须先通过真实 streaming、RTF、内存与资源隔离基准门。
@@ -81,7 +81,7 @@ launchd plist syntax: passed
 ```
 
 QwenPaw 已在本机通过其 `whisper_api` provider 指向 SpeechRail 完成一段中文短音频 smoke。
-本交接不保留音频、模型绝对路径、API key 或转写正文。Hermes 与 `voice-realtime` 尚无真实
+本交接不保留音频、模型绝对路径、API key 或转写正文。Hermes 与 `sona` 尚无真实
 端到端验收。
 
 ## 已优化目标设计
@@ -94,7 +94,7 @@ QwenPaw 已在本机通过其 `whisper_api` provider 指向 SpeechRail 完成一
 | async jobs | ASR/TTS 长任务使用明确 job resource、独立 cancel/result/delete 和 completed_at TTL |
 | Realtime v2 | `/v2/realtime` 只支持 `transcription` 与 `speech` session type |
 | v1 | `/v1/realtime` 语义冻结，避免破坏当前可观察行为 |
-| legacy | `/asr` 只保留到 `voice-realtime` v2 迁移与回滚演练完成 |
+| legacy | `/asr` 只保留到 `sona` v2 迁移与回滚演练完成 |
 
 Realtime v2 不是 OpenAI 的完整对话协议：它不携带 LLM response、tool call、语音对话编排或
 播放指令。它只承载 ASR PCM 输入/partial-final 输出，以及 TTS 文本输入/音频 chunk 输出。
@@ -117,18 +117,18 @@ Realtime v2 不是 OpenAI 的完整对话协议：它不携带 LLM response、to
 - 上述 TTS 候选均未下载、加载或基准验证。模型来源、版本、许可、量化、MPS 兼容性和质量
   必须在实施阶段逐一验收。
 
-## `voice-realtime` 直接迁移路径
+## `sona` 直接迁移路径
 
 ```text
 AudioHub PCM
-  → shared SpeechRailRealtimeClient（voice-realtime 内）
+  → shared SpeechRailRealtimeClient（sona 内）
       ├─ SpeechRailStreamingTranscriber（字幕/会议）
       └─ SpeechRailConversationSTTFactory（语音助手）
   → SpeechRail /v2/realtime, session.type=transcription
   → delta / item completed / session completed
 ```
 
-迁移只改变协议 client 与两个现有应用端口 adapter；SpeechRail 不 import `voice-realtime`，
+迁移只改变协议 client 与两个现有应用端口 adapter；SpeechRail 不 import `sona`，
 也不接管其会议、AudioHub、TTS bridge、UI 或数据库。实施计划应按以下依赖顺序拆分：
 
 1. 真实 streaming/resource 可行性门，确定 worker 拓扑和预算；
@@ -136,7 +136,7 @@ AudioHub PCM
 3. 语音助手和完整会议分别冒烟；
 4. 切换、回滚演练、退役旧 WLK / `/asr`。
 
-TTS 不阻塞 ASR 迁移。`voice-realtime` 可先保留自己的播放/TTS bridge，待 SpeechRail
+TTS 不阻塞 ASR 迁移。`sona` 可先保留自己的播放/TTS bridge，待 SpeechRail
 `speech` 会话稳定后再改为消费公共 TTS audio chunk。
 
 ## 已知风险与技术债
@@ -149,7 +149,7 @@ TTS 不阻塞 ASR 迁移。`voice-realtime` 可先保留自己的播放/TTS brid
 6. TTS 模型的许可证、声音安全、MPS 实现质量和中文表现尚未验收。
 7. job 结果 TTL 引入短期输出存储，需要实现权限、清理、容量与失败恢复测试。
 8. Realtime v2.0 的断线恢复依赖应用建立新 epoch 并显式记录 gap，不提供透明续传。
-9. `voice-realtime` 的会议与语音助手使用不同 ASR 端口，必须分别实现和验收 adapter。
+9. `sona` 的会议与语音助手使用不同 ASR 端口，必须分别实现和验收 adapter。
 
 ## 审查决议
 
@@ -159,7 +159,7 @@ TTS 不阻塞 ASR 迁移。`voice-realtime` 可先保留自己的播放/TTS brid
 | ASR/TTS 共用路径 | 接受同一 `/v2/realtime`，使用 discriminated session 和两个独立状态机 |
 | async jobs | 接受自定义 resource；拆分 cancel/result/delete，TTL 从 completed_at 开始 |
 | 调度 | 接受实时容量保护；不采用严格全局优先队列，使用预留、剩余容量准入和 aging |
-| voice-realtime adapter | 一个共享 client、两个窄端口 adapter；应用继续拥有 epoch/gap/SRT/数据库 |
+| sona adapter | 一个共享 client、两个窄端口 adapter；应用继续拥有 epoch/gap/SRT/数据库 |
 | voice | 首发只允许 preset voice；不保留 clone 字段、样本或隐藏入口 |
 | TTS streaming | 增加 response ID、chunk index、cancelled 确认和慢消费者上限后接受 |
 | 性能门 | fake contract 可先行；默认模型、worker 和并发必须在真实基准后决定 |
@@ -179,4 +179,4 @@ TTS 不阻塞 ASR 迁移。`voice-realtime` 可先保留自己的播放/TTS brid
 
 请先确认优化后的规格、v2 设计契约和 ADR。确认后才使用独立请求创建分阶段实施计划；该计划
 应把可行性门、ASR v2、两个消费端口 adapter、jobs 和 TTS 拆为可单独验证和回退的阶段。
-在确认前不会开始写 v2、TTS、jobs 或 `voice-realtime` 代码。
+在确认前不会开始写 v2、TTS、jobs 或 `sona` 代码。

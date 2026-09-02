@@ -38,7 +38,7 @@ date: 2026-09-01
 ## 验收门（未实测，须在对应场景完成）
 
 - Hermes 的 STT 配置和聊天 endpoint 隔离 smoke；
-- `voice-realtime` 的真实 ASR/TTS worker 端到端音频、播放与回滚验收；
+- `sona` 的真实 ASR/TTS worker 端到端音频、播放与回滚验收；
 - 多语言/长文件（>60s）的质量、失败恢复与长时间运行基准；
 - 非 loopback 的 TLS、CORS、网段控制、速率限制和 legacy auth 实现；
 - 解码后实际音频时长限制、观测指标导出与日志收集策略实现；
@@ -48,5 +48,5 @@ date: 2026-09-01
 
 REST 自动化门禁、真实 Qwen3 ASR/TTS smoke、目标客户端真实 smoke、实时/legacy
 所需契约实现、回滚演练和安全审计全部通过后，SpeechRail 才作为生产默认。当前 `8201` 是
-独立服务端口；voice-realtime 的旧 TTS bridge 已退役，若需回滚只能恢复已验证版本目录与配置，
+独立服务端口；sona 的旧 TTS bridge 已退役，若需回滚只能恢复已验证版本目录与配置，
 不能依赖一个仍在运行的旧 bridge 进程。

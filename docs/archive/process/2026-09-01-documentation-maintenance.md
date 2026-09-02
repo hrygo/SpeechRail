@@ -47,7 +47,7 @@
 
 **Files:**
 - Create: `docs/archive/README.md`
-- Move: `docs/03-voice-realtime-absorption.md` → `docs/archive/process/voice-realtime-absorption.md`
+- Move: `docs/03-sona-absorption.md` → `docs/archive/process/sona-absorption.md`
 - Move: `docs/12-senior-engineer-handoff.md` → `docs/archive/process/senior-engineer-handoff.md`
 - Move: `docs/superpowers/` → `docs/archive/process/superpowers/`
 

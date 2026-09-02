@@ -28,7 +28,7 @@
 | SR-02 | Worker process transport | SR-01 | 待领取 | 共用 framed transport，ASR/TTS profile policy 保持分离 |
 | SR-03 | TTS delivery | SR-02 | 待领取 | application stream 校验复用，三层 defense in depth 保留 |
 | SR-04 | SpeechRail 仓库级验收 | SR-03 | 待领取 | pytest、Ruff、mypy、OpenAPI lint、diff gate 全部通过 |
-| XR-01 | 两仓公共契约闭环 | SR-04、voice-realtime `VR-07` | 待领取 | fake/contract 与真实 runtime 状态分别留证 |
+| XR-01 | 两仓公共契约闭环 | SR-04、sona `VR-07` | 待领取 | fake/contract 与真实 runtime 状态分别留证 |
 
 ## SR-00：执行前基线与所有权锁定
 
@@ -215,7 +215,7 @@ git diff --check
 
 - [ ] 对照重构前证据核对 route set、OpenAPI paths、错误 code、WS close code 和 terminal event fixture。
 - [ ] 审查正常、异常、timeout 与 cancel 路径，确认 process、task、async generator 释放。
-- [ ] 确认提交不含 `.env`、模型、音频、日志、缓存、构建产物、并行 hunk 或 voice-realtime 文件。
+- [ ] 确认提交不含 `.env`、模型、音频、日志、缓存、构建产物、并行 hunk 或 sona 文件。
 - [ ] 分别标记 `contract/fake`、`real ASR`、`real TTS`、`performance/resource` 为 passed、failed 或 unverified。
 
 ### 完成证据
@@ -223,19 +223,19 @@ git diff --check
 - 完整 gate 结果与审查结论。
 - SR-01 至 SR-03 的 commit/PR 对应关系和回退顺序。
 - 公共契约“无变化”证据，或导致阻塞的精确差异。
-- 可交给 voice-realtime 团队的脱敏 fixture、事件字段与错误语义摘要。
+- 可交给 sona 团队的脱敏 fixture、事件字段与错误语义摘要。
 
 ## XR-01：两仓公共契约闭环
 
-**共同责任：** SpeechRail 团队发布服务端证据；voice-realtime 团队执行客户端 adapter/workflow 验证；跨团队验证负责人汇总。
+**共同责任：** SpeechRail 团队发布服务端证据；sona 团队执行客户端 adapter/workflow 验证；跨团队验证负责人汇总。
 
-**依赖：** 本仓 SR-04 与 voice-realtime `VR-07` 均完成。
+**依赖：** 本仓 SR-04 与 sona `VR-07` 均完成。
 
 **写入范围：** 默认只生成验收记录；任何修复必须回到所属仓库的新任务和独立 commit。
 
 ### 验收清单
 
-- [ ] 两仓先分别运行 contract/fake tests，确认 voice-realtime 未导入 SpeechRail 内部 Python 模块。
+- [ ] 两仓先分别运行 contract/fake tests，确认 sona 未导入 SpeechRail 内部 Python 模块。
 - [ ] 核对 ASR final/segments/speaker/remap/error 与 TTS audio/completed/cancel/slow-consumer 的 public field 和顺序。
 - [ ] 缺少真实 runtime 时记录 `contract/fake: passed` 与 `real runtime: unverified`，不得声明生产闭环。
 - [ ] 条件与授权具备时，依次验证 `/health`、`/readyz`、`/v1/models`、`/v1/voices`、REST ASR/TTS、Realtime v2 ASR/TTS、cancel、slow consumer 与 reconnect。

@@ -4,7 +4,7 @@
 
 **Goal:** Restore multi-speaker meeting capability through a reusable SpeechRail diarization profile without moving meeting ownership into the public runtime.
 
-**Architecture:** A vendor-neutral domain port produces session-scoped anonymous assignments and a final remap. The FastAPI Realtime v2 gateway only orchestrates the port and serializes additive events. `voice-realtime` maps those events into meeting entities and removes its ineffective acoustic runtime.
+**Architecture:** A vendor-neutral domain port produces session-scoped anonymous assignments and a final remap. The FastAPI Realtime v2 gateway only orchestrates the port and serializes additive events. `sona` maps those events into meeting entities and removes its ineffective acoustic runtime.
 
 **Tech Stack:** Python 3.12, Pydantic v2, FastAPI WebSocket, pytest, PostgreSQL meeting repository.
 
@@ -46,9 +46,9 @@
 ### Task 3: Migrate the meeting client and remove ineffective acoustic ownership
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/asr/adapters/speechrail_realtime.py`, `src/voice_realtime/meeting/session.py`, `src/voice_realtime/ui/server.py`, `src/voice_realtime/config.py`
-- Delete: `src/voice_realtime/meeting/voiceprint.py` and its tests after confirming no remaining references
-- Test: `/Users/hrygo/Documents/voice-realtime/tests/asr/test_speechrail_realtime.py`, `tests/test_meeting_session.py`, `tests/test_config.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/asr/adapters/speechrail_realtime.py`, `src/sona/meeting/session.py`, `src/sona/ui/server.py`, `src/sona/config.py`
+- Delete: `src/sona/meeting/voiceprint.py` and its tests after confirming no remaining references
+- Test: `/Users/hrygo/Documents/sona/tests/asr/test_speechrail_realtime.py`, `tests/test_meeting_session.py`, `tests/test_config.py`
 
 - [x] Write failing adapter tests for multi-speaker mapping, overlap primary selection and fail-closed meeting startup.
 - [x] Implement event parsing and remap propagation through the meeting port; retain only application-level smoothing and identity mapping.
@@ -58,7 +58,7 @@
 ### Task 4: Integrate, document and verify
 
 **Files:**
-- Modify: `contracts/openapi.yaml`, `docs/08-migration-runbook.md`, `docs/11-operations-runbook.md`, `/Users/hrygo/Documents/voice-realtime/README.md`
+- Modify: `contracts/openapi.yaml`, `docs/08-migration-runbook.md`, `docs/11-operations-runbook.md`, `/Users/hrygo/Documents/sona/README.md`
 - Test: both repositories’ complete suites plus static and frontend gates
 
 - [x] Update contract and operations docs with profile configuration, resource limits, privacy guarantees, known real-model gate and rollback.

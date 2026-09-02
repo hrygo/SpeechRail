@@ -24,7 +24,7 @@
 | TTS preset 目录 | 已实现 | `/v1/voices` 返回登记目录；TTS worker 未就绪时条目标记 `available=false` |
 | Realtime v1（OpenAI 兼容） | 已实现并可推理 | `/v1/realtime` 标准 SDK 可接入；ASR/TTS 真实 smoke 与连续会话验证完成 |
 | Realtime `/v1`（OpenAI 兼容） | 已实现 | ASR/TTS 事件、背压、取消、native streaming 与匿名 diarization 边界已覆盖 |
-| `voice-realtime` | 客户端边界已接入 | 会议、播放、UI、数据库和 LLM 由调用方拥有；真实端到端发布门待验收 |
+| `sona` | 客户端边界已接入 | 会议、播放、UI、数据库和 LLM 由调用方拥有；真实端到端发布门待验收 |
 | 常驻服务 | CLI 已实现（macOS） | `speechrail service install/enable/status/restart/disable/uninstall` 管理当前用户 `LaunchAgent`；不自动安装或启用 |
 
 ## 事实来源层级

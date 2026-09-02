@@ -9,7 +9,7 @@ date: 2026-08-31
 ## 1. 目标
 
 SpeechRail 是一个独立、本地优先的语音识别服务，首发后端为 `Qwen3-ASR-1.7B`，向
-QwenPaw、`voice-realtime`、Hermes Agent 及其他应用提供统一接口。服务拥有模型运行时、
+QwenPaw、`sona`、Hermes Agent 及其他应用提供统一接口。服务拥有模型运行时、
 队列、认证、健康检查和兼容层；调用方只依赖公共契约，不依赖 Qwen SDK、模型快照路径或
 WhisperLiveKit 内部模块。
 
@@ -20,7 +20,7 @@ WhisperLiveKit 内部模块。
 
 本规格依据 2026-08-31 对当前本机资料和代码的核对：
 
-- `voice-realtime` 版本 `1.4.0`，当前分支为 `feature/physical-output-audio`；其 Qwen3
+- `sona` 版本 `1.4.0`，当前分支为 `feature/physical-output-audio`；其 Qwen3
   隔离 worker、ASR contracts、WLK `/asr` 和 `8001` 端口是迁移输入。
 - QwenPaw 当前使用 `whisper_api` 形式的 `/v1/audio/transcriptions`。
 - Hermes Agent `0.20.5` 的转写工具使用 `STT_OPENAI_BASE_URL`、`STT_OPENAI_MODEL` 和
@@ -48,7 +48,7 @@ WhisperLiveKit 内部模块。
 - 会议状态、speaker mapping、SRT/数据库、UI、TTS、LLM 和 Agent prompt。
 - 断线后的业务重连策略，以及 transcript 的业务持久化。
 
-特别是 `voice-realtime` 的 `AudioHub`、会议状态机、Sortformer、PostgreSQL、TTS 和
+特别是 `sona` 的 `AudioHub`、会议状态机、Sortformer、PostgreSQL、TTS 和
 LM Studio 原生对话链不迁入 SpeechRail。
 
 ## 4. 目标拓扑
@@ -58,7 +58,7 @@ QwenPaw ───────────────┐
 Hermes Agent ──────────┼── HTTP /v1/audio/transcriptions ─┐
 其他批量客户端 ────────┘                                  │
                                                          ▼
-voice-realtime ─────── WS /v1/realtime ───────► SpeechRail supervisor
+sona ─────── WS /v1/realtime ───────► SpeechRail supervisor
 旧 SubtitleStream ──── WS /asr (legacy) ───────►   ├─ admission/queue
                                                          ├─ Qwen3 batch worker
                                                          └─ Qwen3/WLK realtime worker
@@ -113,7 +113,7 @@ transcription_session.update
 
 ### 5.3 Legacy WLK
 
-`WS /asr?language=...&mode=full` 只为当前 `voice-realtime` 迁移保留：首帧 `config`，
+`WS /asr?language=...&mode=full` 只为当前 `sona` 迁移保留：首帧 `config`，
 接受裸 PCM，输出 `lines`/`buffer_transcription` full snapshot，空 PCM 表示 EOF 并输出
 `ready_to_stop`。该路径带有弃用标识和单独 parity fixtures，新客户端不能依赖它。
 
@@ -173,21 +173,21 @@ Qwen worker 使用 framed IPC，至少包含长度、协议版本、request ID�
 ## 9. 迁移策略
 
 ```text
-0. 冻结 voice-realtime 基线
+0. 冻结 sona 基线
    ↓
 1. SpeechRail 以 8201 旁路启动，先验收 health/ready/model/REST
    ↓
-2. QwenPaw 与 Hermes 切到 8201，voice-realtime 仍留在旧 WLK 8001
+2. QwenPaw 与 Hermes 切到 8201，sona 仍留在旧 WLK 8001
    ↓
 3. SpeechRail legacy /asr parity 通过后，停旧 WLK 并切 8001
    ↓
-4. voice-realtime 增加现代 Realtime client adapter
+4. sona 增加现代 Realtime client adapter
    ↓
 5. 冻结/退役重复 ASR server；保留可执行回滚路径
 ```
 
 每一步都要保留旧端口回滚能力。SpeechRail 项目不会直接修改原
-`voice-realtime` 工作树；原项目的改动使用独立 feature branch，且只改 client/config/
+`sona` 工作树；原项目的改动使用独立 feature branch，且只改 client/config/
 process ownership。
 
 ## 10. 验收标准
@@ -197,6 +197,6 @@ process ownership。
 1. OpenAPI 与代码路由、错误 envelope、模型 alias 一致。
 2. Qwen worker 的离线、MPS identity、取消和临时文件清理测试通过。
 3. REST、Realtime 和 legacy WLK 契约测试通过。
-4. QwenPaw、Hermes Agent、`voice-realtime` 各完成真实 smoke；Hermes 聊天 endpoint 不受影响。
+4. QwenPaw、Hermes Agent、`sona` 各完成真实 smoke；Hermes 聊天 endpoint 不受影响。
 5. 至少一个完整字幕/会议闭环通过，包含 partial、confirmed、EOF、SRT 和重连。
 6. `8201 → 8001` 切换和反向回滚演练通过，且没有删除原项目数据或代码。

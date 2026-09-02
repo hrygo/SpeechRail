@@ -141,7 +141,7 @@ SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEE
 | Apple Silicon device | MPS / `float16`；不允许自动 CPU fallback |
 | HTTP 服务依赖 | 主 `uv` 环境中的 FastAPI 等，不加载模型权重 |
 
-它不会加载 Whisper、LM Studio chat/embedding 模型或 `voice-realtime` 的会议组件。未配置
+它不会加载 Whisper、LM Studio chat/embedding 模型或 `sona` 的会议组件。未配置
 对应 snapshot/runtime 时不会加载该 profile；`/health` 会返回可诊断的 `diarization` 状态，
 `/v1/models` 不会宣称 `gpt-4o-transcribe-diarize` 可用，启用该模型的 Realtime session 会在
 `session.update` 阶段返回 `diarization_not_available`，而不是等到 `commit` 才失败。
@@ -222,5 +222,5 @@ API key、Authorization、音频、Base64、完整 prompt 或转写正文。
 模型 snapshot；不要通过 `git reset --hard` 丢弃配置。
 
 服务回滚为：停止新进程，恢复上一个已验证版本工作目录与 `.env`，启动后完成 REST smoke。
-QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。`voice-realtime` adapter
+QwenPaw 回滚只恢复转写 provider 的 base URL/model 并完整重启。`sona` adapter
 已经实现；启用、影子、回滚均须使用[迁移 Runbook](migration-runbook.md)。

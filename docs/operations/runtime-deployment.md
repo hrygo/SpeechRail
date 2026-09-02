@@ -37,7 +37,7 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录不在仓库内，请
 | TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证 |
 | diarization profile | Sortformer（可选 CAM++） | 由 profile/runtime 决定 | `/v1/realtime` opt-in；只保留有界匿名状态 |
 
-SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `voice-realtime` 组件。
+SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。
 
 ## 配置
 

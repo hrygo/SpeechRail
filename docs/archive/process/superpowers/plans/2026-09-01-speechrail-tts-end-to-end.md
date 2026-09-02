@@ -2,9 +2,9 @@
 
 > **For agentic workers:** Execute this plan task-by-task with review checkpoints. The shared worktree contains unrelated parallel changes; never stage or commit files outside the task's explicit file list.
 
-**Goal:** Move the `voice-realtime` MLX Qwen3-TTS VoiceDesign path into SpeechRail and wire both REST audition and Realtime v2 playback without losing existing ASR, meeting, UI, or playback ownership.
+**Goal:** Move the `sona` MLX Qwen3-TTS VoiceDesign path into SpeechRail and wire both REST audition and Realtime v2 playback without losing existing ASR, meeting, UI, or playback ownership.
 
-**Architecture:** SpeechRail owns TTS policy, preset voice registry, request/session state, worker supervision, model adapter, audio validation, and public REST/WebSocket delivery. `voice-realtime` owns interaction and playback and consumes SpeechRail through a neutral outbound protocol adapter; Pipecat and UI remain delivery/application adapters. The model runtime stays behind SpeechRail's external worker boundary.
+**Architecture:** SpeechRail owns TTS policy, preset voice registry, request/session state, worker supervision, model adapter, audio validation, and public REST/WebSocket delivery. `sona` owns interaction and playback and consumes SpeechRail through a neutral outbound protocol adapter; Pipecat and UI remain delivery/application adapters. The model runtime stays behind SpeechRail's external worker boundary.
 
 **Tech Stack:** Python 3.12, `uv`, FastAPI, Pydantic v2, asyncio, WebSocket Realtime v2, MLX `mlx-audio` in a separately configured worker environment, Pipecat 1.7, React/TypeScript, pytest, Ruff, mypy, OpenAPI/JSON Schema validation.
 
@@ -15,7 +15,7 @@
 - Python remains `>=3.12,<3.13`; use `uv` and PEP 621 metadata.
 - Public TTS model ID is `speechrail/qwen3-tts`; the actual `mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16` snapshot remains an external absolute path.
 - Public audio is mono 24,000 Hz signed little-endian PCM16; REST supports `pcm` and `wav`.
-- Four preset voices are `default`, `warm`, `bright`, and `calm`; `alloy` is only a `voice-realtime` compatibility alias mapped to `default`.
+- Four preset voices are `default`, `warm`, `bright`, and `calm`; `alloy` is only a `sona` compatibility alias mapped to `default`.
 - Model downloads are disabled by default and never happen during a request.
 - Do not persist source audio, raw transcript/TTS text, prompts, credentials, or absolute model paths in logs.
 - Preserve all unrelated staged/unstaged changes in both repositories; do not run broad staging, reset, checkout, clean, or dependency upgrades.
@@ -96,15 +96,15 @@ def test_generation_budget_is_bounded():
 - [ ] **Step 5: Update OpenAPI and Realtime contract documents to match the implemented fields and event order.**
 - [ ] **Step 6: Run the focused API tests, contract validator, and `uv run ruff check` on changed SpeechRail files.**
 
-### Task 4: Create the neutral `voice-realtime` SpeechRail outbound adapter
+### Task 4: Create the neutral `sona` SpeechRail outbound adapter
 
 **Files:**
-- Create: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/speechrail/__init__.py`
-- Create: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/speechrail/transport.py`
-- Create: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/speechrail/tts.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/asr/adapters/speechrail_realtime.py`
-- Create: `/Users/hrygo/Documents/voice-realtime/tests/test_speechrail_tts.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/tests/asr/test_speechrail_realtime.py`
+- Create: `/Users/hrygo/Documents/sona/src/sona/speechrail/__init__.py`
+- Create: `/Users/hrygo/Documents/sona/src/sona/speechrail/transport.py`
+- Create: `/Users/hrygo/Documents/sona/src/sona/speechrail/tts.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/asr/adapters/speechrail_realtime.py`
+- Create: `/Users/hrygo/Documents/sona/tests/test_speechrail_tts.py`
+- Modify: `/Users/hrygo/Documents/sona/tests/asr/test_speechrail_realtime.py`
 
 **Interfaces:**
 - `SpeechRailV2Transport` validates JSON object shape, `session_id`, `request_id`, and monotonically increasing `sequence`; it supports `connect`, `send_event`, `receive`, and `close` and is reusable by ASR and TTS adapters.
@@ -120,12 +120,12 @@ def test_generation_budget_is_bounded():
 ### Task 5: Replace the Pipecat local bridge with a Realtime v2 TTS service
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/interaction/tts.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/interaction/pipeline.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/config.py`
-- Create: `/Users/hrygo/Documents/voice-realtime/tests/test_speechrail_tts_service.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/tests/test_pipeline.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/tests/test_local_tts.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/interaction/tts.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/interaction/pipeline.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/config.py`
+- Create: `/Users/hrygo/Documents/sona/tests/test_speechrail_tts_service.py`
+- Modify: `/Users/hrygo/Documents/sona/tests/test_pipeline.py`
+- Modify: `/Users/hrygo/Documents/sona/tests/test_local_tts.py`
 
 **Interfaces:**
 - `SpeechRailTTSService(TTSService)` consumes aggregated LLM text, opens a v2 speech session per bounded clause, yields `TTSAudioRawFrame(audio, 24000, 1, context_id)`, and closes/cancels the client in every exit path.
@@ -141,15 +141,15 @@ def test_generation_budget_is_bounded():
 ### Task 6: Move UI health, voice selection, and REST audition to SpeechRail
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/ui/server.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/ui/control.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/src/voice_realtime/ui/runtime.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/ui/src/components/AssistantPanel.tsx`
-- Modify: `/Users/hrygo/Documents/voice-realtime/ui/src/components/StatusBar.tsx`
-- Modify: `/Users/hrygo/Documents/voice-realtime/ui/src/components/assistantPresentation.ts`
-- Create: `/Users/hrygo/Documents/voice-realtime/tests/test_ui_speechrail_tts.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/tests/test_ui_server.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/tests/test_control.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/ui/server.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/ui/control.py`
+- Modify: `/Users/hrygo/Documents/sona/src/sona/ui/runtime.py`
+- Modify: `/Users/hrygo/Documents/sona/ui/src/components/AssistantPanel.tsx`
+- Modify: `/Users/hrygo/Documents/sona/ui/src/components/StatusBar.tsx`
+- Modify: `/Users/hrygo/Documents/sona/ui/src/components/assistantPresentation.ts`
+- Create: `/Users/hrygo/Documents/sona/tests/test_ui_speechrail_tts.py`
+- Modify: `/Users/hrygo/Documents/sona/tests/test_ui_server.py`
+- Modify: `/Users/hrygo/Documents/sona/tests/test_control.py`
 
 **Interfaces:**
 - UI proxy routes call SpeechRail REST derived from the configured SpeechRail endpoint, preserve upstream content type and structured error bodies, and never call port `8765`.
@@ -165,18 +165,18 @@ def test_generation_budget_is_bounded():
 ### Task 7: Retire the old bridge active path and update deployment documentation
 
 **Files:**
-- Modify: `/Users/hrygo/Documents/voice-realtime/scripts/run-all.sh`
-- Modify: `/Users/hrygo/Documents/voice-realtime/pyproject.toml`
-- Modify: `/Users/hrygo/Documents/voice-realtime/tests/test_run_all_script.py`
-- Modify: `/Users/hrygo/Documents/voice-realtime/README.md`
+- Modify: `/Users/hrygo/Documents/sona/scripts/run-all.sh`
+- Modify: `/Users/hrygo/Documents/sona/pyproject.toml`
+- Modify: `/Users/hrygo/Documents/sona/tests/test_run_all_script.py`
+- Modify: `/Users/hrygo/Documents/sona/README.md`
 - Modify: `/Users/hrygo/Documents/SpeechRail/configs/speechrail.example.env`
 - Modify: `/Users/hrygo/Documents/SpeechRail/docs/11-operations-runbook.md`
-- Modify: `/Users/hrygo/Documents/SpeechRail/docs/03-voice-realtime-absorption.md`
+- Modify: `/Users/hrygo/Documents/SpeechRail/docs/03-sona-absorption.md`
 - Modify: `/Users/hrygo/Documents/SpeechRail/docs/08-migration-runbook.md`
 
 **Interfaces:**
 - `run-all.sh` starts only `vr-ui` and verifies the independently managed SpeechRail endpoint; it does not spawn `vr-bridge` or download TTS weights.
-- `voice-realtime` no longer exposes a `vr-bridge` console script or TTS-only MLX/model-cache dependency after all active references are removed; meeting dependencies remain intact.
+- `sona` no longer exposes a `vr-bridge` console script or TTS-only MLX/model-cache dependency after all active references are removed; meeting dependencies remain intact.
 - Example configuration documents the external MLX worker Python/snapshot and `SPEECHRAIL_TTS_VOICE_IDS=["default","warm","bright","calm"]` without real paths or credentials.
 
 - [ ] **Step 1: Add a script regression test that fails if `run-all.sh` starts `vr-bridge` or derives `VR_INTERACTION_TTS_BRIDGE_URL`.**
@@ -191,8 +191,8 @@ def test_generation_budget_is_bounded():
 - Create: `/Users/hrygo/Documents/SpeechRail/tests/test_tts_closed_loop_contract.py` if a missing deterministic cross-boundary case is found.
 
 - [ ] **Step 1: Run SpeechRail focused TTS tests, then the full `uv run pytest`, `uv run ruff check`, `uv run mypy`, OpenAPI validation, and Realtime contract validation.**
-- [ ] **Step 2: Run `voice-realtime` focused TTS/adapter/UI tests, then full backend pytest, `uv run ruff check`, `uv run mypy`, UI tests, and UI build.**
+- [ ] **Step 2: Run `sona` focused TTS/adapter/UI tests, then full backend pytest, `uv run ruff check`, `uv run mypy`, UI tests, and UI build.**
 - [ ] **Step 3: With an already-authorized existing MLX snapshot and configured worker Python, run health/readiness, `/v1/voices`, REST PCM/WAV, v2 append/flush/commit, Pipecat frame, playback, cancel, and recovery smoke tests.**
 - [ ] **Step 4: Verify the output is actually mono 24 kHz PCM16 and non-empty, and record first-chunk/RTF/memory only as local QA evidence without logging text, audio, credentials, or absolute snapshot paths.**
-- [ ] **Step 5: Re-run exact active-reference searches and graph coverage for every changed source path; confirm no SpeechRail → `voice-realtime`/LM/DB/playback dependency exists and no old bridge path is active.**
+- [ ] **Step 5: Re-run exact active-reference searches and graph coverage for every changed source path; confirm no SpeechRail → `sona`/LM/DB/playback dependency exists and no old bridge path is active.**
 - [ ] **Step 6: Report each gate as passed, failed, or unverified; do not claim completion if the real model or end-to-end playback cannot be executed locally.**

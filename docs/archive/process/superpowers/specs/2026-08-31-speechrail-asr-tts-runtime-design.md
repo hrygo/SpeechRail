@@ -18,10 +18,10 @@ SpeechRail 演进为本机优先的**公共语音运行时**，只提供 ASR 与
 - 异步批量任务：长文件或大量文本的受控处理。
 
 它不提供“语音入、语音出”的对话 Agent，不管理 LLM 会话、工具调用、麦克风、播放、
-打断策略、会议状态、字幕 UI、SRT 或数据库。那些仍由 QwenPaw、`voice-realtime` 或其他
+打断策略、会议状态、字幕 UI、SRT 或数据库。那些仍由 QwenPaw、`sona` 或其他
 消费者拥有。
 
-`voice-realtime` 将直接消费最终的 Realtime v2，而不是要求 SpeechRail 完整复刻 WLK
+`sona` 将直接消费最终的 Realtime v2，而不是要求 SpeechRail 完整复刻 WLK
 `/asr` snapshot。它是 SpeechRail 最重要的真实集成冒烟客户端；旧 `/asr` 仅作短期回滚面。
 
 ## 2. 目标、非目标与现状
@@ -56,7 +56,7 @@ SpeechRail 演进为本机优先的**公共语音运行时**，只提供 ASR 与
                          │                                 │
 QwenPaw ─ REST ─────────►│  API gateway / auth / request ID │
 批处理器 ─ REST/jobs ───►│          │                      │
-voice-realtime ─ v2 WS ─►│  resource governor / scheduler   │
+sona ─ v2 WS ─►│  resource governor / scheduler   │
                          │     ├─ ASR profile worker(s)     │
                          │     │    ├─ realtime ASR lane    │
                          │     │    └─ batch ASR lane       │
@@ -212,26 +212,26 @@ session.update
 - 健康检查必须区分进程存活、各 ASR/TTS profile 的 worker ready 和 queue saturation；
   readiness 不得只凭配置字段为 true。
 
-## 7. `voice-realtime` 直接迁移
+## 7. `sona` 直接迁移
 
 目标路径不是 `/asr`：
 
 ```text
-voice-realtime AudioHub
+sona AudioHub
   → shared SpeechRailRealtimeClient
       ├─ SpeechRailStreamingTranscriber → SubtitleProxy / MeetingSession
       └─ SpeechRailConversationSTTFactory → 语音助手 Pipecat pipeline
   → /v2/realtime (transcription)
 ```
 
-迁移在 `voice-realtime` 内使用一个共享协议客户端，但暴露两个应用端口 adapter：会议/字幕
+迁移在 `sona` 内使用一个共享协议客户端，但暴露两个应用端口 adapter：会议/字幕
 端实现现有 `StreamingTranscriber`，语音助手端实现现有 `ConversationSTTFactory` 并创建
 Pipecat processor。两者复用认证、连接和事件解析，但分别映射领域事件，不能用一个万能
 adapter 抹平不同生命周期。
 
 会议 adapter 将逐句 completed 累积为 `TranscriptWindow` snapshot；只有 session completed
 才映射为 final/EOF。应用仍拥有 source epoch、断线 gap、SRT、PostgreSQL、会议和 UI。
-SpeechRail 不 import `voice-realtime`，也不写其数据库。
+SpeechRail 不 import `sona`，也不写其数据库。
 
 迁移阶段：
 
@@ -239,7 +239,7 @@ SpeechRail 不 import `voice-realtime`，也不写其数据库。
    profile，先决定 worker 拓扑和容量预算，不下载或启用未授权模型。
 2. **契约阶段**：以 fake backend 固化 v2 item/session、错误、取消、背压和非恢复式重连。
 3. **运行时阶段**：实现通过可行性门的 ASR streaming profile；分别跑 fake 与真实模型测试。
-4. **Adapter 阶段**：在 `voice-realtime` 独立分支实现共享 client 与两个端口 adapter，保留原
+4. **Adapter 阶段**：在 `sona` 独立分支实现共享 client 与两个端口 adapter，保留原
    WLK/语音助手 STT 配置。
 5. **影子阶段**：同一 PCM 在应用内受控复制到旧后端与 SpeechRail，仅比较测试/人工验收
    结果，不写入重复会议记录。
@@ -247,7 +247,7 @@ SpeechRail 不 import `voice-realtime`，也不写其数据库。
    可回滚配置。
 7. **退役阶段**：v2 持续稳定后删除 `/asr` 兼容路径与旧 WLK 启动依赖。
 
-TTS 迁移独立于 ASR：`voice-realtime` 的交互 pipeline 通过共享 Realtime v2 transport
+TTS 迁移独立于 ASR：`sona` 的交互 pipeline 通过共享 Realtime v2 transport
 把文本增量发往 SpeechRail，并自行负责播放返回的 24 kHz PCM chunk；REST 仅用于试听/回放。
 
 ## 8. 验收与发布门
@@ -257,7 +257,7 @@ TTS 迁移独立于 ASR：`voice-realtime` 的交互 pipeline 通过共享 Realt
 - REST：短音频、长音频 job、错误、取消、TTL、OpenAI SDK 兼容测试；
 - v2：合法顺序、非法顺序、delta revision 覆盖、逐句 completed、session final 唯一性、
   server VAD/manual flush、commit、cancel、慢消费者、重连新 epoch/gap、队列满和 worker 重启；
-- `voice-realtime`：语音助手输入、会议开始/结束、字幕、confirmed 文本、SRT、数据库、
+- `sona`：语音助手输入、会议开始/结束、字幕、confirmed 文本、SRT、数据库、
   断线与旧后端回滚的真实 smoke。
 
 ### TTS
@@ -270,7 +270,7 @@ TTS 迁移独立于 ASR：`voice-realtime` 的交互 pipeline 通过共享 Realt
   主观验收样本的访问控制；没有证据不宣称实时性能。
 
 发布前必须运行完整测试、Ruff、mypy、OpenAPI/Realtime 契约校验，并分别运行真实模型与
-`voice-realtime` 冒烟。任何模型下载、加载、客户端切换或端口替换必须由单独请求授权。
+`sona` 冒烟。任何模型下载、加载、客户端切换或端口替换必须由单独请求授权。
 
 ## 9. 取舍
 
@@ -282,6 +282,6 @@ TTS 迁移独立于 ASR：`voice-realtime` 的交互 pipeline 通过共享 Realt
 | 端到端 Speech-to-Speech 模型 | 不采用 | 不利于会议文本、时间轴和可观测性，也超出当前职责 |
 | ASR/TTS 共用无优先级队列 | 不采用 | TTS 可能破坏会议字幕延迟 |
 | 单一严格全局优先队列 | 不采用 | 不可抢占任务仍会阻塞实时请求，并可能让 batch 永久饥饿 |
-| 一个万能 voice-realtime adapter | 不采用 | 会议 StreamingTranscriber 与语音助手 ConversationSTTFactory 生命周期不同 |
+| 一个万能 sona adapter | 不采用 | 会议 StreamingTranscriber 与语音助手 ConversationSTTFactory 生命周期不同 |
 
 本设计由 ADR-0006 固化。实施前应依据本规格创建分阶段计划；每个阶段单独可验证、可回退。

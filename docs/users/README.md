@@ -4,7 +4,7 @@
 
 ## 推荐阅读顺序
 
-1. [用户与客户端接入](integrations.md)：按 QwenPaw、OpenAI SDK、Hermes 和 `voice-realtime` 选择接入方式。
+1. [用户与客户端接入](integrations.md)：按 QwenPaw、OpenAI SDK、Hermes 和 `sona` 选择接入方式。
 2. [公共 API 契约](api-contract.md)：确认模型 ID、端点、请求字段、错误和认证行为。
 3. [OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md)：需要 WebSocket 时阅读 `/v1/realtime` 的完整事件顺序和限制。
 4. 接入前先完成[运维 Runbook 的健康检查与 smoke](../operations/operations-runbook.md)。

@@ -20,7 +20,7 @@ QwenPaw 当前使用 `whisper_api` 形态，Hermes Agent 使用 OpenAI SDK 的
 - 模型清单使用 `GET /v1/models`。
 - 实时新客户端使用 `/v1/realtime`，事件名对齐 OpenAI transcription session。
 - 统一错误 envelope，保留 `code`、`request_id`、`retryable` 扩展字段。
-- `voice-realtime` 的 `/asr` 独立标记为 legacy，不污染核心 API。
+- `sona` 的 `/asr` 独立标记为 legacy，不污染核心 API。
 
 ## Alternatives considered
 

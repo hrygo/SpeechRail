@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use executing-plans to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
-**Goal:** Deliver a local public ASR/TTS runtime with OpenAI-compatible REST, durable batch jobs, Realtime v2 sessions, and direct voice-realtime v2 adapters.
+**Goal:** Deliver a local public ASR/TTS runtime with OpenAI-compatible REST, durable batch jobs, Realtime v2 sessions, and direct sona v2 adapters.
 
-**Architecture:** Preserve existing v1 behavior. Add typed v2 state machines, a Resource Governor, isolated ASR/TTS backend ports, and an external SQLite job spool. voice-realtime owns devices, meeting, LLM, playback and UI; it connects through a shared v2 client and two adapters.
+**Architecture:** Preserve existing v1 behavior. Add typed v2 state machines, a Resource Governor, isolated ASR/TTS backend ports, and an external SQLite job spool. sona owns devices, meeting, LLM, playback and UI; it connects through a shared v2 client and two adapters.
 
 **Tech Stack:** Python 3.12, FastAPI, Pydantic v2, asyncio, SQLite, websockets, ffmpeg, isolated Qwen runtimes, mlx-audio in an isolated TTS runtime, pytest, Ruff, mypy, OpenAPI 3.1.
 
@@ -19,7 +19,7 @@
 - One profile owns one long-lived worker; ASGI workers never duplicate models.
 - Realtime v2 is non-resumable. sequence is session-local only.
 - New HTTP/WS endpoints require Bearer auth when an API key is configured.
-- voice-realtime is changed only in a separate worktree/branch after SpeechRail v2 is testable.
+- sona is changed only in a separate worktree/branch after SpeechRail v2 is testable.
 - Model download/activation, client cutover and service installation are separate authorization gates.
 
 ---
@@ -256,7 +256,7 @@ Run: uv run --extra dev pytest tests/test_speech_api.py -q --no-cov
 
 - [ ] **Step 3: Port reusable worker mechanics only**
 
-Port text normalization, bounded producer/consumer queue, cancellation, PCM conversion and sample-rate validation from voice-realtime tts_bridge/engine.py. Do not port global voice mutation, custom voice text, HTTP service state, playback or application configuration.
+Port text normalization, bounded producer/consumer queue, cancellation, PCM conversion and sample-rate validation from sona tts_bridge/engine.py. Do not port global voice mutation, custom voice text, HTTP service state, playback or application configuration.
 
 - [ ] **Step 4: Add optional runtime configuration**
 
@@ -386,7 +386,7 @@ Run: uv run --extra dev pytest tests/test_wlk_streaming.py -q --no-cov
 
 - [ ] **Step 3: Implement adapter/supervisor**
 
-Port protocol normalization from voice-realtime asr/adapters/wlk.py and local executable lifecycle constraints from subtitles/launcher.py. Preflight paths, own the sidecar process, cancel on session teardown and translate snapshots before the backend port.
+Port protocol normalization from sona asr/adapters/wlk.py and local executable lifecycle constraints from subtitles/launcher.py. Preflight paths, own the sidecar process, cancel on session teardown and translate snapshots before the backend port.
 
 - [ ] **Step 4: Add disabled-until-proven profile and commit**
 
@@ -396,19 +396,19 @@ The profile returns backend_not_ready until a separately authorized local stream
     git add src/speechrail/backends src/speechrail/config src/speechrail/app.py docs/05-runtime-deployment.md tests/test_wlk_streaming.py
     git commit -m "feat: adapt streaming asr backend for realtime v2"
 
-## Task 9: Migrate voice-realtime through two narrow adapters
+## Task 9: Migrate sona through two narrow adapters
 
 实施状态：**代码完成，影子/切换未验收**（`e585597` 至 `dcb45f2`）。
 
-**Workspace:** create a new voice-realtime worktree and branch. Do not edit SpeechRail in this task.
+**Workspace:** create a new sona worktree and branch. Do not edit SpeechRail in this task.
 
 **Files:**
-- Create: src/voice_realtime/asr/adapters/speechrail_realtime.py
+- Create: src/sona/asr/adapters/speechrail_realtime.py
 - Create: tests/asr/test_speechrail_realtime.py
-- Modify: src/voice_realtime/asr/defaults.py
-- Modify: src/voice_realtime/asr/registry.py
-- Modify: src/voice_realtime/ui/subtitle_proxy.py
-- Modify: src/voice_realtime/interaction/pipeline.py
+- Modify: src/sona/asr/defaults.py
+- Modify: src/sona/asr/registry.py
+- Modify: src/sona/ui/subtitle_proxy.py
+- Modify: src/sona/interaction/pipeline.py
 
 **Interfaces:**
 - SpeechRailRealtimeClient owns handshake, sequence validation, non-resumable reconnect and close.
@@ -432,7 +432,7 @@ Keep WLK fields out of the new client. The subtitle adapter maps v2 items to Tra
 Add disabled-by-default independent ASR v2 settings for subtitles and conversation. Shadow mode duplicates bounded PCM only for diagnostics and never writes duplicate results.
 
     VR_TEST_DATABASE_URL=postgresql:///knowledge uv run pytest tests/asr/test_speechrail_realtime.py -q --no-cov
-    git add src/voice_realtime/asr src/voice_realtime/ui/subtitle_proxy.py src/voice_realtime/interaction/pipeline.py tests/asr/test_speechrail_realtime.py
+    git add src/sona/asr src/sona/ui/subtitle_proxy.py src/sona/interaction/pipeline.py tests/asr/test_speechrail_realtime.py
     git commit -m "feat(asr): add speechrail realtime v2 adapters"
 
 ## Task 10: Complete docs, tests and separately authorized smokes
@@ -463,7 +463,7 @@ Document v1/v2 coexistence, profile readiness, slots, spool, voice registry, loo
 
 - [ ] **Step 4: Run separately authorized runtime/client gates**
 
-Only after explicit authorization: ASR v2 synthetic PCM; TTS REST/v2 preconfigured voice; QwenPaw REST regression; voice-realtime subtitle shadow; voice-realtime conversation STT shadow; then each cutover and rollback. Record no raw audio or transcript in Git.
+Only after explicit authorization: ASR v2 synthetic PCM; TTS REST/v2 preconfigured voice; QwenPaw REST regression; sona subtitle shadow; sona conversation STT shadow; then each cutover and rollback. Record no raw audio or transcript in Git.
 
 - [ ] **Step 5: Commit**
 
@@ -472,6 +472,6 @@ Only after explicit authorization: ASR v2 synthetic PCM; TTS REST/v2 preconfigur
 
 ## Plan Self-Review
 
-- Tasks 1-4 cover the Realtime v2 contract; Tasks 2 and 7 cover Resource Governor/jobs; Tasks 5-6 implement batch/stream TTS; Task 8 supplies real streaming ASR; Task 9 migrates both voice-realtime ports; Task 10 covers security, operations and acceptance.
+- Tasks 1-4 cover the Realtime v2 contract; Tasks 2 and 7 cover Resource Governor/jobs; Tasks 5-6 implement batch/stream TTS; Task 8 supplies real streaming ASR; Task 9 migrates both sona ports; Task 10 covers security, operations and acceptance.
 - No task downloads models, activates a profile, switches a client or installs a service without the named authorization gate.
 - Every public event is produced from Task 1 session types and Task 3 typed backend ports; no vendor or meeting field crosses into the public API.

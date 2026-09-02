@@ -10,7 +10,7 @@ date: 2026-09-02
 ## 当前实现
 
 ```text
-QwenPaw / OpenAI SDK ── multipart ──> FastAPI app <── JSON/WS ── voice-realtime
+QwenPaw / OpenAI SDK ── multipart ──> FastAPI app <── JSON/WS ── sona
                                           │
                                    request ID / auth / queue
                               ┌───────────┴───────────┐
@@ -57,5 +57,5 @@ profile 未 ready 时在 `session.update` 阶段 fail closed，不伪造 speaker
 它们不能从架构图或早期设计推断为已启用。启用前须先实现、测试并更新契约与边界文档，
 门禁见[当前边界](current-boundaries.md) 与 [迁移 Runbook](../operations/migration-runbook.md)。
 
-`voice-realtime` 继续拥有 AudioHub、会议、播放、数据库、UI 与 LM Studio；SpeechRail
+`sona` 继续拥有 AudioHub、会议、播放、数据库、UI 与 LM Studio；SpeechRail
 拥有 ASR/TTS API/runtime，但不接管这些应用职责。

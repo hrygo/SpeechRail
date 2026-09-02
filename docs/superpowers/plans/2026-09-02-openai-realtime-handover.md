@@ -11,7 +11,7 @@
 
 **Tech Stack:** Python 3.12、FastAPI WebSocket、Pydantic v2、pytest、ruff、mypy、OpenAPI 3.1。
 
-**Spec:** `docs/superpowers/specs/2026-09-02-openai-realtime-handover-design.md`；需求基线为 `/Users/hrygo/Documents/voice-realtime/docs/operations/SpeechRail-OpenAI标准协议功能需求交割单.md`。
+**Spec:** `docs/superpowers/specs/2026-09-02-openai-realtime-handover-design.md`；需求基线为 `/Users/hrygo/Documents/sona/docs/operations/SpeechRail-OpenAI标准协议功能需求交割单.md`。
 
 ## Global Constraints
 

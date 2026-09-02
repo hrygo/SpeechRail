@@ -103,5 +103,5 @@ completed 当作唯一转写结果，不得把此接口用于要求低延迟 par
 `{ "type": "ready_to_stop" }`。非空 PCM 当前不会产生转写或 WLK `lines` /
 `buffer_transcription`。
 
-因此它不具备 `voice-realtime` 替换资格，也未实现认证。新客户端必须使用
+因此它不具备 `sona` 替换资格，也未实现认证。新客户端必须使用
 `/v1/realtime` 或 REST。

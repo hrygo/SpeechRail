@@ -52,7 +52,7 @@ wheel 只包含 `speechrail` 服务包；模型权重、vendor runtime、`.env`�
 | `tests/` | 无模型依赖的契约、安全与边界测试 |
 
 SpeechRail 不拥有麦克风、会议、播放、UI、PostgreSQL、LLM chat orchestration 或客户端
-prompt。不要从 `voice-realtime` 复制这些职责进来。
+prompt。不要从 `sona` 复制这些职责进来。
 
 ## 4. 当前模型运行方式
 

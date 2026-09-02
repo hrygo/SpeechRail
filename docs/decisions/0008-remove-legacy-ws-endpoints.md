@@ -12,7 +12,7 @@ Accepted; superseded by [ADR-0009](0009-openai-realtime-only.md)
 
 ADR-0004 决定保留 WLK `/asr` 作为迁移期过渡兼容层，`/v1/realtime/legacy` 承载旧
 append-then-commit batch 协议。v1.0.0 发布前，所有已知消费者（QwenPaw、
-`voice-realtime`、Hermes 配置方法）均已切换到 OpenAI-compatible `/v1/realtime`、
+`sona`、Hermes 配置方法）均已切换到 OpenAI-compatible `/v1/realtime`、
 `/v2/realtime` 与 REST 路径；ADR-0006 已固定 `/v2/realtime` 为主迁移路线。保留两个
 legacy 端点会持续承载认证盲区、无 WLK parity 的骨架行为和历史协议维护成本。
 

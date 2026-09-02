@@ -9,9 +9,9 @@ review: user-approved-scope-and-approach
 
 ## 1. 决策摘要
 
-本次采用 **Scope A：只迁移原 `voice-realtime` 的 TTS 完整链路**。SpeechRail 成为
+本次采用 **Scope A：只迁移原 `sona` 的 TTS 完整链路**。SpeechRail 成为
 TTS 模型、合成会话、音频格式、队列、取消、鉴权和可观测性的唯一运行时所有者；
-`voice-realtime` 仍拥有 LLM、Pipecat 对话编排、播放、打断、回声处理、会议、UI 和
+`sona` 仍拥有 LLM、Pipecat 对话编排、播放、打断、回声处理、会议、UI 和
 PostgreSQL。
 
 传输采用 **Realtime v2 原生链路 + REST 兼容试听链路**：
@@ -19,7 +19,7 @@ PostgreSQL。
 1. 语音助手生产链路使用 `WS /v2/realtime`，以文本增量换取有序 PCM 音频 chunk；
 2. UI 试听、重播和诊断使用 `POST /v1/audio/speech`，复用同一 TTS 应用用例，不复制
    一套生成逻辑；
-3. `voice-realtime` 以出站 adapter 消费 SpeechRail，不把模型 SDK 或 SpeechRail
+3. `sona` 以出站 adapter 消费 SpeechRail，不把模型 SDK 或 SpeechRail
    内部实现引入业务层；
 4. 新链路通过真实模型、取消、背压、播放和 UI 冒烟后，退役旧 `tts_bridge`、
    `vr-bridge` 运行路径。
@@ -30,7 +30,7 @@ PostgreSQL。
 
 ### 2.1 模型和运行时
 
-原 `voice-realtime` TTS bridge 的默认后端是：
+原 `sona` TTS bridge 的默认后端是：
 
 - 实际模型快照：`mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-bf16`；
 - 模型类型：`voice_design`；
@@ -53,14 +53,14 @@ worker backend，而不是只改客户端 URL。
 Pipecat / LM Studio 文本
   → ChineseClauseTextAggregator
   → LocalBridgeTTSService
-  → voice-realtime tts_bridge HTTP
+  → sona tts_bridge HTTP
   → MLX Qwen3-TTS VoiceDesign
   → PCM16 24 kHz
   → TTSStateObserver / AudioHub / playback
 ```
 
 旧 bridge 还提供 `/health`、`/v1/voices`、`/v1/voice` 和 `/v1/audio/speech`，并在
-`voice-realtime` 的 `run-all` 脚本中作为独立进程启动。旧服务用 `alloy` 作为 Pipecat
+`sona` 的 `run-all` 脚本中作为独立进程启动。旧服务用 `alloy` 作为 Pipecat
 占位 voice，再映射到当前 preset；这只是兼容细节，不应成为 SpeechRail 公共 voice ID。
 
 ### 2.3 当前 SpeechRail 差距
@@ -72,7 +72,7 @@ Pipecat / LM Studio 文本
 - worker 还没有与 v2 response cancellation 对齐的取消和 stale-output 隔离；
 - `/v1/voices` 尚未成为公共能力；
 - `/readyz`、v2 speech session 的 voice 校验和 commit/cancel 生命周期仍需补齐；
-- `voice-realtime` 的实时 TTS 仍走本地 bridge，不能仅通过修改 OpenAI base URL 迁移，
+- `sona` 的实时 TTS 仍走本地 bridge，不能仅通过修改 OpenAI base URL 迁移，
   因为 Pipecat 默认会发送 `gpt-4o-mini-tts` 和 `alloy`，与 SpeechRail 契约不匹配。
 
 ## 3. 范围和非目标
@@ -82,7 +82,7 @@ Pipecat / LM Studio 文本
 - 将 MLX Qwen3-TTS VoiceDesign adapter、预置 voice profile、文本归一化和 PCM 后处理
   迁入 SpeechRail infrastructure/application 边界；
 - 补齐 SpeechRail REST 与 Realtime v2 TTS 的端到端生命周期；
-- 在 `voice-realtime` 增加共享的 SpeechRail transport client 和 Pipecat TTS adapter；
+- 在 `sona` 增加共享的 SpeechRail transport client 和 Pipecat TTS adapter；
 - 把语音助手 pipeline、试听/replay、voice selector、健康探针和启动配置切到 SpeechRail；
 - 完整验证从 LM Studio 文本到实际扬声器播放、取消和 UI 试听的闭环；
 - 在新链路验收后删除或停用旧 bridge 的主动调用、启动和 TTS 模型依赖。
@@ -92,13 +92,13 @@ Pipecat / LM Studio 文本
 - 麦克风、扬声器、播放缓冲和 barge-in/interrupt 决策；
 - LLM、LM Studio 会话、Agent、prompt 和对话持久化；
 - 会议生命周期、说话人 diarization、SRT、PostgreSQL 和会议 UI；
-- `voice-realtime` 的 ASR 领域语义。已有 SpeechRail ASR adapter 只在需要共享 transport
+- `sona` 的 ASR 领域语义。已有 SpeechRail ASR adapter 只在需要共享 transport
   时做最小重构；
 - 语音克隆、任意 voice sample 或自由文本 speaker embedding；
 - 自动下载、加载、卸载或更换本机模型配置。
 
 本次架构验收聚焦 TTS 代码路径和两个项目之间的边界，不以重构无关会议/LLM/设备代码为
-前置条件。`voice-realtime` 中现有的生命周期、重连和资源清理控制流环不属于 TTS 迁移
+前置条件。`sona` 中现有的生命周期、重连和资源清理控制流环不属于 TTS 迁移
 对象；它们不应促使 SpeechRail 接管这些领域。
 
 ## 4. 统一 TTS 契约
@@ -125,7 +125,7 @@ Pipecat / LM Studio 文本
 | `bright` | `明亮活泼的中文女声，音调偏高，语气轻快，适合播报与讲解。` |
 | `calm` | `沉稳平静的中文男声，语速平稳，语气专业，适合资讯播报。` |
 
-`alloy` 只作为 `voice-realtime` 内部的历史兼容别名，发送给 SpeechRail 前归一化为
+`alloy` 只作为 `sona` 内部的历史兼容别名，发送给 SpeechRail 前归一化为
 `default`，不出现在 SpeechRail 的 voice registry。该别名的退役日期暂定为
 **2026-10-31**；实施时必须在配置和迁移说明中保留该日期，过期后以稳定错误拒绝。
 
@@ -207,7 +207,7 @@ infrastructure
   `SpeechSynthesizer`，不能用隐式全局模型；
 - worker 的模型路径来自已校验的外部绝对路径，日志只记录逻辑 profile 和脱敏资源摘要。
 
-### 5.2 `voice-realtime`
+### 5.2 `sona`
 
 ```text
 interaction / meeting / UI application logic
@@ -228,7 +228,7 @@ interaction / meeting / UI application logic
 - UI server 是 delivery adapter，只代理 REST、健康和 voice catalog，不直接 import MLX、
   TTS engine 或 worker；control layer 只改变应用选择的 preset，不调用已退役的全局
   `/v1/voice` 热切换服务；
-- `voice-realtime` 不持有 SpeechRail 模型路径、模型 cache、TTS vendor dependency 或
+- `sona` 不持有 SpeechRail 模型路径、模型 cache、TTS vendor dependency 或
   worker 生命周期；部署 supervisor 负责分别启动和监控两个项目；
 - 播放、AudioHub、TTSStateObserver、回声抑制、meeting store 和 PostgreSQL 继续位于
   应用侧，SpeechRail 只返回音频和协议事件。
@@ -237,8 +237,8 @@ interaction / meeting / UI application logic
 
 ```text
 LM Studio token/text
-  → voice-realtime clause aggregator
-  → voice-realtime SpeechRailPipecatTTSService
+  → sona clause aggregator
+  → sona SpeechRailPipecatTTSService
   → SpeechRail v2 client
   → SpeechRail /v2/realtime speech session
   → SpeechRail application/session governor
@@ -249,12 +249,12 @@ LM Studio token/text
   → existing observer / AudioHub / playback
 
 UI preview/replay
-  → voice-realtime REST proxy
+  → sona REST proxy
   → SpeechRail /v1/audio/speech
   → same application use case and worker
 ```
 
-任何反向依赖（SpeechRail import `voice_realtime`、写会议数据库、调用 LM Studio 或操作
+任何反向依赖（SpeechRail import `sona`、写会议数据库、调用 LM Studio 或操作
 播放设备）都视为架构验收失败。
 
 ## 6. 分阶段迁移方案
@@ -284,14 +284,14 @@ UI preview/replay
 - 以真实 snapshot 做受控本机冒烟，记录首 chunk、RTF、峰值内存和音频可播放性，不宣称
   未测出的性能指标。
 
-### Phase 4：`voice-realtime` 出站 adapter 和 pipeline
+### Phase 4：`sona` 出站 adapter 和 pipeline
 
 - 从现有 ASR adapter 提取中性的 SpeechRail realtime transport；保留 ASR 的领域 adapter；
 - 实现 SpeechRail TTS client 和 Pipecat service，复用 `ChineseClauseTextAggregator` 的
   安全边界，但把网络和协议解析放在 adapter；
 - 将 pipeline 的 `LocalBridgeTTSService` 替换为 SpeechRail TTS service；实现 cancel、
   cleanup、TTSAudioRawFrame、24 kHz 元数据和 playback 侧 observer 的完整映射；
-- 仅在 `voice-realtime` adapter 内把 `alloy` 归一化为 `default`，并记录退役日期。
+- 仅在 `sona` adapter 内把 `alloy` 归一化为 `default`，并记录退役日期。
 
 ### Phase 5：UI、部署与退役
 
@@ -306,11 +306,11 @@ UI preview/replay
 
 ## 7. 回滚策略
 
-- 代码回滚以两个仓库的原子提交为单位；SpeechRail 和 `voice-realtime` 的切换提交必须
+- 代码回滚以两个仓库的原子提交为单位；SpeechRail 和 `sona` 的切换提交必须
   记录对应关系，避免只回滚消费者而请求仍指向新 endpoint；
 - 发布期间通过 `SPEECHRAIL_TTS_REST_URL`、`SPEECHRAIL_TTS_REALTIME_URL` 和旧 bridge
   compatibility flag 选择 provider；默认值切回旧 bridge 即可恢复语音助手，不改模型文件；
-- 新 worker 或真实模型异常时，健康探针必须让 voice-realtime 停止把新请求送入未 ready
+- 新 worker 或真实模型异常时，健康探针必须让 sona 停止把新请求送入未 ready
   服务；已有播放只由应用侧按 interrupt/cleanup 策略处理；
 - 不删除旧模型 snapshot，不覆盖用户未提交改动，不在回滚中执行下载或全局 cache 清理；
 - 只有新链路通过发布周期验收后，才允许删除旧 bridge 文件和 TTS-only dependency。
@@ -330,7 +330,7 @@ UI preview/replay
 - 项目门禁：focused tests、full pytest、`ruff check`、`mypy`、OpenAPI validation 和
   Realtime contract validation。
 
-### 8.2 `voice-realtime`
+### 8.2 `sona`
 
 - shared transport：握手、鉴权、envelope、sequence、超时、关闭和 server error 映射；
 - Pipecat adapter：文本 clause 到 v2 events、audio delta 到 `TTSAudioRawFrame`、24 kHz
@@ -352,7 +352,7 @@ SpeechRail ready
   → REST /v1/audio/speech (pcm + wav)
   → v2 session.update/append/flush/commit
   → response.audio.delta
-  → voice-realtime Pipecat frame
+  → sona Pipecat frame
   → AudioHub/playback
   → response.cancel / playback interrupt
 ```

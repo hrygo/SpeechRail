@@ -5,7 +5,7 @@
 
 ## 背景
 
-根据 `voice-realtime/docs/operations/SpeechRail-OpenAI标准协议功能需求交割单.md`，将 SpeechRail 的 `WS /v1/realtime` 补齐为可供 voice-realtime 统一使用的 OpenAI-compatible ASR/TTS 协议。当前代码已经提供标准转写事件、TTS 生命周期、取消和 commit 基础链路；本次设计聚焦实时匿名分人、事件对账元数据、会话参数对齐及批量 diarized 输出。
+根据 `sona/docs/operations/SpeechRail-OpenAI标准协议功能需求交割单.md`，将 SpeechRail 的 `WS /v1/realtime` 补齐为可供 sona 统一使用的 OpenAI-compatible ASR/TTS 协议。当前代码已经提供标准转写事件、TTS 生命周期、取消和 commit 基础链路；本次设计聚焦实时匿名分人、事件对账元数据、会话参数对齐及批量 diarized 输出。
 
 ## 目标与非目标
 

@@ -3,7 +3,7 @@
 ## 目标
 
 在不改变 SpeechRail 公共 ASR/TTS 定位的前提下，恢复并提升原
-`voice-realtime` 的多人会议能力：实时显示匿名说话人、在收尾后稳定归并标签，
+`sona` 的多人会议能力：实时显示匿名说话人、在收尾后稳定归并标签，
 并由会议应用完成人员身份和持久化。
 
 ## 边界
@@ -12,7 +12,7 @@ SpeechRail 拥有 PCM 输入验证、VAD/diarization 推理、会话内 label、
 短期有界缓冲、分段结果和最终 remap。它不拥有会议、姓名、声纹库、数据库、UI、
 LLM、播放或跨会话身份。
 
-`voice-realtime` 拥有 `speaker_id → display_name` 的会议映射、人工更正、事务性
+`sona` 拥有 `speaker_id → display_name` 的会议映射、人工更正、事务性
 remap、纪要与展示。它不得再运行 Sortformer、CAM++ 或任何 ASR fallback。
 
 ## 公共契约
@@ -50,7 +50,7 @@ ID 表示确定性归并；没有变更时 `mapping` 为空。
 流式 Sortformer 用于在线标签；embedding + 聚类用于收尾校正。模型 adapter 的输出在
 进入领域前必须验证 speaker ID、时间范围、置信度和数量限制。
 
-## `voice-realtime` 映射
+## `sona` 映射
 
 SpeechRail adapter 解析 `speaker` / `speakers`，为会议生成
 `epoch:<source_epoch>:speaker:<id>`。不含 speaker 的非-diarization 会话沿用单一
@@ -66,7 +66,7 @@ mapping 后，会议 repository 在一个事务中应用 remap，保留人工 di
 - 单元：输入/输出 schema、label 验证、ring-buffer 上限、overlap、映射归并。
 - WebSocket：启用/未启用/未就绪状态，completed event 和 finalize event 的有序性。
 - 客户端：多 speaker segment 映射、overlap 的主 speaker 选择、无 profile 的 fail-closed。
-- 回归：SpeechRail 全量测试、Ruff、mypy、OpenAPI lint；voice-realtime 全量测试、Ruff、
+- 回归：SpeechRail 全量测试、Ruff、mypy、OpenAPI lint；sona 全量测试、Ruff、
   mypy、前端测试与构建；以真实本地 ASR worker 完成原有语音助手、字幕、会议 smoke。
 
 真实 diarization model 上线门槛另行用已授权评测集衡量在线延迟、DER/JER、label

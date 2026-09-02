@@ -44,7 +44,7 @@ uv run pytest tests/test_app_contract.py tests/test_speech_api.py \
 - `/v1/realtime` 仍是 commit 后 batch；`/v2/realtime` 仍只承载 ASR/TTS；`/asr` 不借重构获得 WLK parity、认证或 LAN 暴露能力。
 - 模型 snapshot 和 vendor Python 仍是仓库外绝对路径；请求期间不下载模型、不读取远程音频 URL。
 - 不持久化音频、PCM、embedding、完整转写、完整 TTS 文本、凭据或绝对模型路径。
-- 不把 `voice-realtime` 的会议、UI、PostgreSQL、播放、LM Studio 或应用提示词移入本仓库。
+- 不把 `sona` 的会议、UI、PostgreSQL、播放、LM Studio 或应用提示词移入本仓库。
 - 不创建跨仓库共享 Python 包；跨项目只通过现有 public contract 和脱敏 fixture 验收。
 - 本轮是内部结构重构。`contracts/` 与 accepted ADR 作为只读验收依据；若实施发现必须改变公共行为，停止当前子计划，先走独立 API/ADR 决策。
 - 当前工作树包含并行文档改动和未跟踪计划文件。执行时只暂存当前子计划列出的 code/test hunk，不使用 `reset`、`checkout`、`clean`、force-push 或广泛 `git add`。
@@ -141,11 +141,11 @@ git diff --check
 - [ ] 检查进程、task、async generator 均在正常退出、异常、timeout 和 cancel 路径释放。
 - [ ] 检查 diff 不含 `.env`、模型、音频、日志、缓存、构建产物或另一个仓库文件。
 
-## Stage 5: 与 voice-realtime 的闭环
+## Stage 5: 与 sona 的闭环
 
-本阶段只在 SpeechRail 三份子计划和 voice-realtime 的 ASR/Subtitle 子计划均通过后执行。
+本阶段只在 SpeechRail 三份子计划和 sona 的 ASR/Subtitle 子计划均通过后执行。
 
-- [ ] 在 `voice-realtime` 仓库运行 typed SpeechRail ASR/TTS adapter 测试，不做内部 Python import。
+- [ ] 在 `sona` 仓库运行 typed SpeechRail ASR/TTS adapter 测试，不做内部 Python import。
 - [ ] 有真实 runtime 和明确授权时，验证 `/health`、`/readyz`、`/v1/models`、`/v1/voices`、REST ASR/TTS、Realtime v2 ASR/TTS、cancel、slow consumer 和 reconnect。
 - [ ] 没有真实 snapshot/runtime 时，分别记录 `fake/contract: passed` 与 `real runtime: unverified`；不得使用 `SPEECHRAIL_BACKEND_READY=true` 伪造真实验收。
 - [ ] 两个仓库分别提交、分别回退，不创建跨仓库原子 commit 假象。

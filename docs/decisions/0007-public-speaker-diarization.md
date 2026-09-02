@@ -6,7 +6,7 @@ Accepted — 2026-09-01
 
 ## Context
 
-`voice-realtime` 已迁移到 SpeechRail OpenAI Realtime `/v1`。旧会议链路曾依赖
+`sona` 已迁移到 SpeechRail OpenAI Realtime `/v1`。旧会议链路曾依赖
 Sortformer 的帧级标签、时序平滑、CAM++ embedding 与会后聚类；迁移后当前
 SpeechRail adapter 固定输出 `speaker:0`，因而旧会议端的平滑和声纹代码不能
 实现多人分离。
@@ -20,7 +20,7 @@ SpeechRail 增加可选 `diarization` ASR profile，提供会话内匿名 speake
 时间范围、置信度、重叠信息和收尾后的 label remap。未配置该 profile 时明确
 拒绝 diarization 请求，绝不伪造单一 speaker label。
 
-`voice-realtime` 仅消费这些匿名结果，并将其映射为会议内的显示名称、人工更正和
+`sona` 仅消费这些匿名结果，并将其映射为会议内的显示名称、人工更正和
 数据库事实。它不加载、管理或回退到任何 ASR/diarization 模型。实名声纹识别不在
 首发范围；它必须是独立、默认关闭且获得明确授权的未来能力。
 
@@ -31,7 +31,7 @@ SpeechRail 增加可选 `diarization` ASR profile，提供会话内匿名 speake
 
 - OpenAI Realtime transcript segment event 承载 `speaker` / `speakers`，客户端按契约消费
   忽略新增字段。
-- `voice-realtime` 的会议表使用 SpeechRail 提供的 label 作为外键，remap 必须以
+- `sona` 的会议表使用 SpeechRail 提供的 label 作为外键，remap 必须以
   原子数据库更新应用，人工名称优先于默认名称。
 - 模型实现通过独立端口注入，先以 deterministic fake backend 验证协议和资源边界；
   真实模型仅在本机基准证明实时余量和 DER/JER 后启用。

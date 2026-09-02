@@ -10,8 +10,8 @@ Accepted
 
 ## Context
 
-QwenPaw、`voice-realtime` 和 Hermes Agent 都需要语音转文字，但它们的应用生命周期、
-UI、会议数据和 Agent 配置不同。把 ASR 继续放在 `voice-realtime` 的综合进程里，会让
+QwenPaw、`sona` 和 Hermes Agent 都需要语音转文字，但它们的应用生命周期、
+UI、会议数据和 Agent 配置不同。把 ASR 继续放在 `sona` 的综合进程里，会让
 其他应用依赖其端口、分支、Python 环境和 WLK 内部协议。
 
 ## Decision
@@ -21,7 +21,7 @@ UI、会议数据和 Agent 配置不同。把 ASR 继续放在 `voice-realtime` 
 
 ## Alternatives considered
 
-### 继续使用 voice-realtime:8001
+### 继续使用 sona:8001
 
 改动最小，但 QwenPaw/Hermes 会绑定会议应用的发布和故障域，无法独立升级。
 
@@ -38,5 +38,5 @@ LM Studio 适合作为本机 LLM/Embedding 服务；当前本机稳定使用面�
 
 - 需要维护一个独立服务和版本生命周期。
 - 多个客户端共享认证、限流、观测和模型管理。
-- `voice-realtime` 需要在迁移完成后停止自带 WLK server。
+- `sona` 需要在迁移完成后停止自带 WLK server。
 - 旧 `/asr` 兼容层会增加一段过渡维护成本，但可以降低切换风险。

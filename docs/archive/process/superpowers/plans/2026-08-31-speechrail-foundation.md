@@ -1,22 +1,22 @@
 # SpeechRail Foundation Implementation Plan
 
 > **Status:** historical foundation plan. The ASR/TTS target architecture, Realtime v2 contract and
-> `voice-realtime` migration details are superseded by the final runtime design, ADR-0006 and
+> `sona` migration details are superseded by the final runtime design, ADR-0006 and
 > `contracts/realtime-v2.md`; do not execute future-integration wording here as the current plan.
 
 > **For agentic workers:** Execute the tasks in order. Keep the public contract and the
 > application ownership boundaries in the design spec. Do not modify the original
-> `voice-realtime` working tree during this plan; its integration patch is a separately
+> `sona` working tree during this plan; its integration patch is a separately
 > reviewed change set.
 
-**Goal:** 将 `Qwen3-ASR-1.7B` 从 `voice-realtime` 的综合运行时提取为 SpeechRail 独立服务，
+**Goal:** 将 `Qwen3-ASR-1.7B` 从 `sona` 的综合运行时提取为 SpeechRail 独立服务，
 以 OpenAI-compatible REST、现代 Realtime WS 和 WLK legacy WS 同时服务 QwenPaw、Hermes
-Agent 与 `voice-realtime`。
+Agent 与 `sona`。
 
 **Architecture:** 一个 supervisor 管理 FastAPI/ASGI、有限队列、Qwen3 batch worker 和
 realtime worker/sidecar。所有后端输出先进入 SpeechRail 领域模型，再由 REST formatter、
 Realtime event mapper 或 WLK compatibility serializer 输出。模型快照在仓库外，默认离线、
-MPS fail-fast，调用方不 import `voice_realtime`。
+MPS fail-fast，调用方不 import `sona`。
 
 **Tech Stack:** Python 3.12、FastAPI、Pydantic v2、Uvicorn、`uv`、Qwen3-ASR native
 runtime、WhisperLiveKit compatibility adapter、pytest、Ruff、mypy、OpenAPI 3.1。
@@ -31,7 +31,7 @@ runtime、WhisperLiveKit compatibility adapter、pytest、Ruff、mypy、OpenAPI 
 - 不把 `AudioHub`、会议状态、Sortformer、PostgreSQL、UI、TTS、LLM 或 Agent 编排迁入。
 - 不使用多个 ASGI worker 复制模型；队列、worker slot、临时文件和取消路径必须可测试。
 - 每个任务先写失败测试，再写最小实现；每个任务结束都执行该任务列出的命令并记录证据。
-- `voice-realtime` 的修改只在其独立 feature branch 中进行，SpeechRail 仓库不直接复制或
+- `sona` 的修改只在其独立 feature branch 中进行，SpeechRail 仓库不直接复制或
   import 原项目包。
 
 ---
@@ -48,7 +48,7 @@ runtime、WhisperLiveKit compatibility adapter、pytest、Ruff、mypy、OpenAPI 
 
 **Implementation:**
 
-1. 从 `voice-realtime` ASR contracts 提取 `TranscriptSegment`、`TranscriptWord`、
+1. 从 `sona` ASR contracts 提取 `TranscriptSegment`、`TranscriptWord`、
    `TranscriptResult`、`TranscriptWindow`，去除会议数据库字段和应用 import。
 2. 为时间戳、`source_epoch`、partial/final、language 和 model alias 添加 Pydantic 校验。
 3. 为 batch/realtime/legacy 声明能力 profile；未实现 word timestamp、diarization 或
@@ -75,7 +75,7 @@ runtime、WhisperLiveKit compatibility adapter、pytest、Ruff、mypy、OpenAPI 
 
 **Implementation:**
 
-1. 将 `voice_realtime.asr.workers.qwen3_native_worker` 改为 SpeechRail 私有 worker module；
+1. 将 `sona.asr.workers.qwen3_native_worker` 改为 SpeechRail 私有 worker module；
    只接收 framed request，不接收 shell command 或任意 import path。
 2. 在启动前校验模型目录、必要文件、runtime Python、snapshot 指纹和离线环境。
 3. 保留 Qwen3 native 的 MPS identity 检查；`PYTORCH_ENABLE_MPS_FALLBACK=0` 时 device
@@ -172,7 +172,7 @@ uv run ruff check src tests
 
 1. `/v1/realtime` 在握手后返回 session created，接入 realtime adapter，按契约发 delta、
    completed/error，并对慢客户端施加有界 buffer。
-2. `/asr` 调用 compatibility adapter；保持当前 `voice-realtime` 对首帧、裸 PCM、full
+2. `/asr` 调用 compatibility adapter；保持当前 `sona` 对首帧、裸 PCM、full
    snapshot、空 PCM EOF 的可观察行为。
 3. 对 SIGTERM、WebSocket disconnect、worker cancel 和 commit error 做幂等资源清理。
 
@@ -191,9 +191,9 @@ uv run ruff check src tests
 - Maintain `docs/08-migration-runbook.md`。
 - Maintain `examples/qwenpaw.md`。
 - Maintain `examples/hermes.env.example`。
-- Maintain `examples/voice-realtime.migration.env.example`。
+- Maintain `examples/sona.migration.env.example`。
 
-**Separate `voice-realtime` branch changes:**
+**Separate `sona` branch changes:**
 
 - Add `VR_SUBTITLE_EXTERNAL_URL` and `VR_SUBTITLE_MANAGED` to subtitle settings.
 - Add a shared `SpeechRailRealtimeClient`, a meeting/subtitle `SpeechRailStreamingTranscriber`, and
@@ -205,7 +205,7 @@ uv run ruff check src tests
 
 - QwenPaw: `base_url=http://127.0.0.1:8201/v1`, canonical model, full app restart, REST smoke。
 - Hermes: `STT_OPENAI_BASE_URL`/`STT_OPENAI_MODEL` only; global `OPENAI_BASE_URL` remains unchanged。
-- `voice-realtime`: legacy parity, modern WS, meeting/SRT/DB flow and rollback。
+- `sona`: legacy parity, modern WS, meeting/SRT/DB flow and rollback。
 
 **Run:** follow `docs/08-migration-runbook.md`; do not claim integration success from config-only checks。
 

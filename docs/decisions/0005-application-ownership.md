@@ -10,7 +10,7 @@ Accepted
 
 ## Context
 
-`voice-realtime` 已经拥有 AudioHub 单一麦克风源、会议状态机、Sortformer、PostgreSQL、
+`sona` 已经拥有 AudioHub 单一麦克风源、会议状态机、Sortformer、PostgreSQL、
 TTS、UI、回声抑制和 LM Studio 原生对话链。若迁移时把这些模块一并搬进 SpeechRail，
 会形成新的综合 God Service。
 
@@ -19,7 +19,7 @@ TTS、UI、回声抑制和 LM Studio 原生对话链。若迁移时把这些模�
 SpeechRail 只负责“收到音频 → 产生转写事件/结果”。
 
 - 音频采集、回声和 TTS 留在应用。
-- 会议事实源、speaker mapping、SRT/数据库留在 `voice-realtime`。
+- 会议事实源、speaker mapping、SRT/数据库留在 `sona`。
 - Agent prompt、session、权限和聊天模型留在 QwenPaw/Hermes。
 - SpeechRail 只输出可验证的 segment/speaker optional metadata。
 

@@ -2,7 +2,7 @@
 
 SpeechRail（声轨）是面向本机应用的独立 ASR/TTS 运行时。它以稳定的 OpenAI-compatible
 REST 与 Realtime 接口提供语音转写和文本转语音，并将模型运行、队列、认证与观测从
-QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
+QwenPaw、`sona`、Hermes Agent 等客户端中分离出来。
 
 ## 当前状态
 
@@ -24,7 +24,7 @@ QwenPaw、`voice-realtime`、Hermes Agent 等客户端中分离出来。
 | `WS /v1/realtime` | 可用（OpenAI 兼容） | 标准 OpenAI Realtime 协议的 ASR/TTS 子集；`openai` SDK 的 `client.realtime.connect(model="whisper-1")` 可接入；支持 partial/completed、TTS audio delta、取消、背压与可选匿名 diarization |
 | QwenPaw | 已完成本机 smoke（2026-08-31） | 使用 `whisper_api` 接入 `/v1`；再次切换前须按用户文档复验 |
 | Hermes Agent | 配置方法已文档化 | 提供 STT 专用配置方法；真实 Hermes smoke 待验收，不修改其全局聊天 endpoint |
-| `voice-realtime` | `/v1/realtime` adapter 已实现 | ASR/TTS 通过 OpenAI Realtime 兼容协议；会议、播放、UI、数据库和 LLM 由调用方拥有，真实端到端闭环待部署验收 |
+| `sona` | `/v1/realtime` adapter 已实现 | ASR/TTS 通过 OpenAI Realtime 兼容协议；会议、播放、UI、数据库和 LLM 由调用方拥有，真实端到端闭环待部署验收 |
 | `launchd` 服务 CLI | 已实现（macOS） | `speechrail service` 显式管理当前用户 LaunchAgent；不会自动安装或启用 |
 
 客户端可直接使用 OpenAI 标准模型名（`whisper-1`、`tts-1` 等）接入；`/v1/models` 列出

@@ -6,7 +6,7 @@
 
 ## 1. 项目画像与设计原则
 
-SpeechRail 是供 QwenPaw、`voice-realtime`、Hermes Agent 及未来应用共享的
+SpeechRail 是供 QwenPaw、`sona`、Hermes Agent 及未来应用共享的
 独立本地语音识别与合成服务。它提供稳定的 ASR/TTS 公共接口、运行时生命周期、模型适配器、
 资源边界和兼容性边界；调用方仍拥有麦克风、播放、会议、UI、会话和应用编排。
 
@@ -18,7 +18,7 @@ SpeechRail 是供 QwenPaw、`voice-realtime`、Hermes Agent 及未来应用共�
 - **本地优先**：默认 loopback、外部模型快照、请求期间处理音频，不把本机服务当作公网平台。
 - **单人但允许有界并行**：队列、Resource Governor、超时和背压用于保护本机资源，不代表多租户或分布式需求。
 - **能力按需启用**：TTS、`jobs`、diarization 和 LAN 暴露均须有明确消费者与验收证据，默认关闭或保持最小边界。
-- **职责不外溢**：不把 `voice-realtime` 的会议、数据库、UI、播放或 LLM 编排移入 SpeechRail。
+- **职责不外溢**：不把 `sona` 的会议、数据库、UI、播放或 LLM 编排移入 SpeechRail。
 
 ### 设计决策过滤器
 
@@ -137,7 +137,7 @@ embedding 或完整转写正文。
 - 对外文件转写 API 使用 OpenAI-compatible 的
   `/v1/audio/transcriptions`。
 - 对外流式接口 `/v1/realtime` 实现 OpenAI Realtime 兼容协议（ASR/TTS 子集）；标准
-  OpenAI 客户端和 `voice-realtime` 可直接接入，均须先通过真实 backend 和客户端 smoke。
+  OpenAI 客户端和 `sona` 可直接接入，均须先通过真实 backend 和客户端 smoke。
 - 默认绑定 loopback。绑定 LAN 时必须启用 API key，并明确配置允许的
   origin 策略。
 - 模型快照使用外部绝对路径。请求处理期间不得下载模型或静默访问网络。
@@ -145,7 +145,7 @@ embedding 或完整转写正文。
   转写正文。
 - 对外模型名与具体模型实现解耦。`qwen3-asr-1.7b` 是后端 profile，不能
   因此重命名服务或 API。
-- 不要把 `voice-realtime` 的会议、UI、TTS、LM Studio 或 PostgreSQL 职责
+- 不要把 `sona` 的会议、UI、TTS、LM Studio 或 PostgreSQL 职责
   移入本仓库。
 
 ### 公共契约规则
@@ -178,7 +178,7 @@ embedding 或完整转写正文。
   既有事件形状，启用但没有 profile 时必须返回 `diarization_not_available`。
 - 输出只包含 session-scoped 的匿名 `spk_*` label、置信度、重叠信息和 finalize remap。
   `group_id` 只用于有界匿名声学状态，不得承载姓名、邮箱、手机号或凭据。
-- `voice-realtime` 负责 `speaker_id → display_name`、人工修正、事务性 remap、会议和数据库。
+- `sona` 负责 `speaker_id → display_name`、人工修正、事务性 remap、会议和数据库。
   SpeechRail 不加载 CAM++、不管理声纹库、不保存 PCM/embedding、不伪造单一 speaker。
 
 ## 5. 配置与运行前提

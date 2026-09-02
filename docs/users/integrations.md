@@ -24,7 +24,7 @@ loopback 模式不需 API key；非 loopback 模式将 key 放在客户端安全
 ## QwenPaw（已验证）
 
 QwenPaw 使用已有的 `whisper_api` provider，不需要 SpeechRail SDK。2026-08-31 已在本机
-将 provider `voice-realtime-asr` 的 base URL 改为 `http://127.0.0.1:8201/v1`，并设置
+将 provider `sona-asr` 的 base URL 改为 `http://127.0.0.1:8201/v1`，并设置
 模型 `speechrail/qwen3-asr-1.7b`；完成完整应用重启和中文短音频 smoke。
 
 在 QwenPaw 的语音/转写设置中填写：
@@ -79,9 +79,9 @@ STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
 OpenAI-compatible 转写调用形状；真实 Hermes 消息 smoke 尚未在本机完成，实施时先在
 单独配置/进程试运行，再验证聊天功能未受影响。失败时还原这两个 STT 配置并重启 Hermes。
 
-## `voice-realtime`（已接入 OpenAI Realtime 客户端边界）
+## `sona`（已接入 OpenAI Realtime 客户端边界）
 
-`voice-realtime` 使用一个共享 `SpeechRailRealtimeClient` 族和三个窄 adapter：
+`sona` 使用一个共享 `SpeechRailRealtimeClient` 族和三个窄 adapter：
 
 1. 字幕/会议使用 `SpeechRailStreamingTranscriber`，消费 ASR snapshot/completed 与 EOF；
 2. 语音助手使用 `SpeechRailConversationSTTFactory`，把 VAD turn 映射为 Pipecat 文本帧；
@@ -89,11 +89,11 @@ OpenAI-compatible 转写调用形状；真实 Hermes 消息 smoke 尚未在本�
 
 当前默认地址为 `ws://127.0.0.1:8201/v1/realtime`，TTS 试听/回放使用
 `http://127.0.0.1:8201/v1`。客户端只传入 16 kHz 单声道 ASR PCM 或 UTF-8 TTS 文本，
-不接管 AudioHub、会议、数据库、UI 或 LLM；播放、回声与打断仍由 `voice-realtime` 拥有。
+不接管 AudioHub、会议、数据库、UI 或 LLM；播放、回声与打断仍由 `sona` 拥有。
 非 loopback 服务启用 key 时，客户端配置 `speechrail_api_key`，通过 Authorization header
 发送，绝不把 key 放入 URL。
 
-旧 `vr-bridge` 已从 voice-realtime 的运行脚本、console entry point、TTS 专属依赖和源代码中
+旧 `vr-bridge` 已从 sona 的运行脚本、console entry point、TTS 专属依赖和源代码中
 退役；`BridgeSettings`/`tts_bridge_url` 仅作为配置文件兼容字段保留至 2026-10-31。
 
 ## Realtime 客户端限制
