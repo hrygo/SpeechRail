@@ -113,9 +113,13 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 | 进程组件 | 待机常驻物理内存 (Idle) | 压测峰值物理内存 (Peak) | 峰值 CPU | 显存与调度行为 |
 |---|---|---|---|---|
 | **主服务 (FastAPI)** | **533.0 MB** | **533.1 MB** | 0.6% | 协议路由、音频解码与资源守护 |
-| **统一 ASR Worker** | **2,531.3 MB (~2.53 GB)** | **9,158.5 MB (~9.16 GB)** | 71.4% | INT8 内存即时量化，统辖 Batch 与 Streaming 推理 |
+| **ASR Worker (Batch)** | **2,531.3 MB (~2.53 GB)** | **9,158.5 MB (~9.16 GB)** | 71.4% | INT8 内存即时量化，处理 Batch REST 转写 |
 | **Qwen3 TTS Worker** | **4,789.1 MB (~4.79 GB)** | **5,341.4 MB (~5.34 GB)** | 1.2% | VoiceDesign 1.7B，应用 256MB 显存池上限管理 |
 | **全系统总常驻 (Total)** | **7,853.4 MB (~7.85 GB)** | **15,033.0 MB (~15.03 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
+
+> 表内 ASR/TTS 测量为 v1.5.0 统一 ASR Worker 架构（Batch 与 Streaming 共享一个 worker 进程）的实测数据。
+> **v1.5.1 起 native realtime 使用独立 streaming worker（懒加载，首个 realtime 会话才启动）**，避免共享管道上
+> batch 与 realtime 并发读帧导致崩溃/死锁；启用 realtime 会话时内存模型需按两个 ASR worker 重新评估。
 
 ### 🚀 2. 推理延迟与吞吐基线
 

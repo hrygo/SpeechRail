@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.application.lifecycle import RuntimeLifecycle
-from speechrail.application.services import AppServices
+from speechrail.application.services import AppOverrides, AppServices, build_app_services
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
 
@@ -216,3 +216,35 @@ def test_lifespan_logs_worker_startup_failure_with_stderr_tail(
 
     assert "speechrail startup failed" in caplog.text.lower()
     assert "failed to allocate model weights" in caplog.text
+
+
+def test_native_realtime_uses_dedicated_streaming_worker_not_batch(
+    tmp_path: Path,
+) -> None:
+    """Batch and native realtime must never share one worker transport.
+
+    A realtime session's read loop parks on the transport between frames, while
+    batch transcription needs its own request/response exchange on the same
+    pipe; with no routing ids on session frames either read crashes
+    readexactly or a locked read deadlocks every batch request. The composition
+    root therefore wires a dedicated streaming worker for realtime.
+    """
+    snapshot = tmp_path.parent / "external-qwen3-wiring-profile"
+    snapshot.mkdir(exist_ok=True)
+    for filename in MODEL_FILES:
+        (snapshot / filename).touch()
+
+    settings = Settings(
+        qwen3_model_dir=snapshot,
+        qwen3_python=Path(executable),
+        realtime_asr_backend="native",
+        _env_file=None,
+    )
+    services = build_app_services(settings, AppOverrides())
+
+    assert services.batch_transcriber is not None
+    assert services.realtime_asr_factory is not None
+    assert services.asr_worker is not None
+    streaming_worker = getattr(services.realtime_asr_factory, "_worker", None)
+    assert type(streaming_worker).__name__ == "Qwen3StreamingWorker"
+    assert streaming_worker is not services.asr_worker

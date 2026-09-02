@@ -209,34 +209,31 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         and settings.qwen3_python is not None
         and settings.qwen3_model_dir is not None
     ):
-        if asr_worker is not None:
-            realtime_asr_factory = NativeRealtimeFactory(
-                worker=asr_worker,
+        # Dedicated streaming worker: a realtime session's read loop parks on the
+        # transport between frames, so it must never share a pipe with batch
+        # transcriptions (worker session frames carry no routing id, making one
+        # concurrent reader crash readexactly and a locked one deadlock).
+        streaming_worker = Qwen3StreamingWorker(
+            Qwen3StreamingBackendConfig(
+                repository_root=_package_root(),
+                python_executable=settings.qwen3_python,
+                model_dir=settings.qwen3_model_dir,
+                device=settings.device,
                 mode=settings.qwen3_streaming_mode,
-                next_session_id=lambda: f"sess_{uuid4().hex}",
+                chunk_sec=settings.qwen3_streaming_chunk_sec,
+                left_context_sec=settings.qwen3_streaming_left_context_sec,
+                right_context_ms=settings.qwen3_streaming_right_context_ms,
+                hold_back_words=settings.qwen3_streaming_hold_back_words,
+                stable_iterations=settings.qwen3_streaming_stable_iterations,
+                max_new_tokens=settings.qwen3_streaming_max_new_tokens,
+                timeout_seconds=settings.request_timeout_seconds,
             )
-        else:
-            streaming_worker = Qwen3StreamingWorker(
-                Qwen3StreamingBackendConfig(
-                    repository_root=_package_root(),
-                    python_executable=settings.qwen3_python,
-                    model_dir=settings.qwen3_model_dir,
-                    device=settings.device,
-                    mode=settings.qwen3_streaming_mode,
-                    chunk_sec=settings.qwen3_streaming_chunk_sec,
-                    left_context_sec=settings.qwen3_streaming_left_context_sec,
-                    right_context_ms=settings.qwen3_streaming_right_context_ms,
-                    hold_back_words=settings.qwen3_streaming_hold_back_words,
-                    stable_iterations=settings.qwen3_streaming_stable_iterations,
-                    max_new_tokens=settings.qwen3_streaming_max_new_tokens,
-                    timeout_seconds=settings.request_timeout_seconds,
-                )
-            )
-            realtime_asr_factory = NativeRealtimeFactory(
-                worker=streaming_worker,
-                mode=settings.qwen3_streaming_mode,
-                next_session_id=lambda: f"sess_{uuid4().hex}",
-            )
+        )
+        realtime_asr_factory = NativeRealtimeFactory(
+            worker=streaming_worker,
+            mode=settings.qwen3_streaming_mode,
+            next_session_id=lambda: f"sess_{uuid4().hex}",
+        )
 
     diarization_engine = overrides.diarization_engine
     if diarization_engine is None and settings.diarization_model_path is not None:
