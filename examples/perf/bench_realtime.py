@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import os
 import queue
 import threading
 import time
@@ -148,7 +149,9 @@ def main() -> None:
     parser.add_argument("--sessions", type=int, default=2)
     args = parser.parse_args()
 
-    client = OpenAI(api_key="local", base_url=args.base_url)
+    client = OpenAI(
+        api_key=os.environ.get("SPEECHRAIL_API_KEY", "local"), base_url=args.base_url
+    )
     pcm = args.pcm_file.read_bytes()
 
     for i in range(1, args.sessions + 1):

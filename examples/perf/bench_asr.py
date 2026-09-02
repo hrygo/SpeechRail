@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import os
 import statistics
 import subprocess
 import time
@@ -21,6 +22,12 @@ from pathlib import Path
 from urllib import request
 
 DEFAULT_BASE = "http://127.0.0.1:8201/v1/audio/transcriptions"
+
+
+def auth_headers() -> dict[str, str]:
+    """Return an Authorization header when SPEECHRAIL_API_KEY is configured."""
+    key = os.environ.get("SPEECHRAIL_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def audio_duration(path: Path) -> float:
@@ -46,11 +53,11 @@ def transcribe(base: str, path: Path, model: str) -> tuple[float, str | None]:
     )
     body += path.read_bytes()
     body += f"\r\n--{boundary}--\r\n".encode()
-    req = request.Request(
-        base,
-        data=bytes(body),
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-    )
+    headers = {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        **auth_headers(),
+    }
+    req = request.Request(base, data=bytes(body), headers=headers)
     t0 = time.monotonic()
     with request.urlopen(req, timeout=600) as resp:
         payload = json.loads(resp.read())

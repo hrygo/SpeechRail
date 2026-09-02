@@ -12,12 +12,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import statistics
 import time
 from urllib import request
 
 DEFAULT_BASE = "http://127.0.0.1:8201/v1/audio/speech"
 PCM_BYTES_PER_SECOND = 48_000  # 24 kHz * 16-bit stereo? no: mono 16-bit = 48000 B/s
+
+
+def auth_headers() -> dict[str, str]:
+    """Return an Authorization header when SPEECHRAIL_API_KEY is configured."""
+    key = os.environ.get("SPEECHRAIL_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def synthesize(
@@ -31,7 +38,8 @@ def synthesize(
             "response_format": "pcm",
         }
     ).encode()
-    req = request.Request(base, data=body, headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json", **auth_headers()}
+    req = request.Request(base, data=body, headers=headers)
     t0 = time.monotonic()
     with request.urlopen(req, timeout=600) as resp:
         audio = resp.read()
