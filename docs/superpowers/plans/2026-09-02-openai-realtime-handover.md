@@ -1,10 +1,13 @@
 # OpenAI Realtime 交割实现计划
 
+> 状态：已完成（2026-09-02）。`/v2/realtime` 保留条款已由 ADR-0009 supersede；当前唯一
+> 实时入口为 `/v1/realtime`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use inline execution with this plan task-by-task. Each step is tracked with checkbox syntax and must complete its own test cycle.
 
 **Goal:** 将 `WS /v1/realtime` 补齐为带实时匿名分人、可对账事件元数据、完整 EOF/取消语义的 OpenAI-compatible ASR/TTS 协议，并同步批量 diarized 输出。
 
-**Architecture:** 复用现有 `RealtimeAsrFactory`、`StreamingAsrEvent.segments`、`DiarizationCoordinator` 和 `TranscriptResult`，只在 OpenAI compatibility route 增加协议呈现与连接级生命周期管理。保留 `/v2/realtime` 作为 deprecated 兼容入口，不把会议身份、音频持久化或 LLM 编排引入 SpeechRail。
+**Architecture:** 复用现有 `RealtimeAsrFactory`、`StreamingAsrEvent.segments`、`DiarizationCoordinator` 和 `TranscriptResult`，由 `compatibility` 负责协议呈现、`application` 负责连接级生命周期管理，HTTP route 只负责传输边界；不把会议身份、音频持久化或 LLM 编排引入 SpeechRail。
 
 **Tech Stack:** Python 3.12、FastAPI WebSocket、Pydantic v2、pytest、ruff、mypy、OpenAPI 3.1。
 
@@ -172,7 +175,7 @@
 
 - [ ] **Step 1: Update contract tests or assertions**
 
-  补充 segment schema、sequence/event_id/session_id、cancelled terminal、diarization unavailable 和 `/v2/realtime` deprecated 的契约断言。
+  补充 segment schema、sequence/event_id/session_id、cancelled terminal 和 diarization unavailable 的契约断言；v2 移除由 ADR-0009 断言。
 
 - [ ] **Step 2: Run contract tests to verify RED where behavior is not yet documented**
 

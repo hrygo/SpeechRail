@@ -7,8 +7,8 @@
 | [0003](0003-runtime-isolation.md) | 模型运行时隔离与离线准入 | Accepted |
 | [0004](0004-wlk-legacy-compatibility.md) | 保留 WLK legacy `/asr` | Accepted |
 | [0005](0005-application-ownership.md) | 会议/音频/LLM 所有权留在 voice-realtime | Accepted |
-| [0006](0006-public-asr-tts-runtime.md) | 公共 ASR/TTS runtime、双端口 adapter 与 Realtime v2 直迁移 | Accepted |
-| [0007](0007-public-speaker-diarization.md) | 公共 Realtime v2 匿名说话人分离与应用侧身份映射 | Accepted |
+| [0006](0006-public-asr-tts-runtime.md) | 公共 ASR/TTS runtime 与 Realtime 直迁移 | Superseded by 0009 |
+| [0007](0007-public-speaker-diarization.md) | 公共 Realtime 匿名说话人分离与应用侧身份映射 | Accepted |
 | [0008](0008-remove-legacy-ws-endpoints.md) | 移除 legacy WS 端点与外部 WLK streaming 后端 | Accepted |
 | [0009](0009-openai-realtime-only.md) | 移除 `/v2/realtime`，统一 OpenAI Realtime `/v1/realtime` | Accepted |
 

@@ -23,14 +23,14 @@
 | REST TTS | 已实现并可推理 | `/v1/audio/speech` 使用登记 preset；未配置 TTS runtime 时返回 `backend_not_ready` |
 | TTS preset 目录 | 已实现 | `/v1/voices` 返回登记目录；TTS worker 未就绪时条目标记 `available=false` |
 | Realtime v1（OpenAI 兼容） | 已实现并可推理 | `/v1/realtime` 标准 SDK 可接入；ASR/TTS 真实 smoke 与连续会话验证完成 |
-| Realtime v2 | 已实现 | ASR/TTS state machine、背压、取消与 native streaming 真实 smoke 完成 |
+| Realtime `/v1`（OpenAI 兼容） | 已实现 | ASR/TTS 事件、背压、取消、native streaming 与匿名 diarization 边界已覆盖 |
 | `voice-realtime` | 客户端边界已接入 | 会议、播放、UI、数据库和 LLM 由调用方拥有；真实端到端发布门待验收 |
 | 常驻服务 | CLI 已实现（macOS） | `speechrail service install/enable/status/restart/disable/uninstall` 管理当前用户 `LaunchAgent`；不自动安装或启用 |
 
 ## 事实来源层级
 
 1. 当前代码、测试和实际运行结果。
-2. [OpenAPI 契约](../contracts/openapi.yaml)与 [OpenAI Realtime 兼容契约](../contracts/realtime-openai.md)、[Realtime v2 契约](../contracts/realtime-v2.md)。
+2. [OpenAPI 契约](../contracts/openapi.yaml)与 [OpenAI Realtime 兼容契约](../contracts/realtime-openai.md)。
 3. [正式架构/用户/开发/运维文档](#先按角色进入)和 [ADR](decisions/README.md)。
 4. [归档过程材料](archive/README.md)仅用于历史追溯。
 

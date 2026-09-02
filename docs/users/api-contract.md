@@ -32,16 +32,16 @@ TTS: speechrail/qwen3-tts
 alias 条目带 `resolves_to` 标注其 canonical profile。标准名归一化到对应 canonical
 profile，不代表服务加载 OpenAI 模型。
 
-删除字段、改变字段类型、错误码语义或 WebSocket 状态机属于破坏性变更，必须进入 `/v2`
-并附迁移说明。`/asr` 不承诺稳定新功能。
+`/v1/realtime` 是当前唯一的 Realtime 公共入口；删除字段、改变字段类型、错误码语义或
+WebSocket 状态机需要单独的兼容设计和迁移说明。`/asr` 不承诺稳定新功能。
 
 ## 当前端点
 
 | 方法 | 路径 | 实际行为 |
 |---|---|---|
-| `GET` | `/health` | 返回进程、版本及 `asr_ready`/`tts_ready` 独立状态 |
-| `GET` | `/readyz` | 至少一个已配置 ASR/TTS 推理入口可接受请求 |
-| `GET` | `/v1/models` | canonical ASR/TTS ID 与兼容 aliases |
+| `GET` | `/health` | 返回进程、版本、ASR/TTS 独立状态及可选 diarization 状态 |
+| `GET` | `/readyz` | 至少一个 ASR/TTS 推理入口可接受请求；附带可选 diarization 状态 |
+| `GET` | `/v1/models` | canonical ASR/TTS ID 与兼容 aliases；diarized alias 仅在 profile ready 时出现 |
 | `GET` | `/v1/voices` | 登记的 TTS preset 目录；TTS worker 未就绪时仍可返回目录并标记 `available=false` |
 | `POST` | `/v1/audio/transcriptions` | OpenAI-compatible multipart 文件转写 |
 | `POST` | `/v1/audio/speech` | OpenAI-compatible 整句 TTS；当前支持 `wav` 与 `pcm` |

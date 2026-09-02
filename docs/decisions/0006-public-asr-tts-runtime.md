@@ -1,8 +1,8 @@
-# ADR-0006：SpeechRail 作为公共 ASR/TTS 运行时，voice-realtime 直接迁移 Realtime v2
+# ADR-0006：SpeechRail 作为公共 ASR/TTS 运行时，voice-realtime 直接迁移 Realtime
 
 ## Status
 
-Accepted
+Accepted; superseded by [ADR-0009](0009-openai-realtime-only.md)
 
 ## Date
 

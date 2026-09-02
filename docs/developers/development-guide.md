@@ -74,17 +74,18 @@ prompt。不要从 `voice-realtime` 复制这些职责进来。
 
 ## 5. 契约变更流程
 
-1. 先更新 `contracts/openapi.yaml`、`contracts/realtime-openai.md` 或 `contracts/realtime-v2.md`，再修改路由/事件代码与测试。
+1. 先更新 `contracts/openapi.yaml` 或 `contracts/realtime-openai.md`，再修改路由/事件代码与测试。
 2. 可选请求字段、可选响应字段和新端点可以作为 `/v1` 的兼容扩展。
-3. 删除字段、改变类型、错误码语义或 WS 状态机需要 `/v2`、迁移说明与兼容期。
+3. 删除字段、改变类型、错误码语义或 WS 状态机需要兼容设计、迁移说明与兼容期；当前只有一个 Realtime 公共入口。
 4. 所有公共错误保持 `error.message/type/code/request_id/retryable` envelope；不要暴露
    traceback、路径、密钥、音频或完整文本。
 5. alias 只能映射到同一后端 profile。新客户端必须使用 canonical model ID；不要把
    `whisper-1` 当作真实模型。
 
-更新 realtime 文档时务必区分目标协议与当前行为。v1 不发送 delta 且每个会话在第一次
-commit 后结束；v2 可按 backend 能力发送 ASR partial/completed 或 TTS audio delta，但不能
-把未通过真实 smoke 的 backend 写成已验收能力。
+更新 realtime 文档时务必区分目标协议与当前行为。`/v1/realtime` 按 OpenAI 兼容子集提供
+ASR/TTS 事件；当前 batch backend 在 commit 后产出最终结果，native streaming backend
+可按能力产出 partial/completed 或 TTS audio delta，但不能把未通过真实 smoke 的 backend
+写成已验收能力。
 
 ## 6. 测试与质量门禁
 

@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 总体架构"
 status: active
-version: "1.0.0"
-date: 2026-09-01
+version: "1.1.0"
+date: 2026-09-02
 ---
 
 # SpeechRail 总体架构
@@ -30,12 +30,13 @@ QwenPaw / OpenAI SDK ── multipart ──> FastAPI app <── JSON/WS ──
 
 | 目录 | 当前责任 |
 |---|---|
-| `app.py` | API 路由、上传解码、错误和 WebSocket 边界 |
-| `backends/` | Qwen3 worker、snapshot 验证与离线 runtime |
-| `domain/` | 转写结果与 TTS policy 模型 |
+| `app.py` | 组合根、API 路由注册、错误和生命周期 |
+| `application/` | Realtime OpenAI 用例、diarization 协调和跨传输交付 |
+| `backends/` | Qwen3 worker、Sortformer/CAM++、snapshot 验证与离线 runtime |
+| `domain/` | vendor-neutral 转写、TTS 与 diarization 模型 |
 | `runtime/` | queue、governor 与 worker protocol |
-| `realtime/` | WebSocket 状态机 |
-| `compatibility/` | WLK config / EOF 等窄兼容呈现 |
+| `http/routes/` | REST 与唯一 `/v1/realtime` transport 边界 |
+| `compatibility/` | OpenAI alias、事件和格式化兼容呈现 |
 | `config/` | 环境变量 Settings |
 
 ## 接口数据流
@@ -43,11 +44,12 @@ QwenPaw / OpenAI SDK ── multipart ──> FastAPI app <── JSON/WS ──
 REST：`multipart audio/*` → 内存有界读取 → `ffmpeg` PCM → queue → worker → formatter。
 处理过程不落盘上传音频。
 
-Realtime transcription：`update` → 0..N PCM `append` → `flush/commit` → ASR worker →
-`delta/completed`。Realtime speech：`update` → text `append` → `flush/commit` → TTS worker →
-ordered audio delta；两类会话共享 auth、sequence、backpressure 和 cancel 边界。
+Realtime transcription：`session.update` → 0..N PCM `append` → `commit` → ASR worker →
+transcription events。Realtime speech：`session.update` → text `append` → `commit` → TTS worker →
+ordered audio delta；两类会话共享 auth、event envelope、backpressure 和 cancel 边界。
 
-Legacy：连接 → `config` → 空二进制帧 → `ready_to_stop`。当前不转写，也不认证。
+可选 diarization 在 transcription session 内使用匿名、session-scoped acoustic state；
+profile 未 ready 时在 `session.update` 阶段 fail closed，不伪造 speaker label。
 
 ## 范围外能力
 

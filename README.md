@@ -41,6 +41,7 @@ canonical 与全部兼容 alias，alias 条目带 `resolves_to` 标注其 canoni
 cd <path-to-SpeechRail>
 uv sync --extra dev
 cp configs/speechrail.example.env .env
+chmod 600 .env
 # 编辑 .env：填写本机外部模型 snapshot 与专用 Python 的绝对路径。
 # 前台运行；按 Ctrl-C 停止。
 uv run speechrail serve
@@ -161,7 +162,7 @@ REST 的准确字段、响应格式、错误码以 [OpenAPI 契约](contracts/op
 
 ## 兼容策略
 
-REST 接口优先保持向后兼容；破坏性 API 变更使用 `/v2` 并提供迁移说明。
+REST 接口优先保持向后兼容；破坏性 API 变更需要单独的兼容设计、迁移说明和回滚路径。
 
 ## 许可与变更记录
 

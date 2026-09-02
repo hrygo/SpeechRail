@@ -19,6 +19,7 @@ Python runtime 与本机 MLX Qwen3-TTS VoiceDesign snapshot。`.env` 只能由�
 ```bash
 cd <path-to-SpeechRail>
 cp configs/speechrail.example.env .env
+chmod 600 .env
 ```
 
 最小真实运行配置（路径必须替换为本机实际值，不能提交）：
@@ -110,7 +111,8 @@ curl http://127.0.0.1:8201/v1/models
 curl -i http://127.0.0.1:8201/v1/voices
 ```
 
-`/readyz` 为 200 仅说明推理入口已配置；发布前还要用操作者拥有的非敏感短音频完成一次
+`/readyz` 为 200 仅说明 ASR/TTS 推理入口已配置；响应中的 `diarization` 是可选 profile 的独立状态，
+不影响 ASR/TTS readiness。发布前还要用操作者拥有的非敏感短音频完成一次
 REST ASR smoke，确认 HTTP 200、非空文本和 `X-Request-ID`，随后删除音频。启用 TTS 后，使用
 `POST /v1/audio/speech` 请求 `speechrail/qwen3-tts`、登记 voice 和 `response_format=pcm`，确认
 HTTP 200、非空且偶数字节的 24 kHz PCM16；不得记录输入文本或输出音频。
@@ -120,6 +122,12 @@ HTTP 200、非空且偶数字节的 24 kHz PCM16；不得记录输入文本或�
 和服务是否已重启；这不是缺少 TTS runtime 配置的直接表现。Creator 等客户端要完成 TTS 合成，必须在
 SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_TTS_PYTHON`，
 然后重启服务；缺少任一配置时，`/v1/audio/speech` 预期返回 `503 backend_not_ready`。
+
+启动前的 preflight 会在配置了 `SPEECHRAIL_DIARIZATION_MODEL_PATH` 时额外检查
+`diarization_config`、`diarization_snapshot` 和 `diarization_runtime`；配置 CAM++ 时还检查
+`diarization_embedding_snapshot` 与 `diarization_embedding_runtime`。这些检查只验证外部文件和
+当前服务 Python 的导入能力，不会下载模型或提前加载权重。配置错误会阻止 preflight，通过后模型
+仍在第一个 diarization session 惰性加载。
 
 ## 启动时加载的模型
 
@@ -134,7 +142,9 @@ SpeechRail 的 `.env` 中同时配置 `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` 与 `SPEE
 | HTTP 服务依赖 | 主 `uv` 环境中的 FastAPI 等，不加载模型权重 |
 
 它不会加载 Whisper、LM Studio chat/embedding 模型或 `voice-realtime` 的会议组件。未配置
-对应 snapshot/runtime 时不会加载该 profile；请求会安全返回 `503 backend_not_ready`。
+对应 snapshot/runtime 时不会加载该 profile；`/health` 会返回可诊断的 `diarization` 状态，
+`/v1/models` 不会宣称 `gpt-4o-transcribe-diarize` 可用，启用该模型的 Realtime session 会在
+`session.update` 阶段返回 `diarization_not_available`，而不是等到 `commit` 才失败。
 
 ## 说话人分离 profile
 
@@ -147,6 +157,7 @@ PCM 的上限由 `SPEECHRAIL_DIARIZATION_MAX_BUFFER_BYTES` 强制；超过上限
 真实模型验收必须使用操作者有权处理的评测音频，至少记录实时延迟、DER/JER、重连 label
 稳定率与人工更正率；不把音频、embedding、转写原文或 group ID 写入日志。发现质量退化时，
 先移除两条 diarization 模型路径并重启服务；此操作只关闭该可选 profile，不影响 ASR/TTS。
+恢复 profile 同样需要重新执行 preflight 并重启服务，使外部配置重新组合。
 
 ## macOS `launchd` 常驻安装
 

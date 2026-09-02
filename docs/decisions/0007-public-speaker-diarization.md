@@ -6,7 +6,7 @@ Accepted — 2026-09-01
 
 ## Context
 
-`voice-realtime` 已迁移到 SpeechRail Realtime v2。旧会议链路曾依赖
+`voice-realtime` 已迁移到 SpeechRail OpenAI Realtime `/v1`。旧会议链路曾依赖
 Sortformer 的帧级标签、时序平滑、CAM++ embedding 与会后聚类；迁移后当前
 SpeechRail adapter 固定输出 `speaker:0`，因而旧会议端的平滑和声纹代码不能
 实现多人分离。
@@ -29,7 +29,7 @@ SpeechRail 增加可选 `diarization` ASR profile，提供会话内匿名 speake
 
 ## Consequences
 
-- Realtime v2 transcript event 可加性扩展 `speaker` / `speakers`，旧客户端仍可
+- OpenAI Realtime transcript segment event 承载 `speaker` / `speakers`，客户端按契约消费
   忽略新增字段。
 - `voice-realtime` 的会议表使用 SpeechRail 提供的 label 作为外键，remap 必须以
   原子数据库更新应用，人工名称优先于默认名称。

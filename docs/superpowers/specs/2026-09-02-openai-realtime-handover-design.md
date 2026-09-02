@@ -1,5 +1,8 @@
 # SpeechRail OpenAI 标准实时协议交割实施设计
 
+> 状态：已实施（2026-09-02）。实施结果统一为 `/v1/realtime`；下方原始设计中的 v2 保留
+> 条款已由 ADR-0009 supersede，历史差距记录仅供追溯。
+
 ## 背景
 
 根据 `voice-realtime/docs/operations/SpeechRail-OpenAI标准协议功能需求交割单.md`，将 SpeechRail 的 `WS /v1/realtime` 补齐为可供 voice-realtime 统一使用的 OpenAI-compatible ASR/TTS 协议。当前代码已经提供标准转写事件、TTS 生命周期、取消和 commit 基础链路；本次设计聚焦实时匿名分人、事件对账元数据、会话参数对齐及批量 diarized 输出。
@@ -13,11 +16,11 @@
 - 保证 ASR partial/final、EOF commit、TTS 流式输出和取消语义可由客户端对账。
 - 对齐 `language`、`languages`、`keywords`、`timestamp_granularities`、`known_speaker_names` 和 `known_speaker_references` 的协议边界；不把这些字段误当作 prompt 或身份持久化。
 - 批量 `/v1/audio/transcriptions` 在已有匿名领域模型基础上支持 diarized JSON 与 diarize model alias。
-- 保留 `/v2/realtime` 兼容入口并标记 deprecated，迁移完成前不删除公共路径。
+- 直接移除 `/v2/realtime` 兼容入口，避免维护重复状态机。
 
 非目标：
 
-- 不删除 `/v2/realtime`，不迁移会议、UI、播放、数据库或 LLM 编排。
+- 不迁移会议、UI、播放、数据库或 LLM 编排。
 - 不伪造 speaker label；没有可用 diarization profile 时显式返回 `diarization_not_available`。
 - 不持久化音频、PCM、embedding、完整转写或已知说话人身份。
 - 不承诺 fake backend 可以证明真实模型质量、TTFT/TTFA、DER/JER、峰值内存或并发性能。
@@ -61,7 +64,7 @@ OpenAI realtime adapter 接受协议文档列出的语言、关键词、时间�
 
 ### 5. 批量呈现与契约
 
-批量路由复用 `TranscriptResult.segments`、`TranscriptSegment.speaker/speakers` 和现有 verbose formatter，补齐 diarized JSON 的稳定响应形状及 model alias 校验。OpenAPI 和 realtime 文档同步描述新增事件、参数、错误和 `/v2/realtime` deprecation 状态。
+批量路由复用 `TranscriptResult.segments`、`TranscriptSegment.speaker/speakers` 和现有 verbose formatter，补齐 diarized JSON 的稳定响应形状及 model alias 校验。OpenAPI 和 Realtime 文档同步描述新增事件、参数和错误；v2 保留条款已由 ADR-0009 取代。
 
 ## 写入范围
 
@@ -81,4 +84,4 @@ OpenAI realtime adapter 接受协议文档列出的语言、关键词、时间�
 
 ## 回退
 
-本设计及后续实现按独立 commit 保存。回退时只恢复本任务 commit，不触碰现有未提交文件、`.env`、外部 runtime、模型 snapshot 或用户数据；`/v2/realtime` 保留作为兼容回退路径。
+本设计及后续实现按独立 commit 保存。回退时只恢复本任务 commit，不触碰现有未提交文件、`.env`、外部 runtime、模型 snapshot 或用户数据；不得恢复已移除的 v2 公共路径作为运行时 fallback。

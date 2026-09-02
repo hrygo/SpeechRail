@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-09-02
+
+### Added
+
+- 增加可选 Sortformer/CAM++ diarization profile 的配置校验、运行时 readiness 和 service preflight。
+- `/health` 与成功的 `/readyz` 返回匿名 diarization 状态；`/v1/models` 仅在 profile ready 时发布
+  `gpt-4o-transcribe-diarize`。
+
+### Changed
+
+- diarization runtime 未安装或 snapshot 不可用时，Realtime 在 `session.update` 阶段 fail closed，
+  不再等到 `commit` 才暴露部署问题。
+- active 配置、OpenAPI、架构和运维文档统一为唯一 `/v1/realtime` 公共入口。
+
+### Known limitations
+
+- 真实 diarization 的 DER/JER、时延、峰值内存和会议端到端闭环仍需按部署环境单独验收。
+- 非 loopback 的 TLS、CORS、Origin、网段限制和速率限制仍未完整实现。
+
 ## [1.0.0] - 2026-09-02
 
 ### Added
@@ -31,7 +50,7 @@
 
 ### Known limitations
 
-- `/v2/realtime` 即将废弃，仅保留 OpenAI Realtime 兼容 `/v1/realtime` 作为标准接入面。
+- `/v2/realtime` 已在 1.0.0 移除，仅保留 OpenAI Realtime 兼容 `/v1/realtime` 作为标准接入面。
 - 真实 TTS/diarization 的质量、时延、峰值内存和客户端闭环需按运维/验收文档单独确认。
 - 非 loopback 的 TLS、CORS、Origin、网段限制和速率限制仍未完整实现。
 

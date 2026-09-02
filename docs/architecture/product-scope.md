@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 产品范围"
 status: active
-version: "1.0.0"
-date: 2026-09-01
+version: "1.1.0"
+date: 2026-09-02
 ---
 
 # SpeechRail 产品范围
@@ -17,12 +17,13 @@ SpeechRail 是一项本地优先的共享 ASR/TTS 运行时：一次管理外部
 - OpenAI-compatible 文件转写、健康、模型清单及统一错误 envelope；
 - OpenAI-compatible 整句 TTS、preset 目录与 24 kHz PCM/WAV 输出；
 - OpenAI Realtime 兼容 `/v1/realtime`，作为唯一实时 ASR/TTS 入口；
+- 可选 Sortformer/CAM++ diarization profile 的配置、readiness 和匿名 session 状态；
 - 认证配置、request ID、无正文的运行诊断边界。
 
 ## 不属于服务的责任
 
 - 麦克风、扬声器、播放队列、回声消除与打断策略；
-- 会议状态、UI、SRT、PostgreSQL、Sortformer、AudioHub；
+- 会议状态、UI、SRT、PostgreSQL、AudioHub 和 speaker display-name 映射；
 - QwenPaw/Hermes 的 prompt、会话、权限和聊天模型；
 - LM Studio 的 chat/embedding 运行时。
 

@@ -21,7 +21,7 @@ git diff --check
 
 测试使用 fake backend 和合成/脱敏数据，不加载模型、不访问网络，也不提交真实音频。
 至少覆盖：模型 aliases、ASR/TTS 错误 envelope、上传限制、队列、REST 响应格式、voice
-registry、worker frame 协议、snapshot preflight、Realtime v1/v2 的 update/append/flush/commit/
+registry、worker frame 协议、snapshot preflight、Realtime v1 的 update/append/flush/commit/
 cancel 顺序、TTS chunk 顺序与背压，以及 legacy config/EOF 行为。
 
 ## 真实 worker smoke
