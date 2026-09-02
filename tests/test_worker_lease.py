@@ -91,7 +91,6 @@ def test_runtime_lifecycle_eager_load_starts_immediately() -> None:
     asyncio.run(run())
 
 
-<<<<<<< HEAD
 def test_evictor_close_is_blocked_while_worker_lock_is_held() -> None:
     """When close() acquires a lock, evictor's close() call blocks until lock is released."""
 

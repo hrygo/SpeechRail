@@ -13,6 +13,7 @@ from uuid import uuid4
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
+from speechrail.backends.vad import VoiceActivityDetector
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
     conversation_created,
@@ -40,7 +41,6 @@ from speechrail.compatibility.openai_realtime import (
     transcription_segment,
     validate_append,
 )
-from speechrail.backends.vad import VoiceActivityDetector
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import resolve_voice
