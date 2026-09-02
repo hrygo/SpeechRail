@@ -34,7 +34,7 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录不在仓库内，请
 | 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` (默认) 或 `int8` (内存优化) | 启动时加载一份，拒绝 CPU fallback；本机已验证 |
 | 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` (默认) 或 `int8` | 启动时加载一份；性能基准待对应硬件验收 |
 | 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
-| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` (默认) 或 `int8` (W8A16 内存量化) 或 `cpu` / `float32` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证（int8 待机 ~3.3GB，较 bf16 降 ~31%） |
+| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证；TTS 运行时暂不支持权重量化（int8 仅作用于 ASR） |
 | diarization profile | Sortformer（可选 CAM++） | 由 profile/runtime 决定 | `/v1/realtime` opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。
@@ -51,7 +51,7 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的 TTS snapshot/runtime |
 | `SPEECHRAIL_TTS_VOICE_IDS` | 服务器登记的 TTS preset 列表 |
 | `SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；TTS worker 仅使用外部完整 snapshot |
-| `SPEECHRAIL_DEVICE` / `DTYPE` | `mps`（支持 `float16` 默认 / `int8` 优化）或 `cpu`（支持 `float32` / `int8`） |
+| `SPEECHRAIL_DEVICE` / `DTYPE` | `mps`（支持 `float16` 默认 / `int8` 优化）或 `cpu`（支持 `float32` / `int8`）；`int8` 仅作用于 ASR Worker，TTS Worker 恒为 `float16`（mps）/ `float32`（cpu） |
 | `SPEECHRAIL_MAX_QUEUE_SIZE` | 同时等待/执行任务的有界队列大小 |
 | `SPEECHRAIL_MAX_UPLOAD_BYTES` | REST 上传的强制字节上限 |
 | `SPEECHRAIL_MAX_REALTIME_*` | WebSocket 单帧和缓存字节上限 |

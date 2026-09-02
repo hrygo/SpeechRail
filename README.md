@@ -100,13 +100,13 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 |---|---|---|---|---|
 | **Qwen3-ASR** (语音识别) | **1.7B** *(默认推荐)* | ~3.0 GB (FP16) / ~1.5 GB (INT8) | 会议长音频、高精度中英文/多语种混合识别 | 标点与时间戳综合效果最优，SpeechRail 默认主力 |
 | **Qwen3-ASR** (语音识别) | **0.6B** *(极速/轻量)* | ~1.0 GB (FP16) / ~600 MB (INT8) | 8GB 内存设备、端侧极速流式转写、高并发场景 | 延迟极低、显存极小，完全兼容相同 Worker 协议 |
-| **Qwen3-TTS** (语音合成) | **VoiceDesign** (约 1.7B) | ~3.0 GB (FP16) / ~1.6 GB (INT8) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 等预设音色 |
+| **Qwen3-TTS** (语音合成) | **VoiceDesign** (约 1.7B) | ~3.0 GB (FP16) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 等预设音色；运行时暂不支持权重量化 |
 
 ---
 
 ## ⚡ 性能基线与资源实测
 
-> 真实测试环境：Apple M5 Max (18 核 CPU / 128GB 统一内存)，macOS 26.6.2，MLX (MPS 加速)，Qwen3-ASR-1.7B (INT8 内存量化) + Qwen3-TTS VoiceDesign (INT8/W8A16 内存量化)。
+> 真实测试环境：Apple M5 Max (18 核 CPU / 128GB 统一内存)，macOS 26.6.2，MLX (MPS 加速)，Qwen3-ASR-1.7B (INT8 内存量化) + Qwen3-TTS (VoiceDesign 1.7B bf16)。
 
 ### 📊 1. 真实物理显存与内存常驻 (macOS 原生 `footprint`)
 
@@ -114,8 +114,8 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 |---|---|---|---|---|
 | **主服务 (FastAPI)** | **533.0 MB** | **533.1 MB** | 0.6% | 协议路由、音频解码与资源守护 |
 | **统一 ASR Worker** | **2,531.3 MB (~2.53 GB)** | **9,158.5 MB (~9.16 GB)** | 71.4% | INT8 内存即时量化，统辖 Batch 与 Streaming 推理 |
-| **Qwen3 TTS Worker** | **3,291.6 MB (~3.29 GB)** | **5,240.3 MB (~5.24 GB)** | 1.2%* | VoiceDesign 1.7B；INT8 (W8A16) 内存量化 + 256MB 显存池上限管理（bf16 待机 4.79 GB，见归档基准） |
-| **全系统总常驻 (Total)** | **~6.36 GB** | **~14.93 GB** | -- | 各进程分测值合计（口径同归档报告）；主动 Metal GC 与显存限额，无泄漏滞留 |
+| **Qwen3 TTS Worker** | **4,789.1 MB (~4.79 GB)** | **5,341.4 MB (~5.34 GB)** | 1.2% | VoiceDesign 1.7B，应用 256MB 显存池上限管理 |
+| **全系统总常驻 (Total)** | **7,853.4 MB (~7.85 GB)** | **15,033.0 MB (~15.03 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
 
 ### 🚀 2. 推理延迟与吞吐基线
 
@@ -304,7 +304,7 @@ response.stream_to_file("output.mp3")
 |---|---|---|
 | `SPEECHRAIL_HOST` / `PORT` | `127.0.0.1:8201` | 服务绑定地址与端口 |
 | `SPEECHRAIL_DEVICE` | `mps` | 推理硬件（`mps` 用于 Apple Silicon GPU/NPU 加速，或 `cpu`） |
-| `SPEECHRAIL_DTYPE` | `float16` | 推理精度：默认 `float16`（开箱兼容官方权重）；低内存设备推荐配置 `int8`（显存减半且吞吐更优）。**同时作用于 ASR 与 TTS Worker**：TTS 的 `int8` 采用 W8A16 内存量化，embedding/codec/tokenizer 保持原生精度 |
+| `SPEECHRAIL_DTYPE` | `float16` | 推理精度：默认 `float16`（开箱兼容官方权重）；低内存设备推荐配置 `int8`（显存减半且吞吐更优）。**`int8` 仅作用于 ASR Worker**；TTS Worker 始终使用 `float16`（mps）/ `float32`（cpu） |
 | `SPEECHRAIL_QWEN3_MODEL_DIR` | *(必填)* | 本地 Qwen3-ASR 权重目录绝对路径 |
 | `SPEECHRAIL_QWEN3_PYTHON` | *(必填)* | ASR Worker 独立的 Python 解释器绝对路径 |
 | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` | *(可选)* | 本地 Qwen3-TTS 权重目录绝对路径 |

@@ -55,7 +55,7 @@ flowchart TD
         end
 
         subgraph TTS_Worker ["🔊 Qwen3-TTS Worker (VoiceDesign)"]
-            TTS_Core["• VoiceDesign 本地模型 (FP16 / INT8)<br/>• 24kHz PCM16 / WAV 极速流式生成<br/>• 丰富预设音色 (warm, calm, bright...)"]
+            TTS_Core["• VoiceDesign 本地模型 (FP16)<br/>• 24kHz PCM16 / WAV 极速流式生成<br/>• 丰富预设音色 (warm, calm, bright...)"]
         end
 
         subgraph Diar_Worker ["👥 Diarization 引擎 (可选)"]

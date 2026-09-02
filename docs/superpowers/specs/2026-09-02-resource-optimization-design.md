@@ -2,6 +2,11 @@
 
 > 状态：设计完成 / 待实施（2026-09-02）  
 > 目标：在保障 ASR 字错误率 (WER) 与 TTS 自然度 (MOS) 劣化 ≤ 5%（实测目标 ≤ 1.5%）的前提下，实现运行时峰值显存降低 55%~65%、待机显存归零（~200MB）及磁盘减半。
+>
+> 更新注记（2026-09-02）：TTS INT8（W8A16）方案经实测评估后**未采纳**——当前 mlx-audio Qwen3-TTS 的
+> talker 为手写层（`TalkerAttention`/`TalkerMLP` 无 `to_quantized`），`mlx.nn.quantize` 实际为零层空转，
+> 官方 8-bit 快照键不兼容。`SPEECHRAIL_DTYPE=int8` 目前仅作用于 ASR Worker；TTS Worker 恒为
+> `float16`（mps）/ `float32`（cpu），不声称运行时权重量化。本文其余量化分析保留作设计参考。
 
 ---
 

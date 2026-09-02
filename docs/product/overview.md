@@ -50,7 +50,7 @@ mindmap
 - **最小化日志审计**：日志中仅记录 Request ID、时长与耗时指标，严禁打印原始音频与转写正文。
 
 ### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
-- **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS (`float16`/`int8`)，单模型显存占用低至 3GB。
+- **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS（ASR 支持 `float16`/`int8`，TTS 恒为 `float16`），单模型显存占用低至 3GB。
 - **全链路极速吞吐**：WAV 容器 Fast-Path 直读避免转码开销；端到端流式转写首字延迟低至百毫秒级。
 - **整句高质量合成**：VoiceDesign 驱动 24 kHz 高保真自然语音生成，支持多语种与丰富预设音色。
 

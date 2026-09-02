@@ -4,16 +4,6 @@
 
 ## [1.5.1] - 2026-09-02
 
-### Changed
-
-- **TTS 精度可配置量化 (`SPEECHRAIL_DTYPE`)**：dtype 现同时作用于 ASR 与 TTS Worker。TTS worker
-  新增 `--dtype` 透传并支持 int8 (W8A16, group 64) 内存量化——仅量化 `talker` 线性权重，
-  embedding/codec/speech-tokenizer 保持原生精度（mlx-audio 0.4.8 整树遍历含 `mlx.gc_func` 属性，
-  无法直接调 `mlx_lm.utils.quantize_model`，故收敛到 talker 子树）。`SPEECHRAIL_DTYPE=int8` 下 TTS
-  待机常驻由 bf16 的 ~4.79GB 降至 **~3.29GB（-31%）**（M5 Max 实测，加载峰值 ~5.24GB）。握手身份
-  现严格校验 dtype：配置 `int8` 时 worker 必须报告 `int8`，修复此前文档披露的"配置 int8、实际静默
-  bf16（或 `backend_identity_mismatch` 中止）"边界。
-
 ### Fixed
 
 - **Worker 加载/推理失败底层原因不再被吞**：ASR/TTS worker 的加载与推理 `except Exception`

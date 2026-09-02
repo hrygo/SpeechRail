@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查"
 status: active
-version: "1.4.2"
+version: "1.4.1"
 date: 2026-09-02
 ---
 
@@ -369,11 +369,6 @@ Live smoke（临时实例 :8202，真实 ASR/TTS/diarization runtime；合成非
    需先修身份透传或在 `.env` 回退 `float16`。
 2. TTS 流被客户端中途断开时按既有 fail-closed 设计（"abort on any unfinished stream"）终止 worker，
    且 `tts_ready` 不再自动恢复；重拉语义建议与上一条一并评估。
-
-> **后置更新（边界 1 已关闭）**：上述边界 1 已由 TTS 精度可配置量化变更修复（见 CHANGELOG
-> `[Unreleased]`）。TTS worker 现接收 `--dtype` 并对 `int8` 做 W8A16 内存量化（talker 子树），
-> 身份帧如实报告量化后的 dtype；`qwen3_tts.py` 握手按 `config.dtype` 严格匹配，不再容忍
-> "配置 int8、实际 bf16" 静默降级。边界 2（流中途断开终止 worker）仍待评估。
 
 边界披露：真实 `openai` SDK 解析测试未执行（worktree venv 无 `openai` 包），以逐字段 JSON 断言替代；
 A6 `prompt` 透传与 `rate_limits` 语义仅单元/契约层证实，live 未单独观测。
