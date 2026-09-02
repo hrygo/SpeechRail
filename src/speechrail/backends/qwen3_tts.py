@@ -22,6 +22,7 @@ from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
+    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
@@ -87,6 +88,8 @@ class Qwen3TtsBackendConfig:
             str(self.model_dir),
             "--device",
             self.device,
+            "--dtype",
+            self.dtype,
             "--sample-rate",
             str(self.sample_rate),
             "--chunk-ms",
@@ -159,16 +162,17 @@ class Qwen3TtsWorker:
                     "type": "start",
                     "model_dir": str(self.config.model_dir),
                     "device": self.config.device,
+                    "dtype": self.config.dtype,
                     "sample_rate": self.config.sample_rate,
                 }
             )
             ready = await self._receive_profile_frame()
             if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-                raise RuntimeError(str(ready.get("code", "worker_start_failed")))
+                raise RuntimeError(error_frame_message(ready, "worker_start_failed"))
             if (
                 ready.get("backend") != TTS_BACKEND_ID
                 or ready.get("device") != self.config.device
-                or ready.get("dtype") not in {self.config.dtype, "float16", "float32"}
+                or ready.get("dtype") != self.config.dtype
                 or ready.get("sample_rate") != self.config.sample_rate
             ):
                 raise RuntimeError("backend_identity_mismatch")
@@ -211,7 +215,7 @@ class Qwen3TtsWorker:
                             completed = True
                             return
                         if frame.get("type") == "error":
-                            raise RuntimeError(str(frame.get("code", "worker_inference_error")))
+                            raise RuntimeError(error_frame_message(frame, "worker_inference_error"))
                         if frame.get("type") != "audio":
                             raise RuntimeError("worker_frame_invalid")
                         chunk_index = frame.get("chunk_index")

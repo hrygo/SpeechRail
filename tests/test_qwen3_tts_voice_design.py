@@ -45,6 +45,7 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
     chunks = list(engine.synthesize("你好", voice="warm", speed=1.25, language="zh"))
 
     assert engine.identity.backend == "mlx-qwen3-tts-voice-design"
+    assert engine.identity.dtype == "float16"
     assert model.calls == [
         {
             "text": "你好。",
@@ -63,3 +64,31 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
     assert len(chunks) == 1
     assert np.frombuffer(chunks[0], dtype="<i2").size == 4
     assert np.isfinite(np.frombuffer(chunks[0], dtype="<i2")).all()
+
+
+def test_mlx_voice_design_engine_quantizes_in_memory_on_int8(tmp_path: Path) -> None:
+    model = FakeMlxModel()
+    quantized = FakeMlxModel()
+    calls: list[tuple[object, Path]] = []
+
+    def fake_quantize(model_arg: object, model_dir_arg: Path):
+        calls.append((model_arg, model_dir_arg))
+        return quantized
+
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        dtype="int8",
+        sample_rate=24_000,
+        load_fn=lambda _: model,
+        quantize_fn=fake_quantize,
+        numpy_module=np,
+        warmup=False,
+    )
+
+    assert engine.identity.dtype == "int8"
+    assert len(calls) == 1
+    assert calls[0][0] is model
+    assert calls[0][1] == tmp_path
+    list(engine.synthesize("你好", voice="default", speed=1.0, language="zh"))
+    assert quantized.calls, "generation must use the quantized model instance"
