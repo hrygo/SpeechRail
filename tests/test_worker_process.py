@@ -194,3 +194,39 @@ def test_terminate_timeout_falls_back_to_kill(tmp_path: Path) -> None:
         assert process.returncode is not None
 
     _run(scenario)
+
+
+def test_child_exit_surfaces_stderr_in_protocol_error(tmp_path: Path) -> None:
+    """When the child writes to stderr and dies, the ProtocolError includes the output."""
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "stderr_and_exit"})
+            # Give the child a moment to write stderr and exit
+            await asyncio.sleep(0.1)
+            with pytest.raises(ProtocolError, match="transformers") as exc_info:
+                await transport.receive()
+            assert "stderr" in str(exc_info.value).lower()
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+def test_child_exit_without_stderr_reports_no_stderr_captured(tmp_path: Path) -> None:
+    """When the child exits silently, the ProtocolError reports no stderr captured."""
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": "exit"})
+            await asyncio.sleep(0.1)
+            with pytest.raises(ProtocolError, match="no stderr captured"):
+                await transport.receive()
+        finally:
+            await transport.close()
+
+    _run(scenario)

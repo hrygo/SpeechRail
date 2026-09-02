@@ -37,6 +37,10 @@ def main() -> None:
             return
         elif action == "exit":
             return
+        elif action == "stderr_and_exit":
+            sys.stderr.write("ImportError: No module named 'transformers'\n")
+            sys.stderr.flush()
+            return
         else:
             write_frame(stdout, {"type": "error", "code": "unknown_action"})
 

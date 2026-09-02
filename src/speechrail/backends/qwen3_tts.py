@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,6 +132,8 @@ class Qwen3TtsWorker:
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
+        self._epoch: int = 0
+        self.last_active: float = time.monotonic()
 
     @property
     def alive(self) -> bool:
@@ -143,40 +146,48 @@ class Qwen3TtsWorker:
 
     async def start(self) -> None:
         async with self._lock:
-            if self._started:
-                return
-            try:
-                await self._transport.start()
-                await self._transport.send(
-                    {
-                        "version": PROTOCOL_VERSION,
-                        "type": "start",
-                        "model_dir": str(self.config.model_dir),
-                        "device": self.config.device,
-                        "sample_rate": self.config.sample_rate,
-                    }
-                )
-                ready = await self._receive_profile_frame()
-                if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-                    raise RuntimeError(str(ready.get("code", "worker_start_failed")))
-                if (
-                    ready.get("backend") != TTS_BACKEND_ID
-                    or ready.get("device") != self.config.device
-                    or ready.get("dtype") not in {self.config.dtype, "float16", "float32"}
-                    or ready.get("sample_rate") != self.config.sample_rate
-                ):
-                    raise RuntimeError("backend_identity_mismatch")
-                self._started = True
-            except BaseException:
-                await self._transport.abort()
-                raise
+            await self._start_locked()
+
+    async def _start_locked(self) -> None:
+        if self._started:
+            return
+        try:
+            await self._transport.start()
+            await self._transport.send(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "start",
+                    "model_dir": str(self.config.model_dir),
+                    "device": self.config.device,
+                    "sample_rate": self.config.sample_rate,
+                }
+            )
+            ready = await self._receive_profile_frame()
+            if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
+                raise RuntimeError(str(ready.get("code", "worker_start_failed")))
+            if (
+                ready.get("backend") != TTS_BACKEND_ID
+                or ready.get("device") != self.config.device
+                or ready.get("dtype") not in {self.config.dtype, "float16", "float32"}
+                or ready.get("sample_rate") != self.config.sample_rate
+            ):
+                raise RuntimeError("backend_identity_mismatch")
+            self._started = True
+            self._epoch += 1
+            self.last_active = time.monotonic()
+        except BaseException:
+            await self._transport.abort()
+            raise
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         """Yield ordered public PCM chunks while serializing private worker access."""
 
         async def stream() -> AsyncIterator[AudioChunk]:
-            await self.start()
             async with self._lock:
+                if not self._started:
+                    await self._start_locked()
+                epoch = self._epoch
+                self.last_active = time.monotonic()
                 response_id = f"resp_{uuid4().hex}"
                 await self._transport.send(
                     {
@@ -218,6 +229,7 @@ class Qwen3TtsWorker:
                             raise RuntimeError("worker_audio_frame_invalid")
                         if chunk_index != expected_chunk_index or not audio or len(audio) % 2:
                             raise RuntimeError("worker_audio_frame_invalid")
+                        self.last_active = time.monotonic()
                         yield AudioChunk(
                             response_id=response_id,
                             chunk_index=expected_chunk_index,
@@ -225,7 +237,8 @@ class Qwen3TtsWorker:
                         )
                         expected_chunk_index += 1
                 finally:
-                    if not completed:
+                    self.last_active = time.monotonic()
+                    if not completed and self._epoch == epoch:
                         self._started = False
                         await self._transport.abort()
 
@@ -238,6 +251,8 @@ class Qwen3TtsWorker:
             raise RuntimeError("worker_frame_invalid") from exc
 
     async def close(self) -> None:
-        """Terminate the worker immediately without waiting for an active stream."""
-        self._started = False
-        await self._transport.abort()
+        """Terminate the worker, waiting for any active stream to finish first."""
+        async with self._lock:
+            self._started = False
+            self._epoch += 1
+            await self._transport.abort()
