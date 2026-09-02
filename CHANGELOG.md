@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-09-02
+
+### Added
+
+- **Realtime 流式分句 TTS 先行生成与音频平滑**：引入 `StreamingSentenceSplitter` 实现增量句子切分与流式下发，结合 5ms 线性淡入淡出 `apply_crossfade` 与 80ms 呼吸停顿 `create_breath_pause`，消除分句爆音与卡顿。
+- **服务端轻量 VAD 与全双工 Barge-in 打断**：实现实时音频能量/过零率语音检测器 `VoiceActivityDetector`，支持 3 帧（$\ge 96\text{ms}$）防抖与 300ms 起声预触发缓冲；在 `server_vad` 模式下自动触发会话隔离的 Barge-in 全双工打断。
+- **三级快速内存音频解码与 128MB 熔断**：实现 16kHz mono WAV 零拷贝透传、非 16kHz/双声道 WAV 纯内存快速重采样混音（$<1\text{ms}$）、以及沙箱 FFmpeg 128MB 内存熔断与 15s 超时保护。
+- **双阶段分级待机与防竞态互斥锁**：实现 `WARM_STANDBY`（180s 显存缓存释放）与 `COLD_EVICTED`（900s 进程回收）状态机，配合 `WorkerLeaseLock` 租约锁防止并发请求与淘汰竞态。
+- **动态热词注入与轻量 ITN 规整**：新增 `compose_hotword_prompt` 动态热词提示词合成与 `apply_light_itn` 轻量逆文本规整（年份、百分比、小数、量词单位规整）。
+
 ## [1.4.0] - 2026-09-02
 
 ### Fixed
