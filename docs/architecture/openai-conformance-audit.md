@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查"
 status: active
-version: "1.4.0"
+version: "1.4.1"
 date: 2026-09-02
 ---
 
@@ -372,6 +372,28 @@ Live smoke（临时实例 :8202，真实 ASR/TTS/diarization runtime；合成非
 
 边界披露：真实 `openai` SDK 解析测试未执行（worktree venv 无 `openai` 包），以逐字段 JSON 断言替代；
 A6 `prompt` 透传与 `rate_limits` 语义仅单元/契约层证实，live 未单独观测。
+
+### 审查修复（Batch E，fixup）
+
+实施后做了双轨审查（五轴自查 + Oracle 独立对抗审查），verdict = APPROVE WITH FIXES，合并为
+单一 fixup 批次（本提交）：
+
+1. **#1 Realtime voice 别名链**：`session.update.voice`/`response.create.response.voice` 此前仅做
+   类型检查、原样透传，REST 已实现的 13→4 别名归一化与注册 preset 成员校验在 WS 侧缺失，未知
+   voice 到合成时才以 worker 内部错误暴露。现统一在配置入口 `resolve_voice` + 成员校验，
+   快速失败 `voice_not_found`/`invalid_voice`，session 不损坏。
+2. **#2 流式会话槽位泄漏**（合并阻塞）：`connect()` 失败仅释放 governor 预留，`RealtimeAsrFactory`
+   槽位与孤儿 session 不归还。现 `except` 路径先 `close()` 孤儿 session 再 `release()`。
+   **F2 自纠**：Batch A 表中「释放预留容量」表述不完整——当时仅释放预留，未归还 factory 槽位。
+3. **#3 空合成输出**：后端零 chunk 时 pcm/wav 返回空 200 主体、容器格式依赖 ffmpeg 行为不一致；
+   现六格式统一 `502 audio_encode_failed`（pcm 以首 chunk peek 实现，保持流式）。
+4. **#4 错误回显放大**：握手与 `session.update` 的 `unknown model: {model}` 未截断，可回显任意长度
+   客户端输入；现截断至 200 字符。
+5. **#5 边界测试补齐**：`prompt` 恰 2000 边界透传、REST 别名目标 preset 未注册时拒绝、
+   REST `prompt` 2000/2001 边界、connect 失败后会话恢复（`committed` 可达）、error envelope
+   截断等 characterization + 回归用例。
+
+`contracts/realtime-openai.md` 的 `session.update`/`response.create` 语义与 CHANGELOG 已同步。
 
 ## 附录 A：Realtime TTS OpenAI 官方参数（🟡 已带链接确认）
 

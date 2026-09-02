@@ -621,6 +621,7 @@ def test_openai_session_update_preserves_diarization_and_standard_hints() -> Non
         tts_ready=True,
         registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
         registered_tts=frozenset({"speechrail/qwen3-tts"}),
+        tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
     )
 
     assert config["language"] == "zh"
@@ -806,6 +807,7 @@ def test_openai_session_update_rejects_non_string_language_hints() -> None:
             tts_ready=True,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
             registered_tts=frozenset({"speechrail/qwen3-tts"}),
+            tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
         )
 
 
@@ -824,6 +826,7 @@ def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
             tts_ready=True,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
             registered_tts=frozenset({"speechrail/qwen3-tts"}),
+            tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
         )
 
 
@@ -844,6 +847,7 @@ def test_openai_session_update_rejects_invalid_diarization_config() -> None:
             tts_ready=True,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
             registered_tts=frozenset({"speechrail/qwen3-tts"}),
+            tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
         )
 
 
@@ -1109,3 +1113,154 @@ def test_openai_rejects_oversized_transcription_prompt() -> None:
         error = socket.receive_json()
     assert error["type"] == "error"
     assert error["error"]["code"] == "prompt_too_long"
+
+
+class RecordingSpeechSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
+def _drive_tts(
+    socket: object, response_body: dict[str, object] | None = None
+) -> list[dict[str, object]]:
+    socket.send_json(  # type: ignore[attr-defined]
+        {
+            "type": "conversation.item.create",
+            "item": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "你好"}],
+            },
+        }
+    )
+    socket.receive_json()  # type: ignore[attr-defined]
+    payload: dict[str, object] = {"type": "response.create"}
+    if response_body is not None:
+        payload["response"] = response_body
+    socket.send_json(payload)  # type: ignore[attr-defined]
+    events: list[dict[str, object]] = []
+    while True:
+        event = socket.receive_json()  # type: ignore[attr-defined]
+        events.append(event)
+        if event["type"] in {"response.done", "error"}:
+            return events
+
+
+def test_realtime_session_update_voice_alias_resolves_to_registered_preset() -> None:
+    synthesizer = RecordingSpeechSynthesizer()
+    client, _ = _client(tts_synthesizer=synthesizer)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "session.update", "session": {"voice": "nova"}})
+        assert socket.receive_json()["type"] == "session.updated"
+        events = _drive_tts(socket)
+    assert events[-1]["type"] == "response.done"
+    assert synthesizer.requests[0].voice == "bright"
+
+
+def test_realtime_session_update_rejects_unknown_voice_and_session_survives() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "session.update", "session": {"voice": "definitely-not-a-voice"}}
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "voice_not_found"
+        socket.send_json({"type": "session.update", "session": {"voice": "warm"}})
+        assert socket.receive_json()["type"] == "session.updated"
+
+
+def test_realtime_response_create_voice_override_resolves_alias_and_type() -> None:
+    synthesizer = RecordingSpeechSynthesizer()
+    client, _ = _client(tts_synthesizer=synthesizer)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        events = _drive_tts(socket, {"voice": {"id": "custom"}})
+        assert events[-1]["type"] == "error"
+        assert events[-1]["error"]["code"] == "invalid_voice"
+        events = _drive_tts(socket, {"voice": "alloy"})
+    assert events[-1]["type"] == "response.done"
+    assert synthesizer.requests[0].voice == "default"
+
+
+def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
+    class ConnectFailureSession(FakeStreamingSession):
+        async def connect(self) -> None:
+            raise RuntimeError("streaming session.open failed")
+
+    class FlakyConnectFactory(FakeStreamingFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def session_class(self) -> type[FakeStreamingSession]:
+            self.attempts += 1
+            return ConnectFailureSession if self.attempts == 1 else FakeStreamingSession
+
+    factory = FlakyConnectFactory()
+    client, _ = _client(factory=factory)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "backend_busy"
+        assert factory.released == [factory.sessions[0]]
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "input_audio_buffer.committed":
+                break
+
+
+def test_realtime_session_update_error_message_truncates_client_model() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "session.update", "session": {"model": "x" * 5000}})
+        error = socket.receive_json()
+    assert error["error"]["code"] == "model_not_found"
+    assert len(error["error"]["message"]) < 300
+
+
+def test_realtime_prompt_exactly_at_limit_forwards_to_session() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"prompt": "p" * 2000}},
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "input_audio_buffer.committed":
+                break
+    assert factory.sessions[0].prompt == "p" * 2000

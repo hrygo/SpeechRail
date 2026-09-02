@@ -42,6 +42,7 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
+from speechrail.domain.tts import resolve_voice
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 SendEvent = Callable[[dict[str, object]], Awaitable[None]]
@@ -77,6 +78,7 @@ class OpenAIRealtimeSession:
             {self._settings.model_id, *self._settings.compatibility_model_ids}
         )
         self._registered_tts = frozenset({self._settings.tts_model_id})
+        self._tts_voice_ids = frozenset(self._settings.tts_voice_ids)
         self._asr: RealtimeAsrSession | None = None
         self._asr_reader: asyncio.Task[None] | None = None
         self._asr_resources: AsyncExitStack | None = None
@@ -149,6 +151,7 @@ class OpenAIRealtimeSession:
             tts_ready=self._services.tts_ready,
             registered_asr=self._registered_asr,
             registered_tts=self._registered_tts,
+            tts_voice_ids=self._tts_voice_ids,
         )
         raw_diarization = config.get("diarization")
         self._diarization_config = (
@@ -172,6 +175,7 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
         if self._asr is None:
             await self._reserve_asr()
+            asr: RealtimeAsrSession | None = None
             try:
                 asr = self._asr_factory.create(
                     language=self._config.get("language"),
@@ -180,6 +184,10 @@ class OpenAIRealtimeSession:
                 await asr.connect()
             except RuntimeError as exc:
                 await self._release_asr()
+                if asr is not None:
+                    with contextlib.suppress(Exception):
+                        await asr.close()
+                    self._asr_factory.release(asr)
                 message = str(exc)
                 code = (
                     "language_not_supported"
@@ -234,11 +242,18 @@ class OpenAIRealtimeSession:
         if self._tts_task is not None and not self._tts_task.done():
             raise RealtimeAdapterError("invalid_state", "a TTS response is already in progress")
         response_body = event.get("response")
-        response_voice = (
-            str(response_body.get("voice"))
-            if isinstance(response_body, dict) and response_body.get("voice")
-            else None
-        )
+        response_voice: str | None = None
+        if isinstance(response_body, dict) and response_body.get("voice") is not None:
+            raw_voice = response_body["voice"]
+            if not isinstance(raw_voice, str) or not raw_voice.strip():
+                raise RealtimeAdapterError(
+                    "invalid_voice", "response.voice must be a non-blank string"
+                )
+            response_voice = resolve_voice(raw_voice.strip())
+            if response_voice not in self._tts_voice_ids:
+                raise RealtimeAdapterError(
+                    "voice_not_found", f"unknown voice: {response_voice[:200]}"
+                )
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
         self._tts_response_id = response_id

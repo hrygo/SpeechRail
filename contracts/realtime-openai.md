@@ -37,12 +37,12 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 语义 |
 |---|---|
-| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 只支持 `null`/`manual`（`server_vad`/`semantic_vad` → `unsupported_turn_detection`）；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 已生效并驱动 TTS 合成。返回 `session.updated` |
+| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 只支持 `null`/`manual`（`server_vad`/`semantic_vad` → `unsupported_turn_detection`）；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受 4 个服务端 preset（`default`/`warm`/`bright`/`calm`）与 13 个 OpenAI 标准 voice 别名（归一化到最近 preset，与 REST 同规则）并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`（快速失败，session 不损坏），非字符串或空白 → `invalid_voice`。返回 `session.updated` |
 | `input_audio_buffer.append` | 追加 base64 PCM16；返回 `input_audio_buffer.committed` 只在 commit 时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用 |
 | `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
-| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 合成；无待处理文本 → `invalid_state` |
+| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 合成；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的别名/注册 preset 规则校验（`voice_not_found`/`invalid_voice`） |
 | `response.cancel` | 取消进行中的 TTS response；丢弃未发送音频并返回 `response.done`（`status: cancelled`） |
 
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、

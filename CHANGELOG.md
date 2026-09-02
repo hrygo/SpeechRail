@@ -14,6 +14,14 @@
   `response.output_audio_transcript.{delta,done}` 更名为 `response.audio.*` /
   `response.audio_transcript.*`，assistant 输出 content part 类型由自造的
   `output_audio` 改为标准 `audio`。消费方（sona `tts.py`）需与新版本同步部署。
+- **Realtime voice 别名链**：`session.update.voice` 与 `response.create.response.voice` 现与
+  REST 走同一别名归一化（13 个 OpenAI 标准名 → 4 preset）并校验注册 preset 成员；未知 voice
+  在配置入口快速失败为 `voice_not_found`，非字符串/空白为 `invalid_voice`；
+  `model_not_found` 错误消息对客户端输入截断至 200 字符。
+- **Realtime 流式会话槽位泄漏**：`input_audio_buffer.append` 触发的 `connect()` 失败现在会
+  关闭孤儿流式会话并归还 factory 槽位，`backend_busy` 不再持续到进程重启。
+- **TTS 空输出语义**：后端未产出任何音频 chunk 时六种 `response_format` 统一返回
+  `502 audio_encode_failed`（此前返回空的 200 主体或仅含包头容器）。
 
 ### Changed
 

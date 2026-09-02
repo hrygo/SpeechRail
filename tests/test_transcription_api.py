@@ -259,3 +259,21 @@ def test_wav_fast_path_decode() -> None:
     # 4. Truncated WAV header
     assert _try_fast_decode_wav(valid_wav[:30]) is None
 
+@pytest.mark.parametrize(
+    ("prompt", "status"),
+    [("p" * 2_000, 200), ("p" * 2_001, 422)],
+)
+def test_transcription_prompt_honors_openai_two_thousand_char_limit(
+    prompt: str, status: int
+) -> None:
+    response = _client().post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        data={"response_format": "json", "prompt": prompt},
+    )
+
+    assert response.status_code == status
+    if status == 422:
+        error = response.json()["error"]
+        assert error["code"] == "prompt_too_long"
+        assert error["param"] == "prompt"

@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from speechrail.domain.diarization import DiarizationConfig
+from speechrail.domain.tts import resolve_voice
 
 _PROTOCOL_VERSION = "realtime=v1"
 _ASR_MODEL_ALIASES = {
@@ -405,7 +406,7 @@ def resolve_handshake_model(
     resolved = canonical_asr_model(model, registered=registered_asr)
     if resolved is None:
         if canonical_tts_model(model, registered=registered_tts) is None:
-            raise RealtimeAdapterError("model_not_found", f"unknown model: {model}")
+            raise RealtimeAdapterError("model_not_found", f"unknown model: {model[:200]}")
         resolved = asr_model
     if model == "gpt-4o-transcribe-diarize" and not diarization_ready:
         raise RealtimeAdapterError(
@@ -431,6 +432,7 @@ def apply_session_update(
     tts_ready: bool,
     registered_asr: frozenset[str],
     registered_tts: frozenset[str],
+    tts_voice_ids: frozenset[str],
 ) -> tuple[dict[str, object], dict[str, Any]]:
     """Validate an OpenAI ``session.update`` and return (session.updated, config).
 
@@ -448,7 +450,7 @@ def apply_session_update(
     )
     resolved_asr = canonical_asr_model(model, registered=registered_asr)
     if resolved_asr is None and canonical_tts_model(model, registered=registered_tts) is None:
-        raise RealtimeAdapterError("model_not_found", f"unknown model: {model}")
+        raise RealtimeAdapterError("model_not_found", f"unknown model: {model[:200]}")
 
     modalities = session.get("modalities")
     if modalities is not None and (
@@ -544,8 +546,15 @@ def apply_session_update(
             )
 
     voice = session.get("voice")
-    if voice is not None and not isinstance(voice, str):
-        raise RealtimeAdapterError("invalid_voice", "voice must be a string")
+    if voice is not None:
+        if not isinstance(voice, str) or not voice.strip():
+            raise RealtimeAdapterError("invalid_voice", "voice must be a non-blank string")
+        preset_voice = resolve_voice(voice.strip())
+        if preset_voice not in tts_voice_ids:
+            raise RealtimeAdapterError(
+                "voice_not_found", f"unknown voice: {preset_voice[:200]}"
+            )
+        voice = preset_voice
 
     config: dict[str, Any] = {
         "model": resolved_asr or asr_model,

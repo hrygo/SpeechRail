@@ -332,3 +332,65 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
         assert instances[0].started is True
 
     assert instances[0].closed is True
+
+
+class EmptySpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            return
+            yield AudioChunk(response_id="resp-empty", chunk_index=0, audio=b"")
+
+        return chunks()
+
+
+@pytest.mark.parametrize("response_format", ["pcm", "wav", "mp3"])
+def test_speech_endpoint_empty_synthesis_stream_is_502_for_every_format(
+    response_format: str,
+) -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=EmptySpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": response_format,
+        },
+    )
+
+    assert response.status_code == 502
+    error = response.json()["error"]
+    assert error["code"] == "audio_encode_failed"
+    assert error["retryable"] is True
+
+
+def test_speech_voice_alias_rejected_when_mapped_preset_not_registered() -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                tts_voice_ids=("default",),
+            ),
+            tts_synthesizer=EchoSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "coral",
+            "response_format": "pcm",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "voice_not_found"

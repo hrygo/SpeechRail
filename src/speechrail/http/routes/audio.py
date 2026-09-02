@@ -477,7 +477,32 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 yield chunk.audio
 
         if body.response_format == "pcm":
-            return StreamingResponse(audio_stream(), media_type="audio/x-pcm")
+            pcm_stream = audio_stream()
+            try:
+                first = await anext(pcm_stream, b"")
+            except TTSDeliveryError as exc:
+                return error_response(
+                    502,
+                    request_id,
+                    exc.code,
+                    "TTS backend delivered an invalid audio stream",
+                    retryable=True,
+                )
+            if not first:
+                return error_response(
+                    502,
+                    request_id,
+                    "audio_encode_failed",
+                    "Failed to encode the synthesized audio",
+                    retryable=True,
+                )
+
+            async def streamed_pcm() -> AsyncIterator[bytes]:
+                yield first
+                async for chunk in pcm_stream:
+                    yield chunk
+
+            return StreamingResponse(streamed_pcm(), media_type="audio/x-pcm")
         pcm = bytearray()
         try:
             async for chunk in audio_stream():
@@ -488,6 +513,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 request_id,
                 exc.code,
                 "TTS backend delivered an invalid audio stream",
+                retryable=True,
+            )
+        if not pcm:
+            return error_response(
+                502,
+                request_id,
+                "audio_encode_failed",
+                "Failed to encode the synthesized audio",
                 retryable=True,
             )
         try:
