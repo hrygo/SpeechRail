@@ -248,9 +248,11 @@ def test_wav_fast_path_decode() -> None:
     valid_wav = _wav_pcm16(pcm_data, sample_rate=16_000)
     assert _try_fast_decode_wav(valid_wav) == pcm_data
 
-    # 2. Invalid sample rate (24000Hz)
+    # 2. Resampled sample rate (24000Hz -> 16000Hz)
     wav_24k = _wav_pcm16(pcm_data, sample_rate=24_000)
-    assert _try_fast_decode_wav(wav_24k) is None
+    resampled = _try_fast_decode_wav(wav_24k)
+    assert resampled is not None
+    assert abs(len(resampled) - int(len(pcm_data) * 16_000 / 24_000)) <= 4
 
     # 3. Not a WAV
     assert _try_fast_decode_wav(b"not a wav file") is None

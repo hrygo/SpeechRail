@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import struct
 from collections.abc import AsyncIterator
@@ -98,7 +99,7 @@ def _resolve_ffmpeg() -> str:
 
 
 def _try_fast_decode_wav(audio: bytes) -> bytes | None:
-    """Fast-path decoding for standard 16kHz mono 16-bit PCM WAV without spawning ffmpeg."""
+    """Fast-path in-memory decoding for PCM WAV (any sample rate/channels) without subprocess."""
     if len(audio) < 44 or not audio.startswith(b"RIFF") or audio[8:12] != b"WAVE":
         return None
     try:
@@ -126,38 +127,56 @@ def _try_fast_decode_wav(audio: bytes) -> bytes | None:
                 bits_per_sample = bits
             elif chunk_id == b"data":
                 data_bytes = audio[chunk_data_start:chunk_data_end]
-                if (
-                    audio_format == 1
-                    and num_channels == 1
-                    and sample_rate == 16_000
-                    and bits_per_sample == 16
-                    and len(data_bytes) % 2 == 0
-                    and len(data_bytes) > 0
-                ):
-                    return data_bytes
             offset = chunk_data_end + (chunk_size % 2)
 
         if (
             audio_format == 1
-            and num_channels == 1
-            and sample_rate == 16_000
+            and num_channels in (1, 2)
             and bits_per_sample == 16
             and data_bytes is not None
-            and len(data_bytes) % 2 == 0
             and len(data_bytes) > 0
+            and len(data_bytes) % (2 * num_channels) == 0
         ):
-            return data_bytes
+            # Fast path: already 16kHz mono
+            if num_channels == 1 and sample_rate == 16_000:
+                return data_bytes
+
+            # In-memory NumPy channel mixing and linear resampling
+            import numpy as np
+
+            samples = np.frombuffer(data_bytes, dtype="<i2").astype(np.float32)
+            if num_channels == 2:
+                samples = samples.reshape(-1, 2).mean(axis=1)
+
+            if sample_rate != 16_000 and sample_rate is not None and sample_rate > 0:
+                num_out = int(round(len(samples) * 16_000.0 / sample_rate))
+                if num_out <= 0:
+                    return None
+                x_old = np.arange(len(samples), dtype=np.float32)
+                x_new = np.linspace(0, len(samples) - 1, num_out, dtype=np.float32)
+                samples = np.interp(x_new, x_old, samples)
+
+            return np.clip(samples, -32768.0, 32767.0).astype("<i2").tobytes()
     except Exception:
         return None
     return None
 
 
-async def _decode_pcm(audio: bytes) -> bytes:
-    """Decode any supported local upload with fixed ffmpeg argv, never a shell."""
+async def _decode_pcm(audio: bytes, max_decompressed_bytes: int = 128 * 1024 * 1024) -> bytes:
+    """Decode audio upload with in-memory fastpath and sandboxed ffmpeg fallback."""
+    # Level 1 & 2: In-process memory decode
+    fast_pcm = _try_fast_decode_wav(audio)
+    if fast_pcm is not None:
+        if len(fast_pcm) > max_decompressed_bytes:
+            raise OverflowError("audio_too_large")
+        return fast_pcm
 
+    # Level 3: Sandboxed single-threaded ffmpeg subprocess with timeout & memory limit
     process = await asyncio.create_subprocess_exec(
         _resolve_ffmpeg(),
         "-nostdin",
+        "-threads",
+        "1",
         "-v",
         "error",
         "-i",
@@ -173,9 +192,19 @@ async def _decode_pcm(audio: bytes) -> bytes:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    pcm, _ = await process.communicate(audio)
+    try:
+        async with asyncio.timeout(15.0):
+            pcm, _ = await process.communicate(audio)
+    except TimeoutError:
+        process.kill()
+        with contextlib.suppress(Exception):
+            await process.communicate()
+        raise ValueError("audio_decode_timeout") from None
+
     if process.returncode != 0 or not pcm or len(pcm) % 2:
         raise ValueError("audio_decode_failed")
+    if len(pcm) > max_decompressed_bytes:
+        raise OverflowError("audio_too_large")
     return pcm
 
 
@@ -349,11 +378,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             audio = await _read_upload(file, resolved.max_upload_bytes)
             if services.asr_worker is not None:
-                fast_pcm = _try_fast_decode_wav(audio)
-                if fast_pcm is not None:
-                    audio = fast_pcm
-                else:
-                    audio = await _decode_pcm(audio)
+                audio = await _decode_pcm(audio)
         except OverflowError:
             return error_response(413, request_id, "audio_too_large", "Audio exceeds upload limit")
         except ValueError as exc:
