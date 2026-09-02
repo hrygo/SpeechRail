@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 总体架构"
 status: active
-version: "1.3.1"
+version: "1.4.0"
 date: 2026-09-02
 ---
 

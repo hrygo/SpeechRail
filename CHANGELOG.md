@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-09-02
+
 ### Fixed
 
 - **OpenAI Realtime 端点对齐**：握手解析 `?model=` 并在 `session.created` 回显，未知模型或
