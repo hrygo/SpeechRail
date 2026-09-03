@@ -2,13 +2,24 @@
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-03
+
+### Added
+
+- **Realtime 流式 Partial Delta 驱动与增量切片计算 (Issue #7)**：在推流达到窗口阈值（`qwen3_streaming_chunk_sec * 32,000` 字节）时自动调用 `asr.flush()`，并基于历史文本计算真正的增量 delta 切片，彻底杜绝打字机文本重复累加。
+- **Realtime 超长流式防溢出自动结转 (Issue #7)**：推流累积超出 `max_realtime_buffer_bytes` 时自动触发分段 commit 结转，音频零丢失且避免被 `buffer_too_large` 锁死。
+
 ### Changed
 
 - **WORKER 默认懒加载 + 空闲自动卸载**：`SPEECHRAIL_WORKER_LAZY_LOAD` 默认为 `false` → `true`。服务启动不再预热所有 worker（ASR ~2.5 GB + TTS ~5 GB 常驻在懒加载下为 0），首个请求按需拉起并阻塞等待模型就绪。`WorkerIdleEvictor` 已有两阶段待机（`warm_standby_timeout=60s` trim 缓存→`idle_timeout=300s` 冷卸载）对全部 worker 生效，请求持有 `WorkerLeaseLock` 时不卸载；流式 batch 与 realtime 共用同一 Evictor 实例。
 - **空闲卸载防抖**：新增 `SPEECHRAIL_WORKER_MIN_UPTIME_SECONDS`（默认 `60`）与 `SPEECHRAIL_WORKER_WARM_STANDBY_TIMEOUT_SECONDS`（默认 `60`）。worker 刚加载（懒加载首建或回收后重建）后 `60s` 内不受空闲时长影响而被误回收（vLLM `min_uptime_s` / cudabroker `ACTIVE_GRACE_SECONDS` 类比），避免间歇请求下的 thrash；行为仅在显式配置时生效（`WorkerIdleEvictor` 组件默认 `0.0`，已有测试保持 `min_uptime=0` 语义）。
 - **Realtime 并发上限默认值 2→3**：`SPEECHRAIL_REALTIME_MAX_SESSIONS` 默认为 `3`（原 `2`，范围 `1-8` 不变），`streaming_worker.start()` 增加并发锁避免冷启动时多会话竞争 `start` 帧。默认上限提升后，`concurrent_realtime_smoke.py --sessions 2` 在懒加载冷启动 + 工厂计数窗口下稳定通过（此前 2 并发 + 冷启动时偶现 `backend_busy`）。
-
 - **Worker 空闲防抖配置**：`worker_min_uptime_seconds` 与 `worker_warm_standby_timeout_seconds`（均 `0.0–86_400`），与既有 `worker_idle_timeout_seconds` 组成完整的可调生命周期三参数。
+
+### Fixed
+
+- **Realtime 空缓冲 Commit 容错 (Issue #7)**：移除原先抛出 `invalid_state` 致命错误，空音频 commit 幂等下发 `committed` 与空 `completed`，平滑完成状态闭环并保持会话可用。
+- **Realtime WebSocket 断开防护与日志降噪 (Issue #7)**：全链路拦截 `(WebSocketDisconnect, RuntimeError)`，优雅退出循环，根除客户端异常关闭时的红字堆栈报警。
 
 ## [1.6.0] - 2026-09-03
 
