@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-09-03
+
+### Fixed
+
+- **`_clear_metal_cache` 调用已弃用 API**：优先调用有效的 `mx.clear_cache()`（mlx≥0.32 中 `mx.metal.clear_cache` 已弃用但仍存在），此前分支排序错误会导致 Metal 缓存滞留、空闲 worker 常驻虚高。
+- **streaming worker 未继承 int8 与 Metal 内存限额**：native realtime 拉起的 streaming worker（`Qwen3StreamingBackendConfig`）此前不传 `--dtype`/`--cache-limit-mb`，回落为 float16 且缓存无界，常驻内存偏高。现与 batch 一致向前传递 `settings.dtype` 与 Metal 限额。
+
 ## [1.6.2] - 2026-09-03
 
 ### Added

@@ -31,7 +31,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
-    wheel = tmp_path / "speechrail-1.6.2-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-1.6.3-py3-none-any.whl"
     wheel.touch()
     env_file = tmp_path / "source.env"
     env_file.write_text("SPEECHRAIL_HOST=127.0.0.1\n", encoding="utf-8")
