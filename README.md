@@ -354,6 +354,7 @@ response.stream_to_file("output.mp3")
 | `SPEECHRAIL_DIARIZATION_MODEL_PATH` | *(可选)* | Sortformer 声纹分割模型 `.nemo` 本地路径 |
 | `SPEECHRAIL_MAX_QUEUE_SIZE` | `8` | 最大等待并发任务队列数 |
 | `SPEECHRAIL_MAX_UPLOAD_BYTES` | `536870912` (512MB) | 单次文件上传最大体积限制 |
+| `SPEECHRAIL_MAX_AUDIO_SECONDS` | `3600` | 音频解码后强制时长上限（超限返回 `400 audio_too_long`） |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | `120` | 单次推理 Worker 超时硬截断（秒） |
 
 完整配置字段请参考 [`configs/speechrail.example.env`](configs/speechrail.example.env)。
