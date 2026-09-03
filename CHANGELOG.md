@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-03
+
+### Added
+
+- **零依赖 Prometheus / OpenMetrics 指标引擎**：`GET /metrics` 默认输出 Prometheus 文本（`text/plain; version=0.0.4`），`Accept: application/json` 返回结构化视图。引擎提供 `Counter`、`Gauge`、`Histogram`（标准 `_bucket{le}`/`_sum`/`_count`），全部基于 Python 标准库、线程安全，不引入重依赖。
+- **HTTP RED 指标**：新增轻量中间件自动记录 `speechrail_http_requests_total{endpoint,method,status}` 与 `speechrail_http_request_duration_seconds`；`endpoint` 归一为路由模板，未匹配路由折叠为 `<unmatched>` 以保低基数。
+- **领域专用指标**：`speechrail_asr_processed_audio_seconds_total`、`speechrail_asr_inference_duration_seconds`、`speechrail_asr_rtf`、`speechrail_tts_generated_audio_seconds_total{voice}`、`speechrail_tts_input_characters_total{voice}`、`speechrail_tts_inference_duration_seconds`、`speechrail_tts_ttfa_seconds`。
+- **Realtime 会话与打断指标**：`speechrail_realtime_sessions_total`、`speechrail_realtime_active_sessions`（gauge）、`speechrail_realtime_bargein_events_total`、`speechrail_realtime_vad_speech_events_total{event}`。
+- **资源调度与 Worker 生命周期指标**：`speechrail_governor_active_requests`、`speechrail_governor_pending_requests`、`speechrail_governor_queue_rejections_total{class,reason}`、`speechrail_worker_status{component,state}`、`speechrail_worker_evictions_total{component,phase}`、`speechrail_health_status{component}`。
+
+### Changed
+
+- **解码后音频时长强制拒绝**：`SPEECHRAIL_MAX_AUDIO_SECONDS`（默认 `3600`）现已在 `_decode_pcm` 解码后强制时长校验，超限返回 `400 audio_too_long`（此前仅作为配置字段未生效）。
+
+### Fixed
+
+- **`trim_memory` 帧失步**：worker 侧处理 `trim_memory` 不再写回 `memory_trimmed` 确认帧（主进程为 fire-and-forget，回包会污染下一个 transcribe/synthesize 的请求/响应帧对齐），修复空闲 warm-standby 后首次真实推理帧错位。
+- **Realtime active_sessions 泄漏**：`record_realtime_session_start()` 移至握手解析成功之后，与 `finally` 中的 `record_realtime_session_end()` 严格成对，握手失败路径不再导致 gauge 单调上涨。
+
 ## [1.6.1] - 2026-09-03
 
 ### Added
