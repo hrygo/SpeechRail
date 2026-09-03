@@ -355,7 +355,7 @@ def test_dynamic_budget_grows_sublinearly_and_is_bounded() -> None:
 
 
 def test_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> None:
-    from speechrail.backends.qwen3_worker import _snapshot_is_quantized
+    from speechrail.backends.qwen3_native import snapshot_is_quantized
 
     snapshot = tmp_path / "quantized"
     snapshot.mkdir()
@@ -363,12 +363,12 @@ def test_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> No
         '{"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}}',
         encoding="utf-8",
     )
-    assert _snapshot_is_quantized(snapshot) is True
+    assert snapshot_is_quantized(snapshot) is True
 
     (snapshot / "config.json").write_text("{}", encoding="utf-8")
-    assert _snapshot_is_quantized(snapshot) is False
+    assert snapshot_is_quantized(snapshot) is False
 
     malformed = tmp_path / "malformed"
     malformed.mkdir()
     (malformed / "config.json").write_text("{not json", encoding="utf-8")
-    assert _snapshot_is_quantized(malformed) is False
+    assert snapshot_is_quantized(malformed) is False

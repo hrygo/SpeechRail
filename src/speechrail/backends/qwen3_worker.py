@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import json
 import os
 import sys
 import traceback
@@ -14,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from speechrail.backends.qwen3_native import MODEL_FILES
+from speechrail.backends.qwen3_native import MODEL_FILES, snapshot_is_quantized
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -87,15 +86,6 @@ def _dynamic_budget(audio_sec: float, max_new_tokens: int) -> int:
     """
     cap = max_new_tokens or 512
     return min(cap, max(32, int(audio_sec * 6) + 24))
-
-
-def _snapshot_is_quantized(model_dir: Path) -> bool:
-    """True when the snapshot ships pre-quantized weights (e.g. an ``-8bit`` MLX snapshot)."""
-    try:
-        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return bool(config.get("quantization") or config.get("quantization_config"))
 
 
 def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> None:
@@ -566,7 +556,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         import mlx_qwen3_asr  # type: ignore[import-not-found]
 
         self._session = mlx_qwen3_asr.Session(model=str(model_dir))
-        snapshot_quantized = _snapshot_is_quantized(model_dir)
+        snapshot_quantized = snapshot_is_quantized(model_dir)
 
         # In-memory INT8 quantization when requested. A snapshot that already ships
         # quantized weights (e.g. an ``-8bit`` MLX snapshot) must NOT be re-quantized.

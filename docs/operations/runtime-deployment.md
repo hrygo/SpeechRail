@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-02
+date: 2026-09-03
 ---
 
 # SpeechRail 运行时与部署
@@ -34,7 +34,7 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录不在仓库内，请
 | 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` (默认) 或 `int8` (内存优化) | 启动时加载一份，拒绝 CPU fallback；本机已验证 |
 | 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` (默认) 或 `int8` | 启动时加载一份；性能基准待对应硬件验收 |
 | 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
-| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证；TTS 运行时暂不支持权重量化（int8 仅作用于 ASR） |
+| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证；TTS 支持预量化 `-8bit` MLX 快照（codec/`speech_tokenizer` 保持 bf16），不再要求运行时只能 float16/float32 |
 | diarization profile | Sortformer（可选 CAM++） | 由 profile/runtime 决定 | `/v1/realtime` opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。

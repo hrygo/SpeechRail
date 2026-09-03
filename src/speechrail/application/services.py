@@ -14,6 +14,7 @@ from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
     Qwen3Worker,
+    snapshot_is_quantized,
 )
 from speechrail.backends.qwen3_streaming import (
     NativeRealtimeFactory,
@@ -189,7 +190,11 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 python_executable=settings.qwen3_tts_python,
                 model_dir=settings.qwen3_tts_model_dir,
                 device=settings.device,
-                dtype="float16" if settings.device == "mps" else "float32",
+                dtype=(
+                    "int8"
+                    if snapshot_is_quantized(settings.qwen3_tts_model_dir)
+                    else ("float16" if settings.device == "mps" else "float32")
+                ),
                 sample_rate=settings.tts_sample_rate,
                 timeout_seconds=settings.request_timeout_seconds,
                 chunk_ms=settings.tts_chunk_ms,

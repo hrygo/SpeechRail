@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import traceback
 from collections.abc import Callable, Iterator
@@ -11,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, Protocol
 
+from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.domain.tts import generation_token_budget, get_voice_profile, normalize_tts_text
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
@@ -20,15 +20,6 @@ from speechrail.runtime.worker_protocol import (
 )
 
 TTS_BACKEND_ID = "mlx-qwen3-tts-voice-design"
-
-
-def _snapshot_is_quantized(model_dir: Path) -> bool:
-    """True when the snapshot ships pre-quantized weights (e.g. an ``-8bit`` MLX snapshot)."""
-    try:
-        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    except Exception:
-        return False
-    return bool(config.get("quantization") or config.get("quantization_config"))
 
 
 def _clear_metal_cache() -> None:
@@ -125,7 +116,7 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
-            dtype="int8" if _snapshot_is_quantized(model_dir) else (
+            dtype="int8" if snapshot_is_quantized(model_dir) else (
                 "float16" if device == "mps" else "float32"
             ),
             sample_rate=sample_rate,
@@ -243,7 +234,7 @@ def serve(
         )
         return
     identity = engine.identity
-    snapshot_quantized = _snapshot_is_quantized(model_dir)
+    snapshot_quantized = snapshot_is_quantized(model_dir)
     expected_dtype = (
         "int8"
         if snapshot_quantized

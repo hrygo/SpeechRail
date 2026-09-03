@@ -7,11 +7,8 @@ from pathlib import Path
 import pytest
 
 import speechrail.backends.qwen3_tts_worker as worker_module
-from speechrail.backends.qwen3_tts_worker import (
-    TtsWorkerIdentity,
-    _snapshot_is_quantized,
-    serve,
-)
+from speechrail.backends.qwen3_native import snapshot_is_quantized
+from speechrail.backends.qwen3_tts_worker import TtsWorkerIdentity, serve
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
@@ -27,14 +24,14 @@ class FakeEngine:
 def test_tts_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> None:
     model_dir = tmp_path / "model"
     model_dir.mkdir()
-    assert _snapshot_is_quantized(model_dir) is False
+    assert snapshot_is_quantized(model_dir) is False
     quantized = {"tts_model_type": "voice_design", "quantization": {"bits": 8, "group_size": 64}}
     (model_dir / "config.json").write_text(json.dumps(quantized), encoding="utf-8")
-    assert _snapshot_is_quantized(model_dir) is True
+    assert snapshot_is_quantized(model_dir) is True
     (model_dir / "config.json").write_text(
         json.dumps({"quantization_config": {"bits": 8}}), encoding="utf-8"
     )
-    assert _snapshot_is_quantized(model_dir) is True
+    assert snapshot_is_quantized(model_dir) is True
 
 
 def test_serve_accepts_int8_identity_for_quantized_snapshot(tmp_path: Path) -> None:

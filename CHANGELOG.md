@@ -13,6 +13,7 @@
 ### Changed
 
 - **预量化快照跳过二次量化**：`qwen3_worker` / `qwen3_native` 检测到快照已配 `quantization` 时跳过内存 int8 量化，底层权重以 int8 加载（codec/embedding 保持 bf16），并正确上报 int8 身份；`qwen3_tts_worker` / `service/preflight` 同步支持单文件量化权重布局。
+- **量化检测统一入口**：新增共享 `snapshot_is_quantized`（`qwen3_native`），ASR worker、TTS worker、`services.py` 三处统一调用，消除两份重复实现；TTS 后端配置 dtype 现由快照是否预量化决定（`int8`），与 worker 上报身份一致。
 - **`SPEECHRAIL_MLX_MEMORY_LIMIT_MB` 说明更正**：该限额只约束 Metal 缓存池/GC 触发，不封顶加载期活跃分配；文件转写峰值主要来自加载期 cast+量化，非配置限额。
 
 ## [1.6.3] - 2026-09-03

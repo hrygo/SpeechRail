@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import os
 import time
 from collections.abc import Mapping
@@ -50,6 +51,19 @@ def weight_files(model_dir: Path) -> tuple[str, ...]:
     raise ValueError(
         "model snapshot weights are missing (need model.safetensors or the two-shard pair)"
     )
+
+
+def snapshot_is_quantized(model_dir: Path) -> bool:
+    """True when ``config.json`` declares pre-quantized weights (e.g. an ``-8bit`` MLX snapshot).
+
+    Shared by the ASR/TTS worker identity reporting and the backend config wiring so a
+    pre-quantized snapshot resolves to an int8 identity no matter which layer reads it.
+    """
+    try:
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(config.get("quantization") or config.get("quantization_config"))
 
 
 def _build_timed_result(

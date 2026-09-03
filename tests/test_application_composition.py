@@ -249,3 +249,36 @@ def test_native_realtime_uses_dedicated_streaming_worker_not_batch(
     streaming_worker = getattr(services.realtime_asr_factory, "_worker", None)
     assert type(streaming_worker).__name__ == "Qwen3StreamingWorker"
     assert streaming_worker is not services.asr_worker
+
+
+def test_build_app_services_tts_dtype_resolves_from_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pre-quantized TTS snapshot drives backend config dtype to int8."""
+    captured: dict[str, str] = {}
+    real_worker = services_module.Qwen3TtsWorker
+
+    def spy_worker(config: object) -> object:
+        captured["dtype"] = getattr(config, "dtype", "")
+        return real_worker(config)
+
+    monkeypatch.setattr(services_module, "Qwen3TtsWorker", spy_worker)
+    asr_snapshot = tmp_path / "asr"
+    asr_snapshot.mkdir()
+    for filename in (*MODEL_FILES, "model.safetensors"):
+        (asr_snapshot / filename).touch()
+    tts_snapshot = tmp_path / "tts"
+    tts_snapshot.mkdir()
+    (tts_snapshot / "config.json").write_text(
+        '{"tts_model_type": "voice_design", "quantization": {"bits": 8, "group_size": 64}}',
+        encoding="utf-8",
+    )
+    settings = Settings(
+        qwen3_model_dir=asr_snapshot,
+        qwen3_python=Path(executable),
+        qwen3_tts_model_dir=tts_snapshot,
+        qwen3_tts_python=Path(executable),
+        _env_file=None,
+    )
+    build_app_services(settings, AppOverrides())
+    assert captured["dtype"] == "int8"
