@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import urllib.request
 import wave
@@ -29,6 +30,17 @@ FIXTURE_TEXTS = {
         "无论长音频转写还是极速流式交互，都能游刃有余。"
     ),
 }
+
+
+def auth_headers() -> dict[str, str]:
+    """Return an Authorization header when SPEECHRAIL_API_KEY is configured.
+
+    Matches the auth_headers() convention used by the benchmark scripts so a
+    service enabled with API-key auth (e.g. bound to 0.0.0.0) can be driven by
+    passing the key via the environment without editing this script.
+    """
+    key = os.environ.get("SPEECHRAIL_API_KEY")
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def main() -> None:
@@ -53,7 +65,7 @@ def main() -> None:
         req = urllib.request.Request(
             args.base,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **auth_headers()},
         )
         with urllib.request.urlopen(req) as resp:
             pcm_data = resp.read()

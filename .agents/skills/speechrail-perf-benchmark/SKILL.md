@@ -24,6 +24,11 @@ This skill guides agents through executing standard performance benchmarks, meas
    - Benchmarking must run entirely against local pre-loaded models (`asr_ready=true`, `tts_ready=true`).
 4. **Standard Audio Durations**:
    - Standard test suite evaluates across 4 audio lengths: **3s (short)**, **10s (medium)**, **30s (long)**, and **60s (extra long)**.
+   - Fixtures are synthesized by local TTS, so the *actual* duration follows the text's natural speaking rate (e.g. ~3s / ~8s / ~16s / ~35s, not a strict 3/10/30/60s). Always compute RTF against the `ffprobe`-measured duration, never the nominal label.
+5. **API-key Authentication**:
+   - When the service is bound to a non-loopback address with `SPEECHRAIL_API_KEY` enabled, `/v1/audio/*` and `/v1/realtime` require the key. `/health`, `/readyz`, `/v1/models` are open.
+   - Export `SPEECHRAIL_API_KEY` in the environment; the bundled scripts (`bench_asr.py`, `bench_tts.py`, `bench_realtime.py`, `sample_resources.py`, `prepare_fixtures.py`) honor it via `auth_headers()` / `os.environ`. Subprocesses spawned by `run_all_benchmarks.py` inherit it automatically.
+   - Without the key the ASR/TTS/Realtime steps return **401 Unauthorized** — do not try to bypass by disabling auth.
 
 ---
 
@@ -138,3 +143,14 @@ When completing a benchmark run:
 1. **Archive Full Report**: Write the comprehensive baseline document to `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`.
 2. **Update README.md**: Sync key metric highlights (Memory footprint, ASR RTF, TTS TTFA, Concurrency) into the **⚡ 性能基线与资源实测** section of `README.md`.
 3. **Verify Git Diff**: Ensure only markdown baseline docs and README are staged before committing.
+
+### Memory Attribution Debugging
+
+A surprising elevation in a worker's resident footprint (e.g. an ASR batch worker jumping from ~2.5 GB to ~4.7 GB across versions) is **NOT** automatically caused by `/metrics` observation buffers. Follow this fixed order before writing any cause into a report:
+
+1. **Check `SPEECHRAIL_DTYPE`** — the ASR worker inherits it (`float16` vs `int8`). Make sure a `float16` load was not mis-attributed; check the worker `--dtype` in `ps`.
+2. **Check metal cache clearing** — `_clear_metal_cache()` in `qwen3_worker.py` must prefer the non-deprecated `mx.clear_cache()` over the legacy `mx.metal.clear_cache()`. The legacy branch exists but has been a no-op since mlx 0.32, so previously the Metal cache was *not* actually freed on trim, leaving ~2.2 GB unnecessarily resident. This was the true v1.6.2 regression, fixed in 1.6.3.
+3. **Check streaming-worker dtype inheritance** — `Qwen3StreamingBackendConfig.command()` must forward `dtype` / `cache_limit_mb` / `memory_limit_mb`; otherwise a streaming worker silently runs `float16` with an unbounded Metal cache and balloons to ~5 GB instead of staying `int8` at ~2.6 GB.
+4. **Only then** consider `/metrics` buffers or other instrumentation as a secondary contributor.
+
+Write the report with the measured `ps`/`footprint` numbers and the exact root cause; never say an unverified buffer is the cause. Mark findings as measured vs inferred.

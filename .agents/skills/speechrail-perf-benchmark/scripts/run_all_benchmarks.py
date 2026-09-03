@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,14 @@ def main() -> None:
     parser.add_argument("--host", default="http://127.0.0.1:8201", help="SpeechRail base URL")
     args = parser.parse_args()
 
+    # SPEECHRAIL_API_KEY is inherited by every subprocess below; when the
+    # service is bound to a non-loopback address with API-key auth enabled the
+    # caller must export it or the ASR/TTS/Realtime steps return 401.
+    if os.environ.get("SPEECHRAIL_API_KEY"):
+        print(">> Using SPEECHRAIL_API_KEY for authenticated inference endpoints.")
+    else:
+        print(">> No SPEECHRAIL_API_KEY set; inference steps run unauthenticated.")
+
     if not check_service(args.host):
         sys.exit(1)
 
@@ -126,6 +135,7 @@ def main() -> None:
         subprocess.run([
             openai_py, str(realtime_script),
             "/tmp/audio_10s_16k.pcm",
+            "--base-url", f"{args.host}/v1",
             "--sessions", "3"
         ], check=True)
     except Exception as exc:
