@@ -119,3 +119,54 @@ def test_settings_validate_resource_governor_reservation() -> None:
 
     settings = Settings(runtime_total_capacity=3, realtime_reserved_capacity=1)
     assert settings.governor_limits.total_capacity == 3
+
+
+def test_governor_queue_full_fires_rejection_metric_callback() -> None:
+    """Queue-full rejection increments speechrail_governor_queue_rejections_total."""
+    from speechrail.observability.metrics import Metrics
+
+    async def scenario() -> None:
+        metrics = Metrics()
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=1),
+            on_reject=metrics.record_governor_rejection,
+        )
+        hold = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def blocking() -> None:
+            entered.set()
+            await hold.wait()
+
+        # Occupy both lanes so a subsequent realtime request must queue.
+        realtime_holder = asyncio.create_task(
+            governor.run(blocking, WorkClass.REALTIME_ASR)
+        )
+        await entered.wait()
+        batch_holder = asyncio.create_task(governor.run(blocking, WorkClass.BATCH_ASR))
+        for _ in range(100):
+            if governor.snapshot().active_batch == 1:
+                break
+            await asyncio.sleep(0.01)
+
+        waiting = asyncio.create_task(
+            governor.run(lambda: asyncio.sleep(0), WorkClass.REALTIME_ASR)
+        )
+        for _ in range(100):
+            if governor.snapshot().pending_realtime == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert governor.snapshot().pending_realtime == 1
+
+        with pytest.raises(GovernorQueueFullError):
+            await governor.run(lambda: asyncio.sleep(0), WorkClass.REALTIME_ASR)
+
+        hold.set()
+        await asyncio.gather(realtime_holder, batch_holder, waiting)
+
+        text = metrics.render_prometheus()
+        assert "speechrail_governor_queue_rejections_total" in text
+        assert 'class="realtime_asr"' in text
+        assert 'reason="queue_full"' in text
+
+    asyncio.run(scenario())

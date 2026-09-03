@@ -15,6 +15,9 @@ from speechrail.runtime.worker_lease import WorkerIdleEvictor
 class StartableComponent(Protocol):
     """Narrow shape shared by the local ASR and TTS workers."""
 
+    @property
+    def alive(self) -> bool: ...
+
     async def start(self) -> None: ...
 
     async def close(self) -> None: ...
@@ -54,6 +57,9 @@ class RuntimeLifecycle:
         poll_seconds: float = 1.0,
     ) -> None:
         self._repository = repository
+        self._asr = asr
+        self._tts = tts
+        self._streaming = streaming
         self._pending: tuple[StartableComponent, ...] = tuple(
             component for component in (asr, tts, streaming) if component is not None
         )
@@ -63,6 +69,23 @@ class RuntimeLifecycle:
         self._poll_seconds = poll_seconds
         self._started_components: list[StartableComponent] = []
         self._runner_task: asyncio.Task[None] | None = None
+
+    def worker_states(self) -> dict[str, str]:
+        """Return low-cardinality lifecycle states for managed inference workers."""
+        states: dict[str, str] = {}
+        for name, comp in (
+            ("asr", self._asr),
+            ("tts", self._tts),
+            ("streaming", self._streaming),
+        ):
+            if comp is None:
+                continue
+            if self._evictor is not None:
+                states[name] = str(self._evictor.state_of(comp))
+            else:
+                is_alive = bool(getattr(comp, "alive", False) or getattr(comp, "ready", False))
+                states[name] = "active" if is_alive else "inactive"
+        return states
 
     @asynccontextmanager
     async def run(self) -> AsyncIterator[None]:

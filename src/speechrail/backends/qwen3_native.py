@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
 import time
@@ -265,6 +266,11 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             words=words,
         )
 
+    async def trim_memory(self) -> None:
+        if self.alive:
+            with contextlib.suppress(Exception):
+                await self._transport.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
+
     async def close(self) -> None:
         async with self._lock:
             self._identity = None
@@ -289,6 +295,11 @@ class Qwen3BatchTranscriber(BatchTranscriber):
     def __init__(self, *, worker: _Qwen3TranscriptionWorker, model_id: str) -> None:
         self._worker = worker
         self._model_id = model_id
+
+    async def trim_memory(self) -> None:
+        trim_fn = getattr(self._worker, "trim_memory", None)
+        if callable(trim_fn):
+            await trim_fn()
 
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
         result = await self._worker.transcribe(

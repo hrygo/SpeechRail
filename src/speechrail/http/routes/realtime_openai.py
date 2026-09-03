@@ -92,6 +92,9 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             model=model,
             display_model=display_model,
         )
+        # Only count a session once the handshake resolved successfully: the
+        # finally block below always pairs this with record_realtime_session_end.
+        services.metrics.record_realtime_session_start()
         client_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
         async def receive_loop() -> None:
@@ -163,6 +166,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             with contextlib.suppress(asyncio.CancelledError):
                 await handle_task
             await session.close()
+            services.metrics.record_realtime_session_end()
 
     return router
 

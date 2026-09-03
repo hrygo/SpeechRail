@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,6 +31,7 @@ from speechrail.domain.ports import (
     SpeechSynthesizer,
     TranscriptionRequest,
 )
+from speechrail.observability.metrics import Metrics
 from speechrail.runtime.admission import AdmissionQueue
 from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRepository
@@ -98,6 +99,7 @@ class AppServices:
     admission: AdmissionQueue
     governor: ResourceGovernor
     lifecycle: RuntimeLifecycle
+    metrics: Metrics = field(default_factory=Metrics)
 
     @property
     def asr_ready(self) -> bool:
@@ -260,7 +262,11 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
 
     admission = AdmissionQueue(settings.max_queue_size)
-    governor = ResourceGovernor(settings.governor_limits)
+    metrics = Metrics()
+    governor = ResourceGovernor(
+        settings.governor_limits,
+        on_reject=metrics.record_governor_rejection,
+    )
     job_runner: JobRunner | None = None
     if job_repository is not None and overrides.job_processor is not None:
         job_runner = JobRunner(
@@ -283,6 +289,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 idle_timeout_seconds=settings.worker_idle_timeout_seconds,
                 warm_standby_timeout_seconds=settings.worker_warm_standby_timeout_seconds,
                 min_uptime_seconds=settings.worker_min_uptime_seconds,
+                on_eviction=metrics.record_eviction,
             )
 
     lifecycle = RuntimeLifecycle(
@@ -307,4 +314,5 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         admission=admission,
         governor=governor,
         lifecycle=lifecycle,
+        metrics=metrics,
     )

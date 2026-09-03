@@ -331,3 +331,38 @@ def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
             await evictor.close()
 
     asyncio.run(run())
+
+
+def test_workers_expose_async_trim_memory() -> None:
+    """Verify inference backend workers define callable trim_memory."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from speechrail.backends.qwen3_native import Qwen3BatchTranscriber, Qwen3Worker
+    from speechrail.backends.qwen3_streaming import Qwen3StreamingWorker
+    from speechrail.backends.qwen3_tts import Qwen3TtsWorker
+
+    mock_transport = MagicMock()
+    mock_transport.alive = True
+    mock_transport.send = AsyncMock()
+
+    # 1. Qwen3Worker
+    native_worker = Qwen3Worker.__new__(Qwen3Worker)
+    native_worker._transport = mock_transport
+    assert hasattr(native_worker, "trim_memory")
+
+    # 2. Qwen3BatchTranscriber
+    mock_inner_worker = MagicMock()
+    mock_inner_worker.trim_memory = AsyncMock()
+    batch_transcriber = Qwen3BatchTranscriber(worker=mock_inner_worker, model_id="m")
+    assert hasattr(batch_transcriber, "trim_memory")
+
+    # 3. Qwen3StreamingWorker
+    streaming_worker = Qwen3StreamingWorker.__new__(Qwen3StreamingWorker)
+    streaming_worker._transport = mock_transport
+    streaming_worker._write_lock = asyncio.Lock()
+    assert hasattr(streaming_worker, "trim_memory")
+
+    # 4. Qwen3TtsWorker
+    tts_worker = Qwen3TtsWorker.__new__(Qwen3TtsWorker)
+    tts_worker._transport = mock_transport
+    assert hasattr(tts_worker, "trim_memory")

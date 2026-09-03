@@ -279,3 +279,24 @@ def test_transcription_prompt_honors_openai_two_thousand_char_limit(
         error = response.json()["error"]
         assert error["code"] == "prompt_too_long"
         assert error["param"] == "prompt"
+
+
+def test_transcription_rejects_audio_exceeding_max_audio_seconds() -> None:
+    pcm_2s = b"\x00\x00" * 32_000
+    wav_2s = audio_module._wav_pcm16(pcm_2s, sample_rate=16_000)
+
+    client = TestClient(
+        create_app(
+            Settings(max_audio_seconds=1, qwen3_model_dir=None, qwen3_python=None),
+            transcribe=_backend,
+        )
+    )
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", wav_2s, "audio/wav")},
+    )
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "audio_too_long"
+    assert payload["error"]["param"] == "file"
+    assert "exceeds maximum limit" in payload["error"]["message"]

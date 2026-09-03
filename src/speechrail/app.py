@@ -75,6 +75,40 @@ def create_app(
     app = FastAPI(title="SpeechRail API", version=resolved.version, lifespan=lifespan)
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
+
+    # Lightweight HTTP metrics middleware — records request count and latency.
+    import time as _time
+
+    from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    class _MetricsMiddleware(BaseHTTPMiddleware):
+        async def dispatch(
+            self,
+            request: Request,
+            call_next: RequestResponseEndpoint,
+        ) -> Response:
+            start = _time.monotonic()
+            response = await call_next(request)
+            duration = _time.monotonic() - start
+            # Normalise path to the matched route template to keep cardinality low.
+            route = request.scope.get("route")
+            endpoint = getattr(route, "path", None)
+            if endpoint is None:
+                # Unmatched routes (e.g. 404s) must not leak the raw, unbounded
+                # URL path into the metric label; collapse them to a sentinel.
+                endpoint = "<unmatched>"
+            services.metrics.record_http_request(
+                endpoint=endpoint,
+                method=request.method,
+                status=response.status_code,
+                duration_sec=duration,
+            )
+            return response
+
+    app.add_middleware(_MetricsMiddleware)
+
     install_error_handlers(app)
     app.include_router(create_system_router(services))
     app.include_router(create_audio_router(services))

@@ -83,3 +83,15 @@ async def test_decode_pcm_enforces_128mb_cutoff() -> None:
 def test_fast_decode_invalid_header_fails_closed() -> None:
     assert _try_fast_decode_wav(b"not-a-wav-file") is None
     assert _try_fast_decode_wav(b"RIFF\x00\x00\x00\x00WAVEfmt ") is None
+
+
+@pytest.mark.anyio
+async def test_decode_pcm_enforces_max_audio_seconds() -> None:
+    # 2.0s audio @ 16kHz mono = 32000 samples = 64000 bytes
+    wav_bytes = _make_wav(sample_rate=16_000, channels=1, num_samples=32000)
+    # Allowed when limit is 3 seconds
+    pcm = await _decode_pcm(wav_bytes, max_audio_seconds=3)
+    assert len(pcm) == 64000
+    # Rejected when limit is 1 second
+    with pytest.raises(ValueError, match="audio_too_long"):
+        await _decode_pcm(wav_bytes, max_audio_seconds=1)

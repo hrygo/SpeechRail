@@ -257,3 +257,32 @@ def test_worker_rejects_unknown_session_audio() -> None:
     errors = [f for f in responses if f.get("type") == "error"]
     assert errors and errors[0]["code"] == "session_invalid"
     assert errors[0]["session_id"] == "ghost"
+
+
+def test_worker_trim_memory_does_not_emit_confirmation_frame() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    transcribe = {
+        "version": PROTOCOL_VERSION,
+        "type": "transcribe",
+        "request_id": "req_t1",
+        "sample_rate": 16000,
+        "channels": 1,
+        "sample_width_bytes": 2,
+        "language": "zh",
+        "prompt": "",
+        "include_timestamps": False,
+        "pcm_b64": "AAA=",
+    }
+    frames = [
+        _start_frame(),
+        {"version": PROTOCOL_VERSION, "type": "trim_memory"},
+        transcribe,
+    ]
+    responses = _run_serve(frames, engine=engine)
+
+    # A fire-and-forget trim_memory must not write a confirmation frame, so the
+    # next request reads back exactly its own result frame.
+    assert not any(f.get("type") == "memory_trimmed" for f in responses)
+    results = [f for f in responses if f.get("type") == "result"]
+    assert len(results) == 1
+    assert results[0]["request_id"] == "req_t1"

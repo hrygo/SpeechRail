@@ -253,6 +253,11 @@ def serve(
         },
     )
     while frame := read_frame(input_stream):
+        if frame.get("type") == "trim_memory":
+            # Fire-and-forget: no confirmation frame so the framing of the next
+            # synthesize response is never pushed out of alignment.
+            _clear_metal_cache()
+            continue
         request_id = frame.get("request_id") if isinstance(frame.get("request_id"), str) else None
         try:
             request_id, text, voice, speed, language = _decode_synthesis_request(frame)

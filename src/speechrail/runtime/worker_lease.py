@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import enum
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Protocol
 
@@ -65,12 +65,14 @@ class WorkerIdleEvictor:
         warm_standby_timeout_seconds: float = 180.0,
         min_uptime_seconds: float = 0.0,
         check_interval_seconds: float = 10.0,
+        on_eviction: Callable[[str, str], None] | None = None,
     ) -> None:
         self._workers = tuple(w for w in workers if w is not None)
         self._idle_timeout = idle_timeout_seconds
         self._warm_standby_timeout = min(warm_standby_timeout_seconds, idle_timeout_seconds)
         self._min_uptime = min_uptime_seconds
         self._check_interval = check_interval_seconds
+        self._on_eviction = on_eviction
         self._last_active: dict[EvictableWorker, float] = {}
         self._loaded_at: dict[EvictableWorker, float] = {}
         self._was_alive: dict[EvictableWorker, bool] = {}
@@ -173,6 +175,8 @@ class WorkerIdleEvictor:
                             await worker.close()
                     self._states[worker] = WorkerLifecycleState.COLD_EVICTED
                     self._last_active[worker] = now
+                    if self._on_eviction is not None:
+                        self._on_eviction(type(worker).__name__, "cold_evict")
                 # Stage 1: Warm Standby (idle >= _warm_standby_timeout)
                 elif idle_duration >= self._warm_standby_timeout:
                     if self._states.get(worker) == WorkerLifecycleState.ACTIVE:
@@ -186,3 +190,5 @@ class WorkerIdleEvictor:
                                 else:
                                     trim_fn()
                         self._states[worker] = WorkerLifecycleState.WARM_STANDBY
+                        if self._on_eviction is not None:
+                            self._on_eviction(type(worker).__name__, "standby")

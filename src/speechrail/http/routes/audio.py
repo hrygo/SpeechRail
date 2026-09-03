@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import shutil
 import struct
+import time as _time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
@@ -162,13 +163,19 @@ def _try_fast_decode_wav(audio: bytes) -> bytes | None:
     return None
 
 
-async def _decode_pcm(audio: bytes, max_decompressed_bytes: int = 128 * 1024 * 1024) -> bytes:
+async def _decode_pcm(
+    audio: bytes,
+    max_decompressed_bytes: int = 128 * 1024 * 1024,
+    max_audio_seconds: int | None = None,
+) -> bytes:
     """Decode audio upload with in-memory fastpath and sandboxed ffmpeg fallback."""
     # Level 1 & 2: In-process memory decode
     fast_pcm = _try_fast_decode_wav(audio)
     if fast_pcm is not None:
         if len(fast_pcm) > max_decompressed_bytes:
             raise OverflowError("audio_too_large")
+        if max_audio_seconds is not None and len(fast_pcm) > max_audio_seconds * 32_000:
+            raise ValueError("audio_too_long")
         return fast_pcm
 
     # Level 3: Sandboxed single-threaded ffmpeg subprocess with timeout & memory limit
@@ -205,6 +212,8 @@ async def _decode_pcm(audio: bytes, max_decompressed_bytes: int = 128 * 1024 * 1
         raise ValueError("audio_decode_failed")
     if len(pcm) > max_decompressed_bytes:
         raise OverflowError("audio_too_large")
+    if max_audio_seconds is not None and len(pcm) > max_audio_seconds * 32_000:
+        raise ValueError("audio_too_long")
     return pcm
 
 
@@ -378,10 +387,29 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             audio = await _read_upload(file, resolved.max_upload_bytes)
             if services.asr_worker is not None:
-                audio = await _decode_pcm(audio)
+                audio = await _decode_pcm(
+                    audio,
+                    max_audio_seconds=resolved.max_audio_seconds,
+                )
+            else:
+                fast_pcm = _try_fast_decode_wav(audio)
+                if (
+                    fast_pcm is not None
+                    and resolved.max_audio_seconds is not None
+                    and len(fast_pcm) > resolved.max_audio_seconds * 32_000
+                ):
+                    raise ValueError("audio_too_long")
         except OverflowError:
             return error_response(413, request_id, "audio_too_large", "Audio exceeds upload limit")
         except ValueError as exc:
+            if str(exc) == "audio_too_long":
+                return error_response(
+                    400,
+                    request_id,
+                    "audio_too_long",
+                    f"Audio duration exceeds maximum limit of {resolved.max_audio_seconds} seconds",
+                    param="file",
+                )
             return error_response(
                 422, request_id, str(exc), "Unsupported audio upload", param="file"
             )
@@ -399,10 +427,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
         effective_prompt = compose_hotword_prompt(prompt, keywords)
         try:
             want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
+            _t0 = _time.monotonic()
             result = await services.admission.run(
                 lambda: transcribe(audio, language, effective_prompt, want_timestamps),
                 deadline=resolved.request_timeout_seconds,
             )
+            _inference_sec = _time.monotonic() - _t0
+            # Audio duration from PCM16 @ 16kHz mono = len / 2 / 16000
+            _audio_sec = len(audio) / 32_000
+            services.metrics.record_asr(_audio_sec, _inference_sec)
         except QueueFullError:
             return JSONResponse(
                 status_code=429,
@@ -517,6 +550,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
 
         if body.response_format == "pcm":
             pcm_stream = audio_stream()
+            _tts_t0 = _time.monotonic()
             try:
                 first = await anext(pcm_stream, b"")
             except TTSDeliveryError as exc:
@@ -537,12 +571,27 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
 
             async def streamed_pcm() -> AsyncIterator[bytes]:
+                nonlocal _tts_t0
+                _emitted_bytes = 0
+                async def _record_if_complete() -> None:
+                    audio_sec = _emitted_bytes / 2 / resolved.tts_sample_rate
+                    services.metrics.record_tts(
+                        voice=preset_voice,
+                        char_count=len(body.input),
+                        audio_duration_sec=audio_sec,
+                        inference_duration_sec=_time.monotonic() - _tts_t0,
+                    )
+
                 yield first
+                _emitted_bytes += len(first)
                 async for chunk in pcm_stream:
+                    _emitted_bytes += len(chunk)
                     yield chunk
+                await _record_if_complete()
 
             return StreamingResponse(streamed_pcm(), media_type="audio/x-pcm")
         pcm = bytearray()
+        _tts_t0 = _time.monotonic()
         try:
             async for chunk in audio_stream():
                 pcm.extend(chunk)
@@ -554,6 +603,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "TTS backend delivered an invalid audio stream",
                 retryable=True,
             )
+        _tts_inference_sec = _time.monotonic() - _tts_t0
         if not pcm:
             return error_response(
                 502,
@@ -562,6 +612,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Failed to encode the synthesized audio",
                 retryable=True,
             )
+        # Record TTS metrics: audio_sec = pcm_bytes / 2 / sample_rate
+        _tts_audio_sec = len(pcm) / 2 / resolved.tts_sample_rate
+        services.metrics.record_tts(
+            voice=preset_voice,
+            char_count=len(body.input),
+            audio_duration_sec=_tts_audio_sec,
+            inference_duration_sec=_tts_inference_sec,
+        )
         try:
             if body.response_format == "wav":
                 content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)

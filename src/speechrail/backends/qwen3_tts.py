@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import os
 import time
 from collections.abc import AsyncIterator
@@ -250,6 +251,11 @@ class Qwen3TtsWorker:
             return await self._transport.receive()
         except ProtocolError as exc:
             raise RuntimeError("worker_frame_invalid") from exc
+
+    async def trim_memory(self) -> None:
+        if self.alive:
+            with contextlib.suppress(Exception):
+                await self._transport.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
 
     async def close(self) -> None:
         """Terminate the worker, waiting for any active stream to finish first."""

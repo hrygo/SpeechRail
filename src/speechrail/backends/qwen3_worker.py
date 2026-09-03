@@ -496,6 +496,11 @@ def serve(
             if session_id is not None:
                 engine.close_session(session_id)
             _clear_metal_cache()
+        elif kind == "trim_memory":
+            # Fire-and-forget: the client never waits for a confirmation frame.
+            # Writing one would pollute the request/response framing of the next
+            # transcribe/synthesize on the same transport.
+            _clear_metal_cache()
         else:
             write_frame(
                 output_stream,

@@ -214,6 +214,11 @@ class Qwen3StreamingWorker:
                 queue.put_nowait({"type": "error", "code": "worker_unavailable"})
             raise
 
+    async def trim_memory(self) -> None:
+        if self.alive:
+            with contextlib.suppress(Exception):
+                await self.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
+
     async def close(self) -> None:
         async with self._start_lock:
             if self._dispatcher is not None:

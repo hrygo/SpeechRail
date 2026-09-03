@@ -230,8 +230,10 @@ class OpenAIRealtimeSession:
             vad_events = self._vad.process_chunk(audio)
             for v_event in vad_events:
                 if v_event.speech_started:
+                    self._services.metrics.record_vad("started")
                     # Barge-in: immediately cancel in-progress TTS response
                     if self._tts_task is not None and not self._tts_task.done():
+                        self._services.metrics.record_bargein()
                         await self._cancel_response()
                     await self._send(
                         input_audio_buffer_speech_started(
@@ -241,6 +243,7 @@ class OpenAIRealtimeSession:
                         )
                     )
                 elif v_event.speech_ended:
+                    self._services.metrics.record_vad("ended")
                     await self._send(
                         input_audio_buffer_speech_stopped(
                             session_id=self._session_id,
@@ -504,6 +507,10 @@ class OpenAIRealtimeSession:
                 sentences = [text]
 
             try:
+                import time as _time
+
+                _ttfa_t0 = _time.monotonic()
+                _ttfa_recorded = False
                 async with self._services.governor.reserve(
                     WorkClass.REALTIME_TTS, deadline=self._settings.request_timeout_seconds
                 ):
@@ -517,6 +524,9 @@ class OpenAIRealtimeSession:
                             language=language,
                         )
                         async for chunk in iter_validated_audio(self._tts.synthesize(request)):
+                            if not _ttfa_recorded:
+                                self._services.metrics.record_ttfa(_time.monotonic() - _ttfa_t0)
+                                _ttfa_recorded = True
                             await self._send(
                                 response_audio_delta(
                                     session_id=self._session_id,

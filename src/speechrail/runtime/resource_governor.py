@@ -56,8 +56,14 @@ class ResourceGovernor:
     preemption when a realtime client begins producing audio.
     """
 
-    def __init__(self, limits: GovernorLimits) -> None:
+    def __init__(
+        self,
+        limits: GovernorLimits,
+        *,
+        on_reject: Callable[[WorkClass], None] | None = None,
+    ) -> None:
         self._limits = limits
+        self._on_reject = on_reject
         self._condition = asyncio.Condition()
         self._ticket = 0
         self._active_realtime = 0
@@ -104,6 +110,8 @@ class ResourceGovernor:
         async with self._condition:
             waiters = self._waiters_for(work_class)
             if len(waiters) >= self._limits.max_pending_per_class:
+                if self._on_reject is not None:
+                    self._on_reject(work_class)
                 raise GovernorQueueFullError(f"{work_class.value} admission queue is full")
             self._ticket += 1
             waiter = _Waiter(ticket=self._ticket, work_class=work_class)

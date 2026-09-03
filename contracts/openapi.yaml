@@ -80,6 +80,32 @@ paths:
           $ref: '#/components/responses/BackendNotReady'
         '400':
           $ref: '#/components/responses/BadRequest'
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [health]
+      summary: Expose low-cardinality runtime metrics
+      description: |
+        Returns metrics in Prometheus text exposition format (default) or a
+        structured JSON view when the request Accept header prefers
+        `application/json`. Labels are strictly limited to the low-cardinality
+        set (`endpoint`, `status`, `class`, `component`, `voice`, `state`,
+        `event`, `reason`, `method`); request IDs and transcript content are
+        never recorded.
+      security: [{}]
+      responses:
+        '200':
+          description: Metrics snapshot in text or JSON form
+          content:
+            text/plain:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
   /v1/models:
     get:
       operationId: listModels

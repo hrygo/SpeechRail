@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from speechrail.application.services import AppServices
@@ -104,5 +104,35 @@ def create_system_router(services: AppServices) -> APIRouter:
                 for voice_id in resolved.tts_voice_ids
             ],
         }
+
+    @router.get("/metrics")
+    async def metrics(request: Request) -> Response:
+        """Expose Prometheus / JSON metrics via the unified Metrics engine."""
+        gov_snap = services.governor.snapshot()
+        worker_states = services.lifecycle.worker_states()
+        readiness = {
+            "asr": services.asr_ready,
+            "tts": services.tts_ready,
+            "diarization": services.diarization_ready,
+        }
+
+        accept = request.headers.get("accept", "")
+        if "application/json" in accept and "text/plain" not in accept:
+            return JSONResponse(
+                content=services.metrics.render_json(
+                    governor_snapshot=gov_snap,
+                    worker_states=worker_states,
+                    readiness=readiness,
+                )
+            )
+
+        return Response(
+            content=services.metrics.render_prometheus(
+                governor_snapshot=gov_snap,
+                worker_states=worker_states,
+                readiness=readiness,
+            ),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
 
     return router

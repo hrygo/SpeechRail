@@ -55,6 +55,7 @@ def test_system_router_can_be_built_from_fake_services(fake_services: AppService
     assert {route.path for route in router.routes} == {
         "/health",
         "/readyz",
+        "/metrics",
         "/v1/models",
         "/v1/voices",
     }
