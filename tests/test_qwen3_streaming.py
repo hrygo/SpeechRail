@@ -516,3 +516,27 @@ def test_session_close_unregisters_its_queue() -> None:
         assert len(cancel_frames) == 1
 
     asyncio.run(scenario())
+
+
+def test_streaming_command_passes_dtype_and_metal_limits(tmp_path: Path) -> None:
+    """Regression: the streaming worker command must forward dtype and Metal
+    cache/memory limits so native realtime inherits the configured int8 backend
+    instead of silently falling back to float16 with an unbounded Metal cache."""
+    snapshot = tmp_path / "external-qwen3-streaming-snapshot"
+    snapshot.mkdir()
+    cfg = Qwen3StreamingBackendConfig(
+        repository_root=tmp_path,
+        python_executable=Path("/usr/bin/python3"),
+        model_dir=snapshot,
+        device="mps",
+        dtype="int8",
+        cache_limit_mb=256,
+        memory_limit_mb=0,
+    )
+    cmd = cfg.command()
+
+    assert "--dtype" in cmd
+    assert cmd[cmd.index("--dtype") + 1] == "int8"
+    assert "--cache-limit-mb" in cmd
+    assert cmd[cmd.index("--cache-limit-mb") + 1] == "256"
+    assert "--memory-limit-mb" not in cmd  # only added when memory_limit_mb > 0

@@ -66,6 +66,9 @@ class Qwen3StreamingBackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
+    dtype: Literal["float16", "float32", "int8"] = "float16"
+    cache_limit_mb: int = 256
+    memory_limit_mb: int = 0
     mode: Literal["windowed", "causal"] = "windowed"
     chunk_sec: float = 2.0
     left_context_sec: float = 12.0
@@ -96,7 +99,7 @@ class Qwen3StreamingBackendConfig:
         object.__setattr__(self, "model_dir", resolved_model)
 
     def command(self) -> list[str]:
-        return [
+        cmd = [
             str(self.python_executable),
             "-m",
             "speechrail.backends.qwen3_worker",
@@ -104,9 +107,16 @@ class Qwen3StreamingBackendConfig:
             str(self.model_dir),
             "--device",
             self.device,
+            "--dtype",
+            self.dtype,
             "--max-new-tokens",
             str(self.max_new_tokens),
+            "--cache-limit-mb",
+            str(self.cache_limit_mb),
         ]
+        if self.memory_limit_mb > 0:
+            cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
+        return cmd
 
     def worker_spec(self) -> WorkerProcessSpec:
         return WorkerProcessSpec(
