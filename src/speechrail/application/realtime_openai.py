@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
+
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
@@ -203,16 +204,19 @@ class OpenAIRealtimeSession:
             buffered_bytes=0,
             max_buffer_bytes=None,
         )
-        if self._settings.max_realtime_buffer_bytes is not None:
-            if len(audio) > self._settings.max_realtime_buffer_bytes:
-                raise RealtimeAdapterError("buffer_too_large", "audio buffer exceeds the configured limit")
+        max_buf = self._settings.max_realtime_buffer_bytes
+        if max_buf is not None:
+            if len(audio) > max_buf:
+                raise RealtimeAdapterError(
+                    "buffer_too_large", "audio buffer exceeds the configured limit"
+                )
             if (
                 self._buffered_audio_bytes > 0
-                and self._buffered_audio_bytes + len(audio) > self._settings.max_realtime_buffer_bytes
+                and self._buffered_audio_bytes + len(audio) > max_buf
+                and self._asr is not None
             ):
                 # Auto-commit rollover for long streaming sessions
-                if self._asr is not None:
-                    await self._commit_audio()
+                await self._commit_audio()
 
         if self._asr_factory is None:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
@@ -397,6 +401,7 @@ class OpenAIRealtimeSession:
         if self._asr is None:
             return
         import os
+
         from speechrail.domain.itn import apply_light_itn
 
         try:
@@ -592,7 +597,11 @@ class OpenAIRealtimeSession:
             with contextlib.suppress(Exception):
                 await self._send(error_event(code="tts_error", message=str(exc)))
                 await self._send(
-                    response_done(session_id=self._session_id, response_id=response_id, status="failed")
+                    response_done(
+                        session_id=self._session_id,
+                        response_id=response_id,
+                        status="failed",
+                    )
                 )
 
     async def _reserve_asr(self) -> None:

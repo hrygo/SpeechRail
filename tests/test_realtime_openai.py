@@ -4,6 +4,7 @@ import asyncio
 import base64
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -1462,7 +1463,7 @@ def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
 
 
 def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
-    """Verifies that exceeding max_realtime_buffer_bytes triggers auto-commit rollover instead of crashing."""
+    """Verifies exceeding max_realtime_buffer_bytes triggers auto-commit rollover."""
     client, factory = _client(
         settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
     )
@@ -1499,7 +1500,7 @@ def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
 
 
 def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
-    """Verifies that a single frame exceeding max_realtime_buffer_bytes is rejected with buffer_too_large."""
+    """Verifies single frame exceeding buffer limit is rejected with buffer_too_large."""
     client, _ = _client(
         settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
     )
