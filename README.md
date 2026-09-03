@@ -147,6 +147,7 @@ SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` �
 
 > 表内 ASR/TTS 测量为 **v1.6.3** 实测数据（Apple M5 Max / 128GB）。
 > **v1.6.4 启用预量化 `-8bit` MLX 快照后**：ASR 加载峰值由 9.58 GB 降至 **3.44 GB**，TTS 由 4.58 GB 降至 **3.18 GB**（-31%）；双 8bit 真同时峰值约 **5.99 GB**（v1.6.3 约 7.9 GB），待机约 **5.64 GB**。
+> **v1.6.5 实测基线（本机 8bit 双 snapshot，Apple M5 Max / 128GB）**：总常驻 **6.60 GB**、真同时压测峰值 **7.27 GB**（ASR batch idle 2.50 GB / TTS idle 3.56 GB / host 540 MB）；ASR 超长音频 (34.6s) 延迟 **0.87s**、RTF **0.03x**，并发吞吐 **4.19 req/s**（P95 0.94s，8/8 成功）；TTS 长句 RTF **0.27x**；Realtime TTS 首包 **34-44ms**、ASR commit 稳态 **0.37s**，3 会话全通过。详见[📊 v1.6.5 性能基线报告](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md)。
 > *：ASR batch 峰值 CPU 为采样瞬间读数（前向计算后归零），不代表负载。
 > **v1.5.1 起 native realtime 使用独立 streaming worker（懒加载，首个 realtime 会话才启动）**，避免共享管道上
 > batch 与 realtime 并发读帧导致崩溃/死锁；启用 realtime 会话时内存模型需按两个 ASR worker 重新评估。
@@ -168,7 +169,7 @@ SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` �
   * TTS 首包生成延迟 (TTFA)：**45 ~ 64 ms** 极速直出（较 v1.6.2 的 70–80ms 回到 v1.6.0 水平）
   * **连续 3 会话 100% 完成**：v1.6.3 的 clear_cache 与 streaming dtype 修复无 `backend_busy`、无空转写、无死锁
 
-> 完整测量报告与复现步骤请参阅 **[📊 v1.6.3 性能基线完整报告](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md)**（历史基线见 [v1.6.2 报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)、[v1.6.0 报告](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) 与 [v1.5.2 报告](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)）。
+> 完整测量报告与复现步骤请参阅 **[📊 v1.6.5 性能基线完整报告](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md)**（历史基线见 [v1.6.3 报告](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md)、[v1.6.2 报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)、[v1.6.0 报告](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) 与 [v1.5.2 报告](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)）。
 
 ---
 
