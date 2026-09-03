@@ -234,6 +234,7 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
         qwen3_model_dir=snapshot,
         qwen3_python=Path(executable),
         backend_ready=False,
+        worker_lazy_load=False,
         diarization_model_path=None,
         diarization_embedding_model_path=None,
     )
@@ -297,6 +298,7 @@ def test_startup_failure_closes_already_started_runtime_workers(
         qwen3_python=Path(executable),
         qwen3_tts_model_dir=tts_snapshot,
         qwen3_tts_python=Path(executable),
+        worker_lazy_load=False,
     )
 
     with pytest.raises(RuntimeError, match="tts_start_failed"), TestClient(create_app(settings)):

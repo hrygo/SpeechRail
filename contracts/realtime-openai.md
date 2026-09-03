@@ -44,8 +44,8 @@ ws://127.0.0.1:8201/v1/realtime
 | 事件 | 语义 |
 |---|---|
 | `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受 4 个服务端 preset（`default`/`warm`/`bright`/`calm`）与 13 个 OpenAI 标准 voice 别名（归一化到最近 preset，与 REST 同规则）并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`（快速失败，session 不损坏），非字符串或空白 → `invalid_voice`。返回 `session.updated` |
-| `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；返回 `input_audio_buffer.committed` 只在 commit 或 VAD 静音截断时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用 |
-| `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态 |
+| `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；推流累积达到时间窗时服务端自动驱动 partial 识别；未提交缓冲区达到上限时自动分段结转（Auto-Commit Rollover），避免硬断；返回 `input_audio_buffer.committed` 只在 commit、VAD 静音截断或超限结转时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用 |
+| `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态；缓冲区为空时幂等完成空闭环，保持 session 正常存活 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
 | `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 流式合成（使用 `StreamingSentenceSplitter` 分句合成并施加淡入淡出音频平滑）；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的别名/注册 preset 规则校验（`voice_not_found`/`invalid_voice`） |
@@ -83,9 +83,9 @@ ws://127.0.0.1:8201/v1/realtime
 
 ## 转写语义
 
-`conversation.item.input_audio_transcription.delta`（partial）仅在 native 流式后端
-可靠产出 partial 时发送；windowed 后端的手动 flush 可能无 delta，客户端必须依赖
-`commit` 后的 `completed` 作为最终结果，这与 OpenAI 的 manual turn detection 语义一致。
+`conversation.item.input_audio_transcription.delta`（partial）在推流累积达到时间窗时自动驱动，
+下发相对上一窗口的增量增量切片（客户端直接追加无文本重复）；客户端亦以 `commit` 后的
+`completed` 作为最终全量结果。
 
 `/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
 已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。

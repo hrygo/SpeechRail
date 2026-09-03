@@ -72,14 +72,16 @@ class Settings(BaseSettings):
     dtype: Literal["float16", "float32", "int8"] = "float16"
     mlx_cache_limit_mb: int = Field(default=256, ge=0, le=65536)
     mlx_memory_limit_mb: int = Field(default=0, ge=0, le=131072)
-    worker_lazy_load: bool = False
+    worker_lazy_load: bool = True
+    worker_min_uptime_seconds: float = Field(default=60.0, ge=0.0, le=86_400)
+    worker_warm_standby_timeout_seconds: float = Field(default=60.0, ge=0.0, le=86_400)
     worker_idle_timeout_seconds: float = Field(default=300.0, ge=0.0, le=86_400)
     max_queue_size: int = Field(default=8, ge=1, le=1024)
     max_upload_bytes: int = Field(default=536_870_912, ge=1)
     max_audio_seconds: int = Field(default=3600, ge=1)
     max_realtime_frame_bytes: int = Field(default=160_000, ge=2, le=4_000_000)
     max_realtime_buffer_bytes: int = Field(default=8_388_608, ge=2, le=64_000_000)
-    realtime_max_sessions: int = Field(default=2, ge=1, le=8)
+    realtime_max_sessions: int = Field(default=3, ge=1, le=8)
     realtime_outbound_max_events: int = Field(default=8, ge=1, le=1_024)
     runtime_total_capacity: int = Field(default=4, ge=2, le=128)
     realtime_reserved_capacity: int = Field(default=1, ge=1, le=127)

@@ -78,11 +78,14 @@ class FakeStreamingSession:
         prompt: str = "",
         segments: tuple[object, ...] = (),
         partials: tuple[str, ...] = (),
+        flush_partials: tuple[str, ...] = (),
     ) -> None:
         self.language = language
         self.prompt = prompt
         self.segments = segments
         self.partials = partials
+        self.flush_partials = list(flush_partials)
+        self.flushes = 0
         self.received: list[bytes] = []
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
         self._finished = asyncio.Event()
@@ -94,7 +97,10 @@ class FakeStreamingSession:
         self.received.append(audio)
 
     async def flush(self) -> None:
-        return None
+        self.flushes += 1
+        if self.flush_partials:
+            text = self.flush_partials.pop(0)
+            await self.events_queue.put(StreamingAsrEvent(kind="partial", text=text))
 
     async def commit(self) -> None:
         for partial in self.partials:
@@ -120,10 +126,15 @@ class FakeStreamingSession:
 
 class FakeStreamingFactory:
     def __init__(
-        self, *, segments: tuple[object, ...] = (), partials: tuple[str, ...] = ()
+        self,
+        *,
+        segments: tuple[object, ...] = (),
+        partials: tuple[str, ...] = (),
+        flush_partials: tuple[str, ...] = (),
     ) -> None:
         self.segments = segments
         self.partials = partials
+        self.flush_partials = flush_partials
         self.sessions: list[FakeStreamingSession] = []
         self.released: list[RealtimeAsrSession] = []
 
@@ -132,7 +143,11 @@ class FakeStreamingFactory:
 
     def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
         session = self.session_class()(
-            language=language, prompt=prompt, segments=self.segments, partials=self.partials
+            language=language,
+            prompt=prompt,
+            segments=self.segments,
+            partials=self.partials,
+            flush_partials=self.flush_partials,
         )
         self.sessions.append(session)
         return session
@@ -221,19 +236,26 @@ def _client(
     *,
     segments: tuple[object, ...] = (),
     partials: tuple[str, ...] = (),
+    flush_partials: tuple[str, ...] = (),
     diarization_engine=None,
     tts_synthesizer=None,
     api_key: str | None = None,
     factory: FakeStreamingFactory | None = None,
+    settings_kwargs: dict[str, Any] | None = None,
 ) -> tuple[TestClient, FakeStreamingFactory]:
-    streaming_factory = factory or FakeStreamingFactory(segments=segments, partials=partials)
-    settings = Settings(
-        qwen3_model_dir=None,
-        qwen3_python=None,
-        diarization_model_path=None,
-        diarization_embedding_model_path=None,
-        api_key=api_key,
+    streaming_factory = factory or FakeStreamingFactory(
+        segments=segments, partials=partials, flush_partials=flush_partials
     )
+    overrides: dict[str, Any] = {
+        "qwen3_model_dir": None,
+        "qwen3_python": None,
+        "diarization_model_path": None,
+        "diarization_embedding_model_path": None,
+        "api_key": api_key,
+    }
+    if settings_kwargs:
+        overrides.update(settings_kwargs)
+    settings = Settings(**overrides)
     services = build_app_services(
         settings,
         AppOverrides(
@@ -502,15 +524,34 @@ def test_openai_rejects_tools() -> None:
         assert error["error"]["code"] == "unsupported_tools"
 
 
-def test_openai_commit_without_audio_fails_closed() -> None:
+def test_openai_commit_without_audio_is_graceful_and_preserves_session() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.receive_json()
         socket.send_json({"type": "input_audio_buffer.commit"})
-        error = socket.receive_json()
-        assert error["type"] == "error"
-        assert error["error"]["code"] == "invalid_state"
+        committed = socket.receive_json()
+        assert committed["type"] == "input_audio_buffer.committed"
+        created = socket.receive_json()
+        assert created["type"] == "conversation.item.created"
+        assert created["item"]["content"][0]["transcript"] == ""
+        completed = socket.receive_json()
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["transcript"] == ""
+
+        # Session remains valid for subsequent audio
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event["type"])
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+        assert "input_audio_buffer.committed" in events
+        assert "conversation.item.input_audio_transcription.completed" in events
 
 
 def test_openai_rejects_unsupported_client_event() -> None:
@@ -858,9 +899,12 @@ def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None
 
     assert [event["delta"] for event in events if event["type"].endswith(".delta")] == [
         "你",
-        "你好",
-        "你好啊",
+        "好",
+        "啊",
     ]
+    # Verify concatenated deltas reconstruct the full text
+    deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
+    assert "".join(deltas) == "你好啊"
 
 
 def test_openai_session_update_rejects_non_string_language_hints() -> None:
@@ -1375,3 +1419,113 @@ def test_realtime_multi_sentence_stream_in_tts() -> None:
         assert "response.audio.done" in events
         assert events[-1] == "response.done"
 
+
+def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
+    """Verifies that accumulating audio frames drives flush() and produces incremental deltas."""
+    client, factory = _client(
+        flush_partials=("Hello", "Hello world"),
+        settings_kwargs={"qwen3_streaming_chunk_sec": 0.5},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+
+        # Send first 16,000 bytes (0.5s PCM16) -> triggers first flush
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
+        )
+        delta1 = socket.receive_json()
+        assert delta1["type"] == "conversation.item.input_audio_transcription.delta"
+        assert delta1["delta"] == "Hello"
+
+        # Send second 16,000 bytes -> triggers second flush
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 16_000)}
+        )
+        delta2 = socket.receive_json()
+        assert delta2["type"] == "conversation.item.input_audio_transcription.delta"
+        # Must be incremental diff " world", NOT full "Hello world"!
+        assert delta2["delta"] == " world"
+
+        assert factory.sessions[0].flushes == 2
+
+        # Final commit completes cleanly
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event["type"])
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+        assert "input_audio_buffer.committed" in events
+        assert "conversation.item.input_audio_transcription.completed" in events
+
+
+def test_realtime_buffer_overflow_auto_commit_rollover() -> None:
+    """Verifies that exceeding max_realtime_buffer_bytes triggers auto-commit rollover instead of crashing."""
+    client, factory = _client(
+        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+
+        # Append 3000 bytes (< 4096)
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 3000)}
+        )
+
+        # Append another 2000 bytes (total 5000 > 4096) -> triggers auto-commit rollover
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 2000)}
+        )
+
+        # First segment auto-commits cleanly
+        committed = socket.receive_json()
+        assert committed["type"] == "input_audio_buffer.committed"
+        created = socket.receive_json()
+        assert created["type"] == "conversation.item.created"
+        completed = socket.receive_json()
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+
+        # The 2000 bytes started a new turn, verify we can commit it
+        assert len(factory.sessions) == 2
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        committed2 = socket.receive_json()
+        assert committed2["type"] == "input_audio_buffer.committed"
+        socket.receive_json()  # conversation.item.created
+        completed2 = socket.receive_json()
+        assert completed2["type"] == "conversation.item.input_audio_transcription.completed"
+
+
+def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
+    """Verifies that a single frame exceeding max_realtime_buffer_bytes is rejected with buffer_too_large."""
+    client, _ = _client(
+        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+
+        # Single frame of 5000 bytes exceeds 4096 max buffer
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 5000)}
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "buffer_too_large"
+
+
+def test_realtime_client_disconnect_during_handle_graceful() -> None:
+    """Verifies that abrupt client disconnect is handled without uncaught exceptions."""
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1", "turn_detection": None},
+            }
+        )
+        # Socket closes on exit without error

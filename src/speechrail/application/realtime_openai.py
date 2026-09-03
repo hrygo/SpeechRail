@@ -10,6 +10,7 @@ from contextlib import AsyncExitStack
 from typing import Any
 from uuid import uuid4
 
+from starlette.websockets import WebSocketDisconnect
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
@@ -89,6 +90,8 @@ class OpenAIRealtimeSession:
         self._diarization_config: DiarizationConfig | None = None
         self._pending_text: str | None = None
         self._buffered_audio_bytes = 0
+        self._unflushed_bytes = 0
+        self._last_partial_text = ""
         self._vad: VoiceActivityDetector | None = None
         self._config: dict[str, Any] = {
             "model": self._initial_model,
@@ -143,6 +146,9 @@ class OpenAIRealtimeSession:
         self._tts_task = None
         if self._vad is not None:
             self._vad.reset()
+        self._buffered_audio_bytes = 0
+        self._unflushed_bytes = 0
+        self._last_partial_text = ""
 
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
@@ -194,9 +200,20 @@ class OpenAIRealtimeSession:
         audio = validate_append(
             event,
             max_frame_bytes=self._settings.max_realtime_frame_bytes,
-            buffered_bytes=self._buffered_audio_bytes,
-            max_buffer_bytes=self._settings.max_realtime_buffer_bytes,
+            buffered_bytes=0,
+            max_buffer_bytes=None,
         )
+        if self._settings.max_realtime_buffer_bytes is not None:
+            if len(audio) > self._settings.max_realtime_buffer_bytes:
+                raise RealtimeAdapterError("buffer_too_large", "audio buffer exceeds the configured limit")
+            if (
+                self._buffered_audio_bytes > 0
+                and self._buffered_audio_bytes + len(audio) > self._settings.max_realtime_buffer_bytes
+            ):
+                # Auto-commit rollover for long streaming sessions
+                if self._asr is not None:
+                    await self._commit_audio()
+
         if self._asr_factory is None:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
 
@@ -274,10 +291,27 @@ class OpenAIRealtimeSession:
         if self._diarization is not None:
             await self._diarization.append_audio(audio)
         self._buffered_audio_bytes += len(audio)
+        self._unflushed_bytes += len(audio)
+
+        chunk_sec = self._settings.qwen3_streaming_chunk_sec
+        flush_threshold = max(1, int(chunk_sec * 32_000))
+        if self._unflushed_bytes >= flush_threshold:
+            self._unflushed_bytes = 0
+            with contextlib.suppress(Exception):
+                await self._asr.flush()
 
     async def _commit_audio(self) -> None:
         if self._asr is None:
-            raise RealtimeAdapterError("invalid_state", "no audio appended before commit")
+            await self._send(input_audio_buffer_committed(session_id=self._session_id))
+            await self._send(
+                conversation_item_created(session_id=self._session_id, transcript="")
+            )
+            await self._send(
+                transcription_completed(session_id=self._session_id, transcript="")
+            )
+            self._last_partial_text = ""
+            self._unflushed_bytes = 0
+            return
         await self._send(input_audio_buffer_committed(session_id=self._session_id))
         await self._asr.commit()
         if self._asr_reader is not None:
@@ -286,6 +320,8 @@ class OpenAIRealtimeSession:
         await self._close_asr_session()
         await self._release_asr()
         self._buffered_audio_bytes = 0
+        self._last_partial_text = ""
+        self._unflushed_bytes = 0
 
     async def _clear_audio(self) -> None:
         if self._vad is not None:
@@ -295,6 +331,8 @@ class OpenAIRealtimeSession:
         await self._release_asr()
         await self._close_diarization()
         self._buffered_audio_bytes = 0
+        self._unflushed_bytes = 0
+        self._last_partial_text = ""
         await self._send(input_audio_buffer_cleared(session_id=self._session_id))
 
     async def _create_text_item(self, event: dict[str, Any]) -> None:
@@ -358,46 +396,68 @@ class OpenAIRealtimeSession:
     async def _drain_asr_events(self) -> None:
         if self._asr is None:
             return
+        import os
         from speechrail.domain.itn import apply_light_itn
 
-        async for event in self._asr.events():
-            if event.kind == "partial":
-                await self._send(transcription_delta(session_id=self._session_id, delta=event.text))
-            elif event.kind == "completed":
-                norm_text = apply_light_itn(event.text)
-                await self._send(
-                    conversation_item_created(session_id=self._session_id, transcript=norm_text)
-                )
-                segments = event.segments
-                if self._diarization is not None and segments:
-                    try:
-                        segments = await self._diarization.annotate(segments)
-                    except DiarizationError as exc:
-                        await self._send(error_event(code=exc.code, message=str(exc)))
-                        return
-                    for segment in segments:
+        try:
+            async for event in self._asr.events():
+                if event.kind == "partial":
+                    current_text = event.text
+                    if not current_text:
+                        continue
+                    if current_text.startswith(self._last_partial_text):
+                        delta = current_text[len(self._last_partial_text):]
+                    else:
+                        common = os.path.commonprefix([self._last_partial_text, current_text])
+                        delta = current_text[len(common):]
+                    self._last_partial_text = current_text
+                    if delta:
                         await self._send(
-                            transcription_segment(
-                                session_id=self._session_id,
-                                item_id=f"item_{self._session_id}_input",
-                                segment_id=segment.id,
-                                text=apply_light_itn(segment.text),
-                                speaker=segment.speaker,
-                                start_ms=segment.start_ms,
-                                end_ms=segment.end_ms,
-                            )
+                            transcription_delta(session_id=self._session_id, delta=delta)
                         )
-                await self._send(
-                    transcription_completed(session_id=self._session_id, transcript=norm_text)
-                )
-            elif event.kind == "error":
-                await self._send(
-                    transcription_failed(
-                        session_id=self._session_id,
-                        code=event.error_code or "backend_error",
-                        message="streaming transcription failed",
+                elif event.kind == "completed":
+                    self._last_partial_text = ""
+                    self._unflushed_bytes = 0
+                    norm_text = apply_light_itn(event.text)
+                    await self._send(
+                        conversation_item_created(session_id=self._session_id, transcript=norm_text)
                     )
-                )
+                    segments = event.segments
+                    if self._diarization is not None and segments:
+                        try:
+                            segments = await self._diarization.annotate(segments)
+                        except DiarizationError as exc:
+                            await self._send(error_event(code=exc.code, message=str(exc)))
+                            return
+                        for segment in segments:
+                            await self._send(
+                                transcription_segment(
+                                    session_id=self._session_id,
+                                    item_id=f"item_{self._session_id}_input",
+                                    segment_id=segment.id,
+                                    text=apply_light_itn(segment.text),
+                                    speaker=segment.speaker,
+                                    start_ms=segment.start_ms,
+                                    end_ms=segment.end_ms,
+                                )
+                            )
+                    await self._send(
+                        transcription_completed(session_id=self._session_id, transcript=norm_text)
+                    )
+                elif event.kind == "error":
+                    self._last_partial_text = ""
+                    self._unflushed_bytes = 0
+                    await self._send(
+                        transcription_failed(
+                            session_id=self._session_id,
+                            code=event.error_code or "backend_error",
+                            message="streaming transcription failed",
+                        )
+                    )
+        except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
+            pass
+        except Exception:
+            pass
 
     async def _synthesize_tts(
         self,
@@ -525,12 +585,15 @@ class OpenAIRealtimeSession:
             await self._send(response_done(session_id=self._session_id, response_id=response_id))
         except asyncio.CancelledError:
             raise
+        except (WebSocketDisconnect, RuntimeError):
+            return
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
-            await self._send(error_event(code="tts_error", message=str(exc)))
-            await self._send(
-                response_done(session_id=self._session_id, response_id=response_id, status="failed")
-            )
+            with contextlib.suppress(Exception):
+                await self._send(error_event(code="tts_error", message=str(exc)))
+                await self._send(
+                    response_done(session_id=self._session_id, response_id=response_id, status="failed")
+                )
 
     async def _reserve_asr(self) -> None:
         self._asr_resources = AsyncExitStack()

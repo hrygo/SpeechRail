@@ -281,6 +281,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             evictor = WorkerIdleEvictor(
                 evictable,
                 idle_timeout_seconds=settings.worker_idle_timeout_seconds,
+                warm_standby_timeout_seconds=settings.worker_warm_standby_timeout_seconds,
+                min_uptime_seconds=settings.worker_min_uptime_seconds,
             )
 
     lifecycle = RuntimeLifecycle(

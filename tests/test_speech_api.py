@@ -315,6 +315,7 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
         qwen3_python=None,
         qwen3_tts_model_dir=snapshot,
         qwen3_tts_python=Path(executable),
+        worker_lazy_load=False,
     )
 
     with TestClient(create_app(settings)) as client:

@@ -287,3 +287,47 @@ def test_lease_lock_protects_against_eviction() -> None:
             await evictor.close()
 
     asyncio.run(run())
+
+
+def test_min_uptime_guard_protects_freshly_loaded_worker() -> None:
+    """A worker that just loaded (lazy start / restart) is not evicted
+    before min_uptime_seconds even if the idle timeout already elapsed."""
+    from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    class _LazyWorker:
+        def __init__(self) -> None:
+            self.alive = False
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+            self.alive = False
+
+    async def run() -> None:
+        worker = _LazyWorker()
+        evictor = WorkerIdleEvictor(
+            (worker,),
+            warm_standby_timeout_seconds=0.02,
+            idle_timeout_seconds=0.03,
+            min_uptime_seconds=0.15,
+            check_interval_seconds=0.01,
+        )
+        await evictor.start()
+        try:
+            # Simulate the first request loading the worker (lazy start).
+            worker.alive = True
+
+            # Past the idle timeout (0.03s) but still inside min_uptime (0.15s):
+            # the guard must hold eviction off.
+            await asyncio.sleep(0.07)
+            assert worker.closed is False
+            assert evictor.state_of(worker) == WorkerLifecycleState.ACTIVE
+
+            # Once min_uptime elapses and idle persists -> eviction proceeds.
+            await asyncio.sleep(0.12)
+            assert worker.closed is True
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+        finally:
+            await evictor.close()
+
+    asyncio.run(run())

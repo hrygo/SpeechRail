@@ -129,6 +129,7 @@ class Qwen3StreamingWorker:
         self.config = config
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._write_lock = asyncio.Lock()
+        self._start_lock = asyncio.Lock()
         self._ready = False
         self._queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
         self._dispatcher: asyncio.Task[None] | None = None
@@ -155,22 +156,25 @@ class Qwen3StreamingWorker:
     async def start(self) -> None:
         if self._ready:
             return
-        await self._transport.start()
-        ready = await self._transport.exchange(
-            {
-                "version": PROTOCOL_VERSION,
-                "type": "start",
-                "model_dir": str(self.config.model_dir),
-                "device": self.config.device,
-            }
-        )
-        if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-            raise RuntimeError(
-                error_frame_message(ready, "streaming worker failed to become ready")
+        async with self._start_lock:
+            if self._ready:
+                return
+            await self._transport.start()
+            ready = await self._transport.exchange(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "start",
+                    "model_dir": str(self.config.model_dir),
+                    "device": self.config.device,
+                }
             )
-        self._ready = True
-        self.last_active = time.monotonic()
-        self._dispatcher = asyncio.create_task(self._dispatch_loop())
+            if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
+                raise RuntimeError(
+                    error_frame_message(ready, "streaming worker failed to become ready")
+                )
+            self._ready = True
+            self.last_active = time.monotonic()
+            self._dispatcher = asyncio.create_task(self._dispatch_loop())
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
@@ -211,14 +215,15 @@ class Qwen3StreamingWorker:
             raise
 
     async def close(self) -> None:
-        if self._dispatcher is not None:
-            self._dispatcher.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._dispatcher
-            self._dispatcher = None
-        self._queues.clear()
-        await self._transport.close()
-        self._ready = False
+        async with self._start_lock:
+            if self._dispatcher is not None:
+                self._dispatcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await self._dispatcher
+                self._dispatcher = None
+            self._queues.clear()
+            self._ready = False
+            await self._transport.close()
 
 
 class Qwen3StreamingSession(RealtimeAsrSession):

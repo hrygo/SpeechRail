@@ -321,7 +321,7 @@ def test_settings_defaults_to_disabled_windowed() -> None:
     settings = Settings()
     assert settings.realtime_asr_backend == "disabled"
     assert settings.qwen3_streaming_mode == "windowed"
-    assert settings.realtime_max_sessions == 2
+    assert settings.realtime_max_sessions == 3
 
 
 def test_settings_rejects_out_of_range_max_sessions() -> None:

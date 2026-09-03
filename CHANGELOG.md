@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **WORKER 默认懒加载 + 空闲自动卸载**：`SPEECHRAIL_WORKER_LAZY_LOAD` 默认为 `false` → `true`。服务启动不再预热所有 worker（ASR ~2.5 GB + TTS ~5 GB 常驻在懒加载下为 0），首个请求按需拉起并阻塞等待模型就绪。`WorkerIdleEvictor` 已有两阶段待机（`warm_standby_timeout=60s` trim 缓存→`idle_timeout=300s` 冷卸载）对全部 worker 生效，请求持有 `WorkerLeaseLock` 时不卸载；流式 batch 与 realtime 共用同一 Evictor 实例。
+- **空闲卸载防抖**：新增 `SPEECHRAIL_WORKER_MIN_UPTIME_SECONDS`（默认 `60`）与 `SPEECHRAIL_WORKER_WARM_STANDBY_TIMEOUT_SECONDS`（默认 `60`）。worker 刚加载（懒加载首建或回收后重建）后 `60s` 内不受空闲时长影响而被误回收（vLLM `min_uptime_s` / cudabroker `ACTIVE_GRACE_SECONDS` 类比），避免间歇请求下的 thrash；行为仅在显式配置时生效（`WorkerIdleEvictor` 组件默认 `0.0`，已有测试保持 `min_uptime=0` 语义）。
+- **Realtime 并发上限默认值 2→3**：`SPEECHRAIL_REALTIME_MAX_SESSIONS` 默认为 `3`（原 `2`，范围 `1-8` 不变），`streaming_worker.start()` 增加并发锁避免冷启动时多会话竞争 `start` 帧。默认上限提升后，`concurrent_realtime_smoke.py --sessions 2` 在懒加载冷启动 + 工厂计数窗口下稳定通过（此前 2 并发 + 冷启动时偶现 `backend_busy`）。
+
+- **Worker 空闲防抖配置**：`worker_min_uptime_seconds` 与 `worker_warm_standby_timeout_seconds`（均 `0.0–86_400`），与既有 `worker_idle_timeout_seconds` 组成完整的可调生命周期三参数。
+
 ## [1.6.0] - 2026-09-03
 
 ### Added
