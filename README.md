@@ -112,32 +112,34 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 
 | 进程组件 | 待机常驻物理内存 (Idle) | 压测峰值物理内存 (Peak) | 峰值 CPU | 显存与调度行为 |
 |---|---|---|---|---|
-| **主服务 (FastAPI)** | **546.8 MB** | **546.8 MB** | 0.7% | 协议路由、音频解码与资源守护 |
-| **ASR Worker (Batch)** | **2,536.5 MB (~2.54 GB)** | **9,148.1 MB (~9.15 GB)** | 79.0% | INT8 内存即时量化，处理 Batch REST 转写 |
-| **Qwen3 TTS Worker** | **4,941.5 MB (~4.94 GB)** | **5,314.8 MB (~5.31 GB)** | 1.4% | VoiceDesign 1.7B，应用 256MB 显存池上限管理 |
-| **全系统总常驻 (Total)** | **8,024.8 MB (~8.02 GB)** | **15,009.7 MB (~15.01 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
+| **主服务 (FastAPI)** | **538.8 MB** | **538.8 MB** | 1.1% | 协议路由、音频解码、资源守护与指标中间件 |
+| **ASR Worker (Batch)** | **4,693.9 MB (~4.69 GB)** | **9,160.7 MB (~9.16 GB)** | —* | INT8 内存即时量化，处理 Batch REST 转写；含 `/metrics` 观测缓冲 |
+| **Qwen3 TTS Worker** | **4,940.5 MB (~4.94 GB)** | **5,342.6 MB (~5.34 GB)** | 1.1% | VoiceDesign 1.7B，应用显存池限额管理 |
+| **全系统总常驻 (Total)** | **10,173.2 MB (~10.17 GB)** | **15,042.1 MB (~15.04 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
 
-> 表内 ASR/TTS 测量为 **v1.6.0** 实测数据（Apple M5 Max / 128GB）。
+> 表内 ASR/TTS 测量为 **v1.6.2** 实测数据（Apple M5 Max / 128GB）。
+> *：ASR batch 峰值 CPU 为采样瞬间读数（前向计算后归零），不代表负载。
 > **v1.5.1 起 native realtime 使用独立 streaming worker（懒加载，首个 realtime 会话才启动）**，避免共享管道上
 > batch 与 realtime 并发读帧导致崩溃/死锁；启用 realtime 会话时内存模型需按两个 ASR worker 重新评估。
 > `sample_resources.py` 中 streaming 与 batch worker 共用 `qwen3_worker.py` 模块入口，当前按 batch 合并统计。
+> **注意**：v1.6.2 ASR batch 常驻（2.54→4.69 GB）较 v1.6.0 上升，主要来自 `/metrics` 观测缓冲；详见[基准报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)。
 
 ### 🚀 2. 推理延迟与吞吐基线
 
 * **非流式 ASR (`POST /v1/audio/transcriptions`)**：
-  * 短音频 (2.8s)：稳定延迟 **0.13s** ($RTF = \mathbf{0.05x}$)
-  * 中音频 (8.6s)：平均延迟 **0.23s** ($RTF = \mathbf{0.03x}$)
-  * 超长音频 (32.0s)：平均延迟 **0.82s** ($RTF = \mathbf{0.03x}$，比播放快 ~39 倍)
-  * 并发吞吐 (4 线程 / 8 次请求)：吞吐量 **4.35 req/s**，P95 延迟 **0.90s**，成功率 **100%**
+  * 短音频 (2.9s)：稳定延迟 **0.12s** ($RTF = \mathbf{0.04x}$)
+  * 中音频 (7.9s)：平均延迟 **0.26s** ($RTF = \mathbf{0.03x}$)
+  * 超长音频 (35.4s)：平均延迟 **0.92s** ($RTF = \mathbf{0.03x}$，比播放快 ~38 倍)
+  * 并发吞吐 (4 线程 / 8 次请求)：10s 音频吞吐量 **3.99 req/s**、3s 音频 **8.28 req/s**，P95 延迟 **0.98s / 0.48s**，成功率 **100%**
 * **语音合成 TTS (`POST /v1/audio/speech`)**：
-  * 短句 (20 字符 / 3.3s 音频)：平均耗时 **1.12s** ($RTF = \mathbf{0.34x}$)
-  * 长句 (50 字符 / 8.4s 音频)：平均耗时 **2.74s** ($RTF = \mathbf{0.33x}$)
+  * 短句 (20 字符 / 3.7s 音频)：平均耗时 **1.21s** ($RTF = \mathbf{0.36x}$)
+  * 长句 (50 字符 / 8.5s 音频)：平均耗时 **2.97s** ($RTF = \mathbf{0.35x}$)
 * **双向流式 WebSocket (`WS /v1/realtime`)**：
-  * 流式 ASR Commit 延迟（8.6s 整段一次提交）：**2.28s ~ 2.29s** ($RTF = \mathbf{0.26x}$)
-  * TTS 首包生成延迟 (TTFA)：稳定在 **44 ms** 极速直出
-  * **连续 3 会话 100% 完成**：v1.6.0 修复 dispatcher 空闲误判（空闲读超时不再判死）与断开/取消槽位泄漏后，无 `backend_busy`、无空转写、无死锁
+  * 流式 ASR Commit 延迟（7.9s 整段一次提交）：**2.24s ~ 2.33s** ($RTF = \mathbf{0.29x}$)
+  * TTS 首包生成延迟 (TTFA)：**70 ~ 80 ms** 极速直出
+  * **连续 3 会话 100% 完成**：v1.6.2 新增指标与 trim_memory 修复后无 `backend_busy`、无空转写、无死锁
 
-> 完整测量报告与复现步骤请参阅 **[📊 v1.6.0 性能基线完整报告](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md)**（历史基线见 [v1.5.2 报告](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md) 与 [v1.5.0 报告](docs/archive/performance/2026-09-02-v1.5.0-performance-benchmark.md)）。
+> 完整测量报告与复现步骤请参阅 **[📊 v1.6.2 性能基线完整报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)**（历史基线见 [v1.6.0 报告](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) 与 [v1.5.2 报告](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)）。
 
 ---
 
