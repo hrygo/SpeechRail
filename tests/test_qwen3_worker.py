@@ -286,3 +286,37 @@ def test_worker_trim_memory_does_not_emit_confirmation_frame() -> None:
     results = [f for f in responses if f.get("type") == "result"]
     assert len(results) == 1
     assert results[0]["request_id"] == "req_t1"
+
+
+def test_clear_metal_cache_prefers_new_mlx_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: ``_clear_metal_cache`` must call the non-deprecated ``mx.clear_cache``.
+
+    When both ``mx.metal.clear_cache`` (deprecated) and ``mx.clear_cache`` exist,
+    the cleanup must prefer the modern module-level API. The previous ordering
+    checked ``mx.metal.clear_cache`` first, so on MLX versions where that symbol
+    still exists (but is deprecated) the effective ``mx.clear_cache`` was never
+    reached and the Metal cache stayed resident.
+    """
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    from speechrail.backends.qwen3_worker import _clear_metal_cache
+
+    calls: list[str] = []
+    metal = SimpleNamespace(clear_cache=lambda: calls.append("metal.clear_cache"))
+    mx = SimpleNamespace(
+        metal=metal,
+        clear_cache=lambda: calls.append("mx.clear_cache"),
+    )
+    # Register both the top-level ``mlx`` package and ``mlx.core`` so that the
+    # function's ``import mlx.core`` resolves to the fake (the project venv has
+    # no real MLX installed for these regression unit tests).
+    mlx_pkg = ModuleType("mlx")
+    mlx_pkg.core = mx
+    monkeypatch.setitem(sys.modules, "mlx", mlx_pkg)
+    monkeypatch.setitem(sys.modules, "mlx.core", mx)
+
+    _clear_metal_cache()
+
+    assert "mx.clear_cache" in calls
+    assert "metal.clear_cache" not in calls

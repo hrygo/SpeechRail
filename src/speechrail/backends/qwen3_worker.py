@@ -67,10 +67,11 @@ def _clear_metal_cache() -> None:
     try:
         import mlx.core as mx  # type: ignore[import-not-found]
 
-        if hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
-            mx.metal.clear_cache()
-        elif hasattr(mx, "clear_cache"):
+        # Prefer the non-deprecated API; mx.metal.clear_cache is deprecated on mlx>=0.32.
+        if hasattr(mx, "clear_cache"):
             mx.clear_cache()
+        elif hasattr(mx, "metal") and hasattr(mx.metal, "clear_cache"):
+            mx.metal.clear_cache()
     except Exception:
         pass
     gc.collect()
