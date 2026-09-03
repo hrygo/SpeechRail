@@ -100,7 +100,7 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 |---|---|---|---|---|
 | **Qwen3-ASR** (语音识别) | **1.7B** *(默认推荐)* | ~3.0 GB (FP16) / ~1.5 GB (INT8) | 会议长音频、高精度中英文/多语种混合识别 | 标点与时间戳综合效果最优，SpeechRail 默认主力 |
 | **Qwen3-ASR** (语音识别) | **0.6B** *(极速/轻量)* | ~1.0 GB (FP16) / ~600 MB (INT8) | 8GB 内存设备、端侧极速流式转写、高并发场景 | 延迟极低、显存极小，完全兼容相同 Worker 协议 |
-| **Qwen3-TTS** (语音合成) | **VoiceDesign** (约 1.7B) | ~3.0 GB (FP16) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 等预设音色；运行时暂不支持权重量化 |
+| **Qwen3-TTS** (语音合成) | **VoiceDesign** (约 1.7B) | ~3.0 GB (FP16) / ~1.9 GB (INT8 预量化) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 等预设音色；支持预量化 `-8bit` MLX 快照（codec/`speech_tokenizer` 保持 bf16），运行时可解析为 int8 |
 
 ---
 
@@ -118,6 +118,7 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 | **全系统总常驻 (Total)** | **10,173.2 MB (~10.17 GB)** | **15,042.1 MB (~15.04 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
 
 > 表内 ASR/TTS 测量为 **v1.6.2** 实测数据（Apple M5 Max / 128GB）。
+> **v1.6.4 启用预量化 `-8bit` MLX 快照后**：ASR 加载峰值由 9.58 GB 降至 **3.44 GB**，TTS 由 4.58 GB 降至 **3.18 GB**（-31%）；双 8bit 真同时峰值约 **5.99 GB**（v1.6.3 约 7.9 GB），待机约 **5.64 GB**。
 > *：ASR batch 峰值 CPU 为采样瞬间读数（前向计算后归零），不代表负载。
 > **v1.5.1 起 native realtime 使用独立 streaming worker（懒加载，首个 realtime 会话才启动）**，避免共享管道上
 > batch 与 realtime 并发读帧导致崩溃/死锁；启用 realtime 会话时内存模型需按两个 ASR worker 重新评估。
