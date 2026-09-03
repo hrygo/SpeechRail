@@ -291,6 +291,7 @@ response.stream_to_file("output.mp3")
 |---|---|---|---|
 | `GET` | `/health` | 服务存活与组件健康状态 | 返回进程状态与组件健康指标 |
 | `GET` | `/readyz` | 推理引擎就绪状态检查 | 确认 ASR/TTS Worker 均已完成加载 (HTTP 200) |
+| `GET` | `/metrics` | 运行指标导出 | Prometheus 文本格式默认输出；`Accept: application/json` 返回结构化 JSON |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1`、`tts-1` 等兼容别名 |
 | `GET` | `/v1/voices` | 可用音色列表 | 返回 `default`, `warm`, `bright`, `calm` 等预设音色 |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |

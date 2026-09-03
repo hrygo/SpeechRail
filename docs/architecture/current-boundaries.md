@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-date: 2026-09-01
+date: 2026-09-03
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -19,8 +19,8 @@ date: 2026-09-01
 
 - `/v1/realtime` 只承载 OpenAI Realtime 协议的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、
   历史或持续会话语义。
-- `/health` 分别反映 ASR/TTS worker readiness，`/readyz` 在至少一个能力可接受请求时返回 200。
-- 上传字节数受限；解码后音频时长、CORS、速率限制与指标导出不在当前能力范围。
+- `/health` 分别反映 ASR/TTS worker readiness，`/readyz` 在至少一个能力可接受请求时返回 200；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
+- 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。
 
 ## 已实测基准（本机，MPS/float16）
@@ -41,7 +41,7 @@ date: 2026-09-01
 - `sona` 的真实 ASR/TTS worker 端到端音频、播放与回滚验收；
 - 多语言/长文件（>60s）的质量、失败恢复与长时间运行基准；
 - 非 loopback 的 TLS、CORS、网段控制、速率限制和 legacy auth 实现；
-- 解码后实际音频时长限制、观测指标导出与日志收集策略实现；
+- 日志收集策略与集中化导出实现；
 - FastAPI startup/shutdown event 迁移到 lifespan 的未来兼容性处理。
 
 ## 发布与端口切换门

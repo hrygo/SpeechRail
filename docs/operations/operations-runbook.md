@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.5.0"
-date: 2026-09-02
+version: "1.6.2"
+date: 2026-09-03
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -45,6 +45,10 @@ curl -s http://127.0.0.1:8201/v1/models | jq .
 
 # 4. 音色注册清单
 curl -s http://127.0.0.1:8201/v1/voices | jq .
+
+# 5. 运行指标 (Prometheus 文本; 加 -H 以 JSON 视图)
+curl -s http://127.0.0.1:8201/metrics
+curl -s -H "Accept: application/json" http://127.0.0.1:8201/metrics | jq .
 ```
 
 > [!NOTE]

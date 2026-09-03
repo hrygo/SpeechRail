@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.5.0"
-date: 2026-09-02
+version: "1.6.2"
+date: 2026-09-03
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -33,6 +33,7 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 |---|---|---|---|
 | `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息 |
 | `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 表示 ASR/TTS 引擎已预热并可接受流量 |
+| `GET` | `/metrics` | 运行指标导出 | 默认 Prometheus 文本；`Accept: application/json` 返回结构化视图 |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
 | `GET` | `/v1/voices` | 注册的 TTS 音色列表 | 返回 `default`, `warm`, `bright`, `calm` 及可用性 |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
@@ -124,6 +125,7 @@ Content-Type: application/json
 | HTTP 状态码 | Error Code | 是否可重试 (`retryable`) | 常见原因与处理建议 |
 |---|---|---|---|
 | **400** | `model_not_found` | `false` | 请求的模型名不存在，核对 `/v1/models` 清单 |
+| **400** | `audio_too_long` | `false` | 音频时长超出 `SPEECHRAIL_MAX_AUDIO_SECONDS` 限制 |
 | **401** | `invalid_api_key` | `false` | 未提供有效的 API Key 或 Token 错误 |
 | **413** | `audio_too_large` | `false` | 音频大小超出 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制 |
 | **422** | `audio_decode_failed` | `false` | 上传文件损坏或非标准音频容器，检查文件有效性 |

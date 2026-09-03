@@ -205,8 +205,8 @@ Qwen3/TTS vendor runtime 使用外部专用 Python，diarization 依赖由 `diar
 | 开关 | `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS`、`SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；服务不下载模型 |
 | 测试模拟 | `SPEECHRAIL_BACKEND_READY` | 仅无真实 backend 的契约测试使用；真实部署不得用它掩盖配置问题 |
 
-`SPEECHRAIL_MAX_AUDIO_SECONDS` 当前是配置字段，但尚未在解码后强制时长拒绝；不能把它
-当作已启用的容量安全边界。上传字节上限、Realtime 帧/缓存上限和 worker timeout 也不能
+`SPEECHRAIL_MAX_AUDIO_SECONDS` 是配置字段，且已在解码后强制时长拒绝（超限返回 `400 audio_too_long`）。
+上传字节上限、Realtime 帧/缓存上限和 worker timeout 也不能
 替代真实性能、峰值内存与长音频基准。
 
 ### wheel 安装后的配置边界
