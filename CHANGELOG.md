@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-09-03
+
+### Fixed
+
+- **ASR/streaming 预量化快照 dtype 自动解析**：新增共享 `resolve_backend_dtype`（`qwen3_native`），统一 ASR、streaming 与 TTS 三处 wiring。快照 `config.json` 声明 `quantization` 时一律自动解析为 `int8` 直接加载，不再依赖 `SPEECHRAIL_DTYPE`。此前 ASR/streaming 仅跟随 `SPEECHRAIL_DTYPE`，`-8bit` 快照配默认 `float16` 会触发 `backend_identity_mismatch` 启动失败。
+- **内存即时量化失败不再谎报 int8**：`Qwen3Engine` 在 `quantize_model` 抛错时按实际加载精度上报身份（fail-closed on truth），避免 fp16 权重冒充 int8；`_resolve_engine_dtype` 纯函数化，量化失败会映射为清晰的 `backend_identity_mismatch`。
+- **后端身份校验纪律统一**：TTS 主进程身份校验改为精确 `dtype` 匹配（原为恒真的枚举成员检查）；`Qwen3StreamingBackendConfig` 补齐 MPS/CPU dtype 组合校验，streaming worker 起始握手补齐 device/dtype 校验。
+
 ## [1.6.4] - 2026-09-03
 
 ### Added
@@ -12,7 +20,7 @@
 
 ### Changed
 
-- **预量化快照跳过二次量化**：`qwen3_worker` / `qwen3_native` 检测到快照已配 `quantization` 时跳过内存 int8 量化，底层权重以 int8 加载（codec/embedding 保持 bf16），并正确上报 int8 身份；`qwen3_tts_worker` / `service/preflight` 同步支持单文件量化权重布局。
+- **预量化快照跳过二次量化**：`qwen3_worker` / `qwen3_native` 检测到快照已配 `quantization` 时跳过内存 int8 量化，底层权重以 int8 加载（`speech_tokenizer` codec 恒为 FP32；text/codec/speaker embedding 与 norms 保持 BF16），并正确上报 int8 身份；`qwen3_tts_worker` / `service/preflight` 同步支持单文件量化权重布局。
 - **量化检测统一入口**：新增共享 `snapshot_is_quantized`（`qwen3_native`），ASR worker、TTS worker、`services.py` 三处统一调用，消除两份重复实现；TTS 后端配置 dtype 现由快照是否预量化决定（`int8`），与 worker 上报身份一致。
 - **`SPEECHRAIL_MLX_MEMORY_LIMIT_MB` 说明更正**：该限额只约束 Metal 缓存池/GC 触发，不封顶加载期活跃分配；文件转写峰值主要来自加载期 cast+量化，非配置限额。
 
