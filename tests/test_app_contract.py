@@ -31,7 +31,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "1.6.3",
+        "version": "1.6.4",
         "backend": "qwen3-asr-1.7b",
         "asr_ready": False,
         "tts_ready": False,
@@ -180,7 +180,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "1.6.3",
+        "version": "1.6.4",
         "backend": "qwen3-asr-1.7b",
         "asr_ready": False,
         "tts_ready": True,
@@ -211,7 +211,7 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
 ) -> None:
     snapshot = tmp_path.parent / "external-qwen3-snapshot"
     snapshot.mkdir(exist_ok=True)
-    for filename in MODEL_FILES:
+    for filename in (*MODEL_FILES, "model.safetensors"):
         (snapshot / filename).touch()
     lifecycle: list[str] = []
 
@@ -259,7 +259,7 @@ def test_startup_failure_closes_already_started_runtime_workers(
 ) -> None:
     asr_snapshot = tmp_path / "external-qwen3-asr-snapshot"
     asr_snapshot.mkdir()
-    for filename in MODEL_FILES:
+    for filename in (*MODEL_FILES, "model.safetensors"):
         (asr_snapshot / filename).touch()
     tts_snapshot = tmp_path / "external-qwen3-tts-snapshot"
     tts_snapshot.mkdir()

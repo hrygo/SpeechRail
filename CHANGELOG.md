@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-09-03
+
+### Added
+
+- **预量化 8bit 快照支持**：ASR 与 TTS 均可在配置指向 `mlx-community` 的 `-8bit` 快照时直接加载，避免 worker 启动时的 bf16→fp16 深拷贝与整树量化瞬时占用。ASR 加载峰值 9.58 GB → 3.44 GB；TTS 加载峰值 4.58 GB → 3.18 GB（-31%）。双 8bit 真同时峰值约 6.0 GB（v1.6.3 约 7.9 GB）。
+- **ASR 解码 token 预算次线性增长**：`_dynamic_budget(audio_sec, cap)` = `min(cap, max(32, audio_sec*6+24))`，长音频解码尾保持小、短音频仍有下限；实测完整转写无截断。
+- **资源采样器真同时峰值统计**：`sample_resources.py` 改为逐采样 tick 取当前 footprint 之和的最大值，不再对逐进程 all-time high-water 做算术求和。
+
+### Changed
+
+- **预量化快照跳过二次量化**：`qwen3_worker` / `qwen3_native` 检测到快照已配 `quantization` 时跳过内存 int8 量化，底层权重以 int8 加载（codec/embedding 保持 bf16），并正确上报 int8 身份；`qwen3_tts_worker` / `service/preflight` 同步支持单文件量化权重布局。
+- **`SPEECHRAIL_MLX_MEMORY_LIMIT_MB` 说明更正**：该限额只约束 Metal 缓存池/GC 触发，不封顶加载期活跃分配；文件转写峰值主要来自加载期 cast+量化，非配置限额。
+
 ## [1.6.3] - 2026-09-03
 
 ### Fixed
