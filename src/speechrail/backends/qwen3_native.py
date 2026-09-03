@@ -66,6 +66,25 @@ def snapshot_is_quantized(model_dir: Path) -> bool:
     return bool(config.get("quantization") or config.get("quantization_config"))
 
 
+def resolve_backend_dtype(
+    model_dir: Path, configured_dtype: Literal["float16", "float32", "int8"]
+) -> Literal["float16", "float32", "int8"]:
+    """Resolve the driver dtype for a backend from its snapshot state.
+
+    A pre-quantized ``-8bit`` snapshot already carries int8 weights and is loaded
+    directly: it is never re-quantized at load time, which would re-quantize
+    already-quantized weights and trigger a transient ``bf16 -> fp16 -> int8`` peak
+    for no benefit. A non-quantized snapshot honors ``configured_dtype``, which may
+    request in-memory int8 quantization.
+
+    Shared by the ASR/TTS/streaming wiring so a pre-quantized snapshot resolves to
+    an int8 identity consistently, independent of the configured default.
+    """
+    if snapshot_is_quantized(model_dir):
+        return "int8"
+    return configured_dtype
+
+
 def _build_timed_result(
     raw: object,
 ) -> tuple[tuple[TranscriptSegment, ...], tuple[TranscriptWord, ...]]:

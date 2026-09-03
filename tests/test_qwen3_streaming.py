@@ -540,3 +540,61 @@ def test_streaming_command_passes_dtype_and_metal_limits(tmp_path: Path) -> None
     assert "--cache-limit-mb" in cmd
     assert cmd[cmd.index("--cache-limit-mb") + 1] == "256"
     assert "--memory-limit-mb" not in cmd  # only added when memory_limit_mb > 0
+
+
+def test_backend_config_rejects_invalid_dtype_for_device(tmp_path: Path) -> None:
+    """MPS must not silently accept float32, and CPU must reject float16."""
+    snapshot = tmp_path / "external-qwen3-streaming-snapshot"
+    snapshot.mkdir()
+
+    with pytest.raises(ValueError, match="MPS requires"):
+        Qwen3StreamingBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path("/usr/bin/python3"),
+            model_dir=snapshot,
+            device="mps",
+            dtype="float32",
+        )
+    with pytest.raises(ValueError, match="CPU requires"):
+        Qwen3StreamingBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path("/usr/bin/python3"),
+            model_dir=snapshot,
+            device="cpu",
+            dtype="float16",
+        )
+
+
+def test_streaming_worker_rejects_ready_identity_mismatch(tmp_path: Path) -> None:
+    """The worker must abort when the ready frame disagrees on device/dtype.
+
+    Matches the batch worker's identity discipline: a streaming worker that loads
+    a different backend than the config resolved must fail closed instead of
+    silently running at the wrong precision.
+    """
+    snapshot = tmp_path.parent / "external-qwen3-streaming-identity-snapshot"
+    snapshot.mkdir()
+    worker = Qwen3StreamingWorker(
+        Qwen3StreamingBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path("/usr/bin/python3"),
+            model_dir=snapshot,
+            device="mps",
+            dtype="int8",
+        )
+    )
+    fake = _FakeTransport(
+        {
+            "type": "ready",
+            "model_loaded": True,
+            "device": "mps",
+            "dtype": "float16",
+        }
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="backend_identity_mismatch"):
+            await worker.start()
+
+    asyncio.run(scenario())

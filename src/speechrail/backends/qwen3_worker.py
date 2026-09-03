@@ -88,6 +88,30 @@ def _dynamic_budget(audio_sec: float, max_new_tokens: int) -> int:
     return min(cap, max(32, int(audio_sec * 6) + 24))
 
 
+def _resolve_engine_dtype(
+    *,
+    snapshot_quantized: bool,
+    requested_dtype: str,
+    loaded_dtype: str,
+    default_dtype: str,
+    quantize_raised: bool,
+) -> str:
+    """Resolve the honest worker identity dtype from the actual load state.
+
+    A pre-quantized ``-8bit`` snapshot loads int8 weights directly and is never
+    re-quantized at load time. A requested in-memory int8 that raised an exception
+    is NOT claimed as int8 (fail-closed on truth): the identity reports the
+    precision the model actually loaded, so an unachievable int8 request surfaces
+    as a clear ``backend_identity_mismatch`` instead of silently running fp16
+    under an int8 label.
+    """
+    if snapshot_quantized:
+        return "int8"
+    if requested_dtype == "int8" and not quantize_raised:
+        return "int8"
+    return loaded_dtype or default_dtype
+
+
 def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> None:
     try:
         import mlx.core as mx
@@ -558,14 +582,17 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         self._session = mlx_qwen3_asr.Session(model=str(model_dir))
         snapshot_quantized = snapshot_is_quantized(model_dir)
 
-        # In-memory INT8 quantization when requested. A snapshot that already ships
-        # quantized weights (e.g. an ``-8bit`` MLX snapshot) must NOT be re-quantized.
+        # In-memory INT8 quantization when requested on a non-quantized snapshot.
+        # A snapshot that already ships quantized weights (e.g. an ``-8bit`` MLX
+        # snapshot) must NOT be re-quantized: it is loaded directly as int8.
+        quantize_raised = False
         if dtype == "int8" and not snapshot_quantized:
             try:
                 from mlx_qwen3_asr.convert import quantize_model  # type: ignore[import-not-found]
 
                 quantize_model(self._session.model, bits=8, group_size=64)
             except Exception as exc:
+                quantize_raised = True
                 print(f"Warning: in-memory INT8 quantization failed: {exc}", file=sys.stderr)
             _clear_metal_cache()
 
@@ -574,8 +601,13 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if loaded_dtype.startswith("mlx.core."):
             loaded_dtype = loaded_dtype.removeprefix("mlx.core.")
         default_dtype = "float16" if device == "mps" else "float32"
-        effective_int8 = snapshot_quantized or dtype == "int8"
-        resolved_dtype = "int8" if effective_int8 else (loaded_dtype or dtype or default_dtype)
+        resolved_dtype = _resolve_engine_dtype(
+            snapshot_quantized=snapshot_quantized,
+            requested_dtype=dtype,
+            loaded_dtype=loaded_dtype,
+            default_dtype=default_dtype,
+            quantize_raised=quantize_raised,
+        )
         self._max_new_tokens = max_new_tokens
         self.identity = WorkerIdentity(device, resolved_dtype)
         self._streaming_states: dict[str, object] = {}

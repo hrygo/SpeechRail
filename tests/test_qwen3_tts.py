@@ -278,6 +278,48 @@ def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
     assert fake.abort_count == 1
 
 
+def test_ready_identity_rejects_dtype_mismatch_even_when_device_matches(
+    tmp_path: Path,
+) -> None:
+    """A dtype mismatch must abort even when the worker reports the right device.
+
+    The identity check must compare dtype exactly against the config expectation
+    (mirroring the ASR backend); a loose membership check against the whole enum
+    would let a float32-on-mps worker pass while claiming an int8 config.
+    """
+    snapshot = tmp_path.parent / "external-qwen3-tts-dtype-mismatch"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+    fake = _FakeTransport(
+        [
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float32",
+                "sample_rate": 24_000,
+            }
+        ]
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="backend_identity_mismatch"):
+        asyncio.run(worker.start())
+
+    assert fake.abort_count == 1
+
+
 def test_each_synthesis_uses_an_independent_response_id(tmp_path: Path) -> None:
     worker, fake = _worker(
         tmp_path,

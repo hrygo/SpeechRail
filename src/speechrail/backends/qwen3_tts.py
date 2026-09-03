@@ -170,8 +170,7 @@ class Qwen3TtsWorker:
             if (
                 ready.get("backend") != TTS_BACKEND_ID
                 or ready.get("device") != self.config.device
-                or ready.get("dtype")
-                not in {self.config.dtype, "float16", "float32", "int8"}
+                or ready.get("dtype") != self.config.dtype
                 or ready.get("sample_rate") != self.config.sample_rate
             ):
                 raise RuntimeError("backend_identity_mismatch")

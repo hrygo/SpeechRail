@@ -282,3 +282,48 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     )
     build_app_services(settings, AppOverrides())
     assert captured["dtype"] == "int8"
+
+
+def test_build_app_services_asr_and_streaming_dtype_resolves_from_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A pre-quantized ASR snapshot drives batch and streaming dtype to int8.
+
+    The wiring must pick up the snapshot's quantization state so a ``-8bit`` ASR
+    snapshot resolves to an int8 identity even when ``SPEECHRAIL_DTYPE`` is the
+    float16 default. Before this, the batch/streaming config kept float16 and the
+    worker's identity check failed with ``backend_identity_mismatch``.
+    """
+    captured: dict[str, str] = {}
+    real_batch = services_module.Qwen3Worker
+    real_streaming = services_module.Qwen3StreamingWorker
+
+    def spy_batch(config: object) -> object:
+        captured["asr"] = getattr(config, "dtype", "")
+        return real_batch(config)
+
+    def spy_streaming(config: object) -> object:
+        captured["streaming"] = getattr(config, "dtype", "")
+        return real_streaming(config)
+
+    monkeypatch.setattr(services_module, "Qwen3Worker", spy_batch)
+    monkeypatch.setattr(services_module, "Qwen3StreamingWorker", spy_streaming)
+
+    asr_snapshot = tmp_path.parent / "external-qwen3-asr-8bit-wiring"
+    asr_snapshot.mkdir(exist_ok=True)
+    for filename in (*MODEL_FILES, "model.safetensors"):
+        (asr_snapshot / filename).touch()
+    (asr_snapshot / "config.json").write_text(
+        '{"quantization": {"bits": 8, "group_size": 64}}', encoding="utf-8"
+    )
+
+    settings = Settings(
+        qwen3_model_dir=asr_snapshot,
+        qwen3_python=Path(executable),
+        realtime_asr_backend="native",
+        _env_file=None,
+    )
+    build_app_services(settings, AppOverrides())
+
+    assert captured["asr"] == "int8"
+    assert captured["streaming"] == "int8"

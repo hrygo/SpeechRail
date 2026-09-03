@@ -94,6 +94,10 @@ class Qwen3StreamingBackendConfig:
             raise ValueError("model_dir must be an existing local directory") from exc
         if not resolved_model.is_dir():
             raise ValueError("model_dir must be an existing local directory")
+        if self.device == "mps" and self.dtype not in {"float16", "int8"}:
+            raise ValueError("MPS requires float16 or int8")
+        if self.device == "cpu" and self.dtype not in {"float32", "int8"}:
+            raise ValueError("CPU requires float32 or int8")
         object.__setattr__(self, "repository_root", root)
         object.__setattr__(self, "python_executable", python)
         object.__setattr__(self, "model_dir", resolved_model)
@@ -182,6 +186,8 @@ class Qwen3StreamingWorker:
                 raise RuntimeError(
                     error_frame_message(ready, "streaming worker failed to become ready")
                 )
+            if ready.get("device") != self.config.device or ready.get("dtype") != self.config.dtype:
+                raise RuntimeError("backend_identity_mismatch")
             self._ready = True
             self.last_active = time.monotonic()
             self._dispatcher = asyncio.create_task(self._dispatch_loop())

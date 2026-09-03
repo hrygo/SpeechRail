@@ -14,7 +14,7 @@ from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
     Qwen3Worker,
-    snapshot_is_quantized,
+    resolve_backend_dtype,
 )
 from speechrail.backends.qwen3_streaming import (
     NativeRealtimeFactory,
@@ -168,7 +168,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 python_executable=settings.qwen3_python,
                 model_dir=settings.qwen3_model_dir,
                 device=settings.device,
-                dtype=settings.dtype,
+                dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
                 cache_limit_mb=settings.mlx_cache_limit_mb,
                 memory_limit_mb=settings.mlx_memory_limit_mb,
                 timeout_seconds=settings.request_timeout_seconds,
@@ -190,10 +190,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 python_executable=settings.qwen3_tts_python,
                 model_dir=settings.qwen3_tts_model_dir,
                 device=settings.device,
-                dtype=(
-                    "int8"
-                    if snapshot_is_quantized(settings.qwen3_tts_model_dir)
-                    else ("float16" if settings.device == "mps" else "float32")
+                dtype=resolve_backend_dtype(
+                    settings.qwen3_tts_model_dir,
+                    "float16" if settings.device == "mps" else "float32",
                 ),
                 sample_rate=settings.tts_sample_rate,
                 timeout_seconds=settings.request_timeout_seconds,
@@ -226,7 +225,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 python_executable=settings.qwen3_python,
                 model_dir=settings.qwen3_model_dir,
                 device=settings.device,
-                dtype=settings.dtype,
+                dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
                 cache_limit_mb=settings.mlx_cache_limit_mb,
                 memory_limit_mb=settings.mlx_memory_limit_mb,
                 mode=settings.qwen3_streaming_mode,

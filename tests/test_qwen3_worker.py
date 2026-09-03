@@ -372,3 +372,75 @@ def test_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> No
     malformed.mkdir()
     (malformed / "config.json").write_text("{not json", encoding="utf-8")
     assert snapshot_is_quantized(malformed) is False
+
+
+def test_resolve_engine_dtype_is_honest_about_in_memory_quantize_failure() -> None:
+    """A failed in-memory int8 request must not be labelled int8.
+
+    The identity reports the precision the model actually loaded (fail-closed on
+    truth), so an unachievable int8 request surfaces as ``backend_identity_mismatch``
+    instead of silently running fp16 under an int8 label.
+    """
+    from speechrail.backends.qwen3_worker import _resolve_engine_dtype
+
+    default = "float16"
+
+    # Pre-quantized snapshot is reliably int8.
+    assert (
+        _resolve_engine_dtype(
+            snapshot_quantized=True,
+            requested_dtype="float16",
+            loaded_dtype="bfloat16",
+            default_dtype=default,
+            quantize_raised=False,
+        )
+        == "int8"
+    )
+
+    # Requested int8 that did not raise: trust the vendor API contract.
+    assert (
+        _resolve_engine_dtype(
+            snapshot_quantized=False,
+            requested_dtype="int8",
+            loaded_dtype="bfloat16",
+            default_dtype=default,
+            quantize_raised=False,
+        )
+        == "int8"
+    )
+
+    # Requested int8 that raised: report what actually loaded, not the intent.
+    assert (
+        _resolve_engine_dtype(
+            snapshot_quantized=False,
+            requested_dtype="int8",
+            loaded_dtype="float16",
+            default_dtype=default,
+            quantize_raised=True,
+        )
+        == "float16"
+    )
+
+    # Non-int8 request on a non-quantized snapshot: report the loaded precision.
+    assert (
+        _resolve_engine_dtype(
+            snapshot_quantized=False,
+            requested_dtype="float16",
+            loaded_dtype="bfloat16",
+            default_dtype=default,
+            quantize_raised=False,
+        )
+        == "bfloat16"
+    )
+
+    # A bare default (no loaded dtype reported) falls back to the device default.
+    assert (
+        _resolve_engine_dtype(
+            snapshot_quantized=False,
+            requested_dtype="float16",
+            loaded_dtype="",
+            default_dtype=default,
+            quantize_raised=False,
+        )
+        == "float16"
+    )
