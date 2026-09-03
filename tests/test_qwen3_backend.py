@@ -9,6 +9,7 @@ from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3Worker,
     validate_snapshot,
+    weight_files,
 )
 
 
@@ -49,7 +50,7 @@ class _FakeTransport:
 def _worker(tmp_path: Path, responses: list[dict[str, Any]]) -> tuple[Qwen3Worker, _FakeTransport]:
     snapshot = tmp_path.parent / "external-qwen3-asr-profile"
     snapshot.mkdir(exist_ok=True)
-    for filename in MODEL_FILES:
+    for filename in (*MODEL_FILES, "model.safetensors"):
         (snapshot / filename).touch()
     config = Qwen3BackendConfig(
         repository_root=Path(__file__).resolve().parents[1],
@@ -72,6 +73,37 @@ def test_snapshot_preflight_rejects_missing_or_repository_local_models(tmp_path:
     inside_repository.mkdir(parents=True)
     with pytest.raises(ValueError, match="outside"):
         validate_snapshot(inside_repository, repository_root=tmp_path)
+
+
+def test_weight_files_accepts_both_layouts_and_rejects_missing(tmp_path: Path) -> None:
+    single = tmp_path / "single-file"
+    single.mkdir()
+    (single / "model.safetensors").touch()
+    assert weight_files(single) == ("model.safetensors",)
+
+    sharded = tmp_path / "two-shard"
+    sharded.mkdir()
+    (sharded / "model-00001-of-00002.safetensors").touch()
+    (sharded / "model-00002-of-00002.safetensors").touch()
+    assert weight_files(sharded) == (
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+    )
+
+    with pytest.raises(ValueError, match="weights are missing"):
+        weight_files(tmp_path / "empty")
+
+
+def test_validate_snapshot_accepts_single_file_quantized_layout(tmp_path: Path) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-asr-8bit"
+    snapshot.mkdir(exist_ok=True)
+    for filename in (*MODEL_FILES, "model.safetensors"):
+        (snapshot / filename).touch()
+    (snapshot / "config.json").write_text('{"quantization": {"bits": 8}}', encoding="utf-8")
+
+    resolved = validate_snapshot(snapshot, repository_root=tmp_path)
+    assert resolved.is_dir()
+    assert resolved.name == "external-qwen3-asr-8bit"
 
 
 def test_backend_config_rejects_cpu_fallback_for_mps_profile(tmp_path: Path) -> None:

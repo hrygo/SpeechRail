@@ -32,9 +32,24 @@ MODEL_FILES = (
     "merges.txt",
     "vocab.json",
     "model.safetensors.index.json",
-    "model-00001-of-00002.safetensors",
-    "model-00002-of-00002.safetensors",
 )
+# Accepted weight-file layouts. Exactly one must be present:
+#   - single-file pre-quantized MLX snapshot (mlx-community ...-8bit),
+#   - the two-shard Qwen original.
+WEIGHT_FILE_SETS = (
+    ("model.safetensors",),
+    ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"),
+)
+
+
+def weight_files(model_dir: Path) -> tuple[str, ...]:
+    """Return the weight-file names for the supported layout present in ``model_dir``."""
+    for layout in WEIGHT_FILE_SETS:
+        if all((model_dir / name).is_file() for name in layout):
+            return layout
+    raise ValueError(
+        "model snapshot weights are missing (need model.safetensors or the two-shard pair)"
+    )
 
 
 def _build_timed_result(
@@ -91,6 +106,7 @@ def validate_snapshot(model_dir: Path, *, repository_root: Path) -> Path:
         not (resolved_model / name).is_file() for name in MODEL_FILES
     ):
         raise ValueError("model snapshot is incomplete")
+    weight_files(resolved_model)  # raises if no supported weight layout is present
     return resolved_model
 
 
@@ -98,7 +114,7 @@ def snapshot_fingerprint(model_dir: Path) -> str:
     """Produce a stable manifest fingerprint without reading audio or model weights."""
 
     digest = hashlib.sha256()
-    for name in MODEL_FILES:
+    for name in (*MODEL_FILES, *weight_files(model_dir)):
         stat = (model_dir / name).stat()
         digest.update(f"{name}:{stat.st_size}".encode())
     return digest.hexdigest()

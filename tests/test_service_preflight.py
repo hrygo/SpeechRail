@@ -35,7 +35,7 @@ def _write_env(
 
 def _complete_snapshot(path: Path) -> None:
     path.mkdir(parents=True)
-    for name in MODEL_FILES:
+    for name in (*MODEL_FILES, "model.safetensors"):
         (path / name).touch()
 
 

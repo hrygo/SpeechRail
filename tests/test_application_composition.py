@@ -135,7 +135,7 @@ def test_fake_overrides_never_construct_real_qwen_workers(
 ) -> None:
     asr_snapshot = tmp_path / "external-qwen3-asr-snapshot"
     asr_snapshot.mkdir()
-    for filename in MODEL_FILES:
+    for filename in (*MODEL_FILES, "model.safetensors"):
         (asr_snapshot / filename).touch()
     tts_snapshot = tmp_path / "external-qwen3-tts-snapshot"
     tts_snapshot.mkdir()
@@ -232,7 +232,7 @@ def test_native_realtime_uses_dedicated_streaming_worker_not_batch(
     """
     snapshot = tmp_path.parent / "external-qwen3-wiring-profile"
     snapshot.mkdir(exist_ok=True)
-    for filename in MODEL_FILES:
+    for filename in (*MODEL_FILES, "model.safetensors"):
         (snapshot / filename).touch()
 
     settings = Settings(

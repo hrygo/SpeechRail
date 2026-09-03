@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 from io import BytesIO
 from pathlib import Path
 
 import pytest
 
 import speechrail.backends.qwen3_tts_worker as worker_module
-from speechrail.backends.qwen3_tts_worker import TtsWorkerIdentity, serve
+from speechrail.backends.qwen3_tts_worker import (
+    TtsWorkerIdentity,
+    _snapshot_is_quantized,
+    serve,
+)
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
@@ -17,6 +22,52 @@ class FakeEngine:
         assert (text, voice, speed, language) == ("你好。", "default", 1.0, "auto")
         yield b"\x00\x00"
         yield b"\x01\x00"
+
+
+def test_tts_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    assert _snapshot_is_quantized(model_dir) is False
+    quantized = {"tts_model_type": "voice_design", "quantization": {"bits": 8, "group_size": 64}}
+    (model_dir / "config.json").write_text(json.dumps(quantized), encoding="utf-8")
+    assert _snapshot_is_quantized(model_dir) is True
+    (model_dir / "config.json").write_text(
+        json.dumps({"quantization_config": {"bits": 8}}), encoding="utf-8"
+    )
+    assert _snapshot_is_quantized(model_dir) is True
+
+
+def test_serve_accepts_int8_identity_for_quantized_snapshot(tmp_path: Path) -> None:
+    """A pre-quantized TTS snapshot reports int8 identity and must pass the gate."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    quantized = {"tts_model_type": "voice_design", "quantization": {"bits": 8, "group_size": 64}}
+    (model_dir / "config.json").write_text(json.dumps(quantized), encoding="utf-8")
+    source = BytesIO()
+    target = BytesIO()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    source.seek(0)
+
+    class Int8Engine(FakeEngine):
+        identity = TtsWorkerIdentity(device="mps", dtype="int8", sample_rate=24_000)
+
+    serve(source, target, model_dir=model_dir, device="mps", sample_rate=24_000,
+          engine_factory=lambda _: Int8Engine())
+
+    target.seek(0)
+    ready = read_frame(target)
+    assert ready["type"] == "ready"
+    assert ready["dtype"] == "int8"
+    assert ready["model_loaded"] is True
 
 
 def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Path) -> None:

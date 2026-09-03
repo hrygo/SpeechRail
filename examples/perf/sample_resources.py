@@ -192,18 +192,26 @@ def main() -> None:
         )
         for key in pids
     }
+    # True CONCURRENT peak = max per-tick sum of CURRENT footprints (an all-time
+    # phys_footprint_peak is monotonic, so summing per-process peaks over-states the
+    # real simultaneous footprint when ASR/TTS run serially).
+    peak_concurrent = [0.0]
     stop = threading.Event()
 
     def sampler_thread() -> None:
         while not stop.is_set():
+            tick_cur: list[float] = []
             for key, pid in pids.items():
                 try:
                     cpu, cur_mb, peak_mb, metric = sample(pid)
                 except subprocess.CalledProcessError:
                     continue
+                tick_cur.append(cur_mb)
                 p = peaks[key]
                 observed_peak = max(p[1], cur_mb, peak_mb)
                 peaks[key] = (max(p[0], cpu), observed_peak, metric)
+            if tick_cur:
+                peak_concurrent[0] = max(peak_concurrent[0], float(sum(tick_cur)))
             time.sleep(0.3)
 
     t = threading.Thread(target=sampler_thread, daemon=True)
@@ -245,14 +253,12 @@ def main() -> None:
     print("-" * 80)
 
     total_idle = 0.0
-    total_peak = 0.0
     for key, pid in pids.items():
         pre_mb = initial_mem.get(key, (0.0, ""))[0]
         post_mb, metric = idle_mem.get(key, (0.0, "MB"))
         peak_cpu, peak_mb, _ = peaks[key]
         peak_mb = max(peak_mb, post_mb)
         total_idle += post_mb
-        total_peak += peak_mb
 
         print(
             f"{key:<20} | {pid:<8} | {pre_mb:>7.1f} MB   | {post_mb:>7.1f} MB ({metric[:4]}) | "
@@ -262,9 +268,13 @@ def main() -> None:
     print("-" * 80)
     total_row = (
         f"{'总物理常驻 (Total)':<20} | {'--':<8} | {'--':<12} | "
-        f"{total_idle:>7.1f} MB        | {total_peak:>7.1f} MB        | {'--':<10}"
+        f"{total_idle:>7.1f} MB        | {peak_concurrent[0]:>7.1f} MB        | {'--':<10}"
     )
     print(total_row)
+    print(
+        "  注: Peak(Total) = 真同时峰值, 即逐采样tick的(当前footprint之和)的最大值; "
+        "不为逐进程 all-time high-water 之和。"
+    )
     print("=" * 80 + "\n")
 
 

@@ -320,3 +320,55 @@ def test_clear_metal_cache_prefers_new_mlx_api(monkeypatch: pytest.MonkeyPatch) 
 
     assert "mx.clear_cache" in calls
     assert "metal.clear_cache" not in calls
+
+
+def test_dynamic_budget_grows_sublinearly_and_is_bounded() -> None:
+    """The batch decode budget must grow sub-linearly with audio length.
+
+    A per-second linear multiplier (``* 8``) pushes the budget toward the hard cap
+    on very long inputs, letting the decoder run away for a large tail that adds
+    little transcription value. The helper must keep a floor for short audio,
+    grow conservatively, and respect the configured ``max_new_tokens`` cap.
+    """
+    from speechrail.backends.qwen3_worker import _dynamic_budget
+
+    # Floor: short audio stays transcribable.
+    assert _dynamic_budget(3.3, 512) >= 32
+    assert _dynamic_budget(0.0, 512) >= 32
+
+    # Mid audio: no runaway, but strictly less than the linear legacy budget.
+    assert _dynamic_budget(8.5, 512) < 128
+    assert _dynamic_budget(8.5, 512) < int(8.5 * 8) + 16
+
+    # Long audio: sub-linear (not ~8x seconds), yet with headroom for the text.
+    assert _dynamic_budget(31.4, 512) < int(31.4 * 8) + 16
+    assert _dynamic_budget(31.4, 512) >= 120
+    assert _dynamic_budget(31.4, 512) > _dynamic_budget(8.5, 512)
+
+    # Monotonic growth and hard cap honored.
+    assert _dynamic_budget(60.0, 512) >= _dynamic_budget(31.4, 512)
+    assert _dynamic_budget(999999.0, 256) == 256
+    assert _dynamic_budget(999999.0, 512) == 512
+
+    # A falsy cap falls back to the default ceiling.
+    assert _dynamic_budget(999999.0, 0) == 512
+
+
+def test_snapshot_is_quantized_detects_config_quantization(tmp_path: Path) -> None:
+    from speechrail.backends.qwen3_worker import _snapshot_is_quantized
+
+    snapshot = tmp_path / "quantized"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text(
+        '{"quantization": {"bits": 8, "group_size": 64, "mode": "affine"}}',
+        encoding="utf-8",
+    )
+    assert _snapshot_is_quantized(snapshot) is True
+
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    assert _snapshot_is_quantized(snapshot) is False
+
+    malformed = tmp_path / "malformed"
+    malformed.mkdir()
+    (malformed / "config.json").write_text("{not json", encoding="utf-8")
+    assert _snapshot_is_quantized(malformed) is False

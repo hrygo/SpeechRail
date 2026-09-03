@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import json
 import os
 import sys
 import traceback
@@ -75,6 +76,26 @@ def _clear_metal_cache() -> None:
     except Exception:
         pass
     gc.collect()
+
+
+def _dynamic_budget(audio_sec: float, max_new_tokens: int) -> int:
+    """Bound the batch decode token budget with sub-linear growth.
+
+    A linear ``audio_sec * 8`` multiplier drives very long inputs toward the hard
+    cap for a large decoder tail that adds little transcription value. Sub-linear
+    growth keeps that tail small while a floor keeps short clips transcribable.
+    """
+    cap = max_new_tokens or 512
+    return min(cap, max(32, int(audio_sec * 6) + 24))
+
+
+def _snapshot_is_quantized(model_dir: Path) -> bool:
+    """True when the snapshot ships pre-quantized weights (e.g. an ``-8bit`` MLX snapshot)."""
+    try:
+        config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return bool(config.get("quantization") or config.get("quantization_config"))
 
 
 def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> None:
@@ -545,9 +566,11 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         import mlx_qwen3_asr  # type: ignore[import-not-found]
 
         self._session = mlx_qwen3_asr.Session(model=str(model_dir))
+        snapshot_quantized = _snapshot_is_quantized(model_dir)
 
-        # In-memory INT8 quantization when requested
-        if dtype == "int8":
+        # In-memory INT8 quantization when requested. A snapshot that already ships
+        # quantized weights (e.g. an ``-8bit`` MLX snapshot) must NOT be re-quantized.
+        if dtype == "int8" and not snapshot_quantized:
             try:
                 from mlx_qwen3_asr.convert import quantize_model  # type: ignore[import-not-found]
 
@@ -561,7 +584,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if loaded_dtype.startswith("mlx.core."):
             loaded_dtype = loaded_dtype.removeprefix("mlx.core.")
         default_dtype = "float16" if device == "mps" else "float32"
-        resolved_dtype = "int8" if dtype == "int8" else (loaded_dtype or dtype or default_dtype)
+        effective_int8 = snapshot_quantized or dtype == "int8"
+        resolved_dtype = "int8" if effective_int8 else (loaded_dtype or dtype or default_dtype)
         self._max_new_tokens = max_new_tokens
         self.identity = WorkerIdentity(device, resolved_dtype)
         self._streaming_states: dict[str, object] = {}
@@ -582,8 +606,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if language != "auto":
             kwargs["language"] = language
         audio_sec = len(audio) / 32_000.0
-        dynamic_budget = min(self._max_new_tokens or 512, max(32, int(audio_sec * 8) + 16))
-        kwargs["max_new_tokens"] = dynamic_budget
+        kwargs["max_new_tokens"] = _dynamic_budget(audio_sec, self._max_new_tokens)
         if include_timestamps:
             kwargs["return_timestamps"] = True
         result = self._session.transcribe((waveform, 16_000), **kwargs)

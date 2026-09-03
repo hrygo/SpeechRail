@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from speechrail.backends.qwen3_native import MODEL_FILES
+from speechrail.backends.qwen3_native import MODEL_FILES, WEIGHT_FILE_SETS
 from speechrail.config import Settings
 from speechrail.service.paths import ServiceLayout
 
@@ -60,7 +60,10 @@ def _runtime_check(
 
 
 def _snapshot_check(
-    name: str, model_dir: Path | None, required_files: tuple[str, ...]
+    name: str,
+    model_dir: Path | None,
+    required_files: tuple[str, ...],
+    weight_sets: tuple[tuple[str, ...], ...] = (),
 ) -> PreflightCheck:
     if model_dir is None:
         return _check(name, False, "model snapshot path is not configured")
@@ -68,6 +71,10 @@ def _snapshot_check(
         return _check(name, False, "model snapshot directory is missing")
     if any(not (model_dir / filename).is_file() for filename in required_files):
         return _check(name, False, "model snapshot is incomplete")
+    if weight_sets and not any(
+        all((model_dir / filename).is_file() for filename in layout) for layout in weight_sets
+    ):
+        return _check(name, False, "model snapshot weights are missing")
     return _check(name, True, "model snapshot is complete")
 
 
@@ -177,7 +184,9 @@ def run_preflight(
         )
     )
     if asr_configured:
-        checks.append(_snapshot_check("asr_snapshot", settings.qwen3_model_dir, MODEL_FILES))
+        checks.append(
+            _snapshot_check("asr_snapshot", settings.qwen3_model_dir, MODEL_FILES, WEIGHT_FILE_SETS)
+        )
         checks.append(_runtime_check("asr_runtime", settings.qwen3_python, "mlx_qwen3_asr", runner))
     else:
         checks.extend(
