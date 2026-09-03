@@ -98,9 +98,37 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 
 | 模型类型 | 规格版本 | 显存/内存占用 (MPS/MLX) | 推荐场景 | 说明 |
 |---|---|---|---|---|
-| **Qwen3-ASR** (语音识别) | **1.7B** *(默认推荐)* | ~3.0 GB (FP16) / ~1.5 GB (INT8) | 会议长音频、高精度中英文/多语种混合识别 | 标点与时间戳综合效果最优，SpeechRail 默认主力 |
-| **Qwen3-ASR** (语音识别) | **0.6B** *(极速/轻量)* | ~1.0 GB (FP16) / ~600 MB (INT8) | 8GB 内存设备、端侧极速流式转写、高并发场景 | 延迟极低、显存极小，完全兼容相同 Worker 协议 |
-| **Qwen3-TTS** (语音合成) | **VoiceDesign** (约 1.7B) | ~3.0 GB (FP16) / ~1.9 GB (INT8 预量化) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 等预设音色；支持预量化 `-8bit` MLX 快照（codec/`speech_tokenizer` 保持 bf16），运行时可解析为 int8 |
+| **Qwen3-ASR** (语音识别) | **1.7B** *(默认推荐)* | ~3.0 GB (bf16→fp16) / ~1.5 GB (int8) | 会议长音频、高精度中英文/多语种混合识别 | 标点与时间戳综合效果最优，SpeechRail 默认主力；支持预量化 `-8bit` MLX 快照（自动解析为 int8 直接加载，避免二次量化峰值） |
+| **Qwen3-ASR** (语音识别) | **0.6B** *(极速/轻量)* | ~1.0 GB (bf16→fp16) / ~600 MB (int8) | 8GB 内存设备、端侧极速流式转写、高并发场景 | 延迟极低、显存极小，完全兼容相同 Worker 协议 |
+| **Qwen3-TTS** (语音合成) | **VoiceDesign** (约 1.7B) | ~3.0 GB (bf16) / ~1.9 GB (int8 预量化) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 等预设音色；支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 解码器恒为 FP32、embedding/norm 为 BF16） |
+
+---
+
+### 🎯 精度语义与权重文件格式 (Precision & Weight-File Format)
+
+SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` 实际张量 dtype）、**计算精度**（推理时 `mx.Array` 的 dtype）、**量化格式**（`-8bit` 快照的 int8 具体编码）。`SPEECHRAIL_DTYPE` 只指定**非预量化快照**的计算精度，与 `-8bit` 预量化快照的权重文件精度**无关**。
+
+| 概念 | 取值 | 说明 |
+|---|---|---|
+| **存储精度**（权重文件） | `BF16` / `FP32` / `int8`(U32 packed)+`BF16` | `.safetensors` 中各张量的实际 dtype（见下表，实测 header） |
+| **计算精度**（运行时） | `fp16` / `bf16` / `int8`(W8A16) | ASR 的 `mlx_qwen3_asr.Session` 默认把 bf16 权重 **cast 成 fp16** 参与计算（`dtype` 默认 `float16`）；TTS 的 mlx-audio loader **不做 cast**，按文件 dtype 直接运行 |
+| **量化格式**（`-8bit`） | `int8` group_size=64 affine | int8 权重以 **`U32`**（每 4 个 int8 打包一个 uint32，MLX packed 布局）存储，配 **BF16 `scales`/`biases`**（每组一个） |
+
+**各快照的权重文件精度（实测 `.safetensors` header，MLX+HF 2026-09-03）：**
+
+| 快照 | `config.json` | 权重文件张量精度 | 说明 |
+|---|---|---|---|
+| Qwen3-ASR `-bf16` | 无 `torch_dtype`、无量化键 | 全部 **BF16** | 加载时 Session 默认 cast 为 **fp16** |
+| Qwen3-ASR `-8bit` | `quantization`/`quantization_config` = `{bits:8, group_size:64, mode:"affine"}` | 主干(decoder+`embed_tokens`) **int8 packed U32** + BF16 `scales`/`biases`；`audio_tower` 编码器/norm **BF16** | W8A16；197 个 U32 量化权重 |
+| Qwen3-TTS `-bf16` | 无量化键 | talker 主干 **BF16** + `speech_tokenizer/` **FP32** | mlx-audio 不 cast，按 bf16/fp32 运行 |
+| Qwen3-TTS `-8bit` | `quantization`/`quantization_config`（同上） | talker+code-predictor 主干 **int8 packed U32** + BF16 `scales`/`biases`；`speech_tokenizer/` **FP32** | 250 个 U32 量化权重；codec 解码器**恒为 FP32、永不量化** |
+
+**要点：**
+- **bf16 ≠ fp16**：`SPEECHRAIL_DTYPE=float16` 时 ASR 会把 bf16 权重 cast 成 fp16 计算（文件仍为 bf16）；TTS 不做 cast，`-bf16` 快照按 bf16 计算。
+- **`-8bit` 的 "int8" 是 W8A16** 的权重侧：int8（group_size=64，affine）以 **U32**（4 int8/uint32）存储，`scales`/`biases` 为 BF16，激活侧以 fp16/bf16 参与计算。
+- **量化检测键**：`snapshot_is_quantized` 与 mlx-audio 均读取 `config.json` 的 **`quantization` 或 `quantization_config`** 判断是否预量化。
+- **已量化快照绝不二次量化**：`-8bit` 文件的权重本身即 int8，loaders 直接重建 `QuantizedLinear` 并原样加载 U32/`scales`/`biases`；再次 `nn.quantize` 只会造成无谓的 bf16→fp16→int8 瞬时内存峰值，且对已量化的 `QuantizedLinear` 叶子是 no-op。
+- **内存对比**：`-bf16`（16-bit，权重文件约 4.1 GB）是**大体积 16-bit 权重**；要避开它、选择紧凑路径，请用**预量化 `-8bit` 快照**（权重文件约 2.3 GB，int8）。`SPEECHRAIL_DTYPE=float16` 默认会加载 16-bit 权重；若要彻底不用大体积 16-bit 文件，直接将模型目录指向 `-8bit` 快照即可自动解析为 int8。
 
 ---
 
@@ -112,35 +140,35 @@ SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语�
 
 | 进程组件 | 待机常驻物理内存 (Idle) | 压测峰值物理内存 (Peak) | 峰值 CPU | 显存与调度行为 |
 |---|---|---|---|---|
-| **主服务 (FastAPI)** | **538.8 MB** | **538.8 MB** | 1.1% | 协议路由、音频解码、资源守护与指标中间件 |
-| **ASR Worker (Batch)** | **4,693.9 MB (~4.69 GB)** | **9,160.7 MB (~9.16 GB)** | —* | INT8 内存即时量化，处理 Batch REST 转写；含 `/metrics` 观测缓冲 |
-| **Qwen3 TTS Worker** | **4,940.5 MB (~4.94 GB)** | **5,342.6 MB (~5.34 GB)** | 1.1% | VoiceDesign 1.7B，应用显存池限额管理 |
-| **全系统总常驻 (Total)** | **10,173.2 MB (~10.17 GB)** | **15,042.1 MB (~15.04 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
+| **主服务 (FastAPI)** | **538.9 MB** | **538.9 MB** | 0.7% | 协议路由、音频解码、资源守护与指标中间件 |
+| **ASR Worker (Batch)** | **2,603.0 MB (~2.60 GB)** | **9,152.0 MB (~9.15 GB)** | —* | INT8 内存即时量化，处理 Batch REST 转写；clear_cache 修复后常驻回落 |
+| **Qwen3 TTS Worker** | **4,940.5 MB (~4.94 GB)** | **5,347.7 MB (~5.35 GB)** | 1.9% | VoiceDesign 1.7B，应用显存池限额管理 |
+| **全系统总常驻 (Total)** | **8,082.4 MB (~8.08 GB)** | **15,038.7 MB (~15.04 GB)** | -- | 主动 Metal GC 与显存限额，无泄漏滞留 |
 
-> 表内 ASR/TTS 测量为 **v1.6.2** 实测数据（Apple M5 Max / 128GB）。
+> 表内 ASR/TTS 测量为 **v1.6.3** 实测数据（Apple M5 Max / 128GB）。
 > **v1.6.4 启用预量化 `-8bit` MLX 快照后**：ASR 加载峰值由 9.58 GB 降至 **3.44 GB**，TTS 由 4.58 GB 降至 **3.18 GB**（-31%）；双 8bit 真同时峰值约 **5.99 GB**（v1.6.3 约 7.9 GB），待机约 **5.64 GB**。
 > *：ASR batch 峰值 CPU 为采样瞬间读数（前向计算后归零），不代表负载。
 > **v1.5.1 起 native realtime 使用独立 streaming worker（懒加载，首个 realtime 会话才启动）**，避免共享管道上
 > batch 与 realtime 并发读帧导致崩溃/死锁；启用 realtime 会话时内存模型需按两个 ASR worker 重新评估。
 > `sample_resources.py` 中 streaming 与 batch worker 共用 `qwen3_worker.py` 模块入口，当前按 batch 合并统计。
-> **注意**：v1.6.2 ASR batch 常驻（2.54→4.69 GB）较 v1.6.0 上升，主要来自 `/metrics` 观测缓冲；详见[基准报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)。
+> **注意**：v1.6.2 的 ASR batch 常驻（2.54→4.69 GB）**并非** `/metrics` 观测缓冲（该指标只在主服务进程，数据 KB 级），真实根因是 `_clear_metal_cache()` 分支排序错误（优先已弃用 `mx.metal.clear_cache()`）。v1.6.3 修复后常驻回落至 **2.60 GB**（v1.6.0 基线 2.54 GB，基本一致）。详见[基准报告](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md)。
 
 ### 🚀 2. 推理延迟与吞吐基线
 
 * **非流式 ASR (`POST /v1/audio/transcriptions`)**：
-  * 短音频 (2.9s)：稳定延迟 **0.12s** ($RTF = \mathbf{0.04x}$)
-  * 中音频 (7.9s)：平均延迟 **0.26s** ($RTF = \mathbf{0.03x}$)
-  * 超长音频 (35.4s)：平均延迟 **0.92s** ($RTF = \mathbf{0.03x}$，比播放快 ~38 倍)
-  * 并发吞吐 (4 线程 / 8 次请求)：10s 音频吞吐量 **3.99 req/s**、3s 音频 **8.28 req/s**，P95 延迟 **0.98s / 0.48s**，成功率 **100%**
+  * 短音频 (3.3s)：稳态延迟 **0.12s** ($RTF = \mathbf{0.04x}$)
+  * 中音频 (8.5s)：平均延迟 **0.25s** ($RTF = \mathbf{0.03x}$)
+  * 超长音频 (31.4s)：平均延迟 **0.89s** ($RTF = \mathbf{0.03x}$，比播放快 ~35 倍)
+  * 并发吞吐 (4 线程 / 8 次请求)：10s 音频吞吐量 **3.87 req/s**，P95 延迟 **1.02s**，成功率 **100%**
 * **语音合成 TTS (`POST /v1/audio/speech`)**：
-  * 短句 (20 字符 / 3.7s 音频)：平均耗时 **1.21s** ($RTF = \mathbf{0.36x}$)
-  * 长句 (50 字符 / 8.5s 音频)：平均耗时 **2.97s** ($RTF = \mathbf{0.35x}$)
+  * 短句 (20 字符 / 3.4s 音频)：平均耗时 **1.25s** ($RTF = \mathbf{0.37x}$)
+  * 长句 (50 字符 / 8.2s 音频)：平均耗时 **2.92s** ($RTF = \mathbf{0.36x}$)
 * **双向流式 WebSocket (`WS /v1/realtime`)**：
-  * 流式 ASR Commit 延迟（7.9s 整段一次提交）：**2.24s ~ 2.33s** ($RTF = \mathbf{0.29x}$)
-  * TTS 首包生成延迟 (TTFA)：**70 ~ 80 ms** 极速直出
-  * **连续 3 会话 100% 完成**：v1.6.2 新增指标与 trim_memory 修复后无 `backend_busy`、无空转写、无死锁
+  * 流式 ASR Commit 延迟（8.5s 音频 windowed 增量提交）：**0.34s ~ 0.42s** ($RTF = \mathbf{0.04x}$)
+  * TTS 首包生成延迟 (TTFA)：**45 ~ 64 ms** 极速直出（较 v1.6.2 的 70–80ms 回到 v1.6.0 水平）
+  * **连续 3 会话 100% 完成**：v1.6.3 的 clear_cache 与 streaming dtype 修复无 `backend_busy`、无空转写、无死锁
 
-> 完整测量报告与复现步骤请参阅 **[📊 v1.6.2 性能基线完整报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)**（历史基线见 [v1.6.0 报告](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) 与 [v1.5.2 报告](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)）。
+> 完整测量报告与复现步骤请参阅 **[📊 v1.6.3 性能基线完整报告](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md)**（历史基线见 [v1.6.2 报告](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md)、[v1.6.0 报告](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) 与 [v1.5.2 报告](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)）。
 
 ---
 
@@ -182,7 +210,8 @@ chmod 600 .env
 SPEECHRAIL_HOST=127.0.0.1
 SPEECHRAIL_PORT=8201
 SPEECHRAIL_DEVICE=mps
-# 精度：默认 float16 兼容标准权重；若需降低 ~50% 显存占用可设为 int8
+# 精度：默认 float16 兼容标准权重；若需降低 ~50% 显存占用：非预量化快照可设为 int8（ASR 内存量化），
+# 或直接使用预量化 "-8bit" MLX 快照（ASR/TTS 自动解析为 int8 直接加载，避免加载期二次量化峰值）。
 SPEECHRAIL_DTYPE=float16
 
 # ASR 推理配置（必填：Qwen3-ASR 本地目录与 Worker Python）
@@ -314,13 +343,13 @@ response.stream_to_file("output.mp3")
 |---|---|---|
 | `SPEECHRAIL_HOST` / `PORT` | `127.0.0.1:8201` | 服务绑定地址与端口 |
 | `SPEECHRAIL_DEVICE` | `mps` | 推理硬件（`mps` 用于 Apple Silicon GPU/NPU 加速，或 `cpu`） |
-| `SPEECHRAIL_DTYPE` | `float16` | 推理精度：默认 `float16`（开箱兼容官方权重）；低内存设备推荐配置 `int8`（显存减半且吞吐更优）。**`int8` 仅作用于 ASR Worker**；TTS Worker 始终使用 `float16`（mps）/ `float32`（cpu） |
+| `SPEECHRAIL_DTYPE` | `float16` | 推理精度：默认 `float16`（开箱兼容官方权重）；**针对非预量化快照**，配置 `int8` 会让 ASR Worker 做内存即时量化（显存减半且吞吐更优）。**`int8` 仅作用于非预量化快照的 ASR Worker**；TTS Worker 不做运行时权重量化，恒为 `float16`（mps）/ `float32`（cpu）。若快照本身为预量化 `-8bit` MLX 权重，则 ASR/TTS 一律按其真实权重自动解析为 `int8` 直接加载（无需也**不应**再二次量化） |
 | `SPEECHRAIL_QWEN3_MODEL_DIR` | *(必填)* | 本地 Qwen3-ASR 权重目录绝对路径 |
 | `SPEECHRAIL_QWEN3_PYTHON` | *(必填)* | ASR Worker 独立的 Python 解释器绝对路径 |
 | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` | *(可选)* | 本地 Qwen3-TTS 权重目录绝对路径 |
 | `SPEECHRAIL_QWEN3_TTS_PYTHON` | *(可选)* | TTS Worker 独立的 Python 解释器绝对路径 |
 | `SPEECHRAIL_REALTIME_ASR_BACKEND` | `disabled` | 流式后端：`disabled` 或 `native` (原生 MLX 运行时) |
-| `SPEECHRAIL_REALTIME_MAX_SESSIONS` | `2` | 并发 realtime 会话数上限（`1-8`）；多个 WebSocket 共享一个 streaming worker，按 `session_id` 路由隔离，超出返回 `backend_busy` |
+| `SPEECHRAIL_REALTIME_MAX_SESSIONS` | `3` | 并发 realtime 会话数上限（`1-8`）；多个 WebSocket 共享一个 streaming worker，按 `session_id` 路由隔离，超出返回 `backend_busy`。`configs/speechrail.example.env` 示例设为 `2` |
 | `SPEECHRAIL_DIARIZATION_MODEL_PATH` | *(可选)* | Sortformer 声纹分割模型 `.nemo` 本地路径 |
 | `SPEECHRAIL_MAX_QUEUE_SIZE` | `8` | 最大等待并发任务队列数 |
 | `SPEECHRAIL_MAX_UPLOAD_BYTES` | `536870912` (512MB) | 单次文件上传最大体积限制 |

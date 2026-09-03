@@ -3,10 +3,18 @@
 > 状态：设计完成 / 待实施（2026-09-02）  
 > 目标：在保障 ASR 字错误率 (WER) 与 TTS 自然度 (MOS) 劣化 ≤ 5%（实测目标 ≤ 1.5%）的前提下，实现运行时峰值显存降低 55%~65%、待机显存归零（~200MB）及磁盘减半。
 >
-> 更新注记（2026-09-02）：TTS INT8（W8A16）方案经实测评估后**未采纳**——当前 mlx-audio Qwen3-TTS 的
-> talker 为手写层（`TalkerAttention`/`TalkerMLP` 无 `to_quantized`），`mlx.nn.quantize` 实际为零层空转，
-> 官方 8-bit 快照键不兼容。`SPEECHRAIL_DTYPE=int8` 目前仅作用于 ASR Worker；TTS Worker 恒为
-> `float16`（mps）/ `float32`（cpu），不声称运行时权重量化。本文其余量化分析保留作设计参考。
+> 更新注记（2026-09-02）：TTS 的**运行时内存 int8（W8A16）量化未采纳**——SpeechRail 仅对 ASR 支持运行时即时量化；
+> TTS 只通过预量化 `-8bit` 快照获得 int8 身份，不做运行时权重量化。原注记称"`TalkerAttention`/`TalkerMLP`
+> 无 `to_quantized` 故 `mlx.nn.quantize` 零层空转"**机制错误**——`mlx.nn.quantize` 量化的对象是叶子 `nn.Linear`
+> （官方 `-8bit` 快照的 talker/code-predictor 主干即有 250 个 U32 量化权重为证）；正确表述是：已量化叶子为
+> `QuantizedLinear`（本身无 `to_quantized`）时再次 `nn.quantize` 才是 no-op。`SPEECHRAIL_DTYPE=int8` 仅作用于
+> 非预量化快照的 ASR Worker；TTS Worker 恒为 `float16`（mps）/ `float32`（cpu）。
+>
+> 更新注记（2026-09-03，v1.6.4）：int8 的**首选路径改为预量化 `-8bit` MLX 快照**——`config.json` 声明
+> `quantization` 时，ASR 与 TTS 通过共享 `resolve_backend_dtype` 一律自动解析为 `int8` 直接加载，**不再**在
+> 加载时二次量化。下表 8-bit 列的"省 48% / 50%"是**设计目标值**：实测显著收益来自预量化快照（ASR 加载峰值
+> 9.58→3.44 GB），而"非预量化快照 + 内存即时量化"会先产生 bf16→fp16→int8 的瞬时加载峰值，属降级保底，且
+> 量化失败时按实际加载精度上报（fail-closed），不再谎报 int8。
 
 ---
 
@@ -17,7 +25,7 @@ SpeechRail 当前在单机 Apple Silicon 环境下运行完整能力（Batch ASR
 1. **ASR Worker 重复载入**：`Qwen3Worker` (Batch) 与 `Qwen3StreamingWorker` (Streaming) 作为两个独立子进程，分别加载了完整的 `Qwen3-ASR-1.7B` 权重快照，造成相同的 1.7B 模型在内存中重复驻留两份（约 2 × 3.5GB = 7.0GB）。
 2. **缺乏生命周期淘汰机制 (Idle Eviction)**：TTS 与 Diarization Worker 在服务启动时全量预热并永久常驻，即使单人日常仅使用语音转写，TTS 也会长期占用 3GB+ 显存。
 3. **MLX Metal 显存分配池碎片**：MLX 在连续推理后默认保留 Metal 缓存池，缺乏及时的显存回收，导致长驻内存额外增加 1.0~1.5GB。
-4. **模型高精度冗余**：目前全部模型均使用 FP16 浮点权重，未启用内存带宽友好的 INT8 (W8A16) 量化。
+4. **模型高精度冗余**：目前全部模型均使用 16-bit（bf16 / fp16）浮点权重，未启用内存带宽友好的 INT8 (W8A16) 量化。
 
 ---
 
@@ -90,9 +98,9 @@ SpeechRail 当前在单机 Apple Silicon 环境下运行完整能力（Batch ASR
 #### 评估基准与品质约束 (Δ ≤ 5%)
 | 模型 | 原生精度 | 8-bit 量化 (W8A16) | 显存变化 | 相对品质损失 (实测基准) | 是否采纳 |
 |---|---|---|---|---|---|
-| **Qwen3-ASR-1.7B** | FP16 (3.5GB) | INT8 (1.8GB) | 减少 **48%** | WER 劣化 **0.5% ~ 1.0%** (远低于 5%) | ✅ **强烈推荐** |
-| **Qwen3-TTS** | FP16 (3.0GB) | INT8 (1.5GB) | 减少 **50%** | MOS 下降 **~0.06** (自然度损失 ~1.5%) | ✅ **推荐支持** |
-| **4-bit (INT4)** | FP16 | INT4 (0.95GB) | 减少 73% | WER 波动 4%~8%，TTS 出现高频电音 | ❌ **不采纳 (超 5% 阈值)** |
+| **Qwen3-ASR-1.7B** | 16-bit (3.5GB) | int8 (1.8GB) | 减少 **48%** | WER 劣化 **0.5% ~ 1.0%** (远低于 5%) | ✅ **强烈推荐** |
+| **Qwen3-TTS** | 16-bit (3.0GB) | int8 (1.5GB) | 减少 **50%** | MOS 下降 **~0.06** (自然度损失 ~1.5%) | ✅ **推荐支持** |
+| **4-bit (INT4)** | 16-bit | int4 (0.95GB) | 减少 73% | WER 波动 4%~8%，TTS 出现高频电音 | ❌ **不采纳 (超 5% 阈值)** |
 
 #### 配置扩展
 - `SPEECHRAIL_DTYPE` 支持配置 `int8` / `float16`（默认 `float16` 保持向后兼容，配置 `int8` 时加载量化权重）。
