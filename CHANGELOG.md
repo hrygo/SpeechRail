@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [1.6.6] - 2026-09-04
+
+### Fixed
+
+- **流式说话人分离端到端生效（ADR-0010）**：流式 `completed` 事件原先硬编码空 `segments`，
+  导致 WS 层 `annotate()` 从不执行、带 `speaker` 的
+  `conversation.item.input_audio_transcription.segment` 事件从不下发（sona 侧表现为
+  「说话人恒为 `speaker:0`」）。现在 worker 为每个流式会话维护有界 PCM 缓冲，commit 且
+  `want_segments=True`（app 侧按是否启用 diarization 门控）时复用批量
+  `transcribe(return_timestamps=True)` 对累积音频做词级强制对齐，产出真实
+  `{text, start_ms, end_ms}` 分段随 `completed` 返回（批路径秒制经
+  `_to_streaming_segments` 换算为毫秒制）。对齐失败 fail-closed 返回空分段，不伪造 speaker。
+- **Sortformer 空格分隔活动解析（批量 diarization 不再 502）**：`_parse_activities`
+  原先用 `ast.literal_eval` 解析 Sortformer `.diarize()` 输出，实测输出为空格分隔字符串
+  （如 `"0.000 2.320 speaker_0"`），解析抛 SyntaxError → HTTP 502。新增
+  `_parse_activity_token` / `_speaker_index` 支持空格分隔与 Python 字面量两种格式，
+  非法输入仍 fail-closed 抛 `diarization_invalid_output`。
+
 ## [1.6.5] - 2026-09-03
 
 ### Fixed
