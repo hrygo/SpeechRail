@@ -115,3 +115,57 @@ def test_speaker_index_normalizes_labels() -> None:
     assert _speaker_index("speaker_0") == 0
     assert _speaker_index("spk_1") == 1
     assert _speaker_index("0") == 0
+
+
+def test_concurrent_first_load_restores_model_once(tmp_path, monkeypatch) -> None:
+    """Two concurrent first diarization requests must not double-load the model."""
+    import importlib.util
+    import sys
+    import threading
+    import time
+    import types
+
+    from speechrail.backends.nemo_sortformer import NemoSortformerEngine
+
+    model_file = tmp_path / "sortformer.nemo"
+    model_file.write_bytes(b"stub")
+    engine = NemoSortformerEngine(model_path=model_file, max_buffer_bytes=4096)
+
+    restore_calls: list[str] = []
+    release_load = threading.Event()
+
+    class _FakeSortformer:
+        @staticmethod
+        def restore_from(path, map_location=None):
+            restore_calls.append(str(path))
+            release_load.wait(timeout=5.0)
+            return type(
+                "M", (), {"diarize": lambda self, *a, **k: [], "eval": lambda s: s}
+            )()
+
+    fake_module = types.ModuleType("nemo.collections.asr.models")
+    fake_module.SortformerEncLabelModel = _FakeSortformer
+    fake_module.__spec__ = importlib.util.spec_from_loader(
+        "nemo.collections.asr.models", None
+    )
+    monkeypatch.setitem(sys.modules, "nemo.collections.asr.models", fake_module)
+
+    import numpy  # pre-warm so both threads reach the restore window together
+
+    del numpy
+    threads = [
+        threading.Thread(target=engine._load_local_model, args=([0.0, 0.0],))
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    # Give an unlocked implementation time to enter restore twice, then release.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline and len(restore_calls) < 2:
+        time.sleep(0.01)
+    release_load.set()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    assert len(restore_calls) == 1, f"model restored {len(restore_calls)} times"
+    assert engine._model is not None

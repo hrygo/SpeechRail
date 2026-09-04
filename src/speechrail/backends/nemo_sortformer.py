@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import importlib.util
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,9 @@ class NemoSortformerEngine:
         self._model_path = Path(model_path)
         self._max_buffer_bytes = max_buffer_bytes
         self._model: Any | None = None
+        # Restore runs in worker threads (asyncio.to_thread); serialize the first
+        # load so concurrent diarization requests cannot each load a full model.
+        self._load_lock = threading.Lock()
         self._diarize = diarize or self._load_local_model
         self._embedding = embedding
         self._centroids = centroids
@@ -82,9 +86,11 @@ class NemoSortformerEngine:
                 "diarization runtime is not installed", code="diarization_not_available"
             ) from exc
         if self._model is None:
-            self._model = SortformerEncLabelModel.restore_from(
-                str(self._model_path), map_location="cpu"
-            ).eval()
+            with self._load_lock:
+                if self._model is None:
+                    self._model = SortformerEncLabelModel.restore_from(
+                        str(self._model_path), map_location="cpu"
+                    ).eval()
         return cast(
             list[list[str]],
             self._model.diarize(
