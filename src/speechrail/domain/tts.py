@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from types import MappingProxyType
 
 
@@ -255,8 +256,13 @@ def apply_crossfade(
     return np.clip(samples, -32768.0, 32767.0).astype("<i2").tobytes()
 
 
+@lru_cache(maxsize=16)
 def create_breath_pause(sample_rate: int = 24_000, pause_ms: int = 100) -> bytes:
-    """Generate silent mono PCM16 bytes for natural inter-sentence breathing pause."""
+    """Generate silent mono PCM16 bytes for natural inter-sentence breathing pause.
+
+    Cached: realtime TTS requests the same (sample_rate, pause_ms) pair per
+    sentence, and the returned bytes are immutable.
+    """
     if pause_ms <= 0:
         return b""
     num_samples = (sample_rate * pause_ms) // 1000
