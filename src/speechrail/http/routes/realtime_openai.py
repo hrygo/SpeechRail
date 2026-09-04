@@ -25,6 +25,10 @@ from speechrail.http.auth import websocket_is_authorized
 logger = logging.getLogger(__name__)
 
 HANDSHAKE_MODEL_CLOSE_CODE = 4004
+QUEUE_OVERFLOW_CLOSE_CODE = 1013
+# Bounded intake so a stalled handler cannot accumulate unbounded base64 audio;
+# 64 events ≈ 64 chunks of audio, far above normal handler drain speed.
+CLIENT_EVENT_QUEUE_LIMIT = 64
 
 
 def create_openai_realtime_router(services: AppServices) -> APIRouter:
@@ -95,7 +99,9 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         # Only count a session once the handshake resolved successfully: the
         # finally block below always pairs this with record_realtime_session_end.
         services.metrics.record_realtime_session_start()
-        client_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        client_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=CLIENT_EVENT_QUEUE_LIMIT
+        )
 
         async def receive_loop() -> None:
             try:
@@ -104,8 +110,21 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     client_events.put_nowait(event)
             except WebSocketDisconnect:
                 pass
+            except asyncio.QueueFull:
+                # The handler is stalled (e.g. a blocked backend); stop reading
+                # instead of buffering unbounded base64 audio and close the
+                # session so the client can reconnect with a fresh one.
+                logger.warning(
+                    "realtime client event queue overflow; closing session %s",
+                    session_id,
+                )
+                with contextlib.suppress(Exception):
+                    await websocket.close(
+                        code=QUEUE_OVERFLOW_CLOSE_CODE, reason="event queue overflow"
+                    )
             finally:
-                client_events.put_nowait(None)
+                with contextlib.suppress(asyncio.QueueFull):
+                    client_events.put_nowait(None)
 
         async def handle_loop() -> None:
             while True:

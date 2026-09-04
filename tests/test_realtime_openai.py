@@ -1727,3 +1727,65 @@ def test_openai_asr_reader_failure_emits_transcription_failed() -> None:
                 assert event["error"]["code"] == "backend_error"
                 break
             assert event["type"] != "error"
+
+
+class _HangingCommitSession(FakeStreamingSession):
+    """Session whose commit never resolves, stalling the event handler."""
+
+    async def commit(self, want_segments: bool = False) -> None:
+        await asyncio.Event().wait()
+
+
+class HangingCommitStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[_HangingCommitSession]:
+        return _HangingCommitSession
+
+
+def test_openai_client_event_queue_overflow_closes_session() -> None:
+    """A stalled handler must not buffer client audio without bound.
+
+    The whole interaction runs on a daemon thread with a bounded wait: the
+    pre-fix server never closes the session, so receiving would block forever.
+    """
+    import threading
+
+    factory = HangingCommitStreamingFactory()
+    client, _ = _client(factory=factory)
+    done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def scenario() -> None:
+        try:
+            with client.websocket_connect("/v1/realtime") as socket:
+                socket.receive_json()
+                socket.receive_json()
+                socket.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {"model": "whisper-1", "turn_detection": None},
+                    }
+                )
+                socket.receive_json()
+                socket.send_json(
+                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+                )
+                socket.send_json({"type": "input_audio_buffer.commit"})
+                for index in range(128):
+                    socket.send_json(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": _pcm16(bytes([index % 256, 0])),
+                        }
+                    )
+                while True:
+                    socket.receive_json()
+        except WebSocketDisconnect:
+            outcome["ok"] = True
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            outcome["error"] = repr(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=scenario, daemon=True).start()
+    assert done.wait(10.0), "session never closed after client event queue overflow"
+    assert outcome.get("ok") is True, outcome
