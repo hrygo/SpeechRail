@@ -1686,3 +1686,44 @@ def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
         received = [chunk for session in factory.sessions for chunk in session.received]
         assert len(received) == 6, f"expected all 6 chunks appended, got {len(received)}"
         assert len(factory.released) == 1
+
+
+class _ExplodingEventsSession(FakeStreamingSession):
+    """Session whose event stream dies with an unexpected error mid-iteration."""
+
+    def events(self):
+        async def iterator():
+            yield StreamingAsrEvent(kind="partial", text="hi")
+            raise ValueError("reader boom")
+
+        return iterator()
+
+
+class ExplodingEventsStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[_ExplodingEventsSession]:
+        return _ExplodingEventsSession
+
+
+def test_openai_asr_reader_failure_emits_transcription_failed() -> None:
+    """A dead ASR reader must surface transcription_failed, not die silently."""
+    factory = ExplodingEventsStreamingFactory()
+    client, _ = _client(factory=factory)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1", "turn_detection": None},
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.failed":
+                assert event["error"]["code"] == "backend_error"
+                break
+            assert event["type"] != "error"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import Any
@@ -49,6 +50,8 @@ from speechrail.domain.tts import resolve_voice
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 SendEvent = Callable[[dict[str, object]], Awaitable[None]]
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIRealtimeSession:
@@ -492,7 +495,17 @@ class OpenAIRealtimeSession:
         except (asyncio.CancelledError, WebSocketDisconnect, RuntimeError):
             pass
         except Exception:
-            pass
+            # A dead reader must not die silently: the client would keep
+            # believing ASR is alive and never see a terminal failure event.
+            logger.exception("realtime ASR event reader failed")
+            with contextlib.suppress(Exception):
+                await self._send(
+                    transcription_failed(
+                        session_id=self._session_id,
+                        code="backend_error",
+                        message="streaming transcription failed",
+                    )
+                )
 
     async def _synthesize_tts(
         self,
