@@ -189,7 +189,9 @@ class JobRepository:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._database)
+        # busy_timeout makes concurrent claim_next BEGIN IMMEDIATE transactions
+        # wait for the writer instead of failing outright with "database is locked".
+        connection = sqlite3.connect(self._database, timeout=5.0)
         connection.row_factory = sqlite3.Row
         return connection
 
