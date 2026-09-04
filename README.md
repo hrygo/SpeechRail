@@ -217,7 +217,7 @@ SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` �
 - **Realtime**：TTS 首包 **35-52ms**，ASR commit **0.36-0.44s**，连续 3 会话 100% 完成。
 - **🆕 流式分人（1.6.6）**：批量双音色精确分离（`spk_01`/`spk_02`）；流式 commit 下发词级 `.segment` + `speaker`。
 
-> 完整测量与复现步骤见 **[📊 v1.6.6 性能基线完整报告](docs/archive/performance/2026-09-04-v1.6.6-performance-benchmark.md)**（含与 v1.6.5 对照及运行条件说明）。历史基线：[v1.6.5](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md) · [v1.6.3](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md) · [v1.6.2](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md) · [v1.6.0](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) · [v1.5.2](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)。
+> 完整测量与复现步骤见 **[📊 v1.6.6 性能基线完整报告](docs/archive/performance/2026-09-04-v1.6.6-performance-benchmark.md)**（含与 v1.6.5 对照及运行条件说明）。跨版本趋势与报告索引见 **[📈 性能基准归档索引](docs/archive/performance/README.md)**。历史基线：[v1.6.5](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md) · [v1.6.3](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md) · [v1.6.2](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md) · [v1.6.0](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) · [v1.5.2](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)。
 
 ---
 

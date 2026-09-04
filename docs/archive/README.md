@@ -5,6 +5,7 @@
 ## 过程材料
 
 - [过程材料索引](process/README.md)：实施计划、设计规格、审查交接和被取代的吸收方案。
+- [性能基准归档索引](performance/README.md)：历次版本 ASR/TTS/Realtime 基准与资源监控报告及其跨版本趋势（最新基线见 v1.6.6 报告）。
 - [Realtime legacy 批量协议契约](realtime-legacy-contract.md)：已退役的
   `/v1/realtime/legacy` 与 `/asr` 端点协议，v1.0.0 移除端点后归档。
 
