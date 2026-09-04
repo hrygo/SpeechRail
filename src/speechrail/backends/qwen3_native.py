@@ -213,6 +213,19 @@ class Qwen3BackendConfig:
         )
 
 
+def _is_transport_loss(exc: BaseException) -> bool:
+    """Distinguish transport-level failures from semantic worker errors.
+
+    Only the former (dead pipe, truncated frame, frame desync) justify an
+    in-request worker rebuild; error frames and result-shape violations must
+    propagate unchanged.
+    """
+
+    if isinstance(exc, TimeoutError | OSError | ProtocolError):
+        return True
+    return isinstance(exc, RuntimeError) and isinstance(exc.__cause__, ProtocolError)
+
+
 class Qwen3Worker:  # pragma: no cover - exercised against an external isolated Qwen runtime.
     """One supervised, offline worker process shared by batch and streaming requests."""
 
@@ -282,9 +295,38 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         *,
         request_id: str | None = None,
     ) -> TranscriptResult:
+        resolved_request_id = request_id or f"req_{uuid4().hex}"
+        try:
+            return await self._transcribe_once(
+                pcm, language, prompt, include_timestamps, resolved_request_id
+            )
+        except TimeoutError:
+            # A worker hang leaves the pipe frame-desynced: kill it so the next
+            # request starts fresh, but do not silently re-run the timed-out
+            # inference; the route maps this to 503 backend_timeout.
+            await self.close()
+            raise
+        except (OSError, ProtocolError, RuntimeError) as exc:
+            if not _is_transport_loss(exc):
+                raise
+        # One in-request rebuild so a crashed worker costs a single retry instead
+        # of failing every request until idle eviction (TTS self-heals the same
+        # way in synthesize()'s finally).
+        await self.close()
+        return await self._transcribe_once(
+            pcm, language, prompt, include_timestamps, resolved_request_id
+        )
+
+    async def _transcribe_once(
+        self,
+        pcm: bytes,
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool,
+        resolved_request_id: str,
+    ) -> TranscriptResult:
         await self.start()
         async with self._lock:
-            resolved_request_id = request_id or f"req_{uuid4().hex}"
             result = await self.exchange(
                 {
                     "version": PROTOCOL_VERSION,

@@ -244,3 +244,116 @@ def test_transcribe_rejects_invalid_text_or_language(tmp_path: Path) -> None:
 
         with pytest.raises(RuntimeError, match="worker_result_invalid"):
             asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
+
+
+class _LossyTransport(_FakeTransport):
+    """Transport that loses the pipe on a chosen exchange call, then recovers."""
+
+    def __init__(self, responses: list[dict[str, Any]], lose_on: int) -> None:
+        super().__init__(responses)
+        self.starts = 0
+        self.exchange_calls = 0
+        self._lose_on = lose_on
+
+    async def start(self) -> None:
+        self.starts += 1
+
+    async def exchange(
+        self, payload: dict[str, Any], binary_payload: bytes | None = None
+    ) -> dict[str, Any]:
+        self.exchange_calls += 1
+        if self._lose_on < 0 and payload.get("type") == "transcribe":
+            raise BrokenPipeError("worker pipe closed")
+        if self.exchange_calls == self._lose_on:
+            raise BrokenPipeError("worker pipe closed")
+        return await super().exchange(payload, binary_payload)
+
+
+_READY = {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"}
+
+
+def _lossy_worker(tmp_path: Path, responses: list[dict[str, Any]], lose_on: int):
+    worker, _ = _worker(tmp_path, responses)
+    fake = _LossyTransport(responses, lose_on=lose_on)
+    worker._transport = fake  # type: ignore[assignment]
+    return worker, fake
+
+
+def test_transcribe_rebuilds_worker_once_after_transport_loss(tmp_path: Path) -> None:
+    """A dead worker pipe costs one in-request rebuild, not every later request."""
+    import asyncio
+
+    worker, fake = _lossy_worker(
+        tmp_path,
+        [_READY, _READY, {"type": "result", "request_id": "req_x", "text": "ok", "language": "zh"}],
+        lose_on=2,
+    )
+
+    result = asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
+
+    assert result.text == "ok"
+    assert fake.starts == 2
+    assert fake.aborted is True
+    assert worker._identity == ("mps", "float16")
+
+
+def test_transcribe_rebuild_failure_propagates_without_infinite_retry(tmp_path: Path) -> None:
+    import asyncio
+
+    worker, fake = _lossy_worker(tmp_path, [_READY, _READY], lose_on=-1)
+
+    with pytest.raises(OSError):
+        asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
+
+    assert fake.starts == 2
+
+
+def test_transcribe_semantic_error_does_not_rebuild_worker(tmp_path: Path) -> None:
+    import asyncio
+
+    worker, fake = _lossy_worker(
+        tmp_path,
+        [
+            _READY,
+            {"type": "error", "code": "backend_error"},
+        ],
+        lose_on=99,
+    )
+
+    with pytest.raises(RuntimeError, match="backend_error"):
+        asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
+
+    assert fake.starts == 1
+    assert fake.aborted is False
+
+
+def test_transcribe_timeout_kills_worker_without_retry(tmp_path: Path) -> None:
+    """A hung worker is killed (frame desync) but the timeout is not retried."""
+    import asyncio
+
+    class _HangingTransport(_FakeTransport):
+        def __init__(self, responses: list[dict[str, Any]]) -> None:
+            super().__init__(responses)
+            self.starts = 0
+
+        async def start(self) -> None:
+            self.starts += 1
+
+        async def exchange(
+            self, payload: dict[str, Any], binary_payload: bytes | None = None
+        ) -> dict[str, Any]:
+            del payload, binary_payload
+            if not self.responses:
+                raise TimeoutError()
+            return self.responses.pop(0)
+
+    worker, _ = _worker(tmp_path, [])
+    fake = _HangingTransport([_READY])
+    worker._transport = fake  # type: ignore[assignment]
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
+
+    assert fake.aborted is True
+    assert worker._identity is None
+    assert fake.starts == 1
