@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -42,6 +43,7 @@ class GovernorSnapshot:
 class _Waiter:
     ticket: int
     work_class: WorkClass
+    enqueued_at: float
 
     @property
     def is_realtime(self) -> bool:
@@ -61,9 +63,11 @@ class ResourceGovernor:
         limits: GovernorLimits,
         *,
         on_reject: Callable[[WorkClass], None] | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._limits = limits
         self._on_reject = on_reject
+        self._clock = clock or time.monotonic
         self._condition = asyncio.Condition()
         self._ticket = 0
         self._active_realtime = 0
@@ -114,7 +118,9 @@ class ResourceGovernor:
                     self._on_reject(work_class)
                 raise GovernorQueueFullError(f"{work_class.value} admission queue is full")
             self._ticket += 1
-            waiter = _Waiter(ticket=self._ticket, work_class=work_class)
+            waiter = _Waiter(
+                ticket=self._ticket, work_class=work_class, enqueued_at=self._clock()
+            )
             waiters.append(waiter)
             try:
                 while not self._can_admit(waiter):
@@ -143,10 +149,16 @@ class ResourceGovernor:
             return False
         if waiter.is_realtime:
             return self._realtime_waiters[0] == waiter
-        if self._realtime_waiters:
+        if self._batch_waiters[0] != waiter:
             return False
         batch_capacity = self._limits.total_capacity - self._limits.realtime_reserved_capacity
-        return self._active_batch < batch_capacity and self._batch_waiters[0] == waiter
+        if self._active_batch < batch_capacity and not self._realtime_waiters:
+            return True
+        # Aging: a batch request that has waited past the threshold may use the
+        # reserved realtime lane, so sustained realtime traffic cannot starve
+        # batch work entirely. FIFO within the batch class is preserved.
+        aged = self._clock() - waiter.enqueued_at >= self._limits.batch_aging_seconds
+        return aged and self._active_batch < self._limits.total_capacity
 
     def _waiters_for(self, work_class: WorkClass) -> deque[_Waiter]:
         return self._realtime_waiters if work_class.is_realtime else self._batch_waiters

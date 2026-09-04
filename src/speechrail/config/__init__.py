@@ -153,6 +153,7 @@ class Settings(BaseSettings):
             total_capacity=self.runtime_total_capacity,
             realtime_reserved_capacity=self.realtime_reserved_capacity,
             max_pending_per_class=self.runtime_max_pending_per_class,
+            batch_aging_seconds=self.batch_aging_seconds,
         )
 
 

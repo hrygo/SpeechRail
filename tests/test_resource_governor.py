@@ -176,3 +176,146 @@ def test_settings_reject_audio_seconds_beyond_worker_frame_limit() -> None:
     """max_audio_seconds that cannot be shipped to the worker must fail at startup."""
     with pytest.raises(ValueError, match="frame limit"):
         Settings(max_audio_seconds=5000, qwen3_model_dir=None, qwen3_python=None)
+
+
+def _aging_governor(now: dict) -> ResourceGovernor:
+    return ResourceGovernor(
+        GovernorLimits(
+            total_capacity=2,
+            realtime_reserved_capacity=1,
+            max_pending_per_class=4,
+            batch_aging_seconds=30.0,
+        ),
+        clock=lambda: now["t"],
+    )
+
+
+def test_batch_aging_admits_starved_batch_past_threshold() -> None:
+    """A batch request that aged past the threshold may use the reserved lane."""
+
+    async def scenario() -> None:
+        now = {"t": 0.0}
+        governor = _aging_governor(now)
+        rt_release = asyncio.Event()
+        batch_release = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def blocking() -> None:
+            entered.set()
+            await rt_release.wait()
+
+        async def blocking_batch() -> None:
+            entered.set()
+            await batch_release.wait()
+
+        realtime_holder = asyncio.create_task(
+            governor.run(blocking, WorkClass.REALTIME_ASR)
+        )
+        await entered.wait()
+        entered.clear()
+        batch_holder = asyncio.create_task(
+            governor.run(blocking_batch, WorkClass.BATCH_ASR)
+        )
+        for _ in range(200):
+            if governor.snapshot().active_batch == 1:
+                break
+            await asyncio.sleep(0.01)
+        entered.clear()
+        realtime_waiter = asyncio.create_task(
+            governor.run(blocking, WorkClass.REALTIME_ASR)
+        )
+        for _ in range(200):
+            if governor.snapshot().pending_realtime == 1:
+                break
+            await asyncio.sleep(0.01)
+        entered.clear()
+
+        starved_started = asyncio.Event()
+
+        async def starved() -> None:
+            starved_started.set()
+
+        starved_task = asyncio.create_task(governor.run(starved, WorkClass.BATCH_ASR))
+        await asyncio.sleep(0.01)
+        assert not starved_started.is_set()
+
+        # Age past the threshold, then churn the realtime lane only: the
+        # waiter's release notifies the starved batch waiter, which may now
+        # take the reserved lane even though the batch lane is still held.
+        now["t"] = 31.0
+        rt_release.set()
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        rt_release.set()
+        await asyncio.wait_for(starved_started.wait(), timeout=1.0)
+
+        batch_release.set()
+        await asyncio.gather(
+            realtime_holder, batch_holder, realtime_waiter, starved_task
+        )
+
+    asyncio.run(scenario())
+
+
+def test_batch_below_aging_threshold_still_defers_to_reserved_capacity() -> None:
+    async def scenario() -> None:
+        now = {"t": 0.0}
+        governor = _aging_governor(now)
+        rt_release = asyncio.Event()
+        batch_release = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def blocking() -> None:
+            entered.set()
+            await rt_release.wait()
+
+        async def blocking_batch() -> None:
+            entered.set()
+            await batch_release.wait()
+
+        realtime_holder = asyncio.create_task(
+            governor.run(blocking, WorkClass.REALTIME_ASR)
+        )
+        await entered.wait()
+        entered.clear()
+        batch_holder = asyncio.create_task(
+            governor.run(blocking_batch, WorkClass.BATCH_ASR)
+        )
+        for _ in range(200):
+            if governor.snapshot().active_batch == 1:
+                break
+            await asyncio.sleep(0.01)
+        entered.clear()
+        realtime_waiter = asyncio.create_task(
+            governor.run(blocking, WorkClass.REALTIME_ASR)
+        )
+        for _ in range(200):
+            if governor.snapshot().pending_realtime == 1:
+                break
+            await asyncio.sleep(0.01)
+        entered.clear()
+
+        starved_started = asyncio.Event()
+
+        async def starved() -> None:
+            starved_started.set()
+
+        starved_task = asyncio.create_task(governor.run(starved, WorkClass.BATCH_ASR))
+        await asyncio.sleep(0.01)
+
+        # Churn the realtime lane below the aging threshold: the batch waiter
+        # must keep waiting for a non-reserved lane instead of stealing one.
+        now["t"] = 10.0
+        rt_release.set()
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        rt_release.set()
+        await asyncio.sleep(0.05)
+        assert not starved_started.is_set()
+
+        # Freeing the batch lane admits the starved request through the normal path.
+        batch_release.set()
+        await asyncio.gather(
+            realtime_holder, batch_holder, realtime_waiter, starved_task
+        )
+        assert starved_started.is_set()
+
+    asyncio.run(scenario())
