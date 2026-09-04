@@ -2,6 +2,46 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **批量 ASR worker 崩溃后自动重建（单次重试）**：`Qwen3Worker.transcribe` 此前在 worker
+  进程死亡后因 `_identity` 未重置而对后续所有请求持续失败，只能等 300s 空闲卸载兜底。
+  现在传输层故障（坏管道/截断帧/帧失步）会关闭并重建 worker 后重试一次；推理超时则
+  kill worker 并直接映射 `503 backend_timeout`（不重跑超时推理）；语义错误帧（如
+  `worker_start_failed`）不受影响照常上抛。TTS worker 原有 stream `finally` 自愈路径保持不变。
+- **Realtime commit 无超时导致会话槽永久泄漏**：`Qwen3StreamingSession.commit` 的
+  `_finished.wait()` 无超时，worker 挂起（无 EOF、无错误帧）会永久卡死会话并占用
+  streaming 槽与 governor 预留。现按 worker timeout 包 `asyncio.wait_for`；应用层
+  `_commit_audio` 在 commit 失败时完整 teardown（reader 任务、ASR 会话、factory 槽位、
+  governor 预留），映射 `error.code=backend_timeout`，下一个 append 可立即开新会话。
+- **Server VAD `speech_ended` 丢弃当前 chunk 尾部音频**：`_append_audio` 原先在
+  append 之前处理 VAD 事件，检出 `speech_ended` 即 commit 并 `return`，导致触发
+  事件的该 chunk 从未进入 ASR/diarization。现调整为先建会话并 append 音频、再处理
+  VAD 事件，句尾 chunk 不再丢失。
+- **worker 帧上限与 `SPEECHRAIL_MAX_AUDIO_SECONDS` 矛盾**：`MAX_FRAME_BYTES`（64MB）
+  使超过约 33 分钟的音频在完整解码后必报 `worker_frame_invalid`。上限提升至 128MB
+  （容纳默认 3600s PCM16 + JSON 头冗余），且 `Settings` 启动期校验
+  `max_audio_seconds * 32_000 + 4096 <= MAX_FRAME_BYTES`，矛盾配置直接启动失败而非
+  请求中途报错。
+
+### Changed
+
+- **批量 REST 接入 ResourceGovernor**：`/v1/audio/transcriptions` 与 `/v1/audio/speech`
+  此前绕过 governor，realtime 预留容量对最大负载不生效。现分别走
+  `BATCH_ASR` / `BATCH_TTS`（governor 外层 + admission 内层，deadline 均为
+  `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS`），governor 队列溢出映射 `429 queue_full`
+  + `Retry-After: 1`，与 admission 溢出一致。
+- **实现 batch aging（消费 `SPEECHRAIL_BATCH_AGING_SECONDS`）**：此前该配置无消费者，
+  realtime 持续等待时 batch 会无限饿死。现等待超过 aging 阈值的 batch 请求允许占用
+  realtime 预留车道（FIFO 保持在 batch 类内），realtime 优先级在阈值内不变。
+- **`AdmissionQueue` 改为 token 队列**：原「先 `locked()` 检查再 `acquire`」存在竞态
+  （偶发放行第 9 个请求并无界等待，deadline 不覆盖排队）。token 队列使满员判定原子化：
+  满即拒（`429 queue_full`），不再有无界等待；deadline 语义（只约束 operation）不变。
+- **Sortformer 首载加锁**：`NemoSortformerEngine._load_local_model` 增加
+  `threading.Lock` 双检锁，防止并发首个分人请求各自 restore 一份模型（瞬时内存翻倍）。
+- **jobs spool SQLite busy timeout**：连接统一 `timeout=5.0`，并发 `claim_next` 的
+  `BEGIN IMMEDIATE` 锁冲突改为短等待而非直接抛 `database is locked`。
+
 ## [1.6.6] - 2026-09-04
 
 ### Fixed
