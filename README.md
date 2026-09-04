@@ -198,23 +198,23 @@ SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` �
 
 ## ⚡ 性能基线与资源实测
 
-> 实测环境：Apple M5 Max (18 核 / 128GB)，macOS 26.6.2，MLX (MPS)，Qwen3-ASR/TTS `-8bit` 双快照（v1.6.6）。
+> 实测环境：Apple M5 Max (18 核 / 128GB)，macOS 26.6.2，MLX (MPS)，Qwen3-ASR/TTS `-8bit` 双快照（v1.6.6，静默环境实测）。
 
 **常驻与峰值（v1.6.6 实测 footprint）：**
 
 | 组件 | 常驻 (Idle) | 压测峰值 (Peak) |
 |---|---|---|
-| 主服务 (FastAPI，含 Sortformer 常驻) | 1.06 GB | 1.59 GB |
-| ASR Worker (batch) | 4.34 GB | 6.41 GB |
-| Qwen3 TTS Worker | 3.56 GB | 4.27 GB |
-| **总物理常驻** | **8.97 GB** | **9.87 GB** |
+| 主服务 (FastAPI，含 Sortformer 常驻) | 1.08 GB | 1.59 GB |
+| ASR Worker (batch) | 2.50 GB | 3.68 GB |
+| Qwen3 TTS Worker | 3.56 GB | 4.13 GB |
+| **总物理常驻** | **7.14 GB** | **7.91 GB** |
 
 **延迟与吞吐：**
 
-- **非流式 ASR**：超长音频 (32.0s) **3.22s**（RTF 0.10x）；8s 音频 **0.88s**。
-- **并发吞吐**（4 workers / 8 请求）：**1.14 req/s**，P95 **3.67s**，成功率 **8/8**。
-- **TTS**：长句 (50 字) **6.24s**（RTF 0.74x）。
-- **Realtime**：TTS 首包 **105-142ms**，ASR commit **0.79-1.03s**，连续 3 会话 100% 完成。
+- **非流式 ASR**：超长音频 (33.0s) **0.89s**（RTF 0.03x）；9s 音频 **0.23s**。
+- **并发吞吐**（4 workers / 8 请求）：**4.04 req/s**，P95 **0.99s**，成功率 **8/8**。
+- **TTS**：长句 (50 字) **2.44s**（RTF 0.28x）。
+- **Realtime**：TTS 首包 **35-52ms**，ASR commit **0.36-0.44s**，连续 3 会话 100% 完成。
 - **🆕 流式分人（1.6.6）**：批量双音色精确分离（`spk_01`/`spk_02`）；流式 commit 下发词级 `.segment` + `speaker`。
 
 > 完整测量与复现步骤见 **[📊 v1.6.6 性能基线完整报告](docs/archive/performance/2026-09-04-v1.6.6-performance-benchmark.md)**（含与 v1.6.5 对照及运行条件说明）。历史基线：[v1.6.5](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md) · [v1.6.3](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md) · [v1.6.2](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md) · [v1.6.0](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) · [v1.5.2](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)。
