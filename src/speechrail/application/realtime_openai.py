@@ -221,40 +221,6 @@ class OpenAIRealtimeSession:
         if self._asr_factory is None:
             raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
 
-        if self._vad is not None:
-            from speechrail.compatibility.openai_realtime import (
-                input_audio_buffer_speech_started,
-                input_audio_buffer_speech_stopped,
-            )
-
-            vad_events = self._vad.process_chunk(audio)
-            for v_event in vad_events:
-                if v_event.speech_started:
-                    self._services.metrics.record_vad("started")
-                    # Barge-in: immediately cancel in-progress TTS response
-                    if self._tts_task is not None and not self._tts_task.done():
-                        self._services.metrics.record_bargein()
-                        await self._cancel_response()
-                    await self._send(
-                        input_audio_buffer_speech_started(
-                            session_id=self._session_id,
-                            audio_start_ms=v_event.audio_start_ms,
-                            item_id=f"item_{self._session_id}_input",
-                        )
-                    )
-                elif v_event.speech_ended:
-                    self._services.metrics.record_vad("ended")
-                    await self._send(
-                        input_audio_buffer_speech_stopped(
-                            session_id=self._session_id,
-                            audio_end_ms=v_event.audio_end_ms,
-                            item_id=f"item_{self._session_id}_input",
-                        )
-                    )
-                    if self._asr is not None:
-                        await self._commit_audio()
-                        return
-
         if self._asr is None:
             await self._reserve_asr()
             asr: RealtimeAsrSession | None = None
@@ -294,11 +260,47 @@ class OpenAIRealtimeSession:
             self._asr = asr
             self._asr_reader = asyncio.create_task(self._drain_asr_events())
         await self._ensure_diarization()
+        # Append the chunk to ASR/diarization before VAD event handling: a
+        # speech_ended commit below must include the very chunk that ended the
+        # utterance, or its tail audio is silently dropped.
         await self._asr.append_audio(audio)
         if self._diarization is not None:
             await self._diarization.append_audio(audio)
         self._buffered_audio_bytes += len(audio)
         self._unflushed_bytes += len(audio)
+
+        if self._vad is not None:
+            from speechrail.compatibility.openai_realtime import (
+                input_audio_buffer_speech_started,
+                input_audio_buffer_speech_stopped,
+            )
+
+            vad_events = self._vad.process_chunk(audio)
+            for v_event in vad_events:
+                if v_event.speech_started:
+                    self._services.metrics.record_vad("started")
+                    # Barge-in: immediately cancel in-progress TTS response
+                    if self._tts_task is not None and not self._tts_task.done():
+                        self._services.metrics.record_bargein()
+                        await self._cancel_response()
+                    await self._send(
+                        input_audio_buffer_speech_started(
+                            session_id=self._session_id,
+                            audio_start_ms=v_event.audio_start_ms,
+                            item_id=f"item_{self._session_id}_input",
+                        )
+                    )
+                elif v_event.speech_ended:
+                    self._services.metrics.record_vad("ended")
+                    await self._send(
+                        input_audio_buffer_speech_stopped(
+                            session_id=self._session_id,
+                            audio_end_ms=v_event.audio_end_ms,
+                            item_id=f"item_{self._session_id}_input",
+                        )
+                    )
+                    await self._commit_audio()
+                    return
 
         chunk_sec = self._settings.qwen3_streaming_chunk_sec
         flush_threshold = max(1, int(chunk_sec * 32_000))
@@ -320,12 +322,37 @@ class OpenAIRealtimeSession:
             self._unflushed_bytes = 0
             return
         await self._send(input_audio_buffer_committed(session_id=self._session_id))
-        await self._asr.commit(want_segments=self._diarization is not None)
-        if self._asr_reader is not None:
-            await self._asr_reader
-            self._asr_reader = None
+        try:
+            await self._asr.commit(want_segments=self._diarization is not None)
+            if self._asr_reader is not None:
+                await self._asr_reader
+                self._asr_reader = None
+        except TimeoutError as exc:
+            await self._discard_failed_commit()
+            raise RealtimeAdapterError(
+                "backend_timeout", "streaming ASR commit timed out"
+            ) from exc
+        except BaseException:
+            await self._discard_failed_commit()
+            raise
         await self._close_asr_session()
         await self._release_asr()
+        self._buffered_audio_bytes = 0
+        self._last_partial_text = ""
+        self._unflushed_bytes = 0
+
+    async def _discard_failed_commit(self) -> None:
+        """Tear down a commit that will never finish.
+
+        A failed commit (worker timeout/hang, dead pipe) must not leak the
+        governor lane or the streaming factory slot: the next append has to be
+        able to open a fresh ASR session.
+        """
+
+        with contextlib.suppress(Exception):
+            await self._stop_asr_reader()
+            await self._close_asr_session()
+            await self._release_asr()
         self._buffered_audio_bytes = 0
         self._last_partial_text = ""
         self._unflushed_bytes = 0

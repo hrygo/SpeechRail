@@ -650,3 +650,31 @@ def test_streaming_worker_rejects_ready_identity_mismatch(tmp_path: Path) -> Non
             await worker.start()
 
     asyncio.run(scenario())
+
+
+def test_session_commit_times_out_when_worker_never_finishes() -> None:
+    """A hung worker (no EOF, no error frame) must not park commit forever."""
+
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        worker.timeout_seconds = 0.05
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+
+        with pytest.raises(TimeoutError):
+            await session.commit()
+
+        await session.close()
+
+    asyncio.run(scenario())

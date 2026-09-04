@@ -331,7 +331,12 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                 "want_segments": want_segments,
             }
         )
-        await self._finished.wait()
+        # A worker that stops producing without EOF (hang) would otherwise park
+        # this await forever and leak the shared streaming slot; the caller
+        # tears the session down on TimeoutError.
+        await asyncio.wait_for(
+            self._finished.wait(), timeout=max(self._worker.timeout_seconds, 1.0)
+        )
 
     def events(self) -> AsyncIterator[StreamingAsrEvent]:
         async def iterator() -> AsyncIterator[StreamingAsrEvent]:

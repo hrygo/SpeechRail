@@ -1559,3 +1559,130 @@ def test_realtime_client_disconnect_during_handle_graceful() -> None:
             }
         )
         # Socket closes on exit without error
+
+
+class _FailingCommitSession(FakeStreamingSession):
+    """Fails the factory's first commit like a hung worker, then behaves normally."""
+
+    def __init__(self, *, fail_state: dict[str, bool], **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._fail_state = fail_state
+
+    async def commit(self, want_segments: bool = False) -> None:
+        self.want_segments = want_segments
+        if not self._fail_state["failed"]:
+            self._fail_state["failed"] = True
+            raise TimeoutError()
+        await super().commit(want_segments=want_segments)
+
+
+class FailingCommitStreamingFactory(FakeStreamingFactory):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.fail_state = {"failed": False}
+
+    def create(self, *, language: str | None, prompt: str) -> _FailingCommitSession:
+        session = _FailingCommitSession(
+            language=language,
+            prompt=prompt,
+            segments=self.segments,
+            partials=self.partials,
+            flush_partials=self.flush_partials,
+            fail_state=self.fail_state,
+        )
+        self.sessions.append(session)
+        return session
+
+
+def test_openai_commit_failure_emits_error_and_releases_slot() -> None:
+    """A failed commit must not leak the streaming slot or the governor lane."""
+    factory = FailingCommitStreamingFactory()
+    client, factory = _client(factory=factory)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1", "turn_detection": None},
+            }
+        )
+        socket.receive_json()
+
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = [socket.receive_json() for _ in range(2)]
+        assert events[0]["type"] == "input_audio_buffer.committed"
+        assert events[1]["type"] == "error"
+        assert events[1]["error"]["code"] == "backend_timeout"
+
+        assert len(factory.released) == 1
+
+        # The slot is usable again: the next append opens a fresh ASR session
+        # and a normal commit round-trips to completion.
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x01\x01")})
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+            if event["type"] == "error":
+                raise AssertionError(f"unexpected error event: {event}")
+        assert len(factory.sessions) == 2
+        assert len(factory.released) == 2
+
+
+def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
+    """The chunk where VAD fires speech_ended must still be appended before commit."""
+    from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
+
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.3,
+                        "prefix_padding_ms": 0,
+                        "silence_duration_ms": 96,
+                    }
+                },
+            }
+        )
+        socket.receive_json()
+
+        frame = _sine_pcm(440, 32, 10000.0)
+        silence = _silence_pcm(32)
+
+        def audio_b64(raw: bytes) -> str:
+            return base64.b64encode(raw).decode("ascii")
+
+        # Three loud frames: the third crosses the debounce and emits speech_started.
+        for _ in range(3):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": audio_b64(frame)}
+            )
+        while True:
+            if socket.receive_json()["type"] == "input_audio_buffer.speech_started":
+                break
+
+        # Three silent frames: the third emits speech_ended and commits. Every
+        # chunk, including the commit chunk, must have reached the ASR session.
+        for _ in range(3):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": audio_b64(silence)}
+            )
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+            if event["type"] == "error":
+                raise AssertionError(f"unexpected error event: {event}")
+
+        received = [chunk for session in factory.sessions for chunk in session.received]
+        assert len(received) == 6, f"expected all 6 chunks appended, got {len(received)}"
+        assert len(factory.released) == 1
