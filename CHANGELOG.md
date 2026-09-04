@@ -4,6 +4,19 @@
 
 ### Fixed
 
+- **diarization 模型空闲自动卸载**：`NemoSortformerEngine` 现实现 `EvictableWorker`
+  协议（`alive`/`last_active`/`async close`）并纳入 `WorkerIdleEvictor`。分人模型
+  首次使用后 ~0.5GB 主服务常驻不再永久占用：空闲即卸载，下一次分人请求经加载锁
+  惰性重载；in-flight 推理持局部引用不受卸载影响。`EvictableWorker` 标记
+  `@runtime_checkable` 以便组装期类型收窄。
+- **Realtime ASR reader 静默死亡可见**：`_drain_asr_events` 的
+  `except Exception: pass` 改为记录异常日志并发送 `transcription_failed`
+  （`backend_error`），客户端不再在 reader 死亡后误认为 ASR 仍存活。
+- **Realtime 客户端事件队列有界**：`client_events` 上限 64 个事件。handler 停滞
+  （如被阻塞的后端调用卡住）时，溢出将关闭会话（close 1013 `event queue overflow`）
+  而非无界堆积 base64 音频。
+- **`/v1/models` 补 OpenAI `created` 字段**：全部 Model 条目补 `created: 0`
+  （契约 `required` 与响应示例同步），严格解析的 OpenAI SDK 客户端不再缺字段。
 - **批量 ASR worker 崩溃后自动重建（单次重试）**：`Qwen3Worker.transcribe` 此前在 worker
   进程死亡后因 `_identity` 未重置而对后续所有请求持续失败，只能等 300s 空闲卸载兜底。
   现在传输层故障（坏管道/截断帧/帧失步）会关闭并重建 worker 后重试一次；推理超时则
@@ -26,6 +39,8 @@
 
 ### Changed
 
+- **`create_breath_pause` 结果缓存**：realtime TTS 每句重复生成的静音 PCM 按
+  `(sample_rate, pause_ms)` 以 `lru_cache` 缓存，消除逐句重复分配。
 - **批量 REST 接入 ResourceGovernor**：`/v1/audio/transcriptions` 与 `/v1/audio/speech`
   此前绕过 governor，realtime 预留容量对最大负载不生效。现分别走
   `BATCH_ASR` / `BATCH_TTS`（governor 外层 + admission 内层，deadline 均为
