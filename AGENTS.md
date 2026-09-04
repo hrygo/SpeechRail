@@ -15,7 +15,7 @@ SpeechRail 是供 QwenPaw、`sona`、Hermes Agent 及未来应用共享的
 
 ### 设计原则
 
-- **本地优先**：默认 loopback、外部模型快照、请求期间处理音频，不把本机服务当作公网平台。
+- **本地优先**：默认 loopback、外部模型快照，不把本机服务当作公网平台。
 - **单人但允许有界并行**：队列、Resource Governor、超时和背压用于保护本机资源，不代表多租户或分布式需求。
 - **能力按需启用**：TTS、`jobs`、diarization 和 LAN 暴露均须有明确消费者与验收证据，默认关闭或保持最小边界。
 - **职责不外溢**：不把 `sona` 的会议、数据库、UI、播放或 LLM 编排移入 SpeechRail。
@@ -91,8 +91,7 @@ FastAPI app（认证、request ID、输入校验、协议状态机、格式化�
 主进程负责公共边界和调度；Qwen3/TTS 的模型 SDK 与权重留在隔离的专用 Python worker。
 当前可选 NeMo diarization adapter 是例外：它由
 `diarization` extra 提供依赖，并在服务进程中按需加载仓库外模型；它仍必须保持有界、
-匿名且不进入 domain。请求路径不下载模型、不读取远程音频 URL，默认不持久化音频、PCM、
-embedding 或完整转写正文。
+匿名且不进入 domain。请求路径不下载模型、不读取远程音频 URL。
 
 #### 目录职责
 
@@ -141,8 +140,7 @@ embedding 或完整转写正文。
 - 默认绑定 loopback。绑定 LAN 时必须启用 API key，并明确配置允许的
   origin 策略。
 - 模型快照使用外部绝对路径。请求处理期间不得下载模型或静默访问网络。
-- 音频默认只在请求期间存在。不得持久化源音频，也不得在日志中记录原始
-  转写正文。
+- 不得在日志中记录原始转写正文。
 - 对外模型名与具体模型实现解耦。`qwen3-asr-1.7b` 是后端 profile，不能
   因此重命名服务或 API。
 - 不要把 `sona` 的会议、UI、TTS、LM Studio 或 PostgreSQL 职责
@@ -171,7 +169,7 @@ embedding 或完整转写正文。
   `server_vad`（`{"type":"server_vad","threshold","prefix_padding_ms","silence_duration_ms"}`）。
 - `/v1/realtime` 只承载 ASR/TTS，不承载 LLM response、tool call、播放、会议和应用打断策略；
   事件 envelope、背压、取消和不可恢复 session 规则以 `contracts/realtime-openai.md` 为准。
-- 断线后创建新 session/source epoch；服务端不保存、不重放旧音频或事件。
+- 断线后创建新 session/source epoch。
 
 #### Diarization 约束
 
