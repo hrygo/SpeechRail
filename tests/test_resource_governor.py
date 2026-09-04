@@ -170,3 +170,9 @@ def test_governor_queue_full_fires_rejection_metric_callback() -> None:
         assert 'reason="queue_full"' in text
 
     asyncio.run(scenario())
+
+
+def test_settings_reject_audio_seconds_beyond_worker_frame_limit() -> None:
+    """max_audio_seconds that cannot be shipped to the worker must fail at startup."""
+    with pytest.raises(ValueError, match="frame limit"):
+        Settings(max_audio_seconds=5000, qwen3_model_dir=None, qwen3_python=None)

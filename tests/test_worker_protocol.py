@@ -172,3 +172,8 @@ def test_worker_handles_binary_payload_transcribe() -> None:
     assert read_frame(outgoing)["type"] == "ready"
     assert read_frame(outgoing)["type"] == "result"
 
+
+
+def test_frame_limit_accommodates_max_audio_seconds_default() -> None:
+    """One hour of 16kHz mono PCM16 plus JSON header slack fits a single frame."""
+    assert MAX_FRAME_BYTES >= 3600 * 32_000 + 4096

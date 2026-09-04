@@ -7,7 +7,9 @@ import struct
 from collections.abc import Mapping
 from typing import BinaryIO
 
-MAX_FRAME_BYTES = 64 * 1024 * 1024
+# Sized so the default max_audio_seconds (3600s of 16kHz mono PCM16 = 115.2MB)
+# plus the JSON header slack fits a single frame; Settings rejects larger values.
+MAX_FRAME_BYTES = 128 * 1024 * 1024
 PROTOCOL_VERSION = 1
 
 

@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.domain.tts import VOICE_PROFILES
+from speechrail.runtime.worker_protocol import MAX_FRAME_BYTES
 
 
 class Settings(BaseSettings):
@@ -127,6 +128,11 @@ class Settings(BaseSettings):
                 )
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
+        if self.max_audio_seconds * 32_000 + 4096 > MAX_FRAME_BYTES:
+            raise ValueError(
+                "max_audio_seconds exceeds the worker IPC frame limit; lower it below "
+                f"{(MAX_FRAME_BYTES - 4096) // 32_000} seconds"
+            )
         if (
             self.diarization_embedding_model_path is not None
             and self.diarization_model_path is None
