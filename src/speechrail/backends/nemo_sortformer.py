@@ -10,6 +10,7 @@ import ast
 import asyncio
 import importlib.util
 import threading
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,10 +51,30 @@ class NemoSortformerEngine:
         # Restore runs in worker threads (asyncio.to_thread); serialize the first
         # load so concurrent diarization requests cannot each load a full model.
         self._load_lock = threading.Lock()
-        self._diarize = diarize or self._load_local_model
+        self.last_active = time.monotonic()
+        self._diarize = self._track_activity(diarize or self._load_local_model)
         self._embedding = embedding
         self._centroids = centroids
         self._readiness = self._check_readiness(diarize=diarize, embedding=embedding)
+
+    @property
+    def alive(self) -> bool:
+        """Whether model weights are resident (the idle evictor's unload signal)."""
+        return self._model is not None
+
+    async def close(self) -> None:
+        """Drop resident weights; the next diarize reloads them lazily."""
+        with self._load_lock:
+            self._model = None
+
+    def _track_activity(self, inner: NativeDiarize) -> NativeDiarize:
+        """Stamp last_active on every diarize call for the idle evictor."""
+
+        def run(samples: Sequence[float]) -> list[list[str]]:
+            self.last_active = time.monotonic()
+            return inner(samples)
+
+        return run
 
     @property
     def readiness(self) -> DiarizationReadiness:
@@ -85,15 +106,17 @@ class NemoSortformerEngine:
             raise DiarizationError(
                 "diarization runtime is not installed", code="diarization_not_available"
             ) from exc
-        if self._model is None:
-            with self._load_lock:
-                if self._model is None:
-                    self._model = SortformerEncLabelModel.restore_from(
-                        str(self._model_path), map_location="cpu"
-                    ).eval()
+        with self._load_lock:
+            if self._model is None:
+                self._model = SortformerEncLabelModel.restore_from(
+                    str(self._model_path), map_location="cpu"
+                ).eval()
+            model = self._model
+        # Keep a local reference: an idle eviction may drop self._model while
+        # this in-flight inference is running; it completes on the local ref.
         return cast(
             list[list[str]],
-            self._model.diarize(
+            model.diarize(
                 np.asarray(samples, dtype=np.float32), sample_rate=16_000, verbose=False
             ),
         )

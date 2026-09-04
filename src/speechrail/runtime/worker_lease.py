@@ -8,7 +8,7 @@ import enum
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 class WorkerLifecycleState(enum.StrEnum):
@@ -17,6 +17,7 @@ class WorkerLifecycleState(enum.StrEnum):
     COLD_EVICTED = "cold_evicted"
 
 
+@runtime_checkable
 class EvictableWorker(Protocol):
     """Narrow interface for an inference worker that can be inspected and closed on idle."""
 

@@ -38,7 +38,7 @@ from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRepository
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
-from speechrail.runtime.worker_lease import WorkerIdleEvictor
+from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
 
@@ -287,9 +287,17 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
 
     evictor: WorkerIdleEvictor | None = None
     if settings.worker_idle_timeout_seconds > 0:
-        evictable = tuple(
+        # The in-service diarization engine participates in idle eviction too:
+        # once resident it holds ~0.5GB in the host process and is otherwise
+        # never released. Its close() drops the weights; the next diarize
+        # reloads lazily under the load lock. The domain DiarizationEngine
+        # protocol intentionally knows nothing about lifecycle, so the engine
+        # is narrowed to the runtime EvictableWorker protocol it implements.
+        evictable: list[EvictableWorker] = [
             w for w in (asr_worker, tts_worker, streaming_worker) if w is not None
-        )
+        ]
+        if isinstance(diarization_engine, EvictableWorker):
+            evictable.append(diarization_engine)
         if evictable:
             evictor = WorkerIdleEvictor(
                 evictable,
