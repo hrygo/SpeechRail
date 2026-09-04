@@ -41,13 +41,18 @@ def worker_pids() -> dict[str, int]:
 
         if "speechrail serve" in line or "python -m speechrail serve" in line:
             found["host-fastapi"] = pid
-        elif "speechrail.backends.qwen3" in line:
-            if "qwen3_worker" in line and "streaming" not in line:
-                found["batch-asr"] = pid
-            elif "qwen3_streaming_worker" in line or "streaming_worker" in line:
-                found["streaming-asr"] = pid
-            elif "qwen3_tts_worker" in line:
-                found["tts"] = pid
+        elif "speechrail.backends.qwen3_tts_worker" in line:
+            found["tts"] = pid
+        elif "--worker-role streaming" in line:
+            # batch and streaming run the same worker module; attribute by the
+            # self-description --worker-role tag rather than module name, which
+            # is identical for both (a native streaming worker would otherwise
+            # be mis-matched as batch-asr and double-count the footprint).
+            found["streaming-asr"] = pid
+        elif "speechrail.backends.qwen3_worker" in line:
+            found["batch-asr"] = pid
+        elif "qwen3_streaming_worker" in line or "streaming_worker" in line:
+            found["streaming-asr"] = pid
     return found
 
 

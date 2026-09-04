@@ -77,6 +77,7 @@ class Qwen3StreamingBackendConfig:
     stable_iterations: int = 2
     max_new_tokens: int = 256
     timeout_seconds: float = 120.0
+    worker_role: str = "streaming"
 
     def __post_init__(self) -> None:
         if self.mode not in _MODE_NAMES:
@@ -117,6 +118,8 @@ class Qwen3StreamingBackendConfig:
             str(self.max_new_tokens),
             "--cache-limit-mb",
             str(self.cache_limit_mb),
+            "--worker-role",
+            self.worker_role,
         ]
         if self.memory_limit_mb > 0:
             cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])

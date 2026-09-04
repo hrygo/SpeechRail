@@ -357,3 +357,20 @@ def test_transcribe_timeout_kills_worker_without_retry(tmp_path: Path) -> None:
     assert fake.aborted is True
     assert worker._identity is None
     assert fake.starts == 1
+
+
+def test_batch_config_command_self_describes_worker_role(tmp_path: Path) -> None:
+    """batch worker must carry --worker-role batch so tooling can attribute it."""
+    snapshot = tmp_path / "external-qwen3-asr-snapshot"
+    snapshot.mkdir()
+    for filename in (*MODEL_FILES, "model.safetensors"):
+        (snapshot / filename).touch()
+    config = Qwen3BackendConfig(
+        repository_root=Path(__file__).resolve().parents[1],
+        python_executable=Path(executable),
+        model_dir=snapshot,
+        device="mps",
+        dtype="int8",
+    )
+    cmd = config.command()
+    assert "--worker-role" in cmd and cmd[cmd.index("--worker-role") + 1] == "batch"

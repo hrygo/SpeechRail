@@ -592,6 +592,7 @@ def test_streaming_command_passes_dtype_and_metal_limits(tmp_path: Path) -> None
     assert "--cache-limit-mb" in cmd
     assert cmd[cmd.index("--cache-limit-mb") + 1] == "256"
     assert "--memory-limit-mb" not in cmd  # only added when memory_limit_mb > 0
+    assert "--worker-role" in cmd and cmd[cmd.index("--worker-role") + 1] == "streaming"
 
 
 def test_backend_config_rejects_invalid_dtype_for_device(tmp_path: Path) -> None:

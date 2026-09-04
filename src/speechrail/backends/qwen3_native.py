@@ -164,6 +164,7 @@ class Qwen3BackendConfig:
     memory_limit_mb: int = 0
     timeout_seconds: float = 120.0
     max_new_tokens: int = 512
+    worker_role: str = "batch"
 
     def __post_init__(self) -> None:
         repository_root = self.repository_root.resolve(strict=True)
@@ -199,6 +200,8 @@ class Qwen3BackendConfig:
             str(self.max_new_tokens),
             "--cache-limit-mb",
             str(self.cache_limit_mb),
+            "--worker-role",
+            self.worker_role,
         ]
         if self.memory_limit_mb > 0:
             cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])

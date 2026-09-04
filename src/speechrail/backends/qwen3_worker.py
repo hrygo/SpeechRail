@@ -768,6 +768,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--cache-limit-mb", type=int, default=256)
     parser.add_argument("--memory-limit-mb", type=int, default=0)
+    # process self-description tag; serve() ignores it, tooling reads it
+    parser.add_argument(
+        "--worker-role", choices=("batch", "streaming"), default="batch"
+    )
     args = parser.parse_args(argv)
     os.environ.update(
         {
