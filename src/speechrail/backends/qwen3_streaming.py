@@ -322,9 +322,14 @@ class Qwen3StreamingSession(RealtimeAsrSession):
             {"version": PROTOCOL_VERSION, "type": "flush", "session_id": self._session_id}
         )
 
-    async def commit(self) -> None:
+    async def commit(self, want_segments: bool = False) -> None:
         await self._worker.send(
-            {"version": PROTOCOL_VERSION, "type": "commit", "session_id": self._session_id}
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "commit",
+                "session_id": self._session_id,
+                "want_segments": want_segments,
+            }
         )
         await self._finished.wait()
 

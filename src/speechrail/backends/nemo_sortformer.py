@@ -265,15 +265,10 @@ def _parse_activities(
         )
     activities: list[tuple[int, int, int]] = []
     for encoded in raw[0]:
-        try:
-            start, end, speaker = ast.literal_eval(encoded)
-            start_ms = int(float(start) * 1000)
-            end_ms = int(float(end) * 1000)
-            speaker_index = int(speaker)
-        except (SyntaxError, TypeError, ValueError) as exc:
-            raise DiarizationError(
-                "diarization returned an invalid activity", code="diarization_invalid_output"
-            ) from exc
+        start, end, speaker = _parse_activity_token(encoded)
+        start_ms = int(float(start) * 1000)
+        end_ms = int(float(end) * 1000)
+        speaker_index = _speaker_index(speaker)
         if (
             start_ms < 0
             or end_ms <= start_ms
@@ -283,6 +278,50 @@ def _parse_activities(
             continue
         activities.append((start_ms + offset_ms, end_ms + offset_ms, speaker_index))
     return tuple(activities)
+
+
+def _parse_activity_token(encoded: str) -> tuple[float, float, str]:
+    """Parses one Sortformer activity token into ``(start_s, end_s, speaker_label)``.
+
+    Sortformer ``diarize`` emits space-separated ``"<start> <end> speaker_N"``
+    tokens (e.g. ``"0.000 2.320 speaker_0"``).  Older/newer profiles may emit
+    Python tuple/list literals, so those are accepted too.
+    """
+    stripped = encoded.strip()
+    if not stripped:
+        raise DiarizationError(
+            "diarization returned an invalid activity", code="diarization_invalid_output"
+        )
+    if " " in stripped and not stripped.startswith(("[", "(")):
+        parts = stripped.split()
+        if len(parts) >= 3:
+            try:
+                return float(parts[0]), float(parts[1]), parts[2]
+            except ValueError:
+                raise DiarizationError(
+                    "diarization returned an invalid activity",
+                    code="diarization_invalid_output",
+                ) from None
+    if stripped.startswith(("[", "(")):
+        try:
+            values = ast.literal_eval(stripped)
+        except (SyntaxError, TypeError, ValueError) as exc:
+            raise DiarizationError(
+                "diarization returned an invalid activity", code="diarization_invalid_output"
+            ) from exc
+        if isinstance(values, (list, tuple)) and len(values) >= 3:
+            return float(values[0]), float(values[1]), str(values[2])
+    raise DiarizationError(
+        "diarization returned an invalid activity", code="diarization_invalid_output"
+    )
+
+
+def _speaker_index(speaker: str) -> int:
+    """Extracts the zero-based speaker index from ``speaker_0`` / ``spk_1`` / ``0``."""
+    label = speaker.strip()
+    if label.startswith(("spk_", "speaker_")):
+        return int(label.rsplit("_", 1)[1])
+    return int(label)
 
 
 def _assign(

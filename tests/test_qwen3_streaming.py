@@ -447,6 +447,58 @@ def test_session_proxies_open_and_streams_events() -> None:
     asyncio.run(scenario())
 
 
+def test_session_commit_propagates_want_segments_true() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+        worker.push("sess_test", {"type": "finished", "session_id": "sess_test", "final": True})
+        await asyncio.sleep(0)
+        await session.commit(want_segments=True)
+        commits = [f for f in worker.sent if f.get("type") == "commit"]
+        assert commits and commits[-1].get("want_segments") is True
+        await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_commit_defaults_want_segments_false() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+        worker.push("sess_test", {"type": "finished", "session_id": "sess_test", "final": True})
+        await asyncio.sleep(0)
+        await session.commit()
+        commits = [f for f in worker.sent if f.get("type") == "commit"]
+        assert commits and commits[-1].get("want_segments") is False
+        await session.close()
+
+    asyncio.run(scenario())
+
+
 async def _collect(
     session: Qwen3StreamingSession,
     out: list[StreamingAsrEvent],

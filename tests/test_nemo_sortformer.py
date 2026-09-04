@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 
-from speechrail.backends.nemo_sortformer import NemoSortformerEngine
+from speechrail.backends.nemo_sortformer import (
+    NemoSortformerEngine,
+    _parse_activities,
+    _speaker_index,
+)
 from speechrail.domain.contracts import TranscriptSegment
-from speechrail.domain.diarization import DiarizationConfig
+from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 
 
@@ -83,3 +87,31 @@ def test_nemo_sortformer_translates_local_model_offsets_to_stream_timeline() -> 
         assert second.assignments[0].primary_speaker_id == "spk_01"
 
     asyncio.run(scenario())
+
+
+def test_parse_activities_accepts_space_separated_sortformer_tokens() -> None:
+    raw = [["0.000 2.320 speaker_0", "4.240 8.070 speaker_0", "2.560 4.160 speaker_1"]]
+    parsed = _parse_activities(raw, hint=2, offset_ms=0)
+    assert parsed == ((0, 2320, 0), (4240, 8070, 0), (2560, 4160, 1))
+
+
+def test_parse_activities_still_accepts_python_list_literals() -> None:
+    raw = [["[0.0, 0.45, 0]", "(0.45, 1.00, 1)"]]
+    parsed = _parse_activities(raw, hint=2, offset_ms=0)
+    assert parsed == ((0, 450, 0), (450, 1000, 1))
+
+
+def test_parse_activities_raises_on_invalid_token() -> None:
+    raw = [["not a valid token"]]
+    try:
+        _parse_activities(raw, hint=2, offset_ms=0)
+    except DiarizationError as exc:
+        assert exc.code == "diarization_invalid_output"
+    else:
+        raise AssertionError("expected DiarizationError")
+
+
+def test_speaker_index_normalizes_labels() -> None:
+    assert _speaker_index("speaker_0") == 0
+    assert _speaker_index("spk_1") == 1
+    assert _speaker_index("0") == 0

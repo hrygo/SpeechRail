@@ -166,6 +166,8 @@ class WorkerEngine(Protocol):
 
     def finish_streaming(self, session_id: str) -> tuple[str, str]: ...
 
+    def align_session_audio(self, session_id: str) -> list[dict[str, object]]: ...
+
     def close_session(self, session_id: str) -> None: ...
 
     def active_session_count(self) -> int: ...
@@ -415,12 +417,16 @@ def _handle_commit(
     if session_id is None or not engine.has_session(session_id):
         _write_error(output_stream, "session_invalid", session_id=session_id)
         return
+    want_segments = bool(frame.get("want_segments", False))
     try:
         text, language = engine.finish_streaming(session_id)
     except Exception:
         traceback.print_exc(file=sys.stderr)
         _write_error(output_stream, "worker_inference_error", session_id=session_id)
         return
+    segments: list[dict[str, object]] = []
+    if want_segments and text:
+        segments = engine.align_session_audio(session_id)
     if text:
         write_frame(
             output_stream,
@@ -431,7 +437,7 @@ def _handle_commit(
                 "kind": "completed",
                 "text": text,
                 "language": language or None,
-                "segments": [],
+                "segments": segments,
             },
         )
     write_frame(
@@ -565,6 +571,33 @@ def _segments(result: object) -> list[dict[str, object]]:
     return segments
 
 
+def _to_streaming_segments(raw: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Convert batch ``{text, start, end}`` (seconds) to streaming ``{text, start_ms, end_ms}``.
+
+    The batch ``_segments`` reports floating-point seconds; the streaming
+    ``completed`` frame and ``qwen3_streaming._segments`` expect integer
+    milliseconds.  Reusing seconds directly would read as ``start_ms=0``
+    (field-name mismatch falls back to ``or 0``), silently dropping timestamps.
+    """
+    streaming: list[dict[str, object]] = []
+    for item in raw:
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        raw_start = item.get("start")
+        raw_end = item.get("end")
+        start_s = float(raw_start) if isinstance(raw_start, (int, float)) else 0.0
+        end_s = float(raw_end) if isinstance(raw_end, (int, float)) else 0.0
+        streaming.append(
+            {
+                "text": text,
+                "start_ms": round(start_s * 1000),
+                "end_ms": round(end_s * 1000),
+            }
+        )
+    return streaming
+
+
 class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and isolated runtime.
     """Unified native MLX Qwen3-ASR engine for batch & streaming via ``mlx_qwen3_asr.Session``."""
 
@@ -611,6 +644,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         self._max_new_tokens = max_new_tokens
         self.identity = WorkerIdentity(device, resolved_dtype)
         self._streaming_states: dict[str, object] = {}
+        self._align_buffers: dict[str, bytearray] = {}
         _clear_metal_cache()
 
     def transcribe(
@@ -662,6 +696,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
         )
+        self._align_buffers[session_id] = bytearray()
 
     def append_audio(self, session_id: str, audio: bytes) -> str:
         import numpy as np
@@ -669,6 +704,11 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         state = self._streaming_states.get(session_id)
         if state is None:
             raise RuntimeError(f"no active session: {session_id}")
+        align = self._align_buffers.get(session_id)
+        if align is not None:
+            if len(align) + len(audio) > MAX_PCM_BYTES:
+                raise ValueError("align buffer limit exceeded")
+            align.extend(audio)
         waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
         state = self._session.feed_audio(waveform, state)
         self._streaming_states[session_id] = state
@@ -694,8 +734,24 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             language if isinstance(language, str) else ""
         )
 
+    def align_session_audio(self, session_id: str) -> list[dict[str, object]]:
+        audio = self._align_buffers.pop(session_id, None)
+        if not audio:
+            return []
+        try:
+            text, _language, raw = self.transcribe(
+                bytes(audio), language="auto", prompt="", include_timestamps=True
+            )
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            return []
+        if not text:
+            return []
+        return _to_streaming_segments(raw)
+
     def close_session(self, session_id: str) -> None:
         self._streaming_states.pop(session_id, None)
+        self._align_buffers.pop(session_id, None)
 
     def active_session_count(self) -> int:
         return len(self._streaming_states)

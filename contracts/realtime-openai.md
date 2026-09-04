@@ -87,5 +87,10 @@ ws://127.0.0.1:8201/v1/realtime
 下发相对上一窗口的增量增量切片（客户端直接追加无文本重复）；客户端亦以 `commit` 后的
 `completed` 作为最终全量结果。
 
+启用 diarization 时，`completed` 事件携带词级 `segments`（worker 对已累积音频做一次
+强制对齐，按 `{text, start_ms, end_ms}` 产出），WS 层据此按 segment 粒度发送
+`conversation.item.input_audio_transcription.segment`，每项含 `speaker`；**未启用
+diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无分人路径一致。
+
 `/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
 已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。

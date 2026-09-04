@@ -320,7 +320,7 @@ class OpenAIRealtimeSession:
             self._unflushed_bytes = 0
             return
         await self._send(input_audio_buffer_committed(session_id=self._session_id))
-        await self._asr.commit()
+        await self._asr.commit(want_segments=self._diarization is not None)
         if self._asr_reader is not None:
             await self._asr_reader
             self._asr_reader = None

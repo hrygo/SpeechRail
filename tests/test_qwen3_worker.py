@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from speechrail.backends.qwen3_worker import serve
+from speechrail.backends.qwen3_worker import _to_streaming_segments, serve
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
@@ -108,6 +108,10 @@ class _FakeEngine:
             raise RuntimeError(f"no active session: {session_id}")
         chunks = self.sessions.pop(session_id)
         return f"text:{len(chunks)}", "zh"
+
+    def align_session_audio(self, session_id: str) -> list[dict[str, object]]:
+        del session_id
+        return [{"text": "你好", "start_ms": 0, "end_ms": 500}]
 
     def close_session(self, session_id: str) -> None:
         self.sessions.pop(session_id, None)
@@ -211,6 +215,59 @@ def test_worker_commit_uses_only_that_sessions_audio() -> None:
     assert completed[0]["text"] == "text:2"
     assert engine.active_session_count() == 1
     assert list(engine.sessions) == ["b"]
+
+
+def test_worker_commit_want_segments_produces_segments() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    frames = [
+        _start_frame(),
+        {"version": PROTOCOL_VERSION, "type": "session.open", "session_id": "a", "language": "zh"},
+        {"version": PROTOCOL_VERSION, "type": "audio.append", "session_id": "a", "pcm_b64": "AAA="},
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "commit",
+            "session_id": "a",
+            "want_segments": True,
+        },
+    ]
+    responses = _run_serve(frames, engine=engine)
+    completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
+    assert len(completed) == 1
+    assert completed[0]["segments"] == [{"text": "你好", "start_ms": 0, "end_ms": 500}]
+
+
+def test_worker_commit_without_want_segments_keeps_empty() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    frames = [
+        _start_frame(),
+        {"version": PROTOCOL_VERSION, "type": "session.open", "session_id": "a", "language": "zh"},
+        {"version": PROTOCOL_VERSION, "type": "audio.append", "session_id": "a", "pcm_b64": "AAA="},
+        {"version": PROTOCOL_VERSION, "type": "commit", "session_id": "a"},
+    ]
+    responses = _run_serve(frames, engine=engine)
+    completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
+    assert len(completed) == 1
+    assert completed[0]["segments"] == []
+
+
+def test_to_streaming_segments_converts_seconds_to_milliseconds() -> None:
+    raw = [
+        {"text": "你好", "start": 0.0, "end": 0.5},
+        {"text": "   ", "start": 0.5, "end": 1.0},
+        {"text": "世界", "start": 1.5, "end": 2.75},
+    ]
+    assert _to_streaming_segments(raw) == [
+        {"text": "你好", "start_ms": 0, "end_ms": 500},
+        {"text": "世界", "start_ms": 1500, "end_ms": 2750},
+    ]
+
+
+def test_to_streaming_segments_drops_missing_or_empty_text() -> None:
+    raw = [
+        {"text": "", "start": 0.0, "end": 0.5},
+        {"text": "ok", "start": 0.5, "end": 1.0},
+    ]
+    assert _to_streaming_segments(raw) == [{"text": "ok", "start_ms": 500, "end_ms": 1000}]
 
 
 def test_worker_cancel_closes_only_that_session() -> None:

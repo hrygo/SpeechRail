@@ -88,6 +88,7 @@ class FakeStreamingSession:
         self.flush_partials = list(flush_partials)
         self.flushes = 0
         self.received: list[bytes] = []
+        self.want_segments = False
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
         self._finished = asyncio.Event()
 
@@ -103,7 +104,8 @@ class FakeStreamingSession:
             text = self.flush_partials.pop(0)
             await self.events_queue.put(StreamingAsrEvent(kind="partial", text=text))
 
-    async def commit(self) -> None:
+    async def commit(self, want_segments: bool = False) -> None:
+        self.want_segments = want_segments
         for partial in self.partials:
             await self.events_queue.put(StreamingAsrEvent(kind="partial", text=partial))
         await self.events_queue.put(
@@ -170,7 +172,8 @@ class RejectingLanguageStreamingFactory(FakeStreamingFactory):
 class _EarlyCompletionSession(FakeStreamingSession):
     """Emits final events while commit() is still awaiting the backend ack."""
 
-    async def commit(self) -> None:
+    async def commit(self, want_segments: bool = False) -> None:
+        self.want_segments = want_segments
         await self.events_queue.put(
             StreamingAsrEvent(kind="completed", text="你好", language="zh", segments=self.segments)
         )
@@ -422,7 +425,7 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
 def test_openai_diarized_model_alias_enables_diarization() -> None:
     engine = FakeDiarizationEngine()
     segment = TranscriptSegment(id=1, start_ms=0, end_ms=500, text="你好")
-    client, _ = _client(segments=(segment,), diarization_engine=engine)
+    client, factory = _client(segments=(segment,), diarization_engine=engine)
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
         socket.receive_json()
@@ -446,6 +449,31 @@ def test_openai_diarized_model_alias_enables_diarization() -> None:
 
     assert len(engine.sessions) == 1
     assert any(event["type"].endswith(".segment") for event in events)
+    assert factory.sessions and factory.sessions[0].want_segments is True
+
+
+def test_openai_commit_without_diarization_does_not_request_segments() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "session.update", "session": {"model": "whisper-1"}}
+        )
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    assert factory.sessions and factory.sessions[0].want_segments is False
+    assert not any(event["type"].endswith(".segment") for event in events)
 
 
 def test_openai_realtime_rejects_a_frame_over_the_configured_limit() -> None:
@@ -662,7 +690,8 @@ class _BlockedCommitSession(FakeStreamingSession):
     async def connect(self) -> None:
         return None
 
-    async def commit(self) -> None:
+    async def commit(self, want_segments: bool = False) -> None:
+        del want_segments
         await asyncio.Event().wait()
 
 
