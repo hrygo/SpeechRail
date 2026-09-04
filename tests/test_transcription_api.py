@@ -300,3 +300,198 @@ def test_transcription_rejects_audio_exceeding_max_audio_seconds() -> None:
     assert payload["error"]["code"] == "audio_too_long"
     assert payload["error"]["param"] == "file"
     assert "exceeds maximum limit" in payload["error"]["message"]
+
+
+def _lane_services(**settings_kwargs):
+    import threading
+
+    from speechrail.application.services import AppOverrides, build_app_services
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    def _blocking_backend(_, __, ___, ____=False):
+        import asyncio
+
+        async def result():
+            entered.set()
+            await asyncio.to_thread(release.wait, 10)
+            return TranscriptResult(
+                request_id="backend",
+                model_id="speechrail/qwen3-asr-1.7b",
+                text="hello",
+                language="en",
+                duration_ms=1000,
+            )
+
+        return result()
+
+    settings = Settings(
+        max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None, **settings_kwargs
+    )
+    services = build_app_services(settings, AppOverrides(transcribe=_blocking_backend))
+    return services, release, entered
+
+
+def _bare_audio_app(services):
+    from fastapi import FastAPI
+
+    from speechrail.http.errors import RequestIdMiddleware
+    from speechrail.http.routes.audio import create_audio_router
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.include_router(create_audio_router(services))
+    return TestClient(app)
+
+
+def test_batch_transcription_holds_governor_batch_lane() -> None:
+    """The REST transcription path must consume the governor's BATCH_ASR lane."""
+    import threading
+    import time
+
+    services, release, entered = _lane_services()
+    client = _bare_audio_app(services)
+
+    responses: list = []
+
+    def do_post() -> None:
+        responses.append(
+            client.post(
+                "/v1/audio/transcriptions",
+                files={"file": ("clip.wav", b"1234", "audio/wav")},
+            )
+        )
+
+    thread = threading.Thread(target=do_post)
+    thread.start()
+    assert entered.wait(5.0), "blocking transcription never entered the backend"
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if services.governor.snapshot().active_batch == 1:
+            break
+        time.sleep(0.01)
+    assert services.governor.snapshot().active_batch == 1, (
+        "batch transcription bypassed the ResourceGovernor"
+    )
+
+    release.set()
+    thread.join(10)
+    assert responses[0].status_code == 200
+
+
+def test_batch_speech_holds_governor_batch_tts_lane() -> None:
+    """The REST speech path must consume the governor's BATCH_TTS lane."""
+    import asyncio
+    import threading
+    import time
+
+    from speechrail.application.services import AppOverrides, build_app_services
+    from speechrail.domain.ports import AudioChunk
+
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _BlockingTts:
+        def synthesize(self, request):
+            async def chunks():
+                entered.set()
+                await asyncio.to_thread(release.wait, 10)
+                yield AudioChunk(response_id="r", chunk_index=0, audio=b"\x00\x00" * 64)
+
+            return chunks()
+
+    settings = Settings(qwen3_model_dir=None, qwen3_python=None)
+    services = build_app_services(
+        settings, AppOverrides(tts_synthesizer=_BlockingTts())
+    )
+    client = _bare_audio_app(services)
+
+    responses: list = []
+
+    def do_post() -> None:
+        responses.append(
+            client.post(
+                "/v1/audio/speech",
+                json={
+                    "model": "tts-1",
+                    "input": "hello",
+                    "voice": "default",
+                    "response_format": "wav",
+                },
+            )
+        )
+
+    thread = threading.Thread(target=do_post)
+    thread.start()
+    assert entered.wait(5.0), "blocking synthesis never entered the backend"
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if services.governor.snapshot().active_batch >= 1:
+            break
+        time.sleep(0.01)
+    assert services.governor.snapshot().active_batch >= 1, (
+        "batch speech bypassed the ResourceGovernor"
+    )
+
+    release.set()
+    thread.join(10)
+    assert responses[0].status_code == 200
+
+
+def test_governor_queue_full_maps_to_429_queue_full() -> None:
+    """A governor queue overflow on the REST path returns 429 with Retry-After.
+
+    All requests share one event loop (httpx ASGI transport) because the
+    governor's admission condition is bound to the loop that uses it.
+    """
+    import asyncio
+    import time
+
+    import httpx
+
+    services, release, entered = _lane_services(
+        runtime_total_capacity=2,
+        realtime_reserved_capacity=1,
+        runtime_max_pending_per_class=1,
+    )
+    from fastapi import FastAPI
+
+    from speechrail.http.errors import RequestIdMiddleware
+    from speechrail.http.routes.audio import create_audio_router
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.include_router(create_audio_router(services))
+
+    async def scenario() -> list[int]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+
+            async def post() -> int:
+                response = await client.post(
+                    "/v1/audio/transcriptions",
+                    files={"file": ("clip.wav", b"1234", "audio/wav")},
+                )
+                return response.status_code
+
+            first_task = asyncio.create_task(post())
+            await asyncio.to_thread(entered.wait, 5.0)
+            assert entered.is_set(), "blocking transcription never entered"
+
+            other_tasks = [asyncio.create_task(post()) for _ in range(2)]
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                one_rejected = sum(task.done() for task in other_tasks) >= 1
+                if one_rejected and services.governor.snapshot().pending_batch == 1:
+                    break
+                await asyncio.sleep(0.01)
+            release.set()
+            first_code = await first_task
+            other_results = await asyncio.gather(*other_tasks)
+            return [first_code, *other_results]
+
+    codes = sorted(asyncio.run(scenario()))
+    assert codes == [200, 200, 429], codes

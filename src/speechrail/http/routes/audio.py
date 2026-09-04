@@ -29,6 +29,7 @@ from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.runtime.admission import QueueFullError
+from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
@@ -428,8 +429,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
             _t0 = _time.monotonic()
-            result = await services.admission.run(
-                lambda: transcribe(audio, language, effective_prompt, want_timestamps),
+            # Batch REST work flows through the governor so the realtime
+            # reservation cannot be starved by concurrent uploads.
+            result = await services.governor.run(
+                lambda: services.admission.run(
+                    lambda: transcribe(audio, language, effective_prompt, want_timestamps),
+                    deadline=resolved.request_timeout_seconds,
+                ),
+                WorkClass.BATCH_ASR,
                 deadline=resolved.request_timeout_seconds,
             )
             _inference_sec = _time.monotonic() - _t0
@@ -437,6 +444,18 @@ def create_audio_router(services: AppServices) -> APIRouter:
             _audio_sec = len(audio) / 32_000
             services.metrics.record_asr(_audio_sec, _inference_sec)
         except QueueFullError:
+            return JSONResponse(
+                status_code=429,
+                content=error(
+                    message="Inference queue is full",
+                    error_type="server_error",
+                    code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except GovernorQueueFullError:
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -545,8 +564,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         )
 
         async def audio_stream() -> AsyncIterator[bytes]:
-            async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
-                yield chunk.audio
+            # Batch TTS flows through the governor so it cannot consume the
+            # reserved realtime TTS lane; the reserve is held while the stream
+            # is consumed and released as soon as the generator closes.
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS, deadline=resolved.request_timeout_seconds
+            ):
+                async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
+                    yield chunk.audio
 
         if body.response_format == "pcm":
             pcm_stream = audio_stream()
@@ -560,6 +585,22 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     exc.code,
                     "TTS backend delivered an invalid audio stream",
                     retryable=True,
+                )
+            except GovernorQueueFullError:
+                return JSONResponse(
+                    status_code=429,
+                    content=error(
+                        message="Inference queue is full",
+                        error_type="server_error",
+                        code="queue_full",
+                        request_id=request_id,
+                        retryable=True,
+                    ),
+                    headers={"Retry-After": "1"},
+                )
+            except TimeoutError:
+                return error_response(
+                    503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
             if not first:
                 return error_response(
@@ -602,6 +643,22 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 exc.code,
                 "TTS backend delivered an invalid audio stream",
                 retryable=True,
+            )
+        except GovernorQueueFullError:
+            return JSONResponse(
+                status_code=429,
+                content=error(
+                    message="Inference queue is full",
+                    error_type="server_error",
+                    code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except TimeoutError:
+            return error_response(
+                503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
         _tts_inference_sec = _time.monotonic() - _tts_t0
         if not pcm:
