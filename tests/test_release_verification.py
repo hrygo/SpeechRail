@@ -20,7 +20,7 @@ def _wheel(path: Path) -> None:
         for name in (
             "speechrail/__main__.py",
             "speechrail/cli.py",
-            "speechrail-1.6.6.dist-info/METADATA",
+            "speechrail-1.6.7.dist-info/METADATA",
         ):
             archive.writestr(name, "")
 

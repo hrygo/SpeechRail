@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.6.7] - 2026-09-05
+
 ### Fixed
 
 - **diarization 模型空闲自动卸载**：`NemoSortformerEngine` 现实现 `EvictableWorker`
