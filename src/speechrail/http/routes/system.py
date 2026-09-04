@@ -56,18 +56,30 @@ def create_system_router(services: AppServices) -> APIRouter:
         asr_target = resolved.model_id
         tts_target = resolved.tts_model_id
         data: list[dict[str, Any]] = [
-            {"id": asr_target, "object": "model", "owned_by": "speechrail"},
-            {"id": tts_target, "object": "model", "owned_by": "speechrail"},
+            {"id": asr_target, "object": "model", "owned_by": "speechrail", "created": 0},
+            {"id": tts_target, "object": "model", "owned_by": "speechrail", "created": 0},
         ]
         for alias, target in sorted(asr_model_aliases().items()):
             if alias in diarization_model_aliases() and not services.diarization_ready:
                 continue
             data.append(
-                {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}
+                {
+                    "id": alias,
+                    "object": "model",
+                    "owned_by": "speechrail",
+                    "created": 0,
+                    "resolves_to": target,
+                }
             )
         for alias, target in sorted(tts_model_aliases().items()):
             data.append(
-                {"id": alias, "object": "model", "owned_by": "speechrail", "resolves_to": target}
+                {
+                    "id": alias,
+                    "object": "model",
+                    "owned_by": "speechrail",
+                    "created": 0,
+                    "resolves_to": target,
+                }
             )
         for compat in resolved.compatibility_model_ids:
             if compat in diarization_model_aliases() and not services.diarization_ready:
@@ -81,6 +93,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     "id": compat,
                     "object": "model",
                     "owned_by": "speechrail",
+                    "created": 0,
                     "resolves_to": asr_target,
                 }
             )

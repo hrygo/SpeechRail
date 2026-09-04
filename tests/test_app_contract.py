@@ -53,6 +53,9 @@ def test_models_exposes_canonical_model_and_compatibility_aliases() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["object"] == "list"
+    # OpenAI's Model schema carries a required `created` timestamp; strict SDK
+    # clients expect it on every entry.
+    assert all(item["created"] == 0 for item in payload["data"])
     by_id = {item["id"]: item for item in payload["data"]}
     assert "speechrail/qwen3-asr-1.7b" in by_id
     assert "Qwen3-ASR-1.7B" in by_id

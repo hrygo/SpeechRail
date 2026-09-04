@@ -125,20 +125,25 @@ paths:
                   - id: speechrail/qwen3-asr-1.7b
                     object: model
                     owned_by: speechrail
+                    created: 0
                   - id: speechrail/qwen3-tts
                     object: model
                     owned_by: speechrail
+                    created: 0
                   - id: whisper-1
                     object: model
                     owned_by: speechrail
+                    created: 0
                     resolves_to: speechrail/qwen3-asr-1.7b
                   - id: gpt-4o-transcribe
                     object: model
                     owned_by: speechrail
+                    created: 0
                     resolves_to: speechrail/qwen3-asr-1.7b
                   - id: tts-1
                     object: model
                     owned_by: speechrail
+                    created: 0
                     resolves_to: speechrail/qwen3-tts
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -396,7 +401,7 @@ components:
           enum: [sortformer, camplus, null]
     Model:
       type: object
-      required: [id, object, owned_by]
+      required: [id, object, owned_by, created]
       properties:
         id:
           type: string
@@ -406,6 +411,11 @@ components:
         owned_by:
           type: string
           const: speechrail
+        created:
+          type: integer
+          description: >
+            Unix timestamp of model registration. Always 0: local snapshots
+            carry no creation time (OpenAI SDK clients expect the field).
         resolves_to:
           type: string
           description: |
