@@ -213,6 +213,22 @@ def test_profile_apply_cancel_does_not_prepare_or_stop(
     assert cli.main(["profile", "apply", "light", "--app-home", str(tmp_path)]) == 1
 
 
+def test_noninteractive_profile_apply_requires_yes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from speechrail.service import profile_commands
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(
+        profile_commands,
+        "apply_profile",
+        lambda preset, app_home: pytest.fail("apply must not run"),
+    )
+
+    assert cli.main(["profile", "apply", "light", "--app-home", str(tmp_path)]) == 1
+    assert "--yes" in capsys.readouterr().err
+
+
 def test_service_error_is_redacted_and_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

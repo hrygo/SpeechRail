@@ -39,6 +39,12 @@ def test_catalog_lists_exact_three_tiers_and_balanced_to_light_only_changes_asr(
     assert model_changes(balanced, light) == frozenset({"asr"})
 
 
+def test_model_changes_accepts_the_public_mapping_shape() -> None:
+    old = {"asr": "large-q8", "tts": "small-custom-q8"}
+    new = {"asr": "small-q8", "tts": "small-custom-q8"}
+    assert model_changes(old, new) == frozenset({"asr"})
+
+
 @pytest.mark.parametrize(
     ("memory_gib", "expected"),
     [(8, "light"), (12, "balanced"), (16, "quality"), (64, "quality")],

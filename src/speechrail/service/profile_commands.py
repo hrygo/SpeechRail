@@ -73,9 +73,20 @@ def list_profiles(catalog: ModelCatalog | None = None) -> tuple[ProfileSummary, 
     return tuple(summaries)
 
 
-def model_changes(old: ProfileSummary, new: ProfileSummary) -> frozenset[str]:
+def _model_value(profile: ProfileSummary | Mapping[str, object], name: str) -> object:
+    if isinstance(profile, Mapping):
+        return profile.get(name)
+    return getattr(profile, name)
+
+
+def model_changes(
+    old: ProfileSummary | Mapping[str, object],
+    new: ProfileSummary | Mapping[str, object],
+) -> frozenset[str]:
     return frozenset(
-        name for name in ("asr", "tts") if getattr(old, name) != getattr(new, name)
+        name
+        for name in ("asr", "tts")
+        if _model_value(old, name) != _model_value(new, name)
     )
 
 

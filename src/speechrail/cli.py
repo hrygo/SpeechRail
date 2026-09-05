@@ -118,6 +118,9 @@ def _format_bytes(size: int) -> str:
 def _confirm(assume_yes: bool) -> bool:
     if assume_yes:
         return True
+    if not sys.stdin.isatty():
+        print("Non-interactive use requires --yes.", file=sys.stderr)
+        return False
     try:
         answer = input("Continue? [y/N] ")
     except EOFError:
