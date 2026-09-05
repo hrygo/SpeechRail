@@ -282,15 +282,17 @@ SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适�
 
 针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 原生集成了高性能多讲话人时序切分与角色分离能力：
 
-| 核心组件 | 底层模型架构 | 职责与能力边界 | 客户端调用入口 |
-|---|---|---|---|
-| **时序切分引擎** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | 在线/离线流式切分不同发言人时间边界，支持最多 4 人重叠语音分离 | `model="gpt-4o-transcribe-diarize"` 或 `response_format="diarized_json"` |
-| **声纹特征提取 (可选)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | 提取 16kHz PCM 声纹特征向量，跨会话短时重聚类，确保发言人归一 | 会话内断线重连或长会议平滑映射 |
+| 核心组件 | 底层模型架构 | 职责与能力边界 | 活跃推理开销 (Active RAM) | 客户端调用入口 |
+|---|---|---|---|---|
+| **时序切分引擎** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | 在线/离线流式切分不同发言人时间边界，支持最多 4 人重叠语音分离 | **+约 0.5 GB** (500 MB) | `model="gpt-4o-transcribe-diarize"` 或 `response_format="diarized_json"` |
+| **声纹特征提取 (可选)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | 提取 16kHz PCM 声纹特征向量，跨会话短时重聚类，确保发言人归一 | **极轻量** (~数十 MB) | 会话内断线重连或长会议平滑映射 |
 
 > [!NOTE]
-> **严格的匿名隐私边界**：
-> 讲话人分离仅输出当前会话生命周期内的匿名标签（如 `speaker_0`, `speaker_1`），**不持久化真实人名、不建立声纹特征库、不进行跨会议身份跟踪**，从根本上杜绝声纹泄露风险。
-> *(启用方式：执行 `uv sync --extra diarization` 安装可选依赖并在 `.env` 中配置模型路径即可，未配置时零额外资源开销)*。
+> **真实内存占用与卸载机制**：
+> 1. **活跃内存开销**：启用并在处理多人会议转录时，讲话人引擎在宿主进程常驻约 **+0.5 GB** 物理内存。
+> 2. **深度接入空闲卸载 (Idle Eviction)**：讲话人引擎同样实现了 `EvictableWorker` 协议。**连续 5 分钟无调用自动触发冷卸载（释放全部 0.5GB 权重与显存）**，待机内存完全回落至 **~50 MB**；新请求到达时按需秒级懒加载。
+> 3. **严格的匿名隐私边界**：仅输出当前会话生命周期内的匿名标签（如 `speaker_0`, `speaker_1`），**不持久化真实人名、不建立声纹库、不进行跨会议身份跟踪**。
+> *(启用方式：执行 `uv sync --extra diarization` 安装可选依赖并在 `.env` 中配置模型路径即可，未配置时零额外内存开销)*。
 
 ---
 
@@ -393,9 +395,11 @@ SpeechRail 的核心性能来自于 Apple MLX 框架对 **Apple Silicon 统一�
 </details>
 
 <details>
-<summary><strong>Q5: 如何开启多人会议讲话人分离 (Speaker Diarization)？</strong></summary>
+<summary><strong>Q5: 如何开启多人会议讲话人分离 (Speaker Diarization)？它占用多少内存？</strong></summary>
 
-讲话人分离属于可选扩展能力。您只需执行 `uv sync --extra diarization` 安装配套依赖，并在 `.env` 中指定 NVIDIA NeMo Sortformer 权重文件路径（`SPEECHRAIL_DIARIZATION_MODEL_PATH`）。服务启动后会自动注册并在 `/v1/models` 中就绪 `gpt-4o-transcribe-diarize` 兼容模型，调用即可输出带发言人标签的分段转写。
+讲话人分离属于按需扩展能力。您只需执行 `uv sync --extra diarization` 安装配套依赖，并在 `.env` 中指定 NVIDIA NeMo Sortformer 权重文件路径（`SPEECHRAIL_DIARIZATION_MODEL_PATH`）。
+- **内存占用**：未配置时为 **0 MB**；启用并处理多人转录时，宿主额外占用约 **0.5 GB** 物理内存。
+- **自动卸载**：同样深度接入系统空闲驱逐器，**连续 5 分钟无调用自动释放全部权重**，完全归还内存，绝不长期霸占系统资源。
 </details>
 
 ---
