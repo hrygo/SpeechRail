@@ -602,7 +602,7 @@ def apply_session_update(
         except ValueError:
             raise RealtimeAdapterError(
                 "voice_not_found", f"unknown voice: {preset_voice[:200]}"
-            )
+            ) from None
         voice = preset_voice
 
     config: dict[str, Any] = {

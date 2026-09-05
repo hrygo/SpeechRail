@@ -13,7 +13,7 @@ from speechrail.compatibility.openai_realtime import (
     diarization_model_aliases,
     tts_model_aliases,
 )
-from speechrail.domain.tts import VOICE_ALIASES, VOICE_PROFILES, get_voice_registry
+from speechrail.domain.tts import VOICE_ALIASES, get_voice_registry
 from speechrail.http.errors import error_response
 
 
@@ -127,31 +127,45 @@ def create_system_router(services: AppServices) -> APIRouter:
     @router.post("/v1/voices")
     async def create_voice(request: Request) -> JSONResponse:
         """Create a persistent custom voice using natural language instruction."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
         try:
             body = await request.json()
         except Exception:
             return error_response(
-                400, getattr(request.state, "request_id", None), "invalid_json", "Invalid JSON payload"
+                400,
+                request_id,
+                "invalid_json",
+                "Invalid JSON payload",
             )
         if not isinstance(body, dict):
             return error_response(
-                400, getattr(request.state, "request_id", None), "invalid_payload", "JSON object expected"
+                400,
+                request_id,
+                "invalid_payload",
+                "JSON object expected",
             )
         name = body.get("name")
         instruction = body.get("instruction")
         voice_id = body.get("id")
         if not isinstance(name, str) or not name.strip():
             return error_response(
-                400, getattr(request.state, "request_id", None), "invalid_name", "Voice name is required"
+                400,
+                request_id,
+                "invalid_name",
+                "Voice name is required",
             )
         if not isinstance(instruction, str) or not instruction.strip():
             return error_response(
                 400,
-                getattr(request.state, "request_id", None),
+                request_id,
                 "invalid_instruction",
                 "Voice instruction is required",
             )
-        vid_str = voice_id.strip().lower() if isinstance(voice_id, str) and voice_id.strip() else None
+        vid_str = (
+            voice_id.strip().lower()
+            if isinstance(voice_id, str) and voice_id.strip()
+            else None
+        )
         try:
             profile = get_voice_registry().create_custom_profile(
                 name=name.strip(),
@@ -173,23 +187,30 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         except ValueError as exc:
             return error_response(
-                400, getattr(request.state, "request_id", None), "voice_creation_failed", str(exc)
+                400,
+                request_id,
+                "voice_creation_failed",
+                str(exc),
             )
 
     @router.delete("/v1/voices/{voice_id}")
     async def delete_voice(voice_id: str, request: Request) -> JSONResponse:
         """Delete a persistent custom voice; system preset voices are protected."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
         try:
             get_voice_registry().delete_custom_profile(voice_id)
             return JSONResponse(status_code=200, content={"status": "deleted", "id": voice_id})
         except ValueError as exc:
             return error_response(
-                403, getattr(request.state, "request_id", None), "voice_deletion_failed", str(exc)
+                403,
+                request_id,
+                "voice_deletion_failed",
+                str(exc),
             )
         except KeyError:
             return error_response(
                 404,
-                getattr(request.state, "request_id", None),
+                request_id,
                 "voice_not_found",
                 f"Voice {voice_id} not found",
             )

@@ -35,7 +35,12 @@ def test_voice_catalog_exposes_the_configured_preset_profiles() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "list"
-    assert [voice["id"] for voice in body["data"] if voice.get("is_system")] == ["default", "warm", "bright", "calm"]
+    assert [voice["id"] for voice in body["data"] if voice.get("is_system")] == [
+        "default",
+        "warm",
+        "bright",
+        "calm",
+    ]
     assert body["data"][0]["is_default"] is True
 
 
@@ -140,13 +145,13 @@ def test_custom_voice_lifecycle_create_list_and_delete() -> None:
     assert created["name"] == "知性女声"
     assert created["is_system"] is False
 
-    # 2. 列出音色，确认包含新建音色
+    # 2. 列出音色, 确认包含新建音色
     list_resp = client.get("/v1/voices")
     assert list_resp.status_code == 200
     voice_ids = [v["id"] for v in list_resp.json()["data"]]
     assert "test_zhixing_voice" in voice_ids
 
-    # 3. 尝试删除系统音色，预期 403 拒绝
+    # 3. 尝试删除系统音色, 预期 403 拒绝
     del_sys_resp = client.delete("/v1/voices/default")
     assert del_sys_resp.status_code == 403
 
@@ -155,7 +160,7 @@ def test_custom_voice_lifecycle_create_list_and_delete() -> None:
     assert del_resp.status_code == 200
     assert del_resp.json()["status"] == "deleted"
 
-    # 5. 再次列出，确认已被移除
+    # 5. 再次列出, 确认已被移除
     list_resp_after = client.get("/v1/voices")
     after_ids = [v["id"] for v in list_resp_after.json()["data"]]
     assert "test_zhixing_voice" not in after_ids

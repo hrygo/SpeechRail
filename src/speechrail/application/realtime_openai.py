@@ -405,7 +405,7 @@ class OpenAIRealtimeSession:
             except ValueError:
                 raise RealtimeAdapterError(
                     "voice_not_found", f"unknown voice: {response_voice[:200]}"
-                )
+                ) from None
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
         self._tts_response_id = response_id
