@@ -28,6 +28,7 @@
 - 🔌 **OpenAI 协议 1:1 无缝替换**：完整实现 `whisper-1`（文件转录）、`tts-1`（语音合成）与 `/v1/realtime`（低延迟双工流式 ASR/TTS），客户端改一行 `base_url` 即可接入。
 - 🛡️ **双物理进程隔离架构**：HTTP 网关与重型 MLX 推理引擎运行在不同物理进程中，通过高效 IPC 管道通信。Worker 崩溃绝不拖垮网关。
 - 🍃 **智能两阶段空闲卸载 (Idle Eviction)**：推理完毕后，默认 **5 分钟无请求自动卸载模型权重并释放显存**，常驻待机内存仅约 **50 MB**，绝不霸占 Mac 宝贵内存。
+- 👥 **原生多讲话人分离 (Speaker Diarization)**：集成 NeMo Sortformer 与 CAM++ 声纹模型，自动区分并标注不同发言人（如 `speaker_0`, `speaker_1`），轻松驾驭多人会议与访谈。
 - 🎚️ **动态三档资源匹配**：针对 8GB 到 128GB 的 Apple Silicon 芯片深度调优（Light / Balanced / Quality），一键无感热切换。
 - 🎙️ **9 种跨档高质量内置音色**：原生集成 Qwen3-TTS 语音能力，涵盖中文、英语、粤语、日语、韩语等丰富声学角色。
 
@@ -138,7 +139,7 @@ client = OpenAI(
 )
 
 # 🎙️ 语音转文字 (ASR)
-with open("meeting.wav", "rb") as audio_file:
+with open("speech.wav", "rb") as audio_file:
     transcript = client.audio.transcriptions.create(
         model="whisper-1",  # 自动调度本地 Qwen3-ASR
         file=audio_file,
@@ -146,6 +147,16 @@ with open("meeting.wav", "rb") as audio_file:
         timestamp_granularities=["segment", "word"],
     )
     print("转录文本:", transcript.text)
+
+# 👥 多人会议转录与发言人区分 (Speaker Diarization)
+with open("meeting.wav", "rb") as audio_file:
+    meeting = client.audio.transcriptions.create(
+        model="gpt-4o-transcribe-diarize",  # 调度本地 NeMo Sortformer 讲话人分离引擎
+        file=audio_file,
+        response_format="diarized_json",  # 返回带 speaker 标签的分段转写
+    )
+    for seg in meeting.segments:
+        print(f"[{seg.speaker}] {seg.text}")
 
 # 🔊 文字转语音 (TTS)
 speech = client.audio.speech.create(
@@ -267,6 +278,20 @@ SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适�
 | `ono_anna` | 轻快日语女声 | 轻盈灵动的年轻日语女声，语气俏皮自然，节奏明快 | 动漫二次元、虚拟主播、日语伴读 |
 | `sohee` | 温暖韩语女声 | 温暖柔和的韩语女声，情感丰富，表达自然亲切 | 影视解说、韩语学习、情感电台 |
 
+### 3. 可选讲话人分离模型 (Speaker Diarization)
+
+针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 原生集成了高性能多讲话人时序切分与角色分离能力：
+
+| 核心组件 | 底层模型架构 | 职责与能力边界 | 客户端调用入口 |
+|---|---|---|---|
+| **时序切分引擎** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | 在线/离线流式切分不同发言人时间边界，支持最多 4 人重叠语音分离 | `model="gpt-4o-transcribe-diarize"` 或 `response_format="diarized_json"` |
+| **声纹特征提取 (可选)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | 提取 16kHz PCM 声纹特征向量，跨会话短时重聚类，确保发言人归一 | 会话内断线重连或长会议平滑映射 |
+
+> [!NOTE]
+> **严格的匿名隐私边界**：
+> 讲话人分离仅输出当前会话生命周期内的匿名标签（如 `speaker_0`, `speaker_1`），**不持久化真实人名、不建立声纹特征库、不进行跨会议身份跟踪**，从根本上杜绝声纹泄露风险。
+> *(启用方式：执行 `uv sync --extra diarization` 安装可选依赖并在 `.env` 中配置模型路径即可，未配置时零额外资源开销)*。
+
 ---
 
 ## 📊 真实性能基准实测 (Apple M5 Max)
@@ -300,17 +325,20 @@ flowchart TD
         Governor -. 闲置监控 .-> Evictor
     end
 
-    subgraph Workers["独立物理推理子进程 (物理隔离沙箱)"]
+    subgraph Workers["独立物理推理与扩展引擎 (物理隔离沙箱)"]
         direction LR
-        ASRWorker["独立 ASR MLX Worker\n(Qwen3-ASR / Batch & Stream 互斥)"]
-        TTSWorker["独立 TTS MLX Worker\n(VoiceDesign / CustomVoice 流式合成)"]
+        ASRWorker["独立 ASR MLX Worker\n(Qwen3-ASR)"]
+        TTSWorker["独立 TTS MLX Worker\n(VoiceDesign / CustomVoice)"]
+        DiarizeEngine["讲话人分离引擎 (可选)\n(NeMo Sortformer + CAM++)"]
     end
 
     Client <== "HTTP / WebSocket" ==> Router
     Governor <== "专属 Framed IPC 管道" ==> ASRWorker
     Governor <== "专属 Framed IPC 管道" ==> TTSWorker
+    Governor <== "会话级流式协调" ==> DiarizeEngine
     Evictor -. 5分钟无请求冷卸载 .-> ASRWorker
     Evictor -. 5分钟无请求冷卸载 .-> TTSWorker
+    Evictor -. 5分钟无请求冷卸载 .-> DiarizeEngine
 ```
 
 > **架构核心考量**：
@@ -362,6 +390,12 @@ SpeechRail 的核心性能来自于 Apple MLX 框架对 **Apple Silicon 统一�
 <summary><strong>Q4: 切换模型档位时需要重新下载所有模型吗？</strong></summary>
 
 不需要。所有模型权重在下载后都会持久化保存在受管目录中。当您在 `light`、`balanced`、`quality` 之间切换时，已下载过的档位会直接秒级复用本地缓存。
+</details>
+
+<details>
+<summary><strong>Q5: 如何开启多人会议讲话人分离 (Speaker Diarization)？</strong></summary>
+
+讲话人分离属于可选扩展能力。您只需执行 `uv sync --extra diarization` 安装配套依赖，并在 `.env` 中指定 NVIDIA NeMo Sortformer 权重文件路径（`SPEECHRAIL_DIARIZATION_MODEL_PATH`）。服务启动后会自动注册并在 `/v1/models` 中就绪 `gpt-4o-transcribe-diarize` 兼容模型，调用即可输出带发言人标签的分段转写。
 </details>
 
 ---
