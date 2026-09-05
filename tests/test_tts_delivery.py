@@ -8,7 +8,11 @@ from collections.abc import AsyncIterator
 import pytest
 from pydantic import ValidationError
 
-from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
+from speechrail.application.tts_delivery import (
+    PcmOutputCounter,
+    TTSDeliveryError,
+    iter_validated_audio,
+)
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 
 
@@ -66,6 +70,26 @@ def test_empty_stream_completes_without_error() -> None:
         return [chunk async for chunk in iter_validated_audio(source)]
 
     assert asyncio.run(scenario()) == []
+
+
+def test_output_limit_includes_the_final_chunk() -> None:
+    counter = PcmOutputCounter(limit_bytes=8)
+
+    counter.accept(8)
+
+    with pytest.raises(OverflowError):
+        counter.accept(2)
+
+
+def test_output_counter_rejects_odd_and_negative_pcm_sizes() -> None:
+    counter = PcmOutputCounter(limit_bytes=8)
+
+    with pytest.raises(TTSDeliveryError, match="tts_audio_invalid"):
+        counter.accept(1)
+    with pytest.raises(TTSDeliveryError, match="tts_audio_invalid"):
+        counter.accept(-2)
+    counter.accept(0)
+    assert counter.total_bytes == 0
 
 
 def test_first_chunk_must_be_index_zero() -> None:

@@ -15,6 +15,30 @@ class TTSDeliveryError(RuntimeError):
         self.code = code
 
 
+class PcmOutputCounter:
+    """Count a bounded PCM16 stream without retaining its audio payload."""
+
+    def __init__(self, limit_bytes: int) -> None:
+        if limit_bytes < 0:
+            raise ValueError("limit_bytes must be non-negative")
+        self._limit_bytes = limit_bytes
+        self._total_bytes = 0
+
+    @property
+    def total_bytes(self) -> int:
+        """Return the number of accepted PCM bytes."""
+        return self._total_bytes
+
+    def accept(self, byte_count: int) -> None:
+        """Accept one PCM chunk size, rejecting malformed or oversized output."""
+        if byte_count < 0 or byte_count % 2:
+            raise TTSDeliveryError("tts_audio_invalid")
+        next_total = self._total_bytes + byte_count
+        if next_total > self._limit_bytes:
+            raise OverflowError("audio_too_large")
+        self._total_bytes = next_total
+
+
 async def iter_validated_audio(
     source: AsyncIterator[AudioChunk],
 ) -> AsyncIterator[AudioChunk]:

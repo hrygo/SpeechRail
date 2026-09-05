@@ -18,7 +18,11 @@ from pydantic import BaseModel, Field, field_validator
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
-from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
+from speechrail.application.tts_delivery import (
+    PcmOutputCounter,
+    TTSDeliveryError,
+    iter_validated_audio,
+)
 from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
     canonical_tts_model,
@@ -45,6 +49,7 @@ _AUDIO_CONTAINER_MIME_TYPES = frozenset(
 )
 _FFMPEG_FALLBACKS = (Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"))
 _FFMPEG_IO_CHUNK_BYTES = 64 * 1024
+_FFMPEG_QUEUE_MAX_CHUNKS = 4
 _FFMPEG_TIMEOUT_SECONDS = 15.0
 _MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
 
@@ -402,8 +407,182 @@ _TTS_CONTAINER_ENCODERS: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 
+async def _stream_encode_container(
+    pcm_source: AsyncIterator[bytes],
+    *,
+    sample_rate: int,
+    response_format: str,
+    pcm_counter: PcmOutputCounter | None = None,
+) -> AsyncIterator[bytes]:
+    """Encode PCM through bounded queues while exposing stdout as an iterator."""
+    try:
+        _, args = _TTS_CONTAINER_ENCODERS[response_format]
+        executable = _resolve_ffmpeg()
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-i",
+            "pipe:0",
+            *args,
+            "pipe:1",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except Exception as exc:
+        raise ValueError("audio_encode_failed") from exc
+
+    if process.stdin is None or process.stdout is None:
+        await _cleanup_ffmpeg_process(process, ())
+        raise ValueError("audio_encode_failed")
+
+    stdin = process.stdin
+    stdout = process.stdout
+    input_queue: asyncio.Queue[bytes | None] = asyncio.Queue(
+        maxsize=_FFMPEG_QUEUE_MAX_CHUNKS
+    )
+    output_queue: asyncio.Queue[bytes | BaseException | None] = asyncio.Queue(
+        maxsize=_FFMPEG_QUEUE_MAX_CHUNKS
+    )
+    counter = pcm_counter or PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
+    pcm_available = asyncio.Event()
+    producer_done = asyncio.Event()
+    writer_done = asyncio.Event()
+    tasks: tuple[asyncio.Task[object], ...] = ()
+
+    async def producer() -> None:
+        try:
+            async for pcm in pcm_source:
+                if not pcm:
+                    continue
+                counter.accept(len(pcm))
+                pcm_available.set()
+                await input_queue.put(pcm)
+            await input_queue.put(None)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            await output_queue.put(exc)
+            raise
+        finally:
+            pcm_available.set()
+            producer_done.set()
+
+    async def writer() -> None:
+        try:
+            while True:
+                pcm = await input_queue.get()
+                if pcm is None:
+                    break
+                stdin.write(pcm)
+                await stdin.drain()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            await output_queue.put(exc)
+            raise
+        finally:
+            with contextlib.suppress(Exception):
+                stdin.close()
+            writer_done.set()
+
+    async def reader() -> None:
+        encoded_bytes = 0
+        try:
+            while True:
+                chunk = await stdout.read(_FFMPEG_IO_CHUNK_BYTES)
+                if not chunk:
+                    break
+                encoded_bytes += len(chunk)
+                if encoded_bytes > _MAX_ENCODED_AUDIO_BYTES:
+                    raise _FFmpegOutputLimitError(ValueError("audio_encode_failed"))
+                await output_queue.put(chunk)
+            await output_queue.put(None)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            await output_queue.put(exc)
+            raise
+
+    try:
+        tasks = (
+            asyncio.create_task(producer()),
+            asyncio.create_task(writer()),
+            asyncio.create_task(reader()),
+        )
+        emitted = False
+        while True:
+            item = await output_queue.get()
+            if item is None:
+                break
+            if isinstance(item, _FFmpegOutputLimitError):
+                raise item.error
+            if isinstance(item, BaseException):
+                if isinstance(
+                    item,
+                    (TTSDeliveryError, GovernorQueueFullError, TimeoutError, OverflowError),
+                ):
+                    raise item
+                raise ValueError("audio_encode_failed") from item
+            if item:
+                await pcm_available.wait()
+                if counter.total_bytes == 0:
+                    continue
+                emitted = True
+                yield item
+
+        # ffmpeg closes stdout only after it has consumed and closed stdin.  If
+        # either producer or writer is still active, EOF means the child exited
+        # early; cancel the input side before waiting so a producer blocked on a
+        # full queue cannot keep response cleanup alive indefinitely.
+        if not producer_done.is_set() or not writer_done.is_set():
+            for task in tasks[:2]:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks[:2], return_exceptions=True)
+            raise ValueError("audio_encode_failed")
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                if isinstance(
+                    result,
+                    (TTSDeliveryError, GovernorQueueFullError, TimeoutError, OverflowError),
+                ):
+                    raise result
+                raise ValueError("audio_encode_failed") from result
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_FFMPEG_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            raise ValueError("audio_encode_failed") from exc
+        if process.returncode != 0 or not emitted or counter.total_bytes == 0:
+            raise ValueError("audio_encode_failed")
+    finally:
+        await _cleanup_ffmpeg_process(process, tasks)
+        close = getattr(pcm_source, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(BaseException):
+                await close()
+
+
+async def _close_audio_stream(source: AsyncIterator[bytes]) -> None:
+    """Close an async byte stream when the response stops consuming it."""
+    close = getattr(source, "aclose", None)
+    if close is not None:
+        with contextlib.suppress(BaseException):
+            await close()
+
+
 async def _encode_container(pcm: bytes, *, sample_rate: int, response_format: str) -> bytes:
-    """Remux complete PCM16 into an OpenAI container with fixed ffmpeg argv, never a shell."""
+    """Remux complete PCM16 for legacy callers and bounded unit tests."""
     _, args = _TTS_CONTAINER_ENCODERS[response_format]
     return await _run_ffmpeg_subprocess(
         (
@@ -808,7 +987,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
             language=body.language,
         )
 
-        async def audio_stream() -> AsyncIterator[bytes]:
+        async def audio_stream(
+            *, counter: PcmOutputCounter | None = None
+        ) -> AsyncIterator[bytes]:
             # Batch TTS flows through the governor so it cannot consume the
             # reserved realtime TTS lane; the reserve is held while the stream
             # is consumed and released as soon as the generator closes.
@@ -816,14 +997,18 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 WorkClass.BATCH_TTS, deadline=resolved.request_timeout_seconds
             ):
                 async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
+                    if counter is not None:
+                        counter.accept(len(chunk.audio))
                     yield chunk.audio
 
         if body.response_format == "pcm":
-            pcm_stream = audio_stream()
+            pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
+            pcm_stream = audio_stream(counter=pcm_counter)
             _tts_t0 = _time.monotonic()
             try:
                 first = await anext(pcm_stream, b"")
             except TTSDeliveryError as exc:
+                await _close_audio_stream(pcm_stream)
                 return error_response(
                     502,
                     request_id,
@@ -832,6 +1017,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     retryable=True,
                 )
             except GovernorQueueFullError:
+                await _close_audio_stream(pcm_stream)
                 return JSONResponse(
                     status_code=429,
                     content=error(
@@ -844,10 +1030,21 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     headers={"Retry-After": "1"},
                 )
             except TimeoutError:
+                await _close_audio_stream(pcm_stream)
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
+            except OverflowError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    502,
+                    request_id,
+                    "audio_encode_failed",
+                    "Failed to encode the synthesized audio",
+                    retryable=True,
+                )
             if not first:
+                await _close_audio_stream(pcm_stream)
                 return error_response(
                     502,
                     request_id,
@@ -857,8 +1054,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
 
             async def streamed_pcm() -> AsyncIterator[bytes]:
-                nonlocal _tts_t0
                 _emitted_bytes = 0
+
                 async def _record_if_complete() -> None:
                     audio_sec = _emitted_bytes / 2 / resolved.tts_sample_rate
                     services.metrics.record_tts(
@@ -868,18 +1065,97 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         inference_duration_sec=_time.monotonic() - _tts_t0,
                     )
 
-                yield first
-                _emitted_bytes += len(first)
-                async for chunk in pcm_stream:
-                    _emitted_bytes += len(chunk)
-                    yield chunk
-                await _record_if_complete()
+                try:
+                    yield first
+                    _emitted_bytes += len(first)
+                    async for chunk in pcm_stream:
+                        _emitted_bytes += len(chunk)
+                        yield chunk
+                    await _record_if_complete()
+                finally:
+                    await _close_audio_stream(pcm_stream)
 
             return StreamingResponse(streamed_pcm(), media_type="audio/x-pcm")
+        pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
+        if body.response_format in _TTS_CONTAINER_ENCODERS:
+            media_type, _ = _TTS_CONTAINER_ENCODERS[body.response_format]
+            encoded_stream = _stream_encode_container(
+                audio_stream(),
+                sample_rate=resolved.tts_sample_rate,
+                response_format=body.response_format,
+                pcm_counter=pcm_counter,
+            )
+            _tts_t0 = _time.monotonic()
+            try:
+                first = await anext(encoded_stream, b"")
+            except TTSDeliveryError as exc:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    502,
+                    request_id,
+                    exc.code,
+                    "TTS backend delivered an invalid audio stream",
+                    retryable=True,
+                )
+            except GovernorQueueFullError:
+                await _close_audio_stream(encoded_stream)
+                return JSONResponse(
+                    status_code=429,
+                    content=error(
+                        message="Inference queue is full",
+                        error_type="server_error",
+                        code="queue_full",
+                        request_id=request_id,
+                        retryable=True,
+                    ),
+                    headers={"Retry-After": "1"},
+                )
+            except TimeoutError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    503, request_id, "backend_timeout", "Inference timed out", retryable=True
+                )
+            except (OverflowError, ValueError):
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    502,
+                    request_id,
+                    "audio_encode_failed",
+                    "Failed to encode the synthesized audio",
+                    retryable=True,
+                )
+            if not first:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    502,
+                    request_id,
+                    "audio_encode_failed",
+                    "Failed to encode the synthesized audio",
+                    retryable=True,
+                )
+
+            async def streamed_encoded() -> AsyncIterator[bytes]:
+                try:
+                    yield first
+                    async for chunk in encoded_stream:
+                        yield chunk
+                    services.metrics.record_tts(
+                        voice=preset_voice,
+                        char_count=len(body.input),
+                        audio_duration_sec=pcm_counter.total_bytes
+                        / 2
+                        / resolved.tts_sample_rate,
+                        inference_duration_sec=_time.monotonic() - _tts_t0,
+                    )
+                finally:
+                    await _close_audio_stream(encoded_stream)
+
+            return StreamingResponse(streamed_encoded(), media_type=media_type)
+
         pcm = bytearray()
         _tts_t0 = _time.monotonic()
         try:
-            async for chunk in audio_stream():
+            async for chunk in audio_stream(counter=pcm_counter):
                 pcm.extend(chunk)
         except TTSDeliveryError as exc:
             return error_response(
@@ -905,6 +1181,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
+        except OverflowError:
+            return error_response(
+                502,
+                request_id,
+                "audio_encode_failed",
+                "Failed to encode the synthesized audio",
+                retryable=True,
+            )
         _tts_inference_sec = _time.monotonic() - _tts_t0
         if not pcm:
             return error_response(
@@ -923,17 +1207,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
             inference_duration_sec=_tts_inference_sec,
         )
         try:
-            if body.response_format == "wav":
-                content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
-                media_type = "audio/wav"
-            else:
-                media_type, _ = _TTS_CONTAINER_ENCODERS[body.response_format]
-                content = await _encode_container(
-                    bytes(pcm),
-                    sample_rate=resolved.tts_sample_rate,
-                    response_format=body.response_format,
-                )
-        except ValueError:
+            content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
+            media_type = "audio/wav"
+        except (OverflowError, ValueError):
             return error_response(
                 502,
                 request_id,
