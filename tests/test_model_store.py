@@ -19,7 +19,14 @@ from speechrail.config.model_catalog import (
     SourceLocation,
 )
 from speechrail.service import model_store
-from speechrail.service.model_store import ModelStoreError, prepare_models, safe_artifact_path
+from speechrail.service.model_store import (
+    ModelStoreError,
+    PreparedModelSet,
+    prepare_models,
+    resolve_prepared_models,
+    resolve_prepared_selection,
+    safe_artifact_path,
+)
 
 _HASH = "b" * 64
 _REVISIONS = {"asr": "a" * 40, "design": "c" * 40, "custom": "d" * 40}
@@ -802,3 +809,159 @@ async def test_external_catalog_paths_are_never_requested(tmp_path: Path) -> Non
     expected = {item.path for artifact in catalog.artifacts[:2] for item in artifact.files}
     assert requested == expected
     assert all(not Path(path).is_absolute() and ".." not in Path(path).parts for path in requested)
+
+
+@pytest.mark.anyio
+async def test_resolve_prepared_models_returns_verified_immutable_identity(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+
+    result = resolve_prepared_models(
+        prepared_id,
+        app_home=tmp_path,
+        catalog=catalog,
+        runtime_lock=lock,
+    )
+
+    assert isinstance(result, PreparedModelSet)
+    assert result.prepared_id == prepared_id
+    assert result.preset == "quality"
+    assert result.runtime_lock_id == lock.id
+    assert result.asr.path == (tmp_path / "models" / "asr").resolve()
+    assert result.tts.path == (tmp_path / "models" / "design").resolve()
+    assert result.asr.model_id == "fixture/asr"
+    assert result.asr.family == "qwen3_asr"
+    assert result.asr.variant == "asr"
+    assert result.asr.files[0]["path"] == "config.json"
+    with pytest.raises(TypeError):
+        result.asr.files[0]["path"] = "changed"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        result.asr.identity["model_id"] = "changed"  # type: ignore[index]
+
+
+@pytest.mark.anyio
+async def test_resolve_prepared_selection_uses_catalog_and_lock_identity(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+    selected = catalog.preset("quality")
+    selection = {
+        "schema_version": 1,
+        "preset": "quality",
+        "generation": 1,
+        "asr": selected.asr,
+        "tts": selected.tts,
+        "runtime_lock_id": lock.id,
+    }
+
+    result = resolve_prepared_selection(
+        selection,
+        app_home=tmp_path,
+        catalog=catalog,
+        runtime_lock=lock,
+    )
+
+    assert result.prepared_id == prepared_id
+    assert result.asr.path.is_absolute()
+    assert result.tts.path.is_absolute()
+
+
+@pytest.mark.anyio
+async def test_resolve_prepared_models_rejects_unknown_id_without_path_leak(
+    tmp_path: Path,
+) -> None:
+    catalog, _ = _catalog()
+    lock = _runtime_lock()
+
+    with pytest.raises(ModelStoreError) as exc_info:
+        resolve_prepared_models(
+            "prepared-unknown",
+            app_home=tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+        )
+
+    assert str(tmp_path) not in str(exc_info.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("field", ["preset", "runtime_lock_id", "artifacts"])
+async def test_resolve_prepared_models_rejects_inconsistent_registry_entry(
+    tmp_path: Path, field: str
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+    registry_path = tmp_path / "state" / "model-preparations.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    candidate = registry["prepared"][prepared_id]
+    if field == "preset":
+        candidate[field] = "balanced"
+    elif field == "runtime_lock_id":
+        candidate[field] = "other-lock"
+    else:
+        candidate[field]["unexpected"] = candidate[field]["asr"]
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+
+    with pytest.raises(ModelStoreError):
+        resolve_prepared_models(
+            prepared_id,
+            app_home=tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+        )
+
+
+@pytest.mark.anyio
+async def test_resolve_prepared_models_rejects_corrupt_snapshot_and_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    prepared_id = await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads))
+    corrupt = tmp_path / "models" / "asr" / "config.json"
+    corrupt.write_bytes(b"corrupt")
+    with pytest.raises(ModelStoreError):
+        resolve_prepared_models(
+            prepared_id,
+            app_home=tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+        )
+
+    corrupt.unlink()
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    corrupt.symlink_to(outside)
+    with pytest.raises(ModelStoreError):
+        resolve_prepared_models(
+            prepared_id,
+            app_home=tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+        )
+
+
+def test_resolve_prepared_selection_rejects_missing_registry(tmp_path: Path) -> None:
+    catalog, _ = _catalog()
+    lock = _runtime_lock()
+    selected = catalog.preset("quality")
+    selection = {
+        "schema_version": 1,
+        "preset": "quality",
+        "generation": 1,
+        "asr": selected.asr,
+        "tts": selected.tts,
+        "runtime_lock_id": lock.id,
+    }
+
+    with pytest.raises(ModelStoreError):
+        resolve_prepared_selection(
+            selection,
+            app_home=tmp_path,
+            catalog=catalog,
+            runtime_lock=lock,
+        )

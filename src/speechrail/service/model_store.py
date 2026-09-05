@@ -12,7 +12,9 @@ import os
 import shutil
 import tempfile
 from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import MappingProxyType
 from typing import Protocol, cast
 from uuid import uuid4
 
@@ -49,6 +51,92 @@ class ModelStoreError(ValueError):
 
 class _DownloadStreamCloseError(ModelStoreError):
     """A downloaded stream could not be closed after a successful transfer."""
+
+
+def _freeze_public(value: object) -> object:
+    """Recursively freeze the small manifest values exposed by a resolver."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_public(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_public(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_public(item) for item in value)
+    return value
+
+
+def _freeze_public_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    frozen = _freeze_public(value)
+    if not isinstance(frozen, Mapping):
+        raise AssertionError("public identity mapping did not freeze")
+    return cast(Mapping[str, object], frozen)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedArtifact:
+    """An immutable, verified model artifact and its safe local directory."""
+
+    key: str
+    path: Path
+    model_id: str
+    revision: str
+    family: str
+    variant: str
+    quantization: Mapping[str, object]
+    source: Mapping[str, str]
+    sources: tuple[Mapping[str, str], ...]
+    files: tuple[Mapping[str, object], ...]
+
+    @property
+    def identity(self) -> Mapping[str, object]:
+        """Return a frozen public copy of the complete artifact identity."""
+        return _freeze_public_mapping(
+            {
+                "key": self.key,
+                "path": self.path,
+                "model_id": self.model_id,
+                "revision": self.revision,
+                "family": self.family,
+                "variant": self.variant,
+                "quantization": self.quantization,
+                "source": self.source,
+                "sources": self.sources,
+                "files": self.files,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedModelSet:
+    """An immutable, verified ASR/TTS pair prepared under one runtime lock."""
+
+    prepared_id: str
+    preset: str
+    runtime_lock_id: str
+    asr: PreparedArtifact
+    tts: PreparedArtifact
+
+    @property
+    def asr_model_dir(self) -> Path:
+        """Return the verified ASR model directory."""
+        return self.asr.path
+
+    @property
+    def tts_model_dir(self) -> Path:
+        """Return the verified TTS model directory."""
+        return self.tts.path
+
+    @property
+    def identity(self) -> Mapping[str, object]:
+        """Return a frozen public copy of the complete prepared-set identity."""
+        return _freeze_public_mapping(
+            {
+                "prepared_id": self.prepared_id,
+                "preset": self.preset,
+                "runtime_lock_id": self.runtime_lock_id,
+                "asr": self.asr.identity,
+                "tts": self.tts.identity,
+            }
+        )
 
 
 def safe_artifact_path(root: Path, relative: str) -> Path:
@@ -415,6 +503,276 @@ def _prepared_entry_is_complete(
         if path is None or not _verify_snapshot(path, artifact):
             return False
     return True
+
+
+def _resolver_inputs(
+    app_home: Path,
+    catalog: ModelCatalog | None,
+    runtime_lock: RuntimeLock | None,
+) -> tuple[Path, ModelCatalog, RuntimeLock]:
+    """Resolve and validate the immutable inputs used by prepared resolvers."""
+    try:
+        resolved_app_home = _resolve_app_home(app_home)
+        resolved_catalog = load_catalog() if catalog is None else catalog
+        resolved_runtime_lock = load_runtime_lock() if runtime_lock is None else runtime_lock
+        if not isinstance(resolved_catalog, ModelCatalog):
+            raise ValueError("catalog must be a ModelCatalog")
+        if not isinstance(resolved_runtime_lock, RuntimeLock):
+            raise ValueError("runtime_lock must be a RuntimeLock")
+    except Exception as exc:
+        raise ModelStoreError("prepared model identity is unavailable") from exc
+    return resolved_app_home, resolved_catalog, resolved_runtime_lock
+
+
+def _resolver_registry_path(app_home: Path) -> Path:
+    """Return a registry path whose parent cannot escape the application home."""
+    state = app_home / "state"
+    try:
+        if state.is_symlink() or (state.exists() and not state.is_dir()):
+            raise ValueError("registry parent is invalid")
+        return safe_artifact_path(app_home, f"state/{_REGISTRY_FILENAME}")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ModelStoreError("prepared model registry path is invalid") from exc
+
+
+def _resolver_artifacts(
+    catalog: ModelCatalog, preset_id: str
+) -> tuple[ModelArtifact, ModelArtifact]:
+    """Return the catalog's exact ASR/TTS pair for one preset."""
+    try:
+        selected_preset = catalog.preset(preset_id)
+        artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
+        asr = artifacts_by_key[selected_preset.asr]
+        tts = artifacts_by_key[selected_preset.tts]
+    except (KeyError, TypeError) as exc:
+        raise ModelStoreError("prepared model identity is invalid") from exc
+
+    if (
+        asr.key == tts.key
+        or asr.family != "qwen3_asr"
+        or asr.variant != "asr"
+        or tts.family != "qwen3_tts"
+        or tts.variant not in {"voice_design", "custom_voice"}
+    ):
+        raise ModelStoreError("prepared model identity is invalid")
+    return asr, tts
+
+
+def _strict_prepared_path(
+    entry: Mapping[str, object], artifact: ModelArtifact, app_home: Path
+) -> Path | None:
+    """Validate a current or preserved P01 model path for one artifact."""
+    relative = entry.get("path")
+    if not isinstance(relative, str) or "\\" in relative:
+        return None
+    parts = PurePosixPath(relative).parts
+    current_path = parts == ("models", artifact.key)
+    preserved_path = (
+        len(parts) == 4
+        and parts[0] == "models"
+        and parts[1] == ".releases"
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == artifact.key
+    )
+    if not current_path and not preserved_path:
+        return None
+    path = _entry_path(entry, app_home)
+    if path is None:
+        return None
+    try:
+        models_root = safe_artifact_path(app_home, "models")
+        path.relative_to(models_root)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return path
+
+
+def _strict_prepared_entry(
+    entry: object, artifact: ModelArtifact, app_home: Path
+) -> Path | None:
+    """Check every persisted field before a snapshot is exposed to callers."""
+    if not isinstance(entry, dict):
+        return None
+    if set(entry) != {
+        "path",
+        "model_id",
+        "revision",
+        "quantization",
+        "source",
+        "sources",
+        "files",
+    }:
+        return None
+    if not _entry_matches_artifact(entry, artifact):
+        return None
+    return _strict_prepared_path(entry, artifact, app_home)
+
+
+def _prepared_artifact_public(
+    artifact: ModelArtifact, entry: Mapping[str, object], path: Path
+) -> PreparedArtifact:
+    """Build a frozen public artifact from validated catalog/registry identity."""
+    source_raw = entry.get("source")
+    if not isinstance(source_raw, Mapping):
+        raise ModelStoreError("prepared model identity is invalid")
+    source = cast(
+        Mapping[str, str],
+        _freeze_public_mapping(cast(Mapping[str, object], source_raw)),
+    )
+    quantization = _freeze_public_mapping(_quantization_manifest(artifact))
+    sources = tuple(
+        cast(Mapping[str, str], _freeze_public_mapping(source_item))
+        for source_item in _sources_manifest(artifact)
+    )
+    files = tuple(
+        _freeze_public_mapping(file_item) for file_item in _file_manifest(artifact)
+    )
+    return PreparedArtifact(
+        key=artifact.key,
+        path=path,
+        model_id=artifact.model_id,
+        revision=artifact.revision,
+        family=artifact.family,
+        variant=artifact.variant,
+        quantization=quantization,
+        source=source,
+        sources=sources,
+        files=files,
+    )
+
+
+def _resolve_prepared_candidate(
+    prepared_id: str,
+    *,
+    registry: Mapping[str, object],
+    app_home: Path,
+    catalog: ModelCatalog,
+    runtime_lock: RuntimeLock,
+) -> tuple[str, tuple[PreparedArtifact, PreparedArtifact]]:
+    """Strictly validate one registry entry and return immutable artifacts."""
+    prepared = registry.get("prepared")
+    if not isinstance(prepared, dict):
+        raise ModelStoreError("prepared model identity is invalid")
+    candidate = prepared.get(prepared_id)
+    if not isinstance(candidate, dict) or set(candidate) != {
+        "preset",
+        "runtime_lock_id",
+        "artifacts",
+    }:
+        raise ModelStoreError("prepared model identity is invalid")
+    preset_id = candidate.get("preset")
+    if not isinstance(preset_id, str) or not preset_id:
+        raise ModelStoreError("prepared model identity is invalid")
+    if candidate.get("runtime_lock_id") != runtime_lock.id:
+        raise ModelStoreError("prepared model identity is invalid")
+
+    artifacts = _resolver_artifacts(catalog, preset_id)
+    if _prepared_id(preset_id, runtime_lock, artifacts) != prepared_id:
+        raise ModelStoreError("prepared model identity is invalid")
+    candidate_artifacts = candidate.get("artifacts")
+    if not isinstance(candidate_artifacts, dict) or set(candidate_artifacts) != {
+        artifacts[0].key,
+        artifacts[1].key,
+    }:
+        raise ModelStoreError("prepared model identity is invalid")
+
+    paths: list[Path] = []
+    entries: list[Mapping[str, object]] = []
+    for artifact in artifacts:
+        entry = candidate_artifacts.get(artifact.key)
+        path = _strict_prepared_entry(entry, artifact, app_home)
+        if path is None or not isinstance(entry, dict):
+            raise ModelStoreError("prepared model identity is invalid")
+        paths.append(path)
+        entries.append(entry)
+
+    if not _prepared_entry_is_complete(
+        registry, prepared_id, app_home, artifacts, runtime_lock, preset_id
+    ):
+        raise ModelStoreError("prepared model snapshot is not verified")
+    return (
+        preset_id,
+        (
+            _prepared_artifact_public(artifacts[0], entries[0], paths[0]),
+            _prepared_artifact_public(artifacts[1], entries[1], paths[1]),
+        ),
+    )
+
+
+def resolve_prepared_models(
+    prepared_id: str,
+    *,
+    app_home: Path,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+) -> PreparedModelSet:
+    """Resolve a registered prepared ID into two verified immutable model paths."""
+    if not isinstance(prepared_id, str) or not prepared_id.strip():
+        raise ModelStoreError("prepared ID must be a non-empty string")
+    resolved_app_home, resolved_catalog, resolved_runtime_lock = _resolver_inputs(
+        app_home, catalog, runtime_lock
+    )
+    try:
+        registry = _read_registry(_resolver_registry_path(resolved_app_home))
+        preset_id, artifacts = _resolve_prepared_candidate(
+            prepared_id,
+            registry=registry,
+            app_home=resolved_app_home,
+            catalog=resolved_catalog,
+            runtime_lock=resolved_runtime_lock,
+        )
+    except Exception as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise ModelStoreError("prepared model set is unavailable") from exc
+    return PreparedModelSet(
+        prepared_id=prepared_id,
+        preset=preset_id,
+        runtime_lock_id=resolved_runtime_lock.id,
+        asr=artifacts[0],
+        tts=artifacts[1],
+    )
+
+
+def resolve_prepared_selection(
+    selection: object,
+    *,
+    app_home: Path,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+) -> PreparedModelSet:
+    """Resolve a validated SelectionRecord to its exact prepared model set."""
+    try:
+        from speechrail.service.profile_store import SelectionRecord
+
+        record = (
+            selection
+            if isinstance(selection, SelectionRecord)
+            else SelectionRecord.model_validate(selection)
+        )
+    except Exception as exc:
+        raise ModelStoreError("selection identity is invalid") from exc
+
+    resolved_app_home, resolved_catalog, resolved_runtime_lock = _resolver_inputs(
+        app_home, catalog, runtime_lock
+    )
+    try:
+        if record.runtime_lock_id != resolved_runtime_lock.id:
+            raise ModelStoreError("selection identity is invalid")
+        artifacts = _resolver_artifacts(resolved_catalog, record.preset)
+        if record.asr != artifacts[0].key or record.tts != artifacts[1].key:
+            raise ModelStoreError("selection identity is invalid")
+        prepared_id = _prepared_id(record.preset, resolved_runtime_lock, artifacts)
+        return resolve_prepared_models(
+            prepared_id,
+            app_home=resolved_app_home,
+            catalog=resolved_catalog,
+            runtime_lock=resolved_runtime_lock,
+        )
+    except Exception as exc:
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        raise ModelStoreError("selection does not resolve to a prepared model set") from exc
 
 
 def _validate_model_store_paths(root: Path) -> None:
@@ -856,4 +1214,13 @@ async def prepare_models(
             staging_root.rmdir()
 
 
-__all__ = ["Downloader", "ModelStoreError", "prepare_models", "safe_artifact_path"]
+__all__ = [
+    "Downloader",
+    "ModelStoreError",
+    "PreparedArtifact",
+    "PreparedModelSet",
+    "prepare_models",
+    "resolve_prepared_models",
+    "resolve_prepared_selection",
+    "safe_artifact_path",
+]
