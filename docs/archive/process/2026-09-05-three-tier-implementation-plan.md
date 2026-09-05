@@ -596,7 +596,7 @@ def test_old_generation_cannot_deliver_a_result():
 **所有权 / Files：** 修改 src/speechrail/runtime/resource_governor.py；新建 src/speechrail/runtime/model_budget.py、tests/test_model_budget.py；补 tests/test_resource_governor.py。
 **接口 / Inputs & Outputs：** budget_for_hardware(total_bytes:int)->int 返回共同算法的基础服务预算；建议初始 max(4GiB,total_bytes//2)，仅 total>=8GiB 可进入已知设备候选。既有用户更明确资源上限优先。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_model_budget.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_model_budget.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.runtime.model_budget import budget_for_hardware
@@ -607,14 +607,14 @@ def test_low_memory_acceptance_is_not_a_global_cap():
     assert budget_for_hardware(128 * gib) > 4 * gib
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_budget.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_budget.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** ASR mode gate 负责互斥，Governor 不再要求为不存在的另一 ASR 模式空留槽位；保留当前 TTS/Jobs 的有界准入和公共指标，禁止整类删除所有 aging 而影响真实消费者。同一算法根据实际 footprint 和已启用附加模型控制 ASR/TTS 大计算重叠；不能只按每个 worker 各设4GiB而让总量超限。内存未知时用保守有界串行，不静默改变权重；记录决策原因。
-- [ ] **4. 边界验证。** 函数没有 preset_id 参数；CPU/MPS identity不可混淆；同预算ASR/TTS排队后释放；没有向导自动关闭现有diarization；低资源拒绝用同一错误码矩阵。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** ASR mode gate 负责互斥，Governor 不再要求为不存在的另一 ASR 模式空留槽位；保留当前 TTS/Jobs 的有界准入和公共指标，禁止整类删除所有 aging 而影响真实消费者。同一算法根据实际 footprint 和已启用附加模型控制 ASR/TTS 大计算重叠；不能只按每个 worker 各设4GiB而让总量超限。内存未知时用保守有界串行，不静默改变权重；记录决策原因。
+- [x] **4. 边界验证。** 函数没有 preset_id 参数；CPU/MPS identity不可混淆；同预算ASR/TTS排队后释放；没有向导自动关闭现有diarization；低资源拒绝用同一错误码矩阵。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `019dc2b`，20 项测试通过）
 
 
 
