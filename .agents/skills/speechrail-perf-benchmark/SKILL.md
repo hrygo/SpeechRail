@@ -3,7 +3,7 @@ name: speechrail-perf-benchmark
 description: >-
   SpeechRail 性能与质量基准 SOP。用于按 SemVer 选择单档或三档范围，测量 ASR/TTS/Realtime
   延迟、RTF、吞吐和 Apple Silicon 物理内存，验证三档质量与音色稳定性，并用统一模板生成
-  版本纵向变化和档位横向对比报告。
+  版本纵向变化和档位横向对比报告，同时把可信摘要同步到 README。
 ---
 
 # SpeechRail 性能与质量基准 SOP
@@ -244,10 +244,42 @@ PATCH 报告只保留当前档列，并注明三档横向对比不适用。
 记录可移植命令、fixture digest、参数和报告生成方式；不写凭据与私人路径。
 ```
 
-## 9. 归档与完成条件
+## 9. README 同步
+
+生成或更新正式基准报告后，必须在同一个逻辑变更中更新根目录 `README.md` 的“真实性能基准实测”区。README 是用户入口，不能只新增归档报告而留下过期摘要。
+
+同步时遵守以下规则：
+
+1. 报告是唯一数据来源。README 中的版本、报告链接、硬件、物理内存、样本数、RTF 和质量结论必须逐项来自报告，不根据原始日志重新计算，也不复制计划值。
+2. PATCH 只测当前部署档时，只更新该档的可信数据和最新报告链接；其他档位只可保留上一份三档报告的已验证数据，并明确标注其来源版本。不得把未重测档位表述为本 patch 实测。
+3. MINOR/MAJOR 完成三档测量后，更新整张横向表和报告链接；三个档位必须来自同一轮、同一硬件和同一 benchmark schema，不能拼接不可比结果。
+4. 对应 gate 为 `unset`/`fail` 或可比性不足时，不把该指标提升为 README 的性能承诺；保留上一份可信值并标注旧来源，或写“本版本未验证”。缺失值不得写成 `0`。
+5. README 只保留用户需要的简表、测试机器与内存、测量口径、报告链接和必要限制；完整分位数、fixture digest、进程采样和 gate 留在归档报告。
+6. 更新后逐项核对 README 数值与报告一致、相对链接可解析，并确认顶部 Release badge 仍存在；不得在整理 README 时删除或改坏该 badge。
+
+README 更新至少包含：
+
+- 标题中的实测硬件；
+- 指向本次正式报告的相对链接；
+- PATCH 当前档或 MINOR/MAJOR 三档的关键 ASR/TTS RTF 与同时物理峰值；
+- `N`、cold/warm 口径和不能直接比较的限制；
+- 数据来自不同版本时，每个保留值的来源版本。
+
+完成前检查：
+
+```bash
+git diff -- README.md docs/archive/performance/
+rg -n 'github/v/release/hrygo/SpeechRail|性能基准|performance-benchmark' README.md
+git diff --check
+```
+
+如果本次没有可信指标可写入 README，仍应更新报告链接或“本版本未验证”状态，并在报告和交接中说明原因；不能静默跳过 README。
+
+## 10. 归档与完成条件
 
 1. 原始 JSON、音频、embedding 和日志保存到仓库外 `<app-home>/benchmarks/<run-id>/`，权限最小化。
 2. Git 报告只保留脱敏指标、digest、可比性和 gate；更新 `docs/archive/performance/README.md`。
-3. README 只在可信基线变化时更新一张简表，并明确硬件与验收边界。
-4. 最终 active profile 与开始一致；服务、模型、音色和公共 smoke 再次通过。
-5. 缺少真实质量、完整物理采样或目标设备证据时，对应 gate 必须为 `unset`/`fail`，不得写“通过”。
+3. 根目录 `README.md` 已按第 9 节同步；报告链接、实测硬件、版本来源和关键指标可追溯且一致。
+4. README 顶部 GitHub Release badge 仍存在且链接、图片 URL 正确。
+5. 最终 active profile 与开始一致；服务、模型、音色和公共 smoke 再次通过。
+6. 缺少真实质量、完整物理采样或目标设备证据时，对应 gate 必须为 `unset`/`fail`，不得写“通过”。

@@ -51,16 +51,25 @@ speechrail service status --app-home "$HOME/Library/Application Support/SpeechRa
 | `tests/test_release_verification.py` | dist-info fixture 名 |
 | `uv.lock` | 项目包版本，由 `uv lock` 生成 |
 | `CHANGELOG.md` | 新版本条目，并保留空的 `[Unreleased]` |
+| `README.md` | Release badge 保留；性能摘要与本次 benchmark 报告一致；用户可见版本引用不过期 |
 
 不要改 worker 帧协议的整数 `version: 1`、历史 CHANGELOG 标题或归档报告中的旧版本。正式文档 front matter 只在正文实质变化时更新。
+
+README 顶部必须保留以下动态 GitHub Release badge。它从 GitHub Releases 自动读取最新版，不要把版本号硬编码进 badge URL，也不要在 README 精简、重排或发布更新时遗漏：
+
+```html
+<a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=3776AB&label=release" alt="Release" /></a>
+```
 
 ```bash
 uv lock
 uv run python scripts/check_version_consistency.py
 uv run --extra dev python -c "from speechrail.config import Settings; print(Settings().version)"
+rg -F -n 'href="https://github.com/hrygo/SpeechRail/releases"' README.md
+rg -F -n 'src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=3776AB&label=release"' README.md
 ```
 
-第二条必须 exit 0，第三条必须输出新版本。检查私有 managed 配置是否含 `SPEECHRAIL_VERSION`；该键会覆盖 wheel 默认版本。若存在，先在仓库外创建权限为 `0600` 的备份，再原子删除该单行，使后续版本来自已安装 wheel。不得输出配置全文。
+第二条必须 exit 0，第三条必须输出新版本，两条 `rg` 必须各命中同一个 badge。检查私有 managed 配置是否含 `SPEECHRAIL_VERSION`；该键会覆盖 wheel 默认版本。若存在，先在仓库外创建权限为 `0600` 的备份，再原子删除该单行，使后续版本来自已安装 wheel。不得输出配置全文。
 
 ## 4. 发布门
 
@@ -171,11 +180,11 @@ uv run python scripts/verify_release.py \
 - MINOR：按 active → 其余两档 → active 串行测三档；
 - MAJOR：三档完整测量并增加迁移/兼容验证。
 
-报告写入 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`，更新性能归档索引。README 只保留面向用户的少量稳定指标，不复制完整报告。
+报告写入 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`，更新性能归档索引，并按 benchmark Skill 的“README 同步”规则更新根目录 `README.md`。PATCH 只发布当前档的本次实测，其他档位如保留旧数据必须标注来源版本；MINOR/MAJOR 用同轮三档结果更新横向表。README 只保留面向用户的少量稳定指标，不复制完整报告。报告、归档索引和 README 缺一项都不算基准交付完成。
 
 ## 9. 提交与 tag
 
-重新运行版本一致性和 `git diff --check`，确认 benchmark 报告记录的是已安装 wheel。然后：
+重新运行版本一致性和 `git diff --check`，确认 benchmark 报告记录的是已安装 wheel、README 摘要可追溯到该报告，且 Release badge 两条 URL 均正确。然后：
 
 ```bash
 git tag v<version>
@@ -198,5 +207,7 @@ git tag v<version>
 - [ ] wheel 已验证并原子替换服务
 - [ ] 新版本、profile、模型、音色和真实 ASR/TTS smoke 已核对
 - [ ] PATCH 当前档或 MINOR/MAJOR 三档基准已归档
+- [ ] 性能归档索引和 README 基准摘要已同步，数值、硬件、版本来源与报告一致
+- [ ] README 保留指向 GitHub Releases 的动态 Release badge，链接与图片 URL 已校验
 - [ ] active profile 已恢复，回退点仍存在
 - [ ] 发布 commit 与本地 tag 已创建；远端操作符合当前授权
