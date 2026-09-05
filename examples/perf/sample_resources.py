@@ -324,6 +324,31 @@ def warm_up(mode: str, base_host: str, audio_path: Path | None) -> None:
     time.sleep(1.0)
 
 
+def _prepare_processes(
+    *,
+    mode: str,
+    base_host: str,
+    audio_path: Path | None,
+    warmup: bool,
+    discover: Callable[[], dict[str, ProcessIdentity]] = worker_pids,
+    reader: ProcessReader = _sample_process,
+    warmer: Callable[[str, str, Path | None], None] = warm_up,
+) -> tuple[dict[str, ProcessIdentity], dict[str, SampleValue]]:
+    """Capture the cold set, then refresh identities after optional lazy loading."""
+    initial_pids = discover()
+    if not initial_pids:
+        return {}, {}
+    initial_mem = {
+        key: observation
+        for key, process in initial_pids.items()
+        if (observation := reader(process)) is not None
+    }
+    if not warmup:
+        return initial_pids, initial_mem
+    warmer(mode, base_host, audio_path)
+    return discover(), initial_mem
+
+
 def _run_load(
     mode: str,
     base_host: str,
@@ -367,25 +392,19 @@ def main() -> None:
 
     audio_path = Path(args.audio) if args.audio else None
 
-    pids = worker_pids()
+    pids, initial_mem = _prepare_processes(
+        mode=args.mode,
+        base_host=args.host,
+        audio_path=audio_path,
+        warmup=args.warmup,
+    )
     if not pids:
         print("Error: No SpeechRail worker or host processes found.", file=sys.stderr)
         sys.exit(1)
 
     print(f"Discovered processes: { {key: process.pid for key, process in pids.items()} }")
 
-    # 1. Pre-warmup initial snapshot
-    initial_mem: dict[str, SampleValue] = {}
-    for key, process in pids.items():
-        observation = _sample_process(process)
-        if observation is not None:
-            initial_mem[key] = observation
-
-    # 2. Warmup if requested
-    if args.warmup:
-        warm_up(args.mode, args.host, audio_path)
-
-    # 3. Post-warmup idle snapshot
+    # Post-warmup idle snapshot uses refreshed identities so lazy workers are included.
     idle_mem: dict[str, SampleValue] = {}
     for key, process in pids.items():
         observation = _sample_process(process)

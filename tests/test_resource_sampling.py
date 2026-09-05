@@ -175,6 +175,38 @@ def test_all_mode_runs_batch_then_tts_in_each_iteration(
     assert events == ["batch", "tts"]
 
 
+def test_prepare_processes_refreshes_lazy_workers_after_warmup() -> None:
+    host = ProcessIdentity(pid=100, start_time_ns=1)
+    tts = ProcessIdentity(pid=200, start_time_ns=2)
+    discoveries = iter(({"host-fastapi": host}, {"host-fastapi": host, "tts": tts}))
+    events: list[str] = []
+
+    def discover() -> dict[str, ProcessIdentity]:
+        events.append("discover")
+        return next(discoveries)
+
+    def reader(process: ProcessIdentity) -> resources.SampleValue | None:
+        events.append(f"sample:{process.pid}")
+        return (0.0, 10.0, 10.0, resources.FOOTPRINT_METRIC)
+
+    def warm(_mode: str, _host: str, _audio: Path | None) -> None:
+        events.append("warm")
+
+    pids, initial = resources._prepare_processes(
+        mode="tts",
+        base_host="http://127.0.0.1:8201",
+        audio_path=None,
+        warmup=True,
+        discover=discover,
+        reader=reader,
+        warmer=warm,
+    )
+
+    assert pids == {"host-fastapi": host, "tts": tts}
+    assert initial == {"host-fastapi": (0.0, 10.0, 10.0, resources.FOOTPRINT_METRIC)}
+    assert events == ["discover", "sample:100", "warm", "discover"]
+
+
 def test_sampler_thread_records_and_cleans_up_reader_exception() -> None:
     process = ProcessIdentity(pid=100, start_time_ns=1)
     state = resources.SamplingStats()
