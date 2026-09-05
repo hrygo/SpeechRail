@@ -59,6 +59,8 @@ def test_system_router_can_be_built_from_fake_services(fake_services: AppService
         "/v1/models",
         "/v1/voices",
         "/v1/voices/{voice_id}",
+        "/v1/voices/clone",
+        "/v1/voices/clone/prompts",
     }
 
 

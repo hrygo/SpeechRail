@@ -37,6 +37,9 @@ class VoiceBinding:
     voice: str
     speaker: str | None
     instruction: str | None
+    is_clone: bool = False
+    ref_audio_path: str | None = None
+    ref_text: str | None = None
 
     @property
     def capabilities(self) -> VoiceCapabilities:
@@ -46,6 +49,7 @@ class VoiceBinding:
             variant=self.variant,
             supports_speaker=self.speaker is not None,
             supports_instruction=self.instruction is not None,
+            supports_clone=self.is_clone,
         )
 
 
@@ -60,11 +64,28 @@ def resolve_binding(variant: str, voice: str) -> VoiceBinding:
     preset_voice = resolve_voice(voice)
     profile = get_voice_profile(preset_voice)
     if variant == "voice_design":
+        if profile.mode == "clone":
+            return VoiceBinding(
+                variant=variant,
+                voice=preset_voice,
+                speaker=None,
+                instruction=None,
+                is_clone=True,
+                ref_audio_path=profile.audio_path,
+                ref_text=profile.ref_text,
+            )
         return VoiceBinding(
             variant=variant,
             voice=preset_voice,
             speaker=None,
             instruction=profile.instruction,
+            is_clone=False,
+        )
+
+    if profile.mode == "clone":
+        raise ValueError(
+            f"voice {voice} requires voice_design variant (quality tier); "
+            "custom_voice variant does not support voice cloning"
         )
 
     try:
@@ -76,6 +97,7 @@ def resolve_binding(variant: str, voice: str) -> VoiceBinding:
         voice=preset_voice,
         speaker=speaker,
         instruction=None,
+        is_clone=False,
     )
 
 

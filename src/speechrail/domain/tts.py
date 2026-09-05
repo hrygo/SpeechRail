@@ -2,39 +2,49 @@
 
 from __future__ import annotations
 
+import io
 import json
 import random
 import re
+import subprocess
 import time
 import uuid
+import wave
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
 
 @dataclass(frozen=True, slots=True)
 class VoiceProfile:
-    """One public preset mapped to a model-independent voice instruction."""
+    """One public preset mapped to a model-independent voice instruction or clone context."""
 
     id: str
-    instruction: str
+    instruction: str = ""
     is_default: bool = False
     name: str = ""
     seed: int = 42
     temperature: float = 0.1
     is_system: bool = False
     created_at: float = 0.0
+    mode: str = "system"  # "system" | "instruction" | "clone"
+    ref_text: str | None = None
+    audio_path: str | None = None
+    duration_seconds: float = 0.0
 
     @property
     def description(self) -> str:
         """Expose the same stable text for API clients and model adapters."""
-        return self.instruction
+        return self.instruction or self.ref_text or ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "id": self.id,
             "name": self.name or self.id,
             "instruction": self.instruction,
@@ -43,7 +53,15 @@ class VoiceProfile:
             "is_default": self.is_default,
             "is_system": self.is_system,
             "created_at": self.created_at,
+            "mode": self.mode,
         }
+        if self.ref_text is not None:
+            data["ref_text"] = self.ref_text
+        if self.audio_path is not None:
+            data["audio_path"] = self.audio_path
+        if self.duration_seconds > 0:
+            data["duration_seconds"] = self.duration_seconds
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +71,7 @@ class VoiceCapabilities:
     variant: str
     supports_speaker: bool
     supports_instruction: bool
+    supports_clone: bool = False
 
 
 SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
@@ -208,36 +227,138 @@ def resolve_voice(voice: str) -> str:
     return VOICE_ALIASES.get(voice, voice)
 
 
-class VoiceRegistry:
-    """Thread-safe registry managing system preset voices and persistent user-designed voices."""
+def transcode_and_validate_clone_audio(
+    audio_bytes: bytes,
+    *,
+    ffmpeg_path: str = "ffmpeg",
+    min_duration: float = 2.0,
+    max_duration: float = 45.0,
+    target_sample_rate: int = 24_000,
+) -> tuple[bytes, float]:
+    """Transcode user audio into 24kHz mono PCM16 WAV and validate duration limits."""
+    if not audio_bytes:
+        raise ValueError("audio content must not be empty")
+    if len(audio_bytes) > 15 * 1024 * 1024:
+        raise ValueError("audio file exceeds 15MB limit")
 
-    def __init__(self, storage_path: Path | None = None) -> None:
+    try:
+        proc = subprocess.run(
+            [
+                str(ffmpeg_path),
+                "-y",
+                "-i",
+                "pipe:0",
+                "-ac",
+                "1",
+                "-ar",
+                str(target_sample_rate),
+                "-f",
+                "wav",
+                "pipe:1",
+            ],
+            input=audio_bytes,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg_not_found") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("audio transcoding timed out") from exc
+
+    if proc.returncode != 0:
+        err_msg = proc.stderr.decode("utf-8", errors="replace")[:200]
+        raise ValueError(f"audio transcoding failed: {err_msg}")
+
+    wav_bytes = proc.stdout
+    max_pcm_bytes = int(max_duration * target_sample_rate * 2) + 2048
+    if len(wav_bytes) > max_pcm_bytes:
+        raise ValueError(
+            f"audio exceeds maximum allowed size for {max_duration}s duration (too long)"
+        )
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            duration = frames / float(rate) if rate > 0 else 0.0
+    except Exception as exc:
+        raise ValueError("transcoded audio is not a valid WAV") from exc
+
+    if duration < min_duration:
+        raise ValueError(f"audio duration {duration:.1f}s is too short (minimum {min_duration}s)")
+    if duration > max_duration:
+        raise ValueError(f"audio duration {duration:.1f}s is too long (maximum {max_duration}s)")
+
+    return wav_bytes, duration
+
+
+class VoiceRegistry:
+    """Thread-safe registry managing system preset voices and custom cloned voices."""
+
+    def __init__(
+        self,
+        storage_path: Path | None = None,
+        voices_dir: Path | None = None,
+    ) -> None:
         self._storage_path = storage_path or (Path.home() / ".speechrail" / "custom_voices.json")
+        self._voices_dir = voices_dir or (Path.home() / ".speechrail" / "voices")
+        self._last_loaded_mtime: float = 0.0
         self._custom_voices: dict[str, VoiceProfile] = {}
         self._load_custom_voices()
 
     def _load_custom_voices(self) -> None:
         if not self._storage_path.is_file():
+            self._last_loaded_mtime = 0.0
             return
         try:
+            mtime = self._storage_path.stat().st_mtime
             data = json.loads(self._storage_path.read_text(encoding="utf-8"))
             if isinstance(data, list):
+                loaded: dict[str, VoiceProfile] = {}
                 for item in data:
-                    if isinstance(item, dict) and "id" in item and "instruction" in item:
+                    if isinstance(item, dict) and "id" in item:
                         vid = str(item["id"]).strip().lower()
                         if vid not in SYSTEM_VOICE_PROFILES and vid not in VOICE_ALIASES:
-                            self._custom_voices[vid] = VoiceProfile(
+                            default_mode = "instruction" if item.get("instruction") else "clone"
+                            mode = str(item.get("mode", default_mode))
+                            ref_text = (
+                                str(item["ref_text"])
+                                if item.get("ref_text") is not None
+                                else None
+                            )
+                            audio_path = (
+                                str(item["audio_path"])
+                                if item.get("audio_path") is not None
+                                else None
+                            )
+                            loaded[vid] = VoiceProfile(
                                 id=vid,
                                 name=str(item.get("name", vid)),
-                                instruction=str(item["instruction"]),
+                                instruction=str(item.get("instruction", "")),
                                 seed=int(item.get("seed", 42)),
                                 temperature=float(item.get("temperature", 0.1)),
                                 is_default=False,
                                 is_system=False,
                                 created_at=float(item.get("created_at", 0.0)),
+                                mode=mode,
+                                ref_text=ref_text,
+                                audio_path=audio_path,
+                                duration_seconds=float(item.get("duration_seconds", 0.0)),
                             )
+                self._custom_voices = loaded
+                self._last_loaded_mtime = mtime
         except Exception:
             pass
+
+    def _check_reload(self) -> None:
+        if self._storage_path.is_file():
+            try:
+                mtime = self._storage_path.stat().st_mtime
+                if mtime > self._last_loaded_mtime:
+                    self._load_custom_voices()
+            except Exception:
+                pass
 
     def _save_custom_voices(self) -> None:
         try:
@@ -246,10 +367,13 @@ class VoiceRegistry:
             self._storage_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
+            if self._storage_path.is_file():
+                self._last_loaded_mtime = self._storage_path.stat().st_mtime
         except Exception:
             pass
 
     def list_profiles(self) -> list[VoiceProfile]:
+        self._check_reload()
         system = list(SYSTEM_VOICE_PROFILES.values())
         custom = sorted(self._custom_voices.values(), key=lambda v: v.created_at, reverse=True)
         return system + custom
@@ -258,6 +382,9 @@ class VoiceRegistry:
         resolved = resolve_voice(voice)
         if resolved in SYSTEM_VOICE_PROFILES:
             return SYSTEM_VOICE_PROFILES[resolved]
+        if resolved in self._custom_voices:
+            return self._custom_voices[resolved]
+        self._check_reload()
         if resolved in self._custom_voices:
             return self._custom_voices[resolved]
         raise ValueError(f"unknown preset voice: {voice}")
@@ -275,6 +402,8 @@ class VoiceRegistry:
             raise ValueError("voice instruction must not be empty")
         if voice_id:
             vid = voice_id.strip().lower()
+            if not VOICE_ID_RE.match(vid):
+                raise ValueError("voice_id must match regex ^[a-zA-Z0-9_-]{1,64}$")
         else:
             vid = f"custom_{int(time.time())}_{uuid.uuid4().hex[:4]}"
 
@@ -291,6 +420,63 @@ class VoiceRegistry:
             is_default=False,
             is_system=False,
             created_at=time.time(),
+            mode="instruction",
+        )
+        self._custom_voices[vid] = profile
+        self._save_custom_voices()
+        return profile
+
+    def create_cloned_profile(
+        self,
+        *,
+        name: str,
+        ref_text: str,
+        audio_bytes: bytes,
+        voice_id: str | None = None,
+        duration_seconds: float,
+    ) -> VoiceProfile:
+        if not name.strip():
+            raise ValueError("voice name must not be empty")
+        if not ref_text.strip():
+            raise ValueError("ref_text must not be empty")
+        if voice_id:
+            vid = voice_id.strip().lower()
+            if not VOICE_ID_RE.match(vid):
+                raise ValueError("voice_id must match regex ^[a-zA-Z0-9_-]{1,64}$")
+        else:
+            vid = f"clone_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+
+        if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
+            raise ValueError(f"cannot override system voice ID: {vid}")
+
+        self._voices_dir.mkdir(parents=True, exist_ok=True)
+        with suppress(Exception):
+            self._voices_dir.chmod(0o700)
+
+        target_file = (self._voices_dir / f"{vid}.wav").resolve()
+        try:
+            if target_file.parent != self._voices_dir.resolve():
+                raise ValueError("voice audio path escapes voices directory")
+        except ValueError as exc:
+            raise ValueError("voice audio path escapes voices directory") from exc
+
+        target_file.write_bytes(audio_bytes)
+        with suppress(Exception):
+            target_file.chmod(0o600)
+
+        profile = VoiceProfile(
+            id=vid,
+            name=name.strip(),
+            instruction="",
+            seed=42,
+            temperature=0.1,
+            is_default=False,
+            is_system=False,
+            created_at=time.time(),
+            mode="clone",
+            ref_text=ref_text.strip(),
+            audio_path=str(target_file),
+            duration_seconds=round(duration_seconds, 2),
         )
         self._custom_voices[vid] = profile
         self._save_custom_voices()
@@ -298,12 +484,22 @@ class VoiceRegistry:
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.match(vid):
+            raise ValueError("invalid voice ID format")
         if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"system voice cannot be deleted: {vid}")
+        self._check_reload()
         if vid not in self._custom_voices:
             raise KeyError(f"custom voice not found: {vid}")
+        profile = self._custom_voices[vid]
         del self._custom_voices[vid]
         self._save_custom_voices()
+
+        if profile.audio_path:
+            p = Path(profile.audio_path).resolve()
+            with suppress(Exception):
+                if p.parent == self._voices_dir.resolve() and p.is_file():
+                    p.unlink(missing_ok=True)
 
 
 _GLOBAL_VOICE_REGISTRY = VoiceRegistry()
@@ -613,6 +809,7 @@ __all__ = [
     "DEFAULT_VOICE_ID",
     "SYSTEM_VOICE_PROFILES",
     "VOICE_ALIASES",
+    "VOICE_ID_RE",
     "VOICE_PROFILES",
     "StreamingSentenceSplitter",
     "VoiceCapabilities",
@@ -626,4 +823,5 @@ __all__ = [
     "get_voice_registry",
     "normalize_tts_text",
     "resolve_voice",
+    "transcode_and_validate_clone_audio",
 ]

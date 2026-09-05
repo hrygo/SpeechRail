@@ -136,6 +136,13 @@ class Qwen3TtsWorker:
         self._started = False
         self._epoch: int = 0
         self.last_active: float = time.monotonic()
+        self.model_variant: str | None = None
+        try:
+            from speechrail.backends.model_identity import inspect_model
+
+            self.model_variant = inspect_model(config.model_dir).variant
+        except Exception:
+            self.model_variant = "voice_design"
 
     @property
     def alive(self) -> bool:
@@ -191,17 +198,25 @@ class Qwen3TtsWorker:
                 epoch = self._epoch
                 self.last_active = time.monotonic()
                 response_id = f"resp_{uuid4().hex}"
-                await self._transport.send(
-                    {
-                        "version": PROTOCOL_VERSION,
-                        "type": "synthesize",
-                        "request_id": response_id,
-                        "text": request.text,
-                        "voice": request.voice,
-                        "speed": request.speed,
-                        "language": request.language,
-                    }
-                )
+                frame_payload: dict[str, object] = {
+                    "version": PROTOCOL_VERSION,
+                    "type": "synthesize",
+                    "request_id": response_id,
+                    "text": request.text,
+                    "voice": request.voice,
+                    "speed": request.speed,
+                    "language": request.language,
+                }
+                try:
+                    from speechrail.backends.qwen3_voice_binding import resolve_binding
+
+                    binding = resolve_binding(self.model_variant or "voice_design", request.voice)
+                    if binding.is_clone and binding.ref_audio_path:
+                        frame_payload["ref_audio"] = binding.ref_audio_path
+                        frame_payload["ref_text"] = binding.ref_text or ""
+                except Exception:
+                    pass
+                await self._transport.send(frame_payload)
                 expected_chunk_index = 0
                 completed = False
                 try:

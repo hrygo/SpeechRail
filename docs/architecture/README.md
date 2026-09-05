@@ -2,8 +2,8 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "1.4.0"
-date: 2026-09-02
+version: "1.4.1"
+date: 2026-09-05
 ---
 
 # 🏛️ SpeechRail 架构文档
@@ -29,6 +29,8 @@ graph TD
 4. **[🚀 ASR/TTS 深度优化规范 (asr-tts-best-practices-and-optimization-spec.md)](asr-tts-best-practices-and-optimization-spec.md)**：Apple Silicon 统一内存优化、流式 VAD、音频平滑算法与长会话显存控制。
 5. **[🛡️ 当前边界与剩余风险 (current-boundaries.md)](current-boundaries.md)**：明确当前已实测能力与发布前必须遵守的安全与容量红线。
 6. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：追溯重大技术选型的历史背景、权衡与替代方案。
+7. **[🎙️ 音色克隆架构设计与工程交接 (voice-cloning-design-and-handoff.md)](voice-cloning-design-and-handoff.md)**：面向 Sona「声音工坊」的零样本克隆架构、Qwen3-TTS ICL 原生实测事实、公共 API 契约与 Worker IPC 实施方案。
+8. **[SpeechRail × Sona 讲话人分离端到端设计](speaker-diarization-e2e-design.md)**（`under_review`）：样本时间线、连续分人、显式协议扩展、匿名关联、资源与质量门；配套[实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)为待执行任务，不代表已发布能力。
 
 ---
 

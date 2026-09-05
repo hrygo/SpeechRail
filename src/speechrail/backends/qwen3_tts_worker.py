@@ -245,6 +245,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         top_p: float = 0.95,
         load_fn: ModelLoader | None = None,
         numpy_module: Any | None = None,
+        audio_loader_fn: Any | None = None,
         warmup: bool = True,
     ) -> None:
         expected = inspect_model(model_dir)
@@ -262,6 +263,16 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             self._model = load_fn(str(model_dir))
         except Exception as exc:
             raise RuntimeError("mlx_qwen3_tts_runtime_unavailable") from exc
+        if audio_loader_fn is None:
+            try:
+                mod = __import__(
+                    "mlx_audio.tts.models.qwen3_tts.qwen3_tts",
+                    fromlist=["load_audio"],
+                )
+                audio_loader_fn = getattr(mod, "load_audio", None)
+            except Exception:
+                pass
+        self._audio_loader_fn = audio_loader_fn
         model_type = getattr(getattr(self._model, "config", None), "tts_model_type", None)
         if model_type is not None and model_type != expected.variant:
             raise RuntimeError("backend_identity_mismatch: loader variant mismatch")
@@ -302,14 +313,28 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 pass
 
     def synthesize(
-        self, text: str, *, voice: str, speed: float, language: str
+        self,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+        language: str,
+        ref_audio: str | None = None,
+        ref_text: str | None = None,
     ) -> Iterator[bytes]:
         clean_text = normalize_tts_text(text)
         if not clean_text:
             return
         first_chunk = True
         for sentence in bounded_sentences(clean_text):
-            for pcm in self._generate(sentence, voice=voice, speed=speed, language=language):
+            for pcm in self._generate(
+                sentence,
+                voice=voice,
+                speed=speed,
+                language=language,
+                ref_audio=ref_audio,
+                ref_text=ref_text,
+            ):
                 if not pcm:
                     continue
                 if first_chunk:
@@ -324,8 +349,48 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 yield pcm
 
     def _generate(
-        self, text: str, *, voice: str, speed: float, language: str
+        self,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+        language: str,
+        ref_audio: str | None = None,
+        ref_text: str | None = None,
     ) -> Iterator[bytes]:
+        if ref_audio is not None or ref_text is not None:
+            if not ref_audio or not Path(ref_audio).is_file():
+                raise RuntimeError("failed to load reference audio: file missing")
+            if ref_text is None or not ref_text.strip():
+                raise RuntimeError("failed to load reference text: text missing")
+            if self._audio_loader_fn is None:
+                raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
+            try:
+                audio_array = self._audio_loader_fn(ref_audio, sample_rate=self._sample_rate)
+            except Exception as exc:
+                raise RuntimeError(f"failed to decode reference audio: {exc}") from exc
+
+            if audio_array is None:
+                raise RuntimeError("failed to decode reference audio: empty array")
+            if not hasattr(self._model, "_generate_icl"):
+                raise RuntimeError(
+                    "model does not support clone generation (_generate_icl missing)"
+                )
+
+            for result in self._model._generate_icl(
+                text=text,
+                ref_audio=audio_array,
+                ref_text=ref_text,
+                language=language,
+                stream=True,
+                streaming_interval=self._chunk_ms / 1000,
+                repetition_penalty=max(self._repetition_penalty, 1.3),
+            ):
+                pcm = self._to_pcm(result)
+                if pcm:
+                    yield pcm
+            return
+
         variant = self.identity.model_variant or "voice_design"
         condition = generation_condition(variant, voice)
         used_temperature = self._temperature
@@ -471,9 +536,25 @@ def serve(
             continue
         request_id = frame.get("request_id") if isinstance(frame.get("request_id"), str) else None
         try:
-            request_id, text, voice, speed, language = _decode_synthesis_request(frame)
+            (
+                request_id,
+                text,
+                voice,
+                speed,
+                language,
+                ref_audio,
+                ref_text,
+            ) = _decode_synthesis_request(frame)
+            synth_kwargs: dict[str, Any] = {
+                "voice": voice,
+                "speed": speed,
+                "language": language,
+            }
+            if ref_audio is not None or ref_text is not None:
+                synth_kwargs["ref_audio"] = ref_audio
+                synth_kwargs["ref_text"] = ref_text
             for index, pcm in enumerate(
-                engine.synthesize(text, voice=voice, speed=speed, language=language)
+                engine.synthesize(text, **synth_kwargs)
             ):
                 if not pcm or len(pcm) % 2:
                     raise ProtocolError("invalid PCM chunk")
@@ -503,7 +584,7 @@ def serve(
                 },
             )
             _clear_metal_cache()
-        except Exception:
+        except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             write_frame(
                 output_stream,
@@ -511,18 +592,23 @@ def serve(
                     "version": PROTOCOL_VERSION,
                     "type": "error",
                     "code": "worker_inference_error",
+                    "message": str(exc),
                     "request_id": request_id,
                 },
             )
             _clear_metal_cache()
 
 
-def _decode_synthesis_request(frame: dict[str, object]) -> tuple[str, str, str, float, str]:
+def _decode_synthesis_request(
+    frame: dict[str, object],
+) -> tuple[str, str, str, float, str, str | None, str | None]:
     request_id = frame.get("request_id")
     text = frame.get("text")
     voice = frame.get("voice")
     speed = frame.get("speed")
     language = frame.get("language", "auto")
+    ref_audio = frame.get("ref_audio")
+    ref_text = frame.get("ref_text")
     if (
         frame.get("version") != PROTOCOL_VERSION
         or frame.get("type") != "synthesize"
@@ -539,7 +625,28 @@ def _decode_synthesis_request(frame: dict[str, object]) -> tuple[str, str, str, 
         or len(language) > 64
     ):
         raise ProtocolError("invalid synthesize request")
-    return request_id, text, voice, float(speed), language.strip()
+
+    validated_ref_audio: str | None = None
+    if ref_audio is not None:
+        if not isinstance(ref_audio, str) or not ref_audio.strip():
+            raise ProtocolError("invalid ref_audio in synthesize request")
+        validated_ref_audio = ref_audio.strip()
+
+    validated_ref_text: str | None = None
+    if ref_text is not None:
+        if not isinstance(ref_text, str):
+            raise ProtocolError("invalid ref_text in synthesize request")
+        validated_ref_text = ref_text
+
+    return (
+        request_id,
+        text,
+        voice,
+        float(speed),
+        language.strip(),
+        validated_ref_audio,
+        validated_ref_text,
+    )
 
 
 def main(argv: list[str] | None = None, *, engine_factory: EngineFactory | None = None) -> None:

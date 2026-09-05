@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from speechrail.application.services import AppServices
@@ -18,6 +20,26 @@ from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
 from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
 from speechrail.http.errors import error_response
+
+_CLONE_PROMPTS_ASSET = (
+    Path(__file__).resolve().parent.parent.parent
+    / "assets"
+    / "clone_prompts.json"
+)
+
+
+def _load_clone_prompts() -> list[dict[str, Any]]:
+    if _CLONE_PROMPTS_ASSET.is_file():
+        try:
+            loaded = json.loads(_CLONE_PROMPTS_ASSET.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                return loaded
+        except Exception:
+            return []
+    return []
+
+
+_CACHED_CLONE_PROMPTS: list[dict[str, Any]] = _load_clone_prompts()
 
 
 def _model_entry(
@@ -56,6 +78,7 @@ def _voice_entry(
     available = tts_ready and enabled
     supports_speaker = False
     supports_instruction = False
+    supports_clone = False
     if variant in {"voice_design", "custom_voice"}:
         try:
             binding = resolve_binding(variant, profile.id)
@@ -65,8 +88,9 @@ def _voice_entry(
             capabilities = binding.capabilities
             supports_speaker = capabilities.supports_speaker
             supports_instruction = capabilities.supports_instruction
+            supports_clone = capabilities.supports_clone
 
-    return {
+    entry: dict[str, Any] = {
         "id": profile.id,
         "name": profile.name or profile.id,
         "description": profile.description,
@@ -82,8 +106,15 @@ def _voice_entry(
         "capabilities": {
             "supports_speaker": supports_speaker,
             "supports_instruction": supports_instruction,
+            "supports_clone": supports_clone,
         },
+        "mode": profile.mode,
     }
+    if profile.ref_text is not None:
+        entry["ref_text"] = profile.ref_text
+    if profile.duration_seconds > 0:
+        entry["duration_seconds"] = profile.duration_seconds
+    return entry
 
 
 def create_system_router(services: AppServices) -> APIRouter:
@@ -247,6 +278,100 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_creation_failed",
                 str(exc),
             )
+
+    @router.get("/v1/voices/clone/prompts")
+    async def clone_prompts() -> dict[str, Any]:
+        """List official curated scripts for zero-shot voice cloning."""
+        return {"object": "list", "data": _CACHED_CLONE_PROMPTS}
+
+    @router.post("/v1/voices/clone")
+    async def clone_voice(
+        request: Request,
+        audio: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.
+        ref_text: str = Form(...),
+        name: str = Form(...),
+        voice_id: str | None = Form(
+            default=None, alias="id"
+        ),
+    ) -> JSONResponse:
+        """Clone and register a custom voice using a reference audio and prompt text."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_clone"
+        variant = active.tts.variant if active.tts is not None else None
+        if variant != "voice_design":
+            tier_name = active.profile or "custom"
+            return error_response(
+                400,
+                request_id,
+                "voice_cloning_unsupported",
+                (
+                    f"Active TTS tier ({tier_name}) variant '{variant}' "
+                    "does not support voice cloning; switch to quality profile"
+                ),
+            )
+
+        if not name or not name.strip():
+            return error_response(400, request_id, "invalid_name", "Voice name is required")
+        if not ref_text or not ref_text.strip():
+            return error_response(
+                400, request_id, "invalid_ref_text", "Reference text (ref_text) is required"
+            )
+
+        audio_content = bytearray()
+        max_limit = 15 * 1024 * 1024
+        while chunk := await audio.read(64 * 1024):
+            audio_content.extend(chunk)
+            if len(audio_content) > max_limit:
+                return error_response(
+                    413, request_id, "audio_too_large", "Audio file exceeds 15MB limit"
+                )
+
+        if len(audio_content) < 1024:
+            return error_response(
+                400, request_id, "audio_too_short", "Audio content is empty or too short"
+            )
+
+        ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
+        try:
+            from speechrail.domain.tts import transcode_and_validate_clone_audio
+
+            wav_bytes, duration = transcode_and_validate_clone_audio(
+                bytes(audio_content),
+                ffmpeg_path=ffmpeg_cmd,
+                min_duration=2.0,
+                max_duration=45.0,
+                target_sample_rate=24_000,
+            )
+        except RuntimeError as exc:
+            return error_response(500, request_id, "dependency_missing", str(exc))
+        except ValueError as exc:
+            err_str = str(exc)
+            if "too short" in err_str:
+                code = "audio_too_short"
+            elif "too long" in err_str:
+                code = "audio_too_long"
+            else:
+                code = "invalid_audio"
+            return error_response(400, request_id, code, err_str)
+
+        vid_str = (
+            voice_id.strip().lower()
+            if isinstance(voice_id, str) and voice_id.strip()
+            else None
+        )
+        try:
+            profile = get_voice_registry().create_cloned_profile(
+                name=name.strip(),
+                ref_text=ref_text.strip(),
+                audio_bytes=wav_bytes,
+                voice_id=vid_str,
+                duration_seconds=duration,
+            )
+            return JSONResponse(
+                status_code=201,
+                content=_voice_entry(profile, active, services.tts_ready),
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "voice_creation_failed", str(exc))
 
     @router.delete("/v1/voices/{voice_id}")
     async def delete_voice(voice_id: str, request: Request) -> JSONResponse:

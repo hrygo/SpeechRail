@@ -6,6 +6,18 @@
 
 - 资源采样器在执行 `--warmup` 后重新发现受管进程，确保懒加载期间新启动的 ASR/TTS worker 进入同 tick `phys_footprint` 集合，避免漏计 worker 仍错误显示完整 gate。
 
+## [1.8.0] - 2026-09-05
+
+### Added
+
+- **零样本音色克隆 API**：新增 `GET /v1/voices/clone/prompts` 精选朗读文案和 `POST /v1/voices/clone`，支持上传参考音频、参考文本与自定义音色 ID，并以受控权限持久化本地音频和元数据。
+- **Quality 档 ICL 音色生成**：`quality` 档将克隆音色的参考音频与文本安全传递至 Qwen3-TTS Worker，使用原生 VoiceDesign ICL 生成路径。
+
+### Changed
+
+- 音色契约新增 `mode`、`ref_text`、`duration_seconds` 与 `supports_clone` 能力声明；`balanced`/`light` 按当前 CustomVoice 权重明确拒绝不支持的克隆请求。
+- 自定义音色注册表支持跨进程元数据热重载，并对上传大小、时长、ID、路径、目录和文件权限执行有界校验。
+
 ## [1.7.1] - 2026-09-05
 
 ### Fixed

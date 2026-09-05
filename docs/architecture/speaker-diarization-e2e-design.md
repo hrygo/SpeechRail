@@ -71,6 +71,8 @@ SpeechRail 管推理、匿名声学状态、接口和资源上限。Sona 管音�
 
 新协议下 Sona 只从 sample 字段换算，旧协议仍使用既有秒制兼容适配。禁止改变旧 `start/end` 的时间域来假装兼容。静音继续送入分人时钟；真实暂停/采集故障导致时间不连续时，Sona 关闭当前 epoch，新建 epoch，不拼接成连续录音。重放只覆盖尚未持久确认的后缀，详细算法见 Sona 规格。
 
+新扩展固定 ASR item 最大 8 秒（128,000 samples），优先使用 server VAD（初始 threshold=0.5、prefix_padding_ms=300、silence_duration_ms=600）自然断句，连续讲话达到上限自动 commit。接收端在样本边界拆分跨上限的包，所有样本恰好归入一个 item；不能等整个超长包处理后再结转。推荐 Sona 每包 20–100 ms，新扩展单包最多 500 ms。活动结果在对应 ASR item 完成对齐前不释放，30 秒 ring 为 8 秒 item、处理积压与修订保留余量。模型增量延迟和等 ASR commit 的延迟必须分开计量。
+
 ### 4.2 一个权重实例，独立流状态
 
 新增内部 `ContinuousDiarizationSession`，由 `DiarizationCoordinator` 持有，生命周期覆盖整个 WS 的分人阶段。ASR commit 只结束 ASR item，不 reset 分人状态。每个 session 独立持有前端特征缓存、Sortformer FIFO/AOSC、输出偏移和匿名标签；权重只加载一次。
@@ -109,7 +111,7 @@ class ContinuousDiarizationSession(Protocol):
 
 初始实验阈值：活动 onset/offset 为 0.60/0.40；最小活动 160 ms；`coverage_ratio>=0.60` 且第一/第二候选支持差 `>=0.20` 才给主 speaker。`overlap_ratio>=0.20` 标记真实重叠，不强行给唯一归属。阈值是开发集起点，正式值经 R5 验收写入版本化 preset。短插话不因时长单独归给邻人。
 
-归属 `status` 为 `unknown | tentative | stable`。词结束后保留最多 3 秒的自动修订时间；当活动 watermark 覆盖词尾且该词在至少两个有效推理步归属一致时，可 stable。3 秒到期仍无足够证据则终止为 unknown。`stable_through_sample` 表示此时间以前不再自动修订（也包含终止为 unknown 的词），不是“以前全部正确”。EOF 冲刷后也遵守这一点。
+归属 `status` 为 `unknown | tentative | stable`。词结束后保留最多 3 秒的自动修订时间；当活动 watermark 覆盖词尾且该词在至少两个有效推理步归属一致时，可 stable。3 秒到期仍无足够证据则终止为 unknown。若 canonical unit 在该期限之后才因 ASR commit 产生，直接用仍缓存的已冻结活动交付 stable/unknown，不重新开启 3 秒窗口。`stable_through_sample` 表示此时间以前不再自动修订（也包含终止为 unknown 的词），不是“以前全部正确”。EOF 冲刷后也遵守这一点。
 
 ### 4.5 CAM++ 和重连
 
@@ -144,7 +146,7 @@ CAM++ 在 Sortformer 已判定非重叠、无明显削波、累计有效语音�
 }
 ```
 
-`extensions` 为拟新增、去重且只允许登记值的数组。`session.updated` 增加 `diarization_contract`，包含 `version:1`、`timebase:"session_samples"`、`sample_rate:16000`、`max_speakers:4`、`max_revision_delay_ms:3000`、`group_generation`（无 group 为 null）。未成功回显即未启用。扩展只能在首个 PCM 前协商，流中修改返回 `invalid_state`。
+`extensions` 为拟新增、去重且只允许登记值的数组。`session.updated` 增加 `diarization_contract`，包含 `version:1`、`timebase:"session_samples"`、`sample_rate:16000`、`max_speakers:4`、`max_item_duration_ms:8000`、`max_revision_delay_ms:3000`、`group_generation`（无 group 为 null）。未成功回显即未启用。扩展只能在首个 PCM 前协商，流中修改返回 `invalid_state`。
 
 旧客户端：保持现有 session/update/segment/completed/clear 行为，不发送新 type，不重新解释旧 start/end。新旧组合：新 Sona 连旧 Rail进入可见 legacy 模式；新 Rail 连旧 Sona保持 legacy。纯字幕、语音助手、REST 不受新协议影响。`speaker_count_hint>4` 在新扩展入口明确拒绝 `speaker_limit_exceeded`；旧入口保留兼容校验但文档声明真实上限。1–4 提示不再裁掉模型输出，也不被描述成准确人数。
 
@@ -229,7 +231,7 @@ ratio 必须是有限 `[0,1]` 数字且不接受 bool；候选最多 4 位不同
 | finalize 超时 | degraded，reason=`finalization_timeout`，Sona 禁止将讲话人结果标为完整 |
 | ASR 自身错误 / PCM 序号矛盾 | 既有稳定 error envelope；停止该 epoch，Sona 记录 gap |
 
-进行中降级通过新的 `speechrail.diarization.status` 事件交付，字段 `{event_id, session_id, sequence, status:"degraded", reason, since_sample}`。它只在 opt-in 模式出现，每 session 只发生一次 active→degraded；后续 ASR completed 继续正常交付，必须仍给 unknown 归属单元。初始 profile 缺失不能自动开始假多人会议，Sona 只可由用户明确选择“仅转写”。
+进行中降级通过新的 `speechrail.diarization.status` 事件交付，字段 `{event_id, session_id, sequence, status:"degraded", reason, since_sample}`。它只在 opt-in 模式出现，每 session 只发生一次 active→degraded；先为已交付但未冻结的单元发送终止为 unknown 的 update，再发送 status。后续 ASR completed 继续正常交付并跟随 unknown update，watermark 正常推进；finalized 维持 degraded 原因，不能漏掉待定单元。初始 profile 缺失不能自动开始假多人会议，Sona 只可由用户明确选择“仅转写”。
 
 ## 6. 资源、调度和音频所有权
 
@@ -260,7 +262,7 @@ ratio 必须是有限 `[0,1]` 数字且不接受 bool；候选最多 4 位不同
 | 中文 CER | 不比同档纯 ASR 基线增加 0.5 个百分点以上 |
 | 讲话人归属文字错误率 | 按字计归属错误和 unknown，清晰集 ≤10%；单列 unknown 占比 ≤5% |
 | 字幕首次显示 P95 | ≤2 秒（从对应语音起点计，另报冷启动） |
-| 稳定讲话人 P95 | ≤4 秒（从该词结束到客户端应用修订计） |
+| 稳定讲话人 P95 | commit 后 ≤4 秒；同时报告词尾到客户端的完整延迟，连续无停顿讲话目标 ≤12 秒（含最多 8 秒等切段） |
 | 推理总忙时/音频时长 | ≤0.7；native 队列积压 P95 ≤2 秒，无持续增长 |
 | 长会议 | 两小时含第 31/61/91 分钟边界、一次重连和一次 16 分钟静音；无历史错位、无长期 tensor 增长 |
 | 内存 | 报物理 footprint；模型热身后最后 30 分钟相对首个稳定 30 分钟增长 ≤10%，所有逻辑缓存遵守硬上限 |

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 1.7.1
+  version: 1.8.0
   description: |
     Local-first shared ASR and TTS service.
 
@@ -42,7 +42,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 1.7.1
+                version: 1.8.0
                 backend: asr-1.7b-q8
                 profile: quality
                 asr_ready: true
@@ -237,6 +237,50 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /v1/voices/clone/prompts:
+    get:
+      operationId: listClonePrompts
+      tags: [speech]
+      summary: List official curated scripts for zero-shot voice cloning
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: List of curated teleprompter prompts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClonePromptList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/voices/clone:
+    post:
+      operationId: cloneVoice
+      tags: [speech]
+      summary: Clone and register a voice from reference audio and script text
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VoiceCloneRequest'
+      responses:
+        '201':
+          description: Created cloned voice profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/AudioTooLarge'
   /v1/voices/{voice_id}:
     delete:
       operationId: deleteVoice
@@ -549,6 +593,14 @@ components:
           enum: [voice_design, custom_voice, null]
         capabilities:
           $ref: '#/components/schemas/VoiceCapabilities'
+        mode:
+          type: string
+          enum: [system, instruction, clone]
+          default: system
+        ref_text:
+          type: [string, 'null']
+        duration_seconds:
+          type: number
     VoiceCapabilities:
       type: object
       required: [supports_speaker, supports_instruction]
@@ -557,6 +609,54 @@ components:
           type: boolean
         supports_instruction:
           type: boolean
+        supports_clone:
+          type: boolean
+          default: false
+    VoiceCloneRequest:
+      type: object
+      required: [audio, ref_text, name]
+      properties:
+        audio:
+          type: string
+          format: binary
+          description: Uploaded voice sample (WebM, WAV, MP3, etc., up to 15MB)
+        ref_text:
+          type: string
+          maxLength: 2000
+          description: The reference prompt script that the user read aloud
+        name:
+          type: string
+          maxLength: 32
+          description: Display name for the cloned voice
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+          description: Optional identifier for the cloned voice
+    ClonePromptItem:
+      type: object
+      required: [id, category, title, script, tips]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        title:
+          type: string
+        script:
+          type: string
+        tips:
+          type: string
+    ClonePromptList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClonePromptItem'
     CreateVoiceRequest:
       type: object
       required: [name, instruction]

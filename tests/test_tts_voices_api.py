@@ -151,6 +151,7 @@ def test_managed_voice_catalog_reports_active_tier_capabilities(
         == {
             "supports_speaker": supports_speaker,
             "supports_instruction": supports_instruction,
+            "supports_clone": False,
         }
         for voice in voices
         if voice["is_system"]
@@ -174,6 +175,7 @@ def test_custom_voice_is_unavailable_under_custom_voice_weights(tmp_path: Path) 
         assert created["capabilities"] == {
             "supports_speaker": False,
             "supports_instruction": False,
+            "supports_clone": False,
         }
     finally:
         client.delete(f"/v1/voices/{voice_id}")
