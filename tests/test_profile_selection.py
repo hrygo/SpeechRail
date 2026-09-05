@@ -11,8 +11,10 @@ import pytest
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
 from speechrail.config.model_catalog import (
-    ModelArtifact,
+    ModelCatalog,
+    RuntimeLock,
     load_catalog,
+    load_runtime_lock,
 )
 from speechrail.config.selection import resolve_selection
 from speechrail.service.paths import ServiceLayout
@@ -21,8 +23,8 @@ from speechrail.service.profile_store import ProfileStore
 
 
 @pytest.fixture
-def catalog_artifacts() -> dict[str, ModelArtifact]:
-    return {a.key: a for a in load_catalog().artifacts}
+def catalog_artifacts() -> ModelCatalog:
+    return load_catalog()
 
 
 def _make_selection(
@@ -30,6 +32,7 @@ def _make_selection(
     asr: str = "asr-1.7b-q8",
     tts: str = "tts-1.7b-design-q8",
     generation: int = 1,
+    runtime_lock_id: str = "mlx-qwen-20260905",
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -37,7 +40,7 @@ def _make_selection(
         "generation": generation,
         "asr": asr,
         "tts": tts,
-        "runtime_lock_id": "runtime-v1",
+        "runtime_lock_id": runtime_lock_id,
     }
 
 
@@ -45,14 +48,21 @@ def _settings(**kwargs: object) -> Settings:
     return Settings(_env_file=None, **kwargs)  # type: ignore[arg-type,call-arg]
 
 
-def test_existing_install_without_selection_is_unchanged(tmp_path: Path) -> None:
+def test_existing_install_without_selection_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     original = _settings(port=8299)
+
+    def _unexpected_lock_load() -> RuntimeLock:
+        pytest.fail("runtime lock must not be loaded without a selection")
+
+    monkeypatch.setattr("speechrail.config.selection.load_runtime_lock", _unexpected_lock_load)
     assert resolve_selection(original, None, {}, tmp_path) == original
 
 
-def test_selection_overlays_asr_model_dir_and_identity(
+def test_selection_overlays_asr_model_dir_and_keeps_public_identity(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-0.6b-q8"
     asr_dir.mkdir(parents=True)
@@ -63,13 +73,13 @@ def test_selection_overlays_asr_model_dir_and_identity(
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
     assert resolved.qwen3_model_dir == asr_dir.resolve()
-    assert resolved.model_id == "mlx-community/Qwen3-ASR-0.6B-8bit"
+    assert resolved.model_id == original.model_id
     assert resolved.dtype == "int8"
 
 
 def test_preserves_unrelated_user_configurations(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
@@ -98,7 +108,7 @@ def test_preserves_unrelated_user_configurations(
 
 def test_disabled_tts_is_not_automatically_enabled(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
@@ -113,7 +123,7 @@ def test_disabled_tts_is_not_automatically_enabled(
 
 def test_enabled_tts_is_updated_to_selected_model(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
@@ -129,12 +139,107 @@ def test_enabled_tts_is_updated_to_selected_model(
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
     assert resolved.qwen3_tts_model_dir == tts_dir.resolve()
-    assert resolved.tts_model_id == "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit"
+    assert resolved.tts_model_id == original.tts_model_id
+
+
+def test_selection_rejects_artifacts_that_do_not_match_preset(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings()
+    selection = _make_selection(
+        preset="light", asr="asr-1.7b-q8", tts="tts-1.7b-design-q8"
+    )
+
+    with pytest.raises(ValueError, match="preset"):
+        resolve_selection(original, selection, catalog_artifacts, tmp_path)
+
+
+def test_selection_rejects_stale_runtime_lock(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings()
+    selection = _make_selection(runtime_lock_id="runtime-v1")
+
+    with pytest.raises(ValueError, match="runtime lock"):
+        resolve_selection(original, selection, catalog_artifacts, tmp_path)
+
+
+def test_selection_rejects_unknown_runtime_lock(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings()
+    selection = _make_selection(runtime_lock_id="runtime-unknown")
+
+    with pytest.raises(ValueError, match="runtime lock"):
+        resolve_selection(original, selection, catalog_artifacts, tmp_path)
+
+
+def test_selection_accepts_injected_published_runtime_lock(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings()
+    selection = _make_selection()
+
+    resolved = resolve_selection(
+        original,
+        selection,
+        catalog_artifacts,
+        tmp_path,
+        runtime_lock=load_runtime_lock(),
+    )
+
+    assert resolved.qwen3_model_dir == asr_dir.resolve()
+
+
+def test_selection_rejects_tts_artifact_as_asr(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "tts-0.6b-custom-q8"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings()
+    selection = _make_selection(
+        asr="tts-0.6b-custom-q8", tts="tts-0.6b-custom-q8"
+    )
+
+    with pytest.raises(ValueError, match="ASR artifact"):
+        resolve_selection(original, selection, catalog_artifacts, tmp_path)
+
+
+def test_selection_rejects_asr_artifact_as_tts(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings()
+    selection = _make_selection(tts="asr-1.7b-q8")
+
+    with pytest.raises(ValueError, match="TTS artifact"):
+        resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
 
 def test_disabled_realtime_is_not_automatically_enabled(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
@@ -149,10 +254,12 @@ def test_disabled_realtime_is_not_automatically_enabled(
 
 def test_missing_model_directory_raises_error(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     original = _settings()
-    selection = _make_selection(asr="asr-0.6b-q8")
+    selection = _make_selection(
+        preset="light", asr="asr-0.6b-q8", tts="tts-0.6b-custom-q8"
+    )
 
     with pytest.raises(ValueError, match="missing"):
         resolve_selection(original, selection, catalog_artifacts, tmp_path)
@@ -160,7 +267,7 @@ def test_missing_model_directory_raises_error(
 
 def test_missing_tts_directory_when_tts_enabled_raises_error(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
@@ -174,7 +281,7 @@ def test_missing_tts_directory_when_tts_enabled_raises_error(
 
 def test_corrupt_or_invalid_selection_schema_raises_error(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     original = _settings()
 
@@ -187,7 +294,7 @@ def test_corrupt_or_invalid_selection_schema_raises_error(
 
 def test_unknown_artifact_key_in_catalog_raises_error(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-unknown"
     asr_dir.mkdir(parents=True)
@@ -201,7 +308,7 @@ def test_unknown_artifact_key_in_catalog_raises_error(
 
 def test_traversal_rejected(
     tmp_path: Path,
-    catalog_artifacts: dict[str, ModelArtifact],
+    catalog_artifacts: ModelCatalog,
 ) -> None:
     original = _settings()
     selection = _make_selection(asr="../escape")
@@ -293,4 +400,3 @@ def test_preflight_fails_when_selected_model_is_missing(
     settings_check = next(c for c in result.checks if c.name == "settings")
     assert settings_check.ok is False
     assert "configuration validation failed" in settings_check.message
-

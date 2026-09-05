@@ -4,20 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from speechrail.config import Settings
+from speechrail.config.model_catalog import (
+    ModelCatalog,
+    RuntimeLock,
+    load_runtime_lock,
+)
 from speechrail.service.profile_store import SelectionRecord
-
-if TYPE_CHECKING:
-    from speechrail.config.model_catalog import ModelArtifact, ModelCatalog
 
 
 def resolve_selection(
     settings: Settings,
     selection: Mapping[str, object] | None,
-    catalog: Mapping[str, ModelArtifact] | ModelCatalog,
+    catalog: ModelCatalog,
     app_home: Path,
+    *,
+    runtime_lock: RuntimeLock | None = None,
 ) -> Settings:
     """Overlay managed model selection on existing settings without altering other configs."""
     if selection is None:
@@ -31,16 +34,22 @@ def resolve_selection(
     except Exception as exc:
         raise ValueError(f"invalid selection record: {exc}") from exc
 
+    if runtime_lock is None:
+        runtime_lock = load_runtime_lock()
+    elif not isinstance(runtime_lock, RuntimeLock):
+        raise ValueError("runtime_lock must be a RuntimeLock")
+    if record.runtime_lock_id != runtime_lock.id:
+        raise ValueError(
+            f"selection runtime lock does not match published lock: {record.runtime_lock_id}"
+        )
+
     resolved_app_home = Path(app_home).resolve()
     if not resolved_app_home.is_absolute():
         raise ValueError("app_home must be an absolute path")
 
-    if hasattr(catalog, "artifacts"):
-        artifacts_map: Mapping[str, ModelArtifact] = {a.key: a for a in catalog.artifacts}
-    elif isinstance(catalog, Mapping):
-        artifacts_map = catalog
-    else:
-        raise ValueError("catalog must be a ModelCatalog or a Mapping of artifacts")
+    if not isinstance(catalog, ModelCatalog):
+        raise ValueError("catalog must be a ModelCatalog")
+    artifacts_map = {a.key: a for a in catalog.artifacts}
 
     asr_key = record.asr
     tts_key = record.tts
@@ -52,6 +61,20 @@ def resolve_selection(
 
     asr_artifact = artifacts_map[asr_key]
     tts_artifact = artifacts_map[tts_key]
+
+    if asr_artifact.family != "qwen3_asr" or asr_artifact.variant != "asr":
+        raise ValueError("ASR artifact must use family=qwen3_asr and variant=asr")
+    if tts_artifact.family != "qwen3_tts" or tts_artifact.variant not in {
+        "voice_design",
+        "custom_voice",
+    }:
+        raise ValueError(
+            "TTS artifact must use family=qwen3_tts and variant=voice_design or custom_voice"
+        )
+
+    expected_preset = catalog.preset(record.preset)
+    if expected_preset.asr != asr_key or expected_preset.tts != tts_key:
+        raise ValueError(f"selection artifacts do not match preset: {record.preset}")
 
     models_dir = (resolved_app_home / "models").resolve()
     asr_dir = (models_dir / asr_key).resolve()
@@ -77,23 +100,19 @@ def resolve_selection(
     )
 
     final_tts_dir: Path | None = None
-    final_tts_model_id: str = settings.tts_model_id
     if tts_configured:
         if not tts_dir.is_dir():
             raise ValueError(f"TTS model snapshot directory is missing: {tts_dir}")
         final_tts_dir = tts_dir
-        final_tts_model_id = tts_artifact.model_id
 
     updates: dict[str, object] = {
         "qwen3_model_dir": asr_dir,
-        "model_id": asr_artifact.model_id,
     }
     if asr_artifact.quantization.bits == 8:
         updates["dtype"] = "int8"
 
     if tts_configured:
         updates["qwen3_tts_model_dir"] = final_tts_dir
-        updates["tts_model_id"] = final_tts_model_id
 
     return settings.model_copy(update=updates)
 
