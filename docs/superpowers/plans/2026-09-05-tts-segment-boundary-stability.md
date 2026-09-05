@@ -35,7 +35,7 @@
 - Consumes: `apply_crossfade(pcm: bytes, *, sample_rate: int = 24_000, fade_ms: int = 5, fade_in: bool = True, fade_out: bool = True) -> bytes`
 - Produces: `MlxVoiceDesignEngine._generate()` 对每次调用的首个非空 PCM 块执行一次 fade-in。
 
-- [ ] **Step 1: 核对并行改动已经独立收口**
+- [x] **Step 1: 核对并行改动已经独立收口**
 
 Run:
 
@@ -49,7 +49,7 @@ Expected: HEAD 包含 `d4a7c9f`，两个目标文件均无未提交改动。若�
 由其所有者先独立收口，再从新 HEAD 重跑本步骤。后续实现必须保留已落地的 seed/temperature
 逻辑。
 
-- [ ] **Step 2: 写多块逻辑边界失败测试**
+- [x] **Step 2: 写多块逻辑边界失败测试**
 
 在 `tests/test_qwen3_tts_voice_design.py` 追加：
 
@@ -94,7 +94,7 @@ def test_mlx_voice_design_engine_fades_only_logical_synthesis_boundaries(
     assert abs(int(final[-1])) < 100
 ```
 
-- [ ] **Step 3: 运行测试并确认当前代码失败**
+- [x] **Step 3: 运行测试并确认当前代码失败**
 
 Run:
 
@@ -104,7 +104,7 @@ uv run --extra dev pytest tests/test_qwen3_tts_voice_design.py::test_mlx_voice_d
 
 Expected: FAIL，`first[0]` 仍约为 `16383`，证明生产生成循环没有 fade-in。
 
-- [ ] **Step 4: 写空块与单块失败测试**
+- [x] **Step 4: 写空块与单块失败测试**
 
 追加两个 fake 和测试：
 
@@ -177,7 +177,7 @@ def test_mlx_voice_design_engine_fades_both_ends_of_single_final_chunk(
     assert abs(int(samples[-1])) < 100
 ```
 
-- [ ] **Step 5: 运行两项测试并确认失败**
+- [x] **Step 5: 运行两项测试并确认失败**
 
 Run:
 
@@ -190,7 +190,7 @@ uv run --extra dev pytest \
 
 Expected: 两项均 FAIL，首个非空块仍以非零样本开始。
 
-- [ ] **Step 6: 最小接入 `apply_crossfade`**
+- [x] **Step 6: 最小接入 `apply_crossfade`**
 
 在 worker 的 domain import 中加入 `apply_crossfade`。保留当前 `_generate()` 中已有的 profile、seed、
 temperature 与 model 参数，仅把结果循环改成以下状态机：
@@ -227,7 +227,7 @@ for result in self._model.generate(
 
 不要修改 `_to_pcm()` 的最终块静音裁剪和 fade-out。
 
-- [ ] **Step 7: 运行 TTS 边界回归**
+- [x] **Step 7: 运行 TTS 边界回归**
 
 Run:
 
@@ -241,7 +241,7 @@ uv run --extra dev pytest \
 
 Expected: 全部 PASS；首块、中间块、空块和最终块语义都被锁定。
 
-- [ ] **Step 8: 运行完整门禁并提交行为修复**
+- [x] **Step 8: 运行完整门禁并提交行为修复**
 
 Run:
 
@@ -278,7 +278,7 @@ Expected: 完整门禁先通过，staged diff 只包含本 Task 两个文件且�
 - Consumes: Task 1 已提交的首块淡入行为。
 - Produces: `dist/speechrail-1.6.9-py3-none-any.whl`。
 
-- [ ] **Step 1: 将版本事实统一提升到 1.6.9**
+- [x] **Step 1: 将版本事实统一提升到 1.6.9**
 
 把以下 `1.6.8` 改为 `1.6.9`：
 
@@ -291,7 +291,7 @@ tests/test_release_verification.py    speechrail-1.6.9.dist-info/METADATA
 tests/test_installer.py               speechrail-1.6.9-py3-none-any.whl
 ```
 
-- [ ] **Step 2: 更新 lock 与 changelog**
+- [x] **Step 2: 更新 lock 与 changelog**
 
 Run:
 
@@ -313,7 +313,7 @@ Expected: `uv.lock` 的本地 package 版本为 `1.6.9`，无无关依赖升级�
   避免实时分句在静音到非零首样本之间产生 click，同时保持 REST/Realtime 契约不变。
 ```
 
-- [ ] **Step 3: 运行版本与发布测试**
+- [x] **Step 3: 运行版本与发布测试**
 
 Run:
 
@@ -328,7 +328,7 @@ uv run --extra dev pytest \
 
 Expected: 全部 PASS，所有版本事实源一致。
 
-- [ ] **Step 4: 运行完整门禁并构建 wheel**
+- [x] **Step 4: 运行完整门禁并构建 wheel**
 
 Run:
 
@@ -345,7 +345,7 @@ python3 -m zipfile -l dist/speechrail-1.6.9-py3-none-any.whl | rg 'qwen3_tts_wor
 Expected: 所有 gate 通过；wheel 包含 `speechrail/backends/qwen3_tts_worker.py` 和
 `speechrail-1.6.9.dist-info/METADATA`。
 
-- [ ] **Step 5: 提交发布元数据与迁移后的 SpeechRail 文档**
+- [x] **Step 5: 提交发布元数据与迁移后的 SpeechRail 文档**
 
 Run:
 
@@ -375,7 +375,7 @@ Expected: staged diff 不包含工作区既有的 voice registry、HTTP route、
 - Consumes: Task 2 wheel。
 - Produces: SpeechRail 1.6.9 服务身份与真实 PCM 验收记录。
 
-- [ ] **Step 1: 记录精确回退目标和部署前健康状态**
+- [x] **Step 1: 记录精确回退目标和部署前健康状态**
 
 Run:
 
@@ -394,7 +394,7 @@ curl -s http://127.0.0.1:8201/v1/voices
 
 Expected: release 路径为非空绝对路径，四个端点成功；不得输出私有 `.env`。
 
-- [ ] **Step 2: 执行版本化安装**
+- [x] **Step 2: 执行版本化安装**
 
 此步骤改变真实运行态，只有获得当前用户明确授权后执行：
 
@@ -409,7 +409,7 @@ python3 tools/install_macos.py \
 
 Expected: `runtime/current` 原子切换到 1.6.9，只运行一个服务实例，私有配置未被覆盖。
 
-- [ ] **Step 3: 验证部署身份与真实 PCM**
+- [x] **Step 3: 验证部署身份与真实 PCM**
 
 Run:
 
