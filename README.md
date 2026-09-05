@@ -106,13 +106,12 @@ curl -i http://127.0.0.1:8201/readyz
 
 ## 🔐 认证与网络安全策略 (Security)
 
-SpeechRail 采用**本地优先、外部强制鉴权**的安全模型（由环境变量 `SPEECHRAIL_API_KEY` 精确控制）：
+SpeechRail 遵循**本地零摩擦、对外硬防护**的安全设计：
 
-| 运行场景 | 监听地址 (`SPEECHRAIL_HOST`) | API Key (`SPEECHRAIL_API_KEY`) | 客户端调用说明 |
-|---|---|---|---|
-| **本机个人使用** (默认) | `127.0.0.1` / `localhost` | **留空** | 客户端免鉴权直连。OpenAI SDK 可传入任意占位符（如 `api_key="local"` 或 `"none"`）。 |
-| **局域网 / 远程暴露** | `0.0.0.0` 或内网特定 IP | **必填**（未配置启动直接报错拒绝） | 所有业务端点均强制校验 HTTP 请求头 `Authorization: Bearer <your-key>`（拒绝 URL query 参数传 key，杜绝日志泄露）。 |
-*注：`/health`、`/readyz`、`/v1/models`、`/v1/voices` 属于系统只读与健康探针端点，始终免鉴权开放。*
+- **本地回环（默认）**：绑定 `127.0.0.1`，无需配置密钥。客户端免密直连，OpenAI SDK 传入任意占位 key（如 `api_key="local"`）即可。
+- **局域网 / 远程暴露**：绑定 `0.0.0.0` 或指定网卡 IP 时，**必须显式配置 `SPEECHRAIL_API_KEY`**（未配置时启动直接报错拦截）。所有业务请求必须在 Header 中携带 `Authorization: Bearer <key>`，禁止在 URL Query 中传 key 以防止日志泄露。
+
+*注：`/health`、`/readyz`、`/v1/models`、`/v1/voices` 为系统健康与发现探针端点，始终免鉴权开放。*
 
 ---
 
