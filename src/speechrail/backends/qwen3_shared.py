@@ -270,8 +270,10 @@ class Qwen3SharedWorker:
         loop = asyncio.get_running_loop()
         pending = _PendingRequest(future=loop.create_future(), generation=self.generation)
         self._requests[request_id] = pending
+        send_succeeded = False
         try:
             await self.send(frame, binary_payload=binary)
+            send_succeeded = True
             try:
                 return await asyncio.wait_for(
                     asyncio.shield(pending.future), timeout=self.timeout_seconds
@@ -291,9 +293,13 @@ class Qwen3SharedWorker:
             await self._fail_generation(pending.generation, code="worker_unavailable")
             raise
         except asyncio.CancelledError:
-            if self._requests.get(request_id) is pending:
+            current = self._requests.get(request_id)
+            if current is pending:
                 self._requests.pop(request_id, None)
                 self._retire_request_id(request_id)
+            if not pending.future.done():
+                pending.future.cancel()
+            if send_succeeded and current is pending:
                 await self._fail_generation(pending.generation, code="worker_request_cancelled")
             raise
         finally:

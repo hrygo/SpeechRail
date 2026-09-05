@@ -105,6 +105,141 @@ def test_one_hundred_sent_cancellations_leave_no_process_or_pending_request() ->
     asyncio.run(scenario())
 
 
+def test_request_cancellation_before_transport_send_keeps_generation_ready() -> None:
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=1.0))
+        await worker.start()
+        generation = worker.generation
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_send = worker._transport.send
+
+        async def blocked_send(*args: Any, **kwargs: Any) -> None:
+            entered.set()
+            await release.wait()
+            await original_send(*args, **kwargs)
+
+        worker._transport.send = blocked_send
+        try:
+            request = asyncio.create_task(
+                worker.request({"action": "shared_batch", "request_id": "pre-send-cancel"})
+            )
+            await asyncio.wait_for(entered.wait(), 1)
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            release.set()
+            await asyncio.sleep(0)
+            assert worker.ready is True
+            assert worker.alive is True
+            assert worker.generation == generation
+            assert worker.pending_request_count == 0
+
+            worker._transport.send = original_send
+            result = await worker.request(
+                {"action": "shared_batch", "request_id": "after-pre-send-cancel", "text": "ok"}
+            )
+            assert result["text"] == "ok"
+            assert worker.generation == generation
+        finally:
+            release.set()
+            worker._transport.send = original_send
+            await worker.close()
+
+    asyncio.run(scenario())
+
+
+def test_request_cancellation_after_transport_send_aborts_generation_and_recovers() -> None:
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=1.0))
+        sent = asyncio.Event()
+        original_send = worker._transport.send
+
+        async def observed_send(payload: Any, **kwargs: Any) -> None:
+            await original_send(payload, **kwargs)
+            if payload.get("request_id") == "post-send-cancel":
+                sent.set()
+
+        worker._transport.send = observed_send
+        try:
+            request = asyncio.create_task(
+                worker.request({"action": "shared_hang", "request_id": "post-send-cancel"})
+            )
+            await asyncio.wait_for(sent.wait(), 1)
+            generation = worker.generation
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+            assert worker.alive is False
+            assert worker.ready is False
+            assert worker.pending_request_count == 0
+
+            worker._transport.send = original_send
+            result = await worker.request(
+                {"action": "shared_batch", "request_id": "after-post-send-cancel", "text": "ok"}
+            )
+            assert result["text"] == "ok"
+            assert worker.generation == generation + 1
+        finally:
+            worker._transport.send = original_send
+            await worker.close()
+
+    asyncio.run(scenario())
+
+
+def test_one_hundred_pre_send_cancellations_keep_one_ready_process_and_no_leaks() -> None:
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=1.0))
+        errors: list[dict[str, Any]] = []
+        loop = asyncio.get_running_loop()
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_send = worker._transport.send
+
+        async def blocked_send(*args: Any, **kwargs: Any) -> None:
+            entered.set()
+            await release.wait()
+            await original_send(*args, **kwargs)
+
+        try:
+            await worker.start()
+            generation = worker.generation
+            process = worker._transport._process
+            assert process is not None
+            worker._transport.send = blocked_send
+            for index in range(100):
+                entered.clear()
+                release.clear()
+                request = asyncio.create_task(
+                    worker.request(
+                        {"action": "shared_batch", "request_id": f"pre-send-{index}"}
+                    )
+                )
+                await asyncio.wait_for(entered.wait(), 1)
+                request.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+                release.set()
+                await asyncio.sleep(0)
+                assert worker.ready is True
+                assert worker.generation == generation
+                assert worker._transport._process is process
+                assert process.returncode is None
+                assert worker.pending_request_count == 0
+                assert not worker._requests
+
+            assert errors == []
+        finally:
+            release.set()
+            worker._transport.send = original_send
+            await worker.close()
+            loop.set_exception_handler(previous_handler)
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "action",
     ["shared_eof", "malformed", "partial_header", "partial_body"],
