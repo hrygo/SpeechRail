@@ -95,6 +95,36 @@ class PreparedRuntime:
     metadata: Mapping[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class RuntimeCurrentSnapshot:
+    """Validated vendor/current target captured before a larger install transaction."""
+
+    app_home: Path
+    vendor_root: Path
+    target: Path | None
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.app_home, Path)
+            or not self.app_home.is_absolute()
+            or self.app_home.is_symlink()
+        ):
+            raise RuntimeBootstrapError("runtime snapshot app_home is invalid")
+        if (
+            not isinstance(self.vendor_root, Path)
+            or not self.vendor_root.is_absolute()
+            or self.vendor_root.is_symlink()
+            or self.vendor_root != self.app_home / _VENDOR_DIRNAME
+        ):
+            raise RuntimeBootstrapError("runtime snapshot vendor root is invalid")
+        if self.target is not None:
+            if not isinstance(self.target, Path) or not self.target.is_absolute():
+                raise RuntimeBootstrapError("runtime snapshot target is invalid")
+            try:
+                self.target.resolve().relative_to(self.vendor_root.resolve())
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise RuntimeBootstrapError("runtime snapshot target escapes vendor root") from exc
+
 def _runtime_lock_payload(lock: RuntimeLock) -> dict[str, object]:
     return {
         "id": lock.id,
@@ -634,6 +664,38 @@ def _restore_current(current: Path, old_target: Path | None) -> None:
         raise RuntimeBootstrapError("could not atomically restore vendor/current") from exc
 
 
+def snapshot_runtime_current(app_home: Path) -> RuntimeCurrentSnapshot:
+    """Capture the validated vendor/current target for a larger install transaction."""
+    resolved_app_home = _resolve_app_home(app_home)
+    vendor_root = resolved_app_home / _VENDOR_DIRNAME
+    if vendor_root.is_symlink():
+        raise RuntimeBootstrapError("vendor root cannot be a symlink")
+    target = _current_target(vendor_root / _CURRENT_NAME, vendor_root)
+    return RuntimeCurrentSnapshot(
+        app_home=resolved_app_home,
+        vendor_root=vendor_root,
+        target=target,
+    )
+
+
+def restore_runtime_current(snapshot: RuntimeCurrentSnapshot) -> None:
+    """Atomically restore a previously captured vendor/current target."""
+    if not isinstance(snapshot, RuntimeCurrentSnapshot):
+        raise RuntimeBootstrapError("runtime snapshot is invalid")
+    resolved_app_home = _resolve_app_home(snapshot.app_home)
+    vendor_root = resolved_app_home / _VENDOR_DIRNAME
+    if snapshot.vendor_root != vendor_root:
+        raise RuntimeBootstrapError("runtime snapshot vendor root does not match app_home")
+    _ensure_directory(vendor_root)
+    target = snapshot.target
+    if target is not None:
+        try:
+            target.resolve().relative_to(vendor_root.resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeBootstrapError("runtime snapshot target escapes vendor root") from exc
+    _restore_current(vendor_root / _CURRENT_NAME, target)
+
+
 def _remove_empty(path: Path) -> None:
     try:
         if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
@@ -831,9 +893,12 @@ def prepare_runtime(
 __all__ = [
     "PreparedRuntime",
     "RuntimeBootstrapError",
+    "RuntimeCurrentSnapshot",
     "RuntimePaths",
     "RuntimeRunner",
     "load_prepared_runtime",
     "prepare_runtime",
+    "restore_runtime_current",
     "runtime_key",
+    "snapshot_runtime_current",
 ]

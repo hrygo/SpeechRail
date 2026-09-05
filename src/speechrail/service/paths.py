@@ -57,6 +57,36 @@ class ServiceLayout:
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
             directory.chmod(0o700)
 
+    @property
+    def runtime_releases(self) -> Path:
+        """Directory containing immutable application wheel releases."""
+        return self.runtime_root / "releases"
+
+    @property
+    def models_root(self) -> Path:
+        """Root for catalog-keyed model snapshots, outside application releases."""
+        return self.app_home / "models"
+
+    @property
+    def models_staging(self) -> Path:
+        """Recoverable model preparation staging directory."""
+        return self.models_root / ".staging"
+
+    @property
+    def vendor_root(self) -> Path:
+        """Root for lock-keyed shared ASR/TTS vendor runtimes."""
+        return self.app_home / "vendor"
+
+    @property
+    def vendor_current(self) -> Path:
+        """Active shared vendor runtime symlink."""
+        return self.vendor_root / "current"
+
+    @property
+    def vendor_staging(self) -> Path:
+        """Recoverable vendor runtime preparation staging directory."""
+        return self.vendor_root / ".staging"
+
     def secure_config_file(self) -> None:
         """Restrict an existing environment file to the current user."""
         if not self.config_file.is_file():

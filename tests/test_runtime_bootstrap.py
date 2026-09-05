@@ -16,9 +16,12 @@ import speechrail.service.bootstrap as bootstrap
 from speechrail.config.model_catalog import RuntimeLock
 from speechrail.service.bootstrap import (
     RuntimeBootstrapError,
+    RuntimeCurrentSnapshot,
     RuntimePaths,
     prepare_runtime,
+    restore_runtime_current,
     runtime_key,
+    snapshot_runtime_current,
 )
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult, run_preflight
@@ -211,6 +214,41 @@ def test_prepare_runtime_reuses_verified_inactive_release(tmp_path: Path) -> Non
     assert runner.calls == []
     assert second.release.is_dir()
     assert (tmp_path / "vendor" / "current").resolve() == first.release.resolve()
+
+
+def test_runtime_current_snapshot_restores_after_later_failure(tmp_path: Path) -> None:
+    first_lock = _lock(lock_id="fixture-runtime-first")
+    second_lock = _lock(lock_id="fixture-runtime-second")
+    first = prepare_runtime(first_lock, tmp_path, FakeRunner())
+    snapshot = snapshot_runtime_current(tmp_path)
+
+    second = prepare_runtime(second_lock, tmp_path, FakeRunner())
+    assert second.release != first.release
+    assert (tmp_path / "vendor" / "current").resolve() == second.release.resolve()
+
+    assert isinstance(snapshot, RuntimeCurrentSnapshot)
+    restore_runtime_current(snapshot)
+
+    assert (tmp_path / "vendor" / "current").resolve() == first.release.resolve()
+    assert first.release.is_dir()
+    assert second.release.is_dir()
+
+
+def test_runtime_current_snapshot_restores_missing_pointer_after_failure(
+    tmp_path: Path,
+) -> None:
+    lock = _lock()
+    snapshot = snapshot_runtime_current(tmp_path)
+
+    prepared = prepare_runtime(lock, tmp_path, FakeRunner())
+    assert (tmp_path / "vendor" / "current").is_symlink()
+
+    restore_runtime_current(snapshot)
+
+    current = tmp_path / "vendor" / "current"
+    assert not current.exists()
+    assert not current.is_symlink()
+    assert prepared.release.is_dir()
 
 
 def test_prepare_runtime_reads_hashed_role_files_and_checks_tokens(
