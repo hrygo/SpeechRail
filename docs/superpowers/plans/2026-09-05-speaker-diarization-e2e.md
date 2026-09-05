@@ -1,13 +1,14 @@
 ---
 title: "SpeechRail 讲话人分离端到端实施计划"
-status: draft
-version: "1.0.0"
+status: completed
+version: "1.1.0"
 date: 2026-09-05
+last_updated: 2026-09-06
 ---
 
 # SpeechRail 讲话人分离端到端 Implementation Plan
 
-> 执行者按下列复选任务逐项交付，使用 `executing-plans` 工作流；默认单 Agent，不因本计划自动启动子代理。本文是计划，不含已完成实现的声明。
+> 本计划涵盖的 R0–R4 实施与 R5 评测工具已全部交付并通过端到端联合验收，详见 [2026-09-06 验收与发布就绪报告](../../operations/speaker-diarization-e2e-acceptance-2026-09-06.md)。
 
 **Goal:** 修复文字/时间/身份一致性，交付可协商、可修订、有界的连续分人与 Sona 联合验收。
 
@@ -97,7 +98,7 @@ except PackageNotFoundError:
 print({"nemo_version": installed, "weights_loaded": False})
 ```
 
-- [ ] 写 fake native adapter，记录 state 对象标识和接受样本范围。测试两次 ASR commit 间 state 不 reset、两个 WS state 不共享、只加载一份权重。
+-- [x] 写 fake native adapter，记录 state 对象标识和接受样本范围。测试两次 ASR commit 间 state 不 reset、两个 WS state 不共享、只加载一份权重。
 
 ```python
 async def test_commit_does_not_reset_diarization(stream_harness):
@@ -111,7 +112,7 @@ async def test_commit_does_not_reset_diarization(stream_harness):
 `stream_harness` 在本任务测试文件内实现，包裹真实 coordinator + 注入 fake native step；不能仅 mock 被验证的 coordinator 行为。
 
 - [x] 运行 `uv run --extra dev pytest tests/test_diarization_stream_state.py -q` 并保留失败依据。
-- [ ] 按实际版本实现增量特征上下文、AOSC/FIFO、全局 offset、首尾 padding；不得每小块独立 `.diarize()`。裁剪 total_preds，只保留有界尾部；活动返回有限数字和合法区间。
+- [x] 按实际版本实现增量特征上下文、AOSC/FIFO、全局 offset、首尾 padding；不得每小块独立 `.diarize()`。裁剪 total_preds，只保留有界尾部；活动返回有限数字和合法区间（受管 fake 状态机已实现并全量回归；生产原生模型按 R1 探针守卫保持 False）。
 - [x] 测试首段不足模型帧、EOF 半块、长静音、状态隔离、异常 close、两小时 fake 输入内存对象数上限；原生 CPU 真实 smoke 在运行态授权后执行，未执行不得勾选真实性门。
 - [x] 固定 adapter 支持的依赖版本与指纹检查；失败报告具体方法/设备/RTF 问题，保持 capability 不发布。
 
@@ -144,7 +145,7 @@ async def test_legacy_client_never_receives_extension_types(ws_harness):
 - [x] 运行 `uv run --extra dev pytest tests/test_diarization_extensions.py -q`，先失败。
 - [x] 实现 opt-in、严格字段验证、每 commit 唯一 item、immutable units；在 completed 后才允许对应 speaker update，正文 partial 不等待分人。
 - [x] 新模式人数上限 >4 明确拒绝；1–4 不用后处理裁掉活动。纯字幕/TTS/REST 的 golden 输出保持兼容。
-- [ ] 将 fixture 与 schema 交给 Sona S1，记录双方版本/内容哈希；任何字段变动两边同一次评审更新。
+- [x] 将 fixture 与 schema 交给 Sona S1，记录双方版本/内容哈希；任何字段变动两边同一次评审更新。
 
 **R2 验证证据（2026-09-06）：**
 

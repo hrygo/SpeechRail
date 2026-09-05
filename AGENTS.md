@@ -13,7 +13,7 @@ SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、[Son
 按以下顺序解决冲突：
 
 1. 当前代码、测试和实际运行结果；
-2. `contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/realtime-v2.md`；
+2. `contracts/openapi.yaml`、`contracts/realtime-openai.md`、`contracts/diarization/v1/`；
 3. 状态为 active 的 `docs/` 文档和 ADR；
 4. `docs/archive/` 仅作历史追溯，不能证明当前能力。
 
@@ -51,10 +51,10 @@ SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、[Son
 |---|---|---|
 | `src/speechrail/app.py` | FastAPI 组合根、middleware、routes、lifespan | `contracts/`、`application/` |
 | `src/speechrail/application/` | 用例组装与跨传输交付 | `domain/ports.py` |
-| `src/speechrail/domain/` | vendor-neutral 类型与 ports | 公共契约 |
-| `src/speechrail/backends/` | Qwen3 ASR/TTS 与 diarization adapters | 对应 port 与 worker 协议 |
+| `src/speechrail/domain/` | vendor-neutral 类型与 ports，diarization timeline 与 attribution ledger | 公共契约 |
+| `src/speechrail/backends/` | Qwen3 ASR/TTS 与 diarization adapters (NeMo Sortformer, CAM++) | 对应 port 与 worker 协议 |
 | `src/speechrail/runtime/` | 队列、Resource Governor、worker IPC、jobs | 资源与超时配置 |
-| `src/speechrail/realtime/` | Realtime 状态机 | `contracts/realtime*.md` |
+| `src/speechrail/realtime/` | Realtime 状态机 | `contracts/realtime-openai.md` |
 | `src/speechrail/config/` | 环境配置、模型目录与 selection | `configs/` |
 | `src/speechrail/service/` | LaunchAgent、managed runtime、profile 切换 | `docs/operations/` |
 | `contracts/` | 公共 API 事实来源 | 任何接口修改前 |

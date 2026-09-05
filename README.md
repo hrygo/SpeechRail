@@ -311,15 +311,15 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), cited from [v1.7.0 Performance Benchmark Report](docs/archive/performance/2026-09-05-v1.7.0-performance-benchmark.md) and fully reproducible:
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), cited from the [v1.8.0 Performance, Architecture & Release Acceptance Report](docs/archive/performance/2026-09-06-v1.8.0-performance-benchmark.md) and fully reproducible. Historical baselines remain in the archive:
 
 | Benchmark Metric | 🟢 Light Profile | 🟡 Balanced Profile | 🟣 Quality Profile | Test Methodology & Scenario |
 |---|---|---|---|---|
-| **ASR Chinese RTF (p50)** | **0.0174** (57x faster than real-time) | **0.0250** (40x faster than real-time) | **0.0243** (41x faster than real-time) | Standalone macOS system voice fixture, N=5 p50 |
-| **ASR English RTF (p50)** | **0.0216** (46x faster than real-time) | **0.0313** (32x faster than real-time) | **0.0302** (33x faster than real-time) | 13-word independent English sample, N=5 p50 |
-| **TTS Synthesis RTF (p50)** | **0.2394** (4.1x faster than real-time) | **0.2405** (4.1x faster than real-time) | **0.2731** (3.6x faster than real-time) | Standard Chinese text, `serena` voice, N=5 p50 |
-| **Peak Total Physical RAM** | **~4.4 GB** (4462 MB) | **~6.0 GB** (6085 MB) | **~6.9 GB** (6943 MB) | Max `phys_footprint` within the same sampling tick |
-| **Steady Physical RAM** | **~4.1 GB** (4142 MB) | **~5.5 GB** (5562 MB) | **~6.6 GB** (6599 MB) | Steady-state physical memory during continuous load |
+| **ASR Chinese RTF (mean)** | **0.0204** (49x faster than real-time) | **0.0295** (34x faster than real-time) | **0.0300** (33x faster than real-time) | Standalone macOS fixture, N=5; latency p50, RTF mean |
+| **ASR English RTF (mean)** | **0.0229** (44x faster than real-time) | **0.0339** (30x faster than real-time) | **0.0362** (28x faster than real-time) | Independent English fixture, N=5; latency p50, RTF mean |
+| **TTS Synthesis RTF (mean)** | **0.2372** (4.2x faster than real-time) | **0.2467** (4.1x faster than real-time) | **0.2690** (3.7x faster than real-time) | Standard Chinese text, `default` voice, N=5; latency p50 |
+| **Peak Total Physical RAM** | **~4.7 GB** (4709.7 MB) | **~6.3 GB** (6305.9 MB) | **~7.3 GB** (7282.2 MB) | Max `phys_footprint` within the same sampling tick |
+| **Steady Physical RAM** | **~4.1 GB** (4147.1 MB) | **~5.5 GB** (5542.8 MB) | **~6.7 GB** (6668.2 MB) | Steady-state physical memory during continuous load |
 | **Idle Standby RAM** | **~50 MB** | **~50 MB** | **~50 MB** | Automatically unloads workers after 5 minutes idle |
 
 ---
@@ -328,38 +328,51 @@ Benchmark results below are measured serially on an Apple M5 Max (128GB Unified 
 
 ```mermaid
 flowchart TD
-    Client["Client Applications (OpenAI SDK / WebUI / Desktop Agent)"]
+    Client["Client Applications (Sona / OpenAI SDK / WebUI / LiveKit)"]
 
     subgraph HostService["FastAPI Host Gateway (Port: 8201)"]
         direction TB
-        Router["Routing & Protocol Dispatch (/v1/audio/*, /v1/realtime)"]
-        Governor["Resource Governor (Bounded Audio Queue & Guardrails)"]
-        Evictor["WorkerIdleEvictor (Automatic Idle Eviction of Weights & VRAM)"]
-        Router --> Governor
+        subgraph Ingress["1. Protocol & Ingress Layer"]
+            Router["Routing & Envelope (/v1/audio/*, /v1/realtime)"]
+            Pipeline["In-Memory Audio Pipeline\n(WAV Fast-Path / ffmpeg Stream, 128MB Guard)"]
+        end
+        subgraph Core["2. Runtime & Coordination Core"]
+            Governor["Resource Governor\n(Priority Queue & WorkerLeaseLock)"]
+            Ledger["AttributionLedger & Timeline\n(16 kHz Sample Clock, Immutable Units)"]
+            Evictor["WorkerIdleEvictor\n(5-Min Inactivity Weight & VRAM Eviction)"]
+        end
+        Router --> Pipeline --> Governor
+        Governor <--> Ledger
         Governor -. Idle Monitoring .-> Evictor
     end
 
-    subgraph Workers["Independent Inference & Extension Engines (Isolated Sandbox)"]
+    subgraph SubprocessSandboxes["Subprocess Sandboxes (Physical Process Isolation)"]
         direction LR
-        ASRWorker["Independent ASR MLX Worker\n(Qwen3-ASR)"]
-        TTSWorker["Independent TTS MLX Worker\n(VoiceDesign / CustomVoice)"]
+        ASRWorker["Qwen3-ASR Worker\n(MLX / Metal Subprocess)"]
+        TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
+    end
+
+    subgraph InServiceEngine["In-Service Evictable Engine"]
         DiarizeEngine["Speaker Diarization Engine (Optional)\n(NeMo Sortformer + CAM++)"]
     end
 
-    Client <== "HTTP / WebSocket" ==> Router
-    Governor <== "Dedicated Framed IPC Pipe" ==> ASRWorker
-    Governor <== "Dedicated Framed IPC Pipe" ==> TTSWorker
-    Governor <== "Session-Level Streaming Coordination" ==> DiarizeEngine
-    Evictor -. 5-Min Idle Eviction .-> ASRWorker
-    Evictor -. 5-Min Idle Eviction .-> TTSWorker
-    Evictor -. 5-Min Idle Eviction .-> DiarizeEngine
+    Client <== "HTTP REST / Full-Duplex WS" ==> Router
+    Governor <== "Framed Binary Zero-Copy IPC" ==> ASRWorker
+    Governor <== "Framed Binary Zero-Copy IPC" ==> TTSWorker
+    Governor <== "Continuous Session Streaming" ==> DiarizeEngine
+    Evictor -. Auto Evict Weights .-> ASRWorker
+    Evictor -. Auto Evict Weights .-> TTSWorker
+    Evictor -. Auto Evict Weights .-> DiarizeEngine
 ```
 
-#### Core Architectural Principles
+#### Core Architectural Principles & Invariants
 
-- **Minimized Blast Radius**: Heavy inference engines run in isolated OS processes. If MLX encounters an unexpected C++ / Metal crash, the host gateway remains online and automatically restarts the worker.
-- **Zero Memory Waste & Green Hibernation**: The gateway's built-in `WorkerIdleEvictor` keeps models loaded during active use and unloads them when idle.
-- **Strict Boundary Separation**: SpeechRail focuses purely on resilient local ASR/TTS protocol serving, without intruding on microphone capture, speaker playback, or client-side LLM orchestration.
+1. **Subprocess Physical Isolation (Minimized Blast Radius)**: Heavy MLX model runners (Qwen3-ASR and Qwen3-TTS) execute in dedicated child processes communicating over a private framed binary IPC protocol. Any Metal GPU exception or native C++ crash is trapped within the worker sandbox; the FastAPI gateway remains online, automatically restarts the worker, and returns standard error envelopes with traceable `request_id`.
+2. **Strict In-Memory Zero-Disk Pipeline**: Audio processing operates entirely in memory through a 3-tier pipeline: Tier 1 WAV fast-path (zero-copy header slicing), Tier 2 streaming in-memory `ffmpeg` pipe (for compressed containers), and Tier 3 128MB hard OOM guardrail. Raw audio, intermediate PCM, embeddings, and transcripts are never written to disk or transmitted across the network.
+3. **Green Hibernation via Coordinated Idle Eviction**: The `WorkerIdleEvictor` monitors request leases across both external MLX worker processes and in-service diarization engines. After 5 minutes without incoming traffic, model weights and GPU buffers are completely purged, returning the idle host footprint to ~50 MB without leaving orphan background processes.
+4. **"Transcript First, Attribution Updated" Invariant (SPK-E2E-1)**: Real-time speaker diarization enforces a strict temporal invariant. Text finalized at ASR commit is the canonical transcript; attribution units (`attribution_units`) are anchored to an integer 16 kHz session timeline. Later speaker re-clustering emits asynchronous attribution updates (`speechrail.diarization.update`) without altering textual content, timestamps, or creating clock drift. The client `finalize` barrier ensures all pending patches settle before meeting summary generation.
+5. **Single-Node Shared Concurrency with WorkerLeaseLock**: Designed as a shared local daemon for multiple desktop tools on a single Mac. Concurrency is arbitrated by `WorkerLeaseLock` and priority scheduling (Realtime sessions take precedence over batch uploads), returning graceful `backend_busy` responses rather than spawning competing duplicate workers that trigger GPU thrashing or OOM.
+6. **Strict Separation of Concerns**: SpeechRail exclusively provides local inference runtimes, protocol translation, resource boundaries, and session-scoped anonymous speaker labelling (`speaker_0`, `speaker_1`). Calling applications (such as [Sona](https://github.com/hrygo/sona)) retain complete ownership of audio I/O hardware, meeting databases, persistent storage, human-in-the-loop speaker renaming, and LLM business orchestration.
 
 ---
 

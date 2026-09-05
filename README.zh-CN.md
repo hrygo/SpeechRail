@@ -311,15 +311,15 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 
 ## 📊 真实性能基准实测 (Apple M5 Max)
 
-以下数据来源于 Apple M5 Max (128GB Unified Memory) 上的串行真实基准测试（引自 [v1.7.0 性能基准实测报告](docs/archive/performance/2026-09-05-v1.7.0-performance-benchmark.md)），真实可复现：
+以下数据来源于 Apple M5 Max (128GB Unified Memory) 上的串行真实基准测试（引自 [v1.8.0 性能、架构与发布验收报告](docs/archive/performance/2026-09-06-v1.8.0-performance-benchmark.md)），真实可复现；历史基线仍保留在归档中：
 
 | 评测指标 | 🟢 Light 档实测 | 🟡 Balanced 档实测 | 🟣 Quality 档实测 | 评测口径与场景 |
 |---|---|---|---|---|
-| **ASR 中文 RTF (p50)** | **0.0174** (超实时 57 倍) | **0.0250** (超实时 40 倍) | **0.0243** (超实时 41 倍) | 独立 macOS 系统语音 fixture，N=5 p50 |
-| **ASR 英文 RTF (p50)** | **0.0216** (超实时 46 倍) | **0.0313** (超实时 32 倍) | **0.0302** (超实时 33 倍) | 13 词独立英文样本，N=5 p50 |
-| **TTS 生成 RTF (p50)** | **0.2394** (超实时 4.1 倍) | **0.2405** (超实时 4.1 倍) | **0.2731** (超实时 3.6 倍) | 统一中文文本、`serena` 音色，N=5 p50 |
-| **最大同时物理占用** | **~4.4 GB** (4462 MB) | **~6.0 GB** (6085 MB) | **~6.9 GB** (6943 MB) | 同一 tick `phys_footprint` 较大值 |
-| **稳定物理占用** | **~4.1 GB** (4142 MB) | **~5.5 GB** (5562 MB) | **~6.6 GB** (6599 MB) | 持续工作稳定态物理内存 |
+| **ASR 中文 RTF (均值)** | **0.0204** (约 49 倍实时) | **0.0295** (约 34 倍实时) | **0.0300** (约 33 倍实时) | 独立 macOS fixture，N=5；延迟 p50、RTF 均值 |
+| **ASR 英文 RTF (均值)** | **0.0229** (约 44 倍实时) | **0.0339** (约 30 倍实时) | **0.0362** (约 28 倍实时) | 独立英文 fixture，N=5；延迟 p50、RTF 均值 |
+| **TTS 生成 RTF (均值)** | **0.2372** (约 4.2 倍实时) | **0.2467** (约 4.1 倍实时) | **0.2690** (约 3.7 倍实时) | 统一中文文本、`default` 音色，N=5；延迟 p50 |
+| **最大同时物理占用** | **~4.7 GB** (4709.7 MB) | **~6.3 GB** (6305.9 MB) | **~7.3 GB** (7282.2 MB) | 同一 tick `phys_footprint` 较大值 |
+| **稳定物理占用** | **~4.1 GB** (4147.1 MB) | **~5.5 GB** (5542.8 MB) | **~6.7 GB** (6668.2 MB) | 持续工作稳定态物理内存 |
 | **空闲卸载待机内存** | **~50 MB** | **~50 MB** | **~50 MB** | 5 分钟无请求自动卸载释放 Worker |
 
 ---
@@ -328,38 +328,51 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 
 ```mermaid
 flowchart TD
-    Client["客户端应用 (OpenAI SDK / WebUI / Desktop Agent)"]
+    Client["客户端应用 (Sona / OpenAI SDK / WebUI / LiveKit)"]
 
     subgraph HostService["FastAPI 宿主守护网关 (Port: 8201)"]
         direction TB
-        Router["路由与协议分发 (/v1/audio/*, /v1/realtime)"]
-        Governor["Resource Governor (有界音频队列 & 资源护栏)"]
-        Evictor["WorkerIdleEvictor (空闲超时自动卸载模型与显存)"]
-        Router --> Governor
+        subgraph Ingress["1. 协议接入与音频管道"]
+            Router["路由分发与统一 Envelope (/v1/audio/*, /v1/realtime)"]
+            Pipeline["内存音频流水线\n(WAV Fast-Path 直读 / ffmpeg 管道流式解码, 128MB 门禁)"]
+        end
+        subgraph Core["2. 运行时调度与协同核心"]
+            Governor["Resource Governor\n(优先级队列调度 & WorkerLeaseLock)"]
+            Ledger["AttributionLedger 归属账本\n(16 kHz 采样时钟, 不可变单元)"]
+            Evictor["WorkerIdleEvictor\n(5 分钟无调用权重与显存冷卸载)"]
+        end
+        Router --> Pipeline --> Governor
+        Governor <--> Ledger
         Governor -. 闲置监控 .-> Evictor
     end
 
-    subgraph Workers["独立物理推理与扩展引擎 (物理隔离沙箱)"]
+    subgraph SubprocessSandboxes["独立子进程沙箱 (物理进程强隔离)"]
         direction LR
-        ASRWorker["独立 ASR MLX Worker\n(Qwen3-ASR)"]
-        TTSWorker["独立 TTS MLX Worker\n(VoiceDesign / CustomVoice)"]
+        ASRWorker["Qwen3-ASR Worker\n(MLX / Metal 独立子进程)"]
+        TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
+    end
+
+    subgraph InServiceEngine["进程内受管引擎 (按需受管卸载)"]
         DiarizeEngine["讲话人分离引擎 (可选)\n(NeMo Sortformer + CAM++)"]
     end
 
-    Client <== "HTTP / WebSocket" ==> Router
-    Governor <== "专属 Framed IPC 管道" ==> ASRWorker
-    Governor <== "专属 Framed IPC 管道" ==> TTSWorker
-    Governor <== "会话级流式协调" ==> DiarizeEngine
-    Evictor -. 5分钟无请求冷卸载 .-> ASRWorker
-    Evictor -. 5分钟无请求冷卸载 .-> TTSWorker
-    Evictor -. 5分钟无请求冷卸载 .-> DiarizeEngine
+    Client <== "HTTP REST / 全双工 WS" ==> Router
+    Governor <== "私有 Framed 二进制零拷贝 IPC" ==> ASRWorker
+    Governor <== "私有 Framed 二进制零拷贝 IPC" ==> TTSWorker
+    Governor <== "会话级连续流式协调" ==> DiarizeEngine
+    Evictor -. 自动卸载释放权重 .-> ASRWorker
+    Evictor -. 自动卸载释放权重 .-> TTSWorker
+    Evictor -. 自动卸载释放权重 .-> DiarizeEngine
 ```
 
-#### 核心架构设计原则
+#### 核心架构原则与设计不变量
 
-- **故障爆炸半径最小化**：重型推理引擎在独立进程内运行。若 MLX 发生底层 C++ / Metal 偶发崩溃，宿主网关依然保持在线，并能自动重启 Worker。
-- **内存零浪费与绿色休眠**：网关内置 `WorkerIdleEvictor`，工作时满血加载，闲置时自动卸载释放。
-- **职责边界清晰**：SpeechRail 专注于提供纯粹、高可靠的本地 ASR/TTS 协议服务，不侵入麦克风拾音、系统扬声器播放或应用业务逻辑。
+1. **子进程物理隔离（故障爆炸半径最小化）**：重型 MLX 模型执行引擎（Qwen3-ASR 与 Qwen3-TTS）在独立子进程中运行，通过私有 Framed 二进制 IPC 管道与网关通信。任何 Metal GPU 显存异常或底层 C++ 崩溃均被严格限制在子进程内；FastAPI 网关保持在线并自动平滑拉起新 Worker，对外返回带可追溯 `request_id` 的标准错误 Envelope。
+2. **纯内存零磁盘音频流水线**：请求音频在内存中经三级防护流式处理：Tier 1 WAV 快速通道（无转码切片直读）、Tier 2 管道级内存 `ffmpeg` 流式解码（适配 MP3/Opus/FLAC 等容器）、Tier 3 128MB 硬上限门禁。源音频、中间 PCM、声纹特征向量与转写文本均不落盘，全链路本地闭环，严禁网络静默外呼。
+3. **协同空闲驱逐与绿色休眠**：网关内置的 `WorkerIdleEvictor` 统一监控外部 IPC Worker 与进程内受管引擎的租约状态。连续 5 分钟无业务请求时，自动触发权重冷卸载并归还全部 Metal/MPS 显存与物理内存，常驻待机内存回落至约 50 MB，不留任何孤儿后台进程。
+4. **“正文先固定，归属后更新”时序不变量（SPK-E2E-1）**：实时分人严格遵循不可变时序范式。ASR commit 产生的正文为权威文本，归属单元（`attribution_units`）锚定于 16 kHz 全局整数采样时钟；后续分人精细聚类仅通过异步事件（`speechrail.diarization.update`）增量修正发言人归属，绝不二次篡改已固定文字与时间戳，彻底根治跨分钟时钟漂移；配合客户端 `finalize` 结束屏障，确保全部归属补丁落库后再触发最终纪要。
+5. **单机单卡共享并发与租约锁（WorkerLeaseLock）**：作为单人桌面环境下多应用的共享底座，通过 `WorkerLeaseLock` 和通道优先级（Realtime 优先抢占，Batch 排队）实现有序互斥调度，模式冲突时稳定返回 `backend_busy`，坚决不通过复制模型进程来盲目换取并发，杜绝显存雪崩。
+6. **严格职责分离与边界清晰**：SpeechRail 专注于提供纯粹的本地推理运行时、协议转换、资源护栏与会话级匿名标签（`speaker_0`, `speaker_1`）。麦克风硬件调用、扬声器播放、会议议程与数据库持久化、实名声纹库映射、UI 交互以及 LLM 业务编排由调用方应用（如 [Sona](https://github.com/hrygo/sona)）全权负责。
 
 ---
 
