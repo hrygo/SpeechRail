@@ -122,11 +122,13 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
   路径含空格/中文与 symlink 拒绝测试通过。干净机器 bootstrap、签名/公证和实机双击仍未验收。
 - `a9ad380` 接入官方 ModelScope 不可变 revision 的直接流式下载，避免 SDK cache 与模型仓库
   同时保留整份快照；下载仍由 model store 执行大小、SHA-256、取消和原子发布门。
-- rebase 后最终代码门：972 项完整 fake/契约测试通过，覆盖率 82.97%；`ruff src tests`、
+- rebase 后最终代码门：973 项完整 fake/契约测试通过，覆盖率 82.98%；`ruff src tests`、
   `mypy src`、OpenAPI lint、LaunchAgent plist lint 与 1.6.9 wheel 构建通过；wheel/安装器/
   双击入口另有 26 项针对性回归通过。
-- C01/C02 公开契约收口、B02 真实质量、12GB 与 M1 Air 8GB 内存/热稳态、V01 发行验收
-  仍在待办范围。S05 私有控制 socket 已退役。
+- C02 已由 `8c94fb2` 完成：REST 的 `AsrModeBusy` 映射为带 request ID 与
+  `Retry-After` 的 `429 backend_busy`，Realtime 既有同码行为保持。C01 的档位能力展示、
+  B02 真实质量、12GB 与 M1 Air 8GB 内存/热稳态、V01 发行验收仍在待办范围。
+  S05 私有控制 socket 已退役。
 
 ## 回退
 

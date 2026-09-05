@@ -1076,25 +1076,30 @@ def test_standard_voice_alias_remains_stable():
 **所有权 / Files：** 修改 src/speechrail/http/routes/audio.py、src/speechrail/application/realtime_openai.py；补 tests/test_realtime_openai.py、test_openai_multipart.py、test_speech_api.py。
 **接口 / Inputs & Outputs：** 按C01契约将AsrModeBusy映射REST429/WS error backend_busy；不增加服务内切档错误。保留request ID和既有错误envelope。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_openai_multipart.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 最终采用 `tests/test_transcription_api.py` 的实际 ASGI 请求，
+  让 transcriber 抛出 `AsrModeBusy` 并验证完整 HTTP 响应：
 
 ```python
-from speechrail.http.errors import error_response
-
-def test_busy_error_keeps_request_identity():
-    response = error_response(429, "req_test", "backend_busy", "ASR mode is busy")
+def test_busy_asr_mode_returns_stable_429_with_request_id():
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        headers={"X-Request-ID": "req_test"},
+    )
     assert response.status_code == 429
     assert response.headers["x-request-id"] == "req_test"
+    assert response.json()["error"]["code"] == "backend_busy"
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_openai_multipart.py -q --no-cov`；
-  确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 同一套fake三档参数化客户端测试先红后绿；REST/WS不捕获后忽略未知错误，不改sample_rate或事件语义。busy请求不创建第二worker，失败后原session保持合同规定的可用性。标准OpenAI SDK路径、multipart视频webm、六TTS格式、aliases、session/update/commit/cancel事件顺序全部回归；真实部分留V01。
-- [ ] **4. 边界验证。** 若现有错误函数由middleware注入header，则本种子改为ASGI实际请求验证而不改既有责任边界。覆盖active stream冲突、unknown voice、无TTS配置、鉴权和断线重建；切档停服窗口由S04测试，不伪造成ASGI内部状态。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **2. 证明测试先失败。** 执行转写 API 针对性测试，确认原行为向 TestClient
+  泄漏 `AsrModeBusy`，失败根因是缺少 REST 映射。
+- [x] **3. 最小实现。** 同一套fake三档参数化客户端测试先红后绿；REST/WS不捕获后忽略未知错误，不改sample_rate或事件语义。busy请求不创建第二worker，失败后原session保持合同规定的可用性。标准OpenAI SDK路径、multipart视频webm、六TTS格式、aliases、session/update/commit/cancel事件顺序全部回归；真实部分留V01。
+- [x] **4. 边界验证。** middleware 保留 `X-Request-ID`，REST 返回 `429 backend_busy`、
+  `retryable=true` 与 `Retry-After: 1`；Realtime 原会话可用性与断线重建回归一并通过。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: preserve stable audio errors across model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** `8c94fb2` 完成 REST 映射；multipart、Realtime 与转写针对性
+  回归 96 项通过，最终完整套件 973 项通过。
 
 
 ### V01：完成全量门禁、实机验收与交接
