@@ -11,10 +11,15 @@ from speechrail.domain.tts import DEFAULT_VOICE_ID
 from speechrail.service.model_store import PreparedModelSet
 
 _SMOKE_TTS_TEXT = "这是语音服务的切换验证，请清楚朗读这段普通话。"
+_MAX_INFERENCE_ATTEMPTS = 3
 
 
 class SmokeProbeError(RuntimeError):
     """The running service did not pass its bounded public API smoke."""
+
+
+class _EmptyTranscriptError(SmokeProbeError):
+    """One valid public ASR response contained no transcript text."""
 
 
 class PublicApiSmokeProbe:
@@ -147,14 +152,21 @@ class PublicApiSmokeProbe:
             raise SmokeProbeError("public ASR smoke failed")
         text = self._json_mapping(response).get("text")
         if not isinstance(text, str) or not text.strip():
-            raise SmokeProbeError("public ASR smoke returned empty text")
+            raise _EmptyTranscriptError("public ASR smoke returned empty text")
 
     def run(self, prepared: PreparedModelSet) -> None:
         if not prepared.prepared_id or not prepared.asr.key or not prepared.tts.key:
             raise SmokeProbeError("prepared profile identity is invalid")
         self._wait_ready()
         self._check_catalogs()
-        self._check_asr(self._tts_audio())
+        for attempt in range(_MAX_INFERENCE_ATTEMPTS):
+            try:
+                self._check_asr(self._tts_audio())
+            except _EmptyTranscriptError:
+                if attempt + 1 == _MAX_INFERENCE_ATTEMPTS:
+                    raise
+            else:
+                return
 
 
 __all__ = ["PublicApiSmokeProbe", "SmokeProbeError"]

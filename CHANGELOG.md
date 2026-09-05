@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-09-05
+
+### Fixed
+
+- Profile 切换的公共 TTS→ASR smoke 仅在 HTTP、request ID 和响应结构均有效但转写为空时，重新生成音频并有界重试，最多三次；其他协议、后端和资源错误仍立即回滚，减少 CustomVoice 随机输出造成的误回滚而不放宽 fail-closed 边界。
+
 ## [1.7.0] - 2026-09-05
 
 ### Added

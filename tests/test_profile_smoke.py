@@ -137,9 +137,12 @@ def test_probe_retries_readiness_without_repeating_inference() -> None:
     assert sleeps == [0.1]
 
 
-@pytest.mark.parametrize("failure", ["missing_request_id", "oversized_audio", "empty_text"])
-def test_probe_fails_closed_on_invalid_public_responses(failure: str) -> None:
+def test_probe_retries_only_empty_asr_transcripts_with_fresh_tts_audio() -> None:
+    tts_calls = 0
+    asr_calls = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal asr_calls, tts_calls
         if request.url.path == "/health":
             return httpx.Response(200, json={"status": "ok"})
         if request.url.path == "/readyz":
@@ -149,12 +152,54 @@ def test_probe_fails_closed_on_invalid_public_responses(failure: str) -> None:
         if request.url.path == "/v1/voices":
             return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
         if request.url.path == "/v1/audio/speech":
+            tts_calls += 1
+            return httpx.Response(
+                200,
+                content=b"RIFF" + b"\x00" * 4 + b"WAVE" + bytes([tts_calls]) * 64,
+                headers={"X-Request-ID": f"req-tts-{tts_calls}"},
+            )
+        if request.url.path == "/v1/audio/transcriptions":
+            asr_calls += 1
+            return httpx.Response(
+                200,
+                json={"text": "" if asr_calls == 1 else "切换验证通过"},
+                headers={"X-Request-ID": f"req-asr-{asr_calls}"},
+            )
+        raise AssertionError(request.url.path)
+
+    with httpx.Client(
+        base_url="http://127.0.0.1:8201", transport=httpx.MockTransport(handler)
+    ) as client:
+        PublicApiSmokeProbe(client=client).run(_prepared())
+
+    assert tts_calls == 2
+    assert asr_calls == 2
+
+
+@pytest.mark.parametrize("failure", ["missing_request_id", "oversized_audio", "empty_text"])
+def test_probe_fails_closed_on_invalid_public_responses(failure: str) -> None:
+    tts_calls = 0
+    asr_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal asr_calls, tts_calls
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"ready": True})
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
+        if request.url.path == "/v1/voices":
+            return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
+        if request.url.path == "/v1/audio/speech":
+            tts_calls += 1
             padding = 9 * 1024 * 1024 if failure == "oversized_audio" else 64
             return httpx.Response(
                 200,
                 content=(b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * padding),
                 headers={} if failure == "missing_request_id" else {"X-Request-ID": "req-tts"},
             )
+        asr_calls += 1
         return httpx.Response(
             200,
             json={"text": "" if failure == "empty_text" else "ok"},
@@ -165,6 +210,10 @@ def test_probe_fails_closed_on_invalid_public_responses(failure: str) -> None:
         base_url="http://127.0.0.1:8201", transport=httpx.MockTransport(handler)
     ) as client, pytest.raises(SmokeProbeError):
         PublicApiSmokeProbe(client=client, max_audio_bytes=8 * 1024 * 1024).run(_prepared())
+
+    expected_attempts = 3 if failure == "empty_text" else 1
+    assert tts_calls == expected_attempts
+    assert asr_calls == (3 if failure == "empty_text" else 0)
 
 
 def test_probe_rejects_non_loopback_transport() -> None:
