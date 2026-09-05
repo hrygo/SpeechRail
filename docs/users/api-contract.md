@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.6.2"
-date: 2026-09-03
+version: "1.6.7"
+date: 2026-09-05
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -58,7 +58,17 @@ Content-Type: multipart/form-data
 | `language` | String | 否 | `auto` | 语言代码（如 `zh`, `en`, `ja`, `auto` 等） |
 | `prompt` | String | 否 | - | 专有名词提示文本（最长 2000 字符） |
 | `response_format` | String | 否 | `json` | 响应格式：`json`, `verbose_json`, `text`, `srt`, `vtt` |
-| `timestamp_granularities[]` | Array | 否 | `["segment"]` | 时间戳精度：`segment`, `word` |
+| `timestamp_granularities[]` | Array | 否 | `["segment", "word"]` | 时间戳精度：`segment`, `word`；须配合 `verbose_json` |
+
+标准 multipart 数组使用重复字段，例如 `timestamp_granularities[]=word`。
+旧 `timestamp_granularities` 字段仍可使用；两种写法混用时合并后验证，任一字段中的非法值都会返回
+`422 invalid_timestamp_granularities`。只请求 `word` 时返回 `words`，只请求 `segment` 时返回
+`segments`；省略粒度时保持同时返回两者。
+
+上传大小仍受 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制；解码输出另受 128 MiB 和
+`SPEECHRAIL_MAX_AUDIO_SECONDS` 约束。WAV fastpath 在重采样前检查预计输出，其他容器在
+读取 `ffmpeg` 输出时检查，超限即停止处理。取消或解码超时会回收对应子进程；这不构成
+`ffmpeg` 自身内存占用的操作系统硬限制。
 
 ---
 
@@ -78,6 +88,9 @@ Content-Type: application/json
   "speed": 1.0
 }
 ```
+
+`mp3`、`opus`、`aac`、`flac` 的容器编码具有 15 秒超时和 128 MiB 输出上限。
+编码超限、超时或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
 
 ### 预设音色库 (Preset Voices)
 - `default`：标准清晰中性音色（OpenAI `alloy` 映射目标）。

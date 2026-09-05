@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import math
 import os
 import sys
 import traceback
@@ -15,6 +16,7 @@ from typing import BinaryIO, Protocol
 
 from speechrail.backends.qwen3_native import MODEL_FILES, snapshot_is_quantized
 from speechrail.runtime.worker_protocol import (
+    MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
     ProtocolError,
     read_frame,
@@ -22,9 +24,12 @@ from speechrail.runtime.worker_protocol import (
 )
 
 MAX_PCM_BYTES = 40 * 1024 * 1024
+# Batch requests are bounded by the shared framed IPC payload; keep a small
+# margin for the JSON header and length prefix.
+MAX_BATCH_PCM_BYTES = MAX_FRAME_BYTES - 4096
 # Defense-in-depth bound for concurrent streaming sessions inside one worker
 # process. The main-process NativeRealtimeFactory enforces the configurable
-# SPEECHRAIL_REALTIME_MAX_SESSIONS (default 2) before frames reach the worker;
+# SPEECHRAIL_REALTIME_MAX_SESSIONS (default 3) before frames reach the worker;
 # this constant only guards against a misbehaving protocol peer.
 MAX_ACTIVE_STREAMING_SESSIONS = 8
 LANGUAGES = {
@@ -78,11 +83,11 @@ def _clear_metal_cache() -> None:
 
 
 def _dynamic_budget(audio_sec: float, max_new_tokens: int) -> int:
-    """Bound the batch decode token budget with sub-linear growth.
+    """Bound the batch decode token budget with linear growth and a hard cap.
 
     A linear ``audio_sec * 8`` multiplier drives very long inputs toward the hard
-    cap for a large decoder tail that adds little transcription value. Sub-linear
-    growth keeps that tail small while a floor keeps short clips transcribable.
+    cap for a large decoder tail that adds little transcription value. The lower
+    multiplier keeps that tail smaller while a floor keeps short clips transcribable.
     """
     cap = max_new_tokens or 512
     return min(cap, max(32, int(audio_sec * 6) + 24))
@@ -206,7 +211,7 @@ def _decode_request(frame: dict[str, object]) -> tuple[str, bytes, str, str, boo
             raise ProtocolError("invalid PCM payload") from exc
     else:
         raise ProtocolError("invalid transcribe request")
-    if not pcm or len(pcm) % 2 or len(pcm) > MAX_PCM_BYTES:
+    if not pcm or len(pcm) % 2 or len(pcm) > MAX_BATCH_PCM_BYTES:
         raise ProtocolError("invalid PCM length")
     canonical_language = LANGUAGES.get(language.strip().lower())
     if canonical_language is None:
@@ -283,6 +288,29 @@ def _write_error(
     write_frame(output_stream, payload)
 
 
+def _coerce_session_float(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("invalid session option")
+    try:
+        result = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("invalid session option") from exc
+    if not math.isfinite(result):
+        raise ValueError("invalid session option")
+    return result
+
+
+def _coerce_session_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("invalid session option")
+    if isinstance(value, float) and (not math.isfinite(value) or not value.is_integer()):
+        raise ValueError("invalid session option")
+    try:
+        return int(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("invalid session option") from exc
+
+
 def _handle_session_open(
     frame: dict[str, object],
     output_stream: BinaryIO,
@@ -296,19 +324,21 @@ def _handle_session_open(
     if not isinstance(language, str):
         _write_error(output_stream, "session_open_failed", session_id=session_id)
         return
+    raw_context = frame.get("context")
+    context = raw_context if isinstance(raw_context, str) else ""
+    try:
+        chunk_sec = _coerce_session_float(frame.get("chunk_sec", 2.0))
+        left_context_sec = _coerce_session_float(frame.get("left_context_sec", 12.0))
+        right_context_ms = _coerce_session_int(frame.get("right_context_ms", 640))
+        max_new_tokens = _coerce_session_int(frame.get("max_new_tokens", 256))
+        if chunk_sec <= 0 or left_context_sec < 0 or right_context_ms < 0 or max_new_tokens <= 0:
+            raise ValueError("invalid session option")
+    except (OverflowError, TypeError, ValueError):
+        _write_error(output_stream, "session_open_failed", session_id=session_id)
+        return
     if engine.active_session_count() >= MAX_ACTIVE_STREAMING_SESSIONS:
         _write_error(output_stream, "session_limit_reached", session_id=session_id)
         return
-    raw_context = frame.get("context")
-    context = raw_context if isinstance(raw_context, str) else ""
-    raw_chunk = frame.get("chunk_sec", 2.0)
-    chunk_sec = float(raw_chunk) if isinstance(raw_chunk, (int, float, str)) else 2.0
-    raw_left = frame.get("left_context_sec", 12.0)
-    left_context_sec = float(raw_left) if isinstance(raw_left, (int, float, str)) else 12.0
-    raw_right = frame.get("right_context_ms", 640)
-    right_context_ms = int(raw_right) if isinstance(raw_right, (int, float, str)) else 640
-    raw_max_tokens = frame.get("max_new_tokens", 256)
-    max_new_tokens = int(raw_max_tokens) if isinstance(raw_max_tokens, (int, float, str)) else 256
     try:
         engine.open_session(
             session_id=session_id,
@@ -420,35 +450,36 @@ def _handle_commit(
     want_segments = bool(frame.get("want_segments", False))
     try:
         text, language = engine.finish_streaming(session_id)
-    except Exception:
-        traceback.print_exc(file=sys.stderr)
-        _write_error(output_stream, "worker_inference_error", session_id=session_id)
-        return
-    segments: list[dict[str, object]] = []
-    if want_segments and text:
-        segments = engine.align_session_audio(session_id)
-    if text:
+        segments: list[dict[str, object]] = []
+        if want_segments and text:
+            segments = engine.align_session_audio(session_id)
+        if text:
+            write_frame(
+                output_stream,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "event",
+                    "session_id": session_id,
+                    "kind": "completed",
+                    "text": text,
+                    "language": language or None,
+                    "segments": segments,
+                },
+            )
         write_frame(
             output_stream,
             {
                 "version": PROTOCOL_VERSION,
-                "type": "event",
+                "type": "finished",
                 "session_id": session_id,
-                "kind": "completed",
-                "text": text,
-                "language": language or None,
-                "segments": segments,
+                "final": True,
             },
         )
-    write_frame(
-        output_stream,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "finished",
-            "session_id": session_id,
-            "final": True,
-        },
-    )
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        _write_error(output_stream, "worker_inference_error", session_id=session_id)
+    finally:
+        engine.close_session(session_id)
 
 
 def serve(
@@ -463,7 +494,11 @@ def serve(
 ) -> None:
     if engine_factory is None:
         engine_factory = Qwen3Engine
-    start = read_frame(input_stream)
+    try:
+        start = read_frame(input_stream)
+    except ProtocolError:
+        _write_error(output_stream, "worker_invalid_start")
+        return
     if (
         start is None
         or start.get("version") != PROTOCOL_VERSION
@@ -550,6 +585,21 @@ def serve(
             )
 
 
+def _timestamp_seconds(value: object) -> float | None:
+    """Normalize a segment timestamp, preserving the legacy missing-value default."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        seconds = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return seconds
+
+
 def _segments(result: object) -> list[dict[str, object]]:
     raw = getattr(result, "segments", None)
     segments: list[dict[str, object]] = []
@@ -561,40 +611,102 @@ def _segments(result: object) -> list[dict[str, object]]:
         text = item.get("text")
         if not isinstance(text, str) or not text.strip():
             continue
+        start_s = _timestamp_seconds(item.get("start"))
+        end_s = _timestamp_seconds(item.get("end"))
+        if start_s is None or end_s is None:
+            continue
         segments.append(
             {
                 "text": text.strip(),
-                "start": float(item.get("start") or 0),
-                "end": float(item.get("end") or 0),
+                "start": start_s,
+                "end": end_s,
             }
         )
     return segments
 
 
-def _to_streaming_segments(raw: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Convert batch ``{text, start, end}`` (seconds) to streaming ``{text, start_ms, end_ms}``.
+_SENTENCE_ENDINGS = frozenset("。？！；…!?;")
 
-    The batch ``_segments`` reports floating-point seconds; the streaming
-    ``completed`` frame and ``qwen3_streaming._segments`` expect integer
-    milliseconds.  Reusing seconds directly would read as ``start_ms=0``
-    (field-name mismatch falls back to ``or 0``), silently dropping timestamps.
+
+def _should_separate_words(prev: str, next_s: str) -> bool:
+    if not prev or not next_s:
+        return False
+    return (
+        prev[-1].isascii()
+        and prev[-1].isalnum()
+        and next_s[0].isascii()
+        and next_s[0].isalnum()
+    )
+
+
+def _to_streaming_segments(raw: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Convert batch seconds to consolidated streaming millisecond segments.
+
+    Consolidates contiguous short tokens (such as character-level tokens emitted by
+    MLX alignment), ensures every segment lasts at least 20 ms, and splits on pauses
+    over 500 ms, sentence punctuation, or a 40-character clause limit.
     """
+    if not raw:
+        return []
+
     streaming: list[dict[str, object]] = []
+    current_text: str | None = None
+    current_start_ms = 0
+    current_end_ms = 0
+
     for item in raw:
-        text = str(item.get("text") or "").strip()
+        if not isinstance(item, dict):
+            continue
+        raw_text = item.get("text")
+        if not isinstance(raw_text, str):
+            continue
+        text = raw_text.strip()
         if not text:
             continue
-        raw_start = item.get("start")
-        raw_end = item.get("end")
-        start_s = float(raw_start) if isinstance(raw_start, (int, float)) else 0.0
-        end_s = float(raw_end) if isinstance(raw_end, (int, float)) else 0.0
-        streaming.append(
-            {
-                "text": text,
-                "start_ms": round(start_s * 1000),
-                "end_ms": round(end_s * 1000),
-            }
+        start_s = _timestamp_seconds(item.get("start"))
+        end_s = _timestamp_seconds(item.get("end"))
+        if start_s is None or end_s is None:
+            continue
+
+        try:
+            start_ms = round(start_s * 1000)
+            end_ms = round(end_s * 1000)
+        except (OverflowError, ValueError):
+            continue
+        if end_ms - start_ms < 20:
+            end_ms = start_ms + 20
+
+        if current_text is None:
+            current_text = text
+            current_start_ms = start_ms
+            current_end_ms = end_ms
+            continue
+
+        gap_ms = start_ms - current_end_ms
+        is_pause = gap_ms > 500
+        ends_sentence = current_text[-1] in _SENTENCE_ENDINGS
+        sep = " " if _should_separate_words(current_text, text) else ""
+        is_too_long = (
+            len(current_text) + len(sep) + len(text) > 40
+            or end_ms - current_start_ms > 10_000
         )
+
+        if not is_pause and not ends_sentence and not is_too_long:
+            current_text = f"{current_text}{sep}{text}"
+            current_end_ms = max(current_end_ms, end_ms)
+        else:
+            streaming.append(
+                {"text": current_text, "start_ms": current_start_ms, "end_ms": current_end_ms}
+            )
+            current_text = text
+            current_start_ms = start_ms
+            current_end_ms = end_ms
+
+    if current_text is not None:
+        streaming.append(
+            {"text": current_text, "start_ms": current_start_ms, "end_ms": current_end_ms}
+        )
+
     return streaming
 
 

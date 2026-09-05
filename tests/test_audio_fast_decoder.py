@@ -7,6 +7,7 @@ import struct
 import numpy as np
 import pytest
 
+import speechrail.http.routes.audio as audio_module
 from speechrail.http.routes.audio import _decode_pcm, _try_fast_decode_wav
 
 
@@ -69,6 +70,81 @@ def test_fast_decode_48k_mono_wav_resampled() -> None:
     assert pcm is not None
     # 0.1s audio at 16kHz mono = 1600 samples = 3200 bytes
     assert abs(len(pcm) - 3200) <= 4
+
+
+def test_fast_decode_rejects_oversized_resample_before_numpy_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A valid 1Hz WAV expands from 10 input frames to 160,000 output frames.
+    wav_bytes = _make_wav(sample_rate=1, num_samples=10)
+
+    def fail_numpy_allocation(*_: object, **__: object) -> None:
+        raise AssertionError("NumPy allocation should not be reached")
+
+    for name in ("frombuffer", "arange", "linspace", "interp", "clip"):
+        monkeypatch.setattr(np, name, fail_numpy_allocation)
+
+    with pytest.raises(OverflowError, match="audio_too_large"):
+        _try_fast_decode_wav(wav_bytes, max_decompressed_bytes=1_000)
+
+
+def test_fast_decode_allows_exact_output_byte_limit_and_rejects_one_byte_under() -> None:
+    # 8kHz mono, 4 frames -> 8 output frames -> exactly 16 bytes.
+    wav_bytes = _make_wav(sample_rate=8_000, num_samples=4)
+
+    pcm = _try_fast_decode_wav(wav_bytes, max_decompressed_bytes=16)
+    assert pcm is not None
+    assert len(pcm) == 16
+
+    with pytest.raises(OverflowError, match="audio_too_large"):
+        _try_fast_decode_wav(wav_bytes, max_decompressed_bytes=15)
+
+
+def test_fast_decode_stereo_limit_counts_mixed_mono_output() -> None:
+    # 8kHz stereo, 4 interleaved frames -> 8 mono output frames -> 16 bytes.
+    wav_bytes = _make_wav(sample_rate=8_000, channels=2, num_samples=4)
+
+    pcm = _try_fast_decode_wav(wav_bytes, max_decompressed_bytes=16)
+    assert pcm is not None
+    assert len(pcm) == 16
+
+
+def test_fast_decode_allows_exact_duration_limit_and_rejects_one_frame_over() -> None:
+    exact = _make_wav(sample_rate=16_000, num_samples=16_000)
+    pcm = _try_fast_decode_wav(exact, max_audio_seconds=1)
+    assert pcm is not None
+    assert len(pcm) == 32_000
+
+    over = _make_wav(sample_rate=16_000, num_samples=16_001)
+    with pytest.raises(ValueError, match="audio_too_long"):
+        _try_fast_decode_wav(over, max_audio_seconds=1)
+
+
+def test_fast_decode_zero_sample_rate_fails_closed() -> None:
+    wav_bytes = bytearray(_make_wav(sample_rate=16_000, num_samples=100))
+    struct.pack_into("<I", wav_bytes, 24, 0)
+
+    assert _try_fast_decode_wav(bytes(wav_bytes)) is None
+
+
+@pytest.mark.anyio
+async def test_decode_pcm_passes_limits_before_numpy_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wav_bytes = _make_wav(sample_rate=1, num_samples=10)
+
+    def fail_numpy_allocation(*_: object, **__: object) -> None:
+        raise AssertionError("NumPy allocation should not be reached")
+
+    def fail_ffmpeg() -> str:
+        raise AssertionError("ffmpeg fallback should not be reached")
+
+    for name in ("frombuffer", "arange", "linspace", "interp", "clip"):
+        monkeypatch.setattr(np, name, fail_numpy_allocation)
+    monkeypatch.setattr(audio_module, "_resolve_ffmpeg", fail_ffmpeg)
+
+    with pytest.raises(OverflowError, match="audio_too_large"):
+        await _decode_pcm(wav_bytes, max_decompressed_bytes=1_000)
 
 
 @pytest.mark.anyio

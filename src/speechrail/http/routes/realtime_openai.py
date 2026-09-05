@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 HANDSHAKE_MODEL_CLOSE_CODE = 4004
 QUEUE_OVERFLOW_CLOSE_CODE = 1013
 # Bounded intake so a stalled handler cannot accumulate unbounded base64 audio;
-# 64 events ≈ 64 chunks of audio, far above normal handler drain speed.
-CLIENT_EVENT_QUEUE_LIMIT = 64
+# 512 events ≈ 16.4s of 32ms audio chunks, accommodating commit/diarization spikes.
+CLIENT_EVENT_QUEUE_LIMIT = 512
 
 
 def create_openai_realtime_router(services: AppServices) -> APIRouter:

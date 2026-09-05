@@ -38,6 +38,9 @@ _AUDIO_CONTAINER_MIME_TYPES = frozenset(
     {"video/mp4", "video/mpeg", "video/webm", "application/ogg", "application/octet-stream"}
 )
 _FFMPEG_FALLBACKS = (Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"))
+_FFMPEG_IO_CHUNK_BYTES = 64 * 1024
+_FFMPEG_TIMEOUT_SECONDS = 15.0
+_MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
 
 
 class _SpeechHTTPBody(BaseModel):
@@ -100,7 +103,11 @@ def _resolve_ffmpeg() -> str:
     raise ValueError("audio_decode_failed")
 
 
-def _try_fast_decode_wav(audio: bytes) -> bytes | None:
+def _try_fast_decode_wav(
+    audio: bytes,
+    max_decompressed_bytes: int = 128 * 1024 * 1024,
+    max_audio_seconds: int | None = None,
+) -> bytes | None:
     """Fast-path in-memory decoding for PCM WAV (any sample rate/channels) without subprocess."""
     if len(audio) < 44 or not audio.startswith(b"RIFF") or audio[8:12] != b"WAVE":
         return None
@@ -130,38 +137,170 @@ def _try_fast_decode_wav(audio: bytes) -> bytes | None:
             elif chunk_id == b"data":
                 data_bytes = audio[chunk_data_start:chunk_data_end]
             offset = chunk_data_end + (chunk_size % 2)
-
-        if (
-            audio_format == 1
-            and num_channels in (1, 2)
-            and bits_per_sample == 16
-            and data_bytes is not None
-            and len(data_bytes) > 0
-            and len(data_bytes) % (2 * num_channels) == 0
-        ):
-            # Fast path: already 16kHz mono
-            if num_channels == 1 and sample_rate == 16_000:
-                return data_bytes
-
-            # In-memory NumPy channel mixing and linear resampling
-            import numpy as np
-
-            samples = np.frombuffer(data_bytes, dtype="<i2").astype(np.float32)
-            if num_channels == 2:
-                samples = samples.reshape(-1, 2).mean(axis=1)
-
-            if sample_rate != 16_000 and sample_rate is not None and sample_rate > 0:
-                num_out = round(len(samples) * 16_000.0 / sample_rate)
-                if num_out <= 0:
-                    return None
-                x_old = np.arange(len(samples), dtype=np.float32)
-                x_new = np.linspace(0, len(samples) - 1, num_out, dtype=np.float32)
-                samples = np.interp(x_new, x_old, samples).astype(np.float32)
-
-            return np.clip(samples, -32768.0, 32767.0).astype("<i2").tobytes()
     except Exception:
         return None
-    return None
+
+    if (
+        audio_format != 1
+        or num_channels not in (1, 2)
+        or sample_rate is None
+        or sample_rate <= 0
+        or bits_per_sample != 16
+        or data_bytes is None
+        or len(data_bytes) == 0
+        or len(data_bytes) % (2 * num_channels) != 0
+    ):
+        return None
+
+    input_frames = len(data_bytes) // (2 * num_channels)
+    if sample_rate == 16_000:
+        num_out = input_frames
+    else:
+        num_out = round(input_frames * 16_000.0 / sample_rate)
+        if num_out <= 0:
+            return None
+    output_bytes = num_out * 2
+    if output_bytes > max_decompressed_bytes:
+        raise OverflowError("audio_too_large")
+    if max_audio_seconds is not None and output_bytes > max_audio_seconds * 32_000:
+        raise ValueError("audio_too_long")
+
+    # Fast path: already 16kHz mono
+    if num_channels == 1 and sample_rate == 16_000:
+        return data_bytes
+
+    # In-memory NumPy channel mixing and linear resampling
+    try:
+        import numpy as np
+
+        samples = np.frombuffer(data_bytes, dtype="<i2").astype(np.float32)
+        if num_channels == 2:
+            samples = samples.reshape(-1, 2).mean(axis=1)
+
+        if sample_rate != 16_000:
+            x_old = np.arange(len(samples), dtype=np.float32)
+            x_new = np.linspace(0, len(samples) - 1, num_out, dtype=np.float32)
+            samples = np.interp(x_new, x_old, samples).astype(np.float32)
+
+        return np.clip(samples, -32768.0, 32767.0).astype("<i2").tobytes()
+    except Exception:
+        return None
+
+
+class _FFmpegOutputLimitError(Exception):
+    """Internal marker carrying the public error for a bounded stdout overflow."""
+
+    def __init__(self, error: ValueError | OverflowError) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
+async def _write_ffmpeg_stdin(stdin: asyncio.StreamWriter, payload: bytes) -> None:
+    """Feed ffmpeg in bounded chunks and close stdin so it can finish."""
+    try:
+        for offset in range(0, len(payload), _FFMPEG_IO_CHUNK_BYTES):
+            stdin.write(payload[offset : offset + _FFMPEG_IO_CHUNK_BYTES])
+            await stdin.drain()
+    finally:
+        stdin.close()
+
+
+async def _read_ffmpeg_stdout(
+    stdout: asyncio.StreamReader,
+    *,
+    max_bytes: int,
+    limit_error: ValueError | OverflowError,
+) -> bytes:
+    """Read at most max_bytes plus one probe byte from ffmpeg stdout."""
+    output = bytearray()
+    max_bytes = max(0, max_bytes)
+    while True:
+        read_size = min(_FFMPEG_IO_CHUNK_BYTES, max_bytes + 1 - len(output))
+        chunk = await stdout.read(read_size)
+        if not chunk:
+            return bytes(output)
+        if len(output) + len(chunk) > max_bytes:
+            raise _FFmpegOutputLimitError(limit_error)
+        output.extend(chunk)
+
+
+async def _cleanup_ffmpeg_process(
+    process: asyncio.subprocess.Process,
+    tasks: tuple[asyncio.Task[object], ...],
+) -> None:
+    """Stop ffmpeg and drain its pipes so cancellation cannot leak a child."""
+    if process.stdin is not None:
+        with contextlib.suppress(Exception):
+            process.stdin.close()
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        with contextlib.suppress(BaseException):
+            await asyncio.gather(*tasks, return_exceptions=True)
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+    # communicate() is used only after termination to drain/discard buffered output and reap.
+    with contextlib.suppress(BaseException):
+        await process.communicate()
+
+
+async def _run_ffmpeg_subprocess(
+    command: tuple[str, ...],
+    payload: bytes,
+    *,
+    max_output_bytes: int,
+    output_limit_error: ValueError | OverflowError,
+    timeout_error: ValueError,
+    failure_error: ValueError,
+) -> bytes:
+    """Run fixed-argv ffmpeg with bounded concurrent stdin/stdout tasks."""
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    if process.stdin is None or process.stdout is None:
+        await _cleanup_ffmpeg_process(process, ())
+        raise failure_error
+
+    writer_task = asyncio.create_task(_write_ffmpeg_stdin(process.stdin, payload))
+    reader_task = asyncio.create_task(
+        _read_ffmpeg_stdout(
+            process.stdout,
+            max_bytes=max_output_bytes,
+            limit_error=output_limit_error,
+        )
+    )
+    tasks: tuple[asyncio.Task[object], ...] = (writer_task, reader_task)
+    try:
+        async with asyncio.timeout(_FFMPEG_TIMEOUT_SECONDS):
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            # FIRST_EXCEPTION returns all tasks when neither task raises. When a task
+            # fails, inspect the reader first so the earliest output limit wins over
+            # a simultaneous BrokenPipeError from the input writer.
+            for task in (reader_task, writer_task):
+                if task in done:
+                    task.result()
+            await process.wait()
+            output = reader_task.result()
+            if process.returncode != 0 or not output:
+                raise RuntimeError("ffmpeg exited without a valid output")
+    except _FFmpegOutputLimitError as exc:
+        await _cleanup_ffmpeg_process(process, tasks)
+        raise exc.error from None
+    except TimeoutError:
+        await _cleanup_ffmpeg_process(process, tasks)
+        raise timeout_error from None
+    except asyncio.CancelledError:
+        await _cleanup_ffmpeg_process(process, tasks)
+        raise
+    except Exception as exc:
+        await _cleanup_ffmpeg_process(process, tasks)
+        raise failure_error from exc
+    return output
 
 
 async def _decode_pcm(
@@ -169,9 +308,13 @@ async def _decode_pcm(
     max_decompressed_bytes: int = 128 * 1024 * 1024,
     max_audio_seconds: int | None = None,
 ) -> bytes:
-    """Decode audio upload with in-memory fastpath and sandboxed ffmpeg fallback."""
+    """Decode audio upload with in-memory fastpath and bounded ffmpeg fallback."""
     # Level 1 & 2: In-process memory decode
-    fast_pcm = _try_fast_decode_wav(audio)
+    fast_pcm = _try_fast_decode_wav(
+        audio,
+        max_decompressed_bytes=max_decompressed_bytes,
+        max_audio_seconds=max_audio_seconds,
+    )
     if fast_pcm is not None:
         if len(fast_pcm) > max_decompressed_bytes:
             raise OverflowError("audio_too_large")
@@ -179,37 +322,40 @@ async def _decode_pcm(
             raise ValueError("audio_too_long")
         return fast_pcm
 
-    # Level 3: Sandboxed single-threaded ffmpeg subprocess with timeout & memory limit
-    process = await asyncio.create_subprocess_exec(
-        _resolve_ffmpeg(),
-        "-nostdin",
-        "-threads",
-        "1",
-        "-v",
-        "error",
-        "-i",
-        "pipe:0",
-        "-f",
-        "s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+    # Level 3: bounded stdout and a cancellable single-threaded ffmpeg subprocess.
+    output_limit = max(0, max_decompressed_bytes)
+    output_limit_error: ValueError | OverflowError = OverflowError("audio_too_large")
+    if max_audio_seconds is not None:
+        duration_limit = max(0, max_audio_seconds * 32_000)
+        if duration_limit < output_limit:
+            output_limit = duration_limit
+            output_limit_error = ValueError("audio_too_long")
+    pcm = await _run_ffmpeg_subprocess(
+        (
+            _resolve_ffmpeg(),
+            "-nostdin",
+            "-threads",
+            "1",
+            "-v",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "pipe:1",
+        ),
+        audio,
+        max_output_bytes=output_limit,
+        output_limit_error=output_limit_error,
+        timeout_error=ValueError("audio_decode_timeout"),
+        failure_error=ValueError("audio_decode_failed"),
     )
-    try:
-        async with asyncio.timeout(15.0):
-            pcm, _ = await process.communicate(audio)
-    except TimeoutError:
-        process.kill()
-        with contextlib.suppress(Exception):
-            await process.communicate()
-        raise ValueError("audio_decode_timeout") from None
 
-    if process.returncode != 0 or not pcm or len(pcm) % 2:
+    if not pcm or len(pcm) % 2:
         raise ValueError("audio_decode_failed")
     if len(pcm) > max_decompressed_bytes:
         raise OverflowError("audio_too_large")
@@ -253,29 +399,29 @@ _TTS_CONTAINER_ENCODERS: dict[str, tuple[str, tuple[str, ...]]] = {
 async def _encode_container(pcm: bytes, *, sample_rate: int, response_format: str) -> bytes:
     """Remux complete PCM16 into an OpenAI container with fixed ffmpeg argv, never a shell."""
     _, args = _TTS_CONTAINER_ENCODERS[response_format]
-    process = await asyncio.create_subprocess_exec(
-        _resolve_ffmpeg(),
-        "-nostdin",
-        "-v",
-        "error",
-        "-f",
-        "s16le",
-        "-ar",
-        str(sample_rate),
-        "-ac",
-        "1",
-        "-i",
-        "pipe:0",
-        *args,
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
+    return await _run_ffmpeg_subprocess(
+        (
+            _resolve_ffmpeg(),
+            "-nostdin",
+            "-v",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            str(sample_rate),
+            "-ac",
+            "1",
+            "-i",
+            "pipe:0",
+            *args,
+            "pipe:1",
+        ),
+        pcm,
+        max_output_bytes=_MAX_ENCODED_AUDIO_BYTES,
+        output_limit_error=ValueError("audio_encode_failed"),
+        timeout_error=ValueError("audio_encode_failed"),
+        failure_error=ValueError("audio_encode_failed"),
     )
-    encoded, _ = await process.communicate(pcm)
-    if process.returncode != 0 or not encoded:
-        raise ValueError("audio_encode_failed")
-    return encoded
 
 
 def create_audio_router(services: AppServices) -> APIRouter:
@@ -295,6 +441,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
         response_format: str = Form(default="json"),
         temperature: float | None = Form(default=None),
         timestamp_granularities: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        timestamp_granularities_bracketed: list[str] = Form(  # noqa: B008 - multipart marker.
+            default=[], alias="timestamp_granularities[]"
+        ),
         stream: bool = Form(default=False),
         chunking_strategy: str | None = Form(default=None),
         include: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
@@ -361,6 +510,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Temperature must be in [0, 2]",
                 param="temperature",
             )
+        timestamp_granularities = [
+            *timestamp_granularities,
+            *timestamp_granularities_bracketed,
+        ]
         if timestamp_granularities:
             unknown = set(timestamp_granularities) - {"word", "segment"}
             if unknown:
@@ -393,7 +546,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     max_audio_seconds=resolved.max_audio_seconds,
                 )
             else:
-                fast_pcm = _try_fast_decode_wav(audio)
+                fast_pcm = _try_fast_decode_wav(
+                    audio,
+                    max_decompressed_bytes=128 * 1024 * 1024,
+                    max_audio_seconds=resolved.max_audio_seconds,
+                )
                 if (
                     fast_pcm is not None
                     and resolved.max_audio_seconds is not None

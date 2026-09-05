@@ -6,7 +6,7 @@ import asyncio
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
@@ -124,12 +124,18 @@ class ResourceGovernor:
             waiters.append(waiter)
             try:
                 while not self._can_admit(waiter):
-                    await self._condition.wait()
+                    timeout = self._batch_aging_wait_timeout(waiter)
+                    if timeout is None:
+                        await self._condition.wait()
+                        continue
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(self._condition.wait(), timeout=timeout)
                 waiters.popleft()
                 if waiter.is_realtime:
                     self._active_realtime += 1
                 else:
                     self._active_batch += 1
+                self._condition.notify_all()
             except BaseException:
                 if waiter in waiters:
                     waiters.remove(waiter)
@@ -159,6 +165,16 @@ class ResourceGovernor:
         # batch work entirely. FIFO within the batch class is preserved.
         aged = self._clock() - waiter.enqueued_at >= self._limits.batch_aging_seconds
         return aged and self._active_batch < self._limits.total_capacity
+
+    def _batch_aging_wait_timeout(self, waiter: _Waiter) -> float | None:
+        if waiter.is_realtime or self._batch_waiters[0] != waiter:
+            return None
+        remaining = (
+            waiter.enqueued_at
+            + self._limits.batch_aging_seconds
+            - self._clock()
+        )
+        return remaining if remaining > 0 else None
 
     def _waiters_for(self, work_class: WorkClass) -> deque[_Waiter]:
         return self._realtime_waiters if work_class.is_realtime else self._batch_waiters

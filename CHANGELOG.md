@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 文件转写接受标准 multipart `timestamp_granularities[]`，保留旧非方括号字段；
+  混用时合并并统一校验。OpenAPI 的 verbose 响应允许按请求只返回 `words` 或 `segments`。
+- WAV fastpath 在重采样分配前检查输出大小与时长，拒绝无效采样率，避免低采样率输入先膨胀再报超限。
+- `ffmpeg` 编解码使用有界管道读写；解码超限提前终止，超时或取消时清理管道并回收进程。
+  容器编码增加 15 秒超时和 128 MiB 输出上限，失败保持 `audio_encode_failed`。
+- batch aging 到期主动重新检查准入条件，并唤醒队列后继；保持 FIFO、容量上限和取消清理。
+- Qwen3 时间分段跳过非法文本和非有限/负时间戳，统一保证 20 ms 最小时长；
+  英文词间空格计入 40 字符合并上限，并修复相关静态类型错误。
+- Qwen3 worker 校验流式会话数值参数，损坏启动帧返回稳定错误；commit 推理或对齐失败
+  仅终结当前会话，成功、空结果和失败均释放会话状态及对齐缓存。
+- 批量 PCM 上限与 128 MiB IPC 的预留规则对齐，消除 40 MiB 旧限额拒绝默认时长范围内
+  长音频的问题；实时 append 和单会话对齐缓存仍保持 40 MiB。
+
+### Performance
+
+- worker 同步帧读取在完整首读时直接复用结果，减少中间复制；支持分片 header，保持截断检查与协议格式。
+  局部对照数据和验证边界见[优化记录](docs/archive/process/2026-09-05-bounded-runtime-optimization.md)。
+
 ## [1.6.7] - 2026-09-05
 
 ### Fixed

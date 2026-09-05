@@ -65,7 +65,17 @@ def decode_frame_body(body: bytes) -> dict[str, object]:
 
 
 def _read_exact(stream: BinaryIO, size: int) -> bytes:
-    chunks = bytearray()
+    if size <= 0:
+        return b""
+
+    first_chunk = stream.read(size)
+    if not first_chunk:
+        raise ProtocolError("truncated worker frame")
+    if len(first_chunk) == size:
+        return first_chunk
+
+    chunks = bytearray(first_chunk)
+    del first_chunk
     while len(chunks) < size:
         chunk = stream.read(size - len(chunks))
         if not chunk:
@@ -79,7 +89,12 @@ def read_frame(stream: BinaryIO) -> dict[str, object] | None:
     if not header:
         return None
     if len(header) != 4:
-        raise ProtocolError("truncated worker frame header")
+        if len(header) > 4:
+            raise ProtocolError("truncated worker frame header")
+        try:
+            header += _read_exact(stream, 4 - len(header))
+        except ProtocolError as exc:
+            raise ProtocolError("truncated worker frame header") from exc
     size = struct.unpack(">I", header)[0]
     if not 0 < size <= MAX_FRAME_BYTES:
         raise ProtocolError("invalid worker frame size")
@@ -91,4 +106,3 @@ def write_frame(
 ) -> None:
     stream.write(encode_frame(payload, binary_payload=binary_payload))
     stream.flush()
-

@@ -14,6 +14,23 @@ from speechrail.runtime.worker_protocol import (
 )
 
 
+class _FragmentedReader:
+    def __init__(self, data: bytes, *, chunk_size: int) -> None:
+        self._data = data
+        self._position = 0
+        self._chunk_size = chunk_size
+
+    def read(self, size: int = -1) -> bytes:
+        if self._position >= len(self._data):
+            return b""
+        if size < 0:
+            size = len(self._data) - self._position
+        count = min(size, self._chunk_size)
+        start = self._position
+        self._position += count
+        return self._data[start : self._position]
+
+
 class _FakeEngine:
     identity = WorkerIdentity(device="mps", dtype="float16")
 
@@ -37,6 +54,50 @@ def test_framed_protocol_round_trips_versioned_request() -> None:
     stream.seek(0)
 
     assert read_frame(stream) == {"version": 1, "type": "transcribe", "request_id": "req_1"}
+
+
+def test_framed_protocol_accepts_fragmented_header_and_body() -> None:
+    payload = {"version": 1, "type": "transcribe", "request_id": "fragmented"}
+
+    assert read_frame(_FragmentedReader(encode_frame(payload), chunk_size=1)) == payload
+
+
+def test_framed_protocol_returns_none_on_clean_eof() -> None:
+    assert read_frame(BytesIO()) is None
+
+
+def test_framed_protocol_distinguishes_truncated_header_from_clean_eof() -> None:
+    with pytest.raises(ProtocolError, match=r"^truncated worker frame header$"):
+        read_frame(_FragmentedReader(b"\x00\x00", chunk_size=1))
+
+
+def test_framed_protocol_rejects_truncated_body_after_fragmented_header() -> None:
+    frame = encode_frame({"version": 1, "type": "transcribe"})
+
+    with pytest.raises(ProtocolError, match=r"^truncated worker frame$"):
+        read_frame(_FragmentedReader(frame[:-1], chunk_size=1))
+
+
+def test_framed_protocol_reads_consecutive_fragmented_frames() -> None:
+    first = encode_frame({"version": 1, "type": "first"})
+    second = encode_frame({"version": 1, "type": "second"})
+    stream = _FragmentedReader(first + second, chunk_size=2)
+
+    assert read_frame(stream) == {"version": 1, "type": "first"}
+    assert read_frame(stream) == {"version": 1, "type": "second"}
+    assert read_frame(stream) is None
+
+
+def test_framed_protocol_reads_consecutive_frames_from_buffered_file(tmp_path: Path) -> None:
+    first = encode_frame({"version": 1, "type": "first"})
+    second = encode_frame({"version": 1, "type": "second"})
+    path = tmp_path / "frames.bin"
+    path.write_bytes(first + second)
+
+    with path.open("rb") as stream:
+        assert read_frame(stream) == {"version": 1, "type": "first"}
+        assert read_frame(stream) == {"version": 1, "type": "second"}
+        assert read_frame(stream) is None
 
 
 def test_framed_protocol_rejects_bad_length_and_eof() -> None:
@@ -130,7 +191,7 @@ def test_codec_round_trips_binary_payload() -> None:
         {"version": 1, "type": "audio.append", "session_id": "s1"},
         binary_payload=raw_audio,
     )
-    stream = BytesIO(frame)
+    stream = _FragmentedReader(frame, chunk_size=3)
     decoded = read_frame(stream)
     assert decoded is not None
     assert decoded["version"] == 1

@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     qwen3_streaming_context: str = ""
     diarization_model_path: Path | None = None
     diarization_embedding_model_path: Path | None = None
-    diarization_max_buffer_bytes: int = Field(default=8_388_608, ge=2, le=64_000_000)
+    diarization_max_buffer_bytes: int = Field(default=64_000_000, ge=2, le=256_000_000)
     diarization_max_groups: int = Field(default=64, ge=1, le=4096)
     diarization_group_ttl_seconds: float = Field(default=900, gt=0, le=86_400)
     diarization_similarity_threshold: float = Field(default=0.8, gt=0, le=1)

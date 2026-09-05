@@ -500,7 +500,19 @@ components:
           items:
             type: string
             enum: [word, segment]
-          description: Only meaningful with response_format=verbose_json.
+          description: |
+            Legacy non-bracketed multipart field; still supported for compatibility.
+            When both this field and timestamp_granularities[] are supplied, their
+            values are merged. Only meaningful with response_format=verbose_json.
+        'timestamp_granularities[]':
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+          description: |
+            Standard OpenAI bracketed multipart field. When both this field and
+            timestamp_granularities are supplied, their values are merged. Only
+            meaningful with response_format=verbose_json.
         stream:
           type: boolean
           default: false
@@ -686,7 +698,7 @@ components:
           minimum: 0
     VerboseTranscriptionResponse:
       type: object
-      required: [task, language, duration, text, segments, words, usage]
+      required: [task, language, duration, text, usage]
       properties:
         task:
           type: string
@@ -701,10 +713,12 @@ components:
           type: string
         segments:
           type: array
+          description: Included when segment timestamps are requested; omitted for word-only responses. When no timestamp granularity is requested, both segments and words are returned.
           items:
             $ref: '#/components/schemas/TranscriptSegment'
         words:
           type: array
+          description: Included when word timestamps are requested; omitted for segment-only responses. When no timestamp granularity is requested, both segments and words are returned.
           items:
             $ref: '#/components/schemas/TranscriptWord'
         usage:

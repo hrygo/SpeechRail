@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from speechrail.backends.qwen3_worker import _to_streaming_segments, serve
+from speechrail.backends.qwen3_worker import _segments, _to_streaming_segments, serve
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
@@ -268,6 +268,102 @@ def test_to_streaming_segments_drops_missing_or_empty_text() -> None:
         {"text": "ok", "start": 0.5, "end": 1.0},
     ]
     assert _to_streaming_segments(raw) == [{"text": "ok", "start_ms": 500, "end_ms": 1000}]
+
+
+def test_segments_skips_invalid_items_and_defaults_missing_timestamps() -> None:
+    class _Result:
+        def __init__(self) -> None:
+            self.segments = [
+                {"text": "nan", "start": float("nan"), "end": 0.5},
+                {"text": "inf", "start": 0.5, "end": float("inf")},
+                {"text": "negative", "start": -0.5, "end": 0.5},
+                {"text": "object", "start": object(), "end": 0.5},
+                {"text": 123, "start": 0.5, "end": 1.0},
+                {"text": "ok", "end": 1.5},
+            ]
+
+    assert _segments(_Result()) == [{"text": "ok", "start": 0.0, "end": 1.5}]
+
+
+def test_to_streaming_segments_skips_invalid_timestamps_and_non_string_text() -> None:
+    raw = [
+        {"text": "nan", "start": float("nan"), "end": 0.5},
+        {"text": "inf", "start": 0.5, "end": float("inf")},
+        {"text": "negative", "start": -0.5, "end": 0.5},
+        {"text": "object", "start": object(), "end": 0.5},
+        {"text": 123, "start": 0.5, "end": 1.0},
+        {"text": "ok", "end": 1.5},
+    ]
+
+    assert _to_streaming_segments(raw) == [{"text": "ok", "start_ms": 0, "end_ms": 1500}]
+
+
+def test_to_streaming_segments_enforces_twenty_millisecond_minimum_duration() -> None:
+    raw = [{"text": "x", "start": 0.0, "end": 0.001}]
+
+    assert _to_streaming_segments(raw) == [{"text": "x", "start_ms": 0, "end_ms": 20}]
+
+
+def test_to_streaming_segments_counts_word_separator_in_clause_limit() -> None:
+    raw = [
+        {"text": "a" * 20, "start": 0.0, "end": 0.1},
+        {"text": "b" * 20, "start": 0.1, "end": 0.2},
+    ]
+
+    assert _to_streaming_segments(raw) == [
+        {"text": "a" * 20, "start_ms": 0, "end_ms": 100},
+        {"text": "b" * 20, "start_ms": 100, "end_ms": 200},
+    ]
+
+
+def test_to_streaming_segments_merges_at_pause_and_duration_boundaries() -> None:
+    raw = [
+        {"text": "a", "start": 0.0, "end": 0.1},
+        {"text": "b", "start": 0.6, "end": 10.0},
+    ]
+
+    assert _to_streaming_segments(raw) == [{"text": "a b", "start_ms": 0, "end_ms": 10000}]
+
+
+def test_to_streaming_segments_splits_after_pause_over_five_hundred_ms() -> None:
+    raw = [
+        {"text": "a", "start": 0.0, "end": 0.1},
+        {"text": "b", "start": 0.601, "end": 0.7},
+    ]
+
+    assert _to_streaming_segments(raw) == [
+        {"text": "a", "start_ms": 0, "end_ms": 100},
+        {"text": "b", "start_ms": 601, "end_ms": 700},
+    ]
+
+
+def test_to_streaming_segments_merges_contiguous_chinese_tokens_and_handles_zero_duration() -> None:
+    raw = [
+        {"text": "啥", "start": 187.63, "end": 187.63},  # zero duration
+        {"text": "鸡", "start": 187.64, "end": 187.72},
+        {"text": "巴", "start": 187.73, "end": 187.85},
+        {"text": "玩", "start": 187.86, "end": 187.95},
+        {"text": "意", "start": 187.96, "end": 188.08},
+        {"text": "儿", "start": 188.09, "end": 188.20},
+    ]
+    result = _to_streaming_segments(raw)
+    assert len(result) == 1
+    assert result[0] == {
+        "text": "啥鸡巴玩意儿",
+        "start_ms": 187630,
+        "end_ms": 188200,
+    }
+
+
+def test_to_streaming_segments_splits_on_sentence_punctuation() -> None:
+    raw = [
+        {"text": "好的。", "start": 0.0, "end": 0.5},
+        {"text": "没问题！", "start": 0.6, "end": 1.2},
+    ]
+    result = _to_streaming_segments(raw)
+    assert len(result) == 2
+    assert result[0] == {"text": "好的。", "start_ms": 0, "end_ms": 500}
+    assert result[1] == {"text": "没问题！", "start_ms": 600, "end_ms": 1200}
 
 
 def test_worker_cancel_closes_only_that_session() -> None:

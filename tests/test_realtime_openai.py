@@ -1770,7 +1770,7 @@ def test_openai_client_event_queue_overflow_closes_session() -> None:
                     {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
                 )
                 socket.send_json({"type": "input_audio_buffer.commit"})
-                for index in range(128):
+                for index in range(600):
                     socket.send_json(
                         {
                             "type": "input_audio_buffer.append",

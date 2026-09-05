@@ -83,6 +83,184 @@ def test_batch_waits_fifo_without_stealing_reserved_realtime_capacity() -> None:
     asyncio.run(scenario())
 
 
+def test_batch_aging_wakes_without_another_release_or_notify() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=2,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=4,
+                batch_aging_seconds=0.02,
+            )
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+
+        async def first() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def second() -> None:
+            second_started.set()
+
+        first_task = asyncio.create_task(governor.run(first, WorkClass.BATCH_ASR))
+        await first_started.wait()
+        second_task = asyncio.create_task(governor.run(second, WorkClass.BATCH_ASR))
+        try:
+            await asyncio.wait_for(second_started.wait(), timeout=0.5)
+        finally:
+            release_first.set()
+            await asyncio.wait_for(first_task, timeout=0.5)
+            if not second_task.done():
+                second_task.cancel()
+            await asyncio.gather(second_task, return_exceptions=True)
+
+        assert second_started.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_batch_aging_hands_timer_to_next_waiter_after_admission() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=4,
+                realtime_reserved_capacity=3,
+                max_pending_per_class=4,
+                batch_aging_seconds=0.02,
+            )
+        )
+        holder_started = asyncio.Event()
+        first_waiter_started = asyncio.Event()
+        second_waiter_started = asyncio.Event()
+        release_holder = asyncio.Event()
+        release_first_waiter = asyncio.Event()
+        release_second_waiter = asyncio.Event()
+
+        async def holder() -> None:
+            holder_started.set()
+            await release_holder.wait()
+
+        async def first_waiter() -> None:
+            first_waiter_started.set()
+            await release_first_waiter.wait()
+
+        async def second_waiter() -> None:
+            second_waiter_started.set()
+            await release_second_waiter.wait()
+
+        holder_task = asyncio.create_task(governor.run(holder, WorkClass.BATCH_ASR))
+        await holder_started.wait()
+        first_task = asyncio.create_task(
+            governor.run(first_waiter, WorkClass.BATCH_ASR)
+        )
+        second_task = asyncio.create_task(
+            governor.run(second_waiter, WorkClass.BATCH_ASR)
+        )
+        try:
+            await asyncio.wait_for(first_waiter_started.wait(), timeout=0.5)
+            await asyncio.wait_for(second_waiter_started.wait(), timeout=0.5)
+        finally:
+            release_holder.set()
+            release_first_waiter.set()
+            release_second_waiter.set()
+            await asyncio.gather(
+                holder_task, first_task, second_task, return_exceptions=True
+            )
+
+        assert second_waiter_started.is_set()
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_batch_waiter_is_removed_without_leaking_capacity() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=2,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=4,
+                batch_aging_seconds=30.0,
+            )
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        first_task = asyncio.create_task(governor.run(first, WorkClass.BATCH_ASR))
+        await first_started.wait()
+        waiting_task = asyncio.create_task(
+            governor.run(lambda: asyncio.sleep(0), WorkClass.BATCH_ASR)
+        )
+        for _ in range(100):
+            if governor.snapshot().pending_batch == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert governor.snapshot().pending_batch == 1
+
+        waiting_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting_task
+        assert governor.snapshot().pending_batch == 0
+        assert governor.snapshot().active_batch == 1
+
+        release_first.set()
+        await first_task
+        assert governor.snapshot().active_batch == 0
+        await governor.run(lambda: asyncio.sleep(0), WorkClass.BATCH_ASR)
+        assert governor.snapshot().active_batch == 0
+
+    asyncio.run(scenario())
+
+
+def test_batch_waiter_deadline_removes_waiter_without_leaking_capacity() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=2,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=4,
+                batch_aging_seconds=30.0,
+            )
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        first_task = asyncio.create_task(governor.run(first, WorkClass.BATCH_ASR))
+        await first_started.wait()
+        waiting_task = asyncio.create_task(
+            governor.run(
+                lambda: asyncio.sleep(0), WorkClass.BATCH_ASR, deadline=0.02
+            )
+        )
+        for _ in range(100):
+            if governor.snapshot().pending_batch == 1:
+                break
+            await asyncio.sleep(0.01)
+        assert governor.snapshot().pending_batch == 1
+
+        with pytest.raises(TimeoutError):
+            await waiting_task
+        assert governor.snapshot().pending_batch == 0
+        assert governor.snapshot().active_batch == 1
+
+        release_first.set()
+        await first_task
+        assert governor.snapshot().active_batch == 0
+        await governor.run(lambda: asyncio.sleep(0), WorkClass.BATCH_ASR)
+        assert governor.snapshot().active_batch == 0
+
+    asyncio.run(scenario())
+
+
 def test_queue_limit_is_reported() -> None:
     async def scenario() -> None:
         governor = ResourceGovernor(

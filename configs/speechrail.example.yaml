@@ -31,7 +31,7 @@ diarization:
   # Optional external snapshots; configure Sortformer before CAM++.
   model_path: /absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
   embedding_model_path: /absolute/path/outside/SpeechRail/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
-  max_buffer_bytes: 8388608
+  max_buffer_bytes: 64000000
   max_groups: 64
   group_ttl_seconds: 900
   similarity_threshold: 0.8
