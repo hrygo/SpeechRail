@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-05
+
+### Added
+
+- **三档统一运行时**：新增 `quality`、`balanced`、`light` 三档受管模型组合；三档复用同一服务架构、worker 协议和 lock-keyed vendor runtime，只改变已校验的 ASR/TTS 权重与量化。`speechrail setup` 与 `profile list|status|apply|rollback` 支持停服切换、公共 ASR/TTS smoke 和一次有界回退。
+- **不可变模型制品与本机安装**：ModelScope 制品按 revision、大小和 SHA-256 锁定，安装器将 wheel、共享 vendor runtime、模型与 selection 分离保存，原子切换 `runtime/current`，并安装双击设置入口。
+- **九个跨档预置角色**：公开 `serena`、`vivian`、`uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。`quality` 使用固定 VoiceDesign 配方，`balanced/light` 映射同名 CustomVoice speaker；旧 ID 与 OpenAI voice 名保留为 alias。
+
+### Changed
+
+- `/health`、`/v1/models`、`/v1/voices` 和 Realtime session 事件从同一次启动 selection 发布实际 profile、artifact、variant、quantization 与 voice capabilities；档位仍对 OpenAI API 调用方透明。
+- batch 与 streaming ASR 由一个物理 worker owner 统一管理并显式互斥；冲突通过 REST/Realtime 稳定返回 `backend_busy`，不复制模型进程。
+- 上传解码、ASR 分窗与增量拼接、长文本 TTS、容器编码、IPC 状态和 Resource Governor 均改为有界路径；取消、超时与 worker 传输失败有明确清理或单次安全恢复。
+
+### Fixed
+
+- 修复 managed wheel 在标准 `uv` 解释器 symlink、当前 macOS wheel 解析、`uv pip sync` 清单参数、共享 Python/ffmpeg 激活、installed-host preflight 和 LaunchAgent bootout/bootstrap 时序下的安装失败。
+- CustomVoice worker identity、VoiceDesign preset 参数、跨档音色 availability 与 profile smoke 现按当前权重严格校验；自定义 VoiceDesign 音色在低档 fail closed，切回 `quality` 后恢复。
+
 ## [1.6.9] - 2026-09-05
 
 ### Added
