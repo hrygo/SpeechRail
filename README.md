@@ -17,7 +17,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License MIT" /></a>
 </p>
 
-SpeechRail 是一套**本地优先**的语音识别与合成服务，为 QwenPaw、Hermes Agent 、`Sona`及任何 OpenAI 兼容客户端提供稳定、低延迟、隐私安全的 ASR/TTS 接口。
+SpeechRail 是一套**本地优先**的语音识别与合成服务，为 QwenPaw、Hermes Agent、`Sona` 及任何 OpenAI 兼容客户端提供稳定、低延迟、隐私安全的 ASR/TTS 接口。
 
 ---
 

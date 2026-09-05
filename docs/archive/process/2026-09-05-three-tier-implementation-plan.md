@@ -11,7 +11,8 @@
 **Tech Stack:** Python >=3.12,<3.13、uv、FastAPI、Pydantic、MLX、mlx-qwen3-asr、mlx-audio、ffmpeg、macOS LaunchAgent。
 **Spec:** [用户已采纳的设计](2026-09-05-low-memory-mac-architecture-proposal.md)。
 **Decision:** [ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
-**状态:** 实施中。日期：2026-09-05。代码勘察基线：`001e744`（v1.6.8）；当前实施分支证据以各任务卡 commit 为准。
+**状态:** 实施中。日期：2026-09-05。原始代码勘察基线：`001e744`（v1.6.8）；当前分支已
+rebase 到 `main` 的 v1.6.9 发布线，实施证据以 rebase 后各任务卡 commit 为准。
 未勾选的接口、命令和文件仍是目标设计，不代表当前代码已存在。
 
 ## 1. Global Constraints
@@ -36,7 +37,7 @@
 
 下表记录计划基线 `001e744` 的调查事实。当前实施工作树图项目
 `Users-hrygo-Documents-SpeechRail-three-tier`，Tier 2；2026-09-05 复核时索引已跟随到
-`243fe5e`，实施后的事实以任务卡 commit、当前代码和测试为准。
+`3b104d7`，实施后的事实以任务卡 commit、当前代码和测试为准。
 对下表主要实现路径调用了 check_index_coverage：metadata_match/no_recorded_issue。
 这只是 best-effort 覆盖；未对整个仓库作穷尽审计。执行每张任务卡前按当时 HEAD 重新核对。
 
@@ -274,7 +275,7 @@ def test_mutable_revision_cannot_ship():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `docs: freeze reproducible three-tier artifacts`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `f040bd0` / `a52b810`，18 项测试通过）
+  `docs: freeze reproducible three-tier artifacts`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `cc5d64b` / `9f07280`，18 项测试通过）
 
 
 ### B01：建立真实基准口径与脱敏结果结构
@@ -300,7 +301,7 @@ def test_peaks_are_attributed_to_the_same_instant():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `test: define comparable speech profile measurements`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `2c346cc` / `adce4a9`，27 项测试通过）
+  `test: define comparable speech profile measurements`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `06ca0b3` / `bd23bdd`，27 项测试通过）
 
 
 ### M02：识别实际模型变体与量化身份
@@ -327,7 +328,7 @@ def test_quantized_does_not_mean_int8():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: validate actual model and quantization identity`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `84eae26`，35 项测试通过）
+  `fix: validate actual model and quantization identity`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `e1cf530`，35 项测试通过）
 
 
 ### M03：定义只包含权重差异的三档目录
@@ -355,7 +356,7 @@ def test_preset_cannot_override_execution_policy():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: define weight-only speech presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `11547dc`，28 项测试通过）
+  `feat: define weight-only speech presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `b0bfb63`，28 项测试通过）
 
 
 ### M04：解析用户选择并保留旧配置
@@ -382,7 +383,7 @@ def test_existing_install_without_selection_is_unchanged(tmp_path):
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: preserve user configuration across model selection`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 commit `36f4dd4`；复核修正 commit `cd969ec`，补齐 public model ID 保留、preset/artifact family 精确绑定和 `runtime_lock_id` 校验，20 项针对性测试 + mypy + ruff 通过）
+  `feat: preserve user configuration across model selection`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 commit `f2d9dc4`；复核修正 commit `8472391`，补齐 public model ID 保留、preset/artifact family 精确绑定和 `runtime_lock_id` 校验，20 项针对性测试 + mypy + ruff 通过）
 
 
 ### T01：建立按模型能力解析的共同音色表
@@ -409,7 +410,7 @@ def test_custom_voice_is_explicitly_bound():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: describe model-specific voice bindings`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `fe869bd` / `335a83b`，25 项测试通过）
+  `feat: describe model-specific voice bindings`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（rebase 后由 main `14b6618` 与三档身份门共同覆盖，25 项测试通过）
 
 
 ### T02：让同一 TTS worker 支持 CustomVoice
@@ -436,7 +437,7 @@ def test_small_custom_voice_does_not_fake_instructions():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: run CustomVoice through the shared TTS engine`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `98f983a`，11 项测试通过）
+  `feat: run CustomVoice through the shared TTS engine`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `9544f98`，11 项测试通过）
 
 
 ### R01：实现 ASR 模式租约
@@ -467,7 +468,7 @@ def test_batch_cannot_enter_unfinished_stream():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: enforce mutually exclusive ASR modes`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `73f5048`，7 项测试通过）
+  `feat: enforce mutually exclusive ASR modes`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `2f56783`，7 项测试通过）
 
 
 ### R02：实现唯一 IPC owner 与有界路由
@@ -493,7 +494,7 @@ def test_batch_and_session_ids_have_separate_namespaces():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: centralize ASR worker frame ownership`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `c3c22b8` / `f1256ea` / `0d44959`，18 项测试通过）
+  `feat: centralize ASR worker frame ownership`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `c6eb387` / `f087268` / `9a37503`，18 项测试通过）
 
 
 ### R03：把 Batch 与 Streaming 门面接入共享 owner
@@ -525,7 +526,7 @@ def test_one_stream_finishing_does_not_release_another():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: share one ASR process across both entry points`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `a373098`，48 项测试通过）
+  `refactor: share one ASR process across both entry points`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `29b282a`，48 项测试通过）
 
 
 ### R04：组合根与生命周期只登记物理实例一次
@@ -562,7 +563,7 @@ def test_lifecycle_closes_a_shared_component_once():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: manage shared ASR worker lifecycle as a single physical instance`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `63e3ef5`，37 项测试通过）
+  `feat: manage shared ASR worker lifecycle as a single physical instance`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `d804475`，37 项测试通过）
 
 
 ### R05：共享 worker 取消、超时与进程恢复
@@ -591,7 +592,7 @@ def test_old_generation_cannot_deliver_a_result():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: isolate failed ASR generations and recover leases`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 commits `0d44959` / `a373098`；复核修正 commits `243fe5e` / `dec1de7`，补齐接收侧 EOF/半帧 cause、逐窗至多一次安全重试及发送前取消不终止 generation；相关恢复测试通过）
+  `fix: isolate failed ASR generations and recover leases`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 commits `9a37503` / `29b282a`；复核修正 commits `3b104d7` / `d9046cb`，补齐接收侧 EOF/半帧 cause、逐窗至多一次安全重试及发送前取消不终止 generation；相关恢复测试通过）
 
 
 ### R06：统一资源保护并移除 ASR 双模式预留依赖
@@ -618,7 +619,7 @@ def test_low_memory_acceptance_is_not_a_global_cap():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 `019dc2b` 仅有算法；复核后由 `29e089d` 接入生产组合根并对未知 footprint 保守串行，59 项预算、Governor、组合与 REST 回归 + mypy + ruff 通过）
+  `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 `5d8f51c` 仅有算法；复核后由 `44933a7` 接入生产组合根并对未知 footprint 保守串行，59 项预算、Governor、组合与 REST 回归 + mypy + ruff 通过）
 
 
 
@@ -650,7 +651,7 @@ def test_duration_limit_is_checked_before_growing_buffer():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: bound upload decoding without whole-file PCM copies`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `0c67e65`，15 项测试通过）
+  `feat: bound upload decoding without whole-file PCM copies`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `bcb68d4`，15 项测试通过）
 
 
 ### A02：建立共同滚动窗口与时间轴拼接
@@ -675,7 +676,7 @@ def test_sample_offset_preserves_global_time():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: preserve transcript boundaries across bounded audio windows`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `6f0518a` / `c668cdc`，12 项测试通过）
+  `feat: preserve transcript boundaries across bounded audio windows`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `3eb5ee0` / `a361806`，12 项测试通过）
 
 
 ### A03：逐窗推理与按需时间戳缓存
@@ -703,7 +704,7 @@ def test_each_inference_window_is_bounded():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `perf: limit ASR inference tensors to one audio window`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `0d7446e`，4 项针对性单测 + mypy + ruff 验证通过）
+  `perf: limit ASR inference tensors to one audio window`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `9683fac`，4 项针对性单测 + mypy + ruff 验证通过）
 
 
 ### A04：把 REST 转写接入有界管线
@@ -729,7 +730,7 @@ def test_long_audio_limit_is_independent_of_single_ipc_frame():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: stream decoded uploads into batch transcription`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `54b0f98`，59 项转写、解码、分窗与 diarization 回归 + mypy + ruff 通过；真实模型质量仍属于 B02）
+  `refactor: stream decoded uploads into batch transcription`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `378535b`，59 项转写、解码、分窗与 diarization 回归 + mypy + ruff 通过；真实模型质量仍属于 B02）
 
 
 ### T03：统一长文本分句与生成上界
@@ -757,7 +758,7 @@ def test_long_text_is_not_silently_truncated():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: bound TTS generation without dropping long text`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `e2ec63b`，28 项 TTS 针对性测试 + 全套 778 项测试 + mypy + ruff 通过；主 Agent 另将引号状态推进收敛为线性扫描；真实音质留待 B02）
+  `fix: bound TTS generation without dropping long text`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `de0041c`，28 项 TTS 针对性测试 + 全套 778 项测试 + mypy + ruff 通过；主 Agent 另将引号状态推进收敛为线性扫描；真实音质留待 B02）
 
 
 ### T04：限制 TTS 编码与交付缓冲
@@ -786,7 +787,7 @@ def test_output_limit_includes_the_final_chunk():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `perf: bound audio encoding and release cancelled TTS work`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `90d8308`；输入/输出各 4 块的 ffmpeg 管线、提前 EOF 与取消回收、四种容器真实 ffmpeg 往返，目标 34 项及扩展 route/TTS 回归 + mypy + ruff 通过）
+  `perf: bound audio encoding and release cancelled TTS work`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `2be3c71`；输入/输出各 4 块的 ffmpeg 管线、提前 EOF 与取消回收、四种容器真实 ffmpeg 往返，目标 34 项及扩展 route/TTS 回归 + mypy + ruff 通过）
 
 
 ### B02：运行 G2 三档可行性与质量对照
@@ -812,7 +813,7 @@ def test_light_release_requires_real_device_and_soak():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `test: establish real hardware gates for speech tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已交付 runner/门禁骨架：commits `c25f995`、`1171c5c`；39 项测试覆盖公共 REST 请求、实际音频时长、资源监控生命周期、脱敏和 fail-closed。第 3 项真实三档串行采样、streaming ASR、soak/switch 与 M1 Air 8GB G2 仍未执行，因此本卡与 G2 保持未完成）
+  `test: establish real hardware gates for speech tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已交付 runner/门禁骨架：commits `d6daaa5`、`57fc5e2`；39 项测试覆盖公共 REST 请求、实际音频时长、资源监控生命周期、脱敏和 fail-closed。第 3 项真实三档串行采样、streaming ASR、soak/switch 与 M1 Air 8GB G2 仍未执行，因此本卡与 G2 保持未完成）
 
 
 ### P01：下载制品、校验与 cache 复用
@@ -839,7 +840,7 @@ def test_catalog_path_cannot_escape_model_store(tmp_path):
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: prepare verified model artifacts outside request handling`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `dc0f70c`，后续一致性修复 `ae8be3a`；36 项离线 fake 覆盖路径、hash/size、镜像、重试、取消、下载流关闭、registry commit point、metadata identity、回滚、磁盘和 cache；一次 prepare 内每个复用权重最多完整 hash 一次；未真实下载）
+  `feat: prepare verified model artifacts outside request handling`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `9247784`，后续一致性修复 `4eb9efa`；36 项离线 fake 覆盖路径、hash/size、镜像、重试、取消、下载流关闭、registry commit point、metadata identity、回滚、磁盘和 cache；一次 prepare 内每个复用权重最多完整 hash 一次；未真实下载）
 
 
 ### P02：统一 vendor runtime 的可重复准备
@@ -865,7 +866,7 @@ def test_runtime_identity_does_not_depend_on_preset():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: reuse one pinned vendor runtime across presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：实现 commit `9a915db`、共享依赖锁修复 `55cb3d3`；ASR/TTS 联合解析为 47 个包、25 个交集且零版本冲突，Apple Silicon/macOS 14 的带 hash、仅 wheel dry-run 成功，临时共同 venv 同步及两个 vendor SDK 导入成功，未加载模型或改变现有服务）
+  `feat: reuse one pinned vendor runtime across presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：实现 commit `71fa2bb`、共享依赖锁修复 `8e8c9d1`；ASR/TTS 联合解析为 47 个包、25 个交集且零版本冲突，Apple Silicon/macOS 14 的带 hash、仅 wheel dry-run 成功，临时共同 venv 同步及两个 vendor SDK 导入成功，未加载模型或改变现有服务）
 
 
 ### P03：把 bootstrap 接入首次安装与 wheel
@@ -924,19 +925,19 @@ def test_uncommitted_candidate_never_becomes_active(tmp_path):
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: persist model selection as a recoverable transaction`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `3a2d83a`，14 项测试通过）
+  `feat: persist model selection as a recoverable transaction`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `278ad2e`，14 项测试通过）
 
 
 ### S02：退役——服务内运行时委派与 generation 租约
 
-2026-09-05 根据“单机应用，允许停服切换”的明确边界退役。原实现 commit `2af710b`
-已由 `3de2dc5` 撤销。该方案会在每个 ASR/TTS/Realtime 请求增加租约和 generation
+2026-09-05 根据“单机应用，允许停服切换”的明确边界退役。原实现 commit `7e31083`
+已由 `6694640` 撤销。该方案会在每个 ASR/TTS/Realtime 请求增加租约和 generation
 委派，且只为热切换服务；停服切换不需要这层间接性。现有 `AppServices`、唯一物理
 ASR owner、模式互斥和有界推理路径保持不变。
 
 ### S03：退役——服务内 drain 状态机
 
-2026-09-05 同步退役。原实现 commit `1df06c9` 已由 `0b9023b` 撤销。单机切档通过
+2026-09-05 同步退役。原实现 commit `7487560` 已由 `94ca67e` 撤销。单机切档通过
 停止 `com.speechrail` 让活动请求自然结束或由服务停止语义终结，不再维护 drain token、
 TTL、活动 generation 或 IdleEvictor 暂停协议。
 
@@ -970,7 +971,7 @@ TTL、活动 generation 或 IdleEvictor 暂停协议。
   回退启动或 smoke 失败。日志不得含绝对模型路径、音频、
   文本、Authorization 或任意环境变量。
 - [x] **6. 绿测试与单主题交付。** 跑针对性 pytest、ruff、mypy、diff check；实现提交
-  `ea00a93`、`f4dbb59`、`23eb7dc`；
+  `9d577ed`、`620395e`、`8c7478f`；
   `feat: switch complete model pairs with stopped-service rollback`。fake 只证明事务顺序，
   真实服务/模型/质量/资源仍由 V01 和 G2/G3 验收。
 
@@ -1006,8 +1007,8 @@ def test_balanced_to_light_only_changes_asr():
 - [ ] **4. 边界验证。** model_changes(old,new)->set[str]本卡定义；输入错误、Ctrl-C、noTTY需显式--yes且有machine-readable影响、已缓存不重下、同档幂等、offline缺模型说明、停服窗口和预计耗时清楚展示；客户端baseURL/port/key/alias未变。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [x] **6. 单主题交付。** 核心命令由 `393adcc` 交付，非交互显式确认与 mapping
-  影响比较由 `b3ac92d` 补齐；提交均通过 staged diff check，未触碰用户 README 改动。
+- [x] **6. 单主题交付。** 核心命令由 `5011c36` 交付，非交互显式确认与 mapping
+  影响比较由 `9aa8bfd` 补齐；提交均通过 staged diff check，未触碰用户 README 改动。
 
 U01 当前可用核心已完成：三档列出、内存推荐、状态、一次应用、回退与 `--yes`。上面第 3/4 项
 要求的精细缺失下载量、完整能力变化说明和机器可读影响输出仍待发行体验收口，因此不将整卡标为完成。
@@ -1036,7 +1037,7 @@ def test_launcher_never_executes_unverified_remote_script():
 - [ ] **4. 边界验证。** 静态测试不是完整验收；必须加fakebin拦截验证下载→hash失败不执行、路径含空格/中文、未安装Python/uv、网络断开恢复、用户取消、权限限制、第二次启动不重装；V01实机双击。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [x] **6. 单主题交付。** `e5b9b66` 交付仓库与已安装双击入口；安装器原子写入
+- [x] **6. 单主题交付。** `10af956` 交付仓库与已安装双击入口；安装器原子写入
   0700 launcher，路径含空格/中文及 symlink 拒绝测试通过。
 
 U02 已完成“已安装运行时双击设置”部分。干净机器仍缺固定且可校验的 uv/Python bootstrap
