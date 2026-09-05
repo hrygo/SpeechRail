@@ -680,7 +680,7 @@ def test_sample_offset_preserves_global_time():
 **所有权 / Files：** 修改 src/speechrail/backends/qwen3_worker.py、qwen3_native.py；新建 tests/test_qwen3_chunked_transcription.py；保留 isolation/limits 回归。
 **接口 / Inputs & Outputs：** 复用现有 transcribe frame，每窗有独立子 request_id 与绝对样本offset（主进程聚合）；同一整文件持 Batch lease。Streaming want_segments 的当前调用时机保持兼容。 新增Qwen3BatchTranscriber.transcribe_stream同A04签名；整文件模式租约覆盖全部子请求。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_qwen3_chunked_transcription.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_qwen3_chunked_transcription.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.application.audio_stream import split_pcm
@@ -692,14 +692,14 @@ def test_each_inference_window_is_bounded():
     assert blocks[-1].core_end_sample == 16000 * 61
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_chunked_transcription.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_chunked_transcription.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 只为当前窗创建 float waveform，前窗临时张量及时释放，不再次装载 Session。批量时间戳逐窗返回后由 A02 合并。Streaming commit 才决定 want_segments 的既有路径，先保留当前有界 align buffer，不能无条件删掉后返回假空segments；仅在调用方开会话时已明确不用segments且合同覆盖时跳过音频副本。更大范围增量对齐作为该卡后续独立质量优化，不成为light上线前偷偷改变输出的捷径。
-- [ ] **4. 边界验证。** fake Session统计一次load/多次transcribe，先窗失败不返回成功部分文件；include_timestamps开关；commit晚请求segments仍有真实结果；sampleoffset对应源音频。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 只为当前窗创建 float waveform，前窗临时张量及时释放，不再次装载 Session。批量时间戳逐窗返回后由 A02 合并。Streaming commit 才决定 want_segments 的既有路径，先保留当前有界 align buffer，不能无条件删掉后返回假空segments；仅在调用方开会话时已明确不用segments且合同覆盖时跳过音频副本。更大范围增量对齐作为该卡后续独立质量优化，不成为light上线前偷偷改变输出的捷径。
+- [x] **4. 边界验证。** fake Session统计一次load/多次transcribe，先窗失败不返回成功部分文件；include_timestamps开关；commit晚请求segments仍有真实结果；sampleoffset对应源音频。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `perf: limit ASR inference tensors to one audio window`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `perf: limit ASR inference tensors to one audio window`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `0d7446e`，4 项针对性单测 + mypy + ruff 验证通过）
 
 
 ### A04：把 REST 转写接入有界管线
