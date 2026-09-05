@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 资源采样器在执行 `--warmup` 后重新发现受管进程，确保懒加载期间新启动的 ASR/TTS worker 进入同 tick `phys_footprint` 集合，避免漏计 worker 仍错误显示完整 gate。
+
 ## [1.7.1] - 2026-09-05
 
 ### Fixed

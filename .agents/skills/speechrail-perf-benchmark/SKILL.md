@@ -40,6 +40,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 4. RTF 使用 `ffprobe` 实测音频时长：`latency / actual_audio_seconds`。不得使用文件名中的 3s/10s/30s/60s 标签代替。
 5. Apple Silicon 内存使用 `footprint -p <pid> -f bytes` 的 `phys_footprint`。不要用 RSS 代替，也不要相加发生在不同时刻的进程峰值。
 6. 总峰值必须来自同一采样 tick 内各目标 PID+start-time 的总和；缺样、PID 重用或 sampler 失败时标记 N/A 并关闭 gate。
+   worker 为懒加载时，采样器必须在预热后重新发现受管进程；预热前固定 PID 集合而漏掉新 worker 的结果无效。
 7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
 9. API key 只从环境读取，不出现在命令、报告或日志中。
