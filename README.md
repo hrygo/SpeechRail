@@ -198,27 +198,27 @@ SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` �
 
 ## ⚡ 性能基线与资源实测
 
-> 实测环境：Apple M5 Max (18 核 / 128GB)，macOS 26.6.2，MLX (MPS)，Qwen3-ASR/TTS `-8bit` 双快照（v1.6.7，含 `sample_resources` 进程分类修正）。
+> 实测环境：Apple M5 Max (18 核 / 128GB)，macOS 26.6.2，MLX (MPS)，Qwen3-ASR/TTS 外部快照（v1.6.8 发布后单次完整重测）。
 
-**常驻与峰值（v1.6.7 实测 footprint）：**
+**常驻与峰值（v1.6.8 实测 footprint）：**
 
 | 组件 | 常驻 (Idle) | 压测峰值 (Peak) | 说明 |
 |---|---|---|---|
-| 主服务 (FastAPI，Sortformer 空闲卸载) | **0.54 GB** | 0.54 GB | ✅ v1.6.6 为 1.08 GB（含 Sortformer），卸载后回落 |
-| ASR Worker (batch) | **2.51 GB** | 3.55 GB | ✅ 与 v1.6.6 基线（2.50 GB）一致 |
-| ASR Worker (streaming) | 2.56 GB | 3.41 GB | native 流式，独立计量 |
-| Qwen3 TTS Worker | 3.56 GB | 3.98 GB | 与 v1.6.6 常驻一致 |
-| **总物理常驻** | **9.17 GB** | **9.73 GB** | 四进程真实同时占用 |
+| 主服务 (FastAPI，Sortformer 空闲卸载) | **0.54 GB** | 0.54 GB | 四进程 footprint 采样 |
+| ASR Worker (batch) | **2.50 GB** | 4.06 GB | 本轮单次压测峰值 |
+| ASR Worker (streaming) | 2.56 GB | 3.42 GB | native 流式，独立计量 |
+| Qwen3 TTS Worker | 3.56 GB | 3.98 GB | 常驻与 v1.6.7 基本一致 |
+| **总物理常驻** | **9.15 GB** | **10.36 GB** | 四进程真实同时占用 |
 
 **延迟与吞吐：**
 
-- **非流式 ASR**：超长音频 (34.7s) **0.90s**（RTF 0.03x）；8.7s 音频 **0.28s**。
-- **并发吞吐**（4 workers / 8 请求）：**3.97 req/s**，P95 **1.02s**，成功率 **8/8**。
-- **TTS**：长句 (50 字) **2.26s**（RTF 0.27x）。
-- **Realtime**：TTS 首包 **34-41ms**，ASR commit **375-395ms**（稳定会话），连续 3 会话 100% 完成。
-- **🆕 Sortformer 空闲卸载（1.6.7）**：分人模型空闲自动卸载，主服务从 1.08 GB 回落 0.54 GB。
+- **非流式 ASR**：超长音频 (34.96s) **1.38s**（RTF 0.04x）；8.24s 音频 **0.32s**。
+- **并发吞吐**（4 workers / 8 请求）：**2.74 req/s**，P95 **1.48s**，成功率 **8/8**。
+- **TTS**：长句 (50 字符) **3.28s**（RTF 0.37x）。
+- **Realtime**：TTS 首包 **44-78ms**，ASR commit **457-592ms**（稳定会话），连续 3 会话 100% 完成。
+- **音频边界**：WAV fastpath、ffmpeg 输出上限/取消回收、标准 `timestamp_granularities[]` 和 worker session 隔离均随 v1.6.8 回归覆盖。
 
-> 完整测量与复现步骤见 **[📊 v1.6.7 性能基线完整报告](docs/archive/performance/2026-09-05-v1.6.7-performance-benchmark.md)**（含与 v1.6.6 对照、`sample_resources` 进程分类修正及运行条件说明）。跨版本趋势与报告索引见 **[📈 性能基准归档索引](docs/archive/performance/README.md)**。历史基线：[v1.6.6](docs/archive/performance/2026-09-04-v1.6.6-performance-benchmark.md) · [v1.6.5](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md) · [v1.6.3](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md) · [v1.6.2](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md) · [v1.6.0](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md) · [v1.5.2](docs/archive/performance/2026-09-03-v1.5.2-performance-benchmark.md)。
+> 完整测量与复现步骤见 **[📊 v1.6.8 性能基线完整报告](docs/archive/performance/2026-09-05-v1.6.8-performance-benchmark.md)**。跨版本趋势与报告索引见 **[📈 性能基准归档索引](docs/archive/performance/README.md)**。历史基线：[v1.6.7](docs/archive/performance/2026-09-05-v1.6.7-performance-benchmark.md) · [v1.6.6](docs/archive/performance/2026-09-04-v1.6.6-performance-benchmark.md) · [v1.6.5](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md) · [v1.6.3](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md) · [v1.6.2](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md) · [v1.6.0](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md)。
 
 ---
 
