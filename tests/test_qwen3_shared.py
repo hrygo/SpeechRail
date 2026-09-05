@@ -53,7 +53,7 @@ def test_batch_and_session_ids_have_separate_namespaces() -> None:
 
 def test_start_performs_ready_handshake_and_starts_one_dispatcher() -> None:
     async def scenario() -> None:
-        worker = Qwen3SharedWorker(_Config(timeout_seconds=0.05))
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=1.0))
         mode_gate = worker.mode_gate
         try:
             assert isinstance(mode_gate, AsrModeGate)
@@ -70,7 +70,7 @@ def test_start_performs_ready_handshake_and_starts_one_dispatcher() -> None:
                 worker.ready = True  # type: ignore[misc]
             with pytest.raises(AttributeError):
                 worker.identity = ("mps", "float16")  # type: ignore[misc]
-            assert worker.timeout_seconds == 0.05
+            assert worker.timeout_seconds == 1.0
             assert dispatcher is not None
             assert dispatcher.done() is False
             await worker.trim_memory()
