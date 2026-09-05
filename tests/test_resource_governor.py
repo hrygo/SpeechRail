@@ -350,10 +350,12 @@ def test_governor_queue_full_fires_rejection_metric_callback() -> None:
     asyncio.run(scenario())
 
 
-def test_settings_reject_audio_seconds_beyond_worker_frame_limit() -> None:
-    """max_audio_seconds that cannot be shipped to the worker must fail at startup."""
-    with pytest.raises(ValueError, match="frame limit"):
-        Settings(max_audio_seconds=5000, qwen3_model_dir=None, qwen3_python=None)
+def test_settings_allow_audio_seconds_beyond_one_worker_frame() -> None:
+    """逐窗 IPC 后，完整文件时长不再受单帧上限约束。"""
+
+    settings = Settings(max_audio_seconds=5000, qwen3_model_dir=None, qwen3_python=None)
+
+    assert settings.max_audio_seconds == 5000
 
 
 def _aging_governor(now: dict) -> ResourceGovernor:
@@ -538,4 +540,3 @@ def test_heavy_overlap_serialization_when_budget_constrained() -> None:
         assert governor.snapshot().active_tts == 0
 
     asyncio.run(scenario())
-
