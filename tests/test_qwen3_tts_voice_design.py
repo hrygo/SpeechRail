@@ -69,7 +69,7 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
             "lang_code": "zh",
             "max_tokens": 39,
             "repetition_penalty": 1.25,
-            "temperature": 0.85,
+            "temperature": 0.1,
             "top_p": 0.95,
             "stream": True,
             "streaming_interval": 0.1,

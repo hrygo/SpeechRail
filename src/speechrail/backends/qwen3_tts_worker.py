@@ -8,10 +8,11 @@ import traceback
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Final, Literal, Protocol
+from typing import Any, BinaryIO, Literal, Protocol
 
 from speechrail.backends.model_identity import inspect_model, read_quantization
 from speechrail.backends.qwen3_native import snapshot_is_quantized
+from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
     apply_crossfade,
@@ -216,28 +217,17 @@ def _ready_identity_fields(identity: object) -> dict[str, object]:
     return fields
 
 
-_CUSTOM_VOICE_SPEAKERS: Final[dict[str, str]] = {
-    "default": "Serena",
-    "warm": "Serena",
-    "bright": "Vivian",
-    "calm": "Uncle_Fu",
-}
-
-
 def generation_condition(variant: str, voice: str) -> dict[str, object]:
     """根据模型变体解析生成条件 (音色或提示词指令)。"""
 
-    if variant == "custom_voice":
-        if voice not in _CUSTOM_VOICE_SPEAKERS:
-            raise ValueError(f"unknown voice: {voice}")
-        return {"voice": _CUSTOM_VOICE_SPEAKERS[voice]}
-    if variant == "voice_design":
-        try:
-            profile = get_voice_profile(voice)
-        except Exception as exc:
-            raise ValueError(f"unknown voice: {voice}") from exc
-        return {"voice": None, "instruct": profile.instruction}
-    raise ValueError(f"unsupported variant: {variant}")
+    try:
+        binding = resolve_binding(variant, voice)
+    except ValueError as exc:
+        raise ValueError(f"unsupported voice or variant: {voice}") from exc
+    condition: dict[str, object] = {"voice": binding.speaker}
+    if binding.instruction is not None:
+        condition["instruct"] = binding.instruction
+    return condition
 
 
 class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized model runtime.
@@ -338,13 +328,23 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
     ) -> Iterator[bytes]:
         variant = self.identity.model_variant or "voice_design"
         condition = generation_condition(variant, voice)
+        used_temperature = self._temperature
+        if variant == "voice_design":
+            profile = get_voice_profile(voice)
+            used_temperature = profile.temperature
+            try:
+                import mlx.core as mx  # type: ignore[import-not-found]
+
+                mx.random.seed(profile.seed)
+            except Exception:
+                pass
         call_kwargs: dict[str, object] = {
             "text": text,
             "speed": speed,
             "lang_code": language,
             "max_tokens": generation_token_budget(text),
             "repetition_penalty": self._repetition_penalty,
-            "temperature": self._temperature,
+            "temperature": used_temperature,
             "top_p": self._top_p,
             "stream": True,
             "streaming_interval": self._chunk_ms / 1000,
