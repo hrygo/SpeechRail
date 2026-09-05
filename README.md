@@ -186,6 +186,16 @@ speechrail profile rollback --yes
 普通用户也可以双击安装目录中的 `SpeechRail 设置.command`。0.6B TTS q4 只保留为候选，
 未通过共同质量门与资源收益门前不会替换 `light` 的 q8 权重。
 
+档位是本机部署状态，不进入 OpenAI 请求。客户端继续发送 `tts-1`、`whisper-1` 和标准
+voice alias；服务在 `/v1/models`、`/v1/voices` 及 Realtime session 事件中以加法字段声明
+实际能力。九个 canonical 角色（`serena`、`vivian`、`uncle_fu`、`dylan`、`eric`、
+`ryan`、`aiden`、`ono_anna`、`sohee`）与 CustomVoice 的九个固定 speaker 一一对应，
+在三档均可用。`quality` 由 VoiceDesign 按相同角色描述生成，`balanced/light` 使用对应的
+固定 speaker；角色意图稳定，但不同权重生成的音色不承诺声纹完全一致。旧的
+`default/warm/bright/calm` 和 OpenAI 标准 voice 名称继续作为兼容 alias。自定义
+VoiceDesign 音色降档后保留但标为
+`available=false`，请求会在推理前返回 `voice_not_available`，切回 `quality` 后自动恢复。
+
 ---
 
 ## 🎯 精度语义与权重文件格式
@@ -261,7 +271,7 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
   -d '{
     "model": "tts-1",
     "input": "欢迎使用 SpeechRail 本地语音服务。",
-    "voice": "warm",
+    "voice": "serena",
     "response_format": "wav"
   }' \
   --output speech.wav
@@ -292,7 +302,7 @@ with open("meeting.wav", "rb") as audio_file:
 # 2. TTS 语音合成
 response = client.audio.speech.create(
     model="tts-1",
-    voice="calm",
+    voice="uncle_fu",
     input="SpeechRail 为您的本地应用提供强大的低延迟语音动力。"
 )
 response.stream_to_file("output.mp3")

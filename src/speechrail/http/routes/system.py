@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
@@ -15,42 +14,15 @@ from speechrail.compatibility.openai_realtime import (
     diarization_model_aliases,
     tts_model_aliases,
 )
-from speechrail.config import Settings
-from speechrail.config.model_catalog import ModelArtifact, load_catalog
+from speechrail.config.model_catalog import ModelArtifact
+from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
 from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
 from speechrail.http.errors import error_response
 
 
-@dataclass(frozen=True, slots=True)
-class _ActiveCatalog:
-    profile: str | None
-    asr: ModelArtifact | None
-    tts: ModelArtifact | None
-
-
-def _active_catalog(settings: Settings) -> _ActiveCatalog:
-    """Match resolved managed model directories to the packaged immutable catalog."""
-
-    catalog = load_catalog()
-    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
-    asr_key = settings.qwen3_model_dir.name if settings.qwen3_model_dir else None
-    tts_key = settings.qwen3_tts_model_dir.name if settings.qwen3_tts_model_dir else None
-    asr = artifacts.get(asr_key) if asr_key else None
-    tts = artifacts.get(tts_key) if tts_key else None
-    profile = next(
-        (
-            preset.id
-            for preset in catalog.presets
-            if preset.asr == asr_key and preset.tts == tts_key
-        ),
-        None,
-    )
-    return _ActiveCatalog(profile=profile, asr=asr, tts=tts)
-
-
 def _model_entry(
     model_id: str,
-    active: _ActiveCatalog,
+    active: ActiveModelCatalog,
     artifact: ModelArtifact | None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
@@ -75,11 +47,13 @@ def _model_entry(
 
 def _voice_entry(
     profile: VoiceProfile,
-    active: _ActiveCatalog,
+    active: ActiveModelCatalog,
     tts_ready: bool,
+    *,
+    enabled: bool = True,
 ) -> dict[str, Any]:
     variant = active.tts.variant if active.tts is not None else None
-    available = tts_ready
+    available = tts_ready and enabled
     supports_speaker = False
     supports_instruction = False
     if variant in {"voice_design", "custom_voice"}:
@@ -116,7 +90,7 @@ def create_system_router(services: AppServices) -> APIRouter:
     """Four read-only endpoints; no auth by design (loopback-first service)."""
     router = APIRouter()
     resolved = services.settings
-    active = _active_catalog(resolved)
+    active = active_model_catalog(resolved)
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
@@ -203,7 +177,15 @@ def create_system_router(services: AppServices) -> APIRouter:
         profiles = registry.list_profiles()
         return {
             "object": "list",
-            "data": [_voice_entry(p, active, services.tts_ready) for p in profiles],
+            "data": [
+                _voice_entry(
+                    profile,
+                    active,
+                    services.tts_ready,
+                    enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
+                )
+                for profile in profiles
+            ],
         }
 
     @router.post("/v1/voices")

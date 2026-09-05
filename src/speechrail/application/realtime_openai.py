@@ -16,6 +16,7 @@ from starlette.websockets import WebSocketDisconnect
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
+from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.backends.vad import VoiceActivityDetector
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
@@ -44,9 +45,10 @@ from speechrail.compatibility.openai_realtime import (
     transcription_segment,
     validate_append,
 )
+from speechrail.config.selection import active_model_catalog
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
-from speechrail.domain.tts import resolve_voice
+from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 SendEvent = Callable[[dict[str, object]], Awaitable[None]]
@@ -80,6 +82,15 @@ class OpenAIRealtimeSession:
         self._asr_factory = services.realtime_asr_factory
         self._diarization_engine = services.diarization_engine
         self._tts = services.tts_synthesizer
+        active = active_model_catalog(self._settings)
+        self._tts_variant = active.tts.variant if active.tts is not None else None
+        tts_available = services.tts_ready
+        self._speech_capabilities: dict[str, object] = {
+            "available": tts_available,
+            "variant": self._tts_variant,
+            "supports_speaker": tts_available and self._tts_variant == "custom_voice",
+            "supports_instruction": tts_available and self._tts_variant == "voice_design",
+        }
         self._registered_asr = frozenset(
             {self._settings.model_id, *self._settings.compatibility_model_ids}
         )
@@ -105,10 +116,12 @@ class OpenAIRealtimeSession:
 
     async def start(self) -> None:
         await self._send(
-            session_created(
-                session_id=self._session_id,
-                model=self._display_model,
-                tts_ready=self._services.tts_ready,
+            self._with_speech_capabilities(
+                session_created(
+                    session_id=self._session_id,
+                    model=self._display_model,
+                    tts_ready=self._services.tts_ready,
+                )
             )
         )
         await self._send(conversation_created(session_id=self._session_id))
@@ -167,6 +180,9 @@ class OpenAIRealtimeSession:
             registered_tts=self._registered_tts,
             tts_voice_ids=self._tts_voice_ids,
         )
+        configured_voice = config.get("voice")
+        if isinstance(configured_voice, str):
+            self._require_voice_available(configured_voice)
         raw_diarization = config.get("diarization")
         self._diarization_config = (
             None if raw_diarization is None else DiarizationConfig.model_validate(raw_diarization)
@@ -198,7 +214,16 @@ class OpenAIRealtimeSession:
             self._vad = None
 
         self._config = config
-        await self._send(updated)
+        await self._send(self._with_speech_capabilities(updated))
+
+    def _with_speech_capabilities(
+        self,
+        event: dict[str, object],
+    ) -> dict[str, object]:
+        session = event.get("session")
+        if isinstance(session, dict):
+            session["speech_capabilities"] = dict(self._speech_capabilities)
+        return event
 
     async def _append_audio(self, event: dict[str, Any]) -> None:
         audio = validate_append(
@@ -406,19 +431,34 @@ class OpenAIRealtimeSession:
                 raise RealtimeAdapterError(
                     "voice_not_found", f"unknown voice: {response_voice[:200]}"
                 ) from None
+            self._require_voice_available(response_voice)
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
         self._tts_response_id = response_id
         self._tts_task = asyncio.create_task(
             self._synthesize_tts(
                 self._pending_text,
-                voice=response_voice or str(self._config.get("voice") or "default"),
+                voice=response_voice or str(self._config.get("voice") or DEFAULT_VOICE_ID),
                 language=str(self._config.get("language") or "auto"),
                 response_id=response_id,
                 item_id=item_id,
             )
         )
         self._pending_text = None
+
+    def _require_voice_available(self, voice: str) -> None:
+        if self._tts_variant not in {"voice_design", "custom_voice"}:
+            return
+        try:
+            resolve_binding(self._tts_variant, voice)
+        except ValueError:
+            raise RealtimeAdapterError(
+                "voice_not_available",
+                (
+                    f"voice {voice[:200]} is unavailable for the active TTS weights; "
+                    "use one of the available system voices from /v1/voices"
+                ),
+            ) from None
 
     async def _cancel_response(self) -> None:
         if self._tts_task is None or self._tts_task.done() or self._tts_response_id is None:

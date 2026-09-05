@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from speechrail.domain.diarization import DiarizationConfig
-from speechrail.domain.tts import resolve_voice
+from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 
 _PROTOCOL_VERSION = "realtime=v1"
 _ASR_MODEL_ALIASES = {
@@ -98,7 +98,7 @@ def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str
             "model": model,
             "modalities": ["text", "audio"],
             "instructions": "",
-            "voice": "default" if tts_ready else None,
+            "voice": DEFAULT_VOICE_ID if tts_ready else None,
             "input_audio_format": "pcm16",
             "output_audio_format": "pcm16",
             "turn_detection": None,
@@ -598,7 +598,9 @@ def apply_session_update(
         preset_voice = resolve_voice(voice.strip())
         from speechrail.domain.tts import get_voice_profile
         try:
-            get_voice_profile(preset_voice)
+            profile = get_voice_profile(preset_voice)
+            if profile.is_system and preset_voice not in tts_voice_ids:
+                raise ValueError(f"voice {preset_voice} not configured")
         except ValueError:
             raise RealtimeAdapterError(
                 "voice_not_found", f"unknown voice: {preset_voice[:200]}"

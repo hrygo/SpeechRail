@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 
 import httpx
 
+from speechrail.domain.tts import DEFAULT_VOICE_ID
 from speechrail.service.model_store import PreparedModelSet
 
 
@@ -94,11 +95,11 @@ class PublicApiSmokeProbe:
             raise SmokeProbeError("public model aliases are unavailable")
         if not isinstance(voice_data, list) or not any(
             isinstance(item, dict)
-            and item.get("id") == "default"
+            and item.get("id") == DEFAULT_VOICE_ID
             and item.get("available") is True
             for item in voice_data
         ):
-            raise SmokeProbeError("default public voice is unavailable")
+            raise SmokeProbeError("canonical default public voice is unavailable")
 
     def _tts_audio(self) -> bytes:
         try:
@@ -108,8 +109,9 @@ class PublicApiSmokeProbe:
                 headers=self._headers,
                 json={
                     "model": "tts-1",
-                    "input": "Speech Rail service smoke test.",
-                    "voice": "default",
+                    "input": "语音服务冒烟测试。",
+                    "voice": DEFAULT_VOICE_ID,
+                    "language": "zh",
                     "response_format": "wav",
                 },
             ) as response:
@@ -134,7 +136,7 @@ class PublicApiSmokeProbe:
             response = self._client.post(
                 "/v1/audio/transcriptions",
                 headers=self._headers,
-                data={"model": "whisper-1", "response_format": "json", "language": "en"},
+                data={"model": "whisper-1", "response_format": "json", "language": "zh"},
                 files={"file": ("speechrail-smoke.wav", audio, "audio/wav")},
             )
         except httpx.HTTPError as exc:

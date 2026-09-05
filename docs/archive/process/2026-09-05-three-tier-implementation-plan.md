@@ -3,7 +3,8 @@
 > 前期独立原子任务按用户指定的 `luna_worker` 执行并由主 Agent 审查。2026-09-05 起，
 > 剩余工作已进入顺序集成和验收阶段，不再委派 subagents，由主 Agent 直接完成。
 > 各任务采用 checkbox 跟踪。
-> 本文同时记录实施进度；已完成的代码卡必须附 commit 与测试证据。尚未执行真实下载、模型加载、安装或服务切换。
+> 本文同时记录实施进度；已完成的代码卡必须附 commit 与测试证据。真实下载、模型加载、
+> 安装与本机三档切换已经执行；目标设备和完整质量门仍以未勾选项为准。
 
 **Goal:** 在统一 MLX 架构下提供 quality/balanced/light 三档，保留本机质量路径，并以 M1 Air 8GB 验收 light。
 **Architecture:** 一个 FastAPI 主进程、一个共享 ASR worker、一个 TTS worker；Batch/Streaming ASR 互斥。
@@ -48,7 +49,7 @@ rebase 到 `main` 的 v1.6.9 发布线，实施证据以 rebase 后各任务卡 
 | src/speechrail/backends/qwen3_streaming.py: Qwen3StreamingWorker | 独立 transport/dispatcher；session 队列目前未设 maxsize | R02/R03 |
 | src/speechrail/backends/qwen3_worker.py: Qwen3Engine | 一个底层 Session 已支持 batch 与 streaming；align buffer 按会话保存 | R05/A03 |
 | src/speechrail/backends/qwen3_tts_worker.py: MlxVoiceDesignEngine | 拒绝非 voice_design；预量化统一报 int8 | M02/T02 |
-| src/speechrail/domain/tts.py | 四个公共 voice ID、aliases、归一化和分句器 | T01/T03 |
+| src/speechrail/domain/tts.py | 九个 canonical voice 角色、兼容 aliases、归一化和分句器 | T01/T03 |
 | src/speechrail/http/routes/audio.py | 有界但整段 upload/decode；PCM TTS 流式，其他格式积累整段 PCM | A01/A02/A04/T03 |
 | src/speechrail/config/__init__.py | 路径来自 env；dtype 与 IPC 整段时长限制耦合 | M04/A04 |
 | src/speechrail/config/profiles.py | 现有 RuntimeProfile 是能力模型，不能直接塞档位调度配置 | M03 |
@@ -57,7 +58,7 @@ rebase 到 `main` 的 v1.6.9 发布线，实施证据以 rebase 后各任务卡 
 | src/speechrail/service/preflight.py | 检查 .env、runtime 导入和快照；不证明真实音频质量 | M04/P02 |
 | tools/install_macos.py + service/paths.py | 已有 release/current 安装结构，环境和模型仍需外部准备 | P02/P03 |
 | src/speechrail/cli.py | 已保留 serve/service，并新增 setup/profile 停服切档命令 | U01 |
-| contracts/openapi.yaml + contracts/realtime-openai.md | 四 voice ID、aliases、统一错误；输入 PCM 现行约束须保持 | T01/C01 |
+| contracts/openapi.yaml + contracts/realtime-openai.md | 九个 canonical voice、兼容 aliases、统一错误；输入 PCM 现行约束须保持 | T01/C01 |
 
 结构查询已从 build_app_services 双向 trace 深度 1 取得 23 个下游/1 个非测试上游，
 并读取相关 worker、TTS、decoder、preflight 和安装函数；无分页遗漏。
@@ -398,19 +399,23 @@ def test_existing_install_without_selection_is_unchanged(tmp_path):
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 
 def test_custom_voice_is_explicitly_bound():
-    binding = resolve_binding("custom_voice", "default")
+    binding = resolve_binding("custom_voice", "serena")
     assert binding.speaker == "Serena"
     assert binding.instruction is None
 ```
 
 - [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_voice_bindings.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [x] **3. 最小实现。** VoiceDesign 四 preset 原指令保持；CustomVoice 按设计 default/warm=Serena、bright=Vivian、calm=Uncle_Fu 解析。0.6B 不传假 instruct；default/warm 同声事实明确显示。所有 aliases 先经 resolve_voice 归一化；未知 voice/variant 失败，不默认用第一项。
-- [x] **4. 边界验证。** 四 preset、13 aliases、unknown、大小写策略与现有契约一致；VoiceDesign 指令逐项原样；同源目录用于 REST 和 WS。
+- [x] **3. 最小实现。** 九个 canonical 角色与 CustomVoice speaker 一一对应；VoiceDesign
+  使用与官方 speaker 描述对齐的九条角色指令。0.6B 不传假 instruct；旧的
+  default/warm/bright/calm 与 13 个 OpenAI voice 名称作为 alias 归一化。未知 voice/variant
+  失败，不默认用第一项。
+- [x] **4. 边界验证。** 九个角色、17 个兼容 alias、unknown、大小写策略与现有契约一致；
+  alias ID 不能被自定义音色覆盖；同一绑定用于 REST 和 WS。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: describe model-specific voice bindings`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（rebase 后由 main `14b6618` 与三档身份门共同覆盖，25 项测试通过）
+  `feat: describe model-specific voice bindings`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（rebase 后由 main `14b6618` 与三档身份门共同覆盖；2026-09-05 按用户确认扩展为九个一一对应角色，旧 ID 保留为 alias）
 
 
 ### T02：让同一 TTS worker 支持 CustomVoice
@@ -1013,7 +1018,7 @@ def test_balanced_to_light_only_changes_asr():
 
 - [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_commands.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 新装只推荐已通过对应硬件矩阵的组合；旧装显示当前selection不重选。TUI依次显示推荐/三档、缺失下载量、音色变化、回退磁盘需求，最后一次“下载并应用”覆盖准备与生效。先P01/P02准备，再由S04停服切换；准备阶段可取消，停服后CLI中断必须完成回退。VoiceDesign→CustomVoice必须展示style/design能力减少和default/warm同声；balanced↔light不提示虚构TTS变化。
+- [ ] **3. 最小实现。** 新装只推荐已通过对应硬件矩阵的组合；旧装显示当前selection不重选。TUI依次显示推荐/三档、缺失下载量、音色变化、回退磁盘需求，最后一次“下载并应用”覆盖准备与生效。先P01/P02准备，再由S04停服切换；准备阶段可取消，停服后CLI中断必须完成回退。VoiceDesign→CustomVoice必须展示自然语言自定义音色能力减少；九个系统角色保持可用，balanced↔light不提示虚构TTS变化。
 - [ ] **4. 边界验证。** model_changes(old,new)->set[str]本卡定义；输入错误、Ctrl-C、noTTY需显式--yes且有machine-readable影响、已缓存不重下、同档幂等、offline缺模型说明、停服窗口和预计耗时清楚展示；客户端baseURL/port/key/alias未变。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
@@ -1066,13 +1071,13 @@ U02 已完成“已安装运行时双击设置”部分。干净机器仍缺固�
 from speechrail.domain.tts import resolve_voice
 
 def test_standard_voice_alias_remains_stable():
-    assert resolve_voice("alloy") == "default"
-    assert resolve_voice("coral") == "warm"
+    assert resolve_voice("alloy") == "serena"
+    assert resolve_voice("coral") == "serena"
 ```
 
 - [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_voices_api.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [x] **3. 最小实现。** 建立三档参数化目录测试：模型真实resolves_to、voice描述/available/capabilities必须来自同一次启动加载的完整 selection。保留所有必需字段和alias。模式冲突继续使用REST429 backend_busy；停服切档不新增HTTP换模状态。禁止在本卡引入采样率迁移或LLM语义。
+- [x] **3. 最小实现。** 建立三档参数化目录测试：模型真实resolves_to、voice描述/available/capabilities必须来自同一次启动加载的完整 selection。发布九个一一对应的 canonical 角色；旧 SpeechRail ID 与 OpenAI 标准名保留为 alias。模式冲突继续使用REST429 backend_busy；停服切档不新增HTTP换模状态。禁止在本卡引入采样率迁移或LLM语义。
 - [x] **4. 边界验证。** 增加实际ASGI fixture：三档voice列表/available、mode冲突、无TTS设置、短音频和六输出格式、response终结一次、cancel/断线重连、鉴权无回归。若文件所有权冲突，卡内按system→audio→WS顺序独占。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。

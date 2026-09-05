@@ -55,10 +55,15 @@ def test_voice_catalog_exposes_the_configured_preset_profiles() -> None:
     body = response.json()
     assert body["object"] == "list"
     assert [voice["id"] for voice in body["data"] if voice.get("is_system")] == [
-        "default",
-        "warm",
-        "bright",
-        "calm",
+        "serena",
+        "vivian",
+        "uncle_fu",
+        "dylan",
+        "eric",
+        "ryan",
+        "aiden",
+        "ono_anna",
+        "sohee",
     ]
     assert body["data"][0]["is_default"] is True
 
@@ -74,9 +79,14 @@ def test_voice_catalog_exposes_openai_standard_voice_aliases() -> None:
     body = client.get("/v1/voices").json()
     aliases = {voice["id"]: set(voice["aliases"]) for voice in body["data"]}
 
-    assert "alloy" in aliases["default"]
-    assert aliases["calm"] == {"fable", "shimmer"}
+    assert "alloy" in aliases["serena"]
+    assert {"default", "warm"}.issubset(aliases["serena"])
+    assert aliases["uncle_fu"] == {"calm", "fable", "shimmer"}
     assert set().union(*aliases.values()) == {
+        "default",
+        "warm",
+        "bright",
+        "calm",
         "alloy",
         "ash",
         "ballad",
@@ -93,9 +103,28 @@ def test_voice_catalog_exposes_openai_standard_voice_aliases() -> None:
     }
 
 
+def test_voice_catalog_marks_an_explicitly_disabled_system_voice_unavailable() -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                tts_voice_ids=("serena",),
+            ),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    voices = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
+
+    assert voices["serena"]["available"] is True
+    assert voices["vivian"]["available"] is False
+
+
 def test_standard_voice_alias_remains_stable() -> None:
-    assert resolve_voice("alloy") == "default"
-    assert resolve_voice("coral") == "warm"
+    assert resolve_voice("alloy") == "serena"
+    assert resolve_voice("coral") == "serena"
+    assert resolve_voice("bright") == "vivian"
 
 
 @pytest.mark.parametrize(
@@ -170,7 +199,7 @@ def test_rest_speech_resolves_standard_voice_alias_to_preset() -> None:
     )
 
     assert response.status_code == 200
-    assert synthesizer.requests[0].voice == "bright"
+    assert synthesizer.requests[0].voice == "vivian"
 
 
 def test_rest_speech_forwards_language_to_the_typed_synthesizer() -> None:
@@ -240,3 +269,20 @@ def test_custom_voice_lifecycle_create_list_and_delete() -> None:
     list_resp_after = client.get("/v1/voices")
     after_ids = [v["id"] for v in list_resp_after.json()["data"]]
     assert "test_zhixing_voice" not in after_ids
+
+
+@pytest.mark.parametrize("reserved_id", ["serena", "default", "alloy"])
+def test_custom_voice_cannot_override_canonical_or_alias_ids(reserved_id: str) -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/voices",
+        json={"name": "冲突音色", "instruction": "自然中文女声。", "id": reserved_id},
+    )
+
+    assert response.status_code == 400

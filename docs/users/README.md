@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "1.4.0"
-date: 2026-09-02
+version: "1.6.9"
+date: 2026-09-05
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -53,7 +53,7 @@ with open("meeting.wav", "rb") as audio:
 # 3. 语音合成 (TTS)
 response = client.audio.speech.create(
     model="tts-1",  # 自动路由到本地 Qwen3-TTS
-    voice="warm",  # 预设音色：default, warm, calm, bright
+    voice="serena",  # 九个 canonical 角色之一；也接受 OpenAI 标准 voice alias
     input="欢迎使用 SpeechRail 本地语音运行时服务。",
 )
 response.stream_to_file("output.mp3")

@@ -3,15 +3,50 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from speechrail.config import Settings
 from speechrail.config.model_catalog import (
+    ModelArtifact,
     ModelCatalog,
     RuntimeLock,
+    load_catalog,
     load_runtime_lock,
 )
 from speechrail.service.profile_store import SelectionRecord
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveModelCatalog:
+    """Public model identity matched from already-resolved managed paths."""
+
+    profile: str | None
+    asr: ModelArtifact | None
+    tts: ModelArtifact | None
+
+
+def active_model_catalog(
+    settings: Settings,
+    catalog: ModelCatalog | None = None,
+) -> ActiveModelCatalog:
+    """Match active model directories to the packaged immutable catalog."""
+
+    resolved_catalog = catalog or load_catalog()
+    artifacts = {artifact.key: artifact for artifact in resolved_catalog.artifacts}
+    asr_key = settings.qwen3_model_dir.name if settings.qwen3_model_dir else None
+    tts_key = settings.qwen3_tts_model_dir.name if settings.qwen3_tts_model_dir else None
+    asr = artifacts.get(asr_key) if asr_key else None
+    tts = artifacts.get(tts_key) if tts_key else None
+    profile = next(
+        (
+            preset.id
+            for preset in resolved_catalog.presets
+            if preset.asr == asr_key and preset.tts == tts_key
+        ),
+        None,
+    )
+    return ActiveModelCatalog(profile=profile, asr=asr, tts=tts)
 
 
 def resolve_selection(
@@ -123,4 +158,4 @@ def resolve_selection(
     return settings.model_copy(update=updates)
 
 
-__all__ = ["resolve_selection"]
+__all__ = ["ActiveModelCatalog", "active_model_catalog", "resolve_selection"]

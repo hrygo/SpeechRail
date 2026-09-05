@@ -2,8 +2,8 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.5.0"
-date: 2026-09-02
+version: "1.6.9"
+date: 2026-09-05
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -51,7 +51,7 @@ with open("test.wav", "rb") as f:
 # 2. 语音合成 (TTS)
 response = client.audio.speech.create(
     model="tts-1",  # 兼容别名，自动路由至 speechrail/qwen3-tts
-    voice="warm",  # 预设音色：default, warm, calm, bright
+    voice="serena",  # 九个 canonical 角色之一；也接受 OpenAI 标准 voice alias
     input="SpeechRail 正在为您提供本地语音服务。",
     response_format="wav",
 )
@@ -81,7 +81,7 @@ async function main() {
   // 2. TTS 合成
   const mp3 = await openai.audio.speech.create({
     model: "tts-1",
-    voice: "calm",
+    voice: "uncle_fu",
     input: "欢迎使用 SpeechRail 实时语音引擎。",
   });
   const buffer = Buffer.from(await mp3.arrayBuffer());
@@ -134,7 +134,7 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
   -d '{
     "model": "tts-1",
     "input": "SpeechRail 语音合成测试。",
-    "voice": "bright",
+    "voice": "vivian",
     "response_format": "mp3"
   }' \
   --output test.mp3

@@ -50,11 +50,13 @@ def test_probe_uses_public_tts_then_transcription_with_stable_aliases() -> None:
         if request.url.path == "/v1/voices":
             return httpx.Response(
                 200,
-                json={"data": [{"id": "default", "available": True}]},
+                json={"data": [{"id": "serena", "available": True}]},
             )
         if request.url.path == "/v1/audio/speech":
             assert request.headers["authorization"] == "Bearer secret"
             assert b'"model":"tts-1"' in request.content
+            assert b'"voice":"serena"' in request.content
+            assert b'"language":"zh"' in request.content
             return httpx.Response(
                 200,
                 content=b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 64,
@@ -104,7 +106,7 @@ def test_probe_retries_readiness_without_repeating_inference() -> None:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
         if request.url.path == "/v1/voices":
-            return httpx.Response(200, json={"data": [{"id": "default", "available": True}]})
+            return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
         if request.url.path == "/v1/audio/speech":
             return httpx.Response(
                 200,
@@ -142,7 +144,7 @@ def test_probe_fails_closed_on_invalid_public_responses(failure: str) -> None:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
         if request.url.path == "/v1/voices":
-            return httpx.Response(200, json={"data": [{"id": "default", "available": True}]})
+            return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
         if request.url.path == "/v1/audio/speech":
             padding = 9 * 1024 * 1024 if failure == "oversized_audio" else 64
             return httpx.Response(

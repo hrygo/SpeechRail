@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 from typing import Literal, Self
@@ -319,6 +320,7 @@ def _load_json(path: Path) -> Mapping[str, object]:
     return payload
 
 
+@lru_cache(maxsize=1)
 def load_catalog() -> ModelCatalog:
     """读取并校验仓库内的模型目录。"""
     return ModelCatalog.model_validate(_load_json(_CATALOG_PATH))

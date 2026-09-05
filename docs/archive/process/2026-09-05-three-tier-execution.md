@@ -7,7 +7,7 @@
 - 原始基线：`001e744`；实现已 rebase 并快进合并到 `main` 的 SpeechRail 1.6.9 发布线，
   临时 worktree 与已合并分支已清理。
 - 私有配置、旧 release 和外部模型保留；当前安装已迁移到受管共享 runtime，结束时 active
-  profile 为 `quality`（generation 4）。
+  profile 为 `quality`（generation 9）。
 - 三档切换采用单机停服事务；不识别 Mac 营销型号，不实现服务内热切换、drain 或控制 socket。
 - M1 Air 8GB 仍是 light 的发布验收条件；设备证据只在 B02/V01 基准阶段记录，不进入运行架构。
 
@@ -137,6 +137,17 @@ ffmpeg 为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小与 SHA-
   `/v1/voices` 从启动时同一受管 selection 发布实际 profile、artifact、variant、量化与
   voice capabilities；OpenAI alias 与必需 Model 字段保持稳定。完整真实质量、12GB 与
   M1 Air 8GB 内存/热稳态、V01 发行验收仍在待办范围。
+- 用户确认将系统音色收敛为九个一一对应角色：`serena`、`vivian`、`uncle_fu`、
+  `dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。`quality` 以 VoiceDesign
+  指令复现角色，`balanced/light` 绑定同名 CustomVoice speaker；旧四 ID 与 13 个 OpenAI
+  voice 名称保留为 alias。API 从当前权重声明能力，自定义 VoiceDesign 音色在低档返回
+  `available=false`，合成前稳定返回 `voice_not_available`。
+- 最终 wheel 已安装；`quality` 的九个 VoiceDesign 角色和 `balanced` 的九个 CustomVoice
+  speaker 均逐项通过真实公共 PCM 合成，`light` 复用同一 TTS artifact 并完成真实合成。
+  自定义音色在 `light` 为不可用，切回 `quality` 后同一条目恢复并合成成功。切档 smoke
+  同步改为 canonical `serena` 的中文原生短句，消除目录旧 ID 与跨语言随机质量对可用性门的干扰；
+  最终已安装 CLI 的 `quality→balanced→quality` 往返 smoke 通过。最终代码门为 1005 项
+  通过、覆盖率 83.17%，Ruff、Mypy、OpenAPI、plist lint 与 wheel 构建均通过。
   S05 私有控制 socket 已退役。
 
 ## 回退

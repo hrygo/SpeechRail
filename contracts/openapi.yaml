@@ -268,7 +268,10 @@ paths:
       description: |
         OpenAI-compatible JSON request shape. Responses are returned as mp3
         (default), opus, aac, flac or wav containers; `pcm` streams raw signed
-        16-bit little-endian mono samples as they are produced.
+        16-bit little-endian mono samples as they are produced. Clients should
+        select a voice with `available=true` from `/v1/voices`; a registered
+        voice unsupported by the active TTS weights returns
+        `400 voice_not_available` before inference starts.
       security:
         - BearerAuth: []
         - {}
@@ -529,7 +532,7 @@ components:
           type: string
         aliases:
           type: array
-          description: OpenAI standard voice names accepted for this preset.
+          description: OpenAI standard and legacy SpeechRail voice names accepted for this preset.
           items:
             type: string
         is_default:
@@ -662,7 +665,8 @@ components:
       properties:
         model:
           type: string
-          const: speechrail/qwen3-tts
+          enum: [speechrail/qwen3-tts, tts-1, tts-1-hd, gpt-4o-mini-tts]
+          description: Canonical TTS model or an OpenAI-compatible alias.
         input:
           type: string
           minLength: 1
@@ -672,10 +676,13 @@ components:
           minLength: 1
           maxLength: 200
           description: |
-            Server preset voices (default, warm, bright, calm) and the OpenAI
-            standard names (alloy, ash, ballad, cedar, coral, echo, fable,
-            marin, nova, onyx, sage, shimmer, verse) are accepted; standard
-            names map to the nearest preset.
+            The nine canonical server roles (serena, vivian, uncle_fu, dylan,
+            eric, ryan, aiden, ono_anna, sohee) map one-to-one to the nine
+            CustomVoice speakers. Legacy SpeechRail names (default, warm,
+            bright, calm) and OpenAI standard names (alloy, ash, ballad, cedar,
+            coral, echo, fable, marin, nova, onyx, sage, shimmer, verse) remain
+            accepted aliases. Active weights and per-voice availability are
+            declared by GET /v1/voices.
         response_format:
           type: string
           enum: [mp3, opus, aac, flac, wav, pcm]

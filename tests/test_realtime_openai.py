@@ -4,6 +4,7 @@ import asyncio
 import base64
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from speechrail.compatibility.openai_realtime import (
     transcription_segment,
 )
 from speechrail.config import Settings
+from speechrail.config.model_catalog import load_catalog
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
     DiarizationAssignment,
@@ -32,6 +34,7 @@ from speechrail.domain.ports import (
     StreamingAsrEvent,
     TranscriptionRequest,
 )
+from speechrail.domain.tts import get_voice_registry
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 
 
@@ -1309,7 +1312,7 @@ def test_realtime_session_update_voice_alias_resolves_to_registered_preset() -> 
         assert socket.receive_json()["type"] == "session.updated"
         events = _drive_tts(socket)
     assert events[-1]["type"] == "response.done"
-    assert synthesizer.requests[0].voice == "bright"
+    assert synthesizer.requests[0].voice == "vivian"
 
 
 def test_realtime_session_update_rejects_unknown_voice_and_session_survives() -> None:
@@ -1327,6 +1330,54 @@ def test_realtime_session_update_rejects_unknown_voice_and_session_survives() ->
         assert socket.receive_json()["type"] == "session.updated"
 
 
+def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
+    tmp_path: Path,
+) -> None:
+    preset = load_catalog().preset("light")
+    client, _ = _client(
+        settings_kwargs={
+            "qwen3_model_dir": tmp_path / preset.asr,
+            "qwen3_tts_model_dir": tmp_path / preset.tts,
+        }
+    )
+    registry = get_voice_registry()
+    voice_id = "test_unavailable_realtime_voice"
+    registry.create_custom_profile(
+        name="Realtime 不可用测试音色",
+        instruction="自然清晰的中文女声。",
+        voice_id=voice_id,
+    )
+    try:
+        with client.websocket_connect("/v1/realtime") as socket:
+            created = socket.receive_json()
+            assert created["session"]["speech_capabilities"] == {
+                "available": True,
+                "variant": "custom_voice",
+                "supports_speaker": True,
+                "supports_instruction": False,
+            }
+            socket.receive_json()
+            socket.send_json(
+                {"type": "session.update", "session": {"voice": voice_id}}
+            )
+            error = socket.receive_json()
+            assert error["type"] == "error"
+            assert error["error"]["code"] == "voice_not_available"
+            socket.send_json({"type": "session.update", "session": {"voice": "warm"}})
+            updated = socket.receive_json()
+            assert updated["type"] == "session.updated"
+            assert updated["session"]["speech_capabilities"] == created["session"][
+                "speech_capabilities"
+            ]
+            unavailable = _drive_tts(socket, {"voice": voice_id})
+            assert unavailable[-1]["type"] == "error"
+            assert unavailable[-1]["error"]["code"] == "voice_not_available"
+            fallback = _drive_tts(socket, {"voice": "alloy"})
+            assert fallback[-1]["type"] == "response.done"
+    finally:
+        registry.delete_custom_profile(voice_id)
+
+
 def test_realtime_response_create_voice_override_resolves_alias_and_type() -> None:
     synthesizer = RecordingSpeechSynthesizer()
     client, _ = _client(tts_synthesizer=synthesizer)
@@ -1338,7 +1389,7 @@ def test_realtime_response_create_voice_override_resolves_alias_and_type() -> No
         assert events[-1]["error"]["code"] == "invalid_voice"
         events = _drive_tts(socket, {"voice": "alloy"})
     assert events[-1]["type"] == "response.done"
-    assert synthesizer.requests[0].voice == "default"
+    assert synthesizer.requests[0].voice == "serena"
 
 
 def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:

@@ -9,7 +9,7 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from speechrail.domain.resource_limits import GovernorLimits
-from speechrail.domain.tts import VOICE_PROFILES
+from speechrail.domain.tts import VOICE_PROFILES, resolve_voice
 
 
 class Settings(BaseSettings):
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
     tts_model_id: str = "speechrail/qwen3-tts"
-    tts_voice_ids: tuple[str, ...] = ("default", "warm", "bright", "calm")
+    tts_voice_ids: tuple[str, ...] = tuple(VOICE_PROFILES)
     qwen3_tts_model_dir: Path | None = None
     qwen3_tts_python: Path | None = None
     tts_allow_model_downloads: bool = False
@@ -94,6 +94,15 @@ class Settings(BaseSettings):
     @classmethod
     def blank_api_key_is_unset(cls, value: Any) -> Any:
         return None if value == "" else value
+
+    @field_validator("tts_voice_ids", mode="after")
+    @classmethod
+    def normalize_tts_voice_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        """Normalize legacy and OpenAI aliases before validating the registry."""
+
+        if value == ("default", "warm", "bright", "calm"):
+            return tuple(VOICE_PROFILES)
+        return tuple(dict.fromkeys(resolve_voice(voice) for voice in value))
 
     @field_validator("job_spool_dir")
     @classmethod

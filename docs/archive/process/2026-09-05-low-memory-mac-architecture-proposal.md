@@ -1,6 +1,7 @@
 # SpeechRail 三档模型与统一运行时设计
 
-日期：2026-09-05。状态：用户已采纳选型，尚未实施或在 M1 Air 8GB 验收。
+日期：2026-09-05。状态：用户已采纳选型；本机实现与三档可行性验证完成，M1 Air 8GB
+发布验收尚未执行。
 本文件替代本轮前期“各档固定 VoiceDesign”“轻量档另用 Kokoro/ONNX”等候选建议。
 实施入口：[详细实施计划](2026-09-05-three-tier-implementation-plan.md)；
 决策记录：[ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
@@ -41,8 +42,8 @@ flowchart TD
     M --> A[一个 ASR worker：Batch / Streaming 互斥]
     M --> T[一个 TTS worker：按权重声明分派]
     S[本地设置向导 / CLI] --> P[制品准备与校验：服务外执行]
-    S --> U[同用户私有控制通道]
-    U --> M
+    S --> U[停服、原子切换、公共 API smoke]
+    U --> H
     A --> AW[所选 ASR 权重]
     T --> TW[所选 TTS 权重]
 ```
@@ -59,13 +60,15 @@ TTS 在同一 Qwen3/MLX 实现内识别 VoiceDesign 与 CustomVoice；共享归�
 
 ## 4. 音色与兼容性
 
-- quality 保留现有 default/warm/bright/calm 的 VoiceDesign 指令和 OpenAI voice aliases。
-- balanced/light 共用一份 CustomVoice 映射：default→Serena、warm→Serena、
-  bright→Vivian、calm→Uncle_Fu。该映射为初始候选，须逐 voice 真实验收；
-  default/warm 可能落到同一个说话人，不能承诺原 VoiceDesign 的风格差异。
+- 九个 canonical 角色与 CustomVoice 的九个 speaker 一一对应：serena、vivian、uncle_fu、
+  dylan、eric、ryan、aiden、ono_anna、sohee。
+- quality 使用 VoiceDesign 按官方 speaker 描述对齐的自然语言指令生成九个角色；
+  balanced/light 使用对应的固定 speaker。角色意图保持一致，但不同权重不承诺声纹完全一致。
+- 旧的 default/warm/bright/calm 和 OpenAI voice 名称保留为请求 alias，不再作为重复的
+  canonical 条目。
 - 不给 0.6B CustomVoice 伪造指令式情绪控制、声音设计或克隆能力。
-- 保留公共 voice ID 和客户端配置；进入会改变音色能力的方案时，向导展示明确的前后差异，
-  用户同一次“下载并应用”操作包含对这份差异的确认。不是无提示地换音色。
+- 保留旧 voice 请求和客户端配置；进入会改变音色能力的方案时，向导展示自然语言自定义
+  音色是否可用。九个系统角色始终可用，调用方无需上送档位。
 - /v1/models 保留既有 alias，同时明确实际 resolves_to/后端权重身份；参数规模不得硬编码成 1.7B。
 - /v1/voices 的描述与 available 根据活动模型及已通过的映射计算。新增能力信息只作兼容扩展，
   不伪称 OpenAI 官方能力；REST/Realtime 使用同一份映射。
@@ -82,8 +85,8 @@ TTS 在同一 Qwen3/MLX 实现内识别 VoiceDesign 与 CustomVoice；共享归�
 按项目约定先核对 ModelScope 同版本/格式/全文件集，缺失才明确回退官方/转换维护者来源。
 模型下载有进度、取消、恢复和哈希校验。runtime 属于统一发布清单，不属于档位字段。
 
-切档只准备缺少的模型，共用已有 runtime。准备期间旧服务继续工作；应用期间停止接收新推理，
-等待活动工作结束，释放旧模型，再串行加载新 ASR/TTS。通过真实短音频冒烟才提交活动记录。
+切档只准备缺少的模型，共用已有 runtime。准备期间旧服务继续工作；应用阶段允许直接停服，
+释放旧模型后加载新 ASR/TTS。通过真实短音频冒烟才提交活动记录。
 失败恢复旧权重，不能把部分成功的 ASR/TTS 配对发布为活动方案。切换可能短暂不可用。
 
 旧 .env 和未知配置不重写；选择记录存于仓库外的私有 sidecar。已有安装不自动重新选档。
@@ -126,5 +129,5 @@ VoiceDesign 1.7B 8-bit 约 3.08GB；CustomVoice 0.6B 8-bit/4-bit 约 1.97/1.69GB
 - [CustomVoice 0.6B 8-bit 制品](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit/tree/main)
 - [CustomVoice 0.6B 4-bit 制品](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-4bit/tree/main)
 
-当前代码和历史基准只证明现有部署；第三档资源/质量/热机和统一运行时完整回归尚未完成。
-实施计划的 G0 必须锁定实际制品 revision、哈希及统一依赖，再进行真实模型验证。
+当前代码、本机制品和三档基准已证明统一运行时可行性；M1 Air 8GB、12GB、完整真人质量集、
+cold/soak/streaming 与干净首次安装仍未完成，不能据此宣布目标设备发布验收通过。

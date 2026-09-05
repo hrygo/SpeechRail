@@ -57,36 +57,76 @@ class VoiceCapabilities:
 
 SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
     {
-        "default": VoiceProfile(
-            id="default",
-            name="默认原声",
-            instruction="自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
+        "serena": VoiceProfile(
+            id="serena",
+            name="温柔中文女声",
+            instruction="温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
             seed=42,
             temperature=0.1,
             is_default=True,
             is_system=True,
         ),
-        "warm": VoiceProfile(
-            id="warm",
-            name="温暖磁性",
-            instruction="温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",
+        "vivian": VoiceProfile(
+            id="vivian",
+            name="明亮中文女声",
+            instruction="明亮清脆的年轻中文女声，略带锋利质感，语气轻快自然。",
             seed=1024,
             temperature=0.1,
             is_system=True,
         ),
-        "bright": VoiceProfile(
-            id="bright",
-            name="清脆干练",
-            instruction="明亮活泼的中文女声，音调偏高，语气轻快，适合播报与讲解。",
+        "uncle_fu": VoiceProfile(
+            id="uncle_fu",
+            name="醇厚中文男声",
+            instruction="成熟稳重的中文男声，音色低沉醇厚，语速平稳，表达从容。",
             seed=2048,
             temperature=0.1,
             is_system=True,
         ),
-        "calm": VoiceProfile(
-            id="calm",
-            name="沉稳专业",
-            instruction="沉稳平静的中文男声，语速平稳，语气专业，适合资讯播报。",
-            seed=4096,
+        "dylan": VoiceProfile(
+            id="dylan",
+            name="北京青年男声",
+            instruction="清晰自然的年轻中文男声，带自然北京口音，语气轻松直接。",
+            seed=5120,
+            temperature=0.1,
+            is_system=True,
+        ),
+        "eric": VoiceProfile(
+            id="eric",
+            name="成都活力男声",
+            instruction="活泼明亮的年轻中文男声，略带沙哑质感和自然四川口音。",
+            seed=6144,
+            temperature=0.1,
+            is_system=True,
+        ),
+        "ryan": VoiceProfile(
+            id="ryan",
+            name="动感英语男声",
+            instruction="富有活力和节奏感的英语男声，发音清晰，表达有推动力。",
+            seed=7168,
+            temperature=0.1,
+            is_system=True,
+        ),
+        "aiden": VoiceProfile(
+            id="aiden",
+            name="阳光美式男声",
+            instruction="阳光自然的美式英语年轻男声，中频清晰，语气友好。",
+            seed=8192,
+            temperature=0.1,
+            is_system=True,
+        ),
+        "ono_anna": VoiceProfile(
+            id="ono_anna",
+            name="轻快日语女声",
+            instruction="轻盈灵动的日语年轻女声，语气俏皮自然，节奏明快。",
+            seed=9216,
+            temperature=0.1,
+            is_system=True,
+        ),
+        "sohee": VoiceProfile(
+            id="sohee",
+            name="温暖韩语女声",
+            instruction="温暖柔和的韩语女声，情感丰富，表达自然亲切。",
+            seed=10240,
             temperature=0.1,
             is_system=True,
         ),
@@ -95,23 +135,30 @@ SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
 
 VOICE_PROFILES: Mapping[str, VoiceProfile] = SYSTEM_VOICE_PROFILES
 
-DEFAULT_VOICE_ID = "default"
+DEFAULT_VOICE_ID = "serena"
 
 VOICE_ALIASES: Mapping[str, str] = MappingProxyType(
     {
-        "alloy": "default",
-        "ash": "default",
-        "echo": "default",
-        "onyx": "default",
-        "coral": "warm",
-        "sage": "warm",
-        "marin": "warm",
-        "nova": "bright",
-        "ballad": "bright",
-        "verse": "bright",
-        "cedar": "bright",
-        "fable": "calm",
-        "shimmer": "calm",
+        # Legacy SpeechRail preset IDs remain accepted but are not listed as
+        # canonical voices. Every canonical ID maps one-to-one to one Qwen
+        # CustomVoice speaker across balanced/light.
+        "default": "serena",
+        "warm": "serena",
+        "bright": "vivian",
+        "calm": "uncle_fu",
+        "alloy": "serena",
+        "ash": "serena",
+        "echo": "serena",
+        "onyx": "serena",
+        "coral": "serena",
+        "sage": "serena",
+        "marin": "serena",
+        "nova": "vivian",
+        "ballad": "vivian",
+        "verse": "vivian",
+        "cedar": "vivian",
+        "fable": "uncle_fu",
+        "shimmer": "uncle_fu",
     }
 )
 
@@ -178,7 +225,7 @@ class VoiceRegistry:
                 for item in data:
                     if isinstance(item, dict) and "id" in item and "instruction" in item:
                         vid = str(item["id"]).strip().lower()
-                        if vid not in SYSTEM_VOICE_PROFILES:
+                        if vid not in SYSTEM_VOICE_PROFILES and vid not in VOICE_ALIASES:
                             self._custom_voices[vid] = VoiceProfile(
                                 id=vid,
                                 name=str(item.get("name", vid)),
@@ -231,7 +278,7 @@ class VoiceRegistry:
         else:
             vid = f"custom_{int(time.time())}_{uuid.uuid4().hex[:4]}"
 
-        if vid in SYSTEM_VOICE_PROFILES:
+        if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"cannot override system voice ID: {vid}")
 
         used_seed = seed if seed is not None else random.randint(1000, 999999)
@@ -251,7 +298,7 @@ class VoiceRegistry:
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()
-        if vid in SYSTEM_VOICE_PROFILES:
+        if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"system voice cannot be deleted: {vid}")
         if vid not in self._custom_voices:
             raise KeyError(f"custom voice not found: {vid}")

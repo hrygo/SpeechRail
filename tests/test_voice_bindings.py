@@ -9,15 +9,26 @@ from speechrail.domain.tts import VOICE_ALIASES, VOICE_PROFILES, VoiceCapabiliti
 
 
 def test_custom_voice_is_explicitly_bound() -> None:
-    binding = resolve_binding("custom_voice", "default")
+    binding = resolve_binding("custom_voice", "serena")
 
     assert binding.speaker == "Serena"
+    assert binding.voice == "serena"
     assert binding.instruction is None
 
 
 @pytest.mark.parametrize(
     ("voice", "speaker"),
-    [("default", "Serena"), ("warm", "Serena"), ("bright", "Vivian"), ("calm", "Uncle_Fu")],
+    [
+        ("serena", "Serena"),
+        ("vivian", "Vivian"),
+        ("uncle_fu", "Uncle_Fu"),
+        ("dylan", "Dylan"),
+        ("eric", "Eric"),
+        ("ryan", "Ryan"),
+        ("aiden", "Aiden"),
+        ("ono_anna", "Ono_Anna"),
+        ("sohee", "Sohee"),
+    ],
 )
 def test_custom_voice_uses_shared_vendor_speaker_mapping(voice: str, speaker: str) -> None:
     binding = resolve_binding("custom_voice", voice)
@@ -50,11 +61,11 @@ def test_unknown_voice_and_variant_fail_closed() -> None:
     with pytest.raises(ValueError, match="unknown preset voice"):
         resolve_binding("custom_voice", "not-registered")
     with pytest.raises(ValueError, match="unsupported voice variant"):
-        resolve_binding("unknown", "default")
+        resolve_binding("unknown", "serena")
 
 
 def test_binding_and_public_capabilities_are_frozen_and_path_free() -> None:
-    binding = resolve_binding("custom_voice", "default")
+    binding = resolve_binding("custom_voice", "serena")
     capabilities = VoiceCapabilities(
         variant="custom_voice", supports_speaker=True, supports_instruction=False
     )

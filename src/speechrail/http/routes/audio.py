@@ -23,10 +23,12 @@ from speechrail.application.tts_delivery import (
     TTSDeliveryError,
     iter_validated_audio,
 )
+from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
     canonical_tts_model,
 )
+from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
 from speechrail.domain.ports import (
@@ -633,6 +635,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
     """Batch transcription and sentence TTS; auth at the route boundary."""
     router = APIRouter()
     resolved = services.settings
+    active = active_model_catalog(resolved)
+    tts_variant = active.tts.variant if active.tts is not None else None
     diarization_engine = services.diarization_engine
 
     @router.post("/v1/audio/transcriptions")
@@ -997,6 +1001,20 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown preset voice: {body.voice}",
                 param="voice",
             )
+        if tts_variant in {"voice_design", "custom_voice"}:
+            try:
+                resolve_binding(tts_variant, preset_voice)
+            except ValueError:
+                return error_response(
+                    400,
+                    request_id,
+                    "voice_not_available",
+                    (
+                        f"Voice {body.voice[:200]} is unavailable for the active TTS weights; "
+                        "use an available system voice from /v1/voices"
+                    ),
+                    param="voice",
+                )
         if body.stream_format not in (None, "audio"):
             return error_response(
                 422,

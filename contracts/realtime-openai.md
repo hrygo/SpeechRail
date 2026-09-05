@@ -46,12 +46,12 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 语义 |
 |---|---|
-| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受 4 个服务端 preset（`default`/`warm`/`bright`/`calm`）与 13 个 OpenAI 标准 voice 别名（归一化到最近 preset，与 REST 同规则）并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`（快速失败，session 不损坏），非字符串或空白 → `invalid_voice`。返回 `session.updated` |
+| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受已注册 voice 与 13 个 OpenAI 标准 voice 别名并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`，已注册但当前权重不支持 → `voice_not_available`，非字符串或空白 → `invalid_voice`。失败均保持 session 可用；客户端可改用 `/v1/voices` 中 `available=true` 的系统 preset。返回 `session.updated` |
 | `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；推流累积达到时间窗时服务端自动驱动 partial 识别；未提交缓冲区达到上限时自动分段结转（Auto-Commit Rollover），避免硬断；返回 `input_audio_buffer.committed` 只在 commit、VAD 静音截断或超限结转时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用 |
 | `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态；缓冲区为空时幂等完成空闭环，保持 session 正常存活 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
-| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 流式合成（使用 `StreamingSentenceSplitter` 分句合成并施加淡入淡出音频平滑）；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的别名/注册 preset 规则校验（`voice_not_found`/`invalid_voice`） |
+| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 流式合成（使用 `StreamingSentenceSplitter` 分句合成并施加淡入淡出音频平滑）；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的规则校验（`voice_not_found`/`voice_not_available`/`invalid_voice`） |
 | `response.cancel` | 取消进行中的 TTS response；丢弃未发送音频并返回 `response.done`（`status: cancelled`） |
 
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
@@ -61,9 +61,9 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 说明 |
 |---|---|
-| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）与 `capabilities` 列表 |
+| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）、`capabilities` 列表及由当前权重生成的 `speech_capabilities`（`available`、`variant`、`supports_speaker`、`supports_instruction`） |
 | `conversation.created` | 会话容器；SpeechRail 不实现可查询/可编辑的消息历史 |
-| `session.updated` | `session.update` 的确认 |
+| `session.updated` | `session.update` 的确认；重复当前 `speech_capabilities`，调用方无需上传或感知本机档位 |
 | `input_audio_buffer.speech_started` | 启用 `server_vad` 时，检测到连续有效语音帧（$\ge 96\text{ms}$ 防抖通过）后触发；自动打断当前会话正在进行的 TTS 合成输出 |
 | `input_audio_buffer.speech_stopped` | 启用 `server_vad` 时，检测到静音持续超过 `silence_duration_ms` 后触发；随后自动执行 committed 转写 |
 | `input_audio_buffer.committed` / `cleared` | 缓冲状态变化；`committed` 携带 `item_id` |

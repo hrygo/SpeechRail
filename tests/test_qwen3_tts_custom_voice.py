@@ -93,9 +93,9 @@ def test_custom_voice_generation_condition_maps_public_voice(
 
 
 def test_voice_design_generation_condition_keeps_instruction() -> None:
-    assert generation_condition("voice_design", "warm") == {
+    assert generation_condition("voice_design", "serena") == {
         "voice": None,
-        "instruct": "温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",
+        "instruct": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
     }
 
 

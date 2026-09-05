@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.6.8"
+version: "1.6.9"
 date: 2026-09-05
 ---
 
@@ -19,7 +19,7 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 | 能力类别 | Canonical 模型 ID | 兼容别名 (Aliases) | 说明 |
 |---|---|---|---|
 | **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录） |
-| **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至本地 Qwen3-TTS 运行时 (VoiceDesign) |
+| **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至当前档位的 VoiceDesign 或 CustomVoice 权重 |
 
 > 💡 **模型规格自适应**：Canonical 模型 ID 标识服务后端能力契约，底层可通过 `SPEECHRAIL_QWEN3_MODEL_DIR` 自由加载 **Qwen3-ASR-1.7B** 或 **Qwen3-ASR-0.6B**（显存占用更低、适用于 8GB 内存设备），对外均遵循相同的 OpenAI 协议。
 
@@ -85,7 +85,7 @@ Content-Type: application/json
 {
   "model": "tts-1",
   "input": "欢迎使用 SpeechRail 本地语音合成引擎。",
-  "voice": "warm",
+  "voice": "serena",
   "response_format": "mp3",
   "speed": 1.0
 }
@@ -95,26 +95,33 @@ Content-Type: application/json
 编码超限、超时或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
 
 ### 预设音色库 (Preset Voices)
-- `default`：标准清晰中性音色（OpenAI `alloy` 映射目标）。
-- `warm`：温暖亲和音色（适合陪伴、聊天）。
-- `calm`：沉稳平静音色（适合新闻播报、听书朗读）。
-- `bright`：明亮活泼音色（适合儿童读物、助手交互）。
+
+九个 canonical 角色与 Qwen CustomVoice speaker 一一对应：`serena`、`vivian`、
+`uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。
+`default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；客户端
+无需感知或上送 `quality/balanced/light`。
 
 ---
 
 ## 5. 音色管理与自然语言设计 API (`/v1/voices`)
 
-SpeechRail 提供工业级的音色注册管理与自然语言音色设计（Voice Design）体系。
+SpeechRail 提供系统角色目录与自然语言音色设计（Voice Design）体系。系统角色在三档均
+可用；自定义 VoiceDesign 音色仅在当前权重声明 `supports_instruction=true` 时可合成。
 
 ### 5.1 系统预置音色与采样确定性保证
 为了根治大模型短句切流式 TTS 合成时可能出现的**分句换人、跨轮音色漂移**问题，SpeechRail 为每个预置音色绑定了确定的随机种子（Random Seed），并在 MLX 推理前显式调用 `mx.random.seed(profile.seed)`，将生成采样温度固定为 `temperature=0.1`：
 
 | 音色 ID | 名称 | 专属 Seed | 采样温度 | 特征定位与适用场景 | 状态 |
 |---|---|---|---|---|---|
-| `default` | 默认原声 | `42` | `0.1` | 标准专业、自然清晰的中文女声，语气平和亲切 | 系统预置（只读保护） |
-| `warm` | 温暖磁性 | `1024` | `0.1` | 温和厚重、富有同理心的青年男声，适合陪伴聊天 | 系统预置（只读保护） |
-| `bright` | 清脆干练 | `2048` | `0.1` | 清脆明快、朝气蓬勃的年轻女声，适合活力交互 | 系统预置（只读保护） |
-| `calm` | 沉稳专业 | `4096` | `0.1` | 沉稳庄重、节奏从容的专业播音员，适合新闻/严肃播报 | 系统预置（只读保护） |
+| `serena` | 温柔中文女声 | `42` | `0.1` | 温暖柔和的年轻中文女声 | 系统预置（默认、只读） |
+| `vivian` | 明亮中文女声 | `1024` | `0.1` | 明亮、略带锋利质感的年轻中文女声 | 系统预置（只读） |
+| `uncle_fu` | 醇厚中文男声 | `2048` | `0.1` | 成熟、低沉醇厚的中文男声 | 系统预置（只读） |
+| `dylan` | 北京青年男声 | `5120` | `0.1` | 清晰自然的北京青年男声 | 系统预置（只读） |
+| `eric` | 成都活力男声 | `6144` | `0.1` | 略带沙哑与四川口音的活力男声 | 系统预置（只读） |
+| `ryan` | 动感英语男声 | `7168` | `0.1` | 节奏感强的英语男声 | 系统预置（只读） |
+| `aiden` | 阳光美式男声 | `8192` | `0.1` | 中频清晰的美式年轻男声 | 系统预置（只读） |
+| `ono_anna` | 轻快日语女声 | `9216` | `0.1` | 轻盈俏皮的日语女声 | 系统预置（只读） |
+| `sohee` | 温暖韩语女声 | `10240` | `0.1` | 情感丰富的温暖韩语女声 | 系统预置（只读） |
 
 > 🛡️ **只读保护原则**：系统预置音色标记为 `is_system: true`，禁止通过 API 进行覆盖、修改或删除。
 
@@ -129,15 +136,17 @@ Authorization: Bearer <TOKEN>
   "object": "list",
   "data": [
     {
-      "id": "default",
-      "name": "默认原声",
-      "description": "自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
-      "instruction": "自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
-      "aliases": ["alloy", "ash", "echo"],
+      "id": "serena",
+      "name": "温柔中文女声",
+      "description": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
+      "instruction": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
+      "aliases": ["alloy", "ash", "coral", "default", "echo", "marin", "onyx", "sage", "warm"],
       "is_default": true,
       "is_system": true,
       "created_at": 1788582000.0,
-      "available": true
+      "available": true,
+      "variant": "voice_design",
+      "capabilities": {"supports_speaker": false, "supports_instruction": true}
     },
     {
       "id": "custom_1788583825_59b3",
@@ -148,7 +157,9 @@ Authorization: Bearer <TOKEN>
       "is_default": false,
       "is_system": false,
       "created_at": 1788583825.0,
-      "available": true
+      "available": true,
+      "variant": "voice_design",
+      "capabilities": {"supports_speaker": false, "supports_instruction": true}
     }
   ]
 }
@@ -171,7 +182,7 @@ Authorization: Bearer <TOKEN>
 - `instruction` (string, 必填)：音色特征自然语言描述（人设、年龄、音质、情绪、语速等）。
 - `id` (string, 可选)：自定义音色标识符。若不提供则自动生成 `custom_<timestamp>_<rand>`。
 
-**持久化机制**：创建成功的音色会自动分配一个固定随机种子（Seed），并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然生效。
+**持久化机制**：创建成功的音色会自动分配一个固定随机种子（Seed），并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。切换到 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回 `quality` 后恢复。
 
 ### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
 ```http
@@ -179,7 +190,7 @@ DELETE /v1/voices/custom_1788583825_59b3
 Authorization: Bearer <TOKEN>
 ```
 - 若删除成功，返回 `{"status": "deleted", "id": "custom_1788583825_59b3"}`；
-- 若尝试删除系统预置音色（`default`, `warm`, `bright`, `calm`），系统将返回 `403 Forbidden` (`{"error": "系统预置音色受保护，不可删除"}`)；
+- 若尝试删除九个系统角色或任一保留 alias，系统返回 `403 Forbidden`；
 - 若音色不存在，返回 `404 Not Found`。
 
 ### 5.5 在语音合成中使用自定义音色

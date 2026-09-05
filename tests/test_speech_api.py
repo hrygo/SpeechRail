@@ -10,14 +10,16 @@ from fastapi.testclient import TestClient
 import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.config import Settings
+from speechrail.config.model_catalog import load_catalog
 from speechrail.domain.ports import AudioChunk, SpeechRequest
+from speechrail.domain.tts import get_voice_registry
 
 
 class FakeSpeechSynthesizer:
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         async def chunks() -> AsyncIterator[AudioChunk]:
             assert request.text == "你好"
-            assert request.voice == "default"
+            assert request.voice == "serena"
             yield AudioChunk(response_id="resp-test", chunk_index=0, audio=b"\x00\x00")
             yield AudioChunk(response_id="resp-test", chunk_index=1, audio=b"\x01\x00")
 
@@ -282,6 +284,51 @@ def test_speech_endpoint_rejects_voice_outside_server_registry() -> None:
     assert response.json()["error"]["code"] == "voice_not_found"
 
 
+def test_speech_rejects_unavailable_custom_voice_before_synthesis(tmp_path: Path) -> None:
+    preset = load_catalog().preset("balanced")
+
+    class FailIfCalled:
+        def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+            raise AssertionError("unavailable voice reached the TTS backend")
+
+    client = TestClient(
+        create_app(
+            Settings(
+                qwen3_model_dir=tmp_path / preset.asr,
+                qwen3_python=None,
+                qwen3_tts_model_dir=tmp_path / preset.tts,
+                qwen3_tts_python=None,
+            ),
+            tts_synthesizer=FailIfCalled(),
+        )
+    )
+    registry = get_voice_registry()
+    voice_id = "test_unavailable_rest_voice"
+    registry.create_custom_profile(
+        name="不可用测试音色",
+        instruction="自然清晰的中文女声。",
+        voice_id=voice_id,
+    )
+    try:
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "tts-1",
+                "input": "你好",
+                "voice": voice_id,
+                "response_format": "pcm",
+            },
+        )
+    finally:
+        registry.delete_custom_profile(voice_id)
+
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "voice_not_available"
+    assert error["param"] == "voice"
+    assert error["retryable"] is False
+
+
 def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -388,7 +435,7 @@ def test_speech_voice_alias_rejected_when_mapped_preset_not_registered() -> None
         json={
             "model": "speechrail/qwen3-tts",
             "input": "你好",
-            "voice": "coral",
+            "voice": "nova",
             "response_format": "pcm",
         },
     )

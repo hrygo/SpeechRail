@@ -57,14 +57,14 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
         warmup=False,
     )
 
-    chunks = list(engine.synthesize("你好", voice="warm", speed=1.25, language="zh"))
+    chunks = list(engine.synthesize("你好", voice="serena", speed=1.25, language="zh"))
 
     assert engine.identity.backend == "mlx-qwen3-tts-voice-design"
     assert model.calls == [
         {
             "text": "你好。",
             "voice": None,
-            "instruct": "温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",
+            "instruct": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
             "speed": 1.25,
             "lang_code": "zh",
             "max_tokens": 39,

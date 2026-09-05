@@ -15,10 +15,15 @@ from speechrail.domain.tts import (
 
 _CUSTOM_VOICE_SPEAKERS: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "default": "Serena",
-        "warm": "Serena",
-        "bright": "Vivian",
-        "calm": "Uncle_Fu",
+        "serena": "Serena",
+        "vivian": "Vivian",
+        "uncle_fu": "Uncle_Fu",
+        "dylan": "Dylan",
+        "eric": "Eric",
+        "ryan": "Ryan",
+        "aiden": "Aiden",
+        "ono_anna": "Ono_Anna",
+        "sohee": "Sohee",
     }
 )
 _SUPPORTED_VARIANTS: Final[frozenset[str]] = frozenset({"voice_design", "custom_voice"})
