@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     backend_ready: bool = False
     qwen3_model_dir: Path | None = None
     qwen3_python: Path | None = None
+    ffmpeg_path: Path | None = None
     allow_model_downloads: bool = False
     device: Literal["mps", "cpu"] = "mps"
     dtype: Literal["float16", "float32", "int8"] = "float16"

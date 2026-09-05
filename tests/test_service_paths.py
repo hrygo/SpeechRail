@@ -49,3 +49,15 @@ def test_settings_can_load_an_explicit_env_file(tmp_path: Path) -> None:
     settings = Settings.from_env_file(env_file)
 
     assert settings.port == 8317
+
+
+def test_settings_reads_optional_ffmpeg_path(tmp_path: Path) -> None:
+    ffmpeg = tmp_path / "vendor" / "current" / "ffmpeg"
+    ffmpeg.parent.mkdir(parents=True)
+    ffmpeg.touch()
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"SPEECHRAIL_FFMPEG_PATH={ffmpeg}\n", encoding="utf-8")
+
+    settings = Settings.from_env_file(env_file)
+
+    assert settings.ffmpeg_path == ffmpeg

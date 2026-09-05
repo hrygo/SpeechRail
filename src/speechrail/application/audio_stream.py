@@ -13,9 +13,12 @@ import math
 import shutil
 from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, cast
 
 from fastapi import UploadFile
+
+from speechrail.service.executable import resolve_configured_executable
 
 _PCM_BLOCK_BYTES = 64 * 1024
 _PCM_SAMPLE_BYTES = 2
@@ -300,8 +303,14 @@ class _StreamEnd:
 _STREAM_END = _StreamEnd()
 
 
-def _resolve_ffmpeg() -> str:
-    """使用固定的本机 ffmpeg resolver, 不读取客户端提供的路径。"""
+def _resolve_ffmpeg(configured_path: Path | str | None = None) -> str:
+    """Resolve a private configured ffmpeg path or the existing PATH lookup."""
+
+    if configured_path is not None:
+        return resolve_configured_executable(
+            configured_path,
+            error_code="audio_decode_failed",
+        )
 
     executable = shutil.which("ffmpeg")
     if executable is None:
@@ -533,12 +542,14 @@ async def decode_upload(
     max_upload_bytes: int,
     max_audio_seconds: int,
     ffmpeg_executable: str | None = None,
+    ffmpeg_path: Path | str | None = None,
     timeout_seconds: float | None = None,
 ) -> AsyncGenerator[bytes, None]:
     """将上传音频解码为 16 kHz mono PCM16, 并按块异步返回。
 
-    ``ffmpeg_executable`` 和 ``timeout_seconds`` 仅用于确定性测试或受控调用方;
-    默认 executable 由固定 resolver 取得, 绝不采用上传内容中的路径或 URL。
+    ``ffmpeg_executable`` 仅用于确定性测试或已解析的受控调用方;
+    ``ffmpeg_path`` 来自私有 Settings, 会经过受信任路径校验。默认 executable
+    由固定 resolver 取得, 绝不采用上传内容中的路径或 URL。
     """
 
     _validate_limits(max_upload_bytes, max_audio_seconds)
@@ -555,7 +566,12 @@ async def decode_upload(
     tasks: list[asyncio.Task[None]] = []
     try:
         await _validate_upload_size(file, max_upload_bytes, timeout)
-        executable = ffmpeg_executable if ffmpeg_executable is not None else _resolve_ffmpeg()
+        if ffmpeg_executable is not None:
+            executable = ffmpeg_executable
+        elif ffmpeg_path is not None:
+            executable = _resolve_ffmpeg(ffmpeg_path)
+        else:
+            executable = _resolve_ffmpeg()
         process = await _wait_with_timeout(_start_ffmpeg(executable), timeout)
         counter = PcmByteCounter(max_samples=max_audio_seconds * _PCM_SAMPLE_RATE)
         queue: asyncio.Queue[bytes | _StreamFailure | _StreamEnd] = asyncio.Queue(

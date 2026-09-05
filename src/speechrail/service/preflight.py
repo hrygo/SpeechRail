@@ -19,6 +19,7 @@ from speechrail.service.bootstrap import (
     RuntimeBootstrapError,
     load_prepared_runtime,
 )
+from speechrail.service.executable import resolve_configured_executable
 from speechrail.service.paths import ServiceLayout
 
 FFMPEG_FALLBACKS = (Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"))
@@ -215,6 +216,32 @@ def _managed_runtime_checks(
     return tuple(checks)
 
 
+def _resolve_ffmpeg(configured_path: Path | str | None = None) -> Path | None:
+    """Resolve the configured executable using the same strict path policy."""
+
+    if configured_path is not None:
+        try:
+            return Path(
+                resolve_configured_executable(
+                    configured_path,
+                    error_code="ffmpeg_unavailable",
+                )
+            )
+        except ValueError:
+            return None
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg:
+        return Path(ffmpeg)
+    return next(
+        (
+            candidate
+            for candidate in FFMPEG_FALLBACKS
+            if candidate.is_file() and os.access(candidate, os.X_OK)
+        ),
+        None,
+    )
+
+
 def run_preflight(
     layout: ServiceLayout,
     *,
@@ -248,15 +275,21 @@ def run_preflight(
             else "configuration file must have mode 0600",
         )
     )
-    ffmpeg = shutil.which("ffmpeg")
-    ffmpeg_path = Path(ffmpeg) if ffmpeg else next(
-        (
-            candidate
-            for candidate in FFMPEG_FALLBACKS
-            if candidate.is_file() and os.access(candidate, os.X_OK)
-        ),
-        None,
-    )
+    settings: Settings | None = None
+    if config_exists:
+        try:
+            settings = Settings.from_env_file(layout.config_file)
+            from speechrail.config.model_catalog import load_catalog
+            from speechrail.config.selection import resolve_selection
+            from speechrail.service.profile_store import recover_selection
+
+            selection = recover_selection(layout.app_home)
+            if selection is not None:
+                settings = resolve_selection(settings, selection, load_catalog(), layout.app_home)
+        except Exception:
+            settings = None
+
+    ffmpeg_path = _resolve_ffmpeg(settings.ffmpeg_path if settings is not None else None)
     checks.append(
         _check(
             "ffmpeg",
@@ -278,16 +311,7 @@ def run_preflight(
         )
         return PreflightResult(ok=all(check.ok for check in checks), checks=tuple(checks))
 
-    try:
-        settings = Settings.from_env_file(layout.config_file)
-        from speechrail.config.model_catalog import load_catalog
-        from speechrail.config.selection import resolve_selection
-        from speechrail.service.profile_store import recover_selection
-
-        selection = recover_selection(layout.app_home)
-        if selection is not None:
-            settings = resolve_selection(settings, selection, load_catalog(), layout.app_home)
-    except Exception:
+    if settings is None:
         checks.append(_check("settings", False, "configuration validation failed"))
         checks.append(_check("asr_config", False, "ASR configuration validation failed"))
         checks.append(_check("tts_config", not require_tts, "TTS configuration validation failed"))

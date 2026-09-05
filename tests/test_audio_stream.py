@@ -9,6 +9,7 @@ import struct
 import subprocess
 import wave
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -248,6 +249,35 @@ async def test_decode_streams_even_pcm_and_fixed_ffmpeg_command(
     assert kwargs["stdin"] is audio_stream.asyncio.subprocess.PIPE
     assert kwargs["stdout"] is audio_stream.asyncio.subprocess.PIPE
     assert kwargs["stderr"] is audio_stream.asyncio.subprocess.DEVNULL
+
+
+@pytest.mark.anyio
+async def test_decode_uses_configured_ffmpeg_path_when_path_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "vendor" / "releases" / "ffmpeg"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    current = tmp_path / "vendor" / "current"
+    current.symlink_to(target.parent, target_is_directory=True)
+    configured = current / target.name
+    upload, _ = _as_upload(b"input")
+    process = _FakeProcess([b"\x00\x00"])
+    calls = _patch_process(monkeypatch, process)
+    monkeypatch.setattr(audio_stream.shutil, "which", lambda _: None)
+
+    assert await _collect(
+        decode_upload(
+            upload,
+            max_upload_bytes=100,
+            max_audio_seconds=1,
+            ffmpeg_path=configured,
+        )
+    ) == b"\x00\x00"
+
+    assert calls[0][0][0] == str(target.resolve())
 
 
 @pytest.mark.anyio

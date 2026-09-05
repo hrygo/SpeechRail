@@ -12,7 +12,11 @@ from speechrail.service.preflight import run_preflight
 
 
 def _write_env(
-    layout: ServiceLayout, *, asr: tuple[Path, Path], tts: tuple[Path, Path] | None
+    layout: ServiceLayout,
+    *,
+    asr: tuple[Path, Path],
+    tts: tuple[Path, Path] | None,
+    ffmpeg_path: Path | None = None,
 ) -> None:
     asr_model, asr_python = asr
     values = [
@@ -29,6 +33,8 @@ def _write_env(
                 f"SPEECHRAIL_QWEN3_TTS_PYTHON={tts_python}",
             ]
         )
+    if ffmpeg_path is not None:
+        values.append(f"SPEECHRAIL_FFMPEG_PATH={ffmpeg_path}")
     layout.config_file.write_text("\n".join(values) + "\n", encoding="utf-8")
     layout.config_file.chmod(0o600)
 
@@ -135,6 +141,61 @@ def test_preflight_uses_absolute_ffmpeg_fallback(
     result = run_preflight(layout, require_tts=False, runner=_successful_runner)
 
     assert next(check for check in result.checks if check.name == "ffmpeg").ok is True
+
+
+def test_preflight_uses_configured_ffmpeg_path_when_path_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    target = tmp_path / "vendor" / "releases" / "ffmpeg"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    current = tmp_path / "vendor" / "current"
+    current.symlink_to(target.parent, target_is_directory=True)
+    _write_env(
+        layout,
+        asr=(asr_model, Path(sys.executable)),
+        tts=None,
+        ffmpeg_path=current / target.name,
+    )
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: None)
+    monkeypatch.setattr("speechrail.service.preflight.FFMPEG_FALLBACKS", ())
+
+    result = run_preflight(layout, require_tts=False, runner=_successful_runner)
+
+    assert next(check for check in result.checks if check.name == "ffmpeg").ok is True
+
+
+def test_preflight_rejects_invalid_configured_ffmpeg_without_using_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    configured = tmp_path / "missing" / "ffmpeg"
+    fallback = tmp_path / "fallback" / "ffmpeg"
+    fallback.parent.mkdir()
+    fallback.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fallback.chmod(0o755)
+    _write_env(
+        layout,
+        asr=(asr_model, Path(sys.executable)),
+        tts=None,
+        ffmpeg_path=configured,
+    )
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: None)
+    monkeypatch.setattr("speechrail.service.preflight.FFMPEG_FALLBACKS", (fallback,))
+
+    result = run_preflight(layout, require_tts=False, runner=_successful_runner)
+    ffmpeg_check = next(check for check in result.checks if check.name == "ffmpeg")
+
+    assert ffmpeg_check.ok is False
+    assert str(configured) not in ffmpeg_check.message
 
 
 def test_preflight_checks_configured_diarization_profile(

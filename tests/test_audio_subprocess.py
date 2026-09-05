@@ -184,6 +184,36 @@ async def test_decode_limit_kills_child_after_bounded_probe(
 
 
 @pytest.mark.anyio
+async def test_decode_uses_configured_ffmpeg_path_when_path_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "vendor" / "releases" / "ffmpeg"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    current = tmp_path / "vendor" / "current"
+    current.symlink_to(target.parent, target_is_directory=True)
+    process = _FakeProcess(b"\x00\x00")
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def create_process(*args: object, **kwargs: object) -> _FakeProcess:
+        calls.append((args, kwargs))
+        return process
+
+    monkeypatch.setattr(audio_module.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(audio_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(audio_module, "_FFMPEG_FALLBACKS", ())
+
+    assert await _decode_pcm(
+        b"not-a-wav",
+        max_decompressed_bytes=8,
+        ffmpeg_path=current / target.name,
+    ) == b"\x00\x00"
+    assert calls[0][0][0] == str(target.resolve())
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("output_size", "max_bytes", "expected_error"),
     [(8, 8, None), (9, 8, OverflowError)],
@@ -347,6 +377,43 @@ async def test_stream_encode_feeds_pcm_incrementally_and_uses_fixed_24k_mono_com
     assert command[command.index("-ar") + 1 : command.index("-ar") + 2] == ("24000",)
     assert command[command.index("-ac") + 1 : command.index("-ac") + 2] == ("1",)
     assert command[-1:] == ("pipe:1",)
+
+
+@pytest.mark.anyio
+async def test_stream_encode_uses_configured_ffmpeg_path_when_path_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "vendor" / "releases" / "ffmpeg"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    current = tmp_path / "vendor" / "current"
+    current.symlink_to(target.parent, target_is_directory=True)
+    process = _FakeProcess(b"encoded-output")
+    process.stdout = _CloseAwareStdout(b"encoded-output", process.stdin)
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def create_process(*args: object, **kwargs: object) -> _FakeProcess:
+        calls.append((args, kwargs))
+        return process
+
+    monkeypatch.setattr(audio_module.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(audio_module.shutil, "which", lambda _: None)
+    monkeypatch.setattr(audio_module, "_FFMPEG_FALLBACKS", ())
+
+    encoded = [
+        chunk
+        async for chunk in _stream_encode_container(
+            _pcm_source([b"\x00\x00"]),
+            sample_rate=24_000,
+            response_format="mp3",
+            ffmpeg_path=current / target.name,
+        )
+    ]
+
+    assert b"".join(encoded) == b"encoded-output"
+    assert calls[0][0][0] == str(target.resolve())
 
 
 @pytest.mark.anyio

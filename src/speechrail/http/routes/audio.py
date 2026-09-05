@@ -40,6 +40,7 @@ from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.service.executable import resolve_configured_executable
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
@@ -104,7 +105,12 @@ async def _read_upload(file: UploadFile, limit: int) -> bytes:
     return bytes(content)
 
 
-def _resolve_ffmpeg() -> str:
+def _resolve_ffmpeg(configured_path: Path | str | None = None) -> str:
+    if configured_path is not None:
+        return resolve_configured_executable(
+            configured_path,
+            error_code="audio_decode_failed",
+        )
     executable = shutil.which("ffmpeg")
     if executable:
         return executable
@@ -318,6 +324,7 @@ async def _decode_pcm(
     audio: bytes,
     max_decompressed_bytes: int = 128 * 1024 * 1024,
     max_audio_seconds: int | None = None,
+    ffmpeg_path: Path | str | None = None,
 ) -> bytes:
     """Decode audio upload with in-memory fastpath and bounded ffmpeg fallback."""
     # Level 1 & 2: In-process memory decode
@@ -341,9 +348,10 @@ async def _decode_pcm(
         if duration_limit < output_limit:
             output_limit = duration_limit
             output_limit_error = ValueError("audio_too_long")
+    executable = _resolve_ffmpeg() if ffmpeg_path is None else _resolve_ffmpeg(ffmpeg_path)
     pcm = await _run_ffmpeg_subprocess(
         (
-            _resolve_ffmpeg(),
+            executable,
             "-nostdin",
             "-threads",
             "1",
@@ -413,11 +421,12 @@ async def _stream_encode_container(
     sample_rate: int,
     response_format: str,
     pcm_counter: PcmOutputCounter | None = None,
+    ffmpeg_path: Path | str | None = None,
 ) -> AsyncIterator[bytes]:
     """Encode PCM through bounded queues while exposing stdout as an iterator."""
     try:
         _, args = _TTS_CONTAINER_ENCODERS[response_format]
-        executable = _resolve_ffmpeg()
+        executable = _resolve_ffmpeg() if ffmpeg_path is None else _resolve_ffmpeg(ffmpeg_path)
         process = await asyncio.create_subprocess_exec(
             executable,
             "-nostdin",
@@ -581,12 +590,22 @@ async def _close_audio_stream(source: AsyncIterator[bytes]) -> None:
             await close()
 
 
-async def _encode_container(pcm: bytes, *, sample_rate: int, response_format: str) -> bytes:
+async def _encode_container(
+    pcm: bytes,
+    *,
+    sample_rate: int,
+    response_format: str,
+    ffmpeg_path: Path | str | None = None,
+) -> bytes:
     """Remux complete PCM16 for legacy callers and bounded unit tests."""
     _, args = _TTS_CONTAINER_ENCODERS[response_format]
+    try:
+        executable = _resolve_ffmpeg() if ffmpeg_path is None else _resolve_ffmpeg(ffmpeg_path)
+    except Exception as exc:
+        raise ValueError("audio_encode_failed") from exc
     return await _run_ffmpeg_subprocess(
         (
-            _resolve_ffmpeg(),
+            executable,
             "-nostdin",
             "-v",
             "error",
@@ -773,6 +792,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         file,
                         max_upload_bytes=resolved.max_upload_bytes,
                         max_audio_seconds=resolved.max_audio_seconds,
+                        ffmpeg_path=resolved.ffmpeg_path,
                     )
 
                     async def observed_audio() -> AsyncIterator[bytes]:
@@ -797,6 +817,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     audio = await _decode_pcm(
                         audio,
                         max_audio_seconds=resolved.max_audio_seconds,
+                        ffmpeg_path=resolved.ffmpeg_path,
                     )
                 else:
                     fast_pcm = _try_fast_decode_wav(
@@ -1084,6 +1105,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 sample_rate=resolved.tts_sample_rate,
                 response_format=body.response_format,
                 pcm_counter=pcm_counter,
+                ffmpeg_path=resolved.ffmpeg_path,
             )
             _tts_t0 = _time.monotonic()
             try:
