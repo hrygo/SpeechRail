@@ -16,11 +16,13 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator
 
 _SAFE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+_PERMIT_FILENAME = "profile-startup-permit.json"
 _STAGES = {
-    "PREPARING": {"VERIFIED", "ROLLING_BACK", "ROLLED_BACK"},
-    "VERIFIED": {"DRAINING", "ROLLING_BACK", "ROLLED_BACK"},
-    "DRAINING": {"ACTIVATING", "ROLLING_BACK", "ROLLED_BACK"},
-    "ACTIVATING": {"SMOKING", "ROLLING_BACK"},
+    "PREPARING": {"VERIFIED", "ROLLING_BACK"},
+    "VERIFIED": {"STOPPING", "ROLLING_BACK"},
+    "STOPPING": {"SWITCHING", "ROLLING_BACK"},
+    "SWITCHING": {"STARTING", "ROLLING_BACK"},
+    "STARTING": {"SMOKING", "ROLLING_BACK"},
     "SMOKING": {"COMMITTED", "ROLLING_BACK"},
     "ROLLING_BACK": {"ROLLED_BACK", "NOT_READY"},
     "COMMITTED": set(), "ROLLED_BACK": set(), "NOT_READY": set(),
@@ -72,6 +74,7 @@ class ProfileStore:
         self.selection_path = self.app_home / "config/selection.json"
         self.previous_path = self.app_home / "config/selection.previous.json"
         self.journal_path = self.app_home / "state/profile-transaction.json"
+        self.startup_permit_path = self.app_home / f"state/{_PERMIT_FILENAME}"
 
     def _safe_path(self, path: Path) -> None:
         for candidate in (self.app_home, path.parent, path):
@@ -163,7 +166,50 @@ class ProfileStore:
         _selection(raw["previous"])
         return raw
 
-    def recover(self) -> dict[str, object] | None:
+    def _read_startup_permit(self) -> tuple[str, dict[str, object]] | None:
+        raw = self._read(self.startup_permit_path)
+        if raw is None:
+            return None
+        if not isinstance(raw, dict) or set(raw) != {
+            "schema_version", "operation_id", "candidate"
+        }:
+            raise ValueError("invalid startup permit schema")
+        if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
+            raise ValueError("unsupported startup permit schema")
+        operation_id = raw["operation_id"]
+        if not isinstance(operation_id, str) or not re.fullmatch(
+            r"op_[0-9a-f]{32}", operation_id
+        ):
+            raise ValueError("invalid startup permit operation")
+        candidate = _selection(raw["candidate"])
+        if candidate is None:
+            raise ValueError("startup permit candidate is missing")
+        return operation_id, candidate
+
+    def _remove_startup_permit(self) -> None:
+        self._safe_path(self.startup_permit_path)
+        try:
+            self.startup_permit_path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise OSError("could not consume startup permit") from exc
+        parent = os.open(self.startup_permit_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+
+    def _has_profile_state(self) -> bool:
+        """Check for profile records without creating a lock or parent directory."""
+        self._safe_path(self.selection_path)
+        self._safe_path(self.journal_path)
+        return any(
+            path.exists() or path.is_symlink()
+            for path in (self.selection_path, self.journal_path, self.startup_permit_path)
+        )
+
+    def _recover_unlocked(self) -> dict[str, object] | None:
         journal = self._journal()
         if journal is not None:
             # 未完成日志中的 candidate 可能损坏。恢复只依赖已校验的 previous。
@@ -174,6 +220,9 @@ class ProfileStore:
                 raise ValueError("committed selection mismatch")
             return committed
         return _selection(self._read(self.selection_path))
+
+    def recover(self) -> dict[str, object] | None:
+        return self._recover_unlocked()
 
     def initialize(self, selection: Mapping[str, object]) -> None:
         validated = _selection(selection)
@@ -220,17 +269,82 @@ class ProfileStore:
             journal["stage"] = stage
             self._write(self.journal_path, journal)
 
+    def stage_candidate(self, operation_id: str) -> None:
+        """Persist the candidate selection and one startup permit before launch."""
+        with self._locked():
+            journal = self._operation(operation_id)
+            if journal["stage"] != "SWITCHING":
+                raise ValueError("candidate staging requires SWITCHING stage")
+            previous = _selection(journal["previous"])
+            candidate = _selection(journal["candidate"])
+            if candidate is None:
+                raise ValueError("candidate is missing")
+            current = _selection(self._read(self.selection_path))
+            if current != previous and current != candidate:
+                raise ValueError("selection does not match transaction")
+
+            permit = self._read_startup_permit()
+            expected_permit = (operation_id, candidate)
+            if permit is not None and permit != expected_permit:
+                raise ValueError("startup permit belongs to another operation")
+            if current != candidate:
+                self._write(self.selection_path, candidate)
+            if permit is None:
+                self._write(
+                    self.startup_permit_path,
+                    {
+                        "schema_version": 1,
+                        "operation_id": operation_id,
+                        "candidate": candidate,
+                    },
+                )
+            journal["stage"] = "STARTING"
+            self._write(self.journal_path, journal)
+
+    def _claim_startup_selection_unlocked(self) -> dict[str, object] | None:
+        journal = self._journal()
+        if journal is None or journal["stage"] != "STARTING":
+            return self._recover_unlocked()
+        candidate = _selection(journal["candidate"])
+        if candidate is None:
+            return self._recover_unlocked()
+        operation_id = journal["operation_id"]
+        assert isinstance(operation_id, str)
+        permit = self._read_startup_permit()
+        if permit != (operation_id, candidate):
+            return self._recover_unlocked()
+        if _selection(self._read(self.selection_path)) != candidate:
+            return self._recover_unlocked()
+        self._remove_startup_permit()
+        return dict(candidate)
+
+    def claim_startup_selection(self) -> dict[str, object] | None:
+        """Consume a matching one-shot startup permit, otherwise return the LKG."""
+        if not self._has_profile_state():
+            return None
+        with self._locked():
+            try:
+                return self._claim_startup_selection_unlocked()
+            except (OSError, TypeError, ValueError):
+                try:
+                    return self._recover_unlocked()
+                except (OSError, TypeError, ValueError):
+                    return None
+
     def commit(self, operation_id: str) -> None:
         with self._locked():
             journal = self._operation(operation_id)
             if journal["stage"] == "COMMITTED":
-                self.recover()
+                self._recover_unlocked()
                 return
             if not allowed_transition(str(journal["stage"]), "COMMITTED"):
                 raise ValueError("invalid commit transition before smoke")
             candidate = _selection(journal["candidate"])
             if candidate is None:
                 raise ValueError("candidate is missing")
+            if _selection(self._read(self.selection_path)) != candidate:
+                raise ValueError("selection does not match candidate")
+            self._remove_startup_permit()
             self._write(self.previous_path, journal["previous"])
             self._write(self.selection_path, candidate)
             journal["stage"] = "COMMITTED"
@@ -243,6 +357,7 @@ class ProfileStore:
                 raise ValueError("committed operation requires a new rollback transaction")
             previous = _selection(journal["previous"])
             # null 表示首次安装失败后的明确未配置状态。
+            self._remove_startup_permit()
             self._write(self.selection_path, previous)
             journal["stage"] = "ROLLED_BACK"
             self._write(self.journal_path, journal)
@@ -250,3 +365,8 @@ class ProfileStore:
 
 def recover_selection(app_home: Path) -> dict[str, object] | None:
     return ProfileStore(app_home).recover()
+
+
+def claim_startup_selection(app_home: Path) -> dict[str, object] | None:
+    """Consume one candidate startup permit, or return the last-known-good selection."""
+    return ProfileStore(app_home).claim_startup_selection()

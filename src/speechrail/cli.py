@@ -33,9 +33,9 @@ def run_server(env_file: Path | None = None) -> None:
 
     from speechrail.config.model_catalog import load_catalog
     from speechrail.config.selection import resolve_selection
-    from speechrail.service.profile_store import recover_selection
+    from speechrail.service.profile_store import claim_startup_selection
 
-    selection = recover_selection(app_home)
+    selection = claim_startup_selection(app_home)
     if selection is not None:
         settings = resolve_selection(settings, selection, load_catalog(), app_home)
 

@@ -55,8 +55,13 @@ def test_service_commands_delegate_to_one_manager_operation(
     assert manager.calls == [expected_call]
 
 
-def test_serve_uses_settings_host_and_port(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_serve_uses_settings_host_and_port(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     captured: dict[str, object] = {}
+
+    monkeypatch.chdir(tmp_path)
+
     class FakeSettings:
         @classmethod
         def from_env_file(cls, env_file: Path | None) -> SimpleNamespace:
@@ -69,6 +74,8 @@ def test_serve_uses_settings_host_and_port(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert cli.main(["serve"]) == 0
     assert captured == {"host": "127.0.0.1", "port": 8201, "log_level": "info"}
+    assert not (tmp_path / "state").exists()
+    assert not (tmp_path / "config").exists()
 
 
 def test_serve_discovers_private_app_home_configuration(
@@ -93,6 +100,50 @@ def test_serve_discovers_private_app_home_configuration(
     assert cli.main(["serve"]) == 0
     assert captured["env_file"] == env_file
     assert captured["port"] == 8317
+
+
+def test_serve_uses_one_shot_startup_claim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "config" / ".env"
+    env_file.parent.mkdir()
+    env_file.write_text("SPEECHRAIL_PORT=8317\n", encoding="utf-8")
+    candidate = {
+        "schema_version": 1,
+        "preset": "quality",
+        "generation": 2,
+        "asr": "large-q8",
+        "tts": "design-q8",
+        "runtime_lock_id": "runtime-v1",
+    }
+    captured: dict[str, object] = {}
+
+    class FakeSettings:
+        @classmethod
+        def from_env_file(cls, actual_env_file: Path | None) -> SimpleNamespace:
+            assert actual_env_file == env_file
+            return SimpleNamespace(host="127.0.0.1", port=8317)
+
+    def claim(app_home: Path) -> dict[str, object]:
+        captured["app_home"] = app_home
+        return candidate
+
+    monkeypatch.setattr(cli, "Settings", FakeSettings)
+    monkeypatch.setattr("speechrail.service.profile_store.claim_startup_selection", claim)
+    monkeypatch.setattr("speechrail.config.model_catalog.load_catalog", lambda: object())
+    monkeypatch.setattr(
+        "speechrail.config.selection.resolve_selection",
+        lambda settings, selection, catalog, app_home: captured.update(
+            {"selection": selection, "selection_app_home": app_home}
+        ) or settings,
+    )
+    monkeypatch.setattr("speechrail.app.create_app", lambda settings: settings)
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
+
+    assert cli.run_server(env_file) is None
+    assert captured["app_home"] == tmp_path.resolve()
+    assert captured["selection"] == candidate
+    assert captured["selection_app_home"] == tmp_path.resolve()
 
 
 def test_no_argument_remains_compatible_with_serve(monkeypatch: pytest.MonkeyPatch) -> None:
