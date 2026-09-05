@@ -181,6 +181,7 @@ def test_prepare_runtime_uses_one_release_per_lock_and_shared_python_version(
     assert install_calls
     assert all("--only-binary" in command for command in install_calls)
     assert all("--require-hashes" in command for command in install_calls)
+    assert all("--python-platform" not in command for command in install_calls)
     assert all("sh" not in command and "bash" not in command for command in runner.calls)
 
     metadata = json.loads((result.release / "runtime.json").read_text(encoding="utf-8"))
