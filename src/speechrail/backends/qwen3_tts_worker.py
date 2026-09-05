@@ -13,7 +13,13 @@ from typing import Any, BinaryIO, Final, Literal, Protocol
 from speechrail.backends.model_identity import inspect_model, read_quantization
 from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.config.model_catalog import QuantizationSpec
-from speechrail.domain.tts import generation_token_budget, get_voice_profile, normalize_tts_text
+from speechrail.domain.tts import (
+    apply_crossfade,
+    bounded_sentences,
+    generation_token_budget,
+    get_voice_profile,
+    normalize_tts_text,
+)
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -311,7 +317,21 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         clean_text = normalize_tts_text(text)
         if not clean_text:
             return
-        yield from self._generate(clean_text, voice=voice, speed=speed, language=language)
+        first_chunk = True
+        for sentence in bounded_sentences(clean_text):
+            for pcm in self._generate(sentence, voice=voice, speed=speed, language=language):
+                if not pcm:
+                    continue
+                if first_chunk:
+                    pcm = apply_crossfade(
+                        pcm,
+                        sample_rate=self._sample_rate,
+                        fade_ms=5,
+                        fade_in=True,
+                        fade_out=False,
+                    )
+                    first_chunk = False
+                yield pcm
 
     def _generate(
         self, text: str, *, voice: str, speed: float, language: str

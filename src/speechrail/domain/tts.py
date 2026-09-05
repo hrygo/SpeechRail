@@ -277,6 +277,152 @@ _ABBREVIATIONS = frozenset(
 )
 _MAIN_PUNCTS = frozenset({"。", "！", "？", "；", "\n", "\r", "!", "?", ";"})
 _SECONDARY_PUNCTS = frozenset({"，", "、", ","})
+_BOUNDED_MAIN_PUNCTS = _MAIN_PUNCTS | {".", "…", "—"}
+_BOUNDED_SECONDARY_MIN_CHARS = 15
+_QUOTE_CLOSERS = {"》": "《", "”": "“", "」": "「", "』": "『"}
+_QUOTE_OPENERS = frozenset(_QUOTE_CLOSERS.values())
+_URL_TRAILING_CHARS = frozenset(
+    " \t\r\n,，、。！？!?；;:：)]}》”」』'\""
+)
+
+
+def _advance_quote_state(
+    text: str, stack: list[str], ascii_quote_open: bool
+) -> bool:
+    """Advance quote state through one bounded text slice."""
+    for char in text:
+        if char in _QUOTE_OPENERS:
+            stack.append(char)
+        elif char in _QUOTE_CLOSERS:
+            opener = _QUOTE_CLOSERS[char]
+            if stack and stack[-1] == opener:
+                stack.pop()
+        elif char == '"':
+            ascii_quote_open = not ascii_quote_open
+    return ascii_quote_open
+
+
+def _non_space_token(text: str, index: int) -> tuple[str, int, int]:
+    """Return the non-whitespace token containing ``index`` and its bounds."""
+    start = index
+    while start > 0 and not text[start - 1].isspace():
+        start -= 1
+    end = index + 1
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    return text[start:end], start, end
+
+
+def _is_abbreviation_period(text: str, index: int) -> bool:
+    token, token_start, _ = _non_space_token(text, index)
+    prefix = token[: index - token_start + 1].lstrip("\"'“”‘’([{《「『").lower()
+    if not prefix:
+        return False
+    return any(
+        abbreviation == prefix or abbreviation.startswith(prefix)
+        for abbreviation in _ABBREVIATIONS
+    )
+
+
+def _is_url_punctuation(text: str, index: int) -> bool:
+    token, token_start, token_end = _non_space_token(text, index)
+    if "://" not in token or not re.search(r"(?i)(?:https?|ftp)://", token):
+        return False
+    if index >= token_end - 1:
+        return False
+    next_char = text[index + 1] if index + 1 < len(text) else ""
+    return next_char not in _URL_TRAILING_CHARS and index >= token_start
+
+
+def _is_protected_period(text: str, index: int) -> bool:
+    previous = text[index - 1] if index > 0 else ""
+    following = text[index + 1] if index + 1 < len(text) else ""
+    if previous.isdigit() and following.isdigit():
+        return True
+    return _is_abbreviation_period(text, index) or _is_url_punctuation(text, index)
+
+
+def _find_bounded_boundary(
+    text: str,
+    start: int,
+    limit: int,
+    quote_stack: list[str],
+    ascii_quote_open: bool,
+) -> int | None:
+    """Find the best boundary in ``text[start:limit]`` without dropping data."""
+    quote_stack = list(quote_stack)
+    sentence_boundary: int | None = None
+    secondary_boundary: int | None = None
+
+    for index in range(start, limit):
+        char = text[index]
+        if char in _QUOTE_OPENERS:
+            quote_stack.append(char)
+        elif char in _QUOTE_CLOSERS:
+            opener = _QUOTE_CLOSERS[char]
+            if quote_stack and quote_stack[-1] == opener:
+                quote_stack.pop()
+        elif char == '"':
+            ascii_quote_open = not ascii_quote_open
+
+        if index == start:
+            continue
+        if quote_stack or ascii_quote_open:
+            continue
+        if _is_url_punctuation(text, index):
+            continue
+        if char == "." and _is_protected_period(text, index):
+            continue
+        if char in _BOUNDED_MAIN_PUNCTS:
+            sentence_boundary = index + 1
+        elif (
+            char in _SECONDARY_PUNCTS
+            and index - start + 1 >= _BOUNDED_SECONDARY_MIN_CHARS
+        ):
+            secondary_boundary = index + 1
+
+    return sentence_boundary or secondary_boundary
+
+
+def bounded_sentences(text: str, max_chars: int = 240) -> tuple[str, ...]:
+    """Split text into bounded, lossless chunks for acoustic generation.
+
+    Sentence-ending punctuation is preferred, followed by secondary punctuation
+    and whitespace. Protected periods in decimals, URLs, abbreviations and
+    quoted text are ignored as boundaries. A final hard character boundary keeps
+    even unpunctuated input lossless when one sentence exceeds ``max_chars``.
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
+    if not text:
+        return ()
+
+    chunks: list[str] = []
+    start = 0
+    quote_stack: list[str] = []
+    ascii_quote_open = False
+    while start < len(text):
+        limit = min(len(text), start + max_chars)
+        if limit == len(text):
+            chunks.append(text[start:])
+            break
+
+        boundary = _find_bounded_boundary(
+            text,
+            start,
+            limit,
+            quote_stack,
+            ascii_quote_open,
+        )
+        if boundary is None:
+            whitespace = text.rfind(" ", start + 1, limit)
+            boundary = whitespace + 1 if whitespace >= start + 1 else limit
+        chunks.append(text[start:boundary])
+        ascii_quote_open = _advance_quote_state(
+            text[start:boundary], quote_stack, ascii_quote_open
+        )
+        start = boundary
+    return tuple(chunks)
 
 
 class StreamingSentenceSplitter:
@@ -426,6 +572,7 @@ __all__ = [
     "VoiceProfile",
     "VoiceRegistry",
     "apply_crossfade",
+    "bounded_sentences",
     "create_breath_pause",
     "generation_token_budget",
     "get_voice_profile",
