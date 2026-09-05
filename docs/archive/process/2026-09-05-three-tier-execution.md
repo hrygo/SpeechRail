@@ -80,7 +80,13 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
   才允许重叠，并把决策原因保存在 Governor snapshot；59 项相关回归通过。
 - T03 已用同一有界分句和 token budget 驱动两种 TTS variant，长文本不再依赖单次
   生成上限静默截断；`e2ec63b` 的 TTS 针对性测试 28 项、全套测试 778 项通过。
-- T04 之后的编码交付缓冲、安装切换、ManagedRuntime、公开契约、真实模型质量及
+- main v1.6.9 对比复核发现 CustomVoice worker 的 ready identity 门仍只接受
+  VoiceDesign；`169358b` 已补齐双 variant 启动门及空首块/单 final chunk fade 回归。
+- T04 已把 mp3/opus/aac/flac 改为输入/输出各 4 块的流式 ffmpeg 管线，PCM 保持真流式，
+  WAV 保留 128MiB 有界缓冲；`90d8308` 通过真实四格式 ffmpeg 往返与取消/早退回收测试。
+- P01 已实现清单锁定的离线制品准备、逐文件校验、缓存、原子登记和回退保留；`dc0f70c`
+  的 29 项 fake 测试通过，尚未接入真实 ModelScope downloader，也未下载模型。
+- B02 真实质量、P02 之后的 runtime/安装切换、ManagedRuntime、公开契约及
   M1 Air 8GB 内存/热稳态仍在待办范围。
 
 ## 回退

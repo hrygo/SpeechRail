@@ -114,8 +114,10 @@ def verify_loaded_identity(expected: ModelArtifact, actual: dict[str, object]) -
 
 # config/selection.py
 def resolve_selection(settings: Settings, selection: dict[str, object] | None,
-                      catalog: dict[str, ModelArtifact], app_home: Path) -> Settings: ...
-# 仅 overlay 模型目录/模型实际身份/必要量化信息；共同 vendor 路径在 bootstrap 后解析。
+                      catalog: ModelCatalog, app_home: Path, *,
+                      runtime_lock: RuntimeLock | None = None) -> Settings: ...
+# 仅 overlay 模型目录/必要量化信息；公共 canonical model ID/alias 保持由既有配置控制；
+# 共同 vendor 路径在 bootstrap 后解析。
 # selection.json固定字段：schema_version=1、preset、generation、asr、tts、runtime_lock_id；
 # 其中asr/tts是已校验artifact key。路径从model store解析，不从客户端输入读取。
 # 不改写现有 host、port、key、aliases、音色用户选择、可选能力或共同推理参数。
@@ -764,7 +766,7 @@ def test_long_text_is_not_silently_truncated():
 **所有权 / Files：** 修改 src/speechrail/http/routes/audio.py、application/tts_delivery.py；补 tests/test_tts_delivery.py、test_audio_subprocess.py。
 **接口 / Inputs & Outputs：** 保持 iter_validated_audio 与公开六种格式；新增 PcmOutputCounter(limit_bytes).accept(byte_count)；可流式容器编码的输入输出队列各<=4块。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_tts_delivery.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_tts_delivery.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.application.tts_delivery import PcmOutputCounter
@@ -777,14 +779,14 @@ def test_output_limit_includes_the_final_chunk():
         counter.accept(2)
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_delivery.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_delivery.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** PCM继续真流式。mp3/opus/aac/flac按固定ffmpeg逐块喂入并回收，首块前错误维持错误envelope；响应开始后错误遵循已定义连接终止语义，日志不输出正文。WAV若无法给出兼容的准确长度则保留当前有界缓冲作为明确例外，不能输出伪造长度头；上限沿用现有128MiB并计入4GiB实测。断开客户端必须关闭 generator、stdin、child、worker租约。
-- [ ] **4. 边界验证。** 真实ffmpeg往返解码、六格式HTTP媒体类型、speed/24k、空音频、奇数PCM、乱序chunk、消费者停读、取消后下一次TTS成功；不把解码帧和传输分块混淆。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** PCM继续真流式。mp3/opus/aac/flac按固定ffmpeg逐块喂入并回收，首块前错误维持错误envelope；响应开始后错误遵循已定义连接终止语义，日志不输出正文。WAV若无法给出兼容的准确长度则保留当前有界缓冲作为明确例外，不能输出伪造长度头；上限沿用现有128MiB并计入4GiB实测。断开客户端必须关闭 generator、stdin、child、worker租约。
+- [x] **4. 边界验证。** 真实ffmpeg往返解码、六格式HTTP媒体类型、speed/24k、空音频、奇数PCM、乱序chunk、消费者停读、取消后下一次TTS成功；不把解码帧和传输分块混淆。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `perf: bound audio encoding and release cancelled TTS work`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `perf: bound audio encoding and release cancelled TTS work`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `90d8308`；输入/输出各 4 块的 ffmpeg 管线、提前 EOF 与取消回收、四种容器真实 ffmpeg 往返，目标 34 项及扩展 route/TTS 回归 + mypy + ruff 通过）
 
 
 ### B02：运行 G2 三档可行性与质量对照
@@ -819,7 +821,7 @@ def test_light_release_requires_real_device_and_soak():
 **所有权 / Files：** 新建 src/speechrail/service/model_store.py、tests/test_model_store.py。
 **接口 / Inputs & Outputs：** prepare_models 按 §3.2；safe_artifact_path(root:Path,relative:str)->Path；外部下载SDK适配注入 Downloader，常规测试使用fake字节流。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_model_store.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_model_store.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.service.model_store import safe_artifact_path
@@ -830,14 +832,14 @@ def test_catalog_path_cannot_escape_model_store(tmp_path):
         safe_artifact_path(tmp_path, "../config/.env")
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_store.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_store.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 从锁定清单选择源，调用ModelScope官方工具或已说明原因的回退适配；精确revision，不远程执行代码。staging写入、分块进度、可取消/有限重试，复用官方可校验恢复能力；不把未知残缺文件标为完整。逐文件校验后原子登记prepared_id；全程不加载模型、不改selection。磁盘不足预检包含新权重、临时文件和旧回退资源。
-- [ ] **4. 边界验证。** hash不符、断网恢复、取消、重复应用零重复下载、snapshot缺codec、symlink逃逸、镜像内容不等价、超预期文件大小中止；模型路径从manifest解析不接受音频请求传入。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 从锁定清单选择源，调用ModelScope官方工具或已说明原因的回退适配；精确revision，不远程执行代码。staging写入、分块进度、可取消/有限重试，复用官方可校验恢复能力；不把未知残缺文件标为完整。逐文件校验后原子登记prepared_id；全程不加载模型、不改selection。磁盘不足预检只计算实际缺失制品的 staging 字节；旧回退资源已由可用空间统计扣除，不重复计算。
+- [x] **4. 边界验证。** hash不符、断网恢复、取消、重复应用零重复下载、snapshot缺codec、symlink逃逸、镜像内容不等价、超预期文件大小中止；模型路径从manifest解析不接受音频请求传入。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: prepare verified model artifacts outside request handling`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: prepare verified model artifacts outside request handling`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `dc0f70c`；29 项离线 fake 覆盖路径、hash/size、镜像、重试、取消、回滚、磁盘和 cache；一次 prepare 内每个复用权重最多完整 hash 一次；未真实下载）
 
 
 ### P02：统一 vendor runtime 的可重复准备
