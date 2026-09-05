@@ -8,7 +8,7 @@ import traceback
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO, Literal, Protocol
+from typing import Any, BinaryIO, Final, Literal, Protocol
 
 from speechrail.backends.model_identity import inspect_model, read_quantization
 from speechrail.backends.qwen3_native import snapshot_is_quantized
@@ -210,8 +210,32 @@ def _ready_identity_fields(identity: object) -> dict[str, object]:
     return fields
 
 
-class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized model runtime.
-    """MLX Qwen3-TTS VoiceDesign engine isolated in the worker process."""
+_CUSTOM_VOICE_SPEAKERS: Final[dict[str, str]] = {
+    "default": "Serena",
+    "warm": "Serena",
+    "bright": "Vivian",
+    "calm": "Uncle_Fu",
+}
+
+
+def generation_condition(variant: str, voice: str) -> dict[str, object]:
+    """根据模型变体解析生成条件 (音色或提示词指令)。"""
+
+    if variant == "custom_voice":
+        if voice not in _CUSTOM_VOICE_SPEAKERS:
+            raise ValueError(f"unknown voice: {voice}")
+        return {"voice": _CUSTOM_VOICE_SPEAKERS[voice]}
+    if variant == "voice_design":
+        try:
+            profile = get_voice_profile(voice)
+        except Exception as exc:
+            raise ValueError(f"unknown voice: {voice}") from exc
+        return {"voice": None, "instruct": profile.instruction}
+    raise ValueError(f"unsupported variant: {variant}")
+
+
+class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized model runtime.
+    """MLX Qwen3-TTS engine isolated in the worker process."""
 
     def __init__(
         self,
@@ -228,7 +252,10 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         warmup: bool = True,
     ) -> None:
         expected = inspect_model(model_dir)
-        if expected.family != "qwen3_tts" or expected.variant != "voice_design":
+        if expected.family != "qwen3_tts" or expected.variant not in (
+            "voice_design",
+            "custom_voice",
+        ):
             raise RuntimeError("backend_identity_mismatch: unsupported TTS snapshot identity")
         try:
             if load_fn is None:
@@ -240,7 +267,7 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         except Exception as exc:
             raise RuntimeError("mlx_qwen3_tts_runtime_unavailable") from exc
         model_type = getattr(getattr(self._model, "config", None), "tts_model_type", None)
-        if model_type != expected.variant:
+        if model_type is not None and model_type != expected.variant:
             raise RuntimeError("backend_identity_mismatch: loader variant mismatch")
         loader_sources = _loader_sources(self._model)
         loaded_family = _loader_value(loader_sources, ("family", "model_type"))
@@ -289,20 +316,24 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
     def _generate(
         self, text: str, *, voice: str, speed: float, language: str
     ) -> Iterator[bytes]:
-        profile = get_voice_profile(voice)
-        for result in self._model.generate(
-            text=text,
-            voice=None,
-            instruct=profile.instruction,
-            speed=speed,
-            lang_code=language,
-            max_tokens=generation_token_budget(text),
-            repetition_penalty=self._repetition_penalty,
-            temperature=self._temperature,
-            top_p=self._top_p,
-            stream=True,
-            streaming_interval=self._chunk_ms / 1000,
-        ):
+        variant = self.identity.model_variant or "voice_design"
+        condition = generation_condition(variant, voice)
+        call_kwargs: dict[str, object] = {
+            "text": text,
+            "speed": speed,
+            "lang_code": language,
+            "max_tokens": generation_token_budget(text),
+            "repetition_penalty": self._repetition_penalty,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "stream": True,
+            "streaming_interval": self._chunk_ms / 1000,
+        }
+        if "voice" in condition:
+            call_kwargs["voice"] = condition["voice"]
+        if "instruct" in condition:
+            call_kwargs["instruct"] = condition["instruct"]
+        for result in self._model.generate(**call_kwargs):
             pcm = self._to_pcm(result)
             if pcm:
                 yield pcm
@@ -331,6 +362,9 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         )
 
 
+MlxVoiceDesignEngine = MlxQwenTtsEngine
+
+
 def _default_engine_factory(  # pragma: no cover - requires separately authorized model runtime.
     device: Literal["mps", "cpu"],
     *,
@@ -341,7 +375,7 @@ def _default_engine_factory(  # pragma: no cover - requires separately authorize
     top_p: float,
     warmup: bool,
 ) -> EngineFactory:
-    return lambda model_dir: MlxVoiceDesignEngine(
+    return lambda model_dir: MlxQwenTtsEngine(
         model_dir,
         device=device,
         sample_rate=sample_rate,
