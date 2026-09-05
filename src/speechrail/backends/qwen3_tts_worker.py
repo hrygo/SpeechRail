@@ -189,7 +189,7 @@ def _identity_matches_tts(
     variant = getattr(identity, "model_variant", None)
     if family is not None and family != "qwen3_tts":
         return False
-    if variant is not None and variant != "voice_design":
+    if variant is not None and variant not in {"voice_design", "custom_voice"}:
         return False
     expected_dtype = "int8" if bits is not None or snapshot_is_quantized(model_dir) else (
         "float16" if device == "mps" else "float32"

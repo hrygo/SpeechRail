@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,9 +14,12 @@ from speechrail.backends.model_identity import SnapshotIdentity
 from speechrail.backends.qwen3_tts_worker import (
     MlxQwenTtsEngine,
     MlxVoiceDesignEngine,
+    TtsWorkerIdentity,
     generation_condition,
+    serve,
 )
 from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
 
 
 class FakeGenerationResult:
@@ -33,6 +37,35 @@ class FakeCustomVoiceModel:
     def generate(self, **kwargs: object):
         self.calls.append(kwargs)
         yield FakeGenerationResult()
+
+
+class EmptyThenNonEmptyCustomVoiceModel:
+    config = SimpleNamespace(tts_model_type="custom_voice")
+
+    def generate(self, **kwargs: object):
+        del kwargs
+        yield SimpleNamespace(
+            sample_rate=24_000,
+            audio=np.array([], dtype=np.float32),
+            is_final_chunk=False,
+        )
+        yield SimpleNamespace(
+            sample_rate=24_000,
+            audio=np.full(4, 0.5, dtype=np.float32),
+            is_final_chunk=False,
+        )
+
+
+class SingleFinalCustomVoiceModel:
+    config = SimpleNamespace(tts_model_type="custom_voice")
+
+    def generate(self, **kwargs: object):
+        del kwargs
+        yield SimpleNamespace(
+            sample_rate=24_000,
+            audio=np.array([0.25, 0.5, 0.75, 1.0], dtype=np.float32),
+            is_final_chunk=True,
+        )
 
 
 def _snapshot_identity() -> SnapshotIdentity:
@@ -114,5 +147,99 @@ def test_custom_voice_engine_uses_shared_streaming_generation_without_instructio
     assert np.isfinite(np.frombuffer(chunks[0], dtype="<i2")).all()
 
 
+def test_custom_voice_fades_first_non_empty_pcm_after_empty_model_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _snapshot_identity()
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+    engine = MlxQwenTtsEngine(
+        tmp_path,
+        device="mps",
+        load_fn=lambda _: EmptyThenNonEmptyCustomVoiceModel(),
+        numpy_module=np,
+        warmup=False,
+    )
+
+    chunks = list(engine.synthesize("你好", voice="warm", speed=1.0, language="zh"))
+
+    assert len(chunks) == 1
+    samples = np.frombuffer(chunks[0], dtype="<i2")
+    assert abs(int(samples[0])) < 100
+    assert abs(int(samples[-1]) - 16_383) < 100
+
+
+def test_custom_voice_single_final_chunk_has_fade_in_and_fade_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _snapshot_identity()
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+    engine = MlxQwenTtsEngine(
+        tmp_path,
+        device="mps",
+        load_fn=lambda _: SingleFinalCustomVoiceModel(),
+        numpy_module=np,
+        warmup=False,
+    )
+
+    chunks = list(engine.synthesize("你好", voice="warm", speed=1.0, language="zh"))
+
+    assert len(chunks) == 1
+    samples = np.frombuffer(chunks[0], dtype="<i2")
+    assert abs(int(samples[0])) < 100
+    assert int(samples[1]) > 0
+    assert int(samples[2]) > 0
+    assert abs(int(samples[-1])) < 100
+
+
 def test_voice_design_alias_is_preserved() -> None:
     assert MlxVoiceDesignEngine is MlxQwenTtsEngine
+
+
+def test_serve_accepts_loaded_custom_voice_identity(tmp_path: Path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = BytesIO()
+    target = BytesIO()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    source.seek(0)
+
+    class CustomVoiceServeEngine:
+        identity = TtsWorkerIdentity(
+            device="mps",
+            dtype="int8",
+            sample_rate=24_000,
+            family="qwen3_tts",
+            model_variant="custom_voice",
+            quantization_bits=4,
+            quantization_group_size=64,
+            weight_fingerprint="shape:" + ("a" * 64),
+        )
+
+        def synthesize(
+            self, text: str, *, voice: str, speed: float, language: str
+        ) -> object:
+            del text, voice, speed, language
+            yield b"\x00\x00"
+
+    serve(
+        source,
+        target,
+        model_dir=model_dir,
+        device="mps",
+        sample_rate=24_000,
+        engine_factory=lambda _: CustomVoiceServeEngine(),
+    )
+
+    target.seek(0)
+    ready = read_frame(target)
+    assert ready["type"] == "ready"
+    assert ready["model_variant"] == "custom_voice"
