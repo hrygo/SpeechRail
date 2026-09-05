@@ -39,8 +39,8 @@ from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.runtime.admission import QueueFullError
+from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
-from speechrail.service.executable import resolve_configured_executable
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from speechrail.service.executable import resolve_configured_executable
+from speechrail.runtime.executable import resolve_configured_executable
 
 
 def _write_executable(path: Path) -> Path:

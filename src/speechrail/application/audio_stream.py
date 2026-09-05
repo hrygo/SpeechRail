@@ -18,7 +18,7 @@ from typing import Protocol, cast
 
 from fastapi import UploadFile
 
-from speechrail.service.executable import resolve_configured_executable
+from speechrail.runtime.executable import resolve_configured_executable
 
 _PCM_BLOCK_BYTES = 64 * 1024
 _PCM_SAMPLE_BYTES = 2

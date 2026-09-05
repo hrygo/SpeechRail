@@ -1,4 +1,4 @@
-"""Helpers for validating executable paths supplied by private settings."""
+"""Helpers for validating executable paths supplied by private runtime settings."""
 
 from __future__ import annotations
 

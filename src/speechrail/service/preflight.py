@@ -14,12 +14,12 @@ from typing import cast
 from speechrail.backends.qwen3_native import MODEL_FILES, WEIGHT_FILE_SETS
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_runtime_lock
+from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.service.bootstrap import (
     PreparedRuntime,
     RuntimeBootstrapError,
     load_prepared_runtime,
 )
-from speechrail.service.executable import resolve_configured_executable
 from speechrail.service.paths import ServiceLayout
 
 FFMPEG_FALLBACKS = (Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"))
