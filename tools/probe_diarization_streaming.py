@@ -57,7 +57,7 @@ def _inspect_class(cls: type[Any]) -> dict[str, Any]:
             {
                 "name": name,
                 "signature": signature,
-                "source_file": source.split("/")[-1] if source else None or "<unknown>",
+                "source_file": source.split("/")[-1] if source else "<unknown>",
                 "source_line": line,
             }
         )

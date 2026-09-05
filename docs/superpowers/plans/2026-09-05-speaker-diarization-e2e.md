@@ -221,8 +221,8 @@ async def test_finalize_is_a_barrier(ws_harness):
 
 **文件：** 新增 `tools/evaluate_diarization_e2e.py`、`tests/test_diarization_metrics.py`；新增 `docs/operations/speaker-diarization-e2e-acceptance-YYYY-MM-DD.md`（执行当天日期）；同步用户契约和与事实冲突的说明。
 
-- [ ] 指标单元测试先失败：同一真值做全场标签最优匹配，交换匿名名字不影响 DER；逐段错换不能通过逐段最优匹配隐藏；unknown 在归属文字错误率中计错。
-- [ ] 实现仓库外 manifest 输入、匿名聚合结果输出，不记录完整音频/正文/姓名/模型路径；校验 fixture licence/授权和 train/eval 划分。
+- [x] 指标单元测试先失败：同一真值做全场标签最优匹配，交换匿名名字不影响 DER；逐段错换不能通过逐段最优匹配隐藏；unknown 在归属文字错误率中计错。
+- [x] 实现仓库外 manifest 输入、匿名聚合结果输出，不记录完整音频/正文/姓名/模型路径；校验 fixture licence/授权和 train/eval 划分。
 - [ ] 按规格 7 的 12 段数据、四种使用场景与两小时 soak 验证；先比较 light/balanced，再固定 ASR 比较 Sortformer v2/v2.1，避免同时改两因素。候选 v2.1 不满足任一门则不升级。
 - [ ] 运行完整代码 gate：
 
@@ -237,6 +237,20 @@ git diff --check
 - [ ] 用契约测试验证新 JSON Schema fixtures；记录测试数量、失败数、代码 commit、模型指纹、参数、warm/cold 延迟、物理 footprint、DER/CER/unknown 与真实设备条件。
 - [ ] 如进入 wheel 发布，使用项目 release/local-deploy/perf-benchmark SOP；结束现有会议，确认唯一服务 owner，保留上一 release。不能因为本计划存在就直接重启服务。
 - [ ] 新 Rail 默认不向 legacy 发送扩展；Sona 完成门后才开新会议 opt-in。回退先关闭 Sona 开关再回旧 wheel；使用公共模型/readyz 探针和授权短音频再次验证，不把配置文件存在当成功。
+
+**R5 评测工具与指标验证证据（2026-09-06）：**
+
+- `tests/test_diarization_metrics.py` 8 项（先因缺少模块失败，实现后全部通过）：
+  - 一致全局讲话人重命名（Permutation Invariance）实测 DER = 0.0000；
+  - 逐段错换（Segment-level swap）全局单映射强约束惩罚，实测捕获 50.0% 混淆，无法被局部段内最优匹配掩饰；
+  - 漏检（Miss）与虚警（False Alarm）精确累积，DER 计算符合 NIST 标准；
+  - Collar 容差（0.25s）边界豁免通过，避免微小起止对齐波动干扰；
+  - 真实双人重叠（Overlap）严格按照实际讲话人数计算 Miss 与 Confusion；
+  - 词级/字级讲话人归属文字错误率（SACER）：`unknown` 状态严格计入错误率与 unknown 比例；
+  - 评测清单（Manifest）强制校验数据授权许可与 `tune`/`eval` 划分；
+  - 评测报告隐私隔离：严格聚合匿名统计结果，绝不输出绝对路径、明文音频、完整转写文本或真实人名。
+- `tools/evaluate_diarization_e2e.py`：实现 CLI 评测套件，支持 `--manifest`、`--collar`、`--split` 与 `--output` 聚合报告输出；manifest SHA-256 签名内置。
+- 回归测试：`tests/test_diarization_metrics.py` 8 passed；`ruff check src tests tools` 与 `mypy src` 全部无告警。真实 12 段材料与 2 小时运行态测试需在获取外部音频后于受权环境执行。
 
 ## 交付验收与追踪
 
