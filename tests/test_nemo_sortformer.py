@@ -75,6 +75,7 @@ def test_nemo_sortformer_remaps_reconnected_raw_labels_within_a_group() -> None:
 
 
 def test_nemo_sortformer_translates_local_model_offsets_to_stream_timeline() -> None:
+    """Second-item segments arrive item-local and must not lose attribution."""
     engine = NemoSortformerEngine(
         model_path="/model/sortformer.nemo",
         max_buffer_bytes=32_000,
@@ -89,7 +90,7 @@ def test_nemo_sortformer_translates_local_model_offsets_to_stream_timeline() -> 
         )
         await session.append_audio(b"\x00\x00" * 16_000)
         second = await session.annotate(
-            (TranscriptSegment(id=1, start_ms=1000, end_ms=2000, text="第二段"),)
+            (TranscriptSegment(id=1, start_ms=0, end_ms=1000, text="第二段"),)
         )
 
         assert first.assignments[0].primary_speaker_id == "spk_01"

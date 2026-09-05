@@ -51,7 +51,7 @@ date: 2026-09-05
 
 **接口：** 新增 `Timeline.accept(pcm: bytes) -> tuple[int,int]`，返回 session 起止样本；`Timeline.absolute(item_start: int, start: int, end: int) -> tuple[int,int]`；新增 `verify_alignment(canonical: str, candidate: str) -> bool`，执行规格 4.3 的归一化一致性检查。实际字符映射和时间校验由同模块独立函数覆盖。
 
-- [ ] 写失败测试：小包累计不漂移、第二个 item 偏移只加一次、时间戳解码丢字必须拒绝。
+- [x] 写失败测试：小包累计不漂移、第二个 item 偏移只加一次、时间戳解码丢字必须拒绝。
 
 ```python
 def test_second_item_does_not_restart_the_session_clock():
@@ -65,10 +65,17 @@ def test_alignment_cannot_silently_drop_a_negation():
     assert verify_alignment("同意。", "同意")
 ```
 
-- [ ] 运行 `uv run --extra dev pytest tests/test_diarization_timeline.py -q`，确认因缺能力/错误结果失败而非环境问题。
-- [ ] 实现整数样本计数与 item 起点；legacy start/end 保持旧语义，新扩展预留 session sample 字段。修复二次解码 language/prompt 丢失，不改变正文；不一致产生 unknown 单元。
-- [ ] 加入 10,001 次不整毫秒小包、非偶数字节、时间越界、空正文、数字 ITN 和中英标点测试；全部拼接文本必须等于 canonical text。
-- [ ] 重跑上述测试及 `uv run --extra dev pytest tests/test_realtime_openai.py tests/test_nemo_sortformer.py -q`。记录两个 commit 的预期与实得 sample 区间，审查后按一个逻辑主题提交。
+- [x] 运行 `uv run --extra dev pytest tests/test_diarization_timeline.py -q`，确认因缺能力/错误结果失败而非环境问题。
+- [x] 实现整数样本计数与 item 起点；legacy start/end 保持旧语义，新扩展预留 session sample 字段。修复二次解码 language/prompt 丢失，不改变正文；不一致产生 unknown 单元。
+- [x] 加入 10,001 次不整毫秒小包、非偶数字节、时间越界、空正文、数字 ITN 和中英标点测试；全部拼接文本必须等于 canonical text。
+- [x] 重跑上述测试及 `uv run --extra dev pytest tests/test_realtime_openai.py tests/test_nemo_sortformer.py -q`。记录两个 commit 的预期与实得 sample 区间，审查后按一个逻辑主题提交。
+
+**R0 验证证据（2026-09-06）：**
+
+- `tests/test_diarization_timeline.py` 15 项：先因模块缺失失败，实现后通过。两个 commit 的 sample 区间实测为 `(0, 48000)`、`(48000, 56000)`；第二 item 本地 `[1600,4800)` 提升为 session `[49600,52800)`（即 `[3100,3300)` ms），与设计 4.1 示例一致；10,001 个 7-sample 包累计 70,007 samples（4,375 ms），无每包毫秒舍入漂移。
+- `tests/test_qwen3_worker.py`：新增 4 项证明 align 二次解码复用 session language/prompt（`zh`/`auto` 均不丢 context），候选文本 `verify_alignment` 不一致时返回空 segments（不改变正文）。
+- `tests/test_nemo_sortformer.py`：第二 item 改用 item-local `start_ms=0` 回归，先以 IndexError 失败（无归属），修复 `_NemoSortformerSession.annotate` 将 item-local segments 按 batch 会话偏移只提升一次后通过。
+- 重跑 `tests/test_diarization_timeline.py tests/test_qwen3_worker.py tests/test_nemo_sortformer.py tests/test_realtime_openai.py`：121 passed；ruff/mypy 通过；`git diff --check` 干净。legacy start/end 线格式未变。
 
 ## R1：连续 NeMo 能力探针与有界 adapter
 

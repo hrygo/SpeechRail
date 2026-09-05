@@ -16,6 +16,7 @@ from typing import BinaryIO, Protocol
 
 from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
 from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.domain.diarization_timeline import verify_alignment
 from speechrail.runtime.worker_protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
@@ -177,7 +178,9 @@ class WorkerEngine(Protocol):
 
     def finish_streaming(self, session_id: str) -> tuple[str, str]: ...
 
-    def align_session_audio(self, session_id: str) -> list[dict[str, object]]: ...
+    def align_session_audio(
+        self, session_id: str, canonical_text: str
+    ) -> list[dict[str, object]]: ...
 
     def close_session(self, session_id: str) -> None: ...
 
@@ -458,7 +461,7 @@ def _handle_commit(
         text, language = engine.finish_streaming(session_id)
         segments: list[dict[str, object]] = []
         if want_segments and text:
-            segments = engine.align_session_audio(session_id)
+            segments = engine.align_session_audio(session_id, text)
         if text:
             write_frame(
                 output_stream,
@@ -935,6 +938,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         )
         self._streaming_states: dict[str, object] = {}
         self._align_buffers: dict[str, bytearray] = {}
+        self._session_contexts: dict[str, tuple[str, str]] = {}
         _clear_metal_cache()
 
     def transcribe(
@@ -979,6 +983,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             raise RuntimeError(f"session already open: {session_id}")
         streaming_language = None if language in {"auto", ""} else language
         max_context_sec = left_context_sec + right_context_ms / 1000.0
+        self._session_contexts[session_id] = (language, context)
         self._streaming_states[session_id] = self._session.init_streaming(
             context=context,
             language=streaming_language,
@@ -1024,24 +1029,35 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             language if isinstance(language, str) else ""
         )
 
-    def align_session_audio(self, session_id: str) -> list[dict[str, object]]:
+    def align_session_audio(
+        self, session_id: str, canonical_text: str
+    ) -> list[dict[str, object]]:
+        """Re-decode the item audio with the session's own language and context.
+
+        The candidate transcript must describe exactly the canonical streaming
+        text (same normalization rules as ``domain.diarization_timeline``);
+        otherwise the word timestamps cannot be trusted and the item is
+        delivered without timing instead of with re-written text.
+        """
         audio = self._align_buffers.pop(session_id, None)
-        if not audio:
+        if not audio or not canonical_text:
             return []
+        language, context = self._session_contexts.get(session_id, ("auto", ""))
         try:
             text, _language, raw = self.transcribe(
-                bytes(audio), language="auto", prompt="", include_timestamps=True
+                bytes(audio), language=language, prompt=context, include_timestamps=True
             )
         except Exception:
             traceback.print_exc(file=sys.stderr)
             return []
-        if not text:
+        if not text or not verify_alignment(canonical_text, text):
             return []
         return _to_streaming_segments(raw)
 
     def close_session(self, session_id: str) -> None:
         self._streaming_states.pop(session_id, None)
         self._align_buffers.pop(session_id, None)
+        self._session_contexts.pop(session_id, None)
 
     def active_session_count(self) -> int:
         return len(self._streaming_states)

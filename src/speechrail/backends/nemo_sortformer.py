@@ -204,14 +204,26 @@ class _NemoSortformerSession:
         activities = _parse_activities(
             raw, self._config.speaker_count_hint, offset_ms=audio_start_ms
         )
+        # Vendor segment times are item-local ms; activities carry the
+        # session-global offset. Lift each segment exactly once so second and
+        # later items keep their attribution instead of overlapping nothing.
+        session_segments = tuple(
+            segment.model_copy(
+                update={
+                    "start_ms": segment.start_ms + audio_start_ms,
+                    "end_ms": segment.end_ms + audio_start_ms,
+                }
+            )
+            for segment in segments
+        )
         raw_assignments = tuple(
             assignment
-            for segment in segments
+            for segment in session_segments
             if (assignment := _assign(segment, activities)) is not None
         )
         await self._track_remap(
             raw_assignments,
-            {segment.id: segment for segment in segments},
+            {segment.id: segment for segment in session_segments},
             activities,
             audio,
             audio_start_ms,

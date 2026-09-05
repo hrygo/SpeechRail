@@ -248,6 +248,7 @@ class _FakeEngine:
         del model_dir, dtype, max_new_tokens
         self.identity = type("Identity", (), {"device": device, "dtype": "float16"})()
         self.sessions: dict[str, list[bytes]] = {}
+        self.align_canonical: list[str] = []
 
     def transcribe(
         self,
@@ -293,7 +294,10 @@ class _FakeEngine:
         chunks = self.sessions.pop(session_id)
         return f"text:{len(chunks)}", "zh"
 
-    def align_session_audio(self, session_id: str) -> list[dict[str, object]]:
+    def align_session_audio(
+        self, session_id: str, canonical_text: str = ""
+    ) -> list[dict[str, object]]:
+        self.align_canonical.append(canonical_text)
         del session_id
         return [{"text": "你好", "start_ms": 0, "end_ms": 500}]
 
@@ -482,6 +486,153 @@ def test_worker_commit_without_want_segments_keeps_empty() -> None:
     completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
     assert len(completed) == 1
     assert completed[0]["segments"] == []
+
+
+class _RecordingAlignEngine(_FakeEngine):
+    def __init__(self, model_dir: Path, device: str, dtype: str, max_new_tokens: int) -> None:
+        super().__init__(model_dir, device, dtype, max_new_tokens)
+        self.recorded_language: str | None = None
+        self.recorded_context: str | None = None
+
+    def open_session(
+        self,
+        *,
+        session_id: str,
+        language: str,
+        context: str,
+        chunk_sec: float = 2.0,
+        left_context_sec: float = 12.0,
+        right_context_ms: int = 640,
+        max_new_tokens: int = 256,
+    ) -> None:
+        super().open_session(
+            session_id=session_id,
+            language=language,
+            context=context,
+            chunk_sec=chunk_sec,
+            left_context_sec=left_context_sec,
+            right_context_ms=right_context_ms,
+            max_new_tokens=max_new_tokens,
+        )
+        self.recorded_language = language
+        self.recorded_context = context
+
+
+def test_worker_commit_passes_canonical_text_to_align() -> None:
+    engine = _RecordingAlignEngine(Path("/tmp"), "mps", "float16", 512)
+    frames = [
+        _start_frame(),
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "session.open",
+            "session_id": "a",
+            "language": "zh",
+            "context": "热词",
+        },
+        {"version": PROTOCOL_VERSION, "type": "audio.append", "session_id": "a", "pcm_b64": "AAA="},
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "commit",
+            "session_id": "a",
+            "want_segments": True,
+        },
+    ]
+    responses = _run_serve(frames, engine=engine)
+    completed = [f for f in responses if f.get("type") == "event" and f.get("kind") == "completed"]
+    assert len(completed) == 1
+    assert engine.align_canonical == [completed[0]["text"]]
+
+
+def _align_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    candidate_text: str,
+    raw_segments: list[dict[str, object]],
+) -> tuple[Qwen3Engine, list[dict[str, object]]]:
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    transcribe_calls: list[dict[str, object]] = []
+
+    class FakeAlignSession:
+        def __init__(self, *, model: str) -> None:
+            del model
+            self.model = SimpleNamespace()
+            self.model_info = {
+                "dtype": "float16",
+                "model_type": "qwen3_asr",
+                "variant": "asr",
+            }
+            self._state = SimpleNamespace(text="")
+
+        def init_streaming(self, **kwargs: object) -> SimpleNamespace:
+            del kwargs
+            return self._state
+
+        def feed_audio(self, wave: object, state: SimpleNamespace) -> SimpleNamespace:
+            del wave
+            return state
+
+        def transcribe(self, audio: object, **kwargs: object) -> SimpleNamespace:
+            del audio
+            transcribe_calls.append(kwargs)
+            return SimpleNamespace(
+                text=candidate_text,
+                language="Chinese",
+                segments=list(raw_segments),
+            )
+
+    runtime = ModuleType("mlx_qwen3_asr")
+    runtime.Session = FakeAlignSession  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+    engine = Qwen3Engine(Path("/tmp"), "mps", "float16")
+    return engine, transcribe_calls
+
+
+def test_align_session_audio_reuses_session_language_and_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, calls = _align_engine(
+        monkeypatch,
+        candidate_text="同意",
+        raw_segments=[{"text": "同意", "start": 0.0, "end": 1.0}],
+    )
+    engine.open_session(session_id="s", language="zh", context="热词")
+    engine.append_audio("s", b"\x00\x00" * 1600)
+
+    segments = engine.align_session_audio("s", canonical_text="同意。")
+
+    assert calls == [
+        {"context": "热词", "language": "zh", "max_new_tokens": 32, "return_timestamps": True}
+    ]
+    assert segments == [{"text": "同意", "start_ms": 0, "end_ms": 1000}]
+
+
+def test_align_session_audio_keeps_auto_language_without_dropping_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, calls = _align_engine(
+        monkeypatch,
+        candidate_text="同意",
+        raw_segments=[{"text": "同意", "start": 0.0, "end": 1.0}],
+    )
+    engine.open_session(session_id="s", language="auto", context="热词")
+    engine.append_audio("s", b"\x00\x00" * 1600)
+
+    assert engine.align_session_audio("s", canonical_text="同意。") != []
+    assert calls == [{"context": "热词", "max_new_tokens": 32, "return_timestamps": True}]
+
+
+def test_align_session_audio_rejects_candidate_dropping_canonical_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _ = _align_engine(
+        monkeypatch,
+        candidate_text="同意",
+        raw_segments=[{"text": "同意", "start": 0.0, "end": 1.0}],
+    )
+    engine.open_session(session_id="s", language="zh", context="热词")
+    engine.append_audio("s", b"\x00\x00" * 1600)
+
+    assert engine.align_session_audio("s", canonical_text="不同意。") == []
 
 
 def test_to_streaming_segments_converts_seconds_to_milliseconds() -> None:

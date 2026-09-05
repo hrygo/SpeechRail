@@ -47,6 +47,7 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
+from speechrail.domain.diarization_timeline import Timeline
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
@@ -108,6 +109,12 @@ class OpenAIRealtimeSession:
         self._unflushed_bytes = 0
         self._last_partial_text = ""
         self._vad: VoiceActivityDetector | None = None
+        # Session-global sample clock (SPK-E2E-1): every accepted PCM sample
+        # advances exactly once; each ASR item records the offset it starts at
+        # so item-local vendor times lift into the session domain once.
+        self._timeline = Timeline()
+        self._item_start_sample = 0
+        self._item_end_sample = 0
         self._config: dict[str, Any] = {
             "model": self._initial_model,
             "language": None,
@@ -286,6 +293,7 @@ class OpenAIRealtimeSession:
                 )
                 raise RealtimeAdapterError(code, message) from exc
             self._asr = asr
+            self._item_start_sample = self._timeline.accepted_samples
             self._asr_reader = asyncio.create_task(self._drain_asr_events())
         await self._ensure_diarization()
         # Append the chunk to ASR/diarization before VAD event handling: a
@@ -296,6 +304,7 @@ class OpenAIRealtimeSession:
             await self._diarization.append_audio(audio)
         self._buffered_audio_bytes += len(audio)
         self._unflushed_bytes += len(audio)
+        self._item_end_sample = self._timeline.accept(audio)[1]
 
         if self._vad is not None:
             from speechrail.compatibility.openai_realtime import (
@@ -384,6 +393,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._last_partial_text = ""
         self._unflushed_bytes = 0
+        self._item_start_sample = self._timeline.accepted_samples
+        self._item_end_sample = self._timeline.accepted_samples
 
     async def _clear_audio(self) -> None:
         if self._vad is not None:
@@ -395,6 +406,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
+        self._item_start_sample = self._timeline.accepted_samples
+        self._item_end_sample = self._timeline.accepted_samples
         await self._send(input_audio_buffer_cleared(session_id=self._session_id))
 
     async def _create_text_item(self, event: dict[str, Any]) -> None:
