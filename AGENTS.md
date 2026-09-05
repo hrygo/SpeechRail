@@ -4,7 +4,7 @@
 
 ## 项目目标
 
-SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、QwenPaw、Sona、Hermes Agent 等客户端提供稳定公共接口。服务负责协议、推理运行时、模型适配、资源边界和可观测性；客户端负责麦克风、播放、会议、UI、数据库和 LLM 编排。
+SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、[Sona](https://github.com/hrygo/sona)、LiveKit / Pipecat、Open-WebUI、OpenClaw 等主流 Agent 与客户端提供稳定公共接口。服务负责协议、推理运行时、模型适配、资源边界和可观测性；客户端负责麦克风、播放、会议、UI、数据库和 LLM 编排。
 
 设计取舍依次考虑：当前消费者是否需要、能否复用现有进程与契约、是否有可验证的失败与回退路径。不要为假设的多租户、云控制面、HA、分布式队列或服务网格增加复杂度。
 

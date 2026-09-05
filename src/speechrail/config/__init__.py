@@ -89,6 +89,7 @@ class Settings(BaseSettings):
     runtime_max_pending_per_class: int = Field(default=8, ge=1, le=1024)
     batch_aging_seconds: float = Field(default=30, gt=0, le=3600)
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
+    realtime_diarization_drain_deadline_seconds: float = Field(default=20.0, gt=0, le=120)
 
     @field_validator("api_key", mode="before")
     @classmethod

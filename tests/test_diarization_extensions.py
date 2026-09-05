@@ -521,3 +521,244 @@ def test_apply_session_update_rejects_unknown_extension_values() -> None:
     assert "invalid_diarization" in str(excinfo.value) or getattr(
         excinfo.value, "code", ""
     ) == "invalid_diarization"
+
+
+# ---------------------------------------------------------------------------
+# R4: finalize barrier, degraded states, single-model lease
+
+
+def _finalize_request(finalization_id: str) -> dict[str, str]:
+    return {"type": "speechrail.diarization.finalize", "finalization_id": finalization_id}
+
+
+def _collect_until(socket, event_type: str, limit: int = 64) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for _ in range(limit):
+        event = socket.receive_json()
+        events.append(event)
+        if event["type"] == event_type:
+            return events
+    raise AssertionError(f"never received {event_type}")
+
+
+def test_finalize_is_a_barrier() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        first = _append_and_commit(socket, 8000)
+        second = _append_and_commit(socket, 4000)
+
+        socket.send_json(_finalize_request("final_1"))
+        tail = _collect_until(socket, "speechrail.diarization.finalized")
+        final = tail[-1]
+        tail_updates = [e for e in tail if e["type"] == "speechrail.diarization.update"]
+
+        all_updates = [
+            e for e in [*first, *second, *tail]
+            if e["type"] == "speechrail.diarization.update"
+        ]
+        assert all_updates, "updates must flow before the finalized barrier"
+        assert final["last_update_sequence"] == all_updates[-1]["sequence"]
+        assert tail_updates, "finalize must flush pending attribution updates first"
+        assert final["sequence"] > all_updates[-1]["sequence"]
+        assert final["status"] == "complete"
+        assert final["reason"] is None
+        assert final["through_sample"] == 12000
+        assert final["stable_through_sample"] == final["through_sample"]
+
+
+def test_finalize_retry_is_idempotent_and_conflicting_id_rejected() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        _append_and_commit(socket, 8000)
+        socket.send_json(_finalize_request("final_1"))
+        first = _collect_until(socket, "speechrail.diarization.finalized")[-1]
+
+        socket.send_json(_finalize_request("final_1"))
+        replay = _collect_until(socket, "speechrail.diarization.finalized")[-1]
+        assert replay["finalization_id"] == first["finalization_id"]
+        assert replay["status"] == first["status"]
+        assert replay["through_sample"] == first["through_sample"]
+        assert replay["last_update_sequence"] == first["last_update_sequence"]
+
+        socket.send_json(_finalize_request("final_2"))
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_state"
+
+
+def test_finalize_rejects_further_audio() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        _append_and_commit(socket, 8000)
+        socket.send_json(_finalize_request("final_1"))
+        _collect_until(socket, "speechrail.diarization.finalized")
+
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(100)})
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_state"
+
+
+def test_empty_meeting_finalize_has_zero_update_sequence() -> None:
+    client, _ = _client(supports_stream=True)
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        socket.send_json(_finalize_request("final_empty"))
+        final = _collect_until(socket, "speechrail.diarization.finalized")[-1]
+        assert final["status"] == "complete"
+        assert final["through_sample"] == 0
+        assert final["stable_through_sample"] == 0
+        assert final["last_update_sequence"] == 0
+
+
+class _HangingContinuous:
+    """Continuous stream whose finish() never returns (simulated hung native)."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def append(self, pcm: bytes, start_sample: int) -> None:
+        del pcm, start_sample
+
+    async def activities(self, through_sample: int):
+        from speechrail.domain.diarization import ActivitySnapshot
+
+        return ActivitySnapshot(through_sample, 0, ())
+
+    async def finish(self, through_sample: int):
+        del through_sample
+        await asyncio.sleep(3600)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _RaisingContinuous:
+    """Continuous stream whose native step raises invalid output."""
+
+    async def append(self, pcm: bytes, start_sample: int) -> None:
+        del pcm, start_sample
+
+    async def activities(self, through_sample: int):
+        del through_sample
+        from speechrail.domain.diarization import DiarizationError
+
+        raise DiarizationError("native dimension mismatch", code="diarization_invalid_output")
+
+    async def finish(self, through_sample: int):
+        del through_sample
+        from speechrail.domain.diarization import DiarizationError
+
+        raise DiarizationError("native dimension mismatch", code="diarization_invalid_output")
+
+    async def close(self) -> None:
+        return None
+
+
+class _LeaseFakeDiarizationEngine(_FakeDiarizationEngine):
+    """Counts weight loads once; streams can hang or raise for R4 tests."""
+
+    def __init__(self, *, stream_mode: str) -> None:
+        super().__init__(supports_stream=True)
+        self.weight_loads = 0
+        self.stream_mode = stream_mode
+
+    def create_stream(self, *, config: object):
+        del config
+        if self.weight_loads == 0:
+            self.weight_loads = 1  # weights load exactly once per engine
+        if self.stream_mode == "hanging":
+            return _HangingContinuous()
+        if self.stream_mode == "raising":
+            return _RaisingContinuous()
+        return super().create_stream(config=config)
+
+
+def _lease_client(*, stream_mode: str, drain_deadline: float = 0.3):
+    streaming_factory = _FakeStreamingFactory()
+    settings = Settings(
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        diarization_model_path=None,
+        diarization_embedding_model_path=None,
+        realtime_diarization_drain_deadline_seconds=drain_deadline,
+    )
+    engine = _LeaseFakeDiarizationEngine(stream_mode=stream_mode)
+    services = build_app_services(
+        settings,
+        AppOverrides(
+            realtime_asr_factory=streaming_factory,  # type: ignore[arg-type]
+            diarization_engine=engine,  # type: ignore[arg-type]
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_openai_realtime_router(services))
+    return TestClient(app), engine
+
+
+def test_hung_native_degrades_finalization_and_keeps_asr_text() -> None:
+    client, engine = _lease_client(stream_mode="hanging")
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        first = _append_and_commit(socket, 8000)
+        completed = first[-1]
+        assert completed["transcript"] == "你好"
+
+        socket.send_json(_finalize_request("final_hang"))
+        tail = _collect_until(socket, "speechrail.diarization.finalized")
+        final = tail[-1]
+        assert final["status"] == "degraded"
+        assert final["reason"] == "finalization_timeout"
+        assert final["through_sample"] == 8000
+        assert final["stable_through_sample"] < final["through_sample"]
+
+        status_events = [
+            e for e in tail if e["type"] == "speechrail.diarization.status"
+        ]
+        assert len(status_events) == 1
+        assert status_events[0]["reason"] == "finalization_timeout"
+
+    # A second session during/after the hang must not load a second model.
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+    assert engine.weight_loads == 1
+
+
+def test_native_exception_sends_unknown_updates_then_one_status() -> None:
+    client, _ = _lease_client(stream_mode="raising")
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        events = _append_and_commit(socket, 8000)
+        completed = events[-1]
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["transcript"] == "你好"
+
+        status = _collect_until(socket, "speechrail.diarization.status")
+        updates = [e for e in status if e["type"] == "speechrail.diarization.update"]
+        degraded = status[-1]
+        assert degraded["status"] == "degraded"
+        assert degraded["reason"] == "diarization_invalid_output"
+        assert degraded["since_sample"] == 8000
+        assert updates, "delivered units must be terminated as unknown first"
+        assert all(
+            update["status"] == "unknown" and update["speaker"] is None
+            for update in updates[-1]["updates"]
+        )
+
+        # The degraded transition happens at most once per session.
+        socket.send_json(_finalize_request("final_deg"))
+        tail = _collect_until(socket, "speechrail.diarization.finalized")
+        assert sum(1 for e in tail if e["type"] == "speechrail.diarization.status") == 0
+        final = tail[-1]
+        assert final["status"] == "degraded"
+        assert final["reason"] == "diarization_invalid_output"

@@ -21,7 +21,7 @@ graph TD
     C --> D[📑 4. OpenAPI 3.1 机器可读定义<br/>../../contracts/openapi.yaml]
 ```
 
-1. **[🔌 客户端与 SDK 快速接入 (integrations.md)](integrations.md)**：包含 QwenPaw、Sona 会议助理、Hermes Agent、官方 OpenAI Python SDK 与 cURL 的实战示例。
+1. **[🔌 客户端与 SDK 快速接入 (integrations.md)](integrations.md)**：包含 [Sona](https://github.com/hrygo/sona) 会议助理、Open-WebUI、LiveKit / Pipecat 实时智能体、OpenClaw、官方 OpenAI Python SDK 与 cURL 的实战示例。
 2. **[📡 公共 API 契约手册 (api-contract.md)](api-contract.md)**：包含 ASR 文件转写、TTS 语音合成、异步 Jobs、音色目录及标准错误 Envelope 的详细规范。
 3. **[⚡ OpenAI Realtime 协议规范](../../contracts/realtime-openai.md)**：包含 `/v1/realtime` WebSocket 全双工流式 ASR/TTS、Server VAD 与打断机制规范。
 4. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。

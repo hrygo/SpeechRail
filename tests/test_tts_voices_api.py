@@ -273,6 +273,56 @@ def test_custom_voice_lifecycle_create_list_and_delete() -> None:
     assert "test_zhixing_voice" not in after_ids
 
 
+def test_custom_voice_accepts_and_returns_explicit_seed() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+    voice_id = "test_seeded_voice"
+    try:
+        response = client.post(
+            "/v1/voices",
+            json={
+                "name": "固定种子音色",
+                "instruction": "自然清晰的中文女声。",
+                "id": voice_id,
+                "seed": 12345,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["seed"] == 12345
+        listed = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
+        assert listed[voice_id]["seed"] == 12345
+    finally:
+        client.delete(f"/v1/voices/{voice_id}")
+
+
+@pytest.mark.parametrize("seed", [-1, 2**32, True, "12345"])
+def test_custom_voice_rejects_invalid_seed(seed: object) -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/voices",
+        json={
+            "name": "非法种子音色",
+            "instruction": "自然清晰的中文女声。",
+            "id": f"test_invalid_seed_{str(seed).lower()}",
+            "seed": seed,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_seed"
+
+
 @pytest.mark.parametrize("reserved_id", ["serena", "default", "alloy"])
 def test_custom_voice_cannot_override_canonical_or_alias_ids(reserved_id: str) -> None:
     client = TestClient(

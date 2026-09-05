@@ -271,6 +271,93 @@ def transcription_completed_extension(
     }
 
 
+def diarization_update_item(
+    *,
+    segment_uid: str,
+    revision: int,
+    status: str,
+    speaker: str | None,
+    coverage_ratio: float,
+    overlap_ratio: float,
+    candidates: tuple[tuple[str, float], ...],
+) -> dict[str, object]:
+    """Render one ``speechrail.diarization.update`` entry."""
+    return {
+        "segment_uid": segment_uid,
+        "revision": revision,
+        "status": status,
+        "speaker": speaker,
+        "coverage_ratio": coverage_ratio,
+        "overlap_ratio": overlap_ratio,
+        "candidates": [
+            {"speaker": candidate_speaker, "support_ratio": support}
+            for candidate_speaker, support in candidates
+        ],
+    }
+
+
+def diarization_update_event(
+    *,
+    group_generation: str | None,
+    stable_through_sample: int,
+    updates: list[dict[str, object]],
+    speaker_links: list[dict[str, object]],
+) -> dict[str, object]:
+    """Render the ``speechrail.diarization.update`` event."""
+    return {
+        "type": "speechrail.diarization.update",
+        "group_generation": group_generation,
+        "stable_through_sample": stable_through_sample,
+        "updates": updates,
+        "speaker_links": speaker_links,
+    }
+
+
+def diarization_status_event(
+    *,
+    reason: str,
+    since_sample: int,
+) -> dict[str, object]:
+    """Render the one-shot ``speechrail.diarization.status`` degraded notice."""
+    return {
+        "type": "speechrail.diarization.status",
+        "status": "degraded",
+        "reason": reason,
+        "since_sample": since_sample,
+    }
+
+
+def diarization_finalized_event(
+    *,
+    finalization_id: str,
+    through_sample: int,
+    stable_through_sample: int,
+    status: str,
+    reason: str | None,
+    last_update_sequence: int,
+) -> dict[str, object]:
+    """Render the terminal ``speechrail.diarization.finalized`` barrier event."""
+    return {
+        "type": "speechrail.diarization.finalized",
+        "finalization_id": finalization_id,
+        "through_sample": through_sample,
+        "stable_through_sample": stable_through_sample,
+        "status": status,
+        "reason": reason,
+        "last_update_sequence": last_update_sequence,
+    }
+
+
+def parse_finalize_request(event: dict[str, Any]) -> str:
+    """Validate ``speechrail.diarization.finalize`` and return its request id."""
+    finalization_id = event.get("finalization_id")
+    if not isinstance(finalization_id, str) or not 1 <= len(finalization_id) <= 128:
+        raise RealtimeAdapterError(
+            "invalid_argument", "finalization_id must be a 1-128 character string"
+        )
+    return finalization_id
+
+
 def transcription_segment(
     *,
     session_id: str,

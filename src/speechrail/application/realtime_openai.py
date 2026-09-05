@@ -26,9 +26,14 @@ from speechrail.compatibility.openai_realtime import (
     conversation_item_created,
     conversation_text_item_created,
     diarization_contract,
+    diarization_finalized_event,
+    diarization_status_event,
+    diarization_update_event,
+    diarization_update_item,
     error_event,
     input_audio_buffer_cleared,
     input_audio_buffer_committed,
+    parse_finalize_request,
     parse_text_item,
     reject_unsupported,
     response_audio_delta,
@@ -52,13 +57,21 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
-from speechrail.domain.diarization_timeline import Timeline, build_alignment_units
+from speechrail.domain.diarization_timeline import (
+    AttributionLedger,
+    AttributionResult,
+    AttributionUnit,
+    Timeline,
+    build_alignment_units,
+)
 from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
-SendEvent = Callable[[dict[str, object]], Awaitable[None]]
+SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
+
+_MAX_UPDATES_PER_EVENT = 256
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +135,17 @@ class OpenAIRealtimeSession:
         self._item_start_sample = 0
         self._item_end_sample = 0
         self._extensions: tuple[str, ...] = ()
+        # SPK-E2E-1 finalization state: attribution bookkeeping lives in the
+        # ledger, phase guards the append barrier, and the degraded fields are
+        # first-wins so a flapping stream can only degrade the session once.
+        self._ledger: AttributionLedger | None = None
+        self._diarization_phase = "active"
+        self._degraded_reason: str | None = None
+        self._status_sent = False
+        self._finalization_id: str | None = None
+        self._finalized_payload: dict[str, object] | None = None
+        self._last_update_sequence = 0
+        self._stable_through_at_degradation = 0
         self._current_item_id = f"item_{self._session_id}_input"
         self._config: dict[str, Any] = {
             "model": self._initial_model,
@@ -161,6 +185,8 @@ class OpenAIRealtimeSession:
             await self._append_audio(event)
         elif event_type == "input_audio_buffer.commit":
             await self._commit_audio()
+        elif event_type == "speechrail.diarization.finalize":
+            await self._handle_finalize(event)
         elif event_type == "input_audio_buffer.clear":
             await self._clear_audio()
         elif event_type == "conversation.item.create":
@@ -229,6 +255,7 @@ class OpenAIRealtimeSession:
                     "diarization extensions require enabled diarization",
                 )
             self._extensions = requested_extensions
+            self._ledger = AttributionLedger()
         configured_voice = config.get("voice")
         if isinstance(configured_voice, str):
             self._require_voice_available(configured_voice)
@@ -282,6 +309,11 @@ class OpenAIRealtimeSession:
         return event
 
     async def _append_audio(self, event: dict[str, Any]) -> None:
+        if self._diarization_phase != "active":
+            raise RealtimeAdapterError(
+                "invalid_state",
+                "diarization finalization has started; audio is no longer accepted",
+            )
         audio = validate_append(
             event,
             max_frame_bytes=self._settings.max_realtime_frame_bytes,
@@ -558,25 +590,31 @@ class OpenAIRealtimeSession:
                 transcript=transcript,
                 audio_start_sample=self._item_start_sample,
                 audio_end_sample=max(self._item_end_sample, self._item_start_sample),
-                attribution_units=self._attribution_units(transcript, ()),
+                attribution_units=self._render_units(
+                    self._build_units(transcript, ())
+                ),
             )
         return transcription_completed(session_id=self._session_id, transcript=transcript)
 
-    def _attribution_units(
+    def _build_units(
         self, canonical: str, segments: tuple[TranscriptSegment, ...]
-    ) -> list[dict[str, object]]:
+    ) -> tuple[AttributionUnit, ...]:
         """Build immutable attribution units over the canonical transcript.
 
         Align segments carry item-local millisecond bounds; they are ITN'd
         with the same rule as the canonical text and mapped onto canonical
-        code point ranges.  Any inconsistency degrades the whole item to one
-        ``timing_quality="unavailable"`` unit instead of re-timing words.
+        code point ranges, then lifted into session-global samples exactly
+        once.  Any inconsistency — or an already degraded session — degrades
+        the whole item to one ``timing_quality="unavailable"`` unit instead
+        of re-timing words.
         """
         item_start = self._item_start_sample
         item_end = max(self._item_end_sample, self._item_start_sample)
         item_samples = item_end - item_start
         if not canonical:
-            return []
+            return ()
+        if self._degraded_reason is not None:
+            return (self._unavailable_unit(canonical, item_start, item_end),)
         parts: list[str] = []
         words: list[tuple[int, int, int, int]] = []
         cursor = 0
@@ -593,27 +631,215 @@ class OpenAIRealtimeSession:
             canonical, candidate, tuple(words), item_samples=item_samples
         )
         if units is None:
-            return [
-                {
-                    "segment_uid": f"seg_{uuid4().hex[:12]}",
-                    "text_start": 0,
-                    "text_end": len(canonical),
-                    "audio_start_sample": item_start,
-                    "audio_end_sample": item_end,
-                    "timing_quality": "unavailable",
-                }
-            ]
+            return (self._unavailable_unit(canonical, item_start, item_end),)
+        return tuple(
+            AttributionUnit(
+                segment_uid=f"seg_{uuid4().hex[:12]}",
+                text_start=unit.text_start,
+                text_end=unit.text_end,
+                start_sample=item_start + unit.start_sample,
+                end_sample=item_start + unit.end_sample,
+                timing_quality="aligned",
+            )
+            for unit in units
+        )
+
+    def _unavailable_unit(self, canonical: str, item_start: int, item_end: int) -> AttributionUnit:
+        return AttributionUnit(
+            segment_uid=f"seg_{uuid4().hex[:12]}",
+            text_start=0,
+            text_end=len(canonical),
+            start_sample=item_start,
+            end_sample=item_end,
+            timing_quality="unavailable",
+        )
+
+    @staticmethod
+    def _render_units(units: tuple[AttributionUnit, ...]) -> list[dict[str, object]]:
         return [
             {
-                "segment_uid": f"seg_{uuid4().hex[:12]}",
+                "segment_uid": unit.segment_uid,
                 "text_start": unit.text_start,
                 "text_end": unit.text_end,
-                "audio_start_sample": item_start + unit.start_sample,
-                "audio_end_sample": item_start + unit.end_sample,
-                "timing_quality": "aligned",
+                "audio_start_sample": unit.start_sample,
+                "audio_end_sample": unit.end_sample,
+                "timing_quality": unit.timing_quality,
             }
             for unit in units
         ]
+
+    async def _register_units(self, units: tuple[AttributionUnit, ...]) -> None:
+        """Feed delivered units to the ledger, then fold fresh activities."""
+        if self._ledger is None or not units:
+            return
+        try:
+            for unit in units:
+                self._ledger.register(unit)
+        except DiarizationError as exc:
+            await self._handle_degradation(exc)
+            return
+        if self._degraded_reason is not None:
+            # Degraded attribution keeps delivering text: new units are
+            # terminated as unknown instead of being silently dropped.
+            await self._send_diarization_updates(
+                tuple(self._unknown_result(unit) for unit in units)
+            )
+            return
+        await self._fold_stream_activities()
+
+    async def _fold_stream_activities(self) -> None:
+        """Query the continuous stream and emit changed attribution revisions."""
+        if (
+            self._ledger is None
+            or self._diarization is None
+            or not self._diarization.is_continuous
+        ):
+            return
+        try:
+            snapshot = await self._diarization.activities(self._timeline.accepted_samples)
+        except DiarizationError as exc:
+            await self._handle_degradation(exc)
+            return
+        if snapshot is not None:
+            await self._send_diarization_updates(self._ledger.apply_activity(snapshot))
+
+    async def _send_diarization_updates(self, results: tuple[AttributionResult, ...]) -> None:
+        """Emit attribution revisions in bounded batches on one serializer."""
+        if self._ledger is None or not results:
+            return
+        items = [
+            diarization_update_item(
+                segment_uid=result.segment_uid,
+                revision=result.revision,
+                status=result.status,
+                speaker=result.speaker,
+                coverage_ratio=result.coverage_ratio,
+                overlap_ratio=result.overlap_ratio,
+                candidates=result.candidates,
+            )
+            for result in results
+        ]
+        for start in range(0, len(items), _MAX_UPDATES_PER_EVENT):
+            chunk = items[start : start + _MAX_UPDATES_PER_EVENT]
+            sequence = await self._send(
+                diarization_update_event(
+                    group_generation=None,
+                    stable_through_sample=self._ledger.stable_through_sample,
+                    updates=chunk,
+                    speaker_links=[],
+                )
+            )
+            if sequence is not None:
+                self._last_update_sequence = sequence
+
+    @staticmethod
+    def _unknown_result(unit: AttributionUnit) -> AttributionResult:
+        return AttributionResult(
+            segment_uid=unit.segment_uid,
+            revision=1,
+            status="unknown",
+            speaker=None,
+            coverage_ratio=0.0,
+            overlap_ratio=0.0,
+            candidates=(),
+        )
+
+    def _mark_degraded(self, reason: str) -> None:
+        if self._degraded_reason is None:
+            self._degraded_reason = reason
+
+    async def _handle_degradation(self, exc: DiarizationError) -> None:
+        """First-wins degradation: freeze units unknown, then one status event."""
+        reason = (
+            exc.code
+            if exc.code in {"diarization_overloaded", "diarization_invalid_output"}
+            else "diarization_invalid_output"
+        )
+        through = self._timeline.accepted_samples
+        if self._ledger is not None and self._degraded_reason is None:
+            self._stable_through_at_degradation = self._ledger.stable_through_sample
+        self._mark_degraded(reason)
+        if self._ledger is not None:
+            await self._send_diarization_updates(self._ledger.freeze(through))
+        if not self._status_sent:
+            self._status_sent = True
+            await self._send(diarization_status_event(reason=reason, since_sample=through))
+
+    async def _handle_finalize(self, event: dict[str, Any]) -> None:
+        if self._ledger is None:
+            raise RealtimeAdapterError(
+                "unsupported_operation",
+                f"{SPEECHRAIL_DIARIZATION_V1} is not negotiated on this session",
+            )
+        finalization_id = parse_finalize_request(event)
+        if self._diarization_phase == "finalized":
+            if self._finalization_id != finalization_id or self._finalized_payload is None:
+                raise RealtimeAdapterError(
+                    "invalid_state",
+                    "session already finalized with a different finalization_id",
+                )
+            await self._send(dict(self._finalized_payload))
+            return
+        if self._diarization_phase == "draining":
+            if self._finalization_id != finalization_id:
+                raise RealtimeAdapterError(
+                    "invalid_state", "another finalization is already in progress"
+                )
+            return
+        self._finalization_id = finalization_id
+        self._diarization_phase = "draining"
+        await self._drain_and_finalize()
+
+    async def _drain_and_finalize(self) -> None:
+        """Drain the native stream under a bounded deadline, then finalize."""
+        deadline = self._settings.realtime_diarization_drain_deadline_seconds
+        assert self._finalization_id is not None
+        try:
+            async with asyncio.timeout(deadline):
+                if self._diarization is not None and self._diarization.is_continuous:
+                    try:
+                        snapshot = await self._diarization.finish_stream(
+                            self._timeline.accepted_samples
+                        )
+                    except DiarizationError as exc:
+                        await self._handle_degradation(exc)
+                    else:
+                        if snapshot is not None and self._ledger is not None:
+                            await self._send_diarization_updates(
+                                self._ledger.apply_activity(snapshot)
+                            )
+                if self._ledger is not None and self._degraded_reason is None:
+                    await self._send_diarization_updates(
+                        self._ledger.freeze(self._timeline.accepted_samples)
+                    )
+        except TimeoutError:
+            through = self._timeline.accepted_samples
+            if self._ledger is not None and self._degraded_reason is None:
+                self._stable_through_at_degradation = self._ledger.stable_through_sample
+            self._mark_degraded("finalization_timeout")
+            if self._ledger is not None:
+                await self._send_diarization_updates(self._ledger.freeze(through))
+            if not self._status_sent:
+                self._status_sent = True
+                await self._send(
+                    diarization_status_event(reason="finalization_timeout", since_sample=through)
+                )
+        through = self._timeline.accepted_samples
+        if self._degraded_reason is None:
+            stable_through = through
+        else:
+            stable_through = min(through, self._stable_through_at_degradation)
+        payload = diarization_finalized_event(
+            finalization_id=self._finalization_id,
+            through_sample=through,
+            stable_through_sample=stable_through,
+            status="complete" if self._degraded_reason is None else "degraded",
+            reason=self._degraded_reason,
+            last_update_sequence=self._last_update_sequence,
+        )
+        self._finalized_payload = payload
+        self._diarization_phase = "finalized"
+        await self._send(payload)
 
     async def _drain_asr_events(self) -> None:
         if self._asr is None:
@@ -650,6 +876,7 @@ class OpenAIRealtimeSession:
                                 item_id=self._current_item_id,
                             )
                         )
+                        units = self._build_units(norm_text, event.segments)
                         await self._send(
                             transcription_completed_extension(
                                 item_id=self._current_item_id,
@@ -658,11 +885,10 @@ class OpenAIRealtimeSession:
                                 audio_end_sample=max(
                                     self._item_end_sample, self._item_start_sample
                                 ),
-                                attribution_units=self._attribution_units(
-                                    norm_text, event.segments
-                                ),
+                                attribution_units=self._render_units(units),
                             )
                         )
+                        await self._register_units(units)
                         continue
                     await self._send(
                         conversation_item_created(

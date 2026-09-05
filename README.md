@@ -223,15 +223,16 @@ curl http://127.0.0.1:8201/v1/audio/speech \
 
 ---
 
-### 4. 主流桌面 AI 客户端接入表
+### 4. 主流 Agent 与桌面 AI 客户端接入表
 
-| 客户端软件 | Base URL (接口地址) | API Key | ASR 模型 | TTS 模型 |
+| 客户端 / Agent 平台 | 接口地址 (Base URL / Endpoint) | API Key | 协议类型 | 推荐接入模型与能力 |
 |---|---|---|---|---|
-| **Cherry Studio** | `http://127.0.0.1:8201/v1` | `local` | `whisper-1` | `tts-1` |
-| **NextChat** | `http://127.0.0.1:8201/v1` | `local` | `whisper-1` | `tts-1` |
-| **Chatbox** | `http://127.0.0.1:8201/v1` | `local` | `whisper-1` | `tts-1` |
-| **Dify / FastGPT** | `http://127.0.0.1:8201/v1` | `local` | `whisper-1` | `tts-1` |
-| **Sona / QwenPaw / Hermes** | `http://127.0.0.1:8201/v1` | `local` | `whisper-1` | `tts-1` |
+| **[Sona](https://github.com/hrygo/sona)** | `ws://127.0.0.1:8201/v1/realtime` | `local` | WebSocket | 全双工流式 ASR + VAD + 声纹分离 + 流式 TTS |
+| **[Open-WebUI](https://github.com/open-webui/open-webui)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (语音听写) / `tts-1` (实时语音通话) |
+| **[LiveKit](https://github.com/livekit/agents) / [Pipecat](https://github.com/pipecat-ai/pipecat)** | `ws://.../v1/realtime` 或 `/v1` | `local` | WS / REST | 实时全双工多模态 Voice Agent 管道与流水线 |
+| **[Cherry Studio](https://github.com/Kang-k/Cherry-Studio)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (语音输入) / `tts-1` (文字朗读) |
+| **[OpenClaw](https://github.com/openclaw/openclaw)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (语音指令) / `tts-1` (状态播报) |
+| **[Dify](https://github.com/langgenius/dify) / FastGPT** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` / `tts-1` (Agentic 知识库工作流) |
 
 *注：以上为本机默认免密调用示例。若跨局域网接入，请将 `127.0.0.1` 替换为目标 Mac 内网 IP，并将 `local` 替换为您在服务端配置的 `SPEECHRAIL_API_KEY`。*
 
@@ -256,7 +257,23 @@ SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适�
 
 ### 2. 9 种跨档系统内置音色
 
-系统内置 9 种经过声学微调的优质音色（同时完美支持 OpenAI 官方音色别名如 `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu` 等）：
+SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色角色（接口与角色 ID 跨档保持一致，原生兼容 OpenAI 官方别名如 `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu` 等）。
+
+但请注意：**同一角色在不同档位下的底层生成机制不同**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动，而 `quality` 档由 **VoiceDesign (1.7B)** 驱动。用户可根据实际业务需要，在“绝对声线稳定性”与“丰富情感表现力”之间做针对性选择：
+
+#### ⚖️ VoiceDesign 与 CustomVoice 核心差异与选型建议
+
+| 比较维度 | 🟡 / 🟢 `balanced` / `light` (CustomVoice) | 🟣 `quality` (VoiceDesign) | 选型与适用场景建议 |
+|---|---|---|---|
+| **底层实现** | 固化 Speaker Embedding 权重 (物理常量) | 自然语言 Instruction 与声学提示驱动拟合 | CustomVoice 结构固化；VoiceDesign 算法拟合 |
+| **声线稳定性 (Identity)** | 🔒 **极高 (近 100% 同一人一致性)**<br>跨不同长文本、不同语境音色完全恒定 | 🎨 **良好 (相同输入 100% 确定性复现)**<br>跨极端差异文本时偶有微小情绪/声调发散 | 长篇朗读、新闻播报、严肃客服选 **CustomVoice**；<br>允许或需要自然语调起伏选 **VoiceDesign** |
+| **情感张力与表现力** | 规范、平稳、标准，情绪起伏小 | 丰富、生动、富有自然呼吸感与戏剧表现力 | 故事旁白、游戏 NPC、虚拟陪伴智能体首选 **VoiceDesign** |
+| **开放自定义扩展** | 仅限 9 个固定角色，不支持自由创造 | 🌟 **支持自然语言 Prompt 任意创造新声线** | 需要探索或定制独一无二的新角色时必选 **`quality`** |
+| **硬件内存与吞吐** | 极轻量 (~4.4-6.0GB 峰值)，推理极速 | 1.7B 高精度 (~6.9GB 峰值)，算力开销略高 | 8GB/16GB Mac 推荐前者；32GB+ 旗舰 Mac 畅享后者 |
+
+> 深入对比数据与声学嵌入实测详见专题架构文档：[VoiceDesign 能力优势与音色稳定性边界](docs/architecture/voicedesign-capability-and-stability.md)。
+
+#### 🎙️ 系统内置 9 大跨档官方角色清单
 
 | 音色 ID (`voice`) | 角色名称 | 声音画像与特点 | 最佳适用场景 |
 |---|---|---|---|

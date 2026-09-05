@@ -140,6 +140,7 @@ Authorization: Bearer <TOKEN>
       "name": "温柔中文女声",
       "description": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
       "instruction": "温暖柔和的年轻中文女声，音色自然亲切，语气平和，语速适中。",
+      "seed": 42,
       "aliases": ["alloy", "ash", "coral", "default", "echo", "marin", "onyx", "sage", "warm"],
       "is_default": true,
       "is_system": true,
@@ -153,6 +154,7 @@ Authorization: Bearer <TOKEN>
       "name": "知性姐姐",
       "description": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。",
       "instruction": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。",
+      "seed": 12345,
       "aliases": [],
       "is_default": false,
       "is_system": false,
@@ -174,15 +176,17 @@ Authorization: Bearer <TOKEN>
 
 {
   "name": "知性姐姐",
-  "instruction": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。"
+  "instruction": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。",
+  "seed": 12345
 }
 ```
 **请求参数**：
 - `name` (string, 必填)：音色友好展示名称。
 - `instruction` (string, 必填)：音色特征自然语言描述（人设、年龄、音质、情绪、语速等）。
 - `id` (string, 可选)：自定义音色标识符。若不提供则自动生成 `custom_<timestamp>_<rand>`。
+- `seed` (integer, 可选)：`0`–`4294967295` 的确定性采样种子；传入后固定该 recipe，未传入则由服务生成并持久化。
 
-**持久化机制**：创建成功的音色会自动分配一个固定随机种子（Seed），并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。切换到 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回 `quality` 后恢复。
+**持久化机制**：创建成功的音色会使用请求提供的 Seed，或由服务自动分配固定 Seed，并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。切换到 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回 `quality` 后恢复。
 
 ### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
 ```http

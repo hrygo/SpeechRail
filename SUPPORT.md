@@ -8,7 +8,7 @@
 
 * **[快速上手与常见配置](README.md)**
 * **[架构设计与边界说明](docs/architecture/architecture.md)**
-* **[客户端与下游生态接入 (QwenPaw / Sona / OpenAI SDK)](docs/users/integrations.md)**
+* **[客户端与下游生态接入 (Sona / Open-WebUI / LiveKit / OpenAI SDK)](docs/users/integrations.md)**
 * **[macOS 服务常驻与 LaunchAgent 运维 Runbook](docs/operations/operations-runbook.md)**
 * **[测试验收与基准数据](docs/developers/testing-acceptance.md)**
 

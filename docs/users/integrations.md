@@ -93,29 +93,60 @@ main();
 
 ---
 
-## 3. 常见应用接入配置
+## 3. 主流 Agent 与客户端接入实战
 
-### 3.1 QwenPaw 桌面智能体
-在 QwenPaw 的语音设置页面配置：
-- **Provider Type**：`Whisper API` / `whisper_api`
-- **Base URL**：`http://127.0.0.1:8201/v1`
-- **Model**：`speechrail/qwen3-asr-1.7b` 或 `whisper-1`
-- **API Key**：留空或任意占位字符
-
-> [!IMPORTANT]
-> 修改配置后需**完全重启 QwenPaw** 以使新 Base URL 生效；无需修改聊天模型的 Endpoint。
-
-### 3.2 Sona (Voice-Realtime 会议助理)
-Sona 通过 `/v1/realtime` 端点连接 SpeechRail：
+### 3.1 [Sona (Voice-Realtime 会议助理)](https://github.com/hrygo/sona)
+Sona 是专为本地高私密环境打造的实时双工会议助理，通过 `/v1/realtime` 端点连接 SpeechRail：
 - **WebSocket URL**：`ws://127.0.0.1:8201/v1/realtime`
-- **能力特性**：流式全双工 ASR、Server VAD 自动断句、Sortformer 匿名说话人分离、流式逐句 TTS。
+- **核心能力**：毫秒级全双工流式 ASR、Server VAD 自动断句、Sortformer 匿名说话人时序分离、流式逐句 TTS。
+- **架构权责**：Sona 负责麦克风音频采集、会话状态机、UI 字幕渲染与 LLM 业务编排；SpeechRail 负责本地模型推理与物理内存隔离治理。
 
-### 3.3 Hermes Agent
-在 Hermes 的独立 STT 配置文件中配置：
-```dotenv
-STT_OPENAI_BASE_URL=http://127.0.0.1:8201/v1
-STT_OPENAI_MODEL=speechrail/qwen3-asr-1.7b
+### 3.2 [Open-WebUI 个人 AI 工作台](https://github.com/open-webui/open-webui)
+在 Open-WebUI 的管理员设置（Admin Settings -> Audio）中配置：
+- **STT Settings**：
+  - **STT Engine**：`OpenAI`
+  - **OpenAI Base URL**：`http://127.0.0.1:8201/v1`
+  - **STT Model**：`whisper-1`
+- **TTS Settings**：
+  - **TTS Engine**：`OpenAI`
+  - **OpenAI Base URL**：`http://127.0.0.1:8201/v1`
+  - **TTS Model**：`tts-1`
+  - **TTS Voice**：`serena` (或其他系统内置音色)
+
+*配置后，所有 Web 端的语音听写与实时语音通话 (Voice Call) 将 100% 由本地 Apple Silicon 推理，零云端 API 依赖。*
+
+### 3.3 [LiveKit Agents / Pipecat 实时语音智能体](https://github.com/livekit/agents)
+在基于 LiveKit Agents 或 [Pipecat](https://github.com/pipecat-ai/pipecat) 构建 2026 年多模态全双工智能体时，直接通过 OpenAI 兼容适配器接入：
+```python
+# LiveKit Agents OpenAI 语音插件示例
+from livekit.plugins import openai
+
+stt = openai.STT(
+    base_url="http://127.0.0.1:8201/v1",
+    api_key="local",
+    model="whisper-1",
+)
+tts = openai.TTS(
+    base_url="http://127.0.0.1:8201/v1",
+    api_key="local",
+    model="tts-1",
+    voice="serena",
+)
 ```
+
+### 3.4 [OpenClaw 本地优先个人助手](https://github.com/openclaw/openclaw)
+在 OpenClaw 的本地配置文件中将语音管道指向 SpeechRail：
+```dotenv
+OPENCLAW_STT_BASE_URL=http://127.0.0.1:8201/v1
+OPENCLAW_STT_MODEL=whisper-1
+OPENCLAW_TTS_BASE_URL=http://127.0.0.1:8201/v1
+OPENCLAW_TTS_MODEL=tts-1
+OPENCLAW_TTS_VOICE=vivian
+```
+
+### 3.5 [Cherry Studio](https://github.com/Kang-k/Cherry-Studio) 与 [Dify](https://github.com/langgenius/dify)
+- **Cherry Studio**：在「设置 -> 语音」中选择 OpenAI 兼容服务，填入 Base URL `http://127.0.0.1:8201/v1`，即可一键启用本地离线语音听写与朗读。
+- **Dify / FastGPT**：在应用工作流中添加「语音转文本」或「文本转语音」节点，API Endpoint 填写 `http://127.0.0.1:8201/v1`，API Key 填入 `local`。
 
 ---
 

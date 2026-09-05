@@ -52,13 +52,14 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         sequence = 0
         disconnected = False
 
-        async def send_event(event: dict[str, object]) -> None:
+        async def send_event(event: dict[str, object]) -> int | None:
+            """Send one event; return its sequence, or None when disconnected."""
             nonlocal sequence, disconnected
             if disconnected:
-                return
+                return None
             async with send_lock:
                 if disconnected:
-                    return
+                    return None
                 sequence += 1
                 payload = dict(event)
                 payload["event_id"] = f"event_{uuid4().hex}"
@@ -68,6 +69,8 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     await websocket.send_json(payload)
                 except (WebSocketDisconnect, RuntimeError):
                     disconnected = True
+                    return None
+                return sequence
 
         registered_asr = frozenset({settings.model_id, *settings.compatibility_model_ids})
         registered_tts = frozenset({settings.tts_model_id})

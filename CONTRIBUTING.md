@@ -17,7 +17,7 @@ SpeechRail 是一个面向本机应用的独立、高性能、隐私优先、Ope
    - 用户音频与转写文本仅在内存中按需流转，不持久化保存源音频。
 2. **OpenAI 协议兼容 (API Conformance)**：
    - 对外公开的 REST API 与 Realtime WebSocket 协议必须 100% 保持与 OpenAI 官方契约一致；
-   - 不向外部公开协议中注入私有专有字段，保持对标准 OpenAI SDK（Python, Node.js 等）及生态应用（QwenPaw、Sona）的无缝兼容。
+   - 不向外部公开协议中注入私有专有字段，保持对标准 OpenAI SDK（Python, Node.js 等）及生态应用（[Sona](https://github.com/hrygo/sona)、Open-WebUI、LiveKit 等）的无缝兼容。
 3. **单机单人与低开销 (Zero Bloat & High Efficiency)**：
    - 优先通过进程隔离、显存池治理、零拷贝 IPC 与轻量状态机解决单机并发保护；
    - 避免为单人本机场景引入过度设计的分布式组件或复杂的平台化基础设施。

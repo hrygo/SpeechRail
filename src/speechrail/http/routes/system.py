@@ -40,6 +40,7 @@ def _load_clone_prompts() -> list[dict[str, Any]]:
 
 
 _CACHED_CLONE_PROMPTS: list[dict[str, Any]] = _load_clone_prompts()
+_MAX_VOICE_SEED = 2**32 - 1
 
 
 def _model_entry(
@@ -95,6 +96,7 @@ def _voice_entry(
         "name": profile.name or profile.id,
         "description": profile.description,
         "instruction": profile.instruction,
+        "seed": profile.seed,
         "aliases": sorted(
             alias for alias, preset in VOICE_ALIASES.items() if preset == profile.id
         ),
@@ -242,6 +244,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         name = body.get("name")
         instruction = body.get("instruction")
         voice_id = body.get("id")
+        seed = body.get("seed")
         if not isinstance(name, str) or not name.strip():
             return error_response(
                 400,
@@ -256,6 +259,15 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "invalid_instruction",
                 "Voice instruction is required",
             )
+        if seed is not None and (
+            type(seed) is not int or seed < 0 or seed > _MAX_VOICE_SEED
+        ):
+            return error_response(
+                400,
+                request_id,
+                "invalid_seed",
+                f"Voice seed must be an integer between 0 and {_MAX_VOICE_SEED}",
+            )
         vid_str = (
             voice_id.strip().lower()
             if isinstance(voice_id, str) and voice_id.strip()
@@ -266,6 +278,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 name=name.strip(),
                 instruction=instruction.strip(),
                 voice_id=vid_str,
+                seed=seed,
             )
             return JSONResponse(
                 status_code=201,

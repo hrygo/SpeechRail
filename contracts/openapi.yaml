@@ -574,6 +574,11 @@ components:
           type: string
         instruction:
           type: string
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional deterministic sampling seed for reproducible voice recipes.
         aliases:
           type: array
           description: OpenAI standard and legacy SpeechRail voice names accepted for this preset.
@@ -670,6 +675,11 @@ components:
         id:
           type: string
           description: Optional voice identifier. If omitted, auto-generated.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional deterministic sampling seed for a reusable voice recipe.
     VoiceList:
       type: object
       required: [object, data]
