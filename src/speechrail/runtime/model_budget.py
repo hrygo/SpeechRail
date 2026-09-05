@@ -20,14 +20,32 @@ MIN_SERVICE_BUDGET_BYTES = 4 * GIB
 class ComponentFootprint:
     """Estimated runtime footprint of loaded active components."""
 
-    asr_bytes: int
-    tts_bytes: int = 0
-    diarization_bytes: int = 0
+    asr_bytes: int | None
+    tts_bytes: int | None = 0
+    diarization_bytes: int | None = 0
+    service_bytes: int = 0
     device: Literal["mps", "cpu"] = "mps"
 
+    def __post_init__(self) -> None:
+        values = (
+            self.asr_bytes,
+            self.tts_bytes,
+            self.diarization_bytes,
+            self.service_bytes,
+        )
+        if any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+            for value in values
+        ):
+            raise ValueError("component footprint values must be non-negative integers or null")
+
     @property
-    def total_bytes(self) -> int:
-        return self.asr_bytes + self.tts_bytes + self.diarization_bytes
+    def total_bytes(self) -> int | None:
+        values = (self.asr_bytes, self.tts_bytes, self.diarization_bytes)
+        if any(value is None for value in values):
+            return None
+        return self.service_bytes + sum(value for value in values if value is not None)
 
 
 def budget_for_hardware(total_bytes: int) -> int:
@@ -50,10 +68,9 @@ def can_overlap_heavy_compute(
 
     Returns (can_overlap, reason).
     """
-    if footprint.tts_bytes == 0:
-        return True, "TTS is inactive; ASR operates within budget"
-
     total_required = footprint.total_bytes
+    if total_required is None:
+        return False, "Enabled component footprint is unknown; serializing workloads"
     if total_required > budget_bytes:
         return (
             False,
@@ -70,7 +87,7 @@ def can_overlap_heavy_compute(
 
 
 def detect_system_memory_bytes() -> int:
-    """Detect total system physical memory in bytes, falling back to 8 GiB."""
+    """Detect total system physical memory in bytes or fail closed."""
     if sys.platform == "darwin":
         try:
             import subprocess
@@ -85,10 +102,10 @@ def detect_system_memory_bytes() -> int:
         page_size = os.sysconf("SC_PAGE_SIZE")
         if pages > 0 and page_size > 0:
             return pages * page_size
-    except (AttributeError, ValueError):
+    except (AttributeError, OSError, ValueError):
         pass
 
-    return MIN_SYSTEM_MEMORY_BYTES
+    raise RuntimeError("system physical memory is unavailable")
 
 
 __all__ = [

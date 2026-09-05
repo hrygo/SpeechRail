@@ -37,11 +37,18 @@ from speechrail.observability.metrics import Metrics
 from speechrail.runtime.admission import AdmissionQueue
 from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRepository
+from speechrail.runtime.model_budget import (
+    ComponentFootprint,
+    budget_for_hardware,
+    can_overlap_heavy_compute,
+    detect_system_memory_bytes,
+)
 from speechrail.runtime.resource_governor import ResourceGovernor
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
+_SERVICE_OVERHEAD_BYTES = 512 * 1024**2
 
 
 def _package_root() -> Path:
@@ -71,6 +78,34 @@ def component_ready(component: object | None) -> bool:
         return False
     state = getattr(component, "ready", None)
     return True if state is None else bool(state)
+
+
+def _heavy_overlap_policy(
+    settings: Settings,
+    *,
+    asr_enabled: bool,
+    tts_enabled: bool,
+    diarization_enabled: bool,
+) -> tuple[bool, str]:
+    """使用共同预算, 未知组件占用时保持保守串行。"""
+
+    configured_limit = (
+        settings.mlx_memory_limit_mb * 1024**2
+        if settings.mlx_memory_limit_mb > 0
+        else None
+    )
+    footprint = ComponentFootprint(
+        asr_bytes=configured_limit if asr_enabled else 0,
+        tts_bytes=configured_limit if tts_enabled else 0,
+        diarization_bytes=None if diarization_enabled else 0,
+        service_bytes=_SERVICE_OVERHEAD_BYTES,
+        device=settings.device,
+    )
+    try:
+        budget = budget_for_hardware(detect_system_memory_bytes())
+    except (RuntimeError, ValueError) as exc:
+        return False, f"Unsupported hardware budget: {exc}; serializing workloads"
+    return can_overlap_heavy_compute(budget, footprint)
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,9 +314,21 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
 
     admission = AdmissionQueue(settings.max_queue_size)
     metrics = Metrics()
+    allow_heavy_overlap, policy_reason = _heavy_overlap_policy(
+        settings,
+        asr_enabled=(
+            transcribe is not None
+            or batch_transcriber is not None
+            or realtime_asr_factory is not None
+        ),
+        tts_enabled=tts_synthesizer is not None,
+        diarization_enabled=diarization_engine is not None,
+    )
     governor = ResourceGovernor(
         settings.governor_limits,
         on_reject=metrics.record_governor_rejection,
+        allow_heavy_overlap=allow_heavy_overlap,
+        policy_reason=policy_reason,
     )
     job_runner: JobRunner | None = None
     if job_repository is not None and overrides.job_processor is not None:

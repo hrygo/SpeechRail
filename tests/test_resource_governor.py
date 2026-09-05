@@ -351,7 +351,7 @@ def test_governor_queue_full_fires_rejection_metric_callback() -> None:
 
 
 def test_settings_allow_audio_seconds_beyond_one_worker_frame() -> None:
-    """逐窗 IPC 后，完整文件时长不再受单帧上限约束。"""
+    """逐窗 IPC 后, 完整文件时长不再受单帧上限约束。"""
 
     settings = Settings(max_audio_seconds=5000, qwen3_model_dir=None, qwen3_python=None)
 

@@ -70,7 +70,37 @@ def test_overlap_decision_accounts_for_diarization() -> None:
     assert decision is False
 
 
+def test_single_asr_still_must_fit_the_whole_service_budget() -> None:
+    budget = budget_for_hardware(8 * GIB)
+    footprint = ComponentFootprint(
+        asr_bytes=5 * GIB,
+        tts_bytes=0,
+        diarization_bytes=1 * GIB,
+    )
+
+    decision, reason = can_overlap_heavy_compute(budget, footprint)
+
+    assert decision is False
+    assert "exceeds" in reason.lower()
+
+
 def test_cpu_and_mps_identities_are_distinct() -> None:
     mps_fp = ComponentFootprint(asr_bytes=2 * GIB, device="mps")
     cpu_fp = ComponentFootprint(asr_bytes=2 * GIB, device="cpu")
     assert mps_fp.device != cpu_fp.device
+
+
+def test_unknown_enabled_component_forces_conservative_serialization() -> None:
+    footprint = ComponentFootprint(asr_bytes=None, tts_bytes=2 * GIB)
+
+    decision, reason = can_overlap_heavy_compute(8 * GIB, footprint)
+
+    assert decision is False
+    assert "unknown" in reason.lower()
+
+
+def test_component_footprint_rejects_negative_or_boolean_values() -> None:
+    with pytest.raises(ValueError, match="footprint"):
+        ComponentFootprint(asr_bytes=-1)
+    with pytest.raises(ValueError, match="footprint"):
+        ComponentFootprint(asr_bytes=True)  # type: ignore[arg-type]

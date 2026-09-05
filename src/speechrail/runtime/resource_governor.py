@@ -39,6 +39,8 @@ class GovernorSnapshot:
     pending_batch: int
     active_asr: int = 0
     active_tts: int = 0
+    allow_heavy_overlap: bool = True
+    policy_reason: str = "caller default"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +69,13 @@ class ResourceGovernor:
         on_reject: Callable[[WorkClass], None] | None = None,
         clock: Callable[[], float] | None = None,
         allow_heavy_overlap: bool = True,
+        policy_reason: str = "caller default",
     ) -> None:
         self._limits = limits
         self._on_reject = on_reject
         self._clock = clock or time.monotonic
         self._allow_heavy_overlap = allow_heavy_overlap
+        self._policy_reason = policy_reason
         self._condition = asyncio.Condition()
         self._ticket = 0
         self._active_realtime = 0
@@ -116,6 +120,8 @@ class ResourceGovernor:
             pending_batch=len(self._batch_waiters),
             active_asr=self._active_asr,
             active_tts=self._active_tts,
+            allow_heavy_overlap=self._allow_heavy_overlap,
+            policy_reason=self._policy_reason,
         )
 
     async def _acquire(self, work_class: WorkClass) -> None:
