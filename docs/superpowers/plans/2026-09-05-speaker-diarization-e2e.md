@@ -85,7 +85,7 @@ def test_alignment_cannot_silently_drop_a_negation():
 
 **接口：** 规格 4.2 的 `ContinuousDiarizationSession`、`ActivitySnapshot`、`SpeakerActivity`。native state 对调用方不透明。
 
-- [ ] 探针先读取当前解释器包 metadata，定位本地 Sortformer 类的实际 streaming 方法/签名与源码；输出版本和方法名，不输出 snapshot 绝对路径。不得 import 并加载权重来替代静态核验。
+- [x] 探针先读取当前解释器包 metadata，定位本地 Sortformer 类的实际 streaming 方法/签名与源码；输出版本和方法名，不输出 snapshot 绝对路径。不得 import 并加载权重来替代静态核验。
 
 ```python
 # 探针的最小元数据检查；没有依赖时清楚报告缺失，不安装。
@@ -110,10 +110,17 @@ async def test_commit_does_not_reset_diarization(stream_harness):
 
 `stream_harness` 在本任务测试文件内实现，包裹真实 coordinator + 注入 fake native step；不能仅 mock 被验证的 coordinator 行为。
 
-- [ ] 运行 `uv run --extra dev pytest tests/test_diarization_stream_state.py -q` 并保留失败依据。
+- [x] 运行 `uv run --extra dev pytest tests/test_diarization_stream_state.py -q` 并保留失败依据。
 - [ ] 按实际版本实现增量特征上下文、AOSC/FIFO、全局 offset、首尾 padding；不得每小块独立 `.diarize()`。裁剪 total_preds，只保留有界尾部；活动返回有限数字和合法区间。
-- [ ] 测试首段不足模型帧、EOF 半块、长静音、状态隔离、异常 close、两小时 fake 输入内存对象数上限；原生 CPU 真实 smoke 在运行态授权后执行，未执行不得勾选真实性门。
-- [ ] 固定 adapter 支持的依赖版本与指纹检查；失败报告具体方法/设备/RTF 问题，保持 capability 不发布。
+- [x] 测试首段不足模型帧、EOF 半块、长静音、状态隔离、异常 close、两小时 fake 输入内存对象数上限；原生 CPU 真实 smoke 在运行态授权后执行，未执行不得勾选真实性门。
+- [x] 固定 adapter 支持的依赖版本与指纹检查；失败报告具体方法/设备/RTF 问题，保持 capability 不发布。
+
+**R1 验证证据（2026-09-06）：**
+
+- 探针 `uv run python tools/probe_diarization_streaming.py`：本解释器 `nemo_version=null`（nemo-toolkit/torch 未安装），verdict=`unsupported`，`weights_loaded=false`。R1 真实性门不通过：无法核验 `forward_streaming_step`/streaming state 签名，也无法测量 CPU RTF；`NemoSortformerEngine._create_native_stream` 保持 raise `diarization_not_available`，连续 capability 不发布。生产 native 接线（上一条未勾选项）被此门阻断。
+- `tests/test_diarization_stream_state.py` 10 项（先因缺类失败）：harness 包裹真实 `DiarizationCoordinator` + 注入脚本化 fake native step。两次 commit 后 `state_identity` 不变、`accepted_ranges == [(0,16000),(16000,32000)]`；两个 WS 会话 state 对象互不相同；首段不足 1280 样本帧不处理（processed=0）；EOF 半块零填充冲刷后 processed=16600 且活动裁剪到真实样本；连续同 speaker 帧合并；2 小时静音 7200×1s 无活动对象累积；2 小时交替说话 ring 停留在有界上限内；close 后 native.close 调用且后续 append 抛 `DiarizationError`；样本连续性 gap/overlap 被拒。
+- 领域新增 `SpeakerActivity`/`ActivitySnapshot`（严格校验：有限分数、区间有序不重叠、stable≤processed）与 `ContinuousDiarizationSession` port；`DiarizationCoordinator` 支持 continuous 模式并持有 R0 `Timeline`。
+- 回归：`tests/test_diarization_stream_state.py tests/test_nemo_sortformer.py tests/test_realtime_openai.py tests/test_diarization_contracts.py tests/test_camplus.py tests/test_speaker_centroids.py` 95 passed；ruff/mypy 通过。
 
 ## R2：冻结公共扩展和唯一正文事件
 

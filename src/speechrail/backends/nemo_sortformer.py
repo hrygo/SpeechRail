@@ -11,24 +11,44 @@ import asyncio
 import importlib.util
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import (
+    ActivitySnapshot,
     DiarizationAssignment,
     DiarizationConfig,
     DiarizationError,
     DiarizationReadiness,
     DiarizationSpeaker,
     DiarizationUpdate,
+    SpeakerActivity,
 )
 from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 
 NativeDiarize = Callable[[Sequence[float]], list[list[str]]]
 EmbeddingExtractor = Callable[[bytes], Sequence[float] | None]
+
+
+class NativeStreamingDiarizer(Protocol):
+    """Verified native incremental diarization step; opaque state stays inside.
+
+    One instance serves exactly one continuous session for its whole lifetime;
+    implementations must hold bounded streaming caches (AOSC/FIFO, speaker
+    cache) and return one label per fed 80 ms frame.
+    """
+
+    frame_samples: int
+
+    def step(self, frame: Sequence[float]) -> tuple[int, float]: ...
+
+    def finish(self) -> None: ...
+
+    def close(self) -> None: ...
 
 
 class NemoSortformerEngine:
@@ -90,6 +110,22 @@ class NemoSortformerEngine:
             self._max_buffer_bytes,
             self._embedding,
             self._centroids,
+        )
+
+    def create_stream(self, *, config: DiarizationConfig) -> NemoSortformerStreamSession:
+        """Create a continuous stream session backed by a verified native step."""
+        if not config.enabled:
+            raise ValueError("diarization config must be enabled")
+        return NemoSortformerStreamSession(self._create_native_stream())
+
+    def _create_native_stream(self) -> NativeStreamingDiarizer:
+        # R1 gate: the native incremental API must be version-verified by
+        # tools/probe_diarization_streaming.py (and a real CPU smoke) before
+        # this returns a production implementation; until then the continuous
+        # capability stays offline and only injected fakes drive the port.
+        raise DiarizationError(
+            "continuous diarization native step is not verified for this runtime",
+            code="diarization_not_available",
         )
 
     def _load_local_model(self, samples: Sequence[float]) -> list[list[str]]:
@@ -295,6 +331,177 @@ def _pcm16_samples(audio: bytes) -> list[float]:
         int.from_bytes(audio[index : index + 2], "little", signed=True) / 32768
         for index in range(0, len(audio), 2)
     ]
+
+
+class NemoSortformerStreamSession:
+    """Bounded continuous Sortformer session over one native streaming step.
+
+    Implements the ``ContinuousDiarizationSession`` port.  The native step is
+    created once per public session and is never reset by ASR commits; every
+    accepted PCM sample advances the session-global clock exactly once.
+    Merged activities are kept in a ring bounded by duration and count and are
+    clipped to the processed watermark, so a two-hour meeting cannot grow the
+    retained state.
+    """
+
+    def __init__(
+        self,
+        native: NativeStreamingDiarizer,
+        *,
+        max_ring_duration_samples: int = 30 * 16_000,
+        max_ring_activities: int = 2048,
+    ) -> None:
+        self._native = native
+        self._frame_samples = int(getattr(native, "frame_samples", 0) or 0)
+        if self._frame_samples <= 0:
+            raise ValueError("native streaming step must declare a positive frame size")
+        if max_ring_duration_samples <= 0 or max_ring_activities <= 0:
+            raise ValueError("ring bounds must be positive")
+        self._max_ring_duration = max_ring_duration_samples
+        self._max_ring_activities = max_ring_activities
+        self._pending = bytearray()
+        self._next_start = 0
+        self._processed_samples = 0
+        self._closed = False
+        self._ring: deque[SpeakerActivity] = deque()
+        self._ring_duration = 0
+        self._open_start = 0
+        self._open_end = 0
+        self._open_speaker: str | None = None
+        self._open_score_sum = 0.0
+        self._open_frames = 0
+
+    @property
+    def next_start_sample(self) -> int:
+        """The session-global start sample the next append must carry."""
+        return self._next_start
+
+    @property
+    def max_ring_activities(self) -> int:
+        return self._max_ring_activities
+
+    def retained_activity_count(self) -> int:
+        return len(self._ring) + (1 if self._open_speaker is not None else 0)
+
+    async def append(self, pcm: bytes, start_sample: int) -> None:
+        if self._closed:
+            raise DiarizationError("diarization stream is closed", code="invalid_audio")
+        if len(pcm) % 2:
+            raise DiarizationError("diarization requires PCM16 audio", code="invalid_audio")
+        if start_sample != self._next_start:
+            raise DiarizationError(
+                "diarization sample continuity broken: "
+                f"expected start {self._next_start}, got {start_sample}",
+                code="invalid_audio",
+            )
+        self._pending.extend(pcm)
+        self._next_start += len(pcm) // 2
+        frame_bytes = self._frame_samples * 2
+        while len(self._pending) >= frame_bytes:
+            frame = bytes(self._pending[:frame_bytes])
+            del self._pending[:frame_bytes]
+            self._consume_frame(frame)
+
+    async def activities(self, through_sample: int) -> ActivitySnapshot:
+        if self._closed:
+            raise DiarizationError("diarization stream is closed", code="invalid_audio")
+        return self._snapshot(through_sample)
+
+    async def finish(self, through_sample: int) -> ActivitySnapshot:
+        """Flush the trailing partial frame (zero-padded) and freeze the tail."""
+        if self._closed:
+            raise DiarizationError("diarization stream is closed", code="invalid_audio")
+        pending = len(self._pending) // 2
+        if pending:
+            frame_bytes = self._frame_samples * 2
+            padding = frame_bytes - len(self._pending)
+            frame = bytes(self._pending) + b"\x00" * padding
+            self._pending.clear()
+            self._consume_frame(frame, end=self._processed_samples + pending)
+        self._native.finish()
+        self._freeze_open_activity()
+        return self._snapshot(through_sample)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._pending.clear()
+        self._ring.clear()
+        self._ring_duration = 0
+        self._reset_open()
+        self._native.close()
+
+    def _consume_frame(self, frame: bytes, *, end: int | None = None) -> None:
+        start = self._processed_samples
+        end = start + self._frame_samples if end is None else end
+        self._processed_samples = end
+        speaker_index, score = self._native.step(_pcm16_samples(frame))
+        if speaker_index < 0:
+            self._freeze_open_activity()
+            return
+        speaker = f"spk_{speaker_index + 1:02d}"
+        if (
+            self._open_speaker == speaker
+            and self._open_end == start
+            and self._open_frames > 0
+        ):
+            self._open_end = end
+            self._open_score_sum += score
+            self._open_frames += 1
+            return
+        self._freeze_open_activity()
+        self._open_start = start
+        self._open_end = end
+        self._open_speaker = speaker
+        self._open_score_sum = score
+        self._open_frames = 1
+
+    def _freeze_open_activity(self) -> None:
+        if self._open_speaker is None:
+            return
+        activity = SpeakerActivity(
+            start_sample=self._open_start,
+            end_sample=self._open_end,
+            speaker=self._open_speaker,
+            activity_score=self._open_score_sum / self._open_frames,
+        )
+        self._reset_open()
+        self._ring.append(activity)
+        self._ring_duration += activity.end_sample - activity.start_sample
+        # Keep at least the newest activity: a single merged interval may
+        # legitimately exceed the duration cap in continuously active audio.
+        while len(self._ring) > 1 and (
+            self._ring_duration > self._max_ring_duration
+            or len(self._ring) > self._max_ring_activities
+        ):
+            evicted = self._ring.popleft()
+            self._ring_duration -= evicted.end_sample - evicted.start_sample
+
+    def _reset_open(self) -> None:
+        self._open_start = 0
+        self._open_end = 0
+        self._open_speaker = None
+        self._open_score_sum = 0.0
+        self._open_frames = 0
+
+    def _snapshot(self, through_sample: int) -> ActivitySnapshot:
+        through = min(max(0, through_sample), self._processed_samples)
+        visible = [activity for activity in self._ring if activity.end_sample <= through]
+        if self._open_speaker is not None and self._open_start < through:
+            visible.append(
+                SpeakerActivity(
+                    start_sample=self._open_start,
+                    end_sample=min(self._open_end, through),
+                    speaker=self._open_speaker,
+                    activity_score=self._open_score_sum / self._open_frames,
+                )
+            )
+        return ActivitySnapshot(
+            processed_through_sample=through,
+            stable_through_sample=through,
+            activities=tuple(visible),
+        )
 
 
 def _parse_activities(

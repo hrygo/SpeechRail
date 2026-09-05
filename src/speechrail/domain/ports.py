@@ -8,7 +8,11 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
-from speechrail.domain.diarization import DiarizationConfig, DiarizationUpdate
+from speechrail.domain.diarization import (
+    ActivitySnapshot,
+    DiarizationConfig,
+    DiarizationUpdate,
+)
 
 
 class TranscriptionRequest(BaseModel):
@@ -121,6 +125,23 @@ class DiarizationSession(Protocol):
     async def annotate(self, segments: tuple[TranscriptSegment, ...]) -> DiarizationUpdate: ...
 
     async def finalize(self) -> DiarizationUpdate: ...
+
+    async def close(self) -> None: ...
+
+
+class ContinuousDiarizationSession(Protocol):
+    """One bounded streaming diarization state spanning a whole public session.
+
+    ASR commits end items, never this state.  Native state stays opaque to
+    callers; implementations must keep bounded caches and return only the
+    unconsumed activity tail, never whole-meeting prediction tensors.
+    """
+
+    async def append(self, pcm: bytes, start_sample: int) -> None: ...
+
+    async def activities(self, through_sample: int) -> ActivitySnapshot: ...
+
+    async def finish(self, through_sample: int) -> ActivitySnapshot: ...
 
     async def close(self) -> None: ...
 

@@ -6,6 +6,7 @@ voiceprint enrolment and persistence belong to consuming applications.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,6 +23,70 @@ class DiarizationError(ValueError):
     def __init__(self, message: str, *, code: str = "diarization_error") -> None:
         super().__init__(message)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class SpeakerActivity:
+    """One anonymous activity interval in session-global samples.
+
+    ``speaker`` is an opaque session-scoped label (never an identity); the
+    interval bounds are integer samples at 16 kHz.
+    """
+
+    start_sample: int
+    end_sample: int
+    speaker: str
+    activity_score: float
+
+    def __post_init__(self) -> None:
+        if self.start_sample < 0 or self.end_sample <= self.start_sample:
+            raise DiarizationError(
+                "activity interval must be ordered and non-empty",
+                code="diarization_invalid_output",
+            )
+        if not self.speaker:
+            raise DiarizationError(
+                "activity speaker label must be non-empty",
+                code="diarization_invalid_output",
+            )
+        if not math.isfinite(self.activity_score) or not 0.0 <= self.activity_score <= 1.0:
+            raise DiarizationError(
+                "activity score must be a finite number in [0, 1]",
+                code="diarization_invalid_output",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ActivitySnapshot:
+    """Bounded streaming diarization output up to one session sample position.
+
+    ``stable_through_sample`` marks the watermark before which attribution is
+    no longer revised automatically; it never claims correctness.
+    """
+
+    processed_through_sample: int
+    stable_through_sample: int
+    activities: tuple[SpeakerActivity, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.processed_through_sample < 0:
+            raise DiarizationError(
+                "processed watermark must be non-negative",
+                code="diarization_invalid_output",
+            )
+        if not 0 <= self.stable_through_sample <= self.processed_through_sample:
+            raise DiarizationError(
+                "stable watermark must not exceed the processed watermark",
+                code="diarization_invalid_output",
+            )
+        previous_end = 0
+        for activity in self.activities:
+            if activity.start_sample < previous_end:
+                raise DiarizationError(
+                    "activities must be ordered and non-overlapping",
+                    code="diarization_invalid_output",
+                )
+            previous_end = activity.end_sample
 
 
 @dataclass(frozen=True, slots=True)
