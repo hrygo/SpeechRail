@@ -1,0 +1,12 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "item_id": "item_legacy_input",
+  "content_index": 0,
+  "transcript": "同意。",
+  "usage": {
+    "type": "transcript_text_usage_tokens",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0
+  }
+}

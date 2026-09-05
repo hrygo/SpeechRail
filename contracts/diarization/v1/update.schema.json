@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://speechrail.local/contracts/diarization/v1/update.schema.json",
+  "title": "SpeechRail diarization attribution update event (SPK-E2E-1, version 1)",
+  "description": "speechrail.diarization.update: revises speaker attribution for units already delivered by an extension-mode completed event. revision counts per segment_uid from 1; repeated revisions must repeat identical content (semantic rule).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "group_generation",
+    "stable_through_sample",
+    "updates",
+    "speaker_links"
+  ],
+  "properties": {
+    "type": {"const": "speechrail.diarization.update"},
+    "group_generation": {"type": ["string", "null"], "minLength": 1},
+    "stable_through_sample": {"type": "integer", "minimum": 0},
+    "updates": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/update"}
+    },
+    "speaker_links": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/link"}
+    }
+  },
+  "$defs": {
+    "ratio": {"type": "number", "minimum": 0, "maximum": 1},
+    "segment_uid": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[ -~]+$"
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_uid",
+        "revision",
+        "status",
+        "speaker",
+        "coverage_ratio",
+        "overlap_ratio",
+        "candidates"
+      ],
+      "properties": {
+        "segment_uid": {"$ref": "#/$defs/segment_uid"},
+        "revision": {"type": "integer", "minimum": 1},
+        "status": {"enum": ["unknown", "tentative", "stable"]},
+        "speaker": {"type": ["string", "null"], "minLength": 1},
+        "coverage_ratio": {"$ref": "#/$defs/ratio"},
+        "overlap_ratio": {"$ref": "#/$defs/ratio"},
+        "candidates": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["speaker", "support_ratio"],
+            "properties": {
+              "speaker": {"type": "string", "minLength": 1},
+              "support_ratio": {"$ref": "#/$defs/ratio"}
+            }
+          }
+        }
+      }
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "link_id",
+        "from_session_id",
+        "from_speaker",
+        "to_session_id",
+        "to_speaker",
+        "relation",
+        "similarity"
+      ],
+      "properties": {
+        "link_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "from_session_id": {"type": "string", "minLength": 1},
+        "from_speaker": {"type": "string", "minLength": 1},
+        "to_session_id": {"type": "string", "minLength": 1},
+        "to_speaker": {"type": "string", "minLength": 1},
+        "relation": {"const": "same_speaker"},
+        "similarity": {"$ref": "#/$defs/ratio"}
+      }
+    }
+  }
+}

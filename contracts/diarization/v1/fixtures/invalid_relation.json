@@ -1,0 +1,17 @@
+{
+  "type": "speechrail.diarization.update",
+  "group_generation": "generation_example",
+  "stable_through_sample": 52800,
+  "updates": [],
+  "speaker_links": [
+    {
+      "link_id": "link_invalid_relation",
+      "from_session_id": "sess_previous",
+      "from_speaker": "spk_01",
+      "to_session_id": "sess_example",
+      "to_speaker": "spk_02",
+      "relation": "related",
+      "similarity": 0.9
+    }
+  ]
+}

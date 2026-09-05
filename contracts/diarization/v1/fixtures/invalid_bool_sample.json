@@ -1,0 +1,9 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "item_id": "item_invalid_bool",
+  "content_index": 0,
+  "transcript": "同意。",
+  "audio_start_sample": true,
+  "audio_end_sample": 56000,
+  "attribution_units": []
+}

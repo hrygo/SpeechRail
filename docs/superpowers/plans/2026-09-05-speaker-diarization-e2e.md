@@ -130,8 +130,8 @@ async def test_commit_does_not_reset_diarization(stream_harness):
 
 **接口：** 严格复制规格第 5 节。每类 schema 含公共 event_id/session_id/sequence；client finalize 单独 `finalize-request.schema.json`，不伪装 OpenAI 标准事件。
 
-- [ ] 先写 fixtures：正常中文 completed、unknown、真实 overlap、跨 session link、降级、finalized、revision 重复/冲突、legacy 无扩展；非法 schema 包含 bool sample、NaN ratio、越界字符范围和 >256 updates。
-- [ ] 写新旧四组合失败测试：旧 Sona fixture 不允许收到 `speechrail.*`；新能力未协商不发送；成功协商后不再双发旧 `.segment`。
+- [x] 先写 fixtures：正常中文 completed、unknown、真实 overlap、跨 session link、降级、finalized、revision 重复/冲突、legacy 无扩展；非法 schema 包含 bool sample、NaN ratio、越界字符范围和 >256 updates。
+- [x] 写新旧四组合失败测试：旧 Sona fixture 不允许收到 `speechrail.*`；新能力未协商不发送；成功协商后不再双发旧 `.segment`。
 
 ```python
 async def test_legacy_client_never_receives_extension_types(ws_harness):
@@ -141,10 +141,18 @@ async def test_legacy_client_never_receives_extension_types(ws_harness):
 
 `ws_harness` 复用当前 FastAPI/WebSocket fake backend 测试入口，传真实 session.update，不直接构造“预期事件列表”。
 
-- [ ] 运行 `uv run --extra dev pytest tests/test_diarization_extensions.py -q`，先失败。
-- [ ] 实现 opt-in、严格字段验证、每 commit 唯一 item、immutable units；在 completed 后才允许对应 speaker update，正文 partial 不等待分人。
-- [ ] 新模式人数上限 >4 明确拒绝；1–4 不用后处理裁掉活动。纯字幕/TTS/REST 的 golden 输出保持兼容。
+- [x] 运行 `uv run --extra dev pytest tests/test_diarization_extensions.py -q`，先失败。
+- [x] 实现 opt-in、严格字段验证、每 commit 唯一 item、immutable units；在 completed 后才允许对应 speaker update，正文 partial 不等待分人。
+- [x] 新模式人数上限 >4 明确拒绝；1–4 不用后处理裁掉活动。纯字幕/TTS/REST 的 golden 输出保持兼容。
 - [ ] 将 fixture 与 schema 交给 Sona S1，记录双方版本/内容哈希；任何字段变动两边同一次评审更新。
+
+**R2 验证证据（2026-09-06）：**
+
+- `contracts/diarization/v1/`：6 个 draft 2020-12 schema（session/completed/update/status/finalized/finalize-request）+ 14 个 fixture（8 valid / 6 invalid）。invalid 覆盖 bool sample、NaN ratio（jsonschema 的 minimum 对 NaN 失效，由语义校验层拒绝并已在测试注明）、越界字符范围、257 条 updates、unknown 带 speaker、非法 relation、同 segment revision 冲突；语义规则（区间有序不重叠、unknown 主 speaker 为 null、revision 幂等一致）记录于 `tests/test_diarization_extensions.py` 并写入契约文档说明 schema+语义共同构成校验标准。
+- `tests/test_diarization_extensions.py` 11 项：fixtures 全部先按 schema/语义校验；四组合中 legacy 会话零 `speechrail.*` 事件且保留 `.segment`、未广播能力时请求返回 `unsupported_operation` 且会话保持 legacy、协商成功后返回 `diarization_contract`（version/timebase/sample_rate/max_speakers/max_item_duration_ms/max_revision_delay_ms/group_generation=null）、completed 携带 session-sample 边界与 partition 的 aligned units 且不再有 `.segment`、第二个 commit 的 `audio_start_sample == 8000`（偏移只加一次）、item_id 逐 commit 唯一、hint=5 → `speaker_limit_exceeded`、首次 PCM 后协商 → `invalid_state`（同 payload 重发幂等）。
+- 实现：capability 广播（`supports_stream`，生产 NeMo 引擎保持 False）、`apply_session_update` 解析/去重/登记值校验/4 人上限、扩展模式下唯一 item_id + ext completed（`_attribution_units` 用 R0 `build_alignment_units`，不一致整 item unavailable）、连续 coordinator（R1）接入、`contracts/realtime-openai.md` 新增扩展节。update/status/finalized 事件渲染按计划由 R3/R4 接线，接线前服务端不发送。
+- 回归：`tests/test_realtime_openai.py tests/test_app_contract.py tests/test_openai_diarized_batch.py tests/test_diarization_contracts.py tests/test_domain_contracts.py tests/test_backend_ports.py tests/test_application_composition.py` 106 passed；ruff/mypy 通过；`git diff --check` 干净。
+- **Sona S1 交接记录（待 Sona 侧确认）：** 本仓 schema/fixtures 版本 = SPK-E2E-1 v1（本提交）。关键哈希：completed.schema `a4b53031…`、update.schema `eeeb940c…`、session.schema `9123a593…`、status.schema `bfaf63ad…`、finalized.schema `57be8694…`、finalize-request.schema `2a093f05…`；完整 22 文件哈希清单见提交内容。任何字段变动须两边同一次评审更新本清单。
 
 ## R3：有界归属修订与匿名跨会话建议
 

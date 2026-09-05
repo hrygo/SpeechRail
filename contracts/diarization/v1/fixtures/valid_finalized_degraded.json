@@ -1,0 +1,9 @@
+{
+  "type": "speechrail.diarization.finalized",
+  "finalization_id": "final_example_2",
+  "through_sample": 720000,
+  "stable_through_sample": 700000,
+  "status": "degraded",
+  "reason": "finalization_timeout",
+  "last_update_sequence": 51
+}

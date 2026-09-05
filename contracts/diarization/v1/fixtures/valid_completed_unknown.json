@@ -1,0 +1,18 @@
+{
+  "type": "conversation.item.input_audio_transcription.completed",
+  "item_id": "item_example_3",
+  "content_index": 0,
+  "transcript": "那个信号不太好。",
+  "audio_start_sample": 56000,
+  "audio_end_sample": 104000,
+  "attribution_units": [
+    {
+      "segment_uid": "seg_example_3_0",
+      "text_start": 0,
+      "text_end": 8,
+      "audio_start_sample": 56000,
+      "audio_end_sample": 104000,
+      "timing_quality": "unavailable"
+    }
+  ]
+}

@@ -150,3 +150,7 @@ class DiarizationEngine(Protocol):
     """Creates a session-local diarization stream after input validation."""
 
     def create(self, *, config: DiarizationConfig) -> DiarizationSession: ...
+
+    def create_stream(self, *, config: DiarizationConfig) -> ContinuousDiarizationSession:
+        """Create a continuous SPK-E2E-1 stream session (extension mode)."""
+        ...

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://speechrail.local/contracts/diarization/v1/finalized.schema.json",
+  "title": "SpeechRail diarization finalized event (SPK-E2E-1, version 1)",
+  "description": "speechrail.diarization.finalized: terminal acknowledgement of speechrail.diarization.finalize. status=complete requires through_sample == stable_through_sample; last_update_sequence is the top-level sequence of the final update (0 when none).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "finalization_id",
+    "through_sample",
+    "stable_through_sample",
+    "status",
+    "reason",
+    "last_update_sequence"
+  ],
+  "properties": {
+    "type": {"const": "speechrail.diarization.finalized"},
+    "finalization_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "through_sample": {"type": "integer", "minimum": 0},
+    "stable_through_sample": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["complete", "degraded"]},
+    "reason": {"type": ["string", "null"], "minLength": 1},
+    "last_update_sequence": {"type": "integer", "minimum": 0}
+  }
+}

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import os
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import Any
@@ -19,10 +20,12 @@ from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.backends.vad import VoiceActivityDetector
 from speechrail.compatibility.openai_realtime import (
+    SPEECHRAIL_DIARIZATION_V1,
     RealtimeAdapterError,
     conversation_created,
     conversation_item_created,
     conversation_text_item_created,
+    diarization_contract,
     error_event,
     input_audio_buffer_cleared,
     input_audio_buffer_committed,
@@ -40,14 +43,17 @@ from speechrail.compatibility.openai_realtime import (
     response_output_item_done,
     session_created,
     transcription_completed,
+    transcription_completed_extension,
     transcription_delta,
     transcription_failed,
     transcription_segment,
     validate_append,
 )
 from speechrail.config.selection import active_model_catalog
+from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
-from speechrail.domain.diarization_timeline import Timeline
+from speechrail.domain.diarization_timeline import Timeline, build_alignment_units
+from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
@@ -115,6 +121,8 @@ class OpenAIRealtimeSession:
         self._timeline = Timeline()
         self._item_start_sample = 0
         self._item_end_sample = 0
+        self._extensions: tuple[str, ...] = ()
+        self._current_item_id = f"item_{self._session_id}_input"
         self._config: dict[str, Any] = {
             "model": self._initial_model,
             "language": None,
@@ -128,10 +136,22 @@ class OpenAIRealtimeSession:
                     session_id=self._session_id,
                     model=self._display_model,
                     tts_ready=self._services.tts_ready,
+                    diarization_extensions=self._diarization_extension_capabilities(),
                 )
             )
         )
         await self._send(conversation_created(session_id=self._session_id))
+
+    def _diarization_extension_capabilities(self) -> tuple[str, ...]:
+        """Advertise SPK-E2E-1 only when a verified continuous stream exists."""
+        engine = self._diarization_engine
+        if (
+            self._services.diarization_ready
+            and engine is not None
+            and bool(getattr(engine, "supports_stream", False))
+        ):
+            return (SPEECHRAIL_DIARIZATION_V1,)
+        return ()
 
     async def handle(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
@@ -187,6 +207,28 @@ class OpenAIRealtimeSession:
             registered_tts=self._registered_tts,
             tts_voice_ids=self._tts_voice_ids,
         )
+        requested_extensions = tuple(config.get("diarization_extensions") or ())
+        if "diarization_extensions" in config and requested_extensions != self._extensions:
+            if self._timeline.accepted_samples > 0:
+                raise RealtimeAdapterError(
+                    "invalid_state",
+                    "diarization extensions can only be negotiated before the first audio",
+                )
+            if requested_extensions != self._diarization_extension_capabilities():
+                raise RealtimeAdapterError(
+                    "unsupported_operation",
+                    f"{SPEECHRAIL_DIARIZATION_V1} is not available on this server",
+                )
+            raw_diarization_config = config.get("diarization")
+            if (
+                not isinstance(raw_diarization_config, dict)
+                or not raw_diarization_config.get("enabled")
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_diarization",
+                    "diarization extensions require enabled diarization",
+                )
+            self._extensions = requested_extensions
         configured_voice = config.get("voice")
         if isinstance(configured_voice, str):
             self._require_voice_available(configured_voice)
@@ -221,6 +263,13 @@ class OpenAIRealtimeSession:
             self._vad = None
 
         self._config = config
+        if self._extensions:
+            session_payload = updated.get("session")
+            if isinstance(session_payload, dict):
+                # group_generation stays null until R3 wires group isolation.
+                session_payload["diarization_contract"] = diarization_contract(
+                    group_generation=None
+                )
         await self._send(self._with_speech_capabilities(updated))
 
     def _with_speech_capabilities(
@@ -347,18 +396,33 @@ class OpenAIRealtimeSession:
                 await self._asr.flush()
 
     async def _commit_audio(self) -> None:
+        if self._extensions:
+            # SPK-E2E-1: every commit gets a unique item id in extension mode.
+            self._current_item_id = f"item_{uuid4().hex[:12]}"
         if self._asr is None:
-            await self._send(input_audio_buffer_committed(session_id=self._session_id))
             await self._send(
-                conversation_item_created(session_id=self._session_id, transcript="")
+                input_audio_buffer_committed(
+                    session_id=self._session_id, item_id=self._current_item_id
+                )
             )
             await self._send(
-                transcription_completed(session_id=self._session_id, transcript="")
+                conversation_item_created(
+                    session_id=self._session_id,
+                    transcript="",
+                    item_id=self._current_item_id,
+                )
+            )
+            await self._send(
+                self._completed_event(transcript="")
             )
             self._last_partial_text = ""
             self._unflushed_bytes = 0
             return
-        await self._send(input_audio_buffer_committed(session_id=self._session_id))
+        await self._send(
+            input_audio_buffer_committed(
+                session_id=self._session_id, item_id=self._current_item_id
+            )
+        )
         try:
             await self._asr.commit(want_segments=self._diarization is not None)
             if self._asr_reader is not None:
@@ -486,12 +550,74 @@ class OpenAIRealtimeSession:
         self._tts_task = None
         self._tts_response_id = None
 
+    def _completed_event(self, *, transcript: str) -> dict[str, object]:
+        """Render the terminal completed event for the current ASR item."""
+        if self._extensions:
+            return transcription_completed_extension(
+                item_id=self._current_item_id,
+                transcript=transcript,
+                audio_start_sample=self._item_start_sample,
+                audio_end_sample=max(self._item_end_sample, self._item_start_sample),
+                attribution_units=self._attribution_units(transcript, ()),
+            )
+        return transcription_completed(session_id=self._session_id, transcript=transcript)
+
+    def _attribution_units(
+        self, canonical: str, segments: tuple[TranscriptSegment, ...]
+    ) -> list[dict[str, object]]:
+        """Build immutable attribution units over the canonical transcript.
+
+        Align segments carry item-local millisecond bounds; they are ITN'd
+        with the same rule as the canonical text and mapped onto canonical
+        code point ranges.  Any inconsistency degrades the whole item to one
+        ``timing_quality="unavailable"`` unit instead of re-timing words.
+        """
+        item_start = self._item_start_sample
+        item_end = max(self._item_end_sample, self._item_start_sample)
+        item_samples = item_end - item_start
+        if not canonical:
+            return []
+        parts: list[str] = []
+        words: list[tuple[int, int, int, int]] = []
+        cursor = 0
+        for segment in segments:
+            text = apply_light_itn(segment.text)
+            if not text:
+                continue
+            start = cursor
+            cursor += len(text)
+            parts.append(text)
+            words.append((start, cursor, segment.start_ms * 16, segment.end_ms * 16))
+        candidate = "".join(parts)
+        units = build_alignment_units(
+            canonical, candidate, tuple(words), item_samples=item_samples
+        )
+        if units is None:
+            return [
+                {
+                    "segment_uid": f"seg_{uuid4().hex[:12]}",
+                    "text_start": 0,
+                    "text_end": len(canonical),
+                    "audio_start_sample": item_start,
+                    "audio_end_sample": item_end,
+                    "timing_quality": "unavailable",
+                }
+            ]
+        return [
+            {
+                "segment_uid": f"seg_{uuid4().hex[:12]}",
+                "text_start": unit.text_start,
+                "text_end": unit.text_end,
+                "audio_start_sample": item_start + unit.start_sample,
+                "audio_end_sample": item_start + unit.end_sample,
+                "timing_quality": "aligned",
+            }
+            for unit in units
+        ]
+
     async def _drain_asr_events(self) -> None:
         if self._asr is None:
             return
-        import os
-
-        from speechrail.domain.itn import apply_light_itn
 
         try:
             async for event in self._asr.events():
@@ -513,8 +639,37 @@ class OpenAIRealtimeSession:
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
                     norm_text = apply_light_itn(event.text)
+                    if self._extensions:
+                        # Extension mode: unique item, session-sample bounds and
+                        # immutable units; legacy .segment events are never sent
+                        # alongside the negotiated contract.
+                        await self._send(
+                            conversation_item_created(
+                                session_id=self._session_id,
+                                transcript=norm_text,
+                                item_id=self._current_item_id,
+                            )
+                        )
+                        await self._send(
+                            transcription_completed_extension(
+                                item_id=self._current_item_id,
+                                transcript=norm_text,
+                                audio_start_sample=self._item_start_sample,
+                                audio_end_sample=max(
+                                    self._item_end_sample, self._item_start_sample
+                                ),
+                                attribution_units=self._attribution_units(
+                                    norm_text, event.segments
+                                ),
+                            )
+                        )
+                        continue
                     await self._send(
-                        conversation_item_created(session_id=self._session_id, transcript=norm_text)
+                        conversation_item_created(
+                            session_id=self._session_id,
+                            transcript=norm_text,
+                            item_id=self._current_item_id,
+                        )
                     )
                     segments = event.segments
                     if self._diarization is not None and segments:
@@ -765,9 +920,14 @@ class OpenAIRealtimeSession:
                 "diarization_not_available",
                 str(self._services.diarization_status["message"]),
             )
-        self._diarization = DiarizationCoordinator(
-            engine.create(config=self._diarization_config)
-        )
+        if self._extensions:
+            self._diarization = DiarizationCoordinator(
+                continuous=engine.create_stream(config=self._diarization_config)
+            )
+        else:
+            self._diarization = DiarizationCoordinator(
+                engine.create(config=self._diarization_config)
+            )
 
     async def _close_diarization(self) -> None:
         if self._diarization is not None:

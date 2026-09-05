@@ -32,6 +32,12 @@ _TTS_MODEL_ALIASES = {
     "gpt-4o-mini-tts": "speechrail/qwen3-tts",
 }
 
+# SPK-E2E-1: the only registered public diarization extension.  Additional
+# capability strings enter through a versioned contract review, never inline.
+SPEECHRAIL_DIARIZATION_V1 = "speechrail.diarization.v1"
+_REGISTERED_DIARIZATION_EXTENSIONS: frozenset[str] = frozenset({SPEECHRAIL_DIARIZATION_V1})
+_MAX_EXTENSION_SPEAKERS = 4
+
 _PCM16_FORMAT: dict[str, object] = {
     "type": "pcm16",
     "sample_rate": 16_000,
@@ -86,11 +92,18 @@ def tts_model_aliases() -> dict[str, str]:
     return dict(_TTS_MODEL_ALIASES)
 
 
-def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str, object]:
+def session_created(
+    *,
+    session_id: str,
+    model: str,
+    tts_ready: bool,
+    diarization_extensions: tuple[str, ...] = (),
+) -> dict[str, object]:
     """The OpenAI ``session.created`` payload scoped to SpeechRail capabilities."""
     capabilities: list[str] = ["transcription"]
     if tts_ready:
         capabilities.append("speech")
+    capabilities.extend(diarization_extensions)
     return {
         "type": "session.created",
         "session": {
@@ -111,21 +124,41 @@ def session_created(*, session_id: str, model: str, tts_ready: bool) -> dict[str
     }
 
 
+def diarization_contract(*, group_generation: str | None = None) -> dict[str, object]:
+    """The SPK-E2E-1 ``diarization_contract`` echoed in ``session.updated``."""
+    return {
+        "version": 1,
+        "timebase": "session_samples",
+        "sample_rate": 16_000,
+        "max_speakers": 4,
+        "max_item_duration_ms": 8000,
+        "max_revision_delay_ms": 3000,
+        "group_generation": group_generation,
+    }
+
+
 def session_updated(
-    *, session_id: str, model: str, turn_detection: dict[str, object] | None = None
+    *,
+    session_id: str,
+    model: str,
+    turn_detection: dict[str, object] | None = None,
+    diarization_contract: dict[str, object] | None = None,
 ) -> dict[str, object]:
+    session: dict[str, object] = {
+        "id": session_id,
+        "model": model,
+        "modalities": ["text", "audio"],
+        "input_audio_format": "pcm16",
+        "output_audio_format": "pcm16",
+        "turn_detection": turn_detection,
+        "tools": [],
+        "tool_choice": "none",
+    }
+    if diarization_contract is not None:
+        session["diarization_contract"] = diarization_contract
     return {
         "type": "session.updated",
-        "session": {
-            "id": session_id,
-            "model": model,
-            "modalities": ["text", "audio"],
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "turn_detection": turn_detection,
-            "tools": [],
-            "tool_choice": "none",
-        },
+        "session": session,
     }
 
 
@@ -136,11 +169,13 @@ def conversation_created(*, session_id: str) -> dict[str, object]:
     }
 
 
-def input_audio_buffer_committed(*, session_id: str) -> dict[str, object]:
+def input_audio_buffer_committed(
+    *, session_id: str, item_id: str | None = None
+) -> dict[str, object]:
     return {
         "type": "input_audio_buffer.committed",
         "previous_item_id": None,
-        "item_id": f"item_{session_id}_input",
+        "item_id": item_id or f"item_{session_id}_input",
     }
 
 
@@ -150,12 +185,14 @@ def input_audio_buffer_cleared(*, session_id: str) -> dict[str, object]:
     }
 
 
-def conversation_item_created(*, session_id: str, transcript: str) -> dict[str, object]:
+def conversation_item_created(
+    *, session_id: str, transcript: str, item_id: str | None = None
+) -> dict[str, object]:
     return {
         "type": "conversation.item.created",
         "previous_item_id": None,
         "item": {
-            "id": f"item_{session_id}_input",
+            "id": item_id or f"item_{session_id}_input",
             "object": "realtime.item",
             "type": "message",
             "role": "user",
@@ -207,6 +244,30 @@ def transcription_completed(*, session_id: str, transcript: str) -> dict[str, ob
             "output_tokens": 0,
             "total_tokens": 0,
         },
+    }
+
+
+def transcription_completed_extension(
+    *,
+    item_id: str,
+    transcript: str,
+    audio_start_sample: int,
+    audio_end_sample: int,
+    attribution_units: list[dict[str, object]],
+) -> dict[str, object]:
+    """Extension-mode ``completed``: session-sample bounds and immutable units.
+
+    Rendered only after a successful ``speechrail.diarization.v1`` negotiation;
+    it replaces the legacy ``usage``/``.segment`` delivery for that session.
+    """
+    return {
+        "type": "conversation.item.input_audio_transcription.completed",
+        "item_id": item_id,
+        "content_index": 0,
+        "transcript": transcript,
+        "audio_start_sample": audio_start_sample,
+        "audio_end_sample": audio_end_sample,
+        "attribution_units": attribution_units,
     }
 
 
@@ -550,6 +611,7 @@ def apply_session_update(
     prompt: str | None = None
     timestamp_granularities: list[str] | None = None
     diarization: dict[str, Any] | None = None
+    diarization_extensions: list[str] | None = None
     known_speaker_names: list[str] | None = None
     known_speaker_references: list[str] | None = None
     raw_diarization: object = session.get("diarization")
@@ -590,6 +652,21 @@ def apply_session_update(
             raise RealtimeAdapterError(
                 "invalid_diarization", "gpt-4o-transcribe-diarize requires diarization"
             )
+        raw_extensions = raw_diarization.get("extensions")
+        if raw_extensions is not None:
+            extensions = _validate_extensions(raw_extensions)
+            raw_hint = raw_diarization.get("speaker_count_hint")
+            if (
+                isinstance(raw_hint, int)
+                and not isinstance(raw_hint, bool)
+                and raw_hint > _MAX_EXTENSION_SPEAKERS
+            ):
+                raise RealtimeAdapterError(
+                    "speaker_limit_exceeded",
+                    "the diarization extension supports at most 4 speakers",
+                )
+            if extensions:
+                diarization_extensions = list(extensions)
 
     voice = session.get("voice")
     if voice is not None:
@@ -622,6 +699,7 @@ def apply_session_update(
         ("keywords", keywords),
         ("timestamp_granularities", timestamp_granularities),
         ("diarization", diarization),
+        ("diarization_extensions", diarization_extensions),
         ("known_speaker_names", known_speaker_names),
         ("known_speaker_references", known_speaker_references),
     ):
@@ -631,6 +709,28 @@ def apply_session_update(
         session_id=session_id, model=model, turn_detection=turn_detection_val
     )
     return response, config
+
+
+def _validate_extensions(raw: object) -> tuple[str, ...]:
+    """Dedupe and gate requested diarization extensions against the registry."""
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise RealtimeAdapterError(
+            "invalid_diarization", "diarization.extensions must be an array of strings"
+        )
+    extensions = tuple(dict.fromkeys(raw))
+    if any(not item for item in extensions):
+        raise RealtimeAdapterError(
+            "invalid_diarization", "diarization.extensions must not contain blank values"
+        )
+    unknown = [
+        item for item in extensions if item not in _REGISTERED_DIARIZATION_EXTENSIONS
+    ]
+    if unknown:
+        raise RealtimeAdapterError(
+            "invalid_diarization",
+            f"unregistered diarization extension: {unknown[0][:100]}",
+        )
+    return extensions
 
 
 def _string_list(session: dict[str, Any], field: str) -> list[str] | None:

@@ -97,3 +97,44 @@ diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无
 
 `/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
 已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。
+
+## Diarization 扩展 `speechrail.diarization.v1`（SPK-E2E-1）
+
+本节为 opt-in 加法扩展：未协商的会话行为与本文件其余部分完全一致。设计事实源为
+`docs/architecture/speaker-diarization-e2e-design.md` 第 5 节；JSON Schema 与 fixtures
+位于 `contracts/diarization/v1/`（schema + 语义规则共同构成校验标准）。连续分人的
+native 能力未经 R1 探针与真实 CPU smoke 验证前，本扩展不会被广播，也不可协商成功。
+
+### 协商
+
+- `session.created.capabilities` 仅在连续分人 adapter 与契约实现均可用时包含
+  `speechrail.diarization.v1`。
+- 客户端必须先读 capability，再在 `session.update` 中显式请求：
+  `input_audio_transcription.diarization.extensions = ["speechrail.diarization.v1"]`
+  （数组去重，只接受登记值；未知值 → `invalid_diarization`）。
+- 协商成功后 `session.updated.session.diarization_contract` 固定为
+  `{version: 1, timebase: "session_samples", sample_rate: 16000, max_speakers: 4,
+  max_item_duration_ms: 8000, max_revision_delay_ms: 3000, group_generation}`；
+  未成功回显即未启用。
+- 扩展只能在首个 PCM 前协商；已接受音频后的首次协商 → `invalid_state`，
+  能力未广播时请求 → `unsupported_operation`，扩展模式下 `speaker_count_hint > 4`
+  → `speaker_limit_exceeded`（1–4 不裁掉模型活动输出）。
+- 新旧组合：旧客户端保持旧事件集合；新客户端连旧服务收到
+  `unsupported_operation` 后继续 legacy 模式。
+
+### 扩展模式下的事件差异
+
+- `input_audio_buffer.committed`、`conversation.item.created` 与
+  `conversation.item.input_audio_transcription.completed` 使用每次 commit 唯一的
+  `item_id`（不再是 `item_{session_id}_input`）。
+- `completed` 新增 `audio_start_sample`/`audio_end_sample`（session-global 16 kHz
+  整数样本域）与 `attribution_units`（`segment_uid`、`text_start`/`text_end`
+  canonical 码点区间、`audio_start_sample`/`audio_end_sample`、`timing_quality`，
+  `aligned | unavailable`）。单元完整分割 canonical text；空 transcript 为空数组；
+  无法与固定正文一致对齐时整 item 使用一个 `timing_quality="unavailable"` 单元。
+  这些字段在归属修订中不可变。
+- 扩展模式**不再发送**旧 `.segment` 事件，避免双写；legacy 会话不受影响。
+- `speechrail.diarization.update`（归属修订与跨会话 `speaker_links`）、
+  `speechrail.diarization.status`（active→degraded 单次转换）、
+  `speechrail.diarization.finalize`（客户端）/`speechrail.diarization.finalized`
+  （服务端终态）由后续任务按上述 schema 接线；接线前服务端不发送这些类型。

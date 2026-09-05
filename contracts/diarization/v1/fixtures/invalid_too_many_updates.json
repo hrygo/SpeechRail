@@ -1,0 +1,36 @@
+{
+  "type": "speechrail.diarization.update",
+  "group_generation": "generation_example",
+  "stable_through_sample": 52800,
+  "updates": [
+    {
+      "segment_uid": "seg_invalid_overflow_000",
+      "revision": 1,
+      "status": "unknown",
+      "speaker": null,
+      "coverage_ratio": 0.0,
+      "overlap_ratio": 0.0,
+      "candidates": []
+    },
+    {
+      "segment_uid": "seg_invalid_overflow_001",
+      "revision": 1,
+      "status": "unknown",
+      "speaker": null,
+      "coverage_ratio": 0.0,
+      "overlap_ratio": 0.0,
+      "candidates": []
+    },
+    {
+      "segment_uid": "seg_invalid_overflow_002",
+      "revision": 1,
+      "status": "unknown",
+      "speaker": null,
+      "coverage_ratio": 0.0,
+      "overlap_ratio": 0.0,
+      "candidates": []
+    }
+  ],
+  "speaker_links": [],
+  "_repeat_updates_to": 257
+}

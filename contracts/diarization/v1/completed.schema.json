@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://speechrail.local/contracts/diarization/v1/completed.schema.json",
+  "title": "SpeechRail extension-mode transcription completed event (SPK-E2E-1, version 1)",
+  "description": "conversation.item.input_audio_transcription.completed as sent after speechrail.diarization.v1 negotiation: unique item_id, session-sample audio bounds and immutable attribution units. Sample ranges are 16 kHz integer sample indexes in the SpeechRail session-global domain. Attribution units must partition transcript with no gaps or overlaps (semantic rule; see contracts/realtime-openai.md).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "type",
+    "item_id",
+    "content_index",
+    "transcript",
+    "audio_start_sample",
+    "audio_end_sample",
+    "attribution_units"
+  ],
+  "properties": {
+    "type": {"const": "conversation.item.input_audio_transcription.completed"},
+    "item_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "content_index": {"type": "integer", "minimum": 0},
+    "transcript": {"type": "string"},
+    "audio_start_sample": {"$ref": "#/$defs/sample"},
+    "audio_end_sample": {"$ref": "#/$defs/sample"},
+    "attribution_units": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {"$ref": "#/$defs/unit"}
+    }
+  },
+  "$defs": {
+    "sample": {"type": "integer", "minimum": 0},
+    "segment_uid": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[ -~]+$"
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segment_uid",
+        "text_start",
+        "text_end",
+        "audio_start_sample",
+        "audio_end_sample",
+        "timing_quality"
+      ],
+      "properties": {
+        "segment_uid": {"$ref": "#/$defs/segment_uid"},
+        "text_start": {"type": "integer", "minimum": 0},
+        "text_end": {"type": "integer", "minimum": 0},
+        "audio_start_sample": {"$ref": "#/$defs/sample"},
+        "audio_end_sample": {"$ref": "#/$defs/sample"},
+        "timing_quality": {"enum": ["aligned", "unavailable"]}
+      }
+    }
+  }
+}

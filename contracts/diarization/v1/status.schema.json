@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://speechrail.local/contracts/diarization/v1/status.schema.json",
+  "title": "SpeechRail diarization degraded status event (SPK-E2E-1, version 1)",
+  "description": "speechrail.diarization.status: delivered at most once per session on the active-to-degraded transition, after terminating pending attribution units as unknown.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "status", "reason", "since_sample"],
+  "properties": {
+    "type": {"const": "speechrail.diarization.status"},
+    "status": {"const": "degraded"},
+    "reason": {
+      "enum": [
+        "diarization_overloaded",
+        "diarization_invalid_output",
+        "finalization_timeout"
+      ]
+    },
+    "since_sample": {"type": "integer", "minimum": 0}
+  }
+}

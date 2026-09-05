@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://speechrail.local/contracts/diarization/v1/session.schema.json",
+  "title": "SpeechRail diarization extension contract (SPK-E2E-1, version 1)",
+  "description": "The diarization_contract object echoed in session.updated after a successful speechrail.diarization.v1 negotiation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "timebase",
+    "sample_rate",
+    "max_speakers",
+    "max_item_duration_ms",
+    "max_revision_delay_ms",
+    "group_generation"
+  ],
+  "properties": {
+    "version": {"const": 1},
+    "timebase": {"const": "session_samples"},
+    "sample_rate": {"const": 16000},
+    "max_speakers": {"const": 4},
+    "max_item_duration_ms": {"const": 8000},
+    "max_revision_delay_ms": {"const": 3000},
+    "group_generation": {"type": ["string", "null"], "minLength": 1}
+  }
+}

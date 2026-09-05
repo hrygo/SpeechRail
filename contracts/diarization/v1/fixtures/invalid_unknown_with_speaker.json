@@ -1,0 +1,17 @@
+{
+  "type": "speechrail.diarization.update",
+  "group_generation": "generation_example",
+  "stable_through_sample": 52800,
+  "updates": [
+    {
+      "segment_uid": "seg_invalid_unknown_speaker",
+      "revision": 1,
+      "status": "unknown",
+      "speaker": "spk_01",
+      "coverage_ratio": 0.9,
+      "overlap_ratio": 0.0,
+      "candidates": [{"speaker": "spk_01", "support_ratio": 0.9}]
+    }
+  ],
+  "speaker_links": []
+}

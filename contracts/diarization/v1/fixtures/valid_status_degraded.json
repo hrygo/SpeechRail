@@ -1,0 +1,6 @@
+{
+  "type": "speechrail.diarization.status",
+  "status": "degraded",
+  "reason": "diarization_overloaded",
+  "since_sample": 960000
+}

@@ -101,6 +101,16 @@ class NemoSortformerEngine:
         """Return startup-checkable status without loading model weights."""
         return self._readiness
 
+    @property
+    def supports_stream(self) -> bool:
+        """Whether the continuous SPK-E2E-1 capability is verifiably available.
+
+        Stays false until tools/probe_diarization_streaming.py plus a real CPU
+        smoke verify the native incremental API (R1 gate); the extension is
+        then neither advertised nor negotiable.
+        """
+        return False
+
     def create(self, *, config: DiarizationConfig) -> _NemoSortformerSession:
         if not config.enabled:
             raise ValueError("diarization config must be enabled")
