@@ -20,6 +20,7 @@
 
 - 修复 managed wheel 在标准 `uv` 解释器 symlink、当前 macOS wheel 解析、`uv pip sync` 清单参数、共享 Python/ffmpeg 激活、installed-host preflight 和 LaunchAgent bootout/bootstrap 时序下的安装失败。
 - CustomVoice worker identity、VoiceDesign preset 参数、跨档音色 availability 与 profile smoke 现按当前权重严格校验；自定义 VoiceDesign 音色在低档 fail closed，切回 `quality` 后恢复。
+- profile 切换的 TTS→ASR 公共 smoke 改用更长的固定普通话句子，降低短音频偶发空转写导致的安全回退；仍保持单次推理与 fail-closed。
 
 ## [1.6.9] - 2026-09-05
 

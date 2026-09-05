@@ -10,6 +10,8 @@ import httpx
 from speechrail.domain.tts import DEFAULT_VOICE_ID
 from speechrail.service.model_store import PreparedModelSet
 
+_SMOKE_TTS_TEXT = "这是语音服务的切换验证，请清楚朗读这段普通话。"
+
 
 class SmokeProbeError(RuntimeError):
     """The running service did not pass its bounded public API smoke."""
@@ -109,7 +111,7 @@ class PublicApiSmokeProbe:
                 headers=self._headers,
                 json={
                     "model": "tts-1",
-                    "input": "语音服务冒烟测试。",
+                    "input": _SMOKE_TTS_TEXT,
                     "voice": DEFAULT_VOICE_ID,
                     "language": "zh",
                     "response_format": "wav",

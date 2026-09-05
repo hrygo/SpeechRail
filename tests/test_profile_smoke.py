@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -57,6 +58,8 @@ def test_probe_uses_public_tts_then_transcription_with_stable_aliases() -> None:
             assert b'"model":"tts-1"' in request.content
             assert b'"voice":"serena"' in request.content
             assert b'"language":"zh"' in request.content
+            payload = json.loads(request.content)
+            assert payload["input"] == "这是语音服务的切换验证，请清楚朗读这段普通话。"
             return httpx.Response(
                 200,
                 content=b"RIFF" + b"\x00" * 4 + b"WAVE" + b"\x00" * 64,
