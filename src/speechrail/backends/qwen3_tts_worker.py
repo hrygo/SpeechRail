@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, BinaryIO, Literal, Protocol
 
 from speechrail.backends.qwen3_native import snapshot_is_quantized
-from speechrail.domain.tts import generation_token_budget, get_voice_profile, normalize_tts_text
+from speechrail.domain.tts import (
+    apply_crossfade,
+    generation_token_budget,
+    get_voice_profile,
+    normalize_tts_text,
+)
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -144,6 +149,7 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         except Exception:
             pass
         used_temperature = getattr(profile, "temperature", self._temperature)
+        first_chunk = True
         for result in self._model.generate(
             text=text,
             voice=None,
@@ -158,8 +164,18 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
             streaming_interval=self._chunk_ms / 1000,
         ):
             pcm = self._to_pcm(result)
-            if pcm:
-                yield pcm
+            if not pcm:
+                continue
+            if first_chunk:
+                pcm = apply_crossfade(
+                    pcm,
+                    sample_rate=self._sample_rate,
+                    fade_ms=5,
+                    fade_in=True,
+                    fade_out=False,
+                )
+                first_chunk = False
+            yield pcm
 
     def _to_pcm(self, result: Any) -> bytes:
         result_sample_rate = int(result.sample_rate)
