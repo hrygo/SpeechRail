@@ -2,13 +2,21 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新发布基线（v1.7.1，PATCH quality）
+## 最新发布基线（v1.8.0，MINOR 三档）
+
+> **结论**：v1.8.0 已完成三档真实 ASR/TTS/Realtime 与完整物理资源采样，最终恢复
+> `quality`。首轮 `balanced → light` smoke 失败后自动回滚，第二次切换通过；SPK-E2E-1
+> 完整架构与契约已进入发布 wheel，但连续 native diarization 仍由 `supports_stream` gate
+> 保护，当前未广播扩展能力。详见
+> [v1.8.0 性能、架构与发布验收报告](2026-09-06-v1.8.0-performance-benchmark.md)。
+
+## 历史发布基线（v1.7.1，PATCH quality）
 
 > **结论**：v1.7.1 修复 profile smoke 的 CustomVoice 空转写误回滚；当前 `quality`
 > ASR/TTS 各 N=5、完整物理采样和 `quality → balanced → light → quality` 连续切换均通过。
 > 详见 [v1.7.1 性能与稳定性基准](2026-09-05-v1.7.1-performance-benchmark.md)。
 
-## 最新三档研究基线（v1.7.0，MINOR 三档）
+## 历史三档研究基线（v1.7.0，MINOR 三档）
 
 > **结论**：v1.7.0 已按 MINOR 规则在同一 Apple M5 Max 上串行测试 `quality`、
 > `balanced`、`light`，最大同时物理占用为 6943.9、6085.9、4462.9 MB；每档
@@ -40,6 +48,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.8.0** | [2026-09-06-v1.8.0-performance-benchmark.md](2026-09-06-v1.8.0-performance-benchmark.md) | MINOR 三档真实基准；Voice clone；SPK-E2E-1 完整架构与 fail-closed native gate |
 | **v1.7.1** | [2026-09-05-v1.7.1-performance-benchmark.md](2026-09-05-v1.7.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；有界空转写重试；三档切换连续通过 |
 | **v1.7.0 完整研究** | [2026-09-05-v1.7.0-full-three-tier-acceptance.md](2026-09-05-v1.7.0-full-three-tier-acceptance.md) | 真人 ASR、3/10/30/60s、Realtime、短时 soak、九角色 243 条生成与 speaker embedding |
 | **v1.7.0** | [2026-09-05-v1.7.0-performance-benchmark.md](2026-09-05-v1.7.0-performance-benchmark.md) | MINOR 三档 N=5 基础基准；版本纵向与档位横向对比；加入同文本/跨重启音色稳定性证据 |
