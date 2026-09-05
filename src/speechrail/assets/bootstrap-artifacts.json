@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "platform": "macos-arm64",
+  "minimum_macos": "14.0",
+  "ffmpeg": {
+    "package": "imageio-ffmpeg",
+    "version": "0.6.0",
+    "filename": "imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl",
+    "url": "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl",
+    "sha256": "b1ae3173414b5fc5f538a726c4e48ea97edc0d2cdc11f103afee655c463fa742",
+    "size": 21113891
+  }
+}
