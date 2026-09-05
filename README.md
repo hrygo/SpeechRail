@@ -51,15 +51,10 @@
 
 ### 硬件与系统要求
 
-- **硬件架构**：必须为配备 **Apple Silicon M 系列芯片** 的 Mac。*(注：暂不支持 Intel x86_64 Mac)*。
+- **硬件架构**：配备 **Apple Silicon M 系列芯片** 的 Mac（暂不支持 Intel x86_64 Mac）。
 - **操作系统**：macOS 14.0 (Sonoma) 及以上。
-- **Python 版本**：核心运行环境锁定 **Python 3.12**。
-  > [!NOTE]
-  > **您完全无需手动安装或配置 Python！** 部署引擎内置自愈机制：无论您的 Mac 是系统自带的 3.9、Homebrew 的 3.13 还是空白未安装，脚本均会自动拉取官方独立的 CPython 3.12 并在后台自动切换，绝不把 Python 变成一道门槛。
-
-> [!TIP]
-> **在全新 / 空白 MacBook 上？** 我们提供了项目级自动化指南 Skill：[`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md)。
-> 涵盖芯片架构检测、Xcode CLT、Homebrew、`ffmpeg`、Python 3.12 自动准备到模型权重拉取校验与常驻服务的从 0 到 1 完整闭环。
+- **Python 环境**：锁定 **Python 3.12**（部署脚本会自动拉取隔离的官方运行时并自愈切换，无需手动安装配置）。
+- **全新 Mac 零配置指南**：针对全新/空白 MacBook 的自动化安装 SOP 详见 [`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md)。
 
 ---
 
@@ -117,9 +112,7 @@ SpeechRail 采用**本地优先、外部强制鉴权**的安全模型（由环�
 |---|---|---|---|
 | **本机个人使用** (默认) | `127.0.0.1` / `localhost` | **留空** | 客户端免鉴权直连。OpenAI SDK 可传入任意占位符（如 `api_key="local"` 或 `"none"`）。 |
 | **局域网 / 远程暴露** | `0.0.0.0` 或内网特定 IP | **必填**（未配置启动直接报错拒绝） | 所有业务端点均强制校验 HTTP 请求头 `Authorization: Bearer <your-key>`（拒绝 URL query 参数传 key，杜绝日志泄露）。 |
-
-> [!NOTE]
-> `/health`、`/readyz`、`/v1/models`、`/v1/voices` 属于系统只读与健康探针端点，始终免鉴权开放。
+*注：`/health`、`/readyz`、`/v1/models`、`/v1/voices` 属于系统只读与健康探针端点，始终免鉴权开放。*
 
 ---
 
@@ -255,12 +248,10 @@ SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适�
 | 🟡 **`balanced` (平衡档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB 主流 Mac (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **~50 MB** (自动卸载) |
 | 🟣 **`quality` (高保真档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ 旗舰款 Mac (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **~50 MB** (自动卸载) |
 
-> [!TIP]
-> **真实设计事实**：
-> 1. **全档 8-bit 高质量化**：全档位模型严格保证 8-bit 量化精度，拒绝 4-bit 带来的音频失真与发音崩塌。
-> 2. **权重共享复用**：`balanced` 与 `quality` 共享同一个 1.7B ASR 模型；`balanced` 与 `light` 共享同一个 0.6B CustomVoice TTS 模型。
-> 3. **智能两阶段空闲卸载 (Worker Idle Eviction)**：默认 **5 分钟无请求（`worker_idle_timeout_seconds=300`）时，自动触发冷卸载（Cold Eviction）释放 Worker 显存与内存**，常驻待机仅占用约 **50MB**；新请求到达时按需秒级懒拉起。
-> 4. **自定义音色边界**：仅 `quality` 档支持通过自然语言设计自定义新音色（VoiceDesign）；在 `balanced`/`light` 档下，自定义音色会自动声明为 `available=false`，切回 `quality` 自动恢复。
+- **全档 8-bit 高精度量化**：全档位模型严格保证 8-bit 量化精度，拒绝低位量化带来的音频失真与发音崩塌。
+- **权重高效复用**：`balanced` 与 `quality` 共享同一个 1.7B ASR 模型；`balanced` 与 `light` 共享同一个 0.6B CustomVoice TTS 模型。
+- **智能两阶段空闲卸载 (Idle Eviction)**：默认 5 分钟无请求时自动触发冷卸载释放显存与内存，常驻待机仅占用约 **~50 MB**，新请求秒级懒拉起。
+- **音色设计边界**：仅 `quality` 档支持通过自然语言设计自定义新音色（VoiceDesign）；在 `balanced`/`light` 档下，自定义音色会自动声明为 `available=false`，切回 `quality` 自动恢复。
 
 ### 2. 9 种跨档系统内置音色
 
@@ -287,12 +278,10 @@ SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适�
 | **时序切分引擎** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | 在线/离线流式切分不同发言人时间边界，支持最多 4 人重叠语音分离 | **+约 0.5 GB** (500 MB) | `model="gpt-4o-transcribe-diarize"` 或 `response_format="diarized_json"` |
 | **声纹特征提取 (可选)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | 提取 16kHz PCM 声纹特征向量，跨会话短时重聚类，确保发言人归一 | **极轻量** (~数十 MB) | 会话内断线重连或长会议平滑映射 |
 
-> [!NOTE]
-> **真实内存占用与卸载机制**：
-> 1. **活跃内存开销**：启用并在处理多人会议转录时，讲话人引擎在宿主进程常驻约 **+0.5 GB** 物理内存。
-> 2. **深度接入空闲卸载 (Idle Eviction)**：讲话人引擎同样实现了 `EvictableWorker` 协议。**连续 5 分钟无调用自动触发冷卸载（释放全部 0.5GB 权重与显存）**，待机内存完全回落至 **~50 MB**；新请求到达时按需秒级懒加载。
-> 3. **严格的匿名隐私边界**：仅输出当前会话生命周期内的匿名标签（如 `speaker_0`, `speaker_1`），**不持久化真实人名、不建立声纹库、不进行跨会议身份跟踪**。
-> *(启用方式：执行 `uv sync --extra diarization` 安装可选依赖并在 `.env` 中配置模型路径即可，未配置时零额外内存开销)*。
+- **活跃内存开销**：启用并在处理多人会议转录时，额外常驻约 **+0.5 GB** 物理内存（未配置模型时零额外开销）。
+- **统一空闲卸载**：深度接入 `EvictableWorker` 机制，**连续 5 分钟无调用自动触发冷卸载释放全部权重与显存**，常驻待机内存回落至 **~50 MB**。
+- **严格匿名隐私**：仅输出会话生命周期内的匿名标签（如 `speaker_0`, `speaker_1`），**不持久化真实人名、不留存声纹库、不进行跨会议身份追踪**。
+- **按需可选安装**：执行 `uv sync --extra diarization` 安装可选依赖并在配置中启用即可。
 
 ---
 
@@ -343,10 +332,11 @@ flowchart TD
     Evictor -. 5分钟无请求冷卸载 .-> DiarizeEngine
 ```
 
-> **架构核心考量**：
-> 1. **故障爆炸半径最小化**：重型推理引擎在独立进程内运行。若 MLX 发生底层 C++ / Metal 偶发崩溃，宿主网关依然保持在线，并能自动重启 Worker。
-> 2. **内存零浪费与绿色休眠**：网关内置 `WorkerIdleEvictor`，工作时满血加载，闲置时自动回收。
-> 3. **职责边界清晰**：SpeechRail 专注于提供纯粹、工业级的本地 ASR/TTS 协议服务，不侵入麦克风拾音、系统扬声器播放或应用业务逻辑。
+#### 核心架构设计原则
+
+- **故障爆炸半径最小化**：重型推理引擎在独立进程内运行。若 MLX 发生底层 C++ / Metal 偶发崩溃，宿主网关依然保持在线，并能自动重启 Worker。
+- **内存零浪费与绿色休眠**：网关内置 `WorkerIdleEvictor`，工作时满血加载，闲置时自动卸载释放。
+- **职责边界清晰**：SpeechRail 专注于提供纯粹、工业级的本地 ASR/TTS 协议服务，不侵入麦克风拾音、系统扬声器播放或应用业务逻辑。
 
 ---
 
