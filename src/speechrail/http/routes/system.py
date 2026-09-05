@@ -13,7 +13,7 @@ from speechrail.compatibility.openai_realtime import (
     diarization_model_aliases,
     tts_model_aliases,
 )
-from speechrail.domain.tts import VOICE_ALIASES, VOICE_PROFILES
+from speechrail.domain.tts import VOICE_ALIASES, VOICE_PROFILES, get_voice_registry
 from speechrail.http.errors import error_response
 
 
@@ -101,22 +101,98 @@ def create_system_router(services: AppServices) -> APIRouter:
 
     @router.get("/v1/voices")
     async def voices() -> dict[str, Any]:
-        """List the server-owned preset voices without exposing model internals."""
+        """List system preset voices and custom user-designed voices."""
+        registry = get_voice_registry()
+        profiles = registry.list_profiles()
         return {
             "object": "list",
             "data": [
                 {
-                    "id": voice_id,
-                    "description": VOICE_PROFILES[voice_id].description,
+                    "id": p.id,
+                    "name": p.name or p.id,
+                    "description": p.description,
+                    "instruction": p.instruction,
                     "aliases": sorted(
-                        alias for alias, preset in VOICE_ALIASES.items() if preset == voice_id
+                        alias for alias, preset in VOICE_ALIASES.items() if preset == p.id
                     ),
-                    "is_default": VOICE_PROFILES[voice_id].is_default,
+                    "is_default": p.is_default,
+                    "is_system": p.is_system,
+                    "created_at": p.created_at,
                     "available": services.tts_ready,
                 }
-                for voice_id in resolved.tts_voice_ids
+                for p in profiles
             ],
         }
+
+    @router.post("/v1/voices")
+    async def create_voice(request: Request) -> JSONResponse:
+        """Create a persistent custom voice using natural language instruction."""
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(
+                400, getattr(request.state, "request_id", None), "invalid_json", "Invalid JSON payload"
+            )
+        if not isinstance(body, dict):
+            return error_response(
+                400, getattr(request.state, "request_id", None), "invalid_payload", "JSON object expected"
+            )
+        name = body.get("name")
+        instruction = body.get("instruction")
+        voice_id = body.get("id")
+        if not isinstance(name, str) or not name.strip():
+            return error_response(
+                400, getattr(request.state, "request_id", None), "invalid_name", "Voice name is required"
+            )
+        if not isinstance(instruction, str) or not instruction.strip():
+            return error_response(
+                400,
+                getattr(request.state, "request_id", None),
+                "invalid_instruction",
+                "Voice instruction is required",
+            )
+        vid_str = voice_id.strip().lower() if isinstance(voice_id, str) and voice_id.strip() else None
+        try:
+            profile = get_voice_registry().create_custom_profile(
+                name=name.strip(),
+                instruction=instruction.strip(),
+                voice_id=vid_str,
+            )
+            return JSONResponse(
+                status_code=201,
+                content={
+                    "id": profile.id,
+                    "name": profile.name,
+                    "description": profile.description,
+                    "instruction": profile.instruction,
+                    "is_default": profile.is_default,
+                    "is_system": profile.is_system,
+                    "created_at": profile.created_at,
+                    "available": services.tts_ready,
+                },
+            )
+        except ValueError as exc:
+            return error_response(
+                400, getattr(request.state, "request_id", None), "voice_creation_failed", str(exc)
+            )
+
+    @router.delete("/v1/voices/{voice_id}")
+    async def delete_voice(voice_id: str, request: Request) -> JSONResponse:
+        """Delete a persistent custom voice; system preset voices are protected."""
+        try:
+            get_voice_registry().delete_custom_profile(voice_id)
+            return JSONResponse(status_code=200, content={"status": "deleted", "id": voice_id})
+        except ValueError as exc:
+            return error_response(
+                403, getattr(request.state, "request_id", None), "voice_deletion_failed", str(exc)
+            )
+        except KeyError:
+            return error_response(
+                404,
+                getattr(request.state, "request_id", None),
+                "voice_not_found",
+                f"Voice {voice_id} not found",
+            )
 
     @router.get("/metrics")
     async def metrics(request: Request) -> Response:

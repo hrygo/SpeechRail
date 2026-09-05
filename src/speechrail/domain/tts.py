@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import random
 import re
+import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -16,34 +22,69 @@ class VoiceProfile:
     id: str
     instruction: str
     is_default: bool = False
+    name: str = ""
+    seed: int = 42
+    temperature: float = 0.1
+    is_system: bool = False
+    created_at: float = 0.0
 
     @property
     def description(self) -> str:
         """Expose the same stable text for API clients and model adapters."""
         return self.instruction
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name or self.id,
+            "instruction": self.instruction,
+            "seed": self.seed,
+            "temperature": self.temperature,
+            "is_default": self.is_default,
+            "is_system": self.is_system,
+            "created_at": self.created_at,
+        }
 
-VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
+
+SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
     {
         "default": VoiceProfile(
             id="default",
+            name="默认原声",
             instruction="自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
+            seed=42,
+            temperature=0.1,
             is_default=True,
+            is_system=True,
         ),
         "warm": VoiceProfile(
             id="warm",
+            name="温暖磁性",
             instruction="温暖柔和的中文女声，语速略慢，语气舒缓，适合阅读与陪伴场景。",
+            seed=1024,
+            temperature=0.1,
+            is_system=True,
         ),
         "bright": VoiceProfile(
             id="bright",
+            name="清脆干练",
             instruction="明亮活泼的中文女声，音调偏高，语气轻快，适合播报与讲解。",
+            seed=2048,
+            temperature=0.1,
+            is_system=True,
         ),
         "calm": VoiceProfile(
             id="calm",
+            name="沉稳专业",
             instruction="沉稳平静的中文男声，语速平稳，语气专业，适合资讯播报。",
+            seed=4096,
+            temperature=0.1,
+            is_system=True,
         ),
     }
 )
+
+VOICE_PROFILES: Mapping[str, VoiceProfile] = SYSTEM_VOICE_PROFILES
 
 DEFAULT_VOICE_ID = "default"
 
@@ -67,11 +108,11 @@ VOICE_ALIASES: Mapping[str, str] = MappingProxyType(
 
 _MARKDOWN_CLEANUP_RE = re.compile(r"[*#`~_>]+")
 _EMOJI_RE = re.compile(
-    r"[\U00010000-\U0010FFFF\u2600-\u27BF\u2300-\u23FF\u2B50-\u2B55\u200d\ufe0f]+"
+    r"[𐀀-􏿿☀-➿⌀-⏿⭐-⭕‍️]+"
 )
-_TRAILING_WEAK_PUNCT_RE = re.compile(r"[\uFF0C,\u3001\uFF1A:\s]+$")
+_TRAILING_WEAK_PUNCT_RE = re.compile(r"[，,、：:\s]+$")
 _SENTENCE_TERMINATORS = frozenset(
-    {"\u3002", "\uff01", "\uff1f", "!", "?", "\uff1b", ";", "\u2026", "\u2014", "."}
+    {"。", "！", "？", "!", "?", "；", ";", "…", "—", "."}
 )
 
 _MIN_GENERATION_TOKENS = 32
@@ -91,7 +132,7 @@ def normalize_tts_text(text: str) -> str:
     if not clean:
         return ""
     if clean[-1] not in _SENTENCE_TERMINATORS:
-        has_cjk = any("\u4e00" <= char <= "\u9fff" for char in clean)
+        has_cjk = any("一" <= char <= "鿿" for char in clean)
         clean += "。" if has_cjk else "."
     return clean
 
@@ -106,19 +147,120 @@ def generation_token_budget(text: str) -> int:
     return max(_MIN_GENERATION_TOKENS, min(_MAX_GENERATION_TOKENS, estimated))
 
 
-def get_voice_profile(voice: str) -> VoiceProfile:
-    """Return a registered preset or raise a stable lookup error."""
-
-    try:
-        return VOICE_PROFILES[voice]
-    except KeyError as exc:
-        raise ValueError(f"unknown preset voice: {voice}") from exc
-
-
 def resolve_voice(voice: str) -> str:
     """Map an OpenAI standard voice name onto the nearest server preset."""
     return VOICE_ALIASES.get(voice, voice)
 
+
+class VoiceRegistry:
+    """Thread-safe registry managing system preset voices and persistent user-designed voices."""
+
+    def __init__(self, storage_path: Path | None = None) -> None:
+        self._storage_path = storage_path or (Path.home() / ".speechrail" / "custom_voices.json")
+        self._custom_voices: dict[str, VoiceProfile] = {}
+        self._load_custom_voices()
+
+    def _load_custom_voices(self) -> None:
+        if not self._storage_path.is_file():
+            return
+        try:
+            data = json.loads(self._storage_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict) and "id" in item and "instruction" in item:
+                        vid = str(item["id"]).strip().lower()
+                        if vid not in SYSTEM_VOICE_PROFILES:
+                            self._custom_voices[vid] = VoiceProfile(
+                                id=vid,
+                                name=str(item.get("name", vid)),
+                                instruction=str(item["instruction"]),
+                                seed=int(item.get("seed", 42)),
+                                temperature=float(item.get("temperature", 0.1)),
+                                is_default=False,
+                                is_system=False,
+                                created_at=float(item.get("created_at", 0.0)),
+                            )
+        except Exception:
+            pass
+
+    def _save_custom_voices(self) -> None:
+        try:
+            self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+            data = [profile.to_dict() for profile in self._custom_voices.values()]
+            self._storage_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def list_profiles(self) -> list[VoiceProfile]:
+        system = list(SYSTEM_VOICE_PROFILES.values())
+        custom = sorted(self._custom_voices.values(), key=lambda v: v.created_at, reverse=True)
+        return system + custom
+
+    def get_profile(self, voice: str) -> VoiceProfile:
+        resolved = resolve_voice(voice)
+        if resolved in SYSTEM_VOICE_PROFILES:
+            return SYSTEM_VOICE_PROFILES[resolved]
+        if resolved in self._custom_voices:
+            return self._custom_voices[resolved]
+        raise ValueError(f"unknown preset voice: {voice}")
+
+    def create_custom_profile(
+        self,
+        name: str,
+        instruction: str,
+        voice_id: str | None = None,
+        seed: int | None = None,
+    ) -> VoiceProfile:
+        if not name.strip():
+            raise ValueError("voice name must not be empty")
+        if not instruction.strip():
+            raise ValueError("voice instruction must not be empty")
+        if voice_id:
+            vid = voice_id.strip().lower()
+        else:
+            vid = f"custom_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+
+        if vid in SYSTEM_VOICE_PROFILES:
+            raise ValueError(f"cannot override system voice ID: {vid}")
+
+        used_seed = seed if seed is not None else random.randint(1000, 999999)
+        profile = VoiceProfile(
+            id=vid,
+            name=name.strip(),
+            instruction=instruction.strip(),
+            seed=used_seed,
+            temperature=0.1,
+            is_default=False,
+            is_system=False,
+            created_at=time.time(),
+        )
+        self._custom_voices[vid] = profile
+        self._save_custom_voices()
+        return profile
+
+    def delete_custom_profile(self, voice_id: str) -> None:
+        vid = voice_id.strip().lower()
+        if vid in SYSTEM_VOICE_PROFILES:
+            raise ValueError(f"system voice cannot be deleted: {vid}")
+        if vid not in self._custom_voices:
+            raise KeyError(f"custom voice not found: {vid}")
+        del self._custom_voices[vid]
+        self._save_custom_voices()
+
+
+_GLOBAL_VOICE_REGISTRY = VoiceRegistry()
+
+
+def get_voice_registry() -> VoiceRegistry:
+    """Return the singleton voice registry."""
+    return _GLOBAL_VOICE_REGISTRY
+
+
+def get_voice_profile(voice: str) -> VoiceProfile:
+    """Return a registered preset or custom profile, or raise a stable lookup error."""
+    return _GLOBAL_VOICE_REGISTRY.get_profile(voice)
 
 
 _ABBREVIATIONS = frozenset(
@@ -258,11 +400,7 @@ def apply_crossfade(
 
 @lru_cache(maxsize=16)
 def create_breath_pause(sample_rate: int = 24_000, pause_ms: int = 100) -> bytes:
-    """Generate silent mono PCM16 bytes for natural inter-sentence breathing pause.
-
-    Cached: realtime TTS requests the same (sample_rate, pause_ms) pair per
-    sentence, and the returned bytes are immutable.
-    """
+    """Generate silent mono PCM16 bytes for natural inter-sentence breathing pause."""
     if pause_ms <= 0:
         return b""
     num_samples = (sample_rate * pause_ms) // 1000
@@ -271,15 +409,17 @@ def create_breath_pause(sample_rate: int = 24_000, pause_ms: int = 100) -> bytes
 
 __all__ = [
     "DEFAULT_VOICE_ID",
+    "SYSTEM_VOICE_PROFILES",
     "VOICE_ALIASES",
     "VOICE_PROFILES",
     "StreamingSentenceSplitter",
     "VoiceProfile",
+    "VoiceRegistry",
     "apply_crossfade",
     "create_breath_pause",
     "generation_token_budget",
     "get_voice_profile",
+    "get_voice_registry",
     "normalize_tts_text",
     "resolve_voice",
 ]
-

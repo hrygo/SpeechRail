@@ -2,6 +2,12 @@
 
 以下文档是实施、评审或迁移过程中的历史记录。它们保留原始上下文，但不应被单独用来证明当前代码已实现或当前服务可发布。
 
+## 已采纳、待执行的三档方案
+
+- [三档模型与统一运行时设计](2026-09-05-low-memory-mac-architecture-proposal.md)：quality / balanced / light 组合、M1 Air 8GB 与本机质量双验收。
+- [详细实施计划](2026-09-05-three-tier-implementation-plan.md)：33 张 luna_worker 原子任务卡、依赖、测试、实机门与切换回退流程；尚未执行。
+- [ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)：记录已采纳决策，不代表当前服务能力。
+
 ## 已取代方案与审查交接
 
 - [sona 吸收方案](sona-absorption.md)：已取代的早期边界/吸收设计。

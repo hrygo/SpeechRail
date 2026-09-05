@@ -35,7 +35,7 @@ def test_voice_catalog_exposes_the_configured_preset_profiles() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["object"] == "list"
-    assert [voice["id"] for voice in body["data"]] == ["default", "warm", "bright", "calm"]
+    assert [voice["id"] for voice in body["data"] if voice.get("is_system")] == ["default", "warm", "bright", "calm"]
     assert body["data"][0]["is_default"] is True
 
 
@@ -115,3 +115,47 @@ def test_rest_speech_forwards_language_to_the_typed_synthesizer() -> None:
     assert response.status_code == 200
     assert synthesizer.requests[0].language == "zh"
 
+
+
+def test_custom_voice_lifecycle_create_list_and_delete() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    # 1. 创建自定义音色
+    resp = client.post(
+        "/v1/voices",
+        json={
+            "name": "知性女声",
+            "instruction": "一位温和优雅的中文女性播音员，语速平稳，声音亲切自然。",
+            "id": "test_zhixing_voice",
+        },
+    )
+    assert resp.status_code == 201
+    created = resp.json()
+    assert created["id"] == "test_zhixing_voice"
+    assert created["name"] == "知性女声"
+    assert created["is_system"] is False
+
+    # 2. 列出音色，确认包含新建音色
+    list_resp = client.get("/v1/voices")
+    assert list_resp.status_code == 200
+    voice_ids = [v["id"] for v in list_resp.json()["data"]]
+    assert "test_zhixing_voice" in voice_ids
+
+    # 3. 尝试删除系统音色，预期 403 拒绝
+    del_sys_resp = client.delete("/v1/voices/default")
+    assert del_sys_resp.status_code == 403
+
+    # 4. 删除刚刚创建的自定义音色
+    del_resp = client.delete("/v1/voices/test_zhixing_voice")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "deleted"
+
+    # 5. 再次列出，确认已被移除
+    list_resp_after = client.get("/v1/voices")
+    after_ids = [v["id"] for v in list_resp_after.json()["data"]]
+    assert "test_zhixing_voice" not in after_ids

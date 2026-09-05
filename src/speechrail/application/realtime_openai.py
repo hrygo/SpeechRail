@@ -399,7 +399,10 @@ class OpenAIRealtimeSession:
                     "invalid_voice", "response.voice must be a non-blank string"
                 )
             response_voice = resolve_voice(raw_voice.strip())
-            if response_voice not in self._tts_voice_ids:
+            from speechrail.domain.tts import get_voice_profile
+            try:
+                get_voice_profile(response_voice)
+            except ValueError:
                 raise RealtimeAdapterError(
                     "voice_not_found", f"unknown voice: {response_voice[:200]}"
                 )

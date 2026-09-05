@@ -687,7 +687,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 param="model",
             )
         preset_voice = resolve_voice(body.voice)
-        if preset_voice not in resolved.tts_voice_ids:
+        from speechrail.domain.tts import get_voice_profile
+        try:
+            get_voice_profile(preset_voice)
+        except ValueError:
             return error_response(
                 400,
                 request_id,

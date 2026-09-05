@@ -12,5 +12,6 @@
 | [0008](0008-remove-legacy-ws-endpoints.md) | 移除 legacy WS 端点与外部 WLK streaming 后端 | Accepted |
 | [0009](0009-openai-realtime-only.md) | 移除 `/v2/realtime`，统一 OpenAI Realtime `/v1/realtime` | Accepted |
 | [0010](0010-streaming-diarization-fix.md) | 修复流式路径说话人分离（segments 硬编码空 + Sortformer 解析） | Accepted |
+| [0011](0011-unified-runtime-model-tiers.md) | 统一 ASR/TTS 运行时、仅权重三档与可恢复本地切换 | Accepted（目标已采纳，未实施/验收） |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

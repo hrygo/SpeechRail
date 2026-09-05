@@ -137,6 +137,13 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         self, text: str, *, voice: str, speed: float, language: str
     ) -> Iterator[bytes]:
         profile = get_voice_profile(voice)
+        try:
+            import mlx.core as mx  # type: ignore[import-not-found]
+
+            mx.random.seed(profile.seed)
+        except Exception:
+            pass
+        used_temperature = getattr(profile, "temperature", self._temperature)
         for result in self._model.generate(
             text=text,
             voice=None,
@@ -145,7 +152,7 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
             lang_code=language,
             max_tokens=generation_token_budget(text),
             repetition_penalty=self._repetition_penalty,
-            temperature=self._temperature,
+            temperature=used_temperature,
             top_p=self._top_p,
             stream=True,
             streaming_interval=self._chunk_ms / 1000,

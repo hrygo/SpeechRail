@@ -596,7 +596,10 @@ def apply_session_update(
         if not isinstance(voice, str) or not voice.strip():
             raise RealtimeAdapterError("invalid_voice", "voice must be a non-blank string")
         preset_voice = resolve_voice(voice.strip())
-        if preset_voice not in tts_voice_ids:
+        from speechrail.domain.tts import get_voice_profile
+        try:
+            get_voice_profile(preset_voice)
+        except ValueError:
             raise RealtimeAdapterError(
                 "voice_not_found", f"unknown voice: {preset_voice[:200]}"
             )
