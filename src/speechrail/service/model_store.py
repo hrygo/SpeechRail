@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import inspect
@@ -44,6 +45,10 @@ class Downloader(Protocol):
 
 class ModelStoreError(ValueError):
     """Raised when a model preparation cannot produce a fully verified snapshot."""
+
+
+class _DownloadStreamCloseError(ModelStoreError):
+    """A downloaded stream could not be closed after a successful transfer."""
 
 
 def safe_artifact_path(root: Path, relative: str) -> Path:
@@ -122,6 +127,14 @@ def _file_manifest(artifact: ModelArtifact) -> list[dict[str, object]]:
     ]
 
 
+def _quantization_manifest(artifact: ModelArtifact) -> dict[str, object]:
+    return {
+        "bits": artifact.quantization.bits,
+        "group_size": artifact.quantization.group_size,
+        "format": artifact.quantization.format,
+    }
+
+
 def _source_manifest(source: SourceLocation) -> dict[str, str]:
     return {
         "provider": source.provider,
@@ -152,9 +165,11 @@ def _prepared_id(preset_id: str, lock: RuntimeLock, artifacts: tuple[ModelArtifa
         "artifacts": [
             {
                 "key": artifact.key,
+                "model_id": artifact.model_id,
                 "revision": artifact.revision,
                 "family": artifact.family,
                 "variant": artifact.variant,
+                "quantization": _quantization_manifest(artifact),
                 "sources": _sources_manifest(artifact),
                 "files": _file_manifest(artifact),
             }
@@ -167,7 +182,13 @@ def _prepared_id(preset_id: str, lock: RuntimeLock, artifacts: tuple[ModelArtifa
 
 def _emit(progress: ProgressCallback | None, event: dict[str, object]) -> None:
     if progress is not None:
-        progress(event)
+        try:
+            progress(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Progress is observational and must not change preparation outcome.
+            return
 
 
 def _check_cancel(cancel_event: asyncio.Event | None) -> None:
@@ -210,6 +231,7 @@ def _write_registry(path: Path, payload: Mapping[str, object]) -> None:
         raise ModelStoreError("model preparation registry cannot be a symlink")
     descriptor, temporary_name = tempfile.mkstemp(prefix=".model-preparations-", dir=path.parent)
     temporary = Path(temporary_name)
+    committed = False
     try:
         raw = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
         with os.fdopen(descriptor, "wb") as output:
@@ -218,15 +240,25 @@ def _write_registry(path: Path, payload: Mapping[str, object]) -> None:
             output.flush()
             os.fsync(output.fileno())
         temporary.replace(path)
-        parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
+        committed = True
     except OSError as exc:
         raise ModelStoreError("could not atomically write model preparation registry") from exc
     finally:
-        temporary.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            temporary.unlink(missing_ok=True)
+
+    if committed:
+        # The rename is the commit point.  Directory fsync improves crash
+        # durability when available, but failure here must not roll back model
+        # directories after the new registry is already visible.
+        try:
+            parent_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError:
+            pass
 
 
 def _artifact_entry(
@@ -237,14 +269,16 @@ def _artifact_entry(
 ) -> dict[str, object]:
     return {
         "path": path,
+        "model_id": artifact.model_id,
         "revision": artifact.revision,
+        "quantization": _quantization_manifest(artifact),
         "source": _source_manifest(source),
         "sources": _sources_manifest(artifact),
         "files": _file_manifest(artifact),
     }
 
 
-def _entry_matches_artifact(entry: object, artifact: ModelArtifact) -> bool:
+def _entry_content_matches_artifact(entry: object, artifact: ModelArtifact) -> bool:
     if not isinstance(entry, dict):
         return False
     expected_sources = _sources_manifest(artifact)
@@ -254,6 +288,17 @@ def _entry_matches_artifact(entry: object, artifact: ModelArtifact) -> bool:
         and entry.get("files") == _file_manifest(artifact)
         and isinstance(entry.get("source"), dict)
         and entry["source"] in expected_sources
+    )
+
+
+def _entry_matches_artifact(entry: object, artifact: ModelArtifact) -> bool:
+    if not _entry_content_matches_artifact(entry, artifact):
+        return False
+    if not isinstance(entry, dict):
+        return False
+    return (
+        entry.get("model_id") == artifact.model_id
+        and entry.get("quantization") == _quantization_manifest(artifact)
     )
 
 
@@ -330,7 +375,7 @@ def _cache_path(
         if not isinstance(candidate, dict):
             continue
         artifacts = candidate.get("artifacts")
-        if not isinstance(artifacts, dict) or not _entry_matches_artifact(
+        if not isinstance(artifacts, dict) or not _entry_content_matches_artifact(
             artifacts.get(artifact.key), artifact
         ):
             continue
@@ -433,6 +478,33 @@ async def _stream_result(result: DownloadResult) -> DownloadStream:
     return result
 
 
+async def _close_download_result(
+    result: object, active_error: BaseException | None
+) -> None:
+    close = getattr(result, "aclose", None)
+    if not callable(close):
+        close = getattr(result, "close", None)
+    if not callable(close):
+        return
+
+    try:
+        close_result = close()
+        if inspect.isawaitable(close_result):
+            await close_result
+    except asyncio.CancelledError:
+        if isinstance(active_error, asyncio.CancelledError):
+            return
+        raise
+    except Exception as exc:
+        if active_error is not None:
+            raise active_error from None
+        raise _DownloadStreamCloseError("download stream close failed") from exc
+    except BaseException:
+        if isinstance(active_error, asyncio.CancelledError):
+            return
+        raise
+
+
 async def _write_download(
     downloader: Downloader,
     source: SourceLocation,
@@ -475,31 +547,40 @@ async def _write_download(
         )
 
     result = await _stream_result(downloader.download(source, item_path))
+    active_error: BaseException | None = None
     try:
-        descriptor = os.open(
-            target,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-            0o600,
-        )
-    except OSError as exc:
-        raise ModelStoreError("could not create staged model file") from exc
-    with os.fdopen(descriptor, "wb") as output:
-        if isinstance(result, (bytes, bytearray, memoryview)):
-            await write_chunk(result, output)
-        elif hasattr(result, "__aiter__"):
-            async for chunk in cast(AsyncIterable[object], result):
-                await write_chunk(chunk, output)
-        elif isinstance(result, Iterable):
-            for chunk in result:
-                await write_chunk(chunk, output)
-        else:
-            raise ModelStoreError("downloader did not return a byte stream")
-        if total != expected_size:
-            raise ModelStoreError(f"artifact file size differs from manifest: {item_path}")
-        if digest.hexdigest() != expected_sha256:
-            raise ModelStoreError(f"artifact file hash differs from manifest: {item_path}")
-        output.flush()
-        os.fsync(output.fileno())
+        try:
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise ModelStoreError("could not create staged model file") from exc
+        with os.fdopen(descriptor, "wb") as output:
+            if isinstance(result, (bytes, bytearray, memoryview)):
+                await write_chunk(result, output)
+            elif hasattr(result, "__aiter__"):
+                async for chunk in cast(AsyncIterable[object], result):
+                    await write_chunk(chunk, output)
+            elif isinstance(result, Iterable):
+                for chunk in result:
+                    await write_chunk(chunk, output)
+            else:
+                raise ModelStoreError("downloader did not return a byte stream")
+            if total != expected_size:
+                raise ModelStoreError(f"artifact file size differs from manifest: {item_path}")
+            if digest.hexdigest() != expected_sha256:
+                raise ModelStoreError(f"artifact file hash differs from manifest: {item_path}")
+            output.flush()
+            os.fsync(output.fileno())
+    except BaseException as exc:
+        active_error = exc
+        raise
+    finally:
+        await _close_download_result(result, active_error)
+
+
 async def _download_artifact(
     artifact: ModelArtifact,
     stage_directory: Path,
@@ -538,6 +619,8 @@ async def _download_artifact(
                     raise ModelStoreError("staged snapshot does not match manifest")
                 return source
             except asyncio.CancelledError:
+                raise
+            except _DownloadStreamCloseError:
                 raise
             except Exception as exc:
                 message = str(exc).lower()

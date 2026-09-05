@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import stat
 from collections import Counter
 from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
@@ -169,6 +170,71 @@ class BlockingDownloader:
         yield b"unreachable"
 
 
+class TrackingAsyncStream:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        started: asyncio.Event | None = None,
+        close_error: BaseException | None = None,
+    ) -> None:
+        self._chunks = list(chunks)
+        self._position = 0
+        self._started = started
+        self._close_error = close_error
+        self.close_calls = 0
+
+    def __aiter__(self) -> TrackingAsyncStream:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._started is not None:
+            self._started.set()
+        if self._position >= len(self._chunks):
+            raise StopAsyncIteration
+        chunk = self._chunks[self._position]
+        self._position += 1
+        await asyncio.sleep(0)
+        return chunk
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        if self._close_error is not None:
+            raise self._close_error
+
+
+class TrackingSyncStream:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self.close_calls = 0
+
+    def __iter__(self) -> TrackingSyncStream:
+        return self
+
+    def __next__(self) -> bytes:
+        if not self._chunks:
+            raise StopIteration
+        return self._chunks.pop(0)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class TrackingDownloader:
+    def __init__(self, payloads: Mapping[tuple[str, str], bytes], *, sync: bool = False) -> None:
+        self.payloads = dict(payloads)
+        self.sync = sync
+        self.streams: list[TrackingAsyncStream | TrackingSyncStream] = []
+
+    async def download(
+        self, source: SourceLocation, relative_path: str
+    ) -> TrackingAsyncStream | TrackingSyncStream:
+        payload = self.payloads[(source.repository, relative_path)]
+        stream = TrackingSyncStream([payload]) if self.sync else TrackingAsyncStream([payload])
+        self.streams.append(stream)
+        return stream
+
+
 async def _prepare(
     tmp_path: Path,
     catalog: ModelCatalog,
@@ -249,6 +315,167 @@ async def test_prepare_streams_locked_files_and_publishes_atomic_registry(tmp_pa
     assert registry["prepared"][prepared_id]["runtime_lock_id"] == "fixture-lock"
     assert not (tmp_path / "models" / ".staging").exists()
     assert any(event.get("phase") == "verified" for event in progress)
+
+
+@pytest.mark.anyio
+async def test_registry_parent_fsync_failure_keeps_committed_models_reusable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog, payloads = _catalog()
+    first_downloader = FakeDownloader(payloads)
+    original_fsync = model_store.os.fsync
+
+    def fsync_without_directory_fsync(fd: int) -> None:
+        if stat.S_ISDIR(model_store.os.fstat(fd).st_mode):
+            raise OSError("directory fsync unavailable")
+        original_fsync(fd)
+
+    monkeypatch.setattr(model_store.os, "fsync", fsync_without_directory_fsync)
+    prepared_id = await _prepare(tmp_path, catalog, _runtime_lock(), first_downloader)
+
+    registry_path = tmp_path / "state" / "model-preparations.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    assert prepared_id in registry["prepared"]
+    assert (tmp_path / "models" / "asr").is_dir()
+    assert (tmp_path / "models" / "design").is_dir()
+
+    second_downloader = FakeDownloader(payloads)
+    assert await _prepare(tmp_path, catalog, _runtime_lock(), second_downloader) == prepared_id
+    assert not second_downloader.calls
+
+
+@pytest.mark.anyio
+async def test_download_async_streams_close_once_on_success_and_hash_failure(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    downloader = TrackingDownloader(payloads)
+
+    await _prepare(tmp_path, catalog, _runtime_lock(), downloader)
+    assert downloader.streams
+    assert all(stream.close_calls == 1 for stream in downloader.streams)
+
+    failed_catalog, failed_payloads = _catalog(revision_suffix="f")
+    failed_payloads["fixture/asr", "config.json"] = b"wrong"
+    failed_downloader = TrackingDownloader(failed_payloads)
+    with pytest.raises(ModelStoreError):
+        await _prepare(
+            tmp_path / "failed",
+            failed_catalog,
+            _runtime_lock(),
+            failed_downloader,
+            max_retries=0,
+        )
+    assert failed_downloader.streams
+    assert all(stream.close_calls == 1 for stream in failed_downloader.streams)
+
+
+@pytest.mark.anyio
+async def test_download_sync_iterables_close_once(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    downloader = TrackingDownloader(payloads, sync=True)
+
+    await _prepare(tmp_path, catalog, _runtime_lock(), downloader)
+
+    assert downloader.streams
+    assert all(stream.close_calls == 1 for stream in downloader.streams)
+
+
+@pytest.mark.anyio
+async def test_download_stream_close_error_is_stable(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+
+    class ClosingErrorDownloader(TrackingDownloader):
+        async def download(
+            self, source: SourceLocation, relative_path: str
+        ) -> TrackingAsyncStream:
+            payload = self.payloads[(source.repository, relative_path)]
+            stream = TrackingAsyncStream([payload], close_error=RuntimeError("secret/body"))
+            self.streams.append(stream)
+            return stream
+
+    downloader = ClosingErrorDownloader(payloads)
+    with pytest.raises(ModelStoreError) as exc_info:
+        await _prepare(tmp_path, catalog, _runtime_lock(), downloader, max_retries=0)
+    assert "secret/body" not in str(exc_info.value)
+    assert downloader.streams[0].close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_download_async_stream_closes_on_cancellation(tmp_path: Path) -> None:
+    catalog, _ = _catalog()
+    started = asyncio.Event()
+
+    class BlockingStreamDownloader:
+        def __init__(self) -> None:
+            self.stream: TrackingAsyncStream | None = None
+
+        async def download(
+            self, source: SourceLocation, relative_path: str
+        ) -> TrackingAsyncStream:
+            del source, relative_path
+            self.stream = TrackingAsyncStream([b"unreachable"], started=started)
+            return self.stream
+
+    downloader = BlockingStreamDownloader()
+    task = asyncio.create_task(_prepare(tmp_path, catalog, _runtime_lock(), downloader))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert downloader.stream is not None
+    assert downloader.stream.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_progress_callback_failure_does_not_retry_or_break_prepare(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    downloader = FakeDownloader(payloads)
+    callback_calls = 0
+
+    def progress(_: dict[str, object]) -> None:
+        nonlocal callback_calls
+        callback_calls += 1
+        if callback_calls == 1:
+            raise RuntimeError("observer failed")
+
+    prepared_id = await _prepare(
+        tmp_path,
+        catalog,
+        _runtime_lock(),
+        downloader,
+        progress=progress,
+    )
+
+    assert prepared_id.startswith("prepared_")
+    assert callback_calls > 1
+    assert len(downloader.calls) == 12
+
+
+@pytest.mark.anyio
+async def test_metadata_change_gets_new_identity_and_reuses_verified_files(tmp_path: Path) -> None:
+    catalog, payloads = _catalog()
+    changed_payload = catalog.model_dump(mode="json")
+    for artifact in changed_payload["artifacts"]:
+        if artifact["key"] == "asr":
+            artifact["model_id"] = "fixture/asr-renamed"
+            artifact["quantization"]["group_size"] = 32
+    changed_catalog = ModelCatalog.model_validate(changed_payload)
+
+    first_downloader = FakeDownloader(payloads)
+    first_id = await _prepare(tmp_path, catalog, _runtime_lock(), first_downloader)
+    second_downloader = FakeDownloader(payloads)
+    second_id = await _prepare(tmp_path, changed_catalog, _runtime_lock(), second_downloader)
+
+    assert second_id != first_id
+    assert not second_downloader.calls
+    registry = json.loads(
+        (tmp_path / "state" / "model-preparations.json").read_text(encoding="utf-8")
+    )
+    entry = registry["prepared"][second_id]["artifacts"]["asr"]
+    assert entry["model_id"] == "fixture/asr-renamed"
+    assert entry["quantization"] == {"bits": 8, "group_size": 32, "format": "fixture"}
 
 
 @pytest.mark.anyio
