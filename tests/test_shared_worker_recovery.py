@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from speechrail.backends.qwen3_shared import GenerationGuard, Qwen3SharedWorker
+from speechrail.backends.qwen3_native import Qwen3Worker
+from speechrail.backends.qwen3_shared import (
+    GenerationGuard,
+    Qwen3SharedWorker,
+    WorkerTransportError,
+)
+from speechrail.runtime.worker_protocol import ProtocolError
 from test_qwen3_shared import _Config
 
 
@@ -94,5 +101,88 @@ def test_one_hundred_sent_cancellations_leave_no_process_or_pending_request() ->
         finally:
             await worker.close()
             loop.set_exception_handler(previous_handler)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["shared_eof", "malformed", "partial_header", "partial_body"],
+)
+def test_receive_side_loss_preserves_transport_cause_and_restarts_generation(
+    action: str,
+) -> None:
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=0.05))
+        try:
+            if action.startswith("partial"):
+                # Keep the request wait longer than the transport's partial-frame
+                # deadline so the dispatcher owns the failure classification.
+                worker.config = replace(worker.config, timeout_seconds=0.5)
+            with pytest.raises(WorkerTransportError) as exc_info:
+                await worker.request({"action": action, "request_id": f"loss-{action}"})
+            assert isinstance(exc_info.value.__cause__, ProtocolError)
+            old_generation = worker.generation
+            assert worker.alive is False
+
+            await worker.start()
+            assert worker.generation == old_generation + 1
+        finally:
+            await worker.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure_action", ["shared_eof", "partial_header", "partial_body"])
+def test_receive_side_loss_gets_one_real_batch_retry(
+    failure_action: str,
+) -> None:
+    async def scenario() -> None:
+        worker_config = _Config(timeout_seconds=0.05)
+        worker = Qwen3SharedWorker(worker_config)
+        if failure_action.startswith("partial"):
+            # Let the dispatcher classify the partial frame before the request
+            # deadline fires. The transport deadline remains 50 ms.
+            worker.config = replace(worker.config, timeout_seconds=0.5)
+        transcribe_calls = 0
+        original_send = worker._transport.send
+        original_receive = worker._transport.receive
+
+        async def send(payload: Any, **kwargs: Any) -> None:
+            nonlocal transcribe_calls
+            if payload.get("type") == "transcribe":
+                transcribe_calls += 1
+                payload = dict(payload)
+                payload["action"] = (
+                    failure_action if transcribe_calls == 1 else "shared_batch"
+                )
+                if transcribe_calls > 1:
+                    payload["text"] = "retried"
+            await original_send(payload, **kwargs)
+
+        async def receive(*, wait_for_frame: bool = False) -> dict[str, object]:
+            frame = await original_receive(wait_for_frame=wait_for_frame)
+            if frame.get("type") == "result":
+                frame["language"] = "zh"
+            return frame
+
+        worker._transport.send = send
+        worker._transport.receive = receive
+        facade = Qwen3Worker(object(), shared_owner=worker)  # type: ignore[arg-type]
+        try:
+            result = await facade.transcribe(
+                b"\0\0",
+                "zh",
+                "",
+                request_id=f"real-retry-{failure_action}",
+            )
+            assert result.text == "retried"
+            assert transcribe_calls == 2
+            assert worker.generation == 2
+            assert worker.ready is True
+        finally:
+            worker._transport.send = original_send
+            worker._transport.receive = original_receive
+            await worker.close()
 
     asyncio.run(scenario())

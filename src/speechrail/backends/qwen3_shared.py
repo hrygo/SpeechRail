@@ -28,6 +28,10 @@ MAX_SESSIONS = 8
 _RETIRED_REQUEST_LIMIT = 64
 
 
+class WorkerTransportError(RuntimeError):
+    """A worker generation failed while receiving or routing transport data."""
+
+
 class GenerationGuard:
     """进程重建后拒绝旧一代投递。"""
 
@@ -354,6 +358,12 @@ class Qwen3SharedWorker:
                 await self._route_frame(frame, generation)
         except asyncio.CancelledError:
             raise
+        except (OSError, ProtocolError) as exc:
+            await self._fail_generation(
+                generation,
+                code="worker_unavailable",
+                cause=exc,
+            )
         except Exception:
             await self._fail_generation(generation, code="worker_unavailable")
         finally:
@@ -408,6 +418,7 @@ class Qwen3SharedWorker:
         *,
         code: str,
         frame: Mapping[str, object] | None = None,
+        cause: BaseException | None = None,
     ) -> None:
         if not self._generation_guard.accepts(generation):
             return
@@ -423,7 +434,14 @@ class Qwen3SharedWorker:
                 self._requests.pop(request_id, None)
                 self._retire_request_id(request_id)
                 if not pending.future.done():
-                    pending.future.set_exception(RuntimeError(code))
+                    failure: RuntimeError
+                    if cause is None:
+                        failure = RuntimeError(code)
+                    else:
+                        failure = WorkerTransportError(code)
+                        failure.__cause__ = cause
+                        failure.__suppress_context__ = True
+                    pending.future.set_exception(failure)
         if self._failure_task is None:
             self._failure_task = asyncio.create_task(
                 self._transport.abort(), name=f"qwen3-shared-reap-{generation}"
@@ -510,5 +528,10 @@ def _is_terminal_frame(frame: Mapping[str, object]) -> bool:
 
 
 __all__ = [
-    "MAX_SESSIONS", "FrameRouter", "GenerationGuard", "Qwen3SharedWorker", "SharedWorkerConfig",
+    "MAX_SESSIONS",
+    "FrameRouter",
+    "GenerationGuard",
+    "Qwen3SharedWorker",
+    "SharedWorkerConfig",
+    "WorkerTransportError",
 ]

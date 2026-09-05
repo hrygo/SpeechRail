@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from speechrail.application.audio_stream import PcmBlock, PcmWindowBuffer, split_pcm
 from speechrail.application.transcript_merge import TranscriptMerger
-from speechrail.backends.qwen3_shared import Qwen3SharedWorker
+from speechrail.backends.qwen3_shared import Qwen3SharedWorker, WorkerTransportError
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
 from speechrail.runtime.worker_process import (
@@ -223,7 +223,7 @@ def _is_transport_loss(exc: BaseException) -> bool:
     propagate unchanged.
     """
 
-    if isinstance(exc, TimeoutError | OSError | ProtocolError):
+    if isinstance(exc, WorkerTransportError | TimeoutError | OSError | ProtocolError):
         return True
     return isinstance(exc, RuntimeError) and isinstance(exc.__cause__, ProtocolError)
 
@@ -299,7 +299,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 merger = TranscriptMerger()
                 for idx, block in enumerate(blocks):
                     sub_req_id = f"{resolved_request_id}_win_{idx}"
-                    result = await self._transcribe_once(
+                    result = await self._transcribe_window_with_retry(
                         block.pcm, language, prompt, include_timestamps, sub_req_id
                     )
                     merger.add(block, result)
@@ -309,18 +309,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
 
         lease = self._shared_owner.mode_gate.acquire("batch")
         try:
-            try:
-                return await self._transcribe_once(
-                    pcm, language, prompt, include_timestamps, resolved_request_id
-                )
-            except TimeoutError:
-                # timeout 后由 owner 保持已终止状态, 不重跑推理。
-                raise
-            except (OSError, ProtocolError, RuntimeError) as exc:
-                if not _is_transport_loss(exc):
-                    raise
-            # transport loss 最多重建一次; 不能 close 共享 owner 误杀其他会话。
-            return await self._transcribe_once(
+            return await self._transcribe_window_with_retry(
                 pcm, language, prompt, include_timestamps, resolved_request_id
             )
         finally:
@@ -346,18 +335,9 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 nonlocal window_idx
                 sub_request_id = f"{resolved_request_id}_win_{window_idx}"
                 window_idx += 1
-                try:
-                    result = await self._transcribe_once(
-                        block.pcm, language, prompt, include_timestamps, sub_request_id
-                    )
-                except TimeoutError:
-                    raise
-                except (OSError, ProtocolError, RuntimeError) as exc:
-                    if not _is_transport_loss(exc):
-                        raise
-                    result = await self._transcribe_once(
-                        block.pcm, language, prompt, include_timestamps, sub_request_id
-                    )
+                result = await self._transcribe_window_with_retry(
+                    block.pcm, language, prompt, include_timestamps, sub_request_id
+                )
                 merger.add(block, result)
 
             async for chunk in audio:
@@ -377,6 +357,30 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
         finally:
             self._shared_owner.mode_gate.release(lease)
+
+    async def _transcribe_window_with_retry(
+        self,
+        pcm: bytes,
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool,
+        request_id: str,
+    ) -> TranscriptResult:
+        """Retry one not-yet-delivered window at most once after transport loss."""
+        try:
+            return await self._transcribe_once(
+                pcm, language, prompt, include_timestamps, request_id
+            )
+        except TimeoutError:
+            # A timeout may have completed inference without delivering a result;
+            # never replay it implicitly.
+            raise
+        except (OSError, ProtocolError, RuntimeError) as exc:
+            if not _is_transport_loss(exc):
+                raise
+        return await self._transcribe_once(
+            pcm, language, prompt, include_timestamps, request_id
+        )
 
     async def _transcribe_once(
         self,
