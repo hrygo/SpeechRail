@@ -8,11 +8,8 @@ for the lifetime of each piece of work.
 
 from __future__ import annotations
 
-import asyncio
 import inspect
-import math
 import threading
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -62,187 +59,6 @@ class RuntimeBusyError(ManagedRuntimeError):
     code = "runtime_busy"
 
 
-class RuntimeDrainError(ManagedRuntimeError):
-    """Base error for the managed runtime drain lifecycle."""
-
-    code = "runtime_drain_error"
-
-
-class RuntimeDrainTokenError(RuntimeDrainError, ValueError):
-    """Raised for foreign, expired, or already-consumed drain tokens."""
-
-    code: ClassVar[str] = "runtime_drain_token_invalid"
-
-    def __init__(self, message: str | None = None) -> None:
-        resolved = message or self.code
-        super().__init__(resolved)
-        self.message = resolved
-
-
-class RuntimeDrainBusyError(RuntimeDrainError, RuntimeBusyError):
-    """Raised when another drain owner already controls the runtime."""
-
-    code = "runtime_drain_busy"
-
-
-class RuntimeDrainActivationError(RuntimeDrainTokenError):
-    """Raised when a token has already crossed into activation."""
-
-    code = "runtime_drain_activation_claimed"
-
-
-class DrainState:
-    """Thread-safe single-owner state machine for a runtime drain.
-
-    ``begin`` changes admission synchronously.  An unclaimed token expires at
-    its deadline and reopens admission when ``expire`` is called.  Production
-    callers use the injected monotonic clock; tests may provide a deterministic
-    clock and explicit ``now`` values.
-    """
-
-    DEFAULT_TTL_SECONDS: ClassVar[float] = 120.0
-
-    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
-        self._clock = time.monotonic if clock is None else clock
-        self._lock = threading.RLock()
-        self._accepting = True
-        self._token: str | None = None
-        self._deadline: float | None = None
-        self._activation_claimed = False
-
-    @property
-    def accepting(self) -> bool:
-        """Whether new work may be admitted."""
-        with self._lock:
-            return self._accepting
-
-    @property
-    def draining(self) -> bool:
-        """Whether a drain owner currently blocks new work."""
-        return not self.accepting
-
-    @property
-    def token(self) -> str | None:
-        """Return the current owner token for lifecycle inspection."""
-        with self._lock:
-            return self._token
-
-    @property
-    def deadline(self) -> float | None:
-        """Return the monotonic deadline of the current unexpired token."""
-        with self._lock:
-            return self._deadline
-
-    @property
-    def activation_claimed(self) -> bool:
-        """Whether the current token has entered the activation phase."""
-        with self._lock:
-            return self._activation_claimed
-
-    def begin(
-        self,
-        now: float | None = None,
-        ttl_seconds: float = DEFAULT_TTL_SECONDS,
-    ) -> str:
-        """Claim the only drain owner and immediately stop admission."""
-        ttl_value = self._validate_ttl(ttl_seconds)
-        current = self._current_time(now)
-        with self._lock:
-            self._expire_locked(current)
-            if self._token is not None or not self._accepting:
-                raise RuntimeDrainBusyError()
-            token = uuid4().hex
-            self._token = token
-            self._deadline = current + ttl_value
-            self._activation_claimed = False
-            self._accepting = False
-            return token
-
-    def expire(self, now: float | None = None) -> bool:
-        """Expire an unclaimed token and reopen admission when its TTL ends."""
-        current = self._current_time(now)
-        with self._lock:
-            return self._expire_locked(current)
-
-    def resume(self, token: str) -> None:
-        """Resume admission for the matching unclaimed token exactly once."""
-        current = self._current_time()
-        with self._lock:
-            self._expire_locked(current)
-            self._require_token_locked(token)
-            if self._activation_claimed:
-                raise RuntimeDrainActivationError()
-            self._clear_locked()
-
-    def claim_activation(self, token: str) -> None:
-        """Mark a valid token as owned by the later activation phase."""
-        current = self._current_time()
-        with self._lock:
-            self._expire_locked(current)
-            self._require_token_locked(token)
-            if self._activation_claimed:
-                raise RuntimeDrainActivationError()
-            self._activation_claimed = True
-
-    def abort(self, token: str) -> bool:
-        """Cancel an unclaimed drain owned by ``token`` and reopen admission."""
-        with self._lock:
-            if token != self._token or self._activation_claimed:
-                return False
-            self._clear_locked()
-            return True
-
-    def owns(self, token: str) -> bool:
-        """Return whether ``token`` is still a live owner."""
-        current = self._current_time()
-        with self._lock:
-            self._expire_locked(current)
-            return token == self._token
-
-    def _expire_locked(self, now: float) -> bool:
-        if (
-            self._token is None
-            or self._activation_claimed
-            or self._deadline is None
-            or now < self._deadline
-        ):
-            return False
-        self._clear_locked()
-        return True
-
-    def _require_token_locked(self, token: str) -> None:
-        if self._token is None or token != self._token:
-            raise RuntimeDrainTokenError()
-
-    def _clear_locked(self) -> None:
-        self._accepting = True
-        self._token = None
-        self._deadline = None
-        self._activation_claimed = False
-
-    @staticmethod
-    def _validate_ttl(ttl_seconds: float) -> float:
-        if (
-            isinstance(ttl_seconds, bool)
-            or not isinstance(ttl_seconds, (int, float))
-            or not math.isfinite(ttl_seconds)
-        ):
-            raise ValueError("drain deadline must be finite")
-        if ttl_seconds <= 0:
-            raise ValueError("drain deadline must be positive")
-        return float(ttl_seconds)
-
-    def _current_time(self, value: float | None = None) -> float:
-        current = self._clock() if value is None else value
-        if (
-            isinstance(current, bool)
-            or not isinstance(current, (int, float))
-            or not math.isfinite(current)
-        ):
-            raise ValueError("drain clock must be finite")
-        return float(current)
-
-
 def _freeze_snapshot(value: object) -> object:
     """Recursively copy the small public snapshot values used by a bundle."""
     if isinstance(value, Mapping):
@@ -290,8 +106,6 @@ class ActiveWork:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._count = 0
-        self._zero_event: asyncio.Event | None = None
-        self._zero_loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def count(self) -> int:
@@ -303,14 +117,10 @@ class ActiveWork:
         """Acquire one generation token, returning an idempotent release handle."""
         with self._lock:
             self._count += 1
-            if self._count == 1 and self._zero_event is not None:
-                self._zero_event.clear()
         return ActiveWorkLease(self, generation)
 
     def release(self, token: ActiveWorkLease) -> None:
         """Release one token without allowing an underflow."""
-        event: asyncio.Event | None = None
-        loop: asyncio.AbstractEventLoop | None = None
         with self._lock:
             if not isinstance(token, ActiveWorkLease) or token._owner is not self:
                 raise ValueError("foreign ActiveWork lease")
@@ -319,47 +129,6 @@ class ActiveWork:
             token._released = True
             if self._count:
                 self._count -= 1
-            if self._count == 0:
-                event = self._zero_event
-                loop = self._zero_loop
-        if event is not None:
-            self._notify_zero(event, loop)
-
-    async def wait_for_zero(self) -> None:
-        """Wait asynchronously until every active-work token is released."""
-        loop = asyncio.get_running_loop()
-        with self._lock:
-            if self._count == 0:
-                return
-            if self._zero_event is None or self._zero_loop is not loop:
-                self._zero_event = asyncio.Event()
-                self._zero_loop = loop
-            event = self._zero_event
-        while True:
-            await event.wait()
-            with self._lock:
-                if self._count == 0:
-                    return
-                event.clear()
-
-    @staticmethod
-    def _notify_zero(
-        event: asyncio.Event,
-        loop: asyncio.AbstractEventLoop | None,
-    ) -> None:
-        if loop is None:
-            event.set()
-            return
-        try:
-            current = asyncio.get_running_loop()
-        except RuntimeError:
-            current = None
-        if current is loop:
-            event.set()
-        elif loop.is_closed():
-            return
-        else:
-            loop.call_soon_threadsafe(event.set)
 
     @contextmanager
     def lease(self, *, generation: int | str = 0) -> Iterator[ActiveWorkLease]:
@@ -548,8 +317,6 @@ class ManagedRuntime(BatchTranscriber, SpeechSynthesizer, RealtimeAsrFactory):
         bundle: RuntimeBundle | None = None,
         *,
         active_work: ActiveWork | None = None,
-        clock: Callable[[], float] | None = None,
-        drain_state: DrainState | None = None,
     ) -> None:
         self._state_lock = threading.RLock()
         self._bundle = bundle or RuntimeBundle(
@@ -561,7 +328,7 @@ class ManagedRuntime(BatchTranscriber, SpeechSynthesizer, RealtimeAsrFactory):
             generation=0,
         )
         self._active_work = active_work or ActiveWork()
-        self._drain_state = drain_state or DrainState(clock=clock)
+        self._draining = False
 
     @property
     def active_work(self) -> ActiveWork:
@@ -576,13 +343,8 @@ class ManagedRuntime(BatchTranscriber, SpeechSynthesizer, RealtimeAsrFactory):
     @property
     def is_draining(self) -> bool:
         """Whether new work is currently rejected."""
-        self._drain_state.expire()
-        return self._drain_state.draining
-
-    @property
-    def drain_state(self) -> DrainState:
-        """Return the drain state for lifecycle orchestration and inspection."""
-        return self._drain_state
+        with self._state_lock:
+            return self._draining
 
     @property
     def bundle(self) -> RuntimeBundle:
@@ -642,8 +404,7 @@ class ManagedRuntime(BatchTranscriber, SpeechSynthesizer, RealtimeAsrFactory):
         never observe a partially switched bundle.
         """
         with self._state_lock:
-            self._drain_state.expire()
-            if not self._drain_state.accepting:
+            if self._draining:
                 raise RuntimeDrainingError()
             bundle = self._bundle
             token = self._active_work.acquire(generation=bundle.generation)
@@ -656,45 +417,15 @@ class ManagedRuntime(BatchTranscriber, SpeechSynthesizer, RealtimeAsrFactory):
                 raise RuntimeBusyError("runtime bundle has active work")
             self._bundle = bundle
 
-    def begin_draining(self) -> str:
-        """Synchronously reject new work and return the sole owner token."""
+    def begin_draining(self) -> None:
+        """Reject new work while existing leases continue to drain."""
         with self._state_lock:
-            self._drain_state.expire()
-            return self._drain_state.begin()
+            self._draining = True
 
-    async def drain(self, deadline_seconds: float = DrainState.DEFAULT_TTL_SECONDS) -> str:
-        """Stop admission and wait for active work, with cancellation-safe cleanup.
-
-        A timeout or cancellation only resumes admission.  Existing leases are
-        left untouched, so their batch, TTS, or realtime operation may finish.
-        On success the returned token remains the sole owner until ``resume``
-        or ``claim_activation`` is called.
-        """
+    def end_draining(self) -> None:
+        """Allow new work after an activation hand-off has completed."""
         with self._state_lock:
-            token = self._drain_state.begin(ttl_seconds=deadline_seconds)
-            if self._active_work.count == 0:
-                return token
-        try:
-            async with asyncio.timeout(deadline_seconds):
-                await self._active_work.wait_for_zero()
-        except BaseException:
-            self._drain_state.abort(token)
-            raise
-        if not self._drain_state.owns(token):
-            raise RuntimeDrainTokenError("drain token expired")
-        return token
-
-    async def resume(self, token: str) -> None:
-        """Resume admission for the matching unclaimed drain owner."""
-        self._drain_state.resume(token)
-
-    def expire(self, now: float | None = None) -> bool:
-        """Apply the drain TTL and report whether it reopened admission."""
-        return self._drain_state.expire(now=now)
-
-    def claim_activation(self, token: str) -> None:
-        """Transfer a drained token to the later activation phase."""
-        self._drain_state.claim_activation(token)
+            self._draining = False
 
     def _acquire_component(
         self, lease: RuntimeLease, component: object | None, name: str
@@ -855,15 +586,10 @@ class ManagedRuntime(BatchTranscriber, SpeechSynthesizer, RealtimeAsrFactory):
 __all__ = [
     "ActiveWork",
     "ActiveWorkLease",
-    "DrainState",
     "ManagedRuntime",
     "ManagedRuntimeError",
     "RuntimeBundle",
     "RuntimeBusyError",
-    "RuntimeDrainActivationError",
-    "RuntimeDrainBusyError",
-    "RuntimeDrainError",
-    "RuntimeDrainTokenError",
     "RuntimeDrainingError",
     "RuntimeLease",
     "RuntimeNotReadyError",
