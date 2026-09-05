@@ -274,6 +274,43 @@ def test_abort_then_restart_does_not_leak_old_frames(tmp_path: Path) -> None:
     _run(scenario)
 
 
+def test_cancelled_abort_reaps_old_process_before_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path, shutdown_timeout=0.15))
+
+    async def scenario() -> None:
+        await transport.start()
+        original = transport._process
+        assert original is not None
+        terminating = asyncio.Event()
+        terminate = transport._terminate
+
+        async def observed_terminate(process: asyncio.subprocess.Process) -> None:
+            terminating.set()
+            await terminate(process)
+
+        monkeypatch.setattr(transport, "_terminate", observed_terminate)
+        try:
+            await transport.exchange({"action": "stubborn_ready"})
+            closing = asyncio.create_task(transport.abort())
+            await terminating.wait()
+            closing.cancel()
+            restarting = asyncio.create_task(transport.start())
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+            await restarting
+            assert original.returncode is not None
+            assert transport._process is not original
+        finally:
+            if original.returncode is None:
+                original.kill()
+                await original.wait()
+            await transport.close()
+
+    _run(scenario)
+
+
 def test_terminate_timeout_falls_back_to_kill(tmp_path: Path) -> None:
     transport = AsyncFramedWorkerProcess(_spec(tmp_path, shutdown_timeout=0.3))
 

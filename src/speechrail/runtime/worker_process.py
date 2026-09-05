@@ -101,6 +101,7 @@ class AsyncFramedWorkerProcess:
         self._stderr_task: asyncio.Task[None] | None = None
         self._read_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def alive(self) -> bool:
@@ -108,21 +109,23 @@ class AsyncFramedWorkerProcess:
         return process is not None and process.returncode is None
 
     async def start(self) -> None:
-        if self.alive:
-            return
-        self._stderr_ring.clear()
-        self._process = await asyncio.create_subprocess_exec(
-            *self._spec.command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=self._spec.cwd,
-            env=dict(self._spec.env),
-        )
-        self._stderr_task = asyncio.create_task(
-            self._drain_stderr(self._process),
-            name="worker-stderr-drain",
-        )
+        async with self._lifecycle_lock:
+            if self.alive:
+                return
+            await self._abort_unlocked()
+            self._stderr_ring.clear()
+            self._process = await asyncio.create_subprocess_exec(
+                *self._spec.command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._spec.cwd,
+                env=dict(self._spec.env),
+            )
+            self._stderr_task = asyncio.create_task(
+                self._drain_stderr(self._process),
+                name="worker-stderr-drain",
+            )
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
         """Read *proc.stderr* line-by-line into the bounded ring buffer."""
@@ -234,13 +237,35 @@ class AsyncFramedWorkerProcess:
         return frame
 
     async def abort(self) -> None:
-        """Drop the reference first, then terminate so stale frames cannot leak."""
+        """隔离旧管道并等待回收完成。调用方取消也不能提前启动下一进程。"""
+        async with self._lifecycle_lock:
+            await self._abort_unlocked()
+
+    async def _abort_unlocked(self) -> None:
         process, self._process = self._process, None
-        if self._stderr_task is not None:
-            self._stderr_task.cancel()
-            self._stderr_task = None
+        stderr_task, self._stderr_task = self._stderr_task, None
+        if stderr_task is not None:
+            stderr_task.cancel()
+        if process is None and stderr_task is None:
+            return
+        cleanup = asyncio.create_task(self._reap(process, stderr_task))
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _reap(
+        self, process: asyncio.subprocess.Process | None, stderr_task: asyncio.Task[None] | None
+    ) -> None:
         if process is not None:
             await self._terminate(process)
+        if stderr_task is not None:
+            await asyncio.gather(stderr_task, return_exceptions=True)
 
     async def close(self) -> None:
         await self.abort()

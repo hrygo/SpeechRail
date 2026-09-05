@@ -168,6 +168,11 @@ def main() -> None:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             time.sleep(30)
             return
+        elif action == "stubborn_ready":
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            write_frame(stdout, {"type": "ready"})
+            time.sleep(30)
+            return
         elif action == "exit":
             return
         elif action == "stderr_and_exit":
