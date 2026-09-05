@@ -308,10 +308,9 @@ flowchart TD
     subgraph HostService["FastAPI 宿主守护网关 (Port: 8201)"]
         direction TB
         Router["路由与协议分发 (/v1/audio/*, /v1/realtime)"]
-        Auth["安全策略校验 (Bearer Token / Local Bypass)"]
         Governor["Resource Governor (有界音频队列 & 资源护栏)"]
         Evictor["WorkerIdleEvictor (空闲超时自动卸载模型与显存)"]
-        Router --> Auth --> Governor
+        Router --> Governor
         Governor -. 闲置监控 .-> Evictor
     end
 
