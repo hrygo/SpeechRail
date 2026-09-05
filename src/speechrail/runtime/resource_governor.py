@@ -37,6 +37,8 @@ class GovernorSnapshot:
     active_batch: int
     pending_realtime: int
     pending_batch: int
+    active_asr: int = 0
+    active_tts: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,14 +66,18 @@ class ResourceGovernor:
         *,
         on_reject: Callable[[WorkClass], None] | None = None,
         clock: Callable[[], float] | None = None,
+        allow_heavy_overlap: bool = True,
     ) -> None:
         self._limits = limits
         self._on_reject = on_reject
         self._clock = clock or time.monotonic
+        self._allow_heavy_overlap = allow_heavy_overlap
         self._condition = asyncio.Condition()
         self._ticket = 0
         self._active_realtime = 0
         self._active_batch = 0
+        self._active_asr = 0
+        self._active_tts = 0
         self._realtime_waiters: deque[_Waiter] = deque()
         self._batch_waiters: deque[_Waiter] = deque()
 
@@ -108,6 +114,8 @@ class ResourceGovernor:
             active_batch=self._active_batch,
             pending_realtime=len(self._realtime_waiters),
             pending_batch=len(self._batch_waiters),
+            active_asr=self._active_asr,
+            active_tts=self._active_tts,
         )
 
     async def _acquire(self, work_class: WorkClass) -> None:
@@ -135,6 +143,10 @@ class ResourceGovernor:
                     self._active_realtime += 1
                 else:
                     self._active_batch += 1
+                if waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR):
+                    self._active_asr += 1
+                else:
+                    self._active_tts += 1
                 self._condition.notify_all()
             except BaseException:
                 if waiter in waiters:
@@ -148,11 +160,21 @@ class ResourceGovernor:
                 self._active_realtime -= 1
             else:
                 self._active_batch -= 1
+            if work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR):
+                self._active_asr -= 1
+            else:
+                self._active_tts -= 1
             self._condition.notify_all()
 
     def _can_admit(self, waiter: _Waiter) -> bool:
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
+        if not self._allow_heavy_overlap:
+            is_asr = waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR)
+            if is_asr and self._active_tts > 0:
+                return False
+            if not is_asr and self._active_asr > 0:
+                return False
         if waiter.is_realtime:
             return self._realtime_waiters[0] == waiter
         if self._batch_waiters[0] != waiter:

@@ -497,3 +497,45 @@ def test_batch_below_aging_threshold_still_defers_to_reserved_capacity() -> None
         assert starved_started.is_set()
 
     asyncio.run(scenario())
+
+
+def test_heavy_overlap_serialization_when_budget_constrained() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=4),
+            allow_heavy_overlap=False,
+        )
+
+        asr_started = asyncio.Event()
+        release_asr = asyncio.Event()
+        tts_started = asyncio.Event()
+
+        async def asr_work() -> None:
+            asr_started.set()
+            await release_asr.wait()
+
+        async def tts_work() -> None:
+            tts_started.set()
+
+        asr_task = asyncio.create_task(governor.run(asr_work, WorkClass.BATCH_ASR))
+        await asr_started.wait()
+
+        # While ASR is active, TTS should be blocked from admission
+        # because allow_heavy_overlap=False.
+        tts_task = asyncio.create_task(governor.run(tts_work, WorkClass.BATCH_TTS))
+        await asyncio.sleep(0.02)
+        assert not tts_started.is_set()
+        assert governor.snapshot().active_asr == 1
+        assert governor.snapshot().active_tts == 0
+        assert governor.snapshot().pending_batch == 1
+
+        # Releasing ASR unblocks TTS
+        release_asr.set()
+        await asr_task
+        await asyncio.wait_for(tts_started.wait(), timeout=1.0)
+        await tts_task
+        assert governor.snapshot().active_asr == 0
+        assert governor.snapshot().active_tts == 0
+
+    asyncio.run(scenario())
+
