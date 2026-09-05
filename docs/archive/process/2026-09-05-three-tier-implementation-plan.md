@@ -3,7 +3,7 @@
 > **For agentic workers:** 按用户指定的 `luna_worker` 逐项执行；每个原子任务完成后由主 Agent 审查。
 > 执行时使用当前可用的 `executing-plans`、测试和验证技能；不依赖本环境未提供的
 > `superpowers:subagent-driven-development`。各任务采用 checkbox 跟踪。
-> 本文只完成计划交付，未执行开发、下载、加载、安装或服务切换。
+> 本文同时记录实施进度；已完成的代码卡必须附 commit 与测试证据。尚未执行真实下载、模型加载、安装或服务切换。
 
 **Goal:** 在统一 MLX 架构下提供 quality/balanced/light 三档，保留本机质量路径，并以 M1 Air 8GB 验收 light。
 **Architecture:** 一个 FastAPI 主进程、一个共享 ASR worker、一个 TTS worker；Batch/Streaming ASR 互斥。
@@ -11,8 +11,8 @@
 **Tech Stack:** Python >=3.12,<3.13、uv、FastAPI、Pydantic、MLX、mlx-qwen3-asr、mlx-audio、ffmpeg、macOS LaunchAgent。
 **Spec:** [用户已采纳的设计](2026-09-05-low-memory-mac-architecture-proposal.md)。
 **Decision:** [ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
-**状态:** 计划就绪，待执行。日期：2026-09-05。代码勘察基线：`001e744`（v1.6.8）。
-本计划新增的接口、命令、文件均是目标设计，不代表当前代码已存在。
+**状态:** 实施中。日期：2026-09-05。代码勘察基线：`001e744`（v1.6.8）；当前实施分支证据以各任务卡 commit 为准。
+未勾选的接口、命令和文件仍是目标设计，不代表当前代码已存在。
 
 ## 1. Global Constraints
 
@@ -31,9 +31,11 @@
 - 所有开发任务先写可观察行为的失败测试，再实现；模型测试默认 fake，不下载真实模型。
 - 每个修改可回退到上一 release；未过 M1 门不能标注 light 已支持，不能临时抬高 4GiB 门槛。
 
-## 2. 已核对的代码落点
+## 2. 计划基线已核对的代码落点
 
-图项目 `Users-hrygo-Documents-SpeechRail`，Tier 2，generation `2026-09-05T02:54:54Z`。
+下表记录计划基线 `001e744` 的调查事实。当前实施工作树图项目
+`Users-hrygo-Documents-SpeechRail-three-tier`，Tier 2；2026-09-05 复核时索引已跟随到
+`243fe5e`，实施后的事实以任务卡 commit、当前代码和测试为准。
 对下表主要实现路径调用了 check_index_coverage：metadata_match/no_recorded_issue。
 这只是 best-effort 覆盖；未对整个仓库作穷尽审计。执行每张任务卡前按当时 HEAD 重新核对。
 
@@ -373,12 +375,12 @@ def test_existing_install_without_selection_is_unchanged(tmp_path):
 
 - [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_selection.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [x] **3. 最小实现。** 先完整解析既有 env，再只 overlay 已明确选中的模型路径、实际身份及量化。managed sidecar 的模型选择优先于旧模型 env；非模型 env/进程配置完全保留；向导说明这一优先级。旧安装没有 sidecar 不自动生成，也不启用原来关闭的 TTS/Realtime。新 setup 的 ASR/TTS 开关在共同安装默认层设置，不在 preset 内设置。
+- [x] **3. 最小实现。** 先完整解析既有 env，再只 overlay 已明确选中的模型路径与量化；对外 canonical model ID/alias 继续由既有公共配置控制。managed sidecar 的模型选择优先于旧模型路径 env；非模型 env/进程配置完全保留；向导说明这一优先级。旧安装没有 sidecar 不自动生成，也不启用原来关闭的 TTS/Realtime。新 setup 的 ASR/TTS 开关在共同安装默认层设置，不在 preset 内设置。
 - [x] **4. 边界验证。** fake manifests 下校验只改变允许字段；key/host/aliases/worker timeout/diarization 原样；损坏 sidecar 返回配置错误而非悄悄省资源；wheel/preflight 和源码解析一致。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: preserve user configuration across model selection`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `36f4dd4`，14 项测试通过）
+  `feat: preserve user configuration across model selection`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 commit `36f4dd4`；复核修正 commit `cd969ec`，补齐 public model ID 保留、preset/artifact family 精确绑定和 `runtime_lock_id` 校验，20 项针对性测试 + mypy + ruff 通过）
 
 
 ### T01：建立按模型能力解析的共同音色表
@@ -587,7 +589,7 @@ def test_old_generation_cannot_deliver_a_result():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: isolate failed ASR generations and recover leases`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `0d44959` / `a373098`，3 项测试通过）
+  `fix: isolate failed ASR generations and recover leases`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 commits `0d44959` / `a373098`；复核修正 commits `243fe5e` / `dec1de7`，补齐接收侧 EOF/半帧 cause、逐窗至多一次安全重试及发送前取消不终止 generation；相关恢复测试通过）
 
 
 ### R06：统一资源保护并移除 ASR 双模式预留依赖
@@ -614,7 +616,7 @@ def test_low_memory_acceptance_is_not_a_global_cap():
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `019dc2b`，20 项测试通过）
+  `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（初版 `019dc2b` 仅有算法；复核后由 `29e089d` 接入生产组合根并对未知 footprint 保守串行，59 项预算、Governor、组合与 REST 回归 + mypy + ruff 通过）
 
 
 
@@ -708,7 +710,7 @@ def test_each_inference_window_is_bounded():
 **所有权 / Files：** 修改 src/speechrail/http/routes/audio.py、domain/ports.py、config/__init__.py；补 tests/test_transcription_api.py、test_openai_multipart.py。
 **接口 / Inputs & Outputs：** 新增 domain 的 StreamingBatchTranscriber.transcribe_stream(request_id,audio:AsyncIterator[bytes],language,prompt,include_timestamps)->TranscriptResult；ManagedRuntime后续实现此port。保留 BatchTranscriber 供现有fake调用方。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_transcription_api.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_transcription_api.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.config import Settings
@@ -718,14 +720,14 @@ def test_long_audio_limit_is_independent_of_single_ipc_frame():
     assert settings.max_audio_seconds == 3600
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_transcription_api.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_transcription_api.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 路由按 capability 选择逐块端口；旧 fake port用现有有界小音频fallback，真实Qwen路径强制流式。取消 max_audio_seconds 与单帧IPC的全文件耦合，保留时长配置上限和每帧大小限制。REST仍一次返回完整结果，不冒充新stream参数。格式text/json/verbose/srt/vtt/diarized字段与现有条件一致，上传错误/超时/请求ID不变；新模式冲突移交C01。
-- [ ] **4. 边界验证。** 必须增加fake流式backend断言route不读整文件、上传超限不启动推理、长文件逐窗总时长、所有格式和WebM；这是结构验证，不以Settings一条测试代替行为回归。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 路由按 capability 选择逐块端口；旧 fake port用现有有界小音频fallback，真实Qwen路径强制流式。取消 max_audio_seconds 与单帧IPC的全文件耦合，保留时长配置上限和每帧大小限制。REST仍一次返回完整结果，不冒充新stream参数。格式text/json/verbose/srt/vtt/diarized字段与现有条件一致，上传错误/超时/请求ID不变；新模式冲突移交C01。
+- [x] **4. 边界验证。** 必须增加fake流式backend断言route不读整文件、上传超限不启动推理、长文件逐窗总时长、所有格式和WebM；这是结构验证，不以Settings一条测试代替行为回归。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: stream decoded uploads into batch transcription`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `refactor: stream decoded uploads into batch transcription`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `54b0f98`，59 项转写、解码、分窗与 diarization 回归 + mypy + ruff 通过；真实模型质量仍属于 B02）
 
 
 ### T03：统一长文本分句与生成上界
@@ -734,7 +736,7 @@ def test_long_audio_limit_is_independent_of_single_ipc_frame():
 **所有权 / Files：** 修改 src/speechrail/domain/tts.py、backends/qwen3_tts_worker.py；补 tests/test_tts_streaming_splitter.py、test_tts_policy.py。
 **接口 / Inputs & Outputs：** bounded_sentences(text:str,max_chars:int=240)->tuple[str,...]；两种变体复用相同函数与 generation_token_budget；Realtime 已分句输入不重复插入停顿。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_tts_streaming_splitter.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_tts_streaming_splitter.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.domain.tts import bounded_sentences
@@ -746,14 +748,14 @@ def test_long_text_is_not_silently_truncated():
     assert max(map(len, chunks)) <= 240
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_streaming_splitter.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_streaming_splitter.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 优先句末/次级标点，保护数字、缩写、引号；单句超240字符按安全字符边界切且不丢字。token预算达到上限时分段，不悄悄截断文本；空/纯格式文本按现有规则处理。跨段平滑只做一次，不能在每个codec小块都fade导致颤音。固定参数所有档位一致，质量回归不过则共同算法回退。
-- [ ] **4. 边界验证。** 超长无标点、中英混排、3.14、URL/缩写、chunk拆开标点、最后半句；同输入不同变体的分句相同；不会以硬裁音频达标。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 优先句末/次级标点，保护数字、缩写、引号；单句超240字符按安全字符边界切且不丢字。token预算达到上限时分段，不悄悄截断文本；空/纯格式文本按现有规则处理。跨段平滑只做一次，不能在每个codec小块都fade导致颤音。固定参数所有档位一致，质量回归不过则共同算法回退。
+- [x] **4. 边界验证。** 超长无标点、中英混排、3.14、URL/缩写、chunk拆开标点、最后半句；同输入不同变体的分句相同；不会以硬裁音频达标。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: bound TTS generation without dropping long text`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `fix: bound TTS generation without dropping long text`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `e2ec63b`，28 项 TTS 针对性测试 + 全套 778 项测试 + mypy + ruff 通过；主 Agent 另将引号状态推进收敛为线性扫描；真实音质留待 B02）
 
 
 ### T04：限制 TTS 编码与交付缓冲

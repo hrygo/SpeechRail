@@ -66,7 +66,22 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
 - T01 音色绑定与原有 TTS policy/splitter 共 34 项回归通过。
 - 共享传输 20 项测试通过，空闲等待与半帧超时分开处理。
 - wheel 构建成功，并确认包含全部 9 份当前 assets 文件。
-- 共享进程接入、安装切换、真实模型质量、M1 Air 8GB 内存/热稳态仍在待办范围。
+- M02/T02 已校验实际量化身份并由同一 TTS engine 支持 VoiceDesign 与 CustomVoice；
+  worker 相关 75 项 fake 回归通过，未加载真实模型。
+- R02–R05 已将 Batch/Streaming 接入一个物理 ASR owner，并补 generation、取消、
+  超时、慢消费者和生命周期去重回归；本轮 `243fe5e` / `dec1de7` 进一步补齐接收侧
+  EOF/半帧安全重试与发送前取消语义。
+- A01–A04 已实现有界上传解码、30 秒滚动窗、增量拼接和 REST 流式 batch 端口；
+  A04 的转写、解码、分窗和 diarization 组合共 59 项测试通过。
+- M04 已接入 sidecar 选择解析；本轮 `cd969ec` 已修正初版缺口：保留公共 model ID，
+  精确校验 preset/artifact family 与 runtime lock；20 项针对性测试通过。
+- R06 初版预算没有生产调用方。本轮 `29e089d` 已在组合根接入共同硬件预算：未知
+  footprint 或内存检测失败时 ASR/TTS 保守串行，只有显式 worker 内存上限在整机预算内
+  才允许重叠，并把决策原因保存在 Governor snapshot；59 项相关回归通过。
+- T03 已用同一有界分句和 token budget 驱动两种 TTS variant，长文本不再依赖单次
+  生成上限静默截断；`e2ec63b` 的 TTS 针对性测试 28 项、全套测试 778 项通过。
+- T04 之后的编码交付缓冲、安装切换、ManagedRuntime、公开契约、真实模型质量及
+  M1 Air 8GB 内存/热稳态仍在待办范围。
 
 ## 回退
 
