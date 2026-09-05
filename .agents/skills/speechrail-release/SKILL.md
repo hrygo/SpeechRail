@@ -1,194 +1,202 @@
 ---
 name: speechrail-release
-description: "SpeechRail 版本发布流程。Use when cutting a SpeechRail release: bumping version across all files, updating CHANGELOG and docs metadata, building the wheel, installing/upgrading the launchd service, and running the version-consistency gate plus full verification gates. Covers the exact file/location list carrying the version, the 4-step gate, wheel build/install commands, health/model/voice verification, and rollback. Triggers: 发布, release, 版本号, bump version, 构建 wheel, 安装新版本, tag, git tag, speechrail 发布."
+description: >-
+  SpeechRail 本机版本发布 SOP。用于判定 SemVer、更新版本与 CHANGELOG、执行代码门、
+  构建 wheel、原子替换 managed/explicit-env LaunchAgent 服务、按版本类型选择性能基准、
+  验证与回滚。触发词：发布、release、版本号、bump、构建 wheel、安装新版本、tag。
 ---
 
-# SpeechRail 版本发布
+# SpeechRail 版本发布 SOP
 
-SpeechRail 是单人本机 ASR/TTS 服务，默认部署目标为本机一个 wheel release +
-`launchd` LaunchAgent。本 skill 指导完整发布流程：版本号精准更新 → 门禁 → 构建 →
-安装 → 验证 → 提交与 tag。
+目标是交付一个可验证、可回退的本机 wheel release。发布流程不得下载未在 catalog 中锁定的模型，不覆盖用户配置，不同时运行两个服务实例。
 
-## 核心原则
+## 1. 确定版本与验收范围
 
-- 版本号是**配置事实来源**；`/health` 返回的 `version` 来自
-  `src/speechrail/config/__init__.py` 的 `Settings.version`，不是包版本。
-- 一次 commit 只表达一个逻辑主题：`refactor:`/`fix:` 代码、`chore:` 版本号、
-  `docs:` 文档分开提交。
-- 破坏性变更必须伴随 ADR 或归档记录；不 force-push、不覆盖他人分支。
-- 服务安装/升级/回滚必须使用 `speechrail service` CLI 与 `tools/install_macos.py`，
-  不得手动编辑 plist 或 kill 进程。
-- 模型 snapshot、vendor Python、`ffmpeg`、`.env` 均在仓库外，由本机单独准备；
-  发布流程不下载模型、不覆盖 `.env`。
+以 `pyproject.toml` 的 `[project].version` 为版本事实来源。先比较上一 tag 到 `HEAD` 的用户可见变化，再选择：
 
-## 版本号更新清单（文件 + 位置）
+| 类型 | 条件 | 性能基准 |
+|---|---|---|
+| PATCH | 兼容 bug、安全、稳定性或性能修复；不增加公共能力，不改变档位组合 | 只测当前部署档位 |
+| MINOR | 新增兼容 API、模型档位、音色能力、运行时能力或明显改变默认行为 | 串行测 `quality`、`balanced`、`light`，结束恢复原档 |
+| MAJOR | 破坏公共契约或迁移要求 | 三档完整基准，并验证迁移与兼容期；必须有 ADR/迁移文档 |
 
-版本号唯一事实来源是 `pyproject.toml` 的 `[project].version`；以下文件必须携带
-同一版本号。位置以字段名为准（行号会漂移，勿依赖）；是否漏更由
-`scripts/check_version_consistency.py` 机器门禁最终判定，不靠肉眼看表。
+纯文档修改通常不单独发版。无法确定类型时取更高一级，避免漏测。
 
-| # | 文件 | 位置 | 说明 |
-|---|---|---|---|
-| 1 | `pyproject.toml` | `[project].version` | PEP 621 包版本 = 唯一事实来源 |
-| 2 | `src/speechrail/__init__.py` | `__version__` | 包属性 |
-| 3 | `src/speechrail/config/__init__.py` | `Settings.version` 默认值 | **决定 `/health` 输出**，最容易遗漏 |
-| 4 | `contracts/openapi.yaml` | `info.version` + `/health` example（两处） | 契约双位置 |
-| 5 | `configs/speechrail.example.env` | `SPEECHRAIL_VERSION=` | 环境模板 |
-| 6 | `configs/speechrail.example.yaml` | `service.version` | YAML 模板 |
-| 7 | `tests/test_app_contract.py` | `/health` 断言（两处） | 契约测试 |
-| 8 | `tests/test_installer.py` | wheel 夹具文件名 | 测试夹具 |
-| 9 | `tests/test_release_verification.py` | dist-info 夹具名 | 测试夹具 |
-| 10 | `CHANGELOG.md` | 新 `[<版本>]` 条目 + 新 `[Unreleased]` | Keep a Changelog |
-| 11 | docs front-matter | `architecture.md`/`product-scope.md` 的 `version` + `date` | **仅正文实质变更时更新**（AGENTS.md metadata 规则） |
-| 12 | `uv.lock` | `speechrail` 项目块版本 | `uv lock` 自动同步，勿手改 |
-
-**注意**：
-- `tests/test_worker_protocol.py`、`tests/test_qwen3_tts.py` 中的 `"version": 1` 是
-  **worker 帧协议版本**（int），不是发布版本，不要改。
-- `contracts/openapi.yaml` 的 `version: {type: string}` 是 schema 字段定义，不是值。
-- `tools/install_macos.py`、`scripts/verify_release.py` 从 wheel 文件名动态解析版本，
-  无硬编码，不需要改。
-- `docs/archive/` 与 `docs/superpowers/` 为历史材料，不随发布更新。
-- 已发布历史版本号引用（docs 中描述已移除旧版本的内容）保留原样。
-- 机器门禁 `scripts/check_version_consistency.py` 是版本号位置的**最终判定**。其豁免
-  清单（CHANGELOG 历史标题、example.yaml 注释中的历史版本引用）与脚本 docstring
-  一致——若未来出现新的合法例外位置，先更新脚本豁免说明再发布。
-
-## 发布流程
-
-### Step 1 — 前置检查
+## 2. 前置快照
 
 ```bash
-cd <path-to-SpeechRail>
-git status --short        # 工作树干净或明确属于本发布
-git log --oneline -5      # 确认分支与最近提交
+git status --short
+git log -5 --oneline
+git describe --tags --abbrev=0
+speechrail profile status --app-home "$HOME/Library/Application Support/SpeechRail"
+speechrail service status --app-home "$HOME/Library/Application Support/SpeechRail"
 ```
 
-### Step 2 — 版本号更新
+记录当前 commit、tag、active profile、selection generation、`runtime/current` 目标和服务 PID。确认 label 为 `com.speechrail`、端口为 `8201`，保留上一 release、selection 和私有配置作为回退点。
 
-先 `uv lock` 同步 `uv.lock` 项目版本，再按上表逐文件更新。全部完成后跑三道检查：
+## 3. 更新发布材料
+
+以下位置必须与新版本一致；以字段定位，不依赖行号：
+
+| 文件 | 字段 |
+|---|---|
+| `pyproject.toml` | `[project].version` |
+| `src/speechrail/__init__.py` | `__version__` |
+| `src/speechrail/config/__init__.py` | `Settings.version` 默认值 |
+| `contracts/openapi.yaml` | `info.version` 与 `/health` example |
+| `configs/speechrail.example.env` | `SPEECHRAIL_VERSION` |
+| `configs/speechrail.example.yaml` | `service.version` |
+| `tests/test_app_contract.py` | 两处 `/health` 断言 |
+| `tests/test_installer.py` | wheel fixture 名 |
+| `tests/test_release_verification.py` | dist-info fixture 名 |
+| `uv.lock` | 项目包版本，由 `uv lock` 生成 |
+| `CHANGELOG.md` | 新版本条目，并保留空的 `[Unreleased]` |
+
+不要改 worker 帧协议的整数 `version: 1`、历史 CHANGELOG 标题或归档报告中的旧版本。正式文档 front matter 只在正文实质变化时更新。
 
 ```bash
-uv lock                                                      # 1. 同步锁文件项目版本
-uv run python scripts/check_version_consistency.py           # 2. 机器一致性门禁：全部位置 OK + exit 0
+uv lock
+uv run python scripts/check_version_consistency.py
 uv run --extra dev python -c "from speechrail.config import Settings; print(Settings().version)"
-# 3. 必须输出新版本 —— /health 事实来源
 ```
 
-反向残留检查（`<旧版本号>` 换成真实旧版本号）：
+第二条必须 exit 0，第三条必须输出新版本。检查私有 managed 配置是否含 `SPEECHRAIL_VERSION`；该键会覆盖 wheel 默认版本。若存在，先在仓库外创建权限为 `0600` 的备份，再原子删除该单行，使后续版本来自已安装 wheel。不得输出配置全文。
+
+## 4. 发布门
 
 ```bash
-rtk grep -rn "<旧版本号>" pyproject.toml src/ contracts/ configs/ tests/ uv.lock
-# 允许的残留仅有：CHANGELOG 历史 "[X.Y.Z]" 标题、docs/测试夹具中的历史版本引用
-# 其余任何出现都视为漏更（以 scripts/check_version_consistency.py exit 0 为最终判定）
+uv run --extra dev pytest
+uv run --extra dev ruff check src tests
+uv run --extra dev mypy src
+npx @redocly/cli lint contracts/openapi.yaml
+plutil -lint deploy/macos/com.speechrail.plist.example
+git diff --check
 ```
 
-### Step 3 — 门禁（完整代码 gate）
+检查结果内容与测试数量，不以退出码摘要替代证据。构建前按逻辑主题提交代码、文档和版本材料；不要提交 `.env`、模型、音频、原始 benchmark 数据、日志或 `dist/`。
 
-```bash
-uv run --extra dev pytest                      # 全部通过
-uv run --extra dev ruff check src tests        # clean
-uv run --extra dev mypy src                    # Success
-npx @redocly/cli lint contracts/openapi.yaml   # valid
-git diff --check                               # clean
-```
-
-mypy 报错时先确认是否为**干净基线**（`git stash` 后重跑对比），不要在工作树半删除状态
-下判断"预先存在错误"。
-
-### Step 4 — 按主题提交
-
-```bash
-git add <代码文件> && git commit -m "refactor: ..."   # 代码主题
-git add pyproject.toml src/__init__.py ... && git commit -m "chore: bump version to X.Y.Z"
-git add README.md AGENTS.md docs/ && git commit -m "docs: ..."
-```
-
-版本号 commit 必须包含 `config/__init__.py` 的 `Settings.version` 行——它独立于
-代码 refactor，不要混入移除类 commit。
-
-### Step 5 — 构建 wheel
+## 5. 构建并校验 wheel
 
 ```bash
 uv build --no-sources --wheel
-# 输出 dist/speechrail-<X.Y.Z>-py3-none-any.whl
+python3 -m zipfile -l dist/speechrail-<version>-py3-none-any.whl
 ```
 
-### Step 6 — 安装/升级服务
+确认文件名、包 metadata、worker 模块、assets 和版本一致。保存 wheel SHA-256 供本机审计；构建产物不提交 Git。
+
+## 6. 替换本机服务
+
+### 6.1 Managed 三档安装（默认）
+
+先停旧服务，再用当前 profile 安装新 wheel。`install_managed` 会复用已校验模型和 lock-keyed vendor runtime，在新 release 中 preflight，原子切换 `runtime/current`，重新安装并启用 LaunchAgent。
 
 ```bash
-USER_APP_HOME="$HOME/Library/Application Support/SpeechRail"
-uv run speechrail service disable --app-home "$USER_APP_HOME"   # 先停旧实例，避免争用 8201
+APP_HOME="$HOME/Library/Application Support/SpeechRail"
+uv run speechrail service disable --app-home "$APP_HOME"
+APP_HOME="$APP_HOME" WHEEL="dist/speechrail-<version>-py3-none-any.whl" uv run python - <<'PY'
+import os
+from pathlib import Path
+
+import httpx
+
+from speechrail.service.modelscope import ModelScopeDownloader
+from speechrail.service.profile_commands import profile_status
+from tools.install_macos import install_managed
+
+app_home = Path(os.environ["APP_HOME"])
+wheel = Path(os.environ["WHEEL"])
+status = profile_status(app_home)
+if status.preset not in {"quality", "balanced", "light"}:
+    raise SystemExit("managed profile is unavailable")
+with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)) as client:
+    result = install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id=status.preset,
+        downloader=ModelScopeDownloader(client=client),
+        env_file=app_home / "config" / ".env",
+        enable=True,
+    )
+print(result.runtime_python)
+PY
+```
+
+这一步允许短暂停服。不要在 wheel 替换时顺便改变 profile；模型档位切换用 `speechrail profile apply` 独立执行。
+
+### 6.2 Explicit-env 安装（仅非 managed 部署）
+
+```bash
+APP_HOME="$HOME/Library/Application Support/SpeechRail"
+uv run speechrail service disable --app-home "$APP_HOME"
 python3 tools/install_macos.py \
-  --wheel dist/speechrail-<X.Y.Z>-py3-none-any.whl \
-  --env-file "$USER_APP_HOME/config/.env" \
-  --app-home "$USER_APP_HOME" \
+  --wheel "dist/speechrail-<version>-py3-none-any.whl" \
+  --env-file "$APP_HOME/config/.env" \
+  --app-home "$APP_HOME" \
   --enable
 ```
 
-`--env-file` 指向**已存在的** `<app-home>/config/.env`（安装器不覆盖已有配置）。
+不要对已有 managed selection 使用 legacy installer。
 
-### Step 7 — 验证
+## 7. 运行态验证
 
-等待模型 worker 加载（ASR+TTS 双配置约 30-40s）：
-
-```bash
-sleep 30
-curl -s http://127.0.0.1:8201/health    # version 必须为新版本；asr_ready/tts_ready=true
-curl -s http://127.0.0.1:8201/readyz    # ready:true
-curl -s http://127.0.0.1:8201/v1/models  # canonical + alias（resolves_to）
-curl -s http://127.0.0.1:8201/v1/voices  # preset 目录，available 状态
-readlink "$USER_APP_HOME/runtime/current"  # 指向新 release 目录
-ps -p <pid> -o command=                  # 确认进程用 runtime/current/.venv
-```
-
-**关键检查**：`/health` 的 `version` 若仍显示旧版本，说明 `Settings.version` 未更新或
-`config/.env` 有 `SPEECHRAIL_VERSION` 覆盖——先查 `config/.env` 是否有该键，再查
-`config/__init__.py`。
-
-真实推理 smoke（有外部 snapshot/runtime 时）：
+模型加载期间使用有界轮询，不固定假设 30 秒：
 
 ```bash
-./examples/curl-transcribe.sh <path-to-short-audio>   # HTTP 200 + 非空文本
+APP_HOME="$HOME/Library/Application Support/SpeechRail"
+uv run speechrail service status --app-home "$APP_HOME"
+curl --fail http://127.0.0.1:8201/health
+curl --fail http://127.0.0.1:8201/readyz
+curl --fail http://127.0.0.1:8201/v1/models
+curl --fail http://127.0.0.1:8201/v1/voices
+readlink "$APP_HOME/runtime/current"
+uv run python scripts/verify_release.py \
+  --wheel "dist/speechrail-<version>-py3-none-any.whl" \
+  --app-home "$APP_HOME"
 ```
 
-### Step 8 — git tag
+必须确认：
+
+- `state=running`，PID 使用 `runtime/current/.venv/bin/python`；
+- `/health.version` 是新版本，`asr_ready=true`、`tts_ready=true`；
+- `/readyz` 为 200；
+- `/v1/models` 声明实际 profile、artifact、variant 与 quantization；
+- `/v1/voices` 返回九个 canonical system roles，且能力与当前权重一致；
+- 公共 ASR 与 TTS 使用真实、非敏感 fixture 返回 200、非空结果和 request ID。
+
+## 8. 发布性能基准
+
+调用 `.agents/skills/speechrail-perf-benchmark/SKILL.md`：
+
+- PATCH：只测步骤 2 记录的 active profile；
+- MINOR：按 active → 其余两档 → active 串行测三档；
+- MAJOR：三档完整测量并增加迁移/兼容验证。
+
+报告写入 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`，更新性能归档索引。README 只保留面向用户的少量稳定指标，不复制完整报告。
+
+## 9. 提交与 tag
+
+重新运行版本一致性和 `git diff --check`，确认 benchmark 报告记录的是已安装 wheel。然后：
 
 ```bash
-git tag v<X.Y.Z>
-git push origin v<X.Y.Z>   # 仅推送自己的 tag，不 force-push
+git tag v<version>
 ```
 
-## 回滚
+创建 tag 前确认工作树干净、tag 指向包含发布报告的目标 commit、同名 tag 不存在。只有当前任务明确授权远端发布时才执行 `git push origin <branch>` 与 `git push origin v<version>`；禁止 force-push。
 
-```text
-1. uv run speechrail service disable --app-home <app-home>
-2. 保留旧 runtime/releases/、config/.env 与模型（不删除外部资源）
-3. 将 runtime/current 恢复到上一份 release（或备份 plist）
-4. uv run speechrail service install --app-home <app-home>，再显式 enable
-5. 重新核对 service status、/health、/readyz、/v1/models、/v1/voices
-```
+## 10. 回滚
 
-`disable` 只停止服务；`uninstall` 删除 plist；都不是 release 回退。
+1. 停用 `com.speechrail`。
+2. 将 `runtime/current` 恢复为前置快照记录的旧 release。
+3. 恢复旧 LaunchAgent 定义；managed 部署同时保留/恢复旧 selection 与 vendor `current`。
+4. 启用旧服务并重新验证 `/health`、`/readyz`、`/v1/models`、`/v1/voices` 和真实 smoke。
+5. 不删除旧 release、模型、私有配置或日志。
 
-## 常见陷阱
+## 完成清单
 
-| 陷阱 | 处理 |
-|---|---|
-| `/health` 版本不变 | `Settings.version` 默认值未改，或 `config/.env` 有 `SPEECHRAIL_VERSION` |
-| 旧实例仍占 8201 | 安装前必须 `service disable`；单实例原则 |
-| mypy 报错误判"预先存在" | `git stash` 后跑干净基线对比，半删除状态会误报 |
-| `git checkout -- <file>` 误恢复 | 发布期间勿用 destructive checkout/stash 操作整理提交；用 `git restore --staged` 拆分 |
-| 测试夹具/契约版本漂移或漏改 | 历史曾出现契约/模板/夹具版本与包版本脱节；以 `scripts/check_version_consistency.py` exit 0 为最终判定 |
-| 版本 commit 缺 `Settings.version` | `/health` 与包版本脱节；版本 commit 必须含 `config/__init__.py` |
-| docs front-matter 随日历更新 | 仅正文实质变更才更新 `version`/`date`（AGENTS.md metadata 规则） |
-
-## 验证清单（发布完成判定）
-
-- [ ] `scripts/check_version_consistency.py` exit 0——版本号所有位置一致（含 `Settings.version`）
-- [ ] pytest / ruff / mypy / redocly / git diff check 全绿
-- [ ] wheel 构建成功且版本正确
-- [ ] 服务运行新 release，`/health` 返回新版本
-- [ ] `/readyz` true、`/v1/models` 与 `/v1/voices` 正常
-- [ ] 真实音频 smoke 通过（有模型时）
-- [ ] commit 按主题拆分、`git tag v<X.Y.Z>` 已打
+- [ ] SemVer 与 benchmark scope 已判定
+- [ ] 版本一致性、pytest、ruff、mypy、OpenAPI、plist、diff gate 全部通过
+- [ ] wheel 已验证并原子替换服务
+- [ ] 新版本、profile、模型、音色和真实 ASR/TTS smoke 已核对
+- [ ] PATCH 当前档或 MINOR/MAJOR 三档基准已归档
+- [ ] active profile 已恢复，回退点仍存在
+- [ ] 发布 commit 与本地 tag 已创建；远端操作符合当前授权

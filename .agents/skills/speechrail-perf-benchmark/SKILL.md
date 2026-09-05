@@ -1,156 +1,252 @@
 ---
 name: speechrail-perf-benchmark
 description: >-
-  Standard operating procedures and runbooks for executing performance benchmarks,
-  measuring latency/throughput/RTF, monitoring physical memory/GPU footprint on macOS,
-  and establishing baseline reports for SpeechRail ASR/TTS/Realtime services.
-  Use this skill whenever running performance tests, resource profiling, or writing baseline docs.
+  SpeechRail 性能与质量基准 SOP。用于按 SemVer 选择单档或三档范围，测量 ASR/TTS/Realtime
+  延迟、RTF、吞吐和 Apple Silicon 物理内存，验证三档质量与音色稳定性，并用统一模板生成
+  版本纵向变化和档位横向对比报告。
 ---
 
-# SpeechRail Performance Benchmarking & Resource Profiling Skill
+# SpeechRail 性能与质量基准 SOP
 
-This skill guides agents through executing standard performance benchmarks, measuring end-to-end latency, real-time factor (RTF), concurrent throughput, and accurately monitoring Apple Silicon physical memory/Metal footprint using macOS native tools on SpeechRail.
+目标是生成可复现、可比较、不会夸大证据的发布基准。所有推理通过公共 API，原始 JSON、音频和日志放在仓库外；Git 只保存脱敏汇总报告。
 
----
+## 1. 三档事实
 
-## 1. Core Benchmarking Principles
+三档使用同一服务架构、worker 协议、调度和共享 vendor runtime，只改变权重与量化：
 
-1. **Real Hardware & Native Metrics**:
-   - On macOS Apple Silicon, **never rely on `ps aux` RSS** for model memory, as it omits MLX/Metal unified memory allocations.
-   - **Always use `footprint -p <pid> -f bytes`** to capture `phys_footprint` and `phys_footprint_peak`.
-2. **Warm-up Before Measuring**:
-   - Run at least 1 warm-up inference iteration across ASR and TTS to fault-in model weights and compile Metal kernels before sampling baseline metrics.
-3. **No Network Downloads**:
-   - Benchmarking must run entirely against local pre-loaded models (`asr_ready=true`, `tts_ready=true`).
-4. **Standard Audio Durations**:
-   - Standard test suite evaluates across 4 audio lengths: **3s (short)**, **10s (medium)**, **30s (long)**, and **60s (extra long)**.
-   - Fixtures are synthesized by local TTS, so the *actual* duration follows the text's natural speaking rate (e.g. ~3s / ~8s / ~16s / ~35s, not a strict 3/10/30/60s). Always compute RTF against the `ffprobe`-measured duration, never the nominal label.
-5. **API-key Authentication**:
-   - When the service is bound to a non-loopback address with `SPEECHRAIL_API_KEY` enabled, `/v1/audio/*` and `/v1/realtime` require the key. `/health`, `/readyz`, `/v1/models` are open.
-   - Export `SPEECHRAIL_API_KEY` in the environment; the bundled scripts (`bench_asr.py`, `bench_tts.py`, `bench_realtime.py`, `sample_resources.py`, `prepare_fixtures.py`) honor it via `auth_headers()` / `os.environ`. Subprocesses spawned by `run_all_benchmarks.py` inherit it automatically.
-   - Without the key the ASR/TTS/Realtime steps return **401 Unauthorized** — do not try to bypass by disabling auth.
+| profile | ASR | TTS | 音色行为 |
+|---|---|---|---|
+| `quality` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 1.7B VoiceDesign q8 | 九个固定 VoiceDesign 配方；支持自然语言自定义音色 |
+| `balanced` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 九个角色映射同名固定 speaker；不执行 VoiceDesign instruction |
+| `light` | Qwen3-ASR 0.6B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 与 balanced 同一 TTS，ASR 更小；8GB Apple Silicon 目标 |
 
----
+profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voices` 的实际声明，不根据计划或目录名推断运行模型。
 
-## 2. Standard Benchmark Workflow
+## 2. 版本决定范围
 
-```mermaid
-graph TD
-    A[1. Service Health & Readiness Probe] --> B[2. Prepare Benchmark Audio Fixtures]
-    B --> C[3. TTS Latency Benchmark]
-    C --> D[4. Non-Streaming ASR Benchmark]
-    D --> E[5. Realtime WS Benchmark]
-    E --> F[6. Concurrent Load & Resource Sampling]
-    F --> G[7. Generate & Archive Baseline Report]
-```
-
-### Step 1: Verify Service Readiness
-
-Ensure the SpeechRail service is active and backends are ready:
-```bash
-curl -s http://127.0.0.1:8201/health | jq .
-curl -s http://127.0.0.1:8201/readyz | jq .
-```
-*Criteria:* `/health` returns `asr_ready: true`, `tts_ready: true`; `/readyz` returns 200.
-
-### Step 2: Generate Standard Test Audio Fixtures
-
-Generate consistent benchmark WAV (16kHz Mono) and PCM fixtures dynamically via TTS:
-```bash
-python3 -c "
-import urllib.request, json, wave, subprocess
-
-texts = {
-    'audio_3s': '你好，这是本地语音识别与合成。',
-    'audio_10s': '你好，这是本地语音识别与合成服务的性能基准测试。SpeechRail 能够快速高效地输出高品质语音。',
-    'audio_30s': 'SpeechRail 是一个本地优先的语音识别与合成服务。它为各种本地智能体和对话应用提供稳定可靠的 ASR 与 TTS 接口。在单人使用场景下，它具备极低的延迟与极致的资源控制能力。',
-    'audio_60s': 'SpeechRail 是一个本地优先的语音识别与合成服务。它为各种本地智能体和对话应用提供稳定可靠的 ASR 与 TTS 接口。在单人使用场景下，它具备极低的延迟与极致的资源控制能力。通过模块化设计与细粒度显存治理，SpeechRail 可以在 macOS 苹果芯片设备上长时间稳定运行，无需担心内存泄漏或显存溢出。无论长音频转写还是极速流式交互，都能游刃有余。'
-}
-
-for name, text in texts.items():
-    req = urllib.request.Request(
-        'http://127.0.0.1:8201/v1/audio/speech',
-        data=json.dumps({'model':'speechrail/qwen3-tts','input':text,'voice':'default','response_format':'pcm'}).encode(),
-        headers={'Content-Type':'application/json'}
-    )
-    with urllib.request.urlopen(req) as resp:
-        pcm_data = resp.read()
-    
-    wav24 = f'/tmp/{name}_24k.wav'
-    with wave.open(wav24, 'wb') as wf:
-        wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(24000)
-        wf.writeframes(pcm_data)
-    
-    wav16 = f'/tmp/{name}.wav'
-    pcm16 = f'/tmp/{name}_16k.pcm'
-    subprocess.run(['ffmpeg', '-y', '-i', wav24, '-ar', '16000', '-ac', '1', wav16], check=True, capture_output=True)
-    subprocess.run(['ffmpeg', '-y', '-i', wav16, '-f', 's16le', '-ac', '1', '-ar', '16000', pcm16], check=True, capture_output=True)
-    print(f'Generated {name}: {wav16}')
-"
-```
-
-### Step 3: Run Speech Synthesis (TTS) Benchmark
-
-Evaluate short sentence (20 chars) and long sentence (50 chars) latency & RTF:
-```bash
-# 1. Short sentence (20 chars)
-python3 examples/perf/bench_tts.py --text "你好, 这是本地语音合成服务的性能测试。" --repeat 3
-
-# 2. Long sentence (50 chars)
-python3 examples/perf/bench_tts.py --text "你好，这是本地语音识别与合成服务的性能基准测试。SpeechRail 能够快速高效地输出高品质语音。" --repeat 3
-```
-
-### Step 4: Run REST ASR Benchmark
-
-Evaluate single-request latency across audio durations and multi-worker concurrent throughput:
-```bash
-# 1. Single request latency (3s, 10s, 30s, 60s)
-python3 examples/perf/bench_asr.py --audio /tmp/audio_3s.wav /tmp/audio_10s.wav /tmp/audio_30s.wav /tmp/audio_60s.wav --n 3
-
-# 2. Concurrent throughput (4 workers, 8 requests)
-python3 examples/perf/bench_asr.py --audio /tmp/audio_10s.wav --workers 4 --n 8
-```
-
-### Step 5: Run OpenAI Realtime WebSocket Benchmark
-
-Measure session handshake setup, ASR commit latency, and TTS first audio delta (TTFA):
-```bash
-# Note: Use Python environment with 'openai' SDK installed
-/Users/hrygo/.qwenpaw/venv/bin/python examples/perf/bench_realtime.py /tmp/audio_10s_16k.pcm --sessions 3
-```
-
-### Step 6: Sample Process Footprint & CPU Under Load
-
-Execute end-to-end continuous resource monitoring during load:
-```bash
-python3 examples/perf/sample_resources.py --audio /tmp/audio_30s.wav --mode all --n 5 --warmup
-```
-
-## 3. Bundled Benchmark Scripts
-
-This skill bundles turnkey execution scripts located in `scripts/`:
-
-| 脚本文件 | 用途 | 运行命令示例 |
+| 发布类型 | 必测范围 | 切换规则 |
 |---|---|---|
-| **`scripts/prepare_fixtures.py`** | 自动通过本地 TTS 合成 3s、10s、30s、60s 标准 16kHz WAV 和 PCM 样本 | `python3 .agents/skills/speechrail-perf-benchmark/scripts/prepare_fixtures.py` |
-| **`scripts/run_all_benchmarks.py`** | 一键全自动串行执行全部 7 项标准性能与资源压测流水线 | `python3 .agents/skills/speechrail-perf-benchmark/scripts/run_all_benchmarks.py` |
+| PATCH | 当前部署 profile | 不为基准切档；与上一可比版本做纵向比较 |
+| MINOR | `quality`、`balanced`、`light` | active → 其余档 → active，逐档停服切换 |
+| MAJOR | 三档完整套件 | 另加迁移、兼容客户端和回退验证 |
 
----
+如果改动直接影响未被上述范围覆盖的 profile、模型、共同 runtime 或 benchmark 工具，应扩大到三档。纯文档改动不制造新的性能结论。
 
-## 4. Reporting & Baseline Maintenance
+## 3. 测量约束
 
-When completing a benchmark run:
-1. **Archive Full Report**: Write the comprehensive baseline document to `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`.
-2. **Update README.md**: Sync key metric highlights (Memory footprint, ASR RTF, TTS TTFA, Concurrency) into the **⚡ 性能基线与资源实测** section of `README.md`.
-3. **Verify Git Diff**: Ensure only markdown baseline docs and README are staged before committing.
+1. 使用已安装 wheel、锁定 snapshot 和无下载运行态；`/health`、`/readyz`、`/v1/models`、`/v1/voices` 均通过后再测。
+2. 记录 commit、版本、profile、artifact、variant、quantization、macOS、芯片、物理内存、Python、MLX 与 benchmark schema。
+3. 每项先预热至少 1 次；基础发布基准测 5 次，报告 p50、p95、min/max 和样本数。首次请求单列为 cold，不混入 warm 分位数。
+4. RTF 使用 `ffprobe` 实测音频时长：`latency / actual_audio_seconds`。不得使用文件名中的 3s/10s/30s/60s 标签代替。
+5. Apple Silicon 内存使用 `footprint -p <pid> -f bytes` 的 `phys_footprint`。不要用 RSS 代替，也不要相加发生在不同时刻的进程峰值。
+6. 总峰值必须来自同一采样 tick 内各目标 PID+start-time 的总和；缺样、PID 重用或 sampler 失败时标记 N/A 并关闭 gate。
+7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
+8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
+9. API key 只从环境读取，不出现在命令、报告或日志中。
 
-### Memory Attribution Debugging
+## 4. 基础发布套件（每个 profile）
 
-A surprising elevation in a worker's resident footprint (e.g. an ASR batch worker jumping from ~2.5 GB to ~4.7 GB across versions) is **NOT** automatically caused by `/metrics` observation buffers. Follow this fixed order before writing any cause into a report:
+### A. 身份与就绪
 
-1. **Check `SPEECHRAIL_DTYPE`** — the ASR worker inherits it (`float16` vs `int8`). Make sure a `float16` load was not mis-attributed; check the worker `--dtype` in `ps`.
-2. **Check metal cache clearing** — `_clear_metal_cache()` in `qwen3_worker.py` must prefer the non-deprecated `mx.clear_cache()` over the legacy `mx.metal.clear_cache()`. The legacy branch exists but has been a no-op since mlx 0.32, so previously the Metal cache was *not* actually freed on trim, leaving ~2.2 GB unnecessarily resident. This was the true v1.6.2 regression, fixed in 1.6.3.
-3. **Check streaming-worker dtype inheritance** — `Qwen3StreamingBackendConfig.command()` must forward `dtype` / `cache_limit_mb` / `memory_limit_mb`; otherwise a streaming worker silently runs `float16` with an unbounded Metal cache and balloons to ~5 GB instead of staying `int8` at ~2.6 GB.
-4. **Only then** consider `/metrics` buffers or other instrumentation as a secondary contributor.
+- `/health` 与 `/readyz` 状态和版本；
+- `/v1/models` 的 active profile、ASR/TTS artifact、variant、quantization；
+- `/v1/voices` 九个 canonical role 的 availability 与 capabilities；
+- 公共 ASR/TTS smoke、HTTP 状态、request ID、非空输出。
 
-Write the report with the measured `ps`/`footprint` numbers and the exact root cause; never say an unverified buffer is the cause. Mark findings as measured vs inferred.
+### B. Batch ASR
+
+- 独立、非 SpeechRail TTS 自生成的中英文短样本；
+- 约 3s、10s、30s、60s 的固定音频；
+- cold 1 次，warm N=5；记录 latency、RTF、CER/WER；
+- 可选 4 workers × 8 requests 吞吐，记录成功率、wall time、req/s、p95；
+- 单独采样 host + batch ASR 的稳定与负载同时物理占用。
+
+### C. TTS
+
+- 固定短句与长句，canonical voice 固定为 `serena`；
+- cold 1 次，warm N=5；记录 latency、实际输出时长、RTF、首音频时间（可用时）；
+- 用独立 ASR 回读只作为可懂度代理，不替代听感质量；
+- 单独采样 host + TTS 的稳定与负载同时物理占用。
+
+### D. Realtime（完整套件或改动相关时）
+
+- 16 kHz mono PCM16，连续 3 个 session；
+- setup、首 delta、commit、TTFA、terminal event、成功率；
+- 单独启动 streaming 模式并采样 host + streaming ASR；结束后恢复原模式。
+
+工具入口：
+
+```bash
+python3 .agents/skills/speechrail-perf-benchmark/scripts/prepare_fixtures.py
+python3 .agents/skills/speechrail-perf-benchmark/scripts/run_all_benchmarks.py \
+  --host http://127.0.0.1:8201
+python3 examples/perf/bench_profiles.py \
+  --base-url http://127.0.0.1:8201 \
+  --manifest <repo-external-manifest.json> \
+  --profile <quality|balanced|light> \
+  --phase warm \
+  --output <repo-external-result.json>
+```
+
+`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开。
+
+## 5. 质量与音色稳定性套件
+
+性能快不代表质量可接受。MINOR/MAJOR 三档必须同时报告质量；PATCH 若影响推理、分句、采样、量化、音色或模型 runtime，也必须执行本节。
+
+### ASR 质量
+
+- 使用版本固定、人工核对的独立真人中英文语料；禁止用当前 SpeechRail TTS 生成 ASR 主质量集。
+- 分别报告总体与语言/时长分组的 CER/WER、样本数和失败数。
+- 同时报告 p50/p95，不能只给均值。
+
+### TTS 可懂度与自然度
+
+- 九个角色覆盖中英文、短长句、数字和标点；记录生成失败率与独立 ASR 回读 CER/WER。
+- 人工 MOS/偏好测试报告样本数、评分尺度、盲听方式和置信区间；没有人工听测时写“未验证”。
+
+### 同一角色跨轮稳定性
+
+每个角色至少覆盖 3 类文本 × 3 次生成，并包含一次服务重启后的重复：
+
+1. **同文本确定性**：固定 input、voice、speed、response format，比较 PCM hash；hash 相同可证明该输入字节级复现，不能证明跨文本身份一致。
+2. **跨文本身份相似度**：使用固定 speaker-embedding 模型，报告同角色 cosine 的 p05/median、不同角色最近邻上界和 separation margin。
+3. **跨重启一致性**：重启前后采用同一配方与 fixture，单列相似度变化。
+4. **ABX 盲听**：听者判断 A/B 是否同一人，并用 X 检查角色混淆；报告人数、样本数和通过率。
+
+`quality` 还需记录 canonical instruction 版本、role seed、temperature 和其他采样参数；`balanced/light` 记录 vendor speaker 名。VoiceDesign 与 CustomVoice 的跨档同名角色只要求角色意图一致，除非 embedding 与盲听都通过，不声明为同一声纹。
+
+建议门值必须在首个可信数据集上冻结后再作为 release gate；门值未冻结前，只报告数值与相对变化，不临时选择有利阈值。
+
+## 6. 档位切换与恢复
+
+MINOR/MAJOR：
+
+1. 记录初始 active profile 和 generation。
+2. 每次 `speechrail profile apply <profile> --yes` 后等待服务真正 ready。
+3. 核对模型/音色身份并执行该档完整基础套件。
+4. 不在同一时间运行多个 benchmark。
+5. 结束时恢复初始 profile，复查公共 ASR/TTS smoke。
+
+切换或 smoke 失败时停止后续数据采集，记录失败，并使用 `speechrail profile rollback --yes`。失败档不得用旧数据补齐。
+
+## 7. 比较与变化表达
+
+报告同时包含两种视图：
+
+- **纵向版本变化**：当前版本与上一份同机器、同 profile、同 fixture、同 benchmark schema 的版本比较。
+- **横向档位对比**：同一版本、同一机器、同一 fixture 下 `quality/balanced/light` 比较。
+
+变化公式：`delta = current - baseline`，`delta_pct = delta / baseline × 100%`。延迟、RTF、CER/WER、内存下降为改善；吞吐、成功率和相似度上升为改善。表中同时显示绝对值与百分比，例如 `0.24 (-0.03, -11.1%)`，并用 `改善 / 持平 / 回归 / 不可比` 表示方向。基线为 0 或口径不同则百分比为 N/A。
+
+“持平”必须使用预先固定的噪声带或统计区间；单轮波动不得直接归因。报告中的 0 只表示实测为 0，缺失值必须写 N/A。
+
+## 8. 报告模板
+
+保存为 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`：
+
+```markdown
+# SpeechRail vX.Y.Z 性能与质量基准
+
+> 状态：通过 / 有条件通过 / 未通过
+> 范围：PATCH 当前档 / MINOR 三档 / MAJOR 三档+迁移
+> 基线：vA.B.C（可比 / 部分可比 / 不可比）
+
+## 一眼结论
+
+| 结论 | 结果 | 证据 |
+|---|---|---|
+| 发布档位 | quality / balanced / light | active profile + artifact identity |
+| 最大同时物理占用 | ... MB | 同一 tick `phys_footprint` |
+| ASR / TTS 关键 RTF | ... / ... | warm N=... |
+| 质量与音色稳定性 | 通过 / 未验证 | CER/WER、embedding、ABX |
+| 相对上一版本 | 改善 / 持平 / 回归 / 不可比 | 见纵向表 |
+
+## 测量身份与可比性
+
+| 项目 | 当前值 | 基线值 | 是否一致 |
+|---|---|---|---|
+| 硬件 / macOS | ... | ... | 是/否 |
+| profile / artifact / quantization | ... | ... | 是/否 |
+| fixture digest / benchmark schema | ... | ... | 是/否 |
+| warmup / N / 背景负载 | ... | ... | 是/否 |
+
+说明任何不可比较项；原始制品只记录仓库外相对位置与 digest，不记录私人绝对路径。
+
+## 纵向：版本变化
+
+| profile | 指标 | 基线版本 | 当前版本 | Δ | Δ% | 判断 |
+|---|---|---:|---:|---:|---:|---|
+| quality | ASR warm p50 RTF ↓ | ... | ... | ... | ... | ... |
+| quality | TTS warm p50 RTF ↓ | ... | ... | ... | ... | ... |
+| quality | 同时物理峰值 ↓ | ... | ... | ... | ... | ... |
+| quality | speaker similarity p05 ↑ | ... | ... | ... | ... | ... |
+
+## 横向：三档对比
+
+| 指标 | quality | balanced | light | 最优 / 代价 |
+|---|---:|---:|---:|---|
+| ASR CER / WER ↓ | ... | ... | ... | ... |
+| ASR warm p50 / p95 RTF ↓ | ... | ... | ... | ... |
+| TTS warm p50 / p95 RTF ↓ | ... | ... | ... | ... |
+| 稳定 / 峰值 phys_footprint ↓ | ... | ... | ... | ... |
+| speaker similarity p05 ↑ | ... | ... | ... | ... |
+| ABX 同一人通过率 ↑ | ... | ... | ... | ... |
+| VoiceDesign 自定义音色 | 支持 | 不支持 | 不支持 | API 按能力声明 |
+
+PATCH 报告只保留当前档列，并注明三档横向对比不适用。
+
+## 分项结果
+
+### Batch ASR
+
+| fixture | actual s | cold s | warm p50 / p95 s | RTF p50 / p95 | CER/WER | success |
+|---|---:|---:|---:|---:|---:|---:|
+
+### TTS
+
+| text set | voice | cold s | warm p50 / p95 s | output s | RTF | success |
+|---|---|---:|---:|---:|---:|---:|
+
+### Realtime（若执行）
+
+| sessions | setup p50 | commit p50 / p95 | TTFA p50 / p95 | terminal success |
+|---:|---:|---:|---:|---:|
+
+### 资源
+
+| 场景 | 进程集合 | stable MB | simultaneous peak MB | samples | complete |
+|---|---|---:|---:|---:|---|
+
+### 质量与音色稳定性
+
+| profile / voice | same-text hash | within-role p05 / median | nearest-other max | margin | restart Δ | ABX |
+|---|---|---:|---:|---:|---:|---:|
+
+## Gate
+
+| Gate | 结果 | 证据 / 原因 |
+|---|---|---|
+| 服务与模型身份 | pass/fail | ... |
+| 性能回归 | pass/fail/unset | ... |
+| 资源上限 | pass/fail | ... |
+| ASR 质量 | pass/fail/unset | ... |
+| TTS 自然度与稳定性 | pass/fail/unset | ... |
+| profile 恢复 | pass/fail | ... |
+
+## 限制与未验证
+
+- ...
+
+## 复现
+
+记录可移植命令、fixture digest、参数和报告生成方式；不写凭据与私人路径。
+```
+
+## 9. 归档与完成条件
+
+1. 原始 JSON、音频、embedding 和日志保存到仓库外 `<app-home>/benchmarks/<run-id>/`，权限最小化。
+2. Git 报告只保留脱敏指标、digest、可比性和 gate；更新 `docs/archive/performance/README.md`。
+3. README 只在可信基线变化时更新一张简表，并明确硬件与验收边界。
+4. 最终 active profile 与开始一致；服务、模型、音色和公共 smoke 再次通过。
+5. 缺少真实质量、完整物理采样或目标设备证据时，对应 gate 必须为 `unset`/`fail`，不得写“通过”。

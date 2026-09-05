@@ -1,180 +1,52 @@
 # SpeechRail 🚂
 
 <p align="center">
-  <strong>本地常驻的高性能、隐私优先、兼容 OpenAI 协议的独立语音识别 (ASR) 与合成 (TTS) 服务</strong>
+  <strong>在 Apple Silicon Mac 上运行的本地 ASR / TTS 服务，提供 OpenAI 兼容 API。</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg" alt="CI Status" /></a>
-  <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=blue&label=version" alt="Latest Release" /></a>
-  <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat&logo=python&logoColor=white" alt="Python 3.12" />
-  <img src="https://img.shields.io/badge/Platform-macOS%20(Apple%20Silicon)-000000.svg?style=flat&logo=apple&logoColor=white" alt="macOS Apple Silicon" />
-  <img src="https://img.shields.io/badge/Accelerators-MLX%20%7C%20MPS-FF6F00.svg?style=flat" alt="MLX & MPS" />
-  <img src="https://img.shields.io/badge/API-OpenAI%20Compatible-412991.svg?style=flat&logo=openai&logoColor=white" alt="OpenAI Compatible" />
-  <img src="https://img.shields.io/badge/Code%20Style-Ruff-000000.svg?style=flat&logo=ruff&logoColor=white" alt="Code Style Ruff" />
-  <img src="https://img.shields.io/badge/Type%20Check-Mypy%20Strict-blue.svg?style=flat" alt="Mypy Strict" />
-  <img src="https://img.shields.io/badge/Coverage-84%25-success.svg?style=flat" alt="Coverage" />
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg?style=flat" alt="License MIT" /></a>
+  <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?label=release" alt="Release" /></a>
+  <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white" alt="Python 3.12" />
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000.svg?logo=apple" alt="Apple Silicon" />
+  <img src="https://img.shields.io/badge/API-OpenAI%20compatible-412991.svg?logo=openai&logoColor=white" alt="OpenAI compatible" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" /></a>
 </p>
 
-SpeechRail 是一套**本地优先**的语音识别与合成服务，为 QwenPaw、Hermes Agent、`Sona` 及任何 OpenAI 兼容客户端提供稳定、低延迟、隐私安全的 ASR/TTS 接口。
+SpeechRail 为桌面 Agent、会议工具和本地应用提供一个常驻语音入口。音频、模型和推理均留在本机；客户端通过标准 `whisper-1`、`tts-1` 和 `/v1/realtime` 接入，无需感知本机选择的性能档位。
 
----
+## 为什么使用 SpeechRail
 
-## 📖 目录
+- **本地与私密**：默认只监听 `127.0.0.1:8201`，请求路径不下载模型，不保存源音频或完整转写。
+- **OpenAI 兼容**：支持文件转写、语音合成和 Realtime ASR/TTS 子集，可直接使用 OpenAI SDK。
+- **一套架构，三种资源档位**：档位只改变模型权重与量化组合，API、worker 协议和调度保持一致。
+- **适合长期常驻**：模型进程隔离、有界队列、超时、背压和原子档位切换保护本机资源。
+- **可观测、可回退**：公开健康、模型、音色和指标端点；wheel release 与 profile 切换均保留回退路径。
 
-- [✨ 核心特性](#-核心特性)
-- [🚀 快速开始](#-快速开始)
-- [🏗️ 架构概览](#-架构概览)
-- [💻 硬件与环境要求](#-硬件与环境要求)
-- [🧩 支持的模型规格](#-支持的模型规格)
-- [🎯 精度语义与权重文件格式](#-精度语义与权重文件格式)
-- [⚡ 性能基线与资源实测](#-性能基线与资源实测)
-- [🔌 客户端与 SDK 接入](#-客户端与-sdk-接入)
-- [📡 API 规范与端点](#-api-规范与端点)
-- [⚙️ 核心配置项说明](#-核心配置项说明)
-- [🛠️ macOS 服务常驻与运维](#-macos-服务常驻与运维)
-- [🔒 安全与隐私边界](#-安全与隐私边界)
-- [📚 文档导航](#-文档导航)
-- [🤝 参与贡献](#-参与贡献)
-- [📄 开源许可](#-开源许可)
+## 当前能力
 
----
+| 能力 | 公共入口 | 状态与边界 |
+|---|---|---|
+| 文件 ASR | `POST /v1/audio/transcriptions` | OpenAI multipart；支持 `json`、`verbose_json`、`text`、`srt`、`vtt` |
+| 流式 ASR/TTS | `WS /v1/realtime` | OpenAI Realtime 兼容子集；只承载语音，不伪装 LLM 对话与工具调用 |
+| TTS | `POST /v1/audio/speech` | `mp3`、`opus`、`aac`、`flac`、`wav`、`pcm` |
+| 音色目录 | `GET /v1/voices` | 九个跨档角色；按当前权重声明 `available`、`variant` 和能力 |
+| 自定义音色 | `POST/DELETE /v1/voices` | SpeechRail 扩展；仅 VoiceDesign 档可合成自然语言设计的音色 |
+| 本机服务 | `speechrail service ...` | macOS 用户级 LaunchAgent；单实例、原子 wheel 替换 |
 
-## ✨ 核心特性
+机器可读接口以 [`contracts/openapi.yaml`](contracts/openapi.yaml) 和 [`contracts/realtime-openai.md`](contracts/realtime-openai.md) 为准。
 
-- 🔒 **完全离线与无状态隐私**：纯离线运行，绝不静默联网；直接加载本地模型权重，音频与文本仅在内存中有界流转、即用即弃，服务端不落盘存储源音频。
-- ⚡ **Apple Silicon 深度优化（MLX & MPS）**：针对 Mac 统一内存调优，非流式与流式 ASR 统一采用原生 `mlx-qwen3-asr` 与 MPS 加速（`float16`/`int8`），具备 WAV 零开销 Fast-path 直读与动态 Token 预算。
-- 🔌 **开箱即用的 OpenAI 协议兼容**：
-  - **文件转写**：`POST /v1/audio/transcriptions`（支持 OpenAI SDK 与 `whisper-1` 等标准别名）。
-  - **语音合成**：`POST /v1/audio/speech`（支持 `tts-1` 别名，输出 24 kHz 高品质音频）。
-  - **双向流式**：`WS /v1/realtime`（标准 OpenAI Realtime 协议，支持 `client.realtime.connect`；多 WebSocket 会话按 `session_id` 路由到唯一物理 ASR worker）。
-- ⏱️ **端到端高精度时间戳**：原生输出句子级与词级对齐时间戳，支持 `verbose_json`、`srt`、`vtt` 及 `timestamp_granularities`，无需外置对齐器。
-- 👥 **实时声纹分割（Speaker Diarization）**：可选集成 Sortformer 与 CAM++，支持匿名说话人分离与重连声学聚类。
-- 🛡️ **进程隔离与资源守护（Resource Governor）**：主服务（FastAPI）与推理后端通过二进制零拷贝 IPC 协议进程级隔离；内置配额管控与背压机制，多任务并发不争抢、不崩溃。
+## 三档模型
 
----
+档位是部署状态，API 调用方不提交 `quality`、`balanced` 或 `light`。
 
-## 🚀 快速开始
-
-### 1. 克隆仓库并安装服务依赖
-
-```bash
-git clone https://github.com/hrygo/SpeechRail.git
-cd SpeechRail
-uv sync --extra dev
-```
-
-### 2. 准备模型权重与 Worker 虚拟环境
-
-> 💡 **模型加载原则**：SpeechRail 遵循离线设计，请先将模型权重下载到本地磁盘（ModelScope 或 HuggingFace），并准备独立的 Python 虚拟环境。
-
-```bash
-# 下载 Qwen3-ASR 模型至本地目录（示例路径占位）
-# /Users/yourname/models/Qwen3-ASR-1.7B
-
-# 为 ASR Worker 创建独立环境并安装推理依赖
-uv venv .venv-asr --python 3.12
-.venv-asr/bin/pip install torch torchaudio mlx-qwen3-asr soundfile
-```
-
-### 3. 配置 `.env`
-
-```bash
-cp configs/speechrail.example.env .env
-chmod 600 .env
-```
-
-编辑 `.env` 中的核心路径（填入您的真实模型目录与 Worker Python 路径）：
-
-```env
-SPEECHRAIL_HOST=127.0.0.1
-SPEECHRAIL_PORT=8201
-SPEECHRAIL_DEVICE=mps
-# 精度：默认 float16 兼容标准权重；若需降低 ~50% 显存：非预量化快照可设为 int8（ASR 内存量化），
-# 或直接使用预量化 "-8bit" MLX 快照（ASR/TTS 自动解析为 int8 直接加载，避免加载期二次量化峰值）。
-SPEECHRAIL_DTYPE=float16
-
-# ASR 推理配置（必填：Qwen3-ASR 本地目录与 Worker Python）
-SPEECHRAIL_QWEN3_MODEL_DIR=/Users/yourname/models/Qwen3-ASR-1.7B
-SPEECHRAIL_QWEN3_PYTHON=/Users/yourname/SpeechRail/.venv-asr/bin/python
-
-# TTS 合成配置（可选：VoiceDesign 本地目录与 Worker Python）
-SPEECHRAIL_QWEN3_TTS_MODEL_DIR=/Users/yourname/models/Qwen3-TTS
-SPEECHRAIL_QWEN3_TTS_PYTHON=/Users/yourname/SpeechRail/.venv-tts/bin/python
-```
-
-### 4. 启动服务与就绪验证
-
-```bash
-# 前台启动服务
-uv run speechrail serve
-```
-
-在另一终端验证服务与模型就绪状态：
-
-```bash
-curl http://127.0.0.1:8201/health    # 进程/组件健康 + 版本
-curl http://127.0.0.1:8201/readyz    # 推理入口已配置可用；仍需真实音频 smoke
-curl http://127.0.0.1:8201/v1/models # 可用模型及别名清单
-```
-
----
-
-## 🏗️ 架构概览
-
-SpeechRail 采用**主控调度与推理运行时强隔离**的微内核设计：主服务负责协议路由与资源管控，推理引擎在独立 Python 进程中执行，通过私有零拷贝二进制 IPC 通信。
-
-```mermaid
-flowchart TD
-    Client["📱 客户端生态 (OpenAI SDK / QwenPaw / Sona / 本地脚本)"]
-
-    subgraph Host ["🚀 SpeechRail 主服务进程 (FastAPI / ASGI :8201)"]
-        direction LR
-        GW["1. 协议网关<br/>(REST & WebSocket)"]
-        Pipe["2. 内存音频流水线<br/>(WAV直读 / 流式解码)"]
-        Gov["3. 资源守护器<br/>(Realtime抢占 / 租约锁)"]
-        GW --> Pipe --> Gov
-    end
-
-    subgraph Workers ["🛡️ 独立 Python 隔离推理 Worker (零拷贝二进制 IPC)"]
-        direction LR
-        ASR["🎙️ 唯一物理 Qwen3-ASR Worker<br/>(Batch / Streaming 互斥复用)"]
-        TTS["🔊 Qwen3-TTS Worker<br/>(VoiceDesign / CustomVoice)"]
-        Diar["👥 Diarization 引擎<br/>(Sortformer 分割)"]
-    end
-
-    Client -->|"HTTP REST / WS"| Host
-    Host ==>|"全双工 IPC 管道"| Workers
-```
-
-> 📖 了解 3-Tier 音频流水线、租约锁机制与状态机的完整设计，请参阅 **[🏛️ 系统总体架构设计文档](docs/architecture/architecture.md)**。
-
----
-
-## 💻 硬件与环境要求
-
-| 组件 | 最低要求 | 推荐配置 | 备注 |
+| 档位 | ASR | TTS | 适用场景 |
 |---|---|---|---|
-| **操作系统** | macOS 14 (Sonoma) | macOS 15 (Sequoia)+ | 针对 Apple Silicon 统一内存架构优化 |
-| **芯片型号** | Apple Silicon M1/M2/M3/M4 | M 系列 Pro / Max / Ultra | 默认使用 `mps` / `float16` |
-| **统一内存** | 8 GB（`light`） | 12 GB（`balanced`）/ 16 GB+（`quality`） | 档位只改变权重组合；M1 Air 8GB 发布门仍待实机验证 |
-| **系统依赖** | Python 3.12、`uv` | 当前稳定版 `uv` | 受管安装使用锁定共享 runtime 与内置 `ffmpeg` |
-| **存储空间** | 15 GB 可用空间 | 30 GB+ 高速 SSD | 用于存放本地模型权重与隔离虚拟环境 |
+| `quality` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 1.7B VoiceDesign q8 | 质量与自然语言音色设计优先 |
+| `balanced` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 保留 1.7B ASR，降低 TTS 内存与延迟 |
+| `light` | Qwen3-ASR 0.6B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 8GB Apple Silicon 目标组合 |
 
-## 🧩 支持的模型规格
-
-SpeechRail 的三个受管档位使用同一服务、worker 协议、调度和共享 vendor runtime，只改变
-ASR/TTS 权重与量化组合：
-
-| 档位 | ASR | TTS | 适用方向 |
-|---|---|---|---|
-| `quality` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 1.7B VoiceDesign q8 | 本机质量优先，保留自然语言音色设计能力 |
-| `balanced` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 保留高质量识别，降低 TTS 延迟与内存 |
-| `light` | Qwen3-ASR 0.6B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 8GB 目标组合；最终发布仍需 M1 Air 8GB 实机门 |
-
-受管安装完成后，可用同一命令查看和切换档位；切换允许短暂停服，并在公共 ASR/TTS smoke
-失败时执行一次回退：
+九个 canonical 角色为 `serena`、`vivian`、`uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。`quality` 使用固定 VoiceDesign 配方复现角色，`balanced/light` 映射到同名 CustomVoice speaker；角色语义一致，跨权重不承诺声纹完全相同。自定义 VoiceDesign 音色在低档保留但显示为 `available=false`，切回 `quality` 后恢复。
 
 ```bash
 speechrail profile list
@@ -183,252 +55,102 @@ speechrail profile apply balanced --yes
 speechrail profile rollback --yes
 ```
 
-普通用户也可以双击安装目录中的 `SpeechRail 设置.command`。0.6B TTS q4 只保留为候选，
-未通过共同质量门与资源收益门前不会替换 `light` 的 q8 权重。
+档位切换会短暂停服。`profile apply` 在公共 ASR/TTS smoke 失败时执行一次有界回退。
 
-档位是本机部署状态，不进入 OpenAI 请求。客户端继续发送 `tts-1`、`whisper-1` 和标准
-voice alias；服务在 `/v1/models`、`/v1/voices` 及 Realtime session 事件中以加法字段声明
-实际能力。九个 canonical 角色（`serena`、`vivian`、`uncle_fu`、`dylan`、`eric`、
-`ryan`、`aiden`、`ono_anna`、`sohee`）与 CustomVoice 的九个固定 speaker 一一对应，
-在三档均可用。`quality` 由 VoiceDesign 按相同角色描述生成，`balanced/light` 使用对应的
-固定 speaker；角色意图稳定，但不同权重生成的音色不承诺声纹完全一致。旧的
-`default/warm/bright/calm` 和 OpenAI 标准 voice 名称继续作为兼容 alias。自定义
-VoiceDesign 音色降档后保留但标为
-`available=false`，请求会在推理前返回 `voice_not_available`，切回 `quality` 后自动恢复。
+## 快速开始
 
----
-
-## 🎯 精度语义与权重文件格式
-
-SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` 实际张量 dtype）、**计算精度**（推理时 `mx.Array` dtype）、**量化格式**（`-8bit` 快照的 int8 编码）。`SPEECHRAIL_DTYPE` 只指定**非预量化快照**的计算精度，与 `-8bit` 预量化快照的权重文件精度**无关**。
-
-**各快照的权重文件精度（实测 `.safetensors` header，MLX+HF 2026-09-03）：**
-
-| 快照 | `config.json` | 权重文件张量精度 | 运行时 |
-|---|---|---|---|
-| Qwen3-ASR `-bf16` | 无 `torch_dtype`、无量化键 | 全部 **BF16** | Session 默认 cast 为 **fp16** |
-| Qwen3-ASR `-8bit` | `quantization`/`quantization_config` = `{bits:8, group_size:64, mode:"affine"}` | 主干(decoder+`embed_tokens`) **int8 packed U32** + BF16 `scales`/`biases`；`audio_tower` 编码器/norm **BF16** | W8A16；197 个 U32 量化权重 |
-| Qwen3-TTS `-bf16` | 无量化键 | talker 主干 **BF16** + `speech_tokenizer/` **FP32** | mlx-audio 不 cast，按 bf16/fp32 运行 |
-| Qwen3-TTS `-8bit` | `quantization`/`quantization_config`（同上） | talker+code-predictor 主干 **int8 packed U32** + BF16 `scales`/`biases`；`speech_tokenizer/` **FP32** | 250 个 U32 量化权重；codec 解码器**恒为 FP32、永不量化** |
-
-**要点：**
-- **`-8bit` 的 "int8" 是 W8A16 的权重侧**：int8（group_size=64，affine）以 **U32**（4 int8/uint32）存储，`scales`/`biases` 为 BF16，激活侧以 fp16/bf16 参与计算。
-- **已量化快照绝不二次量化**：`-8bit` 权重本身即 int8，loaders 直接重建 `QuantizedLinear` 并原样加载；再次 `nn.quantize` 只会造成瞬时内存峰值。
-- **避开大体积 16-bit 权重**：`-bf16`（权重文件约 4.1 GB）是大体积 16-bit；要选紧凑路径请用**预量化 `-8bit` 快照**（权重文件约 2.3 GB）。`SPEECHRAIL_DTYPE=float16` 默认加载 16-bit；将模型目录指向 `-8bit` 快照即自动解析为 int8。
-
-> 量化检测键、U32 布局与底层的完整机制请参阅 **[ASR/TTS 优化与最佳实践](docs/architecture/asr-tts-best-practices-and-optimization-spec.md)**。
-
----
-
-## ⚡ 性能基线与资源实测
-
-> 实测环境：Apple M5 Max / 128GB，macOS 26.6.2，MLX，锁定 q8 snapshot 与同一共享
-> vendor runtime。三档按 `quality → balanced → light → quality` 串行切换；结束时恢复
-> `quality`。
-
-**三档公共 API 与资源实测：**
-
-| 档位 | ASR 热态 RTF（中/英） | TTS 热态 RTF | 最大物理常驻 | 最大压测峰值 |
-|---|---:|---:|---:|---:|
-| `quality` | 0.0346 / 0.0353 | 0.2676 | 6624.8 MB | 7000.3 MB |
-| `balanced` | 0.0332 / 0.0330 | 0.2303 | 5561.3 MB | 5877.4 MB |
-| `light` | 0.0249 / 0.0240 | 0.2272 | 4168.0 MB | 4484.2 MB |
-
-两条独立系统语音代理样本上，`quality`/`balanced` 的中文 CER 与英文 WER 均为 0；
-`light` 中文 CER 为 0、英文 WER 为 7.69%（13 词中 1 词差异）。每档 TTS→ASR 回读
-CER 均为 0，档位切换后的公共 smoke 均通过。资源数字是 FastAPI、一个 batch ASR worker
-和一个 TTS worker 的同一采样轮 `phys_footprint` 总和，不叠加不存在的 batch/streaming
-并行场景。
-
-> 这是本机可行性基准，不是 M1 Air 8GB 发布验收。完整真人语料、人工 TTS 盲听、cold、
-> soak、streaming 和目标设备压力仍需单独完成。详见
-> **[📊 三档本机可行性报告](docs/archive/performance/2026-09-05-three-tier-feasibility.md)**；
-> 历史报告见 **[📈 性能基准归档索引](docs/archive/performance/README.md)**。
-
----
-
-## 🔌 客户端与 SDK 接入
-
-### 1. cURL 命令行调用
-
-#### 🎙️ 音频文件转写（包含句子与词级时间戳）
+要求：Apple Silicon、macOS 14+、Python `>=3.12,<3.13`、[`uv`](https://docs.astral.sh/uv/) 和 `ffmpeg`。模型 snapshot 与 vendor runtime 位于仓库外。
 
 ```bash
-curl -X POST http://127.0.0.1:8201/v1/audio/transcriptions \
-  -F "file=@meeting.wav" \
-  -F "model=whisper-1" \
-  -F "language=zh" \
-  -F "response_format=verbose_json" \
-  -F "timestamp_granularities[]=segment" \
-  -F "timestamp_granularities[]=word"
+git clone https://github.com/hrygo/SpeechRail.git
+cd SpeechRail
+uv sync --extra dev
+cp configs/speechrail.example.env .env
+chmod 600 .env
 ```
 
-#### 🔊 文本转语音 (TTS)
+在 `.env` 中填写 ASR/TTS snapshot 与专用 Python 的绝对路径，然后启动：
 
 ```bash
-curl -X POST http://127.0.0.1:8201/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "tts-1",
-    "input": "欢迎使用 SpeechRail 本地语音服务。",
-    "voice": "serena",
-    "response_format": "wav"
-  }' \
-  --output speech.wav
+uv run speechrail serve
 ```
 
-### 2. 官方 OpenAI Python SDK 接入
+另开终端检查服务：
 
-无需修改业务代码，直接将 `base_url` 指向本地端口：
+```bash
+curl http://127.0.0.1:8201/health
+curl http://127.0.0.1:8201/readyz
+curl http://127.0.0.1:8201/v1/models
+curl http://127.0.0.1:8201/v1/voices
+```
+
+`readyz=200` 只表示入口就绪；部署验收还应使用一段真实短音频完成 ASR/TTS smoke。受管安装、模型准备和 LaunchAgent 操作见[运行时部署](docs/operations/runtime-deployment.md)与[运维手册](docs/operations/operations-runbook.md)。
+
+## OpenAI SDK 示例
 
 ```python
 from openai import OpenAI
 
-client = OpenAI(
-    base_url="http://127.0.0.1:8201/v1",
-    api_key="not-needed"  # 本地 loopback 无需认证
-)
+client = OpenAI(base_url="http://127.0.0.1:8201/v1", api_key="local")
 
-# 1. ASR 文件转写
-with open("meeting.wav", "rb") as audio_file:
+with open("meeting.wav", "rb") as audio:
     transcript = client.audio.transcriptions.create(
         model="whisper-1",
-        file=audio_file,
+        file=audio,
         response_format="verbose_json",
-        timestamp_granularities=["segment", "word"]
+        timestamp_granularities=["segment", "word"],
     )
-    print("转写文本:", transcript.text)
 
-# 2. TTS 语音合成
-response = client.audio.speech.create(
+speech = client.audio.speech.create(
     model="tts-1",
-    voice="uncle_fu",
-    input="SpeechRail 为您的本地应用提供强大的低延迟语音动力。"
+    voice="serena",
+    input="欢迎使用 SpeechRail。",
+    response_format="wav",
 )
-response.stream_to_file("output.mp3")
+speech.write_to_file("speech.wav")
 ```
 
-### 3. 应用与生态集成
+更多 cURL、QwenPaw、Sona、Hermes Agent 与 Realtime 示例见[客户端接入指南](docs/users/integrations.md)。
 
-- **QwenPaw**：选择 `whisper_api` 提供商，Base URL 设为 `http://127.0.0.1:8201/v1`，模型使用 `speechrail/qwen3-asr-1.7b` 或 `whisper-1`。
-- **Sona (实时会议)**：通过 `/v1/realtime` WebSocket 端点直连流式会议转写与说话人分离。
-- **Hermes Agent**：使用标准 STT 模块直连 SpeechRail REST 接口。
+## 性能与资源
 
----
+2026-09-05 在同一台 Apple M5 Max / 128GB 主机上，以相同公共 API 串行测得：
 
-## 📡 API 规范与端点
+| 档位 | ASR 热态 RTF（中 / 英） | TTS 热态 RTF | 最大同时物理占用 |
+|---|---:|---:|---:|
+| `quality` | 0.0346 / 0.0353 | 0.2676 | 7000.3 MB |
+| `balanced` | 0.0332 / 0.0330 | 0.2303 | 5877.4 MB |
+| `light` | 0.0249 / 0.0240 | 0.2272 | 4484.2 MB |
 
-| 方法 | 路径 | 描述 | 支持格式 / 参数 |
-|---|---|---|---|
-| `GET` | `/health` | 服务存活与组件健康状态 | 进程状态、active profile 与实际 ASR artifact |
-| `GET` | `/readyz` | 推理入口就绪状态检查 | 至少一个 ASR/TTS 入口可用时返回 HTTP 200；不替代真实音频 smoke |
-| `GET` | `/metrics` | 运行指标导出 | Prometheus 文本默认；`Accept: application/json` 返回 JSON |
-| `GET` | `/v1/models` | 模型清单与别名路由 | Canonical 条目声明 active profile/artifact/variant/量化；保留 `whisper-1`、`tts-1` 等兼容别名 |
-| `GET` | `/v1/voices` | 可用音色列表 | 返回当前权重下的 `available`、`variant` 和 `capabilities`；保留系统预置与用户自定义音色 |
-| `POST` | `/v1/voices` | 自然语言创建音色 | 创建并持久化 VoiceDesign 音色；CustomVoice 档位下可保存但标记为当前不可用 |
-| `DELETE` | `/v1/voices/{id}` | 删除自定义音色 | 安全删除自建音色，系统预置音色受只读保护 |
-| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
-| `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` |
-| `POST/GET/DELETE` | `/v1/jobs` | 异步转写任务管理 | 提交长任务排队、状态轮询与任务取消 |
-| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时双向流式转写、合成与说话人分离 |
+这些数字用于本机横向比较，不等同于 M1 Air 8GB 发布验收。测量口径、准确率代理和限制见[三档可行性报告](docs/archive/performance/2026-09-05-three-tier-feasibility.md)，历次结果见[性能归档](docs/archive/performance/README.md)。
 
-完整接口协议与错误定义请参阅 [OpenAPI 契约文件](contracts/openapi.yaml) 与 [Realtime 协议文档](contracts/realtime-openai.md)。
+## 架构边界
 
----
-
-## ⚙️ 核心配置项说明
-
-所有配置均通过环境变量或 `.env` 注入，关键配置如下：
-
-| 配置项 | 默认值 | 说明 |
-|---|---|---|
-| `SPEECHRAIL_HOST` / `PORT` | `127.0.0.1:8201` | 服务绑定地址与端口 |
-| `SPEECHRAIL_DEVICE` | `mps` | 推理硬件（`mps` 用于 Apple Silicon GPU/NPU 加速，或 `cpu`） |
-| `SPEECHRAIL_DTYPE` | `float16` | 推理精度。**`int8` 仅作用于非预量化快照的 ASR Worker**（显存减半且吞吐更优）；TTS Worker 不做运行时权重量化，恒为 `float16`（mps）/ `float32`（cpu）。若快照为预量化 `-8bit` MLX 权重，则 ASR/TTS 一律按其真实权重自动解析为 `int8` 直接加载（无需也**不应**再二次量化） |
-| `SPEECHRAIL_QWEN3_MODEL_DIR` | *(必填)* | 本地 Qwen3-ASR 权重目录绝对路径（推荐 `-8bit` 快照） |
-| `SPEECHRAIL_QWEN3_PYTHON` | *(必填)* | ASR Worker 独立的 Python 解释器绝对路径 |
-| `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` | *(可选)* | 本地 Qwen3-TTS 权重目录绝对路径 |
-| `SPEECHRAIL_QWEN3_TTS_PYTHON` | *(可选)* | TTS Worker 独立的 Python 解释器绝对路径 |
-| `SPEECHRAIL_REALTIME_ASR_BACKEND` | `disabled` | 流式后端：`disabled` 或 `native`（原生 MLX 运行时） |
-| `SPEECHRAIL_REALTIME_MAX_SESSIONS` | `3` | 并发 realtime 会话数上限（`1-8`）；共享一个 streaming worker，超出返回 `backend_busy`。示例 env 设为 `2` |
-| `SPEECHRAIL_DIARIZATION_MODEL_PATH` | *(可选)* | Sortformer 声纹分割模型 `.nemo` 本地路径 |
-| `SPEECHRAIL_MAX_QUEUE_SIZE` | `8` | 最大等待并发任务队列数 |
-| `SPEECHRAIL_MAX_UPLOAD_BYTES` | `536870912` (512MB) | 单次文件上传最大体积限制 |
-| `SPEECHRAIL_MAX_AUDIO_SECONDS` | `3600` | 音频解码后强制时长上限（超限返回 `400 audio_too_long`） |
-| `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | `120` | 单次推理 Worker 超时硬截断（秒） |
-
-完整配置字段请参考 [`configs/speechrail.example.env`](configs/speechrail.example.env)。
-
----
-
-## 🛠️ macOS 服务常驻与运维
-
-SpeechRail 内建了专为 macOS `launchd` 设计的用户级后台服务管理命令（无需 root 权限）：
-
-```bash
-# 1. 安装 LaunchAgent 配置（生成 ~/Library/LaunchAgents/com.speechrail.plist）
-uv run speechrail service install
-
-# 2. 启用并启动后台常驻服务
-uv run speechrail service enable
-
-# 3. 查看服务运行状态与 PID
-uv run speechrail service status
-
-# 4. 重启服务（重新加载模型权重）
-uv run speechrail service restart
-
-# 5. 停止服务 / 卸载服务
-uv run speechrail service disable
-uv run speechrail service uninstall
+```text
+OpenAI client
+    │ HTTP / WebSocket
+    ▼
+FastAPI host ── 有界音频处理 / Resource Governor / 协议状态机
+    │ framed IPC
+    ├── 共享 ASR worker（batch 与 streaming 模式互斥）
+    ├── TTS worker（VoiceDesign 或 CustomVoice）
+    └── 可选匿名 diarization adapter
 ```
 
-详细运维操作、Wheel 打包与故障回滚指南请参阅 [📖 运维操作手册](docs/operations/operations-runbook.md)。
+SpeechRail 不负责麦克风、扬声器、播放、会议持久化、UI、LLM 编排或实名声纹库。完整设计与决策见[架构文档](docs/architecture/README.md)和 [ADR](docs/decisions/README.md)。
 
----
+## 文档
 
-## 🔒 安全与隐私边界
+| 读者 | 入口 |
+|---|---|
+| API 使用者 | [用户与集成](docs/users/README.md) · [API 契约说明](docs/users/api-contract.md) |
+| 运维人员 | [运维中心](docs/operations/README.md) · [运行时部署](docs/operations/runtime-deployment.md) |
+| 开发者 | [开发者中心](docs/developers/README.md) · [测试与验收](docs/developers/testing-acceptance.md) |
+| 架构评审 | [架构中心](docs/architecture/README.md) · [当前边界](docs/architecture/current-boundaries.md) |
+| 全部文档 | [文档中心](docs/README.md) |
 
-1. **绝对离线与零网络外链**：模型权重完全从本地加载，推理期间强制配置 `HF_HUB_OFFLINE=1`，绝无隐式联网请求。
-2. **内存流转与即用即弃**：源音频仅在内存中流式解码与推理，不落盘产生临时文件，日志中严禁打印原始音频与转写文本。
-3. **本地绑定与可控鉴权**：默认仅监听 `127.0.0.1` 本地回环接口；如需局域网暴露，需显式设置 `SPEECHRAIL_API_KEY` 并通过 `Authorization: Bearer <key>` 鉴权。
+## 参与贡献
 
----
+提交变更前请阅读[贡献指南](CONTRIBUTING.md)。安全问题按[安全策略](SECURITY.md)私下报告；社区行为遵循[行为准则](CODE_OF_CONDUCT.md)。
 
-## 📚 文档导航
-
-<div align="center">
-
-| 角色门户 | 关注主题 | 文档入口 |
-|:---|:---|:---|
-| 🎯 **产品经理 / 业务决策** | 业务价值、应用场景、功能矩阵、规划路线 | [📖 产品全景概述](docs/product/overview.md) · [📋 产品范围](docs/architecture/product-scope.md) |
-| 🏛️ **系统架构师** | 架构拓扑、进程隔离、零拷贝 IPC、状态机、ADR | [🏛️ 总体架构设计](docs/architecture/architecture.md) · [⚖️ 对标审计](docs/architecture/openai-conformance-audit.md) · [📜 ADR](docs/decisions/README.md) |
-| 🔌 **API 用户 / 客户端集成** | REST / WebSocket 契约、SDK 接入、音色库、错误码 | [🔌 客户端接入指南](docs/users/integrations.md) · [📡 API 契约手册](docs/users/api-contract.md) · [⚡ Realtime 契约](contracts/realtime-openai.md) |
-| 🛠️ **开发者 / 贡献者** | 快速启动、代码分层、测试金字塔、Worker 扩展 | [🛠️ 开发者指南](docs/developers/development-guide.md) · [🧪 测试验收](docs/developers/testing-acceptance.md) |
-| 📦 **运维工程师 / SRE** | LaunchAgent 常驻、Wheel 发布、排障决策树、监控 | [📖 运维操作手册](docs/operations/operations-runbook.md) · [🚀 运行时部署](docs/operations/runtime-deployment.md) · [🔒 安全监控](docs/operations/security-observability.md) |
-
-</div>
-
-👉 查阅完整文档体系请访问 [📚 文档中心 (Docs Portal)](docs/README.md)。
-
----
-
-## 🤝 参与贡献
-
-欢迎任何形式的开源贡献！请参阅：
-
-- 📖 **[贡献指南 (Contributing Guide)](CONTRIBUTING.md)**：开发环境搭建、编码规范与 PR 提交流程。
-- 🛡️ **[行为准则 (Code of Conduct)](CODE_OF_CONDUCT.md)**：友好与包容的社区规范。
-- 🔒 **[安全策略 (Security Policy)](SECURITY.md)**：漏洞披露与反馈途径。
-
----
-
-## 🌟 Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=hrygo/SpeechRail&type=Date)](https://star-history.com/#hrygo/SpeechRail&Date)
-
----
-
-## 📄 开源许可
-
-本项目基于 [MIT License](LICENSE) 开源发布。欢迎自由使用、修改与集成。
+SpeechRail 采用 [MIT License](LICENSE)。
