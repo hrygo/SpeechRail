@@ -179,37 +179,49 @@ class AsyncFramedWorkerProcess:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await asyncio.sleep(0.01)
 
-    async def receive(self) -> dict[str, object]:
+    async def receive(self, *, wait_for_frame: bool = False) -> dict[str, object]:
+        """dispatcher 可等待空闲首字节。开始接收后仍强制完整帧期限。"""
         async with self._read_lock:
-            return await self._receive_unlocked()
+            return await self._receive_unlocked(wait_for_frame=wait_for_frame)
 
-    async def _receive_unlocked(self) -> dict[str, object]:
+    async def _receive_unlocked(self, *, wait_for_frame: bool = False) -> dict[str, object]:
         process = self._require_process()
         if process.stdout is None:
             raise RuntimeError("worker_transport_invalid")
-        async with asyncio.timeout(self._spec.io_timeout_seconds):
-            try:
-                header = await process.stdout.readexactly(4)
-            except IncompleteReadError as exc:
-                await self._drain_stderr_tail()
-                stderr_tail = self._format_stderr_tail()
-                raise ProtocolError(
-                    f"truncated worker frame (read {len(exc.partial)} of "
-                    f"4 header bytes); worker stderr tail:\n{stderr_tail}"
-                ) from exc
+        first = b""
+        try:
+            if wait_for_frame:
+                first = await process.stdout.readexactly(1)
+            async with asyncio.timeout(self._spec.io_timeout_seconds):
+                header = first + await process.stdout.readexactly(4 - len(first))
+        except TimeoutError as exc:
+            if wait_for_frame:
+                raise ProtocolError("incomplete worker frame timed out") from exc
+            raise
+        except IncompleteReadError as exc:
+            await self._drain_stderr_tail()
+            stderr_tail = self._format_stderr_tail()
+            raise ProtocolError(
+                f"truncated worker frame (read {len(first) + len(exc.partial)} of "
+                f"4 header bytes); worker stderr tail:\n{stderr_tail}"
+            ) from exc
         size = struct.unpack(">I", header)[0]
         if not 0 < size <= MAX_FRAME_BYTES:
             raise ProtocolError("invalid worker frame size")
-        async with asyncio.timeout(self._spec.io_timeout_seconds):
-            try:
+        try:
+            async with asyncio.timeout(self._spec.io_timeout_seconds):
                 body = await process.stdout.readexactly(size)
-            except IncompleteReadError as exc:
-                await self._drain_stderr_tail()
-                stderr_tail = self._format_stderr_tail()
-                raise ProtocolError(
-                    f"truncated worker frame payload (read {len(exc.partial)} of "
-                    f"{size} bytes); worker stderr tail:\n{stderr_tail}"
-                ) from exc
+        except TimeoutError as exc:
+            if wait_for_frame:
+                raise ProtocolError("incomplete worker frame timed out") from exc
+            raise
+        except IncompleteReadError as exc:
+            await self._drain_stderr_tail()
+            stderr_tail = self._format_stderr_tail()
+            raise ProtocolError(
+                f"truncated worker frame payload (read {len(exc.partial)} of "
+                f"{size} bytes); worker stderr tail:\n{stderr_tail}"
+            ) from exc
         frame = decode_frame_body(body)
         if frame.get("type") == "error":
             await self._drain_stderr_tail()

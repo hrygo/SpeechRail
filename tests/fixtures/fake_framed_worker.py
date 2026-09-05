@@ -31,6 +31,16 @@ def main() -> None:
         elif action == "hang":
             time.sleep(30)
             return
+        elif action == "partial_header":
+            stdout.write(b"\x00")
+            stdout.flush()
+            time.sleep(30)
+            return
+        elif action == "partial_body":
+            stdout.write(b"\x00\x00\x00\x10{")
+            stdout.flush()
+            time.sleep(30)
+            return
         elif action == "stubborn":
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             time.sleep(30)

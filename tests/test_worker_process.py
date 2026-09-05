@@ -159,6 +159,39 @@ def test_receive_times_out_when_child_never_answers(tmp_path: Path) -> None:
     _run(scenario)
 
 
+def test_dispatch_receive_allows_idle_longer_than_frame_deadline(tmp_path: Path) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.05))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            reader = asyncio.create_task(transport.receive(wait_for_frame=True))
+            await asyncio.sleep(0.15)
+            assert not reader.done()
+            await transport.send({"action": "echo", "text": "after-idle"})
+            assert (await asyncio.wait_for(reader, 2))["text"] == "after-idle"
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
+@pytest.mark.parametrize("action", ["partial_header", "partial_body"])
+def test_dispatch_receive_rejects_stalled_partial_frame(tmp_path: Path, action: str) -> None:
+    transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.1))
+
+    async def scenario() -> None:
+        try:
+            await transport.start()
+            await transport.send({"action": action})
+            with pytest.raises(ProtocolError, match="incomplete worker frame timed out"):
+                await transport.receive(wait_for_frame=True)
+        finally:
+            await transport.close()
+
+    _run(scenario)
+
+
 def test_send_times_out_when_child_stops_draining_stdin(tmp_path: Path) -> None:
     transport = AsyncFramedWorkerProcess(_spec(tmp_path, io_timeout=0.3))
 
