@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import speechrail.application.transcript_merge as transcript_merge
 from speechrail.application.audio_stream import PcmBlock
 from speechrail.application.transcript_merge import (
     TranscriptMerger,
@@ -275,6 +276,34 @@ def test_merger_rejects_cumulative_text_over_limit_during_add() -> None:
         merger.add(blocks[1], _result("b" * 60_000))
     with pytest.raises(ValueError, match="merge_failed"):
         merger.finish("request", "model")
+
+
+def test_incremental_merge_never_retokenizes_cumulative_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_lengths: list[int] = []
+    tokenize = transcript_merge._tokens
+
+    def observed(text: str):
+        observed_lengths.append(len(text))
+        return tokenize(text)
+
+    monkeypatch.setattr(transcript_merge, "_tokens", observed)
+    merger = TranscriptMerger()
+    window_text = "token " * 100
+    for index in range(50):
+        merger.add(
+            _block(
+                start_sample=max(0, index * 7 - 1),
+                core_start_sample=index * 7,
+                core_end_sample=(index + 1) * 7,
+                window_samples=8,
+            ),
+            _result(window_text),
+        )
+
+    assert len(merger.finish("request", "model").text) > len(window_text)
+    assert max(observed_lengths) == len(window_text)
 
 
 def test_language_change_is_top_level_unknown_and_silence_stays_empty() -> None:

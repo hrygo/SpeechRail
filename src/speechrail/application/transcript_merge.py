@@ -114,18 +114,26 @@ def _join_text(left: str, right: str) -> str:
     return left + right
 
 
-def _dedup_text(previous: str, current: str) -> str:
+def _dedup_text(
+    previous: str,
+    current: str,
+    previous_tail: tuple[_Token, ...],
+) -> tuple[str, tuple[_Token, ...]]:
     if not previous:
-        return current.strip()
+        current_tokens = _tokens(current)
+        return current.strip(), current_tokens[-_TOKEN_WINDOW:]
     if not current:
-        return previous
-    previous_tokens = _tokens(previous)
+        return previous, previous_tail
     current_tokens = _tokens(current)
-    count = _overlap_count(previous_tokens, current_tokens)
+    count = _overlap_count(previous_tail, current_tokens)
     if count:
         suffix_start = current_tokens[count - 1].end
         current = current[suffix_start:]
-    return _join_text(previous, current)
+    remaining = current_tokens[count:]
+    return (
+        _join_text(previous, current),
+        (*previous_tail, *remaining)[-_TOKEN_WINDOW:],
+    )
 
 
 def _owns_interval(
@@ -235,6 +243,7 @@ class TranscriptMerger:
         "_last_core_end_sample",
         "_last_window_end_sample",
         "_segments",
+        "_tail_tokens",
         "_text",
         "_window_count",
         "_words",
@@ -251,6 +260,7 @@ class TranscriptMerger:
         self._window_count = 0
         self._segments: list[TranscriptSegment] = []
         self._words: list[TranscriptWord] = []
+        self._tail_tokens: tuple[_Token, ...] = ()
         self._text = ""
 
     def _raise_if_unavailable(self) -> None:
@@ -286,10 +296,22 @@ class TranscriptMerger:
             has_overlap = self._has_windows and (block.start_sample < self._last_window_end_sample)
             if output.has_timestamps:
                 self._text = _join_text(self._text, output.text)
+                self._tail_tokens = (
+                    *self._tail_tokens,
+                    *_tokens(output.text),
+                )[-_TOKEN_WINDOW:]
             elif has_overlap:
-                self._text = _dedup_text(self._text, output.text)
+                self._text, self._tail_tokens = _dedup_text(
+                    self._text,
+                    output.text,
+                    self._tail_tokens,
+                )
             else:
                 self._text = _join_text(self._text, output.text)
+                self._tail_tokens = (
+                    *self._tail_tokens,
+                    *_tokens(output.text),
+                )[-_TOKEN_WINDOW:]
             if len(self._text) > _MAX_CUMULATIVE_TEXT_CHARS:
                 raise ValueError("merge_text_too_long")
             if self._window_count == 0:
