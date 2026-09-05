@@ -234,19 +234,22 @@ curl http://127.0.0.1:8201/v1/audio/speech \
 
 ## 🎛️ 三档模型预设与 9 种跨档内置音色
 
-SpeechRail 对外暴露统一 API，内部通过分级档位平滑适配不同配置的 Mac 硬件：
+SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适配不同配置的 Apple Silicon Mac。全档位严格采用 **8-bit (q8)** 高精度量化权重：
 
 ### 1. 硬件分档矩阵
 
-| 预设档位 (Profile) | ASR 引擎 | TTS 引擎 | 最低物理内存要求 | 活跃推理峰值内存 (Peak RAM) | 空闲待机常驻 (Idle RAM) |
-|---|---|---|---|---|---|
-| 🟢 **`light` (轻量档)** | Qwen3-ASR-0.6B (4-bit) | Qwen3-TTS-0.6B CustomVoice (4-bit) | 8GB 基础款 Mac (Air / Mini) | **~3.8 GB** | **~50 MB** (权重自动卸载) |
-| 🟡 **`balanced` (平衡档)** | Qwen3-ASR-1.7B (4-bit) | Qwen3-TTS-1.7B CustomVoice (4-bit) | 16GB / 24GB 主流 Mac (Pro / Max) | **~4.7 GB** | **~50 MB** (权重自动卸载) |
-| 🟣 **`quality` (高保真档)** | Qwen3-ASR-1.7B (8-bit) | Qwen3-TTS-1.7B VoiceDesign (8-bit) | 32GB+ 旗舰款 Mac (Max / Ultra) | **~9.2 GB** | **~50 MB** (权重自动卸载) |
+| 预设档位 (Profile) | ASR 模型权重 | TTS 模型权重与变体 | 最低物理内存推荐 | 活跃最大物理占用 (Peak) | 稳定物理占用 (Steady) | 空闲待机常驻 (Idle) |
+|---|---|---|---|---|---|---|
+| 🟢 **`light` (轻量档)** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB 基础款 Mac (Air / Mini) | **4462 MB** (~4.4 GB) | **4142 MB** (~4.1 GB) | **~50 MB** (自动卸载) |
+| 🟡 **`balanced` (平衡档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB 主流 Mac (Pro / Max) | **6085 MB** (~6.0 GB) | **5562 MB** (~5.5 GB) | **~50 MB** (自动卸载) |
+| 🟣 **`quality` (高保真档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ 旗舰款 Mac (Max / Ultra) | **6943 MB** (~6.9 GB) | **6599 MB** (~6.6 GB) | **~50 MB** (自动卸载) |
 
 > [!TIP]
-> **关于内存的绝佳体验（智能空闲卸载）**：
-> SpeechRail 内置两阶段空闲驱逐器（`WorkerIdleEvictor`）。默认 **5 分钟无请求（`worker_idle_timeout_seconds=300`）时，系统会自动将重型 Worker 进程及模型权重完全卸载**，将显存与内存即时归还系统，常驻待机内存降至约 **50MB**；新请求到达时按需秒级懒拉起。因此即使在 8GB 或 16GB 的日常办公 Mac 上，也完全不会产生任何内存焦虑！
+> **真实设计事实**：
+> 1. **全档 8-bit 高质量化**：全档位模型严格保证 8-bit 量化精度，拒绝 4-bit 带来的音频失真与发音崩塌。
+> 2. **权重共享复用**：`balanced` 与 `quality` 共享同一个 1.7B ASR 模型；`balanced` 与 `light` 共享同一个 0.6B CustomVoice TTS 模型。
+> 3. **智能两阶段空闲卸载 (Worker Idle Eviction)**：默认 **5 分钟无请求（`worker_idle_timeout_seconds=300`）时，自动触发冷卸载（Cold Eviction）释放 Worker 显存与内存**，常驻待机仅占用约 **50MB**；新请求到达时按需秒级懒拉起。
+> 4. **自定义音色边界**：仅 `quality` 档支持通过自然语言设计自定义新音色（VoiceDesign）；在 `balanced`/`light` 档下，自定义音色会自动声明为 `available=false`，切回 `quality` 自动恢复。
 
 ### 2. 9 种跨档系统内置音色
 
@@ -266,18 +269,18 @@ SpeechRail 对外暴露统一 API，内部通过分级档位平滑适配不同�
 
 ---
 
-## 📊 Apple M5 Max 真实性能基准
+## 📊 真实性能基准实测 (Apple M5 Max)
 
-以下数据来自 Apple M5 Max (128GB Unified Memory) 真实基准实测（引自 [v1.7.0 性能基准实测报告](docs/archive/performance/2026-09-05-v1.7.0-performance-benchmark.md)），真实可复现：
+以下数据来源于 Apple M5 Max (128GB Unified Memory) 上的串行真实基准测试（引自 [v1.7.0 性能基准实测报告](docs/archive/performance/2026-09-05-v1.7.0-performance-benchmark.md)），真实可复现：
 
-| 评测指标 | 🟢 Light 档实测 | 🟡 Balanced 档实测 | 🟣 Quality 档实测 |
-|---|---|---|---|
-| **ASR 转写延迟 (P50)** | **148 ms** | **184 ms** | **233 ms** |
-| **ASR 实时率 (RTF)** | **0.021** (超实时 47 倍) | **0.026** (超实时 38 倍) | **0.033** (超实时 30 倍) |
-| **TTS 首包延迟 (P50)** | **162 ms** | **206 ms** | **282 ms** |
-| **TTS 实时率 (RTF)** | **0.082** (超实时 12 倍) | **0.098** (超实时 10 倍) | **0.134** (超实时 7.5 倍) |
-| **推理活跃峰值内存** | **3.82 GB** | **4.71 GB** | **9.24 GB** |
-| **空闲卸载待机内存** | **~50 MB** | **~50 MB** | **~50 MB** |
+| 评测指标 | 🟢 Light 档实测 | 🟡 Balanced 档实测 | 🟣 Quality 档实测 | 评测口径与场景 |
+|---|---|---|---|---|
+| **ASR 中文 RTF (p50)** | **0.0174** (超实时 57 倍) | **0.0250** (超实时 40 倍) | **0.0243** (超实时 41 倍) | 独立 macOS 系统语音 fixture，N=5 p50 |
+| **ASR 英文 RTF (p50)** | **0.0216** (超实时 46 倍) | **0.0313** (超实时 32 倍) | **0.0302** (超实时 33 倍) | 13 词独立英文样本，N=5 p50 |
+| **TTS 生成 RTF (p50)** | **0.2394** (超实时 4.1 倍) | **0.2405** (超实时 4.1 倍) | **0.2731** (超实时 3.6 倍) | 统一中文文本、`serena` 音色，N=5 p50 |
+| **最大同时物理占用** | **4462.9 MB** (~4.4 GB) | **6085.9 MB** (~6.0 GB) | **6943.9 MB** (~6.9 GB) | 同一 tick `phys_footprint` 较大值 |
+| **稳定物理占用** | **4142.7 MB** (~4.1 GB) | **5562.7 MB** (~5.5 GB) | **6599.7 MB** (~6.6 GB) | 持续工作稳定态物理内存 |
+| **空闲卸载待机内存** | **~50 MB** | **~50 MB** | **~50 MB** | 5 分钟无请求自动卸载释放 Worker |
 
 ---
 
