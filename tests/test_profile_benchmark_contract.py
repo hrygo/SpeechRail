@@ -17,6 +17,7 @@ from examples.perf.bench_profiles import (
     PROFILE_DEVICE_PHASES,
     BenchmarkDependencies,
     HttpResponse,
+    ResourceMonitor,
     build_auth_headers,
     load_manifest,
     main,
@@ -29,10 +30,18 @@ from examples.perf.bench_profiles import (
 
 
 class _FakeHttpRunner:
-    def __init__(self, *, tts_body: bytes = b"tts pcm") -> None:
+    def __init__(
+        self,
+        *,
+        tts_body: bytes = b"tts pcm",
+        events: list[str] | None = None,
+        failure: BaseException | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str]] = []
         self.requests: list[tuple[str, str, bytes | None, Mapping[str, str]]] = []
         self.tts_body = tts_body
+        self.events = events
+        self.failure = failure
 
     def __call__(
         self,
@@ -43,6 +52,12 @@ class _FakeHttpRunner:
     ) -> HttpResponse:
         self.calls.append((method, url))
         self.requests.append((method, url, body, dict(headers)))
+        if self.events is not None:
+            self.events.append(f"http:{url.rsplit('/', 1)[-1]}")
+        if self.failure is not None:
+            failure = self.failure
+            self.failure = None
+            raise failure
         if url.endswith("/health"):
             payload = {"status": "ok", "asr_ready": True, "tts_ready": True}
         elif url.endswith("/readyz"):
@@ -54,6 +69,40 @@ class _FakeHttpRunner:
         else:
             payload = {"text": "secret transcript"}
         return HttpResponse(status_code=200, body=json.dumps(payload).encode())
+
+
+class _FakeResourceMonitor(ResourceMonitor):
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        result: Mapping[str, object] | None = None,
+        start_error: BaseException | None = None,
+        stop_error: BaseException | None = None,
+    ) -> None:
+        self.events = events
+        self.result = {} if result is None else result
+        self.start_error = start_error
+        self.stop_error = stop_error
+        self.starts = 0
+        self.stops = 0
+
+    def start(self) -> None:
+        self.starts += 1
+        self.events.append("start")
+        if self.start_error is not None:
+            error = self.start_error
+            self.start_error = None
+            raise error
+
+    def stop(self) -> Mapping[str, object]:
+        self.stops += 1
+        self.events.append("stop")
+        if self.stop_error is not None:
+            error = self.stop_error
+            self.stop_error = None
+            raise error
+        return self.result
 
 
 class _FakeClock:
@@ -134,6 +183,199 @@ def _dependencies(runner: _FakeHttpRunner) -> BenchmarkDependencies:
         clock=_FakeClock(),
         ffprobe=lambda _: 2.5,
     )
+
+
+def _monitor_result() -> Mapping[str, object]:
+    return {
+        "hardware": {
+            "real": True,
+            "source": "monitor",
+            "chip": "Apple M2",
+            "architecture": "arm64",
+        },
+        "os": {"name": "macOS", "version": "15.6"},
+        "memory": {"physical_bytes": 12 * 1024**3},
+        "process_samples": [
+            {
+                "at": 1.0,
+                "processes": [
+                    {
+                        "pid": 20,
+                        "start_time_ns": 200,
+                        "rss_bytes": 300,
+                        "phys_footprint_bytes": 400,
+                    }
+                ],
+            }
+        ],
+        "resource_sampler": {
+            "available": True,
+            "real": True,
+            "source": "monitor",
+        },
+    }
+
+
+def _with_monitor(
+    runner: _FakeHttpRunner, monitor: _FakeResourceMonitor
+) -> BenchmarkDependencies:
+    base = _dependencies(runner)
+    return BenchmarkDependencies(
+        http_runner=base.http_runner,
+        system_sampler=base.system_sampler,
+        clock=base.clock,
+        ffprobe=base.ffprobe,
+        monitor=monitor,
+    )
+
+
+def test_resource_monitor_wraps_public_calls_and_stop_result(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    events: list[str] = []
+    runner = _FakeHttpRunner(events=events)
+    monitor = _FakeResourceMonitor(events, result=_monitor_result())
+
+    result = run_profile_benchmark(
+        "http://127.0.0.1:8201",
+        manifest,
+        profile="light",
+        phase="quality",
+        dependencies=_with_monitor(runner, monitor),
+    )
+
+    assert events[0] == "start"
+    assert events[-1] == "stop"
+    assert monitor.starts == 1
+    assert monitor.stops == 1
+    assert result["hardware"]["chip"] == "Apple M2"
+    assert result["resources"]["simultaneous_peak"]["phys_footprint_bytes"] == 400
+
+
+def test_resource_monitor_start_failure_sends_no_http(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    events: list[str] = []
+    runner = _FakeHttpRunner(events=events)
+    monitor = _FakeResourceMonitor(
+        events,
+        start_error=RuntimeError("start-secret"),
+    )
+
+    with pytest.raises(ValueError, match="resource monitor start failed") as error:
+        run_profile_benchmark(
+            "http://127.0.0.1:8201",
+            manifest,
+            profile="light",
+            phase="quality",
+            dependencies=_with_monitor(runner, monitor),
+        )
+
+    assert runner.calls == []
+    assert monitor.starts == 1
+    assert monitor.stops == 0
+    assert "start-secret" not in str(error.value)
+
+
+def test_resource_monitor_stops_after_http_runner_failure(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    events: list[str] = []
+    runner = _FakeHttpRunner(events=events, failure=RuntimeError("request-secret"))
+    monitor = _FakeResourceMonitor(events, result=_monitor_result())
+
+    result = run_profile_benchmark(
+        "http://127.0.0.1:8201",
+        manifest,
+        profile="light",
+        phase="quality",
+        dependencies=_with_monitor(runner, monitor),
+    )
+
+    assert monitor.stops == 1
+    assert events[-1] == "stop"
+    assert result["release_pass"] is False
+    assert "request-secret" not in json.dumps(result)
+
+
+def test_resource_monitor_stop_failure_marks_incomplete_without_message(
+    tmp_path: Path,
+) -> None:
+    manifest, _ = _manifest(tmp_path)
+    events: list[str] = []
+    runner = _FakeHttpRunner(events=events)
+    monitor = _FakeResourceMonitor(
+        events,
+        result=_monitor_result(),
+        stop_error=RuntimeError("stop-secret"),
+    )
+
+    result = run_profile_benchmark(
+        "http://127.0.0.1:8201",
+        manifest,
+        profile="light",
+        phase="quality",
+        dependencies=_with_monitor(runner, monitor),
+    )
+
+    assert monitor.stops == 1
+    assert result["resources"]["sampling_complete"] is False
+    assert result["resources"]["monitor"]["status"] == "incomplete"
+    assert result["release_pass"] is False
+    assert "stop-secret" not in json.dumps(result)
+
+
+def test_request_base_exception_survives_monitor_stop_failure(tmp_path: Path) -> None:
+    class CancelledLike(BaseException):
+        pass
+
+    manifest, _ = _manifest(tmp_path)
+    events: list[str] = []
+    runner = _FakeHttpRunner(
+        events=events,
+        failure=CancelledLike("cancelled-request"),
+    )
+    monitor = _FakeResourceMonitor(
+        events,
+        stop_error=RuntimeError("stop-secret"),
+    )
+
+    with pytest.raises(CancelledLike, match="cancelled-request"):
+        run_profile_benchmark(
+            "http://127.0.0.1:8201",
+            manifest,
+            profile="light",
+            phase="quality",
+            dependencies=_with_monitor(runner, monitor),
+        )
+
+    assert monitor.starts == 1
+    assert monitor.stops == 1
+    assert events[-1] == "stop"
+
+
+def test_injected_monitor_never_releases_even_with_passed_manifest(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["phase_evidence"] = {
+        phase: {"status": "passed", "real": True, "source": "operator"}
+        for phase in required_phases("light")
+    }
+    payload["soak"] = {"status": "passed", "real": True, "source": "operator"}
+    payload["switch"] = {"status": "passed", "real": True, "source": "operator"}
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    events: list[str] = []
+    runner = _FakeHttpRunner(events=events)
+    monitor = _FakeResourceMonitor(events, result=_monitor_result())
+
+    result = run_profile_benchmark(
+        "http://127.0.0.1:8201",
+        manifest,
+        profile="light",
+        phase="quality",
+        dependencies=_with_monitor(runner, monitor),
+    )
+
+    assert result["evidence_mode"] == "injected"
+    assert result["release_pass"] is False
+    assert "injected dependencies are not real evidence" in result["release_reasons"]
 
 
 def test_required_phases_are_profile_specific_and_unknown_is_fail_closed() -> None:

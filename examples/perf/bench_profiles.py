@@ -20,7 +20,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import Protocol, cast
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
@@ -124,12 +124,25 @@ type Ffprobe = Callable[[Path], float]
 type SystemSampler = Callable[[], Mapping[str, object]]
 
 
+class ResourceMonitor(Protocol):
+    """Lifecycle boundary for collecting resources across the whole benchmark."""
+
+    def start(self) -> None:
+        """Start sampling before the first public API probe."""
+        ...
+
+    def stop(self) -> Mapping[str, object]:
+        """Stop sampling and return sanitized-input-compatible raw evidence."""
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class BenchmarkDependencies:
     """Injectable side effects so contract tests never need a service or model."""
 
     http_runner: HttpRunner | None = None
     system_sampler: SystemSampler | None = None
+    monitor: ResourceMonitor | None = None
     clock: Clock = time.monotonic
     ffprobe: Ffprobe | None = None
 
@@ -782,6 +795,7 @@ def _release_gate(
     resources_complete: bool,
     injected_dependencies: bool,
     default_sampler_used: bool,
+    monitor_stop_error: str | None,
 ) -> tuple[bool, list[str]]:
     required = required_phases(profile)
     reasons: list[str] = []
@@ -814,6 +828,8 @@ def _release_gate(
         reasons.append("missing complete simultaneous resource samples")
     if default_sampler_used:
         reasons.append("default process sampler unavailable; release gate remains closed")
+    if monitor_stop_error is not None:
+        reasons.append("resource monitor stop failed; evidence incomplete")
     if not inference_observed:
         reasons.append("only readyz evidence; no successful public inference")
     if injected_dependencies:
@@ -847,48 +863,75 @@ def run_profile_benchmark(
     sampler = _default_system_sampler if deps.system_sampler is None else deps.system_sampler
     default_sampler_used = deps.system_sampler is None
 
-    health, health_status = _probe(runner, normalized_base, "/health", auth_headers)
-    readyz, readyz_status = _probe(runner, normalized_base, "/readyz", auth_headers)
-    models, models_status = _probe(runner, normalized_base, "/v1/models", auth_headers)
-    try:
-        raw_system = sampler()
-    except Exception:
-        raw_system = MappingProxyType({})
-    hardware, operating_system, memory = _hardware_and_os(raw_system)
-
-    fixture_results: list[dict[str, object]] = []
-    for fixture in loaded.fixtures:
+    monitor = deps.monitor
+    monitor_started = False
+    monitor_result: Mapping[str, object] = MappingProxyType({})
+    monitor_stop_error: str | None = None
+    if monitor is not None:
         try:
-            duration: float | None = None
-            if fixture.kind == "asr":
-                duration = float(ffprobe(fixture.path))
-                if not math.isfinite(duration) or duration <= 0:
-                    raise ValueError("duration must be positive")
-            fixture_results.append(
-                _fixture_request(
-                    fixture,
-                    base_url=normalized_base,
-                    runner=runner,
-                    clock=clock,
-                    duration=duration,
-                    auth_headers=auth_headers,
+            monitor.start()
+        except Exception as exc:
+            raise BenchmarkInputError("resource monitor start failed") from exc
+        monitor_started = True
+
+    raw_system: Mapping[str, object] = MappingProxyType({})
+    try:
+        health, health_status = _probe(runner, normalized_base, "/health", auth_headers)
+        readyz, readyz_status = _probe(runner, normalized_base, "/readyz", auth_headers)
+        models, models_status = _probe(runner, normalized_base, "/v1/models", auth_headers)
+        if monitor is None:
+            try:
+                raw_system = sampler()
+            except Exception:
+                raw_system = MappingProxyType({})
+
+        fixture_results: list[dict[str, object]] = []
+        for fixture in loaded.fixtures:
+            try:
+                duration: float | None = None
+                if fixture.kind == "asr":
+                    duration = float(ffprobe(fixture.path))
+                    if not math.isfinite(duration) or duration <= 0:
+                        raise ValueError("duration must be positive")
+                fixture_results.append(
+                    _fixture_request(
+                        fixture,
+                        base_url=normalized_base,
+                        runner=runner,
+                        clock=clock,
+                        duration=duration,
+                        auth_headers=auth_headers,
+                    )
                 )
-            )
-        except (OSError, ValueError, TypeError, BenchmarkInputError) as exc:
-            fixture_results.append(
-                {
-                    "id": fixture.id,
-                    "kind": fixture.kind,
-                    "language": fixture.language,
-                    "actual_audio_seconds": None,
-                    "duration_source": None,
-                    "latency_seconds": None,
-                    "rtf": None,
-                    "status_code": None,
-                    "inference_observed": False,
-                    "measurement_error": type(exc).__name__,
-                }
-            )
+            except (OSError, ValueError, TypeError, BenchmarkInputError) as exc:
+                fixture_results.append(
+                    {
+                        "id": fixture.id,
+                        "kind": fixture.kind,
+                        "language": fixture.language,
+                        "actual_audio_seconds": None,
+                        "duration_source": None,
+                        "latency_seconds": None,
+                        "rtf": None,
+                        "status_code": None,
+                        "inference_observed": False,
+                        "measurement_error": type(exc).__name__,
+                    }
+                )
+    finally:
+        if monitor_started and monitor is not None:
+            try:
+                stopped = monitor.stop()
+                if isinstance(stopped, Mapping):
+                    monitor_result = dict(stopped)
+                else:
+                    monitor_stop_error = "invalid_result"
+            except BaseException:
+                monitor_stop_error = "stop_error"
+
+    if monitor is not None:
+        raw_system = monitor_result
+    hardware, operating_system, memory = _hardware_and_os(raw_system)
 
     model_identity = dict(loaded.model_identity)
     for source in (health, models):
@@ -923,6 +966,11 @@ def run_profile_benchmark(
         }
 
     resources = _normalise_resources(raw_system)
+    if monitor_stop_error is not None:
+        resources["monitor"] = {"status": "incomplete", "error": monitor_stop_error}
+        resources["sampling_complete"] = False
+    elif monitor is not None:
+        resources["monitor"] = {"status": "complete"}
     release_pass, release_reasons = _release_gate(
         profile=normalized_profile,
         phase=normalized_phase,
@@ -937,6 +985,7 @@ def run_profile_benchmark(
         resources_complete=bool(resources["sampling_complete"]),
         injected_dependencies=injected_dependencies,
         default_sampler_used=default_sampler_used,
+        monitor_stop_error=monitor_stop_error,
     )
 
     observed_phases = sorted(safe_phase_evidence)
@@ -1039,6 +1088,7 @@ __all__ = [
     "Fixture",
     "HttpResponse",
     "LoadedManifest",
+    "ResourceMonitor",
     "build_auth_headers",
     "load_manifest",
     "main",
