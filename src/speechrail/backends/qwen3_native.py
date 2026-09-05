@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 from uuid import uuid4
 
+from speechrail.application.audio_stream import PcmBlock, PcmWindowBuffer, split_pcm
+from speechrail.application.transcript_merge import TranscriptMerger
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
@@ -290,6 +292,21 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         request_id: str | None = None,
     ) -> TranscriptResult:
         resolved_request_id = request_id or f"req_{uuid4().hex}"
+        blocks = split_pcm(pcm, window_samples=16000 * 30, overlap_samples=16000)
+        if len(blocks) > 1:
+            lease = self._shared_owner.mode_gate.acquire("batch")
+            try:
+                merger = TranscriptMerger()
+                for idx, block in enumerate(blocks):
+                    sub_req_id = f"{resolved_request_id}_win_{idx}"
+                    result = await self._transcribe_once(
+                        block.pcm, language, prompt, include_timestamps, sub_req_id
+                    )
+                    merger.add(block, result)
+                return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
+            finally:
+                self._shared_owner.mode_gate.release(lease)
+
         lease = self._shared_owner.mode_gate.acquire("batch")
         try:
             try:
@@ -306,6 +323,58 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             return await self._transcribe_once(
                 pcm, language, prompt, include_timestamps, resolved_request_id
             )
+        finally:
+            self._shared_owner.mode_gate.release(lease)
+
+    async def transcribe_stream(
+        self,
+        audio: AsyncIterator[bytes],
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool = True,
+        *,
+        request_id: str | None = None,
+    ) -> TranscriptResult:
+        resolved_request_id = request_id or f"req_{uuid4().hex}"
+        lease = self._shared_owner.mode_gate.acquire("batch")
+        try:
+            buffer = PcmWindowBuffer()
+            merger = TranscriptMerger()
+            window_idx = 0
+
+            async def _process_block(block: PcmBlock) -> None:
+                nonlocal window_idx
+                sub_request_id = f"{resolved_request_id}_win_{window_idx}"
+                window_idx += 1
+                try:
+                    result = await self._transcribe_once(
+                        block.pcm, language, prompt, include_timestamps, sub_request_id
+                    )
+                except TimeoutError:
+                    raise
+                except (OSError, ProtocolError, RuntimeError) as exc:
+                    if not _is_transport_loss(exc):
+                        raise
+                    result = await self._transcribe_once(
+                        block.pcm, language, prompt, include_timestamps, sub_request_id
+                    )
+                merger.add(block, result)
+
+            async for chunk in audio:
+                for block in buffer.feed(chunk):
+                    await _process_block(block)
+
+            for block in buffer.finish():
+                await _process_block(block)
+
+            if window_idx == 0:
+                return TranscriptResult(
+                    request_id=resolved_request_id,
+                    model_id="speechrail/qwen3-asr-1.7b",
+                    duration_ms=0,
+                )
+
+            return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
         finally:
             self._shared_owner.mode_gate.release(lease)
 
@@ -366,6 +435,16 @@ class _Qwen3TranscriptionWorker(Protocol):
         request_id: str | None = None,
     ) -> TranscriptResult: ...
 
+    async def transcribe_stream(
+        self,
+        audio: AsyncIterator[bytes],
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool = True,
+        *,
+        request_id: str | None = None,
+    ) -> TranscriptResult: ...
+
 
 class Qwen3BatchTranscriber(BatchTranscriber):
     """Normalize the isolated Qwen worker behind the public batch ASR port."""
@@ -389,4 +468,40 @@ class Qwen3BatchTranscriber(BatchTranscriber):
         )
         return result.model_copy(
             update={"request_id": request.request_id, "model_id": self._model_id}
+        )
+
+    async def transcribe_stream(
+        self,
+        request_id: str,
+        audio: AsyncIterator[bytes],
+        language: str | None = None,
+        prompt: str | None = None,
+        include_timestamps: bool = True,
+    ) -> TranscriptResult:
+        """Streamingly transcribe audio in bounded windows, preserving model_id and request_id."""
+        if hasattr(self._worker, "transcribe_stream"):
+            result = await self._worker.transcribe_stream(
+                audio,
+                language,
+                prompt or "",
+                include_timestamps=include_timestamps,
+                request_id=request_id,
+            )
+            return result.model_copy(
+                update={"request_id": request_id, "model_id": self._model_id}
+            )
+
+        chunks: list[bytes] = []
+        async for chunk in audio:
+            chunks.append(chunk)
+        pcm = b"".join(chunks)
+        result = await self._worker.transcribe(
+            pcm,
+            language,
+            prompt or "",
+            include_timestamps=include_timestamps,
+            request_id=request_id,
+        )
+        return result.model_copy(
+            update={"request_id": request_id, "model_id": self._model_id}
         )
