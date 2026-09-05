@@ -795,7 +795,7 @@ def test_output_limit_includes_the_final_chunk():
 **所有权 / Files：** 新建 examples/perf/bench_profiles.py、tests/test_profile_benchmark_contract.py；新增 docs/archive/performance/2026-09-05-three-tier-feasibility.md（执行日期变化则使用实际日期，索引同改）。
 **接口 / Inputs & Outputs：** bench_profiles.py --base-url --manifest --profile --phase --output；phase=baseline/quality/cold/warm/soak/switch；manifest为仓库外fixture清单，输出脱敏JSON。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_benchmark_contract.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_profile_benchmark_contract.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from examples.perf.bench_profiles import required_phases
@@ -805,14 +805,14 @@ def test_light_release_requires_real_device_and_soak():
     assert {"m1_air_8gb", "quality", "cold", "warm", "soak", "switch"} <= phases
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_benchmark_contract.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_benchmark_contract.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
 - [ ] **3. 最小实现。** 同一硬件同一语料同一配置串行比较三档；按§7执行，不把ASR自生成音频作为唯一准确率证据。先本机两种TTS全voice smoke，再M1 light、12GB balanced。8-bit未过资源门才优先比较light TTS4-bit，ASR保持8-bit；不凭小模型名称保证速度。缺硬件写“未验证”，保留G2未通过。
-- [ ] **4. 边界验证。** required_phases(profile)->set[str]由本卡定义；结果无真实硬件身份/缺soak/只readyz则release_pass=false；推理请求只能经过公共API。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **4. 边界验证。** required_phases(profile)->set[str]由本卡定义；结果无真实硬件身份/缺soak/只readyz则release_pass=false；推理请求只能经过公共API。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `test: establish real hardware gates for speech tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `test: establish real hardware gates for speech tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已交付 runner/门禁骨架：commits `c25f995`、`1171c5c`；39 项测试覆盖公共 REST 请求、实际音频时长、资源监控生命周期、脱敏和 fail-closed。第 3 项真实三档串行采样、streaming ASR、soak/switch 与 M1 Air 8GB G2 仍未执行，因此本卡与 G2 保持未完成）
 
 
 ### P01：下载制品、校验与 cache 复用
@@ -839,7 +839,7 @@ def test_catalog_path_cannot_escape_model_store(tmp_path):
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: prepare verified model artifacts outside request handling`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `dc0f70c`；29 项离线 fake 覆盖路径、hash/size、镜像、重试、取消、回滚、磁盘和 cache；一次 prepare 内每个复用权重最多完整 hash 一次；未真实下载）
+  `feat: prepare verified model artifacts outside request handling`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `dc0f70c`，后续一致性修复 `ae8be3a`；36 项离线 fake 覆盖路径、hash/size、镜像、重试、取消、下载流关闭、registry commit point、metadata identity、回滚、磁盘和 cache；一次 prepare 内每个复用权重最多完整 hash 一次；未真实下载）
 
 
 ### P02：统一 vendor runtime 的可重复准备
@@ -848,7 +848,7 @@ def test_catalog_path_cannot_escape_model_store(tmp_path):
 **所有权 / Files：** 新建 src/speechrail/service/bootstrap.py、tests/test_runtime_bootstrap.py；修改 src/speechrail/service/preflight.py。
 **接口 / Inputs & Outputs：** runtime_key(lock:RuntimeLock|Mapping[str,object])->str；prepare_runtime(lock,app_home,runner)->RuntimePaths；RuntimePaths.asr_python/tts_python/ffmpeg 都在共同release布局。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_runtime_bootstrap.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_runtime_bootstrap.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.service.bootstrap import runtime_key
@@ -858,14 +858,14 @@ def test_runtime_identity_does_not_depend_on_preset():
     assert runtime_key(lock) == runtime_key(dict(lock))
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_runtime_bootstrap.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_runtime_bootstrap.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 用锁定Python3.12和带hash的依赖安装命令，arm64预构建可用性先检查；不从源码临时编译未知native依赖、不偷偷升级全局Python。全档只准备同一ASR/TTS环境一次。preflight检查package/version/artifact匹配、模块能导入且没有加载模型/联网副作用；兼容源码与wheel的PYTHONPATH边界。旧runtime保留。
-- [ ] **4. 边界验证。** runtime_key接受锁的规范化字典或RuntimeLock统一实现，测试3.12.0仅fake不是发布版本；不同preset复用key，lock变更必须新key；网络不可用/签名哈希错误保留旧env；主服务不import模型SDK。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 用锁定Python3.12和带hash的依赖安装命令，arm64预构建可用性先检查；不从源码临时编译未知native依赖、不偷偷升级全局Python。全档只准备同一ASR/TTS环境一次。preflight检查package/version/artifact匹配、模块能导入且没有加载模型/联网副作用；兼容源码与wheel的PYTHONPATH边界。旧runtime保留。
+- [x] **4. 边界验证。** runtime_key接受锁的规范化字典或RuntimeLock统一实现，测试3.12.0仅fake不是发布版本；不同preset复用key，lock变更必须新key；网络不可用/签名哈希错误保留旧env；主服务不import模型SDK。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: reuse one pinned vendor runtime across presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: reuse one pinned vendor runtime across presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：实现 commit `9a915db`、共享依赖锁修复 `55cb3d3`；ASR/TTS 联合解析为 47 个包、25 个交集且零版本冲突，Apple Silicon/macOS 14 的带 hash、仅 wheel dry-run 成功，临时共同 venv 同步及两个 vendor SDK 导入成功，未加载模型或改变现有服务）
 
 
 ### P03：把 bootstrap 接入首次安装与 wheel
@@ -933,7 +933,7 @@ def test_uncommitted_candidate_never_becomes_active(tmp_path):
 **所有权 / Files：** 新建 src/speechrail/application/managed_runtime.py、tests/test_managed_runtime.py；修改 application/services.py 组合注入。
 **接口 / Inputs & Outputs：** ManagedRuntime实现现有ASR/TTS端口及A04流式Batch端口；持有RuntimeBundle(asr,tts,realtime_factory,artifact_identity,voice_catalog,generation)。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_managed_runtime.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_managed_runtime.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.application.managed_runtime import ActiveWork
@@ -946,14 +946,14 @@ def test_old_work_is_visible_until_its_lease_ends():
     assert work.count == 0
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_managed_runtime.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_managed_runtime.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** AppServices保持frozen，routes持有稳定的ManagedRuntime门面而非旧worker引用。每次工作获取当前bundle租约直到结果/生成器finally/后端session终结，替换只在所有活动工作归零。逻辑capabilities/models/voices读取同一个活动generation快照；Settings里的网络和用户策略不被换模修改。test overrides仍绕开真实bundle。
-- [ ] **4. 边界验证。** ActiveWork接口在本卡定义；核心集成断言：流式响应未消费完不可替换、空闲WS不占租约、draining时新request拒绝、同generation模型列表一致、旧port调用签名不变。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** AppServices保持frozen，routes持有稳定的ManagedRuntime门面而非旧worker引用。每次工作获取当前bundle租约直到结果/生成器finally/后端session终结，替换只在所有活动工作归零。逻辑capabilities/models/voices读取同一个活动generation快照；Settings里的网络和用户策略不被换模修改。test overrides仍绕开真实bundle。
+- [x] **4. 边界验证。** ActiveWork接口在本卡定义；核心集成断言：流式响应未消费完不可替换、空闲WS不占租约、draining时新request拒绝、同generation模型列表一致、旧port调用签名不变。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: delegate inference through one managed runtime`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `refactor: delegate inference through one managed runtime`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `2af710b`；129 项相关 fake/组合回归通过。稳定门面、generation 租约、流式 finally 释放与 production/fake 组合边界已覆盖，未做真实模型切换）
 
 
 ### S03：实现可取消的安全 drain
@@ -962,7 +962,7 @@ def test_old_work_is_visible_until_its_lease_ends():
 **所有权 / Files：** 扩充 application/managed_runtime.py；新建 tests/test_profile_drain.py；必要时只修改 runtime/worker_lease.py 的drain保护调用。
 **接口 / Inputs & Outputs：** ManagedRuntime.drain(deadline_seconds)->drain_token / resume(token)；DrainState记录operator token过期时间；只允许一位切换者。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_drain.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_profile_drain.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.application.managed_runtime import DrainState
@@ -975,14 +975,14 @@ def test_expired_unclaimed_drain_restores_admission():
     assert state.accepting
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_drain.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_drain.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
 - [ ] **3. 最小实现。** drain只停止新推理准入，不截断活动transcription/TTS或重启worker。等待backend活动归零；对长会话展示等待，可取消；初始deadline120秒超时恢复旧准入，所有档一致。token失联过期恢复；已进入activate不可任意resume。IdleEvictor挂起且释放有finally。
 - [ ] **4. 边界验证。** DrainState.begin/expire/accepting本卡实现，生产clock注入monotonic；活动会话完成竞争、二次drain、取消两次、读取HTTP音频中取消切换、deadline后当前工作仍成功。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: drain active speech work before switching models`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: drain active speech work before switching models`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（核心已交付：commit `1df06c9`；46 项相关测试覆盖单 owner、有限 TTL、等待归零、取消/deadline 恢复准入和活动工作不被截断。第 3/4 项中的 IdleEvictor 挂起及 HTTP 音频读取期间取消仍待接入验证，真实模型进程行为留给 S04 与运行态验证）
 
 
 ### S04：串行换模、真实冒烟与自动回退

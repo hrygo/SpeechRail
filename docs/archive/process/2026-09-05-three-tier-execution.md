@@ -33,13 +33,16 @@
 
 从当前 runtime 读取包版本作为约束，解析最小依赖闭包。首次仅计算 vendor SDK 时为
 ASR 18 个包、TTS 40 个包；补齐 SpeechRail worker 入口所需的 Pydantic 配置依赖后，
-当前锁定为 ASR 24 个包、TTS 46 个包。
+当前锁定为 ASR 26 个包、TTS 46 个包，联合去重后为 47 个包。
 两者均使用 Python 3.12.14、MLX 0.32.2；ASR 使用 mlx-qwen3-asr 0.3.5，
-TTS 使用 mlx-audio 0.4.8。各档共享相同依赖文件。
+TTS 使用 mlx-audio 0.4.8。25 个跨 role 依赖由 `common.constraints` 统一版本；
+ASR 的 `huggingface-hub` 随 TTS 要求从 0.36.2 对齐到 1.29.0。各档共享相同依赖文件。
 
 解析目标为 Apple Silicon macOS 14.0 及以上；macOS 13 默认目标无法匹配当前
-MLX wheel，安装器需明确检查最低系统。两个临时 venv 的 `uv pip sync --require-hashes`
-均成功；离线导入 SpeechRail ASR/TTS worker 与两个模型 SDK 的入口成功，未加载权重。
+MLX wheel，安装器需明确检查最低系统。ASR/TTS 联合临时 venv 的
+`uv pip sync --require-hashes --only-binary :all:` 成功；离线导入 SpeechRail ASR/TTS
+worker 与两个模型 SDK 的入口成功，未加载权重。联合 Apple Silicon/macOS 14 dry-run
+得到 47 个包且无冲突。
 该导入结果尚不等于新环境真实推理通过。
 
 ```bash
@@ -85,8 +88,26 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
 - T04 已把 mp3/opus/aac/flac 改为输入/输出各 4 块的流式 ffmpeg 管线，PCM 保持真流式，
   WAV 保留 128MiB 有界缓冲；`90d8308` 通过真实四格式 ffmpeg 往返与取消/早退回收测试。
 - P01 已实现清单锁定的离线制品准备、逐文件校验、缓存、原子登记和回退保留；`dc0f70c`
-  的 29 项 fake 测试通过，尚未接入真实 ModelScope downloader，也未下载模型。
-- B02 真实质量、P02 之后的 runtime/安装切换、ManagedRuntime、公开契约及
+  与一致性修复 `ae8be3a` 的 36 项 fake 测试通过。registry rename 后的目录 fsync 失败不会
+  回滚已登记模型，下载流在成功、失败和取消时关闭，制品 identity 包含 `model_id` 与量化元数据。
+  尚未接入真实 ModelScope downloader，也未下载模型。
+- P02 已实现共同 vendor release、锁文件原始字节校验、带 hash/仅 wheel 安装、独立 ffmpeg、
+  离线 preflight、inactive release 复用和 current/registry 回滚；实现 commit `9a915db`，
+  共享依赖锁修复 `55cb3d3`。联合解析为 47 个包、25 个交集且零冲突；73 项相关测试与
+  Apple Silicon/macOS 14 dry-run 通过。临时共同 venv 只做 SDK 导入，未加载模型或切换服务。
+- S02 已用稳定 `ManagedRuntime` 门面和 generation 租约接管 batch、TTS 与 realtime 端口；
+  `2af710b` 的 129 项相关 fake/组合测试覆盖流式 finally 释放、能力快照和生产/fake 注入边界。
+- S03 已实现单 owner、有限 TTL 的 drain/resume/activation claim；`1df06c9` 的 46 项相关
+  测试覆盖活动工作归零、取消与 deadline 恢复准入，活动请求不会被 drain 截断；
+  IdleEvictor 挂起及 HTTP 音频读取期间取消仍待接入验证，因此 S03 卡保持部分完成。
+- B02 已交付公共 API runner 与 fail-closed 证据门 `c25f995`、资源监控生命周期
+  `1171c5c`；39 项测试覆盖 ASR/TTS 请求、实际音频时长、脱敏和采样失败。真实进程采样器、
+  三档串行 cold/warm/soak/switch、streaming ASR、质量对照及 M1 Air 8GB G2 尚未执行。
+- main v1.6.9 已发布的 `POST/DELETE /v1/voices` 与 `VoiceRegistry` 不能在三档集成时丢失；
+  当前分支不整体拣取旧 TTS worker。后续在 C01 依赖满足后增量保留 CRUD，并明确：任意
+  custom ID 可由 VoiceDesign instruction 合成，但 CustomVoice 权重没有可信 vendor speaker
+  映射时返回稳定的不支持错误；preset 不改写用户 voice 的 seed/temperature。
+- P03 安装接入、S04/S05 激活与私有控制、公开契约、B02 真实质量及
   M1 Air 8GB 内存/热稳态仍在待办范围。
 
 ## 回退
