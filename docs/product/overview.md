@@ -125,7 +125,7 @@ graph LR
         AUTH["用户多租户账号体系"]
     end
 
-    subgraph Rail ["🚂 SpeechRail 核心职责"]
+    subgraph Rail ["🎙️ SpeechRail 核心职责"]
         API["OpenAI 兼容协议层"]
         SCHED["Resource Governor 资源调度"]
         ASR_W["Qwen3-ASR 本地推理"]

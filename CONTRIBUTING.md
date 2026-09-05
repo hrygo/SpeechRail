@@ -1,4 +1,4 @@
-# Contributing to SpeechRail 🚂
+# Contributing to SpeechRail 🎙️
 
 感谢你关注并有意愿为 **SpeechRail** 做出贡献！  
 SpeechRail 是一个面向本机应用的独立、高性能、隐私优先、OpenAI 契约兼容的语音识别 (ASR) 与合成 (TTS) 运行时服务。

@@ -23,7 +23,7 @@ graph TD
         Spk["说话人实名展示映射 (spk_0 -> 张三)"]
     end
 
-    subgraph Rail ["🚂 SpeechRail 核心职责"]
+    subgraph Rail ["🎙️ SpeechRail 核心职责"]
         Proto["OpenAI 兼容 REST / WebSocket 协议接入"]
         Sched["Resource Governor 调度 & 显存管理"]
         ASR_M["Qwen3-ASR 离线转写 & 时间戳对齐"]

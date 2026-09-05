@@ -1,4 +1,4 @@
-# SpeechRail 🚂
+# SpeechRail 🎙️
 
 <p align="center">
   <strong>专为 Apple Silicon Mac 打造的工业级本地 ASR / TTS 语音基础设施</strong><br>
@@ -36,7 +36,7 @@
 
 ## ⚖️ 核心方案对比 (Why SpeechRail?)
 
-| 核心特性 | **SpeechRail 🚂 (本地常驻基础设施)** | **商业公有云 API (如 OpenAI)** |
+| 核心特性 | **SpeechRail 🎙️ (本地常驻基础设施)** | **商业公有云 API (如 OpenAI)** |
 |---|---|---|
 | **数据隐私** | 🔒 **100% 本地环回流转，零数据离机** | ❌ 音频必须上传云端，面临合规与泄露风险 |
 | **长期调用成本** | 💰 **$0（一次安装，全机无限量免费调用）** | 💸 按音频时长/Token 持续计费，高频使用昂贵 |

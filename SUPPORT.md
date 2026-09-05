@@ -1,4 +1,4 @@
-# Getting Support for SpeechRail 🚂
+# Getting Support for SpeechRail 🎙️
 
 如果您在使用 SpeechRail 时遇到问题或有任何疑问，请参考以下支持渠道：
 
