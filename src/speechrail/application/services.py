@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from speechrail.application.lifecycle import RuntimeLifecycle
+from speechrail.application.managed_runtime import ManagedRuntime, RuntimeBundle
 from speechrail.backends.camplus import CamPlusEmbeddingExtractor
 from speechrail.backends.nemo_sortformer import NemoSortformerEngine
 from speechrail.backends.qwen3_native import (
@@ -137,6 +138,7 @@ class AppServices:
     governor: ResourceGovernor
     lifecycle: RuntimeLifecycle
     metrics: Metrics = field(default_factory=Metrics)
+    runtime: ManagedRuntime | None = None
 
     @property
     def asr_ready(self) -> bool:
@@ -379,6 +381,49 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         lazy_load=settings.worker_lazy_load,
         poll_seconds=settings.job_poll_seconds,
     )
+
+    # Keep explicit test/caller overrides as the exact objects supplied by the
+    # caller.  Production workers are instead exposed through one stable facade;
+    # the physical adapters can then be replaced or evicted without routes
+    # retaining a stale reference.  No model inspection or path resolution is
+    # performed here: the identity is the public composition snapshot only.
+    managed_runtime: ManagedRuntime | None = None
+    has_port_override = any(
+        value is not None
+        for value in (
+            overrides.transcribe,
+            overrides.batch_transcriber,
+            overrides.realtime_asr_factory,
+            overrides.tts_synthesizer,
+        )
+    )
+    if not has_port_override:
+        runtime_asr = batch_transcriber if asr_worker is not None else None
+        runtime_tts = tts_synthesizer if tts_worker is not None else None
+        runtime_realtime = realtime_asr_factory if streaming_worker is not None else None
+        managed_runtime = ManagedRuntime(
+            RuntimeBundle(
+                asr=runtime_asr,
+                tts=runtime_tts,
+                realtime_factory=runtime_realtime,
+                artifact_identity={
+                    "asr_model_id": settings.model_id,
+                    "tts_model_id": settings.tts_model_id,
+                    "device": settings.device,
+                    "dtype": settings.dtype,
+                },
+                voice_catalog=tuple(settings.tts_voice_ids),
+                generation=0,
+            )
+        )
+        if runtime_asr is not None:
+            transcribe = managed_runtime
+            batch_transcriber = managed_runtime
+        if runtime_tts is not None:
+            tts_synthesizer = managed_runtime
+        if runtime_realtime is not None:
+            realtime_asr_factory = managed_runtime
+
     return AppServices(
         settings=settings,
         transcribe=transcribe,
@@ -392,4 +437,5 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         governor=governor,
         lifecycle=lifecycle,
         metrics=metrics,
+        runtime=managed_runtime,
     )
