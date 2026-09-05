@@ -6,9 +6,8 @@
 
 - 基线：`001e744`；实现位于 `feature/three-tier-runtime` 独立工作树。
 - 保留既有部署、私有配置和外部 runtime；当前服务尚未切换。
-- 用户提供 Parallels Desktop 虚拟机。2026-09-05 只读清单显示现有 guest 是 Ubuntu
-  与 Windows 11，没有 macOS guest；可验证不支持平台的提示，不能替代本机 macOS
-  安装测试、MLX/Metal 推理或 M1 Air 8GB 实机验收。未改变虚拟机运行态。
+- 三档切换采用单机停服事务；不识别 Mac 营销型号，不实现服务内热切换、drain 或控制 socket。
+- M1 Air 8GB 仍是 light 的发布验收条件；设备证据只在 B02/V01 基准阶段记录，不进入运行架构。
 
 ## 已验证的制品元数据
 
@@ -95,11 +94,9 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
   离线 preflight、inactive release 复用和 current/registry 回滚；实现 commit `9a915db`，
   共享依赖锁修复 `55cb3d3`。联合解析为 47 个包、25 个交集且零冲突；73 项相关测试与
   Apple Silicon/macOS 14 dry-run 通过。临时共同 venv 只做 SDK 导入，未加载模型或切换服务。
-- S02 已用稳定 `ManagedRuntime` 门面和 generation 租约接管 batch、TTS 与 realtime 端口；
-  `2af710b` 的 129 项相关 fake/组合测试覆盖流式 finally 释放、能力快照和生产/fake 注入边界。
-- S03 已实现单 owner、有限 TTL 的 drain/resume/activation claim；`1df06c9` 的 46 项相关
-  测试覆盖活动工作归零、取消与 deadline 恢复准入，活动请求不会被 drain 截断；
-  IdleEvictor 挂起及 HTTP 音频读取期间取消仍待接入验证，因此 S03 卡保持部分完成。
+- S02/S03 曾实现服务内 `ManagedRuntime`、generation 租约与 drain。用户明确单机允许停服后，
+  这两层只增加请求路径和状态机复杂度，已分别由 `3de2dc5`、`0b9023b` 完整撤销；
+  共享物理 ASR owner、模式互斥和既有有界推理实现不受影响。
 - B02 已交付公共 API runner 与 fail-closed 证据门 `c25f995`、资源监控生命周期
   `1171c5c`；39 项测试覆盖 ASR/TTS 请求、实际音频时长、脱敏和采样失败。真实进程采样器、
   三档串行 cold/warm/soak/switch、streaming ASR、质量对照及 M1 Air 8GB G2 尚未执行。
@@ -107,11 +104,18 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
   当前分支不整体拣取旧 TTS worker。后续在 C01 依赖满足后增量保留 CRUD，并明确：任意
   custom ID 可由 VoiceDesign instruction 合成，但 CustomVoice 权重没有可信 vendor speaker
   映射时返回稳定的不支持错误；preset 不改写用户 voice 的 seed/temperature。
-- P03 安装接入、S04/S05 激活与私有控制、公开契约、B02 真实质量及
-  M1 Air 8GB 内存/热稳态仍在待办范围。
+- P03 已在 `0595548` 接入 managed wheel/vendor release、私有配置、preflight 和原子 current
+  指针回退；99 项相关测试通过，未做真实安装或服务切换。受管 ffmpeg 接线提交为
+  `8c84b6a`；撤销热切换后的组合回归发现包循环导入，`245f779` 将可执行文件校验移到
+  `runtime` 边界后，139 项 API/组合回归与 ruff/mypy 通过。
+- S04 前置解析器 `681995d` 已把 prepared ID 严格绑定到 catalog/runtime lock、完整
+  ASR/TTS pair、目录、文件大小和 SHA-256；44 项测试通过。解析只在准备/启动/切档调用，
+  不进入请求热路径；全量哈希在停服前完成。
+- S04 停服切换协调器、U01/U02 普通用户入口、公开契约、B02 真实质量及 M1 Air 8GB
+  内存/热稳态仍在待办范围。S05 私有控制 socket 已退役。
 
 ## 回退
 
 本次代码与现有部署隔离。可继续使用原部署与基线版本；不删除模型、配置、日志或
-外部 runtime。实际服务切换前，仍须完成计划规定的 drain、旧进程退出、新组合验证和
-last-known-good 恢复测试。
+外部 runtime。实际服务切换前，仍须完成计划规定的旧进程退出、新 selection 启动、
+公共 API smoke 和 last-known-good 恢复测试。

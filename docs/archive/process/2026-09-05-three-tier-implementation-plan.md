@@ -7,7 +7,7 @@
 
 **Goal:** 在统一 MLX 架构下提供 quality/balanced/light 三档，保留本机质量路径，并以 M1 Air 8GB 验收 light。
 **Architecture:** 一个 FastAPI 主进程、一个共享 ASR worker、一个 TTS worker；Batch/Streaming ASR 互斥。
-档位仅引用权重/量化。安装器准备制品，服务内统一运行时负责有界推理与可恢复换模。
+档位仅引用权重/量化。安装器准备制品；单机切档允许停服，由管理命令完成可恢复的原子切换。
 **Tech Stack:** Python >=3.12,<3.13、uv、FastAPI、Pydantic、MLX、mlx-qwen3-asr、mlx-audio、ffmpeg、macOS LaunchAgent。
 **Spec:** [用户已采纳的设计](2026-09-05-low-memory-mac-architecture-proposal.md)。
 **Decision:** [ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
@@ -22,6 +22,7 @@
 - light 的 0.6B TTS 4-bit 只作对照候选；通过共同质量门和资源收益门才能替换 light 制品版本。
 - 分档不改变依赖、进程结构、VAD、上下文、chunk、并发、缓存、调度、温度或其他生成参数。
 - Batch ASR 与 Streaming ASR 不同时工作；ASR/TTS 重叠和多 Realtime 会话另验收，不删除既有会话隔离。
+- 单机切档允许短暂停服；不实现进程内热切换、双模型驻留、drain 协议或私有控制 socket。
 - 本机当前权重/音色/已启用能力保留；未知配置、.env、模型、日志和并行改动不得覆盖或清理。
 - 主服务一次一个 ASGI worker；vendor runtime 在仓库外隔离环境；不能把两份 ASR 模型换成两份 Session。
 - 模型请求离线；下载与依赖安装只在操作者显式应用方案时进行。不会在服务启动或 inference 中自动下载。
@@ -76,7 +77,7 @@ config/.env                      现有私有配置，原样保留
 config/selection.json             成功生效的制品选择，0600
 config/selection.previous.json    上次成功选择，0600
 state/profile-transaction.json   不含音频/凭据的换模日志，0600
-state/control.sock               同用户 Unix socket，0600，目录0700
+state/profile-startup-permit.json 一次性候选启动许可，服务读取后原子消费
 models/<artifact-key>/            已校验权重及附属文件
 models/.staging/<operation-id>/   未完成下载，不可作为加载路径
 vendor/<runtime-lock-id>/asr/     全档共同 ASR runtime
@@ -158,25 +159,26 @@ def split_pcm(pcm: bytes, *, window_samples: int, overlap_samples: int
 # split_pcm 为小片段的纯函数；生产滚动 splitter 累积 <=window+overlap，
 # 不把完整上传变成 bytes 再调用此函数。
 
-# application/managed_runtime.py
-class ManagedRuntime:
-    # 满足现有 BatchTranscriber / SpeechSynthesizer / RealtimeAsrFactory 端口；
-    # 返回的会话/音频迭代器持有活动 generation 的租约直到完成/close。
-    async def drain(self, *, deadline_seconds: float) -> str: ...
-    async def resume(self, drain_token: str) -> None: ...
-    async def activate(self, prepared_id: str, *, drain_token: str) -> None: ...
-    def status(self) -> dict[str, object]: ...
-# drain 到期只取消切换并恢复准入，不终止有效工作。
-# activate 内先关闭旧模型进程，再串行加载新 ASR/TTS，失败恢复旧组合。
-
 # service/model_store.py
 async def prepare_models(preset_id: str, *, app_home: Path,
                          progress: Callable[[dict[str, object]], None]) -> str: ...
 # 返回已校验 prepared_id，服务只接受该登记 ID，拒绝控制请求提供任意路径/URL。
+def resolve_prepared_models(prepared_id: str, *, app_home: Path) -> PreparedModelSet: ...
+# 在停服前同步完成 catalog/runtime lock/目录/逐文件哈希校验；不得从请求热路径调用。
 
 # service/profile_store.py
 def recover_selection(app_home: Path) -> dict[str, object] | None: ...
 # 有未完成事务时只返回 last-known-good，不把 candidate 冒充 active。
+def claim_startup_selection(app_home: Path) -> dict[str, object] | None: ...
+# 仅当一次性 permit 与当前 STARTING operation 完整匹配时返回 candidate，并原子消费 permit；
+# 无许可、重复读取或候选启动失败后的下一次启动都回到 recover_selection()。
+
+# service/profile_switch.py
+def apply_prepared_profile(prepared_id: str, *, app_home: Path,
+                           service: ServiceController,
+                           smoke: PublicSmokeProbe) -> ApplyResult: ...
+# 只由本机管理命令调用：校验候选 -> 停服 -> 原子写 selection -> 启动 -> 公共 API smoke。
+# 任一步失败都停服并恢复 previous selection 后只重启一次；回退失败进入 NOT_READY。
 ```
 
 这些签名中的 Path、Literal、Mapping、Callable、AsyncIterator、dataclass、asyncio、
@@ -191,25 +193,23 @@ ASR: idle -> batch -> idle
      idle -> streaming(n) -> idle
      batch 与 streaming(n) 互斥；不同请求冲突明确返回 busy，不后台预加载另一模型。
 
-切档: PREPARING -> VERIFIED -> DRAINING -> ACTIVATING -> SMOKING -> COMMITTED
+切档: PREPARING -> VERIFIED -> STOPPING -> SWITCHING -> STARTING -> SMOKING -> COMMITTED
       PREPARING/VERIFIED 失败：旧服务不变
-      DRAINING 取消/到期：恢复旧准入
-      ACTIVATING/SMOKING 失败：ROLLING_BACK -> 上次成功组合
+      STOPPING 之后失败：ROLLING_BACK -> 恢复上次成功选择 -> STARTING -> SMOKING
       回退也失败：NOT_READY，保留所有文件与诊断，禁止自动重试循环
 ```
 
-- 下载在 CLI/setup 进程，服务控制 socket 无下载/安装动作。私有控制协议只允许
-  status、drain、resume、activate(prepared_id)、operation_status(operation_id)。
-- socket 请求长度 <=64KiB，单个控制操作，operation_id 幂等；prepared_id 必须解析到可信
-  model store 内的完整校验登记。拒绝路径穿越、symlink 逃逸、未知 command 和任意命令执行。
-- journal 每步原子 write+fsync+replace；COMMITTED 前 selection.json 不变，保留 previous。
-  主进程意外退出后，重启按 last-known-good 恢复，未完成 candidate 不自动续推理。
-- UI/CLI 在 activation 开始后退出，事务仍由服务完成或回退；drain token 有有限有效期，
-  未进入 activation 的失联调用方不能永久停住服务。
-- 生命周期与 IdleEvictor 对物理 owner 去重。drain/activation 期间禁止 idle eviction 干预。
+- 下载、校验和切换均在 CLI/setup 管理进程；服务进程启动时读取 last-known-good selection，
+  或原子消费一次性许可读取本次候选。
+- prepared_id 必须解析到可信 model store 内的完整校验登记；不接受任意路径、URL 或命令。
+- journal、selection 与 permit 每步原子 write+fsync+replace；COMMITTED 前 recover_selection()
+  仍返回 previous。候选只由一次性 permit 启动；候选进程退出后再次启动按 last-known-good
+  恢复，未完成 candidate 不自动续推理。
+- 切换期间只有一个管理进程持有 app_home 文件锁；CLI 中断也必须在 finally 中恢复或完成当前选择。
+- 生命周期与 IdleEvictor 继续按物理 owner 去重；停服使旧 ASR/TTS 先完全退出，候选才可启动。
 - 启动成功要求 loaded identity、vendor import 与离线 smoke，不只看 readyz=200。
-- 切换期间 /health 仍存活，/readyz=503；新推理返回现有形状的 503 backend_not_ready。
-  正常模式冲突用 REST 429 backend_busy / WS error backend_busy，契约同步明示。
+- 停服窗口客户端得到连接失败；启动后健康端点与公共 smoke 决定提交或回退。正常模式冲突继续使用
+  REST 429 backend_busy / WS error backend_busy，不新增换模中的服务内状态。
 - 日志只保留 operation/request ID、阶段、错误码、计量值、模型公开 ID，不记录正文、音频、
   Base64、完整 prompt、私有绝对模型路径或 Authorization。
 
@@ -226,10 +226,10 @@ ASR: idle -> batch -> idle
 | 2 | R01→R02→R03→R04→R05→R06 | qwen3_native/streaming/worker/services 每次仅一位 writer | 共享实例与恢复 G1a |
 | 3 | A01→A02→A03→A04；T03→T04 | A04/T04 都改 audio.py，必须串行；R05/A03 不同时写 worker | 有界音频与取消 G1b |
 | 4 | B02 | 同一测试设备仅一轮基准；不与任何真实模型任务重叠 | G2：模型/质量/资源可行性 |
-| 5 | P01→P02→P03；S01→S02→S03→S04→S05 | P01 与 S01 可并行；S02/R04/S04 必须串行；同一 app_home 只一操作者 | 事务与安装故障矩阵 |
+| 5 | P01→P02→P03；S01→S04 | 停服切换不经过请求路径；同一 app_home 只允许一个操作者 | 事务与安装故障矩阵 |
 | 6 | U01→U02→C01→C02→V01 | CLI/契约/正式文档集成依次；不得边改边跑最终基准 | G3：发布和用户路径验收 |
 
-总计 33 张原子任务卡。G2 未通过时仍可继续安装器/事务的 fake 开发；真实 light 推广受阻。本机已验证的共享 ASR/稳定性改动可独立交付，
+S02、S03、S05 因 2026-09-05 明确采用停服切换而退役，不计入剩余实现。G2 未通过时仍可继续安装器/事务的 fake 开发；真实 light 推广受阻。本机已验证的共享 ASR/稳定性改动可独立交付，
 但完整三档发布保持未完成；不得把配置存在当作 light 可用。
 
 委派模板：
@@ -710,7 +710,7 @@ def test_each_inference_window_is_bounded():
 
 **依赖：** A03/M04。
 **所有权 / Files：** 修改 src/speechrail/http/routes/audio.py、domain/ports.py、config/__init__.py；补 tests/test_transcription_api.py、test_openai_multipart.py。
-**接口 / Inputs & Outputs：** 新增 domain 的 StreamingBatchTranscriber.transcribe_stream(request_id,audio:AsyncIterator[bytes],language,prompt,include_timestamps)->TranscriptResult；ManagedRuntime后续实现此port。保留 BatchTranscriber 供现有fake调用方。
+**接口 / Inputs & Outputs：** 新增 domain 的 StreamingBatchTranscriber.transcribe_stream(request_id,audio:AsyncIterator[bytes],language,prompt,include_timestamps)->TranscriptResult；现有应用服务直接实现此port。保留 BatchTranscriber 供现有fake调用方。
 
 - [x] **1. 写失败测试。** 在 `tests/test_transcription_api.py` 落地以下行为，并补充本卡额外边界：
 
@@ -920,128 +920,68 @@ def test_uncommitted_candidate_never_becomes_active(tmp_path):
 - [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_store.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
 - [x] **3. 最小实现。** selection/journal/previous均0600，父目录0700；write temp/fsync/replace并fsync父目录。单写锁防多个setup同时申请；prepared摘要必须包含完整ASR/TTS配对与runtime_lock_id。commit之前不覆盖active；未完成启动恢复last-known-good。新安装无previous失败则明确unconfigured，不构造假quality默认。
-- [x] **4. 边界验证。** 本卡定义initialize/recover用于首次有效登记/恢复；生产records用固定schema校验，catalog存在性由上游准备与下游activation双校验。每个journal阶段注入崩溃，symlink目标拒绝，schema未知fail-closed，损坏candidate不损坏previous。
+- [x] **4. 边界验证。** 本卡定义initialize/recover用于首次有效登记/恢复；生产records用固定schema校验，catalog存在性由上游准备与下游停服切换双校验。每个journal阶段注入崩溃，symlink目标拒绝，schema未知fail-closed，损坏candidate不损坏previous。
 - [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `feat: persist model selection as a recoverable transaction`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `3a2d83a`，14 项测试通过）
 
 
-### S02：引入保持端口稳定的运行时委派对象
+### S02：退役——服务内运行时委派与 generation 租约
 
-**依赖：** R04/T04/M04。
-**所有权 / Files：** 新建 src/speechrail/application/managed_runtime.py、tests/test_managed_runtime.py；修改 application/services.py 组合注入。
-**接口 / Inputs & Outputs：** ManagedRuntime实现现有ASR/TTS端口及A04流式Batch端口；持有RuntimeBundle(asr,tts,realtime_factory,artifact_identity,voice_catalog,generation)。
+2026-09-05 根据“单机应用，允许停服切换”的明确边界退役。原实现 commit `2af710b`
+已由 `3de2dc5` 撤销。该方案会在每个 ASR/TTS/Realtime 请求增加租约和 generation
+委派，且只为热切换服务；停服切换不需要这层间接性。现有 `AppServices`、唯一物理
+ASR owner、模式互斥和有界推理路径保持不变。
 
-- [x] **1. 写失败测试。** 在 `tests/test_managed_runtime.py` 落地以下行为，并补充本卡额外边界：
+### S03：退役——服务内 drain 状态机
 
-```python
-from speechrail.application.managed_runtime import ActiveWork
+2026-09-05 同步退役。原实现 commit `1df06c9` 已由 `0b9023b` 撤销。单机切档通过
+停止 `com.speechrail` 让活动请求自然结束或由服务停止语义终结，不再维护 drain token、
+TTL、活动 generation 或 IdleEvictor 暂停协议。
 
-def test_old_work_is_visible_until_its_lease_ends():
-    work = ActiveWork()
-    token = work.acquire(generation=1)
-    assert work.count == 1
-    work.release(token)
-    assert work.count == 0
-```
+### S04：停服切换、公共 API 冒烟与自动回退
 
-- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_managed_runtime.py -q --no-cov`；
-  确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [x] **3. 最小实现。** AppServices保持frozen，routes持有稳定的ManagedRuntime门面而非旧worker引用。每次工作获取当前bundle租约直到结果/生成器finally/后端session终结，替换只在所有活动工作归零。逻辑capabilities/models/voices读取同一个活动generation快照；Settings里的网络和用户策略不被换模修改。test overrides仍绕开真实bundle。
-- [x] **4. 边界验证。** ActiveWork接口在本卡定义；核心集成断言：流式响应未消费完不可替换、空闲WS不占租约、draining时新request拒绝、同generation模型列表一致、旧port调用签名不变。
-- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
-  核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: delegate inference through one managed runtime`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `2af710b`；129 项相关 fake/组合回归通过。稳定门面、generation 租约、流式 finally 释放与 production/fake 组合边界已覆盖，未做真实模型切换）
+**依赖：** S01/P03。
+**所有权 / Files：** S04a 修改 service/profile_store.py、cli.py 与对应测试，提供一次性候选
+启动许可；S04b 新建 service/profile_switch.py、tests/test_profile_switch.py；S04c 只在需要
+复用明确服务控制原语时最小修改 service/launchd.py。
+**接口 / Inputs & Outputs：** `apply_prepared_profile(prepared_id, app_home, service, smoke)`
+接收已登记 ID；`ServiceController` 只提供可等待的 stop/start，`PublicSmokeProbe`
+通过 loopback 公共 ASR/TTS API 验证新进程；返回 committed/rolled_back/not_ready 与稳定错误。
 
+- [ ] **1. 写失败测试。** 用 fake service/store/smoke 记录顺序，断言候选必须先完整解析，
+  再执行 stop→selection switch→start→health/readiness→ASR smoke→TTS smoke→commit；
+  候选解析失败时服务不停止。
+- [ ] **2. 证明测试先失败。** 执行
+  `uv run --extra dev pytest tests/test_profile_switch.py -q --no-cov`，确认失败来自接口未实现。
+- [ ] **3. 最小实现。** 切换前调用 `resolve_prepared_models` 完成 catalog/runtime lock、
+  路径、文件集合、大小和 SHA-256 校验；获取 S01 单写锁并记录 previous/candidate；
+  确认旧服务停止后才暂存 candidate selection，并写入绑定 operation ID 的 0600 一次性启动许可。
+  `run_server` 原子消费许可后仅本次启动使用 candidate；许可已消费但事务未提交时，后续自动
+  重启恢复 previous。候选公共 smoke 全通过才 commit。
+  三档共用同一 vendor lock，普通切档不重建 runtime 或切换 vendor 指针。
+- [ ] **4. 自动回退。** stop/switch/start/smoke 任一步失败后只执行一次恢复：
+  停止候选、恢复 previous selection、启动 previous、再次公共 smoke；恢复成功返回
+  rolled_back，失败写 NOT_READY 并保留 candidate、previous、journal 和诊断，不循环 restart。
+- [ ] **5. 边界验证。** 覆盖同档幂等、服务原本已停、stop/start 超时、CLI
+  `KeyboardInterrupt`、ASR 成功而 TTS 失败、空文本/空音频、进程 PID 未更换、selection
+  写入失败、许可重复消费、候选首次启动崩溃后回到 previous、首次安装无 previous、
+  回退启动或 smoke 失败。日志不得含绝对模型路径、音频、
+  文本、Authorization 或任意环境变量。
+- [ ] **6. 绿测试与单主题交付。** 跑针对性 pytest、ruff、mypy、diff check；建议提交信息
+  `feat: switch complete model pairs with stopped-service rollback`。fake 只证明事务顺序，
+  真实服务/模型/质量/资源仍由 V01 和 G2/G3 验收。
 
-### S03：实现可取消的安全 drain
+### S05：退役——私有控制 socket
 
-**依赖：** S01/S02。
-**所有权 / Files：** 扩充 application/managed_runtime.py；新建 tests/test_profile_drain.py；必要时只修改 runtime/worker_lease.py 的drain保护调用。
-**接口 / Inputs & Outputs：** ManagedRuntime.drain(deadline_seconds)->drain_token / resume(token)；DrainState记录operator token过期时间；只允许一位切换者。
-
-- [x] **1. 写失败测试。** 在 `tests/test_profile_drain.py` 落地以下行为，并补充本卡额外边界：
-
-```python
-from speechrail.application.managed_runtime import DrainState
-
-def test_expired_unclaimed_drain_restores_admission():
-    state = DrainState()
-    state.begin(now=10.0, ttl_seconds=5.0)
-    assert not state.accepting
-    state.expire(now=16.0)
-    assert state.accepting
-```
-
-- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_drain.py -q --no-cov`；
-  确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** drain只停止新推理准入，不截断活动transcription/TTS或重启worker。等待backend活动归零；对长会话展示等待，可取消；初始deadline120秒超时恢复旧准入，所有档一致。token失联过期恢复；已进入activate不可任意resume。IdleEvictor挂起且释放有finally。
-- [ ] **4. 边界验证。** DrainState.begin/expire/accepting本卡实现，生产clock注入monotonic；活动会话完成竞争、二次drain、取消两次、读取HTTP音频中取消切换、deadline后当前工作仍成功。
-- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
-  核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: drain active speech work before switching models`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（核心已交付：commit `1df06c9`；46 项相关测试覆盖单 owner、有限 TTL、等待归零、取消/deadline 恢复准入和活动工作不被截断。第 3/4 项中的 IdleEvictor 挂起及 HTTP 音频读取期间取消仍待接入验证，真实模型进程行为留给 S04 与运行态验证）
-
-
-### S04：串行换模、真实冒烟与自动回退
-
-**依赖：** S03/P03。
-**所有权 / Files：** 扩充 application/managed_runtime.py、service/profile_store.py；新建 tests/test_profile_activation.py。
-**接口 / Inputs & Outputs：** activate(prepared_id,drain_token)由服务持有后台任务；注入BundleLoader.load/close、SmokeProbe.run用于fake故障验证；state/status返回operation_id/stage/generation。
-
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_activation.py` 落地以下行为，并补充本卡额外边界：
-
-```python
-from speechrail.service.profile_store import allowed_transition
-import pytest
-
-def test_activation_cannot_commit_before_smoke():
-    assert allowed_transition("SMOKING", "COMMITTED")
-    assert not allowed_transition("ACTIVATING", "COMMITTED")
-```
-
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_activation.py -q --no-cov`；
-  确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 校验prepared与runtime lock后关闭旧两个模型进程并wait，再串行启动新ASR和TTS。复用共同vendor环境；禁止新旧两套模型同时load。先身份检查和固定synthetic短ASR+TTS通过才commit并开放准入。任意一步失败关闭全部candidate，串行恢复previous并重新冒烟。回退失败只报NOT_READY，不循环restart。私有activation自测走同一服务用例/协议校验，外部/public smoke仍为B02/V01发布必需。
-- [ ] **4. 边界验证。** 函数allowed_transition在本卡定义；fake BundleLoader日志必须证明close_old→load_asr→load_tts→smoke→commit；ASR成功TTS失败、空音频、identity错、cli退出、进程崩溃后store恢复、同preset不重载。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
-  核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: activate complete model pairs with automatic rollback`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
-
-
-### S05：提供同用户私有控制通道
-
-**依赖：** S04。
-**所有权 / Files：** 新建 src/speechrail/service/profile_control.py、tests/test_profile_control.py；修改 application/lifecycle.py 生命周期挂接。
-**接口 / Inputs & Outputs：** Unix socket JSON一请求一响应，§3.3白名单commands；control_request(app_home,payload)->dict；只返回公开模型ID和计量信息。
-
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_control.py` 落地以下行为，并补充本卡额外边界：
-
-```python
-from speechrail.service.profile_control import validate_control_request
-import pytest
-
-def test_control_channel_cannot_execute_commands():
-    with pytest.raises(ValueError):
-        validate_control_request({"command": "exec", "argv": ["anything"]})
-```
-
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_control.py -q --no-cov`；
-  确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 同用户目录0700/socket0600，校验peer uid（macOS可用getpeereid），有界64KiB、读写超时5秒；activation长任务只返回operation_id。prepared_id不解析外部路径。lifecycle唯一创建/关闭socket，未知占用不unlink，stale socket仅确认无所属进程且本服务创建才可恢复。控制不暴露在HTTP/LAN，不执行任意命令。
-- [ ] **4. 边界验证。** 超过长度、wrong uid、恶意prepared路径、重复operation_id、多个设置客户端、drain token过期、socket存在但不同app_home；主服务不可因控制错误退出。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
-  核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: expose bounded local profile control`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
-
+2026-09-05 根据停服切换边界删除此任务。setup/profile CLI 本身就是同用户本机管理入口，
+直接调用 S04 协调器并用 app_home 文件锁串行化；不在服务生命周期中增加 Unix socket、
+peer UID 协议、长任务 operation API 或新的攻击面。
 
 ### U01：实现三档选择与一次应用向导
 
-**依赖：** S05/P03/B02目录验收状态。
+**依赖：** S04/P03/B02目录验收状态。
 **所有权 / Files：** 新建 src/speechrail/service/profile_commands.py、tests/test_profile_commands.py；修改 src/speechrail/cli.py、tests/test_cli.py。
 **接口 / Inputs & Outputs：** 新增 speechrail setup；speechrail profile list|status|apply <id>|rollback，统一--app-home；apply支持--yes供已显示影响后的自动化调用。serve/service旧命令原样。
 
@@ -1058,8 +998,8 @@ def test_balanced_to_light_only_changes_asr():
 
 - [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_commands.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 新装只推荐已通过对应硬件矩阵的组合；旧装显示当前selection不重选。TUI依次显示推荐/三档、缺失下载量、音色变化、回退磁盘需求，最后一次“下载并应用”覆盖准备与生效。先P01/P02准备再S03/S04，阶段进度可取消；activation阶段取消只停止UI等待，不杀服务。VoiceDesign→CustomVoice必须展示style/design能力减少和default/warm同声；balanced↔light不提示虚构TTS变化。
-- [ ] **4. 边界验证。** model_changes(old,new)->set[str]本卡定义；输入错误、Ctrl-C、noTTY需显式--yes且有machine-readable影响、已缓存不重下、同档幂等、offline缺模型说明、不中断当前请求；客户端baseURL/port/key/alias未变。
+- [ ] **3. 最小实现。** 新装只推荐已通过对应硬件矩阵的组合；旧装显示当前selection不重选。TUI依次显示推荐/三档、缺失下载量、音色变化、回退磁盘需求，最后一次“下载并应用”覆盖准备与生效。先P01/P02准备，再由S04停服切换；准备阶段可取消，停服后CLI中断必须完成回退。VoiceDesign→CustomVoice必须展示style/design能力减少和default/warm同声；balanced↔light不提示虚构TTS变化。
+- [ ] **4. 边界验证。** model_changes(old,new)->set[str]本卡定义；输入错误、Ctrl-C、noTTY需显式--yes且有machine-readable影响、已缓存不重下、同档幂等、offline缺模型说明、停服窗口和预计耗时清楚展示；客户端baseURL/port/key/alias未变。
 - [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
@@ -1097,7 +1037,7 @@ def test_launcher_never_executes_unverified_remote_script():
 
 **依赖：** U02/T01/S04。
 **所有权 / Files：** 修改 contracts/openapi.yaml、contracts/realtime-openai.md、src/speechrail/http/routes/system.py；补 tests/test_tts_voices_api.py、tests/test_app_contract.py。
-**接口 / Inputs & Outputs：** 公共voice IDs和aliases保留；/v1/voices可增量返回capabilities/variant，既有必需字段不删；/v1/models实际resolves_to一致；动态值来自ManagedRuntime同generation。
+**接口 / Inputs & Outputs：** 公共voice IDs和aliases保留；/v1/voices可增量返回capabilities/variant，既有必需字段不删；/v1/models实际resolves_to一致；动态值来自进程启动时已验证的同一 selection。
 
 - [ ] **1. 写失败测试。** 在 `tests/test_tts_voices_api.py` 落地以下行为，并补充本卡额外边界：
 
@@ -1111,19 +1051,19 @@ def test_standard_voice_alias_remains_stable():
 
 - [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_voices_api.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 建立三档参数化目录测试：模型真实resolves_to、voice描述/available/capabilities必须来自ManagedRuntime同一generation。保留所有必需字段和alias。把模式冲突REST429 backend_busy与换模503 backend_not_ready语义先写入契约，接线由C02完成；禁止在本卡引入采样率迁移或LLM语义。
-- [ ] **4. 边界验证。** 增加实际ASGI fixture：三档voice列表/available、mode冲突、drain/readiness、无TTS设置、短音频和六输出格式、response终结一次、cancel/断线重连、鉴权无回归。若文件所有权冲突，卡内按system→audio→WS顺序独占。
+- [ ] **3. 最小实现。** 建立三档参数化目录测试：模型真实resolves_to、voice描述/available/capabilities必须来自同一次启动加载的完整 selection。保留所有必需字段和alias。模式冲突继续使用REST429 backend_busy；停服切档不新增HTTP换模状态。禁止在本卡引入采样率迁移或LLM语义。
+- [ ] **4. 边界验证。** 增加实际ASGI fixture：三档voice列表/available、mode冲突、无TTS设置、短音频和六输出格式、response终结一次、cancel/断线重连、鉴权无回归。若文件所有权冲突，卡内按system→audio→WS顺序独占。
 - [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `test: preserve audio contracts across all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
 
 
-### C02：接线忙碌与换模错误并跑客户端回归
+### C02：接线忙碌错误并跑客户端回归
 
-**依赖：** C01/S05。
+**依赖：** C01/S04。
 **所有权 / Files：** 修改 src/speechrail/http/routes/audio.py、src/speechrail/application/realtime_openai.py；补 tests/test_realtime_openai.py、test_openai_multipart.py、test_speech_api.py。
-**接口 / Inputs & Outputs：** 按C01契约将AsrModeBusy映射REST429/WS error backend_busy；draining/activation映射503 backend_not_ready。保留request ID和既有错误envelope。
+**接口 / Inputs & Outputs：** 按C01契约将AsrModeBusy映射REST429/WS error backend_busy；不增加服务内切档错误。保留request ID和既有错误envelope。
 
 - [ ] **1. 写失败测试。** 在 `tests/test_openai_multipart.py` 落地以下行为，并补充本卡额外边界：
 
@@ -1139,11 +1079,11 @@ def test_busy_error_keeps_request_identity():
 - [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_openai_multipart.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
 - [ ] **3. 最小实现。** 同一套fake三档参数化客户端测试先红后绿；REST/WS不捕获后忽略未知错误，不改sample_rate或事件语义。busy请求不创建第二worker，失败后原session保持合同规定的可用性。标准OpenAI SDK路径、multipart视频webm、六TTS格式、aliases、session/update/commit/cancel事件顺序全部回归；真实部分留V01。
-- [ ] **4. 边界验证。** 若现有错误函数由middleware注入header，则本种子改为ASGI实际请求验证而不改既有责任边界。覆盖上传期间换档、active stream冲突、unknown voice、无TTS配置、鉴权和断线重建，不能只测aliases纯函数。
+- [ ] **4. 边界验证。** 若现有错误函数由middleware注入header，则本种子改为ASGI实际请求验证而不改既有责任边界。覆盖active stream冲突、unknown voice、无TTS配置、鉴权和断线重建；切档停服窗口由S04测试，不伪造成ASGI内部状态。
 - [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: report profile transitions through stable audio errors`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+  `fix: preserve stable audio errors across model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
 
 
 ### V01：完成全量门禁、实机验收与交接
@@ -1242,10 +1182,10 @@ M1 Air8GB只能在真机通过；限制M5进程内存、VM、仅TTS单模型或8
 | 故障注入点 | 必须观察到的结果 |
 |---|---|
 | 下载断网/取消/hash错误/磁盘不足 | 当前服务与selection不变；可恢复准备；无半快照可加载 |
-| drain遇到长ASR/TTS | 当前任务继续完成；向导可取消；超时恢复准入 |
-| 新ASR加载失败 | 新TTS不启动；恢复旧组合 |
-| 新TTS加载失败或smoke空音频 | 新ASR关闭后恢复旧ASR/TTS；active不部分更新 |
-| activation中CLI退出 | 服务继续完成或回退，不永久drain |
+| 停服时仍有长ASR/TTS | `launchd` 停止语义有界；切换器等待旧PID退出后才写selection |
+| 新ASR加载失败 | 停止候选进程；恢复旧selection并启动旧组合 |
+| 新TTS加载失败或smoke空音频 | 停止候选进程；active不提交，恢复旧组合 |
+| 停服切换中CLI退出 | `finally` 完成当前提交或一次回退，不遗留candidate冒充active |
 | 服务在各journal阶段崩溃 | 下次启动按last-known-good恢复；未完成candidate不当active |
 | rollback也失败 | readyz=503、明确错误、保留文件，不自动无限restart |
 | 共享ASR EOF/timeout/旧帧 | 当前请求有一次terminal；新generation无串词/串帧 |
@@ -1327,7 +1267,7 @@ G2与G3结果可以复用同一冻结HEAD/lock/语料下的质量数据；中间
 
 - 代码回退：恢复上一已验证release与其配套目录格式，单主题commit可独立revert；
   不reset工作树、不删除用户模型/.env/日志。
-- 权重回退：只选last-known-good完整ASR/TTS组合，同一drain/identity/smoke流程；
+- 权重回退：只选last-known-good完整ASR/TTS组合，使用同一停服/identity/smoke流程；
   不把手动编辑一个模型路径当完成回退。
 - runtime升级回退：保留vendor旧lock目录与主release；旧.env路径继续可用。
 - 首次安装失败：保留可恢复制品缓存和明确unconfigured状态；不能enable假ready服务。
@@ -1345,12 +1285,12 @@ G2与G3结果可以复用同一冻结HEAD/lock/语料下的质量数据；中间
 | 一个共享ASR、Batch/Streaming互斥 | R01–R05 |
 | 两类TTS权重与本机VoiceDesign保留 | T01–T04、B02/V01质量门 |
 | 内存、长音频、取消与稳定性 | A01–A04、R05/R06、T03/T04、B01/B02 |
-| 无手工环境、低成本一次切换 | P01–P03、S01–S05、U01/U02 |
+| 无手工环境、低成本一次切换 | P01–P03、S01/S04、U01/U02 |
 | 保留客户端与OpenAI兼容边界 | C01/C02、V01 |
 | M1 Air8GB强制实机验收 | B02、V01、G2/G3 |
 | 质量优先本机独立回归 | B02/V01，不受light硬件缺失取消 |
 | luna_worker原子执行、共享文件互斥 | §4/§6，每卡明确所有权 |
-| 失败回退、旧配置与数据保留 | M04、P03、S01–S05、V01 |
+| 失败回退、旧配置与数据保留 | M04、P03、S01/S04、V01 |
 
 - [ ] 执行主 Agent 重新核对当前HEAD/dirty状态与图coverage；保存本次计划基线。
 - [ ] 从M01/B01启动，只派发无共享写入的原子卡；不要一次把整阶段交给worker。
