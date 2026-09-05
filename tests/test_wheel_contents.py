@@ -56,7 +56,7 @@ def assert_wheel_contents(wheel_path: Path) -> None:
     assert "speechrail/backends/qwen3_worker.py" in names
     assert "speechrail/backends/qwen3_tts_worker.py" in names
     assert "speechrail/service/preflight.py" in names
-    assert "speechrail/service/executable.py" in names
+    assert "speechrail/runtime/executable.py" in names
     assert "speechrail/config/__init__.py" in names
     assert any(name.endswith(".dist-info/METADATA") for name in names)
     assert not any(name.startswith("tests/") for name in names)
