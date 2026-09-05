@@ -203,6 +203,25 @@ def test_transcode_and_validate_clone_audio_duration_bounds() -> None:
         assert abs(dur - 5.0) < 0.1
 
 
+def test_transcode_accepts_pipe_wav_with_unknown_riff_sizes() -> None:
+    pipe_wav = bytearray(_generate_test_wav(duration_seconds=5.0))
+    pipe_wav[4:8] = b"\xff\xff\xff\xff"
+    data_offset = pipe_wav.find(b"data")
+    assert data_offset > 0
+    pipe_wav[data_offset + 4 : data_offset + 8] = b"\xff\xff\xff\xff"
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout=bytes(pipe_wav),
+            stderr=b"",
+        )
+        wav_out, duration = transcode_and_validate_clone_audio(b"fake_raw_audio")
+
+    assert len(wav_out) == len(pipe_wav)
+    assert duration == pytest.approx(5.0, abs=0.1)
+
+
 def test_transcode_and_validate_clone_audio_errors() -> None:
     # Empty audio
     with pytest.raises(ValueError, match="empty"):
@@ -636,4 +655,3 @@ def test_audio_speech_with_cloned_voice_across_tiers(
     assert resp_b.status_code == 400
     err_b = resp_b.json()["error"]
     assert err_b["code"] == "voice_not_available"
-

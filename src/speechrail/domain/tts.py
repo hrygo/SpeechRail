@@ -281,6 +281,33 @@ def transcode_and_validate_clone_audio(
         with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
             frames = wf.getnframes()
             rate = wf.getframerate()
+            frame_width = wf.getnchannels() * wf.getsampwidth()
+            declared_pcm_bytes = frames * frame_width
+            if declared_pcm_bytes > len(wav_bytes):
+                # ffmpeg cannot seek on pipe output and may leave RIFF/data sizes
+                # at 0xffffffff. Recover the actual PCM payload length from the
+                # bounded in-memory WAV instead of treating that sentinel as data.
+                offset = 12
+                data_bytes: int | None = None
+                while offset + 8 <= len(wav_bytes):
+                    chunk_id = wav_bytes[offset : offset + 4]
+                    chunk_size = int.from_bytes(
+                        wav_bytes[offset + 4 : offset + 8], "little"
+                    )
+                    payload_start = offset + 8
+                    if chunk_id == b"data":
+                        payload_end = payload_start + chunk_size
+                        if chunk_size == 0xFFFFFFFF or payload_end > len(wav_bytes):
+                            payload_end = len(wav_bytes)
+                        data_bytes = payload_end - payload_start
+                        break
+                    next_offset = payload_start + chunk_size + (chunk_size & 1)
+                    if next_offset <= offset:
+                        break
+                    offset = next_offset
+                if data_bytes is None or frame_width <= 0:
+                    raise ValueError("transcoded audio has no valid PCM data chunk")
+                frames = data_bytes // frame_width
             duration = frames / float(rate) if rate > 0 else 0.0
     except Exception as exc:
         raise ValueError("transcoded audio is not a valid WAV") from exc

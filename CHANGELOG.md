@@ -18,6 +18,10 @@
 - 音色契约新增 `mode`、`ref_text`、`duration_seconds` 与 `supports_clone` 能力声明；`balanced`/`light` 按当前 CustomVoice 权重明确拒绝不支持的克隆请求。
 - 自定义音色注册表支持跨进程元数据热重载，并对上传大小、时长、ID、路径、目录和文件权限执行有界校验。
 
+### Fixed
+
+- 修复 ffmpeg 管道输出的 WAV 使用未知 RIFF/data 长度时被误判为超长音频，真实 2–45 秒参考音频现在按实际 PCM payload 校验。
+
 ## [1.7.1] - 2026-09-05
 
 ### Fixed
