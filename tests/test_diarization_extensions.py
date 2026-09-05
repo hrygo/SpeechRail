@@ -320,7 +320,10 @@ def _open(socket) -> dict[str, Any]:
 
 def _update_session(socket, session: dict[str, Any]) -> dict[str, Any]:
     socket.send_json({"type": "session.update", "session": session})
-    return socket.receive_json()
+    while True:
+        event = socket.receive_json()
+        if event["type"] in {"session.updated", "error"}:
+            return event
 
 
 def _append_and_commit(socket, samples: int) -> list[dict[str, Any]]:
@@ -455,8 +458,14 @@ def test_negotiated_session_sends_unique_items_without_legacy_segments() -> None
         assert not any(event["type"].startswith("speechrail.") for event in first)
 
         second = _append_and_commit(socket, 4000)
-        committed2 = second[0]
-        completed2 = second[-1]
+        committed2 = next(
+            event for event in second if event["type"] == "input_audio_buffer.committed"
+        )
+        completed2 = next(
+            event
+            for event in second
+            if event["type"] == "conversation.item.input_audio_transcription.completed"
+        )
         assert committed2["item_id"] != committed1["item_id"]
         assert completed2["audio_start_sample"] == 8000
         assert completed2["audio_end_sample"] == 12000
@@ -671,7 +680,6 @@ class _LeaseFakeDiarizationEngine(_FakeDiarizationEngine):
         self.stream_mode = stream_mode
 
     def create_stream(self, *, config: object):
-        del config
         if self.weight_loads == 0:
             self.weight_loads = 1  # weights load exactly once per engine
         if self.stream_mode == "hanging":
