@@ -1,8 +1,8 @@
 # SpeechRail 🎙️
 
 <p align="center">
-  <strong>专为 Apple Silicon Mac 打造的生产级本地 ASR / TTS 语音服务底座</strong><br>
-  <em>双进程物理隔离 · 空闲自动卸载 · 纯离线零延迟 · 100% 数据私密 · 1:1 兼容 OpenAI 协议</em>
+  <strong>Production-Ready Local ASR / TTS Speech Infrastructure for Apple Silicon Mac</strong><br>
+  <em>Dual-Process Physical Isolation · Automatic Idle Eviction · Fully Offline Zero-Latency · 100% Private · 1:1 OpenAI Compatible</em>
 </p>
 
 <p align="center">
@@ -14,148 +14,152 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" /></a>
 </p>
 
----
-
-## 💡 为什么需要 SpeechRail？
-
-当你为个人桌面 Agent、本地会议转录助手、播客剪辑或各种 AI 工具添加语音能力时，通常面临两难：
-- **调用商业云端 API（如 OpenAI Whisper / TTS）**：每分钟音频都在上传云端，面临隐私泄露隐患；公网抖动带来数百毫秒额外延迟；高频调用产生持续且高昂的账单。
-- **本地应用重复加载模型**：不同桌面应用各自加载模型导致内存爆炸，显存泄漏与异常容易直接拖垮宿主进程。
-
-**SpeechRail 的解法**：作为一个**在 macOS 后台静默常驻的高性能本地语音 Daemon**，单端口监听，本机及局域网所有客户端与 Agent 即插即用：
-
-- 🔒 **数据零离机与强隐私**：默认绑定本地环回（`127.0.0.1`），亦支持内网受控暴露。音频纯内存处理不落盘，全链路本地私有推理，绝无任何数据外呼与云端泄露。
-- 🔌 **OpenAI 协议 1:1 无缝替换**：完整实现 `whisper-1`（文件转录）、`tts-1`（语音合成）与 `/v1/realtime`（低延迟双工流式 ASR/TTS），客户端改一行 `base_url` 即可接入。
-- 🛡️ **双物理进程隔离架构**：HTTP 网关与重型 MLX 推理引擎运行在不同物理进程中，通过高效 IPC 管道通信。Worker 崩溃绝不拖垮网关。
-- 🍃 **智能两阶段空闲卸载 (Idle Eviction)**：推理完毕后，默认 **5 分钟无请求自动卸载模型权重并释放显存**，常驻待机内存仅约 **50 MB**，绝不霸占 Mac 宝贵内存。
-- 👥 **原生多讲话人分离 (Speaker Diarization)**：集成 NeMo Sortformer 与 CAM++ 声纹模型，自动区分并标注不同发言人（如 `speaker_0`, `speaker_1`），轻松驾驭多人会议与访谈。
-- 🎚️ **动态三档资源匹配**：针对 8GB 到 128GB 的 Apple Silicon 芯片深度调优（Light / Balanced / Quality），一键无感热切换。
-- 🎙️ **9 种跨档高质量内置音色**：原生集成 Qwen3-TTS 语音能力，涵盖中文、英语、粤语、日语、韩语等丰富声学角色。
+<p align="center">
+  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
+</p>
 
 ---
 
-## ⚖️ 核心方案对比 (Why SpeechRail?)
+## 💡 Why SpeechRail?
 
-| 核心特性 | **SpeechRail 🎙️ (本地常驻基础设施)** | **商业公有云 API (如 OpenAI)** |
+When adding speech capabilities to personal desktop agents, local meeting transcription assistants, podcast editors, or various AI tools, developers often face a difficult trade-off:
+- **Calling Commercial Cloud APIs (e.g., OpenAI Whisper / TTS)**: Every minute of audio is uploaded to the cloud, posing privacy and compliance risks; public network jitter adds hundreds of milliseconds of latency; high-frequency requests incur continuous and steep API bills.
+- **Local Apps Loading Models Individually**: Each desktop app packaging its own model triggers memory explosion; VRAM leaks or runtime exceptions can easily crash the host application.
+
+**The SpeechRail Solution**: A **high-performance local speech daemon running silently in the macOS background**, listening on a single port, providing plug-and-play speech capabilities for all local and LAN clients/agents:
+
+- 🔒 **Zero Data Egress & Strict Privacy**: Binds to loopback (`127.0.0.1`) by default, with controlled LAN exposure support. Audio is processed purely in-memory without disk caching. Fully local inference with zero telemetry or cloud leakage.
+- 🔌 **1:1 Seamless OpenAI Compatibility**: Full drop-in replacement for `whisper-1` (transcription), `tts-1` (speech synthesis), and `/v1/realtime` (low-latency full-duplex streaming ASR/TTS). Switch your client by updating just one `base_url`.
+- 🛡️ **Dual-Process Physical Isolation**: The HTTP gateway and heavy MLX inference engine run in separate OS processes communicating via an efficient framed IPC pipe. A worker crash will never bring down the gateway.
+- 🍃 **Two-Stage Automatic Idle Eviction**: When idle for **5 minutes (default)** without incoming requests, model weights and VRAM are automatically unloaded. Standby memory drops to just **~50 MB**, never hoarding your Mac's precious memory.
+- 👥 **Native Multi-Speaker Diarization**: Integrated NeMo Sortformer and CAM++ speaker embedding models automatically segment and label different speakers (e.g., `speaker_0`, `speaker_1`), easily handling multi-party meetings and interviews. Supports both batch `diarized_json` and real-time streaming `speechrail.diarization.v1` protocol extensions with immutable transcript units and asynchronous attribution updates.
+- 🎚️ **Dynamic Three-Tier Profiles**: Deeply tuned for Apple Silicon Macs from 8GB to 128GB (Light / Balanced / Quality) with seamless zero-downtime hot switching.
+- 🎙️ **9 High-Quality Built-In Voices Across Profiles**: Natively integrates Qwen3-TTS speech synthesis, featuring rich acoustic personas for Chinese, English, Cantonese, Japanese, Korean, and more.
+
+---
+
+## ⚖️ Core Comparison (Why SpeechRail?)
+
+| Core Feature | **SpeechRail 🎙️ (Local Resident Infrastructure)** | **Commercial Cloud APIs (e.g., OpenAI)** |
 |---|---|---|
-| **数据隐私** | 🔒 **100% 本机私有推理，数据零离机**（默认本地免密直连，支持内网鉴权暴露，绝不上云） | ❌ 音频必须上传云端，面临合规与泄露风险 |
-| **长期调用成本** | 💰 **$0（一次安装，全机及内网无限量免费调用）** | 💸 按音频时长/Token 持续计费，高频使用昂贵 |
-| **网络环境依赖** | ⚡ **纯离线本地计算，0 公网延迟，断网可用** | ⚠️ 依赖稳定外网与跨境链路，受网络抖动影响 |
-| **全机复用与内存管理**| 🍃 **单常驻 Daemon 供全机共享，空闲自动卸载权重 (~50MB)** | 统一云端网关，无本地模型负载 |
-| **系统健壮性** | 🛡️ **网关与推理 Worker 物理进程隔离，异常自动拉起** | 依赖外部云服务商 SLA 与网络状态 |
-| **OpenAI 协议兼容** | ✅ **原生 1:1 兼容 (`whisper-1` / `tts-1` / `/v1/realtime`)** | ✅ 官方标准协议规范 |
+| **Data Privacy** | 🔒 **100% local private inference, zero data egress** (Default keyless loopback, optional LAN auth, never touches the cloud) | ❌ Audio must be uploaded to the cloud, risking compliance and privacy leaks |
+| **Long-Term Cost** | 💰 **$0 (Install once, unlimited free requests across local apps and LAN)** | 💸 Pay-per-minute / pay-per-token pricing; expensive for frequent use |
+| **Network Dependency** | ⚡ **Purely offline local computation, 0 public network latency, works offline** | ⚠️ Relies on stable Internet and cross-border connectivity; vulnerable to jitter |
+| **System-Wide Reuse & Memory**| 🍃 **Single shared daemon for all apps, automatic idle weight eviction (~50MB idle)** | Unified cloud gateway, no local model footprint |
+| **System Robustness** | 🛡️ **Gateway & inference worker physically isolated; automatic worker recovery** | Bound by external cloud provider SLA and connectivity |
+| **OpenAI Compatibility** | ✅ **Native 1:1 compatibility (`whisper-1` / `tts-1` / `/v1/realtime`)** | ✅ Official standard specification |
 
 ---
 
-## ⚡ 5 分钟极速上手 (Quick Start)
+## ⚡ Quick Start (5 Minutes)
 
-### 硬件与系统要求
+### Hardware and System Requirements
 
-- **硬件架构**：配备 **Apple Silicon M 系列芯片** 的 Mac（暂不支持 Intel x86_64 Mac）。
-- **操作系统**：macOS 14.0 (Sonoma) 及以上。
-- **Python 环境**：锁定 **Python 3.12**（部署脚本会自动拉取隔离的官方运行时并自愈切换，无需手动安装配置）。
-- **全新 Mac 零配置指南**：针对全新/空白 MacBook 的自动化安装 SOP 详见 [`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md)。
+- **Hardware Architecture**: Mac with **Apple Silicon M-Series chip** (Intel x86_64 Macs are not supported).
+- **Operating System**: macOS 14.0 (Sonoma) or later.
+- **Python Runtime**: **Python 3.12** required (deployment scripts automatically provision an isolated official runtime and self-heal; no manual setup needed).
+- **Fresh Mac Zero-Setup Guide**: For a fully automated setup SOP on fresh/blank MacBooks, see [`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md).
 
 ---
 
-### 方式 1：推荐一键受管安装 (Managed Setup)
+### Method 1: Recommended Managed Setup
 
-使用全自动部署引擎，自动检测本机物理内存，从 ModelScope 镜像拉取校验完备的量化模型，在独立隔离沙箱构建 MLX Worker 并配置开机自启常驻服务：
+Use the automated deployment engine, which detects physical RAM, fetches verified quantized models from the ModelScope mirror, builds the MLX worker in an isolated sandbox, and registers a startup `LaunchAgent` service:
 
 ```bash
-# 1. 克隆代码仓库
+# 1. Clone the repository
 git clone https://github.com/hrygo/SpeechRail.git
 cd SpeechRail
 
-# 2. 一键引导安装 (适用于全新/空白 Mac，自动搞定环境与依赖)：
+# 2. One-click bootstrap installer (ideal for fresh/blank Macs, sets up environment & dependencies):
 ./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh
 
-# （亦可直接使用任意 python3 启动安装引擎，内置自愈机制会自动准备 Python 3.12 并平滑重执行）：
+# (Or run directly with any python3; the self-healing engine will fetch Python 3.12 and seamlessly re-execute):
 # python3 .agents/skills/speechrail-zero-setup/scripts/zero_setup.py
 ```
 
-安装完成后：
-1. 服务将作为 macOS `LaunchAgent` 在后台默默常驻（监听端口 `8201`）。
-2. 在 App Home 自动生成了可双击打开的 `SpeechRail 设置.command`，方便随时图形化切换档位。
+After installation:
+1. The service runs silently in the background as a macOS `LaunchAgent` (listening on port `8201`).
+2. A double-clickable `SpeechRail 设置.command` script is generated in App Home for easy graphical profile switching anytime.
 
 ---
 
-### 方式 2：显式自定义环境运行 (Explicit Env)
+### Method 2: Explicit Custom Environment (Explicit Env)
 
-若您是高阶开发者，需要接入本地已有的自定义模型权重或自建虚拟环境：
+For advanced developers wishing to use existing local model weights or custom virtual environments:
 
 ```bash
-# 1. 配置私有环境变量
+# 1. Configure private environment variables
 cp configs/speechrail.example.env .env
 chmod 600 .env
 
-# 2. 在 .env 中填入外部模型的绝对路径与独立 Worker 的 Python 解释器
+# 2. In .env, set the absolute paths to external models and the worker Python interpreter
 # SPEECHRAIL_QWEN3_MODEL_DIR=/Users/yourname/models/Qwen3-ASR-1.7B
 # SPEECHRAIL_QWEN3_PYTHON=/Users/yourname/venvs/worker/bin/python
 
-# 3. 启动前台服务
+# 3. Start the foreground service
 uv run speechrail serve
 ```
 
-在另一个终端验证就绪探针（返回 HTTP 200 即为完全就绪）：
+In another terminal, verify the readiness probe (returns HTTP 200 when fully ready):
 ```bash
 curl -i http://127.0.0.1:8201/readyz
 ```
 
 ---
 
-## 🔐 认证与网络安全策略 (Security)
+## 🔐 Authentication & Network Security Policy
 
-SpeechRail 遵循**本地零摩擦、对外硬防护**的安全设计：
+SpeechRail follows a **zero-friction locally, hardened externally** security design:
 
-- **本地回环（默认）**：绑定 `127.0.0.1`，无需配置密钥。客户端免密直连，OpenAI SDK 传入任意占位 key（如 `api_key="local"`）即可。
-- **局域网 / 远程暴露**：绑定 `0.0.0.0` 或指定网卡 IP 时，**必须显式配置 `SPEECHRAIL_API_KEY`**（未配置时启动直接报错拦截）。所有业务请求必须在 Header 中携带 `Authorization: Bearer <key>`，禁止在 URL Query 中传 key 以防止日志泄露。
+- **Local Loopback (Default)**: Bound to `127.0.0.1`, requiring no API key. Local clients connect directly; pass any placeholder key in the OpenAI SDK (e.g., `api_key="local"`).
+- **LAN / Remote Exposure**: When bound to `0.0.0.0` or a specific network interface IP, **`SPEECHRAIL_API_KEY` must be explicitly configured** (service fails to start otherwise). All API requests must include `Authorization: Bearer <key>` in headers. Passing keys via URL query parameters is forbidden to prevent logging leaks.
 
-*注：`/health`、`/readyz`、`/v1/models`、`/v1/voices` 为系统健康与发现探针端点，始终免鉴权开放。*
+*Note: `/health`, `/readyz`, `/v1/models`, and `/v1/voices` are system health and discovery probe endpoints, and remain open without authentication.*
 
 ---
 
-## 💻 客户端全生态即插即用
+## 💻 Client Ecosystem Integration
 
-任何支持自定义 OpenAI 接口地址（`OPENAI_BASE_URL`）的应用，都可以将 SpeechRail 作为底层语音引擎。
+Any application supporting a custom OpenAI base URL (`OPENAI_BASE_URL`) can use SpeechRail as its underlying speech engine.
 
 ### 1. Python (OpenAI SDK)
 
 ```python
 from openai import OpenAI
 
-# 指向本地 SpeechRail 端口，免密模式传入任意占位 key 即可
+# Point to local SpeechRail port; use any placeholder key in keyless local mode
 client = OpenAI(
     base_url="http://127.0.0.1:8201/v1",
     api_key="local",
 )
 
-# 🎙️ 语音转文字 (ASR)
+# 🎙️ Speech-to-Text (ASR)
 with open("speech.wav", "rb") as audio_file:
     transcript = client.audio.transcriptions.create(
-        model="whisper-1",  # 自动调度本地 Qwen3-ASR
+        model="whisper-1",  # Automatically routed to local Qwen3-ASR
         file=audio_file,
         response_format="verbose_json",
         timestamp_granularities=["segment", "word"],
     )
-    print("转录文本:", transcript.text)
+    print("Transcript:", transcript.text)
 
-# 👥 多人会议转录与发言人区分 (Speaker Diarization)
+# 👥 Multi-Speaker Meeting Transcription & Diarization
 with open("meeting.wav", "rb") as audio_file:
     meeting = client.audio.transcriptions.create(
-        model="gpt-4o-transcribe-diarize",  # 调度本地 NeMo Sortformer 讲话人分离引擎
+        model="gpt-4o-transcribe-diarize",  # Dispatches local NeMo Sortformer diarization engine
         file=audio_file,
-        response_format="diarized_json",  # 返回带 speaker 标签的分段转写
+        response_format="diarized_json",  # Returns segmented transcript with speaker labels
     )
     for seg in meeting.segments:
         print(f"[{seg.speaker}] {seg.text}")
 
-# 🔊 文字转语音 (TTS)
+# 🔊 Text-to-Speech (TTS)
 speech = client.audio.speech.create(
-    model="tts-1",  # 支持 tts-1 / tts-1-hd
-    voice="serena",  # 内置 serena (默认), vivian, uncle_fu 等 9 种优质音色
-    input="你好，我是运行在你的 Mac 本地的高性能语音助手 SpeechRail。",
-    response_format="wav",  # 支持 wav / mp3 / opus / aac / flac / pcm
+    model="tts-1",  # Supports tts-1 / tts-1-hd
+    voice="serena",  # Built-in serena (default), vivian, uncle_fu, etc. (9 voices)
+    input="Hello! I am SpeechRail, your high-performance local speech assistant running on Apple Silicon.",
+    response_format="wav",  # Supports wav / mp3 / opus / aac / flac / pcm
 )
 speech.stream_to_file("output.wav")
 ```
@@ -174,21 +178,21 @@ const openai = new OpenAI({
 });
 
 async function main() {
-  // 1. 语音合成 (TTS)
+  // 1. Text-to-Speech (TTS)
   const response = await openai.audio.speech.create({
     model: "tts-1",
     voice: "serena",
-    input: "SpeechRail 已完全就绪，正在本地极速为您提供语音服务。",
+    input: "SpeechRail is fully ready and delivering high-speed local speech synthesis.",
   });
   const buffer = Buffer.from(await response.arrayBuffer());
   await fs.promises.writeFile("speech.mp3", buffer);
 
-  // 2. 语音转写 (ASR)
+  // 2. Speech-to-Text (ASR)
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream("speech.mp3"),
     model: "whisper-1",
   });
-  console.log("转写结果:", transcription.text);
+  console.log("Transcript:", transcription.text);
 }
 
 main();
@@ -196,25 +200,25 @@ main();
 
 ---
 
-### 3. cURL 命令行直接调用
+### 3. cURL CLI Direct Calls
 
-无需安装任何 SDK，直接使用终端命令：
+Use terminal commands directly without installing any SDKs:
 
 ```bash
-# 语音转文字 (ASR)
+# Speech-to-Text (ASR)
 curl http://127.0.0.1:8201/v1/audio/transcriptions \
   -H "Authorization: Bearer local" \
   -F "file=@meeting.wav" \
   -F "model=whisper-1" \
   -F "response_format=json"
 
-# 文字转语音 (TTS)
+# Text-to-Speech (TTS)
 curl http://127.0.0.1:8201/v1/audio/speech \
   -H "Authorization: Bearer local" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "tts-1",
-    "input": "SpeechRail 已完全就绪，正在本地为您提供极速语音合成服务。",
+    "input": "SpeechRail is fully ready and delivering high-speed local speech synthesis.",
     "voice": "serena",
     "response_format": "wav"
   }' \
@@ -223,211 +227,212 @@ curl http://127.0.0.1:8201/v1/audio/speech \
 
 ---
 
-### 4. 主流 Agent 与桌面 AI 客户端接入表
+### 4. Supported Agents & Desktop AI Clients Table
 
-| 客户端 / Agent 平台 | 接口地址 (Base URL / Endpoint) | API Key | 协议类型 | 推荐接入模型与能力 |
+| Client / Agent Platform | Base URL / Endpoint | API Key | Protocol | Recommended Models & Capabilities |
 |---|---|---|---|---|
-| **[Sona](https://github.com/hrygo/sona)** | `ws://127.0.0.1:8201/v1/realtime` | `local` | WebSocket | 全双工流式 ASR + VAD + 声纹分离 + 流式 TTS |
-| **[Open-WebUI](https://github.com/open-webui/open-webui)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (语音听写) / `tts-1` (实时语音通话) |
-| **[LiveKit](https://github.com/livekit/agents) / [Pipecat](https://github.com/pipecat-ai/pipecat)** | `ws://.../v1/realtime` 或 `/v1` | `local` | WS / REST | 实时全双工多模态 Voice Agent 管道与流水线 |
-| **[Cherry Studio](https://github.com/Kang-k/Cherry-Studio)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (语音输入) / `tts-1` (文字朗读) |
-| **[OpenClaw](https://github.com/openclaw/openclaw)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (语音指令) / `tts-1` (状态播报) |
-| **[Dify](https://github.com/langgenius/dify) / FastGPT** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` / `tts-1` (Agentic 知识库工作流) |
+| **[Sona](https://github.com/hrygo/sona)** | `ws://127.0.0.1:8201/v1/realtime` | `local` | WebSocket | Full-duplex streaming ASR + VAD + Diarization + Streaming TTS |
+| **[Open-WebUI](https://github.com/open-webui/open-webui)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (Dictation) / `tts-1` (Real-time voice calls) |
+| **[LiveKit](https://github.com/livekit/agents) / [Pipecat](https://github.com/pipecat-ai/pipecat)** | `ws://.../v1/realtime` or `/v1` | `local` | WS / REST | Real-time full-duplex multimodal Voice Agent pipelines |
+| **[Cherry Studio](https://github.com/Kang-k/Cherry-Studio)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (Voice input) / `tts-1` (Text readout) |
+| **[OpenClaw](https://github.com/openclaw/openclaw)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (Voice commands) / `tts-1` (Status announcement) |
+| **[Dify](https://github.com/langgenius/dify) / FastGPT** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` / `tts-1` (Agentic knowledge base workflows) |
 
-*注：以上为本机默认免密调用示例。若跨局域网接入，请将 `127.0.0.1` 替换为目标 Mac 内网 IP，并将 `local` 替换为您在服务端配置的 `SPEECHRAIL_API_KEY`。*
+*Note: The table above shows local default keyless examples. For LAN access, replace `127.0.0.1` with the host Mac's local IP, and `local` with your configured `SPEECHRAIL_API_KEY`.*
 
 ---
 
-## 🎛️ 三档模型预设与 9 种跨档内置音色
+## 🎛️ Three Model Profiles & 9 Built-in Voices
 
-SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适配不同配置的 Apple Silicon Mac。全档位严格采用 **8-bit (q8)** 高精度量化权重：
+SpeechRail exposes a unified API contract while internally adapting across Apple Silicon Macs through lightweight profile tiers. All tiers strictly employ **8-bit (q8)** high-precision quantized weights:
 
-### 1. 硬件分档矩阵
+### 1. Hardware Profile Matrix
 
-| 预设档位 (Profile) | ASR 模型权重 | TTS 模型权重与变体 | 最低物理内存推荐 | 活跃最大占用 (Peak) | 稳定占用 (Steady) | 空闲待机 (Idle) |
+| Profile | ASR Model Weight | TTS Model Weight & Variant | Min Recommended RAM | Peak Active Footprint | Steady Footprint | Idle Standby |
 |---|---|---|---|---|---|---|
-| 🟢 **`light` (轻量档)** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB 基础款 Mac (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **~50 MB** (自动卸载) |
-| 🟡 **`balanced` (平衡档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB 主流 Mac (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **~50 MB** (自动卸载) |
-| 🟣 **`quality` (高保真档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ 旗舰款 Mac (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **~50 MB** (自动卸载) |
+| 🟢 **`light`** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB Base Macs (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **~50 MB** (Auto-eviction) |
+| 🟡 **`balanced`** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB Mainstream Macs (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **~50 MB** (Auto-eviction) |
+| 🟣 **`quality`** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ Flagship Macs (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **~50 MB** (Auto-eviction) |
 
-- **全档 8-bit 高精度量化**：全档位模型严格保证 8-bit 量化精度，拒绝低位量化带来的音频失真与发音崩塌。
-- **权重高效复用**：`balanced` 与 `quality` 共享同一个 1.7B ASR 模型；`balanced` 与 `light` 共享同一个 0.6B CustomVoice TTS 模型。
-- **智能两阶段空闲卸载 (Idle Eviction)**：默认 5 分钟无请求时自动触发冷卸载释放显存与内存，常驻待机仅占用约 **~50 MB**，新请求秒级懒拉起。
-- **音色设计边界**：仅 `quality` 档支持通过自然语言设计自定义新音色（VoiceDesign）；在 `balanced`/`light` 档下，自定义音色会自动声明为 `available=false`，切回 `quality` 自动恢复。
+- **Strict 8-bit Quantization**: All profile models strictly maintain 8-bit quantization precision, rejecting lower-bit quantization artifacts and pronunciation degradation.
+- **Efficient Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR model; `balanced` and `light` share the same 0.6B CustomVoice TTS model.
+- **Two-Stage Automatic Idle Eviction**: When idle for 5 minutes without requests, cold eviction releases VRAM and memory. Standby memory drops to **~50 MB**, and new requests wake up workers in seconds.
+- **VoiceDesign Boundary**: Only the `quality` tier supports creating novel custom voices via natural language prompts (VoiceDesign). In `balanced`/`light`, custom voices are declared as `available=false`, restoring automatically when switched back to `quality`.
 
-### 2. 9 种跨档系统内置音色
+### 2. 9 Cross-Profile Built-in Voices
 
-SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色角色（接口与角色 ID 跨档保持一致，原生兼容 OpenAI 官方别名如 `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu` 等）。
+SpeechRail preconfigures 9 acoustically fine-tuned voice personas consistent across all profiles (compatible with OpenAI official aliases such as `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu`, etc.).
 
-但请注意：**同一角色在不同档位下的底层生成机制不同**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动，而 `quality` 档由 **VoiceDesign (1.7B)** 驱动。用户可根据实际业务需要，在“绝对声线稳定性”与“丰富情感表现力”之间做针对性选择：
+Note: **The underlying generation mechanism differs by profile**—`balanced` / `light` are powered by **CustomVoice (0.6B)**, whereas `quality` is powered by **VoiceDesign (1.7B)**. Users can choose between "absolute vocal consistency" and "expressive emotional range" based on their application needs:
 
-#### ⚖️ VoiceDesign 与 CustomVoice 核心差异与选型建议
+#### ⚖️ VoiceDesign vs. CustomVoice: Core Differences & Selection Guide
 
-| 比较维度 | 🟡 / 🟢 `balanced` / `light` (CustomVoice) | 🟣 `quality` (VoiceDesign) | 选型与适用场景建议 |
+| Dimension | 🟡 / 🟢 `balanced` / `light` (CustomVoice) | 🟣 `quality` (VoiceDesign) | Recommendation & Use Cases |
 |---|---|---|---|
-| **底层实现** | 固化 Speaker Embedding 权重 (物理常量) | 自然语言 Instruction 与声学提示驱动拟合 | CustomVoice 结构固化；VoiceDesign 算法拟合 |
-| **声线稳定性 (Identity)** | 🔒 **极高 (近 100% 同一人一致性)**<br>跨不同长文本、不同语境音色完全恒定 | 🎨 **良好 (相同输入 100% 确定性复现)**<br>跨极端差异文本时偶有微小情绪/声调发散 | 长篇朗读、新闻播报、严肃客服选 **CustomVoice**；<br>允许或需要自然语调起伏选 **VoiceDesign** |
-| **情感张力与表现力** | 规范、平稳、标准，情绪起伏小 | 丰富、生动、富有自然呼吸感与戏剧表现力 | 故事旁白、游戏 NPC、虚拟陪伴智能体首选 **VoiceDesign** |
-| **开放自定义扩展** | 仅限 9 个固定角色，不支持自由创造 | 🌟 **支持自然语言 Prompt 任意创造新声线** | 需要探索或定制独一无二的新角色时必选 **`quality`** |
-| **硬件内存与吞吐** | 极轻量 (~4.4-6.0GB 峰值)，推理极速 | 1.7B 高精度 (~6.9GB 峰值)，算力开销略高 | 8GB/16GB Mac 推荐前者；32GB+ 旗舰 Mac 畅享后者 |
+| **Underlying Implementation** | Fixed Speaker Embedding weights (physical constants) | Driven by natural language instruction and acoustic prompt fitting | CustomVoice: structural embedding; VoiceDesign: algorithmic synthesis |
+| **Vocal Consistency (Identity)** | 🔒 **Extremely High (~100% identity consistency)**<br>Identical timbre across long texts and varying contexts | 🎨 **Good (100% deterministic reproducibility for identical input)**<br>Minor intonation/prosody variance across drastically different texts | Long audiobooks, news broadcasts, serious customer support: choose **CustomVoice**;<br>Natural prosody variation and emotion: choose **VoiceDesign** |
+| **Emotional Expressiveness** | Measured, stable, standardized, minimal pitch fluctuation | Expressive, vibrant, with natural breathing and dramatic range | Story narration, game NPCs, virtual companions: choose **VoiceDesign** |
+| **Custom Extensibility** | Limited to 9 predefined roles, no free creation | 🌟 **Create any custom voice persona using natural language prompts** | Choose **`quality`** when creating or exploring unique personas |
+| **RAM & Throughput** | Ultra-lightweight (~4.4–6.0 GB peak), fast inference | 1.7B high precision (~6.9 GB peak), higher compute demand | Recommended for 8GB/16GB Macs; 32GB+ flagship Macs enjoy quality tier |
 
-> 深入对比数据与声学嵌入实测详见专题架构文档：[VoiceDesign 能力优势与音色稳定性边界](docs/architecture/voicedesign-capability-and-stability.md)。
+> For comprehensive benchmark data and acoustic embedding evaluation, see [VoiceDesign Capabilities and Stability Boundaries](docs/architecture/voicedesign-capability-and-stability.md).
 
-#### 🎙️ 系统内置 9 大跨档官方角色清单
+#### 🎙️ 9 Official Cross-Profile Built-In Voice Personas
 
-| 音色 ID (`voice`) | 角色名称 | 声音画像与特点 | 最佳适用场景 |
+| Voice ID (`voice`) | Persona Name | Voice Profile & Characteristics | Best For |
 |---|---|---|---|
-| `serena` | 温柔中文女声 (默认) | 温暖柔和的年轻中文女声，音色亲切自然，语气平和 | 个人桌面助理、日常交谈、短视频配音 |
-| `vivian` | 明亮中文女声 | 明亮清脆的年轻中文女声，略带锋利质感，语气轻快 | 新闻资讯、长文朗读、科技解说 |
-| `uncle_fu` | 醇厚中文男声 | 成熟稳重的中文男声，音色低沉醇厚，语速平稳从容 | 有声小说、商务讲座、纪录片旁白 |
-| `dylan` | 北京青年男声 | 清晰自然的年轻男声，带自然北京口音，语气轻松直接 | 运动健身、游戏互动、口播带货 |
-| `eric` | 成都活力男声 | 活泼明亮的年轻中文男声，略带沙哑质感和自然四川口音 | 情感陪伴、趣味互动、生活 Vlog |
-| `ryan` | 动感英语男声 | 富有活力和节奏感的英语男声，发音清晰，表达有推动力 | 英语演讲、品牌广告、正式公告 |
-| `aiden` | 阳光美式男声 | 阳光自然的美式英语年轻男声，中频清晰，语气友好 | 国际会议、外语教学、日常对话 |
-| `ono_anna` | 轻快日语女声 | 轻盈灵动的年轻日语女声，语气俏皮自然，节奏明快 | 动漫二次元、虚拟主播、日语伴读 |
-| `sohee` | 温暖韩语女声 | 温暖柔和的韩语女声，情感丰富，表达自然亲切 | 影视解说、韩语学习、情感电台 |
+| `serena` | Gentle Chinese Female (Default) | Warm and soft young Chinese female voice; natural and friendly | Personal desktop assistant, daily chat, short video voiceover |
+| `vivian` | Bright Chinese Female | Crisp and clear young Chinese female voice; energetic and articulated | News bulletins, long-form reading, tech explainers |
+| `uncle_fu` | Resonant Chinese Male | Mature, calm, and grounded Chinese male voice; deep and composed | Audiobooks, business lectures, documentary narration |
+| `dylan` | Beijing Youth Male | Clear and natural young male voice with subtle Beijing accent; straightforward | Fitness, gaming interactions, live commerce |
+| `eric` | Dynamic Chengdu Male | Lively young Chinese male voice with slight rasp and natural Sichuan accent | Emotional companion, fun interactions, vlogs |
+| `ryan` | Dynamic English Male | Energetic and rhythmic English male voice; articulate and driving | English presentations, brand commercials, announcements |
+| `aiden` | Sunny American Male | Bright, natural American English young male voice; clear mid-range, friendly | International meetings, ESL tutoring, casual dialogue |
+| `ono_anna` | Playful Japanese Female | Light and nimble young Japanese female voice; cheerful and upbeat | Anime, VTubers, Japanese language reading |
+| `sohee` | Warm Korean Female | Warm and gentle Korean female voice; emotionally rich and natural | Drama commentary, Korean learning, storytelling |
 
-### 3. 可选讲话人分离模型 (Speaker Diarization)
+### 3. Optional Speaker Diarization
 
-针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 原生集成了高性能多讲话人时序切分与角色分离能力：
+For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail natively integrates high-performance speaker segmentation and role identification:
 
-| 核心组件 | 底层模型架构 | 职责与能力边界 | 活跃推理开销 (Active RAM) | 客户端调用入口 |
+| Core Component | Model Architecture | Responsibility & Capabilities | Active RAM | Client Entry Point |
 |---|---|---|---|---|
-| **时序切分引擎** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | 在线/离线流式切分不同发言人时间边界，支持最多 4 人重叠语音分离 | **+约 0.5 GB** (500 MB) | `model="gpt-4o-transcribe-diarize"` 或 `response_format="diarized_json"` |
-| **声纹特征提取 (可选)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | 提取 16kHz PCM 声纹特征向量，跨会话短时重聚类，确保发言人归一 | **极轻量** (~数十 MB) | 会话内断线重连或长会议平滑映射 |
+| **Temporal Segmentation Engine** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | Online/offline streaming speaker boundary segmentation, up to 4 overlapping speakers | **+~0.5 GB** (500 MB) | `model="gpt-4o-transcribe-diarize"` or `response_format="diarized_json"` |
+| **Speaker Embedding Extraction (Optional)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | Extracts 16kHz PCM speaker embeddings, cross-session re-clustering for speaker normalization | **Ultra-lightweight** (~tens of MB) | Reconnection recovery or smooth long-meeting mapping |
 
-- **活跃内存开销**：启用并在处理多人会议转录时，额外常驻约 **+0.5 GB** 物理内存（未配置模型时零额外开销）。
-- **统一空闲卸载**：深度接入 `EvictableWorker` 机制，**连续 5 分钟无调用自动触发冷卸载释放全部权重与显存**，常驻待机内存回落至 **~50 MB**。
-- **严格匿名隐私**：仅输出会话生命周期内的匿名标签（如 `speaker_0`, `speaker_1`），**不持久化真实人名、不留存声纹库、不进行跨会议身份追踪**。
-- **端到端持续分人扩展 (SPK-E2E-1)**：针对多人连续会议，在 `/v1/realtime` 中提供 `speechrail.diarization.v1` 扩展。采用“**正文先固定，归属后更新**”范式与整数采样时标，根治跨分钟时钟漂移和二次文字篡改；配合客户端 `finalize` 结束屏障，确保所有归属补丁落库后方触发最终纪要（详见 [端到端设计](docs/architecture/speaker-diarization-e2e-design.md)）。
-- **按需可选安装**：执行 `uv sync --extra diarization` 安装可选依赖并在配置中启用即可。
+- **Active RAM**: Adds approx. **+0.5 GB** physical memory during active multi-speaker transcription (zero additional footprint when unconfigured).
+- **Unified Idle Eviction**: Integrated into `EvictableWorker`; **automatically unloads all weights and VRAM after 5 minutes of inactivity**, returning memory to **~50 MB**.
+- **End-to-End Continuous Diarization Extension (SPK-E2E-1)**: Provides the `speechrail.diarization.v1` extension under `/v1/realtime`. Employs a **"transcript first, attribution updated"** paradigm with integer sample clocking (16 kHz session samples) to eliminate clock drift and retroactive text tampering; pairs with client `finalize` barrier to ensure consistent persistence before final summary generation (see [End-to-End Diarization Design](docs/architecture/speaker-diarization-e2e-design.md) and [Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)).
+- **Consumer Wiring with Sona**: 100% wired with [Sona](https://github.com/hrygo/sona) desktop meeting assistant, supporting streaming attribution patches, manual speaker rename precedence, and crash-resilient recovery journaling.
+- **Offline E2E Evaluation Suite**: Includes `tools/evaluate_diarization_e2e.py` supporting DER calculation via Kuhn-Munkres optimal permutation matching, collar/overlap tolerance, and speaker-attributed character error rate (SACER) with unknown penalties.
+- **Optional On-Demand Installation**: Run `uv sync --extra diarization` to install optional dependencies and enable in configuration.
 
 ---
 
-## 📊 真实性能基准实测 (Apple M5 Max)
+## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-以下数据来源于 Apple M5 Max (128GB Unified Memory) 上的串行真实基准测试（引自 [v1.7.0 性能基准实测报告](docs/archive/performance/2026-09-05-v1.7.0-performance-benchmark.md)），真实可复现：
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), cited from [v1.7.0 Performance Benchmark Report](docs/archive/performance/2026-09-05-v1.7.0-performance-benchmark.md) and fully reproducible:
 
-| 评测指标 | 🟢 Light 档实测 | 🟡 Balanced 档实测 | 🟣 Quality 档实测 | 评测口径与场景 |
+| Benchmark Metric | 🟢 Light Profile | 🟡 Balanced Profile | 🟣 Quality Profile | Test Methodology & Scenario |
 |---|---|---|---|---|
-| **ASR 中文 RTF (p50)** | **0.0174** (超实时 57 倍) | **0.0250** (超实时 40 倍) | **0.0243** (超实时 41 倍) | 独立 macOS 系统语音 fixture，N=5 p50 |
-| **ASR 英文 RTF (p50)** | **0.0216** (超实时 46 倍) | **0.0313** (超实时 32 倍) | **0.0302** (超实时 33 倍) | 13 词独立英文样本，N=5 p50 |
-| **TTS 生成 RTF (p50)** | **0.2394** (超实时 4.1 倍) | **0.2405** (超实时 4.1 倍) | **0.2731** (超实时 3.6 倍) | 统一中文文本、`serena` 音色，N=5 p50 |
-| **最大同时物理占用** | **~4.4 GB** (4462 MB) | **~6.0 GB** (6085 MB) | **~6.9 GB** (6943 MB) | 同一 tick `phys_footprint` 较大值 |
-| **稳定物理占用** | **~4.1 GB** (4142 MB) | **~5.5 GB** (5562 MB) | **~6.6 GB** (6599 MB) | 持续工作稳定态物理内存 |
-| **空闲卸载待机内存** | **~50 MB** | **~50 MB** | **~50 MB** | 5 分钟无请求自动卸载释放 Worker |
+| **ASR Chinese RTF (p50)** | **0.0174** (57x faster than real-time) | **0.0250** (40x faster than real-time) | **0.0243** (41x faster than real-time) | Standalone macOS system voice fixture, N=5 p50 |
+| **ASR English RTF (p50)** | **0.0216** (46x faster than real-time) | **0.0313** (32x faster than real-time) | **0.0302** (33x faster than real-time) | 13-word independent English sample, N=5 p50 |
+| **TTS Synthesis RTF (p50)** | **0.2394** (4.1x faster than real-time) | **0.2405** (4.1x faster than real-time) | **0.2731** (3.6x faster than real-time) | Standard Chinese text, `serena` voice, N=5 p50 |
+| **Peak Total Physical RAM** | **~4.4 GB** (4462 MB) | **~6.0 GB** (6085 MB) | **~6.9 GB** (6943 MB) | Max `phys_footprint` within the same sampling tick |
+| **Steady Physical RAM** | **~4.1 GB** (4142 MB) | **~5.5 GB** (5562 MB) | **~6.6 GB** (6599 MB) | Steady-state physical memory during continuous load |
+| **Idle Standby RAM** | **~50 MB** | **~50 MB** | **~50 MB** | Automatically unloads workers after 5 minutes idle |
 
 ---
 
-## 🏛️ 物理隔离架构与设计哲学
+## 🏛️ Physical Isolation Architecture & Design Philosophy
 
 ```mermaid
 flowchart TD
-    Client["客户端应用 (OpenAI SDK / WebUI / Desktop Agent)"]
+    Client["Client Applications (OpenAI SDK / WebUI / Desktop Agent)"]
 
-    subgraph HostService["FastAPI 宿主守护网关 (Port: 8201)"]
+    subgraph HostService["FastAPI Host Gateway (Port: 8201)"]
         direction TB
-        Router["路由与协议分发 (/v1/audio/*, /v1/realtime)"]
-        Governor["Resource Governor (有界音频队列 & 资源护栏)"]
-        Evictor["WorkerIdleEvictor (空闲超时自动卸载模型与显存)"]
+        Router["Routing & Protocol Dispatch (/v1/audio/*, /v1/realtime)"]
+        Governor["Resource Governor (Bounded Audio Queue & Guardrails)"]
+        Evictor["WorkerIdleEvictor (Automatic Idle Eviction of Weights & VRAM)"]
         Router --> Governor
-        Governor -. 闲置监控 .-> Evictor
+        Governor -. Idle Monitoring .-> Evictor
     end
 
-    subgraph Workers["独立物理推理与扩展引擎 (物理隔离沙箱)"]
+    subgraph Workers["Independent Inference & Extension Engines (Isolated Sandbox)"]
         direction LR
-        ASRWorker["独立 ASR MLX Worker\n(Qwen3-ASR)"]
-        TTSWorker["独立 TTS MLX Worker\n(VoiceDesign / CustomVoice)"]
-        DiarizeEngine["讲话人分离引擎 (可选)\n(NeMo Sortformer + CAM++)"]
+        ASRWorker["Independent ASR MLX Worker\n(Qwen3-ASR)"]
+        TTSWorker["Independent TTS MLX Worker\n(VoiceDesign / CustomVoice)"]
+        DiarizeEngine["Speaker Diarization Engine (Optional)\n(NeMo Sortformer + CAM++)"]
     end
 
     Client <== "HTTP / WebSocket" ==> Router
-    Governor <== "专属 Framed IPC 管道" ==> ASRWorker
-    Governor <== "专属 Framed IPC 管道" ==> TTSWorker
-    Governor <== "会话级流式协调" ==> DiarizeEngine
-    Evictor -. 5分钟无请求冷卸载 .-> ASRWorker
-    Evictor -. 5分钟无请求冷卸载 .-> TTSWorker
-    Evictor -. 5分钟无请求冷卸载 .-> DiarizeEngine
+    Governor <== "Dedicated Framed IPC Pipe" ==> ASRWorker
+    Governor <== "Dedicated Framed IPC Pipe" ==> TTSWorker
+    Governor <== "Session-Level Streaming Coordination" ==> DiarizeEngine
+    Evictor -. 5-Min Idle Eviction .-> ASRWorker
+    Evictor -. 5-Min Idle Eviction .-> TTSWorker
+    Evictor -. 5-Min Idle Eviction .-> DiarizeEngine
 ```
 
-#### 核心架构设计原则
+#### Core Architectural Principles
 
-- **故障爆炸半径最小化**：重型推理引擎在独立进程内运行。若 MLX 发生底层 C++ / Metal 偶发崩溃，宿主网关依然保持在线，并能自动重启 Worker。
-- **内存零浪费与绿色休眠**：网关内置 `WorkerIdleEvictor`，工作时满血加载，闲置时自动卸载释放。
-- **职责边界清晰**：SpeechRail 专注于提供纯粹、高可靠的本地 ASR/TTS 协议服务，不侵入麦克风拾音、系统扬声器播放或应用业务逻辑。
+- **Minimized Blast Radius**: Heavy inference engines run in isolated OS processes. If MLX encounters an unexpected C++ / Metal crash, the host gateway remains online and automatically restarts the worker.
+- **Zero Memory Waste & Green Hibernation**: The gateway's built-in `WorkerIdleEvictor` keeps models loaded during active use and unloads them when idle.
+- **Strict Boundary Separation**: SpeechRail focuses purely on resilient local ASR/TTS protocol serving, without intruding on microphone capture, speaker playback, or client-side LLM orchestration.
 
 ---
 
-## 🛠️ 守护进程管理 (LaunchAgent)
+## 🛠️ Daemon Service Management (LaunchAgent)
 
-SpeechRail 遵循 macOS 标准的用户级守护进程机制，通过原生命令随时管控：
+SpeechRail follows the macOS standard user LaunchAgent daemon mechanism, managed via native commands:
 
 ```bash
-# 查看常驻服务当前运行状态与 PID
+# Check service status and PID
 uv run speechrail service status
 
-# 重启守护服务
+# Restart daemon service
 uv run speechrail service restart
 
-# 停止或卸载守护服务
+# Stop or uninstall daemon service
 uv run speechrail service stop
 uv run speechrail service uninstall
 ```
 
 ---
 
-## ❓ 常见问题 (FAQ)
+## ❓ Frequently Asked Questions (FAQ)
 
 <details>
-<summary><strong>Q1: 我的电脑装的是 Python 3.13 或 3.9，会有版本冲突吗？</strong></summary>
+<summary><strong>Q1: My system runs Python 3.13 or 3.9. Will there be version conflicts?</strong></summary>
 
-**完全不会。** 安装脚本与引导工具内置了自动环境隔离与自愈逻辑。它不会修改您的系统全局 Python，而是通过 `uv` 自动拉取一套官方独立的 CPython 3.12 并在沙箱中运行，两者完全隔离、互不干扰。
+**Not at all.** The installer and bootstrap tools include automated environment isolation and self-healing. They do not modify your global Python installation. Instead, `uv` provisions an isolated CPython 3.12 runtime inside a sandbox, completely separated from your system Python.
 </details>
 
 <details>
-<summary><strong>Q2: 为什么暂不支持 Intel (x86_64) 架构的 Mac？</strong></summary>
+<summary><strong>Q2: Why are Intel (x86_64) Macs not supported?</strong></summary>
 
-SpeechRail 的核心性能来自于 Apple MLX 框架对 **Apple Silicon 统一内存（Unified Memory Architecture）与 Metal GPU** 的深度调优。Intel Mac 没有统一内存架构，MLX 官方目前完全不提供 x86_64 预编译支持。若您使用 Intel Mac，建议使用轻量的 `whisper.cpp` 或通过网络接入另一台 Mac 上的 SpeechRail 服务。
+SpeechRail's performance relies heavily on Apple MLX optimizations for **Apple Silicon Unified Memory Architecture (UMA) and Metal GPU**. Intel Macs lack unified memory, and MLX does not provide pre-compiled wheels for macOS x86_64. If you are on an Intel Mac, consider lightweight alternatives such as `whisper.cpp` or connect across LAN to a SpeechRail instance running on an Apple Silicon Mac.
 </details>
 
 <details>
-<summary><strong>Q3: 为什么本机调用时不需要配置 API Key？</strong></summary>
+<summary><strong>Q3: Why is no API key required for local calls?</strong></summary>
 
-为了给个人桌面开发提供极致的“开箱即用”体验，SpeechRail 默认仅监听本地环回接口 `127.0.0.1`，此时放行本地调用。一旦您在配置中将监听地址开放至局域网（如 `0.0.0.0`），服务会强制校验 `SPEECHRAIL_API_KEY`，未配置将直接拒绝启动。
+To deliver an out-of-the-box zero-friction experience for local desktop development, SpeechRail defaults to listening strictly on loopback (`127.0.0.1`), allowing keyless access. If you expose the listening address to the network (e.g., `0.0.0.0`), the service mandates `SPEECHRAIL_API_KEY` and refuses to start without one.
 </details>
 
 <details>
-<summary><strong>Q4: 切换模型档位时需要重新下载所有模型吗？</strong></summary>
+<summary><strong>Q4: Do I need to re-download all models when switching profiles?</strong></summary>
 
-不需要。所有模型权重在下载后都会持久化保存在受管目录中。当您在 `light`、`balanced`、`quality` 之间切换时，已下载过的档位会直接秒级复用本地缓存。
+No. Model weights are cached persistently in the managed directory. When switching between `light`, `balanced`, and `quality`, previously downloaded weights are reused immediately within seconds.
 </details>
 
 <details>
-<summary><strong>Q5: 如何开启多人会议讲话人分离 (Speaker Diarization)？它占用多少内存？</strong></summary>
+<summary><strong>Q5: How do I enable Speaker Diarization, and how much RAM does it consume?</strong></summary>
 
-讲话人分离属于按需扩展能力。您只需执行 `uv sync --extra diarization` 安装配套依赖，并在 `.env` 中指定 NVIDIA NeMo Sortformer 权重文件路径（`SPEECHRAIL_DIARIZATION_MODEL_PATH`）。
-- **内存占用**：未配置时为 **0 MB**；启用并处理多人转录时，宿主额外占用约 **0.5 GB** 物理内存。
-- **自动卸载**：同样深度接入系统空闲驱逐器，**连续 5 分钟无调用自动释放全部权重**，完全归还内存，绝不长期霸占系统资源。
+Diarization is an optional capability. Run `uv sync --extra diarization` to install dependencies, and set the path to the NVIDIA NeMo Sortformer model checkpoint (`SPEECHRAIL_DIARIZATION_MODEL_PATH`) in `.env`.
+- **RAM Usage**: **0 MB** when not configured; approximately **+0.5 GB** physical RAM when active during multi-speaker transcription.
+- **Auto Eviction**: Automatically unloads after **5 minutes of inactivity**, returning memory to ~50 MB without hoarding system resources.
 </details>
 
 ---
 
-## 📚 完整文档中心
+## 📚 Complete Documentation Center
 
-| 读者角色 | 推荐入口与文档说明 |
+| Role | Recommended Guides |
 |---|---|
-| 🚀 **小白 / 快速搭建** | [空白 Mac 从零搭建指南 (`speechrail-zero-setup`)](.agents/skills/speechrail-zero-setup/SKILL.md) · [运维排障手册](docs/operations/operations-runbook.md) |
-| 🔌 **API 开发者** | [用户与客户端集成指南](docs/users/README.md) · [OpenAI 兼容契约详解](docs/users/api-contract.md) · [OpenAPI 规范](contracts/openapi.yaml) |
-| 🛠️ **系统运维** | [运维中心](docs/operations/README.md) · [受管运行时部署说明](docs/operations/runtime-deployment.md) · [安全与可观测性](docs/operations/security-observability.md) |
-| 🧪 **代码贡献者** | [开发者中心](docs/developers/README.md) · [本地测试与验收套件](docs/developers/testing-acceptance.md) |
-| 📐 **架构评审** | [系统架构全景](docs/architecture/README.md) · [当前边界与权衡](docs/architecture/current-boundaries.md) · [架构决策记录 (ADRs)](docs/decisions/README.md) |
+| 🚀 **Quick Start / Setup** | [Blank Mac Zero-Setup Guide (`speechrail-zero-setup`)](.agents/skills/speechrail-zero-setup/SKILL.md) · [Operations Runbook](docs/operations/operations-runbook.md) |
+| 🔌 **API Developers** | [User & Client Integration Guide](docs/users/README.md) · [OpenAI Compatibility Contract](docs/users/api-contract.md) · [OpenAPI Specification](contracts/openapi.yaml) |
+| 🛠️ **System Operators** | [Operations Center](docs/operations/README.md) · [Managed Runtime Deployment](docs/operations/runtime-deployment.md) · [Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md) · [Security & Observability](docs/operations/security-observability.md) |
+| 🧪 **Code Contributors** | [Developer Center](docs/developers/README.md) · [Testing & Acceptance Suite](docs/developers/testing-acceptance.md) |
+| 📐 **Architecture Review** | [System Architecture Overview](docs/architecture/README.md) · [Speaker Diarization E2E](docs/architecture/speaker-diarization-e2e-design.md) · [Current Boundaries & Trade-offs](docs/architecture/current-boundaries.md) · [Architecture Decision Records (ADRs)](docs/decisions/README.md) |
 
 ---
 
-## 🤝 参与贡献与许可证
+## 🤝 Contributing & License
 
-- 提交代码前请阅读 [贡献指南 (CONTRIBUTING.md)](CONTRIBUTING.md)。
-- 漏洞报告请参阅 [安全策略 (SECURITY.md)](SECURITY.md)。
-- 社区交流请遵守 [行为准则 (CODE_OF_CONDUCT.md)](CODE_OF_CONDUCT.md)。
+- Review [Contributing Guidelines (CONTRIBUTING.md)](CONTRIBUTING.md) before submitting code.
+- Report security issues according to our [Security Policy (SECURITY.md)](SECURITY.md).
+- Community interactions should adhere to the [Code of Conduct (CODE_OF_CONDUCT.md)](CODE_OF_CONDUCT.md).
 
-SpeechRail 采用宽松友好的 [MIT License](LICENSE) 授权开源。您可以自由用于个人创作或商业软件集成。
+SpeechRail is open-source software licensed under the permissive [MIT License](LICENSE). Free for personal use and commercial integrations.
