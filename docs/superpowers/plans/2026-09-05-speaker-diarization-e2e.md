@@ -162,8 +162,8 @@ async def test_legacy_client_never_receives_extension_types(ws_harness):
 
 **接口：** `AttributionLedger.register(unit)`、`AttributionLedger.apply_activity(snapshot)`、`AttributionLedger.freeze(through_sample)`；按规格输出 revision 和 stable watermark。register 的 unit 类型为 R2 领域 `AttributionUnit`，不可修改 text 区间。
 
-- [ ] 写真实重叠与相邻换人的区分测试：A `[0,1600)`、B `[1600,3200)` 不是 overlap；A/B 都覆盖 `[0,3200)` 才是 overlap。
-- [ ] 写短插话、证据不足 unknown、同词两步稳定、3 秒到期未知、冻结后不改、revision 重复一致、最大缓存数测试。
+- [x] 写真实重叠与相邻换人的区分测试：A `[0,1600)`、B `[1600,3200)` 不是 overlap；A/B 都覆盖 `[0,3200)` 才是 overlap。
+- [x] 写短插话、证据不足 unknown、同词两步稳定、3 秒到期未知、冻结后不改、revision 重复一致、最大缓存数测试。
 
 ```python
 def test_temporal_speaker_change_is_not_overlap(attribution_harness):
@@ -174,10 +174,17 @@ def test_temporal_speaker_change_is_not_overlap(attribution_harness):
     assert result.speaker is None
 ```
 
-- [ ] 运行 `uv run --extra dev pytest tests/test_diarization_timeline.py tests/test_speaker_centroids.py -q`，记录失败。
-- [ ] 实现规格 4.4 的交集计算和冻结；标点归属随 canonical unit，错误时间不进入模型决策。
-- [ ] CAM++ 使用至少两段 2–5 秒干净片段，新增 session alias、group_generation、模型指纹与主体隔离，设置 group 内数目上限。活跃静音 touch TTL；测试 16 分钟静音、进程/模型 generation 变化、不相关 group 同编号不关联。
-- [ ] 证明 link 仅是明确带 session 的建议；不输出旧 raw-label 全局 map。状态完成后释放 PCM/embedding 临时片段，测试异常路径也释放。
+- [x] 运行 `uv run --extra dev pytest tests/test_diarization_timeline.py tests/test_speaker_centroids.py -q`，记录失败。
+- [x] 实现规格 4.4 的交集计算和冻结；标点归属随 canonical unit，错误时间不进入模型决策。
+- [x] CAM++ 使用至少两段 2–5 秒干净片段，新增 session alias、group_generation、模型指纹与主体隔离，设置 group 内数目上限。活跃静音 touch TTL；测试 16 分钟静音、进程/模型 generation 变化、不相关 group 同编号不关联。
+- [x] 证明 link 仅是明确带 session 的建议；不输出旧 raw-label 全局 map。状态完成后释放 PCM/embedding 临时片段，测试异常路径也释放。
+
+**R3 验证证据（2026-09-06）：**
+
+- `AttributionLedger`（domain/diarization_timeline.py）：按 4.4 实现区间交集、coverage/support/overlap 计算（无归一化伪概率）、`coverage>=0.60 且 support 差>=0.20 且 top>=0.60 且 overlap<0.20` 才给主 speaker；watermark 覆盖词尾 + 两次一致推理步才 stable；3 秒到期终止 unknown；`freeze(through)` 冻结后不再改；重复相同活动不递增 revision（内容不变不发事件）；晚注册 unit 用冻结活动一次性交付 stable/unknown，不重开窗口；unavailable unit 立即 unknown；pending 上限 4096 单元/30 秒窗口超限抛 `diarization_overloaded`；finalized unit 过修订地平线后释放存储。测试 27 项含计划片段的 touching≠overlap 与 both-cover=overlap 断言。`ActivitySnapshot` 校验修正为"同 speaker 不重叠、按 start 排序"，允许跨 speaker 真实重叠；最小活动 160ms 过滤默认 0（真实阈值归 R5 调参，参数保留）。
+- `SpeakerEvidenceIndex`（runtime/speaker_centroids.py）：一个 raw label 需 ≥2 段互不重叠 clip 匹配同一质心才确认 alias（CAM++ 两段证据门）；cap：4 质心/group、8 summary/质心、4 近期 session alias、8 clip/label；`generation = sha256(model_fingerprint|process_seed)`，指纹/进程变化即换 generation；TTL 900s 活跃 touch；16 分钟静音过期测试；不相关 group 同编号不 link；`suggest_links` 只返回涉及当前 session 的 alias 对（session-scoped 建议，无全局 raw-label map；legacy `.segment` 的 mapping 字段仅限 legacy 兼容路径）；`release_session` 在 try/finally 异常路径测试中清除 clip/alias。
+- `trim_embedding_clip`（backends/camplus.py）：2–5 秒、非重叠、无削波（peak<0.98）才可提取，超长截断到 5 秒。
+- 回归：timeline/centroids/camplus/nemo/stream_state 65 passed；ruff/mypy 通过。update 事件渲染与 finalized 接线在 R4 完成。
 
 ## R4：结束屏障、退化模式与资源 lease
 

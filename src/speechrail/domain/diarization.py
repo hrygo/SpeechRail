@@ -79,14 +79,21 @@ class ActivitySnapshot:
                 "stable watermark must not exceed the processed watermark",
                 code="diarization_invalid_output",
             )
-        previous_end = 0
+        last_start = -1
+        speaker_ends: dict[str, int] = {}
         for activity in self.activities:
-            if activity.start_sample < previous_end:
+            if activity.start_sample < last_start:
                 raise DiarizationError(
-                    "activities must be ordered and non-overlapping",
+                    "activities must be sorted by start sample",
                     code="diarization_invalid_output",
                 )
-            previous_end = activity.end_sample
+            last_start = activity.start_sample
+            if activity.start_sample < speaker_ends.get(activity.speaker, 0):
+                raise DiarizationError(
+                    "same-speaker activities must not overlap",
+                    code="diarization_invalid_output",
+                )
+            speaker_ends[activity.speaker] = activity.end_sample
 
 
 @dataclass(frozen=True, slots=True)

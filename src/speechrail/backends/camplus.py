@@ -140,3 +140,25 @@ def _validated_embedding(values: Sequence[float] | None) -> tuple[float, ...] | 
     if math.sqrt(sum(value * value for value in embedding)) <= 1e-12:
         return None
     return embedding
+
+
+# R3: CAM++ clip eligibility (design 4.5): clean, non-overlapping 2-5 s clips.
+MIN_EMBEDDING_CLIP_BYTES = 2 * 32_000
+MAX_EMBEDDING_CLIP_BYTES = 5 * 32_000
+_CLIPPING_PEAK_RATIO = 0.98
+
+
+def trim_embedding_clip(
+    audio: bytes, *, overlap_free: bool, peak_ratio: float
+) -> bytes | None:
+    """Return the PCM clip to embed, or ``None`` when it is not eligible.
+
+    A clip must be free of overlap with other extraction windows, show no
+    hard clipping, and span 2-5 seconds; clips longer than 5 seconds are
+    truncated to the leading 5 seconds.
+    """
+    if not overlap_free or peak_ratio >= _CLIPPING_PEAK_RATIO:
+        return None
+    if len(audio) < MIN_EMBEDDING_CLIP_BYTES:
+        return None
+    return audio[:MAX_EMBEDDING_CLIP_BYTES]
