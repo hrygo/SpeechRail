@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
@@ -366,3 +367,28 @@ def test_load_runtime_lock_has_hashed_requirements() -> None:
     assert lock.tts_requirements
     assert all("--hash=sha256:" in item for item in lock.asr_requirements)
     assert all("--hash=sha256:" in item for item in lock.tts_requirements)
+
+
+def test_published_runtime_lock_aligns_all_cross_role_package_versions() -> None:
+    lock = load_runtime_lock()
+
+    def versions(requirements: tuple[str, ...]) -> dict[str, str]:
+        parsed: dict[str, str] = {}
+        for requirement in requirements:
+            match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s]+)", requirement)
+            assert match is not None
+            package = re.sub(r"[-_.]+", "-", match.group(1)).casefold()
+            assert package not in parsed
+            parsed[package] = match.group(2)
+        return parsed
+
+    asr = versions(lock.asr_requirements)
+    tts = versions(lock.tts_requirements)
+    overlap = sorted(asr.keys() & tts.keys())
+    assert overlap
+    mismatches = {
+        package: (asr[package], tts[package])
+        for package in overlap
+        if asr[package] != tts[package]
+    }
+    assert not mismatches
