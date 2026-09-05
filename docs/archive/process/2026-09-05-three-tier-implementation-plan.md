@@ -1,8 +1,8 @@
 # SpeechRail 三档模型与统一运行时 Implementation Plan
 
-> **For agentic workers:** 按用户指定的 `luna_worker` 逐项执行；每个原子任务完成后由主 Agent 审查。
-> 执行时使用当前可用的 `executing-plans`、测试和验证技能；不依赖本环境未提供的
-> `superpowers:subagent-driven-development`。各任务采用 checkbox 跟踪。
+> 前期独立原子任务按用户指定的 `luna_worker` 执行并由主 Agent 审查。2026-09-05 起，
+> 剩余工作已进入顺序集成和验收阶段，不再委派 subagents，由主 Agent 直接完成。
+> 各任务采用 checkbox 跟踪。
 > 本文同时记录实施进度；已完成的代码卡必须附 commit 与测试证据。尚未执行真实下载、模型加载、安装或服务切换。
 
 **Goal:** 在统一 MLX 架构下提供 quality/balanced/light 三档，保留本机质量路径，并以 M1 Air 8GB 验收 light。
@@ -55,7 +55,7 @@
 | src/speechrail/runtime/resource_governor.py | 现有按 realtime/batch 保留容量和 aging | R06 |
 | src/speechrail/service/preflight.py | 检查 .env、runtime 导入和快照；不证明真实音频质量 | M04/P02 |
 | tools/install_macos.py + service/paths.py | 已有 release/current 安装结构，环境和模型仍需外部准备 | P02/P03 |
-| src/speechrail/cli.py | 当前只有 serve/service，尚无 setup/profile 命令 | U01 |
+| src/speechrail/cli.py | 已保留 serve/service，并新增 setup/profile 停服切档命令 | U01 |
 | contracts/openapi.yaml + contracts/realtime-openai.md | 四 voice ID、aliases、统一错误；输入 PCM 现行约束须保持 | T01/C01 |
 
 结构查询已从 build_app_services 双向 trace 深度 1 取得 23 个下游/1 个非测试上游，
@@ -950,18 +950,18 @@ TTL、活动 generation 或 IdleEvictor 暂停协议。
 接收已登记 ID；`ServiceController` 只提供可等待的 stop/start，`PublicSmokeProbe`
 通过 loopback 公共 ASR/TTS API 验证新进程；返回 committed/rolled_back/not_ready 与稳定错误。
 
-- [ ] **1. 写失败测试。** 用 fake service/store/smoke 记录顺序，断言候选必须先完整解析，
-  再执行 stop→selection switch→start→health/readiness→ASR smoke→TTS smoke→commit；
+- [x] **1. 写失败测试。** 用 fake service/store/smoke 记录顺序，断言候选必须先完整解析，
+  再执行 stop→selection switch→start→health/readiness→TTS smoke→ASR smoke→commit；
   候选解析失败时服务不停止。
-- [ ] **2. 证明测试先失败。** 执行
+- [x] **2. 证明测试先失败。** 执行
   `uv run --extra dev pytest tests/test_profile_switch.py -q --no-cov`，确认失败来自接口未实现。
-- [ ] **3. 最小实现。** 切换前调用 `resolve_prepared_models` 完成 catalog/runtime lock、
+- [x] **3. 最小实现。** 切换前调用 `resolve_prepared_models` 完成 catalog/runtime lock、
   路径、文件集合、大小和 SHA-256 校验；获取 S01 单写锁并记录 previous/candidate；
   确认旧服务停止后才暂存 candidate selection，并写入绑定 operation ID 的 0600 一次性启动许可。
   `run_server` 原子消费许可后仅本次启动使用 candidate；许可已消费但事务未提交时，后续自动
   重启恢复 previous。候选公共 smoke 全通过才 commit。
   三档共用同一 vendor lock，普通切档不重建 runtime 或切换 vendor 指针。
-- [ ] **4. 自动回退。** stop/switch/start/smoke 任一步失败后只执行一次恢复：
+- [x] **4. 自动回退。** stop/switch/start/smoke 任一步失败后只执行一次恢复：
   停止候选、恢复 previous selection、启动 previous、再次公共 smoke；恢复成功返回
   rolled_back，失败写 NOT_READY 并保留 candidate、previous、journal 和诊断，不循环 restart。
 - [ ] **5. 边界验证。** 覆盖同档幂等、服务原本已停、stop/start 超时、CLI
@@ -969,9 +969,13 @@ TTL、活动 generation 或 IdleEvictor 暂停协议。
   写入失败、许可重复消费、候选首次启动崩溃后回到 previous、首次安装无 previous、
   回退启动或 smoke 失败。日志不得含绝对模型路径、音频、
   文本、Authorization 或任意环境变量。
-- [ ] **6. 绿测试与单主题交付。** 跑针对性 pytest、ruff、mypy、diff check；建议提交信息
+- [x] **6. 绿测试与单主题交付。** 跑针对性 pytest、ruff、mypy、diff check；实现提交
+  `ea00a93`、`f4dbb59`、`23eb7dc`；
   `feat: switch complete model pairs with stopped-service rollback`。fake 只证明事务顺序，
   真实服务/模型/质量/资源仍由 V01 和 G2/G3 验收。
+
+S04 核心事务已完成；第 5 项中的同档幂等、首次安装、一次回退、空音频/文本和中断恢复已有
+回归，真实 PID 更换、launchd 超时与运行日志脱敏仍随 V01 实际服务切换验收。
 
 ### S05：退役——私有控制 socket
 
@@ -985,7 +989,7 @@ peer UID 协议、长任务 operation API 或新的攻击面。
 **所有权 / Files：** 新建 src/speechrail/service/profile_commands.py、tests/test_profile_commands.py；修改 src/speechrail/cli.py、tests/test_cli.py。
 **接口 / Inputs & Outputs：** 新增 speechrail setup；speechrail profile list|status|apply <id>|rollback，统一--app-home；apply支持--yes供已显示影响后的自动化调用。serve/service旧命令原样。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_commands.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_profile_commands.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.service.profile_commands import model_changes
@@ -996,14 +1000,17 @@ def test_balanced_to_light_only_changes_asr():
     assert model_changes(old, new) == {"asr"}
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_commands.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_commands.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
 - [ ] **3. 最小实现。** 新装只推荐已通过对应硬件矩阵的组合；旧装显示当前selection不重选。TUI依次显示推荐/三档、缺失下载量、音色变化、回退磁盘需求，最后一次“下载并应用”覆盖准备与生效。先P01/P02准备，再由S04停服切换；准备阶段可取消，停服后CLI中断必须完成回退。VoiceDesign→CustomVoice必须展示style/design能力减少和default/warm同声；balanced↔light不提示虚构TTS变化。
 - [ ] **4. 边界验证。** model_changes(old,new)->set[str]本卡定义；输入错误、Ctrl-C、noTTY需显式--yes且有machine-readable影响、已缓存不重下、同档幂等、offline缺模型说明、停服窗口和预计耗时清楚展示；客户端baseURL/port/key/alias未变。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: offer a single guided model preset workflow`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 核心命令由 `393adcc` 交付，非交互显式确认与 mapping
+  影响比较由 `b3ac92d` 补齐；提交均通过 staged diff check，未触碰用户 README 改动。
+
+U01 当前可用核心已完成：三档列出、内存推荐、状态、一次应用、回退与 `--yes`。上面第 3/4 项
+要求的精细缺失下载量、完整能力变化说明和机器可读影响输出仍待发行体验收口，因此不将整卡标为完成。
 
 
 ### U02：交付普通用户双击入口与干净机器安装
@@ -1012,7 +1019,7 @@ def test_balanced_to_light_only_changes_asr():
 **所有权 / Files：** 新建 deploy/macos/SpeechRail-Setup.command、tests/test_setup_launcher.py；修改 tools/install_macos.py 生成已安装“SpeechRail 设置.command”。
 **接口 / Inputs & Outputs：** release附带固定bootstrap manifest与setup launcher；已安装launcher调用当前release的 speechrail setup --app-home，路径正确shell quoting；不会另建daemon或WebUI。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_setup_launcher.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_setup_launcher.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from pathlib import Path
@@ -1023,14 +1030,17 @@ def test_launcher_never_executes_unverified_remote_script():
     assert "eval " not in script
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_setup_launcher.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_setup_launcher.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
 - [ ] **3. 最小实现。** 干净arm64 Mac检查OS/架构/磁盘后，使用系统工具取经hash校验的固定uv与Python/runtime制品，再启动同一向导；不要求用户先安装Python/Homebrew。不得curl|sh、eval、不加检查放行Gatekeeper或要求root。打包签名/公证若分发需要则作为release制品门；未签名不能宣称无系统提示。用户权限提示只在首次必要准备出现，不能每个依赖反复确认。
 - [ ] **4. 边界验证。** 静态测试不是完整验收；必须加fakebin拦截验证下载→hash失败不执行、路径含空格/中文、未安装Python/uv、网络断开恢复、用户取消、权限限制、第二次启动不重装；V01实机双击。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: package a double-click speech setup entry`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** `e5b9b66` 交付仓库与已安装双击入口；安装器原子写入
+  0700 launcher，路径含空格/中文及 symlink 拒绝测试通过。
+
+U02 已完成“已安装运行时双击设置”部分。干净机器仍缺固定且可校验的 uv/Python bootstrap
+发行包、签名/公证和断网恢复实测；第 3/4 项保持未勾选，不能宣称干净 M1 首装已验收。
 
 
 ### C01：发布准确的模型/音色目录与契约扩展

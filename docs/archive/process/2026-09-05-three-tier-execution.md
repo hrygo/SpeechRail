@@ -111,8 +111,21 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
 - S04 前置解析器 `681995d` 已把 prepared ID 严格绑定到 catalog/runtime lock、完整
   ASR/TTS pair、目录、文件大小和 SHA-256；44 项测试通过。解析只在准备/启动/切档调用，
   不进入请求热路径；全量哈希在停服前完成。
-- S04 停服切换协调器、U01/U02 普通用户入口、公开契约、B02 真实质量及 M1 Air 8GB
-  内存/热稳态仍在待办范围。S05 私有控制 socket 已退役。
+- S04 核心事务已由 `ea00a93`、`f4dbb59`、`23eb7dc` 完成：一次性候选启动许可、停服切换、
+  公共 ASR/TTS smoke 与一次有界回退均已接线并通过 fake/HTTP 边界测试。真实模型仍由
+  B02/V01 验收。
+- U01 核心命令由 `393adcc`、`b3ac92d` 完成：`setup` 与
+  `profile list|status|apply|rollback` 复用同一停服切换路径，自动化必须显式 `--yes`；
+  8/12/16GiB 推荐只读取物理内存，不识别机器营销型号。更细的缺失下载量与能力影响展示仍待收口。
+- U02 的已安装双击入口由 `e5b9b66` 完成，安装器生成 0700 的“SpeechRail 设置.command”，
+  路径含空格/中文与 symlink 拒绝测试通过。干净机器 bootstrap、签名/公证和实机双击仍未验收。
+- `097d409` 接入官方 ModelScope 不可变 revision 的直接流式下载，避免 SDK cache 与模型仓库
+  同时保留整份快照；下载仍由 model store 执行大小、SHA-256、取消和原子发布门。
+- 当前代码门：965 项完整 fake/契约测试通过，覆盖率 83.10%；`ruff src tests`、`mypy src`、
+  OpenAPI lint、LaunchAgent plist lint 与 wheel 构建通过。之后的 launcher/CLI 小改另有 51 项和
+  27 项针对性回归通过；最终 HEAD 仍须再跑一次完整门。
+- C01/C02 公开契约收口、B02 真实质量、12GB 与 M1 Air 8GB 内存/热稳态、V01 发行验收
+  仍在待办范围。S05 私有控制 socket 已退役。
 
 ## 回退
 
