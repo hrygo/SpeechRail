@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from speechrail.service.launchd import ServiceError
 from speechrail.service.model_store import (
     PreparedModelSet,
     resolve_prepared_models,
@@ -28,6 +29,33 @@ class PublicSmokeProbe(Protocol):
     """Validate one running model pair through the public API."""
 
     def run(self, prepared: PreparedModelSet) -> None: ...
+
+
+class LaunchAgentManagerLike(Protocol):
+    """Narrow manager surface used by profile switching."""
+
+    def status(self) -> str: ...
+
+    def disable(self) -> None: ...
+
+    def enable(self) -> None: ...
+
+
+class LaunchAgentServiceController:
+    """Adapt the existing user LaunchAgent manager to stopped switching."""
+
+    def __init__(self, manager: LaunchAgentManagerLike) -> None:
+        self._manager = manager
+
+    def stop(self) -> None:
+        try:
+            self._manager.status()
+        except ServiceError:
+            return
+        self._manager.disable()
+
+    def start(self) -> None:
+        self._manager.enable()
 
 
 PreparedIdResolver = Callable[[str, Path], PreparedModelSet]
@@ -186,6 +214,7 @@ def apply_prepared_profile(
 
 __all__ = [
     "ApplyResult",
+    "LaunchAgentServiceController",
     "PublicSmokeProbe",
     "ServiceController",
     "apply_prepared_profile",
