@@ -145,7 +145,11 @@ def _loopback_url(settings: Settings) -> str:
 
 def _switch_prepared(prepared_id: str, app_home: Path) -> ApplyResult:
     layout = ServiceLayout.for_app_home(app_home)
-    preflight = run_preflight(layout, require_tts=True)
+    preflight = run_preflight(
+        layout,
+        require_tts=True,
+        host_python=layout.current_runtime / ".venv" / "bin" / "python",
+    )
     if not preflight.ok:
         raise ProfileCommandError("managed runtime preflight failed")
     settings = Settings.from_env_file(layout.config_file)

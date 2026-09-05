@@ -247,6 +247,7 @@ def run_preflight(
     *,
     require_tts: bool,
     runner: CommandRunner = subprocess.run,
+    host_python: Path | None = None,
 ) -> PreflightResult:
     """Validate an installed service without starting workers or downloading models."""
     checks: list[PreflightCheck] = []
@@ -387,6 +388,7 @@ def run_preflight(
     if not asr_configured and not tts_configured:
         checks.extend(_managed_runtime_checks(layout, runner))
 
+    optional_profile_python = host_python or Path(sys.executable)
     diarization_configured = settings.diarization_model_path is not None
     checks.append(
         _check(
@@ -408,7 +410,7 @@ def run_preflight(
         checks.append(
             _runtime_check(
                 "diarization_runtime",
-                Path(sys.executable),
+                optional_profile_python,
                 "nemo.collections.asr.models",
                 runner,
             )
@@ -424,7 +426,7 @@ def run_preflight(
             checks.append(
                 _runtime_check(
                     "diarization_embedding_runtime",
-                    Path(sys.executable),
+                    optional_profile_python,
                     "onnxruntime",
                     runner,
                 )

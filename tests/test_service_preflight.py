@@ -218,3 +218,45 @@ def test_preflight_checks_configured_diarization_profile(
     assert next(check for check in result.checks if check.name == "diarization_config").ok is True
     assert next(check for check in result.checks if check.name == "diarization_snapshot").ok is True
     assert next(check for check in result.checks if check.name == "diarization_runtime").ok is True
+
+
+def test_preflight_uses_explicit_host_python_for_optional_profiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    sortformer = tmp_path / "sortformer.nemo"
+    embedding = tmp_path / "embedding.onnx"
+    sortformer.touch()
+    embedding.touch()
+    host_python = tmp_path / "installed" / "bin" / "python"
+    host_python.parent.mkdir(parents=True)
+    host_python.write_text("fixture python\n", encoding="utf-8")
+    host_python.chmod(0o700)
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_DIARIZATION_MODEL_PATH={sortformer}\n")
+        stream.write(f"SPEECHRAIL_DIARIZATION_EMBEDDING_MODEL_PATH={embedding}\n")
+    commands: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = run_preflight(
+        layout,
+        require_tts=False,
+        runner=runner,
+        host_python=host_python,
+    )
+
+    assert result.ok is True
+    assert any(command[0] == str(host_python) for command in commands)
+    assert all(
+        command[0] == str(host_python)
+        for command in commands
+        if "nemo.collections.asr.models" in command or "onnxruntime" in command
+    )
