@@ -37,7 +37,10 @@ ws://127.0.0.1:8201/v1/realtime
   - `tts-1`、`tts-1-hd`、`gpt-4o-mini-tts` → TTS 兼容 alias
   - `session.update.session.model` 继续同样解析；两者同时出现时以最后一次生效。
 - `/v1/models` 列出 canonical 与当前可用的兼容 alias，alias 条目带 `resolves_to` 标注其
-  canonical profile；`gpt-4o-transcribe-diarize` 仅在 diarization profile 可用时出现。
+  canonical profile；canonical 条目同时声明当前受管档位、实际 artifact、variant 与量化；
+  `gpt-4o-transcribe-diarize` 仅在 diarization profile 可用时出现。
+- `/v1/voices` 的 `available`、`variant` 与 `capabilities` 取自同一次启动所加载的档位。
+  Realtime 客户端应选择 `available=true` 的 voice；OpenAI voice alias 仍按固定映射解析。
 
 ## 支持的客户端事件
 

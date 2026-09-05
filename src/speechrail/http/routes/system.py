@@ -2,25 +2,121 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
 from speechrail.application.services import AppServices
+from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     asr_model_aliases,
     diarization_model_aliases,
     tts_model_aliases,
 )
-from speechrail.domain.tts import VOICE_ALIASES, get_voice_registry
+from speechrail.config import Settings
+from speechrail.config.model_catalog import ModelArtifact, load_catalog
+from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
 from speechrail.http.errors import error_response
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveCatalog:
+    profile: str | None
+    asr: ModelArtifact | None
+    tts: ModelArtifact | None
+
+
+def _active_catalog(settings: Settings) -> _ActiveCatalog:
+    """Match resolved managed model directories to the packaged immutable catalog."""
+
+    catalog = load_catalog()
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    asr_key = settings.qwen3_model_dir.name if settings.qwen3_model_dir else None
+    tts_key = settings.qwen3_tts_model_dir.name if settings.qwen3_tts_model_dir else None
+    asr = artifacts.get(asr_key) if asr_key else None
+    tts = artifacts.get(tts_key) if tts_key else None
+    profile = next(
+        (
+            preset.id
+            for preset in catalog.presets
+            if preset.asr == asr_key and preset.tts == tts_key
+        ),
+        None,
+    )
+    return _ActiveCatalog(profile=profile, asr=asr, tts=tts)
+
+
+def _model_entry(
+    model_id: str,
+    active: _ActiveCatalog,
+    artifact: ModelArtifact | None,
+) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": model_id,
+        "object": "model",
+        "owned_by": "speechrail",
+        "created": 0,
+    }
+    if artifact is not None:
+        entry.update(
+            {
+                "profile": active.profile,
+                "artifact": artifact.key,
+                "source_model": artifact.model_id,
+                "family": artifact.family,
+                "variant": artifact.variant,
+                "quantization": artifact.quantization.model_dump(mode="json"),
+            }
+        )
+    return entry
+
+
+def _voice_entry(
+    profile: VoiceProfile,
+    active: _ActiveCatalog,
+    tts_ready: bool,
+) -> dict[str, Any]:
+    variant = active.tts.variant if active.tts is not None else None
+    available = tts_ready
+    supports_speaker = False
+    supports_instruction = False
+    if variant in {"voice_design", "custom_voice"}:
+        try:
+            binding = resolve_binding(variant, profile.id)
+        except ValueError:
+            available = False
+        else:
+            capabilities = binding.capabilities
+            supports_speaker = capabilities.supports_speaker
+            supports_instruction = capabilities.supports_instruction
+
+    return {
+        "id": profile.id,
+        "name": profile.name or profile.id,
+        "description": profile.description,
+        "instruction": profile.instruction,
+        "aliases": sorted(
+            alias for alias, preset in VOICE_ALIASES.items() if preset == profile.id
+        ),
+        "is_default": profile.is_default,
+        "is_system": profile.is_system,
+        "created_at": profile.created_at,
+        "available": available,
+        "variant": variant,
+        "capabilities": {
+            "supports_speaker": supports_speaker,
+            "supports_instruction": supports_instruction,
+        },
+    }
 
 
 def create_system_router(services: AppServices) -> APIRouter:
     """Four read-only endpoints; no auth by design (loopback-first service)."""
     router = APIRouter()
     resolved = services.settings
+    active = _active_catalog(resolved)
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
@@ -28,7 +124,8 @@ def create_system_router(services: AppServices) -> APIRouter:
             "status": "ok",
             "service": resolved.service_name,
             "version": resolved.version,
-            "backend": "qwen3-asr-1.7b",
+            "backend": active.asr.key if active.asr is not None else resolved.model_id,
+            "profile": active.profile,
             "asr_ready": services.asr_ready,
             "tts_ready": services.tts_ready,
             "diarization_ready": services.diarization_ready,
@@ -56,8 +153,8 @@ def create_system_router(services: AppServices) -> APIRouter:
         asr_target = resolved.model_id
         tts_target = resolved.tts_model_id
         data: list[dict[str, Any]] = [
-            {"id": asr_target, "object": "model", "owned_by": "speechrail", "created": 0},
-            {"id": tts_target, "object": "model", "owned_by": "speechrail", "created": 0},
+            _model_entry(asr_target, active, active.asr),
+            _model_entry(tts_target, active, active.tts),
         ]
         for alias, target in sorted(asr_model_aliases().items()):
             if alias in diarization_model_aliases() and not services.diarization_ready:
@@ -106,22 +203,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         profiles = registry.list_profiles()
         return {
             "object": "list",
-            "data": [
-                {
-                    "id": p.id,
-                    "name": p.name or p.id,
-                    "description": p.description,
-                    "instruction": p.instruction,
-                    "aliases": sorted(
-                        alias for alias, preset in VOICE_ALIASES.items() if preset == p.id
-                    ),
-                    "is_default": p.is_default,
-                    "is_system": p.is_system,
-                    "created_at": p.created_at,
-                    "available": services.tts_ready,
-                }
-                for p in profiles
-            ],
+            "data": [_voice_entry(p, active, services.tts_ready) for p in profiles],
         }
 
     @router.post("/v1/voices")
@@ -174,16 +256,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
             return JSONResponse(
                 status_code=201,
-                content={
-                    "id": profile.id,
-                    "name": profile.name,
-                    "description": profile.description,
-                    "instruction": profile.instruction,
-                    "is_default": profile.is_default,
-                    "is_system": profile.is_system,
-                    "created_at": profile.created_at,
-                    "available": services.tts_ready,
-                },
+                content=_voice_entry(profile, active, services.tts_ready),
             )
         except ValueError as exc:
             return error_response(

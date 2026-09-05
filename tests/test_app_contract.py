@@ -8,6 +8,7 @@ import speechrail.application.services as services_module
 from speechrail.app import create_app
 from speechrail.backends.qwen3_native import MODEL_FILES
 from speechrail.config import Settings
+from speechrail.config.model_catalog import load_catalog
 
 
 def _client() -> TestClient:
@@ -32,7 +33,8 @@ def test_health_reports_contract_shell_without_backend() -> None:
         "status": "ok",
         "service": "speechrail",
 "version": "1.6.9",
-        "backend": "qwen3-asr-1.7b",
+        "backend": "speechrail/qwen3-asr-1.7b",
+        "profile": None,
         "asr_ready": False,
         "tts_ready": False,
         "diarization_ready": False,
@@ -44,6 +46,57 @@ def test_health_reports_contract_shell_without_backend() -> None:
             "profile": None,
         },
         "ready": False,
+    }
+
+
+@pytest.mark.parametrize("preset_id", ["quality", "balanced", "light"])
+def test_managed_profile_publishes_active_model_identity(
+    tmp_path: Path,
+    preset_id: str,
+) -> None:
+    catalog = load_catalog()
+    preset = catalog.preset(preset_id)
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    settings = Settings(
+        qwen3_model_dir=tmp_path / preset.asr,
+        qwen3_python=None,
+        qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_python=None,
+    )
+    client = TestClient(create_app(settings))
+
+    health = client.get("/health").json()
+    assert health["backend"] == preset.asr
+    assert health["profile"] == preset_id
+
+    by_id = {
+        item["id"]: item for item in client.get("/v1/models").json()["data"]
+    }
+    asr = artifacts[preset.asr]
+    tts = artifacts[preset.tts]
+    assert by_id[settings.model_id] == {
+        "id": settings.model_id,
+        "object": "model",
+        "owned_by": "speechrail",
+        "created": 0,
+        "profile": preset_id,
+        "artifact": asr.key,
+        "source_model": asr.model_id,
+        "family": asr.family,
+        "variant": asr.variant,
+        "quantization": asr.quantization.model_dump(mode="json"),
+    }
+    assert by_id[settings.tts_model_id] == {
+        "id": settings.tts_model_id,
+        "object": "model",
+        "owned_by": "speechrail",
+        "created": 0,
+        "profile": preset_id,
+        "artifact": tts.key,
+        "source_model": tts.model_id,
+        "family": tts.family,
+        "variant": tts.variant,
+        "quantization": tts.quantization.model_dump(mode="json"),
     }
 
 
@@ -184,7 +237,8 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
         "status": "ok",
         "service": "speechrail",
 "version": "1.6.9",
-        "backend": "qwen3-asr-1.7b",
+        "backend": "speechrail/qwen3-asr-1.7b",
+        "profile": None,
         "asr_ready": False,
         "tts_ready": True,
         "diarization_ready": False,

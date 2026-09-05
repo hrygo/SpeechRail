@@ -43,7 +43,8 @@ paths:
                 status: ok
                 service: speechrail
                 version: 1.6.9
-                backend: qwen3-asr-1.7b
+                backend: asr-1.7b-q8
+                profile: quality
                 asr_ready: true
                 tts_ready: true
                 diarization_ready: false
@@ -226,7 +227,7 @@ paths:
             schema:
               $ref: '#/components/schemas/CreateVoiceRequest'
       responses:
-        '200':
+        '201':
           description: Created custom voice profile
           content:
             application/json:
@@ -407,7 +408,7 @@ components:
   schemas:
     HealthResponse:
       type: object
-      required: [status, service, version, backend, asr_ready, tts_ready, diarization_ready, diarization, ready]
+      required: [status, service, version, backend, profile, asr_ready, tts_ready, diarization_ready, diarization, ready]
       properties:
         status:
           type: string
@@ -419,7 +420,12 @@ components:
           type: string
         backend:
           type: string
-          example: qwen3-asr-1.7b
+          description: Active managed ASR artifact, or the canonical ASR model ID when unmanaged.
+          example: asr-1.7b-q8
+        profile:
+          type: [string, 'null']
+          enum: [quality, balanced, light, null]
+          description: Active managed profile; null for an unmanaged runtime.
         asr_ready:
           type: boolean
         tts_ready:
@@ -468,6 +474,34 @@ components:
           description: |
             Canonical profile this OpenAI-standard alias resolves to. Present
             only on alias entries; canonical entries omit it.
+        profile:
+          type: [string, 'null']
+          enum: [quality, balanced, light, null]
+          description: Active managed profile on canonical entries.
+        artifact:
+          type: string
+          description: Immutable managed artifact key on canonical entries.
+        source_model:
+          type: string
+          description: Upstream model identifier recorded in the managed catalog.
+        family:
+          type: string
+          enum: [qwen3_asr, qwen3_tts]
+        variant:
+          type: string
+          enum: [asr, voice_design, custom_voice]
+        quantization:
+          $ref: '#/components/schemas/Quantization'
+    Quantization:
+      type: object
+      required: [bits, group_size, format]
+      properties:
+        bits:
+          type: [integer, 'null']
+        group_size:
+          type: [integer, 'null']
+        format:
+          type: string
     ModelList:
       type: object
       required: [object, data]
@@ -482,12 +516,16 @@ components:
             $ref: '#/components/schemas/Model'
     VoiceProfile:
       type: object
-      required: [id, description, aliases, is_default, available]
+      required: [id, name, description, instruction, aliases, is_default, is_system, created_at, available, variant, capabilities]
       properties:
         id:
           type: string
-          enum: [default, warm, bright, calm]
+          description: System preset or user-created voice identifier.
+        name:
+          type: string
         description:
+          type: string
+        instruction:
           type: string
         aliases:
           type: array
@@ -496,7 +534,25 @@ components:
             type: string
         is_default:
           type: boolean
+        is_system:
+          type: boolean
+        created_at:
+          type: number
         available:
+          type: boolean
+          description: Whether the active TTS weights can synthesize this voice.
+        variant:
+          type: [string, 'null']
+          enum: [voice_design, custom_voice, null]
+        capabilities:
+          $ref: '#/components/schemas/VoiceCapabilities'
+    VoiceCapabilities:
+      type: object
+      required: [supports_speaker, supports_instruction]
+      properties:
+        supports_speaker:
+          type: boolean
+        supports_instruction:
           type: boolean
     CreateVoiceRequest:
       type: object
