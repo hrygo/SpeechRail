@@ -139,6 +139,11 @@ def test_enabled_tts_is_updated_to_selected_model(
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
     assert resolved.qwen3_tts_model_dir == tts_dir.resolve()
+    assert resolved.qwen3_python == tmp_path / "vendor" / "current" / "bin" / "python"
+    assert resolved.qwen3_tts_python == tmp_path / "vendor" / "current" / "bin" / "python"
+    assert resolved.ffmpeg_path == (
+        tmp_path / "vendor" / "current" / "ffmpeg" / "bin" / "ffmpeg"
+    )
     assert resolved.tts_model_id == original.tts_model_id
 
 
@@ -359,6 +364,12 @@ def test_preflight_integrates_selection_successfully(
     tts_model = app_home / "models" / "tts-1.7b-design-q8"
     tts_model.mkdir(parents=True)
     (tts_model / "config.json").write_text("{}", encoding="utf-8")
+
+    vendor = app_home / "vendor" / "current"
+    for executable in (vendor / "bin" / "python", vendor / "ffmpeg" / "bin" / "ffmpeg"):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text("fixture executable\n", encoding="utf-8")
+        executable.chmod(0o700)
 
     # Persist selection
     store = ProfileStore(app_home)

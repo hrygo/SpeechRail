@@ -79,6 +79,9 @@ def resolve_selection(
     models_dir = (resolved_app_home / "models").resolve()
     asr_dir = (models_dir / asr_key).resolve()
     tts_dir = (models_dir / tts_key).resolve()
+    vendor_current = resolved_app_home / "vendor" / "current"
+    vendor_python = vendor_current / "bin" / "python"
+    vendor_ffmpeg = vendor_current / "ffmpeg" / "bin" / "ffmpeg"
 
     try:
         asr_dir.relative_to(models_dir)
@@ -107,12 +110,15 @@ def resolve_selection(
 
     updates: dict[str, object] = {
         "qwen3_model_dir": asr_dir,
+        "qwen3_python": vendor_python,
+        "ffmpeg_path": vendor_ffmpeg,
     }
     if asr_artifact.quantization.bits == 8:
         updates["dtype"] = "int8"
 
     if tts_configured:
         updates["qwen3_tts_model_dir"] = final_tts_dir
+        updates["qwen3_tts_python"] = vendor_python
 
     return settings.model_copy(update=updates)
 
