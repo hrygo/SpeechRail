@@ -154,6 +154,65 @@ def test_no_argument_remains_compatible_with_serve(monkeypatch: pytest.MonkeyPat
     assert calls == ["serve"]
 
 
+def test_profile_list_and_status_are_read_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from speechrail.service import profile_commands
+
+    monkeypatch.setattr(
+        profile_commands,
+        "profile_status",
+        lambda app_home: profile_commands.ProfileStatus("balanced", 3, "asr", "tts"),
+    )
+
+    assert cli.main(["profile", "list", "--app-home", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert "quality" in output and "balanced" in output and "light" in output
+    assert "balanced *" in output
+
+    assert cli.main(["profile", "status", "--app-home", str(tmp_path)]) == 0
+    assert "balanced" in capsys.readouterr().out
+
+
+def test_setup_yes_uses_memory_recommendation_without_machine_model_detection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from speechrail.service import profile_commands
+    from speechrail.service.profile_switch import ApplyResult
+
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_physical_memory_bytes", lambda: 8 * 1024**3)
+    monkeypatch.setattr(
+        profile_commands,
+        "profile_status",
+        lambda app_home: profile_commands.ProfileStatus(None, None, None, None),
+    )
+    monkeypatch.setattr(
+        profile_commands,
+        "apply_profile",
+        lambda preset, app_home: calls.append(preset)
+        or ApplyResult("committed", "op_test", None),
+    )
+
+    assert cli.main(["setup", "--yes", "--app-home", str(tmp_path)]) == 0
+    assert calls == ["light"]
+
+
+def test_profile_apply_cancel_does_not_prepare_or_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from speechrail.service import profile_commands
+
+    monkeypatch.setattr("builtins.input", lambda prompt: "n")
+    monkeypatch.setattr(
+        profile_commands,
+        "apply_profile",
+        lambda preset, app_home: pytest.fail("apply must not run"),
+    )
+
+    assert cli.main(["profile", "apply", "light", "--app-home", str(tmp_path)]) == 1
+
+
 def test_service_error_is_redacted_and_returns_nonzero(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

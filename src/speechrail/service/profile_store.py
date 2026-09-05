@@ -224,6 +224,10 @@ class ProfileStore:
     def recover(self) -> dict[str, object] | None:
         return self._recover_unlocked()
 
+    def previous(self) -> dict[str, object] | None:
+        """Return the last committed selection retained for explicit rollback."""
+        return _selection(self._read(self.previous_path))
+
     def initialize(self, selection: Mapping[str, object]) -> None:
         validated = _selection(selection)
         with self._locked():
