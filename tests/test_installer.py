@@ -157,6 +157,7 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     assert runtime_calls == [("prepare-runtime",)]
     assert layout.current_runtime.is_symlink()
     assert layout.config_file.stat().st_mode & 0o777 == 0o600
+    assert (app_home / "SpeechRail 设置.command").stat().st_mode & 0o777 == 0o700
     config = layout.config_file.read_text(encoding="utf-8")
     assert "SPEECHRAIL_HOST=127.0.0.1" in config
     stable_vendor_python = layout.vendor_current / "bin" / "python"
@@ -594,6 +595,9 @@ def test_install_wheel_stages_new_runtime_and_switches_current_atomically(
     assert layout.current_runtime.is_symlink()
     assert layout.current_runtime.resolve() == result.runtime_python.parents[2].resolve()
     assert layout.config_file.read_text(encoding="utf-8") == env_file.read_text(encoding="utf-8")
+    launcher = app_home / "SpeechRail 设置.command"
+    assert launcher.is_file()
+    assert launcher.stat().st_mode & 0o777 == 0o700
     assert not any("launchctl" in part for command in calls for part in command)
 
 

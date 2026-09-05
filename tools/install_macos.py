@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import hashlib
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -221,6 +222,52 @@ def _write_private_config(destination: Path, content: str | bytes) -> None:
         raise
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _setup_launcher_path(app_home: Path) -> Path:
+    return app_home.absolute() / "SpeechRail 设置.command"
+
+
+def _write_setup_launcher(app_home: Path) -> Path:
+    """Atomically install a double-click entry for the current managed release."""
+    resolved_home = app_home.absolute()
+    destination = _setup_launcher_path(resolved_home)
+    if destination.is_symlink():
+        raise InstallerError("setup launcher must not be a symlink")
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    home = shlex.quote(str(resolved_home))
+    content = (
+        "#!/bin/zsh\n"
+        "set -eu\n"
+        f"APP_HOME={home}\n"
+        'RUNTIME_PYTHON="$APP_HOME/runtime/current/.venv/bin/python"\n'
+        'if [[ ! -x "$RUNTIME_PYTHON" ]]; then\n'
+        '  print -u2 "SpeechRail is not installed at: $APP_HOME"\n'
+        "  exit 1\n"
+        "fi\n"
+        'exec "$RUNTIME_PYTHON" -m speechrail setup --app-home "$APP_HOME"\n'
+    ).encode()
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=".SpeechRail-Setup."
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            os.fchmod(output.fileno(), 0o700)
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        if destination.is_symlink():
+            raise InstallerError("setup launcher must not be a symlink")
+        temporary.replace(destination)
+        directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
 
 
 def _copy_config_exclusive(source: Path, destination: Path) -> None:
@@ -533,6 +580,7 @@ def install_managed(
             old_target = _switch_current(layout, release_dir)
             switched = True
         current_python = layout.current_runtime / ".venv" / "bin" / "python"
+        _write_setup_launcher(layout.app_home)
         if not already_current:
             _run(
                 (
@@ -663,6 +711,7 @@ def install_wheel(
         old_target = _switch_current(layout, release_dir)
         try:
             current_python = layout.current_runtime / ".venv" / "bin" / "python"
+            _write_setup_launcher(layout.app_home)
             _run(
                 (
                     str(current_python),
