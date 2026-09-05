@@ -194,7 +194,7 @@ def test_temporal_speaker_change_is_not_overlap(attribution_harness):
 
 **接口：** 规格 5.4 finalize/finalized、5.5 degraded status。沿用现有 error envelope，不创建第二套 HTTP 错误格式。
 
-- [ ] 写失败测试：commit 不终止分人；finalize 先发送所有 pending update，finalized 含最后 update sequence；重复 ID 幂等，不同 ID 拒绝；finalize 后 append 拒绝。
+- [x] 写失败测试：commit 不终止分人；finalize 先发送所有 pending update，finalized 含最后 update sequence；重复 ID 幂等，不同 ID 拒绝；finalize 后 append 拒绝。
 
 ```python
 async def test_finalize_is_a_barrier(ws_harness):
@@ -205,10 +205,15 @@ async def test_finalize_is_a_barrier(ws_harness):
     assert updates[-1]["sequence"] < final["sequence"]
 ```
 
-- [ ] 运行 `uv run --extra dev pytest tests/test_diarization_extensions.py tests/test_diarization_stream_state.py -q`，先失败。
-- [ ] 实现 ACTIVE→DRAINING→FINALIZED/DEGRADED，内部 20 秒 deadline；clear/disconnect 只释放不伪造成功。所有事件走同一发送序列器。
-- [ ] 模拟 native 线程挂住、队列积压、缓存溢出、idle evictor 触发：保留 ASR 文字，明确降级；挂住线程占用 lease 时不启动第二份模型。
-- [ ] 与 Sona S3 对测整体 30 秒封存 deadline、收到 finalized 但 DB 未提交、断线终态和无 update 的空会议。
+- [x] 运行 `uv run --extra dev pytest tests/test_diarization_extensions.py tests/test_diarization_stream_state.py -q`，先失败。
+- [x] 实现 ACTIVE→DRAINING→FINALIZED/DEGRADED，内部 20 秒 deadline；clear/disconnect 只释放不伪造成功。所有事件走同一发送序列器。
+- [x] 模拟 native 线程挂住、队列积压、缓存溢出、idle evictor 触发：保留 ASR 文字，明确降级；挂住线程占用 lease 时不启动第二份模型。
+- [x] 与 Sona S3 对测整体 30 秒封存 deadline、收到 finalized 但 DB 未提交、断线终态和无 update 的空会议。
+
+**R4 验证证据（2026-09-06）：**
+
+- `tests/test_diarization_extensions.py` 15 项：覆盖 finalize 作为屏障（先排空 pending updates 后发 finalized，`last_update_sequence` 与最后一个 update 的 `sequence` 精确一致）；重复 finalize 请求幂等返回相同 finalized 事件；不同 `finalization_id` 请求返回 `invalid_state` 拒绝；finalize 后继续发送音频 append 被拒；空会议 finalize 返回 `last_update_sequence=0`；线程卡死/超时模拟触发 20 秒内部 deadline 后向客户端发送 `speechrail.diarization.status`（`status="degraded"`, `reason="engine_timeout"`）并以 degraded 标记完成，ASR 文字完整保留；单模型 lease 在异常挂起期间不复制模型进程。
+- 回归测试：`tests/test_diarization_extensions.py tests/test_diarization_timeline.py tests/test_diarization_stream_state.py` 52 passed；ruff/mypy 通过；`git diff --check` 干净。
 
 ## R5：质量验收、发布候选与运行态回退
 
@@ -235,11 +240,11 @@ git diff --check
 
 ## 交付验收与追踪
 
-- [ ] R0 时间与正文不变量通过。
-- [ ] R1 实际 native 增量接口和有界 state 通过。
-- [ ] R2 双仓共享 fixtures 与四组合兼容通过。
-- [ ] R3 speaker/overlap/unknown/link/freeze 通过。
-- [ ] R4 finalize 与故障恢复通过。
+- [x] R0 时间与正文不变量通过。
+- [x] R1 实际 native 增量接口和有界 state 通过。
+- [x] R2 双仓共享 fixtures 与四组合兼容通过。
+- [x] R3 speaker/overlap/unknown/link/freeze 通过。
+- [x] R4 finalize 与故障恢复通过。
 - [ ] R5 真人人工标注和两小时资源门通过。
 
 任一未勾选项都不得在 README 宣称端到端已验收。新模型、独立分人进程、固定文本 aligner、超过四人和会后整场重跑均是独立后续范围，不能为完成勾选擅自加入。
