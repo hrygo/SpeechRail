@@ -331,13 +331,19 @@ class AttributionLedger:
         """Watermark before which attribution is no longer auto-revised."""
         return self._stable_through
 
-    def register(self, unit: AttributionUnit) -> None:
-        """Register one immutable unit; duplicate ids are rejected."""
+    def register(self, unit: AttributionUnit) -> AttributionResult | None:
+        """Register one immutable unit; duplicate ids are rejected.
+
+        Returns an ``AttributionResult`` immediately when the unit is finalized
+        at registration (e.g. ``timing_quality == 'unavailable'`` or a late unit
+        ending at or before the stable watermark), or ``None`` if pending.
+        """
         if unit.segment_uid in self._units:
             raise ValueError(f"segment_uid already registered: {unit.segment_uid}")
         if unit.timing_quality == "unavailable" or unit.end_sample <= unit.start_sample:
-            self._units[unit.segment_uid] = self._terminate_unknown(unit)
-            return
+            state = self._terminate_unknown(unit)
+            self._units[unit.segment_uid] = state
+            return self._result(state)
         pending_count = sum(1 for state in self._units.values() if not state.final)
         if pending_count + 1 > self._max_pending_units:
             raise DiarizationError(
@@ -361,6 +367,9 @@ class AttributionLedger:
             speaker = state.speaker
             state.status = "stable" if speaker is not None else "unknown"
             state.final = True
+            state.revision = 1
+            return self._result(state)
+        return None
 
     def apply_activity(self, snapshot: ActivitySnapshot) -> tuple[AttributionResult, ...]:
         """Fold one activity snapshot; return results for changed units only."""
@@ -501,7 +510,7 @@ class AttributionLedger:
         for uid in [
             uid
             for uid, state in self._units.items()
-            if state.final and state.unit.end_sample <= self._stable_through
+            if state.final and state.revision > 0 and state.unit.end_sample <= self._stable_through
         ]:
             del self._units[uid]
 

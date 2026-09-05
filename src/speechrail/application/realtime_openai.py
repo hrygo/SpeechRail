@@ -672,18 +672,28 @@ class OpenAIRealtimeSession:
         """Feed delivered units to the ledger, then fold fresh activities."""
         if self._ledger is None or not units:
             return
+        immediate_results: list[AttributionResult] = []
         try:
             for unit in units:
-                self._ledger.register(unit)
+                res = self._ledger.register(unit)
+                if res is not None:
+                    immediate_results.append(res)
         except DiarizationError as exc:
             await self._handle_degradation(exc)
             return
+        if immediate_results:
+            await self._send_diarization_updates(tuple(immediate_results))
         if self._degraded_reason is not None:
-            # Degraded attribution keeps delivering text: new units are
-            # terminated as unknown instead of being silently dropped.
-            await self._send_diarization_updates(
-                tuple(self._unknown_result(unit) for unit in units)
-            )
+            # Degraded attribution keeps delivering text: any unit not already
+            # delivered as an immediate result is terminated as unknown.
+            delivered_uids = {r.segment_uid for r in immediate_results}
+            pending = [
+                self._unknown_result(u)
+                for u in units
+                if u.segment_uid not in delivered_uids
+            ]
+            if pending:
+                await self._send_diarization_updates(tuple(pending))
             return
         await self._fold_stream_activities()
 

@@ -394,7 +394,11 @@ def test_late_unit_uses_frozen_activities_without_reopening_the_window() -> None
         end_sample=1600,
         timing_quality="aligned",
     )
-    ledger.register(late)
+    result = ledger.register(late)
+    assert result is not None
+    assert result.status == "stable"
+    assert result.speaker == "spk_01"
+    assert result.revision == 1
     assert ledger.stable_through_sample >= 1600
     state = ledger.unit_state("seg_late")
     assert state is not None and state["final"] is True
@@ -411,7 +415,11 @@ def test_unavailable_unit_is_immediately_unknown() -> None:
         end_sample=1600,
         timing_quality="unavailable",
     )
-    ledger.register(unit)
+    result = ledger.register(unit)
+    assert result is not None
+    assert result.status == "unknown"
+    assert result.speaker is None
+    assert result.revision == 1
     state = ledger.unit_state("seg_unavailable")
     assert state is not None and state["status"] == "unknown"
     assert state["final"] is True

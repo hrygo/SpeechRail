@@ -770,3 +770,67 @@ def test_native_exception_sends_unknown_updates_then_one_status() -> None:
         final = tail[-1]
         assert final["status"] == "degraded"
         assert final["reason"] == "diarization_invalid_output"
+
+
+class _MisalignedStreamingSession(_FakeStreamingSession):
+    async def commit(self, want_segments: bool = False) -> None:
+        del want_segments
+        await self.events_queue.put(
+            StreamingAsrEvent(
+                kind="completed",
+                text="不同意。",
+                language="zh",
+                segments=(
+                    TranscriptSegment(id=0, start_ms=0, end_ms=500, text="同意。"),
+                ),
+            )
+        )
+        await self.events_queue.put(None)
+
+
+class _MisalignedStreamingFactory:
+    def create(self, *, language: str | None, prompt: str) -> _MisalignedStreamingSession:
+        del language, prompt
+        return _MisalignedStreamingSession(language=None, prompt="")
+
+    def release(self, session: object) -> None:
+        del session
+
+
+def test_unavailable_alignment_emits_unknown_update() -> None:
+    streaming_factory = _MisalignedStreamingFactory()
+    settings = Settings(
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        diarization_model_path=None,
+        diarization_embedding_model_path=None,
+    )
+    services = build_app_services(
+        settings,
+        AppOverrides(
+            realtime_asr_factory=streaming_factory,  # type: ignore[arg-type]
+            diarization_engine=_FakeDiarizationEngine(supports_stream=True),  # type: ignore[arg-type]
+        ),
+    )
+    app = FastAPI()
+    app.include_router(create_openai_realtime_router(services))
+    client = TestClient(app)
+
+    with client.websocket_connect("/v1/realtime") as socket:
+        _open(socket)
+        _negotiate(socket)
+        events = _append_and_commit(socket, 8000)
+        completed = events[-1]
+        assert completed["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed["transcript"] == "不同意。"
+        units = completed["attribution_units"]
+        assert len(units) == 1
+        assert units[0]["timing_quality"] == "unavailable"
+
+        update_events = _collect_until(socket, "speechrail.diarization.update")
+        update = update_events[-1]
+        assert len(update["updates"]) == 1
+        assert update["updates"][0]["segment_uid"] == units[0]["segment_uid"]
+        assert update["updates"][0]["status"] == "unknown"
+        assert update["updates"][0]["speaker"] is None
+        assert update["updates"][0]["revision"] == 1
