@@ -2,12 +2,13 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新专项基线（三档统一运行时，本机可行性）
+## 最新发布基线（v1.7.0，MINOR 三档）
 
-> **结论**：`quality`、`balanced`、`light` 已在同一 Apple M5 Max 上按公共 API 串行
-> 实测，最大同时物理占用分别为 7000.3 MB、5877.4 MB、4484.2 MB。该数据不替代
-> M1 Air 8GB、12GB 设备和完整真人质量集发布门。详见
-> [三档本机可行性报告](2026-09-05-three-tier-feasibility.md)。
+> **结论**：v1.7.0 已按 MINOR 规则在同一 Apple M5 Max 上串行测试 `quality`、
+> `balanced`、`light`，最大同时物理占用为 6943.9、6085.9、4462.9 MB；每档
+> 中英文 ASR 与 TTS 均 5/5。`quality` 的同一输入在进程内和服务重启后 PCM hash
+> 一致；跨文本同一人听感仍需 embedding 与 ABX。详见
+> [v1.7.0 性能与质量基准](2026-09-05-v1.7.0-performance-benchmark.md)。
 
 ## 历史发布基线（v1.6.8，发布后重测）
 
@@ -31,6 +32,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.7.0** | [2026-09-05-v1.7.0-performance-benchmark.md](2026-09-05-v1.7.0-performance-benchmark.md) | MINOR 三档 N=5 基础基准；版本纵向与档位横向对比；加入同文本/跨重启音色稳定性证据 |
 | **三档专项** | [2026-09-05-three-tier-feasibility.md](2026-09-05-three-tier-feasibility.md) | 同一共享 runtime 的三档公共 API、准确率代理和完整物理内存采样；结束时恢复 quality |
 | **v1.6.8** | [2026-09-05-v1.6.8-performance-benchmark.md](2026-09-05-v1.6.8-performance-benchmark.md) | 发布后完整 7 步重测；总常驻 9.15 GB，单次并发 2.74 req/s；因仅一轮测量暂不改写长期趋势 |
 | **v1.6.7** | [2026-09-05-v1.6.7-performance-benchmark.md](2026-09-05-v1.6.7-performance-benchmark.md) | Sortformer 空闲自动卸载，主服务回落 0.54 GB；修复 sample_resources 进程误分类，batch-asr 回真实基线 2.51 GB |
