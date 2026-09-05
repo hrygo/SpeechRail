@@ -199,7 +199,7 @@ paths:
     get:
       operationId: listVoices
       tags: [speech]
-      summary: List server-owned TTS preset voices
+      summary: List system and custom TTS voices
       security:
         - BearerAuth: []
         - {}
@@ -212,6 +212,53 @@ paths:
                 $ref: '#/components/schemas/VoiceList'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createVoice
+      tags: [speech]
+      summary: Design and register a custom voice using natural language prompt
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVoiceRequest'
+      responses:
+        '200':
+          description: Created custom voice profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/voices/{voice_id}:
+    delete:
+      operationId: deleteVoice
+      tags: [speech]
+      summary: Delete a custom voice
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Voice deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: System voices are protected and cannot be deleted
+        '404':
+          description: Voice not found
   /v1/audio/speech:
     post:
       operationId: createSpeech
@@ -451,6 +498,19 @@ components:
           type: boolean
         available:
           type: boolean
+    CreateVoiceRequest:
+      type: object
+      required: [name, instruction]
+      properties:
+        name:
+          type: string
+          description: Friendly display name for the voice
+        instruction:
+          type: string
+          description: Natural language prompt describing the voice characteristics
+        id:
+          type: string
+          description: Optional voice identifier. If omitted, auto-generated.
     VoiceList:
       type: object
       required: [object, data]

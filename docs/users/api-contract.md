@@ -35,7 +35,9 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 | `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 表示 ASR/TTS 引擎已预热并可接受流量 |
 | `GET` | `/metrics` | 运行指标导出 | 默认 Prometheus 文本；`Accept: application/json` 返回结构化视图 |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
-| `GET` | `/v1/voices` | 注册的 TTS 音色列表 | 返回 `default`, `warm`, `bright`, `calm` 及可用性 |
+| `GET` | `/v1/voices` | 注册与自定义的 TTS 音色列表 | 返回系统预置与自建音色全属性及可用性 |
+| `POST` | `/v1/voices` | 自然语言创建自定义音色 (Voice Design) | 接收名称与人设描述，固化专属 Seed 并持久化 |
+| `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
@@ -100,7 +102,94 @@ Content-Type: application/json
 
 ---
 
-## 5. 全双工 Realtime WebSocket (`WS /v1/realtime`)
+## 5. 音色管理与自然语言设计 API (`/v1/voices`)
+
+SpeechRail 提供工业级的音色注册管理与自然语言音色设计（Voice Design）体系。
+
+### 5.1 系统预置音色与采样确定性保证
+为了根治大模型短句切流式 TTS 合成时可能出现的**分句换人、跨轮音色漂移**问题，SpeechRail 为每个预置音色绑定了确定的随机种子（Random Seed），并在 MLX 推理前显式调用 `mx.random.seed(profile.seed)`，将生成采样温度固定为 `temperature=0.1`：
+
+| 音色 ID | 名称 | 专属 Seed | 采样温度 | 特征定位与适用场景 | 状态 |
+|---|---|---|---|---|---|
+| `default` | 默认原声 | `42` | `0.1` | 标准专业、自然清晰的中文女声，语气平和亲切 | 系统预置（只读保护） |
+| `warm` | 温暖磁性 | `1024` | `0.1` | 温和厚重、富有同理心的青年男声，适合陪伴聊天 | 系统预置（只读保护） |
+| `bright` | 清脆干练 | `2048` | `0.1` | 清脆明快、朝气蓬勃的年轻女声，适合活力交互 | 系统预置（只读保护） |
+| `calm` | 沉稳专业 | `4096` | `0.1` | 沉稳庄重、节奏从容的专业播音员，适合新闻/严肃播报 | 系统预置（只读保护） |
+
+> 🛡️ **只读保护原则**：系统预置音色标记为 `is_system: true`，禁止通过 API 进行覆盖、修改或删除。
+
+### 5.2 获取音色目录 (`GET /v1/voices`)
+```http
+GET /v1/voices
+Authorization: Bearer <TOKEN>
+```
+**响应示例**：
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "default",
+      "name": "默认原声",
+      "description": "自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
+      "instruction": "自然清晰的中文女声，语气平和亲切，语速适中，适合日常对话。",
+      "aliases": ["alloy", "ash", "echo"],
+      "is_default": true,
+      "is_system": true,
+      "created_at": 1788582000.0,
+      "available": true
+    },
+    {
+      "id": "custom_1788583825_59b3",
+      "name": "知性姐姐",
+      "description": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。",
+      "instruction": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。",
+      "aliases": [],
+      "is_default": false,
+      "is_system": false,
+      "created_at": 1788583825.0,
+      "available": true
+    }
+  ]
+}
+```
+
+### 5.3 自然语言设计与创建音色 (`POST /v1/voices`)
+支持使用自然语言描述特征（Prompt）动态创建新音色：
+```http
+POST /v1/voices
+Content-Type: application/json
+Authorization: Bearer <TOKEN>
+
+{
+  "name": "知性姐姐",
+  "instruction": "温柔轻快、语调柔和的年轻女声，吐字清晰亲和，富有同理心与治愈感。"
+}
+```
+**请求参数**：
+- `name` (string, 必填)：音色友好展示名称。
+- `instruction` (string, 必填)：音色特征自然语言描述（人设、年龄、音质、情绪、语速等）。
+- `id` (string, 可选)：自定义音色标识符。若不提供则自动生成 `custom_<timestamp>_<rand>`。
+
+**持久化机制**：创建成功的音色会自动分配一个固定随机种子（Seed），并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然生效。
+
+### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
+```http
+DELETE /v1/voices/custom_1788583825_59b3
+Authorization: Bearer <TOKEN>
+```
+- 若删除成功，返回 `{"status": "deleted", "id": "custom_1788583825_59b3"}`；
+- 若尝试删除系统预置音色（`default`, `warm`, `bright`, `calm`），系统将返回 `403 Forbidden` (`{"error": "系统预置音色受保护，不可删除"}`)；
+- 若音色不存在，返回 `404 Not Found`。
+
+### 5.5 在语音合成中使用自定义音色
+创建成功后，自建音色的 `id` 可直接传入任何合成接口：
+- **REST 试听/合成**：`POST /v1/audio/speech` 中 `{"model": "speechrail/qwen3-tts", "voice": "custom_xxx", "input": "..."}`
+- **Realtime 流式会话**：`WS /v1/realtime` 中通过 `session.update` 配置 `{"session": {"voice": "custom_xxx"}}`。
+
+---
+
+## 6. 全双工 Realtime WebSocket (`WS /v1/realtime`)
 
 连接端点：`ws://127.0.0.1:8201/v1/realtime`
 
@@ -118,7 +207,7 @@ Content-Type: application/json
 
 ---
 
-## 6. 统一错误 Envelope 与状态码
+## 7. 统一错误 Envelope 与状态码
 
 所有 HTTP 接口的非 2xx 响应严格遵循统一的错误结构体：
 

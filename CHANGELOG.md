@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- **预置音色固化与 Seed 采样锁定**：为系统默认音色（`default`, `warm`, `bright`, `calm`）分配专属固定 Seed（`42`, `1024`, `2048`, `4096`），推理采样温度设定为 `0.1`，根治流式切句换人与跨轮音色漂移；系统音色标记 `is_system: true` 受只读保护。
+- **自然语言创建音色 (Voice Design API)**：新增 `POST /v1/voices` 接口，支持使用自然语言描述音色特征（Prompt），自动分配固定 Seed 并持久化至 `~/.speechrail/custom_voices.json`。
+- **自定义音色删除与管理**：新增 `DELETE /v1/voices/{voice_id}`，对系统预置音色拦截返回 403 Forbidden；`/v1/audio/speech` 和 WebSocket `/v1/realtime` 自适应支持所有自建音色。
+
 ## [1.6.8] - 2026-09-05
 
 ### Fixed

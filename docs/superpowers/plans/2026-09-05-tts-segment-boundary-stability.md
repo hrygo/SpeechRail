@@ -17,7 +17,8 @@
 - fade 只作用于每次合成的首个非空块和现有最终块，不得处理每个中间 codec 块。
 - 不修改 voice instruction、seed、temperature、自定义音色持久化或句间 pause。
 - 不记录 TTS 文本、PCM、API key；真实 PCM 仅使用临时目录并在统计后删除。
-- 工作区已有改动属于其所有者；目标文件 dirty 时不得覆盖、stash、revert 或混合提交。
+- 实施基线必须包含已提交的自定义音色改动 `d4a7c9f`；目标文件 dirty 时不得覆盖、stash、revert
+  或混合提交。
 - 任何提交前均须完成 SpeechRail 项目规定的完整质量门禁。
 
 ---
@@ -39,13 +40,14 @@
 Run:
 
 ```bash
+git merge-base --is-ancestor d4a7c9f HEAD
 git status --short
 git diff -- src/speechrail/backends/qwen3_tts_worker.py tests/test_qwen3_tts_voice_design.py
 ```
 
-Expected: 两个目标文件均无未提交改动。若仍包含自定义音色 seed/temperature 等并行工作，停止本
-Task；由该改动所有者先独立验证和提交，再从新 HEAD 重跑本步骤。后续实现必须保留已落地的
-seed/temperature 逻辑。
+Expected: HEAD 包含 `d4a7c9f`，两个目标文件均无未提交改动。若目标文件仍 dirty，停止本 Task，
+由其所有者先独立收口，再从新 HEAD 重跑本步骤。后续实现必须保留已落地的 seed/temperature
+逻辑。
 
 - [ ] **Step 2: 写多块逻辑边界失败测试**
 
@@ -254,7 +256,7 @@ git diff --staged
 git commit -m "fix(tts): 补齐合成片段首块淡入"
 ```
 
-Expected: 完整门禁先通过，staged diff 只包含本 Task 两个文件且不夹带已收口的自定义音色提交。
+Expected: 完整门禁先通过，staged diff 只包含本 Task 两个文件且不改写 `d4a7c9f` 已收口的逻辑。
 
 ---
 

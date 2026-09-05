@@ -301,7 +301,9 @@ response.stream_to_file("output.mp3")
 | `GET` | `/readyz` | 推理引擎就绪状态检查 | ASR/TTS Worker 均已完成加载 (HTTP 200) |
 | `GET` | `/metrics` | 运行指标导出 | Prometheus 文本默认；`Accept: application/json` 返回 JSON |
 | `GET` | `/v1/models` | 模型清单与别名路由 | Canonical 模型名与 `whisper-1`、`tts-1` 等兼容别名 |
-| `GET` | `/v1/voices` | 可用音色列表 | `default`, `warm`, `bright`, `calm` 等预设音色 |
+| `GET` | `/v1/voices` | 可用音色列表 | 系统预置（`default`, `warm`, `bright`, `calm`）与用户自定义音色 |
+| `POST` | `/v1/voices` | 自然语言创建音色 | 通过 Prompt 描述创建专属音色 (Voice Design)，固化固定 Seed 并持久化 |
+| `DELETE` | `/v1/voices/{id}` | 删除自定义音色 | 安全删除自建音色，系统预置音色受只读保护 |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步转写任务管理 | 提交长任务排队、状态轮询与任务取消 |

@@ -17,9 +17,9 @@ SpeechRail 自身仍存在一个独立的边界缺陷：
 该缺陷更可能表现为句首 click，而不是持续噼啪或长播报失速，但属于 SpeechRail 服务内部应修复的
 PCM 逻辑边界。
 
-设计收口时，SpeechRail 工作区另有未提交的自定义音色/voice registry 改动，其中
-`qwen3_tts_worker.py` 新增 seed 与 temperature 选择。实施前必须由该改动所有者独立收口；本修复
-不得覆盖或混入该组改动。
+设计收口期间并行完成了自定义音色/voice registry 改动，并已由提交 `d4a7c9f` 独立收口；其中
+`qwen3_tts_worker.py` 新增 seed 与 temperature 选择。边界修复应基于该提交之后的 HEAD 实施，
+保留这些逻辑，不得回退或改写其职责。
 
 ## 目标
 
