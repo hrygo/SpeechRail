@@ -151,6 +151,13 @@ def run_preflight(
 
     try:
         settings = Settings.from_env_file(layout.config_file)
+        from speechrail.config.model_catalog import load_catalog
+        from speechrail.config.selection import resolve_selection
+        from speechrail.service.profile_store import recover_selection
+
+        selection = recover_selection(layout.app_home)
+        if selection is not None:
+            settings = resolve_selection(settings, selection, load_catalog(), layout.app_home)
     except Exception:
         checks.append(_check("settings", False, "configuration validation failed"))
         checks.append(_check("asr_config", False, "ASR configuration validation failed"))

@@ -27,7 +27,18 @@ def _discover_env_file() -> Path | None:
 
 def run_server(env_file: Path | None = None) -> None:
     """Run one ASGI process with an explicit or app-home configuration file."""
-    settings = Settings.from_env_file(env_file or _discover_env_file())
+    effective_env = env_file or _discover_env_file()
+    settings = Settings.from_env_file(effective_env)
+    app_home = (effective_env.parent.parent if effective_env else Path.cwd()).resolve()
+
+    from speechrail.config.model_catalog import load_catalog
+    from speechrail.config.selection import resolve_selection
+    from speechrail.service.profile_store import recover_selection
+
+    selection = recover_selection(app_home)
+    if selection is not None:
+        settings = resolve_selection(settings, selection, load_catalog(), app_home)
+
     from speechrail.app import create_app
 
     uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level="info")
