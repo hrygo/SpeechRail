@@ -252,7 +252,7 @@ fake helper 在其所属测试文件定义；同一进程假对象需提供当�
 **所有权 / Files：** 新建 tools/build_model_catalog.py、tests/test_model_catalog_builder.py；产出 src/speechrail/assets/model-catalog.json、runtime-lock.json。
 **接口 / Inputs & Outputs：** 输入设计中的五个候选制品（含 light TTS 4-bit）；输出 revision、逐文件 size/SHA-256、量化与共同 runtime lock。生产清单由本任务生成，不使用手写猜测哈希。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_model_catalog_builder.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_model_catalog_builder.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from tools.build_model_catalog import require_immutable_revision
@@ -263,14 +263,14 @@ def test_mutable_revision_cannot_ship():
         require_immutable_revision("main")
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_catalog_builder.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_catalog_builder.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 先读取当前可用 runtime 的非敏感包版本，再在发布准备环境解析同一 Python 3.12 的 ASR/TTS 锁定依赖；保留现有已验证 runtime 为回退。ModelScope 优先逐制品核对，来源不足时记录具体差异再回退转换维护者仓库。revision 必须 immutable，codec/tokenizer 必须全列；远程元数据不足以确认哈希时标记 release gate 未过并在获准制品准备后补实算。build_catalog(entries) 拒绝可变 revision、重复路径和缺哈希；只在目录全通过时写生产文件。
-- [ ] **4. 边界验证。** 拒绝 latest/tag-only、同名不同哈希镜像、缺 speech_tokenizer、运行时 lock 未含全部传递依赖。真实源制品数据必须核实，不以 fake fixture 通过代替生产目录完整。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 先读取当前可用 runtime 的非敏感包版本，再在发布准备环境解析同一 Python 3.12 的 ASR/TTS 锁定依赖；保留现有已验证 runtime 为回退。ModelScope 优先逐制品核对，来源不足时记录具体差异再回退转换维护者仓库。revision 必须 immutable，codec/tokenizer 必须全列；远程元数据不足以确认哈希时标记 release gate 未过并在获准制品准备后补实算。build_catalog(entries) 拒绝可变 revision、重复路径和缺哈希；只在目录全通过时写生产文件。
+- [x] **4. 边界验证。** 拒绝 latest/tag-only、同名不同哈希镜像、缺 speech_tokenizer、运行时 lock 未含全部传递依赖。真实源制品数据必须核实，不以 fake fixture 通过代替生产目录完整。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `docs: freeze reproducible three-tier artifacts`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `docs: freeze reproducible three-tier artifacts`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `f040bd0` / `a52b810`，18 项测试通过）
 
 
 ### B01：建立真实基准口径与脱敏结果结构
@@ -279,7 +279,7 @@ def test_mutable_revision_cannot_ship():
 **所有权 / Files：** 新建 examples/perf/profile_metrics.py、tests/test_profile_metrics.py；修改 examples/perf/sample_resources.py、examples/perf/bench_tts.py（若超过所有权窗口分成同卡两个顺序步骤）。
 **接口 / Inputs & Outputs：** 新增 rtf(elapsed_seconds, audio_seconds)->float；simultaneous_peak(samples:list[dict[int,int]])->int。结果字段固定 commit/runtime_lock/artifact_revision/hardware/phase/actual_audio_seconds/ttfa/rtf/phys_footprint。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_metrics.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_profile_metrics.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from examples.perf.profile_metrics import rtf, simultaneous_peak
@@ -289,14 +289,14 @@ def test_peaks_are_attributed_to_the_same_instant():
     assert rtf(4.0, 8.0) == 0.5
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_metrics.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_metrics.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 复用已有客户端与采样器，按 PID 去重，合并同步采样，不相加非同时的各 PID 峰值。补 PCM 首包、块间隔、完整合成 RTF、冷启动阶段；观测开销单列。真实 baseline 使用当前已授权服务与现有非敏感 fixture，未授权时只交付工具与明确未测标记。M1/12GB 缺机不伪造报告。
-- [ ] **4. 边界验证。** 零时长拒绝；采样丢失不能当零；PID 重用带启动时间标识；实际音频时长而非文件名时长；日志无正文。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 复用已有客户端与采样器，按 PID 去重，合并同步采样，不相加非同时的各 PID 峰值。补 PCM 首包、块间隔、完整合成 RTF、冷启动阶段；观测开销单列。真实 baseline 使用当前已授权服务与现有非敏感 fixture，未授权时只交付工具与明确未测标记。M1/12GB 缺机不伪造报告。
+- [x] **4. 边界验证。** 零时长拒绝；采样丢失不能当零；PID 重用带启动时间标识；实际音频时长而非文件名时长；日志无正文。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `test: define comparable speech profile measurements`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `test: define comparable speech profile measurements`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `2c346cc` / `adce4a9`，27 项测试通过）
 
 
 ### M02：识别实际模型变体与量化身份
@@ -305,7 +305,7 @@ def test_peaks_are_attributed_to_the_same_instant():
 **所有权 / Files：** 新建 src/speechrail/backends/model_identity.py、tests/test_model_identity.py；修改 backends/qwen3_native.py 与 qwen3_tts_worker.py 的身份调用点（与 T02 串行）。
 **接口 / Inputs & Outputs：** 实现 inspect_model / verify_loaded_identity；读取 quantization 与 quantization_config，保留 bits/group_size/混合精度描述；ASR/TTS ready 增量携带 model_variant/quantization_bits/artifact_key。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_model_identity.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_model_identity.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.backends.model_identity import read_quantization
@@ -316,14 +316,14 @@ def test_quantized_does_not_mean_int8():
     assert q.group_size == 64
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_identity.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_identity.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** config 中预量化不再一律代表 INT8。保留现有 device/dtype 字段兼容，bits 独立用于真实校验；未知格式明确失败。只有配置声明且实际张量/loader 信息一致才 ready；不要把模型名中的 4bit 当证据。去除结果中实际权重身份的固定 1.7B 假设，同时保留公共 alias。CPU 原路径独立保留，三档只接受已验证 Apple Silicon MLX，不静默 fallback。
-- [ ] **4. 边界验证。** read_quantization(config:dict)->QuantizationSpec 在本卡定义；覆盖未量化、8-bit、4-bit、metadata/实际不符、未知位宽、codec 混合精度、加载失败不报 ready。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** config 中预量化不再一律代表 INT8。保留现有 device/dtype 字段兼容，bits 独立用于真实校验；未知格式明确失败。只有配置声明且实际张量/loader 信息一致才 ready；不要把模型名中的 4bit 当证据。去除结果中实际权重身份的固定 1.7B 假设，同时保留公共 alias。CPU 原路径独立保留，三档只接受已验证 Apple Silicon MLX，不静默 fallback。
+- [x] **4. 边界验证。** read_quantization(config:dict)->QuantizationSpec 在本卡定义；覆盖未量化、8-bit、4-bit、metadata/实际不符、未知位宽、codec 混合精度、加载失败不报 ready。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: validate actual model and quantization identity`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `fix: validate actual model and quantization identity`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `84eae26`，35 项测试通过）
 
 
 ### M03：定义只包含权重差异的三档目录
@@ -332,7 +332,7 @@ def test_quantized_does_not_mean_int8():
 **所有权 / Files：** 新建 src/speechrail/config/model_catalog.py、tests/test_model_presets.py；读取 assets 两个清单，不修改既有 config/profiles.py 的能力语义。
 **接口 / Inputs & Outputs：** 实现 §3.2 的 ArtifactFile、QuantizationSpec、ModelArtifact、ModelPreset、RuntimeLock；load_catalog()->完整不可变目录；preset(id)->ModelPreset。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_model_presets.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_model_presets.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.config.model_catalog import ModelPreset
@@ -344,14 +344,14 @@ def test_preset_cannot_override_execution_policy():
         ModelPreset(id="light", asr="asr-small-q8", tts="tts-small-q8", chunk_ms=50)
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_presets.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_model_presets.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** preset 的可执行字段只能 id/asr/tts；显示名称从固定文案派生。校验 balanced/light 指向同一 TTS artifact；quality/balanced 指向同一 ASR artifact。variant/capabilities 在 artifact 清单，不是推理策略开关；unknown keys fail-closed。runtime lock 只有一套发布版本，禁止 per-preset override。
-- [ ] **4. 边界验证。** 目录坏引用、混用 runtime 版本、缺 tokenizer、变体不支持、4-bit 候选不能自动覆盖 light 默认。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** preset 的可执行字段只能 id/asr/tts；显示名称从固定文案派生。校验 balanced/light 指向同一 TTS artifact；quality/balanced 指向同一 ASR artifact。variant/capabilities 在 artifact 清单，不是推理策略开关；unknown keys fail-closed。runtime lock 只有一套发布版本，禁止 per-preset override。
+- [x] **4. 边界验证。** 目录坏引用、混用 runtime 版本、缺 tokenizer、变体不支持、4-bit 候选不能自动覆盖 light 默认。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: define weight-only speech presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: define weight-only speech presets`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `11547dc`，28 项测试通过）
 
 
 ### M04：解析用户选择并保留旧配置
@@ -387,7 +387,7 @@ def test_existing_install_without_selection_is_unchanged(tmp_path):
 **所有权 / Files：** 新建 src/speechrail/backends/qwen3_voice_binding.py、tests/test_voice_bindings.py；修改 src/speechrail/domain/tts.py 仅加入 vendor-neutral 能力描述类型，原 preset/alias 不删除。
 **接口 / Inputs & Outputs：** resolve_binding(variant:str,voice:str)->VoiceBinding；VoiceBinding 在 backend 层含 speaker/instruction；公共描述不泄露私有路径。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_voice_bindings.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_voice_bindings.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.backends.qwen3_voice_binding import resolve_binding
@@ -398,14 +398,14 @@ def test_custom_voice_is_explicitly_bound():
     assert binding.instruction is None
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_voice_bindings.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_voice_bindings.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** VoiceDesign 四 preset 原指令保持；CustomVoice 按设计 default/warm=Serena、bright=Vivian、calm=Uncle_Fu 解析。0.6B 不传假 instruct；default/warm 同声事实明确显示。所有 aliases 先经 resolve_voice 归一化；未知 voice/variant 失败，不默认用第一项。
-- [ ] **4. 边界验证。** 四 preset、13 aliases、unknown、大小写策略与现有契约一致；VoiceDesign 指令逐项原样；同源目录用于 REST 和 WS。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** VoiceDesign 四 preset 原指令保持；CustomVoice 按设计 default/warm=Serena、bright=Vivian、calm=Uncle_Fu 解析。0.6B 不传假 instruct；default/warm 同声事实明确显示。所有 aliases 先经 resolve_voice 归一化；未知 voice/variant 失败，不默认用第一项。
+- [x] **4. 边界验证。** 四 preset、13 aliases、unknown、大小写策略与现有契约一致；VoiceDesign 指令逐项原样；同源目录用于 REST 和 WS。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: describe model-specific voice bindings`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: describe model-specific voice bindings`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `fe869bd` / `335a83b`，25 项测试通过）
 
 
 ### T02：让同一 TTS worker 支持 CustomVoice
@@ -414,7 +414,7 @@ def test_custom_voice_is_explicitly_bound():
 **所有权 / Files：** 修改 src/speechrail/backends/qwen3_tts_worker.py；新增 tests/test_qwen3_tts_custom_voice.py；保留并运行 tests/test_qwen3_tts_voice_design.py。
 **接口 / Inputs & Outputs：** 以兼容方式将 MlxVoiceDesignEngine 扩为 MlxQwenTtsEngine；旧类名可作为内部兼容 alias；TtsWorkerEngine.synthesize 签名不变。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_qwen3_tts_custom_voice.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_qwen3_tts_custom_voice.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.backends.qwen3_tts_worker import generation_condition
@@ -425,14 +425,14 @@ def test_small_custom_voice_does_not_fake_instructions():
     }
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_tts_custom_voice.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_tts_custom_voice.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 只按已校验 artifact variant 选择条件构造函数，复用同一 model.generate/已锁定版本的 CustomVoice 接口，统一 streaming/PCM 校验/归一化/温度。以 G0 锁定 runtime 的真实签名为准，不复制不同版本 README 参数；fake loader 精确模拟该签名。warmup 使用当前变体有效音色。Base/未知变体继续 fail-closed。
-- [ ] **4. 边界验证。** generation_condition(variant,voice)->dict 为本卡唯一条件构造函数，VoiceDesign 返回原 instruction。完整 fake generate 验证两变体相同 chunk/speed/sampling、24k 偶数字节、无静音空输出、异常恢复；真实各 voice 由 B02 验收。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 只按已校验 artifact variant 选择条件构造函数，复用同一 model.generate/已锁定版本的 CustomVoice 接口，统一 streaming/PCM 校验/归一化/温度。以 G0 锁定 runtime 的真实签名为准，不复制不同版本 README 参数；fake loader 精确模拟该签名。warmup 使用当前变体有效音色。Base/未知变体继续 fail-closed。
+- [x] **4. 边界验证。** generation_condition(variant,voice)->dict 为本卡唯一条件构造函数，VoiceDesign 返回原 instruction。完整 fake generate 验证两变体相同 chunk/speed/sampling、24k 偶数字节、无静音空输出、异常恢复；真实各 voice 由 B02 验收。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: run CustomVoice through the shared TTS engine`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: run CustomVoice through the shared TTS engine`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `98f983a`，11 项测试通过）
 
 
 ### R01：实现 ASR 模式租约
@@ -441,7 +441,7 @@ def test_small_custom_voice_does_not_fake_instructions():
 **所有权 / Files：** 新建 src/speechrail/runtime/asr_mode.py、tests/test_asr_mode.py。
 **接口 / Inputs & Outputs：** AsrModeGate.acquire/release 与 AsrModeBusy 按 §3.2；busy 为内部明确类型，HTTP/WS 映射在 C01。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_asr_mode.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_asr_mode.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 import pytest
@@ -456,14 +456,14 @@ def test_batch_cannot_enter_unfinished_stream():
     gate.release(gate.acquire("batch"))
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_asr_mode.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_asr_mode.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** Batch 排他；同模式 Streaming 可计数持有；最后一 token 释放后才 idle。无 I/O 的状态变化在事件循环线程完成，不使用容易重入死锁的跨请求长 await 锁。单元测试穷举 idle/batch/streaming→状态；其他gate签发的token拒绝；租约对象记录释放状态，不维护无限增长的历史集合。
-- [ ] **4. 边界验证。** 双 streaming token 逐一释放；异常 finally 释放；重复 release 幂等；不能把公共 WS 是否连接当活动 ASR。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** Batch 排他；同模式 Streaming 可计数持有；最后一 token 释放后才 idle。无 I/O 的状态变化在事件循环线程完成，不使用容易重入死锁的跨请求长 await 锁。单元测试穷举 idle/batch/streaming→状态；其他gate签发的token拒绝；租约对象记录释放状态，不维护无限增长的历史集合。
+- [x] **4. 边界验证。** 双 streaming token 逐一释放；异常 finally 释放；重复 release 幂等；不能把公共 WS 是否连接当活动 ASR。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: enforce mutually exclusive ASR modes`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: enforce mutually exclusive ASR modes`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `73f5048`，7 项测试通过）
 
 
 ### R02：实现唯一 IPC owner 与有界路由
@@ -472,7 +472,7 @@ def test_batch_cannot_enter_unfinished_stream():
 **所有权 / Files：** 新建 src/speechrail/backends/qwen3_shared.py、tests/test_qwen3_shared.py；扩充 tests/fixtures/fake_framed_worker.py 仅增加受控多路脚本模式。
 **接口 / Inputs & Outputs：** Qwen3SharedWorker 协议按 §3.2；内部 FrameRouter.route_key(frame)->tuple[str,str]|None；batch 用 request_id、stream 用 session_id，命名空间隔离。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_qwen3_shared.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_qwen3_shared.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.backends.qwen3_shared import FrameRouter
@@ -482,14 +482,14 @@ def test_batch_and_session_ids_have_separate_namespaces():
     assert FrameRouter.route_key({"session_id": "same", "type": "event"}) == ("stream", "same")
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_shared.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_shared.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** start ready handshake 由 owner 完成后才开启唯一 dispatcher；运行中 request 不调用 exchange 抢读，使用注册 future+send。会话队列初始 maxsize=64（所有档相同），总量受 session cap 约束；满时隔离慢会话并使其 terminal error 可达，dispatcher 不 await 慢消费者。terminal/error/result 不丢；未知/已退休 ID 只统计有限指标。
-- [ ] **4. 边界验证。** 真实 fake subprocess：两会话交织、无 ID error、单一 receive、队列满不堵另一个会话、EOF 广播一次、重启 generation 隔离、idle receive timeout 不误判故障。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** start ready handshake 由 owner 完成后才开启唯一 dispatcher；运行中 request 不调用 exchange 抢读，使用注册 future+send。会话队列初始 maxsize=64（所有档相同），总量受 session cap 约束；满时隔离慢会话并使其 terminal error 可达，dispatcher 不 await 慢消费者。terminal/error/result 不丢；未知/已退休 ID 只统计有限指标。
+- [x] **4. 边界验证。** 真实 fake subprocess：两会话交织、无 ID error、单一 receive、队列满不堵另一个会话、EOF 广播一次、重启 generation 隔离、idle receive timeout 不误判故障。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: centralize ASR worker frame ownership`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: centralize ASR worker frame ownership`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `c3c22b8` / `f1256ea` / `0d44959`，18 项测试通过）
 
 
 ### R03：把 Batch 与 Streaming 门面接入共享 owner
@@ -498,7 +498,7 @@ def test_batch_and_session_ids_have_separate_namespaces():
 **所有权 / Files：** 修改 src/speechrail/backends/qwen3_native.py、qwen3_streaming.py；修改 tests/test_qwen3_backend.py、test_qwen3_streaming.py。
 **接口 / Inputs & Outputs：** Qwen3Worker 与 Qwen3StreamingWorker 构造允许注入 shared owner；既有 transcribe/StreamingWorkerProtocol 调用签名不破坏。facade 不再各建 transport。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_qwen3_streaming.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_qwen3_streaming.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.runtime.asr_mode import AsrModeGate, AsrModeBusy
@@ -514,14 +514,14 @@ def test_one_stream_finishing_does_not_release_another():
     gate.release(gate.acquire("batch"))
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_streaming.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_qwen3_streaming.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** Batch 在整次转写最外层持 mode lease，按 request_id 等 owner future。Streaming connect 时取 token；收到 finished 且清理完本会话后释放，close/失败幂等兜底；不能在 commit 发出时提前释放。factory.create 仅创建对象，未 connect 不占 ASR mode。两级会话队列（owner到session、session到events消费者）均有界；不能让read_loop把有界上游全部搬入无界_events_queue。门面 close 仅清本会话，物理 owner close 由 lifecycle。
-- [ ] **4. 边界验证。** 另写门面集成 fake：Batch→Streaming→Batch 的 process-start 次数=1、mode token 清零；两并发 stream 隔离；取消尚在 connect、finished 后 close、batch失败、identity=model实际规模。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** Batch 在整次转写最外层持 mode lease，按 request_id 等 owner future。Streaming connect 时取 token；收到 finished 且清理完本会话后释放，close/失败幂等兜底；不能在 commit 发出时提前释放。factory.create 仅创建对象，未 connect 不占 ASR mode。两级会话队列（owner到session、session到events消费者）均有界；不能让read_loop把有界上游全部搬入无界_events_queue。门面 close 仅清本会话，物理 owner close 由 lifecycle。
+- [x] **4. 边界验证。** 另写门面集成 fake：Batch→Streaming→Batch 的 process-start 次数=1、mode token 清零；两并发 stream 隔离；取消尚在 connect、finished 后 close、batch失败、identity=model实际规模。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `refactor: share one ASR process across both entry points`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `refactor: share one ASR process across both entry points`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `a373098`，48 项测试通过）
 
 
 ### R04：组合根与生命周期只登记物理实例一次
@@ -530,7 +530,7 @@ def test_one_stream_finishing_does_not_release_another():
 **所有权 / Files：** 修改 src/speechrail/application/services.py、application/lifecycle.py；修改 tests/test_application_composition.py、tests/test_worker_lease.py。
 **接口 / Inputs & Outputs：** build_app_services 创建一个 owner 并注入两门面；RuntimeLifecycle 及 IdleEvictor 的列表以 owner identity 去重；健康诊断可保留逻辑角色但指向同一 worker_id。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_application_composition.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_application_composition.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 import asyncio
@@ -551,14 +551,14 @@ def test_lifecycle_closes_a_shared_component_once():
     asyncio.run(run())
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_application_composition.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_application_composition.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 没有 streaming 配置时 Batch 仍可单独运行；只有 realtime 时不额外启动批量模型。保留 overrides、lazy loading、warm standby、last_active 与已有用户 TTL。owner 在任一活动租约下不可 evict；shutdown close exactly once。逐波保留原单元测试注入 seams。
-- [ ] **4. 边界验证。** 注入 fake overrides 不意外创建真实 runtime；启动中途失败仅清已启动者；逻辑角色内存统计不得重复计数。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 没有 streaming 配置时 Batch 仍可单独运行；只有 realtime 时不额外启动批量模型。保留 overrides、lazy loading、warm standby、last_active 与已有用户 TTL。owner 在任一活动租约下不可 evict；shutdown close exactly once。逐波保留原单元测试注入 seams。
+- [x] **4. 边界验证。** 注入 fake overrides 不意外创建真实 runtime；启动中途失败仅清已启动者；逻辑角色内存统计不得重复计数。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: manage shared ASR lifecycle exactly once`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: manage shared ASR worker lifecycle as a single physical instance`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `63e3ef5`，37 项测试通过）
 
 
 ### R05：共享 worker 取消、超时与进程恢复
@@ -567,7 +567,7 @@ def test_lifecycle_closes_a_shared_component_once():
 **所有权 / Files：** 修改 src/speechrail/backends/qwen3_shared.py、qwen3_worker.py；新建 tests/test_shared_worker_recovery.py。
 **接口 / Inputs & Outputs：** owner 暴露 generation 只读诊断；所有挂起请求关联 generation。worker 内继续按 session_id 隔离状态，frame protocol 新字段只作兼容增量。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_shared_worker_recovery.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_shared_worker_recovery.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.backends.qwen3_shared import GenerationGuard
@@ -580,14 +580,14 @@ def test_old_generation_cannot_deliver_a_result():
     assert guard.accepts(guard.current)
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_shared_worker_recovery.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_shared_worker_recovery.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 未送入 worker 的取消只移除等待者；已送入后超时则 abort 物理 owner，原 generation 的全部请求终结并清理token，下一请求才重建。不得静默重跑超时推理；transport 丢失最多保留一次既有 bounded retry，且只限没有交付结果的安全 batch。进程退出完成前不允许新 owner 复用管道。错误文本不含正文。
-- [ ] **4. 边界验证。** GenerationGuard.current:int/advance()->None/accepts(int)->bool 在本卡定义；fake子进程卡死、部分帧、EOF、连续取消100次、下一请求成功；real worker isolation/limits旧测试仍过。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 未送入 worker 的取消只移除等待者；已送入后超时则 abort 物理 owner，原 generation 的全部请求终结并清理token，下一请求才重建。不得静默重跑超时推理；transport 丢失最多保留一次既有 bounded retry，且只限没有交付结果的安全 batch。进程退出完成前不允许新 owner 复用管道。错误文本不含正文。
+- [x] **4. 边界验证。** GenerationGuard.current:int/advance()->None/accepts(int)->bool 在本卡定义；fake子进程卡死、部分帧、EOF、连续取消100次、下一请求成功；real worker isolation/limits旧测试仍过。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `fix: isolate failed ASR generations and recover leases`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `fix: isolate failed ASR generations and recover leases`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `0d44959` / `a373098`，3 项测试通过）
 
 
 ### R06：统一资源保护并移除 ASR 双模式预留依赖
@@ -617,13 +617,16 @@ def test_low_memory_acceptance_is_not_a_global_cap():
   `refactor: apply one resource policy to all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
 
 
+
+
+
 ### A01：有界读取上传与流式解码
 
 **依赖：** R04。
 **所有权 / Files：** 新建 src/speechrail/application/audio_stream.py、tests/test_audio_stream.py；现有 audio.py decoder 保留到 A04 接线。
 **接口 / Inputs & Outputs：** decode_upload(file,max_upload_bytes,max_audio_seconds)->AsyncIterator[bytes]；每块 PCM16 <=64KiB；生产只读 UploadFile 小块。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_audio_stream.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_audio_stream.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.application.audio_stream import PcmByteCounter
@@ -636,14 +639,14 @@ def test_duration_limit_is_checked_before_growing_buffer():
         counter.accept(2)
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_audio_stream.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_audio_stream.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 保持 multipart/WebM/ffmpeg 真实性校验；使用固定命令与 stdin/stdout 双向并行泵，避免管道互等。累计输入字节/输出样本数先检查再分配。复用现有清理逻辑的语义，断连、超时、上限即 kill+wait。单次探测最多一块，输出奇数字节跨块拼接后校验。不得新增持久化音频；框架现有临时上传句柄在 finally 关闭，ASR不能接受客户端路径。
-- [ ] **4. 边界验证。** PcmByteCounter(max_samples)/accept(byte_count) 本卡定义；fakeffmpeg持续stdout、stdin堵塞、短写、空音频、恰好上限/多1样本、错误mime但有效webm、取消后的进程回收。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 保持 multipart/WebM/ffmpeg 真实性校验；使用固定命令与 stdin/stdout 双向并行泵，避免管道互等。累计输入字节/输出样本数先检查再分配。复用现有清理逻辑的语义，断连、超时、上限即 kill+wait。单次探测最多一块，输出奇数字节跨块拼接后校验。不得新增持久化音频；框架现有临时上传句柄在 finally 关闭，ASR不能接受客户端路径。
+- [x] **4. 边界验证。** PcmByteCounter(max_samples)/accept(byte_count) 本卡定义；fakeffmpeg持续stdout、stdin堵塞、短写、空音频、恰好上限/多1样本、错误mime但有效webm、取消后的进程回收。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: bound upload decoding without whole-file PCM copies`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: bound upload decoding without whole-file PCM copies`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `0c67e65`，15 项测试通过）
 
 
 ### A02：建立共同滚动窗口与时间轴拼接
@@ -652,7 +655,7 @@ def test_duration_limit_is_checked_before_growing_buffer():
 **所有权 / Files：** 扩充 src/speechrail/application/audio_stream.py；新建 src/speechrail/application/transcript_merge.py、tests/test_transcript_merge.py。
 **接口 / Inputs & Outputs：** PcmBlock/split_pcm 按 §3.2；offset_ms(local_ms,start_sample)->int；生产 PcmWindowBuffer.feed(bytes)->tuple[PcmBlock,...]/finish()->tuple[...]；merge_results(blocks/results)->TranscriptResult。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_transcript_merge.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_transcript_merge.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.application.transcript_merge import offset_ms
@@ -661,14 +664,14 @@ def test_sample_offset_preserves_global_time():
     assert offset_ms(250, 16000 * 30) == 30250
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_transcript_merge.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_transcript_merge.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 共同初始窗口30秒、边界重叠1秒，short clip不切片；以样本索引作为唯一时间轴。优先在已有 VAD 候选边界落窗，最长不能超过共同窗口上界。保留 core_start/end，重叠文本根据有界token对齐或真实时间戳归属去重；不使用简单字符串replace删除重复词。承认结果文本随输出长度增长，声称有界的仅 PCM/临时张量。
-- [ ] **4. 边界验证。** 连续样本覆盖无洞；奇数字节拒绝；数字/专名跨界、中文重复词、英文缩写、静音长段、最后不足一窗、语言变化、段序单调；无法无损拼接不得推广窗口优化。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 共同初始窗口30秒、边界重叠1秒，short clip不切片；以样本索引作为唯一时间轴。优先在已有 VAD 候选边界落窗，最长不能超过共同窗口上界。保留 core_start/end，重叠文本根据有界token对齐或真实时间戳归属去重；不使用简单字符串replace删除重复词。承认结果文本随输出长度增长，声称有界的仅 PCM/临时张量。
+- [x] **4. 边界验证。** 连续样本覆盖无洞；奇数字节拒绝；数字/专名跨界、中文重复词、英文缩写、静音长段、最后不足一窗、语言变化、段序单调；无法无损拼接不得推广窗口优化。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: preserve transcript boundaries across bounded audio windows`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: preserve transcript boundaries across bounded audio windows`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `6f0518a` / `c668cdc`，12 项测试通过）
 
 
 ### A03：逐窗推理与按需时间戳缓存
@@ -894,7 +897,7 @@ def test_managed_state_remains_outside_release(tmp_path):
 **所有权 / Files：** 新建 src/speechrail/service/profile_store.py、tests/test_profile_store.py。
 **接口 / Inputs & Outputs：** recover_selection按§3.2；ProfileStore.begin(previous,candidate)->operation_id、mark(id,stage)、commit(id)、rollback(id)；record schema_version=1。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_store.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_profile_store.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.service.profile_store import ProfileStore
@@ -910,14 +913,14 @@ def test_uncommitted_candidate_never_becomes_active(tmp_path):
     assert store.recover() == old
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_store.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_store.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** selection/journal/previous均0600，父目录0700；write temp/fsync/replace并fsync父目录。单写锁防多个setup同时申请；prepared摘要必须包含完整ASR/TTS配对与runtime_lock_id。commit之前不覆盖active；未完成启动恢复last-known-good。新安装无previous失败则明确unconfigured，不构造假quality默认。
-- [ ] **4. 边界验证。** 本卡定义initialize/recover用于首次有效登记/恢复；生产records用固定schema校验，catalog存在性由上游准备与下游activation双校验。每个journal阶段注入崩溃，symlink目标拒绝，schema未知fail-closed，损坏candidate不损坏previous。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** selection/journal/previous均0600，父目录0700；write temp/fsync/replace并fsync父目录。单写锁防多个setup同时申请；prepared摘要必须包含完整ASR/TTS配对与runtime_lock_id。commit之前不覆盖active；未完成启动恢复last-known-good。新安装无previous失败则明确unconfigured，不构造假quality默认。
+- [x] **4. 边界验证。** 本卡定义initialize/recover用于首次有效登记/恢复；生产records用固定schema校验，catalog存在性由上游准备与下游activation双校验。每个journal阶段注入崩溃，symlink目标拒绝，schema未知fail-closed，损坏candidate不损坏previous。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: persist model selection as a recoverable transaction`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: persist model selection as a recoverable transaction`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `3a2d83a`，14 项测试通过）
 
 
 ### S02：引入保持端口稳定的运行时委派对象
