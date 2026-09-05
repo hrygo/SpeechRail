@@ -1,4 +1,5 @@
 annotated-doc==0.0.5
+annotated-types==0.8.0
 anyio==4.14.2
 certifi==2026.7.22
 cffi==2.1.1
@@ -24,7 +25,11 @@ numpy==2.5.2
 packaging==26.3
 protobuf==7.36.1
 pycparser==3.0
+pydantic==2.13.5
+pydantic-core==2.46.5
+pydantic-settings==2.15.0
 pygments==2.21.0
+python-dotenv==1.2.3
 pyyaml==6.0.3
 regex==2026.9.3
 rich==15.0.0
@@ -38,3 +43,4 @@ tqdm==4.70.0
 transformers==5.16.1
 typer==0.27.2
 typing-extensions==4.16.0
+typing-inspection==0.4.4

@@ -31,12 +31,16 @@
 
 ## 共同依赖锁
 
-从当前 runtime 读取包版本作为约束，解析最小依赖闭包：ASR 18 个包、TTS 40 个包。
+从当前 runtime 读取包版本作为约束，解析最小依赖闭包。首次仅计算 vendor SDK 时为
+ASR 18 个包、TTS 40 个包；补齐 SpeechRail worker 入口所需的 Pydantic 配置依赖后，
+当前锁定为 ASR 24 个包、TTS 46 个包。
 两者均使用 Python 3.12.14、MLX 0.32.2；ASR 使用 mlx-qwen3-asr 0.3.5，
 TTS 使用 mlx-audio 0.4.8。各档共享相同依赖文件。
 
 解析目标为 Apple Silicon macOS 14.0 及以上；macOS 13 默认目标无法匹配当前
-MLX wheel，故明确提高安装器的最低系统检查。该依赖解析结果尚不等于新环境真实推理通过。
+MLX wheel，安装器需明确检查最低系统。两个临时 venv 的 `uv pip sync --require-hashes`
+均成功；离线导入 SpeechRail ASR/TTS worker 与两个模型 SDK 的入口成功，未加载权重。
+该导入结果尚不等于新环境真实推理通过。
 
 ```bash
 MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
@@ -57,6 +61,10 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
 - R01 模式门实现与 7 项测试通过；父 Agent 完成代码审查和针对性复测。
 - M01a 离线目录构建器 18 项测试通过；生产目录通过同一校验函数。
 - B01a 指标与 TTS 读取测试 15 项通过，首包读取使用 `read1`，拒绝截断 PCM16。
+- B01b 资源采样 12 项测试通过，缺样/RSS 不冒充物理内存，PID 生命周期在读前读后核对。
+- M03 目录和运行时清单 28 项测试通过，下载镜像允许独立不可变版本，实际文件哈希已校验。
+- T01 音色绑定与原有 TTS policy/splitter 共 34 项回归通过。
+- 共享传输 20 项测试通过，空闲等待与半帧超时分开处理。
 - wheel 构建成功，并确认包含全部 9 份当前 assets 文件。
 - 共享进程接入、安装切换、真实模型质量、M1 Air 8GB 内存/热稳态仍在待办范围。
 
