@@ -2,8 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- **SPK-E2E-1 持续分人协议扩展与结束屏障**：在 `/v1/realtime` 中新增 `speechrail.diarization.v1` 扩展；基于“正文先固定，归属后更新”原则，引入 `Timeline` 全局整数采样时钟、不可变 `attribution_units`、异步归属修订事件 `speechrail.diarization.update`，以及客户端结束屏障 `speechrail.diarization.finalize`/服务端终态 `speechrail.diarization.finalized`（带 `last_update_sequence` 保证落库一致性）。
+- **离线端到端评测套件**：新增 `tools/evaluate_diarization_e2e.py` 与 `tests/test_diarization_metrics.py`，支持基于全局最优二分匹配（Kuhn-Munkres）的 DER 评估、Collar/Overlap 容差计算，以及将 `unknown` 状态计入惩罚的字级归属错误率（SACER）。
+
 ### Fixed
 
+- 修复 `AttributionLedger` 在注册对齐不可用（`unavailable`）或晚到（`late`）单元时未即时产生定态结果导致事件丢失的生命周期漏洞，现在立即下发 `unknown` 或 `stable` 归属更新并受 `revision > 0` 保护。
 - 资源采样器在执行 `--warmup` 后重新发现受管进程，确保懒加载期间新启动的 ASR/TTS worker 进入同 tick `phys_footprint` 集合，避免漏计 worker 仍错误显示完整 gate。
 
 ## [1.8.0] - 2026-09-05

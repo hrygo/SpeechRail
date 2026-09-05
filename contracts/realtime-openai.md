@@ -134,7 +134,16 @@ native 能力未经 R1 探针与真实 CPU smoke 验证前，本扩展不会被�
   无法与固定正文一致对齐时整 item 使用一个 `timing_quality="unavailable"` 单元。
   这些字段在归属修订中不可变。
 - 扩展模式**不再发送**旧 `.segment` 事件，避免双写；legacy 会话不受影响。
-- `speechrail.diarization.update`（归属修订与跨会话 `speaker_links`）、
-  `speechrail.diarization.status`（active→degraded 单次转换）、
-  `speechrail.diarization.finalize`（客户端）/`speechrail.diarization.finalized`
-  （服务端终态）由后续任务按上述 schema 接线；接线前服务端不发送这些类型。
+- `speechrail.diarization.update`：服务端推送的归属修订事件，携带 `stable_through_sample`、
+  `updates`（含 `segment_uid`、`revision` 从 1 严格递增、`status: tentative | stable | unknown`、
+  `speaker`、`coverage_ratio`、`overlap_ratio`、`candidates`）以及会话级 `speaker_links` 声学建议；
+  无法对齐或过期的单元直接归属为 `unknown`（`speaker: null`）。
+- `speechrail.diarization.status`：发生不可恢复故障（如 `diarization_overloaded`、
+  `diarization_invalid_output` 或 `finalization_timeout`）时触发单次 active→degraded 转换，
+  先为未定态单元发送 `unknown` update，再发送本事件；此后正文正常交付，归属保持 `unknown`。
+- `speechrail.diarization.finalize`（客户端）与 `speechrail.diarization.finalized`（服务端终态）：
+  客户端推流完毕后发送 finalize 请求（携带 `finalization_id`）；服务端进入 DRAINING 屏障，
+  冲刷声学尾部并排空所有 pending updates，最后发送 finalized 事件（携带 `through_sample`、
+  `stable_through_sample`、`status: complete | degraded` 与 `last_update_sequence`）。
+  相同 `finalization_id` 重试幂等回显；不同 ID 请求拒绝返回 `invalid_state`；finalize
+  后追加音频返回 `invalid_state`。

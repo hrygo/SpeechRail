@@ -1,16 +1,16 @@
 ---
 title: "SpeechRail × Sona 讲话人分离端到端设计"
-status: under_review
+status: active
 audience: "SpeechRail 与 Sona 实施者、接口与质量评审者"
-version: "1.0.0"
-date: 2026-09-05
+version: "1.1.0"
+date: 2026-09-06
 ---
 
 # SpeechRail × Sona 讲话人分离端到端设计
 
-> 设计编号：`SPK-E2E-1`。本文是待实施的目标规格，新增字段、事件、参数和指标均不是当前服务承诺。用户已要求形成可执行文档；本文不代表已经授权部署、模型下载或数据迁移。
+> 设计编号：`SPK-E2E-1`。本文是两项目讲话人分离端到端规范。SpeechRail 侧 R0–R4 实施与 R5 评测工具已闭环验收，公共契约已冻结并写入 `contracts/realtime-openai.md` 与 `contracts/diarization/v1/`。
 
-配套：[SpeechRail 实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)。Sona 配套文件为 `sona/docs/architecture/speaker-diarization-e2e-design.md` 和同日期实施计划；若两仓库同级检出，可直接打开 [Sona 设计](../../../sona/docs/architecture/speaker-diarization-e2e-design.md)。公共扩展以本文第 5 节为唯一设计事实源，实施后转入 `contracts/realtime-openai.md`，两仓不得分别发明字段。
+配套：[SpeechRail 实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)。Sona 配套文件为 `sona/docs/architecture/speaker-diarization-e2e-design.md` 和同日期实施计划；若两仓库同级检出，可直接打开 [Sona 设计](../../../sona/docs/architecture/speaker-diarization-e2e-design.md)。公共扩展以本文第 5 节为唯一设计事实源，两仓不得分别发明字段。
 
 ## 1. 目标、边界与选择
 

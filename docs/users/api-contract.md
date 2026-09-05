@@ -220,6 +220,17 @@ Authorization: Bearer <TOKEN>
 | `response.audio.delta` | 服务端 → 客户端 | 流式返回 24kHz PCM16 音频增量块 |
 | `response.cancel` | 客户端 → 服务端 | 立即打断并取消正在进行的语音合成 |
 
+### 6.1 多人会议讲话人分离扩展 (`speechrail.diarization.v1`)
+在 `session.update` 中传入 `input_audio_transcription.diarization.extensions = ["speechrail.diarization.v1"]` 协商开启。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
+
+| 扩展事件名称 (Type) | 方向 | 说明 |
+|---|---|---|
+| `conversation.item.input_audio_transcription.completed` | 服务端 → 客户端 | 携带全局 `audio_start_sample`/`audio_end_sample` 与不可变 `attribution_units`（含稳定 `segment_uid`、字符切片及时间质量） |
+| `speechrail.diarization.update` | 服务端 → 客户端 | 异步推送归属修订（含 `revision`、`status: tentative/stable/unknown`、`speaker`、覆盖与重叠率，及跨会话 `speaker_links`） |
+| `speechrail.diarization.status` | 服务端 → 客户端 | 发生过载或算子异常时触发单次降级通知（`status: degraded`），正文保持正常转写交付 |
+| `speechrail.diarization.finalize` | 客户端 → 服务端 | 录制结束屏障请求，携带 `finalization_id`，触发服务端排空声学尾部与待定归属 |
+| `speechrail.diarization.finalized` | 服务端 → 客户端 | 屏障终态响应，携带 `last_update_sequence` 与样本水位，客户端校验后安全触发会议纪要 |
+
 ---
 
 ## 7. 统一错误 Envelope 与状态码
