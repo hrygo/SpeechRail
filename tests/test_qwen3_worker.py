@@ -2,13 +2,43 @@
 
 from __future__ import annotations
 
+import sys
 from io import BytesIO
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from speechrail.backends.qwen3_worker import _segments, _to_streaming_segments, serve
+import speechrail.backends.qwen3_worker as worker_module
+from speechrail.backends.model_identity import SnapshotIdentity
+from speechrail.backends.qwen3_worker import (
+    Qwen3Engine,
+    WorkerIdentity,
+    _segments,
+    _to_streaming_segments,
+    serve,
+)
+from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
+
+
+def _snapshot_identity(
+    *,
+    family: str = "qwen3_asr",
+    variant: str = "asr",
+    bits: int | None = None,
+    group_size: int | None = None,
+) -> SnapshotIdentity:
+    return SnapshotIdentity(
+        family=family,
+        variant=variant,
+        quantization=QuantizationSpec(
+            bits=bits,
+            group_size=group_size,
+            format="mlx" if bits is not None else "none",
+        ),
+        weight_fingerprint="shape:" + ("a" * 64),
+    )
 
 
 def test_serve_reports_worker_load_error_with_traceback_on_stderr(
@@ -55,6 +85,160 @@ def test_serve_reports_worker_load_error_with_traceback_on_stderr(
         "code": "worker_load_error",
     }
     assert "boom-model-load" in capsys.readouterr().err
+
+
+def _install_fake_asr_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    model_info: dict[str, object],
+    quantize_fn: object | None = None,
+) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    class FakeSession:
+        def __init__(self, *, model: str) -> None:
+            calls.append({"model": model})
+            self.model = SimpleNamespace()
+            self.model_info = model_info
+
+    runtime = ModuleType("mlx_qwen3_asr")
+    runtime.Session = FakeSession  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+    if quantize_fn is not None:
+        convert = ModuleType("mlx_qwen3_asr.convert")
+        convert.quantize_model = quantize_fn  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "mlx_qwen3_asr.convert", convert)
+    return calls
+
+
+def test_qwen3_engine_inspects_snapshot_before_vendor_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    expected = _snapshot_identity()
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: order.append("inspect") or expected,
+    )
+
+    class FakeSession:
+        def __init__(self, *, model: str) -> None:
+            del model
+            order.append("load")
+            self.model = SimpleNamespace()
+            self.model_info = {
+                "dtype": "float16",
+                "model_type": "qwen3_asr",
+                "variant": "asr",
+            }
+
+    runtime = ModuleType("mlx_qwen3_asr")
+    runtime.Session = FakeSession  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mlx_qwen3_asr", runtime)
+
+    Qwen3Engine(tmp_path, "mps", "float16")
+
+    assert order == ["inspect", "load"]
+
+
+def test_qwen3_engine_reports_four_bit_snapshot_without_requantizing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _snapshot_identity(bits=4, group_size=64)
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+    quantize_calls: list[object] = []
+
+    def quantize_model(*args: object, **kwargs: object) -> None:
+        quantize_calls.append((args, kwargs))
+
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "int8",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+            "quantization_bits": 4,
+            "quantization_group_size": 64,
+        },
+        quantize_fn=quantize_model,
+    )
+
+    engine = Qwen3Engine(tmp_path, "mps", "int8")
+
+    assert quantize_calls == []
+    assert engine.identity.quantization_bits == 4
+    assert engine.identity.quantization_group_size == 64
+    assert engine.identity.dtype == "int8"
+
+
+def test_qwen3_engine_reports_successful_runtime_int8_quantization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _snapshot_identity()
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+    quantize_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def quantize_model(*args: object, **kwargs: object) -> None:
+        quantize_calls.append((args, kwargs))
+
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "float16",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+        },
+        quantize_fn=quantize_model,
+    )
+
+    engine = Qwen3Engine(tmp_path, "mps", "int8")
+
+    assert quantize_calls and quantize_calls[0][1] == {"bits": 8, "group_size": 64}
+    assert engine.identity.quantization_bits == 8
+    assert engine.identity.quantization_group_size == 64
+    assert engine.identity.dtype == "int8"
+
+
+def test_qwen3_engine_rejects_runtime_int8_quantization_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = _snapshot_identity()
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: expected)
+
+    def quantize_model(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("quantization failed")
+
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "float16",
+            "model_type": "qwen3_asr",
+            "variant": "asr",
+        },
+        quantize_fn=quantize_model,
+    )
+
+    with pytest.raises(RuntimeError, match=r"quantization|identity"):
+        Qwen3Engine(tmp_path, "mps", "int8")
+
+
+def test_qwen3_engine_rejects_loader_variant_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "inspect_model", lambda _: _snapshot_identity())
+    _install_fake_asr_runtime(
+        monkeypatch,
+        model_info={
+            "dtype": "float16",
+            "model_type": "qwen3_tts",
+            "variant": "voice_design",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match=r"identity|family|variant"):
+        Qwen3Engine(tmp_path, "mps", "float16")
 
 
 class _FakeEngine:
@@ -159,6 +343,56 @@ def _start_frame() -> dict[str, object]:
         "device": "mps",
         "dtype": "float16",
     }
+
+
+def test_worker_ready_reports_model_identity_without_relabeling_four_bit() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    engine.identity = WorkerIdentity(
+        device="mps",
+        dtype="int8",
+        family="qwen3_asr",
+        model_variant="asr",
+        quantization_bits=4,
+        quantization_group_size=64,
+        weight_fingerprint="shape:" + ("b" * 64),
+    )
+
+    responses = _run_serve([_start_frame()], engine=engine)
+
+    assert responses[0] == {
+        "version": PROTOCOL_VERSION,
+        "type": "ready",
+        "device": "mps",
+        "dtype": "int8",
+        "model_loaded": True,
+        "family": "qwen3_asr",
+        "model_variant": "asr",
+        "quantization_bits": 4,
+        "quantization_group_size": 64,
+        "weight_fingerprint": "shape:" + ("b" * 64),
+    }
+
+
+def test_worker_rejects_ready_identity_metadata_mismatch() -> None:
+    engine = _FakeEngine(Path("/tmp"), "mps", "float16", 512)
+    engine.identity = WorkerIdentity(
+        device="mps",
+        dtype="int8",
+        family="qwen3_tts",
+        model_variant="voice_design",
+        quantization_bits=8,
+        quantization_group_size=64,
+    )
+
+    responses = _run_serve([_start_frame()], engine=engine)
+
+    assert responses == [
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "error",
+            "code": "backend_identity_mismatch",
+        }
+    ]
 
 
 def test_worker_routes_and_isolates_concurrent_sessions() -> None:

@@ -5,19 +5,15 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Literal, Protocol
 
+from speechrail.backends.model_identity import inspect_model, read_quantization
 from speechrail.backends.qwen3_native import snapshot_is_quantized
-from speechrail.backends.qwen3_voice_binding import resolve_binding
-from speechrail.domain.tts import (
-    apply_crossfade,
-    generation_token_budget,
-    get_voice_profile,
-    normalize_tts_text,
-)
+from speechrail.config.model_catalog import QuantizationSpec
+from speechrail.domain.tts import generation_token_budget, get_voice_profile, normalize_tts_text
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -67,6 +63,11 @@ class TtsWorkerIdentity:
     dtype: str
     sample_rate: int
     backend: str = TTS_BACKEND_ID
+    family: str | None = None
+    model_variant: str | None = None
+    quantization_bits: int | None = None
+    quantization_group_size: int | None = None
+    weight_fingerprint: str | None = None
 
 
 class TtsWorkerEngine(Protocol):
@@ -79,10 +80,138 @@ class TtsWorkerEngine(Protocol):
 
 EngineFactory = Callable[[Path], TtsWorkerEngine]
 ModelLoader = Callable[[str], Any]
+_MISSING = object()
+
+
+def _loader_sources(model: object) -> tuple[object, ...]:
+    model_config = getattr(model, "config", None)
+    return (
+        getattr(model, "model_info", None),
+        model_config,
+        model,
+    )
+
+
+def _loader_value(sources: tuple[object, ...], names: tuple[str, ...]) -> object:
+    for source in sources:
+        if source is None:
+            continue
+        for name in names:
+            if isinstance(source, Mapping):
+                value = source.get(name, _MISSING)
+            else:
+                value = getattr(source, name, _MISSING)
+            if value is not _MISSING and value is not None:
+                return value
+    return _MISSING
+
+
+def _loader_quantization(sources: tuple[object, ...]) -> QuantizationSpec | None:
+    declarations: list[QuantizationSpec] = []
+    for source in sources:
+        if source is None:
+            continue
+        for field_name in ("quantization", "quantization_config"):
+            if isinstance(source, Mapping):
+                raw = source.get(field_name, _MISSING)
+            else:
+                raw = getattr(source, field_name, _MISSING)
+            if raw is _MISSING or raw is None:
+                continue
+            if isinstance(raw, QuantizationSpec):
+                declarations.append(raw)
+            elif isinstance(raw, Mapping):
+                declarations.append(read_quantization({field_name: raw}))
+            else:
+                raise RuntimeError("backend_identity_mismatch: invalid loader quantization")
+
+        if isinstance(source, Mapping):
+            bits = source.get("quantization_bits", _MISSING)
+            group_size = source.get("quantization_group_size", _MISSING)
+        else:
+            bits = getattr(source, "quantization_bits", _MISSING)
+            group_size = getattr(source, "quantization_group_size", _MISSING)
+        if bits is not _MISSING or group_size is not _MISSING:
+            declarations.append(
+                read_quantization(
+                    {
+                        "quantization": {
+                            "bits": None if bits is _MISSING else bits,
+                            "group_size": None if group_size is _MISSING else group_size,
+                        }
+                    }
+                )
+            )
+
+    if not declarations:
+        return None
+    first = declarations[0]
+    if any(
+        (item.bits, item.group_size) != (first.bits, first.group_size)
+        for item in declarations[1:]
+    ):
+        raise RuntimeError("backend_identity_mismatch: loader quantization conflict")
+    return first
+
+
+def _identity_quantization(identity: object) -> tuple[int | None, int | None]:
+    bits = getattr(identity, "quantization_bits", None)
+    group_size = getattr(identity, "quantization_group_size", None)
+    if bits is not None and (
+        not isinstance(bits, int) or isinstance(bits, bool) or bits not in {4, 8}
+    ):
+        raise ValueError("invalid TTS worker quantization bits")
+    if group_size is not None and (
+        not isinstance(group_size, int) or isinstance(group_size, bool) or group_size <= 0
+    ):
+        raise ValueError("invalid TTS worker quantization group size")
+    if bits is None and group_size is not None:
+        raise ValueError("unquantized TTS worker cannot report group size")
+    if bits is not None and group_size is None:
+        raise ValueError("quantized TTS worker must report group size")
+    return bits, group_size
+
+
+def _identity_matches_tts(
+    identity: object, *, device: str, sample_rate: int, model_dir: Path
+) -> bool:
+    try:
+        bits, _ = _identity_quantization(identity)
+    except ValueError:
+        return False
+    family = getattr(identity, "family", None)
+    variant = getattr(identity, "model_variant", None)
+    if family is not None and family != "qwen3_tts":
+        return False
+    if variant is not None and variant != "voice_design":
+        return False
+    expected_dtype = "int8" if bits is not None or snapshot_is_quantized(model_dir) else (
+        "float16" if device == "mps" else "float32"
+    )
+    return (
+        getattr(identity, "device", None) == device
+        and getattr(identity, "dtype", None) == expected_dtype
+        and getattr(identity, "sample_rate", None) == sample_rate
+    )
+
+
+def _ready_identity_fields(identity: object) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for attribute in (
+        "family",
+        "model_variant",
+        "quantization_bits",
+        "quantization_group_size",
+        "weight_fingerprint",
+    ):
+        value = getattr(identity, attribute, None)
+        if value is not None:
+            fields[attribute] = value
+    return fields
 
 
 class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized model runtime.
-    """MLX Qwen3-TTS engine supporting VoiceDesign and CustomVoice snapshots."""
+    """MLX Qwen3-TTS VoiceDesign engine isolated in the worker process."""
 
     def __init__(
         self,
@@ -98,6 +227,9 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         numpy_module: Any | None = None,
         warmup: bool = True,
     ) -> None:
+        expected = inspect_model(model_dir)
+        if expected.family != "qwen3_tts" or expected.variant != "voice_design":
+            raise RuntimeError("backend_identity_mismatch: unsupported TTS snapshot identity")
         try:
             if load_fn is None:
                 from mlx_audio.tts.utils import load  # type: ignore[import-not-found]
@@ -108,9 +240,18 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         except Exception as exc:
             raise RuntimeError("mlx_qwen3_tts_runtime_unavailable") from exc
         model_type = getattr(getattr(self._model, "config", None), "tts_model_type", None)
-        if model_type not in {"voice_design", "custom_voice"}:
-            raise RuntimeError("unsupported_tts_model_type")
-        self._model_variant = model_type
+        if model_type != expected.variant:
+            raise RuntimeError("backend_identity_mismatch: loader variant mismatch")
+        loader_sources = _loader_sources(self._model)
+        loaded_family = _loader_value(loader_sources, ("family", "model_type"))
+        if loaded_family is not _MISSING and loaded_family != expected.family:
+            raise RuntimeError("backend_identity_mismatch: loader family mismatch")
+        loaded_quantization = _loader_quantization(loader_sources)
+        if loaded_quantization is not None and (
+            loaded_quantization.bits,
+            loaded_quantization.group_size,
+        ) != (expected.quantization.bits, expected.quantization.group_size):
+            raise RuntimeError("backend_identity_mismatch: loader quantization mismatch")
         if sample_rate != 24_000:
             raise RuntimeError("qwen3_tts_output_invalid")
         if chunk_ms <= 0:
@@ -123,10 +264,15 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
-            dtype="int8" if snapshot_is_quantized(model_dir) else (
+            dtype="int8" if expected.quantization.bits is not None else (
                 "float16" if device == "mps" else "float32"
             ),
             sample_rate=sample_rate,
+            family=expected.family,
+            model_variant=expected.variant,
+            quantization_bits=expected.quantization.bits,
+            quantization_group_size=expected.quantization.group_size,
+            weight_fingerprint=expected.weight_fingerprint,
         )
         if warmup:
             for _ in self._generate("预热。", voice="default", speed=1.0, language="auto"):
@@ -143,49 +289,23 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
     def _generate(
         self, text: str, *, voice: str, speed: float, language: str
     ) -> Iterator[bytes]:
-        binding = resolve_binding(self._model_variant, voice)
-        profile = (
-            get_voice_profile(binding.voice)
-            if self._model_variant == "voice_design"
-            else None
-        )
-        if profile is not None:
-            try:
-                import mlx.core as mx  # type: ignore[import-not-found]
-
-                mx.random.seed(profile.seed)
-            except Exception:
-                pass
-            used_temperature = profile.temperature
-        else:
-            used_temperature = self._temperature
-        first_chunk = True
+        profile = get_voice_profile(voice)
         for result in self._model.generate(
             text=text,
-            voice=binding.speaker,
+            voice=None,
+            instruct=profile.instruction,
             speed=speed,
             lang_code=language,
             max_tokens=generation_token_budget(text),
             repetition_penalty=self._repetition_penalty,
-            temperature=used_temperature,
+            temperature=self._temperature,
             top_p=self._top_p,
             stream=True,
             streaming_interval=self._chunk_ms / 1000,
-            **({"instruct": binding.instruction} if binding.instruction is not None else {}),
         ):
             pcm = self._to_pcm(result)
-            if not pcm:
-                continue
-            if first_chunk:
-                pcm = apply_crossfade(
-                    pcm,
-                    sample_rate=self._sample_rate,
-                    fade_ms=5,
-                    fade_in=True,
-                    fade_out=False,
-                )
-                first_chunk = False
-            yield pcm
+            if pcm:
+                yield pcm
 
     def _to_pcm(self, result: Any) -> bytes:
         result_sample_rate = int(result.sample_rate)
@@ -209,9 +329,6 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         return bytes(
             self._numpy.clip(samples * 32767.0, -32768.0, 32767.0).astype("<i2").tobytes()
         )
-
-
-MlxQwenTtsEngine = MlxVoiceDesignEngine
 
 
 def _default_engine_factory(  # pragma: no cover - requires separately authorized model runtime.
@@ -270,33 +387,27 @@ def serve(
         )
         return
     identity = engine.identity
-    snapshot_quantized = snapshot_is_quantized(model_dir)
-    expected_dtype = (
-        "int8"
-        if snapshot_quantized
-        else ("float16" if device == "mps" else "float32")
-    )
-    if (
-        identity.device != device
-        or identity.dtype != expected_dtype
-        or identity.sample_rate != sample_rate
+    if not _identity_matches_tts(
+        identity, device=device, sample_rate=sample_rate, model_dir=model_dir
     ):
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "backend_identity_mismatch"},
         )
         return
+    ready: dict[str, object] = {
+        "version": PROTOCOL_VERSION,
+        "type": "ready",
+        "backend": identity.backend,
+        "device": identity.device,
+        "dtype": identity.dtype,
+        "sample_rate": identity.sample_rate,
+        "model_loaded": True,
+    }
+    ready.update(_ready_identity_fields(identity))
     write_frame(
         output_stream,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "ready",
-            "backend": identity.backend,
-            "device": identity.device,
-            "dtype": identity.dtype,
-            "sample_rate": identity.sample_rate,
-            "model_loaded": True,
-        },
+        ready,
     )
     while frame := read_frame(input_stream):
         if frame.get("type") == "trim_memory":

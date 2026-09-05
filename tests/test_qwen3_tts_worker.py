@@ -7,9 +7,28 @@ from pathlib import Path
 import pytest
 
 import speechrail.backends.qwen3_tts_worker as worker_module
+from speechrail.backends.model_identity import SnapshotIdentity
 from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_tts_worker import TtsWorkerIdentity, serve
+from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
+
+
+def _snapshot_identity(
+    *,
+    bits: int | None = None,
+    group_size: int | None = None,
+) -> SnapshotIdentity:
+    return SnapshotIdentity(
+        family="qwen3_tts",
+        variant="voice_design",
+        quantization=QuantizationSpec(
+            bits=bits,
+            group_size=group_size,
+            format="mlx" if bits is not None else "none",
+        ),
+        weight_fingerprint="shape:" + ("c" * 64),
+    )
 
 
 class FakeEngine:
@@ -65,6 +84,109 @@ def test_serve_accepts_int8_identity_for_quantized_snapshot(tmp_path: Path) -> N
     assert ready["type"] == "ready"
     assert ready["dtype"] == "int8"
     assert ready["model_loaded"] is True
+
+
+def test_serve_reports_tts_model_identity_and_preserves_four_bit_value(
+    tmp_path: Path,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = BytesIO()
+    target = BytesIO()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    source.seek(0)
+    identity = TtsWorkerIdentity(
+        device="mps",
+        dtype="int8",
+        sample_rate=24_000,
+        family="qwen3_tts",
+        model_variant="voice_design",
+        quantization_bits=4,
+        quantization_group_size=64,
+        weight_fingerprint="shape:" + ("d" * 64),
+    )
+
+    class FourBitEngine(FakeEngine):
+        pass
+
+    FourBitEngine.identity = identity
+    serve(
+        source,
+        target,
+        model_dir=model_dir,
+        device="mps",
+        sample_rate=24_000,
+        engine_factory=lambda _: FourBitEngine(),
+    )
+
+    target.seek(0)
+    ready = read_frame(target)
+    assert ready == {
+        "version": PROTOCOL_VERSION,
+        "type": "ready",
+        "backend": "mlx-qwen3-tts-voice-design",
+        "device": "mps",
+        "dtype": "int8",
+        "sample_rate": 24_000,
+        "model_loaded": True,
+        "family": "qwen3_tts",
+        "model_variant": "voice_design",
+        "quantization_bits": 4,
+        "quantization_group_size": 64,
+        "weight_fingerprint": "shape:" + ("d" * 64),
+    }
+
+
+def test_serve_rejects_tts_identity_metadata_mismatch(tmp_path: Path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = BytesIO()
+    target = BytesIO()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    source.seek(0)
+
+    class WrongIdentityEngine(FakeEngine):
+        identity = TtsWorkerIdentity(
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+            family="qwen3_asr",
+            model_variant="asr",
+        )
+
+    serve(
+        source,
+        target,
+        model_dir=model_dir,
+        device="mps",
+        sample_rate=24_000,
+        engine_factory=lambda _: WrongIdentityEngine(),
+    )
+
+    target.seek(0)
+    assert read_frame(target) == {
+        "version": PROTOCOL_VERSION,
+        "type": "error",
+        "code": "backend_identity_mismatch",
+    }
 
 
 def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Path) -> None:

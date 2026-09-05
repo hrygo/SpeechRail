@@ -4,8 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
+import speechrail.backends.qwen3_tts_worker as worker_module
+from speechrail.backends.model_identity import SnapshotIdentity
 from speechrail.backends.qwen3_tts_worker import MlxVoiceDesignEngine
+from speechrail.config.model_catalog import QuantizationSpec
 
 
 class FakeGenerationResult:
@@ -26,9 +30,20 @@ class FakeMlxModel:
 
 
 def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = FakeMlxModel()
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=4, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("e" * 64),
+        ),
+        raising=False,
+    )
     engine = MlxVoiceDesignEngine(
         tmp_path,
         device="mps",
@@ -54,7 +69,7 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
             "lang_code": "zh",
             "max_tokens": 39,
             "repetition_penalty": 1.25,
-            "temperature": 0.1,
+            "temperature": 0.85,
             "top_p": 0.95,
             "stream": True,
             "streaming_interval": 0.1,
@@ -65,109 +80,54 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
     assert np.isfinite(np.frombuffer(chunks[0], dtype="<i2")).all()
 
 
-class SequencedFakeMlxModel:
-    config = SimpleNamespace(tts_model_type="voice_design")
-
-    def generate(self, **kwargs: object):
-        del kwargs
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.full(2_400, 0.5, dtype=np.float32),
-            is_final_chunk=False,
-        )
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.full(2_400, 0.5, dtype=np.float32),
-            is_final_chunk=True,
-        )
-
-
-def test_mlx_voice_design_engine_fades_only_logical_synthesis_boundaries(
-    tmp_path: Path,
+def test_mlx_voice_design_engine_reports_disk_quantization_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=4, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("f" * 64),
+        ),
+    )
+
     engine = MlxVoiceDesignEngine(
         tmp_path,
         device="mps",
-        load_fn=lambda _: SequencedFakeMlxModel(),
+        load_fn=lambda _: FakeMlxModel(),
         numpy_module=np,
         warmup=False,
     )
 
-    chunks = list(engine.synthesize("边界测试", voice="default", speed=1.0, language="zh"))
-    first = np.frombuffer(chunks[0], dtype="<i2")
-    final = np.frombuffer(chunks[1], dtype="<i2")
-
-    assert abs(int(first[0])) < 100
-    assert abs(int(first[1_200]) - 16_383) < 100
-    assert abs(int(first[-1]) - 16_383) < 100
-    assert abs(int(final[0]) - 16_383) < 100
-    assert abs(int(final[1_200]) - 16_383) < 100
-    assert abs(int(final[-1])) < 100
+    assert engine.identity.quantization_bits == 4
+    assert engine.identity.quantization_group_size == 64
+    assert engine.identity.weight_fingerprint == "shape:" + ("f" * 64)
 
 
-class EmptyThenSequencedFakeMlxModel:
-    config = SimpleNamespace(tts_model_type="voice_design")
-
-    def generate(self, **kwargs: object):
-        del kwargs
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.array([], dtype=np.float32),
-            is_final_chunk=False,
-        )
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.full(2_400, 0.5, dtype=np.float32),
-            is_final_chunk=False,
-        )
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.full(2_400, 0.5, dtype=np.float32),
-            is_final_chunk=True,
-        )
-
-
-class SingleFinalFakeMlxModel:
-    config = SimpleNamespace(tts_model_type="voice_design")
-
-    def generate(self, **kwargs: object):
-        del kwargs
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.full(2_400, 0.5, dtype=np.float32),
-            is_final_chunk=True,
-        )
-
-
-def test_mlx_voice_design_engine_ignores_empty_chunk_before_fade_in(tmp_path: Path) -> None:
-    engine = MlxVoiceDesignEngine(
-        tmp_path,
-        device="mps",
-        load_fn=lambda _: EmptyThenSequencedFakeMlxModel(),
-        numpy_module=np,
-        warmup=False,
-    )
-    first = np.frombuffer(
-        next(iter(engine.synthesize("空块测试", voice="default", speed=1.0, language="zh"))),
-        dtype="<i2",
-    )
-    assert abs(int(first[0])) < 100
-
-
-def test_mlx_voice_design_engine_fades_both_ends_of_single_final_chunk(
-    tmp_path: Path,
+def test_mlx_voice_design_engine_rejects_loader_variant_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    engine = MlxVoiceDesignEngine(
-        tmp_path,
-        device="mps",
-        load_fn=lambda _: SingleFinalFakeMlxModel(),
-        numpy_module=np,
-        warmup=False,
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=None, group_size=None, format="none"),
+            weight_fingerprint="shape:" + ("f" * 64),
+        ),
     )
-    samples = np.frombuffer(
-        next(iter(engine.synthesize("单块测试", voice="default", speed=1.0, language="zh"))),
-        dtype="<i2",
-    )
-    assert abs(int(samples[0])) < 100
-    assert abs(int(samples[1_200]) - 16_383) < 100
-    assert abs(int(samples[-1])) < 100
+    model = FakeMlxModel()
+    model.config = SimpleNamespace(tts_model_type="custom_voice")
+
+    with pytest.raises(RuntimeError, match=r"identity|variant"):
+        MlxVoiceDesignEngine(
+            tmp_path,
+            device="mps",
+            load_fn=lambda _: model,
+            numpy_module=np,
+            warmup=False,
+        )

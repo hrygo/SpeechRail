@@ -9,12 +9,13 @@ import math
 import os
 import sys
 import traceback
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
-from speechrail.backends.qwen3_native import MODEL_FILES, snapshot_is_quantized
+from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
+from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.worker_protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
@@ -139,6 +140,11 @@ def _apply_metal_limits(cache_limit_mb: int = 256, memory_limit_mb: int = 0) -> 
 class WorkerIdentity:
     device: str
     dtype: str
+    family: str | None = None
+    model_variant: str | None = None
+    quantization_bits: int | None = None
+    quantization_group_size: int | None = None
+    weight_fingerprint: str | None = None
 
 
 class WorkerEngine(Protocol):
@@ -482,6 +488,161 @@ def _handle_commit(
         engine.close_session(session_id)
 
 
+_MISSING = object()
+
+
+def _loader_sources(session: object) -> tuple[object, ...]:
+    model = getattr(session, "model", None)
+    return (
+        getattr(session, "model_info", None),
+        getattr(session, "config", None),
+        model,
+        getattr(model, "config", None),
+    )
+
+
+def _loader_value(sources: tuple[object, ...], names: tuple[str, ...]) -> object:
+    for source in sources:
+        if source is None:
+            continue
+        for name in names:
+            if isinstance(source, Mapping):
+                value = source.get(name, _MISSING)
+            else:
+                value = getattr(source, name, _MISSING)
+            if value is not _MISSING and value is not None:
+                return value
+    return _MISSING
+
+
+def _loader_quantization(sources: tuple[object, ...]) -> QuantizationSpec | None:
+    declarations: list[QuantizationSpec] = []
+    for source in sources:
+        if source is None:
+            continue
+        for field_name in ("quantization", "quantization_config"):
+            if isinstance(source, Mapping):
+                raw = source.get(field_name, _MISSING)
+            else:
+                raw = getattr(source, field_name, _MISSING)
+            if raw is _MISSING or raw is None:
+                continue
+            if isinstance(raw, QuantizationSpec):
+                declarations.append(raw)
+            elif isinstance(raw, Mapping):
+                declarations.append(
+                    read_quantization({field_name: raw})
+                )
+            else:
+                raise RuntimeError("backend_identity_mismatch: invalid loader quantization")
+
+        if isinstance(source, Mapping):
+            bits = source.get("quantization_bits", _MISSING)
+        else:
+            bits = getattr(source, "quantization_bits", _MISSING)
+        group_size = (
+            source.get("quantization_group_size", _MISSING)
+            if isinstance(source, Mapping)
+            else getattr(source, "quantization_group_size", _MISSING)
+        )
+        if bits is not _MISSING or group_size is not _MISSING:
+            if bits is _MISSING:
+                bits = None
+            if group_size is _MISSING:
+                group_size = None
+            declarations.append(
+                read_quantization(
+                    {
+                        "quantization": {
+                            "bits": bits,
+                            "group_size": group_size,
+                        }
+                    }
+                )
+            )
+
+    if not declarations:
+        return None
+    first = declarations[0]
+    if any(
+        (item.bits, item.group_size) != (first.bits, first.group_size)
+        for item in declarations[1:]
+    ):
+        raise RuntimeError("backend_identity_mismatch: loader quantization conflict")
+    return first
+
+
+def _check_loader_identity(
+    session: object, expected: SnapshotIdentity
+) -> tuple[object, ...]:
+    sources = _loader_sources(session)
+    family = _loader_value(sources, ("family", "model_type"))
+    if family is not _MISSING and family != expected.family:
+        raise RuntimeError("backend_identity_mismatch: loader family mismatch")
+    variant = _loader_value(sources, ("model_variant", "variant"))
+    if variant is not _MISSING and variant != expected.variant:
+        raise RuntimeError("backend_identity_mismatch: loader variant mismatch")
+    loaded_quantization = _loader_quantization(sources)
+    if loaded_quantization is not None and (
+        loaded_quantization.bits,
+        loaded_quantization.group_size,
+    ) != (expected.quantization.bits, expected.quantization.group_size):
+        raise RuntimeError("backend_identity_mismatch: loader quantization mismatch")
+    return sources
+
+
+def _identity_quantization(identity: object) -> tuple[int | None, int | None]:
+    bits = getattr(identity, "quantization_bits", None)
+    group_size = getattr(identity, "quantization_group_size", None)
+    if bits is not None and (
+        not isinstance(bits, int) or isinstance(bits, bool) or bits not in {4, 8}
+    ):
+        raise ValueError("invalid worker quantization bits")
+    if group_size is not None and (
+        not isinstance(group_size, int) or isinstance(group_size, bool) or group_size <= 0
+    ):
+        raise ValueError("invalid worker quantization group size")
+    if bits is None and group_size is not None:
+        raise ValueError("unquantized worker cannot report group size")
+    if bits is not None and group_size is None:
+        raise ValueError("quantized worker must report group size")
+    return bits, group_size
+
+
+def _identity_matches_asr(identity: object, *, device: str, dtype: str) -> bool:
+    try:
+        bits, _ = _identity_quantization(identity)
+    except ValueError:
+        return False
+    family = getattr(identity, "family", None)
+    variant = getattr(identity, "model_variant", None)
+    if family is not None and family != "qwen3_asr":
+        return False
+    if variant is not None and variant != "asr":
+        return False
+    expected_dtype = "int8" if bits is not None else (dtype or (
+        "float16" if device == "mps" else "float32"
+    ))
+    return getattr(identity, "device", None) == device and getattr(
+        identity, "dtype", None
+    ) == expected_dtype
+
+
+def _ready_identity_fields(identity: object) -> dict[str, object]:
+    fields: dict[str, object] = {}
+    for attribute in (
+        "family",
+        "model_variant",
+        "quantization_bits",
+        "quantization_group_size",
+        "weight_fingerprint",
+    ):
+        value = getattr(identity, attribute, None)
+        if value is not None:
+            fields[attribute] = value
+    return fields
+
+
 def serve(
     input_stream: BinaryIO,
     output_stream: BinaryIO,
@@ -521,22 +682,23 @@ def serve(
         )
         return
     identity = engine.identity
-    expected_dtype = dtype or ("float16" if device == "mps" else "float32")
-    if identity.device != device or identity.dtype != expected_dtype:
+    if not _identity_matches_asr(identity, device=device, dtype=dtype):
         write_frame(
             output_stream,
             {"version": PROTOCOL_VERSION, "type": "error", "code": "backend_identity_mismatch"},
         )
         return
+    ready: dict[str, object] = {
+        "version": PROTOCOL_VERSION,
+        "type": "ready",
+        "device": identity.device,
+        "dtype": identity.dtype,
+        "model_loaded": True,
+    }
+    ready.update(_ready_identity_fields(identity))
     write_frame(
         output_stream,
-        {
-            "version": PROTOCOL_VERSION,
-            "type": "ready",
-            "device": identity.device,
-            "dtype": identity.dtype,
-            "model_loaded": True,
-        },
+        ready,
     )
     while True:
         try:
@@ -720,17 +882,20 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         dtype: str = "float16",
         max_new_tokens: int = 512,
     ) -> None:
-        if any(not (model_dir / name).is_file() for name in MODEL_FILES):
-            raise ValueError("model snapshot is incomplete")
+        expected = inspect_model(model_dir)
+        if expected.family != "qwen3_asr" or expected.variant != "asr":
+            raise RuntimeError("backend_identity_mismatch: unsupported ASR snapshot identity")
         import mlx_qwen3_asr  # type: ignore[import-not-found]
 
         self._session = mlx_qwen3_asr.Session(model=str(model_dir))
-        snapshot_quantized = snapshot_is_quantized(model_dir)
+        loader_sources = _check_loader_identity(self._session, expected)
+        snapshot_quantized = expected.quantization.bits is not None
 
         # In-memory INT8 quantization when requested on a non-quantized snapshot.
         # A snapshot that already ships quantized weights (e.g. an ``-8bit`` MLX
         # snapshot) must NOT be re-quantized: it is loaded directly as int8.
         quantize_raised = False
+        runtime_quantized = False
         if dtype == "int8" and not snapshot_quantized:
             try:
                 from mlx_qwen3_asr.convert import quantize_model  # type: ignore[import-not-found]
@@ -739,10 +904,12 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             except Exception as exc:
                 quantize_raised = True
                 print(f"Warning: in-memory INT8 quantization failed: {exc}", file=sys.stderr)
+                raise RuntimeError("backend_quantization_failed") from exc
+            runtime_quantized = True
             _clear_metal_cache()
 
-        info = getattr(self._session, "model_info", None) or {}
-        loaded_dtype = str(info.get("dtype", ""))
+        info_dtype = _loader_value(loader_sources, ("dtype",))
+        loaded_dtype = "" if info_dtype is _MISSING else str(info_dtype)
         if loaded_dtype.startswith("mlx.core."):
             loaded_dtype = loaded_dtype.removeprefix("mlx.core.")
         default_dtype = "float16" if device == "mps" else "float32"
@@ -753,8 +920,19 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             default_dtype=default_dtype,
             quantize_raised=quantize_raised,
         )
+        quantization = expected.quantization
+        if runtime_quantized:
+            quantization = QuantizationSpec(bits=8, group_size=64, format="affine")
         self._max_new_tokens = max_new_tokens
-        self.identity = WorkerIdentity(device, resolved_dtype)
+        self.identity = WorkerIdentity(
+            device=device,
+            dtype=resolved_dtype,
+            family=expected.family,
+            model_variant=expected.variant,
+            quantization_bits=quantization.bits,
+            quantization_group_size=quantization.group_size,
+            weight_fingerprint=expected.weight_fingerprint,
+        )
         self._streaming_states: dict[str, object] = {}
         self._align_buffers: dict[str, bytearray] = {}
         _clear_metal_cache()
