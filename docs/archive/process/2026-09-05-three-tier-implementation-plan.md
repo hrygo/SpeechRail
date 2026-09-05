@@ -815,6 +815,12 @@ def test_light_release_requires_real_device_and_soak():
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `test: establish real hardware gates for speech tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已交付 runner/门禁骨架：commits `d6daaa5`、`57fc5e2`；39 项测试覆盖公共 REST 请求、实际音频时长、资源监控生命周期、脱敏和 fail-closed。第 3 项真实三档串行采样、streaming ASR、soak/switch 与 M1 Air 8GB G2 仍未执行，因此本卡与 G2 保持未完成）
 
+2026-09-05 本机增量：已在 Apple M5 Max 上串行完成三档真实模型、公共 API、独立系统语音
+准确率代理、热态 RTF、停服切换和 `phys_footprint`；最大峰值依次为
+7000.3/5877.4/4484.2 MB。完整结果见
+`docs/archive/performance/2026-09-05-three-tier-feasibility.md`。M1 Air 8GB、12GB、完整
+真人质量集、cold/soak/streaming 未完成，因此第 3 项和 G2 保持未勾选。
+
 
 ### P01：下载制品、校验与 cache 复用
 
@@ -875,7 +881,7 @@ def test_runtime_identity_does_not_depend_on_preset():
 **所有权 / Files：** 修改 tools/install_macos.py、src/speechrail/service/paths.py、pyproject.toml（仅必要打包）；补 tests/test_installer.py、test_wheel_contents.py。
 **接口 / Inputs & Outputs：** 旧install_wheel显式env_file接口保留；新增 managed安装路径接受preset_id并调用P01/P02；所有默认目录由ServiceLayout生成。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_installer.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_installer.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.service.paths import ServiceLayout
@@ -886,14 +892,18 @@ def test_managed_state_remains_outside_release(tmp_path):
     assert layout.current_runtime == tmp_path / "runtime" / "current"
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_installer.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_installer.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 首次安装生成私有基础config，统一ASR/TTS默认，监听loopback且无明文新凭据；已有env绝不覆盖。wheel包含catalog/runtime-lock/最小smoke和设置入口资源，不包含大模型/实际音频语料。复用runtime/releases/current、preflight、LaunchAgent；安装与enable分开，最终向导明确应用才启用。避免安装失败清理到原release/外部modelstore；保留可恢复staging。
-- [ ] **4. 边界验证。** 补完整fake安装失败矩阵：既有env字节不变、samepreset幂等、wheel离开checkout仍可启动worker、主版本回退连同旧配置/目录兼容；无EnvironmentVariables凭据。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 首次安装生成私有基础config，统一ASR/TTS默认，监听loopback且无明文新凭据；已有env绝不覆盖。wheel包含catalog/runtime-lock/最小smoke和设置入口资源，不包含大模型/实际音频语料。复用runtime/releases/current、preflight、LaunchAgent；安装与enable分开，最终向导明确应用才启用。避免安装失败清理到原release/外部modelstore；保留可恢复staging。
+- [x] **4. 边界验证。** 补完整fake安装失败矩阵：既有env字节不变、samepreset幂等、wheel离开checkout仍可启动worker、主版本回退连同旧配置/目录兼容；无EnvironmentVariables凭据。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `feat: install managed speech profiles without manual runtime setup`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+
+P03 已完成 fake 矩阵、真实既有用户升级、共享 runtime 构建、受管 ffmpeg、profile selection
+和 LaunchAgent enable。真实安装额外修复 `c3fb306`、`97dc91e`、`30af091`、`5e29b72`、
+`4f30605`；旧 `.env` 字节未被覆盖。
 
 
 ### S01：持久化选择与可恢复事务日志
@@ -1050,7 +1060,7 @@ U02 已完成“已安装运行时双击设置”部分。干净机器仍缺固�
 **所有权 / Files：** 修改 contracts/openapi.yaml、contracts/realtime-openai.md、src/speechrail/http/routes/system.py；补 tests/test_tts_voices_api.py、tests/test_app_contract.py。
 **接口 / Inputs & Outputs：** 公共voice IDs和aliases保留；/v1/voices可增量返回capabilities/variant，既有必需字段不删；/v1/models实际resolves_to一致；动态值来自进程启动时已验证的同一 selection。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_tts_voices_api.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_tts_voices_api.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.domain.tts import resolve_voice
@@ -1060,14 +1070,14 @@ def test_standard_voice_alias_remains_stable():
     assert resolve_voice("coral") == "warm"
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_voices_api.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_tts_voices_api.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 建立三档参数化目录测试：模型真实resolves_to、voice描述/available/capabilities必须来自同一次启动加载的完整 selection。保留所有必需字段和alias。模式冲突继续使用REST429 backend_busy；停服切档不新增HTTP换模状态。禁止在本卡引入采样率迁移或LLM语义。
-- [ ] **4. 边界验证。** 增加实际ASGI fixture：三档voice列表/available、mode冲突、无TTS设置、短音频和六输出格式、response终结一次、cancel/断线重连、鉴权无回归。若文件所有权冲突，卡内按system→audio→WS顺序独占。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 建立三档参数化目录测试：模型真实resolves_to、voice描述/available/capabilities必须来自同一次启动加载的完整 selection。保留所有必需字段和alias。模式冲突继续使用REST429 backend_busy；停服切档不新增HTTP换模状态。禁止在本卡引入采样率迁移或LLM语义。
+- [x] **4. 边界验证。** 增加实际ASGI fixture：三档voice列表/available、mode冲突、无TTS设置、短音频和六输出格式、response终结一次、cancel/断线重连、鉴权无回归。若文件所有权冲突，卡内按system→audio→WS顺序独占。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `test: preserve audio contracts across all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `test: preserve audio contracts across all model tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `339fdb2`；三档 canonical 模型条目、健康状态和 voice capabilities 均由启动时解析的 catalog selection 生成；141 项公共 HTTP/Realtime 回归、Ruff、Mypy 与 OpenAPI lint 通过）
 
 
 ### C02：接线忙碌错误并跑客户端回归
@@ -1127,6 +1137,10 @@ def test_model_selection_assets_are_part_of_release():
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
 - [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `docs: publish verified three-tier speech acceptance`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+
+V01 本机增量已完成：主干全量测试、Ruff、Mypy、OpenAPI、plist、wheel、真实升级
+安装、三档切换、C01 动态能力目录与公共 API 均通过，并已发布本机专项报告。目标设备、完整质量集、
+cold/soak/streaming、干净首装与签名/公证仍未完成，因此 V01 保持未勾选。
 
 
 ## 6. 每卡结束的审查与 Git 规则

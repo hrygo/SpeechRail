@@ -1,12 +1,13 @@
 # 三档统一运行时实施记录
 
-状态：实施中。本文记录代码证据，不代表三档真实模型验收通过。
+状态：本机三档实现与可行性验收完成；目标设备发布门仍在实施中。
 
 ## 工作边界
 
-- 原始基线：`001e744`；实现位于 `feature/three-tier-runtime` 独立工作树，已 rebase 到
-  `main` 的 SpeechRail 1.6.9 发布线。
-- 保留既有部署、私有配置和外部 runtime；当前服务尚未切换。
+- 原始基线：`001e744`；实现已 rebase 并快进合并到 `main` 的 SpeechRail 1.6.9 发布线，
+  临时 worktree 与已合并分支已清理。
+- 私有配置、旧 release 和外部模型保留；当前安装已迁移到受管共享 runtime，结束时 active
+  profile 为 `quality`（generation 4）。
 - 三档切换采用单机停服事务；不识别 Mac 营销型号，不实现服务内热切换、drain 或控制 socket。
 - M1 Air 8GB 仍是 light 的发布验收条件；设备证据只在 B02/V01 基准阶段记录，不进入运行架构。
 
@@ -14,8 +15,8 @@
 
 2026-09-05 从 ModelScope 文件 API 获取五个候选快照的文件清单，选定完整提交 ID 后
 重新查询该不可变版本。配置内容 SHA-256 与清单一致；主权重和 codec 的 SHA-256
-与 Hugging Face 转换维护者仓库的 LFS 元数据一致。没有下载完整权重；下载后的
-逐文件实算哈希、真实 loader 与质量验证仍是后续门槛。
+与 Hugging Face 转换维护者仓库的 LFS 元数据一致。四个正式 q8 snapshot 已下载或从既有
+内容一致快照导入，并在发布前逐文件实算大小与 SHA-256；q4 候选未下载。
 
 | artifact | ModelScope revision | 文件数 | 总字节 |
 |---|---|---:|---:|
@@ -43,7 +44,8 @@ MLX wheel，安装器需明确检查最低系统。ASR/TTS 联合临时 venv 的
 `uv pip sync --require-hashes --only-binary :all:` 成功；离线导入 SpeechRail ASR/TTS
 worker 与两个模型 SDK 的入口成功，未加载权重。联合 Apple Silicon/macOS 14 dry-run
 得到 47 个包且无冲突。
-该导入结果尚不等于新环境真实推理通过。
+受管共享 runtime 已在本机真实创建，47 个锁定包、worker import、内置 ffmpeg 与三档真实
+推理均通过。
 
 ```bash
 MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
@@ -55,8 +57,9 @@ MACOSX_DEPLOYMENT_TARGET=14.0 uv pip compile \
 ```
 
 TTS 使用对应的 `tts.in`、`tts.constraints` 和 `tts.txt`。
-ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小与 SHA-256
-来自 PyPI 发布元数据，记录于 `bootstrap-artifacts.json`；尚未执行下载或安装验证。
+ffmpeg 为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小与 SHA-256 来自 PyPI
+发布元数据并记录于 `bootstrap-artifacts.json`；已在受管 runtime 中安装，并用于真实 WAV
+解码和公共 API smoke。
 
 ## 验证进度
 
@@ -99,22 +102,24 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
   这两层只增加请求路径和状态机复杂度，已分别由 `6694640`、`94ca67e` 完整撤销；
   共享物理 ASR owner、模式互斥和既有有界推理实现不受影响。
 - B02 已交付公共 API runner 与 fail-closed 证据门 `d6daaa5`、资源监控生命周期
-  `57fc5e2`；39 项测试覆盖 ASR/TTS 请求、实际音频时长、脱敏和采样失败。真实进程采样器、
-  三档串行 cold/warm/soak/switch、streaming ASR、质量对照及 M1 Air 8GB G2 尚未执行。
+  `57fc5e2`；本机已按 `quality→balanced→light→quality` 完成真实模型准备、切换、公共
+  ASR/TTS、独立系统语音准确率代理、热态 RTF 与完整 `phys_footprint` 采样。三档最大峰值
+  分别为 7000.3/5877.4/4484.2 MB，详见三档可行性报告。M1 Air 8GB、12GB、完整真人
+  质量集、cold/soak/streaming 仍未执行，因此 G2 发布门保持未完成。
 - rebase 已保留 main v1.6.9 的 `POST/DELETE /v1/voices`、`VoiceRegistry`、契约和版本信息；
   `e86f451` 将 VoiceDesign 的 profile seed/temperature 与 CustomVoice 显式 speaker 绑定重新接入
   三档 worker，同时保留制品 family/variant/量化身份门。任意 custom ID 可由 VoiceDesign
   instruction 合成；CustomVoice 没有可信 vendor speaker 映射时稳定拒绝。
 - P03 已在 `44938e9` 接入 managed wheel/vendor release、私有配置、preflight 和原子 current
-  指针回退；99 项相关测试通过，未做真实安装或服务切换。受管 ffmpeg 接线提交为
+  指针回退；本机已完成真实升级安装、共享 runtime 构建和 service enable。受管 ffmpeg 接线提交为
   `7748964`；撤销热切换后的组合回归发现包循环导入，`bb9d826` 将可执行文件校验移到
   `runtime` 边界后，139 项 API/组合回归与 ruff/mypy 通过。
 - S04 前置解析器 `a37e26c` 已把 prepared ID 严格绑定到 catalog/runtime lock、完整
   ASR/TTS pair、目录、文件大小和 SHA-256；44 项测试通过。解析只在准备/启动/切档调用，
   不进入请求热路径；全量哈希在停服前完成。
 - S04 核心事务已由 `9d577ed`、`620395e`、`8c7478f` 完成：一次性候选启动许可、停服切换、
-  公共 ASR/TTS smoke 与一次有界回退均已接线并通过 fake/HTTP 边界测试。真实模型仍由
-  B02/V01 验收。
+  公共 ASR/TTS smoke 与一次有界回退均已接线。三次真实成功切换已验证；本机还复现并修复
+  `launchctl bootout` 后立即 `bootstrap` 的 exit-5 竞态（`5b081b3`）。
 - U01 核心命令由 `5011c36`、`9aa8bfd` 完成：`setup` 与
   `profile list|status|apply|rollback` 复用同一停服切换路径，自动化必须显式 `--yes`；
   8/12/16GiB 推荐只读取物理内存，不识别机器营销型号。更细的缺失下载量与能力影响展示仍待收口。
@@ -122,16 +127,21 @@ ffmpeg 候选为 `imageio-ffmpeg==0.6.0` 的 arm64 wheel，下载 URL、大小�
   路径含空格/中文与 symlink 拒绝测试通过。干净机器 bootstrap、签名/公证和实机双击仍未验收。
 - `a9ad380` 接入官方 ModelScope 不可变 revision 的直接流式下载，避免 SDK cache 与模型仓库
   同时保留整份快照；下载仍由 model store 执行大小、SHA-256、取消和原子发布门。
-- rebase 后最终代码门：973 项完整 fake/契约测试通过，覆盖率 82.98%；`ruff src tests`、
-  `mypy src`、OpenAPI lint、LaunchAgent plist lint 与 1.6.9 wheel 构建通过；wheel/安装器/
-  双击入口另有 26 项针对性回归通过。
+- 本机真实安装额外暴露并修复标准 uv 解释器 symlink、MLX wheel 平台解析、`uv pip sync`
+  参数、受管共享 Python/ffmpeg 激活和 installed-host preflight 问题（`c3fb306`、`97dc91e`、
+  `30af091`、`5e29b72`、`4f30605`）。C01 合入后的最终代码门为 983 项通过、覆盖率 83.09%；
+  `ruff src tests`、`mypy src`、OpenAPI lint、LaunchAgent plist lint、wheel 构建与真实安装通过。
 - C02 已由 `8c94fb2` 完成：REST 的 `AsrModeBusy` 映射为带 request ID 与
-  `Retry-After` 的 `429 backend_busy`，Realtime 既有同码行为保持。C01 的档位能力展示、
-  B02 真实质量、12GB 与 M1 Air 8GB 内存/热稳态、V01 发行验收仍在待办范围。
+  `Retry-After` 的 `429 backend_busy`，Realtime 既有同码行为保持。C01 的动态模型/音色
+  能力目录由 `339fdb2` 完成：`/health`、canonical `/v1/models` 和
+  `/v1/voices` 从启动时同一受管 selection 发布实际 profile、artifact、variant、量化与
+  voice capabilities；OpenAI alias 与必需 Model 字段保持稳定。完整真实质量、12GB 与
+  M1 Air 8GB 内存/热稳态、V01 发行验收仍在待办范围。
   S05 私有控制 socket 已退役。
 
 ## 回退
 
-本次代码与现有部署隔离。可继续使用原部署与基线版本；不删除模型、配置、日志或
-外部 runtime。实际服务切换前，仍须完成计划规定的旧进程退出、新 selection 启动、
-公共 API smoke 和 last-known-good 恢复测试。
+旧 app release、私有配置、外部模型和受管模型均保留。应用层回退时先停用服务，将
+`runtime/current` 恢复到上一 release，再重新安装并启用对应 LaunchAgent；档位回退使用
+`speechrail profile rollback --yes`。不得删除外部模型、配置或日志。真实失败回退已验证
+selection 保持 last-known-good；目标设备上的回退与长时间运行仍随 V01 验收。

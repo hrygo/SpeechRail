@@ -48,7 +48,7 @@ SpeechRail 是一套**本地优先**的语音识别与合成服务，为 QwenPaw
 - 🔌 **开箱即用的 OpenAI 协议兼容**：
   - **文件转写**：`POST /v1/audio/transcriptions`（支持 OpenAI SDK 与 `whisper-1` 等标准别名）。
   - **语音合成**：`POST /v1/audio/speech`（支持 `tts-1` 别名，输出 24 kHz 高品质音频）。
-  - **双向流式**：`WS /v1/realtime`（标准 OpenAI Realtime 协议，支持 `client.realtime.connect`；多 WebSocket 会话按 `session_id` 路由共享单个 streaming worker）。
+  - **双向流式**：`WS /v1/realtime`（标准 OpenAI Realtime 协议，支持 `client.realtime.connect`；多 WebSocket 会话按 `session_id` 路由到唯一物理 ASR worker）。
 - ⏱️ **端到端高精度时间戳**：原生输出句子级与词级对齐时间戳，支持 `verbose_json`、`srt`、`vtt` 及 `timestamp_granularities`，无需外置对齐器。
 - 👥 **实时声纹分割（Speaker Diarization）**：可选集成 Sortformer 与 CAM++，支持匿名说话人分离与重连声学聚类。
 - 🛡️ **进程隔离与资源守护（Resource Governor）**：主服务（FastAPI）与推理后端通过二进制零拷贝 IPC 协议进程级隔离；内置配额管控与背压机制，多任务并发不争抢、不崩溃。
@@ -115,7 +115,7 @@ uv run speechrail serve
 
 ```bash
 curl http://127.0.0.1:8201/health    # 进程/组件健康 + 版本
-curl http://127.0.0.1:8201/readyz    # 推理引擎就绪（200 即 Worker 加载完成）
+curl http://127.0.0.1:8201/readyz    # 推理入口已配置可用；仍需真实音频 smoke
 curl http://127.0.0.1:8201/v1/models # 可用模型及别名清单
 ```
 
@@ -139,8 +139,8 @@ flowchart TD
 
     subgraph Workers ["🛡️ 独立 Python 隔离推理 Worker (零拷贝二进制 IPC)"]
         direction LR
-        ASR["🎙️ Qwen3-ASR Worker<br/>(MLX / MPS 加速)"]
-        TTS["🔊 Qwen3-TTS Worker<br/>(VoiceDesign 合成)"]
+        ASR["🎙️ 唯一物理 Qwen3-ASR Worker<br/>(Batch / Streaming 互斥复用)"]
+        TTS["🔊 Qwen3-TTS Worker<br/>(VoiceDesign / CustomVoice)"]
         Diar["👥 Diarization 引擎<br/>(Sortformer 分割)"]
     end
 
@@ -158,19 +158,33 @@ flowchart TD
 |---|---|---|---|
 | **操作系统** | macOS 14 (Sonoma) | macOS 15 (Sequoia)+ | 针对 Apple Silicon 统一内存架构优化 |
 | **芯片型号** | Apple Silicon M1/M2/M3/M4 | M 系列 Pro / Max / Ultra | 默认使用 `mps` / `float16` |
-| **统一内存** | 8 GB (0.6B INT8) / 16 GB (1.7B) | 24 GB ~ 32 GB+ | 详见模型选型与内存对照 |
-| **系统依赖** | Python 3.12, `ffmpeg`, `uv` | 最新版 `brew` 工具链 | `ffmpeg` 必须可在系统 `PATH` 中找到 |
+| **统一内存** | 8 GB（`light`） | 12 GB（`balanced`）/ 16 GB+（`quality`） | 档位只改变权重组合；M1 Air 8GB 发布门仍待实机验证 |
+| **系统依赖** | Python 3.12、`uv` | 当前稳定版 `uv` | 受管安装使用锁定共享 runtime 与内置 `ffmpeg` |
 | **存储空间** | 15 GB 可用空间 | 30 GB+ 高速 SSD | 用于存放本地模型权重与隔离虚拟环境 |
 
 ## 🧩 支持的模型规格
 
-SpeechRail 支持通过指定本地权重目录加载不同规格的 Qwen3 语音模型：
+SpeechRail 的三个受管档位使用同一服务、worker 协议、调度和共享 vendor runtime，只改变
+ASR/TTS 权重与量化组合：
 
-| 模型类型 | 规格版本 | 内存占用 (MPS/MLX) | 推荐场景 | 说明 |
-|---|---|---|---|---|
-| **Qwen3-ASR** | **1.7B** *(默认推荐)* | ~3.0 GB (bf16→fp16) / ~1.5 GB (int8) | 会议长音频、高精度中英文/多语种识别 | 标点与时间戳综合效果最优，默认主力；支持预量化 `-8bit` MLX 快照（自动解析为 int8 直接加载，避免二次量化峰值） |
-| **Qwen3-ASR** | **0.6B** *(极速/轻量)* | ~1.0 GB (bf16→fp16) / ~600 MB (int8) | 8GB 内存设备、端侧极速流式转写、高并发 | 延迟极低、显存极小，兼容相同 Worker 协议 |
-| **Qwen3-TTS** | **VoiceDesign** (约 1.7B) | ~3.0 GB (bf16) / ~1.9 GB (int8 预量化) | 本地助手播报、多音色对话合成 | 内置 `default`, `warm`, `calm`, `bright` 预设音色；支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16） |
+| 档位 | ASR | TTS | 适用方向 |
+|---|---|---|---|
+| `quality` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 1.7B VoiceDesign q8 | 本机质量优先，保留自然语言音色设计能力 |
+| `balanced` | Qwen3-ASR 1.7B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 保留高质量识别，降低 TTS 延迟与内存 |
+| `light` | Qwen3-ASR 0.6B q8 | Qwen3-TTS 0.6B CustomVoice q8 | 8GB 目标组合；最终发布仍需 M1 Air 8GB 实机门 |
+
+受管安装完成后，可用同一命令查看和切换档位；切换允许短暂停服，并在公共 ASR/TTS smoke
+失败时执行一次回退：
+
+```bash
+speechrail profile list
+speechrail profile status
+speechrail profile apply balanced --yes
+speechrail profile rollback --yes
+```
+
+普通用户也可以双击安装目录中的 `SpeechRail 设置.command`。0.6B TTS q4 只保留为候选，
+未通过共同质量门与资源收益门前不会替换 `light` 的 q8 权重。
 
 ---
 
@@ -198,29 +212,28 @@ SpeechRail 的精度需区分三个层面：**存储精度**（`.safetensors` �
 
 ## ⚡ 性能基线与资源实测
 
-> 实测环境：Apple M5 Max (18 核 / 128GB)，macOS 26.6.2，MLX (MPS)，Qwen3-ASR/TTS 外部快照（v1.6.8 发布后第二次完整复测，主表采用最新结果）。
+> 实测环境：Apple M5 Max / 128GB，macOS 26.6.2，MLX，锁定 q8 snapshot 与同一共享
+> vendor runtime。三档按 `quality → balanced → light → quality` 串行切换；结束时恢复
+> `quality`。
 
-**常驻与峰值（v1.6.8 实测 footprint）：**
+**三档公共 API 与资源实测：**
 
-| 组件 | 常驻 (Idle) | 压测峰值 (Peak) | 说明 |
-|---|---|---|---|
-| 主服务 (FastAPI，Sortformer 空闲卸载) | **0.54 GB** | 0.54 GB | 四进程 footprint 采样 |
-| ASR Worker (batch) | **2.50 GB** | 3.78 GB | 本轮单次压测峰值 |
-| ASR Worker (streaming) | 2.56 GB | 3.74 GB | native 流式，独立计量 |
-| Qwen3 TTS Worker | 3.56 GB | 3.98 GB | 常驻与 v1.6.7 基本一致 |
-| **总物理常驻** | **9.16 GB** | **9.54 GB** | 四进程真实同时占用 |
+| 档位 | ASR 热态 RTF（中/英） | TTS 热态 RTF | 最大物理常驻 | 最大压测峰值 |
+|---|---:|---:|---:|---:|
+| `quality` | 0.0346 / 0.0353 | 0.2676 | 6624.8 MB | 7000.3 MB |
+| `balanced` | 0.0332 / 0.0330 | 0.2303 | 5561.3 MB | 5877.4 MB |
+| `light` | 0.0249 / 0.0240 | 0.2272 | 4168.0 MB | 4484.2 MB |
 
-**延迟与吞吐：**
+两条独立系统语音代理样本上，`quality`/`balanced` 的中文 CER 与英文 WER 均为 0；
+`light` 中文 CER 为 0、英文 WER 为 7.69%（13 词中 1 词差异）。每档 TTS→ASR 回读
+CER 均为 0，档位切换后的公共 smoke 均通过。资源数字是 FastAPI、一个 batch ASR worker
+和一个 TTS worker 的同一采样轮 `phys_footprint` 总和，不叠加不存在的 batch/streaming
+并行场景。
 
-- **非流式 ASR**：超长音频 (33.36s) **1.22s**（RTF 0.04x）；9.60s 音频 **0.28s**。
-- **并发吞吐**（4 workers / 8 请求）：**3.05 req/s**，P95 **1.31s**，成功率 **8/8**。
-- **TTS**：长句 (50 字符) **2.71s**（RTF 0.33x）。
-- **Realtime**：TTS 首包 **47-54ms**，ASR commit **460-539ms**（连续会话），连续 3 会话 100% 完成。
-- **音频边界**：WAV fastpath、ffmpeg 输出上限/取消回收、标准 `timestamp_granularities[]` 和 worker session 隔离均随 v1.6.8 回归覆盖。
-
-> 同版本两轮复测的稳定待机 footprint 基本一致；峰值和延迟受 fixture 实际时长、冷路径及负载时序影响，暂不作回归结论。
-
-> 完整测量与复现步骤见 **[📊 v1.6.8 性能基线完整报告](docs/archive/performance/2026-09-05-v1.6.8-performance-benchmark.md)**。跨版本趋势与报告索引见 **[📈 性能基准归档索引](docs/archive/performance/README.md)**。历史基线：[v1.6.7](docs/archive/performance/2026-09-05-v1.6.7-performance-benchmark.md) · [v1.6.6](docs/archive/performance/2026-09-04-v1.6.6-performance-benchmark.md) · [v1.6.5](docs/archive/performance/2026-09-03-v1.6.5-performance-benchmark.md) · [v1.6.3](docs/archive/performance/2026-09-03-v1.6.3-performance-benchmark.md) · [v1.6.2](docs/archive/performance/2026-09-03-v1.6.2-performance-benchmark.md) · [v1.6.0](docs/archive/performance/2026-09-03-v1.6.0-performance-benchmark.md)。
+> 这是本机可行性基准，不是 M1 Air 8GB 发布验收。完整真人语料、人工 TTS 盲听、cold、
+> soak、streaming 和目标设备压力仍需单独完成。详见
+> **[📊 三档本机可行性报告](docs/archive/performance/2026-09-05-three-tier-feasibility.md)**；
+> 历史报告见 **[📈 性能基准归档索引](docs/archive/performance/README.md)**。
 
 ---
 
@@ -297,12 +310,12 @@ response.stream_to_file("output.mp3")
 
 | 方法 | 路径 | 描述 | 支持格式 / 参数 |
 |---|---|---|---|
-| `GET` | `/health` | 服务存活与组件健康状态 | 进程状态与组件健康指标 |
-| `GET` | `/readyz` | 推理引擎就绪状态检查 | ASR/TTS Worker 均已完成加载 (HTTP 200) |
+| `GET` | `/health` | 服务存活与组件健康状态 | 进程状态、active profile 与实际 ASR artifact |
+| `GET` | `/readyz` | 推理入口就绪状态检查 | 至少一个 ASR/TTS 入口可用时返回 HTTP 200；不替代真实音频 smoke |
 | `GET` | `/metrics` | 运行指标导出 | Prometheus 文本默认；`Accept: application/json` 返回 JSON |
-| `GET` | `/v1/models` | 模型清单与别名路由 | Canonical 模型名与 `whisper-1`、`tts-1` 等兼容别名 |
-| `GET` | `/v1/voices` | 可用音色列表 | 系统预置（`default`, `warm`, `bright`, `calm`）与用户自定义音色 |
-| `POST` | `/v1/voices` | 自然语言创建音色 | 通过 Prompt 描述创建专属音色 (Voice Design)，固化固定 Seed 并持久化 |
+| `GET` | `/v1/models` | 模型清单与别名路由 | Canonical 条目声明 active profile/artifact/variant/量化；保留 `whisper-1`、`tts-1` 等兼容别名 |
+| `GET` | `/v1/voices` | 可用音色列表 | 返回当前权重下的 `available`、`variant` 和 `capabilities`；保留系统预置与用户自定义音色 |
+| `POST` | `/v1/voices` | 自然语言创建音色 | 创建并持久化 VoiceDesign 音色；CustomVoice 档位下可保存但标记为当前不可用 |
 | `DELETE` | `/v1/voices/{id}` | 删除自定义音色 | 安全删除自建音色，系统预置音色受只读保护 |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` |
