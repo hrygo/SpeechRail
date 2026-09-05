@@ -26,13 +26,16 @@ class FakeManager:
 
 def test_controller_stops_only_a_loaded_service_and_always_starts() -> None:
     loaded = FakeManager(loaded=True)
-    controller = LaunchAgentServiceController(loaded)
+    delays: list[float] = []
+    controller = LaunchAgentServiceController(loaded, sleeper=delays.append)
     controller.stop()
     controller.start()
     assert loaded.calls == ["status", "disable", "enable"]
+    assert delays == [0.25]
 
     stopped = FakeManager(loaded=False)
-    controller = LaunchAgentServiceController(stopped)
+    controller = LaunchAgentServiceController(stopped, sleeper=delays.append)
     controller.stop()
     controller.start()
     assert stopped.calls == ["status", "enable"]
+    assert delays == [0.25]

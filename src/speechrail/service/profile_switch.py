@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,8 +45,14 @@ class LaunchAgentManagerLike(Protocol):
 class LaunchAgentServiceController:
     """Adapt the existing user LaunchAgent manager to stopped switching."""
 
-    def __init__(self, manager: LaunchAgentManagerLike) -> None:
+    def __init__(
+        self,
+        manager: LaunchAgentManagerLike,
+        *,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._manager = manager
+        self._sleep = sleeper
 
     def stop(self) -> None:
         try:
@@ -53,6 +60,9 @@ class LaunchAgentServiceController:
         except ServiceError:
             return
         self._manager.disable()
+        # launchctl bootout returns before the label can always be bootstrapped
+        # again. A short bounded settle avoids the documented exit-5 race.
+        self._sleep(0.25)
 
     def start(self) -> None:
         self._manager.enable()
