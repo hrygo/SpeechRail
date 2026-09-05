@@ -299,13 +299,13 @@ def test_build_app_services_asr_and_streaming_dtype_resolves_from_snapshot(
     real_batch = services_module.Qwen3Worker
     real_streaming = services_module.Qwen3StreamingWorker
 
-    def spy_batch(config: object) -> object:
+    def spy_batch(config: object, **kwargs: object) -> object:
         captured["asr"] = getattr(config, "dtype", "")
-        return real_batch(config)
+        return real_batch(config, **kwargs)
 
-    def spy_streaming(config: object) -> object:
+    def spy_streaming(config: object, **kwargs: object) -> object:
         captured["streaming"] = getattr(config, "dtype", "")
-        return real_streaming(config)
+        return real_streaming(config, **kwargs)
 
     monkeypatch.setattr(services_module, "Qwen3Worker", spy_batch)
     monkeypatch.setattr(services_module, "Qwen3StreamingWorker", spy_streaming)
@@ -328,3 +328,38 @@ def test_build_app_services_asr_and_streaming_dtype_resolves_from_snapshot(
 
     assert captured["asr"] == "int8"
     assert captured["streaming"] == "int8"
+
+
+def test_batch_and_streaming_share_one_physical_owner(tmp_path: Path) -> None:
+    snapshot = tmp_path / "shared-snapshot"
+    snapshot.mkdir()
+    for filename in (*MODEL_FILES, "model.safetensors"):
+        (snapshot / filename).touch()
+    settings = Settings(
+        _env_file=None, qwen3_model_dir=snapshot, qwen3_python=Path(executable),
+        realtime_asr_backend="native", worker_lazy_load=True,
+    )
+    services = build_app_services(settings, AppOverrides())
+    owner = services.asr_worker.shared_owner
+    assert services.realtime_asr_factory._worker.shared_owner is owner
+    assert services.lifecycle._pending == (owner,)
+    assert services.lifecycle._evictor._workers == (owner,)
+
+
+def test_explicit_batch_override_does_not_construct_real_asr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = tmp_path / "unused-snapshot"
+    snapshot.mkdir()
+    settings = Settings(
+        _env_file=None, qwen3_model_dir=snapshot, qwen3_python=Path(executable),
+    )
+    fake = object()
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("real ASR construction is forbidden")
+
+    monkeypatch.setattr(services_module, "Qwen3Worker", forbidden)
+    result = build_app_services(settings, AppOverrides(batch_transcriber=fake))
+    assert result.batch_transcriber is fake
+    assert result.asr_worker is None

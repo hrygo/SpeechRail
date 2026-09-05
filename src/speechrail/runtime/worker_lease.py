@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Protocol, runtime_checkable
 
+from speechrail.runtime.asr_mode import AsrModeGate
+
 
 class WorkerLifecycleState(enum.StrEnum):
     ACTIVE = "active"
@@ -68,7 +70,7 @@ class WorkerIdleEvictor:
         check_interval_seconds: float = 10.0,
         on_eviction: Callable[[str, str], None] | None = None,
     ) -> None:
-        self._workers = tuple(w for w in workers if w is not None)
+        self._workers = tuple({id(w): w for w in workers if w is not None}.values())
         self._idle_timeout = idle_timeout_seconds
         self._warm_standby_timeout = min(warm_standby_timeout_seconds, idle_timeout_seconds)
         self._min_uptime = min_uptime_seconds
@@ -118,13 +120,19 @@ class WorkerIdleEvictor:
         """Force immediate cold eviction (e.g. on macOS memory pressure notification)."""
         targets = (worker,) if worker is not None else self._workers
         for w in targets:
-            lease_lock = self._lease_locks.get(w)
-            if lease_lock is not None and lease_lock.active_leases > 0:
+            if self._in_use(w):
                 continue  # In active use, do not evict
             if getattr(w, "alive", False) or getattr(w, "ready", False):
                 with contextlib.suppress(Exception):
                     await w.close()
             self._states[w] = WorkerLifecycleState.COLD_EVICTED
+
+    def _in_use(self, worker: EvictableWorker) -> bool:
+        lease = self._lease_locks.get(worker)
+        mode_gate = getattr(worker, "mode_gate", None)
+        return bool(lease is not None and lease.active_leases > 0) or (
+            isinstance(mode_gate, AsrModeGate) and mode_gate.active_count > 0
+        )
 
     async def _eviction_loop(self) -> None:
         while True:
@@ -139,8 +147,7 @@ class WorkerIdleEvictor:
                     self._last_active[worker] = worker_activity
                     self._states[worker] = WorkerLifecycleState.ACTIVE
 
-                lease_lock = self._lease_locks.get(worker)
-                if lease_lock is not None and lease_lock.active_leases > 0:
+                if self._in_use(worker):
                     self._last_active[worker] = now
                     self._states[worker] = WorkerLifecycleState.ACTIVE
                     continue

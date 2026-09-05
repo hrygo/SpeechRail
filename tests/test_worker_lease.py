@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from speechrail.application.lifecycle import RuntimeLifecycle
+from speechrail.runtime.asr_mode import AsrModeGate
 from speechrail.runtime.worker_lease import WorkerIdleEvictor
 
 
@@ -22,6 +23,50 @@ class _FakeWorker:
     async def close(self) -> None:
         self.closed = True
         self.alive = False
+
+
+def test_shared_lifecycle_starts_and_closes_physical_worker_once() -> None:
+    class CountingWorker(_FakeWorker):
+        starts = closes = 0
+
+        async def start(self) -> None:
+            self.starts += 1
+            await super().start()
+
+        async def close(self) -> None:
+            self.closes += 1
+            await super().close()
+
+    async def run() -> None:
+        worker = CountingWorker()
+        life = RuntimeLifecycle(asr=worker, streaming=worker)
+        await life.start()
+        await life.start()
+        await life.close()
+        await life.close()
+        assert (worker.starts, worker.closes) == (1, 1)
+
+    asyncio.run(run())
+
+
+def test_evictor_deduplicates_owner_and_preserves_active_asr_mode() -> None:
+    class SharedWorker(_FakeWorker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mode_gate = AsrModeGate()
+
+    async def run() -> None:
+        worker = SharedWorker()
+        evictor = WorkerIdleEvictor((worker, worker), idle_timeout_seconds=0.01)
+        assert len(evictor._workers) == 1
+        lease = worker.mode_gate.acquire("streaming")
+        await evictor.force_evict()
+        assert worker.alive
+        worker.mode_gate.release(lease)
+        await evictor.force_evict()
+        assert not worker.alive
+
+    asyncio.run(run())
 
 
 def test_worker_idle_evictor_closes_idle_worker() -> None:

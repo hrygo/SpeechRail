@@ -16,6 +16,7 @@ from speechrail.backends.qwen3_native import (
     Qwen3Worker,
     resolve_backend_dtype,
 )
+from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.backends.qwen3_streaming import (
     NativeRealtimeFactory,
     Qwen3StreamingBackendConfig,
@@ -155,25 +156,30 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         job_repository = JobRepository(settings.job_spool_dir)
 
     asr_worker: Qwen3Worker | None = None
+    shared_owner: Qwen3SharedWorker | None = None
     transcribe = overrides.transcribe
     batch_transcriber = overrides.batch_transcriber
     if (
         transcribe is None
+        and batch_transcriber is None
         and settings.qwen3_model_dir is not None
         and settings.qwen3_python is not None
     ):
-        asr_worker = Qwen3Worker(
-            Qwen3BackendConfig(
-                repository_root=_package_root(),
-                python_executable=settings.qwen3_python,
-                model_dir=settings.qwen3_model_dir,
-                device=settings.device,
-                dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
-                cache_limit_mb=settings.mlx_cache_limit_mb,
-                memory_limit_mb=settings.mlx_memory_limit_mb,
-                timeout_seconds=settings.request_timeout_seconds,
-            )
+        asr_config = Qwen3BackendConfig(
+            repository_root=_package_root(),
+            python_executable=settings.qwen3_python,
+            model_dir=settings.qwen3_model_dir,
+            device=settings.device,
+            dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
+            cache_limit_mb=settings.mlx_cache_limit_mb,
+            memory_limit_mb=settings.mlx_memory_limit_mb,
+            timeout_seconds=settings.request_timeout_seconds,
         )
+        shared_owner = Qwen3SharedWorker(asr_config, max_sessions=settings.realtime_max_sessions)
+        try:
+            asr_worker = Qwen3Worker(asr_config, shared_owner=shared_owner)
+        except TypeError:
+            asr_worker = Qwen3Worker(asr_config)
         transcribe = asr_worker.transcribe
         batch_transcriber = Qwen3BatchTranscriber(worker=asr_worker, model_id=settings.model_id)
 
@@ -215,29 +221,32 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         and settings.qwen3_python is not None
         and settings.qwen3_model_dir is not None
     ):
-        # Dedicated streaming worker: concurrent realtime sessions multiplex one
-        # pipe via session_id frame routing (the worker, not batch, owns the
-        # streaming read side). Keeping batch on a separate worker bounds batch
-        # latency from delaying realtime frames.
-        streaming_worker = Qwen3StreamingWorker(
-            Qwen3StreamingBackendConfig(
-                repository_root=_package_root(),
-                python_executable=settings.qwen3_python,
-                model_dir=settings.qwen3_model_dir,
-                device=settings.device,
-                dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
-                cache_limit_mb=settings.mlx_cache_limit_mb,
-                memory_limit_mb=settings.mlx_memory_limit_mb,
-                mode=settings.qwen3_streaming_mode,
-                chunk_sec=settings.qwen3_streaming_chunk_sec,
-                left_context_sec=settings.qwen3_streaming_left_context_sec,
-                right_context_ms=settings.qwen3_streaming_right_context_ms,
-                hold_back_words=settings.qwen3_streaming_hold_back_words,
-                stable_iterations=settings.qwen3_streaming_stable_iterations,
-                max_new_tokens=settings.qwen3_streaming_max_new_tokens,
-                timeout_seconds=settings.request_timeout_seconds,
-            )
+        # 两种逻辑入口共用同一物理模型。模式门限制 batch/streaming 互斥。
+        streaming_config = Qwen3StreamingBackendConfig(
+            repository_root=_package_root(),
+            python_executable=settings.qwen3_python,
+            model_dir=settings.qwen3_model_dir,
+            device=settings.device,
+            dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
+            cache_limit_mb=settings.mlx_cache_limit_mb,
+            memory_limit_mb=settings.mlx_memory_limit_mb,
+            mode=settings.qwen3_streaming_mode,
+            chunk_sec=settings.qwen3_streaming_chunk_sec,
+            left_context_sec=settings.qwen3_streaming_left_context_sec,
+            right_context_ms=settings.qwen3_streaming_right_context_ms,
+            hold_back_words=settings.qwen3_streaming_hold_back_words,
+            stable_iterations=settings.qwen3_streaming_stable_iterations,
+            max_new_tokens=settings.qwen3_streaming_max_new_tokens,
+            timeout_seconds=settings.request_timeout_seconds,
         )
+        if shared_owner is None:
+            shared_owner = Qwen3SharedWorker(
+                streaming_config, max_sessions=settings.realtime_max_sessions
+            )
+        try:
+            streaming_worker = Qwen3StreamingWorker(streaming_config, shared_owner=shared_owner)
+        except TypeError:
+            streaming_worker = Qwen3StreamingWorker(streaming_config)
         realtime_asr_factory = NativeRealtimeFactory(
             worker=streaming_worker,
             mode=settings.qwen3_streaming_mode,
@@ -294,7 +303,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         # protocol intentionally knows nothing about lifecycle, so the engine
         # is narrowed to the runtime EvictableWorker protocol it implements.
         evictable: list[EvictableWorker] = [
-            w for w in (asr_worker, tts_worker, streaming_worker) if w is not None
+            w for w in (shared_owner, tts_worker) if w is not None
         ]
         if isinstance(diarization_engine, EvictableWorker):
             evictable.append(diarization_engine)
@@ -307,11 +316,17 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 on_eviction=metrics.record_eviction,
             )
 
+    asr_owner = getattr(asr_worker, "shared_owner", asr_worker) if asr_worker is not None else None
+    streaming_owner = (
+        getattr(streaming_worker, "shared_owner", streaming_worker)
+        if streaming_worker is not None
+        else None
+    )
     lifecycle = RuntimeLifecycle(
         repository=job_repository,
-        asr=asr_worker,
+        asr=asr_owner,
         tts=tts_worker,
-        streaming=streaming_worker,
+        streaming=streaming_owner,
         runner=job_runner,
         evictor=evictor,
         lazy_load=settings.worker_lazy_load,

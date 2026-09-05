@@ -60,15 +60,17 @@ class RuntimeLifecycle:
         self._asr = asr
         self._tts = tts
         self._streaming = streaming
-        self._pending: tuple[StartableComponent, ...] = tuple(
-            component for component in (asr, tts, streaming) if component is not None
-        )
+        self._pending: tuple[StartableComponent, ...] = tuple({
+            id(component): component
+            for component in (asr, tts, streaming) if component is not None
+        }.values())
         self._runner = runner
         self._evictor = evictor
         self._lazy_load = lazy_load
         self._poll_seconds = poll_seconds
         self._started_components: list[StartableComponent] = []
         self._runner_task: asyncio.Task[None] | None = None
+        self._running = False
 
     def worker_states(self) -> dict[str, str]:
         """Return low-cardinality lifecycle states for managed inference workers."""
@@ -96,6 +98,8 @@ class RuntimeLifecycle:
             await self.close()
 
     async def start(self) -> None:
+        if self._running:
+            return
         try:
             if self._repository is not None:
                 self._repository.recover_interrupted()
@@ -111,11 +115,13 @@ class RuntimeLifecycle:
                 )
             if self._evictor is not None:
                 await self._evictor.start()
+            self._running = True
         except BaseException:
             await self._close_started()
             raise
 
     async def close(self) -> None:
+        self._running = False
         if self._evictor is not None:
             await self._evictor.close()
         if self._runner_task is not None:
