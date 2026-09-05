@@ -67,7 +67,7 @@ class RuntimePaths:
             if not isinstance(path, Path) or not path.is_absolute():
                 raise RuntimeBootstrapError(f"{name} must be an absolute path")
             try:
-                path.resolve().relative_to(release)
+                path.parent.resolve().relative_to(release)
             except (OSError, RuntimeError, ValueError) as exc:
                 raise RuntimeBootstrapError(f"{name} escapes the runtime release") from exc
         if (
@@ -455,12 +455,16 @@ def _runtime_paths(release: Path, key: str, lock_id: str) -> RuntimePaths:
     )
 
 
-def _validate_executable(path: Path, release: Path) -> None:
-    if path.is_symlink():
-        try:
-            path.resolve().relative_to(release.resolve())
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise RuntimeBootstrapError("runtime executable symlink escapes release") from exc
+def _validate_executable(
+    path: Path, release: Path, *, allow_external_symlink: bool = False
+) -> None:
+    try:
+        path.parent.resolve(strict=True).relative_to(release.resolve())
+        resolved = path.resolve(strict=True)
+        if not allow_external_symlink:
+            resolved.relative_to(release.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeBootstrapError("runtime executable path is invalid") from exc
     if not path.is_file() or not os.access(path, os.X_OK):
         raise RuntimeBootstrapError("runtime executable is missing or not executable")
 
@@ -593,8 +597,9 @@ def _runtime_metadata_matches(
     }:
         raise RuntimeBootstrapError("prepared runtime artifact identity is invalid")
     paths = _runtime_paths(release, key, lock.id)
-    for executable in (paths.asr_python, paths.tts_python, paths.ffmpeg):
-        _validate_executable(executable, release)
+    _validate_executable(paths.asr_python, release, allow_external_symlink=True)
+    _validate_executable(paths.tts_python, release, allow_external_symlink=True)
+    _validate_executable(paths.ffmpeg, release)
     return paths
 
 
@@ -751,7 +756,7 @@ def prepare_runtime(
         shared_environment = stage_release
         _run(("uv", "venv", "--python", lock.python, str(shared_environment)), runner)
         shared_python = shared_environment / "bin" / "python"
-        _validate_executable(shared_python, stage_release)
+        _validate_executable(shared_python, stage_release, allow_external_symlink=True)
 
         requirements_root = stage_release / "requirements"
         _ensure_directory(requirements_root)
@@ -834,8 +839,9 @@ def prepare_runtime(
         )
         _run((str(shared_python), "-c", _EXPORT_FFMPEG_CODE, str(ffmpeg_path)), runner)
         paths = _runtime_paths(stage_release, key, lock.id)
-        for executable in (paths.asr_python, paths.tts_python, paths.ffmpeg):
-            _validate_executable(executable, stage_release)
+        _validate_executable(paths.asr_python, stage_release, allow_external_symlink=True)
+        _validate_executable(paths.tts_python, stage_release, allow_external_symlink=True)
+        _validate_executable(paths.ffmpeg, stage_release)
         metadata = _metadata_for(
             lock,
             key,

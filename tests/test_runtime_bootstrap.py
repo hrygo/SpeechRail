@@ -419,6 +419,30 @@ def test_prepare_runtime_rejects_symlink_escape_from_runner(tmp_path: Path) -> N
         prepare_runtime(_lock(), tmp_path, EscapingRunner())
 
 
+def test_prepare_runtime_accepts_uv_style_external_python_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "uv-managed-python" / "bin"
+    outside.mkdir(parents=True)
+    interpreter = outside / "python3.12"
+    interpreter.write_text("fake managed python\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+
+    class UvStyleRunner(FakeRunner):
+        def __call__(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+            result = super().__call__(command)
+            if command[:2] == ("uv", "venv"):
+                environment = Path(command[-1])
+                python = environment / "bin" / "python"
+                python.unlink()
+                python.symlink_to(interpreter)
+            return result
+
+    result = prepare_runtime(_lock(), tmp_path / "app", UvStyleRunner())
+
+    assert result.asr_python.is_symlink()
+    assert result.asr_python.resolve() == interpreter.resolve()
+    assert result.asr_python == result.tts_python
+
+
 def test_preflight_accepts_prepared_runtime_without_external_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
