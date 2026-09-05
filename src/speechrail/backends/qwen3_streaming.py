@@ -9,18 +9,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, StreamingAsrEvent
+from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease
 from speechrail.runtime.worker_process import (
-    AsyncFramedWorkerProcess,
     WorkerProcessSpec,
-    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION
@@ -40,6 +39,9 @@ _SUPPORTED_LANGUAGES = {
 
 class StreamingWorkerProtocol(Protocol):
     """Narrow multiplexed interface required by streaming sessions from an ASR worker."""
+
+    @property
+    def mode_gate(self) -> AsrModeGate: ...
 
     @property
     def alive(self) -> bool: ...
@@ -142,116 +144,70 @@ class Qwen3StreamingWorker:
     sessions can multiplex one pipe without stealing each other's frames.
     """
 
-    def __init__(self, config: Qwen3StreamingBackendConfig) -> None:
+    def __init__(
+        self,
+        config: Qwen3StreamingBackendConfig,
+        *,
+        shared_owner: Qwen3SharedWorker | None = None,
+    ) -> None:
         self.config = config
-        self._transport = AsyncFramedWorkerProcess(config.worker_spec())
-        self._write_lock = asyncio.Lock()
-        self._start_lock = asyncio.Lock()
-        self._ready = False
-        self._queues: dict[str, asyncio.Queue[dict[str, object]]] = {}
-        self._dispatcher: asyncio.Task[None] | None = None
-        self.last_active: float = time.monotonic()
+        self._shared_owner = shared_owner or Qwen3SharedWorker(config)
+
+    @property
+    def shared_owner(self) -> Qwen3SharedWorker:
+        """Return the sole IPC owner used by this streaming facade."""
+
+        return self._shared_owner
+
+    @property
+    def mode_gate(self) -> AsrModeGate:
+        return self._shared_owner.mode_gate
 
     @property
     def alive(self) -> bool:
-        return self._transport.alive
+        return self._shared_owner.alive
+
+    @property
+    def ready(self) -> bool:
+        return self._shared_owner.ready
+
+    @property
+    def identity(self) -> tuple[str, str] | None:
+        return self._shared_owner.identity
 
     @property
     def timeout_seconds(self) -> float:
-        return self.config.timeout_seconds
+        return self._shared_owner.timeout_seconds
+
+    @property
+    def last_active(self) -> float:
+        return self._shared_owner.last_active
 
     def register_session(self, session_id: str) -> asyncio.Queue[dict[str, object]]:
-        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        self._queues[session_id] = queue
-        self.last_active = time.monotonic()
-        return queue
+        return self._shared_owner.register_session(session_id)
 
     def unregister_session(self, session_id: str) -> None:
-        self._queues.pop(session_id, None)
-        self.last_active = time.monotonic()
+        self._shared_owner.unregister_session(session_id)
 
     async def start(self) -> None:
-        if self._ready:
-            return
-        async with self._start_lock:
-            if self._ready:
-                return
-            await self._transport.start()
-            ready = await self._transport.exchange(
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "start",
-                    "model_dir": str(self.config.model_dir),
-                    "device": self.config.device,
-                }
-            )
-            if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-                raise RuntimeError(
-                    error_frame_message(ready, "streaming worker failed to become ready")
-                )
-            if ready.get("device") != self.config.device or ready.get("dtype") != self.config.dtype:
-                raise RuntimeError("backend_identity_mismatch")
-            self._ready = True
-            self.last_active = time.monotonic()
-            self._dispatcher = asyncio.create_task(self._dispatch_loop())
+        await self._shared_owner.start()
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None:
-        async with self._write_lock:
-            await self._transport.send(payload, binary_payload=binary_payload)
-        self.last_active = time.monotonic()
-
-    async def _dispatch_loop(self) -> None:
-        try:
-            while True:
-                try:
-                    frame = await self._transport.receive()
-                except TimeoutError:
-                    # A streaming worker legitimately goes silent between
-                    # sessions; an idle read timeout is not a worker failure.
-                    # Dying here would strand every later session waiting for
-                    # session.opened, so keep dispatching on idle silence.
-                    continue
-                self.last_active = time.monotonic()
-                session_id = frame.get("session_id")
-                queue = (
-                    self._queues.get(session_id)
-                    if isinstance(session_id, str)
-                    else None
-                )
-                if queue is not None:
-                    await queue.put(frame)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # Real worker failure (EOF / protocol error): reset readiness so a
-            # later start() rebuilds the worker and dispatcher instead of
-            # silently leaving every future session stuck in connect().
-            self._ready = False
-            for queue in tuple(self._queues.values()):
-                queue.put_nowait({"type": "error", "code": "worker_unavailable"})
-            raise
+        await self._shared_owner.send(payload, binary_payload=binary_payload)
 
     async def trim_memory(self) -> None:
-        if self.alive:
-            with contextlib.suppress(Exception):
-                await self.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
+        await self._shared_owner.trim_memory()
 
     async def close(self) -> None:
-        async with self._start_lock:
-            if self._dispatcher is not None:
-                self._dispatcher.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await self._dispatcher
-                self._dispatcher = None
-            self._queues.clear()
-            self._ready = False
-            await self._transport.close()
+        await self._shared_owner.close()
 
 
 class Qwen3StreamingSession(RealtimeAsrSession):
     """One bounded realtime session proxying PCM to the shared worker."""
+
+    EVENT_QUEUE_MAXSIZE = 64
 
     def __init__(
         self,
@@ -260,16 +216,29 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         language: str,
         prompt: str,
         session_id: str,
+        chunk_sec: float = 2.0,
+        left_context_sec: float = 12.0,
+        right_context_ms: int = 640,
+        max_new_tokens: int = 256,
     ) -> None:
         self._worker = worker
         self._language = language
         self._prompt = prompt
         self._session_id = session_id
+        self._chunk_sec = chunk_sec
+        self._left_context_sec = left_context_sec
+        self._right_context_ms = right_context_ms
+        self._max_new_tokens = max_new_tokens
         self._queue: asyncio.Queue[dict[str, object]] | None = None
-        self._events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
+        self._events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue(
+            maxsize=self.EVENT_QUEUE_MAXSIZE
+        )
         self._reader: asyncio.Task[None] | None = None
         self._connected = False
         self._finished = asyncio.Event()
+        self._mode_lease: AsrModeLease | None = None
+        self._cleanup_lock = asyncio.Lock()
+        self._finalized = False
 
     @property
     def session_id(self) -> str:
@@ -278,9 +247,14 @@ class Qwen3StreamingSession(RealtimeAsrSession):
     async def connect(self) -> None:
         if self._connected:
             return
-        await self._worker.start()
-        self._queue = self._worker.register_session(self._session_id)
+        self._finalized = False
+        self._finished = asyncio.Event()
+        self._mode_lease = self._worker.mode_gate.acquire("streaming")
+        registered = False
         try:
+            await self._worker.start()
+            self._queue = self._worker.register_session(self._session_id)
+            registered = True
             await self._worker.send(
                 {
                     "version": PROTOCOL_VERSION,
@@ -288,25 +262,28 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                     "session_id": self._session_id,
                     "language": self._language,
                     "context": self._prompt,
+                    "chunk_sec": self._chunk_sec,
+                    "left_context_sec": self._left_context_sec,
+                    "right_context_ms": self._right_context_ms,
+                    "max_new_tokens": self._max_new_tokens,
                 }
             )
+            assert self._queue is not None
             opened = await asyncio.wait_for(
                 self._queue.get(),
                 timeout=max(self._worker.timeout_seconds, 1.0),
             )
+            if opened.get("type") != "session.opened":
+                raise RuntimeError("streaming session.open failed")
+            self._connected = True
+            self._reader = asyncio.create_task(
+                self._read_loop(), name=f"qwen3-stream-session-{self._session_id}"
+            )
         except BaseException:
-            # CancelledError (client disconnect) must also unregister the
-            # per-session queue, or the dispatch loop keeps routing into a
-            # queue nobody drains until the shared worker is rebuilt.
-            self._worker.unregister_session(self._session_id)
-            self._queue = None
+            # CancelledError 或握手失败也必须释放 session queue 与 mode token。
+            with contextlib.suppress(BaseException):
+                await self._finalize(cancel=registered)
             raise
-        if opened.get("type") != "session.opened":
-            self._worker.unregister_session(self._session_id)
-            self._queue = None
-            raise RuntimeError("streaming session.open failed")
-        self._connected = True
-        self._reader = asyncio.create_task(self._read_loop())
 
     async def append_audio(self, audio: bytes) -> None:
         if not audio or len(audio) % 2:
@@ -352,47 +329,130 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         return iterator()
 
     async def close(self) -> None:
-        if self._reader is not None:
-            self._reader.cancel()
+        reader = self._reader
+        if reader is not None and reader is not asyncio.current_task() and not reader.done():
+            reader.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._reader
-            self._reader = None
-        if self._connected:
-            await self._worker.send(
-                {"version": PROTOCOL_VERSION, "type": "cancel", "session_id": self._session_id}
-            )
-            self._connected = False
-        if self._queue is not None:
-            self._worker.unregister_session(self._session_id)
-            self._queue = None
+                await reader
+        self._reader = None
+        await self._finalize(cancel=True)
 
     async def _read_loop(self) -> None:
         try:
             while True:
-                frame = await self._queue.get()  # type: ignore[union-attr]
+                if self._queue is None:
+                    return
+                frame = await self._queue.get()
                 kind = frame.get("type")
                 if kind == "event":
-                    await self._events_queue.put(_to_event(frame))
+                    if not self._put_event(_to_event(frame)):
+                        self._replace_events_with_error("session_queue_full")
+                        with contextlib.suppress(BaseException):
+                            await self._finalize(cancel=True)
+                        return
                 elif kind == "finished":
                     self._finished.set()
-                    await self._events_queue.put(None)
+                    queue_full = not self._put_terminal()
+                    if queue_full:
+                        with contextlib.suppress(BaseException):
+                            await self._finalize(cancel=True)
+                    else:
+                        await self._finalize(cancel=False)
                     return
                 elif kind == "error":
                     code = frame.get("code")
-                    await self._events_queue.put(
-                        StreamingAsrEvent(
-                            kind="error",
-                            error_code=str(code or "backend_error"),
-                        )
-                    )
                     self._finished.set()
-                    await self._events_queue.put(None)
+                    queue_full = self._events_queue.full()
+                    if queue_full:
+                        self._replace_events_with_error("session_queue_full")
+                    else:
+                        self._events_queue.put_nowait(
+                            StreamingAsrEvent(
+                                kind="error",
+                                error_code=str(code or "backend_error"),
+                            )
+                        )
+                        self._events_queue.put_nowait(None)
+                    if queue_full:
+                        with contextlib.suppress(BaseException):
+                            await self._finalize(cancel=True)
+                    else:
+                        await self._finalize(cancel=False)
                     return
         except asyncio.CancelledError:
             raise
         except Exception:
             self._finished.set()
-            await self._events_queue.put(None)
+            self._replace_events_with_error("worker_unavailable")
+            with contextlib.suppress(BaseException):
+                await self._finalize(cancel=True)
+
+    def _put_event(self, event: StreamingAsrEvent) -> bool:
+        try:
+            self._events_queue.put_nowait(event)
+        except asyncio.QueueFull:
+            return False
+        return True
+
+    def _put_terminal(self) -> bool:
+        if self._events_queue.full():
+            self._replace_events_with_error("session_queue_full")
+            return False
+        self._events_queue.put_nowait(None)
+        return True
+
+    def _replace_events_with_error(self, code: str) -> None:
+        _clear_event_queue(self._events_queue)
+        self._events_queue.put_nowait(StreamingAsrEvent(kind="error", error_code=code))
+        self._events_queue.put_nowait(None)
+
+    async def _finalize(self, *, cancel: bool) -> None:
+        async with self._cleanup_lock:
+            if self._finalized:
+                return
+            self._finalized = True
+            cleanup_error: BaseException | None = None
+            try:
+                if cancel and self._queue is not None:
+                    try:
+                        await self._worker.send(
+                            {
+                                "version": PROTOCOL_VERSION,
+                                "type": "cancel",
+                                "session_id": self._session_id,
+                            }
+                        )
+                    except BaseException as exc:
+                        cleanup_error = exc
+            finally:
+                self._connected = False
+                queue = self._queue
+                self._queue = None
+                if queue is not None:
+                    try:
+                        self._worker.unregister_session(self._session_id)
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                lease = self._mode_lease
+                self._mode_lease = None
+                if lease is not None:
+                    try:
+                        self._worker.mode_gate.release(lease)
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
+                self._finished.set()
+            if cleanup_error is not None:
+                raise cleanup_error
+
+
+def _clear_event_queue(queue: asyncio.Queue[StreamingAsrEvent | None]) -> None:
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
 
 
 def _to_event(frame: Mapping[str, object]) -> StreamingAsrEvent:
@@ -460,11 +520,16 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
             raise _unsupported_language(resolved)
         if len(self._sessions) >= self._max_sessions:
             raise RuntimeError("realtime streaming backend busy")
+        config = getattr(self._worker, "config", None)
         session = Qwen3StreamingSession(
             worker=self._worker,
             language=resolved,
             prompt=prompt,
             session_id=self._next_session_id(),
+            chunk_sec=getattr(config, "chunk_sec", 2.0),
+            left_context_sec=getattr(config, "left_context_sec", 12.0),
+            right_context_ms=getattr(config, "right_context_ms", 640),
+            max_new_tokens=getattr(config, "max_new_tokens", 256),
         )
         self._sessions[session.session_id] = session
         return session

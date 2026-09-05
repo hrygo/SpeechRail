@@ -2,22 +2,19 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import hashlib
 import json
 import os
-import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 from uuid import uuid4
 
+from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
 from speechrail.runtime.worker_process import (
-    AsyncFramedWorkerProcess,
     WorkerProcessSpec,
     error_frame_message,
     offline_environment,
@@ -232,62 +229,56 @@ def _is_transport_loss(exc: BaseException) -> bool:
 class Qwen3Worker:  # pragma: no cover - exercised against an external isolated Qwen runtime.
     """One supervised, offline worker process shared by batch and streaming requests."""
 
-    def __init__(self, config: Qwen3BackendConfig) -> None:
+    def __init__(
+        self,
+        config: Qwen3BackendConfig,
+        *,
+        shared_owner: Qwen3SharedWorker | None = None,
+    ) -> None:
         self.config = config
-        self._transport = AsyncFramedWorkerProcess(config.worker_spec())
-        self._lock = asyncio.Lock()
-        self._identity: tuple[str, str] | None = None
-        self.last_active: float = time.monotonic()
+        self._shared_owner = shared_owner or Qwen3SharedWorker(config)
+
+    @property
+    def shared_owner(self) -> Qwen3SharedWorker:
+        """Return the sole IPC owner used by this batch facade."""
+
+        return self._shared_owner
 
     @property
     def alive(self) -> bool:
-        return self._transport.alive
+        return self._shared_owner.alive
+
+    @property
+    def ready(self) -> bool:
+        return self._shared_owner.ready
+
+    @property
+    def identity(self) -> tuple[str, str] | None:
+        return self._shared_owner.identity
+
+    @property
+    def last_active(self) -> float:
+        return self._shared_owner.last_active
 
     async def start(self) -> None:
-        async with self._lock:
-            if self._identity is not None:
-                return
-            try:
-                await self._transport.start()
-                ready = await self.exchange(
-                    {
-                        "version": PROTOCOL_VERSION,
-                        "type": "start",
-                        "model_dir": str(self.config.model_dir),
-                        "device": self.config.device,
-                    }
-                )
-                if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-                    raise RuntimeError(error_frame_message(ready, "worker_start_failed"))
-                device, dtype = ready.get("device"), ready.get("dtype")
-                if device != self.config.device or dtype != self.config.dtype:
-                    raise RuntimeError("backend_identity_mismatch")
-                self._identity = (str(device), str(dtype))
-            except BaseException:
-                await self._transport.abort()
-                raise
+        await self._shared_owner.start()
 
     async def send(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None:
-        await self._transport.send(payload, binary_payload=binary_payload)
-        self.last_active = time.monotonic()
+        await self._shared_owner.send(payload, binary_payload=binary_payload)
 
     async def receive(self) -> dict[str, object]:
-        frame = await self._transport.receive()
-        self.last_active = time.monotonic()
-        return frame
+        raise RuntimeError("shared owner owns receive")
 
     async def exchange(
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> dict[str, object]:
-        """Send one request and read its response atomically on the shared transport."""
-        try:
-            frame = await self._transport.exchange(payload, binary_payload=binary_payload)
-        except ProtocolError as exc:
-            raise RuntimeError("worker_frame_invalid") from exc
-        self.last_active = time.monotonic()
-        return frame
+        """Compatibility wrapper; runtime reads remain owned by the shared dispatcher."""
+        request_id = payload.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise RuntimeError("shared owner owns receive")
+        return await self._shared_owner.request(payload, binary=binary_payload)
 
     async def transcribe(
         self,
@@ -299,26 +290,24 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         request_id: str | None = None,
     ) -> TranscriptResult:
         resolved_request_id = request_id or f"req_{uuid4().hex}"
+        lease = self._shared_owner.mode_gate.acquire("batch")
         try:
+            try:
+                return await self._transcribe_once(
+                    pcm, language, prompt, include_timestamps, resolved_request_id
+                )
+            except TimeoutError:
+                # timeout 后由 owner 保持已终止状态, 不重跑推理。
+                raise
+            except (OSError, ProtocolError, RuntimeError) as exc:
+                if not _is_transport_loss(exc):
+                    raise
+            # transport loss 最多重建一次; 不能 close 共享 owner 误杀其他会话。
             return await self._transcribe_once(
                 pcm, language, prompt, include_timestamps, resolved_request_id
             )
-        except TimeoutError:
-            # A worker hang leaves the pipe frame-desynced: kill it so the next
-            # request starts fresh, but do not silently re-run the timed-out
-            # inference; the route maps this to 503 backend_timeout.
-            await self.close()
-            raise
-        except (OSError, ProtocolError, RuntimeError) as exc:
-            if not _is_transport_loss(exc):
-                raise
-        # One in-request rebuild so a crashed worker costs a single retry instead
-        # of failing every request until idle eviction (TTS self-heals the same
-        # way in synthesize()'s finally).
-        await self.close()
-        return await self._transcribe_once(
-            pcm, language, prompt, include_timestamps, resolved_request_id
-        )
+        finally:
+            self._shared_owner.mode_gate.release(lease)
 
     async def _transcribe_once(
         self,
@@ -329,21 +318,20 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         resolved_request_id: str,
     ) -> TranscriptResult:
         await self.start()
-        async with self._lock:
-            result = await self.exchange(
-                {
-                    "version": PROTOCOL_VERSION,
-                    "type": "transcribe",
-                    "request_id": resolved_request_id,
-                    "sample_rate": 16000,
-                    "channels": 1,
-                    "sample_width_bytes": 2,
-                    "language": language or "auto",
-                    "prompt": prompt,
-                    "include_timestamps": include_timestamps,
-                },
-                binary_payload=pcm,
-            )
+        result = await self._shared_owner.request(
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "transcribe",
+                "request_id": resolved_request_id,
+                "sample_rate": 16000,
+                "channels": 1,
+                "sample_width_bytes": 2,
+                "language": language or "auto",
+                "prompt": prompt,
+                "include_timestamps": include_timestamps,
+            },
+            binary=pcm,
+        )
         if result.get("type") != "result" or result.get("request_id") != resolved_request_id:
             raise RuntimeError(error_frame_message(result, "worker_request_failed"))
         text, detected = result.get("text"), result.get("language")
@@ -361,14 +349,10 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         )
 
     async def trim_memory(self) -> None:
-        if self.alive:
-            with contextlib.suppress(Exception):
-                await self._transport.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
+        await self._shared_owner.trim_memory()
 
     async def close(self) -> None:
-        async with self._lock:
-            self._identity = None
-            await self._transport.close()
+        await self._shared_owner.close()
 
 
 class _Qwen3TranscriptionWorker(Protocol):

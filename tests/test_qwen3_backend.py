@@ -11,43 +11,99 @@ from speechrail.backends.qwen3_native import (
     validate_snapshot,
     weight_files,
 )
+from speechrail.backends.qwen3_shared import Qwen3SharedWorker
+from speechrail.runtime.asr_mode import AsrModeBusy, AsrModeGate
 
 
-class _FakeTransport:
-    def __init__(self, responses: list[dict[str, Any]]) -> None:
-        self.responses = responses
+class _FakeSharedOwner:
+    def __init__(
+        self,
+        responses: list[dict[str, Any] | BaseException],
+        *,
+        timeout_seconds: float = 120.0,
+        expected_identity: tuple[str, str] = ("mps", "float16"),
+    ) -> None:
+        self.responses = list(responses)
+        self.requests: list[tuple[dict[str, Any], bytes | None]] = []
         self.sends: list[dict[str, Any]] = []
+        self.starts = 0
+        self.close_calls = 0
         self.aborted = False
-
-    alive = True
+        self.alive = False
+        self.ready = False
+        self.identity: tuple[str, str] | None = None
+        self.timeout_seconds = timeout_seconds
+        self.mode_gate = AsrModeGate()
+        self.last_active = 0.0
+        self.expected_identity = expected_identity
 
     async def start(self) -> None:
-        return None
+        if self.ready and self.alive:
+            return
+        self.starts += 1
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            self._mark_dead()
+            raise response
+        self.sends.append({"type": "start"})
+        if response.get("type") != "ready" or response.get("model_loaded") is not True:
+            self._mark_dead()
+            code = str(response.get("code") or "worker_start_failed")
+            tail = response.get("stderr_tail")
+            if isinstance(tail, str) and tail:
+                code = f"{code}; worker stderr tail:\n{tail}"
+            raise RuntimeError(code)
+        device, dtype = response.get("device"), response.get("dtype")
+        if (device, dtype) != self.expected_identity:
+            self._mark_dead()
+            raise RuntimeError("backend_identity_mismatch")
+        self.alive = True
+        self.ready = True
+        self.identity = (device, dtype)
+        self.last_active += 1
 
-    async def send(self, payload: dict[str, Any], binary_payload: bytes | None = None) -> None:
+    async def request(
+        self,
+        payload: dict[str, Any],
+        binary: bytes | None = None,
+    ) -> dict[str, Any]:
+        self.requests.append((dict(payload), binary))
+        self.last_active += 1
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            if isinstance(response, (OSError, TimeoutError)):
+                self._mark_dead()
+            raise response
+        return response
+
+    async def send(
+        self, payload: dict[str, Any], binary_payload: bytes | None = None
+    ) -> None:
         if binary_payload is not None:
             payload["_binary"] = binary_payload
         self.sends.append(payload)
+        self.last_active += 1
 
-    async def receive(self) -> dict[str, Any]:
-        if not self.responses:
-            raise AssertionError("fake transport ran out of canned responses")
-        return self.responses.pop(0)
-
-    async def exchange(
-        self, payload: dict[str, Any], binary_payload: bytes | None = None
-    ) -> dict[str, Any]:
-        await self.send(payload, binary_payload=binary_payload)
-        return await self.receive()
-
-    async def abort(self) -> None:
-        self.aborted = True
+    async def trim_memory(self) -> None:
+        self.last_active += 1
 
     async def close(self) -> None:
+        self.close_calls += 1
+        self._mark_dead()
+
+    def _mark_dead(self) -> None:
+        self.alive = False
+        self.ready = False
+        self.identity = None
         self.aborted = True
 
 
-def _worker(tmp_path: Path, responses: list[dict[str, Any]]) -> tuple[Qwen3Worker, _FakeTransport]:
+def _worker(
+    tmp_path: Path,
+    responses: list[dict[str, Any] | BaseException],
+    *,
+    timeout_seconds: float = 120.0,
+) -> tuple[Qwen3Worker, _FakeSharedOwner]:
     snapshot = tmp_path.parent / "external-qwen3-asr-profile"
     snapshot.mkdir(exist_ok=True)
     for filename in (*MODEL_FILES, "model.safetensors"):
@@ -59,9 +115,12 @@ def _worker(tmp_path: Path, responses: list[dict[str, Any]]) -> tuple[Qwen3Worke
         device="mps",
         dtype="float16",
     )
-    worker = Qwen3Worker(config)
-    fake = _FakeTransport(responses)
-    worker._transport = fake  # type: ignore[assignment]
+    fake = _FakeSharedOwner(
+        responses,
+        timeout_seconds=timeout_seconds,
+        expected_identity=(config.device, config.dtype),
+    )
+    worker = Qwen3Worker(config, shared_owner=fake)  # type: ignore[arg-type]
     return worker, fake
 
 
@@ -121,20 +180,37 @@ def test_backend_config_rejects_cpu_fallback_for_mps_profile(tmp_path: Path) -> 
         )
 
 
-def test_start_payload_declares_snapshot_and_device(tmp_path: Path) -> None:
+def test_batch_facade_delegates_start_and_identity_to_shared_owner(tmp_path: Path) -> None:
     worker, fake = _worker(
         tmp_path,
         [{"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"}],
     )
 
-    worker._transport = fake  # keep the fake after construction
     import asyncio
 
     asyncio.run(worker.start())
 
-    assert fake.sends[0]["type"] == "start"
-    assert fake.sends[0]["device"] == "mps"
-    assert fake.sends[0]["model_dir"].endswith("external-qwen3-asr-profile")
+    assert worker.shared_owner is fake
+    assert fake.starts == 1
+    assert worker.ready is True
+    assert worker.identity == ("mps", "float16")
+
+
+def test_batch_facade_accepts_an_injected_shared_owner(tmp_path: Path) -> None:
+    worker, _ = _worker(tmp_path, [])
+    owner = object()
+
+    facade = Qwen3Worker(worker.config, shared_owner=owner)  # type: ignore[arg-type]
+
+    assert facade.shared_owner is owner
+
+
+def test_batch_facade_default_owner_is_shared_worker(tmp_path: Path) -> None:
+    worker, _ = _worker(tmp_path, [])
+
+    facade = Qwen3Worker(worker.config)
+
+    assert isinstance(facade.shared_owner, Qwen3SharedWorker)
 
 
 def test_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
@@ -181,15 +257,16 @@ def test_transcribe_request_is_single_pcm16_frame_with_stable_request_id(tmp_pat
 
     result = asyncio.run(worker.transcribe(b"\x00\x00", "zh", "names", request_id="req_x"))
 
-    request = fake.sends[1]
+    request, binary = fake.requests[0]
     assert request["type"] == "transcribe"
     assert request["request_id"] == "req_x"
     assert request["sample_rate"] == 16000
     assert request["channels"] == 1
-    assert request["_binary"] == b"\x00\x00"
+    assert binary == b"\x00\x00"
     assert result.request_id == "req_x"
     assert result.text == "hello"
     assert worker.last_active > 0
+    assert fake.mode_gate.active_count == 0
 
 
 def test_transcribe_refreshes_last_active(tmp_path: Path) -> None:
@@ -246,47 +323,21 @@ def test_transcribe_rejects_invalid_text_or_language(tmp_path: Path) -> None:
             asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
 
 
-class _LossyTransport(_FakeTransport):
-    """Transport that loses the pipe on a chosen exchange call, then recovers."""
-
-    def __init__(self, responses: list[dict[str, Any]], lose_on: int) -> None:
-        super().__init__(responses)
-        self.starts = 0
-        self.exchange_calls = 0
-        self._lose_on = lose_on
-
-    async def start(self) -> None:
-        self.starts += 1
-
-    async def exchange(
-        self, payload: dict[str, Any], binary_payload: bytes | None = None
-    ) -> dict[str, Any]:
-        self.exchange_calls += 1
-        if self._lose_on < 0 and payload.get("type") == "transcribe":
-            raise BrokenPipeError("worker pipe closed")
-        if self.exchange_calls == self._lose_on:
-            raise BrokenPipeError("worker pipe closed")
-        return await super().exchange(payload, binary_payload)
-
-
 _READY = {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"}
-
-
-def _lossy_worker(tmp_path: Path, responses: list[dict[str, Any]], lose_on: int):
-    worker, _ = _worker(tmp_path, responses)
-    fake = _LossyTransport(responses, lose_on=lose_on)
-    worker._transport = fake  # type: ignore[assignment]
-    return worker, fake
 
 
 def test_transcribe_rebuilds_worker_once_after_transport_loss(tmp_path: Path) -> None:
     """A dead worker pipe costs one in-request rebuild, not every later request."""
     import asyncio
 
-    worker, fake = _lossy_worker(
+    worker, fake = _worker(
         tmp_path,
-        [_READY, _READY, {"type": "result", "request_id": "req_x", "text": "ok", "language": "zh"}],
-        lose_on=2,
+        [
+            _READY,
+            BrokenPipeError("worker pipe closed"),
+            _READY,
+            {"type": "result", "request_id": "req_x", "text": "ok", "language": "zh"},
+        ],
     )
 
     result = asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
@@ -294,13 +345,23 @@ def test_transcribe_rebuilds_worker_once_after_transport_loss(tmp_path: Path) ->
     assert result.text == "ok"
     assert fake.starts == 2
     assert fake.aborted is True
-    assert worker._identity == ("mps", "float16")
+    assert fake.close_calls == 0
+    assert worker.identity == ("mps", "float16")
+    assert fake.mode_gate.active_count == 0
 
 
 def test_transcribe_rebuild_failure_propagates_without_infinite_retry(tmp_path: Path) -> None:
     import asyncio
 
-    worker, fake = _lossy_worker(tmp_path, [_READY, _READY], lose_on=-1)
+    worker, fake = _worker(
+        tmp_path,
+        [
+            _READY,
+            BrokenPipeError("worker pipe closed"),
+            _READY,
+            BrokenPipeError("worker pipe closed"),
+        ],
+    )
 
     with pytest.raises(OSError):
         asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
@@ -311,13 +372,12 @@ def test_transcribe_rebuild_failure_propagates_without_infinite_retry(tmp_path: 
 def test_transcribe_semantic_error_does_not_rebuild_worker(tmp_path: Path) -> None:
     import asyncio
 
-    worker, fake = _lossy_worker(
+    worker, fake = _worker(
         tmp_path,
         [
             _READY,
             {"type": "error", "code": "backend_error"},
         ],
-        lose_on=99,
     )
 
     with pytest.raises(RuntimeError, match="backend_error"):
@@ -331,32 +391,31 @@ def test_transcribe_timeout_kills_worker_without_retry(tmp_path: Path) -> None:
     """A hung worker is killed (frame desync) but the timeout is not retried."""
     import asyncio
 
-    class _HangingTransport(_FakeTransport):
-        def __init__(self, responses: list[dict[str, Any]]) -> None:
-            super().__init__(responses)
-            self.starts = 0
-
-        async def start(self) -> None:
-            self.starts += 1
-
-        async def exchange(
-            self, payload: dict[str, Any], binary_payload: bytes | None = None
-        ) -> dict[str, Any]:
-            del payload, binary_payload
-            if not self.responses:
-                raise TimeoutError()
-            return self.responses.pop(0)
-
-    worker, _ = _worker(tmp_path, [])
-    fake = _HangingTransport([_READY])
-    worker._transport = fake  # type: ignore[assignment]
+    worker, fake = _worker(tmp_path, [_READY, TimeoutError()])
 
     with pytest.raises(TimeoutError):
         asyncio.run(worker.transcribe(b"\x00\x00", None, "", request_id="req_x"))
 
     assert fake.aborted is True
-    assert worker._identity is None
+    assert worker.identity is None
     assert fake.starts == 1
+    assert fake.mode_gate.active_count == 0
+
+
+def test_batch_lease_rejects_streaming_mode_and_releases_on_error(tmp_path: Path) -> None:
+    worker, fake = _worker(tmp_path, [_READY, {"type": "error", "code": "backend_error"}])
+    streaming_lease = fake.mode_gate.acquire("streaming")
+
+    import asyncio
+
+    with pytest.raises(AsrModeBusy):
+        asyncio.run(worker.transcribe(b"\x00\x00", None, ""))
+    assert fake.mode_gate.active_count == 1
+    fake.mode_gate.release(streaming_lease)
+
+    with pytest.raises(RuntimeError, match="backend_error"):
+        asyncio.run(worker.transcribe(b"\x00\x00", None, ""))
+    assert fake.mode_gate.active_count == 0
 
 
 def test_batch_config_command_self_describes_worker_role(tmp_path: Path) -> None:

@@ -28,6 +28,19 @@ MAX_SESSIONS = 8
 _RETIRED_REQUEST_LIMIT = 64
 
 
+class GenerationGuard:
+    """进程重建后拒绝旧一代投递。"""
+
+    def __init__(self) -> None:
+        self.current = 0
+
+    def advance(self) -> None:
+        self.current += 1
+
+    def accepts(self, generation: int) -> bool:
+        return generation == self.current
+
+
 class SharedWorkerConfig(Protocol):
     """Qwen3SharedWorker 所需的最窄配置协议。"""
 
@@ -96,7 +109,8 @@ class Qwen3SharedWorker:
         self._identity: tuple[str, str] | None = None
         # gate 的生命周期属于 owner, 重启子进程时也必须保持同一个对象。
         self._mode_gate = AsrModeGate()
-        self._generation = 0
+        self._generation_guard = GenerationGuard()
+        self._failure_task: asyncio.Task[None] | None = None
         self._dispatcher: asyncio.Task[None] | None = None
         self._sessions: dict[str, _SessionSlot] = {}
         self._requests: dict[str, _PendingRequest] = {}
@@ -148,7 +162,7 @@ class Qwen3SharedWorker:
     def generation(self) -> int:
         """返回当前子进程 generation。"""
 
-        return self._generation
+        return self._generation_guard.current
 
     @property
     def pending_request_count(self) -> int:
@@ -172,7 +186,7 @@ class Qwen3SharedWorker:
         if len(self._sessions) >= self.max_sessions:
             raise RuntimeError("session_limit_reached")
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=SESSION_QUEUE_MAXSIZE)
-        self._sessions[session_id] = _SessionSlot(queue=queue, generation=self._generation)
+        self._sessions[session_id] = _SessionSlot(queue=queue, generation=self.generation)
         self.last_active = time.monotonic()
         return queue
 
@@ -191,8 +205,11 @@ class Qwen3SharedWorker:
             if self._ready and self.alive:
                 return
             await self._stop_dispatcher()
-            self._generation += 1
-            generation = self._generation
+            if self._failure_task is not None:
+                await asyncio.shield(self._failure_task)
+                self._failure_task = None
+            self._generation_guard.advance()
+            generation = self.generation
             self._failure_broadcasted = False
             self._identity = None
             self._clear_retired_request_ids()
@@ -247,7 +264,7 @@ class Qwen3SharedWorker:
             raise ValueError("duplicate request_id")
 
         loop = asyncio.get_running_loop()
-        pending = _PendingRequest(future=loop.create_future(), generation=self._generation)
+        pending = _PendingRequest(future=loop.create_future(), generation=self.generation)
         self._requests[request_id] = pending
         try:
             await self.send(frame, binary_payload=binary)
@@ -279,6 +296,11 @@ class Qwen3SharedWorker:
             if self._requests.get(request_id) is pending:
                 self._requests.pop(request_id, None)
                 self._retire_request_id(request_id)
+            if not pending.future.done():
+                pending.future.cancel()
+            elif not pending.future.cancelled():
+                # send 与 dispatcher 故障可能同拍到达, 取走未 await 的异常。
+                pending.future.exception()
 
     async def send(
         self,
@@ -307,6 +329,9 @@ class Qwen3SharedWorker:
             self._identity = None
             self._failure_broadcasted = True
             await self._stop_dispatcher()
+            if self._failure_task is not None:
+                await asyncio.shield(self._failure_task)
+                self._failure_task = None
             for pending in self._requests.values():
                 if not pending.future.done():
                     pending.future.cancel()
@@ -319,11 +344,11 @@ class Qwen3SharedWorker:
 
     async def _dispatch_loop(self, generation: int) -> None:
         try:
-            while self._ready and generation == self._generation:
+            while self._ready and self._generation_guard.accepts(generation):
                 # wait_for_frame 允许真正的 idle, 但半帧超时由 transport 转成 ProtocolError,
                 # 这里必须结束本代 worker, 不能循环吞掉它。
                 frame = await self._transport.receive(wait_for_frame=True)
-                if generation != self._generation or not self._ready:
+                if not self._generation_guard.accepts(generation) or not self._ready:
                     return
                 self.last_active = time.monotonic()
                 await self._route_frame(frame, generation)
@@ -336,6 +361,8 @@ class Qwen3SharedWorker:
                 self._dispatcher = None
 
     async def _route_frame(self, frame: Mapping[str, object], generation: int) -> None:
+        if not self._generation_guard.accepts(generation):
+            return
         route = FrameRouter.route_key(frame)
         if route is None:
             if frame.get("type") == "error":
@@ -382,7 +409,7 @@ class Qwen3SharedWorker:
         code: str,
         frame: Mapping[str, object] | None = None,
     ) -> None:
-        if generation != self._generation:
+        if not self._generation_guard.accepts(generation):
             return
         self._ready = False
         self._identity = None
@@ -397,7 +424,12 @@ class Qwen3SharedWorker:
                 self._retire_request_id(request_id)
                 if not pending.future.done():
                     pending.future.set_exception(RuntimeError(code))
-        await self._transport.abort()
+        if self._failure_task is None:
+            self._failure_task = asyncio.create_task(
+                self._transport.abort(), name=f"qwen3-shared-reap-{generation}"
+            )
+        # 同一代所有故障只触发一次回收; 重建必须等待该任务完成。
+        await asyncio.shield(self._failure_task)
 
     async def _deliver_session_frame(
         self,
@@ -477,4 +509,6 @@ def _is_terminal_frame(frame: Mapping[str, object]) -> bool:
     )
 
 
-__all__ = ["MAX_SESSIONS", "FrameRouter", "Qwen3SharedWorker", "SharedWorkerConfig"]
+__all__ = [
+    "MAX_SESSIONS", "FrameRouter", "GenerationGuard", "Qwen3SharedWorker", "SharedWorkerConfig",
+]
