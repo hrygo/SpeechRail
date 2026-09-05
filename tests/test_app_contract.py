@@ -31,7 +31,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-"version": "1.6.8",
+"version": "1.6.9",
         "backend": "qwen3-asr-1.7b",
         "asr_ready": False,
         "tts_ready": False,
@@ -183,7 +183,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-"version": "1.6.8",
+"version": "1.6.9",
         "backend": "qwen3-asr-1.7b",
         "asr_ready": False,
         "tts_ready": True,
