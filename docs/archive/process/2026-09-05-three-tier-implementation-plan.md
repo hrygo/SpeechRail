@@ -12,9 +12,10 @@
 **Tech Stack:** Python >=3.12,<3.13、uv、FastAPI、Pydantic、MLX、mlx-qwen3-asr、mlx-audio、ffmpeg、macOS LaunchAgent。
 **Spec:** [用户已采纳的设计](2026-09-05-low-memory-mac-architecture-proposal.md)。
 **Decision:** [ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
-**状态:** 实施中。日期：2026-09-05。原始代码勘察基线：`001e744`（v1.6.8）；当前分支已
-rebase 到 `main` 的 v1.6.9 发布线，实施证据以 rebase 后各任务卡 commit 为准。
-未勾选的接口、命令和文件仍是目标设计，不代表当前代码已存在。
+**状态:** 核心实现和本机三档技术验收已完成；人工 MOS/ABX、60 分钟热稳定性、扩大真人语料与
+干净机器分发仍未完成。日期：2026-09-05。原始代码勘察基线：`001e744`（v1.6.8）；实施证据
+以 rebase 后各任务卡 commit、已安装 wheel 和本机公共 API 报告为准。未勾选项仍是扩大质量或
+分发门，不应表述为已完成。
 
 ## 1. Global Constraints
 
@@ -820,11 +821,13 @@ def test_light_release_requires_real_device_and_soak():
 - [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `test: establish real hardware gates for speech tiers`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已交付 runner/门禁骨架：commits `d6daaa5`、`57fc5e2`；39 项测试覆盖公共 REST 请求、实际音频时长、资源监控生命周期、脱敏和 fail-closed。第 3 项真实三档串行采样、streaming ASR、soak/switch 与 M1 Air 8GB G2 仍未执行，因此本卡与 G2 保持未完成）
 
-2026-09-05 本机增量：已在 Apple M5 Max 上串行完成三档真实模型、公共 API、独立系统语音
-准确率代理、热态 RTF、停服切换和 `phys_footprint`；最大峰值依次为
-7000.3/5877.4/4484.2 MB。完整结果见
-`docs/archive/performance/2026-09-05-three-tier-feasibility.md`。M1 Air 8GB、12GB、完整
-真人质量集、cold/soak/streaming 未完成，因此第 3 项和 G2 保持未勾选。
+2026-09-05 本机完整增量：已在同一服务架构和同一主机上串行完成三档真实模型、公共 API、
+官方真人中英文 ASR、3/10/30/60s、cold、Realtime 3 会话、30 请求交替短时 soak、九角色
+每档 81 条生成与回读，以及固定 WeSpeaker 模型的跨文本 embedding。最大同时物理占用为
+6943.9/6085.9/4462.9 MB；`light` 已证明服务进程包络低于 8GB，但不以机器型号字符串替代
+特定设备的热、内存压力和前台共存运输验收。完整结果见
+`docs/archive/performance/2026-09-05-v1.7.0-full-three-tier-acceptance.md`。扩大真人语料、
+人工 MOS/ABX、60 分钟热稳定性仍未完成，因此第 3 项继续保留未勾选并准确限定缺口。
 
 
 ### P01：下载制品、校验与 cache 复用
@@ -1143,9 +1146,10 @@ def test_model_selection_assets_are_part_of_release():
 - [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
   `docs: publish verified three-tier speech acceptance`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
 
-V01 本机增量已完成：主干全量测试、Ruff、Mypy、OpenAPI、plist、wheel、真实升级
-安装、三档切换、C01 动态能力目录与公共 API 均通过，并已发布本机专项报告。目标设备、完整质量集、
-cold/soak/streaming、干净首装与签名/公证仍未完成，因此 V01 保持未勾选。
+V01 本机技术验收已完成：v1.7.1 主干 `1006` 项测试、Ruff、Mypy、OpenAPI、plist、wheel、
+真实升级安装、三档首次切换、C01 动态能力目录与公共 API 均通过；cold、Realtime、短时 soak、
+九角色跨文本 embedding 也已归档。扩大真人质量集、人工 MOS/ABX、60 分钟热稳定性、干净首装
+与签名/公证仍未完成，因此 V01 扩大门继续保留未勾选。
 
 
 ## 6. 每卡结束的审查与 Git 规则

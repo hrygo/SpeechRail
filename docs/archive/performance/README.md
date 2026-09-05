@@ -2,13 +2,21 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新发布基线（v1.7.0，MINOR 三档）
+## 最新发布基线（v1.7.1，PATCH quality）
+
+> **结论**：v1.7.1 修复 profile smoke 的 CustomVoice 空转写误回滚；当前 `quality`
+> ASR/TTS 各 N=5、完整物理采样和 `quality → balanced → light → quality` 连续切换均通过。
+> 详见 [v1.7.1 性能与稳定性基准](2026-09-05-v1.7.1-performance-benchmark.md)。
+
+## 最新三档研究基线（v1.7.0，MINOR 三档）
 
 > **结论**：v1.7.0 已按 MINOR 规则在同一 Apple M5 Max 上串行测试 `quality`、
 > `balanced`、`light`，最大同时物理占用为 6943.9、6085.9、4462.9 MB；每档
 > 中英文 ASR 与 TTS 均 5/5。`quality` 的同一输入在进程内和服务重启后 PCM hash
-> 一致；跨文本同一人听感仍需 embedding 与 ABX。详见
-> [v1.7.0 性能与质量基准](2026-09-05-v1.7.0-performance-benchmark.md)。
+> 一致。后续完整套件加入真人 ASR、Realtime、短时 soak、每档 81 条九角色压力集和
+> speaker embedding；`balanced/light` 的同名角色中心高度一致，`quality` 的 VoiceDesign
+> 跨文本角色分离较弱，人工 ABX 仍未执行。详见
+> [v1.7.0 三档完整本机验收与音色稳定性研究](2026-09-05-v1.7.0-full-three-tier-acceptance.md)。
 
 ## 历史发布基线（v1.6.8，发布后重测）
 
@@ -32,6 +40,8 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.7.1** | [2026-09-05-v1.7.1-performance-benchmark.md](2026-09-05-v1.7.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；有界空转写重试；三档切换连续通过 |
+| **v1.7.0 完整研究** | [2026-09-05-v1.7.0-full-three-tier-acceptance.md](2026-09-05-v1.7.0-full-three-tier-acceptance.md) | 真人 ASR、3/10/30/60s、Realtime、短时 soak、九角色 243 条生成与 speaker embedding |
 | **v1.7.0** | [2026-09-05-v1.7.0-performance-benchmark.md](2026-09-05-v1.7.0-performance-benchmark.md) | MINOR 三档 N=5 基础基准；版本纵向与档位横向对比；加入同文本/跨重启音色稳定性证据 |
 | **三档专项** | [2026-09-05-three-tier-feasibility.md](2026-09-05-three-tier-feasibility.md) | 同一共享 runtime 的三档公共 API、准确率代理和完整物理内存采样；结束时恢复 quality |
 | **v1.6.8** | [2026-09-05-v1.6.8-performance-benchmark.md](2026-09-05-v1.6.8-performance-benchmark.md) | 发布后完整 7 步重测；总常驻 9.15 GB，单次并发 2.74 req/s；因仅一轮测量暂不改写长期趋势 |
