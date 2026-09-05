@@ -360,7 +360,7 @@ def test_preset_cannot_override_execution_policy():
 **所有权 / Files：** 新建 src/speechrail/config/selection.py、tests/test_profile_selection.py；修改 src/speechrail/service/preflight.py 与 cli.py 的配置加载调用点，后续 U01 串行。
 **接口 / Inputs & Outputs：** resolve_selection(settings,selection,catalog,app_home)->Settings；selection None 返回原 settings；校验已准备绝对路径；主服务和 preflight 使用相同解析器。
 
-- [ ] **1. 写失败测试。** 在 `tests/test_profile_selection.py` 落地以下行为，并补充本卡额外边界：
+- [x] **1. 写失败测试。** 在 `tests/test_profile_selection.py` 落地以下行为，并补充本卡额外边界：
 
 ```python
 from speechrail.config import Settings
@@ -371,14 +371,14 @@ def test_existing_install_without_selection_is_unchanged(tmp_path):
     assert resolve_selection(original, None, {}, tmp_path) == original
 ```
 
-- [ ] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_selection.py -q --no-cov`；
+- [x] **2. 证明测试先失败。** 执行 `uv run --extra dev pytest tests/test_profile_selection.py -q --no-cov`；
   确认失败来自新行为未实现，而非环境/导入配置事故。已存在的纯函数种子若已过，必须先加入下面要求的实际边界失败测试。
-- [ ] **3. 最小实现。** 先完整解析既有 env，再只 overlay 已明确选中的模型路径、实际身份及量化。managed sidecar 的模型选择优先于旧模型 env；非模型 env/进程配置完全保留；向导说明这一优先级。旧安装没有 sidecar 不自动生成，也不启用原来关闭的 TTS/Realtime。新 setup 的 ASR/TTS 开关在共同安装默认层设置，不在 preset 内设置。
-- [ ] **4. 边界验证。** fake manifests 下校验只改变允许字段；key/host/aliases/worker timeout/diarization 原样；损坏 sidecar 返回配置错误而非悄悄省资源；wheel/preflight 和源码解析一致。
-- [ ] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
+- [x] **3. 最小实现。** 先完整解析既有 env，再只 overlay 已明确选中的模型路径、实际身份及量化。managed sidecar 的模型选择优先于旧模型 env；非模型 env/进程配置完全保留；向导说明这一优先级。旧安装没有 sidecar 不自动生成，也不启用原来关闭的 TTS/Realtime。新 setup 的 ASR/TTS 开关在共同安装默认层设置，不在 preset 内设置。
+- [x] **4. 边界验证。** fake manifests 下校验只改变允许字段；key/host/aliases/worker timeout/diarization 原样；损坏 sidecar 返回配置错误而非悄悄省资源；wheel/preflight 和源码解析一致。
+- [x] **5. 绿测试与审查。** 再执行同一针对性命令；对本卡src/tests运行ruff及受影响src的mypy，
   核对diff只在所有权范围。报告fake和真实证据分别覆盖什么。
-- [ ] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
-  `feat: preserve user configuration across model selection`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。
+- [x] **6. 单主题交付。** 主 Agent 审查通过后仅暂存本卡明确文件；建议提交信息
+  `feat: preserve user configuration across model selection`。提交前运行 `git diff --staged --check`，不自动暂存未知并行变更。（已验收：commit `36f4dd4`，14 项测试通过）
 
 
 ### T01：建立按模型能力解析的共同音色表
