@@ -1,4 +1,4 @@
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from pathlib import Path
 
 import pytest
@@ -8,6 +8,7 @@ import speechrail.http.routes.audio as audio_module
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
+from speechrail.domain.ports import TranscriptionRequest
 
 
 def _backend(
@@ -102,6 +103,68 @@ def test_transcription_rejects_oversized_and_unsupported_mime() -> None:
     )
     assert unsupported.status_code == 422
     assert unsupported.json()["error"]["code"] == "unsupported_audio_type"
+
+
+def test_long_audio_limit_is_independent_of_single_ipc_frame() -> None:
+    settings = Settings(_env_file=None, max_audio_seconds=3600)
+    assert settings.max_audio_seconds == 3600
+    assert Settings(_env_file=None, max_audio_seconds=7200).max_audio_seconds == 7200
+
+
+def test_real_streaming_batch_port_consumes_decoded_audio_incrementally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    produced: list[int] = []
+
+    async def decoded(*_args: object, **_kwargs: object) -> AsyncIterator[bytes]:
+        produced.append(1)
+        yield b"\x00\x00" * 16_000
+        produced.append(2)
+        yield b"\x00\x00" * 16_000
+
+    class _StreamingBatch:
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            raise AssertionError(f"whole-file fallback used: {len(request.audio)}")
+
+        async def transcribe_stream(
+            self,
+            request_id: str,
+            audio: AsyncIterator[bytes],
+            language: str | None = None,
+            prompt: str | None = None,
+            include_timestamps: bool = True,
+        ) -> TranscriptResult:
+            chunk_count = 0
+            total_bytes = 0
+            async for chunk in audio:
+                chunk_count += 1
+                total_bytes += len(chunk)
+                if chunk_count == 1:
+                    assert produced == [1]
+            return TranscriptResult(
+                request_id=request_id,
+                model_id="speechrail/qwen3-asr-1.7b",
+                text="incremental",
+                language=language or "auto",
+                duration_ms=total_bytes // 32,
+            )
+
+    monkeypatch.setattr(audio_module, "decode_upload", decoded)
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            batch_transcriber=_StreamingBatch(),
+        )
+    )
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.webm", b"container", "video/webm")},
+        data={"language": "zh"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "incremental"
+    assert produced == [1, 2]
 
 
 def test_transcription_rejects_stream_and_chunking_strategy() -> None:

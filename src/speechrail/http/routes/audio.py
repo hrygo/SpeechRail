@@ -9,12 +9,13 @@ import struct
 import time as _time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from speechrail.application.audio_stream import decode_upload
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
@@ -22,8 +23,13 @@ from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
     canonical_tts_model,
 )
+from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
-from speechrail.domain.ports import SpeechRequest
+from speechrail.domain.ports import (
+    SpeechRequest,
+    StreamingBatchTranscriber,
+    TranscriptionRequest,
+)
 from speechrail.domain.tts import resolve_voice
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
@@ -538,25 +544,124 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if language is None and languages:
             language = languages[0]
+        batch_transcriber = services.batch_transcriber
+        transcribe_stream = getattr(batch_transcriber, "transcribe_stream", None)
+        streaming_batch = (
+            cast(StreamingBatchTranscriber, batch_transcriber)
+            if callable(transcribe_stream)
+            else None
+        )
+        transcribe = services.transcribe
+        if streaming_batch is None and transcribe is None and batch_transcriber is None:
+            return error_response(
+                503,
+                request_id,
+                "backend_not_ready",
+                "SpeechRail inference backend is not ready",
+                retryable=True,
+            )
+        if not _has_supported_audio_hint(file):
+            return error_response(
+                422,
+                request_id,
+                "unsupported_audio_type",
+                "Unsupported audio upload",
+                param="file",
+            )
+        from speechrail.domain.itn import apply_light_itn, compose_hotword_prompt
+
+        effective_prompt = compose_hotword_prompt(prompt, keywords)
+        want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
+        coordinator: DiarizationCoordinator | None = None
+        if diarization_requested:
+            assert diarization_engine is not None
+            coordinator = DiarizationCoordinator(
+                diarization_engine.create(config=DiarizationConfig(enabled=True))
+            )
+        audio_bytes = 0
+
+        async def close_coordinator() -> None:
+            nonlocal coordinator
+            if coordinator is not None:
+                current, coordinator = coordinator, None
+                await current.close()
+
+        async def run_inference() -> TranscriptResult:
+            nonlocal audio_bytes
+            try:
+                if streaming_batch is not None:
+                    decoded = decode_upload(
+                        file,
+                        max_upload_bytes=resolved.max_upload_bytes,
+                        max_audio_seconds=resolved.max_audio_seconds,
+                    )
+
+                    async def observed_audio() -> AsyncIterator[bytes]:
+                        nonlocal audio_bytes
+                        async for chunk in decoded:
+                            audio_bytes += len(chunk)
+                            if coordinator is not None:
+                                await coordinator.append_audio(chunk)
+                            yield chunk
+
+                    async with contextlib.aclosing(decoded):
+                        return await streaming_batch.transcribe_stream(
+                            request_id,
+                            observed_audio(),
+                            language,
+                            effective_prompt,
+                            want_timestamps,
+                        )
+
+                audio = await _read_upload(file, resolved.max_upload_bytes)
+                if services.asr_worker is not None:
+                    audio = await _decode_pcm(
+                        audio,
+                        max_audio_seconds=resolved.max_audio_seconds,
+                    )
+                else:
+                    fast_pcm = _try_fast_decode_wav(
+                        audio,
+                        max_decompressed_bytes=128 * 1024 * 1024,
+                        max_audio_seconds=resolved.max_audio_seconds,
+                    )
+                    if fast_pcm is not None:
+                        audio = fast_pcm
+                audio_bytes = len(audio)
+                if coordinator is not None:
+                    await coordinator.append_audio(audio)
+                if batch_transcriber is not None:
+                    return await batch_transcriber.transcribe(
+                        TranscriptionRequest(
+                            request_id=request_id,
+                            audio=audio,
+                            language=language,
+                            prompt=effective_prompt,
+                            include_timestamps=want_timestamps,
+                        )
+                    )
+                assert transcribe is not None
+                return await transcribe(audio, language, effective_prompt, want_timestamps)
+            except BaseException:
+                await close_coordinator()
+                raise
+
         try:
-            audio = await _read_upload(file, resolved.max_upload_bytes)
-            if services.asr_worker is not None:
-                audio = await _decode_pcm(
-                    audio,
-                    max_audio_seconds=resolved.max_audio_seconds,
-                )
-            else:
-                fast_pcm = _try_fast_decode_wav(
-                    audio,
-                    max_decompressed_bytes=128 * 1024 * 1024,
-                    max_audio_seconds=resolved.max_audio_seconds,
-                )
-                if (
-                    fast_pcm is not None
-                    and resolved.max_audio_seconds is not None
-                    and len(fast_pcm) > resolved.max_audio_seconds * 32_000
-                ):
-                    raise ValueError("audio_too_long")
+            _t0 = _time.monotonic()
+            # Batch REST work flows through the governor so the realtime
+            # reservation cannot be starved by concurrent uploads.
+            result = await services.governor.run(
+                lambda: services.admission.run(
+                    run_inference,
+                    deadline=resolved.request_timeout_seconds,
+                ),
+                WorkClass.BATCH_ASR,
+                deadline=resolved.request_timeout_seconds,
+            )
+            _inference_sec = _time.monotonic() - _t0
+            # Audio duration from PCM16 @ 16kHz mono = len / 2 / 16000
+            _audio_sec = audio_bytes / 32_000
+            services.metrics.record_asr(_audio_sec, _inference_sec)
         except OverflowError:
             return error_response(413, request_id, "audio_too_large", "Audio exceeds upload limit")
         except ValueError as exc:
@@ -571,36 +676,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return error_response(
                 422, request_id, str(exc), "Unsupported audio upload", param="file"
             )
-        transcribe = services.transcribe
-        if transcribe is None:
-            return error_response(
-                503,
-                request_id,
-                "backend_not_ready",
-                "SpeechRail inference backend is not ready",
-                retryable=True,
-            )
-        from speechrail.domain.itn import apply_light_itn, compose_hotword_prompt
-
-        effective_prompt = compose_hotword_prompt(prompt, keywords)
-        try:
-            want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
-            _t0 = _time.monotonic()
-            # Batch REST work flows through the governor so the realtime
-            # reservation cannot be starved by concurrent uploads.
-            result = await services.governor.run(
-                lambda: services.admission.run(
-                    lambda: transcribe(audio, language, effective_prompt, want_timestamps),
-                    deadline=resolved.request_timeout_seconds,
-                ),
-                WorkClass.BATCH_ASR,
-                deadline=resolved.request_timeout_seconds,
-            )
-            _inference_sec = _time.monotonic() - _t0
-            # Audio duration from PCM16 @ 16kHz mono = len / 2 / 16000
-            _audio_sec = len(audio) / 32_000
-            services.metrics.record_asr(_audio_sec, _inference_sec)
         except QueueFullError:
+            await close_coordinator()
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -613,6 +690,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 headers={"Retry-After": "1"},
             )
         except GovernorQueueFullError:
+            await close_coordinator()
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -625,16 +703,21 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 headers={"Retry-After": "1"},
             )
         except TimeoutError:
+            await close_coordinator()
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
-        if diarization_requested:
-            assert diarization_engine is not None
-            coordinator = DiarizationCoordinator(
-                diarization_engine.create(config=DiarizationConfig(enabled=True))
+        except DiarizationError as exc:
+            await close_coordinator()
+            return error_response(
+                502,
+                request_id,
+                exc.code,
+                "Diarization backend returned an invalid result",
+                retryable=True,
             )
+        if coordinator is not None:
             try:
-                await coordinator.append_audio(audio)
                 segments = await coordinator.annotate(result.segments)
                 result = result.model_copy(update={"segments": segments})
             except DiarizationError as exc:
@@ -646,7 +729,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     retryable=True,
                 )
             finally:
-                await coordinator.close()
+                await close_coordinator()
 
         # Apply Light ITN to output text and segments
         result = result.model_copy(

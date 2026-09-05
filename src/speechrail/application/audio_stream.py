@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import math
 import shutil
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable
 from dataclasses import dataclass
 from typing import Protocol, cast
 
@@ -534,7 +534,7 @@ async def decode_upload(
     max_audio_seconds: int,
     ffmpeg_executable: str | None = None,
     timeout_seconds: float | None = None,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes, None]:
     """将上传音频解码为 16 kHz mono PCM16, 并按块异步返回。
 
     ``ffmpeg_executable`` 和 ``timeout_seconds`` 仅用于确定性测试或受控调用方;

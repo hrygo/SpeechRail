@@ -50,6 +50,19 @@ class BatchTranscriber(Protocol):
     async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult: ...
 
 
+class StreamingBatchTranscriber(Protocol):
+    """Consumes decoded PCM incrementally while preserving a batch REST result."""
+
+    async def transcribe_stream(
+        self,
+        request_id: str,
+        audio: AsyncIterator[bytes],
+        language: str | None = None,
+        prompt: str | None = None,
+        include_timestamps: bool = True,
+    ) -> TranscriptResult: ...
+
+
 class StreamingTranscriber(Protocol):
     def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[TranscriptResult]: ...
 
