@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.6.8] - 2026-09-05
+
 ### Fixed
 
 - 文件转写接受标准 multipart `timestamp_granularities[]`，保留旧非方括号字段；

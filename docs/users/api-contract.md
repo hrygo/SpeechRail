@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.6.7"
+version: "1.6.8"
 date: 2026-09-05
 ---
 
