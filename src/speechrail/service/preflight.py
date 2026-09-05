@@ -6,12 +6,19 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from speechrail.backends.qwen3_native import MODEL_FILES, WEIGHT_FILE_SETS
 from speechrail.config import Settings
+from speechrail.config.model_catalog import load_runtime_lock
+from speechrail.service.bootstrap import (
+    PreparedRuntime,
+    RuntimeBootstrapError,
+    load_prepared_runtime,
+)
 from speechrail.service.paths import ServiceLayout
 
 FFMPEG_FALLBACKS = (Path("/opt/homebrew/bin/ffmpeg"), Path("/usr/local/bin/ffmpeg"))
@@ -84,6 +91,128 @@ def _file_check(name: str, model_path: Path | None, *, label: str) -> PreflightC
     if not model_path.is_absolute() or not model_path.is_file():
         return _check(name, False, f"{label} file is missing")
     return _check(name, True, f"{label} file is available")
+
+
+def _controlled_pythonpath(prepared: PreparedRuntime, role: str) -> tuple[str, ...]:
+    raw = prepared.metadata.get("pythonpath")
+    if not isinstance(raw, Mapping):
+        raise RuntimeBootstrapError("prepared runtime Python path is invalid")
+    entries = raw.get(role)
+    if not isinstance(entries, (list, tuple)):
+        raise RuntimeBootstrapError("prepared runtime Python path is invalid")
+    resolved: list[str] = []
+    release = prepared.paths.release.resolve()
+    for entry in entries:
+        if not isinstance(entry, str) or not entry or "\x00" in entry:
+            raise RuntimeBootstrapError("prepared runtime Python path is invalid")
+        candidate = (prepared.paths.release / entry).resolve()
+        try:
+            candidate.relative_to(release)
+        except ValueError as exc:
+            raise RuntimeBootstrapError("prepared runtime Python path escapes release") from exc
+        if not candidate.is_dir():
+            raise RuntimeBootstrapError("prepared runtime Python path is missing")
+        resolved.append(str(candidate))
+    return tuple(resolved)
+
+
+def _package_map(prepared: PreparedRuntime, role: str) -> dict[str, str]:
+    packages = prepared.metadata.get("packages")
+    if not isinstance(packages, Mapping):
+        raise RuntimeBootstrapError("prepared runtime package identity is missing")
+    values = packages.get(role)
+    if not isinstance(values, Mapping):
+        raise RuntimeBootstrapError("prepared runtime package identity is invalid")
+    if any(
+        not isinstance(name, str) or not isinstance(version, str)
+        for name, version in values.items()
+    ):
+        raise RuntimeBootstrapError("prepared runtime package identity is invalid")
+    return dict(cast(Mapping[str, str], values))
+
+
+def _runtime_probe_code(
+    python_version: str,
+    packages: Mapping[str, str],
+    module: str,
+    pythonpath: Sequence[str],
+) -> str:
+    version = tuple(int(part) for part in python_version.split("."))
+    return (
+        "import importlib, importlib.metadata, sys\n"
+        f"assert sys.version_info[:3] == {version!r}\n"
+        f"sys.path[:0] = {tuple(pythonpath)!r}\n"
+        f"expected = {dict(packages)!r}\n"
+        "for name, expected_version in expected.items():\n"
+        "    assert importlib.metadata.version(name) == expected_version\n"
+        f"importlib.import_module({module!r})\n"
+    )
+
+
+def _managed_runtime_checks(
+    layout: ServiceLayout, runner: CommandRunner
+) -> tuple[PreflightCheck, ...]:
+    """Check an installed lock-keyed runtime without loading a model or using the network."""
+    try:
+        lock = load_runtime_lock()
+        prepared = load_prepared_runtime(layout.app_home, lock)
+        asr_packages = _package_map(prepared, "asr")
+        tts_packages = _package_map(prepared, "tts")
+        asr_path = _controlled_pythonpath(prepared, "asr")
+        tts_path = _controlled_pythonpath(prepared, "tts")
+    except Exception:
+        message = "prepared runtime is unavailable"
+        return tuple(
+            _check(name, False, message)
+            for name in (
+                "managed_runtime",
+                "managed_runtime_identity",
+                "managed_asr_runtime",
+                "managed_tts_runtime",
+                "managed_ffmpeg",
+            )
+        )
+
+    paths = prepared.paths
+    ffmpeg_ok = (
+        paths.ffmpeg.is_absolute()
+        and paths.ffmpeg.is_file()
+        and os.access(paths.ffmpeg, os.X_OK)
+    )
+    checks = [
+        _check("managed_runtime", True, "prepared vendor runtime is available"),
+        _check("managed_runtime_identity", True, "runtime lock and manifest identity match"),
+        _check(
+            "managed_ffmpeg",
+            ffmpeg_ok,
+            "prepared ffmpeg is available" if ffmpeg_ok else "prepared ffmpeg is missing",
+        ),
+    ]
+    for name, role, module, path, packages in (
+        ("managed_asr_runtime", "ASR", "mlx_qwen3_asr", asr_path, asr_packages),
+        ("managed_tts_runtime", "TTS", "mlx_audio", tts_path, tts_packages),
+    ):
+        try:
+            completed = runner(
+                (
+                    str(paths.asr_python if role == "ASR" else paths.tts_python),
+                    "-c",
+                    _runtime_probe_code(lock.python, packages, module, path),
+                )
+            )
+            ok = completed.returncode == 0
+        except Exception:
+            ok = False
+        checks.append(
+            _check(
+                name,
+                ok,
+                f"prepared {role} runtime identity and worker import are available"
+                if ok
+                else f"prepared {role} runtime package or worker import failed",
+            )
+        )
+    return tuple(checks)
 
 
 def run_preflight(
@@ -230,6 +359,9 @@ def run_preflight(
                 _check("tts_runtime", False, "TTS runtime cannot be checked"),
             ]
         )
+
+    if not asr_configured and not tts_configured:
+        checks.extend(_managed_runtime_checks(layout, runner))
 
     diarization_configured = settings.diarization_model_path is not None
     checks.append(
