@@ -95,6 +95,200 @@ class PcmByteCounter:
 
 
 @dataclass(frozen=True, slots=True)
+class PcmBlock:
+    """一个有界 PCM 窗及其在源音频中的唯一 core 范围。"""
+
+    start_sample: int
+    pcm: bytes
+    core_start_sample: int
+    core_end_sample: int
+
+    def __post_init__(self) -> None:
+        sample_fields = (
+            self.start_sample,
+            self.core_start_sample,
+            self.core_end_sample,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in sample_fields
+        ):
+            raise ValueError("invalid_pcm_block")
+        if not isinstance(self.pcm, bytes):
+            raise ValueError("invalid_pcm_block")
+        if len(self.pcm) % _PCM_SAMPLE_BYTES:
+            raise ValueError("pcm_bytes_odd")
+        end_sample = self.start_sample + len(self.pcm) // _PCM_SAMPLE_BYTES
+        if not (
+            self.start_sample <= self.core_start_sample <= self.core_end_sample <= end_sample
+        ):
+            raise ValueError("invalid_pcm_block")
+
+
+class PcmWindowBuffer:
+    """以固定窗口和前导 overlap 滚动缓存 PCM16。"""
+
+    __slots__ = (
+        "_buffer",
+        "_buffer_start_sample",
+        "_emitted_any",
+        "_finish_result",
+        "_finished",
+        "_overlap_samples",
+        "_source_samples",
+        "_step_samples",
+        "_window_samples",
+    )
+
+    def __init__(
+        self,
+        window_samples: int = _PCM_SAMPLE_RATE * 30,
+        overlap_samples: int = _PCM_SAMPLE_RATE,
+    ) -> None:
+        if (
+            isinstance(window_samples, bool)
+            or not isinstance(window_samples, int)
+            or window_samples <= 0
+            or isinstance(overlap_samples, bool)
+            or not isinstance(overlap_samples, int)
+            or overlap_samples < 0
+            or overlap_samples >= window_samples
+        ):
+            raise ValueError("invalid_window")
+        self._window_samples = window_samples
+        self._overlap_samples = overlap_samples
+        self._step_samples = window_samples - overlap_samples
+        self._buffer = bytearray()
+        self._buffer_start_sample = 0
+        self._source_samples = 0
+        self._emitted_any = False
+        self._finished = False
+        self._finish_result: tuple[PcmBlock, ...] | None = None
+
+    @property
+    def window_samples(self) -> int:
+        return self._window_samples
+
+    @property
+    def overlap_samples(self) -> int:
+        return self._overlap_samples
+
+    @property
+    def buffered_samples(self) -> int:
+        """返回当前内部缓存大小, 仅用于有界性诊断。"""
+
+        return len(self._buffer) // _PCM_SAMPLE_BYTES
+
+    @property
+    def _window_bytes(self) -> int:
+        return self._window_samples * _PCM_SAMPLE_BYTES
+
+    @property
+    def _max_buffer_bytes(self) -> int:
+        return (self._window_samples + self._overlap_samples) * _PCM_SAMPLE_BYTES
+
+    def _emit_full_window(self) -> PcmBlock:
+        window_bytes = self._window_bytes
+        start_sample = self._buffer_start_sample
+        core_start_sample = (
+            0
+            if not self._emitted_any
+            else start_sample + self._overlap_samples
+        )
+        core_end_sample = start_sample + self._window_samples
+        block = PcmBlock(
+            start_sample=start_sample,
+            pcm=bytes(self._buffer[:window_bytes]),
+            core_start_sample=core_start_sample,
+            core_end_sample=core_end_sample,
+        )
+        del self._buffer[: self._step_samples * _PCM_SAMPLE_BYTES]
+        self._buffer_start_sample += self._step_samples
+        self._emitted_any = True
+        return block
+
+    def feed(self, pcm: bytes) -> tuple[PcmBlock, ...]:
+        """接受任意偶数字节并返回当前已满窗口, 内部缓存保持有界。"""
+
+        if self._finished:
+            raise ValueError("window_buffer_finished")
+        if not isinstance(pcm, bytes):
+            raise ValueError("invalid_pcm")
+        if len(pcm) % _PCM_SAMPLE_BYTES:
+            raise ValueError("pcm_bytes_odd")
+        if not pcm:
+            return ()
+
+        emitted: list[PcmBlock] = []
+        view = memoryview(pcm)
+        offset = 0
+        self._source_samples += len(pcm) // _PCM_SAMPLE_BYTES
+        try:
+            while offset < len(view):
+                while len(self._buffer) >= self._window_bytes:
+                    emitted.append(self._emit_full_window())
+                capacity = self._max_buffer_bytes - len(self._buffer)
+                if capacity <= 0:
+                    raise RuntimeError("window_buffer_internal_limit")
+                take = min(capacity, len(view) - offset)
+                self._buffer.extend(view[offset : offset + take])
+                offset += take
+            while len(self._buffer) >= self._window_bytes:
+                emitted.append(self._emit_full_window())
+        finally:
+            view.release()
+        return tuple(emitted)
+
+    def finish(self) -> tuple[PcmBlock, ...]:
+        """返回尾窗并关闭 buffer; 重复调用返回相同结果。"""
+
+        if self._finished:
+            assert self._finish_result is not None
+            return self._finish_result
+        self._finished = True
+
+        if not self._buffer:
+            result: tuple[PcmBlock, ...] = ()
+        elif not self._emitted_any:
+            result = (
+                PcmBlock(
+                    start_sample=0,
+                    pcm=bytes(self._buffer),
+                    core_start_sample=0,
+                    core_end_sample=self._source_samples,
+                ),
+            )
+        else:
+            core_start_sample = self._buffer_start_sample + self._overlap_samples
+            if core_start_sample >= self._source_samples:
+                result = ()
+            else:
+                result = (
+                    PcmBlock(
+                        start_sample=self._buffer_start_sample,
+                        pcm=bytes(self._buffer),
+                        core_start_sample=core_start_sample,
+                        core_end_sample=self._source_samples,
+                    ),
+                )
+        self._buffer.clear()
+        self._finish_result = result
+        return result
+
+
+def split_pcm(
+    pcm: bytes,
+    *,
+    window_samples: int,
+    overlap_samples: int,
+) -> tuple[PcmBlock, ...]:
+    """对小型 PCM fixture 应用与生产 buffer 相同的窗口规则。"""
+
+    buffer = PcmWindowBuffer(window_samples, overlap_samples)
+    return buffer.feed(pcm) + buffer.finish()
+
+
+@dataclass(frozen=True, slots=True)
 class _StreamFailure:
     error: ValueError | OverflowError
 
