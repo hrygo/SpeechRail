@@ -25,6 +25,7 @@ graph TD
 2. **[📖 运维操作手册 (operations-runbook.md)](operations-runbook.md)**：macOS `launchd` 用户级服务管理、原子化升级/回滚流程与故障排查决策树。
 3. **[🔒 安全防护与可观测性 (security-observability.md)](security-observability.md)**：网络访问控制、日志脱敏规范、内存配额与健康探针标准。
 4. **[🔄 客户端迁移与平滑回滚 (migration-runbook.md)](migration-runbook.md)**：QwenPaw 与 Sona 的平滑切换、影子流量验证与旧端点退役流程。
+5. **[📊 会议分人端到端验收报告 (speaker-diarization-e2e-acceptance-2026-09-06.md)](speaker-diarization-e2e-acceptance-2026-09-06.md)**：SPK-E2E-1 持续分人协议扩展与 Sona 联合端到端验收与发布就绪报告。
 
 ---
 

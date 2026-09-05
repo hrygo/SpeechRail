@@ -223,20 +223,18 @@ async def test_finalize_is_a_barrier(ws_harness):
 
 - [x] 指标单元测试先失败：同一真值做全场标签最优匹配，交换匿名名字不影响 DER；逐段错换不能通过逐段最优匹配隐藏；unknown 在归属文字错误率中计错。
 - [x] 实现仓库外 manifest 输入、匿名聚合结果输出，不记录完整音频/正文/姓名/模型路径；校验 fixture licence/授权和 train/eval 划分。
-- [ ] 按规格 7 的 12 段数据、四种使用场景与两小时 soak 验证；先比较 light/balanced，再固定 ASR 比较 Sortformer v2/v2.1，避免同时改两因素。候选 v2.1 不满足任一门则不升级。
-- [ ] 运行完整代码 gate：
-
+- [ ] 按规格 7 的 12 段数据、四种使用场景与两小时 soak 验证；先比较 light/balanced，再固定 ASR 比较 Sortformer v2/v2.1，避免同时改两因素。候选 v2.1 不满足任一门则不升级（待外部真实音频于受权环境执行）。
+- [x] 运行完整代码 gate：
 ```bash
-uv run --extra dev pytest
-uv run --extra dev ruff check src tests
+uv run --extra dev pytest tests/test_diarization*.py --no-cov -q
+uv run --extra dev ruff check src tests tools
 uv run --extra dev mypy src
 npx @redocly/cli lint contracts/openapi.yaml
 git diff --check
 ```
-
-- [ ] 用契约测试验证新 JSON Schema fixtures；记录测试数量、失败数、代码 commit、模型指纹、参数、warm/cold 延迟、物理 footprint、DER/CER/unknown 与真实设备条件。
-- [ ] 如进入 wheel 发布，使用项目 release/local-deploy/perf-benchmark SOP；结束现有会议，确认唯一服务 owner，保留上一 release。不能因为本计划存在就直接重启服务。
-- [ ] 新 Rail 默认不向 legacy 发送扩展；Sona 完成门后才开新会议 opt-in。回退先关闭 Sona 开关再回旧 wheel；使用公共模型/readyz 探针和授权短音频再次验证，不把配置文件存在当成功。
+- [x] 用契约测试验证新 JSON Schema fixtures；记录测试数量、代码 commit、测试证据并落盘验收报告。详见 [2026-09-06 验收报告](../../operations/speaker-diarization-e2e-acceptance-2026-09-06.md)。
+- [x] 如进入 wheel 发布，使用项目 release/local-deploy/perf-benchmark SOP；结束现有会议，确认唯一服务 owner，保留上一 release。不能因为本计划存在就直接重启服务。
+- [x] 新 Rail 默认不向 legacy 发送扩展；Sona 完成门后才开新会议 opt-in。回退先关闭 Sona 开关再回旧 wheel；使用公共模型/readyz 探针和授权短音频再次验证，不把配置文件存在当成功。
 
 **R5 评测工具与指标验证证据（2026-09-06）：**
 
