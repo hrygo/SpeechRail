@@ -39,6 +39,7 @@ from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
 from speechrail.runtime.admission import QueueFullError
+from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
@@ -897,6 +898,19 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     message="Inference queue is full",
                     error_type="server_error",
                     code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except AsrModeBusy:
+            await close_coordinator()
+            return JSONResponse(
+                status_code=429,
+                content=error(
+                    message="ASR mode is busy",
+                    error_type="server_error",
+                    code="backend_busy",
                     request_id=request_id,
                     retryable=True,
                 ),
