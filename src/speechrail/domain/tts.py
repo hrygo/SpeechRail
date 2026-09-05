@@ -46,6 +46,15 @@ class VoiceProfile:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class VoiceCapabilities:
+    """Public voice capabilities without vendor-specific details."""
+
+    variant: str
+    supports_speaker: bool
+    supports_instruction: bool
+
+
 SYSTEM_VOICE_PROFILES: Mapping[str, VoiceProfile] = MappingProxyType(
     {
         "default": VoiceProfile(
@@ -413,6 +422,7 @@ __all__ = [
     "VOICE_ALIASES",
     "VOICE_PROFILES",
     "StreamingSentenceSplitter",
+    "VoiceCapabilities",
     "VoiceProfile",
     "VoiceRegistry",
     "apply_crossfade",

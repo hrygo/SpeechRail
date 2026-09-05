@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Literal, Protocol
 
 from speechrail.backends.qwen3_native import snapshot_is_quantized
+from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.domain.tts import (
     apply_crossfade,
     generation_token_budget,
@@ -81,7 +82,7 @@ ModelLoader = Callable[[str], Any]
 
 
 class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized model runtime.
-    """MLX Qwen3-TTS VoiceDesign engine isolated in the worker process."""
+    """MLX Qwen3-TTS engine supporting VoiceDesign and CustomVoice snapshots."""
 
     def __init__(
         self,
@@ -107,8 +108,9 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         except Exception as exc:
             raise RuntimeError("mlx_qwen3_tts_runtime_unavailable") from exc
         model_type = getattr(getattr(self._model, "config", None), "tts_model_type", None)
-        if model_type != "voice_design":
+        if model_type not in {"voice_design", "custom_voice"}:
             raise RuntimeError("unsupported_tts_model_type")
+        self._model_variant = model_type
         if sample_rate != 24_000:
             raise RuntimeError("qwen3_tts_output_invalid")
         if chunk_ms <= 0:
@@ -141,19 +143,26 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
     def _generate(
         self, text: str, *, voice: str, speed: float, language: str
     ) -> Iterator[bytes]:
-        profile = get_voice_profile(voice)
-        try:
-            import mlx.core as mx  # type: ignore[import-not-found]
+        binding = resolve_binding(self._model_variant, voice)
+        profile = (
+            get_voice_profile(binding.voice)
+            if self._model_variant == "voice_design"
+            else None
+        )
+        if profile is not None:
+            try:
+                import mlx.core as mx  # type: ignore[import-not-found]
 
-            mx.random.seed(profile.seed)
-        except Exception:
-            pass
-        used_temperature = getattr(profile, "temperature", self._temperature)
+                mx.random.seed(profile.seed)
+            except Exception:
+                pass
+            used_temperature = profile.temperature
+        else:
+            used_temperature = self._temperature
         first_chunk = True
         for result in self._model.generate(
             text=text,
-            voice=None,
-            instruct=profile.instruction,
+            voice=binding.speaker,
             speed=speed,
             lang_code=language,
             max_tokens=generation_token_budget(text),
@@ -162,6 +171,7 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
             top_p=self._top_p,
             stream=True,
             streaming_interval=self._chunk_ms / 1000,
+            **({"instruct": binding.instruction} if binding.instruction is not None else {}),
         ):
             pcm = self._to_pcm(result)
             if not pcm:
@@ -199,6 +209,9 @@ class MlxVoiceDesignEngine:  # pragma: no cover - requires separately authorized
         return bytes(
             self._numpy.clip(samples * 32767.0, -32768.0, 32767.0).astype("<i2").tobytes()
         )
+
+
+MlxQwenTtsEngine = MlxVoiceDesignEngine
 
 
 def _default_engine_factory(  # pragma: no cover - requires separately authorized model runtime.
