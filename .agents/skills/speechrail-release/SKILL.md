@@ -40,6 +40,8 @@ curl --fail http://127.0.0.1:8201/health
 
 记录当前 commit、active profile、generation、runtime target、服务 PID、listener 数量、模型身份、旧 wheel hash 和可回退 selection/vendor runtime。必须确认只有一个 8201 listener，且 PID 属于 `runtime/current/.venv/bin/python`。工作树可以有与本发布无关的用户改动，但发布 commit、报告和 tag 只能包含明确归属本次 release 的文件。
 
+发布、切档和性能 smoke 前还必须隔离外部 realtime 客户端：用 `lsof -nP -iTCP:8201` 查找 `ESTABLISHED` 连接，用已配置鉴权读取 `/metrics` 确认 `speechrail_realtime_active_sessions=0`、batch/realtime governor active requests 均为 0。Sona、浏览器或其它客户端的连接不会随 SpeechRail `bootout` 自动释放；先关闭所属客户端，必要时只按已核验的精确 PID 规则结束它，再继续发布。若公共 ASR 仍返回 `429 backend_busy`，停止发布并保留证据，不循环重试。
+
 执行 `speechrail service preflight --app-home "$APP_HOME"`，确认它通过 managed runtime 的 Python；不要从源码 `.venv` 推断已安装 wheel 的依赖。
 
 ## 3. 更新版本材料
@@ -147,6 +149,7 @@ lsof -nP -iTCP:8201 -sTCP:LISTEN
 - `/health.profile`、`/v1/models` 的 profile/artifact/variant/quantization 与 selection 一致；
 - `/readyz` 为 200，`/v1/voices` 的 availability/capabilities 与当前 TTS variant 一致；
 - 真实、非敏感 fixture 的 ASR/TTS 都返回 200、非空结果和 request ID；
+- 没有外部 established realtime connection，`realtime_active_sessions=0`，batch/realtime active requests 均为 0；
 - 通过一次“第二实例应失败”的检查（启动同一端口的 `speechrail serve` 得到 `server_already_running`），然后不留下第二进程。
 
 仅有进程存在、plist 存在、配置存在或 `/health` 200 都不能证明新 release 生效；profile identity mismatch 说明 smoke 可能打到了旧 listener，必须重新安全 stop。
@@ -161,7 +164,7 @@ lsof -nP -iTCP:8201 -sTCP:LISTEN
 
 profile 切换失败时停止后续采集，记录失败档、operation 状态、PID、stderr 尾部和错误码；使用 `profile rollback --yes` 只回滚一次。回滚也失败时保持 `not_ready`，不要用旧数据补齐或连续重启。
 
-基准报告必须记录实际安装 wheel hash、commit、profile、generation、模型身份、硬件、资源采样完整性和 gate；缺少真实质量或完整物理采样时写 `unset`/`fail`，不能写“通过”。原始 JSON、音频、embedding 和日志放仓库外。
+基准报告必须记录实际安装 wheel hash、commit、profile、generation、模型身份、硬件、资源采样完整性、外部客户端隔离证据和 gate；缺少真实质量或完整物理采样时写 `unset`/`fail`，不能写“通过”。原始 JSON、音频、embedding 和日志放仓库外。
 
 ## 8. 回滚与恢复
 

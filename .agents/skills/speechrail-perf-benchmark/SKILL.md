@@ -44,6 +44,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
 9. API key 只从环境读取，不出现在命令、报告或日志中。
+10. 基准开始、每次切档前和最终恢复后都要隔离外部 realtime 客户端：用 `lsof -nP -iTCP:<port>` 排除 `ESTABLISHED` 连接，并用已配置鉴权读取 `/metrics` 确认 `realtime_active_sessions=0`、batch/realtime active requests 均为 0。Sona、浏览器标签页或其它客户端不会随服务 stop 自动断开；必须先关闭所属客户端，必要时按精确 PID 规则结束它。顺序 ASR 仍返回 `429 backend_busy` 时停止采集并记录根因，不循环重试或复用旧数据。
 
 ## 4. 基础发布套件（每个 profile）
 
@@ -74,6 +75,8 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 - 16 kHz mono PCM16，连续 3 个 session；
 - setup、首 delta、commit、TTFA、terminal event、成功率；
 - 单独启动 streaming 模式并采样 host + streaming ASR；结束后恢复原模式。
+
+开始任何一档的基础套件前，先记录外部连接快照：listener、established client PID、`realtime_active_sessions`、两类 governor active requests 和 streaming worker state。只有客户端连接清零后，`/health`、`/readyz` 和短 ASR smoke 都通过，才允许开始该档数据采集。
 
 工具入口：
 
@@ -126,10 +129,11 @@ python3 examples/perf/bench_profiles.py \
 MINOR/MAJOR：
 
 1. 记录初始 active profile 和 generation。
-2. 每次 `speechrail profile apply <profile> --yes` 后等待服务真正 ready，并先核对 `/health.profile` 是否等于目标档位。
-3. 核对 `/v1/models`、`/v1/voices` 的模型/音色身份并执行该档完整基础套件。
-4. 不在同一时间运行多个 benchmark；启动真空可持续数分钟时不要连续 restart。
-5. 结束时恢复初始 profile，复查公共 ASR/TTS smoke 和单 listener。
+2. 每次 `speechrail profile apply <profile> --yes` 前后都重做外部连接快照；发现 established realtime client 或 active session 时先关闭客户端，不能把 `backend_busy` 当作候选模型失败。
+3. 每次 `speechrail profile apply <profile> --yes` 后等待服务真正 ready，并先核对 `/health.profile` 是否等于目标档位。
+4. 核对 `/v1/models`、`/v1/voices` 的模型/音色身份并执行该档完整基础套件。
+5. 不在同一时间运行多个 benchmark；启动真空可持续数分钟时不要连续 restart。
+6. 结束时恢复初始 profile，复查公共 ASR/TTS smoke、外部 session 清零和单 listener。
 
 切换或 smoke 失败时停止后续数据采集，记录失败档、operation 状态、PID、stderr 尾部和错误码，并使用 `speechrail profile rollback --yes` 只回滚一次。回滚也失败时保持 `not_ready`，不要循环重启或用旧数据补齐。
 

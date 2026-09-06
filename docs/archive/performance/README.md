@@ -2,9 +2,10 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新安装验收（v1.10.0，MINOR 三档）
+## 最新性能基准（v1.10.0，MINOR 三档）
 
-> **结论**：v1.10.0 已完成 managed 安装，`quality → balanced → light → quality` 串行切换、公共 ASR/TTS smoke、profile 身份和第二实例拒绝均通过；完整性能 gate 未打开。详见
+> **结论**：v1.10.0 已完成 `quality → balanced → light → quality` 的三档真实基准。ASR/TTS N=5、Realtime 3 session、三档 `phys_footprint` 采样和最终 quality 恢复均通过；独立 CER/WER、MOS/ABX 与 speaker embedding 仍为 `unset`。首轮被外部 Sona realtime WebSocket 占用触发的 `backend_busy` 已定位并补入部署/发布/性能 skill 的前置隔离检查。详见
+> [v1.10.0 性能与质量基准](2026-09-07-v1.10.0-performance-benchmark.md) 与
 > [v1.10.0 发布验收](2026-09-06-v1.10.0-release-acceptance.md)。
 
 ## 历史安装验收（v1.9.2，PATCH quality）
@@ -76,7 +77,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
-| **v1.10.0** | [2026-09-06-v1.10.0-release-acceptance.md](2026-09-06-v1.10.0-release-acceptance.md) | MINOR 三档安装验收；speech admission/VAD 与生命周期 controller；完整性能 gate 未完成 |
+| **v1.10.0** | [2026-09-07-v1.10.0-performance-benchmark.md](2026-09-07-v1.10.0-performance-benchmark.md) | MINOR 三档真实性能/资源/Realtime 基准；外部 Sona `backend_busy` 根因与隔离 SOP 已固化 |
 | **v1.9.2** | [2026-09-06-v1.9.2-performance-benchmark.md](2026-09-06-v1.9.2-performance-benchmark.md) | PATCH 当前 `quality`；三档切换与停机恢复通过；完整性能 gate 未完成 |
 | **v1.9.1** | [2026-09-06-v1.9.1-performance-benchmark.md](2026-09-06-v1.9.1-performance-benchmark.md) | PATCH 当前 `quality`；修复重复服务进程与 smoke 误测；完整性能 gate 未完成 |
 | **v1.9.0** | [2026-09-06-v1.9.0-performance-benchmark.md](2026-09-06-v1.9.0-performance-benchmark.md) | MINOR 安装验收；quality 公共推理通过；balanced/light 自动回滚；三档性能 gate 未完成 |

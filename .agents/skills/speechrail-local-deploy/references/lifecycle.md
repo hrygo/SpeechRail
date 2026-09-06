@@ -27,6 +27,16 @@ PY
 
 `stop()` 的固定边界是：先 `bootout`，最多等待 2 秒获取同一 per-port lock；仍占用时只对 `launchctl print` 或 lock owner metadata、并经过 PID/命令行校验的精确进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。PID 缺失、owner 无法验证或 lock 仍未释放都会失败并阻止候选启动。
 
+## stop 前的外部连接检查
+
+controller 只负责 SpeechRail LaunchAgent 和其 worker；它不会替外部 Sona、浏览器或其它 `/v1/realtime` 客户端关闭 WebSocket。执行 `stop()` 或 profile 事务前，先运行 `lsof -nP -iTCP:<port>`，只把 `ESTABLISHED` 连接视为客户端占用，并用已配置鉴权读取 `/metrics`：
+
+- `speechrail_realtime_active_sessions` 必须为 0；
+- `speechrail_governor_active_requests{class="batch"}` 和 `{class="realtime"}` 必须为 0；
+- streaming worker 不应有活动 session。
+
+发现外部连接时先关闭其所属应用；UI 关闭后仍存活的客户端进程，只能在精确核对 PID、命令行和 owner 后按授权结束。若短 ASR smoke 仍为 `429 backend_busy`，保留证据并停止事务；不要以重启循环掩盖连接未释放。
+
 切换 `runtime/current`、安装 plist 后，用新 runtime 执行 `start()`，它会在 `bootstrap`/`kickstart` 前再次确认没有旧进程持锁：
 
 ```bash

@@ -33,6 +33,18 @@ curl --fail http://127.0.0.1:8201/health
 
 发布前执行 `speechrail service preflight --app-home "$APP_HOME"`。preflight 必须使用 `runtime/current/.venv/bin/python`；不要用源码 checkout 的 `.venv` 推断 managed runtime 是否可用。
 
+## 外部 realtime 客户端隔离
+
+`service stop`、`profile apply` 和 benchmark 只管理 SpeechRail 的 LaunchAgent，不会替仍在运行的 Sona、浏览器标签页或其它 WebSocket 客户端关闭连接。停服或切档前必须做一次外部连接快照：
+
+1. 用 `lsof -nP -iTCP:<port>` 区分唯一 listener 与 `ESTABLISHED` 客户端连接，记录连接所属的精确 PID；不要把 `CLOSED` 条目当成活动会话。
+2. 用已配置的鉴权方式读取 `/metrics`，只检查 `speechrail_realtime_active_sessions`、`speechrail_governor_active_requests{class="batch|realtime"}` 和 streaming worker state；不把 API key 写入命令或日志。
+3. 只要存在外部 established connection、active realtime session 或 active governor request，先在拥有连接的客户端执行停止/断开，再等待连接消失、session 和 active requests 归零。服务自身 stop 不等于客户端 stop。
+4. 客户端 UI 关闭后若精确 PID 仍持有连接，先核对 PID 的命令行与 owner，再按本 SOP 的精确 PID 规则结束该客户端；不得使用 `pkill`、`killall` 或模糊名称匹配。
+5. 重新做一次短公共 ASR smoke；若仍返回 `429 backend_busy`，停止切档/发布并保留连接、metrics 和 operation 状态证据，不循环重试或用旧结果补齐。
+
+外部客户端未隔离时，`worker_load_error`、`not_ready` 或 `backend_busy` 不能直接归因于模型制品或候选 runtime。
+
 ## 首次安装
 
 managed 首装由受审查的 installer/设置入口完成：先选择 `quality`、`balanced` 或 `light`，只准备 catalog 锁定并逐文件校验的制品，再创建共享 runtime、写入 `0600` 私有配置、执行 managed-runtime preflight、安装 LaunchAgent，最后启用并做公共 smoke。自动化切档或首装必须显式 `--yes`。
@@ -94,6 +106,7 @@ speechrail service preflight --app-home "$APP_HOME"
 - `/v1/models` 的 profile、artifact、variant、quantization 与 selection 一致；
 - `/v1/voices` 返回当前 TTS variant 实际支持的九个 canonical roles；
 - 真实 ASR/TTS 均返回 200、非空结果和 request ID；
+- 没有外部 `ESTABLISHED` realtime 客户端连接，`realtime_active_sessions=0`，batch/realtime active requests 均为 0；
 - 不存在第二个服务、遗留 listener 或仍持有 per-port lock 的旧进程。
 
 ## profile 切换与回滚
@@ -132,6 +145,7 @@ speechrail profile rollback --app-home "$APP_HOME" --yes
 | `server_already_running` | `lsof` 与 `launchctl print` 是否已有唯一服务 | 不启动第二实例；确认调用方使用目标 app home 和 runtime |
 | `/health` 是旧 profile/版本 | `/health.profile`、`runtime/current`、PID 的实际 executable | 停止并确认 lock 释放；禁止把旧 listener 当作候选 smoke 结果 |
 | `/readyz` 503 | selection、snapshot hash、共享 runtime、preflight 输出 | 保持停服，修复配置/制品后再启动；不打开下载开关掩盖问题 |
+| `429 backend_busy` 或切档 smoke 不 ready | 外部 established WebSocket、`realtime_active_sessions`、governor active requests、streaming worker state | 先关闭 Sona/浏览器/其它客户端并确认连接与 session 清零，再重做一次短 smoke；不要循环重试或先换模型 |
 | `launchctl` exit 5 | bootout 后旧父进程/worker 是否还持锁 | 等待 2 秒，按精确 PID 进程组强杀，再等最多 10 秒；不要连续 restart |
 | `service preflight` 可疑失败 | 执行 preflight 的 Python 是否为 `runtime/current/.venv/bin/python` | 重新从 managed runtime 执行，避免源码依赖污染判断 |
 

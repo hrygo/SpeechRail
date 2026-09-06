@@ -317,16 +317,17 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), with the latest installation evidence recorded in the [v1.9.2 Performance and Runtime Stability Benchmark](docs/archive/performance/2026-09-06-v1.9.2-performance-benchmark.md). v1.9.2 revalidated the active `quality` profile, completed a three-tier switch loop, and fixed the LaunchAgent stop/start race behind stale-worker `worker_load_error`; its full performance gate remains unset, so the numeric table keeps complete historical baselines labeled by version. Historical reports remain in the archive:
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.10.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.10.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.10.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset. Historical reports remain in the archive:
 
-| Benchmark Metric | 🟢 Light Profile (v1.8.0) | 🟡 Balanced Profile (v1.8.0) | 🟣 Quality Profile (v1.8.1) | Test Methodology & Scenario |
+| Benchmark Metric | 🟢 Light Profile (v1.10.0) | 🟡 Balanced Profile (v1.10.0) | 🟣 Quality Profile (v1.10.0) | Test Methodology & Scenario |
 |---|---|---|---|---|
-| **ASR Chinese RTF (mean)** | **0.0204** (49x faster than real-time) | **0.0295** (34x faster than real-time) | **0.0335** (~30x faster than real-time) | Quality current: independent fixture, N=5; latency p50, RTF mean |
-| **ASR English RTF (mean)** | **0.0229** (44x faster than real-time) | **0.0339** (30x faster than real-time) | **0.0377** (~27x faster than real-time) | Quality current: independent English fixture, N=5; latency p50, RTF mean |
-| **TTS Synthesis RTF (mean)** | **0.2372** (4.2x faster than real-time) | **0.2467** (4.1x faster than real-time) | **0.2832** (~3.5x faster than real-time) | Quality current: standard Chinese text, `default` voice, N=5; latency p50 |
-| **Peak Total Physical RAM** | **~4.7 GB** (4709.7 MB) | **~6.3 GB** (6305.9 MB) | **~7.8 GB** (7770.1 MB) | Quality current: max `phys_footprint` within same tick |
-| **Steady Physical RAM** | **~4.1 GB** (4147.1 MB) | **~5.5 GB** (5542.8 MB) | **~6.6 GB** (6609.9 MB) | Quality current: steady-state physical memory during load |
-| **Idle Standby RAM** | **~50 MB** (v1.8.0) | **~50 MB** (v1.8.0) | **~50 MB** (v1.8.0) | Not remeasured in v1.8.1; prior worker idle-eviction observation |
+| **ASR 10s warm RTF p50** | **0.0232** | **0.0289** | **0.0301** | Actual fixture 9.36s, warm N=5; lower is faster |
+| **TTS short warm RTF p50** | **0.256** | **0.270** | **0.315** | Actual PCM duration, warm N=5; lower is faster |
+| **Peak Total Physical RAM** | **4.66 GB** (4661.0 MB) | **6.34 GB** (6336.0 MB) | **7.70 GB** (7696.2 MB) | Same-tick macOS `phys_footprint`; complete ticks 16/18/15 |
+| **Warm Idle Physical RAM** | **4.15 GB** (4152.8 MB) | **5.54 GB** (5540.8 MB) | **N/A** | Quality lazy worker pre-load sample was incomplete; no old value substituted |
+| **Realtime ASR commit p50** | **291.5 ms** | **418.4 ms** | **800.9 ms** | 16kHz PCM16, three consecutive sessions; terminal success 3/3 |
+
+> `balanced` and `light` use `CustomVoice` and do not support voice cloning; `quality` uses `VoiceDesign` and declares `supports_clone=true`. Concurrent batch ASR is intentionally rejected with `backend_busy` when the shared worker is occupied; it is not reported as usable throughput.
 
 ---
 
