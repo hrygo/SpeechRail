@@ -7,6 +7,18 @@
 - 统一 `service start/stop/restart` 与 profile 切换的 bounded lifecycle；status 不可用时只有经过 lock owner、PID 和命令行校验的旧实例才允许恢复。
 - managed installer 在切换 `runtime/current` 前确认端口 singleton lock 已释放；profile smoke 严格校验 profile、ASR/TTS readiness 和实际 artifact identity。
 
+## [1.10.0] - 2026-09-06
+
+### Added
+
+- 为 Realtime ASR 增加 speech admission 与 neural VAD，静音或非语音输入不再进入转写提交路径，降低空结果和幻觉转写。
+- 增加 controller-backed `service start`、`stop`、`restart` 入口，并将单实例 lock、精确旧进程恢复、严格 profile smoke 和安全安装切换固化到本机发布流程。
+
+### Fixed
+
+- 修复 profile 切换期间旧 listener、错误 runtime 或 worker 尚未释放导致的 `worker_load_error` 自动回滚，发布和切换现在会在端口 lock 释放后才启动候选实例。
+- 更新 cartoon-avatar 示例的 avatar profile、voice binding 和 playback progress 交互，保持示例状态与 SpeechRail 音色能力一致。
+
 ## [1.9.2] - 2026-09-06
 
 ### Fixed
