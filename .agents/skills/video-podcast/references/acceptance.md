@@ -24,12 +24,25 @@ uv run python "$SKILL_DIR/scripts/inspect_media.py" final.mp4 --loudness
 
 可选 `--expected-duration`、`--duration-tolerance`、`--target-lufs`、`--lufs-tolerance`、`--max-true-peak`、`--av-tolerance`、`--video-index` 与 `--audio-index`。`--timeout` 为单个外部命令上限，长节目可按实际资源调整。选目标阈值时遵循 [audio.md](audio.md)。
 
-退出码：`0` 表示已请求检查无失败且无未知；`1` 表示存在技术失败；`2` 表示数据不足或操作失败。JSON 始终标记 `human_review_required`，不输出“整体验收通过”。未请求响度时不推断响度合格；没有流时长时保留未知，不能用容器时长填入音视频流并制造相等。
+默认时长容差与音视频容差均为 `0.1` 秒，响度容差为 `1 LU`，单命令超时为 `300` 秒；这些是工具默认值，不是平台规范。`--av-tolerance` 分别检查所选音视频流的时长差、起点差和终点差。`--expected-duration` 比较容器时长；多音轨文件仍须逐轨检查。参数必须有限，容差非负，预期时长与超时大于零。
 
-无 `--loudness` 时主要读取头部信息；开启后解码完整首个音频流，不执行完整视频逐帧解码。需要检查视频损坏时另用 FFmpeg 全解码：
+只有选定交付目标后才添加阈值。例如，下例表示这次制作选择了相应目标，并非所有节目都应使用这些数值：
 
 ```bash
-ffmpeg -v error -xerror -i final.mp4 -map 0:v:0 -map 0:a:0 -f null -
+uv run python "$SKILL_DIR/scripts/inspect_media.py" final.mp4 \
+  --target-lufs -16 --lufs-tolerance 1 --max-true-peak -1 \
+  --expected-duration 90
+```
+
+退出码：`0` 表示已请求检查无失败且无未知；`1` 表示存在技术失败；`2` 表示数据不足或操作失败。JSON 始终标记 `human_review_required`，不输出“整体验收通过”。未请求响度时不推断响度合格；没有流时长时保留未知，不能用容器时长填入音视频流并制造相等。
+
+JSON 提供 `sha256`、`checked_at`、所选流和各项检查状态；不输出路径、转写或任意媒体 tags。读取媒体字节计算哈希不等于解码。底层测量使用 [ffprobe](https://ffmpeg.org/ffprobe.html) 与 [FFmpeg loudnorm](https://ffmpeg.org/ffmpeg-filters.html#loudnorm) 的输入侧统计。
+
+未请求响度时只探测媒体元数据并计算哈希；`--loudness` 或任意响度目标参数会解码完整的**所选音频流**，不执行完整视频逐帧解码。需要检查视频损坏时另用 FFmpeg 全解码（示例选择全局 index `0` 和 `1`，按检查报告中的实际 index 替换，避免选到封面或错误音轨）：
+
+```bash
+ffmpeg -v error -xerror -nostdin -protocol_whitelist file -i final.mp4 \
+  -map 0:0 -map 0:1 -f null -
 ```
 
 ## 全文与同步
@@ -53,3 +66,13 @@ ffmpeg -v error -xerror -i final.mp4 -map 0:v:0 -map 0:a:0 -f null -
 失败回到最早出错的阶段，保留前后对照，不对所有环节反复加效果。改音频后重测最终音轨；改布局后检查受影响镜头和转场；发布前重新确认提供链接的正是验收版本。
 
 交付成片链接、画幅 / 时长、关键改进、实际验证范围与未验证事项。用户要求时附字幕、音频母带、制作清单和可运行项目。只完成了元数据检测时如实说“技术检查”，不声称发音正确或听感自然。
+
+## 维护检查器
+
+修改检查器后运行以下独立测试；项目默认 `pytest` 的 `testpaths` 不包含 skill 目录。测试用 FFmpeg 在临时目录生成非敏感媒体，不调用 TTS / ASR 或本机服务：
+
+```bash
+uv run python -m unittest discover -s "$SKILL_DIR/tests" -v
+```
+
+缺少 FFmpeg 时测试会跳过；跳过不能作为检查器已验证的证据。

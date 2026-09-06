@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -134,6 +135,118 @@ class InspectMediaCliTests(unittest.TestCase):
         report = self.parse_output(result)
         self.assertEqual(report["status"], "unknown")
         self.assertEqual(report["checks"]["loudness"]["status"], "unknown")
+
+    def test_metadata_only_does_not_claim_loudness_or_modify_media(self):
+        before = hashlib.sha256(self.media_path.read_bytes()).hexdigest()
+        result = self.run_inspector(self.media_path)
+        report = self.parse_output(result)
+        self.assertEqual(result.returncode, 0, report)
+        self.assertEqual(report["checks"]["loudness"]["status"], "not_requested")
+        self.assertEqual(report["sha256"], before)
+        self.assertEqual(hashlib.sha256(self.media_path.read_bytes()).hexdigest(), before)
+
+    def test_threshold_implicitly_measures_and_can_fail(self):
+        result = self.run_inspector(self.media_path, "--max-true-peak", "-60")
+        report = self.parse_output(result)
+        self.assertEqual(result.returncode, 1, report)
+        self.assertEqual(report["checks"]["true_peak"]["status"], "fail")
+
+    def test_wrong_stream_type_is_input_error(self):
+        result = self.run_inspector(self.media_path, "--audio-index", "0")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.parse_output(result)["error"]["kind"], "input")
+
+    def test_nonfinite_and_negative_options_are_json_errors(self):
+        for option, value in [
+            ("--target-lufs", "nan"),
+            ("--timeout", "0"),
+            ("--av-tolerance", "-1"),
+            ("--audio-index", "-1"),
+        ]:
+            with self.subTest(option=option):
+                result = self.run_inspector(self.media_path, option, value)
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(self.parse_output(result)["error"]["kind"], "input")
+
+    def test_selected_audio_is_measured_instead_of_first_track(self):
+        multi = self.media_path.parent / "multi.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(self.media_path),
+                "-i",
+                str(self.silent_media_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0",
+                "-map",
+                "1:a:0",
+                "-c",
+                "copy",
+                str(multi),
+            ],
+            check=True,
+        )
+        result = self.run_inspector(multi, "--audio-index", "2", "--loudness")
+        report = self.parse_output(result)
+        self.assertEqual(result.returncode, 2, report)
+        self.assertEqual(report["media"]["audio"]["index"], 2)
+        self.assertEqual(report["checks"]["loudness"]["status"], "unknown")
+
+    def test_container_duration_does_not_fill_unknown_stream_duration(self):
+        media = self.media_path.parent / "unknown-duration.mkv"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(self.media_path),
+                "-c",
+                "copy",
+                str(media),
+            ],
+            check=True,
+        )
+        result = self.run_inspector(media)
+        report = self.parse_output(result)
+        self.assertEqual(result.returncode, 2, report)
+        self.assertEqual(report["checks"]["audio_video_duration"]["status"], "unknown")
+
+    def test_equal_durations_with_offset_are_not_synchronized(self):
+        media = self.media_path.parent / "offset.mp4"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-i",
+                str(self.media_path),
+                "-itsoffset",
+                "0.4",
+                "-i",
+                str(self.media_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-c",
+                "copy",
+                str(media),
+            ],
+            check=True,
+        )
+        result = self.run_inspector(media, "--av-tolerance", "0.1")
+        report = self.parse_output(result)
+        self.assertEqual(result.returncode, 1, report)
+        self.assertEqual(report["checks"]["audio_video_start"]["status"], "fail")
 
 
 if __name__ == "__main__":
