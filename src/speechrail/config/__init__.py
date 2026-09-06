@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     realtime_diarization_drain_deadline_seconds: float = Field(default=20.0, gt=0, le=120)
     realtime_speech_admission_enabled: bool = False
+    realtime_vad_engine: Literal["legacy", "silero"] = "legacy"
+    realtime_vad_model_path: Path | None = None
+    realtime_vad_shadow_enabled: bool = False
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -113,11 +116,15 @@ class Settings(BaseSettings):
             raise ValueError("job_spool_dir must be an external absolute path")
         return value
 
-    @field_validator("diarization_model_path", "diarization_embedding_model_path")
+    @field_validator(
+        "diarization_model_path",
+        "diarization_embedding_model_path",
+        "realtime_vad_model_path",
+    )
     @classmethod
-    def require_absolute_diarization_model(cls, value: Path | None) -> Path | None:
+    def require_absolute_model_paths(cls, value: Path | None) -> Path | None:
         if value is not None and not value.is_absolute():
-            raise ValueError("diarization model paths must be external absolute paths")
+            raise ValueError("model paths must be external absolute paths")
         return value
 
     @model_validator(mode="after")
@@ -137,6 +144,12 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "realtime_asr_backend=native requires qwen3_model_dir"
                 )
+        if self.realtime_vad_shadow_enabled and self.realtime_vad_engine == "silero":
+            raise ValueError(
+                "realtime_vad_shadow_enabled is only supported with realtime_vad_engine='legacy'"
+            )
+        if self.realtime_vad_engine == "silero" and self.realtime_vad_model_path is None:
+            raise ValueError("realtime_vad_engine=silero requires realtime_vad_model_path")
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
         if (

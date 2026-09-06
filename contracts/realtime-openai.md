@@ -98,6 +98,16 @@ diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无
 `/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
 已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。
 
+## 语音准入与无声闭环（SR-SILENCE-1）
+
+在 `server_vad` 模式下，SpeechRail 引入有界语音准入机制（`SpeechAdmission`）：
+
+1. **准入与 ASR 隔离**：在未检测到确认的连续人声前（IDLE/CANDIDATE 状态），不向 ASR 推理器输入音频、不执行无声 flush，且绝不发送非空 `delta`、`segment` 或 `completed` 文本（杜绝纯静音下输出“嗯”等幻觉转录）。
+2. **时钟守恒与时间映射**：连续输入的 session sample 时钟以及 diarization 输入不受准入跳过静音的影响，始终按物理音频线性推进；ASR 接纳区间的本地时间统一映射回 session-global sample 时钟（包括 pre-roll 前置缓冲与尾音）。
+3. **确定性空闭环**：在纯静音、空缓冲或未准入语音状态下触发的 commit（无论是客户端显式 commit 还是超限结转），均执行统一的空终态序列：`input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.completed`（其中 `transcript=""`，扩展模式下 `attribution_units=[]`）。连接与会话保持健康可用。
+4. **全双工打断（Barge-in）**：在 TTS 正在播放时，一旦检测到有效人声输入（`speech_started`），立即原子取消当前 TTS 响应并释放硬件排队槽位，随后无阻塞启动 ASR 会话。
+5. **协议透明与兼容**：`turn_detection=null` 或 `manual` 模式完全保持原有行为；`server_vad` 模式不新增未协商的私有 wire 字段，现有 OpenAI Realtime 客户端与 Sona 无缝兼容。
+
 ## Diarization 扩展 `speechrail.diarization.v1`（SPK-E2E-1）
 
 本节为 opt-in 加法扩展：未协商的会话行为与本文件其余部分完全一致。设计事实源为

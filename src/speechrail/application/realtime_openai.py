@@ -18,7 +18,6 @@ from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.backends.qwen3_voice_binding import resolve_binding
-from speechrail.backends.vad import VoiceActivityDetector
 from speechrail.compatibility.openai_realtime import (
     SPEECHRAIL_DIARIZATION_V1,
     RealtimeAdapterError,
@@ -57,7 +56,6 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
-from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.domain.diarization_timeline import (
     AttributionLedger,
     AttributionResult,
@@ -68,6 +66,7 @@ from speechrail.domain.diarization_timeline import (
 from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
+from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
@@ -128,7 +127,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
-        self._vad: VoiceActivityDetector | None = None
+        self._vad: Any = None
+        self._shadow_vad: Any = None
         self._speech_admission: SpeechAdmission | None = None
         self._turn_generation: int = 0
         self._asr_turn_generation: int = 0
@@ -137,6 +137,7 @@ class OpenAIRealtimeSession:
         self._admitted_end_sample: int = 0
         self._vad_raw_buffer = bytearray()
         self._vad_sample_cursor: int = 0
+        self._bargein_pending_audio: list[bytes] = []
         # Session-global sample clock (SPK-E2E-1): every accepted PCM sample
         # advances exactly once; each ASR item records the offset it starts at
         # so item-local vendor times lift into the session domain once.
@@ -225,6 +226,9 @@ class OpenAIRealtimeSession:
         self._tts_task = None
         if self._vad is not None:
             self._vad.reset()
+        if self._shadow_vad is not None:
+            self._shadow_vad.reset()
+        self._bargein_pending_audio.clear()
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
@@ -279,18 +283,52 @@ class OpenAIRealtimeSession:
 
         turn_detection = config.get("turn_detection")
         if isinstance(turn_detection, dict) and turn_detection.get("type") == "server_vad":
-            from speechrail.backends.vad import VadConfig, VoiceActivityDetector
-
             threshold = float(turn_detection.get("threshold", 0.5))
             prefix_padding = int(turn_detection.get("prefix_padding_ms", 300))
             silence_duration = int(turn_detection.get("silence_duration_ms", 400))
-            self._vad = VoiceActivityDetector(
-                VadConfig(
-                    threshold=threshold,
-                    prefix_padding_ms=prefix_padding,
-                    silence_duration_ms=silence_duration,
+
+            if self._settings.realtime_vad_engine == "silero":
+                from speechrail.backends.neural_vad import SileroVadConfig, SileroVadDetector
+
+                ready, reason = SileroVadDetector.check_readiness(
+                    self._settings.realtime_vad_model_path
                 )
-            )
+                if not ready:
+                    raise RealtimeAdapterError(
+                        "backend_not_ready",
+                        f"Silero VAD preflight failed: {reason}",
+                    )
+                self._vad = SileroVadDetector(
+                    self._settings.realtime_vad_model_path,
+                    config=SileroVadConfig(threshold=threshold),
+                )
+                self._shadow_vad = None
+            else:
+                from speechrail.backends.vad import VadConfig, VoiceActivityDetector
+
+                self._vad = VoiceActivityDetector(
+                    VadConfig(
+                        threshold=threshold,
+                        prefix_padding_ms=prefix_padding,
+                        silence_duration_ms=silence_duration,
+                    )
+                )
+                if self._settings.realtime_vad_shadow_enabled:
+                    from speechrail.backends.neural_vad import SileroVadConfig, SileroVadDetector
+
+                    ready, _ = SileroVadDetector.check_readiness(
+                        self._settings.realtime_vad_model_path
+                    )
+                    if ready:
+                        self._shadow_vad = SileroVadDetector(
+                            self._settings.realtime_vad_model_path,
+                            config=SileroVadConfig(threshold=threshold),
+                        )
+                    else:
+                        self._shadow_vad = None
+                else:
+                    self._shadow_vad = None
+
             if self._settings.realtime_speech_admission_enabled:
                 prefix_samples = int(prefix_padding * 16)
                 stop_frames = max(1, (silence_duration + 31) // 32)
@@ -312,6 +350,7 @@ class OpenAIRealtimeSession:
             or turn_detection == "manual"
         ):
             self._vad = None
+            self._shadow_vad = None
             self._speech_admission = None
             self._vad_raw_buffer.clear()
 
@@ -431,18 +470,19 @@ class OpenAIRealtimeSession:
                 self._unflushed_bytes = 0
                 await self._ensure_asr_for_turn(generation=self._turn_generation)
 
-            await self._asr.append_audio(dec.pcm)
-            self._admitted_end_sample = dec.end_sample
-            self._item_end_sample = dec.end_sample
-            self._buffered_audio_bytes += len(dec.pcm)
-            self._unflushed_bytes += len(dec.pcm)
+            if self._asr is not None:
+                await self._asr.append_audio(dec.pcm)
+                self._admitted_end_sample = dec.end_sample
+                self._item_end_sample = dec.end_sample
+                self._buffered_audio_bytes += len(dec.pcm)
+                self._unflushed_bytes += len(dec.pcm)
 
-            chunk_sec = self._settings.qwen3_streaming_chunk_sec
-            flush_threshold = max(1, int(chunk_sec * 32_000))
-            if self._unflushed_bytes >= flush_threshold:
-                self._unflushed_bytes = 0
-                with contextlib.suppress(Exception):
-                    await self._asr.flush()
+                chunk_sec = self._settings.qwen3_streaming_chunk_sec
+                flush_threshold = max(1, int(chunk_sec * 32_000))
+                if self._unflushed_bytes >= flush_threshold:
+                    self._unflushed_bytes = 0
+                    with contextlib.suppress(Exception):
+                        await self._asr.flush()
 
         elif dec.kind == "end":
             self._services.metrics.record_vad("ended")
@@ -491,6 +531,9 @@ class OpenAIRealtimeSession:
                 frame_start_sample = self._vad_sample_cursor
                 self._vad_sample_cursor += 512
                 prob = self._vad.score_frame(frame)
+                if self._shadow_vad is not None:
+                    with contextlib.suppress(Exception):
+                        self._shadow_vad.score_frame(frame)
                 decisions = self._speech_admission.push(
                     frame,
                     start_sample=frame_start_sample,
@@ -501,23 +544,6 @@ class OpenAIRealtimeSession:
             return
 
         # 2. Legacy / manual path (unaltered behavior)
-        if max_buf is not None:
-            if (
-                self._buffered_audio_bytes > 0
-                and self._buffered_audio_bytes + len(audio) > max_buf
-                and self._asr is not None
-            ):
-                # Auto-commit rollover for long streaming sessions
-                await self._commit_audio()
-
-        if self._asr is None:
-            await self._ensure_asr_for_turn(generation=self._turn_generation)
-            self._item_start_sample = self._timeline.accepted_samples - (len(audio) // 2)
-
-        await self._asr.append_audio(audio)
-        self._buffered_audio_bytes += len(audio)
-        self._unflushed_bytes += len(audio)
-
         if self._vad is not None:
             from speechrail.compatibility.openai_realtime import (
                 input_audio_buffer_speech_started,
@@ -528,7 +554,6 @@ class OpenAIRealtimeSession:
             for v_event in vad_events:
                 if v_event.speech_started:
                     self._services.metrics.record_vad("started")
-                    # Barge-in: immediately cancel in-progress TTS response
                     if self._tts_task is not None and not self._tts_task.done():
                         self._services.metrics.record_bargein()
                         await self._cancel_response()
@@ -548,15 +573,49 @@ class OpenAIRealtimeSession:
                             item_id=f"item_{self._session_id}_input",
                         )
                     )
-                    await self._commit_audio()
-                    return
+                    if self._asr is not None:
+                        await self._asr.append_audio(audio)
+                        self._buffered_audio_bytes += len(audio)
+                        self._unflushed_bytes += len(audio)
+                        await self._commit_audio()
+                        return
 
-        chunk_sec = self._settings.qwen3_streaming_chunk_sec
-        flush_threshold = max(1, int(chunk_sec * 32_000))
-        if self._unflushed_bytes >= flush_threshold:
-            self._unflushed_bytes = 0
-            with contextlib.suppress(Exception):
-                await self._asr.flush()
+            # If not yet in speech (debouncing or pure silence), defer ASR acquisition
+            if not self._vad.in_speech:
+                self._bargein_pending_audio.append(audio)
+                return
+
+        # Normal legacy append flow
+        if (
+            max_buf is not None
+            and self._buffered_audio_bytes > 0
+            and self._buffered_audio_bytes + len(audio) > max_buf
+            and self._asr is not None
+        ):
+            # Auto-commit rollover for long streaming sessions
+            await self._commit_audio()
+
+        if self._asr is None:
+            await self._ensure_asr_for_turn(generation=self._turn_generation)
+            self._item_start_sample = self._timeline.accepted_samples - (len(audio) // 2)
+            if self._bargein_pending_audio and self._asr is not None:
+                for pending_chunk in self._bargein_pending_audio:
+                    await self._asr.append_audio(pending_chunk)
+                    self._buffered_audio_bytes += len(pending_chunk)
+                    self._unflushed_bytes += len(pending_chunk)
+                self._bargein_pending_audio.clear()
+
+        if self._asr is not None:
+            await self._asr.append_audio(audio)
+            self._buffered_audio_bytes += len(audio)
+            self._unflushed_bytes += len(audio)
+
+            chunk_sec = self._settings.qwen3_streaming_chunk_sec
+            flush_threshold = max(1, int(chunk_sec * 32_000))
+            if self._unflushed_bytes >= flush_threshold:
+                self._unflushed_bytes = 0
+                with contextlib.suppress(Exception):
+                    await self._asr.flush()
 
     async def _commit_audio(self, reason: str = "client") -> None:
         if self._extensions:
@@ -569,6 +628,9 @@ class OpenAIRealtimeSession:
                 rem = bytes(self._vad_raw_buffer)
                 self._vad_raw_buffer.clear()
                 prob = self._vad.score_frame(rem)
+                if self._shadow_vad is not None:
+                    with contextlib.suppress(Exception):
+                        self._shadow_vad.score_frame(rem)
                 rem_start = self._vad_sample_cursor
                 self._vad_sample_cursor += len(rem) // 2
                 decisions = self._speech_admission.push(
@@ -687,8 +749,11 @@ class OpenAIRealtimeSession:
             self._speech_admission.reset(next_sample=self._timeline.accepted_samples)
         self._vad_raw_buffer.clear()
         self._vad_sample_cursor = self._timeline.accepted_samples
+        self._bargein_pending_audio.clear()
         if self._vad is not None:
             self._vad.reset()
+        if self._shadow_vad is not None:
+            self._shadow_vad.reset()
         await self._stop_asr_reader()
         await self._close_asr_session()
         await self._release_asr()

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from speechrail.config import Settings
-from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
+from speechrail.realtime.speech_admission import SpeechAdmission
 
 
 def test_silence_has_no_admission() -> None:
@@ -26,7 +26,6 @@ def test_silence_has_no_admission() -> None:
 
 
 def test_candidate_debounce_and_activation() -> None:
-    frame_bytes = 1024  # 512 samples
     gate = SpeechAdmission(
         threshold=0.5,
         start_frames=3,

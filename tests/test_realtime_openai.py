@@ -141,7 +141,7 @@ class FakeStreamingSession:
 
     async def close(self) -> None:
         self.closes += 1
-        return None
+        return
 
 
 class FakeStreamingFactory:
@@ -242,10 +242,16 @@ class FakeDiarizationSession:
 
 
 class FakeDiarizationEngine:
-    def __init__(self) -> None:
+    def __init__(self, *, supports_stream: bool = True) -> None:
+        self.supports_stream = supports_stream
         self.sessions: list[FakeDiarizationSession] = []
 
     def create(self, *, config):
+        session = FakeDiarizationSession()
+        self.sessions.append(session)
+        return session
+
+    def create_stream(self, *, config):
         session = FakeDiarizationSession()
         self.sessions.append(session)
         return session
@@ -1923,7 +1929,7 @@ def test_server_vad_silence_never_emits_text_before_commit() -> None:
 
 def test_server_vad_silence_rollover_has_no_text() -> None:
     """R0/R2: Silence exceeding buffer threshold must not emit non-empty transcripts."""
-    client, factory = _client(
+    client, _ = _client(
         completed_text="嗯",
         settings_kwargs={
             "max_realtime_buffer_bytes": 4000,
@@ -1967,7 +1973,7 @@ def test_server_vad_silence_rollover_has_no_text() -> None:
 
 def test_server_vad_silence_explicit_commit_closes_empty() -> None:
     """R0/R2: Explicit commit on silence closes with committed first, then empty completed."""
-    client, factory = _client(
+    client, _ = _client(
         completed_text="嗯",
         settings_kwargs={"realtime_speech_admission_enabled": True},
     )
@@ -2000,3 +2006,138 @@ def test_server_vad_silence_explicit_commit_closes_empty() -> None:
         assert events[2]["type"] == "conversation.item.input_audio_transcription.completed"
         assert events[2]["transcript"] == ""
 
+
+def test_server_vad_admission_admitted_speech_transcription_and_events() -> None:
+    """R2: SpeechAdmission accurately admits speech, triggers ASR and yields completed text."""
+    from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
+
+    client, factory = _client(
+        completed_text="你好世界",
+        partials=("你好",),
+        settings_kwargs={"realtime_speech_admission_enabled": True},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.3,
+                        "prefix_padding_ms": 100,
+                        "silence_duration_ms": 100,
+                    }
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+
+        # 1. Send some initial silence (3 frames, ~96ms) -> should NOT trigger speech or ASR
+        for _ in range(3):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+            )
+
+        # 2. Send loud active speech (4 frames, ~128ms) -> triggers speech_started & ASR
+        for _ in range(4):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_sine_pcm(440, 32, 10000.0))}
+            )
+
+        events_seen = []
+        # Receive speech_started
+        start_ev = socket.receive_json()
+        assert start_ev["type"] == "input_audio_buffer.speech_started"
+
+        # 3. Send silence to trigger speech_ended (4 frames of silence, ~128ms > 100ms)
+        for _ in range(4):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+            )
+
+        while True:
+            ev = socket.receive_json()
+            events_seen.append(ev["type"])
+            if ev["type"] == "conversation.item.input_audio_transcription.completed":
+                assert ev["transcript"] == "你好世界"
+                break
+            if ev["type"] == "error":
+                raise AssertionError(f"unexpected error: {ev}")
+
+        assert "input_audio_buffer.speech_stopped" in events_seen
+        assert len(factory.sessions) == 1
+        assert factory.sessions[0].commits == 1
+        assert len(factory.released) == 1
+
+
+def test_server_vad_admission_diarization_sample_mapping() -> None:
+    """R2: Session sample clock and diarization units accurately preserve timing under admission."""
+    from test_diarization_extensions import EXTENSION, _FakeDiarizationEngine
+    from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
+
+    client, _ = _client(
+        completed_text="扩展模式转写",
+        diarization_engine=_FakeDiarizationEngine(supports_stream=True),
+        settings_kwargs={"realtime_speech_admission_enabled": True},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.3,
+                        "prefix_padding_ms": 100,
+                        "silence_duration_ms": 100,
+                    },
+                    "input_audio_transcription": {
+                        "diarization": {
+                            "enabled": True,
+                            "extensions": [EXTENSION],
+                        }
+                    },
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+
+        # Send 1 second of silence (31 chunks of 32ms = 992ms, 15872 samples)
+        for _ in range(31):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+            )
+
+        # Send active speech (4 chunks)
+        for _ in range(4):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_sine_pcm(440, 32, 10000.0))}
+            )
+
+        # Wait for speech_started
+        start_ev = socket.receive_json()
+        assert start_ev["type"] == "input_audio_buffer.speech_started"
+        # Audio start ms should reflect the timeline after prefix padding
+        assert start_ev["audio_start_ms"] >= 800
+
+        # Send silence to complete turn
+        for _ in range(4):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(_silence_pcm(32))}
+            )
+
+        completed_ev = None
+        while True:
+            ev = socket.receive_json()
+            if ev["type"] == "conversation.item.input_audio_transcription.completed":
+                completed_ev = ev
+                break
+
+        assert completed_ev is not None
+        assert completed_ev["transcript"] == "扩展模式转写"
+        assert completed_ev["audio_start_sample"] >= 12000
+        assert completed_ev["audio_end_sample"] > completed_ev["audio_start_sample"]
