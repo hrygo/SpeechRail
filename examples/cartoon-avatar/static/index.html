@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="使用 SpeechRail 音色驱动的本地卡通数字人播报示例"
+    />
+    <title>卡通数字人 · SpeechRail</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script type="module" src="/static/app.mjs"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="stage-panel" aria-labelledby="avatar-heading">
+        <p class="eyebrow">SpeechRail 本地示例</p>
+        <h1 id="avatar-heading">卡通数字人</h1>
+        <p class="intro">
+          选择当前可用的 TTS 音色，让小小播报员把文字说出来。
+        </p>
+
+        <div class="avatar-stage">
+          <svg
+            id="avatar"
+            viewBox="0 0 360 460"
+            role="img"
+            aria-labelledby="avatar-title avatar-description"
+            preserveAspectRatio="xMidYMid meet"
+          >
+            <title id="avatar-title">戴青绿色领巾的卡通播报员</title>
+            <desc id="avatar-description">一个圆脸、明亮眼睛、穿着简洁服装的半身卡通人物。</desc>
+            <g id="avatar-body" class="avatar-body" aria-hidden="true">
+              <ellipse cx="180" cy="434" rx="122" ry="18" fill="#dbe8e3" />
+              <path d="M72 430c3-88 46-128 108-128s105 40 108 128H72Z" fill="#1e8f88" />
+              <path d="M128 319h104l-20 55h-64l-20-55Z" fill="#f8fbf8" />
+              <path d="M145 310c4 28 16 48 35 61 19-13 31-33 35-61h-70Z" fill="#f0b88e" />
+              <path d="M145 327l35 44 35-44-16-18h-38l-16 18Z" fill="#f6d45e" />
+              <circle cx="180" cy="353" r="8" fill="#145f65" />
+              <path d="M126 392c20 10 41 15 54 15s34-5 54-15" fill="none" stroke="#b8e5d7" stroke-width="6" stroke-linecap="round" />
+            </g>
+
+            <g aria-hidden="true">
+              <path d="M77 185c-12 0-22 12-22 28s10 28 24 28h13v-56H77Z" fill="#f0b88e" />
+              <path d="M283 185c12 0 22 12 22 28s-10 28-24 28h-13v-56h13Z" fill="#f0b88e" />
+              <rect x="82" y="80" width="196" height="226" rx="92" fill="#f0b88e" />
+              <path d="M83 171c-2-65 31-107 97-107s99 42 97 107c-18-20-34-40-43-62-33 29-80 45-151 48Z" fill="#194b59" />
+              <path d="M88 133c21-51 54-73 92-73s71 22 92 73c-28-19-57-27-92-27s-64 8-92 27Z" fill="#247c83" />
+              <path d="M99 136c-7 14-11 31-11 51 0 65 41 111 92 111s92-46 92-111c0-20-4-37-11-51-25 27-56 40-81 40s-56-13-81-40Z" fill="#f0b88e" />
+              <ellipse cx="123" cy="230" rx="18" ry="9" fill="#e99c8a" opacity=".6" />
+              <ellipse cx="237" cy="230" rx="18" ry="9" fill="#e99c8a" opacity=".6" />
+            </g>
+
+            <g id="avatar-eyes" class="avatar-eyes" aria-hidden="true">
+              <path d="M110 174c12-10 29-10 41 0" fill="none" stroke="#194b59" stroke-width="7" stroke-linecap="round" />
+              <path d="M209 174c12-10 29-10 41 0" fill="none" stroke="#194b59" stroke-width="7" stroke-linecap="round" />
+              <ellipse cx="130" cy="199" rx="19" ry="23" fill="#fffdf8" />
+              <ellipse cx="230" cy="199" rx="19" ry="23" fill="#fffdf8" />
+              <circle cx="130" cy="201" r="10" fill="#194b59" />
+              <circle cx="230" cy="201" r="10" fill="#194b59" />
+              <circle cx="134" cy="196" r="3.5" fill="#fffdf8" />
+              <circle cx="234" cy="196" r="3.5" fill="#fffdf8" />
+            </g>
+
+            <g aria-hidden="true">
+              <path d="M180 196c-3 12-5 23-1 29 3 4 8 5 14 3" fill="none" stroke="#c17d69" stroke-width="4" stroke-linecap="round" />
+              <path d="M153 248c16 10 38 10 54 0" fill="none" stroke="#c17d69" stroke-width="4" stroke-linecap="round" />
+            </g>
+            <ellipse id="mouth" cx="180" cy="264" rx="10" ry="2" fill="#7a3852" aria-hidden="true" />
+          </svg>
+        </div>
+      </section>
+
+      <section class="control-panel" aria-labelledby="controls-heading">
+        <div>
+          <p class="eyebrow">文字播报</p>
+          <h2 id="controls-heading">让角色说点什么</h2>
+        </div>
+
+        <form id="controls" novalidate>
+          <div class="field-group">
+            <label for="input">播报文本</label>
+            <textarea
+              id="input"
+              name="input"
+              rows="6"
+              maxlength="600"
+              placeholder="输入一段简短文字，例如：你好，欢迎体验卡通数字人。"
+              required
+            ></textarea>
+            <div class="field-meta">
+              <span>最多 600 个 Unicode 字符</span>
+              <output id="char-count" for="input">0 / 600</output>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="voice">音色</label>
+            <select id="voice" name="voice" disabled aria-describedby="voice-help">
+              <option value="">正在加载音色…</option>
+            </select>
+            <p id="voice-help" class="field-help">首次打开会从本地 SpeechRail 读取可用音色。</p>
+          </div>
+
+          <div class="button-row">
+            <button id="speak" type="submit" class="button button-primary" disabled>
+              开始播报
+            </button>
+            <button id="stop" type="button" class="button button-secondary" disabled>
+              停止
+            </button>
+          </div>
+          <button id="refresh-voices" type="button" class="button button-link">
+            刷新音色
+          </button>
+        </form>
+
+        <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true">
+          正在准备音色目录…
+        </p>
+      </section>
+    </main>
+  </body>
+</html>
