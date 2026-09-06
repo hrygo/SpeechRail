@@ -2,7 +2,12 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新安装验收（v1.9.2，PATCH quality）
+## 最新安装验收（v1.10.0，MINOR 三档）
+
+> **结论**：v1.10.0 已完成 managed 安装，`quality → balanced → light → quality` 串行切换、公共 ASR/TTS smoke、profile 身份和第二实例拒绝均通过；完整性能 gate 未打开。详见
+> [v1.10.0 发布验收](2026-09-06-v1.10.0-release-acceptance.md)。
+
+## 历史安装验收（v1.9.2，PATCH quality）
 
 > **结论**：v1.9.2 修复 LaunchAgent 停止真空窗导致的旧 worker 残留、候选误测和
 > `worker_load_error` 回滚，并保留同端口单实例与 managed preflight runtime 修复。
@@ -71,6 +76,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.10.0** | [2026-09-06-v1.10.0-release-acceptance.md](2026-09-06-v1.10.0-release-acceptance.md) | MINOR 三档安装验收；speech admission/VAD 与生命周期 controller；完整性能 gate 未完成 |
 | **v1.9.2** | [2026-09-06-v1.9.2-performance-benchmark.md](2026-09-06-v1.9.2-performance-benchmark.md) | PATCH 当前 `quality`；三档切换与停机恢复通过；完整性能 gate 未完成 |
 | **v1.9.1** | [2026-09-06-v1.9.1-performance-benchmark.md](2026-09-06-v1.9.1-performance-benchmark.md) | PATCH 当前 `quality`；修复重复服务进程与 smoke 误测；完整性能 gate 未完成 |
 | **v1.9.0** | [2026-09-06-v1.9.0-performance-benchmark.md](2026-09-06-v1.9.0-performance-benchmark.md) | MINOR 安装验收；quality 公共推理通过；balanced/light 自动回滚；三档性能 gate 未完成 |
