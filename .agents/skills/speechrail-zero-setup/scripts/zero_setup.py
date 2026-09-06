@@ -105,7 +105,11 @@ import httpx  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT))
 
-from tools.install_macos import InstallerError, install_managed  # noqa: E402
+from tools.install_macos import (  # noqa: E402
+    InstallerError,
+    install_managed,
+    install_video_podcast_skill,
+)
 
 from speechrail.service.launchd import ServiceError  # noqa: E402
 from speechrail.service.modelscope import ModelScopeDownloader  # noqa: E402
@@ -262,6 +266,10 @@ def run_zero_setup(
     )
 
     wheel_path = _build_wheel()
+
+    _log("SKILL", "安装 video-podcast skill 到用户级 .agents/skills ...")
+    install_video_podcast_skill(REPO_ROOT / ".agents" / "skills" / "video-podcast")
+    _success("video-podcast skill 已安装到用户级 .agents/skills/video-podcast")
 
     _log("INSTALL", f"开始拉取 ModelScope 权重并安装隔离运行时 (预设: {selected_preset})...")
     _log(

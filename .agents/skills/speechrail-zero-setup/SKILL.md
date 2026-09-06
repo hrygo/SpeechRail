@@ -69,13 +69,14 @@ uv run --python 3.12 python .agents/skills/speechrail-zero-setup/scripts/zero_se
 > **自动化引擎幕后 100% 自动执行的闭环任务：**
 > 1. 🛡️ **双重硬件与版本拦截**：检测 CPU 架构是否为 `arm64`，检测 Python 是否为 `3.12`；
 > 2. 📦 **应用打包**：调用 `uv build` 构建干净的标准 wheel 产物；
-> 3. 📥 **模型拉取与校验**：从 ModelScope 流式下载对应档位（ASR + TTS）权重，全量比对 SHA-256 哈希；
-> 4. 🐍 **创建独立 Worker 环境**：基于 `runtime-lock.json` 在 `vendor/` 目录下构建完全隔离的 MLX 运行环境；
-> 5. 🔒 **生成受管配置**：自动生成 `app_home/config/.env`（严格限制为 `0600` 私有权限）；
-> 6. 🖥️ **生成双击设置程序**：在 App Home 生成无需开终端即可交互调用的 `SpeechRail 设置.command`；
-> 7. 🔍 **执行服务 Preflight**：校验 Worker 模块 import、静态 ffmpeg 权限与配置完整性；
-> 8. 🚀 **注册并启动守护进程**：生成并激活 `~/Library/LaunchAgents/com.speechrail.plist`；
-> 9. 🎙️ **端到端冒烟测试**：有界轮询等待 `/readyz` 200，调用真实 TTS 合成一段测试音频，紧接着调用 ASR 接口转写验证闭环。
+> 3. 🧰 **安装制作 skill**：将项目内可移植的 `video-podcast` skill 完整复制到用户级 `~/.agents/skills/video-podcast`，供后续制作与验收使用；
+> 4. 📥 **模型拉取与校验**：从 ModelScope 流式下载对应档位（ASR + TTS）权重，全量比对 SHA-256 哈希；
+> 5. 🐍 **创建独立 Worker 环境**：基于 `runtime-lock.json` 在 `vendor/` 目录下构建完全隔离的 MLX 运行环境；
+> 6. 🔒 **生成受管配置**：自动生成 `app_home/config/.env`（严格限制为 `0600` 私有权限）；
+> 7. 🖥️ **生成双击设置程序**：在 App Home 生成无需开终端即可交互调用的 `SpeechRail 设置.command`；
+> 8. 🔍 **执行服务 Preflight**：校验 Worker 模块 import、静态 ffmpeg 权限与配置完整性；
+> 9. 🚀 **注册并启动守护进程**：生成并激活 `~/Library/LaunchAgents/com.speechrail.plist`；
+> 10. 🎙️ **端到端冒烟测试**：有界轮询等待 `/readyz` 200，调用真实 TTS 合成一段测试音频，紧接着调用 ASR 接口转写验证闭环。
 
 ---
 
@@ -152,6 +153,8 @@ with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)
 print(f"安装成功: {res.app_home}")
 PY
 ```
+
+受管 zero-setup 会在模型下载前安装用户级 `~/.agents/skills/video-podcast`；复制的是完整 skill 内容，项目级来源只使用相对路径，不把当前机器的绝对路径写回仓库。
 
 ---
 
@@ -237,4 +240,5 @@ speechrail profile rollback           # 一键安全回滚至上一可用档位
 - [ ] `uv run speechrail service status` 显示服务正常常驻且有明确 PID；
 - [ ] `curl -i http://127.0.0.1:8201/readyz` 返回 `HTTP/1.1 200 OK`；
 - [ ] `curl http://127.0.0.1:8201/v1/voices` 成功列出 9 个预设角色；
+- [ ] 用户级 `~/.agents/skills/video-podcast/SKILL.md` 与随附 `references/`、`scripts/`、`assets/` 可用；
 - [ ] 使用 OpenAI SDK 或 cURL 成功生成一段非空语音并完成文本识别闭环。
