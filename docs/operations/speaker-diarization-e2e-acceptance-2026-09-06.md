@@ -157,7 +157,7 @@ git diff --check
 1. **客户端协议回退（首选，秒级）**：
    在 Sona 环境配置中将 `SONA_MEETING_DIARIZATION_EXTENSIONS_ENABLED` 置为 `false`。Sona 将停止在 `session.update` 中协商 `speechrail.diarization.v1`。SpeechRail 服务端原位降级为标准 legacy Realtime 单人转写流，服务无需重启，会议不中断。
 2. **服务二进制回退**：
-   若需撤回 SpeechRail 版本，依照 `docs/operations/operations-runbook.md`，将 `runtime/current` 软链接切回前一版本的 release 目录并执行 `uv run speechrail service restart`。
+   若需撤回 SpeechRail 版本，依照 `docs/operations/operations-runbook.md`，先用 controller-backed `service stop`，将 `runtime/current` 软链接切回前一版本的 release 目录，再执行 `service start` 并完成 `/health`、`/readyz` 和真实 ASR/TTS smoke。
 3. **数据库保护**：
    Sona 端数据库采用完全非破坏性加法字段（`ADD COLUMN IF NOT EXISTS`），回退后旧版代码仍可正常读取正文，数据零损坏。
 

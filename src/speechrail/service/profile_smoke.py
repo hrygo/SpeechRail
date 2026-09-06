@@ -112,7 +112,11 @@ class PublicApiSmokeProbe:
             raise SmokeProbeError("public catalogs are unavailable")
         model_data = self._json_mapping(models).get("data")
         voice_data = self._json_mapping(voices).get("data")
-        model_entries = [item for item in model_data if isinstance(item, dict)] if isinstance(model_data, list) else []
+        model_entries = (
+            [item for item in model_data if isinstance(item, dict)]
+            if isinstance(model_data, list)
+            else []
+        )
         model_ids = {
             model_id
             for item in model_entries

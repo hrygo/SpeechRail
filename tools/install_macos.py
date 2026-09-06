@@ -493,18 +493,12 @@ def _load_managed_dependencies() -> type[Any]:
     global load_catalog, load_runtime_lock, prepare_models, prepare_runtime, recover_selection
     global restore_runtime_current, snapshot_runtime_current
     try:
-        from speechrail.config.model_catalog import (
-            ModelCatalog as CatalogType,
-        )
-        from speechrail.config.model_catalog import (
-            RuntimeLock as LockType,
-        )
-        from speechrail.config.model_catalog import (
-            load_catalog as catalog_loader,
-        )
-        from speechrail.config.model_catalog import (
-            load_runtime_lock as lock_loader,
-        )
+        from speechrail.config.model_catalog import ModelCatalog as CatalogType
+        from speechrail.config.model_catalog import RuntimeLock as LockType
+        from speechrail.config.model_catalog import load_catalog as catalog_loader
+        from speechrail.config.model_catalog import load_runtime_lock as lock_loader
+        from speechrail.runtime.server_lock import ServerInstanceError as ServerInstanceErrorType
+        from speechrail.runtime.server_lock import ServerInstanceLock as ServerInstanceLockType
         from speechrail.service.bootstrap import (
             RuntimeCurrentSnapshot as RuntimeSnapshotType,
         )
@@ -522,10 +516,6 @@ def _load_managed_dependencies() -> type[Any]:
         from speechrail.service.profile_store import (
             recover_selection as selection_loader,
         )
-        from speechrail.runtime.server_lock import (
-            ServerInstanceError as ServerInstanceErrorType,
-        )
-        from speechrail.runtime.server_lock import ServerInstanceLock as ServerInstanceLockType
     except ImportError as exc:
         raise InstallerError("managed install requires the SpeechRail package") from exc
     if ModelCatalog is None:

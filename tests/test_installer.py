@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 
 from speechrail.config.model_catalog import load_catalog, load_runtime_lock
+from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service.bootstrap import RuntimePaths
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
-from speechrail.runtime.server_lock import ServerInstanceLock
 
 _INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
 _SPEC = importlib.util.spec_from_file_location("speechrail_test_installer", _INSTALLER_PATH)

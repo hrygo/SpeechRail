@@ -97,7 +97,7 @@ shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
 
 ## 5. 安全替换 managed 服务
 
-`tools.install_macos.install_managed(...)` 负责 staging、新 release preflight、共享 runtime 准备和原子切换 `runtime/current`，但不会替旧服务完成进程退出确认。替换前后都必须使用 [本机生命周期 controller](../speechrail-local-deploy/references/lifecycle.md)：
+`tools.install_macos.install_managed(...)` 负责 staging、新 release preflight、共享 runtime 准备和原子切换 `runtime/current`，并会在切换前确认配置端口的 lock 已释放，但不会替旧服务完成进程退出确认。替换前后都必须使用 [本机生命周期 controller](../speechrail-local-deploy/references/lifecycle.md)：
 
 1. 记录 active profile，确认新 wheel 与旧 selection/model lock 相容；不要在 wheel 发布事务中改变 profile。
 2. 用当前 managed Python 执行安全 stop：`bootout` 后最多等 2 秒；lock 仍被占用时对 `launchctl print` 得到的精确 PID/进程组 `SIGKILL`；再最多等 10 秒。PID 缺失、不安全或 lock 未释放时中止，不启动候选。
@@ -105,7 +105,7 @@ shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
 4. 使用新 `runtime/current/.venv/bin/python` 安装/更新 LaunchAgent，确认 plist 指向新 runtime；随后用 controller `start()`，它会在 `bootstrap`/`kickstart` 前再次确认 lock 已释放。
 5. 只允许一个新父进程和一个 listener。模型加载期间不连续 restart，使用有界轮询等待；启动上限按实际设备和模型确定，可达数分钟。
 
-`speechrail service disable` 单独执行只能卸载 LaunchAgent，不能证明旧父进程/vendor worker 已退出；不能把它当作发布 stop 完成条件。不要用 `service restart`、`pkill`、`killall` 或手工 plist 绕过 controller。
+`speechrail service stop` 会执行 bounded stop、精确强杀和 lock 验证；`service disable` 仅作为兼容别名。不要用底层 `launchctl`、`pkill`、`killall` 或手工 plist 绕过 controller。
 
 ### explicit-env（仅无 managed selection 时）
 

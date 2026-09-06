@@ -95,5 +95,5 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
 - **回退**：源码 `git checkout -- src/speechrail/backends/qwen3_worker.py
   src/speechrail/backends/qwen3_streaming_worker.py`；文档 `git checkout -- README.md
   configs/speechrail.example.env docs/operations/operations-runbook.md`；服务
-  `service disable` → 恢复 `runtime/current` → `service enable`；worker venv 死依赖
+  `service stop` → 恢复 `runtime/current` → `service start`；worker venv 死依赖
   可 `uv pip install qwen-asr==0.0.6 qwen3-asr-causal==0.1.0` 复原。

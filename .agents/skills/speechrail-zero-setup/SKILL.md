@@ -127,6 +127,8 @@ uv build --no-sources --wheel
 
 ### Step 3.5: 执行受管服务安装 (Managed Install)
 调用内建的 `install_managed` 完成安装：
+
+安装器会在切换 `runtime/current` 前确认服务端口 lock 已释放；如果已有 SpeechRail 实例运行，必须先执行 controller-backed `service stop`，不能在运行态直接替换。
 ```bash
 APP_HOME="$HOME/Library/Application Support/SpeechRail"
 PRESET="balanced"  # 可选: quality, balanced, light
@@ -202,9 +204,10 @@ curl -s http://127.0.0.1:8201/v1/audio/transcriptions \
 ### 常用服务命令
 ```bash
 uv run speechrail service status    # 查看当前运行 PID 与端口状态
-uv run speechrail service restart   # 重启服务
-uv run speechrail service disable   # 临时停用服务
-uv run speechrail service enable    # 启用常驻服务
+uv run speechrail service stop      # 短等待后确认退出，必要时精确强杀
+uv run speechrail service start     # 确认端口锁释放后启动
+uv run speechrail service restart   # 使用同一套安全 stop/start 流程
+# enable/disable 仍兼容，但等价于 controller-backed start/stop
 ```
 
 ### 运行档位切换与回滚

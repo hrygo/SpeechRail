@@ -35,19 +35,22 @@ graph TD
 # 1. 安装当前用户的 LaunchAgent 配置文件
 uv run speechrail service install
 
-# 2. 启用常驻后台服务
-uv run speechrail service enable
+# 2. 安全启动常驻后台服务
+uv run speechrail service start
 
 # 3. 实时查看服务运行状态与 PID
 uv run speechrail service status
 
-# 4. 重启服务（重新加载模型）
+# 4. 安全重启服务（短等待后必要时精确强杀）
 uv run speechrail service restart
 
-# 5. 停用服务 / 完全卸载
-uv run speechrail service disable
+# 5. 安全停用服务 / 完全卸载
+uv run speechrail service stop
 uv run speechrail service uninstall
 ```
+
+`service enable` / `service disable` 保留为兼容别名，但已经经过同一套
+controller-backed stop/start 流程。发布和切档不得直接调用底层 `launchctl`。
 
 ---
 

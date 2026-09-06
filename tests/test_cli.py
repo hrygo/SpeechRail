@@ -34,12 +34,29 @@ class _FakeManager:
         self.calls.append("uninstall")
 
 
+class _FakeController:
+    def __init__(self, manager: _FakeManager, **kwargs: object) -> None:
+        del kwargs
+        self.manager = manager
+
+    def start(self) -> None:
+        self.manager.enable()
+
+    def stop(self) -> None:
+        self.manager.disable()
+
+    def restart(self) -> None:
+        self.manager.restart()
+
+
 @pytest.mark.parametrize(
     ("command", "expected_call"),
     [
         ("install", "install"),
         ("enable", "enable"),
         ("disable", "disable"),
+        ("start", "enable"),
+        ("stop", "disable"),
         ("restart", "restart"),
         ("status", "status"),
         ("uninstall", "uninstall"),
@@ -50,6 +67,7 @@ def test_service_commands_delegate_to_one_manager_operation(
 ) -> None:
     manager = _FakeManager()
     monkeypatch.setattr(cli, "create_launch_agent_manager", lambda: manager)
+    monkeypatch.setattr(cli, "LaunchAgentServiceController", _FakeController)
 
     assert cli.main(["service", command]) == 0
     assert manager.calls == [expected_call]
@@ -237,6 +255,7 @@ def test_service_error_is_redacted_and_returns_nonzero(
             raise ServiceError("launchctl operation failed with exit code 1")
 
     monkeypatch.setattr(cli, "create_launch_agent_manager", FailingManager)
+    monkeypatch.setattr(cli, "LaunchAgentServiceController", _FakeController)
 
     assert cli.main(["service", "enable"]) == 1
     assert capsys.readouterr().err == (

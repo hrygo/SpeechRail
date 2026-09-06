@@ -207,6 +207,11 @@ class LaunchAgentServiceController:
         self._wait_for_previous_instance(timeout_seconds=self._graceful_stop_timeout_seconds)
         self._manager.enable()
 
+    def restart(self) -> None:
+        """Restart through the same bounded stop/start lifecycle as switching."""
+        self.stop()
+        self.start()
+
 
 PreparedIdResolver = Callable[[str, Path], PreparedModelSet]
 SelectionResolver = Callable[[Mapping[str, object], Path], PreparedModelSet]

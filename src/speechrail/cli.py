@@ -19,6 +19,7 @@ from speechrail.service import (
     create_launch_agent_manager,
     run_preflight,
 )
+from speechrail.service.profile_switch import LaunchAgentServiceController
 
 
 def _discover_env_file() -> Path | None:
@@ -81,7 +82,17 @@ def _parser() -> argparse.ArgumentParser:
 
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
     service_commands = service.add_subparsers(dest="service_command", required=True)
-    for command in ("install", "enable", "disable", "restart", "status", "uninstall", "preflight"):
+    for command in (
+        "install",
+        "start",
+        "stop",
+        "enable",
+        "disable",
+        "restart",
+        "status",
+        "uninstall",
+        "preflight",
+    ):
         command_parser = service_commands.add_parser(command)
         command_parser.add_argument(
             "--app-home",
@@ -111,6 +122,16 @@ def _physical_memory_bytes() -> int:
     if not isinstance(pages, int) or not isinstance(page_size, int) or min(pages, page_size) <= 0:
         raise ServiceError("could not determine physical memory")
     return pages * page_size
+
+
+def _service_port(app_home: Path | None) -> int:
+    """Load the configured port for controller-backed lifecycle operations."""
+    if app_home is None:
+        return 8201
+    layout = ServiceLayout.for_app_home(app_home)
+    if not layout.config_file.is_file():
+        return 8201
+    return Settings.from_env_file(layout.config_file).port
 
 
 def _format_bytes(size: int) -> str:
@@ -238,12 +259,19 @@ def _run_service(command: str, app_home: Path | None = None, asr_only: bool = Fa
         print(f"Installed LaunchAgent plist: {manager.install()}")
         print("Run 'speechrail service enable' to start SpeechRail.")
         return
-    if command == "enable":
-        manager.enable()
-    elif command == "disable":
-        manager.disable()
+    if command in {"start", "enable", "stop", "disable", "restart"}:
+        controller = LaunchAgentServiceController(manager, port=_service_port(app_home))
+    else:
+        controller = None
+    if command in {"start", "enable"}:
+        assert controller is not None
+        controller.start()
+    elif command in {"stop", "disable"}:
+        assert controller is not None
+        controller.stop()
     elif command == "restart":
-        manager.restart()
+        assert controller is not None
+        controller.restart()
     elif command == "status":
         print(manager.status(), end="")
         return

@@ -52,7 +52,7 @@ curl -s -H "Accept: application/json" http://127.0.0.1:8201/metrics | jq .
 ```
 
 > [!NOTE]
-> `/readyz` 返回 HTTP 200 表示至少一个 ASR/TTS 模型 Worker 已完成 Snapshot 预检并准备好接收流量。
+> `/readyz` 返回 HTTP 200 表示至少一个 ASR/TTS 模型 Worker 已完成 Snapshot 预检并准备好接收流量。发布和 profile 切换还必须检查候选 profile 所需的每个能力，以及 `/v1/models` 的 artifact/variant/quantization 身份。
 
 ---
 
@@ -67,17 +67,17 @@ uv run speechrail service install
 # 2. 校验 Plist 格式
 plutil -lint ~/Library/LaunchAgents/com.speechrail.plist
 
-# 3. 启动并启用常驻服务
-uv run speechrail service enable
+# 3. 启动并启用常驻服务（controller-backed）
+uv run speechrail service start
 
 # 4. 查询服务运行状态与 PID
 uv run speechrail service status
 
-# 5. 重启服务（重新加载外部模型）
+# 5. 安全重启服务（重新加载外部模型）
 uv run speechrail service restart
 
-# 6. 停用服务（保留配置文件）
-uv run speechrail service disable
+# 6. 安全停用服务（保留配置文件）
+uv run speechrail service stop
 
 # 7. 完全卸载服务（删除 Plist 文件）
 uv run speechrail service uninstall
@@ -125,24 +125,24 @@ sequenceDiagram
     participant New as 新版本 Runtime
     participant Agent as LaunchAgent (8201)
 
-    SRE->>Old: 1. 停用当前服务 (service disable)
+    SRE->>Old: 1. 安全停服 (service stop)
     SRE->>New: 2. 安装新 Wheel 至隔离 Release 目录
     SRE->>New: 3. 执行 Pre-flight 静态与 Smoke 验证
     alt 验证通过
         SRE->>Agent: 4. 原子切换 runtime/current 指针
-        SRE->>Agent: 5. 重新生成 Plist 并 service enable
+        SRE->>Agent: 5. 重新生成 Plist 并 service start
         SRE->>New: 6. 验证 /health, /readyz 为 200
     else 验证失败 (触发回滚)
         SRE->>Old: 回滚至旧版本 runtime/current 指针
         SRE->>Agent: 重新启用旧版本 LaunchAgent
-        Note over SRE,Old: 零数据丢失，服务立即恢复
+        Note over SRE,Old: 单机允许停服窗口，失败时恢复旧 runtime
     end
 ```
 
 ### 标准发布升级步骤：
 ```bash
-# 1. 停用当前旧服务
-uv run speechrail service disable
+# 1. 安全停用当前旧服务
+uv run speechrail service stop
 
 # 2. 构建新版本 Wheel
 uv build --no-sources --wheel
