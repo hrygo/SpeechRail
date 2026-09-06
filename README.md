@@ -317,7 +317,7 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), cited from the [v1.8.1 Performance & Stability Benchmark](docs/archive/performance/2026-09-06-v1.8.1-performance-benchmark.md). This patch remeasured only the active `quality` profile; Light/Balanced and idle-standby values are retained from v1.8.0 and labeled below. Historical baselines remain in the archive:
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), with the latest installation evidence recorded in the [v1.9.0 Installation & Performance Acceptance](docs/archive/performance/2026-09-06-v1.9.0-performance-benchmark.md). v1.9.0 revalidated the active `quality` profile through public ASR/TTS/VoiceDesign preview requests, while its `balanced` and `light` candidates rolled back during worker startup smoke; the numeric table therefore keeps the last complete historical baselines, labeled by version. Historical reports remain in the archive:
 
 | Benchmark Metric | 🟢 Light Profile (v1.8.0) | 🟡 Balanced Profile (v1.8.0) | 🟣 Quality Profile (v1.8.1) | Test Methodology & Scenario |
 |---|---|---|---|---|

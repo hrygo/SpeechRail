@@ -2,7 +2,15 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新发布基线（v1.8.1，PATCH quality）
+## 最新安装验收（v1.9.0，MINOR 三档）
+
+> **结论**：v1.9.0 wheel 已完成 managed 安装，`quality` 的公共 ASR/TTS/VoiceDesign
+> preview smoke 与一轮真实 warm fixture 均成功；`balanced`、`light` 切换在候选 worker
+> 启动 smoke 报 `worker_load_error` 后自动回滚，最终恢复 `quality`。三档性能 gate 未完成，
+> 不把历史数字冒充本版本结果。详见
+> [v1.9.0 安装与性能验收](2026-09-06-v1.9.0-performance-benchmark.md)。
+
+## 上一发布基线（v1.8.1，PATCH quality）
 
 > **结论**：v1.8.1 按 PATCH 范围仅复测当前 `quality`；公共 ASR/TTS warm N=5 均成功，
 > 真实 `phys_footprint` 采样 17/17 tick 完整，稳态 6609.9 MB、同 tick 峰值 7770.1 MB，
@@ -55,6 +63,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.9.0** | [2026-09-06-v1.9.0-performance-benchmark.md](2026-09-06-v1.9.0-performance-benchmark.md) | MINOR 安装验收；quality 公共推理通过；balanced/light 自动回滚；三档性能 gate 未完成 |
 | **v1.8.1** | [2026-09-06-v1.8.1-performance-benchmark.md](2026-09-06-v1.8.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；公共推理与完整 `phys_footprint` 采样；性能噪声带未冻结 |
 | **v1.8.0** | [2026-09-06-v1.8.0-performance-benchmark.md](2026-09-06-v1.8.0-performance-benchmark.md) | MINOR 三档真实基准；Voice clone；SPK-E2E-1 完整架构与 fail-closed native gate |
 | **v1.7.1** | [2026-09-05-v1.7.1-performance-benchmark.md](2026-09-05-v1.7.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；有界空转写重试；三档切换连续通过 |
