@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-09-06
+
+### Changed
+
+- 补充 `video-podcast` 技能、`autobiography-video` 与 `cartoon-avatar` 示例及媒体验收工具，完善本地创作工作流的可复现材料。
+- 收紧 GitHub Actions release workflow 的默认权限，固定 action 版本，并使同名 Release 的 wheel 上传可幂等重试。
+
+### Fixed
+
+- 将 Qwen3 shared worker 的握手测试超时从 `0.05s` 调整为 `1.0s`，降低 CI 时序抖动；不改变运行时协议或服务行为。
+
 ## [1.8.0] - 2026-09-06
 
 ### Added

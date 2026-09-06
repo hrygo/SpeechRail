@@ -316,16 +316,16 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), cited from the [v1.8.0 Performance, Architecture & Release Acceptance Report](docs/archive/performance/2026-09-06-v1.8.0-performance-benchmark.md) and fully reproducible. Historical baselines remain in the archive:
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory), cited from the [v1.8.1 Performance & Stability Benchmark](docs/archive/performance/2026-09-06-v1.8.1-performance-benchmark.md). This patch remeasured only the active `quality` profile; Light/Balanced and idle-standby values are retained from v1.8.0 and labeled below. Historical baselines remain in the archive:
 
-| Benchmark Metric | 🟢 Light Profile | 🟡 Balanced Profile | 🟣 Quality Profile | Test Methodology & Scenario |
+| Benchmark Metric | 🟢 Light Profile (v1.8.0) | 🟡 Balanced Profile (v1.8.0) | 🟣 Quality Profile (v1.8.1) | Test Methodology & Scenario |
 |---|---|---|---|---|
-| **ASR Chinese RTF (mean)** | **0.0204** (49x faster than real-time) | **0.0295** (34x faster than real-time) | **0.0300** (33x faster than real-time) | Standalone macOS fixture, N=5; latency p50, RTF mean |
-| **ASR English RTF (mean)** | **0.0229** (44x faster than real-time) | **0.0339** (30x faster than real-time) | **0.0362** (28x faster than real-time) | Independent English fixture, N=5; latency p50, RTF mean |
-| **TTS Synthesis RTF (mean)** | **0.2372** (4.2x faster than real-time) | **0.2467** (4.1x faster than real-time) | **0.2690** (3.7x faster than real-time) | Standard Chinese text, `default` voice, N=5; latency p50 |
-| **Peak Total Physical RAM** | **~4.7 GB** (4709.7 MB) | **~6.3 GB** (6305.9 MB) | **~7.3 GB** (7282.2 MB) | Max `phys_footprint` within the same sampling tick |
-| **Steady Physical RAM** | **~4.1 GB** (4147.1 MB) | **~5.5 GB** (5542.8 MB) | **~6.7 GB** (6668.2 MB) | Steady-state physical memory during continuous load |
-| **Idle Standby RAM** | **~50 MB** | **~50 MB** | **~50 MB** | Automatically unloads workers after 5 minutes idle |
+| **ASR Chinese RTF (mean)** | **0.0204** (49x faster than real-time) | **0.0295** (34x faster than real-time) | **0.0335** (~30x faster than real-time) | Quality current: independent fixture, N=5; latency p50, RTF mean |
+| **ASR English RTF (mean)** | **0.0229** (44x faster than real-time) | **0.0339** (30x faster than real-time) | **0.0377** (~27x faster than real-time) | Quality current: independent English fixture, N=5; latency p50, RTF mean |
+| **TTS Synthesis RTF (mean)** | **0.2372** (4.2x faster than real-time) | **0.2467** (4.1x faster than real-time) | **0.2832** (~3.5x faster than real-time) | Quality current: standard Chinese text, `default` voice, N=5; latency p50 |
+| **Peak Total Physical RAM** | **~4.7 GB** (4709.7 MB) | **~6.3 GB** (6305.9 MB) | **~7.8 GB** (7770.1 MB) | Quality current: max `phys_footprint` within same tick |
+| **Steady Physical RAM** | **~4.1 GB** (4147.1 MB) | **~5.5 GB** (5542.8 MB) | **~6.6 GB** (6609.9 MB) | Quality current: steady-state physical memory during load |
+| **Idle Standby RAM** | **~50 MB** (v1.8.0) | **~50 MB** (v1.8.0) | **~50 MB** (v1.8.0) | Not remeasured in v1.8.1; prior worker idle-eviction observation |
 
 ---
 
