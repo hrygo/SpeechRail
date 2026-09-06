@@ -134,13 +134,6 @@ class ServerInstanceLock:
         os.write(self._descriptor, payload)
         os.fsync(self._descriptor)
 
-    def _clear_owner_metadata(self) -> None:
-        if self._descriptor is None:
-            return
-        os.ftruncate(self._descriptor, 0)
-        os.lseek(self._descriptor, 0, os.SEEK_SET)
-        os.fsync(self._descriptor)
-
     def release(self) -> None:
         descriptor, self._descriptor = self._descriptor, None
         if descriptor is None:
