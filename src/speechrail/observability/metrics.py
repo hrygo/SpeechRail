@@ -137,6 +137,11 @@ class Metrics:
             "Total VAD speech activity detection events",
         )
         self._describe(
+            "speechrail_realtime_vad_shadow_frames_total",
+            "Per-frame agreement between the primary VAD engine and the shadow "
+            "engine (both scored against the entry threshold)",
+        )
+        self._describe(
             "speechrail_realtime_turn_commits_total",
             "Total realtime turn commits by mode, reason and outcome",
         )
@@ -298,6 +303,18 @@ class Metrics:
 
     def record_vad(self, event: str) -> None:
         self.inc("speechrail_realtime_vad_speech_events_total", event=event)
+
+    def record_vad_shadow(self, *, primary_speech: bool, shadow_speech: bool) -> None:
+        """Tally one frame's primary-vs-shadow VAD decision agreement."""
+        if primary_speech and shadow_speech:
+            agreement = "both_speech"
+        elif primary_speech:
+            agreement = "primary_only"
+        elif shadow_speech:
+            agreement = "shadow_only"
+        else:
+            agreement = "both_silence"
+        self.inc("speechrail_realtime_vad_shadow_frames_total", agreement=agreement)
 
     def record_realtime_turn(
         self,

@@ -7,6 +7,7 @@ import base64
 import contextlib
 import logging
 import os
+from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import Any
@@ -131,13 +132,17 @@ class OpenAIRealtimeSession:
         self._shadow_vad: Any = None
         self._speech_admission: SpeechAdmission | None = None
         self._turn_generation: int = 0
-        self._asr_turn_generation: int = 0
         self._turn_has_admitted_speech: bool = False
         self._admitted_start_sample: int = 0
         self._admitted_end_sample: int = 0
         self._vad_raw_buffer = bytearray()
         self._vad_sample_cursor: int = 0
-        self._bargein_pending_audio: list[bytes] = []
+        # Pre-speech window for the legacy path, bounded to prefix_padding_ms
+        # (32 bytes per ms at 16kHz PCM16) so silence can neither grow the
+        # buffer nor reach ASR when speech is confirmed.
+        self._bargein_pending_audio: deque[bytes] = deque()
+        self._bargein_pending_bytes = 0
+        self._bargein_pending_max_bytes = 9_600
         # Session-global sample clock (SPK-E2E-1): every accepted PCM sample
         # advances exactly once; each ASR item records the offset it starts at
         # so item-local vendor times lift into the session domain once.
@@ -229,6 +234,7 @@ class OpenAIRealtimeSession:
         if self._shadow_vad is not None:
             self._shadow_vad.reset()
         self._bargein_pending_audio.clear()
+        self._bargein_pending_bytes = 0
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
@@ -344,6 +350,7 @@ class OpenAIRealtimeSession:
                 self._vad_sample_cursor = self._timeline.accepted_samples
             else:
                 self._speech_admission = None
+            self._bargein_pending_max_bytes = max(1, prefix_padding * 32)
         elif (
             turn_detection is None
             or (isinstance(turn_detection, dict) and turn_detection.get("type") is None)
@@ -373,7 +380,7 @@ class OpenAIRealtimeSession:
             session["speech_capabilities"] = dict(self._speech_capabilities)
         return event
 
-    async def _ensure_asr_for_turn(self, generation: int) -> None:
+    async def _ensure_asr_for_turn(self) -> None:
         if self._asr is not None:
             return
         if self._asr_factory is None:
@@ -410,12 +417,11 @@ class OpenAIRealtimeSession:
             )
             raise RealtimeAdapterError(code, message) from exc
         self._asr = asr
-        self._asr_turn_generation = generation
-        self._asr_reader = asyncio.create_task(
-            self._drain_asr_events(turn_generation=generation)
-        )
+        self._asr_reader = asyncio.create_task(self._drain_asr_events())
 
-    async def _handle_admission_decision(self, dec: AdmissionDecision) -> None:
+    async def _handle_admission_decision(
+        self, dec: AdmissionDecision, *, in_commit: bool = False
+    ) -> None:
         from speechrail.compatibility.openai_realtime import (
             input_audio_buffer_speech_started,
             input_audio_buffer_speech_stopped,
@@ -444,11 +450,11 @@ class OpenAIRealtimeSession:
                     item_id=f"item_{self._session_id}_input",
                 )
             )
-            await self._ensure_asr_for_turn(generation=self._turn_generation)
+            await self._ensure_asr_for_turn()
 
         elif dec.kind == "audio":
             if not self._turn_has_admitted_speech or self._asr is None:
-                await self._ensure_asr_for_turn(generation=self._turn_generation)
+                await self._ensure_asr_for_turn()
                 self._turn_has_admitted_speech = True
                 self._admitted_start_sample = dec.start_sample
                 self._item_start_sample = dec.start_sample
@@ -468,7 +474,7 @@ class OpenAIRealtimeSession:
                 self._item_start_sample = dec.start_sample
                 self._buffered_audio_bytes = 0
                 self._unflushed_bytes = 0
-                await self._ensure_asr_for_turn(generation=self._turn_generation)
+                await self._ensure_asr_for_turn()
 
             if self._asr is not None:
                 await self._asr.append_audio(dec.pcm)
@@ -494,7 +500,11 @@ class OpenAIRealtimeSession:
                     item_id=f"item_{self._session_id}_input",
                 )
             )
-            await self._commit_audio(reason="vad_stop")
+            # A commit flushing the state machine is already the commit in
+            # progress: nesting another one here would double-commit the item
+            # and append a phantom empty close-out after the real transcript.
+            if not in_commit:
+                await self._commit_audio(reason="vad_stop")
 
     async def _append_audio(self, event: dict[str, Any]) -> None:
         if self._diarization_phase != "active":
@@ -533,7 +543,11 @@ class OpenAIRealtimeSession:
                 prob = self._vad.score_frame(frame)
                 if self._shadow_vad is not None:
                     with contextlib.suppress(Exception):
-                        self._shadow_vad.score_frame(frame)
+                        shadow_prob = self._shadow_vad.score_frame(frame)
+                        self._services.metrics.record_vad_shadow(
+                            primary_speech=prob >= self._vad.threshold,
+                            shadow_speech=shadow_prob >= self._shadow_vad.threshold,
+                        )
                 decisions = self._speech_admission.push(
                     frame,
                     start_sample=frame_start_sample,
@@ -580,9 +594,18 @@ class OpenAIRealtimeSession:
                         await self._commit_audio()
                         return
 
-            # If not yet in speech (debouncing or pure silence), defer ASR acquisition
+            # If not yet in speech (debouncing or pure silence), defer ASR
+            # acquisition. Keep only the most recent prefix window so long
+            # silence cannot grow the buffer or reach ASR at speech onset.
             if not self._vad.in_speech:
                 self._bargein_pending_audio.append(audio)
+                self._bargein_pending_bytes += len(audio)
+                while (
+                    self._bargein_pending_bytes > self._bargein_pending_max_bytes
+                    and len(self._bargein_pending_audio) > 1
+                ):
+                    dropped = self._bargein_pending_audio.popleft()
+                    self._bargein_pending_bytes -= len(dropped)
                 return
 
         # Normal legacy append flow
@@ -596,7 +619,7 @@ class OpenAIRealtimeSession:
             await self._commit_audio()
 
         if self._asr is None:
-            await self._ensure_asr_for_turn(generation=self._turn_generation)
+            await self._ensure_asr_for_turn()
             self._item_start_sample = self._timeline.accepted_samples - (len(audio) // 2)
             if self._bargein_pending_audio and self._asr is not None:
                 for pending_chunk in self._bargein_pending_audio:
@@ -604,6 +627,7 @@ class OpenAIRealtimeSession:
                     self._buffered_audio_bytes += len(pending_chunk)
                     self._unflushed_bytes += len(pending_chunk)
                 self._bargein_pending_audio.clear()
+                self._bargein_pending_bytes = 0
 
         if self._asr is not None:
             await self._asr.append_audio(audio)
@@ -622,25 +646,25 @@ class OpenAIRealtimeSession:
             # SPK-E2E-1: every commit gets a unique item id in extension mode.
             self._current_item_id = f"item_{uuid4().hex[:12]}"
 
-        # If speech admission is active, flush any remaining sub-frame leftover
+        # If speech admission is active, flush any remaining sub-frame leftover.
+        # The remainder is always below one 512-sample frame (append drains full
+        # frames), so it never forms a VAD decision here: admission parks it in
+        # its own leftover buffer and emits it as tail audio on finish(). Scoring
+        # a partial frame would crash the Silero engine, which requires exactly
+        # 512 samples.
         if self._speech_admission is not None and self._vad is not None:
             if self._vad_raw_buffer:
                 rem = bytes(self._vad_raw_buffer)
                 self._vad_raw_buffer.clear()
-                prob = self._vad.score_frame(rem)
-                if self._shadow_vad is not None:
-                    with contextlib.suppress(Exception):
-                        self._shadow_vad.score_frame(rem)
-                rem_start = self._vad_sample_cursor
-                self._vad_sample_cursor += len(rem) // 2
                 decisions = self._speech_admission.push(
-                    rem, start_sample=rem_start, probability=prob
+                    rem, start_sample=self._vad_sample_cursor, probability=0.0
                 )
+                self._vad_sample_cursor += len(rem) // 2
                 for dec in decisions:
-                    await self._handle_admission_decision(dec)
+                    await self._handle_admission_decision(dec, in_commit=True)
             fin_decisions = self._speech_admission.finish()
             for dec in fin_decisions:
-                await self._handle_admission_decision(dec)
+                await self._handle_admission_decision(dec, in_commit=True)
 
         if self._speech_admission is not None and not self._turn_has_admitted_speech:
             await self._send(
@@ -750,6 +774,7 @@ class OpenAIRealtimeSession:
         self._vad_raw_buffer.clear()
         self._vad_sample_cursor = self._timeline.accepted_samples
         self._bargein_pending_audio.clear()
+        self._bargein_pending_bytes = 0
         if self._vad is not None:
             self._vad.reset()
         if self._shadow_vad is not None:
@@ -1110,16 +1135,19 @@ class OpenAIRealtimeSession:
         self._diarization_phase = "finalized"
         await self._send(payload)
 
-    async def _drain_asr_events(self, turn_generation: int | None = None) -> None:
-        if self._asr is None:
+    async def _drain_asr_events(self) -> None:
+        asr = self._asr
+        if asr is None:
             return
 
-        target_gen = (
-            turn_generation if turn_generation is not None else self._asr_turn_generation
-        )
         try:
-            async for event in self._asr.events():
-                if target_gen != self._turn_generation:
+            async for event in asr.events():
+                # Stop as soon as this session is no longer the current one
+                # (superseded by barge-in, clear, or a commit): its remaining
+                # events are stale. A generation counter cannot be used here —
+                # a session opened by a rollover commit legitimately spans
+                # later turn generations when speech re-activates on it.
+                if self._asr is not asr:
                     break
                 if event.kind == "partial":
                     if self._speech_admission is not None and not self._turn_has_admitted_speech:
@@ -1138,7 +1166,7 @@ class OpenAIRealtimeSession:
                             transcription_delta(session_id=self._session_id, delta=delta)
                         )
                 elif event.kind == "completed":
-                    if target_gen != self._turn_generation:
+                    if self._asr is not asr:
                         break
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0

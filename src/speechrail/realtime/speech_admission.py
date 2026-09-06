@@ -34,12 +34,18 @@ class SpeechAdmission:
               and continuous subsequent audio frames.
     - HANGOVER: silence after active speech. Keeps emitting audio to preserve
                 word endings. If silence reaches stop_frames, emits end decision.
+
+    Decision hysteresis mirrors Silero's official VADIterator: onset frames
+    must clear the entry ``threshold`` while an utterance in progress only
+    yields to frames below ``stop_threshold`` (default ``threshold - 0.15``),
+    so mid-word probability dips do not chop the utterance.
     """
 
     def __init__(
         self,
         *,
         threshold: float = 0.5,
+        stop_threshold: float | None = None,
         start_frames: int = 3,
         stop_frames: int = 12,
         prefix_samples: int = 4800,
@@ -48,6 +54,10 @@ class SpeechAdmission:
     ) -> None:
         if threshold < 0.0 or threshold > 1.0:
             raise ValueError("threshold must be between 0.0 and 1.0")
+        if stop_threshold is None:
+            stop_threshold = max(0.0, threshold - 0.15)
+        if not 0.0 <= stop_threshold <= threshold:
+            raise ValueError("stop_threshold must be between 0.0 and threshold")
         if start_frames < 1:
             raise ValueError("start_frames must be >= 1")
         if stop_frames < 1:
@@ -58,6 +68,7 @@ class SpeechAdmission:
             raise ValueError("prefix_samples must be >= 0")
 
         self._threshold = threshold
+        self._stop_threshold = stop_threshold
         self._start_frames = start_frames
         self._stop_frames = stop_frames
         self._frame_samples = frame_samples
@@ -86,6 +97,16 @@ class SpeechAdmission:
     @property
     def state(self) -> Literal["IDLE", "CANDIDATE", "ACTIVE", "HANGOVER"]:
         return self._state
+
+    @property
+    def threshold(self) -> float:
+        """Entry threshold: onset frames must reach this probability."""
+        return self._threshold
+
+    @property
+    def stop_threshold(self) -> float:
+        """Exit threshold: an active utterance yields below this probability."""
+        return self._stop_threshold
 
     def reset(self, *, next_sample: int = 0) -> None:
         """Reset internal buffers and state machine to IDLE."""
@@ -139,7 +160,13 @@ class SpeechAdmission:
         sample_offset: int,
         probability: float,
     ) -> list[AdmissionDecision]:
-        is_speech = probability >= self._threshold
+        # Dual-threshold hysteresis: onset confirmation uses the entry
+        # threshold; an utterance in progress only yields below the lower
+        # exit threshold (see class docstring).
+        if self._state in ("ACTIVE", "HANGOVER"):
+            is_speech = probability >= self._stop_threshold
+        else:
+            is_speech = probability >= self._threshold
         frame_end_sample = sample_offset + self._frame_samples
         decisions: list[AdmissionDecision] = []
 

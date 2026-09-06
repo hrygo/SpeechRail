@@ -232,3 +232,57 @@ def test_config_setting_from_env() -> None:
     with patch.dict(os.environ, {"SPEECHRAIL_REALTIME_SPEECH_ADMISSION_ENABLED": "false"}):
         settings = Settings()
         assert settings.realtime_speech_admission_enabled is False
+
+
+def test_dual_threshold_hysteresis_keeps_utterance_alive() -> None:
+    """Mid-band frames (below entry, at/above exit) must not chop an active
+    utterance, and must never open a new one from silence (Silero-style)."""
+    gate = SpeechAdmission(
+        threshold=0.5,
+        start_frames=1,
+        stop_frames=3,
+        prefix_samples=0,
+        frame_samples=512,
+    )
+    frame = bytes(1024)
+
+    # Activate with a clear-speech frame.
+    gate.push(frame, start_sample=0, probability=0.9)
+    assert gate.state == "ACTIVE"
+
+    # Mid-band probability inside an utterance: speech continues, audio flows.
+    decisions = gate.push(frame, start_sample=512, probability=0.42)
+    assert gate.state == "ACTIVE"
+    assert len(decisions) == 1
+    assert decisions[0].kind == "audio"
+
+    # The same mid-band probability never opens an utterance from IDLE.
+    idle_gate = SpeechAdmission(
+        threshold=0.5,
+        start_frames=1,
+        stop_frames=3,
+        prefix_samples=0,
+        frame_samples=512,
+    )
+    assert idle_gate.push(frame, start_sample=0, probability=0.42) == ()
+    assert idle_gate.state == "IDLE"
+
+    # Below the exit threshold the hangover still closes the utterance.
+    gate.push(frame, start_sample=1024, probability=0.1)
+    gate.push(frame, start_sample=1536, probability=0.1)
+    closing = gate.push(frame, start_sample=2048, probability=0.1)
+    assert gate.state == "IDLE"
+    assert closing[-1].kind == "end"
+
+
+def test_stop_threshold_defaults_and_validation() -> None:
+    gate = SpeechAdmission(threshold=0.5)
+    assert gate.stop_threshold == pytest.approx(0.35)
+    explicit = SpeechAdmission(threshold=0.5, stop_threshold=0.2)
+    assert explicit.stop_threshold == pytest.approx(0.2)
+    assert explicit.threshold == pytest.approx(0.5)
+
+    with pytest.raises(ValueError, match="stop_threshold must be between"):
+        SpeechAdmission(threshold=0.5, stop_threshold=0.6)
+    with pytest.raises(ValueError, match="stop_threshold must be between"):
+        SpeechAdmission(threshold=0.5, stop_threshold=-0.1)

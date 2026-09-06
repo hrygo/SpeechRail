@@ -76,3 +76,29 @@ uv run --extra dev pytest tests/test_diarization_extensions.py tests/test_diariz
    本次验证使用了合成数字纯静音、环境噪声与人声正弦样本；本地开发机器上未安装 Silero 外部权重文件，因此当前默认 `realtime_vad_engine="legacy"`。显式配置 `silero` 且缺少权重时已验证抛出 `backend_not_ready`。真实会议/长录音环境下的声学误报率（FAR/FRR）需在搭载真实权重的预发环境中进行实际声学测量。
 2. **Sona 对齐状态**：
    Sona 作为标准 OpenAI Realtime 及 `speechrail.diarization.v1` 客户端，完全兼容本次实现的空闭环与时间轴格式，不需要新增私有 wire 字段或在客户端实施文本去重过滤。
+
+---
+
+## 5. 2026-09-06 VAD 专项审查补充（修复记录）
+
+对 v1.10.0（commit `5ea4d6f`）做 VAD 专项代码审查（临时 pytest 复现 + Silero 官方 ONNX 封装 / OpenAI Realtime 官方文档 / webrtcvad 收集器模式调研），确认 4 个缺陷并全部修复：
+
+| # | 缺陷（审查实测） | 修复 |
+|---|---|---|
+| 1 | legacy `server_vad` 路径（准入关闭时）把每个非语音 chunk 无界累积进 `_bargein_pending_audio`（实测 61s 静音 ≈ 983KB），语音确认后整体灌入 ASR——内存无界且默认路径未获得幻觉治理收益 | 缓冲改为 `prefix_padding_ms` 窗口字节上限（16kHz PCM16 每毫秒 32 字节），超出从最旧端裁剪；窗口外静音不再进入 ASR |
+| 2 | 准入路径中 commit（显式或结转）发生在话语进行中时，`SpeechAdmission.finish()` 合成的 `end` 决策嵌套触发第二次 `_commit_audio`，客户端收到重复 `committed` + 幻影空 item | `_handle_admission_decision` 增加 `in_commit` 标志：commit 内 flush 出的 `end` 只发送 `speech_stopped`，由进行中的 commit 完成唯一一次终态序列 |
+| 3 | 准入路径 commit 对 `_vad_raw_buffer` 中 <1024B 子帧余数调用 `score_frame`，Silero 严格 512 样本校验必抛 `ValueError` → `backend_error` 且该次 commit 被中止 | 子帧余数不打分，直接 push 给准入状态机（不足一帧永不形成决策；`finish()` 按尾音发射），对 legacy/silero 引擎一致 |
+| 4 | `realtime_vad_engine="silero"` 且准入关闭时每次 append 走 legacy 分支调用不存在的 `process_chunk` → `AttributeError` | Settings 校验强制 `silero → realtime_speech_admission_enabled=true` |
+
+审查额外发现并修复一个 **转写丢失缺陷**：结转 commit 后 ASR 会话跨世代复用时（结转预开的 session 在下一次 `speech_started` 复用），`_drain_asr_events` 的 turn generation 守卫（reader 绑定旧 generation）在 commit 时直接 break，该 item 的 `item.created`/`completed` 被静默丢弃。守卫改为 **session 身份比较**（`self._asr is not asr`），语义即"session 被替换才停止发射"；generation 绑定随之移除。
+
+**默认值变更**：`realtime_speech_admission_enabled` 默认 `False` → `True`。本报告第 1 节描述的治理（SR-SILENCE-1）自此对默认配置生效，与上方契约条文一致；需要旧行为的部署可显式设 `SPEECHRAIL_REALTIME_SPEECH_ADMISSION_ENABLED=false` 回到 legacy 路径（仍受 #1 窗口上限约束）。上一节 §4.2 "无需客户端去重"的结论在 #2 修复后成立（修复前中途 commit 会产生重复 `committed`）。
+
+**回归测试**：新增 `tests/test_realtime_admission_commits.py`（中途 commit 单次闭环、结转逐 item 单次闭环、legacy 静音窗口上限）与 `tests/test_neural_vad.py` 3 例（silero 配置校验、v4/v5 schema fail-closed、子帧余数 commit 无错误）；6 例在修复前均复现失败。另将 `test_realtime_vad_speech_end_does_not_drop_chunk_audio` 的断言从 append 调用次数改为字节守恒（两路径等价成立）。
+
+**仍待验证（与 §4.1 同边界）**：真实 Silero 权重下的 FAR/FRR 声学测量；v5 权重加载时的实际报错形态（依据官方 schema 推断，本地无权重未实测）。
+
+**P2 批次（2026-09-07 同批完成）**：
+1. **双阈值迟滞**：`SpeechAdmission` 与 legacy `VoiceActivityDetector` 均采用 entry `threshold` / exit `threshold - 0.15`（参照 Silero 官方 VADIterator），`stop_threshold` 可显式覆盖；迟滞带内的帧不截断进行中话语、也不从静音新开话语。契约 VAD 引擎节已同步。
+2. **ORT session 共享**：`InferenceSession` 按模型路径跨连接共享（创建持锁；`Run()` 官方线程安全），递归 h/c 状态仍按流隔离。
+3. **shadow 观测指标**：新增 `speechrail_realtime_vad_shadow_frames_total{agreement=both_speech|both_silence|primary_only|shadow_only}`，shadow 打分不再是死代码。

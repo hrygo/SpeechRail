@@ -11,14 +11,33 @@ import numpy as np
 
 @dataclass(frozen=True)
 class VadConfig:
-    """Configuration for server-side VAD and Barge-in boundary detection."""
+    """Configuration for server-side VAD and Barge-in boundary detection.
+
+    ``stop_threshold`` implements Silero-VADIterator-style hysteresis: onset
+    frames must reach ``threshold`` while an utterance in progress only yields
+    to frames below ``stop_threshold`` (default ``threshold - 0.15``), so
+    mid-word energy dips do not chop the utterance.
+    """
 
     threshold: float = 0.5
+    stop_threshold: float | None = None
     prefix_padding_ms: int = 300
     silence_duration_ms: int = 400
     debounce_frames: int = 3
     sample_rate: int = 16_000
     frame_samples: int = 512  # 32ms at 16kHz (1024 bytes PCM16)
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.threshold <= 1.0:
+            raise ValueError("threshold must be between 0.0 and 1.0")
+        stop = (
+            self.stop_threshold
+            if self.stop_threshold is not None
+            else max(0.0, self.threshold - 0.15)
+        )
+        if not 0.0 <= stop <= self.threshold:
+            raise ValueError("stop_threshold must be between 0.0 and threshold")
+        object.__setattr__(self, "stop_threshold", stop)
 
 
 @dataclass(frozen=True)
@@ -38,6 +57,12 @@ class VoiceActivityDetector:
 
     def __init__(self, config: VadConfig | None = None) -> None:
         self._config = config or VadConfig()
+        self._entry_threshold = self._config.threshold
+        self._exit_threshold = (
+            self._config.stop_threshold
+            if self._config.stop_threshold is not None
+            else max(0.0, self._config.threshold - 0.15)
+        )
         self._bytes_per_frame = self._config.frame_samples * 2  # 16-bit mono
         self._frame_duration_ms = int(
             (self._config.frame_samples / self._config.sample_rate) * 1000
@@ -58,6 +83,11 @@ class VoiceActivityDetector:
     @property
     def in_speech(self) -> bool:
         return self._in_speech
+
+    @property
+    def threshold(self) -> float:
+        """Entry threshold: onset frames must reach this score."""
+        return self._entry_threshold
 
     def reset(self) -> None:
         """Reset internal buffers and state machine."""
@@ -89,7 +119,11 @@ class VoiceActivityDetector:
     def _process_single_frame(self, frame: bytes) -> VadEvent | None:
         self._total_processed_ms += self._frame_duration_ms
         prob = self._score_frame(frame)
-        is_active = prob >= self._config.threshold
+        # Dual-threshold hysteresis: onset confirmation clears the entry
+        # threshold; an ongoing utterance only yields below the lower exit
+        # threshold (see VadConfig).
+        threshold = self._exit_threshold if self._in_speech else self._entry_threshold
+        is_active = prob >= threshold
 
         if is_active:
             self._silence_frame_count = 0

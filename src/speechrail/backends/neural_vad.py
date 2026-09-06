@@ -3,10 +3,39 @@
 from __future__ import annotations
 
 import importlib.util
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+# One InferenceSession per resolved model path, shared across detector
+# instances. ORT documents ``InferenceSession.run`` as thread-safe; the
+# recurrent h/c state lives on each detector instance, so sharing the read-only
+# weights never crosses streams. Creation is NOT thread-safe, hence the lock.
+_shared_sessions: dict[str, Any] = {}
+_shared_sessions_lock = threading.Lock()
+
+
+def _open_session(model_path: Path) -> Any:
+    import onnxruntime as ort  # type: ignore[import-untyped]
+
+    options = ort.SessionOptions()
+    options.inter_op_num_threads = 1
+    options.intra_op_num_threads = 1
+    session = ort.InferenceSession(str(model_path), sess_options=options)
+    SileroVadDetector._validate_session(session)
+    return session
+
+
+def _shared_session(model_path: Path) -> Any:
+    key = str(model_path)
+    with _shared_sessions_lock:
+        session = _shared_sessions.get(key)
+        if session is None:
+            session = _open_session(model_path)
+            _shared_sessions[key] = session
+        return session
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,13 +108,27 @@ class SileroVadDetector:
         if not ready:
             raise RuntimeError(f"Silero VAD preflight failed: {reason}")
 
-        import onnxruntime as ort  # type: ignore[import-untyped]
-
-        options = ort.SessionOptions()
-        options.inter_op_num_threads = 1
-        options.intra_op_num_threads = 1
         assert self._model_path is not None
-        self._session = ort.InferenceSession(str(self._model_path), sess_options=options)
+        self._session = _shared_session(self._model_path)
+
+    @staticmethod
+    def _validate_session(session: Any) -> None:
+        """Fail closed on unsupported ONNX schemas.
+
+        The adapter implements the Silero v4 recurrent schema (input/h/c/sr,
+        hidden state [2, 1, 64]). Silero v5 exports rename the state inputs to
+        a single ``state`` tensor and would crash mid-stream, so reject them
+        here with an actionable message instead.
+        """
+        input_names = {item.name for item in session.get_inputs()}
+        required = {"input", "h", "c", "sr"}
+        if not required <= input_names:
+            raise RuntimeError(
+                "Unsupported Silero VAD ONNX schema: expected v4 inputs "
+                f"{sorted(required)}, got {sorted(input_names)}. Silero v5 "
+                "models (input/state/sr) are not supported; provide a v4 "
+                "silero_vad.onnx."
+            )
 
     def _infer_frame(self, frame: bytes) -> float:
         import numpy as np

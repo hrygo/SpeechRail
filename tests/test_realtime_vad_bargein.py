@@ -195,3 +195,37 @@ def test_bargein_session_isolation() -> None:
 
         # Verify Session B is still intact and not cancelled!
         # Session B did not receive any unexpected cancellation
+
+
+def test_vad_hysteresis_mid_band_frames_stay_in_speech() -> None:
+    """Legacy scorer hysteresis: frames scoring between the exit and entry
+    thresholds keep an ongoing utterance alive but never start one."""
+    config = VadConfig(threshold=0.5, debounce_frames=3, silence_duration_ms=96)
+    # RMS ~209 -> sigmoid score ~0.40: below the 0.5 entry, above the 0.35 exit.
+    mid = _sine_pcm(200, 32, 296.0)
+    loud = _sine_pcm(200, 32, 5000.0)
+    quiet = _silence_pcm(32)
+
+    vad = VoiceActivityDetector(config)
+    for _ in range(3):
+        # The third loud frame emits the debounced speech_started event.
+        assert all(not e.speech_ended for e in vad.process_chunk(loud))
+    assert vad.in_speech
+
+    # Mid-band frames do not advance the silence counter mid-utterance
+    # (they emit plain is_speech events without boundary transitions).
+    for _ in range(10):
+        assert all(not e.speech_ended and not e.speech_started for e in vad.process_chunk(mid))
+        assert vad.in_speech
+
+    # From silence the same frames stay below the entry threshold.
+    idle = VoiceActivityDetector(config)
+    for _ in range(5):
+        assert idle.process_chunk(mid) == []
+        assert not idle.in_speech
+
+    # True silence (below the exit threshold) still ends the utterance.
+    events: list[object] = []
+    for _ in range(3):
+        events = vad.process_chunk(quiet)
+    assert any(getattr(event, "speech_ended", False) for event in events)

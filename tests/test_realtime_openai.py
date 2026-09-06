@@ -1769,7 +1769,11 @@ def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
                 raise AssertionError(f"unexpected error event: {event}")
 
         received = [chunk for session in factory.sessions for chunk in session.received]
-        assert len(received) == 6, f"expected all 6 chunks appended, got {len(received)}"
+        # Byte conservation across both VAD paths: all six 32ms chunks reach
+        # the ASR (the admission path batches the activation pre-roll into a
+        # single append, so count bytes rather than append calls).
+        total = sum(len(chunk) for chunk in received)
+        assert total == 6 * 1024, f"expected 6144 audio bytes appended, got {total}"
         assert len(factory.released) == 1
 
 
