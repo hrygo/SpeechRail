@@ -72,16 +72,22 @@ def _is_live_speechrail_process(owner: ServerInstanceOwner) -> bool:
     except OSError:
         return False
     command = completed.stdout.strip()
-    expected = f"{owner.executable} -m speechrail serve"
-    return command == expected or command.startswith(f"{expected} ")
+    suffix = " -m speechrail serve"
+    if not command.endswith(suffix):
+        return False
+    command_executable = command[: -len(suffix)]
+    try:
+        return os.path.realpath(command_executable) == os.path.realpath(owner.executable)
+    except (OSError, ValueError):
+        return False
 
 
 def _owner_pid_for_port(port: int) -> int | None:
     """Resolve a validated SpeechRail owner for a held server lock."""
-    reader = getattr(ServerInstanceLock, "read_owner", None)
-    if reader is None:
+    try:
+        owner = ServerInstanceLock.read_owner(port)
+    except AttributeError:
         return None
-    owner = reader(port)
     if owner is None or not _is_live_speechrail_process(owner):
         return None
     return owner.pid

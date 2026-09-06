@@ -81,7 +81,8 @@ class ServerInstanceLock:
             or not isinstance(executable, str)
             or not executable
             or role != "speechrail-serve"
-            or type(started_at) not in {int, float}
+            or not isinstance(started_at, (int, float))
+            or isinstance(started_at, bool)
         ):
             return None
         return ServerInstanceOwner(

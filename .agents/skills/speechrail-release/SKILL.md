@@ -100,7 +100,7 @@ shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
 `tools.install_macos.install_managed(...)` 负责 staging、新 release preflight、共享 runtime 准备和原子切换 `runtime/current`，并会在切换前确认配置端口的 lock 已释放，但不会替旧服务完成进程退出确认。替换前后都必须使用 [本机生命周期 controller](../speechrail-local-deploy/references/lifecycle.md)：
 
 1. 记录 active profile，确认新 wheel 与旧 selection/model lock 相容；不要在 wheel 发布事务中改变 profile。
-2. 用当前 managed Python 执行安全 stop：`bootout` 后最多等 2 秒；lock 仍被占用时对 `launchctl print` 得到的精确 PID/进程组 `SIGKILL`；再最多等 10 秒。PID 缺失、不安全或 lock 未释放时中止，不启动候选。
+2. 用 `speechrail service stop` 或当前 managed Python 执行安全 stop：`bootout` 后最多等 2 秒；lock 仍被占用时对经过 owner/PID 校验的精确进程组 `SIGKILL`；再最多等 10 秒。PID 缺失、不安全或 lock 未释放时中止，不启动候选。
 3. 调用 `install_managed(wheel, app_home=..., preset_id=<active profile>, ..., enable=False)`；preflight 失败时恢复 `runtime/current` 和 runtime snapshot，保留旧服务回退点。
 4. 使用新 `runtime/current/.venv/bin/python` 安装/更新 LaunchAgent，确认 plist 指向新 runtime；随后用 controller `start()`，它会在 `bootstrap`/`kickstart` 前再次确认 lock 已释放。
 5. 只允许一个新父进程和一个 listener。模型加载期间不连续 restart，使用有界轮询等待；启动上限按实际设备和模型确定，可达数分钟。

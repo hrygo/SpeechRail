@@ -1,6 +1,6 @@
 # SpeechRail 生命周期控制器
 
-wheel 替换时不要把 `speechrail service disable` 的成功返回当成旧进程已退出。当前 CLI 的 `disable` 只执行 `launchctl bootout`；macOS 可能在 ASGI 父进程或 vendor worker 仍持有 per-port lock 时返回。使用当前 managed runtime 中的生命周期 controller，或由等价的受审查入口调用同一实现。
+wheel 替换时使用 `speechrail service stop`；`service disable` 只是兼容别名。controller 会在 `launchctl bootout` 后确认 per-port lock，不能把单独的 `launchctl` 成功返回当成旧进程已退出。
 
 ## 安全 stop/start
 
@@ -25,7 +25,7 @@ LaunchAgentServiceController(manager, port=settings.port).stop()
 PY
 ```
 
-`stop()` 的固定边界是：先 `bootout`，最多等待 2 秒获取同一 per-port lock；仍占用时只对 `launchctl print` 得到的精确 PID/进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。PID 缺失、PID 不安全或 lock 仍未释放都会失败并阻止候选启动。
+`stop()` 的固定边界是：先 `bootout`，最多等待 2 秒获取同一 per-port lock；仍占用时只对 `launchctl print` 或 lock owner metadata、并经过 PID/命令行校验的精确进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。PID 缺失、owner 无法验证或 lock 仍未释放都会失败并阻止候选启动。
 
 切换 `runtime/current`、安装 plist 后，用新 runtime 执行 `start()`，它会在 `bootstrap`/`kickstart` 前再次确认没有旧进程持锁：
 
@@ -57,7 +57,11 @@ PY
 3. 再检查 `/readyz`、模型/音色 catalog 和真实公共 smoke；
 4. 失败只回滚一次；回滚也失败则标记 `not_ready`，不做重启重试。
 
-这条事务路径用于模型档位切换；不要用 `service restart` 代替它。
+这条事务路径用于模型档位切换；普通重启可以用 controller-backed `service restart`，但不能用它代替 profile 事务。
+
+## managed installer 的前置条件
+
+`install_managed` 在准备阶段和切换 `runtime/current` 前都会检查配置端口的 singleton lock。lock 被占用时立即失败并保留旧 release；必须先完成 `service stop`，不能在运行态直接替换 managed runtime。
 
 ## 安全边界
 

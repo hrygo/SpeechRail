@@ -14,7 +14,7 @@ SpeechRail 是单机、单用户服务：只允许一个 `com.speechrail` Launch
 - app home 默认是 `$HOME/Library/Application Support/SpeechRail`；服务 label 是 `com.speechrail`；只使用用户级 `LaunchAgent`，不使用 root、`LaunchDaemon` 或手工改 plist。
 - `speechrail serve` 进入 per-user/per-port `flock`。第二个进程必须失败为 `server_already_running`；看到 `worker_load_error` 之前，先排除重复父进程、遗留 vendor worker 和端口锁竞争。
 - `runtime/current`、selection、共享 vendor runtime、模型 snapshot 和 wheel release 分开管理。切换只改变已校验的 selection；替换 wheel 只原子切 `runtime/current`，不覆盖配置、模型或 vendor `current`。
-- `service disable`/`enable` 是原始 LaunchAgent 操作；`launchctl bootout` 返回不等于 ASGI 父进程和 vendor worker 已退出。profile apply/rollback 已使用生命周期 controller；wheel 替换必须使用同等的停止协议，详见 [references/lifecycle.md](references/lifecycle.md)。
+- `service stop`/`start`/`restart` 使用生命周期 controller；`enable`/`disable` 只保留为兼容别名。`launchctl bootout` 返回不等于 ASGI 父进程和 vendor worker 已退出，详见 [references/lifecycle.md](references/lifecycle.md)。
 - 不使用 `pkill`、`killall`、模糊名称匹配或未经确认的 PID。强杀只允许针对 `launchctl print` 得到的精确 PID/进程组，且不得是当前 Codex/终端进程。
 - 不输出 API key、`.env` 全文、Authorization、音频、完整转写、完整日志或私有绝对路径；诊断只保留状态、版本、profile、generation、错误码和脱敏 stderr 尾部。
 
@@ -69,8 +69,8 @@ speechrail profile apply balanced --app-home "$APP_HOME" --yes
 ## wheel 替换
 
 1. 先完成版本、代码 gate、wheel preflight 和当前快照；确认回退 release、selection、vendor runtime 和私有配置都存在。
-2. 使用当前 managed Python 执行安全 stop；`service disable` 单独执行只能卸载 LaunchAgent，不能作为“旧进程已退出”的证据。
-3. 用 `tools.install_macos.install_managed(...)` 准备新 release、共享 runtime 和同一 active profile；preflight 通过后原子替换 `runtime/current`。失败时恢复旧指针和 runtime snapshot。
+2. 使用 `service stop` 或当前 managed Python 执行安全 stop；status 不可用时只有经过 owner metadata、PID 和命令行校验的旧进程才允许被精确强杀。
+3. 用 `tools.install_macos.install_managed(...)` 准备新 release、共享 runtime 和同一 active profile；安装器会在切换前再次确认端口 lock 已释放。失败时恢复旧指针和 runtime snapshot。
 4. 使用新 `runtime/current/.venv/bin/python` 安装/启用 LaunchAgent，再按启停协议确认 lock 已释放后启动。
 5. 以有界轮询检查 `/health`、`/readyz`、`/v1/models`、`/v1/voices`，再以非敏感短 fixture 做真实 ASR/TTS smoke。只看到进程、配置或 `/health` 200 不算发布成功。
 
