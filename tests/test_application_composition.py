@@ -44,6 +44,7 @@ def test_audio_router_can_be_built_from_fake_services(fake_services: AppServices
     assert {route.path for route in router.routes} == {
         "/v1/audio/transcriptions",
         "/v1/audio/speech",
+        "/v1/voices/previews",
     }
 
 
