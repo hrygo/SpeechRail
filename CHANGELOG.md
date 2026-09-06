@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-09-06
+
+### Fixed
+
+- 防止同一用户在同一端口启动多个 SpeechRail 进程；profile smoke 现在会拒绝验收到错误 profile，避免旧进程或资源竞争把切换误报为 `worker_load_error` 并让其他用户不可用。
+
 ## [1.9.0] - 2026-09-06
 
 ### Added

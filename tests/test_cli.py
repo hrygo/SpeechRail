@@ -66,14 +66,14 @@ def test_serve_uses_settings_host_and_port(
         @classmethod
         def from_env_file(cls, env_file: Path | None) -> SimpleNamespace:
             assert env_file is None
-            return SimpleNamespace(host="127.0.0.1", port=8201)
+            return SimpleNamespace(host="127.0.0.1", port=8317)
 
     monkeypatch.setattr(cli, "Settings", FakeSettings)
     monkeypatch.setattr("speechrail.app.create_app", lambda settings: settings)
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
 
     assert cli.main(["serve"]) == 0
-    assert captured == {"host": "127.0.0.1", "port": 8201, "log_level": "info"}
+    assert captured == {"host": "127.0.0.1", "port": 8317, "log_level": "info"}
     assert not (tmp_path / "state").exists()
     assert not (tmp_path / "config").exists()
 
@@ -272,3 +272,23 @@ def test_service_preflight_reports_failure_without_enabling(
 
     assert cli.main(["service", "preflight", "--app-home", str(tmp_path)]) == 1
     assert "FAIL tts_config: TTS is missing" in capsys.readouterr().out
+
+
+def test_service_preflight_uses_the_managed_runtime_for_optional_profiles(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    layout = cli.ServiceLayout.for_app_home(tmp_path)
+    managed_python = layout.current_runtime / ".venv" / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.touch()
+    captured: dict[str, object] = {}
+
+    def preflight(*args: object, **kwargs: object) -> PreflightResult:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return PreflightResult(ok=True, checks=())
+
+    monkeypatch.setattr(cli, "run_preflight", preflight)
+
+    assert cli.main(["service", "preflight", "--app-home", str(tmp_path)]) == 0
+    assert captured["kwargs"] == {"require_tts": True, "host_python": managed_python}

@@ -11,6 +11,7 @@ from pathlib import Path
 import uvicorn
 
 from speechrail.config import Settings
+from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service import (
     PreflightResult,
     ServiceError,
@@ -42,7 +43,8 @@ def run_server(env_file: Path | None = None) -> None:
 
     from speechrail.app import create_app
 
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level="info")
+    with ServerInstanceLock(settings.port):
+        uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level="info")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -218,7 +220,12 @@ def _print_preflight(result: PreflightResult) -> None:
 def _run_service(command: str, app_home: Path | None = None, asr_only: bool = False) -> None:
     if command == "preflight":
         layout = ServiceLayout.for_app_home(app_home or Path.cwd())
-        result = run_preflight(layout, require_tts=not asr_only)
+        managed_python = layout.current_runtime / ".venv" / "bin" / "python"
+        result = run_preflight(
+            layout,
+            require_tts=not asr_only,
+            host_python=managed_python if managed_python.is_file() else None,
+        )
         _print_preflight(result)
         if not result.ok:
             raise ServiceError("preflight failed; service was not enabled")
@@ -250,13 +257,13 @@ def _run_service(command: str, app_home: Path | None = None, asr_only: bool = Fa
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the console command and return a shell-compatible exit status."""
     args = _parser().parse_args(list(argv) if argv is not None else None)
-    if args.command is None:
-        run_server()
-        return 0
-    if args.command == "serve":
-        run_server(args.env_file)
-        return 0
     try:
+        if args.command is None:
+            run_server()
+            return 0
+        if args.command == "serve":
+            run_server(args.env_file)
+            return 0
         if args.command == "service":
             _run_service(
                 args.service_command,

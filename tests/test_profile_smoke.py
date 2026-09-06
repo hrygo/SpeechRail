@@ -137,6 +137,32 @@ def test_probe_retries_readiness_without_repeating_inference() -> None:
     assert sleeps == [0.1]
 
 
+def test_probe_rejects_ready_service_for_a_different_profile() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        if request.url.path == "/health":
+            return httpx.Response(
+                200,
+                json={
+                    "status": "ok",
+                    "profile": "quality",
+                    "ready": True,
+                },
+            )
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"ready": True})
+        raise AssertionError("a profile mismatch must stop before public inference")
+
+    with httpx.Client(
+        base_url="http://127.0.0.1:8201", transport=httpx.MockTransport(handler)
+    ) as client, pytest.raises(SmokeProbeError, match="profile mismatch"):
+        PublicApiSmokeProbe(client=client).run(_prepared())
+
+    assert requests == ["/health"]
+
+
 def test_probe_retries_only_empty_asr_transcripts_with_fresh_tts_audio() -> None:
     tts_calls = 0
     asr_calls = 0

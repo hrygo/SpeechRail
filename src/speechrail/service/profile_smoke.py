@@ -62,21 +62,38 @@ class PublicApiSmokeProbe:
             raise SmokeProbeError("public smoke returned invalid JSON")
         return payload
 
-    def _wait_ready(self) -> None:
+    def _wait_ready(self, prepared: PreparedModelSet) -> None:
         deadline = self._clock() + self._deadline_seconds
         while True:
             try:
                 health = self._client.get("/health")
-                ready = self._client.get("/readyz")
-                if (
-                    health.status_code == 200
-                    and self._json_mapping(health).get("status") == "ok"
-                    and ready.status_code == 200
-                    and self._json_mapping(ready).get("ready") is True
-                ):
-                    return
+                health_payload = self._json_mapping(health)
             except (httpx.HTTPError, SmokeProbeError):
                 pass
+            else:
+                reported_profile = health_payload.get("profile")
+                if (
+                    isinstance(reported_profile, str)
+                    and reported_profile
+                    and reported_profile != prepared.preset
+                ):
+                    raise SmokeProbeError(
+                        "public smoke profile mismatch; "
+                        f"expected {prepared.preset}, got {reported_profile}"
+                    )
+                try:
+                    ready = self._client.get("/readyz")
+                    ready_payload = self._json_mapping(ready)
+                except (httpx.HTTPError, SmokeProbeError):
+                    pass
+                else:
+                    if (
+                        health.status_code == 200
+                        and health_payload.get("status") == "ok"
+                        and ready.status_code == 200
+                        and ready_payload.get("ready") is True
+                    ):
+                        return
             if self._clock() >= deadline:
                 raise SmokeProbeError("service did not become ready before the smoke deadline")
             self._sleep(self._poll_interval_seconds)
@@ -157,7 +174,7 @@ class PublicApiSmokeProbe:
     def run(self, prepared: PreparedModelSet) -> None:
         if not prepared.prepared_id or not prepared.asr.key or not prepared.tts.key:
             raise SmokeProbeError("prepared profile identity is invalid")
-        self._wait_ready()
+        self._wait_ready(prepared)
         self._check_catalogs()
         for attempt in range(_MAX_INFERENCE_ATTEMPTS):
             try:
