@@ -15,11 +15,11 @@
 
 ## 自动检查工具
 
-`.agents/skills/video-podcast/scripts/inspect_media.py` 需要 Python 3.12+、`ffprobe`，使用 `--loudness` 时还需要 `ffmpeg`。只读本地媒体，结果打印为 JSON，不修改视频。默认检查首个非封面视频流与首个音频流；多音轨交付可用 `--video-index` / `--audio-index` 指定 ffprobe 的全局 stream index，不能由默认首轨推断全部音轨合格。
+`.agents/skills/video-podcast/scripts/inspect_media.py` 需要 Python 3.12+、`ffprobe`；使用 `--loudness` 或响度阈值参数时还需要 `ffmpeg`。只读本地媒体，结果打印为 JSON，不修改视频。默认检查首个非封面视频流与首个音频流；多音轨交付可用 `--video-index` / `--audio-index` 指定 ffprobe 的全局 stream index，不能由默认首轨推断全部音轨合格。
 
 ```bash
 SKILL_DIR=".agents/skills/video-podcast"
-python3 "$SKILL_DIR/scripts/inspect_media.py" final.mp4 --loudness
+uv run python "$SKILL_DIR/scripts/inspect_media.py" final.mp4 --loudness
 ```
 
 可选 `--expected-duration`、`--duration-tolerance`、`--target-lufs`、`--lufs-tolerance`、`--max-true-peak`、`--av-tolerance`、`--video-index` 与 `--audio-index`。`--timeout` 为单个外部命令上限，长节目可按实际资源调整。选目标阈值时遵循 [audio.md](audio.md)。

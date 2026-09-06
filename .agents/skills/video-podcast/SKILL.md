@@ -60,18 +60,18 @@ description: 生成、剪辑或精修以语音为主的视频播客，支持文�
 
 阅读 [acceptance.md](references/acceptance.md)。先验证短样片，再完成最终编码。检查的对象必须是最终交付文件，而不只是原始语音或预览帧。
 
-技术检查可使用随附的只读工具。以下示例从当前项目根目录执行：
+技术检查可使用随附的只读工具。以下示例从当前项目根目录执行；本项目使用 `uv` 提供 Python 3.12，其他环境将 `uv run python` 替换为已确认的 Python 3.12+ 解释器：
 
 ```bash
 SKILL_DIR=".agents/skills/video-podcast"
-python3 "$SKILL_DIR/scripts/inspect_media.py" path/to/final.mp4 --loudness
+uv run python "$SKILL_DIR/scripts/inspect_media.py" path/to/final.mp4 --loudness
 ```
 
 只有明确选定交付目标后才加验收阈值，例如：
 
 ```bash
 SKILL_DIR=".agents/skills/video-podcast"
-python3 "$SKILL_DIR/scripts/inspect_media.py" path/to/final.mp4 \
+uv run python "$SKILL_DIR/scripts/inspect_media.py" path/to/final.mp4 \
   --loudness --target-lufs -16 --lufs-tolerance 1 \
   --max-true-peak -1 --expected-duration 90
 ```
