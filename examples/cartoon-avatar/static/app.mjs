@@ -1,4 +1,4 @@
-import { mouthLevel, renderMouth } from "./avatar.mjs";
+import { createAvatarController, speechLevel } from "./avatar.mjs";
 import { createPlayer } from "./player.mjs";
 
 const MAX_INPUT_LENGTH = 600;
@@ -128,7 +128,7 @@ function initializePage() {
   const status = document.getElementById("status");
   const count = document.getElementById("char-count");
   const voiceHelp = document.getElementById("voice-help");
-  const mouth = document.getElementById("mouth");
+  const avatar = document.getElementById("avatar");
   if (
     !(form instanceof HTMLFormElement) ||
     !(input instanceof HTMLTextAreaElement) ||
@@ -139,7 +139,7 @@ function initializePage() {
     !(status instanceof HTMLElement) ||
     !(count instanceof HTMLOutputElement) ||
     !(voiceHelp instanceof HTMLElement) ||
-    !(mouth instanceof SVGElement)
+    !(avatar instanceof HTMLElement)
   ) {
     return null;
   }
@@ -154,8 +154,9 @@ function initializePage() {
     voiceAbortController: null,
     player: null,
     pageHidden: false,
-    mouthLevel: 0,
+    speechLevel: 0,
   };
+  const avatarController = createAvatarController(avatar);
 
   function setStatus(message, isError = false, requestId) {
     status.replaceChildren();
@@ -201,6 +202,8 @@ function initializePage() {
 
   function handlePlayerState(nextState, error) {
     state.playback = nextState;
+    avatarController.setSpeechLevel(nextState === "speaking" ? state.speechLevel : 0);
+    avatarController.setPlaybackState(nextState);
     if (nextState === "generating") {
       setStatus("正在生成语音");
     } else if (nextState === "speaking") {
@@ -214,15 +217,15 @@ function initializePage() {
   }
 
   function makePlayer() {
-    state.mouthLevel = 0;
-    renderMouth(mouth, 0);
+    state.speechLevel = 0;
+    avatarController.setSpeechLevel(0);
     return createPlayer({
       fetchAudio,
       makeContext: createBrowserContext,
       onState: handlePlayerState,
       onLevel: (samples, deltaMs) => {
-        state.mouthLevel = mouthLevel(samples, state.mouthLevel, deltaMs);
-        renderMouth(mouth, state.mouthLevel);
+        state.speechLevel = speechLevel(samples, state.speechLevel, deltaMs);
+        avatarController.setSpeechLevel(state.speechLevel);
       },
       scheduleFrame: (callback) => window.requestAnimationFrame(callback),
       cancelFrame: (frame) => window.cancelAnimationFrame(frame),

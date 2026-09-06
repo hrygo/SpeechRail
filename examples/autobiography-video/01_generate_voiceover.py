@@ -32,109 +32,143 @@ SCRIPT_SEGMENTS = [
         "id": "act1_1",
         "act": 1,
         "voice": "uncle_fu",
-        "text": "停下！别再把你每一次私密对话上传云端，也别再让笨重的模型拖垮你 Mac 的内存了。",
+        "text": (
+            "停一下。别让每一次私密对话，都先传到云端。"
+            "也别让每个应用，各自加载一套模型。"
+        ),
+        "spoken_text": (
+            "停一下。别让每一次私密对话，都先传到云端。"
+            "也别让每个应用，各自加载一套模型。"
+        ),
     },
     {
         "id": "act1_2",
         "act": 1,
         "voice": "uncle_fu",
-        "text": "".join(
-            (
-                "我是 SpeechRail——此刻你听到的每一个字，都来自我在 Apple Silicon ",
-                "上的本地实时发声。",
-            )
-        ),
+        "text": "现在，你听到的每一个字，都来自 Apple Silicon 上 SpeechRail 的本地实时合成。",
+        "spoken_text": "现在，你听到的每一个字，都由这台电脑在本地实时合成。",
+        "pause_before": 0.18,
     },
     # Act 2: 10 - 25s (破局底座 - 身份与定位)
     {
         "id": "act2_1",
         "act": 2,
         "voice": "uncle_fu",
-        "text": "我不是又一个封闭的客户端，而是默默常驻在 macOS 底层的独立语音基座。",
+        "text": "我不是另一个聊天应用。我是一套运行在 macOS 底层、供多个应用共享的本地语音服务。",
+        "spoken_text": (
+            "我不是另一个聊天应用。我是一套运行在系统底层、"
+            "供多个应用共享的本地语音服务。"
+        ),
     },
     {
         "id": "act2_2",
         "act": 2,
         "voice": "uncle_fu",
         "speed_override": 1.08,
-        # Keep product notation in the subtitle, but spell symbols out for
-        # the Chinese TTS voice so "1:1" is not read as "One D One".
-        "text": (
-            "1:1 兼容 OpenAI 协议，单端口监听。全机所有的 Agent 和应用，改一行代码，即插即用。"
-        ),
+        "text": "兼容 OpenAI 接入方式。单端口统一监听。多个应用只需改一行配置，就能共享本地语音。",
         "spoken_text": (
-            "接口与 OpenAI 协议一比一兼容，单端口监听。全机所有的智能体和应用，"
-            "改一行代码，即插即用。"
+            "它兼容 OpenAI 的接入方式。多个应用只需改一行配置，"
+            "就能从同一个入口共享本地语音。"
         ),
+        "pause_before": 0.20,
     },
     # Act 3: 25 - 40s (身躯与呼吸 - 双进程与空闲释放)
     {
         "id": "act3_1",
         "act": 3,
         "voice": "uncle_fu",
-        "text": "双物理进程隔离，重型推理即使异常崩溃，网关也绝不宕机。",
+        "text": "网关和模型分开运行。就算推理出了问题，语音服务也不会一起停摆。",
+        "spoken_text": "网关和模型分开运行。就算推理出了问题，语音服务也不会一起停摆。",
     },
     {
         "id": "act3_2",
         "act": 3,
         "voice": "uncle_fu",
-        "text": "".join(
-            (
-                "更体贴的是我的呼吸——两阶段空闲卸载，推理完毕自动释放显存，平时常驻仅需 50 兆，",
-                "绝不打扰你的日常工作。",
-            )
+        "text": (
+            "我会自己管理内存。模型用完就分阶段释放；"
+            "平时只占大约 50MB 内存，不打扰你的工作。"
         ),
+        "spoken_text": (
+            "我会自己管理内存。模型用完就分阶段释放；"
+            "平时只占大约五十兆内存，不打扰你的工作。"
+        ),
+        "pause_before": 0.20,
     },
     # Act 4: 40 - 55s (耳朵与辨识 - 会议多讲话人分离)
     {
         "id": "act4_1",
         "act": 4,
         "voice": "uncle_fu",
-        "text": "我不但听得快，更能听得清。毫秒级实时流式转录，原生集成 Sortformer 讲话人分离。",
+        "text": "我不只转得快，也能听清多人对话。实时转写，自动分开不同讲话人的发言。",
+        "spoken_text": "我不只转得快，也能听清多人对话。实时转写，还能自动分开不同讲话人的发言。",
     },
     {
         "id": "act4_2",
         "act": 4,
         "voice": "uncle_fu",
-        "text": "多人激烈讨论中，我能分秒不差指出谁说了什么，让混乱的会议录音瞬间井井有条。",
+        "text": "多人一起讨论时，我会把每个人的发言分开标记，让混乱的录音重新变得清楚。",
+        "spoken_text": "多人一起讨论时，我会把每个人的发言分开标记，让混乱的录音重新变得清楚。",
+        "pause_before": 0.20,
     },
     # Act 5: 55 - 72s (千面变声秀 - 炫技现场无缝切换)
     {
         "id": "act5_1",
         "act": 5,
         "voice": "uncle_fu",
-        "text": "你能听到我沉稳低沉的思考，",
+        "text": "先听听我的沉稳低音。",
+        "spoken_text": "先听听我的沉稳低音。",
     },
     {
         "id": "act5_2",
         "act": 5,
         "voice": "vivian",
-        "text": "也能下一秒变成清脆自然的表达，",
+        "text": "下一秒，就换成清脆自然的女声。",
+        "spoken_text": "下一秒，就换成清脆自然的女声。",
+        "pause_before": 0.12,
     },
     {
         "id": "act5_3",
         "act": 5,
         "voice": "ryan",
-        "text": "And seamless multilingual speech with native emotions.",
+        "text": "I can switch languages naturally, with the right emotion.",
+        "spoken_text": "I can switch languages naturally, with the right emotion.",
+        "pause_before": 0.10,
     },
     {
         "id": "act5_4",
         "act": 5,
         "voice": "uncle_fu",
-        "text": "9 款高保真跨语言音色，全部由你的 Mac 本地现场渲染。",
+        "text": "9 种高保真音色，都能在你的 Mac 上本地实时合成。",
+        "spoken_text": "九种高保真音色，都能在你的电脑上本地实时合成。",
+        "pause_before": 0.14,
     },
     # Act 6: 72 - 90s (终章信仰 - 号召与自由)
     {
         "id": "act6_1",
         "act": 6,
         "voice": "uncle_fu",
-        "text": "纯离线零延迟，数据永不离机。一次安装，全机无限量免费调用。",
+        "text": (
+            "本地运行，响应更直接，数据不必离开你的电脑。"
+            "一次安装，多个应用共享同一套语音能力。"
+        ),
+        "spoken_text": (
+            "本地运行，响应更直接，数据不必离开你的电脑。"
+            "一次安装，多个应用共享同一套语音能力。"
+        ),
     },
     {
         "id": "act6_2",
         "act": 6,
         "voice": "uncle_fu",
-        "text": "这就是 SpeechRail——把声音还给本地，把隐私还给你自己。现在，你的 Mac 准备好了吗？",
+        "text": (
+            "这就是 SpeechRail。让声音留在本机，让隐私回到你手里。"
+            "想在你的电脑上试试？扫码了解。"
+        ),
+        "spoken_text": (
+            "这就是 SpeechRail。让声音留在本机，让隐私回到你手里。"
+            "想在你的电脑上试试？扫码了解。"
+        ),
+        "pause_before": 0.20,
     },
 ]
 

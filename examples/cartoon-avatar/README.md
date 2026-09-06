@@ -1,6 +1,6 @@
 # 卡通数字人示例
 
-这是一个独立的本地浏览器示例：选择 SpeechRail 当前可用的 TTS 音色，输入文字后由内联 SVG 卡通人物播报。示例进程只做代理和静态资源服务，不加载模型，也不会替换、重启或停止 SpeechRail。
+这是一个独立的本地浏览器示例：选择 SpeechRail 当前可用的 TTS 音色，输入文字后由从自传视频封面提取的透明人物立绘播报。示例进程只做代理和静态资源服务，不加载模型，也不会替换、重启或停止 SpeechRail。
 
 ## 前置条件
 
@@ -30,9 +30,11 @@ uv run python examples/cartoon-avatar/server.py --port 8203
 
 - 页面启动时只请求 `GET /api/voices`，不会发声或请求麦克风。只有上游返回 `available=true` 的音色会进入选择框。
 - 页面向 `POST /api/speech` 发送 `{ "input": "…", "voice": "…" }`；代理固定转发模型 `speechrail/qwen3-tts` 和 `response_format: "wav"`。
+- 人物资源位于 `static/assets/autobiography-character.png`，由 `examples/autobiography-video/cover_art.jpg` 提取透明背景得到；原封面图不会被示例修改。
+- 人物预置 `idle`、`thinking`、`speaking`、`emphasis` 和 `settle` 动作：生成等待时思考，播放时随音量轻微重心/倾身，音量峰值触发短促强调，结束后自然回落。
 - 输入限制为 1–600 个 Unicode 码点，音色 ID 限制为 1–200 个字符。代理拒绝额外字段、非 JSON、超过 8 KiB 的请求体和不匹配的本地 `Host`/`Origin`。
 - 浏览器等待完整 WAV 下载后再解码播放，因此首音延迟包含整段生成与下载时间；音频只驻留内存，代理端上限为 32 MiB。
-- 嘴部根据播放节点的时域幅值开合，是非精确的音量口型，不提供音素级对齐、字幕或逐字时间戳。
+- 人物动作根据播放节点的时域幅值和播放器状态驱动，是轻量的表现增强，不提供音素级口型对齐、字幕或逐字时间戳。
 - “停止”会立即停止本页音频、取消浏览器请求并忽略迟到结果；它不能证明或强制取消 SpeechRail 已经开始的后端推理。后端仍忙时，下一次请求可能得到 `example_busy`。
 
 ## 错误恢复

@@ -25,7 +25,7 @@ SPEED_MAP = {
     3: 1.28,
     4: 1.28,
     5: 1.15,  # Showcase voices clearly
-    6: 1.22,  # Resonant ending
+    6: 1.34,  # Keep the CTA spacious while preserving the 90s showcase tail
 }
 
 # Act start targets in the 90-second video
@@ -39,7 +39,10 @@ ACT_START_TARGETS = {
 }
 SHOWCASE_START = 81.2
 SHOWCASE_GAP = 0.18
+SHOWCASE_BOUNDARY_PAUSE = 0.05
 DURATION = 90.0
+DEFAULT_PAUSE_BEFORE = 0.20
+ACT_BOUNDARY_PAUSE = 0.12
 
 # Mastering targets for a speech-led streaming demo. The per-clip controls below
 # are deliberately conservative for formal narration: they correct obvious
@@ -184,9 +187,13 @@ def main():
         act = seg["act"]
         if act != current_act:
             current_act = act
-            current_t = ACT_START_TARGETS[act]
+            target_t = ACT_START_TARGETS[act]
+            # A longer regenerated sentence must not overlap the next Act's
+            # fixed visual target. Keep a short spoken boundary pause when the
+            # previous Act runs past that target.
+            current_t = max(target_t, current_t + ACT_BOUNDARY_PAUSE) if timeline else target_t
         else:
-            current_t += 0.25  # Breath pause
+            current_t += float(seg.get("pause_before", DEFAULT_PAUSE_BEFORE))
 
         start_t = current_t
         end_t = start_t + seg["proc_duration"]
@@ -225,7 +232,10 @@ def main():
         with SHOWCASE_META.open(encoding="utf-8") as f:
             showcase_meta = json.load(f)
 
-    showcase_t = SHOWCASE_START
+    showcase_t = max(
+        SHOWCASE_START,
+        (timeline[-1]["end"] + SHOWCASE_BOUNDARY_PAUSE) if timeline else SHOWCASE_START,
+    )
     for seg in showcase_meta:
         speed = seg.get("speed_override", 1.0)
         raw_path = Path(seg["path"])

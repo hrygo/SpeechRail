@@ -386,7 +386,7 @@ def draw_hud(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
 def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
     # Scene 1: 0.0 - 12.8s (🔥 High-Hook!)
     if t < 12.8:
-        title = "停下！声音与隐私，该回归本地了"
+        title = "停一下。让声音与隐私回到本地"
         bbox_t = draw.textbbox((0, 0), title, font=font_title)
         draw.text(
             ((WIDTH - (bbox_t[2] - bbox_t[0])) // 2, 105),
@@ -395,7 +395,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             font=font_title,
         )
 
-        sub = "此刻你听到的每一个字，都来自 Apple Silicon 上的 SpeechRail 本地现场实时渲染"
+        sub = "此刻你听到的每一个字，都来自 Apple Silicon 上 SpeechRail 的本地实时合成"
         bbox_s = draw.textbbox((0, 0), sub, font=font_subtitle)
         draw.text(
             ((WIDTH - (bbox_s[2] - bbox_s[0])) // 2, 168),
@@ -409,10 +409,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_badge(draw, 160, 255, "云端妥协", (100, 25, 35), (255, 120, 140))
         draw.text((270, 255), "云端外呼与本地内存之痛", fill=(255, 100, 120), font=font_card_header)
         cloud_points = [
-            ("隐秘数据泄露", "每句私密音频上传云端，面临商业机密与个人隐私外泄隐患"),
-            ("网络延迟抖动", "公网往返平均 800ms~1500ms，难以胜任极速实时双工交互"),
-            ("昂贵持续账单", "按音频分钟与 Token 持续累加扣费，高频使用成本高昂"),
-            ("重复加载崩溃", "各应用各自装大模型导致内存瞬间爆炸 (OOM)，拖垮系统"),
+            ("隐私离开本机", "音频离开本机，带来商业机密与个人隐私风险"),
+            ("网络延迟抖动", "公网往返延迟，实时交互体验容易受网络影响"),
+            ("持续使用成本", "按音频分钟或 Token 计费，高频使用成本逐步累加"),
+            ("重复加载模型", "各应用各自加载模型，内存占用容易叠加，影响系统响应"),
         ]
         cy = 325
         for h, d in cloud_points:
@@ -428,10 +428,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             (1150, 255), "SpeechRail 生产级本地底座", fill=(0, 245, 212), font=font_card_header
         )
         sol_points = [
-            ("100% 数据私密", "纯离线零公网延迟，音频纯内存高速推理，数据永远留在你的 Mac"),
-            ("告别内存爆炸", "独立进程常驻守护，单端口全机共享，待机仅需 50MB 内存"),
-            ("终身无限免费", "一次安装，全机所有 Agent 与客户端永久免密直连、无门槛调用"),
-            ("原生极速流式", "深度结合 Apple MLX 统一内存加速，毫秒级流式双工响应"),
+            ("本地处理", "音频在本机内存中处理，数据不必离开你的 Mac"),
+            ("减少重复占用", "独立进程统一提供服务，多个应用共享同一套语音能力"),
+            ("一次安装，多应用共享", "一次配置，多个 Agent 与客户端按需接入"),
+            ("低延迟流式", "结合 Apple MLX 统一内存加速，提供连续的流式响应"),
         ]
         ly = 325
         for h, d in sol_points:
@@ -451,7 +451,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             font=font_title,
         )
 
-        sub = "不是又一个封闭应用，而是常驻 macOS 底层的独立系统级 Daemon"
+        sub = "不是另一个聊天应用，而是运行在 macOS 底层的共享语音服务"
         bbox_s = draw.textbbox((0, 0), sub, font=font_subtitle)
         draw.text(
             ((WIDTH - (bbox_s[2] - bbox_s[0])) // 2, 168),
@@ -467,7 +467,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
                 920,
                 485,
                 "开放标准",
-                "1:1 兼容 OpenAI 开放协议",
+                "兼容 OpenAI 接入方式",
                 [
                     "完整实现 whisper-1、tts-1 与 /v1/realtime 双工流式契约",
                     '客户端改一行 base_url="http://127.0.0.1:8201/v1" 即可接入',
@@ -481,11 +481,11 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
                 1800,
                 485,
                 "隐私安全",
-                "100% 本地私密 · 数据零离机",
+                "本地处理 · 数据默认留在本机",
                 [
-                    "默认绑定 127.0.0.1 本地回环接口，免密直连零配置摩擦",
-                    "音频纯内存管道流转推理，严防任何音频切片与声纹离机落盘",
-                    "断网状态完全可用，绝无任何数据外呼与第三方遥测",
+                    "默认绑定 127.0.0.1 本地回环接口，减少网络暴露范围",
+                    "音频通过内存管道流转，避免中间切片落盘",
+                    "本地模型可在断网状态运行，减少对公网链路的依赖",
                 ],
                 (0, 245, 212),
             ),
@@ -495,10 +495,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
                 920,
                 780,
                 "极速响应",
-                "纯离线运算 · 0 公网延迟",
+                "本地运行 · 少受网络影响",
                 [
                     "基于 Apple MLX 与 Metal 硬件深度调优，直接调度统一内存",
-                    "毫秒级首包流式响应，告别公网抖动与跨洋链路丢包",
+                    "流式响应不依赖公网往返，减少网络抖动影响",
                     "三档动态硬件匹配 (Quality / Balanced / Light) 自适应 Apple Silicon",
                 ],
                 (255, 183, 3),
@@ -509,11 +509,11 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
                 1800,
                 780,
                 "全机共享",
-                "单端口常驻 · 全机应用共享",
+                "一个服务 · 多个应用共享",
                 [
-                    "作为 macOS LaunchAgent 后台静默守护，单端口 8201 监听",
-                    "全机所有桌面软件与多 Agent 共同复用同一语音引擎底座",
-                    "告别重复加载，彻底根除不同工具各自霸占显存的困局",
+                    "作为 macOS LaunchAgent 后台守护，一个端口统一接入",
+                    "多个桌面软件与 Agent 共同复用同一套语音服务",
+                    "减少重复加载，降低不同工具各自占用内存的压力",
                 ],
                 (157, 78, 221),
             ),
@@ -530,7 +530,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
 
     # Scene 3: 27.2 - 41.8s
     elif t < 41.8:
-        title = "双物理进程隔离 · 智能两阶段空闲卸载"
+        title = "网关与模型分开运行 · 空闲自动释放"
         bbox_t = draw.textbbox((0, 0), title, font=font_title)
         draw.text(
             ((WIDTH - (bbox_t[2] - bbox_t[0])) // 2, 105),
@@ -539,7 +539,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             font=font_title,
         )
 
-        sub = "坚固的系统容灾设计，温柔体贴 Mac 的每一寸统一内存"
+        sub = "网关保持稳定，模型按需使用内存"
         bbox_s = draw.textbbox((0, 0), sub, font=font_subtitle)
         draw.text(
             ((WIDTH - (bbox_s[2] - bbox_s[0])) // 2, 168),
@@ -555,10 +555,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             (270, 265), "HTTP 网关 (FastAPI 组合根)", fill=(0, 230, 255), font=font_card_header
         )
         gw_points = [
-            "极轻量常驻守护进程，待机仅占用 ~50 MB 内存",
-            "对外单端口 8201 统一监听，严密负责请求路由与鉴权",
-            "Resource Governor：内置高并发队列治理与自适应限流",
-            "生命周期深度监管：提供心跳保活与 Worker 故障自愈",
+            "轻量常驻守护进程，待机约占用 50 MB 内存",
+            "统一入口负责请求路由与鉴权",
+            "Resource Governor：统一管理并发请求",
+            "生命周期管理：Worker 异常时自动恢复",
         ]
         gy = 330
         for p in gw_points:
@@ -570,7 +570,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_card(draw, 825, 305, 1095, 490, (26, 20, 38), (157, 78, 221))
         draw_badge(draw, 880, 325, "物理隔离屏障", (80, 40, 120), (220, 160, 255))
         draw.text((885, 375), "高效 IPC 管道", fill=(255, 255, 255), font=font_card_header)
-        draw.text((860, 425), "推理崩溃 网关永不宕机", fill=(0, 245, 212), font=font_hud)
+        draw.text((860, 425), "模型异常，网关继续工作", fill=(0, 245, 212), font=font_hud)
 
         # Geometric arrows
         draw_geo_arrow(draw, 792, 395, size=10, color=(0, 220, 255))
@@ -583,10 +583,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             (1290, 265), "独立推理 Worker (Apple MLX)", fill=(255, 130, 190), font=font_card_header
         )
         wk_points = [
-            "独立 Python 物理沙箱进程，专职执行重型矩阵计算",
+            "独立进程专门执行模型推理",
             "Qwen3-ASR / TTS / Diarization 硬件加速并行流水线",
-            "物理级异常隔离：Worker 崩溃不拖垮主网关并毫秒级自愈",
-            "音频纯内存管道高速流转，无任何中间切片落盘隐患",
+            "异常隔离：Worker 出错时不拖垮主网关",
+            "音频通过内存管道高速流转，避免中间切片落盘",
         ]
         wy = 330
         for p in wk_points:
@@ -599,14 +599,14 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_badge(draw, 160, 620, "自适应显存治理", (0, 70, 65), (0, 255, 220))
         draw.text(
             (325, 620),
-            "智能两阶段空闲卸载机制 (2-Stage Idle Eviction)",
+            "自动内存管理 (Idle Eviction)",
             fill=(0, 245, 212),
             font=font_card_header,
         )
         draw_bullet(draw, 170, 680, (0, 245, 212))
         draw.text(
             (190, 668),
-            "推理完成后开启 5 分钟倒计时；超时无请求自动将模型权重从显存中卸载，归还统一内存",
+            "推理完成后开始计时；长时间无请求时，模型自动释放内存",
             fill=(210, 240, 235),
             font=font_card_body,
         )
@@ -614,8 +614,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw.text(
             (190, 710),
             (
-                "常驻待机内存仅约 50 MB，即使在 8GB / 16GB 的入门款 Mac 上，"
-                "也能长年静默守护、从不抢占内存！"
+                "常驻待机约 50 MB，减少对 8GB / 16GB Mac 日常工作的影响"
             ),
             fill=(255, 220, 120),
             font=font_card_body,
@@ -623,7 +622,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
 
     # Scene 4: 41.8 - 56.6s
     elif t < 56.6:
-        title = "超敏流式听觉 · 原生讲话人分离 (Diarization)"
+        title = "实时转写 · 自动区分不同讲话人"
         bbox_t = draw.textbbox((0, 0), title, font=font_title)
         draw.text(
             ((WIDTH - (bbox_t[2] - bbox_t[0])) // 2, 105),
@@ -632,7 +631,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             font=font_title,
         )
 
-        sub = "NeMo Sortformer + CAM++ 声纹模型 · 正文先固定，归属后更新"
+        sub = "支持多人对话转写 · 输出匿名讲话人标签"
         bbox_s = draw.textbbox((0, 0), sub, font=font_subtitle)
         draw.text(
             ((WIDTH - (bbox_s[2] - bbox_s[0])) // 2, 168),
@@ -646,7 +645,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_badge(draw, 160, 250, "实测会话流", (0, 60, 90), (0, 220, 255))
         draw.text(
             (280, 250),
-            "多人会议转写实时分离实录 (Diarized Transcript)",
+            "多人会议转写示例",
             fill=(0, 220, 255),
             font=font_card_header,
         )
@@ -664,7 +663,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         )
         draw.text(
             (185, 360),
-            "“我们今天需要把语音服务完全本地化，保证所有会议记录绝不出公司网。”",
+            "“我们今天需要把语音服务尽量留在本地，减少会议记录离开公司网的风险。”",
             fill=(255, 255, 255),
             font=font_card_body,
         )
@@ -682,7 +681,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         )
         draw.text(
             (185, 495),
-            "“SpeechRail 的 Sortformer 表现太出色了！即使两人抢话，也能精准区分。”",
+            "“SpeechRail 能把两人的发言分开，录音更容易整理。”",
             fill=(255, 255, 255),
             font=font_card_body,
         )
@@ -700,7 +699,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         )
         draw.text(
             (185, 630),
-            "“而且它支持 /v1/realtime 流式持续分人扩展，正文先固定，归属后更新！”",
+            "“还支持 /v1/realtime 流式更新讲话人归属。”",
             fill=(255, 255, 255),
             font=font_card_body,
         )
@@ -708,7 +707,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_bullet(draw, 170, 725, (0, 245, 212))
         draw.text(
             (190, 715),
-            "输出标准 session-scoped 匿名标签，全链路不存储声纹库，捍卫个人声纹隐私",
+            "输出 session-scoped 匿名标签，不把实名身份带进服务",
             fill=(0, 245, 212),
             font=font_hud,
         )
@@ -718,10 +717,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_badge(draw, 1220, 250, "技术指标", (80, 60, 20), (255, 200, 50))
         draw.text((1330, 250), "架构与契约优势", fill=(255, 200, 50), font=font_card_header)
         spec_points = [
-            ("Sortformer 多人分离", "突破传统聚类迟滞，直接端到端输出声学活动与讲话人重叠"),
-            ("CAM++ 深度声纹表征", "高辨识度声纹特征提取，复杂环境音抗干扰能力极强"),
+            ("Sortformer 多人分离", "持续更新声学活动与讲话人归属"),
+            ("CAM++ 深度声纹表征", "提取讲话人特征，适配多人对话场景"),
             ("双模式全面覆盖", "支持离线长音频 diarized_json 与低延迟流式 WebSocket"),
-            ("工业级屏障保障", "严格践行结束落库屏障，保证转录正文与发言人归属零冲突"),
+            ("工业级屏障保障", "先固定转写正文，再更新讲话人归属，减少状态冲突"),
         ]
         sy = 325
         for title, desc in spec_points:
@@ -732,7 +731,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
 
     # Scene 5: 56.6 - 69.2s (Showcase Voices)
     elif t < ACT6_START:
-        title = "千面声学矩阵 · 9 款高品质原生音色"
+        title = "多种本地音色 · 自然切换"
         bbox_t = draw.textbbox((0, 0), title, font=font_title)
         draw.text(
             ((WIDTH - (bbox_t[2] - bbox_t[0])) // 2, 105),
@@ -741,7 +740,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             font=font_title,
         )
 
-        sub = "Qwen3-TTS 本地实时渲染 · 情绪自然细腻 · 跨语种多角色切换"
+        sub = "本地实时合成 · 多种音色 · 跨语言切换"
         bbox_s = draw.textbbox((0, 0), sub, font=font_subtitle)
         draw.text(
             ((WIDTH - (bbox_s[2] - bbox_s[0])) // 2, 168),
@@ -860,7 +859,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw_badge(draw, grid_x1 + card_pad, 618, "音色库矩阵", (60, 30, 90), (220, 160, 255))
         draw.text(
             (grid_x1 + card_pad + 105, 620),
-            "9 款原生内置音色全部由 Apple Silicon 本地实时生成：",
+            "9 种内置音色，可由 Apple Silicon 在本地实时合成：",
             fill=(210, 180, 255),
             font=font_card_body,
         )
@@ -903,7 +902,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             font=font_title,
         )
 
-        sub = "专为 Apple Silicon Mac 打造的生产级本地语音基座"
+        sub = "面向 Apple Silicon Mac 的本地共享语音服务"
         bbox_s = draw.textbbox((0, 0), sub, font=font_subtitle)
         draw.text(
             ((WIDTH - (bbox_s[2] - bbox_s[0])) // 2, 155),
@@ -936,7 +935,7 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
             (">> Model Weights Verified (Quality Profile): OK", (120, 220, 160)),
             (">> macOS LaunchAgent Registered (com.speechrail): OK", (120, 220, 160)),
             ("", (0, 0, 0)),
-            ("● [SpeechRail 1.8.0] Listening on http://127.0.0.1:8201", (0, 255, 200)),
+            ("● [SpeechRail 1.8.1] Listening on http://127.0.0.1:8201", (0, 255, 200)),
             ("● [Health Probe] readyz = 200 OK | ASR, TTS, Diarization READY!", (0, 255, 200)),
         ]
         ty = 285
@@ -951,10 +950,10 @@ def draw_act_content(draw: ImageDraw.ImageDraw, t: float, frame_idx: int):
         draw.text((1260, 250), "SpeechRail 承诺与信仰", fill=(0, 245, 212), font=font_card_header)
 
         manifesto = [
-            ("100% 数据私密", "纯离线零公网延迟，所有数据永远留在你的 Mac"),
-            ("终身无限量调用", "一次配置，全机应用与 Agent 永久免费无门槛使用"),
-            ("工业级双进程隔离", "系统极其健壮，待机仅 50MB，空闲自动释放显存"),
-            ("1:1 兼容 OpenAI 协议", "极佳的兼容性，为每一位开发者提供最稳固的语音轨道"),
+            ("本地处理", "数据默认留在你的 Mac，具体行为以部署配置为准"),
+            ("一次配置，多应用共享", "多个应用与 Agent 按需接入同一套语音服务"),
+            ("网关与模型分开运行", "待机约 50MB，空闲时自动释放模型资源"),
+            ("兼容 OpenAI 接入方式", "为已有 AI 工具提供熟悉的接入路径"),
         ]
         my = 325
         for h, d in manifesto:

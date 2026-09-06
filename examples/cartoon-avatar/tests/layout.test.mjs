@@ -23,3 +23,18 @@ test("stage does not render the removed mouth-animation explanation", () => {
   assert.doesNotMatch(index, /嘴部会根据正在播放的声音幅值轻轻变化/);
   assert.doesNotMatch(index, /class=["']stage-note["']/);
 });
+
+test("stage mounts the extracted character asset and exposes an action state", () => {
+  assert.match(index, /id=["']avatar["'][^>]*data-action=["']idle["']/);
+  assert.match(index, /class=["']avatar-image["']/);
+  assert.match(index, /src=["']\/static\/assets\/autobiography-character\.png["']/);
+  assert.match(index, /alt=["']["']/);
+});
+
+test("action styles include reduced-motion fallback", () => {
+  assert.match(styles, /\.avatar-action-speaking\s+\.avatar-image/);
+  assert.match(styles, /\.avatar-action-thinking\s+\.avatar-image/);
+  assert.match(styles, /\.avatar-action-emphasis\s+\.avatar-image/);
+  assert.match(styles, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
+  assert.match(styles, /\.avatar-image\s*\{[\s\S]*max-width:\s*100%;/);
+});
