@@ -257,7 +257,7 @@ def _run_service(command: str, app_home: Path | None = None, asr_only: bool = Fa
         manager = create_launch_agent_manager(working_directory=app_home)
     if command == "install":
         print(f"Installed LaunchAgent plist: {manager.install()}")
-        print("Run 'speechrail service enable' to start SpeechRail.")
+        print("Run 'speechrail service start' to start SpeechRail.")
         return
     if command in {"start", "enable", "stop", "disable", "restart"}:
         controller = LaunchAgentServiceController(manager, port=_service_port(app_home))
