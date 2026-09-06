@@ -22,7 +22,6 @@ from speechrail.service.model_store import (
 from speechrail.service.profile_store import ProfileStore
 
 _PORT_WAIT_INTERVAL_SECONDS = 0.25
-_PORT_WAIT_TIMEOUT_SECONDS = 180.0
 _GRACEFUL_STOP_TIMEOUT_SECONDS = 2.0
 _FORCE_KILL_TIMEOUT_SECONDS = 10.0
 _PID_RE = re.compile(r"^\s*pid = (\d+)\s*$", re.MULTILINE)
@@ -84,13 +83,11 @@ class LaunchAgentServiceController:
         sleeper: Callable[[float], None] = time.sleep,
         port: int | None = None,
         clock: Callable[[], float] = time.monotonic,
-        port_wait_timeout_seconds: float = _PORT_WAIT_TIMEOUT_SECONDS,
         graceful_stop_timeout_seconds: float = _GRACEFUL_STOP_TIMEOUT_SECONDS,
         force_kill_timeout_seconds: float = _FORCE_KILL_TIMEOUT_SECONDS,
         process_killer: Callable[[int], None] = _kill_process_group,
     ) -> None:
         if min(
-            port_wait_timeout_seconds,
             graceful_stop_timeout_seconds,
             force_kill_timeout_seconds,
         ) <= 0:
@@ -99,17 +96,15 @@ class LaunchAgentServiceController:
         self._sleep = sleeper
         self._port = port
         self._clock = clock
-        self._port_wait_timeout_seconds = port_wait_timeout_seconds
         self._graceful_stop_timeout_seconds = graceful_stop_timeout_seconds
         self._force_kill_timeout_seconds = force_kill_timeout_seconds
         self._process_killer = process_killer
 
-    def _wait_for_previous_instance(self, *, timeout_seconds: float | None = None) -> None:
+    def _wait_for_previous_instance(self, *, timeout_seconds: float) -> None:
         """Wait until the old ASGI process releases its per-port singleton lock."""
         if self._port is None:
             return
-        timeout = timeout_seconds or self._port_wait_timeout_seconds
-        deadline = self._clock() + timeout
+        deadline = self._clock() + timeout_seconds
         while True:
             try:
                 with ServerInstanceLock(self._port):
