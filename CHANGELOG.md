@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 统一 `service start/stop/restart` 与 profile 切换的 bounded lifecycle；status 不可用时只有经过 lock owner、PID 和命令行校验的旧实例才允许恢复。
+- managed installer 在切换 `runtime/current` 前确认端口 singleton lock 已释放；profile smoke 严格校验 profile、ASR/TTS readiness 和实际 artifact identity。
+
 ## [1.9.2] - 2026-09-06
 
 ### Fixed

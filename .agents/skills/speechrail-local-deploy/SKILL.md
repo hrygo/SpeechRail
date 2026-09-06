@@ -15,7 +15,7 @@ SpeechRail 是单机、单用户服务：只允许一个 `com.speechrail` Launch
 - `speechrail serve` 进入 per-user/per-port `flock`。第二个进程必须失败为 `server_already_running`；看到 `worker_load_error` 之前，先排除重复父进程、遗留 vendor worker 和端口锁竞争。
 - `runtime/current`、selection、共享 vendor runtime、模型 snapshot 和 wheel release 分开管理。切换只改变已校验的 selection；替换 wheel 只原子切 `runtime/current`，不覆盖配置、模型或 vendor `current`。
 - `service stop`/`start`/`restart` 使用生命周期 controller；`enable`/`disable` 只保留为兼容别名。`launchctl bootout` 返回不等于 ASGI 父进程和 vendor worker 已退出，详见 [references/lifecycle.md](references/lifecycle.md)。
-- 不使用 `pkill`、`killall`、模糊名称匹配或未经确认的 PID。强杀只允许针对 `launchctl print` 得到的精确 PID/进程组，且不得是当前 Codex/终端进程。
+- 不使用 `pkill`、`killall`、模糊名称匹配或未经确认的 PID。强杀只允许针对 `launchctl print` 或 lock owner metadata 验证出的精确 PID/进程组，且不得是当前 Codex/终端进程。
 - 不输出 API key、`.env` 全文、Authorization、音频、完整转写、完整日志或私有绝对路径；诊断只保留状态、版本、profile、generation、错误码和脱敏 stderr 尾部。
 
 ## 操作前快照
