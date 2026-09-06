@@ -1,111 +1,138 @@
 ---
 name: speechrail-local-deploy
 description: >-
-  SpeechRail macOS 本机部署、wheel 替换、managed profile 切换、LaunchAgent 验证和回滚 SOP。
-  用于安装、升级、启停、排障或核对本机服务。
+  SpeechRail macOS 本机部署、wheel 替换、LaunchAgent 启停、managed profile 切换、故障排查和回滚 SOP。
+  用于安装、升级、停服、强制清理旧进程、切档或核对本机服务；不用于远程或多实例部署。
 ---
 
-# SpeechRail 本机部署 SOP
+# SpeechRail 本机部署、启停与切换 SOP
 
-SpeechRail 只部署为当前用户的 `LaunchAgent`。默认 app home 为 `$HOME/Library/Application Support/SpeechRail`，label 为 `com.speechrail`，端口为 `127.0.0.1:8201`。
+SpeechRail 是单机、单用户服务：只允许一个 `com.speechrail` LaunchAgent、一个 ASGI 父进程和一个 `127.0.0.1:8201` listener。模型加载和切档期间允许完全停服，停服真空可持续数分钟；正确性优先于保持端口连续可用。
 
-## 原则
+## 终态不变量
 
-- 始终保持单实例；替换 release 前先停旧服务。
-- 私有配置权限为 `0600`，不得输出、覆盖或提交。
-- app wheel、共享 vendor runtime、模型 snapshot 和 selection 分开管理；profile 只改变权重组合。
-- preflight 通过后才切 `runtime/current`；失败恢复旧指针并保持模型与配置不变。
-- 不用 root、`LaunchDaemon`、`pkill`、模糊 PID 或手工 plist 修改。
+- app home 默认是 `$HOME/Library/Application Support/SpeechRail`；服务 label 是 `com.speechrail`；只使用用户级 `LaunchAgent`，不使用 root、`LaunchDaemon` 或手工改 plist。
+- `speechrail serve` 进入 per-user/per-port `flock`。第二个进程必须失败为 `server_already_running`；看到 `worker_load_error` 之前，先排除重复父进程、遗留 vendor worker 和端口锁竞争。
+- `runtime/current`、selection、共享 vendor runtime、模型 snapshot 和 wheel release 分开管理。切换只改变已校验的 selection；替换 wheel 只原子切 `runtime/current`，不覆盖配置、模型或 vendor `current`。
+- `service disable`/`enable` 是原始 LaunchAgent 操作；`launchctl bootout` 返回不等于 ASGI 父进程和 vendor worker 已退出。profile apply/rollback 已使用生命周期 controller；wheel 替换必须使用同等的停止协议，详见 [references/lifecycle.md](references/lifecycle.md)。
+- 不使用 `pkill`、`killall`、模糊名称匹配或未经确认的 PID。强杀只允许针对 `launchctl print` 得到的精确 PID/进程组，且不得是当前 Codex/终端进程。
+- 不输出 API key、`.env` 全文、Authorization、音频、完整转写、完整日志或私有绝对路径；诊断只保留状态、版本、profile、generation、错误码和脱敏 stderr 尾部。
 
 ## 操作前快照
 
 ```bash
-APP_HOME="$HOME/Library/Application Support/SpeechRail"
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 speechrail service status --app-home "$APP_HOME"
 speechrail profile status --app-home "$APP_HOME"
 readlink "$APP_HOME/runtime/current"
+lsof -nP -iTCP:8201 -sTCP:LISTEN
 curl --fail http://127.0.0.1:8201/health
 ```
 
-记录 PID、版本、active profile、generation、runtime target 和模型身份。任何路径或 label 不符都先停止操作并定位实际部署。
+记录当前 commit、wheel SHA-256、runtime target、服务 PID、active profile、generation、`/health` 的模型身份和 listener 数量。必须确认只有一个 listener；路径、label、端口或 PID 不符时先停用并定位，不能继续安装。
+
+发布前执行 `speechrail service preflight --app-home "$APP_HOME"`。preflight 必须使用 `runtime/current/.venv/bin/python`；不要用源码 checkout 的 `.venv` 推断 managed runtime 是否可用。
 
 ## 首次安装
 
-源码开发环境使用 `uv sync --extra dev` 与私有 `.env`。面向用户的 managed 首装应通过受审查的 installer/双击入口，选择 `quality`、`balanced` 或 `light`，下载 catalog 锁定的 ModelScope 制品并逐文件校验，再创建共享 runtime、安装 wheel、preflight 和启用服务。
-
-`SpeechRail 设置.command` 与以下命令使用同一切档事务：
+managed 首装由受审查的 installer/设置入口完成：先选择 `quality`、`balanced` 或 `light`，只准备 catalog 锁定并逐文件校验的制品，再创建共享 runtime、写入 `0600` 私有配置、执行 managed-runtime preflight、安装 LaunchAgent，最后启用并做公共 smoke。自动化切档或首装必须显式 `--yes`。
 
 ```bash
-speechrail setup --app-home "$APP_HOME"
-speechrail profile list
-speechrail profile apply light --app-home "$APP_HOME" --yes
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+speechrail setup --app-home "$APP_HOME" --yes
+speechrail profile status --app-home "$APP_HOME"
 ```
 
-自动化切档必须显式 `--yes`。切换允许短暂停服，公共 ASR/TTS smoke 失败时只回退一次。
+不为诊断临时打开模型下载、不直接运行 vendor worker 作为服务、不把 explicit-env 安装混入已有 managed selection。
+
+## 启停协议
+
+所有需要替换进程的操作都遵循以下顺序；不要用连续 `restart` 代替它：
+
+1. 读取 `launchctl print gui/$(id -u)/com.speechrail` 的 PID；没有已加载任务时保留 PID 为空。
+2. `bootout` 旧 LaunchAgent。
+3. 最多等待 2 秒，反复尝试获取同一个 per-port singleton lock。
+4. 仍被占用且 PID 已确认时，对该 PID 的精确进程组发送 `SIGKILL`；不递归杀其他进程，不杀当前进程。
+5. 最多再等待 10 秒确认 lock 释放。仍未释放则中止，不得启动候选服务；保留旧 runtime/selection 并报告 `previous service instance did not stop`。
+6. 只有 lock 已释放后才 `bootstrap`/`kickstart` 候选服务。
+7. 启动真空期间不要反复重启。模型加载可能超过 30 秒，应按实际启动上限有界轮询；端口出现后仍必须验证 profile、ready 和公共 API。
+
+profile 切换直接使用事务命令；它会准备制品、停止旧服务、写入一次性 startup permit、启动候选、检查 `/health.profile`，再做 `/readyz`、catalog 和真实 smoke：
+
+```bash
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+speechrail profile apply balanced --app-home "$APP_HOME" --yes
+```
+
+`service restart` 只适合不改变 selection 的普通重启；它不替代上面的停止确认。wheel 替换的安全 stop/start 入口见 [references/lifecycle.md](references/lifecycle.md)。
 
 ## wheel 替换
 
-完整发布使用 `.agents/skills/speechrail-release/SKILL.md`。顺序固定为：
+1. 先完成版本、代码 gate、wheel preflight 和当前快照；确认回退 release、selection、vendor runtime 和私有配置都存在。
+2. 使用当前 managed Python 执行安全 stop；`service disable` 单独执行只能卸载 LaunchAgent，不能作为“旧进程已退出”的证据。
+3. 用 `tools.install_macos.install_managed(...)` 准备新 release、共享 runtime 和同一 active profile；preflight 通过后原子替换 `runtime/current`。失败时恢复旧指针和 runtime snapshot。
+4. 使用新 `runtime/current/.venv/bin/python` 安装/启用 LaunchAgent，再按启停协议确认 lock 已释放后启动。
+5. 以有界轮询检查 `/health`、`/readyz`、`/v1/models`、`/v1/voices`，再以非敏感短 fixture 做真实 ASR/TTS smoke。只看到进程、配置或 `/health` 200 不算发布成功。
 
-1. 完整代码 gate 与 wheel 校验；
-2. 记录当前 managed profile 和回退点；
-3. `service disable`；
-4. 以同一 profile 调用 `tools.install_macos.install_managed(...)`；
-5. 新 release preflight；
-6. 原子切换 app `runtime/current`，保留 vendor runtime/model current；
-7. 安装并启用 LaunchAgent；
-8. 验证端点和真实 ASR/TTS。
+不要在 wheel 替换事务中顺便改变 profile；模型档位切换单独执行并记录 generation。
 
-不要用 `tools/install_macos.py` 的 legacy CLI 替换已有 managed deployment；该入口只用于显式 `.env`、没有 managed selection 的安装。
-
-## 验证
-
-使用有界轮询等待模型加载，然后检查：
+## 验证清单
 
 ```bash
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+.agents/skills/speechrail-local-deploy/scripts/verify_service.sh
 speechrail service status --app-home "$APP_HOME"
-curl --fail http://127.0.0.1:8201/health
-curl --fail http://127.0.0.1:8201/readyz
-curl --fail http://127.0.0.1:8201/v1/models
-curl --fail http://127.0.0.1:8201/v1/voices
-curl --fail http://127.0.0.1:8201/metrics
+speechrail profile status --app-home "$APP_HOME"
+speechrail service preflight --app-home "$APP_HOME"
 ```
 
 通过条件：
 
-- PID 指向 `runtime/current/.venv/bin/python`；
-- `/health.version` 与 wheel 一致，ASR/TTS ready；
-- `/v1/models` 的 profile、artifact、variant 和 quantization 与 selection 一致；
-- `/v1/voices` 有九个 canonical system roles，availability/capabilities 与当前 TTS variant 一致；
-- 一段真实非敏感音频的 ASR 与 `serena` TTS 均返回 200、非空结果和 request ID。
+- `lsof` 对 8201 只有一个 listener，PID 属于 `runtime/current/.venv/bin/python`；
+- `/health.version`、wheel metadata 和 release 记录一致，ASR/TTS ready；
+- `/health.profile` 与目标 selection 一致；`/readyz` 为 200；
+- `/v1/models` 的 profile、artifact、variant、quantization 与 selection 一致；
+- `/v1/voices` 返回当前 TTS variant 实际支持的九个 canonical roles；
+- 真实 ASR/TTS 均返回 200、非空结果和 request ID；
+- 不存在第二个服务、遗留 listener 或仍持有 per-port lock 的旧进程。
+
+## profile 切换与回滚
+
+切换只允许一次事务和一次回滚，不做无限重试：
+
+1. 记录 active profile、generation 和旧 prepared selection。
+2. `profile apply <target> --yes`；准备阶段失败时不碰服务。
+3. 停止旧服务并确认 lock 释放后启动候选；先核对 `/health.profile`，再做 ready/catalog/真实 smoke。
+4. 成功才 commit generation；失败执行一次 `profile rollback --yes`，再次走同样 stop/start/smoke。
+5. 回滚也失败时标记 `not_ready`，停止继续采集或重启，保留 operation 状态、stderr 尾部、PID 和 runtime/selection 指针供人工处理。
+
+MINOR/MAJOR 验收按 `quality → balanced → light → quality` 串行执行；每档都等待真实 ready 和 smoke，结束必须恢复开始的档位。PATCH 只测当前档，性能口径见 `speechrail-perf-benchmark`。
 
 ## 回滚
 
-### profile 回滚
+### profile
 
 ```bash
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 speechrail profile rollback --app-home "$APP_HOME" --yes
 ```
 
-### wheel 回滚
+### wheel
 
-1. 停用当前服务。
-2. 恢复操作前记录的 app `runtime/current`。
-3. managed 安装同时核对旧 selection 与 vendor runtime current；不要凭目录名猜测。
-4. 用旧 runtime 执行 `speechrail service install` 和 `enable`。
-5. 重做全部端点与真实 smoke。
+1. 用同一安全停止协议停用当前服务。
+2. 恢复快照记录的 `runtime/current`，同时核对旧 selection 与 vendor `current`；不要凭目录名猜版本。
+3. 用旧 runtime 安装/启用 LaunchAgent，完成同一组 endpoint 和真实 smoke。
+4. 不删除旧 release、模型、配置或日志；`disable`/`uninstall` 都不是版本回滚。
 
-`disable` 只停服务，`uninstall` 删除 plist；二者都不是版本回滚。不要删除旧 release、模型、配置或日志。
+## 故障定位顺序
 
-## 常见故障
-
-| 现象 | 先查 | 处理 |
+| 现象 | 首先确认 | 处理 |
 |---|---|---|
-| 端口拒绝 | service status、PID、stderr | 确认单实例和 LaunchAgent domain |
-| `/health` 仍是旧版本 | app current、wheel metadata、私有 `SPEECHRAIL_VERSION` | managed 配置不应长期覆盖 wheel 版本 |
-| `/readyz` 503 | selection、snapshot hash、共享 runtime、preflight | 修复配置/制品，不用测试开关掩盖 |
-| 音色数量或能力错误 | active TTS variant、selection generation、是否运行新 wheel | 重启当前 release 并核对 `/v1/voices` |
-| profile apply 失败 | prepared set、启动许可、public smoke | 使用一次 rollback，保留失败证据 |
-| `launchctl` exit 5 | 旧任务是否完成 bootout | 使用服务 CLI 的 settle 逻辑，不连续 restart |
+| `worker_load_error` | listener 数量、LaunchAgent PID、per-port lock、vendor worker 是否属于同一 runtime | 先按安全 stop 清理旧进程，再用 managed runtime preflight；单进程重试仍失败才检查模型制品 |
+| `server_already_running` | `lsof` 与 `launchctl print` 是否已有唯一服务 | 不启动第二实例；确认调用方使用目标 app home 和 runtime |
+| `/health` 是旧 profile/版本 | `/health.profile`、`runtime/current`、PID 的实际 executable | 停止并确认 lock 释放；禁止把旧 listener 当作候选 smoke 结果 |
+| `/readyz` 503 | selection、snapshot hash、共享 runtime、preflight 输出 | 保持停服，修复配置/制品后再启动；不打开下载开关掩盖问题 |
+| `launchctl` exit 5 | bootout 后旧父进程/worker 是否还持锁 | 等待 2 秒，按精确 PID 进程组强杀，再等最多 10 秒；不要连续 restart |
+| `service preflight` 可疑失败 | 执行 preflight 的 Python 是否为 `runtime/current/.venv/bin/python` | 重新从 managed runtime 执行，避免源码依赖污染判断 |
 
-交付时报告版本、profile、generation、端点状态、真实 smoke、未验证项和精确回滚目标，不含凭据或私人绝对路径。
+交付时报告版本、wheel hash、runtime target、profile、generation、PID/listener、endpoint、真实 smoke、回退目标和未验证项，不含凭据、音频或完整日志。

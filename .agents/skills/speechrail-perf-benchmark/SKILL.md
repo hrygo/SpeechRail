@@ -121,15 +121,17 @@ python3 examples/perf/bench_profiles.py \
 
 ## 6. 档位切换与恢复
 
+切档是停服事务，不是普通热重启。`launchctl bootout` 返回不代表旧 ASGI 父进程或 vendor worker 已退出；每次切档必须使用本机部署 skill 的生命周期 controller：先 bootout，最多等待 2 秒获取同一个 per-port singleton lock；仍占用时只对 `launchctl print` 得到的精确 PID/进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。lock 未释放、PID 不安全或无法确认旧服务身份时立即停止基准，不启动候选。详见 [speechrail-local-deploy 生命周期 SOP](../speechrail-local-deploy/references/lifecycle.md)。
+
 MINOR/MAJOR：
 
 1. 记录初始 active profile 和 generation。
-2. 每次 `speechrail profile apply <profile> --yes` 后等待服务真正 ready。
-3. 核对模型/音色身份并执行该档完整基础套件。
-4. 不在同一时间运行多个 benchmark。
-5. 结束时恢复初始 profile，复查公共 ASR/TTS smoke。
+2. 每次 `speechrail profile apply <profile> --yes` 后等待服务真正 ready，并先核对 `/health.profile` 是否等于目标档位。
+3. 核对 `/v1/models`、`/v1/voices` 的模型/音色身份并执行该档完整基础套件。
+4. 不在同一时间运行多个 benchmark；启动真空可持续数分钟时不要连续 restart。
+5. 结束时恢复初始 profile，复查公共 ASR/TTS smoke 和单 listener。
 
-切换或 smoke 失败时停止后续数据采集，记录失败，并使用 `speechrail profile rollback --yes`。失败档不得用旧数据补齐。
+切换或 smoke 失败时停止后续数据采集，记录失败档、operation 状态、PID、stderr 尾部和错误码，并使用 `speechrail profile rollback --yes` 只回滚一次。回滚也失败时保持 `not_ready`，不要循环重启或用旧数据补齐。
 
 ## 7. 比较与变化表达
 
