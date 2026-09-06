@@ -1,0 +1,4 @@
+interface:
+  display_name: "视频播客制作"
+  short_description: "从文稿、录音或访谈生成视频播客，涵盖自然混音、字幕、视觉和整体验收"
+  default_prompt: "使用 $video-podcast 根据当前资料制作视频播客，保留自然表达，并完成音画同步、响度与成片复检。"

@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "project": {
+    "title": "",
+    "audience": "",
+    "format": "narration",
+    "language": "zh-CN",
+    "sources": []
+  },
+  "delivery": {
+    "aspect_ratio": "16:9",
+    "width": 1920,
+    "height": 1080,
+    "fps": "30/1",
+    "duration_policy": "content-led",
+    "duration_seconds": null,
+    "sample_rate": 48000,
+    "channels": 2,
+    "output_file": "build/final.mp4"
+  },
+  "audio": {
+    "target_lufs": null,
+    "true_peak_ceiling_dbtp": null,
+    "lra_target_lu": null,
+    "target_rationale": "",
+    "bgm_asset": null,
+    "visualization_source": "voice_stem"
+  },
+  "design": {
+    "tokens_file": null,
+    "font_files": [],
+    "cover_asset": null,
+    "cta_url": null
+  },
+  "segments": [
+    {
+      "id": "s001",
+      "speaker_id": "speaker_a",
+      "language": "zh-CN",
+      "display_text": "",
+      "spoken_text": "",
+      "subtitle_text": "",
+      "editorial_notes": "",
+      "audio_source": {
+        "kind": "tts",
+        "file": null,
+        "provider": null,
+        "model": null,
+        "voice": null,
+        "source_in_seconds": null,
+        "source_out_seconds": null
+      },
+      "timeline": {
+        "track": "voice_a",
+        "start_seconds": null,
+        "end_seconds": null,
+        "intentional_overlap": false
+      },
+      "processing": {"speed": 1.0, "gain_db": 0.0},
+      "cache_fingerprint": null
+    }
+  ],
+  "scenes": [
+    {
+      "id": "scene001",
+      "segment_ids": ["s001"],
+      "start_seconds": null,
+      "end_seconds": null,
+      "layout": "speaker-and-caption",
+      "transition_in": null,
+      "transition_out": null
+    }
+  ],
+  "review": {
+    "final_sha256": null,
+    "technical_status": "pending",
+    "transcript_status": "pending",
+    "listening_coverage": [],
+    "visual_coverage": [],
+    "unverified": []
+  }
+}
