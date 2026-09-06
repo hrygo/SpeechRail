@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-09-06
+
+### Fixed
+
+- Wait for the previous managed process to release the per-port singleton lock before starting a profile candidate, preventing launchd stop/start races from misrouting smoke probes or causing `worker_load_error` during tier switches.
+
 ## [1.9.1] - 2026-09-06
 
 ### Fixed

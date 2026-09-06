@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import os
+import re
+import signal
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from speechrail.runtime.server_lock import ServerInstanceError, ServerInstanceLock
 from speechrail.service.launchd import ServiceError
 from speechrail.service.model_store import (
     PreparedModelSet,
@@ -16,6 +20,34 @@ from speechrail.service.model_store import (
     resolve_prepared_selection,
 )
 from speechrail.service.profile_store import ProfileStore
+
+_PORT_WAIT_INTERVAL_SECONDS = 0.25
+_PORT_WAIT_TIMEOUT_SECONDS = 180.0
+_GRACEFUL_STOP_TIMEOUT_SECONDS = 2.0
+_FORCE_KILL_TIMEOUT_SECONDS = 10.0
+_PID_RE = re.compile(r"^\s*pid = (\d+)\s*$", re.MULTILINE)
+
+
+def _service_pid(status: str) -> int | None:
+    match = _PID_RE.search(status)
+    if match is None:
+        return None
+    pid = int(match.group(1))
+    return pid if pid > 1 else None
+
+
+def _kill_process_group(pid: int) -> None:
+    """Kill only the exact LaunchAgent process group after graceful stop stalls."""
+    if pid <= 1 or pid == os.getpid():
+        raise ServiceError("refusing to kill an unsafe service pid")
+    try:
+        process_group = os.getpgid(pid)
+    except ProcessLookupError:
+        return
+    if process_group > 1 and process_group == pid and process_group != os.getpgrp():
+        os.killpg(process_group, signal.SIGKILL)
+    else:
+        os.kill(pid, signal.SIGKILL)
 
 
 class ServiceController(Protocol):
@@ -50,21 +82,72 @@ class LaunchAgentServiceController:
         manager: LaunchAgentManagerLike,
         *,
         sleeper: Callable[[float], None] = time.sleep,
+        port: int | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        port_wait_timeout_seconds: float = _PORT_WAIT_TIMEOUT_SECONDS,
+        graceful_stop_timeout_seconds: float = _GRACEFUL_STOP_TIMEOUT_SECONDS,
+        force_kill_timeout_seconds: float = _FORCE_KILL_TIMEOUT_SECONDS,
+        process_killer: Callable[[int], None] = _kill_process_group,
     ) -> None:
+        if min(
+            port_wait_timeout_seconds,
+            graceful_stop_timeout_seconds,
+            force_kill_timeout_seconds,
+        ) <= 0:
+            raise ValueError("service stop timeouts must be positive")
         self._manager = manager
         self._sleep = sleeper
+        self._port = port
+        self._clock = clock
+        self._port_wait_timeout_seconds = port_wait_timeout_seconds
+        self._graceful_stop_timeout_seconds = graceful_stop_timeout_seconds
+        self._force_kill_timeout_seconds = force_kill_timeout_seconds
+        self._process_killer = process_killer
+
+    def _wait_for_previous_instance(self, *, timeout_seconds: float | None = None) -> None:
+        """Wait until the old ASGI process releases its per-port singleton lock."""
+        if self._port is None:
+            return
+        timeout = timeout_seconds or self._port_wait_timeout_seconds
+        deadline = self._clock() + timeout
+        while True:
+            try:
+                with ServerInstanceLock(self._port):
+                    return
+            except ServerInstanceError as exc:
+                if self._clock() >= deadline:
+                    raise ServiceError("previous service instance did not stop") from exc
+                self._sleep(_PORT_WAIT_INTERVAL_SECONDS)
 
     def stop(self) -> None:
         try:
-            self._manager.status()
+            status = self._manager.status()
         except ServiceError:
             return
+        pid = _service_pid(status)
         self._manager.disable()
-        # launchctl bootout returns before the label can always be bootstrapped
-        # again. A short bounded settle avoids the documented exit-5 race.
-        self._sleep(0.25)
+        # launchctl bootout returns before the process and its vendor workers
+        # necessarily release the port. Wait for the same singleton lock that
+        # guards ``speechrail serve`` before allowing a replacement to start.
+        try:
+            self._wait_for_previous_instance(timeout_seconds=self._graceful_stop_timeout_seconds)
+        except ServiceError:
+            if pid is None:
+                raise
+            self._process_killer(pid)
+            try:
+                self._wait_for_previous_instance(timeout_seconds=self._force_kill_timeout_seconds)
+            except ServiceError as force_error:
+                raise ServiceError("previous service instance did not stop") from force_error
+            else:
+                return
+        if self._port is None:
+            self._sleep(_PORT_WAIT_INTERVAL_SECONDS)
 
     def start(self) -> None:
+        # A stale unmanaged process must not be mistaken for the candidate
+        # service during the first public smoke probe.
+        self._wait_for_previous_instance(timeout_seconds=self._graceful_stop_timeout_seconds)
         self._manager.enable()
 
 

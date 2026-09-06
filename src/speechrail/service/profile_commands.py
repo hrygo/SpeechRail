@@ -154,7 +154,7 @@ def _switch_prepared(prepared_id: str, app_home: Path) -> ApplyResult:
         raise ProfileCommandError("managed runtime preflight failed")
     settings = Settings.from_env_file(layout.config_file)
     manager = create_launch_agent_manager(working_directory=app_home)
-    controller = LaunchAgentServiceController(manager)
+    controller = LaunchAgentServiceController(manager, port=settings.port)
     timeout = httpx.Timeout(settings.request_timeout_seconds)
     with httpx.Client(base_url=_loopback_url(settings), timeout=timeout) as client:
         smoke = PublicApiSmokeProbe(client=client, api_key=settings.api_key)

@@ -1,5 +1,5 @@
 """SpeechRail package."""
 
-__version__ = "1.9.1"
+__version__ = "1.9.2"
 
 __all__ = ["__version__"]

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+
+from speechrail.service import profile_switch
 from speechrail.service.launchd import ServiceError
 from speechrail.service.profile_switch import LaunchAgentServiceController
 
@@ -39,3 +42,133 @@ def test_controller_stops_only_a_loaded_service_and_always_starts() -> None:
     controller.start()
     assert stopped.calls == ["status", "enable"]
     assert delays == [0.25]
+
+
+def test_controller_waits_for_previous_process_lock_before_restarting(monkeypatch) -> None:
+    class FakePortLock:
+        attempts = 0
+
+        def __init__(self, port: int) -> None:
+            assert port == 8201
+
+        def __enter__(self):
+            type(self).attempts += 1
+            if self.attempts < 3:
+                raise profile_switch.ServerInstanceError("server_already_running")
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(profile_switch, "ServerInstanceLock", FakePortLock)
+    loaded = FakeManager(loaded=True)
+    delays: list[float] = []
+    controller = LaunchAgentServiceController(
+        loaded,
+        port=8201,
+        sleeper=delays.append,
+    )
+
+    controller.stop()
+    controller.start()
+
+    assert loaded.calls == ["status", "disable", "enable"]
+    assert FakePortLock.attempts == 4
+    assert delays == [0.25, 0.25]
+
+
+def test_controller_fails_bounded_when_previous_process_never_releases(monkeypatch) -> None:
+    class StuckPortLock:
+        def __init__(self, port: int) -> None:
+            assert port == 8201
+
+        def __enter__(self):
+            raise profile_switch.ServerInstanceError("server_already_running")
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(profile_switch, "ServerInstanceLock", StuckPortLock)
+    loaded = FakeManager(loaded=True)
+    now = 0.0
+    delays: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        delays.append(delay)
+        now += delay
+
+    controller = LaunchAgentServiceController(
+        loaded,
+        port=8201,
+        sleeper=sleep,
+        clock=clock,
+        graceful_stop_timeout_seconds=0.5,
+        force_kill_timeout_seconds=0.5,
+    )
+
+    with pytest.raises(ServiceError, match="previous service instance did not stop"):
+        controller.stop()
+
+    assert loaded.calls == ["status", "disable"]
+    assert delays == [0.25, 0.25]
+
+
+def test_controller_force_kills_exact_service_group_after_graceful_timeout(monkeypatch) -> None:
+    class LoadedManager(FakeManager):
+        def status(self) -> str:
+            self.calls.append("status")
+            if not self.loaded:
+                raise ServiceError("not loaded")
+            return "pid = 4242"
+
+    class StalledUntilKilledLock:
+        killed = False
+
+        def __init__(self, port: int) -> None:
+            assert port == 8201
+
+        def __enter__(self):
+            if not type(self).killed:
+                raise profile_switch.ServerInstanceError("server_already_running")
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(profile_switch, "ServerInstanceLock", StalledUntilKilledLock)
+    manager = LoadedManager(loaded=True)
+    now = 0.0
+    delays: list[float] = []
+    killed: list[int] = []
+
+    def clock() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        delays.append(delay)
+        now += delay
+
+    def kill(pid: int) -> None:
+        killed.append(pid)
+        StalledUntilKilledLock.killed = True
+
+    controller = LaunchAgentServiceController(
+        manager,
+        port=8201,
+        sleeper=sleep,
+        clock=clock,
+        graceful_stop_timeout_seconds=0.5,
+        force_kill_timeout_seconds=0.5,
+        process_killer=kill,
+    )
+
+    controller.stop()
+
+    assert manager.calls == ["status", "disable"]
+    assert killed == [4242]
+    assert delays == [0.25, 0.25]
