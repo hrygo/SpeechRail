@@ -138,6 +138,79 @@ def test_speech_endpoint_defaults_to_mp3_for_openai_parity() -> None:
     assert response.headers["content-type"].startswith("audio/mpeg")
 
 
+class PreviewCapturingSpeechSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(response_id="preview", chunk_index=0, audio=b"\x00\x00\x01\x00")
+
+        return chunks()
+
+
+def _preview_client(
+    tmp_path: Path, preset_id: str = "quality"
+) -> tuple[TestClient, PreviewCapturingSpeechSynthesizer, Path]:
+    preset = load_catalog().preset(preset_id)
+    synthesizer = PreviewCapturingSpeechSynthesizer()
+    custom_voices = tmp_path / "custom_voices.json"
+    client = TestClient(
+        create_app(
+            Settings(
+                api_key=None,
+                qwen3_model_dir=tmp_path / preset.asr,
+                qwen3_python=None,
+                qwen3_tts_model_dir=tmp_path / preset.tts,
+                qwen3_tts_python=None,
+            ),
+            tts_synthesizer=synthesizer,
+        )
+    )
+    return client, synthesizer, custom_voices
+
+
+def test_voice_preview_returns_audio_without_creating_voice_profile(tmp_path: Path) -> None:
+    client, synthesizer, custom_voices = _preview_client(tmp_path)
+
+    response = client.post(
+        "/v1/voices/previews",
+        json={
+            "model": "tts-1",
+            "input": "试听这一句。",
+            "instruction": "温暖自然的中文女声。",
+            "seed": 12345,
+            "response_format": "wav",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
+    assert response.content[:4] == b"RIFF"
+    assert synthesizer.requests[0].voice == "serena"
+    assert synthesizer.requests[0].instruction == "温暖自然的中文女声。"
+    assert synthesizer.requests[0].seed == 12345
+    assert not custom_voices.exists()
+
+
+def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None:
+    client, _synthesizer, _custom_voices = _preview_client(tmp_path, "balanced")
+
+    response = client.post(
+        "/v1/voices/previews",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "试听这一句。",
+            "instruction": "自然的中文女声。",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "voice_preview_unsupported"
+
+
 def test_speech_endpoint_caps_input_at_openai_limit() -> None:
     client = _speech_client()
 
@@ -174,6 +247,15 @@ class InvalidDeliverySynthesizer:
         return chunks()
 
 
+class FailingSynthesizer:
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            raise RuntimeError("worker_inference_error")
+            yield AudioChunk(response_id="unreachable", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
 def test_speech_endpoint_maps_invalid_delivery_to_unified_error_envelope() -> None:
     client = TestClient(
         create_app(
@@ -190,6 +272,27 @@ def test_speech_endpoint_maps_invalid_delivery_to_unified_error_envelope() -> No
     assert response.status_code == 502
     error = response.json()["error"]
     assert error["code"] == "tts_chunk_order_invalid"
+    assert error["type"] == "server_error"
+    assert error["retryable"] is True
+    assert error["request_id"]
+
+
+def test_speech_endpoint_maps_backend_runtime_failure_to_unified_error_envelope() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=FailingSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"model": "speechrail/qwen3-tts", "input": "你好", "voice": "default"},
+    )
+
+    assert response.status_code == 502
+    error = response.json()["error"]
+    assert error["code"] == "backend_error"
     assert error["type"] == "server_error"
     assert error["retryable"] is True
     assert error["request_id"]

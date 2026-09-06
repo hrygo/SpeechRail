@@ -207,6 +207,10 @@ class Qwen3TtsWorker:
                     "speed": request.speed,
                     "language": request.language,
                 }
+                if request.instruction is not None:
+                    frame_payload["instruction"] = request.instruction
+                if request.seed is not None:
+                    frame_payload["seed"] = request.seed
                 try:
                     from speechrail.backends.qwen3_voice_binding import resolve_binding
 

@@ -81,7 +81,16 @@ class TtsWorkerEngine(Protocol):
     identity: TtsWorkerIdentity
 
     def synthesize(
-        self, text: str, *, voice: str, speed: float, language: str
+        self,
+        text: str,
+        *,
+        voice: str,
+        speed: float,
+        language: str,
+        instruction: str | None = None,
+        seed: int | None = None,
+        ref_audio: str | None = None,
+        ref_text: str | None = None,
     ) -> Iterator[bytes]: ...
 
 
@@ -217,8 +226,18 @@ def _ready_identity_fields(identity: object) -> dict[str, object]:
     return fields
 
 
-def generation_condition(variant: str, voice: str) -> dict[str, object]:
+def generation_condition(
+    variant: str, voice: str, *, instruction: str | None = None
+) -> dict[str, object]:
     """根据模型变体解析生成条件 (音色或提示词指令)。"""
+
+    if instruction is not None:
+        if variant != "voice_design":
+            raise ValueError("voice preview requires voice_design variant")
+        normalized = instruction.strip()
+        if not normalized:
+            raise ValueError("voice preview instruction must not be blank")
+        return {"instruct": normalized}
 
     try:
         binding = resolve_binding(variant, voice)
@@ -319,6 +338,8 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         voice: str,
         speed: float,
         language: str,
+        instruction: str | None = None,
+        seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
     ) -> Iterator[bytes]:
@@ -332,6 +353,8 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 voice=voice,
                 speed=speed,
                 language=language,
+                instruction=instruction,
+                seed=seed,
                 ref_audio=ref_audio,
                 ref_text=ref_text,
             ):
@@ -355,6 +378,8 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         voice: str,
         speed: float,
         language: str,
+        instruction: str | None = None,
+        seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
     ) -> Iterator[bytes]:
@@ -392,15 +417,18 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return
 
         variant = self.identity.model_variant or "voice_design"
-        condition = generation_condition(variant, voice)
+        condition = generation_condition(variant, voice, instruction=instruction)
         used_temperature = self._temperature
         if variant == "voice_design":
-            profile = get_voice_profile(voice)
-            used_temperature = profile.temperature
+            if instruction is None:
+                profile = get_voice_profile(voice)
+                used_temperature = profile.temperature
+                seed = profile.seed
             try:
                 import mlx.core as mx  # type: ignore[import-not-found]
 
-                mx.random.seed(profile.seed)
+                if seed is not None:
+                    mx.random.seed(seed)
             except Exception:
                 pass
         call_kwargs: dict[str, object] = {
@@ -544,6 +572,8 @@ def serve(
                 language,
                 ref_audio,
                 ref_text,
+                instruction,
+                seed,
             ) = _decode_synthesis_request(frame)
             synth_kwargs: dict[str, Any] = {
                 "voice": voice,
@@ -553,6 +583,10 @@ def serve(
             if ref_audio is not None or ref_text is not None:
                 synth_kwargs["ref_audio"] = ref_audio
                 synth_kwargs["ref_text"] = ref_text
+            if instruction is not None:
+                synth_kwargs["instruction"] = instruction
+            if seed is not None:
+                synth_kwargs["seed"] = seed
             for index, pcm in enumerate(
                 engine.synthesize(text, **synth_kwargs)
             ):
@@ -601,7 +635,7 @@ def serve(
 
 def _decode_synthesis_request(
     frame: dict[str, object],
-) -> tuple[str, str, str, float, str, str | None, str | None]:
+) -> tuple[str, str, str, float, str, str | None, str | None, str | None, int | None]:
     request_id = frame.get("request_id")
     text = frame.get("text")
     voice = frame.get("voice")
@@ -609,6 +643,8 @@ def _decode_synthesis_request(
     language = frame.get("language", "auto")
     ref_audio = frame.get("ref_audio")
     ref_text = frame.get("ref_text")
+    instruction = frame.get("instruction")
+    seed = frame.get("seed")
     if (
         frame.get("version") != PROTOCOL_VERSION
         or frame.get("type") != "synthesize"
@@ -638,6 +674,22 @@ def _decode_synthesis_request(
             raise ProtocolError("invalid ref_text in synthesize request")
         validated_ref_text = ref_text
 
+    validated_instruction: str | None = None
+    if instruction is not None:
+        if not isinstance(instruction, str) or not instruction.strip() or len(instruction) > 10_000:
+            raise ProtocolError("invalid instruction in synthesize request")
+        validated_instruction = instruction.strip()
+
+    validated_seed: int | None = None
+    if seed is not None:
+        if (
+            not isinstance(seed, int)
+            or isinstance(seed, bool)
+            or not 0 <= seed <= 2**32 - 1
+        ):
+            raise ProtocolError("invalid seed in synthesize request")
+        validated_seed = seed
+
     return (
         request_id,
         text,
@@ -646,6 +698,8 @@ def _decode_synthesis_request(
         language.strip(),
         validated_ref_audio,
         validated_ref_text,
+        validated_instruction,
+        validated_seed,
     )
 
 

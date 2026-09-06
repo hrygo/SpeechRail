@@ -13,7 +13,7 @@ from typing import Literal, cast
 
 from fastapi import APIRouter, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.diarization import DiarizationCoordinator
@@ -36,7 +36,7 @@ from speechrail.domain.ports import (
     StreamingBatchTranscriber,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import resolve_voice
+from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
@@ -77,9 +77,32 @@ class _SpeechHTTPBody(BaseModel):
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+
     @field_validator("language")
     @classmethod
     def normalize_language(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+
+class _VoicePreviewHTTPBody(BaseModel):
+    """Ephemeral VoiceDesign request kept separate from OpenAI TTS parity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str = Field(min_length=1, max_length=200)
+    input: str = Field(min_length=1, max_length=4_096)
+    instruction: str = Field(min_length=1, max_length=10_000)
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "wav"
+    speed: float = Field(default=1.0, ge=0.25, le=4.0)
+    language: str = Field(default="auto", min_length=1, max_length=64)
+    seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
+
+    @field_validator("input", "instruction", "language")
+    @classmethod
+    def reject_blank_value(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError("must not be blank")
@@ -540,7 +563,13 @@ async def _stream_encode_container(
             if isinstance(item, BaseException):
                 if isinstance(
                     item,
-                    (TTSDeliveryError, GovernorQueueFullError, TimeoutError, OverflowError),
+                    (
+                        TTSDeliveryError,
+                        GovernorQueueFullError,
+                        TimeoutError,
+                        OverflowError,
+                        RuntimeError,
+                    ),
                 ):
                     raise item
                 raise ValueError("audio_encode_failed") from item
@@ -567,7 +596,13 @@ async def _stream_encode_container(
             if isinstance(result, BaseException):
                 if isinstance(
                     result,
-                    (TTSDeliveryError, GovernorQueueFullError, TimeoutError, OverflowError),
+                    (
+                        TTSDeliveryError,
+                        GovernorQueueFullError,
+                        TimeoutError,
+                        OverflowError,
+                        RuntimeError,
+                    ),
                 ):
                     raise result
                 raise ValueError("audio_encode_failed") from result
@@ -972,6 +1007,140 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return PlainTextResponse(format_srt(result), media_type="application/x-subrip")
         return PlainTextResponse(format_vtt(result), media_type="text/vtt")
 
+    @router.post("/v1/voices/previews")
+    async def voice_preview(request: Request, body: _VoicePreviewHTTPBody) -> Response:
+        """Generate a transient VoiceDesign sample without registering a voice."""
+
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        if canonical_tts_model(
+            body.model, registered=frozenset({resolved.tts_model_id})
+        ) is None:
+            return error_response(
+                400,
+                request_id,
+                "model_not_found",
+                f"Unknown TTS model: {body.model}",
+                param="model",
+            )
+        if tts_variant != "voice_design":
+            return error_response(
+                400,
+                request_id,
+                "voice_preview_unsupported",
+                "Voice previews require an active quality VoiceDesign TTS profile",
+            )
+        synthesizer = services.tts_synthesizer
+        if synthesizer is None or not services.tts_ready:
+            return error_response(
+                503,
+                request_id,
+                "backend_not_ready",
+                "SpeechRail TTS backend is not ready",
+                retryable=True,
+            )
+
+        synthesis = SpeechRequest(
+            text=body.input,
+            voice=DEFAULT_VOICE_ID,
+            output_format="pcm16",
+            speed=body.speed,
+            language=body.language,
+            instruction=body.instruction,
+            seed=body.seed,
+        )
+        pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
+        pcm = bytearray()
+        preview_t0 = _time.monotonic()
+        try:
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS, deadline=resolved.request_timeout_seconds
+            ):
+                async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
+                    pcm_counter.accept(len(chunk.audio))
+                    pcm.extend(chunk.audio)
+        except TTSDeliveryError as exc:
+            return error_response(
+                502,
+                request_id,
+                exc.code,
+                "TTS backend delivered an invalid audio stream",
+                retryable=True,
+            )
+        except GovernorQueueFullError:
+            return JSONResponse(
+                status_code=429,
+                content=error(
+                    message="Inference queue is full",
+                    error_type="server_error",
+                    code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except TimeoutError:
+            return error_response(
+                503, request_id, "backend_timeout", "Inference timed out", retryable=True
+            )
+        except OverflowError:
+            return error_response(
+                502,
+                request_id,
+                "audio_encode_failed",
+                "Failed to encode the synthesized audio",
+                retryable=True,
+            )
+        except (RuntimeError, ValueError):
+            return error_response(
+                502,
+                request_id,
+                "backend_error",
+                "TTS backend failed to generate the preview",
+                retryable=True,
+            )
+
+        if not pcm:
+            return error_response(
+                502,
+                request_id,
+                "audio_encode_failed",
+                "Failed to encode the synthesized audio",
+                retryable=True,
+            )
+        audio_duration_sec = len(pcm) / 2 / resolved.tts_sample_rate
+        services.metrics.record_tts(
+            voice=DEFAULT_VOICE_ID,
+            char_count=len(body.input),
+            audio_duration_sec=audio_duration_sec,
+            inference_duration_sec=_time.monotonic() - preview_t0,
+        )
+        try:
+            if body.response_format == "pcm":
+                content = bytes(pcm)
+                media_type = "audio/x-pcm"
+            elif body.response_format == "wav":
+                content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
+                media_type = "audio/wav"
+            else:
+                content = await _encode_container(
+                    bytes(pcm),
+                    sample_rate=resolved.tts_sample_rate,
+                    response_format=body.response_format,
+                    ffmpeg_path=resolved.ffmpeg_path,
+                )
+                media_type = _TTS_CONTAINER_ENCODERS[body.response_format][0]
+        except (OverflowError, ValueError):
+            return error_response(
+                502,
+                request_id,
+                "audio_encode_failed",
+                "Failed to encode the synthesized audio",
+                retryable=True,
+            )
+        return Response(content=content, media_type=media_type)
+
     @router.post("/v1/audio/speech")
     async def speech(request: Request, body: _SpeechHTTPBody) -> Response:
         request_id = request.state.request_id
@@ -1087,6 +1256,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
+            except RuntimeError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    502,
+                    request_id,
+                    "backend_error",
+                    "TTS backend failed to synthesize audio",
+                    retryable=True,
+                )
             except OverflowError:
                 await _close_audio_stream(pcm_stream)
                 return error_response(
@@ -1169,6 +1347,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
+            except RuntimeError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    502,
+                    request_id,
+                    "backend_error",
+                    "TTS backend failed to synthesize audio",
+                    retryable=True,
+                )
             except (OverflowError, ValueError):
                 await _close_audio_stream(encoded_stream)
                 return error_response(
@@ -1234,6 +1421,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         except TimeoutError:
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
+            )
+        except RuntimeError:
+            return error_response(
+                502,
+                request_id,
+                "backend_error",
+                "TTS backend failed to synthesize audio",
+                retryable=True,
             )
         except OverflowError:
             return error_response(

@@ -97,6 +97,11 @@ def test_managed_profile_publishes_active_model_identity(
         "family": tts.family,
         "variant": tts.variant,
         "quantization": tts.quantization.model_dump(mode="json"),
+        "capabilities": {
+            "supports_preview": tts.variant == "voice_design",
+            "supports_clone": tts.variant == "voice_design",
+            "supports_instruction": tts.variant == "voice_design",
+        },
     }
 
 

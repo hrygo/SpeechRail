@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.6.9"
-date: 2026-09-05
+version: "1.7.0"
+date: 2026-09-06
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -24,6 +24,9 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 > 💡 **模型规格自适应**：Canonical 模型 ID 标识服务后端能力契约，底层可通过 `SPEECHRAIL_QWEN3_MODEL_DIR` 自由加载 **Qwen3-ASR-1.7B** 或 **Qwen3-ASR-0.6B**（显存占用更低、适用于 8GB 内存设备），对外均遵循相同的 OpenAI 协议。
 
 客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系。
+TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 与
+`supports_instruction`；`voice_design`（quality）为 `true`，`custom_voice`
+（balanced/light）为 `false`。这些字段描述当前权重能力，不能由客户端自行推断。
 
 ---
 
@@ -40,6 +43,7 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
+| `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写、合成与说话人分割 |
 
@@ -93,6 +97,9 @@ Content-Type: application/json
 
 `mp3`、`opus`、`aac`、`flac` 的容器编码具有 15 秒超时和 128 MiB 输出上限。
 编码超限、超时或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
+
+标准接口要求 `voice`，请求中的复数 `instructions` 字段为 OpenAI SDK 兼容保留字段，当前
+不会改变已选音色。自然语言音色设计试听使用下方独立的 `/v1/voices/previews` 扩展。
 
 ### 预设音色库 (Preset Voices)
 
@@ -201,6 +208,29 @@ Authorization: Bearer <TOKEN>
 创建成功后，自建音色的 `id` 可直接传入任何合成接口：
 - **REST 试听/合成**：`POST /v1/audio/speech` 中 `{"model": "speechrail/qwen3-tts", "voice": "custom_xxx", "input": "..."}`
 - **Realtime 流式会话**：`WS /v1/realtime` 中通过 `session.update` 配置 `{"session": {"voice": "custom_xxx"}}`。
+
+### 5.6 不落盘的自然语言音色试听 (`POST /v1/voices/previews`)
+
+该接口只在 `quality` / `voice_design` 档位可用，用于声音工坊在用户保存 VoiceProfile 前试听
+一个自然语言音色配方。请求期间的 instruction 和 seed 通过内部类型化 TTS 请求传入 worker；接口
+不会创建 VoiceProfile、写入 `custom_voices.json` 或保存音频文件。
+
+```json
+{
+  "model": "tts-1",
+  "input": "你好，这是声音设计试听。",
+  "instruction": "温暖自然的中文女声，吐字清晰。",
+  "seed": 12345,
+  "speed": 1.0,
+  "language": "zh",
+  "response_format": "wav"
+}
+```
+
+`instruction` 最长 10000 字符，`input` 最长 4096 字符，`seed` 范围为 `0`–`4294967295`。
+支持 `mp3`、`opus`、`aac`、`flac`、`wav` 和 `pcm`；预览接口先在内存中完成生成与编码，
+因此后端或编码失败时仍能返回统一错误 envelope。`balanced` 和 `light` 返回
+`400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
 
 ---
 

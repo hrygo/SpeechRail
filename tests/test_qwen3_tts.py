@@ -170,6 +170,30 @@ def test_tts_worker_normalizes_private_audio_frames_to_public_chunks(tmp_path: P
     assert fake.abort_count == 0
 
 
+def test_tts_worker_packs_ephemeral_preview_parameters(tmp_path: Path) -> None:
+    worker, fake = _worker(
+        tmp_path,
+        [_chunk_frame("pending", 0, b"\x00\x00"), {"type": "completed", "request_id": "pending"}],
+    )
+    worker.model_variant = "voice_design"
+
+    async def collect() -> list[Any]:
+        request = SpeechRequest(
+            text="试听这一句。",
+            voice="serena",
+            instruction="温暖自然的中文女声。",
+            seed=12345,
+        )
+        return [chunk async for chunk in worker.synthesize(request)]
+
+    chunks = asyncio.run(collect())
+
+    assert chunks
+    request = fake.sends[0]
+    assert request["instruction"] == "温暖自然的中文女声。"
+    assert request["seed"] == 12345
+
+
 def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path: Path) -> None:
     snapshot = tmp_path.parent / "external-qwen3-tts-start"
     snapshot.mkdir()

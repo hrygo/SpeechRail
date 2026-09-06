@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
@@ -38,6 +38,12 @@ class SpeechRequest(BaseModel):
     sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
+    instruction: str | None = Field(
+        default=None,
+        max_length=10_000,
+        description="Ephemeral VoiceDesign instruction; never persisted by the TTS port.",
+    )
+    seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
 
 
 class AudioChunk(BaseModel):

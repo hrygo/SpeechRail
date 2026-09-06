@@ -65,6 +65,13 @@ def _model_entry(
                 "quantization": artifact.quantization.model_dump(mode="json"),
             }
         )
+        if artifact.family == "qwen3_tts":
+            supports_voice_design = artifact.variant == "voice_design"
+            entry["capabilities"] = {
+                "supports_preview": supports_voice_design,
+                "supports_clone": supports_voice_design,
+                "supports_instruction": supports_voice_design,
+            }
     return entry
 
 
@@ -183,6 +190,14 @@ def create_system_router(services: AppServices) -> APIRouter:
                     "owned_by": "speechrail",
                     "created": 0,
                     "resolves_to": target,
+                    "capabilities": {
+                        "supports_preview": active.tts is not None
+                        and active.tts.variant == "voice_design",
+                        "supports_clone": active.tts is not None
+                        and active.tts.variant == "voice_design",
+                        "supports_instruction": active.tts is not None
+                        and active.tts.variant == "voice_design",
+                    },
                 }
             )
         for compat in resolved.compatibility_model_ids:

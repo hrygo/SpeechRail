@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 `POST /v1/voices/previews`，为 `quality` / `voice_design` 档提供不创建 VoiceProfile 的自然语言音色试听；`/v1/models` 同步公开 `supports_preview`、`supports_clone` 与 `supports_instruction`。
+
+### Changed
+
+- 标准 `POST /v1/audio/speech` 保持 `voice` 必填和 OpenAI `instructions` 兼容语义，声音设计 instruction 改由独立预览契约通过类型化 worker 请求传递。
+
 ## [1.8.1] - 2026-09-06
 
 ### Changed

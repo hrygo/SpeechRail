@@ -281,6 +281,65 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '413':
           $ref: '#/components/responses/AudioTooLarge'
+  /v1/voices/previews:
+    post:
+      operationId: createVoicePreview
+      tags: [speech]
+      summary: Generate an ephemeral VoiceDesign preview
+      description: |
+        Generates a short-lived audio preview from a natural-language voice
+        instruction. The request does not create or persist a VoiceProfile or
+        reference audio. This endpoint is available only when the active TTS
+        artifact has variant=voice_design (the quality profile).
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoicePreviewRequest'
+      responses:
+        '200':
+          description: Ephemeral synthesized audio
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/opus:
+              schema:
+                type: string
+                format: binary
+            audio/aac:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/x-pcm:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '502':
+          $ref: '#/components/responses/BackendDeliveryInvalid'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
   /v1/voices/{voice_id}:
     delete:
       operationId: deleteVoice
@@ -539,6 +598,21 @@ components:
           enum: [asr, voice_design, custom_voice]
         quantization:
           $ref: '#/components/schemas/Quantization'
+        capabilities:
+          $ref: '#/components/schemas/ModelCapabilities'
+    ModelCapabilities:
+      type: object
+      required: [supports_preview, supports_clone, supports_instruction]
+      properties:
+        supports_preview:
+          type: boolean
+          description: Whether ephemeral natural-language VoiceDesign previews are supported.
+        supports_clone:
+          type: boolean
+          description: Whether reference-audio voice cloning is supported.
+        supports_instruction:
+          type: boolean
+          description: Whether natural-language voice instructions are supported by the model.
     Quantization:
       type: object
       required: [bits, group_size, format]
@@ -815,6 +889,45 @@ components:
           type: string
           enum: [audio]
           description: Only audio is accepted; other values are rejected with stream_format_unsupported.
+    VoicePreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [model, input, instruction]
+      properties:
+        model:
+          type: string
+          enum: [speechrail/qwen3-tts, tts-1, tts-1-hd, gpt-4o-mini-tts]
+          description: Canonical TTS model or an OpenAI-compatible alias.
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Text to synthesize for the preview.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Natural-language description of the desired voice.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional request-local seed for reproducible previews.
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: auto
+        response_format:
+          type: string
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: wav
+          description: Audio container or raw 24kHz signed 16-bit mono PCM.
     JobCreateRequest:
       type: object
       additionalProperties: false

@@ -299,6 +299,58 @@ class FakeIclMlxModel:
         yield FakeIclGenerationResult()
 
 
+class FakePreviewMlxModel:
+    config = SimpleNamespace(tts_model_type="voice_design")
+
+    def __init__(self) -> None:
+        self.generate_calls: list[dict[str, object]] = []
+
+    def generate(self, **kwargs: object):
+        self.generate_calls.append(kwargs)
+        yield FakeIclGenerationResult()
+
+
+def test_mlx_voice_design_engine_accepts_ephemeral_preview_instruction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakePreviewMlxModel()
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("p" * 64),
+        ),
+    )
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        sample_rate=24_000,
+        load_fn=lambda _: model,
+        numpy_module=np,
+        warmup=False,
+    )
+
+    chunks = list(
+        engine.synthesize(
+            "试听这一句。",
+            voice="serena",
+            speed=1.0,
+            language="zh",
+            instruction="温暖自然的中文女声。",
+            seed=12345,
+        )
+    )
+
+    assert chunks
+    assert len(model.generate_calls) == 1
+    call = model.generate_calls[0]
+    assert call["instruct"] == "温暖自然的中文女声。"
+    assert "voice" not in call
+
+
 def test_mlx_voice_design_engine_routes_icl_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
