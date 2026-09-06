@@ -18,6 +18,11 @@
   <a href="README.md">English</a> | <strong>简体中文</strong>
 </p>
 
+<p align="center">
+  🤝 <strong>为 <a href="https://github.com/hrygo/sona">Sona</a> 打造</strong><br>
+  <em>为 Sona 提供私有、本地、实时 ASR/TTS 与多人讲话人分离能力。</em>
+</p>
+
 ---
 
 ## 💡 为什么需要 SpeechRail？

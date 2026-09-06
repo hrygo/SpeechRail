@@ -18,6 +18,11 @@
   <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
 </p>
 
+<p align="center">
+  🤝 <strong>Built for <a href="https://github.com/hrygo/sona">Sona</a></strong><br>
+  <em>Private, local, real-time ASR/TTS and speaker diarization for Sona.</em>
+</p>
+
 ---
 
 ## 💡 Why SpeechRail?
