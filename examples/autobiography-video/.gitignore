@@ -1,0 +1,5 @@
+build/
+*.npy
+*.mp4
+*.jpg
+!cover_art.jpg
