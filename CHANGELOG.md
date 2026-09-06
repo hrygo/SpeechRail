@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-06
+
 ### Added
 
 - 新增 `POST /v1/voices/previews`，为 `quality` / `voice_design` 档提供不创建 VoiceProfile 的自然语言音色试听；`/v1/models` 同步公开 `supports_preview`、`supports_clone` 与 `supports_instruction`。
