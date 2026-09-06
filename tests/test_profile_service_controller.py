@@ -172,3 +172,56 @@ def test_controller_force_kills_exact_service_group_after_graceful_timeout(monke
     assert manager.calls == ["status", "disable"]
     assert killed == [4242]
     assert delays == [0.25, 0.25]
+
+
+def test_controller_recovers_a_validated_owner_when_launchd_status_is_unavailable(
+    monkeypatch,
+) -> None:
+    class StalledPortLock:
+        killed = False
+
+        def __init__(self, port: int) -> None:
+            assert port == 8201
+
+        def __enter__(self):
+            if not type(self).killed:
+                raise profile_switch.ServerInstanceError("server_already_running")
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(profile_switch, "ServerInstanceLock", StalledPortLock)
+    manager = FakeManager(loaded=False)
+    now = 0.0
+    delays: list[float] = []
+    killed: list[int] = []
+
+    def clock() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        delays.append(delay)
+        now += delay
+
+    def kill(pid: int) -> None:
+        killed.append(pid)
+        StalledPortLock.killed = True
+
+    controller = LaunchAgentServiceController(
+        manager,
+        port=8201,
+        sleeper=sleep,
+        clock=clock,
+        graceful_stop_timeout_seconds=0.5,
+        force_kill_timeout_seconds=0.5,
+        process_killer=kill,
+        owner_pid_resolver=lambda port: 4242,
+    )
+
+    controller.stop()
+
+    assert manager.calls == ["status"]
+    assert killed == [4242]
+    assert delays == [0.25, 0.25]

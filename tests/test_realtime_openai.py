@@ -83,13 +83,20 @@ class FakeStreamingSession:
         segments: tuple[object, ...] = (),
         partials: tuple[str, ...] = (),
         flush_partials: tuple[str, ...] = (),
+        completed_text: str = "你好",
+        emit_text_on_flush: str | None = None,
     ) -> None:
         self.language = language
         self.prompt = prompt
         self.segments = segments
         self.partials = partials
         self.flush_partials = list(flush_partials)
+        self.completed_text = completed_text
+        self.emit_text_on_flush = emit_text_on_flush
         self.flushes = 0
+        self.appends = 0
+        self.commits = 0
+        self.closes = 0
         self.received: list[bytes] = []
         self.want_segments = False
         self.events_queue: asyncio.Queue[StreamingAsrEvent | None] = asyncio.Queue()
@@ -99,6 +106,7 @@ class FakeStreamingSession:
         return None
 
     async def append_audio(self, audio: bytes) -> None:
+        self.appends += 1
         self.received.append(audio)
 
     async def flush(self) -> None:
@@ -106,14 +114,19 @@ class FakeStreamingSession:
         if self.flush_partials:
             text = self.flush_partials.pop(0)
             await self.events_queue.put(StreamingAsrEvent(kind="partial", text=text))
+        elif self.emit_text_on_flush is not None:
+            await self.events_queue.put(
+                StreamingAsrEvent(kind="partial", text=self.emit_text_on_flush)
+            )
 
     async def commit(self, want_segments: bool = False) -> None:
+        self.commits += 1
         self.want_segments = want_segments
         for partial in self.partials:
             await self.events_queue.put(StreamingAsrEvent(kind="partial", text=partial))
         await self.events_queue.put(
             StreamingAsrEvent(
-                kind="completed", text="你好", language="zh", segments=self.segments
+                kind="completed", text=self.completed_text, language="zh", segments=self.segments
             )
         )
         await self.events_queue.put(None)
@@ -127,6 +140,7 @@ class FakeStreamingSession:
         return iterator()
 
     async def close(self) -> None:
+        self.closes += 1
         return None
 
 
@@ -137,23 +151,31 @@ class FakeStreamingFactory:
         segments: tuple[object, ...] = (),
         partials: tuple[str, ...] = (),
         flush_partials: tuple[str, ...] = (),
+        completed_text: str = "你好",
+        emit_text_on_flush: str | None = None,
     ) -> None:
         self.segments = segments
         self.partials = partials
         self.flush_partials = flush_partials
+        self.completed_text = completed_text
+        self.emit_text_on_flush = emit_text_on_flush
         self.sessions: list[FakeStreamingSession] = []
         self.released: list[RealtimeAsrSession] = []
+        self.creates = 0
 
     def session_class(self) -> type[FakeStreamingSession]:
         return FakeStreamingSession
 
     def create(self, *, language: str | None, prompt: str) -> FakeStreamingSession:
+        self.creates += 1
         session = self.session_class()(
             language=language,
             prompt=prompt,
             segments=self.segments,
             partials=self.partials,
             flush_partials=self.flush_partials,
+            completed_text=self.completed_text,
+            emit_text_on_flush=self.emit_text_on_flush,
         )
         self.sessions.append(session)
         return session
@@ -244,6 +266,8 @@ def _client(
     segments: tuple[object, ...] = (),
     partials: tuple[str, ...] = (),
     flush_partials: tuple[str, ...] = (),
+    completed_text: str = "你好",
+    emit_text_on_flush: str | None = None,
     diarization_engine=None,
     tts_synthesizer=None,
     api_key: str | None = None,
@@ -251,7 +275,11 @@ def _client(
     settings_kwargs: dict[str, Any] | None = None,
 ) -> tuple[TestClient, FakeStreamingFactory]:
     streaming_factory = factory or FakeStreamingFactory(
-        segments=segments, partials=partials, flush_partials=flush_partials
+        segments=segments,
+        partials=partials,
+        flush_partials=flush_partials,
+        completed_text=completed_text,
+        emit_text_on_flush=emit_text_on_flush,
     )
     overrides: dict[str, Any] = {
         "qwen3_model_dir": None,
@@ -1840,3 +1868,135 @@ def test_openai_client_event_queue_overflow_closes_session() -> None:
     threading.Thread(target=scenario, daemon=True).start()
     assert done.wait(10.0), "session never closed after client event queue overflow"
     assert outcome.get("ok") is True, outcome
+
+
+def test_server_vad_silence_never_emits_text_before_commit() -> None:
+    """R0/R2: Pure silence under server_vad must never trigger ASR text before commit."""
+    client, factory = _client(
+        emit_text_on_flush="嗯",
+        settings_kwargs={
+            "qwen3_streaming_chunk_sec": 1.0,
+            "realtime_speech_admission_enabled": True,
+        },
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.receive_json()  # conversation.created
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 400,
+                    }
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+
+        # 1.0s chunk_sec = 32000 bytes. Send 40,000 bytes of zero PCM
+        silence_chunk = b"\x00\x00" * 320  # 640 bytes (20ms)
+        for _ in range(65):  # 41,600 bytes > 32,000 bytes flush threshold
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(silence_chunk)}
+            )
+
+        socket.send_json({"type": "input_audio_buffer.commit"})
+
+        received_types: list[str] = []
+        while True:
+            ev = socket.receive_json()
+            received_types.append(ev["type"])
+            if ev["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+        # Under speech admission, silence never flushes ASR or emits deltas
+        assert "conversation.item.input_audio_transcription.delta" not in received_types
+        # ASR session should not have any appended speech frames
+        if factory.sessions:
+            assert factory.sessions[0].appends == 0
+            assert factory.sessions[0].flushes == 0
+
+
+def test_server_vad_silence_rollover_has_no_text() -> None:
+    """R0/R2: Silence exceeding buffer threshold must not emit non-empty transcripts."""
+    client, factory = _client(
+        completed_text="嗯",
+        settings_kwargs={
+            "max_realtime_buffer_bytes": 4000,
+            "realtime_speech_admission_enabled": True,
+        },
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 400,
+                    }
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+
+        # Send 6000 bytes of silence
+        silence_chunk = b"\x00\x00" * 500  # 1000 bytes
+        for _ in range(6):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(silence_chunk)}
+            )
+
+        socket.send_json({"type": "input_audio_buffer.commit"})
+
+        events = [socket.receive_json() for _ in range(3)]
+        assert events[0]["type"] == "input_audio_buffer.committed"
+        assert events[1]["type"] == "conversation.item.created"
+        assert events[2]["type"] == "conversation.item.input_audio_transcription.completed"
+        # Completed text must be empty for silence!
+        assert events[2]["transcript"] == ""
+
+
+def test_server_vad_silence_explicit_commit_closes_empty() -> None:
+    """R0/R2: Explicit commit on silence closes with committed first, then empty completed."""
+    client, factory = _client(
+        completed_text="嗯",
+        settings_kwargs={"realtime_speech_admission_enabled": True},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 400,
+                    }
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 500)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+
+        events = [socket.receive_json() for _ in range(3)]
+        assert events[0]["type"] == "input_audio_buffer.committed"
+        assert events[1]["type"] == "conversation.item.created"
+        assert events[2]["type"] == "conversation.item.input_audio_transcription.completed"
+        assert events[2]["transcript"] == ""
+

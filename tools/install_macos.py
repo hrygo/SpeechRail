@@ -32,6 +32,8 @@ RuntimeLock: Any = None
 RuntimeCurrentSnapshot: Any = None
 RuntimePaths: Any = None
 ServiceLayout: Any = None
+ServerInstanceError: Any = None
+ServerInstanceLock: Any = None
 ProfileStore: Any = None
 load_catalog: Any = None
 load_runtime_lock: Any = None
@@ -398,6 +400,47 @@ def _same_selection(
     return all(current.get(key) == value for key, value in candidate.items() if key != "generation")
 
 
+def _configured_service_port(layout: InstallLayout | ServiceLayout, env_file: Path | None) -> int:
+    """Read the local service port without loading a runtime or exposing secrets."""
+    source = layout.config_file if layout.config_file.is_file() else env_file
+    if source is None:
+        return 8201
+    try:
+        lines = source.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise InstallerError("service configuration cannot be read") from exc
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        if key.strip() != "SPEECHRAIL_PORT":
+            continue
+        try:
+            port = int(value.strip())
+        except ValueError as exc:
+            raise InstallerError("service port is invalid") from exc
+        if not 1 <= port <= 65_535:
+            raise InstallerError("service port is invalid")
+        return port
+    return 8201
+
+
+def _assert_service_port_free(port: int, directory: Path | None) -> None:
+    """Refuse to replace managed pointers while a server owns the port."""
+    if ServerInstanceLock is None or ServerInstanceError is None:
+        raise InstallerError("managed install service lock is unavailable")
+    try:
+        with ServerInstanceLock(port, directory=directory):
+            pass
+    except ServerInstanceError as exc:
+        raise InstallerError(
+            "managed installation requires the SpeechRail service to be stopped"
+        ) from exc
+    except OSError as exc:
+        raise InstallerError("managed installation could not verify the service lock") from exc
+
+
 def _stage_managed_wheel(
     wheel: Path,
     layout: InstallLayout | ServiceLayout,
@@ -445,6 +488,7 @@ def _stage_managed_wheel(
 def _load_managed_dependencies() -> type[Any]:
     """Load package code lazily for managed installs and return RuntimePaths."""
     global ModelCatalog, ProfileStore, RuntimeCurrentSnapshot, RuntimeLock, RuntimePaths
+    global ServerInstanceError, ServerInstanceLock
     global ServiceLayout
     global load_catalog, load_runtime_lock, prepare_models, prepare_runtime, recover_selection
     global restore_runtime_current, snapshot_runtime_current
@@ -478,6 +522,10 @@ def _load_managed_dependencies() -> type[Any]:
         from speechrail.service.profile_store import (
             recover_selection as selection_loader,
         )
+        from speechrail.runtime.server_lock import (
+            ServerInstanceError as ServerInstanceErrorType,
+        )
+        from speechrail.runtime.server_lock import ServerInstanceLock as ServerInstanceLockType
     except ImportError as exc:
         raise InstallerError("managed install requires the SpeechRail package") from exc
     if ModelCatalog is None:
@@ -492,6 +540,10 @@ def _load_managed_dependencies() -> type[Any]:
         ServiceLayout = LayoutType
     if ProfileStore is None:
         ProfileStore = ProfileStoreType
+    if ServerInstanceError is None:
+        ServerInstanceError = ServerInstanceErrorType
+    if ServerInstanceLock is None:
+        ServerInstanceLock = ServerInstanceLockType
     if load_catalog is None:
         load_catalog = catalog_loader
     if load_runtime_lock is None:
@@ -547,6 +599,7 @@ def install_managed(
     catalog: ModelCatalog | None = None,
     runtime_lock: RuntimeLock | None = None,
     env_file: Path | None = None,
+    server_lock_directory: Path | None = None,
 ) -> InstallResult:
     """Install one catalog preset with a shared, lock-keyed vendor runtime."""
     if not wheel.is_file() or wheel.suffix != ".whl":
@@ -572,6 +625,8 @@ def install_managed(
         and layout.config_file.absolute() != env_file.absolute()
     ):
         raise InstallerError("configuration already exists and will not be overwritten")
+    service_port = _configured_service_port(layout, env_file)
+    _assert_service_port_free(service_port, server_lock_directory)
     current_selection = recover_selection(layout.app_home)
     candidate = _selection_candidate(
         selected_catalog,
@@ -645,6 +700,11 @@ def install_managed(
         )
         if not preflight.ok:
             raise InstallerError("preflight failed; service was not enabled")
+
+        # Preparation can take minutes. Recheck immediately before changing
+        # runtime/current so a service started during preparation cannot be
+        # mistaken for a safe cutover.
+        _assert_service_port_free(service_port, server_lock_directory)
 
         already_current = (
             layout.current_runtime.is_symlink()

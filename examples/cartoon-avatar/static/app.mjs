@@ -1,7 +1,13 @@
-import { createAvatarController, speechLevel } from "./avatar.mjs";
+import {
+  AVATAR_PROFILES,
+  createAvatarController,
+  getAvatarProfile,
+  renderAvatarProfile,
+  speechLevel,
+} from "./avatar.mjs";
 import { createPlayer } from "./player.mjs";
 
-const MAX_INPUT_LENGTH = 600;
+export const MAX_INPUT_LENGTH = 600;
 const SAFE_CODE = /^[a-z][a-z0-9_.-]{0,63}$/;
 const FRIENDLY_MESSAGES = Object.freeze({
   audio_unavailable: "浏览器暂停了音频，请再次点击播报。",
@@ -21,6 +27,34 @@ const FRIENDLY_MESSAGES = Object.freeze({
   voice_not_available: "所选音色当前不可用，请刷新音色后再试。",
   request_failed: "语音请求失败，请检查 SpeechRail 后重试。",
 });
+
+export function chooseVoiceForProfile(
+  availableVoices,
+  profileId,
+  previousVoice = "",
+  { preservePrevious = true } = {},
+) {
+  const profile = getAvatarProfile(profileId);
+  const availableIds = new Set(
+    availableVoices
+      .filter((item) => item && typeof item.id === "string")
+      .map((item) => item.id),
+  );
+  const bindingAvailable = availableIds.has(profile.voiceId);
+  const voiceId = bindingAvailable
+    ? profile.voiceId
+    : preservePrevious && availableIds.has(previousVoice)
+      ? previousVoice
+      : "";
+  return { voiceId, boundVoiceId: profile.voiceId, bindingAvailable };
+}
+
+export function formatPlaybackTime(seconds) {
+  const safeSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+  const minutes = Math.floor(safeSeconds / 60);
+  const remaining = safeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+}
 
 function safeCode(value) {
   if (typeof value !== "string") {
@@ -125,6 +159,11 @@ function initializePage() {
   const speakButton = document.getElementById("speak");
   const stopButton = document.getElementById("stop");
   const refreshButton = document.getElementById("refresh-voices");
+  const character = document.getElementById("character");
+  const characterHelp = document.getElementById("character-help");
+  const transcript = document.getElementById("transcript");
+  const playbackProgress = document.getElementById("playback-progress");
+  const playbackTime = document.getElementById("playback-time");
   const status = document.getElementById("status");
   const count = document.getElementById("char-count");
   const voiceHelp = document.getElementById("voice-help");
@@ -136,6 +175,11 @@ function initializePage() {
     !(speakButton instanceof HTMLButtonElement) ||
     !(stopButton instanceof HTMLButtonElement) ||
     !(refreshButton instanceof HTMLButtonElement) ||
+    !(character instanceof HTMLSelectElement) ||
+    !(characterHelp instanceof HTMLElement) ||
+    !(transcript instanceof HTMLElement) ||
+    !(playbackProgress instanceof HTMLProgressElement) ||
+    !(playbackTime instanceof HTMLOutputElement) ||
     !(status instanceof HTMLElement) ||
     !(count instanceof HTMLOutputElement) ||
     !(voiceHelp instanceof HTMLElement) ||
@@ -148,6 +192,8 @@ function initializePage() {
     directory: "loading",
     voices: [],
     selectedVoice: "",
+    profileId: AVATAR_PROFILES[0].id,
+    boundVoiceAvailable: true,
     playback: "idle",
     refreshing: false,
     voiceGeneration: 0,
@@ -157,6 +203,37 @@ function initializePage() {
     speechLevel: 0,
   };
   const avatarController = createAvatarController(avatar);
+  renderAvatarProfile(avatar, state.profileId);
+
+  function renderProfiles() {
+    character.replaceChildren();
+    for (const profile of AVATAR_PROFILES) {
+      const option = document.createElement("option");
+      option.value = profile.id;
+      option.textContent = profile.name;
+      character.append(option);
+    }
+    character.value = state.profileId;
+  }
+
+  function updateCharacterHelp() {
+    const profile = getAvatarProfile(state.profileId);
+    characterHelp.textContent = state.boundVoiceAvailable
+      ? `绑定音色：${profile.voiceId}。切换角色会同步选择它的期望音色。`
+      : `角色绑定音色 ${profile.voiceId} 当前不可用，请手动选择替代音色。`;
+  }
+
+  function setPlaybackProgress(elapsed, duration) {
+    const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+    const safeElapsed =
+      safeDuration > 0 && Number.isFinite(elapsed)
+        ? Math.max(0, Math.min(safeDuration, elapsed))
+        : 0;
+    const ratio = safeDuration > 0 ? safeElapsed / safeDuration : 0;
+    playbackProgress.value = ratio;
+    playbackProgress.setAttribute("aria-valuenow", String(ratio));
+    playbackTime.textContent = `${formatPlaybackTime(safeElapsed)} / ${formatPlaybackTime(safeDuration)}`;
+  }
 
   function setStatus(message, isError = false, requestId) {
     status.replaceChildren();
@@ -196,6 +273,7 @@ function initializePage() {
       textLength > MAX_INPUT_LENGTH ||
       !selectedVoiceIsAvailable;
     stopButton.disabled = !activePlayback;
+    character.disabled = state.refreshing || activePlayback;
     voice.disabled = state.directory !== "ready" || state.refreshing || activePlayback || !state.voices.length;
     refreshButton.disabled = state.refreshing || activePlayback;
   }
@@ -227,23 +305,39 @@ function initializePage() {
         state.speechLevel = speechLevel(samples, state.speechLevel, deltaMs);
         avatarController.setSpeechLevel(state.speechLevel);
       },
+      onProgress: setPlaybackProgress,
       scheduleFrame: (callback) => window.requestAnimationFrame(callback),
       cancelFrame: (frame) => window.cancelAnimationFrame(frame),
     });
   }
 
-  function renderVoices(availableVoices, previousSelection) {
+  function renderVoices(availableVoices, previousSelection, options = {}) {
     voice.replaceChildren();
+    const choice = chooseVoiceForProfile(
+      availableVoices,
+      state.profileId,
+      previousSelection,
+      options,
+    );
+    state.boundVoiceAvailable = choice.bindingAvailable;
+    if (!choice.voiceId) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = state.boundVoiceAvailable
+        ? "请选择音色"
+        : "角色绑定音色不可用，请选择替代音色";
+      option.disabled = true;
+      voice.append(option);
+    }
     for (const item of availableVoices) {
       const option = document.createElement("option");
       option.value = item.id;
       option.textContent = item.name;
       voice.append(option);
     }
-    const preserved = availableVoices.find((item) => item.id === previousSelection);
-    const defaultVoice = availableVoices.find((item) => item.is_default === true);
-    state.selectedVoice = preserved?.id ?? defaultVoice?.id ?? availableVoices[0]?.id ?? "";
+    state.selectedVoice = choice.voiceId;
     voice.value = state.selectedVoice;
+    updateCharacterHelp();
   }
 
   function normalizeVoiceList(payload) {
@@ -306,7 +400,11 @@ function initializePage() {
         setStatus("暂无可用音色，请检查 SpeechRail 后刷新。", true);
       } else {
         voiceHelp.textContent = "只显示当前 SpeechRail 权重实际可用的音色。";
-        setStatus(`已加载 ${availableVoices.length} 个可用音色。`);
+        if (state.boundVoiceAvailable) {
+          setStatus(`已加载 ${availableVoices.length} 个可用音色，当前角色已绑定。`);
+        } else {
+          setStatus("当前角色绑定音色不可用，请手动选择替代音色。", true);
+        }
       }
     } catch (error) {
       if (generation !== state.voiceGeneration || (error && error.name === "AbortError")) {
@@ -327,6 +425,26 @@ function initializePage() {
   }
 
   input.addEventListener("input", updateControls);
+  character.addEventListener("change", () => {
+    const previousSelection = voice.value;
+    state.profileId = character.value;
+    renderAvatarProfile(avatar, state.profileId);
+    if (state.directory === "ready") {
+      renderVoices(state.voices, previousSelection, { preservePrevious: false });
+    } else {
+      updateCharacterHelp();
+    }
+    const profile = getAvatarProfile(state.profileId);
+    avatarController.smile();
+    if (state.directory === "ready" && state.voices.length > 0) {
+      if (state.boundVoiceAvailable) {
+        setStatus(`已切换到${profile.name}，已选择绑定音色。`);
+      } else {
+        setStatus("该角色的绑定音色当前不可用，请手动选择替代音色。", true);
+      }
+    }
+    updateControls();
+  });
   voice.addEventListener("change", () => {
     state.selectedVoice = voice.value;
     updateControls();
@@ -345,6 +463,9 @@ function initializePage() {
       updateControls();
       return;
     }
+    transcript.textContent = inputSnapshot;
+    transcript.classList.remove("is-empty");
+    setPlaybackProgress(0, 0);
     void state.player.speak({ input: inputSnapshot, voice: voiceSnapshot });
   });
   stopButton.addEventListener("click", () => {
@@ -361,6 +482,7 @@ function initializePage() {
     state.voiceAbortController?.abort();
     state.voiceAbortController = null;
     void state.player?.dispose();
+    avatarController.dispose();
   });
   window.addEventListener("pageshow", () => {
     if (!state.pageHidden) {
@@ -368,11 +490,15 @@ function initializePage() {
     }
     state.pageHidden = false;
     state.player = makePlayer();
+    avatarController.welcome();
     setStatus("页面已恢复，请再次点击播报。");
     updateControls();
   });
 
   state.player = makePlayer();
+  renderProfiles();
+  avatarController.welcome();
+  setPlaybackProgress(0, 0);
   updateControls();
   void loadVoices();
   return { loadVoices, state };

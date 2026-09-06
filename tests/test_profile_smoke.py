@@ -34,20 +34,55 @@ def _prepared() -> PreparedModelSet:
     )
 
 
+def _health_payload(
+    *,
+    profile: str = "light",
+    asr_ready: bool = True,
+    tts_ready: bool = True,
+) -> dict[str, object]:
+    return {
+        "status": "ok",
+        "profile": profile,
+        "asr_ready": asr_ready,
+        "tts_ready": tts_ready,
+        "ready": asr_ready or tts_ready,
+    }
+
+
+def _models_payload(prepared: PreparedModelSet) -> dict[str, object]:
+    return {
+        "data": [
+            {
+                "id": "asr-model",
+                "profile": prepared.preset,
+                "artifact": prepared.asr.key,
+                "variant": prepared.asr.variant,
+                "quantization": dict(prepared.asr.quantization),
+            },
+            {
+                "id": "tts-model",
+                "profile": prepared.preset,
+                "artifact": prepared.tts.key,
+                "variant": prepared.tts.variant,
+                "quantization": dict(prepared.tts.quantization),
+            },
+            {"id": "whisper-1"},
+            {"id": "tts-1"},
+        ]
+    }
+
+
 def test_probe_uses_public_tts_then_transcription_with_stable_aliases() -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.url.path == "/health":
-            return httpx.Response(200, json={"status": "ok"})
+            return httpx.Response(200, json=_health_payload())
         if request.url.path == "/readyz":
             return httpx.Response(200, json={"ready": True})
         if request.url.path == "/v1/models":
-            return httpx.Response(
-                200,
-                json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]},
-            )
+            return httpx.Response(200, json=_models_payload(_prepared()))
         if request.url.path == "/v1/voices":
             return httpx.Response(
                 200,
@@ -99,7 +134,7 @@ def test_probe_retries_readiness_without_repeating_inference() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal ready_calls
         if request.url.path == "/health":
-            return httpx.Response(200, json={"status": "ok"})
+            return httpx.Response(200, json=_health_payload())
         if request.url.path == "/readyz":
             ready_calls += 1
             return httpx.Response(
@@ -107,7 +142,7 @@ def test_probe_retries_readiness_without_repeating_inference() -> None:
                 json={"ready": ready_calls == 2},
             )
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
+            return httpx.Response(200, json=_models_payload(_prepared()))
         if request.url.path == "/v1/voices":
             return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
         if request.url.path == "/v1/audio/speech":
@@ -148,6 +183,8 @@ def test_probe_rejects_ready_service_for_a_different_profile() -> None:
                 json={
                     "status": "ok",
                     "profile": "quality",
+                    "asr_ready": True,
+                    "tts_ready": True,
                     "ready": True,
                 },
             )
@@ -163,6 +200,62 @@ def test_probe_rejects_ready_service_for_a_different_profile() -> None:
     assert requests == ["/health"]
 
 
+def test_probe_rejects_ready_service_without_profile_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok", "asr_ready": True, "tts_ready": True})
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"ready": True})
+        raise AssertionError("missing profile identity must stop before public inference")
+
+    with httpx.Client(
+        base_url="http://127.0.0.1:8201", transport=httpx.MockTransport(handler)
+    ) as client, pytest.raises(SmokeProbeError, match="profile identity"):
+        PublicApiSmokeProbe(client=client).run(_prepared())
+
+
+def test_probe_rejects_public_catalog_for_a_different_prepared_artifact() -> None:
+    prepared = _prepared()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json=_health_payload())
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"ready": True})
+        if request.url.path == "/v1/models":
+            payload = _models_payload(prepared)
+            assert isinstance(payload["data"], list)
+            payload["data"][0]["artifact"] = "old-asr"
+            return httpx.Response(200, json=payload)
+        if request.url.path == "/v1/voices":
+            return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
+        raise AssertionError("artifact mismatch must stop before public inference")
+
+    with httpx.Client(
+        base_url="http://127.0.0.1:8201", transport=httpx.MockTransport(handler)
+    ) as client, pytest.raises(SmokeProbeError, match="prepared model identity"):
+        PublicApiSmokeProbe(client=client).run(prepared)
+
+
+def test_probe_rejects_readyz_when_required_tts_capability_is_not_ready() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json=_health_payload(tts_ready=False))
+        if request.url.path == "/readyz":
+            return httpx.Response(200, json={"ready": True})
+        raise AssertionError("incomplete capability readiness must stop before inference")
+
+    with httpx.Client(
+        base_url="http://127.0.0.1:8201", transport=httpx.MockTransport(handler)
+    ) as client, pytest.raises(SmokeProbeError, match="smoke deadline"):
+        PublicApiSmokeProbe(
+            client=client,
+            deadline_seconds=0.01,
+            poll_interval_seconds=0.001,
+            sleep=lambda _: None,
+        ).run(_prepared())
+
+
 def test_probe_retries_only_empty_asr_transcripts_with_fresh_tts_audio() -> None:
     tts_calls = 0
     asr_calls = 0
@@ -170,11 +263,11 @@ def test_probe_retries_only_empty_asr_transcripts_with_fresh_tts_audio() -> None
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal asr_calls, tts_calls
         if request.url.path == "/health":
-            return httpx.Response(200, json={"status": "ok"})
+            return httpx.Response(200, json=_health_payload())
         if request.url.path == "/readyz":
             return httpx.Response(200, json={"ready": True})
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
+            return httpx.Response(200, json=_models_payload(_prepared()))
         if request.url.path == "/v1/voices":
             return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
         if request.url.path == "/v1/audio/speech":
@@ -210,11 +303,11 @@ def test_probe_fails_closed_on_invalid_public_responses(failure: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal asr_calls, tts_calls
         if request.url.path == "/health":
-            return httpx.Response(200, json={"status": "ok"})
+            return httpx.Response(200, json=_health_payload())
         if request.url.path == "/readyz":
             return httpx.Response(200, json={"ready": True})
         if request.url.path == "/v1/models":
-            return httpx.Response(200, json={"data": [{"id": "whisper-1"}, {"id": "tts-1"}]})
+            return httpx.Response(200, json=_models_payload(_prepared()))
         if request.url.path == "/v1/voices":
             return httpx.Response(200, json={"data": [{"id": "serena", "available": True}]})
         if request.url.path == "/v1/audio/speech":

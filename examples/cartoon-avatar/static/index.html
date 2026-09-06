@@ -17,7 +17,7 @@
         <p class="eyebrow">SpeechRail 本地示例</p>
         <h1 id="avatar-heading">卡通数字人</h1>
         <p class="intro">
-          选择当前可用的 TTS 音色，让小小播报员把文字说出来。
+          选择一个角色和音色，让本地播报员把文字说出来。
         </p>
 
         <div class="avatar-stage">
@@ -25,20 +25,121 @@
             id="avatar"
             class="avatar-figure avatar-action-idle"
             data-action="idle"
+            data-profile="midnight"
+            data-hair="short"
+            data-clothes="blazer"
+            data-accessory="glasses"
+            data-voice-id="uncle_fu"
             role="img"
             aria-labelledby="avatar-title avatar-description"
           >
-            <span id="avatar-title" class="visually-hidden">戴眼镜、穿深色西装的卡通播报员</span>
+            <span id="avatar-title" class="visually-hidden">原创几何风格卡通播报员</span>
             <span id="avatar-description" class="visually-hidden">
-              一个来自自传视频封面图的半身人物，会随播报状态做轻微动作。
+              一个可以切换外观和音色的半身卡通角色，会随播报状态做轻微动作。
             </span>
-            <img
-              class="avatar-image"
-              src="/static/assets/autobiography-character.png"
-              alt=""
+            <svg
+              id="avatar-svg"
+              class="avatar-svg"
+              viewBox="0 0 360 500"
               aria-hidden="true"
-              draggable="false"
-            />
+              focusable="false"
+            >
+              <ellipse class="avatar-shadow" cx="180" cy="472" rx="112" ry="14" />
+              <g id="avatar-body" class="avatar-body">
+                <path
+                  class="avatar-shoulders"
+                  fill="var(--avatar-clothes)"
+                  d="M70 468c8-82 42-132 110-132s102 50 110 132z"
+                />
+                <path
+                  class="avatar-shirt"
+                  fill="var(--avatar-shirt)"
+                  d="M146 344h68l34 124h-136z"
+                />
+                <path
+                  id="avatar-collar-blazer"
+                  class="avatar-variant avatar-collar"
+                  fill="var(--avatar-clothes-accent)"
+                  d="M147 341l33 42 33-42 30 127h-36l-27-84-27 84h-36z"
+                />
+                <path
+                  id="avatar-collar-hoodie"
+                  class="avatar-variant avatar-collar"
+                  fill="var(--avatar-clothes-accent)"
+                  d="M128 347c15 28 37 42 52 42s37-14 52-42l25 121H103z"
+                />
+                <path
+                  id="avatar-collar-sweater"
+                  class="avatar-variant avatar-collar"
+                  fill="var(--avatar-clothes-accent)"
+                  d="M143 344c9 34 22 50 37 50s28-16 37-50l22 124h-118z"
+                />
+                <path
+                  class="avatar-clothes-line"
+                  fill="none"
+                  stroke="var(--avatar-accent)"
+                  stroke-linecap="round"
+                  stroke-width="6"
+                  d="M92 430h176"
+                />
+              </g>
+
+              <g id="avatar-head" class="avatar-head">
+                <ellipse class="avatar-ear" cx="88" cy="184" rx="18" ry="28" />
+                <ellipse class="avatar-ear" cx="272" cy="184" rx="18" ry="28" />
+                <ellipse class="avatar-face" cx="180" cy="182" rx="92" ry="108" />
+
+                <path
+                  id="avatar-hair-short"
+                  class="avatar-variant avatar-hair"
+                  fill="var(--avatar-hair)"
+                  d="M92 171c-8-80 31-126 89-126 61 0 94 46 87 129l-31-37c-18 18-47 31-83 31-26 0-46-5-62-15z"
+                />
+                <path
+                  id="avatar-hair-bob"
+                  class="avatar-variant avatar-hair"
+                  fill="var(--avatar-hair)"
+                  d="M86 204c-12-102 28-159 94-159 72 0 105 57 94 163l-32-25-13 62-24-46c-17 10-36 15-56 15-24 0-44-6-61-18z"
+                />
+                <path
+                  id="avatar-hair-wave"
+                  class="avatar-variant avatar-hair"
+                  fill="var(--avatar-hair)"
+                  d="M92 165c-7-82 35-120 91-120 63 0 91 42 86 121l-24-30c-5 28-19 39-36 42l-13-35c-23 29-55 42-93 37z"
+                />
+                <path
+                  class="avatar-hair-highlight"
+                  fill="none"
+                  stroke="var(--avatar-hair-highlight)"
+                  stroke-linecap="round"
+                  stroke-width="10"
+                  d="M117 88c18-26 39-37 66-38"
+                />
+
+                <g id="avatar-eyes" class="avatar-eyes">
+                  <circle class="avatar-eye" cx="145" cy="178" r="9" />
+                  <circle class="avatar-eye" cx="215" cy="178" r="9" />
+                  <circle class="avatar-eye-glint" cx="148" cy="175" r="3" />
+                  <circle class="avatar-eye-glint" cx="218" cy="175" r="3" />
+                </g>
+                <g id="avatar-glasses" class="avatar-variant avatar-glasses">
+                  <rect x="116" y="151" width="59" height="49" rx="16" />
+                  <rect x="185" y="151" width="59" height="49" rx="16" />
+                  <path d="M175 166h10M116 166l-13-8M244 166l13-8" />
+                </g>
+                <path class="avatar-nose" d="M180 184l-11 33h21" />
+                <ellipse id="mouth" class="avatar-mouth" cx="180" cy="238" rx="10" ry="2" />
+                <path id="smile-mouth" class="avatar-smile-mouth" d="M155 234c13 20 37 20 50 0" />
+                <path class="avatar-cheek avatar-cheek-left" d="M118 222h14" />
+                <path class="avatar-cheek avatar-cheek-right" d="M228 222h14" />
+                <path
+                  id="avatar-accessory-star"
+                  class="avatar-variant avatar-star"
+                  fill="var(--avatar-accessory)"
+                  d="M269 92l6 14 15 1-12 10 4 15-13-8-13 8 4-15-12-10 15-1z"
+                />
+              </g>
+            </svg>
           </div>
         </div>
       </section>
@@ -67,6 +168,16 @@
           </div>
 
           <div class="field-group">
+            <label for="character">角色预设</label>
+            <select id="character" name="character" aria-describedby="character-help">
+              <option value="">正在加载角色…</option>
+            </select>
+            <p id="character-help" class="field-help">
+              每个角色带有一个期望音色；切换角色不会静默替换你的手动选择。
+            </p>
+          </div>
+
+          <div class="field-group">
             <label for="voice">音色</label>
             <select id="voice" name="voice" disabled aria-describedby="voice-help">
               <option value="">正在加载音色…</option>
@@ -86,6 +197,24 @@
             刷新音色
           </button>
         </form>
+
+        <section class="transcript-panel" aria-labelledby="transcript-heading">
+          <div class="progress-heading">
+            <h3 id="transcript-heading">本次播报</h3>
+            <output id="playback-time" for="playback-progress">00:00 / 00:00</output>
+          </div>
+          <p id="transcript" class="transcript is-empty">播报后会在这里显示完整文本。</p>
+          <progress
+            id="playback-progress"
+            max="1"
+            value="0"
+            role="progressbar"
+            aria-label="播放进度"
+            aria-valuemin="0"
+            aria-valuemax="1"
+            aria-valuenow="0"
+          ></progress>
+        </section>
 
         <p id="status" class="status" role="status" aria-live="polite" aria-atomic="true">
           正在准备音色目录…

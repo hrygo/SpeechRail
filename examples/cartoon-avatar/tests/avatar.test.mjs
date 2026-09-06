@@ -3,13 +3,47 @@ import assert from "node:assert/strict";
 
 import {
   AVATAR_ACTIONS,
+  AVATAR_PROFILES,
   createAvatarController,
+  getAvatarProfile,
+  renderAvatarProfile,
   setAvatarAction,
   speechLevel,
 } from "../static/avatar.mjs";
 
 test("avatar action presets cover the common playback states", () => {
-  assert.deepEqual(AVATAR_ACTIONS, ["idle", "thinking", "speaking", "emphasis", "settle"]);
+  assert.deepEqual(AVATAR_ACTIONS, [
+    "idle",
+    "welcome",
+    "thinking",
+    "speaking",
+    "smile",
+    "emphasis",
+    "settle",
+  ]);
+});
+
+test("avatar profiles render their palette and visual variants without replacing the element", () => {
+  const styles = new Map();
+  const avatar = {
+    dataset: {},
+    style: {
+      setProperty(name, value) {
+        styles.set(name, value);
+      },
+    },
+  };
+  const profile = AVATAR_PROFILES[1];
+
+  assert.equal(renderAvatarProfile(avatar, profile.id), profile.id);
+  assert.equal(avatar.dataset.profile, profile.id);
+  assert.equal(avatar.dataset.hair, profile.hair);
+  assert.equal(avatar.dataset.clothes, profile.clothes);
+  assert.equal(avatar.dataset.accessory, profile.accessory);
+  assert.equal(styles.get("--avatar-accent"), profile.colors.accent);
+  assert.equal(styles.get("--avatar-clothes-accent"), profile.colors.clothesAccent);
+  assert.equal(styles.get("--avatar-hair-highlight"), profile.colors.hairHighlight);
+  assert.equal(getAvatarProfile("missing").id, AVATAR_PROFILES[0].id);
 });
 
 test("avatar controller maps playback states and clamps speech level", () => {
@@ -92,6 +126,47 @@ test("loud speaking samples trigger a bounded emphasis beat", () => {
 
   scheduled.at(-1)();
   assert.equal(controller.setSpeechLevel(0.9), "emphasis");
+});
+
+test("welcome and smile actions settle back to idle", () => {
+  const classes = new Set();
+  const avatar = {
+    classList: {
+      toggle(name, force) {
+        if (force) {
+          classes.add(name);
+        } else {
+          classes.delete(name);
+        }
+      },
+    },
+    dataset: {},
+    style: { setProperty() {} },
+  };
+  const scheduled = [];
+  const controller = createAvatarController(avatar, {
+    schedule: (callback) => {
+      scheduled.push(callback);
+      return scheduled.length - 1;
+    },
+    cancel: (handle) => {
+      scheduled[handle] = null;
+    },
+  });
+
+  assert.equal(controller.welcome(), "welcome");
+  assert.ok(classes.has("avatar-action-welcome"));
+  scheduled.at(-1)();
+  assert.equal(avatar.dataset.action, "settle");
+  scheduled.at(-1)();
+  assert.equal(avatar.dataset.action, "idle");
+
+  assert.equal(controller.smile(), "smile");
+  assert.ok(classes.has("avatar-action-smile"));
+  scheduled.at(-1)();
+  assert.equal(avatar.dataset.action, "settle");
+  scheduled.at(-1)();
+  assert.equal(avatar.dataset.action, "idle");
 });
 
 test("unknown avatar actions fall back to idle", () => {

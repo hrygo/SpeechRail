@@ -72,24 +72,28 @@ class PublicApiSmokeProbe:
                 pass
             else:
                 reported_profile = health_payload.get("profile")
-                if (
-                    isinstance(reported_profile, str)
-                    and reported_profile
-                    and reported_profile != prepared.preset
-                ):
+                if not isinstance(reported_profile, str) or not reported_profile:
+                    raise SmokeProbeError("public smoke profile identity is missing")
+                if reported_profile != prepared.preset:
                     raise SmokeProbeError(
                         "public smoke profile mismatch; "
                         f"expected {prepared.preset}, got {reported_profile}"
                     )
+                capabilities_ready = (
+                    health_payload.get("asr_ready") is True
+                    and health_payload.get("tts_ready") is True
+                )
                 try:
-                    ready = self._client.get("/readyz")
-                    ready_payload = self._json_mapping(ready)
+                    ready = self._client.get("/readyz") if capabilities_ready else None
+                    ready_payload = self._json_mapping(ready) if ready is not None else {}
                 except (httpx.HTTPError, SmokeProbeError):
                     pass
                 else:
                     if (
                         health.status_code == 200
                         and health_payload.get("status") == "ok"
+                        and capabilities_ready
+                        and ready is not None
                         and ready.status_code == 200
                         and ready_payload.get("ready") is True
                     ):
@@ -98,7 +102,7 @@ class PublicApiSmokeProbe:
                 raise SmokeProbeError("service did not become ready before the smoke deadline")
             self._sleep(self._poll_interval_seconds)
 
-    def _check_catalogs(self) -> None:
+    def _check_catalogs(self, prepared: PreparedModelSet) -> None:
         try:
             models = self._client.get("/v1/models")
             voices = self._client.get("/v1/voices")
@@ -108,15 +112,26 @@ class PublicApiSmokeProbe:
             raise SmokeProbeError("public catalogs are unavailable")
         model_data = self._json_mapping(models).get("data")
         voice_data = self._json_mapping(voices).get("data")
-        model_ids: set[str] = set()
-        if isinstance(model_data, list):
-            for item in model_data:
-                if isinstance(item, dict):
-                    model_id = item.get("id")
-                    if isinstance(model_id, str):
-                        model_ids.add(model_id)
+        model_entries = [item for item in model_data if isinstance(item, dict)] if isinstance(model_data, list) else []
+        model_ids = {
+            model_id
+            for item in model_entries
+            if isinstance(model_id := item.get("id"), str)
+        }
         if not isinstance(model_data, list) or not {"whisper-1", "tts-1"}.issubset(model_ids):
             raise SmokeProbeError("public model aliases are unavailable")
+        for artifact in (prepared.asr, prepared.tts):
+            if not any(
+                item.get("profile") == prepared.preset
+                and item.get("artifact") == artifact.key
+                and item.get("variant") == artifact.variant
+                and item.get("quantization") == dict(artifact.quantization)
+                for item in model_entries
+            ):
+                raise SmokeProbeError(
+                    "public prepared model identity is unavailable; "
+                    f"expected {artifact.key}"
+                )
         if not isinstance(voice_data, list) or not any(
             isinstance(item, dict)
             and item.get("id") == DEFAULT_VOICE_ID
@@ -175,7 +190,7 @@ class PublicApiSmokeProbe:
         if not prepared.prepared_id or not prepared.asr.key or not prepared.tts.key:
             raise SmokeProbeError("prepared profile identity is invalid")
         self._wait_ready(prepared)
-        self._check_catalogs()
+        self._check_catalogs(prepared)
         for attempt in range(_MAX_INFERENCE_ATTEMPTS):
             try:
                 self._check_asr(self._tts_audio())

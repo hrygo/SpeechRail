@@ -64,6 +64,7 @@ class FakeAnalyser {
 class FakeContext {
   constructor({ resume, decodeAudioData } = {}) {
     this.state = "suspended";
+    this.currentTime = 0;
     this.destination = { kind: "destination" };
     this.sources = [];
     this.analysers = [];
@@ -111,6 +112,7 @@ function makeHarness(options = {}) {
   const fetchStarted = deferred();
   const states = [];
   const levels = [];
+  const progress = [];
   const frames = [];
   const cancelledFrames = [];
   const fetchImplementation = options.fetchAudio ?? (() => audio.promise);
@@ -122,6 +124,7 @@ function makeHarness(options = {}) {
     makeContext: () => context,
     onState: (state, error) => states.push({ state, error }),
     onLevel: (samples, deltaMs) => levels.push({ samples, deltaMs }),
+    onProgress: (elapsed, duration) => progress.push({ elapsed, duration }),
     scheduleFrame: (callback) => {
       frames.push(callback);
       return callback;
@@ -138,6 +141,7 @@ function makeHarness(options = {}) {
     },
     states,
     levels,
+    progress,
     frames,
     cancelledFrames,
     runFrame(timestamp = 16) {
@@ -231,6 +235,23 @@ test("natural end cleans the source and leaves the mouth closed", async () => {
   assert.equal(h.levels.at(-1).samples.length, 0);
   assert.equal(source.stopped, 0);
   assert.equal(source.disconnected, 1);
+});
+
+test("reports playback progress from the decoded buffer and closes at its duration", async () => {
+  const h = makeHarness();
+  const pending = h.player.speak({ input: "你好", voice: "demo" });
+  await h.fetchStarted;
+  h.resolveAudio(new ArrayBuffer(48));
+  await pending;
+
+  assert.deepEqual(h.progress.at(-1), { elapsed: 0, duration: 0.01 });
+  h.context.currentTime = 0.006;
+  h.runFrame(100);
+  assert.ok(h.progress.at(-1).elapsed > 0);
+  assert.equal(h.progress.at(-1).duration, 0.01);
+
+  h.context.sources[0].onended();
+  assert.deepEqual(h.progress.at(-1), { elapsed: 0.01, duration: 0.01 });
 });
 
 test("a late old onended callback cannot stop a newer source", async () => {

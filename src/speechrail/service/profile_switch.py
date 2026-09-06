@@ -6,13 +6,18 @@ import contextlib
 import os
 import re
 import signal
+import subprocess
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
-from speechrail.runtime.server_lock import ServerInstanceError, ServerInstanceLock
+from speechrail.runtime.server_lock import (
+    ServerInstanceError,
+    ServerInstanceLock,
+    ServerInstanceOwner,
+)
 from speechrail.service.launchd import ServiceError
 from speechrail.service.model_store import (
     PreparedModelSet,
@@ -47,6 +52,39 @@ def _kill_process_group(pid: int) -> None:
         os.killpg(process_group, signal.SIGKILL)
     else:
         os.kill(pid, signal.SIGKILL)
+
+
+def _is_live_speechrail_process(owner: ServerInstanceOwner) -> bool:
+    """Validate a lock owner before allowing recovery to signal its PID."""
+    if owner.pid <= 1 or owner.pid == os.getpid():
+        return False
+    try:
+        os.kill(owner.pid, 0)
+    except OSError:
+        return False
+    try:
+        completed = subprocess.run(
+            ("ps", "-p", str(owner.pid), "-o", "command="),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError:
+        return False
+    command = completed.stdout.strip()
+    expected = f"{owner.executable} -m speechrail serve"
+    return command == expected or command.startswith(f"{expected} ")
+
+
+def _owner_pid_for_port(port: int) -> int | None:
+    """Resolve a validated SpeechRail owner for a held server lock."""
+    reader = getattr(ServerInstanceLock, "read_owner", None)
+    if reader is None:
+        return None
+    owner = reader(port)
+    if owner is None or not _is_live_speechrail_process(owner):
+        return None
+    return owner.pid
 
 
 class ServiceController(Protocol):
@@ -86,6 +124,7 @@ class LaunchAgentServiceController:
         graceful_stop_timeout_seconds: float = _GRACEFUL_STOP_TIMEOUT_SECONDS,
         force_kill_timeout_seconds: float = _FORCE_KILL_TIMEOUT_SECONDS,
         process_killer: Callable[[int], None] = _kill_process_group,
+        owner_pid_resolver: Callable[[int], int | None] = _owner_pid_for_port,
     ) -> None:
         if min(
             graceful_stop_timeout_seconds,
@@ -99,6 +138,7 @@ class LaunchAgentServiceController:
         self._graceful_stop_timeout_seconds = graceful_stop_timeout_seconds
         self._force_kill_timeout_seconds = force_kill_timeout_seconds
         self._process_killer = process_killer
+        self._owner_pid_resolver = owner_pid_resolver
 
     def _wait_for_previous_instance(self, *, timeout_seconds: float) -> None:
         """Wait until the old ASGI process releases its per-port singleton lock."""
@@ -118,6 +158,26 @@ class LaunchAgentServiceController:
         try:
             status = self._manager.status()
         except ServiceError:
+            # launchctl may lose the job record while the old process still
+            # owns the port. Treat an available lock as already stopped, but
+            # recover only a validated SpeechRail owner when it remains held.
+            try:
+                self._wait_for_previous_instance(
+                    timeout_seconds=self._graceful_stop_timeout_seconds
+                )
+            except ServiceError as lock_error:
+                pid = self._owner_pid_resolver(self._port) if self._port is not None else None
+                if pid is None:
+                    raise ServiceError(
+                        "service status unavailable and previous service owner is not verifiable"
+                    ) from lock_error
+                self._process_killer(pid)
+                try:
+                    self._wait_for_previous_instance(
+                        timeout_seconds=self._force_kill_timeout_seconds
+                    )
+                except ServiceError as force_error:
+                    raise ServiceError("previous service instance did not stop") from force_error
             return
         pid = _service_pid(status)
         self._manager.disable()
@@ -127,6 +187,8 @@ class LaunchAgentServiceController:
         try:
             self._wait_for_previous_instance(timeout_seconds=self._graceful_stop_timeout_seconds)
         except ServiceError:
+            if pid is None:
+                pid = self._owner_pid_resolver(self._port) if self._port is not None else None
             if pid is None:
                 raise
             self._process_killer(pid)

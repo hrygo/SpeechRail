@@ -12,6 +12,7 @@ from speechrail.config.model_catalog import load_catalog, load_runtime_lock
 from speechrail.service.bootstrap import RuntimePaths
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
+from speechrail.runtime.server_lock import ServerInstanceLock
 
 _INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
 _SPEC = importlib.util.spec_from_file_location("speechrail_test_installer", _INSTALLER_PATH)
@@ -19,6 +20,19 @@ assert _SPEC is not None and _SPEC.loader is not None
 install_macos = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = install_macos
 _SPEC.loader.exec_module(install_macos)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_managed_service_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    original = install_macos.install_managed
+
+    def isolated_install_managed(*args: object, **kwargs: object):
+        kwargs.setdefault("server_lock_directory", tmp_path)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(install_macos, "install_managed", isolated_install_managed)
 
 
 def _runner_that_creates_python(calls: list[tuple[str, ...]]):
@@ -101,6 +115,27 @@ def _selection_payload() -> bytes:
         )
         + "\n"
     ).encode()
+
+
+def test_managed_install_rejects_an_active_service_before_staging(tmp_path: Path) -> None:
+    wheel, _, app_home = _inputs(tmp_path)
+    lock = ServerInstanceLock(8201, directory=tmp_path)
+    lock.acquire()
+    try:
+        with pytest.raises(install_macos.InstallerError, match="service to be stopped"):
+            install_macos.install_managed(
+                wheel,
+                app_home=app_home,
+                preset_id="quality",
+                downloader=object(),
+                server_lock_directory=tmp_path,
+            )
+    finally:
+        lock.release()
+
+    releases = app_home / "runtime" / "releases"
+    assert releases.is_dir()
+    assert list(releases.iterdir()) == []
 
 
 def test_managed_state_remains_outside_release(tmp_path: Path) -> None:

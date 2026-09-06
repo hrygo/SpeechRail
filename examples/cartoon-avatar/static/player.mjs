@@ -28,6 +28,10 @@ function defaultCancelFrame(frame) {
   }
 }
 
+function clamp(value, lower, upper) {
+  return Math.max(lower, Math.min(upper, value));
+}
+
 function isCurrent(token, source, activeSource) {
   return token === activeSource.generation && source === activeSource.source;
 }
@@ -58,6 +62,7 @@ export function createPlayer({
   makeContext = defaultMakeContext,
   onState = () => {},
   onLevel = () => {},
+  onProgress = () => {},
   scheduleFrame = defaultScheduleFrame,
   cancelFrame = defaultCancelFrame,
 }) {
@@ -68,11 +73,21 @@ export function createPlayer({
   let activeFrame = null;
   let activeSamples = null;
   let lastFrameTime = null;
+  let activeDuration = 0;
+  let playbackStartTime = null;
   let generation = 0;
   let disposed = false;
 
   function emitLevelZero() {
     onLevel(ZERO_SAMPLES, 0);
+  }
+
+  function emitProgress(elapsed, duration) {
+    const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
+    const safeElapsed = safeDuration > 0 && Number.isFinite(elapsed)
+      ? clamp(elapsed, 0, safeDuration)
+      : 0;
+    onProgress(safeElapsed, safeDuration);
   }
 
   function cancelMeter() {
@@ -83,12 +98,15 @@ export function createPlayer({
     lastFrameTime = null;
   }
 
-  function cleanupAudio({ stopSource = true, notifyZero = true } = {}) {
+  function cleanupAudio({ stopSource = true, notifyZero = true, resetProgress = true } = {}) {
     const source = activeSource;
     const analyser = activeAnalyser;
+    const duration = activeDuration;
     activeSource = null;
     activeAnalyser = null;
     activeSamples = null;
+    activeDuration = 0;
+    playbackStartTime = null;
     cancelMeter();
 
     if (source) {
@@ -116,6 +134,9 @@ export function createPlayer({
     if (notifyZero) {
       emitLevelZero();
     }
+    if (resetProgress) {
+      emitProgress(0, duration);
+    }
   }
 
   function failCurrent(token, code, cause) {
@@ -138,6 +159,12 @@ export function createPlayer({
       try {
         analyser.getFloatTimeDomainData(activeSamples);
         onLevel(activeSamples, deltaMs);
+        const currentTime = Number.isFinite(context?.currentTime) ? context.currentTime : null;
+        const elapsed =
+          currentTime !== null && playbackStartTime !== null
+            ? currentTime - playbackStartTime
+            : 0;
+        emitProgress(elapsed, activeDuration);
       } catch (error) {
         failCurrent(token, "audio_unavailable", error);
         return;
@@ -153,7 +180,8 @@ export function createPlayer({
     if (token !== generation || source !== activeSource) {
       return;
     }
-    cleanupAudio({ stopSource: false });
+    emitProgress(activeDuration, activeDuration);
+    cleanupAudio({ stopSource: false, resetProgress: false });
     onState("idle");
   }
 
@@ -228,6 +256,8 @@ export function createPlayer({
       source.connect(analyser);
       analyser.connect(context.destination);
       source.onended = () => finishNaturally(token, source);
+      activeDuration = Number.isFinite(buffer?.duration) && buffer.duration > 0 ? buffer.duration : 0;
+      playbackStartTime = Number.isFinite(context.currentTime) ? context.currentTime : null;
 
       stage = "start";
       source.start();
@@ -236,6 +266,7 @@ export function createPlayer({
         return;
       }
       onState("speaking");
+      emitProgress(0, activeDuration);
       startMeter(token, source, analyser);
     } catch (error) {
       if (token !== generation) {

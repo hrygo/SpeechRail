@@ -57,6 +57,7 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import DiarizationConfig, DiarizationError
+from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.domain.diarization_timeline import (
     AttributionLedger,
     AttributionResult,
@@ -128,6 +129,14 @@ class OpenAIRealtimeSession:
         self._unflushed_bytes = 0
         self._last_partial_text = ""
         self._vad: VoiceActivityDetector | None = None
+        self._speech_admission: SpeechAdmission | None = None
+        self._turn_generation: int = 0
+        self._asr_turn_generation: int = 0
+        self._turn_has_admitted_speech: bool = False
+        self._admitted_start_sample: int = 0
+        self._admitted_end_sample: int = 0
+        self._vad_raw_buffer = bytearray()
+        self._vad_sample_cursor: int = 0
         # Session-global sample clock (SPK-E2E-1): every accepted PCM sample
         # advances exactly once; each ASR item records the offset it starts at
         # so item-local vendor times lift into the session domain once.
@@ -282,12 +291,29 @@ class OpenAIRealtimeSession:
                     silence_duration_ms=silence_duration,
                 )
             )
+            if self._settings.realtime_speech_admission_enabled:
+                prefix_samples = int(prefix_padding * 16)
+                stop_frames = max(1, (silence_duration + 31) // 32)
+                self._speech_admission = SpeechAdmission(
+                    threshold=threshold,
+                    start_frames=3,
+                    stop_frames=stop_frames,
+                    prefix_samples=prefix_samples,
+                    frame_samples=512,
+                    sample_rate=16_000,
+                )
+                self._vad_raw_buffer.clear()
+                self._vad_sample_cursor = self._timeline.accepted_samples
+            else:
+                self._speech_admission = None
         elif (
             turn_detection is None
             or (isinstance(turn_detection, dict) and turn_detection.get("type") is None)
             or turn_detection == "manual"
         ):
             self._vad = None
+            self._speech_admission = None
+            self._vad_raw_buffer.clear()
 
         self._config = config
         if self._extensions:
@@ -308,6 +334,128 @@ class OpenAIRealtimeSession:
             session["speech_capabilities"] = dict(self._speech_capabilities)
         return event
 
+    async def _ensure_asr_for_turn(self, generation: int) -> None:
+        if self._asr is not None:
+            return
+        if self._asr_factory is None:
+            raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
+
+        await self._reserve_asr()
+        asr: RealtimeAsrSession | None = None
+        from speechrail.domain.itn import compose_hotword_prompt
+
+        asr_prompt = compose_hotword_prompt(
+            str(self._config.get("prompt") or ""),
+            self._config.get("keywords"),
+        )
+        try:
+            asr = self._asr_factory.create(
+                language=self._config.get("language"),
+                prompt=asr_prompt,
+            )
+            await asr.connect()
+        except BaseException as exc:
+            with contextlib.suppress(Exception):
+                await self._release_asr()
+            if asr is not None:
+                with contextlib.suppress(Exception):
+                    await asr.close()
+                self._asr_factory.release(asr)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            message = str(exc)
+            code = (
+                "language_not_supported"
+                if message.startswith("language_not_supported")
+                else "backend_busy"
+            )
+            raise RealtimeAdapterError(code, message) from exc
+        self._asr = asr
+        self._asr_turn_generation = generation
+        self._asr_reader = asyncio.create_task(
+            self._drain_asr_events(turn_generation=generation)
+        )
+
+    async def _handle_admission_decision(self, dec: AdmissionDecision) -> None:
+        from speechrail.compatibility.openai_realtime import (
+            input_audio_buffer_speech_started,
+            input_audio_buffer_speech_stopped,
+        )
+
+        if dec.kind == "start":
+            self._turn_generation += 1
+            self._turn_has_admitted_speech = True
+            self._admitted_start_sample = dec.start_sample
+            self._admitted_end_sample = dec.end_sample
+            self._item_start_sample = dec.start_sample
+            self._item_end_sample = dec.end_sample
+            self._buffered_audio_bytes = 0
+            self._unflushed_bytes = 0
+
+            self._services.metrics.record_vad("started")
+            if self._tts_task is not None and not self._tts_task.done():
+                self._services.metrics.record_bargein()
+                await self._cancel_response()
+
+            audio_start_ms = int((dec.start_sample / 16_000) * 1000)
+            await self._send(
+                input_audio_buffer_speech_started(
+                    session_id=self._session_id,
+                    audio_start_ms=audio_start_ms,
+                    item_id=f"item_{self._session_id}_input",
+                )
+            )
+            await self._ensure_asr_for_turn(generation=self._turn_generation)
+
+        elif dec.kind == "audio":
+            if not self._turn_has_admitted_speech or self._asr is None:
+                await self._ensure_asr_for_turn(generation=self._turn_generation)
+                self._turn_has_admitted_speech = True
+                self._admitted_start_sample = dec.start_sample
+                self._item_start_sample = dec.start_sample
+
+            max_item_bytes = (
+                256_000
+                if self._extensions
+                else (self._settings.max_realtime_buffer_bytes or 8_388_608)
+            )
+            if self._buffered_audio_bytes > 0 and (
+                self._buffered_audio_bytes + len(dec.pcm) > max_item_bytes
+            ):
+                await self._commit_audio(reason="rollover")
+                self._turn_generation += 1
+                self._turn_has_admitted_speech = True
+                self._admitted_start_sample = dec.start_sample
+                self._item_start_sample = dec.start_sample
+                self._buffered_audio_bytes = 0
+                self._unflushed_bytes = 0
+                await self._ensure_asr_for_turn(generation=self._turn_generation)
+
+            await self._asr.append_audio(dec.pcm)
+            self._admitted_end_sample = dec.end_sample
+            self._item_end_sample = dec.end_sample
+            self._buffered_audio_bytes += len(dec.pcm)
+            self._unflushed_bytes += len(dec.pcm)
+
+            chunk_sec = self._settings.qwen3_streaming_chunk_sec
+            flush_threshold = max(1, int(chunk_sec * 32_000))
+            if self._unflushed_bytes >= flush_threshold:
+                self._unflushed_bytes = 0
+                with contextlib.suppress(Exception):
+                    await self._asr.flush()
+
+        elif dec.kind == "end":
+            self._services.metrics.record_vad("ended")
+            audio_end_ms = int((dec.end_sample / 16_000) * 1000)
+            await self._send(
+                input_audio_buffer_speech_stopped(
+                    session_id=self._session_id,
+                    audio_end_ms=audio_end_ms,
+                    item_id=f"item_{self._session_id}_input",
+                )
+            )
+            await self._commit_audio(reason="vad_stop")
+
     async def _append_audio(self, event: dict[str, Any]) -> None:
         if self._diarization_phase != "active":
             raise RealtimeAdapterError(
@@ -321,11 +469,39 @@ class OpenAIRealtimeSession:
             max_buffer_bytes=None,
         )
         max_buf = self._settings.max_realtime_buffer_bytes
-        if max_buf is not None:
-            if len(audio) > max_buf:
-                raise RealtimeAdapterError(
-                    "buffer_too_large", "audio buffer exceeds the configured limit"
+        if max_buf is not None and len(audio) > max_buf:
+            raise RealtimeAdapterError(
+                "buffer_too_large", "audio buffer exceeds the configured limit"
+            )
+
+        if self._asr_factory is None:
+            raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
+
+        await self._ensure_diarization()
+        self._item_end_sample = self._timeline.accept(audio)[1]
+        if self._diarization is not None:
+            await self._diarization.append_audio(audio)
+
+        # 1. SpeechAdmission path (server_vad with admission enabled)
+        if self._speech_admission is not None and self._vad is not None:
+            self._vad_raw_buffer.extend(audio)
+            while len(self._vad_raw_buffer) >= 1024:
+                frame = bytes(self._vad_raw_buffer[:1024])
+                del self._vad_raw_buffer[:1024]
+                frame_start_sample = self._vad_sample_cursor
+                self._vad_sample_cursor += 512
+                prob = self._vad.score_frame(frame)
+                decisions = self._speech_admission.push(
+                    frame,
+                    start_sample=frame_start_sample,
+                    probability=prob,
                 )
+                for dec in decisions:
+                    await self._handle_admission_decision(dec)
+            return
+
+        # 2. Legacy / manual path (unaltered behavior)
+        if max_buf is not None:
             if (
                 self._buffered_audio_bytes > 0
                 and self._buffered_audio_bytes + len(audio) > max_buf
@@ -334,58 +510,13 @@ class OpenAIRealtimeSession:
                 # Auto-commit rollover for long streaming sessions
                 await self._commit_audio()
 
-        if self._asr_factory is None:
-            raise RealtimeAdapterError("backend_not_ready", "streaming ASR backend is not ready")
-
         if self._asr is None:
-            await self._reserve_asr()
-            asr: RealtimeAsrSession | None = None
-            from speechrail.domain.itn import compose_hotword_prompt
+            await self._ensure_asr_for_turn(generation=self._turn_generation)
+            self._item_start_sample = self._timeline.accepted_samples - (len(audio) // 2)
 
-            asr_prompt = compose_hotword_prompt(
-                str(self._config.get("prompt") or ""),
-                self._config.get("keywords"),
-            )
-            try:
-                asr = self._asr_factory.create(
-                    language=self._config.get("language"),
-                    prompt=asr_prompt,
-                )
-                await asr.connect()
-            except BaseException as exc:
-                # Any failure (factory RuntimeError, BrokenPipeError/OSError from a
-                # dead worker pipe, CancelledError from client disconnect, ...)
-                # must release both the governor reservation and the factory slot,
-                # or the single streaming slot leaks until restart and every later
-                # session gets backend_busy.
-                with contextlib.suppress(Exception):
-                    await self._release_asr()
-                if asr is not None:
-                    with contextlib.suppress(Exception):
-                        await asr.close()
-                    self._asr_factory.release(asr)
-                if isinstance(exc, asyncio.CancelledError):
-                    raise
-                message = str(exc)
-                code = (
-                    "language_not_supported"
-                    if message.startswith("language_not_supported")
-                    else "backend_busy"
-                )
-                raise RealtimeAdapterError(code, message) from exc
-            self._asr = asr
-            self._item_start_sample = self._timeline.accepted_samples
-            self._asr_reader = asyncio.create_task(self._drain_asr_events())
-        await self._ensure_diarization()
-        # Append the chunk to ASR/diarization before VAD event handling: a
-        # speech_ended commit below must include the very chunk that ended the
-        # utterance, or its tail audio is silently dropped.
         await self._asr.append_audio(audio)
-        if self._diarization is not None:
-            await self._diarization.append_audio(audio)
         self._buffered_audio_bytes += len(audio)
         self._unflushed_bytes += len(audio)
-        self._item_end_sample = self._timeline.accept(audio)[1]
 
         if self._vad is not None:
             from speechrail.compatibility.openai_realtime import (
@@ -427,10 +558,56 @@ class OpenAIRealtimeSession:
             with contextlib.suppress(Exception):
                 await self._asr.flush()
 
-    async def _commit_audio(self) -> None:
+    async def _commit_audio(self, reason: str = "client") -> None:
         if self._extensions:
             # SPK-E2E-1: every commit gets a unique item id in extension mode.
             self._current_item_id = f"item_{uuid4().hex[:12]}"
+
+        # If speech admission is active, flush any remaining sub-frame leftover
+        if self._speech_admission is not None and self._vad is not None:
+            if self._vad_raw_buffer:
+                rem = bytes(self._vad_raw_buffer)
+                self._vad_raw_buffer.clear()
+                prob = self._vad.score_frame(rem)
+                rem_start = self._vad_sample_cursor
+                self._vad_sample_cursor += len(rem) // 2
+                decisions = self._speech_admission.push(
+                    rem, start_sample=rem_start, probability=prob
+                )
+                for dec in decisions:
+                    await self._handle_admission_decision(dec)
+            fin_decisions = self._speech_admission.finish()
+            for dec in fin_decisions:
+                await self._handle_admission_decision(dec)
+
+        if self._speech_admission is not None and not self._turn_has_admitted_speech:
+            await self._send(
+                input_audio_buffer_committed(
+                    session_id=self._session_id, item_id=self._current_item_id
+                )
+            )
+            await self._send(
+                conversation_item_created(
+                    session_id=self._session_id,
+                    transcript="",
+                    item_id=self._current_item_id,
+                )
+            )
+            await self._send(
+                self._completed_event(transcript="")
+            )
+            self._last_partial_text = ""
+            self._unflushed_bytes = 0
+            self._buffered_audio_bytes = 0
+            self._services.metrics.record_realtime_turn(
+                mode="server_vad",
+                commit_reason=reason,
+                outcome="empty",
+                characters=0,
+                active_samples=0,
+            )
+            return
+
         if self._asr is None:
             await self._send(
                 input_audio_buffer_committed(
@@ -449,7 +626,15 @@ class OpenAIRealtimeSession:
             )
             self._last_partial_text = ""
             self._unflushed_bytes = 0
+            self._services.metrics.record_realtime_turn(
+                mode="manual",
+                commit_reason=reason,
+                outcome="empty",
+                characters=0,
+                active_samples=0,
+            )
             return
+
         await self._send(
             input_audio_buffer_committed(
                 session_id=self._session_id, item_id=self._current_item_id
@@ -468,6 +653,8 @@ class OpenAIRealtimeSession:
         except BaseException:
             await self._discard_failed_commit()
             raise
+        finally:
+            self._turn_has_admitted_speech = False
         await self._close_asr_session()
         await self._release_asr()
         self._buffered_audio_bytes = 0
@@ -486,6 +673,7 @@ class OpenAIRealtimeSession:
             await self._stop_asr_reader()
             await self._close_asr_session()
             await self._release_asr()
+        self._turn_has_admitted_speech = False
         self._buffered_audio_bytes = 0
         self._last_partial_text = ""
         self._unflushed_bytes = 0
@@ -493,6 +681,12 @@ class OpenAIRealtimeSession:
         self._item_end_sample = self._timeline.accepted_samples
 
     async def _clear_audio(self) -> None:
+        self._turn_generation += 1
+        self._turn_has_admitted_speech = False
+        if self._speech_admission is not None:
+            self._speech_admission.reset(next_sample=self._timeline.accepted_samples)
+        self._vad_raw_buffer.clear()
+        self._vad_sample_cursor = self._timeline.accepted_samples
         if self._vad is not None:
             self._vad.reset()
         await self._stop_asr_reader()
@@ -851,13 +1045,20 @@ class OpenAIRealtimeSession:
         self._diarization_phase = "finalized"
         await self._send(payload)
 
-    async def _drain_asr_events(self) -> None:
+    async def _drain_asr_events(self, turn_generation: int | None = None) -> None:
         if self._asr is None:
             return
 
+        target_gen = (
+            turn_generation if turn_generation is not None else self._asr_turn_generation
+        )
         try:
             async for event in self._asr.events():
+                if target_gen != self._turn_generation:
+                    break
                 if event.kind == "partial":
+                    if self._speech_admission is not None and not self._turn_has_admitted_speech:
+                        continue
                     current_text = event.text
                     if not current_text:
                         continue
@@ -872,9 +1073,18 @@ class OpenAIRealtimeSession:
                             transcription_delta(session_id=self._session_id, delta=delta)
                         )
                 elif event.kind == "completed":
+                    if target_gen != self._turn_generation:
+                        break
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
                     norm_text = apply_light_itn(event.text)
+                    self._services.metrics.record_realtime_turn(
+                        mode="server_vad" if self._vad is not None else "manual",
+                        commit_reason="vad_stop" if self._vad is not None else "client",
+                        outcome="text" if norm_text else "empty",
+                        characters=len(norm_text),
+                        active_samples=max(0, self._item_end_sample - self._item_start_sample),
+                    )
                     if self._extensions:
                         # Extension mode: unique item, session-sample bounds and
                         # immutable units; legacy .segment events are never sent
@@ -914,6 +1124,11 @@ class OpenAIRealtimeSession:
                         except DiarizationError as exc:
                             await self._send(error_event(code=exc.code, message=str(exc)))
                             return
+                        offset_ms = (
+                            int(self._item_start_sample / 16)
+                            if self._speech_admission is not None
+                            else 0
+                        )
                         for segment in segments:
                             await self._send(
                                 transcription_segment(
@@ -922,8 +1137,8 @@ class OpenAIRealtimeSession:
                                     segment_id=segment.id,
                                     text=apply_light_itn(segment.text),
                                     speaker=segment.speaker,
-                                    start_ms=segment.start_ms,
-                                    end_ms=segment.end_ms,
+                                    start_ms=segment.start_ms + offset_ms,
+                                    end_ms=segment.end_ms + offset_ms,
                                 )
                             )
                     await self._send(

@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { fetchAudio } from "../static/app.mjs";
+import { chooseVoiceForProfile, fetchAudio, formatPlaybackTime } from "../static/app.mjs";
+import { AVATAR_PROFILES } from "../static/avatar.mjs";
 
 test("fetchAudio sends only the relative speech route and a stable payload", async () => {
   const originalFetch = globalThis.fetch;
@@ -75,4 +76,45 @@ test("fetchAudio rejects a non-WAV success before reading audio bytes", async ()
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("R1 exposes three distinct character presets with stable voice bindings", () => {
+  assert.equal(AVATAR_PROFILES.length, 3);
+  assert.equal(new Set(AVATAR_PROFILES.map((profile) => profile.id)).size, 3);
+  assert.equal(new Set(AVATAR_PROFILES.map((profile) => profile.voiceId)).size, 3);
+  for (const profile of AVATAR_PROFILES) {
+    assert.ok(profile.name);
+    assert.ok(profile.description);
+    assert.ok(profile.colors.accent);
+  }
+});
+
+test("unavailable profile binding is reported instead of silently replaced", () => {
+  const profile = AVATAR_PROFILES[0];
+  const result = chooseVoiceForProfile(
+    [{ id: "replacement", name: "替代音色", available: true, is_default: true }],
+    profile.id,
+    "",
+  );
+  assert.equal(result.voiceId, "");
+  assert.equal(result.bindingAvailable, false);
+  assert.equal(result.boundVoiceId, profile.voiceId);
+});
+
+test("changing to a profile with an unavailable binding asks for a fresh replacement", () => {
+  const profile = AVATAR_PROFILES[0];
+  const result = chooseVoiceForProfile(
+    [{ id: "replacement", name: "替代音色", available: true, is_default: true }],
+    profile.id,
+    "replacement",
+    { preservePrevious: false },
+  );
+  assert.equal(result.voiceId, "");
+  assert.equal(result.bindingAvailable, false);
+});
+
+test("playback time formatting stays compact and predictable", () => {
+  assert.equal(formatPlaybackTime(0), "00:00");
+  assert.equal(formatPlaybackTime(65.8), "01:05");
+  assert.equal(formatPlaybackTime(Number.NaN), "00:00");
 });

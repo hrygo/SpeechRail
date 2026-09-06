@@ -27,6 +27,9 @@ TTS_DURATION_BUCKETS: tuple[float, ...] = (
 TTFA_BUCKETS: tuple[float, ...] = (
     0.02, 0.05, 0.1, 0.2, 0.3, 0.5, 1.0, 2.0
 )
+REALTIME_TURN_DURATION_BUCKETS: tuple[float, ...] = (
+    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0
+)
 
 LabelKey = tuple[tuple[str, str], ...]
 
@@ -132,6 +135,22 @@ class Metrics:
         self._describe(
             "speechrail_realtime_vad_speech_events_total",
             "Total VAD speech activity detection events",
+        )
+        self._describe(
+            "speechrail_realtime_turn_commits_total",
+            "Total realtime turn commits by mode, reason and outcome",
+        )
+        self._describe(
+            "speechrail_realtime_turn_characters_total",
+            "Total transcribed characters in realtime turns by mode and outcome",
+        )
+        self._describe(
+            "speechrail_realtime_turn_duration_seconds",
+            "Realtime turn processing duration in seconds",
+        )
+        self._describe(
+            "speechrail_realtime_active_audio_samples_total",
+            "Total admitted speech audio samples in realtime turns",
         )
         self._describe(
             "speechrail_governor_active_requests",
@@ -279,6 +298,42 @@ class Metrics:
 
     def record_vad(self, event: str) -> None:
         self.inc("speechrail_realtime_vad_speech_events_total", event=event)
+
+    def record_realtime_turn(
+        self,
+        *,
+        mode: str,
+        commit_reason: str,
+        outcome: str,
+        characters: int = 0,
+        active_samples: int = 0,
+        duration_seconds: float = 0.0,
+    ) -> None:
+        self.inc(
+            "speechrail_realtime_turn_commits_total",
+            mode=mode,
+            commit_reason=commit_reason,
+            outcome=outcome,
+        )
+        if characters > 0:
+            self.inc(
+                "speechrail_realtime_turn_characters_total",
+                mode=mode,
+                outcome=outcome,
+                by=characters,
+            )
+        if active_samples > 0:
+            self.inc(
+                "speechrail_realtime_active_audio_samples_total",
+                mode=mode,
+                by=active_samples,
+            )
+        if duration_seconds > 0.0:
+            self.observe(
+                "speechrail_realtime_turn_duration_seconds",
+                duration_seconds,
+                REALTIME_TURN_DURATION_BUCKETS,
+            )
 
     def record_eviction(self, component: str, phase: str) -> None:
         self.inc("speechrail_worker_evictions_total", component=component, phase=phase)

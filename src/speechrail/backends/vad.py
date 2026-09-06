@@ -138,6 +138,10 @@ class VoiceActivityDetector:
 
         return None
 
+    def score_frame(self, frame: bytes) -> float:
+        """Calculate speech probability score for a single PCM frame."""
+        return self._score_frame(frame)
+
     def _score_frame(self, frame: bytes) -> float:
         """Calculate speech probability score using normalized RMS energy & zero-crossing."""
         if len(frame) < 2:
