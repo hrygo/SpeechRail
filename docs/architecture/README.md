@@ -2,8 +2,8 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "1.4.1"
-date: 2026-09-05
+version: "1.5.0"
+date: 2026-09-07
 ---
 
 # 🏛️ SpeechRail 架构文档
@@ -31,6 +31,7 @@ graph TD
 6. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：追溯重大技术选型的历史背景、权衡与替代方案。
 7. **[🎙️ 音色克隆架构设计与工程交接 (voice-cloning-design-and-handoff.md)](voice-cloning-design-and-handoff.md)**：面向 Sona「声音工坊」的零样本克隆架构、Qwen3-TTS ICL 原生实测事实、公共 API 契约与 Worker IPC 实施方案。
 8. **[SpeechRail × Sona 讲话人分离端到端设计](speaker-diarization-e2e-design.md)**（`active`）：样本时间线、连续分人、显式协议扩展、匿名关联、资源与质量门；SpeechRail 侧 R0–R4 已闭环验收，R5 评测工具代码就绪，配套[实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)进入消费端接线阶段。
+9. **[🎙️ SpeechRail MCP Proxy 工具与契约 (speechrail-mcp-proxy.md)](speechrail-mcp-proxy.md)**（`active`）：外置 `speechrail-mcp` 进程把 ASR/TTS/diarization 暴露为 MCP 工具（`describe`/`transcribe`/`synthesize`/`preview_voice`/`create_job`/`get_job`/`cancel_job`），无状态 + 零配置 key，供 agent 更精准地调用本地语音能力。
 
 
 ---
