@@ -10,6 +10,8 @@ description: >-
 
 目标是交付一个可验证、可回退的本机 wheel release。发布允许停服和数分钟的启动真空，但任何候选版本都不得与旧实例并存，也不得在模型制品、配置或回退点未确认时切换运行态。
 
+发布、安装和回滚必须遵守 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)；本 SOP 只补充版本材料、代码门和交付证据。
+
 ## 1. 先确定范围与发布锁
 
 以 `pyproject.toml` 的 `[project].version` 为版本事实来源。先比较上一 tag 到 `HEAD` 的用户可见变化，再选择验收范围：

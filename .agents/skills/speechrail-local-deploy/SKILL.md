@@ -9,6 +9,8 @@ description: >-
 
 SpeechRail 是单机、单用户服务：只允许一个 `com.speechrail` LaunchAgent、一个 ASGI 父进程和一个 `127.0.0.1:8201` listener。模型加载和切档期间允许完全停服，停服真空可持续数分钟；正确性优先于保持端口连续可用。
 
+跨发布、安装、停启、切档和基准的共同终态契约见 [references/operator-contract.md](references/operator-contract.md)；本文件补充本机命令和排障细节。
+
 ## 终态不变量
 
 - app home 默认是 `$HOME/Library/Application Support/SpeechRail`；服务 label 是 `com.speechrail`；只使用用户级 `LaunchAgent`，不使用 root、`LaunchDaemon` 或手工改 plist。

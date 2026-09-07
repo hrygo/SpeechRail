@@ -10,6 +10,8 @@ description: >-
 
 目标是生成可复现、可比较、不会夸大证据的发布基准。所有推理通过公共 API，原始 JSON、音频和日志放在仓库外；Git 只保存脱敏汇总报告。
 
+停服、强杀、切档和恢复边界统一遵守 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)；本 SOP 只定义测量口径、证据和报告。
+
 ## 1. 三档事实
 
 三档使用同一服务架构、worker 协议、调度和共享 vendor runtime，只改变权重与量化：
@@ -81,9 +83,6 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 工具入口：
 
 ```bash
-python3 .agents/skills/speechrail-perf-benchmark/scripts/prepare_fixtures.py
-python3 .agents/skills/speechrail-perf-benchmark/scripts/run_all_benchmarks.py \
-  --host http://127.0.0.1:8201
 python3 examples/perf/bench_profiles.py \
   --base-url http://127.0.0.1:8201 \
   --manifest <repo-external-manifest.json> \
@@ -92,7 +91,7 @@ python3 examples/perf/bench_profiles.py \
   --output <repo-external-result.json>
 ```
 
-`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开。
+正式 benchmark 只接受外部 manifest 和外部 fixture；`prepare_fixtures.py` 仅用于开发调试，不得作为发布基准入口。`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开。
 
 ## 5. 质量与音色稳定性套件
 

@@ -12,6 +12,8 @@ description: >-
 
 本指南面向在**全新、未配置过 AI 运行时的空白 Apple Silicon MacBook**（从 M1 MacBook Air 到 M5 Max 各机型）上，从 0 到 100% 完成硬件兼容性检查、系统基座工具链、隔离的 Python 3.12 准备、应用打包、锁定的独立 Worker 运行时构建、ModelScope 权重拉取、LaunchAgent 常驻以及端到端冒烟验证的完整标准流程。
 
+安装、停启、切档和回滚的共享终态契约见 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)；本指南补充空白 Mac 的前置准备和首次安装顺序。
+
 ---
 
 ## 🛑 核心前置拦截与自动解决方案 (FAQ & Guardrails)
