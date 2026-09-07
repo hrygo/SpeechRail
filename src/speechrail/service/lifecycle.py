@@ -74,14 +74,10 @@ def _is_live_speechrail_process(owner: ServerInstanceOwner) -> bool:
         return False
 
 
-def _owner_pid_for_port(
-    port: int,
-    *,
-    lock_factory: Callable[[int], ServerInstanceLock] = ServerInstanceLock,
-) -> int | None:
+def _owner_pid_for_port(port: int) -> int | None:
     """Resolve a validated SpeechRail owner for a held server lock."""
     try:
-        owner = lock_factory.read_owner(port)
+        owner = ServerInstanceLock.read_owner(port)
     except AttributeError:
         return None
     if owner is None or not _is_live_speechrail_process(owner):
@@ -139,7 +135,6 @@ class ServiceLifecycle:
         clock: Callable[[], float] = time.monotonic,
         process_killer: Callable[[int], None] = _kill_process_group,
         owner_pid_resolver: Callable[[int], int | None] | None = None,
-        lock_factory: Callable[[int], ServerInstanceLock] | None = None,
     ) -> None:
         self._status = status_reader
         self._disable = disable
@@ -149,13 +144,7 @@ class ServiceLifecycle:
         self._sleep = sleeper
         self._clock = clock
         self._process_killer = process_killer
-        self._lock_factory = ServerInstanceLock if lock_factory is None else lock_factory
-        self._owner_pid_resolver = owner_pid_resolver or (
-            lambda current_port: _owner_pid_for_port(
-                current_port,
-                lock_factory=self._lock_factory,
-            )
-        )
+        self._owner_pid_resolver = owner_pid_resolver or _owner_pid_for_port
 
     def _wait_for_previous_instance(self, *, timeout_seconds: float) -> None:
         """Wait until the old ASGI process releases its per-port singleton lock."""
@@ -164,7 +153,7 @@ class ServiceLifecycle:
         deadline = self._clock() + timeout_seconds
         while True:
             try:
-                with self._lock_factory(self._port):
+                with ServerInstanceLock(self._port):
                     return
             except ServerInstanceError as exc:
                 if self._clock() >= deadline:
