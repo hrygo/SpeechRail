@@ -29,6 +29,22 @@ from examples.perf.bench_profiles import (
 )
 
 
+def test_profile_benchmark_has_one_modular_entrypoint() -> None:
+    examples_root = Path(__file__).resolve().parents[1] / "examples" / "perf"
+    assert (examples_root / "benchmark_manifest.py").is_file()
+    assert (examples_root / "benchmark_http.py").is_file()
+    assert (examples_root / "benchmark_resources.py").is_file()
+    assert (examples_root / "benchmark_runner.py").is_file()
+    assert not (
+        Path(__file__).resolve().parents[1]
+        / ".agents"
+        / "skills"
+        / "speechrail-perf-benchmark"
+        / "scripts"
+        / "run_all_benchmarks.py"
+    ).exists()
+
+
 class _FakeHttpRunner:
     def __init__(
         self,
