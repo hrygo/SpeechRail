@@ -100,6 +100,11 @@ def _atomic_write(target: Path, content: bytes) -> None:
             os.fsync(output.fileno())
         temporary.chmod(0o600)
         temporary.replace(target)
+        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     finally:
         temporary.unlink(missing_ok=True)
 
