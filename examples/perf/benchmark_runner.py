@@ -218,7 +218,9 @@ def run_profile_benchmark(
         resources["monitor"] = {"status": "incomplete", "error": monitor_stop_error}
         resources["sampling_complete"] = False
     elif monitor is not None:
-        resources["monitor"] = {"status": "complete"}
+        resources["monitor"] = {
+            "status": "complete" if resources["sampling_complete"] else "incomplete"
+        }
     release_pass, release_reasons = _release_gate(
         profile=normalized_profile,
         phase=normalized_phase,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import platform
 import subprocess
@@ -51,6 +53,12 @@ _SENSITIVE_KEYS = frozenset(
 
 type SystemSampler = Callable[[], Mapping[str, object]]
 
+_PROCESS_COMMAND_TIMEOUT_SECONDS = 1.0
+_MONITOR_STOP_TIMEOUT_SECONDS = 5.0
+_GENERIC_CHIP_IDENTITIES = frozenset(
+    {"", "unknown", "arm", "arm64", "aarch64", "x86_64", "amd64", "i386"}
+)
+
 
 class ResourceMonitor(Protocol):
     """Lifecycle boundary for collecting resources across the whole benchmark."""
@@ -82,6 +90,7 @@ def _read_rss_bytes(pid: int) -> int | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=_PROCESS_COMMAND_TIMEOUT_SECONDS,
             env={"PATH": os.defpath, "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError):
@@ -104,14 +113,15 @@ class ProcessResourceMonitor:
         reader: Callable[[ProcessIdentity], tuple[float, float, float, str] | None]
         = _sample_process,
     ) -> None:
-        if interval_seconds <= 0:
-            raise ValueError("resource monitor interval must be positive")
+        if not math.isfinite(interval_seconds) or interval_seconds <= 0:
+            raise ValueError("resource monitor interval must be finite and positive")
         self._interval_seconds = interval_seconds
         self._discover = discover
         self._reader = reader
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._samples: list[dict[str, object]] = []
+        self._error: BaseException | None = None
         self._started = False
 
     def _collect_tick(self) -> None:
@@ -143,15 +153,23 @@ class ProcessResourceMonitor:
             )
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            self._collect_tick()
-            self._stop.wait(self._interval_seconds)
+        try:
+            while not self._stop.is_set():
+                self._collect_tick()
+                self._stop.wait(self._interval_seconds)
+        except BaseException as exc:
+            self._error = exc
+            self._stop.set()
 
     def start(self) -> None:
         if self._started:
             raise RuntimeError("resource monitor already started")
         self._started = True
-        self._thread = threading.Thread(target=self._run, name="speechrail-resource-monitor")
+        self._thread = threading.Thread(
+            target=self._run,
+            name="speechrail-resource-monitor",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> Mapping[str, object]:
@@ -159,14 +177,14 @@ class ProcessResourceMonitor:
             raise RuntimeError("resource monitor was not started")
         self._stop.set()
         if self._thread is not None:
-            self._thread.join()
+            self._thread.join(timeout=_MONITOR_STOP_TIMEOUT_SECONDS)
+            if self._thread.is_alive():
+                raise RuntimeError("resource monitor stop timed out")
+        if self._error is not None:
+            raise RuntimeError("resource monitor failed") from self._error
+        hardware = _hardware_snapshot(source="sample_resources")
         return {
-            "hardware": {
-                "real": True,
-                "source": "sample_resources",
-                "architecture": platform.machine() or "unknown",
-                "chip": platform.processor() or platform.machine() or "unknown",
-            },
+            "hardware": hardware,
             "os": {"name": platform.system() or "unknown", "version": platform.release()},
             "memory": {"physical_bytes": _physical_memory_bytes()},
             "process_samples": self._samples,
@@ -182,10 +200,12 @@ def _physical_memory_bytes() -> int | None:
     if sys.platform == "darwin":
         try:
             process = subprocess.run(
-                ["sysctl", "-n", "hw.memsize"],
+                ["/usr/sbin/sysctl", "-n", "hw.memsize"],
                 capture_output=True,
                 text=True,
                 check=True,
+                timeout=_PROCESS_COMMAND_TIMEOUT_SECONDS,
+                env={"PATH": os.defpath, "LC_ALL": "C"},
             )
             darwin_value = int(process.stdout.strip())
             return darwin_value if darwin_value > 0 else None
@@ -198,16 +218,52 @@ def _physical_memory_bytes() -> int | None:
         return None
 
 
+def _macos_chip_name() -> str | None:
+    """Read only the chip field from macOS hardware metadata."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        process = subprocess.run(
+            ["/usr/sbin/system_profiler", "SPHardwareDataType", "-json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=3.0,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
+        )
+        payload = json.loads(process.stdout)
+    except (OSError, subprocess.SubprocessError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    entries = payload.get("SPHardwareDataType")
+    if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes, bytearray)):
+        return None
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        chip = entry.get("chip_type")
+        if isinstance(chip, str) and chip.strip():
+            return chip.strip()
+    return None
+
+
+def _hardware_snapshot(*, source: str) -> dict[str, object]:
+    architecture = platform.machine() or "unknown"
+    chip = _macos_chip_name() or platform.processor() or architecture
+    return {
+        "real": True,
+        "source": source,
+        "architecture": architecture,
+        "chip": chip,
+    }
+
+
 def _default_system_sampler() -> Mapping[str, object]:
     """Collect hardware identity; process samples stay explicit until a sampler supplies them."""
 
     return {
-        "hardware": {
-            "real": True,
-            "source": "system",
-            "architecture": platform.machine() or "unknown",
-            "chip": platform.processor() or platform.machine() or "unknown",
-        },
+        "hardware": _hardware_snapshot(source="system"),
         "os": {"name": platform.system() or "unknown", "version": platform.release()},
         "memory": {"physical_bytes": _physical_memory_bytes()},
         "process_samples": [],
@@ -281,21 +337,28 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
     sanitized_ticks: list[dict[str, object]] = []
     rss_snapshots: list[dict[ProcessIdentity, int]] = []
     footprint_snapshots: list[dict[ProcessIdentity, int]] = []
-    paired_snapshots = False
+    raw_tick_count = 0
+    complete_tick_count = 0
+    invalid_tick_seen = False
     if isinstance(raw_ticks, Sequence) and not isinstance(raw_ticks, (str, bytes, bytearray)):
         for tick in raw_ticks:
+            raw_tick_count += 1
             if not isinstance(tick, Mapping):
+                invalid_tick_seen = True
                 continue
             raw_processes = tick.get("processes", [])
             if not isinstance(raw_processes, Sequence) or isinstance(
                 raw_processes, (str, bytes, bytearray)
             ):
+                invalid_tick_seen = True
                 continue
             rss_tick: dict[ProcessIdentity, int] = {}
             footprint_tick: dict[ProcessIdentity, int] = {}
             output_processes: list[dict[str, object]] = []
+            invalid_process = False
             for process in raw_processes:
                 if not isinstance(process, Mapping):
+                    invalid_process = True
                     continue
                 pid = process.get("pid")
                 started = process.get("start_time_ns")
@@ -307,6 +370,7 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
                     or not isinstance(started, int)
                     or started < 0
                 ):
+                    invalid_process = True
                     continue
                 identity = ProcessIdentity(pid=pid, start_time_ns=started)
                 rss = process.get("rss_bytes")
@@ -339,12 +403,17 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
                         "processes": output_processes,
                     }
                 )
-            if rss_tick:
+            tick_complete = bool(
+                output_processes
+                and not invalid_process
+                and len(rss_tick) == len(output_processes)
+                and len(footprint_tick) == len(output_processes)
+                and set(rss_tick) == set(footprint_tick)
+            )
+            if tick_complete:
+                complete_tick_count += 1
                 rss_snapshots.append(rss_tick)
-            if footprint_tick:
                 footprint_snapshots.append(footprint_tick)
-            if rss_tick and footprint_tick and set(rss_tick) == set(footprint_tick):
-                paired_snapshots = True
 
     def _peak(snapshots: list[dict[ProcessIdentity, int]]) -> int | None:
         if not snapshots:
@@ -365,7 +434,9 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
         },
         "sampling_complete": bool(
             sanitized_ticks
-            and paired_snapshots
+            and not invalid_tick_seen
+            and raw_tick_count == len(sanitized_ticks)
+            and complete_tick_count == len(sanitized_ticks)
             and rss_peak is not None
             and footprint_peak is not None
         ),
@@ -408,6 +479,21 @@ def _real_evidence(value: Mapping[str, object]) -> bool:
         "mock",
         "test",
     }
+
+
+def _hardware_identity_complete(value: Mapping[str, object]) -> bool:
+    chip = value.get("chip")
+    architecture = value.get("architecture")
+    if not isinstance(chip, str) or not chip.strip():
+        return False
+    if not isinstance(architecture, str) or not architecture.strip():
+        return False
+    normalized_chip = chip.strip().lower()
+    normalized_architecture = architecture.strip().lower()
+    return (
+        normalized_chip not in _GENERIC_CHIP_IDENTITIES
+        and normalized_chip != normalized_architecture
+    )
 
 
 def _passed_evidence(value: Mapping[str, object]) -> bool:
@@ -467,10 +553,7 @@ def _release_gate(
     physical_bytes = memory.get("physical_bytes")
     if (
         not _real_evidence(hardware)
-        or not isinstance(hardware.get("chip"), str)
-        or not str(hardware["chip"]).strip()
-        or not isinstance(hardware.get("architecture"), str)
-        or not str(hardware["architecture"]).strip()
+        or not _hardware_identity_complete(hardware)
         or not isinstance(physical_bytes, int)
         or isinstance(physical_bytes, bool)
         or physical_bytes <= 0

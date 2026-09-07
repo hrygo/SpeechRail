@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from collections.abc import Mapping
 from pathlib import Path
 from stat import S_IMODE
@@ -68,6 +69,107 @@ def test_process_resource_monitor_records_same_tick_identity(
     assert process["start_time_ns"] == 99
     assert process["rss_bytes"] == 1_024
     assert process["phys_footprint_bytes"] == 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), 0.0])
+def test_process_resource_monitor_rejects_non_finite_or_non_positive_interval(
+    interval: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        ProcessResourceMonitor(interval_seconds=interval)
+
+
+def test_process_resource_monitor_surfaces_discovery_failure() -> None:
+    failed = threading.Event()
+
+    def discover() -> Mapping[str, benchmark_resources.ProcessIdentity]:
+        failed.set()
+        raise RuntimeError("sampler-secret")
+
+    monitor = ProcessResourceMonitor(interval_seconds=0.01, discover=discover)
+    monitor.start()
+    assert failed.wait(timeout=1.0)
+
+    with pytest.raises(RuntimeError, match="resource monitor"):
+        monitor.stop()
+
+
+def test_macos_chip_name_uses_system_profiler_system_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class Completed:
+        stdout = json.dumps(
+            {"SPHardwareDataType": [{"chip_type": "Apple M5 Max"}]}
+        )
+
+    def run(args: list[str], **kwargs: object) -> Completed:
+        calls.append((args, kwargs))
+        return Completed()
+
+    monkeypatch.setattr(benchmark_resources.sys, "platform", "darwin")
+    monkeypatch.setattr(benchmark_resources.subprocess, "run", run)
+
+    assert benchmark_resources._macos_chip_name() == "Apple M5 Max"
+    assert calls[0][0][0] == "/usr/sbin/system_profiler"
+
+
+def test_macos_physical_memory_uses_sysctl_system_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    class Completed:
+        stdout = "137438953472\n"
+
+    def run(args: list[str], **kwargs: object) -> Completed:
+        calls.append((args, kwargs))
+        return Completed()
+
+    monkeypatch.setattr(benchmark_resources.sys, "platform", "darwin")
+    monkeypatch.setattr(benchmark_resources.subprocess, "run", run)
+
+    assert benchmark_resources._physical_memory_bytes() == 137438953472
+    assert calls[0][0][0] == "/usr/sbin/sysctl"
+
+
+def test_resource_normalisation_rejects_any_incomplete_tick() -> None:
+    identity = benchmark_resources.ProcessIdentity(pid=4242, start_time_ns=99)
+    normalised = benchmark_resources._normalise_resources(
+        {
+            "process_samples": [
+                {
+                    "at_seconds": 1.0,
+                    "processes": [
+                        {
+                            "pid": identity.pid,
+                            "start_time_ns": identity.start_time_ns,
+                            "rss_bytes": 100,
+                            "phys_footprint_bytes": 200,
+                        }
+                    ],
+                },
+                {
+                    "at_seconds": 2.0,
+                    "processes": [
+                        {
+                            "pid": identity.pid,
+                            "start_time_ns": identity.start_time_ns,
+                            "rss_bytes": None,
+                            "phys_footprint_bytes": 300,
+                        }
+                    ],
+                },
+            ]
+        }
+    )
+
+    assert normalised["sampling_complete"] is False
+    assert normalised["simultaneous_peak"] == {
+        "rss_bytes": 100,
+        "phys_footprint_bytes": 200,
+    }
 
 
 class _FakeHttpRunner:
@@ -363,6 +465,35 @@ def test_resource_monitor_stop_failure_marks_incomplete_without_message(
     assert "stop-secret" not in json.dumps(result)
 
 
+def test_resource_monitor_without_samples_is_marked_incomplete(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    runner = _FakeHttpRunner()
+    monitor = _FakeResourceMonitor(
+        [],
+        result={
+            "hardware": {
+                "real": True,
+                "source": "monitor",
+                "chip": "Apple M2",
+                "architecture": "arm64",
+            },
+            "memory": {"physical_bytes": 12 * 1024**3},
+            "process_samples": [],
+        },
+    )
+
+    result = run_profile_benchmark(
+        "http://127.0.0.1:8201",
+        manifest,
+        profile="light",
+        phase="quality",
+        dependencies=_with_monitor(runner, monitor),
+    )
+
+    assert result["resources"]["sampling_complete"] is False
+    assert result["resources"]["monitor"]["status"] == "incomplete"
+
+
 def test_request_base_exception_survives_monitor_stop_failure(tmp_path: Path) -> None:
     class CancelledLike(BaseException):
         pass
@@ -462,6 +593,37 @@ def test_manifest_must_be_external_and_audio_must_be_local(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="does not exist"):
         load_manifest(tmp_path / "missing.json", repository_root=repo)
+
+
+@pytest.mark.parametrize("fixture_id", ["/private/token", "../token", "token with spaces"])
+def test_manifest_rejects_fixture_ids_that_could_leak_private_metadata(
+    tmp_path: Path, fixture_id: str
+) -> None:
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"fixtures": [{"id": fixture_id, "path": str(audio)}]}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="opaque identifier"):
+        load_manifest(manifest, repository_root=tmp_path / "repo")
+
+
+def test_manifest_rejects_non_language_labels_that_could_leak_tokens(tmp_path: Path) -> None:
+    audio = tmp_path / "fixture.wav"
+    audio.write_bytes(b"fixture")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {"fixtures": [{"id": "fixture-1", "language": "secret-token", "path": str(audio)}]}
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="language"):
+        load_manifest(manifest, repository_root=tmp_path / "repo")
 
 
 def test_output_path_cannot_overwrite_existing_file(tmp_path: Path) -> None:
@@ -653,6 +815,39 @@ def test_benchmark_result_is_redacted_and_uses_public_api_with_actual_duration(
     assert str(audio) not in encoded
     assert "secret transcript" not in encoded
     assert all(url.startswith("http://127.0.0.1:8201") for _, url in runner.calls)
+
+
+def test_release_gate_rejects_generic_architecture_as_chip_identity(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    runner = _FakeHttpRunner()
+    base = _dependencies(runner)
+    dependencies = BenchmarkDependencies(
+        http_runner=base.http_runner,
+        system_sampler=lambda: {
+            "hardware": {
+                "real": True,
+                "source": "sample_resources",
+                "chip": "arm",
+                "architecture": "arm64",
+            },
+            "os": {"name": "macOS", "version": "15.6"},
+            "memory": {"physical_bytes": 8 * 1024**3},
+            "process_samples": base.system_sampler().get("process_samples", []),
+        },
+        clock=base.clock,
+        ffprobe=base.ffprobe,
+    )
+
+    result = run_profile_benchmark(
+        "http://127.0.0.1:8201",
+        manifest,
+        profile="light",
+        phase="quality",
+        dependencies=dependencies,
+    )
+
+    assert result["release_pass"] is False
+    assert "missing real hardware identity" in result["release_reasons"]
 
 
 def test_injected_dependencies_cannot_be_recorded_as_release_evidence(tmp_path: Path) -> None:

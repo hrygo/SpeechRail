@@ -106,7 +106,14 @@ def _current_process_identity(pid: int, *, start_hint: str | None = None) -> Pro
 
 def worker_pids() -> dict[str, ProcessIdentity]:
     """Finds PIDs for host and backend worker processes."""
-    out = subprocess.run(["ps", "aux"], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(
+        ["ps", "aux"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=1.0,
+        env={"PATH": os.defpath, "LC_ALL": "C"},
+    ).stdout
     found: dict[str, ProcessIdentity] = {}
     seen: set[ProcessIdentity] = set()
     for line in out.splitlines():
@@ -179,6 +186,8 @@ def _read_ps_number(pid: int, field: str) -> float | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=1.0,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
         )
     except (OSError, subprocess.SubprocessError):
         return None

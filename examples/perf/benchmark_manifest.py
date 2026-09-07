@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,8 @@ _PROFILE_REQUIRED_PHASES: Mapping[str, frozenset[str]] = MappingProxyType(
 )
 _EVIDENCE_PHASES = PHASES | frozenset(PROFILE_DEVICE_PHASES.values())
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_FIXTURE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_LANGUAGE_RE = re.compile(r"^(?:auto|[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*)$")
 
 
 class BenchmarkInputError(ValueError):
@@ -151,7 +154,11 @@ def load_manifest(
         if not isinstance(raw_item, Mapping):
             raise BenchmarkInputError(f"{label} must be an object")
         fixture_id = _required_string(raw_item, "id", label=label)
-        if fixture_id in seen_ids or _looks_like_url(fixture_id):
+        if (
+            fixture_id in seen_ids
+            or _looks_like_url(fixture_id)
+            or _FIXTURE_ID_RE.fullmatch(fixture_id) is None
+        ):
             raise BenchmarkInputError(f"{label}.id must be a unique opaque identifier")
         seen_ids.add(fixture_id)
         kind = str(raw_item.get("kind", "asr")).strip().lower()
@@ -162,12 +169,15 @@ def load_manifest(
             raise BenchmarkInputError(f"{label}.text is required for TTS fixtures")
         if text is not None and not isinstance(text, str):
             raise BenchmarkInputError(f"{label}.text must be a string")
+        language = str(raw_item.get("language", "auto")).strip()
+        if _LANGUAGE_RE.fullmatch(language) is None:
+            raise BenchmarkInputError(f"{label}.language must be a safe language tag")
         fixtures.append(
             Fixture(
                 id=fixture_id,
                 path=_fixture_path(raw_item, repository_root=root, label=label),
                 kind=kind,
-                language=str(raw_item.get("language", "auto")),
+                language=language,
                 voice=str(raw_item.get("voice", "default")),
                 text=text.strip() if isinstance(text, str) else None,
             )
