@@ -1,4 +1,16 @@
-"""Neural VAD adapter for streaming speech activity detection using Silero VAD (ONNX)."""
+"""Neural VAD adapter for streaming speech activity detection using Silero VAD (ONNX).
+
+Supports two Silero ONNX graph schemas, auto-detected at session open:
+
+- ``v4`` (legacy): inputs ``{input, h, c, sr}`` with separate LSTM h/c state
+  tensors of shape ``[2, 1, 64]``.
+- ``v5/v6`` (current): inputs ``{input, state}`` with a single consolidated
+  state tensor of shape ``[2, 1, 128]`` and a 64-sample context the caller must
+  carry forward. ``input`` is ``[1, 576]`` = 512 current samples + 64 context.
+
+The public ``score_frame`` contract is unchanged: one 16 kHz PCM16 frame of 512
+samples (1024 bytes) in, one speech probability out.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +19,17 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 # One InferenceSession per resolved model path, shared across detector
 # instances. ORT documents ``InferenceSession.run`` as thread-safe; the
-# recurrent h/c state lives on each detector instance, so sharing the read-only
-# weights never crosses streams. Creation is NOT thread-safe, hence the lock.
+# recurrent h/c (or consolidated state + context) lives on each detector
+# instance, so sharing the read-only weights never crosses streams. Creation is
+# NOT thread-safe, hence the lock.
 _shared_sessions: dict[str, Any] = {}
 _shared_sessions_lock = threading.Lock()
+
+_SileroSchema = Literal["v4", "v56"]
 
 
 def _open_session(model_path: Path) -> Any:
@@ -24,7 +39,7 @@ def _open_session(model_path: Path) -> Any:
     options.inter_op_num_threads = 1
     options.intra_op_num_threads = 1
     session = ort.InferenceSession(str(model_path), sess_options=options)
-    SileroVadDetector._validate_session(session)
+    SileroVadDetector._detect_schema(session)
     return session
 
 
@@ -59,8 +74,14 @@ class SileroVadDetector:
         self._runner = runner
         self._config = config or SileroVadConfig()
         self._session: Any = None
+        self._schema: _SileroSchema | None = None
+        self._input_names: frozenset[str] = frozenset()
+        # v4 recurrent state tensors
         self._state_h: Any = None
         self._state_c: Any = None
+        # v5/v6 consolidated state + 64-sample context
+        self._state: Any = None
+        self._context: Any = None
         self._initialized = False
 
     @property
@@ -82,9 +103,11 @@ class SileroVadDetector:
         return True, None
 
     def reset(self) -> None:
-        """Reset internal recurrent state tensors."""
+        """Reset internal recurrent state and context tensors."""
         self._state_h = None
         self._state_c = None
+        self._state = None
+        self._context = None
 
     def score_frame(self, frame: bytes) -> float:
         """Score a single 16kHz PCM16 frame (512 samples = 1024 bytes)."""
@@ -110,40 +133,50 @@ class SileroVadDetector:
 
         assert self._model_path is not None
         self._session = _shared_session(self._model_path)
+        self._schema = self._detect_schema(self._session)
+        self._input_names = frozenset(i.name for i in self._session.get_inputs())
 
     @staticmethod
-    def _validate_session(session: Any) -> None:
-        """Fail closed on unsupported ONNX schemas.
+    def _detect_schema(session: Any) -> _SileroSchema:
+        """Classify a Silero ONNX graph schema from its input names.
 
-        The adapter implements the Silero v4 recurrent schema (input/h/c/sr,
-        hidden state [2, 1, 64]). Silero v5 exports rename the state inputs to
-        a single ``state`` tensor and would crash mid-stream, so reject them
-        here with an actionable message instead.
+        Fails closed on any schema that is neither the legacy v4 recurrent
+        form nor the current v5/v6 consolidated-state form.
         """
         input_names = {item.name for item in session.get_inputs()}
-        required = {"input", "h", "c", "sr"}
-        if not required <= input_names:
-            raise RuntimeError(
-                "Unsupported Silero VAD ONNX schema: expected v4 inputs "
-                f"{sorted(required)}, got {sorted(input_names)}. Silero v5 "
-                "models (input/state/sr) are not supported; provide a v4 "
-                "silero_vad.onnx."
-            )
+        has_state = "state" in input_names
+        has_h = "h" in input_names
+        has_c = "c" in input_names
+        if has_state and not (has_h or has_c):
+            return "v56"
+        if has_h and has_c and "input" in input_names:
+            return "v4"
+        raise RuntimeError(
+            "Unsupported Silero VAD ONNX schema: got inputs "
+            f"{sorted(input_names)}. Expected v4 (input/h/c/sr) or v5/v6 "
+            "(input/state)."
+        )
 
     def _infer_frame(self, frame: bytes) -> float:
         import numpy as np
 
         samples = np.frombuffer(frame, dtype="<i2").astype(np.float32) / 32768.0
+        if self._schema == "v56":
+            return self._infer_v56(samples)
+        # v4, or a session not yet classified (test stubs default to v4).
+        return self._infer_v4(samples)
+
+    def _infer_v4(self, samples: Any) -> float:
+        import numpy as np
+
         input_tensor = np.expand_dims(samples, axis=0)  # [1, 512]
 
         if self._state_h is None or self._state_c is None:
-            # Silero v4/v5 hidden state shape: [2, 1, 64]
             self._state_h = np.zeros((2, 1, 64), dtype=np.float32)
             self._state_c = np.zeros((2, 1, 64), dtype=np.float32)
 
         sr_tensor = np.array(self._config.sample_rate, dtype=np.int64)
 
-        # Silero VAD inputs
         inputs = {
             "input": input_tensor,
             "sr": sr_tensor,
@@ -154,6 +187,33 @@ class SileroVadDetector:
         prob = float(outputs[0][0][0])
         self._state_h = outputs[1]
         self._state_c = outputs[2]
+        return prob
+
+    def _infer_v56(self, samples: Any) -> float:
+        import numpy as np
+
+        chunk = np.expand_dims(samples, axis=0)  # [1, 512]
+
+        if self._state is None:
+            self._state = np.zeros((2, 1, 128), dtype=np.float32)
+        if self._context is None:
+            self._context = np.zeros((1, 64), dtype=np.float32)
+
+        # v5/v6 input is [1, 576] = last-64 context + current 512 samples.
+        x = np.concatenate([self._context, chunk], axis=1)
+
+        inputs: dict[str, Any] = {"input": x, "state": self._state}
+        if "sr" in self._input_names:
+            inputs["sr"] = np.array(self._config.sample_rate, dtype=np.int64)
+
+        outputs = self._session.run(None, inputs)
+        out_names = [o.name for o in self._session.get_outputs()]
+        named = dict(zip(out_names, outputs, strict=True))
+        prob_tensor = named.get("output", outputs[0])
+        state_tensor = named.get("stateN", named.get("state", outputs[1]))
+        prob = float(np.asarray(prob_tensor).reshape(-1)[0])
+        self._state = state_tensor
+        self._context = x[:, -64:].copy()
         return prob
 
 

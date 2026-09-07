@@ -105,18 +105,18 @@ diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无
 1. **准入与 ASR 隔离**：在未检测到确认的连续人声前（IDLE/CANDIDATE 状态），不向 ASR 推理器输入音频、不执行无声 flush，且绝不发送非空 `delta`、`segment` 或 `completed` 文本（杜绝纯静音下输出“嗯”等幻觉转录）。legacy 路径（准入关闭时）保留防抖前音频缓冲，但仅保留最近 `prefix_padding_ms` 窗口，静音不进入 ASR、缓冲不无界增长。
 2. **时钟守恒与时间映射**：连续输入的 session sample 时钟以及 diarization 输入不受准入跳过静音的影响，始终按物理音频线性推进；ASR 接纳区间的本地时间统一映射回 session-global sample 时钟（包括 pre-roll 前置缓冲与尾音）。
 3. **确定性空闭环**：在纯静音、空缓冲或未准入语音状态下触发的 commit（无论是客户端显式 commit 还是超限结转），均执行统一的空终态序列：`input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.completed`（其中 `transcript=""`，扩展模式下 `attribution_units=[]`）。连接与会话保持健康可用。
-4. **全双工打断（Barge-in）**：在 TTS 正在播放时，一旦检测到有效人声输入（`speech_started`），立即原子取消当前 TTS 响应并释放硬件排队槽位，随后无阻塞启动 ASR 会话。
+4. **全双工打断（Barge-in）**：在 TTS 正在播放时，一旦检测到有效人声输入（`speech_started`），立即原子取消当前 TTS 响应并释放硬件排队槽位，随后无阻塞启动 ASR 会话。取消后进入 `realtime_vad_bargein_cooldown_ms`（默认 250ms）冷却窗口，窗口内新的 `speech_started` 不再触发取消，防止 TTS 尾部回声反复触发打断。
 5. **话语中途 commit 与超限结转的单次闭环**：当客户端显式 `commit` 或缓冲超限结转发生在已准入话语进行中时，服务端先发送 `input_audio_buffer.speech_stopped`，随后对该 item 恰好执行一次 `committed` → `item.created` → `completed` 终态序列；不产生重复 `committed`、幻影空 item 或额外空闭环。ASR 会话随后为新准入区间重新建立。
 6. **协议透明与兼容**：`turn_detection=null` 或 `manual` 模式完全保持原有行为；`server_vad` 模式不新增未协商的私有 wire 字段，现有 OpenAI Realtime 客户端与 Sona 无缝兼容。
 
 ### VAD 引擎
 
-`realtime_vad_engine` 选择帧级语音概率评分器：`legacy`（默认，能量 + 过零率评分）或 `silero`（Silero VAD v4 ONNX，`input/h/c/sr` 递归 schema；v5 ONNX 的 `input/state/sr` schema 不受支持，加载时明确报错，不静默回退）。`silero` 引擎要求 `realtime_speech_admission_enabled=true`（服务端配置校验强制），且要求配置 `realtime_vad_model_path`。客户端下发的 `turn_detection.threshold` 在 legacy 引擎下映射到能量评分门限、在 silero 引擎下为真实语音概率门限；两者对同一取值的灵敏度不同。
+`realtime_vad_engine` 选择帧级语音概率评分器：`auto`（默认，配置 `realtime_vad_model_path` 时解析为 `silero`，否则回退 `legacy`）、`legacy`（能量 + 过零率评分）或 `silero`（Silero VAD ONNX，自动探测 v4 `input/h/c/sr` 与 v5/v6 `input/state` schema；不支持的 schema 在加载时明确报错、不静默回退）。解析为 `silero` 时要求 `realtime_speech_admission_enabled=true`（服务端配置校验强制），且要求配置 `realtime_vad_model_path`；`auto` 已配置模型但 preflight 失败时返回 `backend_not_ready`，不降级到 `legacy`。客户端下发的 `turn_detection.threshold` 在 legacy 引擎下映射到能量评分门限、在 silero 引擎下为真实语音概率门限；两者对同一取值的灵敏度不同。
 
 - **双阈值迟滞**（参照 Silero 官方 VADIterator）：起振帧须达到 `threshold`；已进行的话语仅在概率低于 `threshold - 0.15`（服务端 `stop_threshold`，可显式覆盖）时开始收尾。处于迟滞带（低于 entry、不低于 exit）的帧不会截断进行中的话语，也不会从静音新开话语。
 - **server_vad 参数默认值**：`threshold=0.5`、`prefix_padding_ms=300`、`silence_duration_ms=400` 为 SpeechRail 本地默认。注意 `silence_duration_ms` 的 OpenAI 官方默认为 **500ms**：依赖平台默认端点时长的客户端应显式传参以获得确定行为。
-- **ONNX 会话共享**：`InferenceSession` 按模型文件路径跨 WebSocket 连接共享（`Run()` 官方线程安全）；递归 h/c 状态按连接隔离并在 `reset`/`clear` 时清零。
-- **shadow 观测**：`realtime_vad_shadow_enabled`（仅 legacy 引擎可用）下 shadow 引擎逐帧打分仅用于观测对比，不改任何协议行为；指标 `speechrail_realtime_vad_shadow_frames_total{agreement=both_speech|both_silence|primary_only|shadow_only}` 按帧记录主引擎与 shadow 引擎相对 entry threshold 的判定一致性。
+- **ONNX 会话共享**：`InferenceSession` 按模型文件路径跨 WebSocket 连接共享（`Run()` 官方线程安全）；递归状态（v4 的 h/c，v5/v6 的合并 state + 64 采样上下文）按连接隔离并在 `reset`/`clear` 时清零。
+- **shadow 观测**：`realtime_vad_shadow_enabled`（仅 legacy 主引擎可用）下 shadow 引擎逐帧打分仅用于观测对比，不改任何协议行为；指标 `speechrail_realtime_vad_shadow_frames_total{agreement=both_speech|both_silence|primary_only|shadow_only}` 按帧记录主引擎与 shadow 引擎相对 entry threshold 的判定一致性。`auto` 解析为 silero 主引擎时不启用 shadow。
 
 ## Diarization 扩展 `speechrail.diarization.v1`（SPK-E2E-1）
 

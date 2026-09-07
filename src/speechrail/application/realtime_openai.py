@@ -7,6 +7,7 @@ import base64
 import contextlib
 import logging
 import os
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
@@ -143,6 +144,11 @@ class OpenAIRealtimeSession:
         self._bargein_pending_audio: deque[bytes] = deque()
         self._bargein_pending_bytes = 0
         self._bargein_pending_max_bytes = 9_600
+        # Barge-in cooldown: after a TTS cancellation or speech_stopped, a new
+        # speech onset within this window does not re-trigger a cancellation,
+        # preventing the TTS tail echo from making the agent never finish.
+        self._bargein_cooldown_s = self._settings.realtime_vad_bargein_cooldown_ms / 1000.0
+        self._bargein_cooldown_until = 0.0
         # Session-global sample clock (SPK-E2E-1): every accepted PCM sample
         # advances exactly once; each ASR item records the offset it starts at
         # so item-local vendor times lift into the session domain once.
@@ -293,7 +299,7 @@ class OpenAIRealtimeSession:
             prefix_padding = int(turn_detection.get("prefix_padding_ms", 300))
             silence_duration = int(turn_detection.get("silence_duration_ms", 400))
 
-            if self._settings.realtime_vad_engine == "silero":
+            if self._settings.resolves_to_silero_vad:
                 from speechrail.backends.neural_vad import SileroVadConfig, SileroVadDetector
 
                 ready, reason = SileroVadDetector.check_readiness(
@@ -438,9 +444,14 @@ class OpenAIRealtimeSession:
             self._unflushed_bytes = 0
 
             self._services.metrics.record_vad("started")
-            if self._tts_task is not None and not self._tts_task.done():
+            if (
+                self._tts_task is not None
+                and not self._tts_task.done()
+                and self._bargein_allowed()
+            ):
                 self._services.metrics.record_bargein()
                 await self._cancel_response()
+                self._mark_bargein_cooldown()
 
             audio_start_ms = int((dec.start_sample / 16_000) * 1000)
             await self._send(
@@ -492,6 +503,7 @@ class OpenAIRealtimeSession:
 
         elif dec.kind == "end":
             self._services.metrics.record_vad("ended")
+            self._mark_bargein_cooldown()
             audio_end_ms = int((dec.end_sample / 16_000) * 1000)
             await self._send(
                 input_audio_buffer_speech_stopped(
@@ -568,9 +580,14 @@ class OpenAIRealtimeSession:
             for v_event in vad_events:
                 if v_event.speech_started:
                     self._services.metrics.record_vad("started")
-                    if self._tts_task is not None and not self._tts_task.done():
+                    if (
+                        self._tts_task is not None
+                        and not self._tts_task.done()
+                        and self._bargein_allowed()
+                    ):
                         self._services.metrics.record_bargein()
                         await self._cancel_response()
+                        self._mark_bargein_cooldown()
                     await self._send(
                         input_audio_buffer_speech_started(
                             session_id=self._session_id,
@@ -580,6 +597,7 @@ class OpenAIRealtimeSession:
                     )
                 elif v_event.speech_ended:
                     self._services.metrics.record_vad("ended")
+                    self._mark_bargein_cooldown()
                     await self._send(
                         input_audio_buffer_speech_stopped(
                             session_id=self._session_id,
@@ -769,6 +787,7 @@ class OpenAIRealtimeSession:
     async def _clear_audio(self) -> None:
         self._turn_generation += 1
         self._turn_has_admitted_speech = False
+        self._bargein_cooldown_until = 0.0
         if self._speech_admission is not None:
             self._speech_admission.reset(next_sample=self._timeline.accepted_samples)
         self._vad_raw_buffer.clear()
@@ -852,6 +871,12 @@ class OpenAIRealtimeSession:
                     "use one of the available system voices from /v1/voices"
                 ),
             ) from None
+
+    def _bargein_allowed(self) -> bool:
+        return time.monotonic() >= self._bargein_cooldown_until
+
+    def _mark_bargein_cooldown(self) -> None:
+        self._bargein_cooldown_until = time.monotonic() + self._bargein_cooldown_s
 
     async def _cancel_response(self) -> None:
         if self._tts_task is None or self._tts_task.done() or self._tts_response_id is None:

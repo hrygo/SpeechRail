@@ -166,28 +166,26 @@ def test_settings_silero_engine_requires_admission(tmp_path: Path) -> None:
         )
 
 
-def test_silero_rejects_unsupported_onnx_schema() -> None:
-    """Finding: the adapter hard-codes the v4 ONNX schema (input/h/c/sr); a v5
-    model (input/state/sr) must fail closed at session creation, not mid-stream."""
+def test_detect_schema_v4_v56_and_reject_unsupported() -> None:
+    """Schema detection accepts v4 and v5/v6, fails closed on anything else."""
 
     class _Input:
         def __init__(self, name: str) -> None:
             self.name = name
 
-    class _V4Session:
+    class _Session:
+        def __init__(self, names: tuple[str, ...]) -> None:
+            self._names = names
+
         def get_inputs(self) -> list[_Input]:
-            return [_Input(name) for name in ("input", "h", "c", "sr")]
+            return [_Input(name) for name in self._names]
 
-    class _V5Session:
-        def get_inputs(self) -> list[_Input]:
-            return [_Input(name) for name in ("input", "state", "sr")]
+    assert SileroVadDetector._detect_schema(_Session(("input", "h", "c", "sr"))) == "v4"
+    assert SileroVadDetector._detect_schema(_Session(("input", "state"))) == "v56"
+    assert SileroVadDetector._detect_schema(_Session(("input", "state", "sr"))) == "v56"
 
-    v4_session: Any = _V4Session()
-    SileroVadDetector._validate_session(v4_session)
-
-    v5_session: Any = _V5Session()
-    with pytest.raises(RuntimeError, match="expected v4 inputs"):
-        SileroVadDetector._validate_session(v5_session)
+    with pytest.raises(RuntimeError, match="Unsupported Silero VAD ONNX schema"):
+        SileroVadDetector._detect_schema(_Session(("input", "foo")))
 
 
 def test_silero_commit_with_subframe_remainder_does_not_error(tmp_path: Path) -> None:
@@ -267,7 +265,14 @@ def test_shared_ort_session_reused_across_detectors(monkeypatch, tmp_path: Path)
     """ORT InferenceSession is shared per model file across detector instances
     (Run() is thread-safe) while recurrent h/c state stays per-stream."""
 
+    class _Input:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
     class _StubSession:
+        def get_inputs(self) -> list[_Input]:
+            return [_Input(name) for name in ("input", "h", "c", "sr")]
+
         def run(self, _names: Any, _inputs: Any) -> list[Any]:
             zero_state = np.zeros((2, 1, 64), dtype=np.float32)
             return [np.zeros((1, 1), dtype=np.float32), zero_state, zero_state.copy()]
@@ -381,3 +386,132 @@ def test_shadow_vad_records_agreement_metrics(tmp_path: Path) -> None:
     counters = services.metrics.render_json()["counters"]
     assert counters["speechrail_realtime_vad_shadow_frames_total{agreement=\"both_speech\"}"] == 3
     assert counters["speechrail_realtime_vad_shadow_frames_total{agreement=\"shadow_only\"}"] == 3
+
+
+def test_v56_inference_carries_state_and_context(monkeypatch, tmp_path: Path) -> None:
+    """v5/v6 path: [1,576] input (512+64 ctx), state [2,1,128], prob + stateN out."""
+
+    import speechrail.backends.neural_vad as neural_vad_module
+
+    class _Input:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class _V56Session:
+        def get_inputs(self) -> list[_Input]:
+            return [_Input("input"), _Input("state")]
+
+        def get_outputs(self) -> list[_Input]:
+            return [_Input("output"), _Input("stateN")]
+
+        def run(self, _names: Any, inputs: dict[str, Any]) -> list[Any]:
+            assert inputs["input"].shape == (1, 576)
+            assert inputs["state"].shape == (2, 1, 128)
+            return [
+                np.full((1, 1), 0.7, dtype=np.float32),
+                np.zeros((2, 1, 128), dtype=np.float32),
+            ]
+
+    model_path = tmp_path / "silero_v56.onnx"
+    model_path.write_bytes(b"stub")
+    monkeypatch.setattr(neural_vad_module, "_open_session", lambda _p: _V56Session())
+    monkeypatch.setattr(
+        SileroVadDetector,
+        "check_readiness",
+        classmethod(lambda cls, path: (True, None)),
+    )
+
+    detector = SileroVadDetector(model_path)
+    assert detector.score_frame(b"\x00\x00" * 512) == pytest.approx(0.7)
+    assert detector._schema == "v56"
+    assert detector._state is not None
+    assert detector._context is not None and detector._context.shape == (1, 64)
+    detector.reset()
+    assert detector._state is None
+    assert detector._context is None
+
+
+def test_settings_auto_engine_resolution(tmp_path: Path) -> None:
+    model_file = tmp_path / "silero.onnx"
+    model_file.touch()
+
+    assert Settings().realtime_vad_engine == "auto"
+    assert Settings().resolves_to_silero_vad is False
+    assert Settings(realtime_vad_engine="legacy").resolves_to_silero_vad is False
+    assert (
+        Settings(
+            realtime_vad_engine="silero", realtime_vad_model_path=model_file
+        ).resolves_to_silero_vad
+        is True
+    )
+    assert (
+        Settings(
+            realtime_vad_engine="auto", realtime_vad_model_path=model_file
+        ).resolves_to_silero_vad
+        is True
+    )
+    assert Settings(realtime_vad_engine="auto").resolves_to_silero_vad is False
+
+
+def test_settings_auto_with_model_requires_admission(tmp_path: Path) -> None:
+    model_file = tmp_path / "silero.onnx"
+    model_file.touch()
+    with pytest.raises(
+        ValidationError, match="realtime_vad_engine='auto' with a configured model"
+    ):
+        Settings(
+            realtime_vad_engine="auto",
+            realtime_vad_model_path=model_file,
+            realtime_speech_admission_enabled=False,
+        )
+
+
+def test_settings_auto_with_model_rejects_shadow(tmp_path: Path) -> None:
+    """shadow is a legacy-primary A/B aid; auto→silero must reject it, not silently drop."""
+    model_file = tmp_path / "silero.onnx"
+    model_file.touch()
+    with pytest.raises(
+        ValidationError,
+        match="realtime_vad_shadow_enabled is only supported with realtime_vad_engine='legacy'",
+    ):
+        Settings(
+            realtime_vad_engine="auto",
+            realtime_vad_model_path=model_file,
+            realtime_vad_shadow_enabled=True,
+        )
+
+
+def test_bargein_cooldown_gates_repeat_cancel() -> None:
+    """A speech onset inside the cooldown window must not re-cancel TTS."""
+
+    services = build_app_services(
+        Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+            realtime_vad_bargein_cooldown_ms=250,
+        ),
+        AppOverrides(
+            batch_transcriber=FakeTranscriber(),
+            tts_synthesizer=FakeSpeechSynthesizer(),
+            realtime_asr_factory=FakeStreamingFactory(),
+            diarization_engine=None,
+        ),
+    )
+
+    async def send(event: dict[str, Any]) -> int | None:
+        return 0
+
+    session = OpenAIRealtimeSession(services, session_id="s", send=send)
+
+    with patch("speechrail.application.realtime_openai.time.monotonic", return_value=1000.0):
+        session._mark_bargein_cooldown()
+        assert session._bargein_allowed() is False
+
+    with patch("speechrail.application.realtime_openai.time.monotonic", return_value=1000.3):
+        assert session._bargein_allowed() is True
+
+    with patch("speechrail.application.realtime_openai.time.monotonic", return_value=2000.0):
+        session._bargein_cooldown_until = 0.0
+        assert session._bargein_allowed() is True

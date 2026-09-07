@@ -12,6 +12,7 @@ import httpx
 
 from speechrail.config import Settings
 from speechrail.config.model_catalog import ModelCatalog, load_catalog, load_runtime_lock
+from speechrail.service import vad_model
 from speechrail.service.launchd import create_launch_agent_manager
 from speechrail.service.model_store import prepare_models, resolve_prepared_selection
 from speechrail.service.modelscope import ModelScopeDownloader
@@ -29,6 +30,7 @@ PresetId = Literal["quality", "balanced", "light"]
 PrepareProfile = Callable[[str, Path], str]
 SwitchPrepared = Callable[[str, Path], ApplyResult]
 ResolvePrevious = Callable[[Mapping[str, object], Path], str]
+PrepareVadModel = Callable[[Path], None]
 _ORDER: tuple[PresetId, ...] = ("quality", "balanced", "light")
 
 
@@ -166,15 +168,35 @@ def _switch_prepared(prepared_id: str, app_home: Path) -> ApplyResult:
         )
 
 
+def _prepare_optional_vad_model(app_home: Path) -> None:
+    """Best-effort Silero VAD model download; never blocks a profile apply.
+
+    On success the model path is recorded in the private config so the ``auto``
+    engine resolves to Silero. On failure the engine falls back to the
+    zero-dependency legacy VAD and the apply continues unchanged.
+    """
+    try:
+        model_path = vad_model.ensure_vad_model(app_home)
+        if model_path is None:
+            return
+        layout = ServiceLayout.for_app_home(app_home)
+        if layout.config_file.is_file():
+            vad_model.write_vad_model_path(layout.config_file, model_path)
+    except Exception:  # optional dependency must never fail a profile apply
+        vad_model.logger.exception("optional Silero VAD model preparation failed")
+
+
 def apply_profile(
     preset: PresetId,
     *,
     app_home: Path,
     prepare: PrepareProfile = _prepare_profile,
     switch: SwitchPrepared = _switch_prepared,
+    prepare_vad: PrepareVadModel = _prepare_optional_vad_model,
 ) -> ApplyResult:
     resolved_home = app_home.resolve()
     prepared_id = prepare(preset, resolved_home)
+    prepare_vad(resolved_home)
     return switch(prepared_id, resolved_home)
 
 

@@ -5,8 +5,10 @@ from pathlib import Path
 import pytest
 
 from speechrail.config.model_catalog import load_catalog
+from speechrail.service.paths import ServiceLayout
 from speechrail.service.profile_commands import (
     ProfileCommandError,
+    _prepare_optional_vad_model,
     apply_profile,
     list_profiles,
     model_changes,
@@ -70,9 +72,22 @@ def test_apply_prepares_then_switches_exact_preset(tmp_path: Path) -> None:
         events.append(f"switch:{prepared_id}:{app_home.name}")
         return ApplyResult("committed", "op_test", None)
 
-    result = apply_profile("light", app_home=tmp_path, prepare=prepare, switch=switch)
+    def prepare_vad(app_home: Path) -> None:
+        events.append(f"prepare_vad:{app_home.name}")
+
+    result = apply_profile(
+        "light",
+        app_home=tmp_path,
+        prepare=prepare,
+        switch=switch,
+        prepare_vad=prepare_vad,
+    )
     assert result.status == "committed"
-    assert events == [f"prepare:light:{tmp_path.name}", f"switch:prepared-light:{tmp_path.name}"]
+    assert events == [
+        f"prepare:light:{tmp_path.name}",
+        f"prepare_vad:{tmp_path.name}",
+        f"switch:prepared-light:{tmp_path.name}",
+    ]
 
 
 def test_rollback_uses_previous_complete_pair_without_download(tmp_path: Path) -> None:
@@ -104,3 +119,49 @@ def test_rollback_uses_previous_complete_pair_without_download(tmp_path: Path) -
 def test_rollback_without_previous_selection_is_explicit(tmp_path: Path) -> None:
     with pytest.raises(ProfileCommandError, match="previous"):
         rollback_profile(app_home=tmp_path, switch=lambda prepared_id, app_home: None)  # type: ignore[arg-type,return-value]
+
+
+def test_prepare_optional_vad_writes_env_on_success(tmp_path: Path, monkeypatch) -> None:
+    from speechrail.service import vad_model as vad_module
+
+    layout = ServiceLayout.for_app_home(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, mode=0o700)
+    layout.config_file.write_text("SPEECHRAIL_PORT=8201\n", encoding="utf-8")
+    model = tmp_path / "models" / "vad" / "silero_vad.onnx"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"fake-model")
+
+    monkeypatch.setattr(vad_module, "ensure_vad_model", lambda app_home: model)
+
+    _prepare_optional_vad_model(tmp_path)
+
+    text = layout.config_file.read_text(encoding="utf-8")
+    assert f"SPEECHRAIL_REALTIME_VAD_MODEL_PATH={model}\n" in text
+
+
+def test_prepare_optional_vad_swallows_download_failure(tmp_path: Path, monkeypatch) -> None:
+    from speechrail.service import vad_model as vad_module
+
+    def boom(app_home: Path) -> None:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(vad_module, "ensure_vad_model", boom)
+
+    _prepare_optional_vad_model(tmp_path)  # must not raise
+
+
+def test_prepare_optional_vad_swallows_config_write_failure(tmp_path: Path, monkeypatch) -> None:
+    from speechrail.service import vad_model as vad_module
+
+    layout = ServiceLayout.for_app_home(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, mode=0o700)
+    # Non-UTF-8 content → read_text(encoding="utf-8") raises UnicodeDecodeError
+    layout.config_file.write_bytes(b"\xff\xfe\x00 invalid")
+
+    model = tmp_path / "models" / "vad" / "silero_vad.onnx"
+    model.parent.mkdir(parents=True)
+    model.write_bytes(b"fake-model")
+
+    monkeypatch.setattr(vad_module, "ensure_vad_model", lambda app_home: model)
+
+    _prepare_optional_vad_model(tmp_path)  # must not raise, even with non-UTF-8 .env
