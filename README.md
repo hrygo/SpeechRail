@@ -317,6 +317,11 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
+> **v1.12.0 状态**：本版为功能发布（无状态 MCP 代理、Silero VAD 自动引擎与 setup 自动下载），
+> **未重测**三档性能/质量基准（仓库外独立 fixture/语料与人工听测未就绪），对应 gate `unset`。
+> 下方表格为上一可信基线 **v1.11.0** 实测，保留用于对照；完整验收见
+> [v1.12.0 发布验收](docs/archive/performance/2026-09-07-v1.12.0-release-acceptance.md)。
+
 Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.11.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.11.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.11.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset (same as v1.10.0). ASR and realtime use the same fixtures as the v1.10.0 baseline; TTS uses a fixed text set in this run, so its values are reported in-profile and not compared longitudinally. Historical reports remain in the archive:
 
 | Benchmark Metric | 🟢 Light Profile (v1.11.0) | 🟡 Balanced Profile (v1.11.0) | 🟣 Quality Profile (v1.11.0) | Test Methodology & Scenario |

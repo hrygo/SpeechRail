@@ -2,6 +2,14 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
+## 最新发布验收（v1.12.0，MINOR；性能/质量 gate unset）
+
+> **结论**：v1.12.0 为功能发布（无状态 MCP 代理、Silero VAD 自动引擎与 setup 自动下载），已完成
+> 代码门、wheel、managed 安装、启停、单实例、真实短 TTS/ASR 与运行态验收，当前 `quality` 运行。
+> **未重测三档性能/质量基准**（仓库外独立 fixture/语料与人工听测未就绪），对应 gate 记为 `unset`，
+> 不伪造数字；上一可信基线为 v1.11.0。详见
+> [v1.12.0 发布验收](2026-09-07-v1.12.0-release-acceptance.md)。
+
 ## 最新性能基准（v1.11.0，MINOR 三档）
 
 > **结论**：v1.11.0 已完成 `quality → balanced → light → quality` 的三档真实基准。ASR/TTS N=5、Realtime 3 session、三档 `phys_footprint` 采样和最终 quality 恢复均通过；独立 CER/WER、MOS/ABX 与 speaker embedding 仍为 `unset`。ASR 与 realtime 复用 v1.10.0 的同一 fixture（SHA-256 一致），可直接纵向比较；TTS 采用本轮固定文本集，仅作本版横向。本轮为纯行为/基础设施改动（`/health` 就绪语义、系统路由鉴权、语音克隆原子持久化、流式计时中间件、`voice_class` 指标降基数），未触碰推理模型。详见
@@ -86,6 +94,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.12.0** | [2026-09-07-v1.12.0-release-acceptance.md](2026-09-07-v1.12.0-release-acceptance.md) | MINOR 功能发布（MCP 代理、Silero VAD、auto download）；代码门与运行态验收通过，性能/质量 gate 保持 unset |
 | **v1.10.0 operator** | [2026-09-07-v1.10.0-operator-efficiency.md](2026-09-07-v1.10.0-operator-efficiency.md) | 模块化 benchmark、真实资源采样、managed wheel 安装与停启效率复验；N=1 warm，gate 保持 unset |
 | **v1.10.0** | [2026-09-07-v1.10.0-performance-benchmark.md](2026-09-07-v1.10.0-performance-benchmark.md) | MINOR 三档真实性能/资源/Realtime 基准；外部 Sona `backend_busy` 根因与隔离 SOP 已固化 |
 | **v1.9.2** | [2026-09-06-v1.9.2-performance-benchmark.md](2026-09-06-v1.9.2-performance-benchmark.md) | PATCH 当前 `quality`；三档切换与停机恢复通过；完整性能 gate 未完成 |

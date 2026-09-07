@@ -344,7 +344,7 @@ def _stage_wheel(
     venv_dir = release_dir / ".venv"
     runtime_python = venv_dir / "bin" / "python"
     wheel_requirement = str(wheel)
-    extras: list[str] = ["mcp"]  # mcp 默认启用：轻量协议层，零配置即用
+    extras: list[str] = ["mcp"]  # mcp 默认启用: 轻量协议层 零配置即用
     if install_diarization:
         extras.append("diarization")
     wheel_requirement += "[" + ",".join(extras) + "]"

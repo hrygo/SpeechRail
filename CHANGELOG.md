@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-09-07
+
+### Added
+
+- 新增 `speechrail-mcp` 入口与无状态 MCP 代理（`speechrail-mcp`），为 OpenAI SDK / Sona / OpenClaw 等客户端提供零配置 agent 访问，并同步 MCP server/client/tools。
+- Realtime 增加 schema-aware Silero VAD v5/v6：`realtime_vad_engine` 默认 `auto`，配置了 `SPEECHRAIL_REALTIME_VAD_MODEL_PATH` 时解析到 Silero ONNX，否则回退零依赖旧引擎。
+- `speechrail setup` 在网络可达时自动下载固定 `silero_vad.onnx`（约 2.3 MB，MIT）并做 schema check；不可达时记录 warning 并保留旧引擎回退。
+- `service` 新增 VAD 模型下载与管理命令，profile 命令同步支持 VAD 资源。
+
+### Fixed
+
+- 修复 `auto` 引擎解析为 silero 时被误判为 shadow VAD 而拒绝的问题。
+- `_atomic_write` 增加关闭后 `fsync directory`，提升元数据持久化可靠性，写盘失败不再静默丢弃。
+
 ## [1.11.0] - 2026-09-07
 
 ### Fixed
