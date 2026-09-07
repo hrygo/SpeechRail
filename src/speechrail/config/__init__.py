@@ -91,9 +91,10 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     realtime_diarization_drain_deadline_seconds: float = Field(default=20.0, gt=0, le=120)
     realtime_speech_admission_enabled: bool = True
-    realtime_vad_engine: Literal["legacy", "silero"] = "legacy"
+    realtime_vad_engine: Literal["auto", "legacy", "silero"] = "auto"
     realtime_vad_model_path: Path | None = None
     realtime_vad_shadow_enabled: bool = False
+    realtime_vad_bargein_cooldown_ms: int = Field(default=250, ge=0, le=5_000)
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -154,6 +155,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "realtime_vad_engine='silero' requires realtime_speech_admission_enabled=true"
             )
+        if (
+            self.realtime_vad_engine == "auto"
+            and self.realtime_vad_model_path is not None
+            and not self.realtime_speech_admission_enabled
+        ):
+            raise ValueError(
+                "realtime_vad_engine='auto' with a configured model resolves to Silero and "
+                "requires realtime_speech_admission_enabled=true"
+            )
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
         if (
@@ -168,6 +178,19 @@ class Settings(BaseSettings):
         if self.tts_sample_rate != 24_000:
             raise ValueError("tts_sample_rate must be 24000 for the public PCM profile")
         return self
+
+    @property
+    def resolves_to_silero_vad(self) -> bool:
+        """True when the realtime VAD engine resolves to Silero at runtime.
+
+        ``auto`` resolves to Silero only when a model path is configured;
+        without a model it falls back to the zero-dependency legacy engine.
+        ``silero`` always resolves to Silero; ``legacy`` never does. The Silero
+        branch still runs its own readiness preflight and fails closed.
+        """
+        return self.realtime_vad_engine == "silero" or (
+            self.realtime_vad_engine == "auto" and self.realtime_vad_model_path is not None
+        )
 
     @property
     def governor_limits(self) -> GovernorLimits:
