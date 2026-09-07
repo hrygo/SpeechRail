@@ -435,6 +435,14 @@ Diarization is an optional capability. Run `uv sync --extra diarization` to inst
 - **Auto Eviction**: Automatically unloads after **5 minutes of inactivity**, returning memory to ~50 MB without hoarding system resources.
 </details>
 
+<details>
+<summary><strong>Q6: How is the Silero VAD model for /v1/realtime installed?</strong></summary>
+
+The realtime voice-activity detector uses `realtime_vad_engine` (`auto` by default): it resolves to the Silero ONNX model when `SPEECHRAIL_REALTIME_VAD_MODEL_PATH` is configured, and otherwise falls back to a zero-dependency legacy engine. The managed `speechrail setup` downloads the pinned `silero_vad.onnx` (about 2.3 MB, MIT, from `snakers4/silero-vad`) automatically when the network is reachable, so no manual step is normally required. If the download is unreachable, setup logs a warning and keeps the legacy engine — you can later place the model manually and set `SPEECHRAIL_REALTIME_VAD_MODEL_PATH` in `.env` (see `configs/speechrail.example.env`).
+- **RAM Usage**: **0 MB** when not configured; roughly a few MB of resident weights when the Silero engine is active.
+- **Auto Eviction**: Not evicted — the VAD runs in-process and its ~2.3 MB footprint is negligible next to the ASR/TTS workers.
+</details>
+
 ---
 
 ## 📚 Complete Documentation Center
