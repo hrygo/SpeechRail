@@ -2,7 +2,7 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.0.0"
+version: "1.0.1"
 date: 2026-09-07
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
@@ -263,7 +263,15 @@ per-tool 授权矩阵属**运维安全**，降为附录 B。
   `~/.speechrail/voices/`（`0600`）。Proxy 不缓存音频、不记录文本/音频/凭证。
 
 ### 8.2 授权
-- Proxy 用 `SPEECHRAIL_API_KEY`（Bearer）；本机 keyless 填占位符。
+- Proxy 的 `Authorization: Bearer <key>` 由 `_resolve_api_key()`（`server.py:75`）解析，**优先级**：
+  1. `SPEECHRAIL_API_KEY` 环境变量（最高）；
+  2. **自动发现**：SpeechRail app home 的 `config/.env`（`SPEECHRAIL_APP_HOME` 可覆盖，默认
+     `~/Library/Application Support/SpeechRail`）；
+  3. 均无 → keyless（本机 loopback 免 key）。
+- **零配置**：本机服务已配置 key 时，`speechrail-mcp` 启动即自动从 `config/.env` 读取并鉴权，无需手动设
+  `SPEECHRAIL_API_KEY`；keyless 本机连接也无需填占位符。
+- 其余环境变量：`SPEECHRAIL_BASE_URL`（默认 `http://127.0.0.1:8201`）、`SPEECHRAIL_MCP_TIMEOUT_SECONDS`、
+  `SPEECHRAIL_MCP_TRANSPORT`（`stdio|streamable-http`）。
 - `allowed_origins` 已定义但**无 CORSMiddleware 实例化**（`config:66`，全库仅定义无引用）——若 Proxy 走
   HTTP Streamable 对外，需在 Proxy 侧自行处理 origin 策略，**不能依赖主服务**。
 
