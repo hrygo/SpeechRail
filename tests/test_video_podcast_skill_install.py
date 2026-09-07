@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from speechrail.service import skill_installer
+
 _INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
 _SPEC = importlib.util.spec_from_file_location("speechrail_skill_installer", _INSTALLER_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -31,7 +33,7 @@ def _skill_files(root: Path) -> dict[Path, bytes]:
 def test_video_podcast_skill_is_portable_and_installed_completely(tmp_path: Path) -> None:
     user_skills = tmp_path / ".agents" / "skills"
 
-    installed = install_macos.install_video_podcast_skill(
+    installed = skill_installer.install_video_podcast_skill(
         PROJECT_SKILL,
         user_skills_dir=user_skills,
     )
@@ -41,7 +43,7 @@ def test_video_podcast_skill_is_portable_and_installed_completely(tmp_path: Path
     assert not any("__pycache__" in path.parts for path in installed.rglob("*"))
     assert not any(path.suffix == ".pyc" for path in installed.rglob("*"))
     assert all(
-        not install_macos._LOCAL_ABSOLUTE_PATH_RE.search(content.decode("utf-8"))
+        not skill_installer._LOCAL_ABSOLUTE_PATH_RE.search(content.decode("utf-8"))
         for content in _skill_files(installed).values()
         if b"\x00" not in content
     )
@@ -56,8 +58,8 @@ def test_video_podcast_skill_install_rejects_local_absolute_paths(tmp_path: Path
         encoding="utf-8",
     )
 
-    with pytest.raises(install_macos.InstallerError, match="absolute path"):
-        install_macos.install_video_podcast_skill(
+    with pytest.raises(skill_installer.InstallerError, match="absolute path"):
+        skill_installer.install_video_podcast_skill(
             source,
             user_skills_dir=tmp_path / "user" / "skills",
         )
@@ -70,24 +72,28 @@ def test_video_podcast_skill_install_refuses_destination_symlink(tmp_path: Path)
     outside.mkdir()
     (user_skills / "video-podcast").symlink_to(outside, target_is_directory=True)
 
-    with pytest.raises(install_macos.InstallerError, match="symlink"):
-        install_macos.install_video_podcast_skill(PROJECT_SKILL, user_skills_dir=user_skills)
+    with pytest.raises(skill_installer.InstallerError, match="symlink"):
+        skill_installer.install_video_podcast_skill(PROJECT_SKILL, user_skills_dir=user_skills)
 
     assert not (outside / "SKILL.md").exists()
 
 
 def test_video_podcast_skill_install_replaces_previous_copy_atomically(tmp_path: Path) -> None:
     user_skills = tmp_path / "user" / "skills"
-    installed = install_macos.install_video_podcast_skill(
+    installed = skill_installer.install_video_podcast_skill(
         PROJECT_SKILL,
         user_skills_dir=user_skills,
     )
     (installed / "stale.txt").write_text("stale", encoding="utf-8")
 
-    install_macos.install_video_podcast_skill(PROJECT_SKILL, user_skills_dir=user_skills)
+    skill_installer.install_video_podcast_skill(PROJECT_SKILL, user_skills_dir=user_skills)
 
     assert not (installed / "stale.txt").exists()
     assert _skill_files(installed) == _skill_files(PROJECT_SKILL)
+
+
+def test_managed_installer_does_not_own_skill_installation() -> None:
+    assert not hasattr(install_macos, "install_video_podcast_skill")
 
 
 @pytest.mark.skipif(

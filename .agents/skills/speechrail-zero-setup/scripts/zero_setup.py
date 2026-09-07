@@ -108,7 +108,6 @@ sys.path.insert(0, str(REPO_ROOT))
 from tools.install_macos import (  # noqa: E402
     InstallerError,
     install_managed,
-    install_video_podcast_skill,
 )
 
 from speechrail.service.launchd import ServiceError  # noqa: E402
@@ -119,6 +118,7 @@ from speechrail.service.profile_smoke import (  # noqa: E402
     PublicApiSmokeProbe,
     SmokeProbeError,
 )
+from speechrail.service.skill_installer import install_video_podcast_skill  # noqa: E402
 
 
 def _log(stage: str, message: str) -> None:
