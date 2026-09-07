@@ -37,13 +37,13 @@ curl --fail http://127.0.0.1:8201/health
 
 ## 外部 realtime 客户端隔离
 
-`service stop`、`profile apply` 和 benchmark 只管理 SpeechRail 的 LaunchAgent，不会替仍在运行的 Sona、浏览器标签页或其它 WebSocket 客户端关闭连接。停服或切档前必须做一次外部连接快照：
+`service stop`、`profile apply` 和 benchmark 只管理 SpeechRail 的 LaunchAgent，不会替仍在运行的 Sona、浏览器标签页或其它 WebSocket 客户端关闭连接。诊断默认只读；停服、切档或基准前做一次外部连接快照，发现活动客户端时暂停并报告阻塞，不自动结束其他应用：
 
 1. 用 `lsof -nP -iTCP:<port>` 区分唯一 listener 与 `ESTABLISHED` 客户端连接，记录连接所属的精确 PID；不要把 `CLOSED` 条目当成活动会话。
 2. 用已配置的鉴权方式读取 `/metrics`，只检查 `speechrail_realtime_active_sessions`、`speechrail_governor_active_requests{class="batch|realtime"}` 和 streaming worker state；不把 API key 写入命令或日志。
-3. 只要存在外部 established connection、active realtime session 或 active governor request，先在拥有连接的客户端执行停止/断开，再等待连接消失、session 和 active requests 归零。服务自身 stop 不等于客户端 stop。
-4. 客户端 UI 关闭后若精确 PID 仍持有连接，先核对 PID 的命令行与 owner，再按本 SOP 的精确 PID 规则结束该客户端；不得使用 `pkill`、`killall` 或模糊名称匹配。
-5. 重新做一次短公共 ASR smoke；若仍返回 `429 backend_busy`，停止切档/发布并保留连接、metrics 和 operation 状态证据，不循环重试或用旧结果补齐。
+3. 只要存在外部 established connection、active realtime session 或 active governor request，就暂停依赖静默环境的停服、切档或基准操作，报告持有连接的客户端 PID、session/active request 计数和阻塞原因，等待客户端自行断开。服务自身 stop 不等于客户端 stop。
+4. 只有用户明确授权关闭指定客户端时，才在核对 PID 的命令行与 owner 后按精确 PID/进程组结束该客户端；不得使用 `pkill`、`killall` 或模糊名称匹配。维护 SpeechRail 的授权不自动包含关闭浏览器、Sona 或其它客户端。
+5. 连接清零后重新做一次短公共 ASR smoke；若仍返回 `429 backend_busy`，停止切档/发布并保留连接、metrics 和 operation 状态证据，不循环重试或用旧结果补齐。
 
 外部客户端未隔离时，`worker_load_error`、`not_ready` 或 `backend_busy` 不能直接归因于模型制品或候选 runtime。
 
@@ -118,7 +118,7 @@ speechrail service preflight --app-home "$APP_HOME"
 1. 记录 active profile、generation 和旧 prepared selection。
 2. `profile apply <target> --yes`；准备阶段失败时不碰服务。
 3. 停止旧服务并确认 lock 释放后启动候选；先核对 `/health.profile`，再做 ready/catalog/真实 smoke。
-4. 成功才 commit generation；失败执行一次 `profile rollback --yes`，再次走同样 stop/start/smoke。
+4. 成功才 commit generation；失败先读取 operation 状态、回滚结果和当前 selection。事务已自动回滚且已恢复时不得再次回滚；仅在确认未恢复、回退目标明确且 operation 允许时执行一次 `profile rollback --yes` 人工恢复，再走同样 stop/start/smoke。
 5. 回滚也失败时标记 `not_ready`，停止继续采集或重启，保留 operation 状态、stderr 尾部、PID 和 runtime/selection 指针供人工处理。
 
 MINOR/MAJOR 验收按 `quality → balanced → light → quality` 串行执行；每档都等待真实 ready 和 smoke，结束必须恢复开始的档位。PATCH 只测当前档，性能口径见 `speechrail-perf-benchmark`。
@@ -147,7 +147,7 @@ speechrail profile rollback --app-home "$APP_HOME" --yes
 | `server_already_running` | `lsof` 与 `launchctl print` 是否已有唯一服务 | 不启动第二实例；确认调用方使用目标 app home 和 runtime |
 | `/health` 是旧 profile/版本 | `/health.profile`、`runtime/current`、PID 的实际 executable | 停止并确认 lock 释放；禁止把旧 listener 当作候选 smoke 结果 |
 | `/readyz` 503 | selection、snapshot hash、共享 runtime、preflight 输出 | 保持停服，修复配置/制品后再启动；不打开下载开关掩盖问题 |
-| `429 backend_busy` 或切档 smoke 不 ready | 外部 established WebSocket、`realtime_active_sessions`、governor active requests、streaming worker state | 先关闭 Sona/浏览器/其它客户端并确认连接与 session 清零，再重做一次短 smoke；不要循环重试或先换模型 |
+| `429 backend_busy` 或切档 smoke 不 ready | 外部 established WebSocket、`realtime_active_sessions`、governor active requests、streaming worker state | 报告活动客户端并暂停，等待客户端自行断开或用户明确授权关闭，连接与 session 清零后再重做一次短 smoke；不要循环重试或先换模型 |
 | `launchctl` exit 5 | bootout 后旧父进程/worker 是否还持锁 | 等待 2 秒，按精确 PID 进程组强杀，再等最多 10 秒；不要连续 restart |
 | `service preflight` 可疑失败 | 执行 preflight 的 Python 是否为 `runtime/current/.venv/bin/python` | 重新从 managed runtime 执行，避免源码依赖污染判断 |
 

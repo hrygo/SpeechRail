@@ -100,7 +100,7 @@ def test_managed_installer_does_not_own_skill_installation() -> None:
     sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
     reason="zero-setup is a macOS Python 3.12 entry point",
 )
-def test_zero_setup_installs_skill_before_managed_service(
+def test_zero_setup_requires_explicit_confirmation_before_any_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     zero_setup_path = (
@@ -156,11 +156,95 @@ def test_zero_setup_installs_skill_before_managed_service(
 
     monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
 
+    with pytest.raises(zero_setup.InstallerError, match="explicit confirmation"):
+        zero_setup.run_zero_setup(
+            preset="light",
+            app_home=tmp_path / "app",
+            enable=False,
+            run_smoke=False,
+        )
+
+    assert events == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
+    reason="zero-setup is a macOS Python 3.12 entry point",
+)
+def test_zero_setup_keeps_video_skill_install_optional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zero_setup_path = (
+        PROJECT_ROOT
+        / ".agents"
+        / "skills"
+        / "speechrail-zero-setup"
+        / "scripts"
+        / "zero_setup.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "speechrail_zero_setup_optional_skill_test", zero_setup_path
+    )
+    assert spec is not None and spec.loader is not None
+    zero_setup = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = zero_setup
+    spec.loader.exec_module(zero_setup)
+
+    events: list[tuple[str, Path | None]] = []
+    wheel = tmp_path / "speechrail.whl"
+    wheel.write_bytes(b"test wheel")
+
+    monkeypatch.setattr(zero_setup, "_check_system_prerequisites", lambda: None)
+    monkeypatch.setattr(zero_setup, "_get_physical_memory_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(zero_setup, "_build_wheel", lambda: wheel)
+    monkeypatch.setattr(
+        zero_setup,
+        "install_video_podcast_skill",
+        lambda source: events.append(("skill", source)),
+        raising=False,
+    )
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    monkeypatch.setattr(zero_setup.httpx, "Client", FakeClient)
+
+    def fake_install_managed(*args: object, **kwargs: object) -> SimpleNamespace:
+        del args, kwargs
+        events.append(("service", None))
+        return SimpleNamespace(
+            app_home=tmp_path / "app",
+            plist_path=tmp_path / "com.speechrail.plist",
+            enabled=False,
+        )
+
+    monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
+
     zero_setup.run_zero_setup(
         preset="light",
         app_home=tmp_path / "app",
         enable=False,
         run_smoke=False,
+        confirmed=True,
+    )
+
+    assert [kind for kind, _ in events] == ["service"]
+
+    events.clear()
+    zero_setup.run_zero_setup(
+        preset="light",
+        app_home=tmp_path / "app",
+        enable=False,
+        run_smoke=False,
+        confirmed=True,
+        install_video_skill=True,
     )
 
     assert [kind for kind, _ in events] == ["skill", "service"]

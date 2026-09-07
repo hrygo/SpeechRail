@@ -38,7 +38,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 
 1. 使用已安装 wheel、锁定 snapshot 和无下载运行态；`/health`、`/readyz`、`/v1/models`、`/v1/voices` 均通过后再测。
 2. 记录 commit、版本、profile、artifact、variant、quantization、macOS、实际芯片（不能用 `arm`/`arm64` 等通用架构名替代）、物理内存、Python、MLX 与 benchmark schema。
-3. 每项先预热至少 1 次；基础发布基准测 5 次，报告 p50、p95、min/max 和样本数。首次请求单列为 cold，不混入 warm 分位数。
+3. 每项先预热至少 1 次；基础发布基准测 5 次，报告 p50、p95、min/max 和样本数。cold 只统计从确认未加载或已重置状态发出的首次推理；此前已执行过推理（含前置 smoke）时标记为 warm 或 `cold_unavailable`，不混入 warm 分位数。
 4. RTF 使用 `ffprobe` 实测音频时长：`latency / actual_audio_seconds`。不得使用文件名中的 3s/10s/30s/60s 标签代替。
 5. Apple Silicon 内存使用 `footprint -p <pid> -f bytes` 的 `phys_footprint`。不要用 RSS 代替，也不要相加发生在不同时刻的进程峰值。
 6. 总峰值必须来自每个完整采样 tick 内各目标 PID+start-time 的总和；任一 tick 缺样、PID 重用、sampler 线程异常或停止超时都标记 N/A 并关闭 gate。
@@ -46,7 +46,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
 9. API key 只从环境读取，不出现在命令、报告或日志中。
-10. 基准开始、每次切档前和最终恢复后都要隔离外部 realtime 客户端：用 `lsof -nP -iTCP:<port>` 排除 `ESTABLISHED` 连接，并用已配置鉴权读取 `/metrics` 确认 `realtime_active_sessions=0`、batch/realtime active requests 均为 0。Sona、浏览器标签页或其它客户端不会随服务 stop 自动断开；必须先关闭所属客户端，必要时按精确 PID 规则结束它。顺序 ASR 仍返回 `429 backend_busy` 时停止采集并记录根因，不循环重试或复用旧数据。
+10. 基准开始、每次切档前和最终恢复后都要隔离外部 realtime 客户端：用 `lsof -nP -iTCP:<port>` 排除 `ESTABLISHED` 连接，并用已配置鉴权读取 `/metrics` 确认 `realtime_active_sessions=0`、batch/realtime active requests 均为 0。Sona、浏览器标签页或其它客户端不会随服务 stop 自动断开；发现活动客户端时暂停采集并报告阻塞，等待客户端自行断开，只有用户明确授权才按精确 PID 关闭指定客户端。顺序 ASR 仍返回 `429 backend_busy` 时停止采集并记录根因，不循环重试或复用旧数据。
 
 ## 4. 基础发布套件（每个 profile）
 
@@ -56,6 +56,8 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 - `/v1/models` 的 active profile、ASR/TTS artifact、variant、quantization；
 - `/v1/voices` 九个 canonical role 的 availability 与 capabilities；
 - 公共 ASR/TTS smoke、HTTP 状态、request ID、非空输出。
+
+身份检查（`/health`、`/readyz`、`/v1/models`、`/v1/voices`）只读、不触发推理，不影响 cold；但 ASR/TTS smoke 会触发推理，若在 cold 测量前执行过任何推理，该档 cold 标记为 `cold_unavailable`，不把预热后的首次请求当 cold。
 
 ### B. Batch ASR
 
@@ -128,13 +130,13 @@ python3 examples/perf/bench_profiles.py \
 MINOR/MAJOR：
 
 1. 记录初始 active profile 和 generation。
-2. 每次 `speechrail profile apply <profile> --yes` 前后都重做外部连接快照；发现 established realtime client 或 active session 时先关闭客户端，不能把 `backend_busy` 当作候选模型失败。
+2. 每次 `speechrail profile apply <profile> --yes` 前后都重做外部连接快照；发现 established realtime client 或 active session 时暂停并报告阻塞，等待客户端自行断开或用户明确授权关闭，不能把 `backend_busy` 当作候选模型失败。
 3. 每次 `speechrail profile apply <profile> --yes` 后等待服务真正 ready，并先核对 `/health.profile` 是否等于目标档位。
 4. 核对 `/v1/models`、`/v1/voices` 的模型/音色身份并执行该档完整基础套件。
 5. 不在同一时间运行多个 benchmark；启动真空可持续数分钟时不要连续 restart。
 6. 结束时恢复初始 profile，复查公共 ASR/TTS smoke、外部 session 清零和单 listener。
 
-切换或 smoke 失败时停止后续数据采集，记录失败档、operation 状态、PID、stderr 尾部和错误码，并使用 `speechrail profile rollback --yes` 只回滚一次。回滚也失败时保持 `not_ready`，不要循环重启或用旧数据补齐。
+切换或 smoke 失败时停止后续数据采集，记录失败档、operation 状态、PID、stderr 尾部和错误码。先读取 operation 状态与回滚结果：事务已自动回滚且已恢复时不得再次回滚；仅在确认未恢复且回退目标明确时执行一次 `speechrail profile rollback --yes`。回滚也失败时保持 `not_ready`，不要循环重启或用旧数据补齐。
 
 ## 7. 比较与变化表达
 

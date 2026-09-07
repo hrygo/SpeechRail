@@ -1,258 +1,76 @@
 ---
 name: speechrail-zero-setup
 description: >-
-  在全新/空白 MacBook (Apple Silicon) 上从零搭建 SpeechRail 完整运行环境的标准流程 (SOP)。
-  包含 M 芯片硬件与 macOS 14+ 前置拦截、通过 uv 自动准备隔离的 Python 3.12（解决用户电脑 Python 不兼容问题）、
-  自动安装 Xcode CLT/Homebrew/ffmpeg、Managed 预设自动化部署 (quality/balanced/light)、
-  外部权重自动拉取与哈希校验、以及 LaunchAgent 常驻和冒烟测试闭环。触发词：从零搭建、空白Mac安装、全新Mac配置、
-  zero setup、fresh mac install、从0部署、M芯片检查、Python版本不匹配。
+  在全新 Apple Silicon Mac 上安装 SpeechRail 的首装 SOP。仅在用户明确要求完成 SpeechRail
+  从零安装、下载模型并注册本机服务时使用；普通 Python 版本排障、日常升级或远程部署不触发。
 ---
 
-# 🚀 SpeechRail 空白 MacBook 从零搭建 SOP (`speechrail-zero-setup`)
+# SpeechRail 空白 Mac 首装
 
-本指南面向在**全新、未配置过 AI 运行时的空白 Apple Silicon MacBook**（从 M1 MacBook Air 到 M5 Max 各机型）上，从 0 到 100% 完成硬件兼容性检查、系统基座工具链、隔离的 Python 3.12 准备、应用打包、锁定的独立 Worker 运行时构建、ModelScope 权重拉取、LaunchAgent 常驻以及端到端冒烟验证的完整标准流程。
+本流程会安装本机依赖、下载模型、写入用户 app home 并注册用户级 LaunchAgent。诊断默认只读；任何安装入口都必须显式 `--yes`。共享运行边界见 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)。
 
-安装、停启、切档和回滚的共享终态契约见 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)；本指南补充空白 Mac 的前置准备和首次安装顺序。
+## 前置条件
 
----
+- Apple Silicon `arm64`，macOS 14+，Python `>=3.12,<3.13`；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+- 预留至少 20 GB 磁盘空间，并可访问项目锁定的下载源。
+- profile 推荐以代码中的 `recommend_profile()` 为唯一事实源；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。
+- 安装前确认脚本解析到包含 `pyproject.toml` 的项目根目录；不得从未知目录继续执行。
 
-## 🛑 核心前置拦截与自动解决方案 (FAQ & Guardrails)
+## 首选入口
 
-在开始之前，先明确两个最容易踩坑的硬性条件：
-
-### 1. 硬件支持：为什么必须是 M 系列芯片（Apple Silicon）？
-- **硬件事实**：SpeechRail 的推理核心采用 Qwen3-MLX 运行时。MLX 是专为 Apple Silicon 的**统一内存架构 (Unified Memory)** 与 **Metal GPU 算力** 定制的，直接在内存与显存之间实现零拷贝。
-- **Intel (x86_64) Mac 现状**：Intel 芯片缺少 Apple Neural Engine 和统一内存架构，无法安装或运行 MLX。脚本会在最前置检测 `uname -m`，若为 `x86_64` 将明确报错拦截，避免徒劳下载几个 GB 的模型。
-
-### 2. Python 版本：用户电脑自带或已装的 Python 不支持怎么办？
-- **版本要求**：项目与 MLX Worker 运行环境严格锁定 Python `3.12.x`（`>=3.12,<3.13`）。macOS 自带的 Python 是 3.9，而 Homebrew 目前默认安装的是 3.13，直接用系统 Python 运行 100% 会报语法或依赖冲突。
-- **降维解决方案（零污染接管）**：
-  我们通过独立包管理器 `uv`（静态二进制，不依赖系统任何 Python）直接自动拉取官方编译的独立 CPython 3.12：
-  ```bash
-  uv python install 3.12
-  ```
-  之后所有命令统一通过 `uv run --python 3.12 ...` 调度。**无论用户的 Mac 上装的是什么版本，甚至没装 Python，都能 100% 确保运行环境为纯净标准的 Python 3.12**！
-
----
-
-## 📋 1. 系统与硬件前置条件
-
-| 检查项 | 绝对底线要求 | 推荐配置 | 终端快速核对命令 |
-|---|---|---|---|
-| **CPU 架构** | Apple Silicon (`arm64`) | M-Series Pro / Max / Ultra | `uname -m` (必须返回 `arm64`) |
-| **操作系统** | macOS 14.0 (Sonoma) 以上 | macOS 15.x (Sequoia) | `sw_vers -productVersion` |
-| **磁盘剩余空间** | 至少 20 GB 可用空间 | 40 GB+ 空闲空间 | `df -h /System/Volumes/Data` |
-| **网络连通性** | 可稳定访问 GitHub 与 ModelScope | 具备国内高速网络访问能力 | `curl -I https://modelscope.cn` |
-
----
-
-## ⚡ 2. 推荐方式：一键自动化全流程搭建 (Zero-Touch)
-
-在全新 Mac 打开终端，克隆代码后直接运行 Skill 内置的一键脚本：
+克隆项目后，从项目根目录执行：
 
 ```bash
-# 1. 克隆代码仓库
-git clone https://github.com/hrygo/SpeechRail.git
-cd SpeechRail
-
-# 2. 运行一键全自动引导程序 (自动处理芯片架构检测、Xcode CLT、Homebrew、ffmpeg、Python 3.12 准备与部署)
-./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh --yes
 ```
 
-*(如果机器上已经预装了 `uv`，亦可直接使用专属 Python 3.12 调用核心安装引擎：)*
-```bash
-# 自动根据内存推荐档位 (8GB=light, 16GB=balanced, 16GB+=quality)
-uv run --python 3.12 python .agents/skills/speechrail-zero-setup/scripts/zero_setup.py
-
-# 亦可显式指定需要的档位（如平衡档）：
-# uv run --python 3.12 python .agents/skills/speechrail-zero-setup/scripts/zero_setup.py --preset balanced
-```
-
-> **自动化引擎幕后 100% 自动执行的闭环任务：**
-> 1. 🛡️ **双重硬件与版本拦截**：检测 CPU 架构是否为 `arm64`，检测 Python 是否为 `3.12`；
-> 2. 📦 **应用打包**：调用 `uv build` 构建干净的标准 wheel 产物；
-> 3. 🧰 **安装制作 skill**：将项目内可移植的 `video-podcast` skill 完整复制到用户级 `~/.agents/skills/video-podcast`，供后续制作与验收使用；
-> 4. 📥 **模型拉取与校验**：从 ModelScope 流式下载对应档位（ASR + TTS）权重，全量比对 SHA-256 哈希；
-> 5. 🐍 **创建独立 Worker 环境**：基于 `runtime-lock.json` 在 `vendor/` 目录下构建完全隔离的 MLX 运行环境；
-> 6. 🔒 **生成受管配置**：自动生成 `app_home/config/.env`（严格限制为 `0600` 私有权限）；
-> 7. 🖥️ **生成双击设置程序**：在 App Home 生成无需开终端即可交互调用的 `SpeechRail 设置.command`；
-> 8. 🔍 **执行服务 Preflight**：校验 Worker 模块 import、静态 ffmpeg 权限与配置完整性；
-> 9. 🚀 **注册并启动守护进程**：生成并激活 `~/Library/LaunchAgents/com.speechrail.plist`；
-> 10. 🎙️ **端到端冒烟测试**：使用已安装 profile 的 prepared identity，通过统一 `PublicApiSmokeProbe` 有界等待 `/health`、`/readyz`、models/voices，再调用真实 TTS→ASR；若 `.env` 配置了 `SPEECHRAIL_API_KEY`，探针自动使用它，失败会触发安装事务回滚并返回非零。
-
----
-
-## 🛠️ 3. 分步手动执行 SOP (Step-by-Step for Audit)
-
-如果你希望逐步审计每一步的执行细节，请按以下标准化步骤进行：
-
-### Step 3.1: 架构核查与 Xcode CLT
-```bash
-# 1. 确认是否为 Apple Silicon
-[ "$(uname -m)" = "arm64" ] || { echo "非 M 芯片，不支持"; exit 1; }
-
-# 2. 检查或安装 Xcode 命令行工具
-xcode-select -p >/dev/null 2>&1 || xcode-select --install
-```
-
-### Step 3.2: 准备 Homebrew 与 ffmpeg
-```bash
-# 1. 安装 Homebrew (如果未安装)
-if ! command -v brew >/dev/null 2>&1; then
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-fi
-
-# 2. 固化 Apple Silicon 的 PATH 环境变量
-eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || true)"
-grep -q '/opt/homebrew/bin/brew shellenv' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-
-# 3. 安装音频处理工具
-brew install ffmpeg git
-```
-
-### Step 3.3: 精准安装 Python 3.12 (通过 uv)
-```bash
-# 1. 安装 uv
-command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
-source "$HOME/.cargo/env" 2>/dev/null || export PATH="$HOME/.cargo/bin:$PATH"
-
-# 2. 显式拉取标准的 Python 3.12 运行时
-uv python install 3.12
-```
-
-### Step 3.4: 同步依赖与构建 Wheel
-```bash
-cd /path/to/SpeechRail
-uv sync --python 3.12 --extra dev
-uv build --no-sources --wheel
-```
-
-### Step 3.5: 执行受管服务安装 (Managed Install)
-调用内建的 `install_managed` 完成安装：
-
-安装器会在切换 `runtime/current` 前确认服务端口 lock 已释放；如果已有 SpeechRail 实例运行，必须先执行 controller-backed `service stop`，不能在运行态直接替换。启用阶段若 LaunchAgent 部分加载后返回失败，安装器会尝试停止候选并清理首次安装的 selection，避免留下“配置已切换但服务不可用”的半状态。
-```bash
-APP_HOME="$HOME/Library/Application Support/SpeechRail"
-PRESET="balanced"  # 可选: quality, balanced, light
-
-uv run --python 3.12 python - <<PY
-import os
-from pathlib import Path
-import httpx
-from speechrail.service.modelscope import ModelScopeDownloader
-from tools.install_macos import install_managed
-
-app_home = Path(os.environ.get("APP_HOME", "$HOME/Library/Application Support/SpeechRail")).expanduser()
-preset = os.environ.get("PRESET", "balanced")
-wheel = sorted(Path("dist").glob("speechrail-*.whl"))[-1]
-
-with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)) as client:
-    res = install_managed(
-        wheel,
-        app_home=app_home,
-        preset_id=preset,
-        downloader=ModelScopeDownloader(client=client),
-        enable=True,  # 自动安装并启用 LaunchAgent
-    )
-print(f"安装成功: {res.app_home}")
-PY
-```
-
-受管 zero-setup 会在模型下载前安装用户级 `~/.agents/skills/video-podcast`；复制的是完整 skill 内容，项目级来源只使用相对路径，不把当前机器的绝对路径写回仓库。
-
----
-
-## 🔍 4. 验证探针与冒烟验收 (Verification)
-
-### 4.1 系统状态探针
-```bash
-# 1. 查看 LaunchAgent 常驻状态与 PID
-uv run speechrail service status
-
-# 2. 检查基础健康
-curl -s http://127.0.0.1:8201/health | jq .
-
-# 3. 检查推理 Worker 就绪状态 (HTTP 200 表示权重已载入统一内存)
-curl -i http://127.0.0.1:8201/readyz
-
-# 4. 检查可用音色与模型清单
-curl -s http://127.0.0.1:8201/v1/models | jq .
-curl -s http://127.0.0.1:8201/v1/voices | jq .
-```
-
-### 4.2 真实端到端推理闭环测试 (TTS + ASR)
-
-zero-setup 默认已经执行统一的 `PublicApiSmokeProbe`。手动重做时，如果私有 `.env` 启用了认证，先在当前 shell 设置同一 API key；不要把真实 key 写入脚本、日志或仓库：
+可显式指定档位、app home，并可独立选择是否安装附带的视频制作技能：
 
 ```bash
-export SPEECHRAIL_API_KEY='从私有 .env 临时读取的值'
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
+  --yes \
+  --preset balanced \
+  --app-home "$HOME/Library/Application Support/SpeechRail"
+
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
+  --yes \
+  --preset balanced \
+  --install-video-podcast-skill
 ```
+
+已有 `uv` 与 Python 3.12 时可直接调用核心安装器；同样必须显式确认：
 
 ```bash
-# 1. 语音合成 (TTS): 生成一段测试语音
-curl -s http://127.0.0.1:8201/v1/audio/speech \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $SPEECHRAIL_API_KEY" \
-  -d '{"model": "tts-1", "input": "你好，SpeechRail 已经在你的 Mac 上就绪。", "voice": "serena"}' \
-  --output test_speech.wav
-
-# 2. 播放音频（macOS 原生播放命令）
-afplay test_speech.wav
-
-# 3. 语音识别 (ASR): 转写刚刚生成的音频
-curl -s http://127.0.0.1:8201/v1/audio/transcriptions \
-  -H "Authorization: Bearer $SPEECHRAIL_API_KEY" \
-  -F file="@test_speech.wav" \
-  -F model="whisper-1" | jq .
+uv run --python 3.12 python \
+  .agents/skills/speechrail-zero-setup/scripts/zero_setup.py \
+  --yes --preset balanced
 ```
 
----
+`zero_setup.py` 在独立输出目录构建本次唯一 wheel，核对 wheel metadata 版本并记录 SHA-256；不会从 `dist/` 猜测旧产物。默认不安装用户级 `video-podcast` skill，该操作只有传入 `--install-video-podcast-skill` 时才执行，且失败不应改变 managed runtime。
 
-## 🎛️ 5. 日常运维与档位切换
+## 安装事务
 
-服务安装为当前用户的 macOS LaunchAgent，开机自启、故障自愈。
+确认后依次完成：
 
-### 常用服务命令
-```bash
-uv run speechrail service status    # 查看当前运行 PID 与端口状态
-uv run speechrail service stop      # 短等待后确认退出，必要时精确强杀
-uv run speechrail service start     # 确认端口锁释放后启动
-uv run speechrail service restart   # 使用同一套安全 stop/start 流程
-# enable/disable 仍兼容，但等价于 controller-backed start/stop
-```
+1. 检查架构、macOS、磁盘和依赖；缺失 Xcode CLT、Homebrew、`ffmpeg`、`uv` 或 Python 3.12 时按入口提示安装。
+2. 构建并验证精确 wheel；从 ModelScope 准备 catalog 锁定且逐文件校验的模型制品。
+3. 创建隔离 worker runtime，写入权限为 `0600` 的私有配置，并执行 managed-runtime preflight。
+4. 安装用户级 `com.speechrail` LaunchAgent；启用时使用统一生命周期 controller。
+5. 使用 `PublicApiSmokeProbe` 在进程内读取必要凭据，验证 health、ready、models、voices、TTS 和 ASR。失败时由安装事务恢复旧指针或清理首次安装状态，并返回非零。
 
-### 运行档位切换与回滚
-```bash
-speechrail profile list               # 查看各档位下载体积与模型配置
-speechrail profile apply balanced     # 切换至 balanced 档（自动冒烟与回退保护）
-speechrail profile rollback           # 一键安全回滚至上一可用档位
-```
+不要把真实 API key 放进命令参数或 shell 历史，不在仓库内生成测试音频，也不输出完整转写。手工复查仍使用统一探针；只记录 HTTP 状态、request ID、非空音频/转写校验和脱敏错误。
 
-桌面图形化设置：
-直接双击打开 `$HOME/Library/Application Support/SpeechRail/SpeechRail 设置.command` 即可交互式调整档位。
+## 已有实例
 
----
+若检测到已运行的 SpeechRail，首装脚本不得在运行态替换。已有明确服务维护授权时使用 `speechrail service stop`；否则报告当前 PID、listener、profile 和阻塞原因。升级现有 wheel 使用 `speechrail-release`，日常启停或切档使用 `speechrail-local-deploy`。
 
-## 🚨 6. 常见故障自愈决策表
+## 完成条件
 
-| 故障现象 | 根因与判定依据 | 立即恢复操作 |
-|---|---|---|
-| `硬件架构不兼容: 检测到当前芯片架构为「x86_64」` | 该机器为 Intel Mac，硬件不支持 MLX 与统一内存 | 需使用配备 Apple Silicon (M1~M5) 的 Mac 运行 |
-| `Python 版本不匹配: 当前运行解释器为 Python 3.9/3.13` | 用户使用了系统原生或 Homebrew 默认的 Python | 统一前缀 `uv run --python 3.12` 执行 |
-| `command not found: brew` | Apple Silicon 未正确将 `/opt/homebrew` 加入 PATH | 执行 `eval "$(/opt/homebrew/bin/brew shellenv)"` |
-| `/readyz` 返回 `503 backend_not_ready` | 首次模型权重载入统一内存需要 5~15 秒 | 稍等数秒重试，或查看 `tail -n 20 ~/Library/Logs/SpeechRail/service.stderr.log` |
-| 语音转写报 `audio_decode_failed` | 系统中缺失 `ffmpeg` 解封装工具 | 执行 `brew install ffmpeg` |
-| 下载 ModelScope 权重速度慢或连接中断 | 局域网访问外部源偶发抖动 | 重新运行安装脚本，引擎会自动校验已有本地文件并断点续传 |
+- 架构、系统版本、磁盘和 Python 3.12 检查通过；任何回退假设都已披露。
+- 本次 wheel 的 metadata 版本与项目一致，SHA-256 已记录。
+- managed runtime preflight 通过，只有一个目标 listener，PID/executable、profile 和 selection 一致。
+- `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。
+- 安装失败时旧 runtime/selection 保持可恢复；首次安装失败时不留下可误启动的半配置。
+- 只有显式请求安装 `video-podcast` 时才验证其用户级副本；该技能不是 SpeechRail 服务安装的完成条件。
 
----
-
-## ✅ 7. 100% Done 验收标准 (Definition of Done)
-
-只有同时满足以下所有条件，才算在全新 Mac 上搭建完成：
-- [ ] `uname -m` 为 `arm64`，`ffmpeg -version` 正常工作；
-- [ ] 当前执行环境为 Python 3.12 (`>=3.12,<3.13`)；
-- [ ] `uv run speechrail service status` 显示服务正常常驻且有明确 PID；
-- [ ] `curl -i http://127.0.0.1:8201/readyz` 返回 `HTTP/1.1 200 OK`；
-- [ ] `curl http://127.0.0.1:8201/v1/voices` 成功列出 9 个预设角色；
-- [ ] 用户级 `~/.agents/skills/video-podcast/SKILL.md` 与随附 `references/`、`scripts/`、`assets/` 可用；
-- [ ] 使用 OpenAI SDK 或 cURL 成功生成一段非空语音并完成文本识别闭环。
+交付报告区分已安装、已验证和未验证项，不使用“100%”或“自动自愈”代替证据。

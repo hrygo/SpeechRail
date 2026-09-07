@@ -12,7 +12,7 @@
 ## 唯一生命周期流程
 
 1. 记录 active profile、generation、runtime target、PID/listener 和健康状态。
-2. 隔离外部 realtime 客户端：`lsof` 只把 `ESTABLISHED` 视为活动连接，metrics 确认 realtime session 和 batch/realtime active requests 为零。
+2. 隔离外部 realtime 客户端：`lsof` 只把 `ESTABLISHED` 视为活动连接，metrics 确认 realtime session 和 batch/realtime active requests 为零。发现活动客户端时暂停并报告阻塞，只有用户明确授权关闭指定客户端时才按精确 PID 结束，不自动关闭 Sona、浏览器或其它客户端。
 3. 通过 `LaunchAgentServiceController.stop()` 执行 `bootout`。
 4. 有端口时轮询同一个 per-port singleton lock；无端口测试路径立即返回，不插入无意义 sleep。
 5. 默认最多等待 2 秒；仍占用时先重新读取当前 lock owner 并核对命令行/executable，不能直接信任早期 `launchctl status` 快照；只有身份仍一致的精确 PID/进程组才允许发送 `SIGKILL`。

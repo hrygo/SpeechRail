@@ -35,7 +35,7 @@ controller 只负责 SpeechRail LaunchAgent 和其 worker；它不会替外部 S
 - `speechrail_governor_active_requests{class="batch"}` 和 `{class="realtime"}` 必须为 0；
 - streaming worker 不应有活动 session。
 
-发现外部连接时先关闭其所属应用；UI 关闭后仍存活的客户端进程，只能在精确核对 PID、命令行和 owner 后按授权结束。若短 ASR smoke 仍为 `429 backend_busy`，保留证据并停止事务；不要以重启循环掩盖连接未释放。
+发现外部连接时暂停事务并报告阻塞，等待客户端自行断开；不得自动关闭 Sona、浏览器或其它客户端。只有用户明确授权关闭指定客户端时，才在精确核对 PID、命令行和 owner 后按精确 PID/进程组结束它。若短 ASR smoke 仍为 `429 backend_busy`，保留证据并停止事务；不要以重启循环掩盖连接未释放。
 
 切换 `runtime/current`、安装 plist 后，用新 runtime 执行 `start()`，它会在 `bootstrap`/`kickstart` 前再次确认没有旧进程持锁：
 
@@ -65,7 +65,7 @@ PY
 1. 写入候选和一次性 startup permit；
 2. 启动后先检查 `/health.profile` 是否等于候选；
 3. 再检查 `/readyz`、模型/音色 catalog 和真实公共 smoke；
-4. 失败只回滚一次；回滚也失败则标记 `not_ready`，不做重启重试。
+4. 失败只回滚一次，事务已自动回滚且已恢复时不得再次回滚；回滚也失败则标记 `not_ready`，不做重启重试。
 
 这条事务路径用于模型档位切换；普通重启可以用 controller-backed `service restart`，但不能用它代替 profile 事务。
 

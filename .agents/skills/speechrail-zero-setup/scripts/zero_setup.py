@@ -88,6 +88,13 @@ def _auto_resolve_python_312() -> None:
     sys.exit(ret.returncode)
 
 
+if not ((3, 12) <= sys.version_info < (3, 13)) and "--yes" not in sys.argv[1:]:
+    print(
+        "[ERROR] 准备 Python 3.12 会下载并安装运行时；请显式传入 --yes。",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
 if not ((3, 12) <= sys.version_info < (3, 13)):
     _auto_resolve_python_312()
 
@@ -95,10 +102,14 @@ if not ((3, 12) <= sys.version_info < (3, 13)):
 # 业务逻辑主体
 # ==============================================================================
 import argparse  # noqa: E402
+import hashlib  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
+from email.parser import BytesParser  # noqa: E402
 from pathlib import Path  # noqa: E402
+from zipfile import ZipFile  # noqa: E402
 
 import httpx  # noqa: E402
 
@@ -110,6 +121,7 @@ from tools.install_macos import (  # noqa: E402
     install_managed,
 )
 
+from speechrail import __version__  # noqa: E402
 from speechrail.service.launchd import ServiceError  # noqa: E402
 from speechrail.service.model_store import resolve_prepared_models  # noqa: E402
 from speechrail.service.modelscope import ModelScopeDownloader  # noqa: E402
@@ -170,20 +182,44 @@ def _get_physical_memory_bytes() -> int:
             return pages * page_size
     except (OSError, ValueError):
         pass
-    return 16 * 1024**3  # 默认假定 16GB
+    raise InstallerError("无法读取物理内存；请使用 --preset 显式选择运行档位")
+
+
+def _wheel_version(wheel: Path) -> str:
+    with ZipFile(wheel) as archive:
+        metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+        if len(metadata_names) != 1:
+            raise InstallerError("构建 wheel 缺少唯一 METADATA")
+        metadata = BytesParser().parsebytes(archive.read(metadata_names[0]))
+    version = metadata.get("Version")
+    if not version:
+        raise InstallerError("构建 wheel METADATA 缺少 Version")
+    return version
 
 
 def _build_wheel() -> Path:
     _log("BUILD", "正在构建应用 Wheel 安装包...")
     dist_dir = REPO_ROOT / "dist"
-    subprocess.run(["uv", "build", "--no-sources", "--wheel"], cwd=REPO_ROOT, check=True)
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(tempfile.mkdtemp(prefix="speechrail-build-", dir=dist_dir))
+    subprocess.run(
+        ["uv", "build", "--no-sources", "--wheel", "--out-dir", str(output_dir)],
+        cwd=REPO_ROOT,
+        check=True,
+    )
 
-    wheels = sorted(dist_dir.glob("speechrail-*.whl"), key=os.path.getmtime)
-    if not wheels:
-        raise InstallerError("Wheel 构建完成但在 dist/ 目录下未找到产物")
+    wheels = list(output_dir.glob("speechrail-*.whl"))
+    if len(wheels) != 1:
+        raise InstallerError("本次构建没有生成唯一 SpeechRail wheel")
 
-    wheel_path = wheels[-1]
-    _success(f"Wheel 构建完成: {wheel_path.name}")
+    wheel_path = wheels[0]
+    wheel_version = _wheel_version(wheel_path)
+    if wheel_version != __version__:
+        raise InstallerError(
+            f"wheel metadata version mismatch: expected {__version__}, got {wheel_version}"
+        )
+    digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+    _success(f"Wheel 构建完成: {wheel_path.name} (sha256={digest})")
     return wheel_path
 
 
@@ -262,7 +298,11 @@ def run_zero_setup(
     enable: bool = True,
     run_smoke: bool = True,
     timeout_seconds: int = 300,
+    confirmed: bool = False,
+    install_video_skill: bool = False,
 ) -> None:
+    if not confirmed:
+        raise InstallerError("zero-setup requires explicit confirmation")
     _check_system_prerequisites()
 
     resolved_app_home = (
@@ -280,9 +320,10 @@ def run_zero_setup(
 
     wheel_path = _build_wheel()
 
-    _log("SKILL", "安装 video-podcast skill 到用户级 .agents/skills ...")
-    install_video_podcast_skill(REPO_ROOT / ".agents" / "skills" / "video-podcast")
-    _success("video-podcast skill 已安装到用户级 .agents/skills/video-podcast")
+    if install_video_skill:
+        _log("SKILL", "安装 video-podcast skill 到用户级 .agents/skills ...")
+        install_video_podcast_skill(REPO_ROOT / ".agents" / "skills" / "video-podcast")
+        _success("video-podcast skill 已安装到用户级 .agents/skills/video-podcast")
 
     _log("INSTALL", f"开始拉取 ModelScope 权重并安装隔离运行时 (预设: {selected_preset})...")
     _log(
@@ -326,7 +367,7 @@ def run_zero_setup(
     _success("Managed 运行时与服务安装及验证成功！")
 
     print("\n" + "=" * 60)
-    print("\033[1;32m🎉 恭喜！SpeechRail 本地语音服务已 100% 完成从 0 搭建！\033[0m")
+    print("\033[1;32mSpeechRail 本地语音服务已通过本次安装与验证。\033[0m")
     print("=" * 60)
     print("• 本地服务地址 : http://127.0.0.1:8201/v1")
     print("• 常用管理命令 :")
@@ -345,6 +386,11 @@ def run_zero_setup(
 def main() -> None:
     parser = argparse.ArgumentParser(description="SpeechRail 全新 Mac 从零搭建与自动化安装")
     parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认安装依赖、下载模型、写入 app home 并注册用户级 LaunchAgent",
+    )
+    parser.add_argument(
         "--preset",
         choices=("quality", "balanced", "light"),
         help=(
@@ -362,6 +408,11 @@ def main() -> None:
         help="安装后不立即激活 LaunchAgent 常驻服务",
     )
     parser.add_argument(
+        "--install-video-podcast-skill",
+        action="store_true",
+        help="另行安装项目附带的 video-podcast 用户级 skill",
+    )
+    parser.add_argument(
         "--skip-smoke",
         action="store_true",
         help="跳过服务启动后的端到端 ASR/TTS 冒烟测试",
@@ -374,6 +425,8 @@ def main() -> None:
             app_home=args.app_home,
             enable=not args.no_enable,
             run_smoke=not args.skip_smoke,
+            confirmed=args.yes,
+            install_video_skill=args.install_video_podcast_skill,
         )
     except (InstallerError, ServiceError, KeyboardInterrupt) as exc:
         _fail(f"搭建过程终止: {exc}")

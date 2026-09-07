@@ -8,6 +8,18 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="${0:A:h}"
+REPO_ROOT="${SCRIPT_DIR:h:h:h:h}"
+if [[ ! -f "$REPO_ROOT/pyproject.toml" ]]; then
+  echo "[ERROR] 无法确认 SpeechRail 项目根目录: $REPO_ROOT" >&2
+  exit 2
+fi
+if [[ "${1:-}" != "--yes" ]]; then
+  echo "用法: $0 --yes [--preset quality|balanced|light] [--app-home PATH] [--install-video-podcast-skill]" >&2
+  echo "该命令会安装系统依赖、下载模型并注册用户级 LaunchAgent；必须显式传入 --yes。" >&2
+  exit 2
+fi
+
 # 颜色定义
 BLUE='\033[1;34m'
 GREEN='\033[1;32m'
@@ -98,9 +110,6 @@ echo -e "${GREEN}[5/6] uv 与专属 Python 3.12 已就绪 (无需担心系统 Py
 # ------------------------------------------------------------------------------
 # 6. 同步项目依赖并调起核心安装引擎 zero_setup.py
 # ------------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../../../" && pwd)"
-
 cd "$REPO_ROOT"
 echo -e "${BLUE}[+] 基于 Python 3.12 同步主工程依赖...${NC}"
 uv sync --python 3.12 --extra dev

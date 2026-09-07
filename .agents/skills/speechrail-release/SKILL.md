@@ -3,7 +3,8 @@ name: speechrail-release
 description: >-
   SpeechRail 本机版本发布 SOP。用于判定 SemVer、更新版本与 CHANGELOG、执行代码门、构建并安装 wheel、
   安全替换 managed LaunchAgent、验证启停与 profile 切换、回滚和留存发布证据。
-  触发词：发布、release、版本号、bump、构建 wheel、安装新版本、tag。
+  只读版本判断、仅构建 wheel、本机安装发布是三个不同入口；命中的具体入口按用户请求范围选择，
+  不因单个触发词自动执行完整发布。
 ---
 
 # SpeechRail 版本发布 SOP
@@ -11,6 +12,18 @@ description: >-
 目标是交付一个可验证、可回退的本机 wheel release。发布允许停服和数分钟的启动真空，但任何候选版本都不得与旧实例并存，也不得在模型制品、配置或回退点未确认时切换运行态。
 
 发布、安装和回滚必须遵守 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)；本 SOP 只补充版本材料、代码门和交付证据。
+
+## 入口分级
+
+本 SOP 覆盖三种不同范围的入口，命中后按用户请求选择，不因单个词自动升级：
+
+| 入口 | 范围 | 是否改动运行态 |
+|---|---|---|
+| 只读版本判断 | 读取 `pyproject.toml`/`__version__`、比较上一 tag 到 HEAD，输出建议 SemVer | 否 |
+| 仅构建 wheel | 更新版本材料、执行代码门、从干净源快照构建 wheel 并记录 SHA-256 | 否 |
+| 本机安装发布 | 完整替换 managed 服务并做运行态验收（本 SOP 默认主题） | 是 |
+
+`版本号`、`bump`、`构建 wheel` 等词默认进入只读或仅构建入口；只有用户明确要求安装/替换本机服务时才进入完整发布。
 
 ## 1. 先确定范围与发布锁
 
@@ -40,9 +53,9 @@ lsof -nP -iTCP:8201 -sTCP:LISTEN
 curl --fail http://127.0.0.1:8201/health
 ```
 
-记录当前 commit、active profile、generation、runtime target、服务 PID、listener 数量、模型身份、旧 wheel hash 和可回退 selection/vendor runtime。必须确认只有一个 8201 listener，且 PID 属于 `runtime/current/.venv/bin/python`。工作树可以有与本发布无关的用户改动，但发布 commit、报告和 tag 只能包含明确归属本次 release 的文件。
+记录当前 commit、active profile、generation、runtime target、服务 PID、listener 数量、模型身份、旧 wheel hash 和可回退 selection/vendor runtime。必须确认只有一个 8201 listener，且 PID 属于 `runtime/current/.venv/bin/python`。发布必须从明确的 release 源快照构建，不能从含未归属改动的工作树直接构建；记录 commit、工作树摘要、构建输入文件集合、wheel metadata 和 SHA-256，最终 tag 必须与构建输入一致。
 
-发布、切档和性能 smoke 前还必须隔离外部 realtime 客户端：用 `lsof -nP -iTCP:8201` 查找 `ESTABLISHED` 连接，用已配置鉴权读取 `/metrics` 确认 `speechrail_realtime_active_sessions=0`、batch/realtime governor active requests 均为 0。Sona、浏览器或其它客户端的连接不会随 SpeechRail `bootout` 自动释放；先关闭所属客户端，必要时只按已核验的精确 PID 规则结束它，再继续发布。若公共 ASR 仍返回 `429 backend_busy`，停止发布并保留证据，不循环重试。
+发布、切档和性能 smoke 前还必须隔离外部 realtime 客户端：用 `lsof -nP -iTCP:8201` 查找 `ESTABLISHED` 连接，用已配置鉴权读取 `/metrics` 确认 `speechrail_realtime_active_sessions=0`、batch/realtime governor active requests 均为 0。Sona、浏览器或其它客户端的连接不会随 SpeechRail `bootout` 自动释放；发现活动客户端时暂停发布并报告阻塞，等待客户端自行断开，只有用户明确授权才按已核验的精确 PID 关闭指定客户端。若公共 ASR 仍返回 `429 backend_busy`，停止发布并保留证据，不循环重试。
 
 执行 `speechrail service preflight --app-home "$APP_HOME"`，确认它通过 managed runtime 的 Python；不要从源码 `.venv` 推断已安装 wheel 的依赖。
 
@@ -84,6 +97,8 @@ rg -F -n 'src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=37
 若私有 managed 配置含 `SPEECHRAIL_VERSION`，先在仓库外创建 `0600` 备份，再原子删除该单行，使版本来自 wheel；不得输出配置全文或提交 `.env`。
 
 ## 4. 代码门与 wheel
+
+构建必须绑定精确源快照：先确认 `git status --short` 只有本次 release 文件，记录 `git rev-parse HEAD` 与构建输入文件集合；从该快照构建，记录 wheel metadata 与 SHA-256，最终 tag 与构建输入一致。
 
 ```bash
 env -u SPEECHRAIL_API_KEY uv run --extra dev pytest
@@ -151,7 +166,7 @@ lsof -nP -iTCP:8201 -sTCP:LISTEN
 - MINOR：`active → 其余两档 → active`，逐档停服、确认 lock、启动、等真实 ready、核对 `/health.profile`、做 smoke；
 - MAJOR：三档完整套件，再做迁移/兼容和回退验证。
 
-profile 切换失败时停止后续采集，记录失败档、operation 状态、PID、stderr 尾部和错误码；使用 `profile rollback --yes` 只回滚一次。回滚也失败时保持 `not_ready`，不要用旧数据补齐或连续重启。
+profile 切换失败时停止后续采集，记录失败档、operation 状态、PID、stderr 尾部和错误码。先读取 operation 状态与回滚结果：事务已自动回滚且已恢复时不得再次回滚；仅在确认未恢复且回退目标明确时执行一次 `profile rollback --yes`。回滚也失败时保持 `not_ready`，不要用旧数据补齐或连续重启。
 
 基准报告必须记录实际安装 wheel hash、commit、profile、generation、模型身份、硬件、资源采样完整性、外部客户端隔离证据和 gate；缺少真实质量或完整物理采样时写 `unset`/`fail`，不能写“通过”。原始 JSON、音频、embedding 和日志放仓库外。
 

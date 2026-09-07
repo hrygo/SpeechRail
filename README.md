@@ -86,7 +86,7 @@ cd SpeechRail
 After installation:
 1. The service runs silently in the background as a macOS `LaunchAgent` (listening on port `8201`).
 2. A double-clickable `SpeechRail 设置.command` script is generated in App Home for easy graphical profile switching anytime.
-3. The full `video-podcast` production skill is installed at `~/.agents/skills/video-podcast` for the current user.
+3. Optionally, the bundled `video-podcast` skill can be installed at `~/.agents/skills/video-podcast` by passing `--install-video-podcast-skill`.
 
 ---
 
