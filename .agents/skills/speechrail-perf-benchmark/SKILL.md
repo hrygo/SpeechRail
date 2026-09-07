@@ -37,11 +37,11 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 ## 3. 测量约束
 
 1. 使用已安装 wheel、锁定 snapshot 和无下载运行态；`/health`、`/readyz`、`/v1/models`、`/v1/voices` 均通过后再测。
-2. 记录 commit、版本、profile、artifact、variant、quantization、macOS、芯片、物理内存、Python、MLX 与 benchmark schema。
+2. 记录 commit、版本、profile、artifact、variant、quantization、macOS、实际芯片（不能用 `arm`/`arm64` 等通用架构名替代）、物理内存、Python、MLX 与 benchmark schema。
 3. 每项先预热至少 1 次；基础发布基准测 5 次，报告 p50、p95、min/max 和样本数。首次请求单列为 cold，不混入 warm 分位数。
 4. RTF 使用 `ffprobe` 实测音频时长：`latency / actual_audio_seconds`。不得使用文件名中的 3s/10s/30s/60s 标签代替。
 5. Apple Silicon 内存使用 `footprint -p <pid> -f bytes` 的 `phys_footprint`。不要用 RSS 代替，也不要相加发生在不同时刻的进程峰值。
-6. 总峰值必须来自同一采样 tick 内各目标 PID+start-time 的总和；缺样、PID 重用或 sampler 失败时标记 N/A 并关闭 gate。
+6. 总峰值必须来自每个完整采样 tick 内各目标 PID+start-time 的总和；任一 tick 缺样、PID 重用、sampler 线程异常或停止超时都标记 N/A 并关闭 gate。
    worker 为懒加载时，采样器必须在预热后重新发现受管进程；预热前固定 PID 集合而漏掉新 worker 的结果无效。
 7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
@@ -91,7 +91,7 @@ python3 examples/perf/bench_profiles.py \
   --output <repo-external-result.json>
 ```
 
-正式 benchmark 只接受外部 manifest 和外部 fixture；`prepare_fixtures.py` 仅用于开发调试，不得作为发布基准入口。`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开。
+正式 benchmark 只接受外部 manifest 和外部 fixture；`prepare_fixtures.py` 仅用于开发调试，不得作为发布基准入口。`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开；fixture 标签必须是安全的 opaque id/language tag。
 
 ## 5. 质量与音色稳定性套件
 
@@ -123,7 +123,7 @@ python3 examples/perf/bench_profiles.py \
 
 ## 6. 档位切换与恢复
 
-切档是停服事务，不是普通热重启。`launchctl bootout` 返回不代表旧 ASGI 父进程或 vendor worker 已退出；每次切档必须使用本机部署 skill 的生命周期 controller：先 bootout，最多等待 2 秒获取同一个 per-port singleton lock；仍占用时只对 `launchctl print` 得到的精确 PID/进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。lock 未释放、PID 不安全或无法确认旧服务身份时立即停止基准，不启动候选。详见 [speechrail-local-deploy 生命周期 SOP](../speechrail-local-deploy/references/lifecycle.md)。
+切档是停服事务，不是普通热重启。`launchctl bootout` 返回不代表旧 ASGI 父进程或 vendor worker 已退出；每次切档必须使用本机部署 skill 的生命周期 controller：先 bootout，最多等待 2 秒获取同一个 per-port singleton lock；仍占用时重新核对当前 lock owner、命令行和 executable，只对仍然匹配的精确 PID/进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。lock 未释放、PID 不安全、身份不一致或无法确认旧服务身份时立即停止基准，不启动候选。详见 [speechrail-local-deploy 生命周期 SOP](../speechrail-local-deploy/references/lifecycle.md)。
 
 MINOR/MAJOR：
 

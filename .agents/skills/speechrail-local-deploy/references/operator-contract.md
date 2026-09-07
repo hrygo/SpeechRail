@@ -15,8 +15,8 @@
 2. 隔离外部 realtime 客户端：`lsof` 只把 `ESTABLISHED` 视为活动连接，metrics 确认 realtime session 和 batch/realtime active requests 为零。
 3. 通过 `LaunchAgentServiceController.stop()` 执行 `bootout`。
 4. 有端口时轮询同一个 per-port singleton lock；无端口测试路径立即返回，不插入无意义 sleep。
-5. 默认最多等待 2 秒；仍占用时仅对已经由 LaunchAgent status 或 lock owner metadata 校验的精确 PID/进程组发送 `SIGKILL`。
-6. 强杀后最多再等待 10 秒确认 lock 释放；无安全 PID 或 lock 未释放时中止，不启动候选。
+5. 默认最多等待 2 秒；仍占用时先重新读取当前 lock owner 并核对命令行/executable，不能直接信任早期 `launchctl status` 快照；只有身份仍一致的精确 PID/进程组才允许发送 `SIGKILL`。
+6. 强杀后最多再等待 10 秒确认 lock 释放；PID 身份不一致、无法验证或 lock 未释放时中止，不启动候选。`launchctl`、`ps` 和 lock waiter 都必须有界，不能因为控制面无响应而无限等待。
 7. 通过 `LaunchAgentServiceController.start()` 在 bootstrap/kickstart 前再次确认 lock，启动后等待真实 ready，再做 profile/model/voice 和公共 smoke。
 
 禁止 `pkill`、`killall`、模糊名称匹配、手工 plist 修改和连续 `restart` 重试。停止失败必须保留旧 runtime/selection 作为回退点。
@@ -33,7 +33,8 @@
 - 正式基准唯一入口为 `examples/perf/bench_profiles.py`，其实现分为 `benchmark_manifest.py`、`benchmark_http.py`、`benchmark_resources.py` 和 `benchmark_runner.py`。
 - manifest 和 fixture 必须位于仓库外；基准工具不得生成 TTS fixture 再把它当作独立 ASR 质量证据。
 - 原始 JSON、音频、日志和采样制品放在 app home 外部 benchmark 目录；Git 只保存脱敏汇总报告。
-- release gate 需要真实硬件/模型身份、独立质量证据、成功公共推理和完整同 tick 资源采样；缺任何一项就写 `unset`/`fail`。
+- release gate 需要真实硬件/模型身份、独立质量证据、成功公共推理和每个 tick 均完整的同 tick 资源采样；通用的 `arm`/`arm64` 只能算架构，不能算芯片身份；缺任何一项、采样线程异常或停止超时就写 `unset`/`fail`。
+- manifest 的 fixture `id` 和 `language` 只能使用安全标签；原始路径、任意 token、文本和音频不得进入结果 JSON 或归档报告。
 - `PATCH` 测 active profile；`MINOR` 按 `quality → balanced → light → quality` 串行执行并恢复初始档；`MAJOR` 在此基础上加入迁移与兼容验证。
 
 ## 完成证据

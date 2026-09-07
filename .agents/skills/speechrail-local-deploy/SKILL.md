@@ -17,7 +17,7 @@ SpeechRail 是单机、单用户服务：只允许一个 `com.speechrail` Launch
 - `speechrail serve` 进入 per-user/per-port `flock`。第二个进程必须失败为 `server_already_running`；看到 `worker_load_error` 之前，先排除重复父进程、遗留 vendor worker 和端口锁竞争。
 - `runtime/current`、selection、共享 vendor runtime、模型 snapshot 和 wheel release 分开管理。切换只改变已校验的 selection；替换 wheel 只原子切 `runtime/current`，不覆盖配置、模型或 vendor `current`。
 - `service stop`/`start`/`restart` 使用生命周期 controller；`enable`/`disable` 只保留为兼容别名。`launchctl bootout` 返回不等于 ASGI 父进程和 vendor worker 已退出，详见 [references/lifecycle.md](references/lifecycle.md)。
-- 不使用 `pkill`、`killall`、模糊名称匹配或未经确认的 PID。强杀只允许针对 `launchctl print` 或 lock owner metadata 验证出的精确 PID/进程组，且不得是当前 Codex/终端进程。
+- 不使用 `pkill`、`killall`、模糊名称匹配或未经确认的 PID。强杀前必须重新核对当前 lock owner、命令行和 executable；只有仍一致的精确 PID/进程组才允许强杀，且不得是当前 Codex/终端进程。
 - 不输出 API key、`.env` 全文、Authorization、音频、完整转写、完整日志或私有绝对路径；诊断只保留状态、版本、profile、generation、错误码和脱敏 stderr 尾部。
 
 ## 操作前快照
@@ -66,7 +66,7 @@ speechrail profile status --app-home "$APP_HOME"
 1. 读取 `launchctl print gui/$(id -u)/com.speechrail` 的 PID；没有已加载任务时保留 PID 为空。
 2. `bootout` 旧 LaunchAgent。
 3. 最多等待 2 秒，反复尝试获取同一个 per-port singleton lock。
-4. 仍被占用且 PID 已确认时，对该 PID 的精确进程组发送 `SIGKILL`；不递归杀其他进程，不杀当前进程。
+4. 仍被占用且当前 owner/PID 身份重新确认时，对该 PID 的精确进程组发送 `SIGKILL`；不递归杀其他进程，不杀当前进程。
 5. 最多再等待 10 秒确认 lock 释放。仍未释放则中止，不得启动候选服务；保留旧 runtime/selection 并报告 `previous service instance did not stop`。
 6. 只有 lock 已释放后才 `bootstrap`/`kickstart` 候选服务。
 7. 启动真空期间不要反复重启。模型加载可能超过 30 秒，应按实际启动上限有界轮询；端口出现后仍必须验证 profile、ready 和公共 API。
