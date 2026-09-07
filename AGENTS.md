@@ -123,3 +123,10 @@ wheel 替换必须先停旧实例，再在隔离 release 目录 preflight，最�
 - 同文件存在并行改动时只提交可安全分离的 hunk；无法分离就报告阻塞。
 
 结束时报告：结果、改动、实测、运行态、未验证/风险、并行改动和回退方式。结论范围必须与证据一致。
+
+## Agent 工作纪律
+
+- **同一文件的多个 edit 必须串行**，禁止在一次消息里并行编辑同一文件——并行 edit 会基于同一原始内容产生覆盖竞态（曾把 `contracts/openapi.yaml` 的缩进覆盖错位）。
+- **合并到受保护主干（main/master）前先检查远程分支保护规则与 merge 策略**：`main` 要求线性历史（如提示 `must not contain merge commits`、历史用 squash）时，用 `rebase + --merge/--ff-only`，不要默认 `git merge --no-ff` 制造 merge commit；远程禁 force-push 时一旦 push 出去不可逆。
+- macOS（Apple Git）推送受保护分支遇 `LibreSSL SSL_connect: SSL_ERROR_SYSCALL to github.com:443` 而 `curl` 同地址正常时，是 HTTP/2 连接被 reset，用 `git -c http.version=HTTP/1.1 push ...` 绕过（单命令注入，不持久改全局 config）。
+- 发布/部署/验收脚本使用可移植命令：有界等待用 `python -c 'import subprocess; subprocess.run([...], timeout=30)'`，不要依赖 macOS 缺失的 GNU `timeout`；远端删分支后用 `git fetch --prune` 清理过期 tracking ref。

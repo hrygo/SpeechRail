@@ -112,7 +112,7 @@ python3 -m zipfile -l dist/speechrail-<version>-py3-none-any.whl
 shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
 ```
 
-测试时清除环境中的 `SPEECHRAIL_API_KEY`，避免私有配置污染匿名/契约测试；不要把 key 写入命令、报告或日志。构建后核对 wheel 文件名、metadata、worker 模块、assets 和版本；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
+测试时清除环境中的 `SPEECHRAIL_API_KEY`，避免私有配置污染匿名/契约测试；不要把 key 写入命令、报告或日志。`--extra dev` 已包含 `mcp`（默认启用），因此 `tests/mcp/` 无需再单独 `--extra mcp`。本地功能门禁用 `--no-cov` 运行以验证正确性，覆盖率 80% 上限由 CI 的 `pytest --cov=src` 承担；`ruff check src tests tools` 与 CI 同口径，避免只查 `src tests` 漏掉 `tools/` 的遗留 lint。构建后核对 wheel 文件名、metadata、worker 模块、assets 和版本；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
 
 ## 5. 安全替换 managed 服务
 
@@ -152,9 +152,9 @@ lsof -nP -iTCP:8201 -sTCP:LISTEN
 - `/health.version`、wheel metadata、`runtime/current` release 和发布记录一致；ASR/TTS ready；
 - `/health.profile`、`/v1/models` 的 profile/artifact/variant/quantization 与 selection 一致；
 - `/readyz` 为 200，`/v1/voices` 的 availability/capabilities 与当前 TTS variant 一致；
-- 真实、非敏感 fixture 的 ASR/TTS 都返回 200、非空结果和 request ID；
+- 真实、非敏感 fixture 的 ASR/TTS 都返回 200、非空结果和 request ID（私有 `.env` 配置 API key 时，须用该 key 鉴权，从 `.env` 读取且**不回显**）；
 - 没有外部 established realtime connection，`realtime_active_sessions=0`，batch/realtime active requests 均为 0；
-- 通过一次“第二实例应失败”的检查（启动同一端口的 `speechrail serve` 得到 `server_already_running`），然后不留下第二进程。
+- 通过一次“第二实例应失败”的检查（启动同一端口的 `speechrail serve` 得到 `server_already_running`），然后不留下第二进程。macOS 无 GNU `timeout`，用 `python -c 'import subprocess,os; subprocess.run([...], timeout=30)'` 实现有界等待；`speechrail serve --app-home ...` 可用作显式 app home。
 
 仅有进程存在、plist 存在、配置存在或 `/health` 200 都不能证明新 release 生效；profile identity mismatch 说明 smoke 可能打到了旧 listener，必须重新安全 stop。
 
@@ -195,7 +195,7 @@ git status --short
 git tag v<version>
 ```
 
-远端 push 只有在当前任务明确授权时执行；禁止 force-push。若工作树含其他用户改动，不得声称“干净”或擅自打 tag。
+远端 push 只有在当前任务明确授权时执行；禁止 force-push。若工作树含其他用户改动，不得声称“干净”或擅自打 tag。macOS（Apple Git）向受保护分支推送时若遇 `LibreSSL SSL_connect: SSL_ERROR_SYSCALL to github.com:443` 而 `curl` 同一地址正常，通常是 HTTP/2 连接被 reset；用 `git -c http.version=HTTP/1.1 push ...` 绕过（单命令注入，不要持久改动全局 config）。
 
 ## 完成清单
 
