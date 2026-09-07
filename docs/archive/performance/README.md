@@ -8,6 +8,10 @@
 > [v1.10.0 性能与质量基准](2026-09-07-v1.10.0-performance-benchmark.md) 与
 > [v1.10.0 发布验收](2026-09-06-v1.10.0-release-acceptance.md)。
 
+> **工具链复验**：同日完成模块化 benchmark、真实资源 monitor、managed wheel 安装和
+> `stop → start → ready` 计时；本轮每档为 N=1 warm 观测，正式 release gate 仍保持 `unset`。
+> 详见 [v1.10.0 operator efficiency recheck](2026-09-07-v1.10.0-operator-efficiency.md)。
+
 ## 历史安装验收（v1.9.2，PATCH quality）
 
 > **结论**：v1.9.2 修复 LaunchAgent 停止真空窗导致的旧 worker 残留、候选误测和
@@ -77,6 +81,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.10.0 operator** | [2026-09-07-v1.10.0-operator-efficiency.md](2026-09-07-v1.10.0-operator-efficiency.md) | 模块化 benchmark、真实资源采样、managed wheel 安装与停启效率复验；N=1 warm，gate 保持 unset |
 | **v1.10.0** | [2026-09-07-v1.10.0-performance-benchmark.md](2026-09-07-v1.10.0-performance-benchmark.md) | MINOR 三档真实性能/资源/Realtime 基准；外部 Sona `backend_busy` 根因与隔离 SOP 已固化 |
 | **v1.9.2** | [2026-09-06-v1.9.2-performance-benchmark.md](2026-09-06-v1.9.2-performance-benchmark.md) | PATCH 当前 `quality`；三档切换与停机恢复通过；完整性能 gate 未完成 |
 | **v1.9.1** | [2026-09-06-v1.9.1-performance-benchmark.md](2026-09-06-v1.9.1-performance-benchmark.md) | PATCH 当前 `quality`；修复重复服务进程与 smoke 误测；完整性能 gate 未完成 |

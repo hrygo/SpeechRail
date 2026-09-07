@@ -317,7 +317,7 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.10.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.10.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.10.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset. Historical reports remain in the archive:
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.10.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.10.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.10.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset. The follow-up [operator efficiency recheck](docs/archive/performance/2026-09-07-v1.10.0-operator-efficiency.md) validates the modular benchmark, managed install, and stop/start path with a separate N=1 warm scope. Historical reports remain in the archive:
 
 | Benchmark Metric | 🟢 Light Profile (v1.10.0) | 🟡 Balanced Profile (v1.10.0) | 🟣 Quality Profile (v1.10.0) | Test Methodology & Scenario |
 |---|---|---|---|---|

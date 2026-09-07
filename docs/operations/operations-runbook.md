@@ -10,6 +10,8 @@ date: 2026-09-07
 
 > 本 Runbook 规定了在 macOS 本机环境下部署、启动、维护、排障与回滚 SpeechRail 的标准化操作流程。
 
+服务发布、安装、停启、切档和基准共同遵守 [本机 operator contract](../../.agents/skills/speechrail-local-deploy/references/operator-contract.md)。本机允许完全停服和数分钟启动真空；生命周期 controller 在短等待无响应时只对已核验的精确 PID/进程组强杀。
+
 ---
 
 ## 1. 生产上线前就绪检查清单 (Pre-flight Checklist)

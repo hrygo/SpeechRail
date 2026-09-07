@@ -8,6 +8,8 @@ date: 2026-09-03
 
 本页说明当前实际运行组成；日常操作以[运维 Runbook](operations-runbook.md) 为准。
 
+停启、安装和 profile 切换的唯一安全边界见 [本机 operator contract](../../.agents/skills/speechrail-local-deploy/references/operator-contract.md)；本页只描述运行时拓扑和制品布局。
+
 ## 运行拓扑
 
 ```text

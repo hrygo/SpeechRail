@@ -12,6 +12,11 @@ REQUIRED_SKILLS = (
     "speechrail-perf-benchmark/SKILL.md",
     "speechrail-zero-setup/SKILL.md",
 )
+LIFECYCLE_SKILLS = (
+    "speechrail-local-deploy/SKILL.md",
+    "speechrail-release/SKILL.md",
+    "speechrail-perf-benchmark/SKILL.md",
+)
 SHARED_REFERENCE = Path(".agents/skills/speechrail-local-deploy/references/operator-contract.md")
 
 
@@ -31,6 +36,13 @@ def main() -> int:
             failures.append(f"skill does not link shared contract: {relative}")
         if "run_all_benchmarks.py" in content:
             failures.append(f"skill still references removed benchmark entrypoint: {relative}")
+        if relative in LIFECYCLE_SKILLS:
+            for phrase in ("2 秒", "10 秒", "SIGKILL"):
+                if phrase not in content:
+                    failures.append(f"skill omits lifecycle invariant {phrase!r}: {relative}")
+            for block in content.split("```")[1::2]:
+                if any(token in block for token in ("pkill ", "killall ", "grep | kill")):
+                    failures.append(f"skill contains a forbidden kill command example: {relative}")
     legacy = (
         repository_root
         / ".agents/skills/speechrail-perf-benchmark/scripts/run_all_benchmarks.py"
