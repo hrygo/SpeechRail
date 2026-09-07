@@ -64,6 +64,12 @@ def test_stop_policy_rejects_non_positive_timings(field: str) -> None:
         StopPolicy(**{field: 0.0})
 
 
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_stop_policy_rejects_non_finite_timings(value: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        StopPolicy(graceful_timeout_seconds=value)
+
+
 def test_service_lifecycle_is_independent_from_launchagent_manager() -> None:
     events: list[str] = []
     lifecycle_controller = ServiceLifecycle(
@@ -200,6 +206,7 @@ def test_controller_force_kills_exact_service_group_after_graceful_timeout(monke
         graceful_stop_timeout_seconds=0.5,
         force_kill_timeout_seconds=0.5,
         process_killer=kill,
+        owner_pid_resolver=lambda port: 4242,
     )
 
     controller.stop()
@@ -207,6 +214,100 @@ def test_controller_force_kills_exact_service_group_after_graceful_timeout(monke
     assert manager.calls == ["status", "disable"]
     assert killed == [4242]
     assert delays == [0.25, 0.25]
+
+
+def test_controller_revalidates_status_pid_against_current_lock_owner(monkeypatch) -> None:
+    class LoadedManager(FakeManager):
+        def status(self) -> str:
+            self.calls.append("status")
+            return "pid = 1111"
+
+    class StalledUntilKilledLock:
+        killed = False
+
+        def __init__(self, port: int) -> None:
+            assert port == 8201
+
+        def __enter__(self):
+            if not type(self).killed:
+                raise lifecycle.ServerInstanceError("server_already_running")
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(lifecycle, "ServerInstanceLock", StalledUntilKilledLock)
+    manager = LoadedManager(loaded=True)
+    now = 0.0
+    killed: list[int] = []
+
+    def clock() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    def kill(pid: int) -> None:
+        killed.append(pid)
+        StalledUntilKilledLock.killed = True
+
+    controller = LaunchAgentServiceController(
+        manager,
+        port=8201,
+        sleeper=sleep,
+        clock=clock,
+        graceful_stop_timeout_seconds=0.5,
+        force_kill_timeout_seconds=0.5,
+        process_killer=kill,
+        owner_pid_resolver=lambda port: 2222,
+    )
+
+    controller.stop()
+
+    assert killed == [2222]
+
+
+def test_controller_fails_closed_when_launchd_disable_fails(monkeypatch) -> None:
+    class StuckPortLock:
+        def __init__(self, port: int) -> None:
+            assert port == 8201
+
+        def __enter__(self):
+            raise lifecycle.ServerInstanceError("server_already_running")
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(lifecycle, "ServerInstanceLock", StuckPortLock)
+    killed: list[int] = []
+    now = 0.0
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    manager = FakeManager(loaded=True)
+
+    def disable() -> None:
+        manager.calls.append("disable")
+        raise ServiceError("bootout failed")
+
+    controller = ServiceLifecycle(
+        status_reader=manager.status,
+        disable=disable,
+        enable=manager.enable,
+        port=8201,
+        sleeper=sleep,
+        clock=lambda: now,
+        process_killer=killed.append,
+        policy=StopPolicy(graceful_timeout_seconds=0.5, force_kill_timeout_seconds=0.5),
+    )
+
+    with pytest.raises(ServiceError, match="bootout failed"):
+        controller.stop()
+
+    assert killed == []
 
 
 def test_controller_recovers_a_validated_owner_when_launchd_status_is_unavailable(

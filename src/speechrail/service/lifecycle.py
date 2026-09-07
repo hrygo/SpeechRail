@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import signal
@@ -60,8 +61,10 @@ def _is_live_speechrail_process(owner: ServerInstanceOwner) -> bool:
             check=False,
             capture_output=True,
             text=True,
+            timeout=1.0,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return False
     command = completed.stdout.strip()
     suffix = " -m speechrail serve"
@@ -112,12 +115,19 @@ class StopPolicy:
     poll_interval_seconds: float = _PORT_WAIT_INTERVAL_SECONDS
 
     def __post_init__(self) -> None:
-        if min(
+        timings = (
             self.graceful_timeout_seconds,
             self.force_kill_timeout_seconds,
             self.poll_interval_seconds,
-        ) <= 0:
-            raise ValueError("service stop timings must be positive")
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+            for value in timings
+        ):
+            raise ValueError("service stop timings must be finite and positive")
 
 
 class ServiceLifecycle:
@@ -160,6 +170,20 @@ class ServiceLifecycle:
                     raise ServiceError("previous service instance did not stop") from exc
                 self._sleep(self._policy.poll_interval_seconds)
 
+    def _validated_owner_pid(self, status_pid: int | None) -> int | None:
+        """Resolve the current lock owner instead of trusting an old launchd PID."""
+        if self._port is None:
+            return None
+        owner_pid = self._owner_pid_resolver(self._port)
+        if owner_pid is None or owner_pid <= 1 or owner_pid == os.getpid():
+            return None
+        if status_pid is not None and owner_pid == status_pid:
+            return status_pid
+        # A changed PID means launchd's status snapshot is stale. The resolver
+        # has already checked the current lock owner and process identity, so
+        # that PID is the only safe recovery target.
+        return owner_pid
+
     def stop(self) -> None:
         try:
             status = self._status()
@@ -171,7 +195,7 @@ class ServiceLifecycle:
                     timeout_seconds=self._policy.graceful_timeout_seconds
                 )
             except ServiceError as lock_error:
-                pid = self._owner_pid_resolver(self._port) if self._port is not None else None
+                pid = self._validated_owner_pid(None)
                 if pid is None:
                     raise ServiceError(
                         "service status unavailable and previous service owner is not verifiable"
@@ -185,7 +209,19 @@ class ServiceLifecycle:
                     raise ServiceError("previous service instance did not stop") from force_error
             return
         pid = _service_pid(status)
-        self._disable()
+        try:
+            self._disable()
+        except ServiceError as disable_error:
+            # A bootout race can report an error after the process has already
+            # released the lock. Treat that as stopped; otherwise fail closed
+            # instead of signalling a service that launchd may still restart.
+            try:
+                self._wait_for_previous_instance(
+                    timeout_seconds=self._policy.graceful_timeout_seconds
+                )
+            except ServiceError as lock_error:
+                raise disable_error from lock_error
+            return
         # bootout returns before the process and its vendor workers necessarily
         # release the port. The same singleton lock guards replacement startup.
         try:
@@ -193,8 +229,7 @@ class ServiceLifecycle:
                 timeout_seconds=self._policy.graceful_timeout_seconds
             )
         except ServiceError:
-            if pid is None:
-                pid = self._owner_pid_resolver(self._port) if self._port is not None else None
+            pid = self._validated_owner_pid(pid)
             if pid is None:
                 raise
             self._process_killer(pid)

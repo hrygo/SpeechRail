@@ -190,6 +190,28 @@ def test_lifecycle_commands_use_user_domain_and_do_not_delete_on_bootout_failure
     assert manager.paths.plist_path.exists()
 
 
+def test_launchctl_timeout_is_reported_as_a_bounded_service_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    definition = _definition(tmp_path)
+    manager = LaunchAgentManager(
+        definition=definition,
+        paths=LaunchAgentPaths(
+            plist_path=tmp_path / "LaunchAgents" / f"{SERVICE_LABEL}.plist",
+            log_directory=tmp_path / "logs",
+        ),
+        uid=501,
+    )
+
+    def timeout(*_args: object, **_kwargs: object) -> None:
+        raise subprocess.TimeoutExpired(cmd="launchctl", timeout=15.0)
+
+    monkeypatch.setattr("speechrail.service.launchd.subprocess.run", timeout)
+
+    with pytest.raises(ServiceError, match="timed out"):
+        manager.status()
+
+
 def test_create_manager_rejects_non_macos_before_touching_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

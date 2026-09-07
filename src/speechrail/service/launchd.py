@@ -14,6 +14,7 @@ from pathlib import Path
 from speechrail.service.constants import SERVICE_LABEL
 
 _THROTTLE_SECONDS = 10
+_LAUNCHCTL_TIMEOUT_SECONDS = 15.0
 
 Runner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
 
@@ -105,7 +106,13 @@ class LaunchAgentPaths:
 
 
 def _run_subprocess(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, check=False, capture_output=True, text=True)
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=_LAUNCHCTL_TIMEOUT_SECONDS,
+    )
 
 
 class LaunchAgentManager:
@@ -169,6 +176,8 @@ class LaunchAgentManager:
     def _run(self, command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         try:
             completed = self._runner(command)
+        except subprocess.TimeoutExpired as exc:
+            raise ServiceError("launchctl operation timed out") from exc
         except OSError as exc:
             raise ServiceError("launchctl could not be executed") from exc
         if completed.returncode != 0:
