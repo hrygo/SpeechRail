@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from speechrail.service import profile_switch
+from speechrail.service import lifecycle
 from speechrail.service.launchd import ServiceError
 from speechrail.service.profile_switch import LaunchAgentServiceController
 
@@ -34,14 +34,24 @@ def test_controller_stops_only_a_loaded_service_and_always_starts() -> None:
     controller.stop()
     controller.start()
     assert loaded.calls == ["status", "disable", "enable"]
-    assert delays == [0.25]
+    assert delays == []
 
     stopped = FakeManager(loaded=False)
     controller = LaunchAgentServiceController(stopped, sleeper=delays.append)
     controller.stop()
     controller.start()
     assert stopped.calls == ["status", "enable"]
-    assert delays == [0.25]
+    assert delays == []
+
+
+def test_controller_without_port_does_not_sleep_after_bootout() -> None:
+    manager = FakeManager(loaded=True)
+    delays: list[float] = []
+
+    LaunchAgentServiceController(manager, sleeper=delays.append).stop()
+
+    assert manager.calls == ["status", "disable"]
+    assert delays == []
 
 
 def test_controller_waits_for_previous_process_lock_before_restarting(monkeypatch) -> None:
@@ -54,13 +64,13 @@ def test_controller_waits_for_previous_process_lock_before_restarting(monkeypatc
         def __enter__(self):
             type(self).attempts += 1
             if self.attempts < 3:
-                raise profile_switch.ServerInstanceError("server_already_running")
+                raise lifecycle.ServerInstanceError("server_already_running")
             return self
 
         def __exit__(self, *_: object) -> None:
             return None
 
-    monkeypatch.setattr(profile_switch, "ServerInstanceLock", FakePortLock)
+    monkeypatch.setattr(lifecycle, "ServerInstanceLock", FakePortLock)
     loaded = FakeManager(loaded=True)
     delays: list[float] = []
     controller = LaunchAgentServiceController(
@@ -83,12 +93,12 @@ def test_controller_fails_bounded_when_previous_process_never_releases(monkeypat
             assert port == 8201
 
         def __enter__(self):
-            raise profile_switch.ServerInstanceError("server_already_running")
+            raise lifecycle.ServerInstanceError("server_already_running")
 
         def __exit__(self, *_: object) -> None:
             return None
 
-    monkeypatch.setattr(profile_switch, "ServerInstanceLock", StuckPortLock)
+    monkeypatch.setattr(lifecycle, "ServerInstanceLock", StuckPortLock)
     loaded = FakeManager(loaded=True)
     now = 0.0
     delays: list[float] = []
@@ -133,13 +143,13 @@ def test_controller_force_kills_exact_service_group_after_graceful_timeout(monke
 
         def __enter__(self):
             if not type(self).killed:
-                raise profile_switch.ServerInstanceError("server_already_running")
+                raise lifecycle.ServerInstanceError("server_already_running")
             return self
 
         def __exit__(self, *_: object) -> None:
             return None
 
-    monkeypatch.setattr(profile_switch, "ServerInstanceLock", StalledUntilKilledLock)
+    monkeypatch.setattr(lifecycle, "ServerInstanceLock", StalledUntilKilledLock)
     manager = LoadedManager(loaded=True)
     now = 0.0
     delays: list[float] = []
@@ -185,13 +195,13 @@ def test_controller_recovers_a_validated_owner_when_launchd_status_is_unavailabl
 
         def __enter__(self):
             if not type(self).killed:
-                raise profile_switch.ServerInstanceError("server_already_running")
+                raise lifecycle.ServerInstanceError("server_already_running")
             return self
 
         def __exit__(self, *_: object) -> None:
             return None
 
-    monkeypatch.setattr(profile_switch, "ServerInstanceLock", StalledPortLock)
+    monkeypatch.setattr(lifecycle, "ServerInstanceLock", StalledPortLock)
     manager = FakeManager(loaded=False)
     now = 0.0
     delays: list[float] = []

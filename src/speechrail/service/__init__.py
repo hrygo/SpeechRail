@@ -9,6 +9,7 @@ from speechrail.service.launchd import (
     UnsupportedPlatformError,
     create_launch_agent_manager,
 )
+from speechrail.service.lifecycle import LaunchAgentServiceController, ServiceController
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import (
     FFMPEG_FALLBACKS,
@@ -25,8 +26,10 @@ __all__ = [
     "LaunchAgentDefinition",
     "LaunchAgentManager",
     "LaunchAgentPaths",
+    "LaunchAgentServiceController",
     "PreflightCheck",
     "PreflightResult",
+    "ServiceController",
     "ServiceError",
     "ServiceLayout",
     "UnsupportedPlatformError",
