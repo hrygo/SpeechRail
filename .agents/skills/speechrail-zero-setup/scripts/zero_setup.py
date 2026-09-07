@@ -112,8 +112,13 @@ from tools.install_macos import (  # noqa: E402
 )
 
 from speechrail.service.launchd import ServiceError  # noqa: E402
+from speechrail.service.model_store import resolve_prepared_models  # noqa: E402
 from speechrail.service.modelscope import ModelScopeDownloader  # noqa: E402
 from speechrail.service.profile_commands import recommend_profile  # noqa: E402
+from speechrail.service.profile_smoke import (  # noqa: E402
+    PublicApiSmokeProbe,
+    SmokeProbeError,
+)
 
 
 def _log(stage: str, message: str) -> None:
@@ -202,44 +207,52 @@ def _wait_for_ready(base_url: str, timeout_seconds: int = 45) -> bool:
     return False
 
 
-def _run_smoke_test(base_url: str) -> None:
-    _log("SMOKE", "执行端到端 TTS 语音合成与 ASR 转写冒烟测试...")
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
-        # 1. 测试 TTS
-        test_text = "欢迎使用 SpeechRail 本地语音运行时服务。"
-        tts_resp = client.post(
-            "/v1/audio/speech",
-            json={
-                "model": "tts-1",
-                "input": test_text,
-                "voice": "serena",
-                "response_format": "wav",
-            },
-        )
-        if tts_resp.status_code != 200:
-            _fail(f"TTS 测试失败，HTTP 状态码: {tts_resp.status_code}, 响应: {tts_resp.text}")
-            return
+def _read_api_key(app_home: Path) -> str | None:
+    """Read only the local API key needed by an authenticated smoke probe."""
+    env_file = app_home / "config" / ".env"
+    if not env_file.is_file():
+        return None
+    try:
+        lines = env_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise InstallerError("private service configuration cannot be read") from exc
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key.strip() != "SPEECHRAIL_API_KEY":
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        return value or None
+    return None
 
-        audio_bytes = tts_resp.content
-        if len(audio_bytes) < 1000:
-            _fail(f"TTS 生成音频过小 ({len(audio_bytes)} 字节)")
-            return
 
-        _success(f"TTS 语音合成测试成功 (生成 {len(audio_bytes)} 字节 WAV 音频)")
-
-        # 2. 测试 ASR
-        asr_resp = client.post(
-            "/v1/audio/transcriptions",
-            files={"file": ("test.wav", audio_bytes, "audio/wav")},
-            data={"model": "whisper-1", "response_format": "json"},
-        )
-        if asr_resp.status_code != 200:
-            _fail(f"ASR 测试失败，HTTP 状态码: {asr_resp.status_code}, 响应: {asr_resp.text}")
-            return
-
-        result = asr_resp.json()
-        transcript = result.get("text", "")
-        _success(f"ASR 语音转写测试成功，转写文本: 「{transcript}」")
+def _run_smoke_test(
+    base_url: str,
+    *,
+    app_home: Path,
+    prepared_id: str | None,
+    api_key: str | None = None,
+) -> None:
+    """Use the canonical public smoke probe for installation verification."""
+    if not prepared_id:
+        raise InstallerError("managed install did not return a prepared model identity")
+    _log("SMOKE", "执行端到端公共 API 冒烟测试（健康、模型、TTS、ASR）...")
+    try:
+        prepared = resolve_prepared_models(prepared_id, app_home=app_home)
+        with httpx.Client(base_url=base_url, timeout=30.0) as client:
+            PublicApiSmokeProbe(
+                client=client,
+                api_key=api_key,
+                deadline_seconds=300.0,
+            ).run(prepared)
+    except (SmokeProbeError, OSError, ValueError, httpx.HTTPError) as exc:
+        _fail("公共 API 冒烟测试失败")
+        raise InstallerError("public API smoke failed") from exc
+    _success("公共 API 冒烟测试通过（健康、模型、TTS、ASR）")
 
 
 def run_zero_setup(
@@ -277,6 +290,23 @@ def run_zero_setup(
         "提示：首次下载需获取约 1.5GB~5GB 模型快照并完成 SHA-256 校验，请保持网络连接稳定。",
     )
 
+    post_enable = None
+    if enable:
+        base_url = "http://127.0.0.1:8201"
+
+        def verify_started(candidate_home: Path, prepared_id: str) -> None:
+            if run_smoke:
+                _run_smoke_test(
+                    base_url,
+                    app_home=candidate_home,
+                    prepared_id=prepared_id,
+                    api_key=_read_api_key(candidate_home),
+                )
+            elif not _wait_for_ready(base_url, timeout_seconds=45):
+                raise InstallerError("service did not become ready")
+
+        post_enable = verify_started
+
     timeout = httpx.Timeout(connect=30.0, read=timeout_seconds, write=30.0, pool=30.0)
     with httpx.Client(timeout=timeout) as client:
         downloader = ModelScopeDownloader(client=client)
@@ -286,17 +316,14 @@ def run_zero_setup(
             preset_id=selected_preset,
             downloader=downloader,
             enable=enable,
+            post_enable=post_enable,
         )
 
-    _success("Managed 运行时与服务安装成功！")
     _log("INFO", f"应用主目录: {result.app_home}")
     _log("INFO", f"服务 Plist 路径: {result.plist_path}")
     _log("INFO", f"LaunchAgent 状态: {'已激活并运行' if result.enabled else '已安装但未启用'}")
 
-    if enable:
-        base_url = "http://127.0.0.1:8201"
-        if _wait_for_ready(base_url, timeout_seconds=45) and run_smoke:
-            _run_smoke_test(base_url)
+    _success("Managed 运行时与服务安装及验证成功！")
 
     print("\n" + "=" * 60)
     print("\033[1;32m🎉 恭喜！SpeechRail 本地语音服务已 100% 完成从 0 搭建！\033[0m")

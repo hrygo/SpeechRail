@@ -107,6 +107,8 @@ shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
 4. 使用新 `runtime/current/.venv/bin/python` 安装/更新 LaunchAgent，确认 plist 指向新 runtime；随后用 controller `start()`，它会在 `bootstrap`/`kickstart` 前再次确认 lock 已释放。
 5. 只允许一个新父进程和一个 listener。模型加载期间不连续 restart，使用有界轮询等待；启动上限按实际设备和模型确定，可达数分钟。
 
+安装器的安全边界是强制的：legacy `install_wheel` 会拒绝已有 `config/selection.json` 的 managed app home，并在 staging 前复用同一个 per-port lock 检查；managed 首次安装若 `service enable` 或注入的 post-enable verifier 失败，会尝试停止候选、清理新 selection、恢复旧 current/runtime。安装器只负责组合这些端口，PID/进程组识别和短等待后精确 `SIGKILL` 仍由 lifecycle controller 单一实现。
+
 `speechrail service stop` 会执行 bounded stop、精确强杀和 lock 验证；`service disable` 仅作为兼容别名。不要用底层 `launchctl`、`pkill`、`killall` 或手工 plist 绕过 controller。
 
 ### explicit-env（仅无 managed selection 时）

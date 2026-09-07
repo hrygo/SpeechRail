@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.6.2"
-date: 2026-09-03
+version: "1.6.3"
+date: 2026-09-07
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -139,7 +139,7 @@ sequenceDiagram
     end
 ```
 
-### 标准发布升级步骤：
+### 标准发布升级步骤（explicit-env，无 managed selection）：
 ```bash
 # 1. 安全停用当前旧服务
 uv run speechrail service stop
@@ -147,7 +147,7 @@ uv run speechrail service stop
 # 2. 构建新版本 Wheel
 uv build --no-sources --wheel
 
-# 3. 执行本地安装器部署（指向专用 app-home）
+# 3. 执行本地安装器部署（指向专用 app-home；managed selection 必须走 managed installer）
 python3 tools/install_macos.py \
   --wheel dist/speechrail-x.y.z-py3-none-any.whl \
   --env-file /path/to/private/.env \
@@ -158,3 +158,10 @@ python3 tools/install_macos.py \
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
 ```
+
+tools/install_macos.py 的 legacy explicit-env 路径只适用于没有
+config/selection.json 的 app home；它会在写入前拒绝 managed selection，并复用服务的
+per-port lock，服务未完全停下时不会 staging 或替换 runtime/current。managed 发布必须调用
+tools.install_macos.install_managed(...)，完成同一 active profile 的准备、preflight 和原子切换。
+首次 managed 安装启用失败时，安装器会停止可能已部分加载的候选、清理新 selection 并恢复旧指针；
+随后仍须按本 Runbook 完成 /health、/readyz、models/voices 及真实 TTS→ASR 验收。

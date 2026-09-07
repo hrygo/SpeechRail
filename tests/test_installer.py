@@ -576,6 +576,115 @@ def test_managed_install_only_enables_when_requested(
     assert any("service" in command and "enable" in command for command in calls)
 
 
+def test_managed_first_install_enable_failure_removes_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, _, app_home = _inputs(tmp_path)
+    layout = ServiceLayout.for_app_home(app_home)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(
+        install_macos,
+        "prepare_runtime",
+        lambda lock, prepared_app_home, runner: _fake_runtime_switching(prepared_app_home),
+    )
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ("uv", "venv"):
+            venv = Path(command[-1])
+            venv.joinpath("bin").mkdir(parents=True)
+            venv.joinpath("bin", "python").touch()
+        if "service" in command and "enable" in command:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="failed")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    with pytest.raises(install_macos.InstallerError):
+        install_macos.install_managed(
+            wheel,
+            app_home=app_home,
+            preset_id="quality",
+            downloader=object(),
+            runtime_runner=lambda command: subprocess.CompletedProcess(
+                command, 0, stdout="", stderr=""
+            ),
+            enable=True,
+            runner=runner,
+        )
+
+    assert not (app_home / "config" / "selection.json").exists()
+    assert not layout.current_runtime.exists()
+    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
+    assert any("service" in command and "enable" in command for command in calls)
+    assert any("service" in command and "stop" in command for command in calls)
+
+
+def test_managed_post_enable_verifier_failure_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, _, app_home = _inputs(tmp_path)
+    layout = ServiceLayout.for_app_home(app_home)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(
+        install_macos,
+        "prepare_runtime",
+        lambda lock, prepared_app_home, runner: _fake_runtime_switching(prepared_app_home),
+    )
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ("uv", "venv"):
+            venv = Path(command[-1])
+            venv.joinpath("bin").mkdir(parents=True)
+            venv.joinpath("bin", "python").touch()
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def failed_smoke(app_home_arg: Path, prepared_id: str) -> None:
+        del app_home_arg, prepared_id
+        raise install_macos.InstallerError("smoke failed")
+
+    with pytest.raises(install_macos.InstallerError, match="smoke failed"):
+        install_macos.install_managed(
+            wheel,
+            app_home=app_home,
+            preset_id="quality",
+            downloader=object(),
+            runtime_runner=lambda command: subprocess.CompletedProcess(
+                command, 0, stdout="", stderr=""
+            ),
+            enable=True,
+            post_enable=failed_smoke,
+            runner=runner,
+        )
+
+    assert not (app_home / "config" / "selection.json").exists()
+    assert not layout.current_runtime.exists()
+    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
+    assert any("service" in command and "enable" in command for command in calls)
+    assert any("service" in command and "stop" in command for command in calls)
+
+
 def test_managed_preparation_failure_keeps_previous_current_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -621,6 +730,7 @@ def test_install_wheel_stages_new_runtime_and_switches_current_atomically(
         wheel,
         app_home=app_home,
         env_file=env_file,
+        server_lock_directory=tmp_path,
         runner=_runner_that_creates_python(calls),
     )
 
@@ -634,6 +744,43 @@ def test_install_wheel_stages_new_runtime_and_switches_current_atomically(
     assert launcher.is_file()
     assert launcher.stat().st_mode & 0o777 == 0o700
     assert not any("launchctl" in part for command in calls for part in command)
+
+
+def test_install_wheel_rejects_managed_selection_before_staging(tmp_path: Path) -> None:
+    wheel, env_file, app_home = _inputs(tmp_path)
+    layout = ServiceLayout.for_app_home(app_home)
+    layout.ensure_directories()
+    selection_path = app_home / "config" / "selection.json"
+    selection_path.write_text("{}\n", encoding="utf-8")
+    calls: list[tuple[str, ...]] = []
+
+    with pytest.raises(install_macos.InstallerError, match="managed selection"):
+        install_macos.install_wheel(
+            wheel,
+            app_home=app_home,
+            env_file=env_file,
+            runner=_runner_that_creates_python(calls),
+        )
+
+    assert not calls
+    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
+
+
+def test_install_wheel_rejects_active_service_before_staging(tmp_path: Path) -> None:
+    wheel, env_file, app_home = _inputs(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    with ServerInstanceLock(8201, directory=tmp_path), pytest.raises(
+        install_macos.InstallerError, match="service to be stopped"
+    ):
+        install_macos.install_wheel(
+            wheel,
+            app_home=app_home,
+            env_file=env_file,
+            server_lock_directory=tmp_path,
+            runner=_runner_that_creates_python(calls),
+        )
+
+    assert not calls
 
 
 def test_install_wheel_installs_diarization_extra_when_configured(
@@ -656,6 +803,7 @@ def test_install_wheel_installs_diarization_extra_when_configured(
         wheel,
         app_home=app_home,
         env_file=env_file,
+        server_lock_directory=tmp_path,
         runner=_runner_that_creates_python(calls),
     )
 
@@ -733,6 +881,7 @@ def test_preflight_failure_does_not_switch_current_or_enable(
             wheel,
             app_home=app_home,
             env_file=env_file,
+            server_lock_directory=tmp_path,
             runner=_runner_that_creates_python(calls),
         )
 
@@ -763,6 +912,7 @@ def test_wheel_install_failure_keeps_previous_current_runtime(
             wheel,
             app_home=app_home,
             env_file=env_file,
+            server_lock_directory=tmp_path,
             runner=failing_runner,
         )
 

@@ -25,8 +25,9 @@ if TYPE_CHECKING:
     from speechrail.service.model_store import Downloader
     from speechrail.service.paths import ServiceLayout
 
-# Managed dependencies are loaded only when the new managed path is requested so
-# the historical explicit-env installer remains usable as a standalone script.
+# Managed dependencies are loaded lazily. Both installation paths share the
+# package-owned per-port lock; explicit-env therefore fails closed if the
+# SpeechRail package is unavailable instead of risking a live pointer swap.
 ModelCatalog: Any = None
 RuntimeLock: Any = None
 RuntimeCurrentSnapshot: Any = None
@@ -441,7 +442,7 @@ def _assert_service_port_free(port: int, directory: Path | None) -> None:
         raise InstallerError("managed installation could not verify the service lock") from exc
 
 
-def _stage_managed_wheel(
+def _stage_wheel(
     wheel: Path,
     layout: InstallLayout | ServiceLayout,
     *,
@@ -450,7 +451,11 @@ def _stage_managed_wheel(
     install_diarization: bool = False,
     allow_existing: bool = True,
 ) -> tuple[Path, Path, bool]:
-    """Stage a wheel, reusing a complete release on a repeated managed install."""
+    """Stage one wheel release, optionally reusing a complete release.
+
+    Managed and explicit-env installation deliberately share this boundary so
+    the release identity, virtualenv creation and cleanup rules cannot drift.
+    """
     release_dir = layout.runtime_root / "releases" / _release_id(wheel)
     if release_dir.is_symlink():
         raise InstallerError("wheel release must not be a symlink")
@@ -551,6 +556,25 @@ def _load_managed_dependencies() -> type[Any]:
     return RuntimePathsType
 
 
+def _assert_explicit_install_allowed(
+    layout: InstallLayout,
+    env_file: Path,
+    *,
+    server_lock_directory: Path | None,
+) -> None:
+    """Keep the historical installer isolated from managed profile state."""
+    selection_path = layout.app_home / "config" / "selection.json"
+    if selection_path.exists() or selection_path.is_symlink():
+        raise InstallerError(
+            "legacy installer refuses managed selection; use install_managed instead"
+        )
+    _load_managed_dependencies()
+    _assert_service_port_free(
+        _configured_service_port(layout, env_file),
+        server_lock_directory,
+    )
+
+
 def _prepare_models_for_install(
     preset_id: str,
     *,
@@ -590,12 +614,15 @@ def install_managed(
     runtime_lock: RuntimeLock | None = None,
     env_file: Path | None = None,
     server_lock_directory: Path | None = None,
+    post_enable: Callable[[Path, str], None] | None = None,
 ) -> InstallResult:
     """Install one catalog preset with a shared, lock-keyed vendor runtime."""
     if not wheel.is_file() or wheel.suffix != ".whl":
         raise InstallerError("wheel file is missing or invalid")
     if env_file is not None and not env_file.is_file():
         raise InstallerError("configuration file is missing")
+    if post_enable is not None and not enable:
+        raise InstallerError("post-enable verifier requires enable=True")
     runtime_paths_type = _load_managed_dependencies()
 
     try:
@@ -632,9 +659,13 @@ def install_managed(
     old_target: Path | None = None
     runtime_snapshot: Any = None
     switched = False
+    selection_created = False
+    enable_attempted = False
+    current_python: Path | None = None
+    selection_path = layout.app_home / "config" / "selection.json"
     try:
         # Keep the application wheel in its own release before touching model/runtime state.
-        release_dir, runtime_python, release_created = _stage_managed_wheel(
+        release_dir, runtime_python, release_created = _stage_wheel(
             wheel,
             layout,
             uv_executable=uv_executable,
@@ -720,7 +751,9 @@ def install_managed(
             )
         if current_selection is None:
             ProfileStore(layout.app_home).initialize(candidate)
+            selection_created = True
         if enable:
+            enable_attempted = True
             _run(
                 (
                     str(current_python),
@@ -733,6 +766,8 @@ def install_managed(
                 ),
                 runner,
             )
+            if post_enable is not None:
+                post_enable(layout.app_home, prepared_id)
         return InstallResult(
             app_home=layout.app_home,
             runtime_python=runtime_python,
@@ -743,11 +778,28 @@ def install_managed(
         )
     except BaseException as original_error:
         rollback_error: BaseException | None = None
+        if enable_attempted and current_python is not None:
+            try:
+                _run(
+                    (
+                        str(current_python),
+                        "-m",
+                        "speechrail",
+                        "service",
+                        "stop",
+                        "--app-home",
+                        str(layout.app_home),
+                    ),
+                    runner,
+                )
+            except BaseException as exc:
+                rollback_error = exc
         if runtime_snapshot is not None:
             try:
                 restore_runtime_current(runtime_snapshot)
             except BaseException as exc:
-                rollback_error = exc
+                if rollback_error is None:
+                    rollback_error = exc
         if switched and release_dir is not None:
             try:
                 if layout.current_runtime.is_symlink():
@@ -760,6 +812,14 @@ def install_managed(
         if config_created:
             try:
                 layout.config_file.unlink(missing_ok=True)
+            except BaseException as exc:
+                if rollback_error is None:
+                    rollback_error = exc
+        if selection_created:
+            try:
+                if selection_path.is_symlink():
+                    raise InstallerError("selection file became a symlink during rollback")
+                selection_path.unlink(missing_ok=True)
             except BaseException as exc:
                 if rollback_error is None:
                     rollback_error = exc
@@ -785,6 +845,7 @@ def install_wheel(
     require_tts: bool = True,
     enable: bool = False,
     runner: CommandRunner = _runner,
+    server_lock_directory: Path | None = None,
 ) -> InstallResult:
     """Stage, validate and optionally enable one wheel-based installation."""
     if not wheel.is_file() or wheel.suffix != ".whl":
@@ -795,10 +856,15 @@ def install_wheel(
     layout = InstallLayout.for_app_home(app_home)
     layout.ensure_directories()
     config_created = False
-    if layout.config_file.exists():
-        if layout.config_file.absolute() != env_file.absolute():
-            raise InstallerError("configuration already exists and will not be overwritten")
-    else:
+    config_exists = layout.config_file.exists()
+    if config_exists and layout.config_file.absolute() != env_file.absolute():
+        raise InstallerError("configuration already exists and will not be overwritten")
+    _assert_explicit_install_allowed(
+        layout,
+        env_file,
+        server_lock_directory=server_lock_directory,
+    )
+    if not config_exists:
         _copy_config(env_file, layout.config_file)
         config_created = True
 
@@ -807,24 +873,14 @@ def install_wheel(
         if config_created:
             layout.config_file.unlink(missing_ok=True)
         raise InstallerError("this wheel is already staged")
-    release_dir.mkdir(parents=True)
-    venv_dir = release_dir / ".venv"
-    runtime_python = venv_dir / "bin" / "python"
-    wheel_requirement = str(wheel)
-    if _config_enables_diarization(env_file):
-        wheel_requirement += "[diarization]"
     try:
-        _run((uv_executable, "venv", "--python", "3.12", str(venv_dir)), runner)
-        _run(
-            (
-                uv_executable,
-                "pip",
-                "install",
-                "--python",
-                str(runtime_python),
-                wheel_requirement,
-            ),
-            runner,
+        release_dir, runtime_python, _ = _stage_wheel(
+            wheel,
+            layout,
+            uv_executable=uv_executable,
+            runner=runner,
+            install_diarization=_config_enables_diarization(env_file),
+            allow_existing=False,
         )
         result = run_preflight(
             runtime_python, layout, require_tts=require_tts, runner=runner

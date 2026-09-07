@@ -76,7 +76,7 @@ uv run --python 3.12 python .agents/skills/speechrail-zero-setup/scripts/zero_se
 > 7. 🖥️ **生成双击设置程序**：在 App Home 生成无需开终端即可交互调用的 `SpeechRail 设置.command`；
 > 8. 🔍 **执行服务 Preflight**：校验 Worker 模块 import、静态 ffmpeg 权限与配置完整性；
 > 9. 🚀 **注册并启动守护进程**：生成并激活 `~/Library/LaunchAgents/com.speechrail.plist`；
-> 10. 🎙️ **端到端冒烟测试**：有界轮询等待 `/readyz` 200，调用真实 TTS 合成一段测试音频，紧接着调用 ASR 接口转写验证闭环。
+> 10. 🎙️ **端到端冒烟测试**：使用已安装 profile 的 prepared identity，通过统一 `PublicApiSmokeProbe` 有界等待 `/health`、`/readyz`、models/voices，再调用真实 TTS→ASR；若 `.env` 配置了 `SPEECHRAIL_API_KEY`，探针自动使用它，失败会触发安装事务回滚并返回非零。
 
 ---
 
@@ -128,7 +128,7 @@ uv build --no-sources --wheel
 ### Step 3.5: 执行受管服务安装 (Managed Install)
 调用内建的 `install_managed` 完成安装：
 
-安装器会在切换 `runtime/current` 前确认服务端口 lock 已释放；如果已有 SpeechRail 实例运行，必须先执行 controller-backed `service stop`，不能在运行态直接替换。
+安装器会在切换 `runtime/current` 前确认服务端口 lock 已释放；如果已有 SpeechRail 实例运行，必须先执行 controller-backed `service stop`，不能在运行态直接替换。启用阶段若 LaunchAgent 部分加载后返回失败，安装器会尝试停止候选并清理首次安装的 selection，避免留下“配置已切换但服务不可用”的半状态。
 ```bash
 APP_HOME="$HOME/Library/Application Support/SpeechRail"
 PRESET="balanced"  # 可选: quality, balanced, light
@@ -179,10 +179,18 @@ curl -s http://127.0.0.1:8201/v1/voices | jq .
 ```
 
 ### 4.2 真实端到端推理闭环测试 (TTS + ASR)
+
+zero-setup 默认已经执行统一的 `PublicApiSmokeProbe`。手动重做时，如果私有 `.env` 启用了认证，先在当前 shell 设置同一 API key；不要把真实 key 写入脚本、日志或仓库：
+
+```bash
+export SPEECHRAIL_API_KEY='从私有 .env 临时读取的值'
+```
+
 ```bash
 # 1. 语音合成 (TTS): 生成一段测试语音
 curl -s http://127.0.0.1:8201/v1/audio/speech \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $SPEECHRAIL_API_KEY" \
   -d '{"model": "tts-1", "input": "你好，SpeechRail 已经在你的 Mac 上就绪。", "voice": "serena"}' \
   --output test_speech.wav
 
@@ -191,6 +199,7 @@ afplay test_speech.wav
 
 # 3. 语音识别 (ASR): 转写刚刚生成的音频
 curl -s http://127.0.0.1:8201/v1/audio/transcriptions \
+  -H "Authorization: Bearer $SPEECHRAIL_API_KEY" \
   -F file="@test_speech.wav" \
   -F model="whisper-1" | jq .
 ```

@@ -159,3 +159,90 @@ def test_zero_setup_installs_skill_before_managed_service(
 
     assert [kind for kind, _ in events] == ["skill", "service"]
     assert events[0][1] == zero_setup.REPO_ROOT / ".agents" / "skills" / "video-podcast"
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
+    reason="zero-setup is a macOS Python 3.12 entry point",
+)
+def test_zero_setup_reads_private_api_key_without_exposing_it(
+    tmp_path: Path,
+) -> None:
+    zero_setup_path = (
+        PROJECT_ROOT
+        / ".agents"
+        / "skills"
+        / "speechrail-zero-setup"
+        / "scripts"
+        / "zero_setup.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "speechrail_zero_setup_key_test", zero_setup_path
+    )
+    assert spec is not None and spec.loader is not None
+    zero_setup = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = zero_setup
+    spec.loader.exec_module(zero_setup)
+
+    app_home = tmp_path / "app"
+    config = app_home / "config" / ".env"
+    config.parent.mkdir(parents=True)
+    config.write_text(
+        "SPEECHRAIL_HOST=127.0.0.1\nSPEECHRAIL_API_KEY=\"local-secret\"\n",
+        encoding="utf-8",
+    )
+
+    assert zero_setup._read_api_key(app_home) == "local-secret"
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
+    reason="zero-setup is a macOS Python 3.12 entry point",
+)
+def test_zero_setup_smoke_failure_is_fatal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zero_setup_path = (
+        PROJECT_ROOT
+        / ".agents"
+        / "skills"
+        / "speechrail-zero-setup"
+        / "scripts"
+        / "zero_setup.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "speechrail_zero_setup_smoke_test", zero_setup_path
+    )
+    assert spec is not None and spec.loader is not None
+    zero_setup = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = zero_setup
+    spec.loader.exec_module(zero_setup)
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        def __enter__(self) -> FakeClient:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            del args
+
+    class FailingProbe:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def run(self, prepared: object) -> None:
+            del prepared
+            raise zero_setup.SmokeProbeError("probe failed")
+
+    monkeypatch.setattr(zero_setup.httpx, "Client", FakeClient)
+    monkeypatch.setattr(zero_setup, "resolve_prepared_models", lambda *args, **kwargs: object())
+    monkeypatch.setattr(zero_setup, "PublicApiSmokeProbe", FailingProbe)
+
+    with pytest.raises(zero_setup.InstallerError, match="public API smoke failed"):
+        zero_setup._run_smoke_test(
+            "http://127.0.0.1:8201",
+            app_home=tmp_path / "app",
+            prepared_id="prepared-quality",
+        )
