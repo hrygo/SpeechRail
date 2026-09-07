@@ -76,19 +76,34 @@ Governor。默认部署不包含内建的 `input_ref` 路径/URL resolver，不�
 snapshot、`ffmpeg` 和 `.env` 均由本机预先准备。发布目录应同时提供 wheel、`tools/install_macos.py`、
 `configs/speechrail.example.env`、plist 模板和校验文件。
 
-在发布目录中构建并安装：
+在发布目录中构建并通过唯一 managed installer 安装：
 
 ```bash
 uv build --no-sources --wheel
-python3 tools/install_macos.py \
-  --wheel <wheel-file> \
-  --env-file <private-env-file> \
-  --app-home "$HOME/Library/Application Support/SpeechRail"
+uv run python - <<PY
+import os
+from pathlib import Path
+import httpx
+from speechrail.service.modelscope import ModelScopeDownloader
+from tools.install_macos import install_managed
+
+app_home = Path(os.environ.get("SPEECHRAIL_APP_HOME", Path.home() / "Library/Application Support/SpeechRail"))
+preset = os.environ.get("SPEECHRAIL_PRESET", "quality")
+wheel = sorted(Path("dist").glob("speechrail-*.whl"))[-1]
+with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)) as client:
+    install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id=preset,
+        downloader=ModelScopeDownloader(client=client),
+        enable=True,
+    )
+PY
 ```
 
-安装器默认只创建新 runtime、运行 preflight 和写入 LaunchAgent plist，不启用服务；确认需要常驻
-运行时再追加 `--enable`。完整安装要求 ASR/TTS 两组 runtime 和 snapshot 均通过检查；只部署 ASR
-时必须显式追加 `--asr-only`。安装器不会覆盖已有 `.env`、删除旧 runtime 或下载模型。
+managed installer 会准备新 release、执行 preflight、更新 LaunchAgent 并按事务完成启动与公共 smoke；
+启用或 smoke 失败会停止候选并恢复旧 runtime/current。完整安装要求 ASR/TTS 两组 runtime 和 snapshot
+均通过检查；私有 `.env` 可作为 managed 初始化配置输入，但不会被覆盖或写入 wheel。
 
 验证已安装 wheel，而不是源码工作树：
 

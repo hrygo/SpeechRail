@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Install a SpeechRail wheel into a user-owned macOS runtime."""
+"""Install a SpeechRail wheel into a user-owned macOS runtime.
+
+The installer is an import-only managed deployment helper; it has no command-line
+interface.  Call :func:`install_managed` from a reviewed release workflow.
+"""
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import hashlib
 import os
@@ -11,10 +14,9 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,9 +27,8 @@ if TYPE_CHECKING:
     from speechrail.service.model_store import Downloader
     from speechrail.service.paths import ServiceLayout
 
-# Managed dependencies are loaded lazily. Both installation paths share the
-# package-owned per-port lock; explicit-env therefore fails closed if the
-# SpeechRail package is unavailable instead of risking a live pointer swap.
+# Managed dependencies are loaded lazily so importing the installer remains
+# lightweight until the managed deployment path is selected.
 ModelCatalog: Any = None
 RuntimeLock: Any = None
 RuntimeCurrentSnapshot: Any = None
@@ -49,43 +50,6 @@ CommandRunner = Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]]
 
 class InstallerError(RuntimeError):
     """Raised when a wheel installation cannot be completed safely."""
-
-
-@dataclass(frozen=True)
-class InstallLayout:
-    app_home: Path
-    runtime_root: Path
-    current_runtime: Path
-    config_file: Path
-    log_directory: Path
-    plist_path: Path
-
-    @classmethod
-    def for_app_home(cls, app_home: Path) -> InstallLayout:
-        if not app_home.is_absolute():
-            raise InstallerError("app home must be absolute")
-        home = Path.home().absolute()
-        runtime_root = app_home.absolute() / "runtime"
-        return cls(
-            app_home=app_home.absolute(),
-            runtime_root=runtime_root,
-            current_runtime=runtime_root / "current",
-            config_file=app_home.absolute() / "config" / ".env",
-            log_directory=home / "Library" / "Logs" / "SpeechRail",
-            plist_path=home / "Library" / "LaunchAgents" / "com.speechrail.plist",
-        )
-
-    def ensure_directories(self) -> None:
-        for directory in (
-            self.app_home,
-            self.config_file.parent,
-            self.runtime_root,
-            self.runtime_root / "releases",
-            self.log_directory,
-            self.plist_path.parent,
-        ):
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            directory.chmod(0o700)
 
 
 @dataclass(frozen=True)
@@ -120,7 +84,7 @@ def _run(command: tuple[str, ...], runner: CommandRunner) -> None:
 
 def run_preflight(
     runtime_python: Path,
-    layout: InstallLayout | ServiceLayout,
+    layout: ServiceLayout,
     *,
     require_tts: bool,
     runner: CommandRunner,
@@ -144,20 +108,6 @@ def run_preflight(
     return PreflightOutcome(ok=completed.returncode == 0)
 
 
-def _copy_config(source: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor, temporary_name = tempfile.mkstemp(dir=destination.parent, prefix=".env.")
-    temporary_path = Path(temporary_name)
-    try:
-        os.close(descriptor)
-        shutil.copyfile(source, temporary_path)
-        temporary_path.chmod(0o600)
-        temporary_path.replace(destination)
-    except Exception:
-        temporary_path.unlink(missing_ok=True)
-        raise
-
-
 def _config_enables_diarization(env_file: Path) -> bool:
     """Detect an opted-in diarization profile without logging configuration values."""
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
@@ -167,7 +117,7 @@ def _config_enables_diarization(env_file: Path) -> bool:
     return False
 
 
-def _switch_current(layout: InstallLayout, release_dir: Path) -> Path | None:
+def _switch_current(layout: ServiceLayout, release_dir: Path) -> Path | None:
     if layout.current_runtime.exists() and not layout.current_runtime.is_symlink():
         raise InstallerError("runtime/current must be a symlink")
     old_target = layout.current_runtime.readlink() if layout.current_runtime.is_symlink() else None
@@ -178,7 +128,7 @@ def _switch_current(layout: InstallLayout, release_dir: Path) -> Path | None:
     return old_target
 
 
-def _restore_current(layout: InstallLayout, old_target: Path | None) -> None:
+def _restore_current(layout: ServiceLayout, old_target: Path | None) -> None:
     if layout.current_runtime.is_symlink():
         layout.current_runtime.unlink()
     if old_target is not None:
@@ -401,7 +351,7 @@ def _same_selection(
     return all(current.get(key) == value for key, value in candidate.items() if key != "generation")
 
 
-def _configured_service_port(layout: InstallLayout | ServiceLayout, env_file: Path | None) -> int:
+def _configured_service_port(layout: ServiceLayout, env_file: Path | None) -> int:
     """Read the local service port without loading a runtime or exposing secrets."""
     source = layout.config_file if layout.config_file.is_file() else env_file
     if source is None:
@@ -444,24 +394,23 @@ def _assert_service_port_free(port: int, directory: Path | None) -> None:
 
 def _stage_wheel(
     wheel: Path,
-    layout: InstallLayout | ServiceLayout,
+    layout: ServiceLayout,
     *,
     uv_executable: str,
     runner: CommandRunner,
     install_diarization: bool = False,
-    allow_existing: bool = True,
 ) -> tuple[Path, Path, bool]:
     """Stage one wheel release, optionally reusing a complete release.
 
-    Managed and explicit-env installation deliberately share this boundary so
-    the release identity, virtualenv creation and cleanup rules cannot drift.
+    Managed installation keeps release identity, virtualenv creation and
+    cleanup in one boundary.
     """
     release_dir = layout.runtime_root / "releases" / _release_id(wheel)
     if release_dir.is_symlink():
         raise InstallerError("wheel release must not be a symlink")
     if release_dir.exists():
         runtime_python = release_dir / ".venv" / "bin" / "python"
-        if allow_existing and runtime_python.is_file():
+        if runtime_python.is_file():
             return release_dir, runtime_python, False
         raise InstallerError("this wheel release is incomplete")
 
@@ -554,25 +503,6 @@ def _load_managed_dependencies() -> type[Any]:
     if snapshot_runtime_current is None:
         snapshot_runtime_current = runtime_snapshot
     return RuntimePathsType
-
-
-def _assert_explicit_install_allowed(
-    layout: InstallLayout,
-    env_file: Path,
-    *,
-    server_lock_directory: Path | None,
-) -> None:
-    """Keep the historical installer isolated from managed profile state."""
-    selection_path = layout.app_home / "config" / "selection.json"
-    if selection_path.exists() or selection_path.is_symlink():
-        raise InstallerError(
-            "legacy installer refuses managed selection; use install_managed instead"
-        )
-    _load_managed_dependencies()
-    _assert_service_port_free(
-        _configured_service_port(layout, env_file),
-        server_lock_directory,
-    )
 
 
 def _prepare_models_for_install(
@@ -836,141 +766,7 @@ def install_managed(
         raise
 
 
-def install_wheel(
-    wheel: Path,
-    *,
-    app_home: Path,
-    env_file: Path,
-    uv_executable: str = "uv",
-    require_tts: bool = True,
-    enable: bool = False,
-    runner: CommandRunner = _runner,
-    server_lock_directory: Path | None = None,
-) -> InstallResult:
-    """Stage, validate and optionally enable one wheel-based installation."""
-    if not wheel.is_file() or wheel.suffix != ".whl":
-        raise InstallerError("wheel file is missing or invalid")
-    if not env_file.is_file():
-        raise InstallerError("configuration file is missing")
-
-    layout = InstallLayout.for_app_home(app_home)
-    layout.ensure_directories()
-    config_created = False
-    config_exists = layout.config_file.exists()
-    if config_exists and layout.config_file.absolute() != env_file.absolute():
-        raise InstallerError("configuration already exists and will not be overwritten")
-    _assert_explicit_install_allowed(
-        layout,
-        env_file,
-        server_lock_directory=server_lock_directory,
-    )
-    if not config_exists:
-        _copy_config(env_file, layout.config_file)
-        config_created = True
-
-    release_dir = layout.runtime_root / "releases" / _release_id(wheel)
-    if release_dir.exists():
-        if config_created:
-            layout.config_file.unlink(missing_ok=True)
-        raise InstallerError("this wheel is already staged")
-    try:
-        release_dir, runtime_python, _ = _stage_wheel(
-            wheel,
-            layout,
-            uv_executable=uv_executable,
-            runner=runner,
-            install_diarization=_config_enables_diarization(env_file),
-            allow_existing=False,
-        )
-        result = run_preflight(
-            runtime_python, layout, require_tts=require_tts, runner=runner
-        )
-        if not result.ok:
-            raise InstallerError("preflight failed; service was not enabled")
-
-        old_target = _switch_current(layout, release_dir)
-        try:
-            current_python = layout.current_runtime / ".venv" / "bin" / "python"
-            _write_setup_launcher(layout.app_home)
-            _run(
-                (
-                    str(current_python),
-                    "-m",
-                    "speechrail",
-                    "service",
-                    "install",
-                    "--app-home",
-                    str(layout.app_home),
-                ),
-                runner,
-            )
-            if enable:
-                _run(
-                    (
-                        str(current_python),
-                        "-m",
-                        "speechrail",
-                        "service",
-                        "enable",
-                        "--app-home",
-                        str(layout.app_home),
-                    ),
-                    runner,
-                )
-        except Exception:
-            _restore_current(layout, old_target)
-            raise
-        return InstallResult(
-            app_home=layout.app_home,
-            runtime_python=runtime_python,
-            plist_path=layout.plist_path,
-            enabled=enable,
-        )
-    except Exception:
-        if (
-            layout.current_runtime.is_symlink()
-            and layout.current_runtime.resolve() == release_dir.resolve()
-        ):
-            layout.current_runtime.unlink()
-        shutil.rmtree(release_dir, ignore_errors=True)
-        if config_created:
-            layout.config_file.unlink(missing_ok=True)
-        raise
-
-
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Install a SpeechRail wheel on macOS")
-    parser.add_argument("--wheel", type=Path, required=True)
-    parser.add_argument("--env-file", type=Path, required=True)
-    parser.add_argument(
-        "--app-home",
-        type=Path,
-        default=Path.home() / "Library" / "Application Support" / "SpeechRail",
-    )
-    parser.add_argument("--uv", default="uv", dest="uv_executable")
-    parser.add_argument("--asr-only", action="store_true")
-    parser.add_argument("--enable", action="store_true")
-    return parser
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
-    try:
-        result = install_wheel(
-            args.wheel,
-            app_home=args.app_home,
-            env_file=args.env_file,
-            uv_executable=args.uv_executable,
-            require_tts=not args.asr_only,
-            enable=args.enable,
-        )
-    except InstallerError as exc:
-        print(f"SpeechRail installer: {exc}", file=sys.stderr)
-        return 1
-    print(f"Installed SpeechRail runtime at {result.app_home}")
-    print(f"LaunchAgent enabled: {result.enabled}")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(
+        "tools/install_macos.py is import-only; call install_managed(...) from the release workflow"
+    )

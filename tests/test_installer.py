@@ -47,13 +47,11 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
     return runner
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _inputs(tmp_path: Path) -> tuple[Path, Path]:
     wheel = tmp_path / "speechrail-1.10.0-py3-none-any.whl"
     wheel.touch()
-    env_file = tmp_path / "source.env"
-    env_file.write_text("SPEECHRAIL_HOST=127.0.0.1\n", encoding="utf-8")
     app_home = tmp_path / "Application Support" / "SpeechRail"
-    return wheel, env_file, app_home
+    return wheel, app_home
 
 
 def _fake_runtime(tmp_path: Path) -> RuntimePaths:
@@ -118,7 +116,7 @@ def _selection_payload() -> bytes:
 
 
 def test_managed_install_rejects_an_active_service_before_staging(tmp_path: Path) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     lock = ServerInstanceLock(8201, directory=tmp_path)
     lock.acquire()
     try:
@@ -150,7 +148,7 @@ def test_managed_state_remains_outside_release(tmp_path: Path) -> None:
 def test_managed_install_prepares_preset_and_keeps_service_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     model_calls: list[str] = []
     runtime_calls: list[tuple[str, ...]] = []
@@ -211,7 +209,7 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
 def test_managed_install_same_preset_reuses_wheel_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
 
@@ -266,7 +264,7 @@ def test_managed_failure_restores_app_and_vendor_currents(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str,
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     layout.ensure_directories()
     old_release = layout.runtime_root / "releases" / "old"
@@ -350,7 +348,7 @@ def test_managed_failure_restores_app_and_vendor_currents(
 def test_managed_rollback_error_does_not_skip_app_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     layout.ensure_directories()
     old_release = layout.runtime_root / "releases" / "old"
@@ -403,7 +401,7 @@ def test_managed_rollback_error_does_not_skip_app_cleanup(
 def test_managed_first_install_failure_removes_vendor_current_but_keeps_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     calls: list[tuple[str, ...]] = []
 
@@ -446,7 +444,7 @@ def test_managed_first_install_failure_removes_vendor_current_but_keeps_release(
 def test_managed_install_preserves_existing_config_bytes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     layout.ensure_directories()
     original = b"SPEECHRAIL_HOST=127.0.0.1\r\nSPEECHRAIL_API_KEY=provided\r\n"
@@ -544,7 +542,7 @@ def test_private_config_cleans_its_file_when_directory_fsync_fails(
 def test_managed_install_only_enables_when_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     calls: list[tuple[str, ...]] = []
     runtime = _fake_runtime(tmp_path)
 
@@ -579,7 +577,7 @@ def test_managed_install_only_enables_when_requested(
 def test_managed_first_install_enable_failure_removes_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     calls: list[tuple[str, ...]] = []
 
@@ -632,7 +630,7 @@ def test_managed_first_install_enable_failure_removes_selection(
 def test_managed_post_enable_verifier_failure_rolls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     calls: list[tuple[str, ...]] = []
 
@@ -688,7 +686,7 @@ def test_managed_post_enable_verifier_failure_rolls_back(
 def test_managed_preparation_failure_keeps_previous_current_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    wheel, _, app_home = _inputs(tmp_path)
+    wheel, app_home = _inputs(tmp_path)
     layout = ServiceLayout.for_app_home(app_home)
     layout.ensure_directories()
     old_release = layout.runtime_root / "releases" / "old"
@@ -715,100 +713,10 @@ def test_managed_preparation_failure_keeps_previous_current_runtime(
     assert layout.current_runtime.resolve() == old_release.resolve()
 
 
-def test_install_wheel_stages_new_runtime_and_switches_current_atomically(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        install_macos,
-        "run_preflight",
-        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
-    )
-
-    result = install_macos.install_wheel(
-        wheel,
-        app_home=app_home,
-        env_file=env_file,
-        server_lock_directory=tmp_path,
-        runner=_runner_that_creates_python(calls),
-    )
-
-    layout = ServiceLayout.for_app_home(app_home)
-    assert result.enabled is False
-    assert result.runtime_python.is_file()
-    assert layout.current_runtime.is_symlink()
-    assert layout.current_runtime.resolve() == result.runtime_python.parents[2].resolve()
-    assert layout.config_file.read_text(encoding="utf-8") == env_file.read_text(encoding="utf-8")
-    launcher = app_home / "SpeechRail 设置.command"
-    assert launcher.is_file()
-    assert launcher.stat().st_mode & 0o777 == 0o700
-    assert not any("launchctl" in part for command in calls for part in command)
-
-
-def test_install_wheel_rejects_managed_selection_before_staging(tmp_path: Path) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    layout = ServiceLayout.for_app_home(app_home)
-    layout.ensure_directories()
-    selection_path = app_home / "config" / "selection.json"
-    selection_path.write_text("{}\n", encoding="utf-8")
-    calls: list[tuple[str, ...]] = []
-
-    with pytest.raises(install_macos.InstallerError, match="managed selection"):
-        install_macos.install_wheel(
-            wheel,
-            app_home=app_home,
-            env_file=env_file,
-            runner=_runner_that_creates_python(calls),
-        )
-
-    assert not calls
-    assert not (layout.runtime_releases / install_macos._release_id(wheel)).exists()
-
-
-def test_install_wheel_rejects_active_service_before_staging(tmp_path: Path) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    calls: list[tuple[str, ...]] = []
-    with ServerInstanceLock(8201, directory=tmp_path), pytest.raises(
-        install_macos.InstallerError, match="service to be stopped"
-    ):
-        install_macos.install_wheel(
-            wheel,
-            app_home=app_home,
-            env_file=env_file,
-            server_lock_directory=tmp_path,
-            runner=_runner_that_creates_python(calls),
-        )
-
-    assert not calls
-
-
-def test_install_wheel_installs_diarization_extra_when_configured(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    env_file.write_text(
-        "SPEECHRAIL_HOST=127.0.0.1\n"
-        "SPEECHRAIL_DIARIZATION_MODEL_PATH=/external/sortformer.nemo\n",
-        encoding="utf-8",
-    )
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        install_macos,
-        "run_preflight",
-        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
-    )
-
-    install_macos.install_wheel(
-        wheel,
-        app_home=app_home,
-        env_file=env_file,
-        server_lock_directory=tmp_path,
-        runner=_runner_that_creates_python(calls),
-    )
-
-    install_command = next(command for command in calls if command[:2] == ("uv", "pip"))
-    assert install_command[-1] == f"{wheel}[diarization]"
+def test_explicit_env_installer_surface_is_removed() -> None:
+    assert not hasattr(install_macos, "install_wheel")
+    assert not hasattr(install_macos, "InstallLayout")
+    assert not hasattr(install_macos, "main")
 
 
 def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:
@@ -817,7 +725,7 @@ def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:
 
     result = install_macos.run_preflight(
         tmp_path / "runtime" / "bin" / "python",
-        install_macos.InstallLayout.for_app_home(layout.app_home),
+        layout,
         require_tts=False,
         runner=_runner_that_creates_python(calls),
     )
@@ -835,85 +743,3 @@ def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:
             "--asr-only",
         )
     ]
-
-
-def test_install_wheel_does_not_overwrite_existing_configuration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    layout = ServiceLayout.for_app_home(app_home)
-    layout.ensure_directories()
-    layout.config_file.write_text("SPEECHRAIL_PORT=9999\n", encoding="utf-8")
-    layout.config_file.chmod(0o600)
-    monkeypatch.setattr(
-        install_macos,
-        "run_preflight",
-        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
-    )
-
-    with pytest.raises(install_macos.InstallerError, match="configuration already exists"):
-        install_macos.install_wheel(
-            wheel,
-            app_home=app_home,
-            env_file=env_file,
-            runner=_runner_that_creates_python([]),
-        )
-
-
-def test_preflight_failure_does_not_switch_current_or_enable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    layout = ServiceLayout.for_app_home(app_home)
-    layout.ensure_directories()
-    old_release = layout.runtime_root / "releases" / "old"
-    old_release.mkdir(parents=True)
-    layout.current_runtime.symlink_to(old_release, target_is_directory=True)
-    calls: list[tuple[str, ...]] = []
-    monkeypatch.setattr(
-        install_macos,
-        "run_preflight",
-        lambda *args, **kwargs: PreflightResult(ok=False, checks=()),
-    )
-
-    with pytest.raises(install_macos.InstallerError, match="preflight failed"):
-        install_macos.install_wheel(
-            wheel,
-            app_home=app_home,
-            env_file=env_file,
-            server_lock_directory=tmp_path,
-            runner=_runner_that_creates_python(calls),
-        )
-
-    assert layout.current_runtime.resolve() == old_release.resolve()
-    assert not layout.config_file.exists()
-    assert not any("launchctl" in part for command in calls for part in command)
-
-
-def test_wheel_install_failure_keeps_previous_current_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    wheel, env_file, app_home = _inputs(tmp_path)
-    layout = ServiceLayout.for_app_home(app_home)
-    layout.ensure_directories()
-    old_release = layout.runtime_root / "releases" / "old"
-    old_release.mkdir(parents=True)
-    layout.current_runtime.symlink_to(old_release, target_is_directory=True)
-
-    def failing_runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
-        if command[:2] == ("uv", "venv"):
-            Path(command[-1]).mkdir(parents=True)
-        if command[:2] == ("uv", "pip"):
-            return subprocess.CompletedProcess(command, 1, stdout="", stderr="install failed")
-        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-    with pytest.raises(install_macos.InstallerError, match="uv command failed"):
-        install_macos.install_wheel(
-            wheel,
-            app_home=app_home,
-            env_file=env_file,
-            server_lock_directory=tmp_path,
-            runner=failing_runner,
-        )
-
-    assert layout.current_runtime.resolve() == old_release.resolve()

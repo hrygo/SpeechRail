@@ -2,7 +2,7 @@
 name: speechrail-release
 description: >-
   SpeechRail 本机版本发布 SOP。用于判定 SemVer、更新版本与 CHANGELOG、执行代码门、构建并安装 wheel、
-  安全替换 managed/explicit-env LaunchAgent、验证启停与 profile 切换、回滚和留存发布证据。
+  安全替换 managed LaunchAgent、验证启停与 profile 切换、回滚和留存发布证据。
   触发词：发布、release、版本号、bump、构建 wheel、安装新版本、tag。
 ---
 
@@ -85,7 +85,7 @@ rg -F -n 'src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=37
 
 ```bash
 env -u SPEECHRAIL_API_KEY uv run --extra dev pytest
-uv run --extra dev ruff check src tests
+uv run --extra dev ruff check src tests tools
 uv run --extra dev mypy src
 npx @redocly/cli lint contracts/openapi.yaml
 plutil -lint deploy/macos/com.speechrail.plist.example
@@ -107,24 +107,9 @@ shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
 4. 使用新 `runtime/current/.venv/bin/python` 安装/更新 LaunchAgent，确认 plist 指向新 runtime；随后用 controller `start()`，它会在 `bootstrap`/`kickstart` 前再次确认 lock 已释放。
 5. 只允许一个新父进程和一个 listener。模型加载期间不连续 restart，使用有界轮询等待；启动上限按实际设备和模型确定，可达数分钟。
 
-安装器的安全边界是强制的：legacy `install_wheel` 会拒绝已有 `config/selection.json` 的 managed app home，并在 staging 前复用同一个 per-port lock 检查；managed 首次安装若 `service enable` 或注入的 post-enable verifier 失败，会尝试停止候选、清理新 selection、恢复旧 current/runtime。安装器只负责组合这些端口，PID/进程组识别和短等待后精确 `SIGKILL` 仍由 lifecycle controller 单一实现。
+安装器的安全边界是强制的：managed 首次安装若 `service enable` 或注入的 post-enable verifier 失败，会尝试停止候选、清理新 selection、恢复旧 current/runtime。安装器只负责组合这些端口，PID/进程组识别和短等待后精确 `SIGKILL` 仍由 lifecycle controller 单一实现。
 
 `speechrail service stop` 会执行 bounded stop、精确强杀和 lock 验证；`service disable` 仅作为兼容别名。不要用底层 `launchctl`、`pkill`、`killall` 或手工 plist 绕过 controller。
-
-### explicit-env（仅无 managed selection 时）
-
-确认 app home 没有 managed `selection.json`，仍使用同一安全 stop 协议。然后用受审查的 legacy installer 安装显式 `.env`，最后再做整套运行态验收：
-
-```bash
-APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
-python3 tools/install_macos.py \
-  --wheel "dist/speechrail-<version>-py3-none-any.whl" \
-  --env-file "$APP_HOME/config/.env" \
-  --app-home "$APP_HOME" \
-  --enable
-```
-
-不要用 legacy installer 覆盖已有 managed selection；发现 selection 存在时停止并改走 managed 流程。
 
 ## 6. 运行态验收
 

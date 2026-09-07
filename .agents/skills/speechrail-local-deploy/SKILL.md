@@ -55,7 +55,7 @@ speechrail setup --app-home "$APP_HOME" --yes
 speechrail profile status --app-home "$APP_HOME"
 ```
 
-不为诊断临时打开模型下载、不直接运行 vendor worker 作为服务、不把 explicit-env 安装混入已有 managed selection。
+不为诊断临时打开模型下载、不直接运行 vendor worker 作为服务；安装和回滚统一走 managed selection。
 
 ## 启停协议
 

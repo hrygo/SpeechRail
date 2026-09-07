@@ -139,7 +139,7 @@ sequenceDiagram
     end
 ```
 
-### 标准发布升级步骤（explicit-env，无 managed selection）：
+### 标准发布升级步骤（managed）：
 ```bash
 # 1. 安全停用当前旧服务
 uv run speechrail service stop
@@ -147,21 +147,32 @@ uv run speechrail service stop
 # 2. 构建新版本 Wheel
 uv build --no-sources --wheel
 
-# 3. 执行本地安装器部署（指向专用 app-home；managed selection 必须走 managed installer）
-python3 tools/install_macos.py \
-  --wheel dist/speechrail-x.y.z-py3-none-any.whl \
-  --env-file /path/to/private/.env \
-  --app-home "$HOME/Library/Application Support/SpeechRail" \
-  --enable
+# 3. 通过唯一 managed installer 准备 active profile、preflight 并启用
+uv run python - <<PY
+import os
+from pathlib import Path
+import httpx
+from speechrail.service.modelscope import ModelScopeDownloader
+from tools.install_macos import install_managed
 
-# 4. 验证新版本端点
+app_home = Path(os.environ.get("SPEECHRAIL_APP_HOME", Path.home() / "Library/Application Support/SpeechRail"))
+preset = os.environ.get("SPEECHRAIL_PRESET", "quality")
+wheel = sorted(Path("dist").glob("speechrail-*.whl"))[-1]
+with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)) as client:
+    install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id=preset,
+        downloader=ModelScopeDownloader(client=client),
+        enable=True,
+    )
+PY
+
+# 4. 验证新版本端点与真实 TTS→ASR smoke
 curl http://127.0.0.1:8201/health
 curl http://127.0.0.1:8201/readyz
 ```
 
-tools/install_macos.py 的 legacy explicit-env 路径只适用于没有
-config/selection.json 的 app home；它会在写入前拒绝 managed selection，并复用服务的
-per-port lock，服务未完全停下时不会 staging 或替换 runtime/current。managed 发布必须调用
-tools.install_macos.install_managed(...)，完成同一 active profile 的准备、preflight 和原子切换。
-首次 managed 安装启用失败时，安装器会停止可能已部分加载的候选、清理新 selection 并恢复旧指针；
-随后仍须按本 Runbook 完成 /health、/readyz、models/voices 及真实 TTS→ASR 验收。
+安装入口只有 managed installer。它会在 staging 和切换前复用 per-port lock；服务未完全停下时不会替换
+runtime/current。启用或 post-enable smoke 失败时会停止候选、清理首次安装的 selection 并恢复旧指针。
+发布完成后仍须核对 `/health`、`/readyz`、models/voices、PID/listener 和真实 TTS→ASR 结果。
