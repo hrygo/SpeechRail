@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Awaitable
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from mcp.server.fastmcp import FastMCP
@@ -71,16 +72,43 @@ def _timeout_from_env() -> float:
     return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
 
 
+def _resolve_api_key() -> str | None:
+    """Resolve the SpeechRail API key with a zero-config fallback.
+
+    Priority: the ``SPEECHRAIL_API_KEY`` environment variable, then the managed
+    daemon's ``config/.env`` under the SpeechRail app home.  Returns ``None`` in
+    keyless mode so local loopback daemons keep working without any key.
+    """
+    key = os.getenv("SPEECHRAIL_API_KEY")
+    if key:
+        return key
+    default_home = Path("~/Library/Application Support/SpeechRail").expanduser()
+    app_home = os.getenv("SPEECHRAIL_APP_HOME", str(default_home))
+    env_path = Path(app_home) / "config" / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        line = line.strip()
+        if line.startswith("SPEECHRAIL_API_KEY="):
+            value = line.split("=", 1)[1].strip()
+            return value.strip('"').strip("'") or None
+    return None
+
+
 def create_server() -> FastMCP:
     """Build a FastMCP server bound to the configured SpeechRail daemon.
 
     Environment:
       SPEECHRAIL_BASE_URL             server base (default http://127.0.0.1:8201/v1)
-      SPEECHRAIL_API_KEY              bearer key (empty for local keyless mode)
+      SPEECHRAIL_API_KEY              bearer key (optional: auto-discovered from the
+                                      daemon's config/.env when unset)
+      SPEECHRAIL_APP_HOME             app home for key discovery (default ~/Library/...)
       SPEECHRAIL_MCP_TIMEOUT_SECONDS  per-request timeout in seconds
     """
     base_url = os.getenv("SPEECHRAIL_BASE_URL", DEFAULT_BASE_URL)
-    api_key = os.getenv("SPEECHRAIL_API_KEY") or None
+    api_key = _resolve_api_key()
     client = SpeechRailClient(
         base_url=base_url,
         api_key=api_key,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from speechrail.mcp import server
@@ -74,3 +76,30 @@ def test_main_prints_help_without_running(capsys: pytest.CaptureFixture[str]) ->
     assert server.main(["--help"]) == 0
     captured = capsys.readouterr()
     assert "usage: speechrail-mcp" in captured.out
+
+
+def test_resolve_api_key_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPEECHRAIL_API_KEY", "env-key")
+    assert server._resolve_api_key() == "env-key"
+
+
+def test_resolve_api_key_falls_back_to_app_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("SPEECHRAIL_API_KEY", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / ".env").write_text('SPEECHRAIL_API_KEY="file-key"\n', encoding="utf-8")
+    monkeypatch.setenv("SPEECHRAIL_APP_HOME", str(tmp_path))
+    assert server._resolve_api_key() == "file-key"
+
+
+def test_resolve_api_key_keyless_when_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("SPEECHRAIL_API_KEY", raising=False)
+    cfg = tmp_path / "config"
+    cfg.mkdir()
+    (cfg / ".env").write_text("SPEECHRAIL_PORT=8201\n", encoding="utf-8")
+    monkeypatch.setenv("SPEECHRAIL_APP_HOME", str(tmp_path))
+    assert server._resolve_api_key() is None
