@@ -4,6 +4,7 @@ import pytest
 
 from speechrail.service import lifecycle
 from speechrail.service.launchd import ServiceError
+from speechrail.service.lifecycle import ServiceLifecycle, StopPolicy
 from speechrail.service.profile_switch import LaunchAgentServiceController
 
 
@@ -52,6 +53,30 @@ def test_controller_without_port_does_not_sleep_after_bootout() -> None:
 
     assert manager.calls == ["status", "disable"]
     assert delays == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["graceful_timeout_seconds", "force_kill_timeout_seconds", "poll_interval_seconds"],
+)
+def test_stop_policy_rejects_non_positive_timings(field: str) -> None:
+    with pytest.raises(ValueError, match="positive"):
+        StopPolicy(**{field: 0.0})
+
+
+def test_service_lifecycle_is_independent_from_launchagent_manager() -> None:
+    events: list[str] = []
+    lifecycle_controller = ServiceLifecycle(
+        status_reader=lambda: "running",
+        disable=lambda: events.append("disable"),
+        enable=lambda: events.append("enable"),
+        sleeper=lambda _: events.append("sleep"),
+    )
+
+    lifecycle_controller.stop()
+    lifecycle_controller.start()
+
+    assert events == ["disable", "enable"]
 
 
 def test_controller_waits_for_previous_process_lock_before_restarting(monkeypatch) -> None:
