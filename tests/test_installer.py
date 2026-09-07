@@ -206,6 +206,85 @@ def test_managed_install_prepares_preset_and_keeps_service_disabled(
     assert not any("launchctl" in part for command in calls for part in command)
 
 
+def test_managed_install_defaults_to_mcp_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    runtime = _fake_runtime(tmp_path)
+
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    install_macos.install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id="quality",
+        downloader=object(),
+        runtime_runner=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+        runner=_runner_that_creates_python(calls),
+    )
+
+    pip_installs = [command for command in calls if command[:2] == ("uv", "pip")]
+    assert pip_installs, "expected a uv pip install call"
+    requirement = pip_installs[0][-1]
+    assert requirement.endswith("[mcp]"), requirement
+    assert "[diarization]" not in requirement
+
+
+def test_managed_install_adds_diarization_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    runtime = _fake_runtime(tmp_path)
+    env_file = tmp_path / "diarization.env"
+    env_file.write_text(
+        "SPEECHRAIL_DIARIZATION_MODEL_PATH=/models/diar/sortformer\n",
+        encoding="utf-8",
+    )
+
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    install_macos.install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id="quality",
+        downloader=object(),
+        runtime_runner=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+        runner=_runner_that_creates_python(calls),
+        env_file=env_file,
+    )
+
+    pip_installs = [command for command in calls if command[:2] == ("uv", "pip")]
+    assert pip_installs, "expected a uv pip install call"
+    requirement = pip_installs[0][-1]
+    assert requirement.endswith("[mcp,diarization]"), requirement
+
+
 def test_managed_install_same_preset_reuses_wheel_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

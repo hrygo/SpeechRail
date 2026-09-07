@@ -54,7 +54,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install project dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra mcp
 
       - name: Build wheel package
         run: uv build --no-sources --wheel

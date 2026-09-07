@@ -327,7 +327,9 @@ def _stage_wheel(
     """Stage one wheel release, optionally reusing a complete release.
 
     Managed installation keeps release identity, virtualenv creation and
-    cleanup in one boundary.
+    cleanup in one boundary.  The ``mcp`` extra is always installed so the
+    bundled ``speechrail-mcp`` proxy works out of the box with zero extra
+    configuration; ``diarization`` stays opt-in because it needs a model path.
     """
     release_dir = layout.runtime_root / "releases" / _release_id(wheel)
     if release_dir.is_symlink():
@@ -342,8 +344,10 @@ def _stage_wheel(
     venv_dir = release_dir / ".venv"
     runtime_python = venv_dir / "bin" / "python"
     wheel_requirement = str(wheel)
+    extras: list[str] = ["mcp"]  # mcp 默认启用：轻量协议层，零配置即用
     if install_diarization:
-        wheel_requirement += "[diarization]"
+        extras.append("diarization")
+    wheel_requirement += "[" + ",".join(extras) + "]"
     try:
         _run((uv_executable, "venv", "--python", "3.12", str(venv_dir)), runner)
         _run(

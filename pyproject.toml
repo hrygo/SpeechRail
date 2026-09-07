@@ -50,9 +50,11 @@ diarization = [
     "numpy>=1.26,<2.0",
     "onnxruntime>=1.20",
 ]
+mcp = ["mcp>=1.12,<2"]
 
 [project.scripts]
 speechrail = "speechrail.__main__:main"
+speechrail-mcp = "speechrail.mcp.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
