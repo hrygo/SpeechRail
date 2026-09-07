@@ -44,100 +44,331 @@
               aria-hidden="true"
               focusable="false"
             >
-              <ellipse class="avatar-shadow" cx="180" cy="472" rx="112" ry="14" />
+              <defs>
+                <radialGradient id="avatar-shadow-grad" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stop-color="#18343a" stop-opacity="0.28" />
+                  <stop offset="65%" stop-color="#18343a" stop-opacity="0.08" />
+                  <stop offset="100%" stop-color="#18343a" stop-opacity="0" />
+                </radialGradient>
+                <linearGradient id="avatar-eye-grad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#0f172a" />
+                  <stop offset="60%" stop-color="var(--avatar-accent)" />
+                  <stop offset="100%" stop-color="var(--avatar-hair-highlight)" />
+                </linearGradient>
+                <radialGradient id="avatar-blush-grad" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%" stop-color="var(--avatar-blush, #fb7185)" stop-opacity="0.45" />
+                  <stop offset="100%" stop-color="var(--avatar-blush, #fb7185)" stop-opacity="0" />
+                </radialGradient>
+              </defs>
+
+              <ellipse class="avatar-shadow" cx="180" cy="474" rx="118" ry="14" fill="url(#avatar-shadow-grad)" />
+
+              <!-- BODY GROUP (Breathing & Torso) -->
               <g id="avatar-body" class="avatar-body">
+                <!-- Neck & Under-chin Shadow -->
+                <path
+                  class="avatar-neck"
+                  fill="var(--avatar-skin)"
+                  d="M162 232h36v82h-36z"
+                />
+                <path
+                  class="avatar-neck-shadow"
+                  fill="var(--avatar-skin-shadow)"
+                  opacity="0.38"
+                  d="M162 232c10 18 26 18 36 0v22c-10 14-26 14-36 0z"
+                />
+
+                <!-- Shoulders / Coat -->
                 <path
                   class="avatar-shoulders"
                   fill="var(--avatar-clothes)"
-                  d="M70 468c8-82 42-132 110-132s102 50 110 132z"
+                  d="M72 472c8-98 46-150 108-150s100 52 108 150z"
                 />
+
+                <!-- Shirt / Base Inner -->
                 <path
                   class="avatar-shirt"
                   fill="var(--avatar-shirt)"
-                  d="M146 344h68l34 124h-136z"
+                  d="M148 322h64l28 150h-120z"
                 />
-                <path
-                  id="avatar-collar-blazer"
-                  class="avatar-variant avatar-collar"
-                  fill="var(--avatar-clothes-accent)"
-                  d="M147 341l33 42 33-42 30 127h-36l-27-84-27 84h-36z"
-                />
-                <path
-                  id="avatar-collar-hoodie"
-                  class="avatar-variant avatar-collar"
-                  fill="var(--avatar-clothes-accent)"
-                  d="M128 347c15 28 37 42 52 42s37-14 52-42l25 121H103z"
-                />
-                <path
-                  id="avatar-collar-sweater"
-                  class="avatar-variant avatar-collar"
-                  fill="var(--avatar-clothes-accent)"
-                  d="M143 344c9 34 22 50 37 50s28-16 37-50l22 124h-118z"
-                />
+
+                <!-- Blazer Variant -->
+                <g id="avatar-collar-blazer" class="avatar-variant avatar-collar">
+                  <path
+                    fill="var(--avatar-clothes)"
+                    d="M136 322l44 72 44-72 32 150h-36l-28-94-12 18-12-18-28 94h-36z"
+                  />
+                  <path
+                    fill="var(--avatar-clothes-accent)"
+                    d="M144 322l36 56 36-56 10 38-28 46-18-26-18 26-28-46z"
+                  />
+                  <polygon
+                    points="180,334 186,348 180,390 174,348"
+                    fill="var(--avatar-accent)"
+                  />
+                  <circle cx="180" cy="336" r="4.5" fill="var(--avatar-clothes-accent)" />
+                </g>
+
+                <!-- Hoodie Variant -->
+                <g id="avatar-collar-hoodie" class="avatar-variant avatar-collar">
+                  <path
+                    fill="var(--avatar-clothes-accent)"
+                    d="M130 324c14 26 34 38 50 38s36-12 50-38c16 8 36 52 42 148H88c6-96 26-140 42-148z"
+                  />
+                  <path
+                    fill="var(--avatar-clothes)"
+                    d="M138 324c12 20 27 30 42 30s30-10 42-30l16 70c-18 24-40 32-58 32s-40-8-58-32z"
+                  />
+                  <path
+                    d="M166 354v44M194 354v40"
+                    stroke="var(--avatar-shirt)"
+                    stroke-width="3.5"
+                    stroke-linecap="round"
+                  />
+                  <circle cx="166" cy="400" r="3" fill="var(--avatar-accent)" />
+                  <circle cx="194" cy="396" r="3" fill="var(--avatar-accent)" />
+                </g>
+
+                <!-- Sweater Variant -->
+                <g id="avatar-collar-sweater" class="avatar-variant avatar-collar">
+                  <path
+                    fill="var(--avatar-clothes-accent)"
+                    d="M140 322c11 26 24 38 40 38s29-12 40-38l22 150h-124z"
+                  />
+                  <polygon points="180,330 162,320 172,316" fill="var(--avatar-shirt)" />
+                  <polygon points="180,330 198,320 188,316" fill="var(--avatar-shirt)" />
+                  <path
+                    d="M152 326c8 16 18 24 28 24s20-8 28-24"
+                    fill="none"
+                    stroke="var(--avatar-accent)"
+                    stroke-width="3"
+                    stroke-linecap="round"
+                  />
+                </g>
+
+                <!-- Clothes Line Detail -->
                 <path
                   class="avatar-clothes-line"
                   fill="none"
                   stroke="var(--avatar-accent)"
                   stroke-linecap="round"
-                  stroke-width="6"
-                  d="M92 430h176"
+                  stroke-dasharray="8 6"
+                  stroke-width="3.5"
+                  d="M100 435h160"
                 />
               </g>
 
+              <!-- HEAD GROUP (Nodding, Tilting, Expressions) -->
               <g id="avatar-head" class="avatar-head">
-                <ellipse class="avatar-ear" cx="88" cy="184" rx="18" ry="28" />
-                <ellipse class="avatar-ear" cx="272" cy="184" rx="18" ry="28" />
-                <ellipse class="avatar-face" cx="180" cy="182" rx="92" ry="108" />
+                <!-- Hair Back Layers (for bob and wave) -->
+                <path
+                  id="avatar-hair-bob-back"
+                  class="avatar-hair-back avatar-hair-bob-back"
+                  fill="var(--avatar-hair)"
+                  d="M92 144c-24 50-18 102 12 136 12-32 18-70 24-106zM268 144c24 50 18 102-12 136-12-32-18-70-24-106z"
+                />
+                <path
+                  id="avatar-hair-wave-back"
+                  class="avatar-hair-back avatar-hair-wave-back"
+                  fill="var(--avatar-hair)"
+                  d="M86 144c-28 60-14 116 18 148 10-38 18-80 24-118zM274 144c28 60 14 116-18 148-10-38-18-80-24-118z"
+                />
 
+                <!-- Ears -->
+                <g class="avatar-ears">
+                  <g class="avatar-ear avatar-ear-left">
+                    <ellipse cx="88" cy="182" rx="16" ry="24" fill="var(--avatar-skin)" stroke="var(--avatar-skin-shadow)" stroke-width="2.5" />
+                    <path d="M86 174c-4 6-2 14 4 16" fill="none" stroke="var(--avatar-skin-shadow)" stroke-width="2" stroke-linecap="round" />
+                  </g>
+                  <g class="avatar-ear avatar-ear-right">
+                    <ellipse cx="272" cy="182" rx="16" ry="24" fill="var(--avatar-skin)" stroke="var(--avatar-skin-shadow)" stroke-width="2.5" />
+                    <path d="M274 174c4 6 2 14-4 16" fill="none" stroke="var(--avatar-skin-shadow)" stroke-width="2" stroke-linecap="round" />
+                  </g>
+                </g>
+
+                <!-- Face Contour (Chibi Sculpted Contour) -->
                 <path
-                  id="avatar-hair-short"
-                  class="avatar-variant avatar-hair"
-                  fill="var(--avatar-hair)"
-                  d="M92 171c-8-80 31-126 89-126 61 0 94 46 87 129l-31-37c-18 18-47 31-83 31-26 0-46-5-62-15z"
+                  class="avatar-face"
+                  fill="var(--avatar-skin)"
+                  stroke="var(--avatar-skin-shadow)"
+                  stroke-width="2.5"
+                  d="M98 145c-6 58 12 96 46 110 18 8 54 8 72 0 34-14 52-52 46-110-4-58-40-75-82-75s-78 17-82 75z"
                 />
+
+                <!-- Soft Cheeks Blush -->
+                <ellipse class="avatar-cheek avatar-cheek-left" cx="122" cy="208" rx="18" ry="10" fill="url(#avatar-blush-grad)" />
+                <ellipse class="avatar-cheek avatar-cheek-right" cx="238" cy="208" rx="18" ry="10" fill="url(#avatar-blush-grad)" />
+                <circle cx="120" cy="206" r="2.2" fill="#ffffff" opacity="0.6" />
+                <circle cx="240" cy="206" r="2.2" fill="#ffffff" opacity="0.6" />
+
+                <!-- Nose (Cute Button Nose) -->
                 <path
-                  id="avatar-hair-bob"
-                  class="avatar-variant avatar-hair"
-                  fill="var(--avatar-hair)"
-                  d="M86 204c-12-102 28-159 94-159 72 0 105 57 94 163l-32-25-13 62-24-46c-17 10-36 15-56 15-24 0-44-6-61-18z"
+                  class="avatar-nose"
+                  d="M178 194c1 3 3 3 4 0"
+                  fill="none"
+                  stroke="var(--avatar-skin-shadow)"
+                  stroke-width="3"
+                  stroke-linecap="round"
                 />
-                <path
-                  id="avatar-hair-wave"
-                  class="avatar-variant avatar-hair"
-                  fill="var(--avatar-hair)"
-                  d="M92 165c-7-82 35-120 91-120 63 0 91 42 86 121l-24-30c-5 28-19 39-36 42l-13-35c-23 29-55 42-93 37z"
-                />
+
+                <!-- Eyebrows (Dynamic & Expressive) -->
+                <g id="avatar-brows" class="avatar-brows">
+                  <path
+                    class="avatar-brow avatar-brow-left"
+                    d="M128 148c8-7 20-7 26-2"
+                    fill="none"
+                    stroke="var(--avatar-hair)"
+                    stroke-width="3.8"
+                    stroke-linecap="round"
+                  />
+                  <path
+                    class="avatar-brow avatar-brow-right"
+                    d="M206 146c6-5 18-5 26 2"
+                    fill="none"
+                    stroke="var(--avatar-hair)"
+                    stroke-width="3.8"
+                    stroke-linecap="round"
+                  />
+                </g>
+
+                <!-- Eyes (Large Sparkling Eyes) -->
+                <g id="avatar-eyes" class="avatar-eyes">
+                  <!-- Normal Open Eyes -->
+                  <g class="avatar-eyes-open">
+                    <!-- Left Eye -->
+                    <g class="avatar-eye-group avatar-eye-group-left">
+                      <ellipse cx="144" cy="174" rx="14" ry="17" fill="#ffffff" stroke="var(--avatar-skin-shadow)" stroke-width="1.2" />
+                      <ellipse class="avatar-eye avatar-eye-left" cx="144" cy="174" rx="11" ry="14" fill="url(#avatar-eye-grad)" />
+                      <ellipse cx="144" cy="175" rx="5" ry="7" fill="#0f172a" />
+                      <path d="M136 178c3 5 13 5 16 0" fill="none" stroke="var(--avatar-hair-highlight)" stroke-width="2" opacity="0.85" />
+                      <circle class="avatar-eye-glint" cx="148" cy="168" r="4.2" fill="#ffffff" />
+                      <circle cx="139" cy="179" r="2.2" fill="#ffffff" opacity="0.85" />
+                      <path d="M128 170c4-12 26-12 32 0" fill="none" stroke="var(--avatar-hair)" stroke-width="4" stroke-linecap="round" />
+                    </g>
+                    <!-- Right Eye -->
+                    <g class="avatar-eye-group avatar-eye-group-right">
+                      <ellipse cx="216" cy="174" rx="14" ry="17" fill="#ffffff" stroke="var(--avatar-skin-shadow)" stroke-width="1.2" />
+                      <ellipse class="avatar-eye avatar-eye-right" cx="216" cy="174" rx="11" ry="14" fill="url(#avatar-eye-grad)" />
+                      <ellipse cx="216" cy="175" rx="5" ry="7" fill="#0f172a" />
+                      <path d="M208 178c3 5 13 5 16 0" fill="none" stroke="var(--avatar-hair-highlight)" stroke-width="2" opacity="0.85" />
+                      <circle class="avatar-eye-glint" cx="220" cy="168" r="4.2" fill="#ffffff" />
+                      <circle cx="211" cy="179" r="2.2" fill="#ffffff" opacity="0.85" />
+                      <path d="M200 170c4-12 26-12 32 0" fill="none" stroke="var(--avatar-hair)" stroke-width="4" stroke-linecap="round" />
+                    </g>
+                  </g>
+
+                  <!-- Smile Eyes (Happy curved crescents) -->
+                  <g class="avatar-eyes-smile">
+                    <path d="M128 176c6-9 24-9 30 0" fill="none" stroke="var(--avatar-hair)" stroke-width="4.5" stroke-linecap="round" />
+                    <path d="M202 176c6-9 24-9 30 0" fill="none" stroke="var(--avatar-hair)" stroke-width="4.5" stroke-linecap="round" />
+                  </g>
+                </g>
+
+                <!-- Mouth System (Closed / Speech / Smile) -->
+                <g id="avatar-mouth-wrapper" class="avatar-mouth-wrapper">
+                  <!-- Closed Mouth Line -->
+                  <path
+                    class="avatar-mouth-closed"
+                    d="M172 226c4 3 12 3 16 0"
+                    fill="none"
+                    stroke="var(--avatar-skin-shadow)"
+                    stroke-width="3"
+                    stroke-linecap="round"
+                  />
+                  <!-- Speaking Mouth (Audio reactive aperture + teeth & tongue) -->
+                  <g class="avatar-speaking-mouth-box">
+                    <ellipse
+                      id="mouth"
+                      class="avatar-mouth"
+                      cx="180"
+                      cy="228"
+                      rx="10"
+                      ry="2"
+                    />
+                  </g>
+                  <!-- Cheerful Big Smile Mouth -->
+                  <path
+                    id="smile-mouth"
+                    class="avatar-smile-mouth"
+                    d="M165 223c4 16 26 16 30 0z"
+                  />
+                </g>
+
+                <!-- Front Hair Styles -->
+                <!-- Hair 1: Midnight (Short Layered Chic Hair) -->
+                <g id="avatar-hair-short" class="avatar-variant avatar-hair">
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M92 148c-10-68 28-98 88-98 62 0 98 32 90 98-18-24-34-36-62-34-22 2-38 18-50 36-18-12-38-12-66-2z"
+                  />
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M90 142c-6 32-2 56 6 68 4-22 8-46 14-64zM270 142c6 32 2 56-6 68-4-22-8-46-14-64z"
+                  />
+                </g>
+
+                <!-- Hair 2: Coral (Cute Bob + Energetic Ahoge) -->
+                <g id="avatar-hair-bob" class="avatar-variant avatar-hair">
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M88 152c-12-76 30-104 92-104 64 0 102 32 92 104-20-22-38-34-66-32-20 2-36 16-48 34-16-10-38-12-70-2z"
+                  />
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M84 148c-14 46-6 86 16 102 4-28 6-58 10-86zM276 148c14 46 6 86-16 102-4-28-6-58-10-86z"
+                  />
+                  <!-- Energetic Ahoge (呆毛!) -->
+                  <path
+                    class="avatar-ahoge"
+                    fill="var(--avatar-hair)"
+                    d="M178 52c-4-32 24-42 20-52-12 18-4 32-14 52z"
+                  />
+                </g>
+
+                <!-- Hair 3: Mint (Soft Fluffy Wavy Curls) -->
+                <g id="avatar-hair-wave" class="avatar-variant avatar-hair">
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M90 148c-10-72 32-100 90-100 60 0 100 30 90 100-24-22-44-32-68-30-22 2-38 16-48 32-18-8-38-10-64-2z"
+                  />
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M82 144c-18 42-12 88 14 114 4-24 4-50 8-76 6 22 14 38 22 46-8-28-8-56-6-84z"
+                  />
+                  <path
+                    fill="var(--avatar-hair)"
+                    d="M278 144c18 42 12 88-14 114-4-24-4-50-8-76-6 22-14 38-22 46 8-28 8-56 6-84z"
+                  />
+                </g>
+
+                <!-- Hair Highlight Streak (Luminous Gloss) -->
                 <path
                   class="avatar-hair-highlight"
                   fill="none"
                   stroke="var(--avatar-hair-highlight)"
                   stroke-linecap="round"
-                  stroke-width="10"
-                  d="M117 88c18-26 39-37 66-38"
+                  stroke-width="7"
+                  opacity="0.85"
+                  d="M124 82c20-22 40-28 68-28"
                 />
 
-                <g id="avatar-eyes" class="avatar-eyes">
-                  <circle class="avatar-eye" cx="145" cy="178" r="9" />
-                  <circle class="avatar-eye" cx="215" cy="178" r="9" />
-                  <circle class="avatar-eye-glint" cx="148" cy="175" r="3" />
-                  <circle class="avatar-eye-glint" cx="218" cy="175" r="3" />
-                </g>
+                <!-- Accessories -->
+                <!-- Stylish Modern Glasses -->
                 <g id="avatar-glasses" class="avatar-variant avatar-glasses">
-                  <rect x="116" y="151" width="59" height="49" rx="16" />
-                  <rect x="185" y="151" width="59" height="49" rx="16" />
-                  <path d="M175 166h10M116 166l-13-8M244 166l13-8" />
+                  <rect x="114" y="152" width="58" height="46" rx="16" />
+                  <rect x="188" y="152" width="58" height="46" rx="16" />
+                  <path d="M172 168h16M114 168l-18-6M246 168l18-6" />
+                  <path d="M122 160l14-6M196 160l14-6" stroke="rgba(255,255,255,0.75)" stroke-width="2.5" stroke-linecap="round" />
                 </g>
-                <path class="avatar-nose" d="M180 184l-11 33h21" />
-                <ellipse id="mouth" class="avatar-mouth" cx="180" cy="238" rx="10" ry="2" />
-                <path id="smile-mouth" class="avatar-smile-mouth" d="M155 234c13 20 37 20 50 0" />
-                <path class="avatar-cheek avatar-cheek-left" d="M118 222h14" />
-                <path class="avatar-cheek avatar-cheek-right" d="M228 222h14" />
-                <path
-                  id="avatar-accessory-star"
-                  class="avatar-variant avatar-star"
-                  fill="var(--avatar-accessory)"
-                  d="M269 92l6 14 15 1-12 10 4 15-13-8-13 8 4-15-12-10 15-1z"
-                />
+
+                <!-- Golden Sparkling Star Hairpin -->
+                <g id="avatar-accessory-star" class="avatar-variant avatar-star">
+                  <path
+                    fill="var(--avatar-accessory)"
+                    d="M268 96l5 13 14 1-11 9 4 14-12-8-12 8 4-14-11-9 14-1z"
+                  />
+                  <circle cx="268" cy="108" r="3" fill="#ffffff" opacity="0.85" />
+                </g>
               </g>
             </svg>
           </div>
