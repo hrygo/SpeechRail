@@ -13,10 +13,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from examples.perf import benchmark_resources
 from examples.perf.bench_profiles import (
     PROFILE_DEVICE_PHASES,
     BenchmarkDependencies,
     HttpResponse,
+    ProcessResourceMonitor,
     ResourceMonitor,
     build_auth_headers,
     load_manifest,
@@ -43,6 +45,29 @@ def test_profile_benchmark_has_one_modular_entrypoint() -> None:
         / "scripts"
         / "run_all_benchmarks.py"
     ).exists()
+
+
+def test_process_resource_monitor_records_same_tick_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = benchmark_resources.ProcessIdentity(pid=4242, start_time_ns=99)
+    monkeypatch.setattr(benchmark_resources, "_read_rss_bytes", lambda _: 1_024)
+    monitor = ProcessResourceMonitor(
+        interval_seconds=0.01,
+        discover=lambda: {"host-fastapi": identity},
+        reader=lambda _: (0.0, 2.0, 2.0, benchmark_resources.FOOTPRINT_METRIC),
+    )
+
+    monitor.start()
+    result = monitor.stop()
+
+    samples = result["process_samples"]
+    assert isinstance(samples, list) and samples
+    process = samples[0]["processes"][0]
+    assert process["pid"] == 4242
+    assert process["start_time_ns"] == 99
+    assert process["rss_bytes"] == 1_024
+    assert process["phys_footprint_bytes"] == 2 * 1024 * 1024
 
 
 class _FakeHttpRunner:

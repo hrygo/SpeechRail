@@ -30,6 +30,7 @@ try:
     )
     from .benchmark_resources import (
         BenchmarkDependencies,
+        ProcessResourceMonitor,
         _default_system_sampler,
         _hardware_and_os,
         _model_ids,
@@ -57,6 +58,7 @@ except ImportError:  # pragma: no cover - exercised when run as a script
     )
     from benchmark_resources import (  # type: ignore[no-redef]
         BenchmarkDependencies,
+        ProcessResourceMonitor,
         _default_system_sampler,
         _hardware_and_os,
         _model_ids,
@@ -96,16 +98,20 @@ def run_profile_benchmark(
     if normalized_phase not in PHASES and normalized_phase not in PROFILE_DEVICE_PHASES.values():
         raise BenchmarkInputError(f"unknown benchmark phase: {phase}")
     loaded = load_manifest(manifest)
-    deps = BenchmarkDependencies() if dependencies is None else dependencies
+    deps = (
+        BenchmarkDependencies(monitor=ProcessResourceMonitor())
+        if dependencies is None
+        else dependencies
+    )
     injected_dependencies = dependencies is not None
     auth_headers = build_auth_headers()
     runner = _default_http_runner if deps.http_runner is None else deps.http_runner
     clock = deps.clock
     ffprobe = _default_ffprobe if deps.ffprobe is None else deps.ffprobe
     sampler = _default_system_sampler if deps.system_sampler is None else deps.system_sampler
-    default_sampler_used = deps.system_sampler is None
 
     monitor = deps.monitor
+    default_sampler_used = deps.system_sampler is None and monitor is None
     monitor_started = False
     monitor_result: Mapping[str, object] = MappingProxyType({})
     monitor_stop_error: str | None = None

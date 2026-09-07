@@ -27,6 +27,7 @@ try:
     )
     from .benchmark_resources import (
         BenchmarkDependencies,
+        ProcessResourceMonitor,
         ResourceMonitor,
         SystemSampler,
         _default_system_sampler,
@@ -68,6 +69,7 @@ except ImportError:  # pragma: no cover - exercised when run as a script
     )
     from benchmark_resources import (  # type: ignore[no-redef]
         BenchmarkDependencies,
+        ProcessResourceMonitor,
         ResourceMonitor,
         SystemSampler,
         _default_system_sampler,
@@ -97,6 +99,7 @@ __all__ = [
     "HttpResponse",
     "HttpRunner",
     "LoadedManifest",
+    "ProcessResourceMonitor",
     "ResourceMonitor",
     "SystemSampler",
     "_default_ffprobe",

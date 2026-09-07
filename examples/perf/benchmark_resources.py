@@ -6,6 +6,7 @@ import os
 import platform
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,12 +16,18 @@ try:
     from .benchmark_http import Clock, Ffprobe, HttpRunner
     from .benchmark_manifest import _mapping_or_empty, required_phases
     from .profile_metrics import ProcessIdentity, simultaneous_peak_by_identity
+    from .sample_resources import FOOTPRINT_METRIC, _sample_process, worker_pids
 except ImportError:  # pragma: no cover - exercised when run as a script
     from benchmark_http import Clock, Ffprobe, HttpRunner  # type: ignore[no-redef]
     from benchmark_manifest import _mapping_or_empty, required_phases  # type: ignore[no-redef]
     from profile_metrics import (  # type: ignore[no-redef]
         ProcessIdentity,
         simultaneous_peak_by_identity,
+    )
+    from sample_resources import (  # type: ignore[no-redef]
+        FOOTPRINT_METRIC,
+        _sample_process,
+        worker_pids,
     )
 
 _SENSITIVE_KEYS = frozenset(
@@ -66,6 +73,109 @@ class BenchmarkDependencies:
     monitor: ResourceMonitor | None = None
     clock: Clock = time.monotonic
     ffprobe: Ffprobe | None = None
+
+
+def _read_rss_bytes(pid: int) -> int | None:
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    try:
+        rss_kib = int(completed.stdout.strip())
+    except ValueError:
+        return None
+    return rss_kib * 1024 if completed.returncode == 0 and rss_kib >= 0 else None
+
+
+class ProcessResourceMonitor:
+    """Collect same-tick managed-process RSS and macOS physical footprint samples."""
+
+    def __init__(
+        self,
+        *,
+        interval_seconds: float = 0.25,
+        discover: Callable[[], Mapping[str, ProcessIdentity]] = worker_pids,
+        reader: Callable[[ProcessIdentity], tuple[float, float, float, str] | None]
+        = _sample_process,
+    ) -> None:
+        if interval_seconds <= 0:
+            raise ValueError("resource monitor interval must be positive")
+        self._interval_seconds = interval_seconds
+        self._discover = discover
+        self._reader = reader
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._samples: list[dict[str, object]] = []
+        self._started = False
+
+    def _collect_tick(self) -> None:
+        processes: list[dict[str, object]] = []
+        for role, identity in self._discover().items():
+            observation = self._reader(identity)
+            if observation is None:
+                continue
+            _, current_mb, _, metric = observation
+            rss_bytes = _read_rss_bytes(identity.pid)
+            footprint_bytes = (
+                int(current_mb * 1024 * 1024) if metric == FOOTPRINT_METRIC else None
+            )
+            processes.append(
+                {
+                    "role": role,
+                    "pid": identity.pid,
+                    "start_time_ns": identity.start_time_ns,
+                    "rss_bytes": rss_bytes,
+                    "phys_footprint_bytes": footprint_bytes,
+                }
+            )
+        if processes:
+            self._samples.append(
+                {
+                    "at_seconds": time.monotonic(),
+                    "processes": processes,
+                }
+            )
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._collect_tick()
+            self._stop.wait(self._interval_seconds)
+
+    def start(self) -> None:
+        if self._started:
+            raise RuntimeError("resource monitor already started")
+        self._started = True
+        self._thread = threading.Thread(target=self._run, name="speechrail-resource-monitor")
+        self._thread.start()
+
+    def stop(self) -> Mapping[str, object]:
+        if not self._started:
+            raise RuntimeError("resource monitor was not started")
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+        return {
+            "hardware": {
+                "real": True,
+                "source": "sample_resources",
+                "architecture": platform.machine() or "unknown",
+                "chip": platform.processor() or platform.machine() or "unknown",
+            },
+            "os": {"name": platform.system() or "unknown", "version": platform.release()},
+            "memory": {"physical_bytes": _physical_memory_bytes()},
+            "process_samples": self._samples,
+            "resource_sampler": {
+                "available": True,
+                "real": True,
+                "source": "sample_resources",
+            },
+        }
 
 
 def _physical_memory_bytes() -> int | None:
