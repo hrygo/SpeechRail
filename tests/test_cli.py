@@ -120,6 +120,34 @@ def test_serve_discovers_private_app_home_configuration(
     assert captured["port"] == 8317
 
 
+def test_serve_explicit_app_home_resolves_private_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "config" / ".env"
+    env_file.parent.mkdir()
+    env_file.write_text("SPEECHRAIL_PORT=8317\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakeSettings:
+        @classmethod
+        def from_env_file(cls, actual_env_file: Path | None) -> SimpleNamespace:
+            captured["env_file"] = actual_env_file
+            return SimpleNamespace(host="127.0.0.1", port=8317)
+
+    monkeypatch.setattr(cli, "Settings", FakeSettings)
+    monkeypatch.setattr(
+        "speechrail.service.profile_store.claim_startup_selection",
+        lambda app_home: captured.update({"claimed_app_home": app_home}),
+    )
+    monkeypatch.setattr("speechrail.app.create_app", lambda settings: settings)
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
+
+    assert cli.main(["serve", "--app-home", str(tmp_path)]) == 0
+    assert captured["claimed_app_home"] == tmp_path.resolve()
+    assert captured["env_file"] == env_file
+    assert captured["port"] == 8317
+
+
 def test_serve_uses_one_shot_startup_claim(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

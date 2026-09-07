@@ -28,11 +28,16 @@ def _discover_env_file() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def run_server(env_file: Path | None = None) -> None:
+def run_server(env_file: Path | None = None, app_home: Path | None = None) -> None:
     """Run one ASGI process with an explicit or app-home configuration file."""
-    effective_env = env_file or _discover_env_file()
+    if app_home is None:
+        effective_env = env_file or _discover_env_file()
+        app_home = (effective_env.parent.parent if effective_env else Path.cwd()).resolve()
+    else:
+        app_home = Path(app_home).resolve()
+        candidate_env = app_home / "config" / ".env"
+        effective_env = env_file or (candidate_env if candidate_env.is_file() else None)
     settings = Settings.from_env_file(effective_env)
-    app_home = (effective_env.parent.parent if effective_env else Path.cwd()).resolve()
 
     from speechrail.config.model_catalog import load_catalog
     from speechrail.config.selection import resolve_selection
@@ -55,6 +60,9 @@ def _parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command")
     serve = subcommands.add_parser("serve", help="start one SpeechRail ASGI process")
     serve.add_argument("--env-file", type=Path, help="load configuration from this file")
+    serve.add_argument(
+        "--app-home", type=Path, help="use this installed app home's private configuration"
+    )
 
     setup = subcommands.add_parser(
         "setup", help="choose and apply a three-tier model profile"
@@ -290,7 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_server()
             return 0
         if args.command == "serve":
-            run_server(args.env_file)
+            run_server(args.env_file, getattr(args, "app_home", None))
             return 0
         if args.command == "service":
             _run_service(
