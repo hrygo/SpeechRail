@@ -466,6 +466,21 @@ def test_settings_auto_with_model_requires_admission(tmp_path: Path) -> None:
         )
 
 
+def test_settings_auto_with_model_rejects_shadow(tmp_path: Path) -> None:
+    """shadow is a legacy-primary A/B aid; auto→silero must reject it, not silently drop."""
+    model_file = tmp_path / "silero.onnx"
+    model_file.touch()
+    with pytest.raises(
+        ValidationError,
+        match="realtime_vad_shadow_enabled is only supported with realtime_vad_engine='legacy'",
+    ):
+        Settings(
+            realtime_vad_engine="auto",
+            realtime_vad_model_path=model_file,
+            realtime_vad_shadow_enabled=True,
+        )
+
+
 def test_bargein_cooldown_gates_repeat_cancel() -> None:
     """A speech onset inside the cooldown window must not re-cancel TTS."""
 

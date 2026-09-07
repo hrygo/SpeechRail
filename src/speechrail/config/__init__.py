@@ -145,7 +145,7 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "realtime_asr_backend=native requires qwen3_model_dir"
                 )
-        if self.realtime_vad_shadow_enabled and self.realtime_vad_engine == "silero":
+        if self.realtime_vad_shadow_enabled and self.resolves_to_silero_vad:
             raise ValueError(
                 "realtime_vad_shadow_enabled is only supported with realtime_vad_engine='legacy'"
             )
