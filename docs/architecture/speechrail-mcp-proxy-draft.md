@@ -1,0 +1,313 @@
+---
+title: "SpeechRail MCP Proxy 工具与契约草案"
+status: draft
+audience: "系统架构师、协议设计者、agent 集成方"
+version: "0.2.0"
+date: 2026-09-07
+supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.1.0)"
+---
+
+# 🎙️ SpeechRail MCP Proxy 工具与契约草案 (v0.2.0)
+
+> **状态声明**：本文档是**提案草案**，**尚未被接受**为 active 契约。它描述一个拟议的
+> 外置 `speechrail-mcp` 进程如何把 SpeechRail 的 OpenAI-compatible REST 面暴露给 AI agent。
+> 写入范围：`docs/architecture/`（带 `draft` 状态）；**不进入** `contracts/` 的 active 契约层。
+>
+> **本版（v0.2.0）修订记录** —— 经 Metis 预实施评审（以"agent 使用更容易、更精准"为唯一
+> 北极星）+ 代码事实核实后重构：
+> - **合并** `list_models` + `list_voices` → 单一 **`describe()`** 工具；
+> - **移除** MRTR / `requestState` / `input_required`（对 agent 是打断而非辅助）；
+> - **恢复** `preview_voice`（quality-only，代理强制），避免能力静默丢失；
+> - **Tier 从"广告"升级为"硬强制"**（工具层拒绝而非 prose 建议）；
+> - **`audio_ref` 传输契约明确化**（path-first + `BlobResourceContents` 兜底）；
+> - **修正事实**：9 个系统音色在**所有档位**可用；仅**用户自建 clone 音色**在
+>   `balanced/light` 不可用（原 v0.1 "2/9 为 clone 类"表述有误）；
+> - per-tool 授权矩阵降为**附录 B**（运维安全，非工具契约核心）。
+
+---
+
+## 1. 目标与范围
+
+### 1.1 北极星（唯一成功标准）
+
+> **MCP 增强的唯一目标：让 agent 使用 SpeechRail 更容易、更精准。**
+
+| 维度 | 含义 | 度量 |
+|---|---|---|
+| **更容易** | 少填参数；不用学协议枚举（`response_format`/`timestamp_granularities`）；不被确认弹窗打断；不把音频灌进 context | agent 完成任务所需的调用数 / 参数数 / 上下文消耗 |
+| **更精准** | 选对档位能力、选到可用音色、输出形状正确；绝不因选错而拿到 `voice_not_available` / 错误转写形状 | 误选率 / 错误返回率 |
+
+### 1.2 为什么做
+
+SpeechRail 已是 OpenAI-compatible REST + WS。对 agent 而言它是"能调用的语音机器"，但 agent
+无法一次得知该选哪档/哪音色/能否克隆，也无法把长任务/试听编排进工作流。MCP 2026-07-28 的
+`server/discover`（能力自描述）、可缓存 list、显式状态句柄（`job_id`）为此提供载体。
+
+### 1.3 不做什么（边界，不可越界）
+
+- ❌ **不替换 `/v1/realtime`** 实时全双工 WebSocket（VAD / barge-in / 逐句 TTS / `speechrail.diarization.v1` 分人流）。
+  实时音频仍由 Sona 等客户端经 WS 直连。
+- ❌ **不引入说话人实名、声纹库、LLM 上下文、会议持久化** —— 调用方职责（`product-scope.md` 红线）。
+- ❌ **不把 MCP 内建进主服务进程** —— 主服务只做协议接入与调度。
+- ❌ **不接收 base64 内联音频、不落盘、不记录** 原始音频/Base64/完整转写。
+- ⚠️ **voice-design 试听（`preview_voice`）保留**为 quality-only 工具（代理强制），不作为普通工具暴露。
+
+---
+
+## 2. 架构形态（方案 A：外置 Proxy）
+
+```mermaid
+flowchart LR
+    Agent["AI Agent\n(Claude / Open-WebUI / Cursor / 任意 MCP 客户端)"]
+    Proxy["speechrail-mcp (外置进程)\nstdio 或 HTTP Streamable\n由工具调用 / 能力发现"]
+    Rail["SpeechRail 主服务 (FastAPI :8201)\nOpenAI-compatible REST\nBearer 认证"]
+
+    Agent <-->|"MCP 2026-07-28\n(stateless / discover)"| Proxy
+    Proxy <-->|"Authorization: Bearer \\nPOST /v1/audio/* ..."| Rail
+```
+
+- Proxy 是**独立进程**，把 MCP 工具调用翻译成带 `Authorization: Bearer` 的 REST 调用。
+- **不内建** MRTR/session 管理进主进程。
+- Transport：**stdio 优先**（本机），可选 HTTP Streamable（供 Open-WebUI 原生 HTTP MCP 直连）。
+
+---
+
+## 3. `server/discover`（能力自描述）
+
+Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`instructions` 是给 LLM 的
+自然语言指导，**应以"agent 现在能做什么、该怎么选"为中心**，而非协议向自我介绍。
+
+```jsonc
+{
+  "jsonrpc": "2.0",
+  "id": "discover-1",
+  "result": {
+    "resultType": "complete",
+    "supportedVersions": ["2026-07-28"],
+    "capabilities": { "tools": { "listChanged": false }, "resources": { "subscribe": false, "listChanged": false } },
+    "_meta": { "io.modelcontextprotocol/serverInfo": { "name": "speechrail-mcp", "version": "0.2.0" } },
+    "instructions": "当前档位 quality(voice_design)：支持音色克隆与试听。把音频作为 audio_ref(文件路径或资源 URI)，绝对不要内联 base64。先调 describe() 看当前可用能力与音色，再选。长请求用 create_job+get_job。资源忙时返回 backend_busy/queue_full(可退避重试，勿死循环)。实时全双工音频不在此工具集，需 WS /v1/realtime。",
+    "ttlMs": 3600000,
+    "cacheScope": "user"
+  }
+}
+```
+
+- `instructions` **动态反映当前 profile**（`quality` → clone/preview 可用；`balanced/light` → 不可）。
+- Proxy 每次 `discover` 前读 `GET /v1/models` + `GET /v1/voices` 组装。
+
+---
+
+## 4. 工具清单（v0.2 核心）
+
+> 全部工具执行时 Proxy 携带 `Authorization: Bearer <key>`（本机 keyless 时任意占位）。
+> 输入音频一律用 **`audio_ref`**，**禁止 base64 内联**（见 §8 传输契约）。
+
+### 4.1 `describe()` —— 单一能力快照（合并 `list_models` + `list_voices`）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `--` | — | — | 无参数 |
+
+- **Proxy 调用**：`GET /v1/models`（`system.py:170`）+ `GET /v1/voices`（`system.py:226`）。
+- **返回**：当前档位 + 能力摘要 + 音色清单（含精准判别字段）。
+
+```jsonc
+{
+  "tier": "quality",
+  "profile": "quality",
+  "diarization_ready": false,          // 是否已安装/就绪（决定 diarize 是否可用）
+  "clone_supported": true,             // quality&voice_design → true
+  "preview_supported": true,           // quality&voice_design → true
+  "models": [{ "id": "...", "variant": "voice_design", "capabilities": { "supports_preview": true, "supports_clone": true } }],
+  "voices": [{ "id": "serena", "variant": "voice_design", "mode": "system", "is_default": true, "available": true,
+               "capabilities": { "supports_speaker": false, "supports_instruction": true, "supports_clone": false } }]
+}
+```
+
+- **精准作用**：agent 只从 `available=true` 的 voices 选择；`mode`（`system|instruction|clone`）区分
+  "永远可用 preset" vs "跨档脆弱 clone"；`is_default`（`serena`）让 agent 可完全省略 `voice`。
+- **传输**：结果带 `ttlMs`（如 60s，随 profile）供缓存；档位/diarization 切换时失效。
+
+### 4.2 `transcribe`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `audio_ref` | string | 是 | 音频文件路径或资源 URI（**禁 base64**） |
+| `language` | string | 否 | ISO 639-1；缺省自动检测 |
+| `diarize` | bool | 否 | 默认 false；true → `diarized_json` 形状。**需 `diarization_ready=true`** |
+| `timestamps` | bool | 否 | 默认 false；true → `verbose_json` 形状（含 segment/word）。仅非 diarize 时生效 |
+
+- **Proxy 调用**：`POST /v1/audio/transcriptions`（`audio.py:677`）。
+- **输出形状**（在工具 schema 声明）：
+  - 默认 `{text}`（纯文本，多数 agent 需要）；
+  - `timestamps:true` → `{text, segments:[{start,end,text}], words?}`；
+  - `diarize:true` → `{segments:[{speaker,start,end,text}]}`。
+- **前置检查**：`diarize=true` 但 `diarization_ready=false` → 返回结构化错误（"diarization 引擎未安装，先 `uv sync --extra diarization`"），非盲报上游 400。
+- **`timestamps` 隐含**：强制走 `verbose_json`，绝不自降为 `json`（`timestamp_granularities` 仅在 `verbose_json` 下有意义，`openapi.yaml:838-848`）。
+
+### 4.3 `synthesize`
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `text` | string | 是 | 待合成文本（≤4096） |
+| `voice` | string | 否 | 缺省 `serena`；必须来自 `describe().voices` |
+| `output_format` | string | 否 | `mp3`（默认）/ `wav` / `pcm` |
+| `speed` | number | 否 | 0.25–4.0 |
+
+- **Proxy 调用**：`POST /v1/audio/speech`（`audio.py:1144`）。
+- **Tier 硬强制**：`voice` 对应 `mode=clone` 或 `supports_instruction`，而当前档位非 `quality`
+  → **直接拒绝**（镜像后端 `resolve_binding` 的 ValueError，`system.py:93-95`），并引导：
+  *"当前档位 `balanced` 不支持此 voice；调 `describe()` 选 `available=true` 的音色，或切换档位。"*
+- **输出**：二进制音频。写入临时文件并返回 `audio_path`（与 `docker-talkies`/`voice-mcp` 先例一致，
+  便于 host 播放/发包），或 `BlobResourceContents`。临时文件用后由调用方删除，Proxy 不缓存。
+
+### 4.4 `preview_voice`（恢复，quality-only）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `instruction` | string | 是 | VoiceDesign 音色指令（自然语言描述） |
+| `text` | string | 是 | 试听文本 |
+
+- **Proxy 调用**：`POST /v1/voices/previews`（`audio.py:1010`，`extra="forbid"`）。
+- **仅 `quality` 档**。非 quality → 结构化错误：*"试听需 `quality` 档（voice_design）；当前档位不支持。可用 `describe()` 确认。"*
+- **作用**：让 agent 先试听再选音色，是"精准选择"的关键能力——**不作为普通工具暴露**，仅 quality 档可用。
+
+### 4.5 `create_job` / `get_job` / `cancel_job`（可选长任务句柄）
+
+| 工具 | 参数 | 说明 |
+|---|---|---|
+| `create_job` | `kind`（`transcription`\|`speech`）、`input_ref`（≤1000）、可选 `params` | `POST /v1/jobs`（`jobs.py:49`）；返回 `job_id`（`^job_[a-f0-9]{32}$`） |
+| `get_job` | `job_id` | `GET /v1/jobs/{id}`（`jobs.py:66`）；`state ∈ {queued,running,completed,failed,cancelled,expired}` |
+| `cancel_job` | `job_id` | `DELETE /v1/jobs/{id}`（`jobs.py:83`） |
+
+- **定位**：**可选增益，非预教要求**。`transcribe`/`synthesize` 优先同步；仅当同步返回
+  `backend_timeout`/`audio_too_long` 时，结构错误提示 *"长请求请调 `create_job`（同 `input_ref`）并轮询 `get_job`"*。
+  agent 按需学，不在前置里塞。
+- **`job_id` 是 SpeechRail 唯一现成的无状态显式句柄**，是 MCP SEP-2567 推荐的"显式状态句柄"模式。
+- 长转写/合成（超 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 默认 120s）走 `create_job`。
+
+---
+
+## 5. 资源映射
+
+| MCP 资源 | 对应 REST | 说明 |
+|---|---|---|
+| `speechrail://health` | `GET /health`（`system.py:136`） | worker readiness |
+| `speechrail://readyz` | `GET /readyz`（`system.py:155`） | 至少一能力可接受时 200 |
+| `speechrail://metrics` | `GET /metrics`（`system.py:437`） | Prometheus/JSON；`Cache-Control:no-store` 已设 |
+| `speechrail://voices`（列表） | `GET /v1/voices` | describe 的快照源 |
+| `speechrail://models`（列表） | `GET /v1/models` | describe 的快照源 |
+
+> 注：MCP 标准 `resources.list` 可暴露上述读端点；但**主要的"选能力"入口是 `describe()` 工具**（带判别字段），
+> 资源仅作原始读。
+
+---
+
+## 6. 错误 / 重试语义（映射到 MCP tool error）
+
+SpeechRail 内置全局三闸门：Resource Governor（容量/class queue）+ AdmissionQueue（token 池）
++ AsrModeGate（batch/streaming 互斥）。任一命中返回 **429**，`code ∈ {queue_full, backend_busy}`，
+`retryable=true`，`Retry-After: 1`（`audio.py:919-957`）。Proxy 映射为 MCP **tool error**（`isError=true`）：
+
+| SpeechRail code | 语义 | MCP 处理 |
+|---|---|---|
+| `backend_busy` | 共享 worker 忙 / streaming 会话达上限 | `{code:"backend_busy", retryable:true}` → 退避后重试（1s 起），**勿死循环** |
+| `queue_full` | 有界队列 / governor class 满 | `{code:"queue_full", retryable:true}` → 同上 |
+| `audio_too_long` | 超 `SPEECHRAIL_MAX_AUDIO_SECONDS`（默认 3600） | `{code:"audio_too_long", retryable:false}` → 截断 / 走 `create_job` |
+| `audio_too_large` | 超 `SPEECHRAIL_MAX_UPLOAD_BYTES`（默认 512MB） | `{code:"audio_too_large", retryable:false}` → 换引用 |
+| `model_not_found` | 未登记模型 | `{code:"model_not_found", retryable:false}` → 调 `describe()` |
+| `voice_not_found` / `voice_not_available` | 音色未知 / 档位不支持 | `{code:"voice_not_available", retryable:false}` → 调 `describe()` 选 `available=true` |
+
+> **关键**：MCP 工具层重试必须**退避**，不能撞穿单机 `backend_busy` 边界——SpeechRail 是单机共享，
+> agent 爆发会拖累所有调用方。
+
+---
+
+## 7. 明确不在本版实现（v0.2 决策记录）
+
+### 7.1 移除 MRTR / `requestState` / `input_required`
+原 v0.1 用 MRTR 承载"中途确认弹窗"。**已移除**——向 agent 弹窗是要它做服务端判断，是打断而非辅助。
+agent 自己能判断（如"非 quality 档"→ 它直接改用其它音色）。若后续确有需要（如语音克隆需上传参考音频），
+改为**更自然的工具形态**（如 `create_clone(audio_ref, ref_text, ...)`），而非协议级的 `input_required`。
+
+### 7.2 WS `/v1/realtime` 不做 MCP handle
+`OpenAIRealtimeSession`（`application/realtime_openai.py:80-169`）是 connection-scoped、不可重入。
+本版**不暴露**它为 MCP 句柄，仅暴露 `job_id`；实时全双工留给 WS 客户端直连。避免"agent 管一个实时会话"的复杂。
+
+### 7.3 per-tool 授权矩阵 → 附录 B
+SpeechRail 授权是二进制 Bearer，无 scope 分级（一个 key 解锁全部受保护工具）。MCP 层的
+per-tool 授权矩阵属**运维安全**，降为附录 B。
+
+---
+
+## 8. 授权 / 隐私 / 传输契约
+
+### 8.1 `audio_ref` 传输契约（v0.2 明确）
+
+| 场景 | 传输方式 | 说明 |
+|---|---|---|
+| stdio / host-local（Claude Code） | **path-first**（`file://` 或裸路径） | Proxy 直读 agent 文件系统 |
+| 跨容器（Open-WebUI Docker） | **`BlobResourceContents` 资源 URI 兜底** | Proxy 经 MCP 资源传输拉字节（out-of-band），**不读** agent 文件系统 |
+| 任何情况 | **base64 拒绝** | 教学错误：*"base64 不接受；传 path 或资源 URI，让音频不进入你的 context。"* |
+
+- **base64 是 generation-time 事件**（一旦进 args 已在 context），故**在工具 schema 描述 + `instructions` 防**，
+  再在 call-time 拒绝作为恢复信号，而非唯一防线。
+- **隐私**：全内存、不落日志（`openapi` 明示 request_id/content 不入日志）；唯 voice-clone 落盘
+  `~/.speechrail/voices/`（`0600`）。Proxy 不缓存音频、不记录文本/音频/凭证。
+
+### 8.2 授权
+- Proxy 用 `SPEECHRAIL_API_KEY`（Bearer）；本机 keyless 填占位符。
+- `allowed_origins` 已定义但**无 CORSMiddleware 实例化**（`config:66`，全库仅定义无引用）——若 Proxy 走
+  HTTP Streamable 对外，需在 Proxy 侧自行处理 origin 策略，**不能依赖主服务**。
+
+---
+
+## 9. 未决点（实施前须推敲）
+
+1. **`describe()` 的 `ttlMs` + 失效信号**：档位/diarization 切换如何通知已缓存 client？建议 `cacheScope="user"`
+   + 短 `ttlMs`（60s）或 `listChanged` 通知；需在 Proxy 实现层敲定。
+2. **`preview_voice` 上限**：是否需要防滥用（quality 档单次试听较贵）；建议 Proxy 侧简单节流。
+3. **HTTP Streamable transport**：是否提供，供 Open-WebUI 原生 HTTP MCP 直连。
+
+---
+
+## 10. 工具矩阵汇总（v0.2）
+
+| MCP 工具 | SpeechRail 端点 (file:line) | 是否推荐 | 备注 |
+|---|---|---|---|
+| `describe()` | `GET /v1/models`（`system.py:170`）+ `GET /v1/voices`（`system.py:226`） | ✅ 高（合并） | 单一能力快照，含 `mode/is_default/available` 判别字段 |
+| `transcribe` | `POST /v1/audio/transcriptions`（`audio.py:677`） | ✅ 高 | `audio_ref`；`diarize?`/`timestamps?` 语义化 |
+| `synthesize` | `POST /v1/audio/speech`（`audio.py:1144`） | ✅ 高 | **tier 硬强制**；输出 `audio_path`/Blob |
+| `preview_voice` | `POST /v1/voices/previews`（`audio.py:1010`） | ✅ 高（quality-only） | 代理强制档位，先试再选 |
+| `create_job`/`get_job`/`cancel_job` | `POST/GET/DELETE /v1/jobs`（`jobs.py:49/66/83`） | ✅ 中（可选长任务） | `job_id` = 显式句柄 |
+| 实时全双工 | `WS /v1/realtime`（`realtime_openai.py:39`） | ❌ **不做 MCP** | 保留 WS，客户端直连 |
+
+---
+
+## 附录 A：证据
+
+- SpeechRail 端点 file:line 取自当前工作树实测（契约/代码/文档三层核验）。
+- **事实修正**：`SYSTEM_VOICE_PROFILES`（`tts.py:82`）9 音色全为 `mode="system"`，所有档位可用；
+  `mode="clone"`（`tts.py:562`）/`mode="instruction"`（`tts.py:507`）仅用户自建；`resolve_binding` 对
+  `mode=clone` 在 `custom_voice` 下抛 `ValueError` → `available=false`（`system.py:93-95`）。
+- MCP 2026-07-28 规范字面取自官方 spec（`server/discover`、MRTR `requestState`、JSON Schema 2020-12、
+  `cacheScope`/`ttlMs`）。
+- 外部先例：`docker-talkies`（内置 `/v1/mcp`）、`trongnguyenbinh/voice-mcp`（MCP proxy→Bearer REST）、
+  `agent-voice-mcp`/`whisper-transcribe-mcp`（`audio_ref` vs base64 踩坑）、`modelcontextprotocol/ext-apps/say-server`（实时 TTS queue-polling）。
+- 本项目当前**无任何 MCP 引用**（grep `modelcontextprotocol`/`\bmcp\b` 于 `src/`、`contracts/`、`docs/` 均零命中）。
+
+## 附录 B：per-tool 授权矩阵（运维安全，非工具契约）
+
+面对 agent 客户端（尤其是 MCP 端口对外时）建议的默认授权分级，供 Proxy 配置化实现：
+
+| 工具 | 默认允许 | 建议理由 |
+|---|---|---|
+| `describe` | ✅ | 只读能力发现，无害 |
+| `transcribe` | ✅ | 核心能力；音频引用不落日志 |
+| `synthesize` | ✅ | 核心能力 |
+| `preview_voice` | ⚠️ 视 token/配额 | quality 档较贵，建议 agent 内加节流 |
+| `create_job`/`get_job`/`cancel_job` | ✅ | 长任务句柄 |
+| `delete_voice`（克隆删除） | ❌ 默认禁 | 破坏性，应由本地人（而非 agent）操作 |
+
+> 配置建议：`SPEECHRAIL_MCP_ALLOW_PREVIEW=0/1`、`SPEECHRAIL_MCP_ALLOW_DELETE_VOICE=0` 等。
