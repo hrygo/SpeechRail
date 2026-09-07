@@ -317,15 +317,15 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.10.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.10.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.10.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset. The follow-up [operator efficiency recheck](docs/archive/performance/2026-09-07-v1.10.0-operator-efficiency.md) validates the modular benchmark, managed install, and stop/start path with a separate N=1 warm scope. Historical reports remain in the archive:
+Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.11.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.11.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.11.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset (same as v1.10.0). ASR and realtime use the same fixtures as the v1.10.0 baseline; TTS uses a fixed text set in this run, so its values are reported in-profile and not compared longitudinally. Historical reports remain in the archive:
 
-| Benchmark Metric | 🟢 Light Profile (v1.10.0) | 🟡 Balanced Profile (v1.10.0) | 🟣 Quality Profile (v1.10.0) | Test Methodology & Scenario |
+| Benchmark Metric | 🟢 Light Profile (v1.11.0) | 🟡 Balanced Profile (v1.11.0) | 🟣 Quality Profile (v1.11.0) | Test Methodology & Scenario |
 |---|---|---|---|---|
-| **ASR 10s warm RTF p50** | **0.0232** | **0.0289** | **0.0301** | Actual fixture 9.36s, warm N=5; lower is faster |
-| **TTS short warm RTF p50** | **0.256** | **0.270** | **0.315** | Actual PCM duration, warm N=5; lower is faster |
-| **Peak Total Physical RAM** | **4.66 GB** (4661.0 MB) | **6.34 GB** (6336.0 MB) | **7.70 GB** (7696.2 MB) | Same-tick macOS `phys_footprint`; complete ticks 16/18/15 |
-| **Warm Idle Physical RAM** | **4.15 GB** (4152.8 MB) | **5.54 GB** (5540.8 MB) | **N/A** | Quality lazy worker pre-load sample was incomplete; no old value substituted |
-| **Realtime ASR commit p50** | **291.5 ms** | **418.4 ms** | **800.9 ms** | 16kHz PCM16, three consecutive sessions; terminal success 3/3 |
+| **ASR 10s warm RTF mean** | **0.019** | **0.028** | **0.028** | Actual fixture 9.36s, warm N=5; lower is faster |
+| **TTS short warm RTF mean** | **0.243** | **0.249** | **0.275** | Actual PCM duration, warm N=5; lower is faster |
+| **Peak Total Physical RAM** | **4.89 GB** (4894.6 MB) | **6.01 GB** (6011.8 MB) | **7.05 GB** (7045.1 MB) | Same-tick macOS `phys_footprint`; complete ticks |
+| **Warm Idle Physical RAM** | **4.24 GB** (4241.3 MB) | **5.46 GB** (5464.0 MB) | **6.70 GB** (6695.9 MB) | Warm-residency sample after model fault-in |
+| **Realtime ASR commit p50** | **390 ms** | **347 ms** | **350 ms** | 16kHz PCM16, three consecutive sessions; terminal success 3/3 |
 
 > `balanced` and `light` use `CustomVoice` and do not support voice cloning; `quality` uses `VoiceDesign` and declares `supports_clone=true`. Concurrent batch ASR is intentionally rejected with `backend_busy` when the shared worker is occupied; it is not reported as usable throughput.
 

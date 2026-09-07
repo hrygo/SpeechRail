@@ -183,6 +183,51 @@ class AppServices:
     def diarization_ready(self) -> bool:
         return bool(self.diarization_status["ready"])
 
+    @property
+    def subsystem_states(self) -> dict[str, str]:
+        """Per-subsystem inference lifecycle state for transparent readiness.
+
+        The ``*_ready`` booleans mean "configured and able to serve on demand".
+        This carries the granular lifecycle (active / warm_standby /
+        cold_evicted / inactive) so a cold-evicted or idle worker is visible
+        instead of hidden behind a bare readiness flag.
+        """
+        worker_states = self.lifecycle.worker_states()
+        return {
+            "asr": self._state_for("asr", self._asr_configured, worker_states),
+            "tts": self._state_for("tts", self._tts_configured, worker_states),
+            "streaming": self._state_for(
+                "streaming", self._streaming_configured, worker_states
+            ),
+        }
+
+    @property
+    def _asr_configured(self) -> bool:
+        return bool(
+            self.transcribe is not None
+            or self.batch_transcriber is not None
+            or self.realtime_asr_factory is not None
+            or self.settings.backend_ready
+        )
+
+    @property
+    def _tts_configured(self) -> bool:
+        return self.tts_synthesizer is not None or self.settings.backend_ready
+
+    @property
+    def _streaming_configured(self) -> bool:
+        return self.realtime_asr_factory is not None
+
+    @staticmethod
+    def _state_for(
+        name: str, configured: bool, worker_states: dict[str, str]
+    ) -> str:
+        if not configured:
+            return "unconfigured"
+        if name in worker_states:
+            return worker_states[name]
+        return "active"
+
 
 def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServices:
     """Compose concrete Qwen/NeMo/job components without starting them."""

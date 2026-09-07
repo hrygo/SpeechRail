@@ -19,6 +19,7 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
 from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
+from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
 
 _CLONE_PROMPTS_ASSET = (
@@ -134,6 +135,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
     @router.get("/health")
     async def health() -> dict[str, Any]:
+        states = services.subsystem_states
         return {
             "status": "ok",
             "service": resolved.service_name,
@@ -144,6 +146,9 @@ def create_system_router(services: AppServices) -> APIRouter:
             "tts_ready": services.tts_ready,
             "diarization_ready": services.diarization_ready,
             "diarization": services.diarization_status,
+            "asr_state": states.get("asr", "unconfigured"),
+            "tts_state": states.get("tts", "unconfigured"),
+            "streaming_state": states.get("streaming", "unconfigured"),
             "ready": services.asr_ready or services.tts_ready,
         }
 
@@ -240,6 +245,8 @@ def create_system_router(services: AppServices) -> APIRouter:
     async def create_voice(request: Request) -> JSONResponse:
         """Create a persistent custom voice using natural language instruction."""
         request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
         try:
             body = await request.json()
         except Exception:
@@ -324,6 +331,8 @@ def create_system_router(services: AppServices) -> APIRouter:
     ) -> JSONResponse:
         """Clone and register a custom voice using a reference audio and prompt text."""
         request_id: str = getattr(request.state, "request_id", "") or "req_clone"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
         variant = active.tts.variant if active.tts is not None else None
         if variant != "voice_design":
             tier_name = active.profile or "custom"
@@ -405,6 +414,8 @@ def create_system_router(services: AppServices) -> APIRouter:
     async def delete_voice(voice_id: str, request: Request) -> JSONResponse:
         """Delete a persistent custom voice; system preset voices are protected."""
         request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
         try:
             get_voice_registry().delete_custom_profile(voice_id)
             return JSONResponse(status_code=200, content={"status": "deleted", "id": voice_id})

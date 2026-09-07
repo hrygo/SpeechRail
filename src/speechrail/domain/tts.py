@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import io
 import json
+import logging
+import os
 import random
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 import wave
@@ -17,6 +20,8 @@ from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
@@ -227,6 +232,56 @@ def resolve_voice(voice: str) -> str:
     return VOICE_ALIASES.get(voice, voice)
 
 
+def _atomic_write_bytes(target: Path, payload: bytes, *, mode: int) -> Path:
+    """Write ``payload`` to ``target`` atomically with an explicit mode.
+
+    The payload is written to a temp file in the same directory, fsync'd, then
+    ``os.replace``'d onto the target so a hard kill or write failure can never
+    leave a half-written file. The final file is chmod'd to ``mode`` (e.g. 0600
+    for private voice metadata/audio).
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.chmod(mode)
+        tmp_path.replace(target)
+        dir_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        with suppress(OSError):
+            tmp_path.unlink(missing_ok=True)
+        raise
+    return target
+
+
+def tts_voice_class(voice: str) -> str:
+    """Return a low-cardinality voice category label for metrics.
+
+    Maps a resolved voice onto one of ``system``, ``custom`` or ``clone`` so a
+    user-controlled custom/clone voice ID can never grow into an unbounded
+    metric label time series. Unknown or failsafe voices resolve to ``custom``.
+    """
+    try:
+        profile = get_voice_profile(voice)
+    except ValueError:
+        return "custom"
+    if profile.mode == "clone":
+        return "clone"
+    if profile.mode == "system":
+        return "system"
+    return "custom"
+
+
 def transcode_and_validate_clone_audio(
     audio_bytes: bytes,
     *,
@@ -375,8 +430,12 @@ class VoiceRegistry:
                             )
                 self._custom_voices = loaded
                 self._last_loaded_mtime = mtime
-        except Exception:
-            pass
+        except Exception as exc:
+            # A corrupt or unreadable registry must not silently drop every
+            # custom voice; surface it so the operator can repair the store.
+            logger.warning(
+                "failed to load custom voices from %s: %s", self._storage_path, exc
+            )
 
     def _check_reload(self) -> None:
         if self._storage_path.is_file():
@@ -388,16 +447,14 @@ class VoiceRegistry:
                 pass
 
     def _save_custom_voices(self) -> None:
-        try:
-            self._storage_path.parent.mkdir(parents=True, exist_ok=True)
-            data = [profile.to_dict() for profile in self._custom_voices.values()]
-            self._storage_path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            if self._storage_path.is_file():
-                self._last_loaded_mtime = self._storage_path.stat().st_mtime
-        except Exception:
-            pass
+        # Atomic (temp + fsync + rename) and 0600 so a hard kill during a write
+        # can never corrupt the registry, and sibling processes/accounts cannot
+        # read the private voice metadata. Failures propagate to the caller so
+        # a persistence error is observable instead of silently swallowed.
+        data = [profile.to_dict() for profile in self._custom_voices.values()]
+        payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        written = _atomic_write_bytes(self._storage_path, payload, mode=0o600)
+        self._last_loaded_mtime = written.stat().st_mtime
 
     def list_profiles(self) -> list[VoiceProfile]:
         self._check_reload()
@@ -450,7 +507,11 @@ class VoiceRegistry:
             mode="instruction",
         )
         self._custom_voices[vid] = profile
-        self._save_custom_voices()
+        try:
+            self._save_custom_voices()
+        except BaseException:
+            self._custom_voices.pop(vid, None)
+            raise
         return profile
 
     def create_cloned_profile(
@@ -487,9 +548,7 @@ class VoiceRegistry:
         except ValueError as exc:
             raise ValueError("voice audio path escapes voices directory") from exc
 
-        target_file.write_bytes(audio_bytes)
-        with suppress(Exception):
-            target_file.chmod(0o600)
+        _atomic_write_bytes(target_file, audio_bytes, mode=0o600)
 
         profile = VoiceProfile(
             id=vid,
@@ -506,7 +565,13 @@ class VoiceRegistry:
             duration_seconds=round(duration_seconds, 2),
         )
         self._custom_voices[vid] = profile
-        self._save_custom_voices()
+        try:
+            self._save_custom_voices()
+        except BaseException:
+            with suppress(Exception):
+                target_file.unlink(missing_ok=True)
+            self._custom_voices.pop(vid, None)
+            raise
         return profile
 
     def delete_custom_profile(self, voice_id: str) -> None:
@@ -520,7 +585,11 @@ class VoiceRegistry:
             raise KeyError(f"custom voice not found: {vid}")
         profile = self._custom_voices[vid]
         del self._custom_voices[vid]
-        self._save_custom_voices()
+        try:
+            self._save_custom_voices()
+        except BaseException:
+            self._custom_voices[vid] = profile
+            raise
 
         if profile.audio_path:
             p = Path(profile.audio_path).resolve()
@@ -851,4 +920,5 @@ __all__ = [
     "normalize_tts_text",
     "resolve_voice",
     "transcode_and_validate_clone_audio",
+    "tts_voice_class",
 ]

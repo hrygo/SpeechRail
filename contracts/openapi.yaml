@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 1.10.0
+  version: 1.11.0
   description: |
     Local-first shared ASR and TTS service.
 
@@ -42,7 +42,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 1.10.0
+                version: 1.11.0
                 backend: asr-1.7b-q8
                 profile: quality
                 asr_ready: true
@@ -54,6 +54,9 @@ paths:
                   code: diarization_not_configured
                   message: diarization profile is not configured
                   profile: null
+                asr_state: active
+                tts_state: active
+                streaming_state: active
                 ready: true
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -90,7 +93,7 @@ paths:
         Returns metrics in Prometheus text exposition format (default) or a
         structured JSON view when the request Accept header prefers
         `application/json`. Labels are strictly limited to the low-cardinality
-        set (`endpoint`, `status`, `class`, `component`, `voice`, `state`,
+        set (`endpoint`, `status`, `class`, `component`, `voice_class`, `state`,
         `event`, `reason`, `method`); request IDs and transcript content are
         never recorded.
       security: [{}]
@@ -514,7 +517,20 @@ components:
   schemas:
     HealthResponse:
       type: object
-      required: [status, service, version, backend, profile, asr_ready, tts_ready, diarization_ready, diarization, ready]
+      required:
+        - status
+        - service
+        - version
+        - backend
+        - profile
+        - asr_ready
+        - tts_ready
+        - diarization_ready
+        - diarization
+        - asr_state
+        - tts_state
+        - streaming_state
+        - ready
       properties:
         status:
           type: string
@@ -534,12 +550,26 @@ components:
           description: Active managed profile; null for an unmanaged runtime.
         asr_ready:
           type: boolean
+          description: ASR is configured and able to serve on demand.
         tts_ready:
           type: boolean
+          description: TTS is configured and able to serve on demand.
         diarization_ready:
           type: boolean
         diarization:
           $ref: '#/components/schemas/DiarizationStatus'
+        asr_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular ASR inference lifecycle state.
+        tts_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular TTS inference lifecycle state.
+        streaming_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular streaming ASR lifecycle state.
         ready:
           type: boolean
     DiarizationStatus:

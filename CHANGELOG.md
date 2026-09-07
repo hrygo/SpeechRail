@@ -2,10 +2,17 @@
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-09-07
+
 ### Fixed
 
 - 统一 `service start/stop/restart` 与 profile 切换的 bounded lifecycle；status 不可用时只有经过 lock owner、PID 和命令行校验的旧实例才允许恢复。
 - managed installer 在切换 `runtime/current` 前确认端口 singleton lock 已释放；profile smoke 严格校验 profile、ASR/TTS readiness 和实际 artifact identity。
+- `/health` 新增 `asr_state`、`tts_state`、`streaming_state` 生命周期状态，`tts=cold_evicted` 或 worker 失效不再被布尔就绪位掩盖。
+- 系统路由对 `POST/DELETE /v1/voices` 与 `/v1/voices/clone` 应用 bearer 鉴权，与 audio/jobs 路由一致；配置 API key 后未授权写入返回 401。
+- 语音克隆元数据改为原子写入（temp + fsync + rename）并设 `0600`，写盘失败不再静默吞错，同时消除孤儿 WAV 与半写 JSON 风险。
+- HTTP 请求指标中间件改为纯 ASGI 包裹完整 body 发送，流式响应时长不再被低估。
+- TTS 指标改用有界的 `voice_class`（system/custom/clone）标签，避免用户自定义 voice ID 造成无界时间序列。
 
 ## [1.10.0] - 2026-09-06
 

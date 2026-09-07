@@ -270,7 +270,8 @@ class Metrics:
 
     def record_tts(
         self,
-        voice: str,
+        *,
+        voice_class: str,
         char_count: int,
         audio_duration_sec: float,
         inference_duration_sec: float,
@@ -278,14 +279,18 @@ class Metrics:
         self.inc(
             "speechrail_tts_generated_audio_seconds_total",
             amount=audio_duration_sec,
-            voice=voice,
+            voice_class=voice_class,
         )
-        self.inc("speechrail_tts_input_characters_total", amount=char_count, voice=voice)
+        self.inc(
+            "speechrail_tts_input_characters_total",
+            amount=char_count,
+            voice_class=voice_class,
+        )
         self.observe(
             "speechrail_tts_inference_duration_seconds",
             inference_duration_sec,
             TTS_DURATION_BUCKETS,
-            voice=voice,
+            voice_class=voice_class,
         )
 
     def record_ttfa(self, ttfa_sec: float) -> None:

@@ -32,7 +32,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "1.10.0",
+        "version": "1.11.0",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
@@ -45,6 +45,9 @@ def test_health_reports_contract_shell_without_backend() -> None:
             "message": "diarization profile is not configured",
             "profile": None,
         },
+        "asr_state": "unconfigured",
+        "tts_state": "unconfigured",
+        "streaming_state": "unconfigured",
         "ready": False,
     }
 
@@ -241,7 +244,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "1.10.0",
+        "version": "1.11.0",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
@@ -254,6 +257,9 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
             "message": "diarization profile is not configured",
             "profile": None,
         },
+        "asr_state": "unconfigured",
+        "tts_state": "active",
+        "streaming_state": "unconfigured",
         "ready": True,
     }
     assert client.get("/readyz").json() == {

@@ -76,36 +76,47 @@ def create_app(
     app.state.settings = resolved
     app.add_middleware(RequestIdMiddleware)
 
-    # Lightweight HTTP metrics middleware — records request count and latency.
+    # Lightweight HTTP metrics middleware.  A pure ASGI wrapper measures from
+    # request start to the final response-body send, so a StreamingResponse is
+    # timed to its last byte instead of the instant it was handed off.
     import time as _time
+    from collections.abc import MutableMapping
+    from typing import Any
 
-    from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-    from starlette.requests import Request
-    from starlette.responses import Response
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
-    class _MetricsMiddleware(BaseHTTPMiddleware):
-        async def dispatch(
-            self,
-            request: Request,
-            call_next: RequestResponseEndpoint,
-        ) -> Response:
+    class _MetricsMiddleware:
+        def __init__(self, app: ASGIApp) -> None:
+            self._app = app
+
+        async def __call__(
+            self, scope: Scope, receive: Receive, send: Send
+        ) -> None:
+            if scope["type"] != "http":
+                await self._app(scope, receive, send)
+                return
             start = _time.monotonic()
-            response = await call_next(request)
-            duration = _time.monotonic() - start
-            # Normalise path to the matched route template to keep cardinality low.
-            route = request.scope.get("route")
-            endpoint = getattr(route, "path", None)
-            if endpoint is None:
-                # Unmatched routes (e.g. 404s) must not leak the raw, unbounded
-                # URL path into the metric label; collapse them to a sentinel.
-                endpoint = "<unmatched>"
+            status = 0
+            endpoint = "<unmatched>"
+
+            async def send_wrapper(message: MutableMapping[str, Any]) -> None:
+                nonlocal status, endpoint
+                if message.get("type") == "http.response.start":
+                    status_raw = message.get("status", 0)
+                    status = status_raw if isinstance(status_raw, int) else 0
+                    route = scope.get("route")
+                    route_path = getattr(route, "path", None)
+                    if isinstance(route_path, str) and route_path:
+                        endpoint = route_path
+                await send(message)
+
+            await self._app(scope, receive, send_wrapper)
             services.metrics.record_http_request(
                 endpoint=endpoint,
-                method=request.method,
-                status=response.status_code,
-                duration_sec=duration,
+                method=scope["method"],
+                status=status,
+                duration_sec=_time.monotonic() - start,
             )
-            return response
 
     app.add_middleware(_MetricsMiddleware)
 

@@ -2,7 +2,12 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新性能基准（v1.10.0，MINOR 三档）
+## 最新性能基准（v1.11.0，MINOR 三档）
+
+> **结论**：v1.11.0 已完成 `quality → balanced → light → quality` 的三档真实基准。ASR/TTS N=5、Realtime 3 session、三档 `phys_footprint` 采样和最终 quality 恢复均通过；独立 CER/WER、MOS/ABX 与 speaker embedding 仍为 `unset`。ASR 与 realtime 复用 v1.10.0 的同一 fixture（SHA-256 一致），可直接纵向比较；TTS 采用本轮固定文本集，仅作本版横向。本轮为纯行为/基础设施改动（`/health` 就绪语义、系统路由鉴权、语音克隆原子持久化、流式计时中间件、`voice_class` 指标降基数），未触碰推理模型。详见
+> [v1.11.0 性能与质量基准](2026-09-07-v1.11.0-performance-benchmark.md)。
+
+## 上一发布基线（v1.10.0，MINOR 三档）
 
 > **结论**：v1.10.0 已完成 `quality → balanced → light → quality` 的三档真实基准。ASR/TTS N=5、Realtime 3 session、三档 `phys_footprint` 采样和最终 quality 恢复均通过；独立 CER/WER、MOS/ABX 与 speaker embedding 仍为 `unset`。首轮被外部 Sona realtime WebSocket 占用触发的 `backend_busy` 已定位并补入部署/发布/性能 skill 的前置隔离检查。详见
 > [v1.10.0 性能与质量基准](2026-09-07-v1.10.0-performance-benchmark.md) 与

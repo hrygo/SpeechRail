@@ -36,7 +36,7 @@ from speechrail.domain.ports import (
     StreamingBatchTranscriber,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
+from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice, tts_voice_class
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
@@ -1111,7 +1111,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         audio_duration_sec = len(pcm) / 2 / resolved.tts_sample_rate
         services.metrics.record_tts(
-            voice=DEFAULT_VOICE_ID,
+            voice_class=tts_voice_class(DEFAULT_VOICE_ID),
             char_count=len(body.input),
             audio_duration_sec=audio_duration_sec,
             inference_duration_sec=_time.monotonic() - preview_t0,
@@ -1290,7 +1290,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 async def _record_if_complete() -> None:
                     audio_sec = _emitted_bytes / 2 / resolved.tts_sample_rate
                     services.metrics.record_tts(
-                        voice=preset_voice,
+                        voice_class=tts_voice_class(preset_voice),
                         char_count=len(body.input),
                         audio_duration_sec=audio_sec,
                         inference_duration_sec=_time.monotonic() - _tts_t0,
@@ -1381,7 +1381,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     async for chunk in encoded_stream:
                         yield chunk
                     services.metrics.record_tts(
-                        voice=preset_voice,
+                        voice_class=tts_voice_class(preset_voice),
                         char_count=len(body.input),
                         audio_duration_sec=pcm_counter.total_bytes
                         / 2
@@ -1450,7 +1450,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
         # Record TTS metrics: audio_sec = pcm_bytes / 2 / sample_rate
         _tts_audio_sec = len(pcm) / 2 / resolved.tts_sample_rate
         services.metrics.record_tts(
-            voice=preset_voice,
+            voice_class=tts_voice_class(preset_voice),
             char_count=len(body.input),
             audio_duration_sec=_tts_audio_sec,
             inference_duration_sec=_tts_inference_sec,
