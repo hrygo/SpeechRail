@@ -60,7 +60,7 @@ jobs:
         run: uv build --no-sources --wheel
 
       - name: Code style check (Ruff)
-        run: uv run ruff check src tests
+        run: uv run ruff check src tests tools
 
       - name: Static type check (Mypy)
         run: uv run mypy src

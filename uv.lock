@@ -2271,6 +2271,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "jsonschema" },
+    { name = "mcp" },
     { name = "mypy" },
     { name = "numpy" },
     { name = "pytest" },
@@ -2294,6 +2295,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
     { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.23" },
     { name = "kaldi-native-fbank", marker = "extra == 'diarization'", specifier = ">=1.22" },
+    { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.12,<2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.12,<2" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.14" },
     { name = "nemo-toolkit", extras = ["asr"], marker = "extra == 'diarization'", specifier = ">=2.0" },
