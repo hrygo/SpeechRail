@@ -17,6 +17,26 @@ def _constant_pcm16(amplitude: float, samples: int) -> bytes:
     return struct.pack(f"<{samples}h", *([value] * samples))
 
 
+def _sparse_sine_pcm16(
+    amplitude: float,
+    active_fraction: float,
+    phase: int,
+    samples: int = 2_400,
+) -> bytes:
+    active_samples = max(1, round(samples * active_fraction))
+    values = [
+        round(
+            amplitude
+            * math.sin(2.0 * math.pi * 220.0 * (index + phase) / 24_000.0)
+            * 32767.0
+        )
+        if index < active_samples
+        else 0
+        for index in range(samples)
+    ]
+    return struct.pack(f"<{samples}h", *values)
+
+
 def _decode_pcm16(pcm: bytes) -> tuple[int, ...]:
     return tuple(value[0] for value in struct.iter_unpack("<h", pcm))
 
@@ -126,6 +146,28 @@ def test_controller_handles_wide_voice_level_changes_without_large_jumps() -> No
     amplitudes = (0.01, 0.08, 0.40, 0.02, 0.20, 0.01, 0.50, 0.03) * 3
 
     output = [controller.process(_constant_pcm16(amplitude, 1_920)) for amplitude in amplitudes]
+    levels = [_rms_dbfs(chunk) for chunk in output]
+    jumps = [abs(current - previous) for previous, current in pairwise(levels)]
+
+    assert percentile(jumps, 0.95) < 10.0
+    assert percentile(levels, 0.50) == pytest.approx(-20.0, abs=3.0)
+
+
+def test_controller_handles_sparse_streaming_chunks_without_pumping() -> None:
+    controller = StreamingPcm16LoudnessController(sample_rate=24_000)
+    source = (
+        (0.15, 1.0),
+        (0.40, 0.7),
+        (0.04, 0.35),
+        (0.50, 0.9),
+        (0.08, 0.2),
+        (0.20, 0.8),
+    ) * 4
+
+    output = [
+        controller.process(_sparse_sine_pcm16(amplitude, fraction, index * 2_400))
+        for index, (amplitude, fraction) in enumerate(source)
+    ]
     levels = [_rms_dbfs(chunk) for chunk in output]
     jumps = [abs(current - previous) for previous, current in pairwise(levels)]
 

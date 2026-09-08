@@ -13,7 +13,7 @@ class Pcm16LoudnessConfig:
 
     target_rms: float = 10 ** (-20 / 20)
     peak_ceiling: float = 10 ** (-1 / 20)
-    silence_rms: float = 10 ** (-50 / 20)
+    silence_rms: float = 10 ** (-60 / 20)
     calibration_ms: int = 240
     attack_ms: int = 250
     release_ms: int = 800
@@ -116,10 +116,10 @@ class StreamingPcm16LoudnessController:
         if not active:
             return pcm
 
-        active_rms = math.sqrt(sum(sample * sample for sample in active) / len(active))
+        chunk_rms = math.sqrt(sum(sample * sample for sample in normalized) / len(normalized))
         desired_gain_db = self._bounded_gain_db(
             20.0 * math.log10(max(self._config.target_rms, 1e-12))
-            - 20.0 * math.log10(max(active_rms, 1e-12))
+            - 20.0 * math.log10(max(chunk_rms, 1e-12))
         )
         previous_gain_db = self._current_gain_db
         if previous_gain_db is None:
@@ -188,10 +188,9 @@ class StreamingPcm16LoudnessController:
         return current_db + (desired_db - current_db) * alpha
 
     def _apply_rms_window(self, samples: list[float]) -> list[float]:
-        active = tuple(sample for sample in samples if abs(sample) > self._config.silence_rms)
-        if not active:
+        rms = math.sqrt(sum(sample * sample for sample in samples) / len(samples))
+        if rms <= self._config.silence_rms:
             return samples
-        rms = math.sqrt(sum(sample * sample for sample in active) / len(active))
         min_rms = self._config.target_rms / math.sqrt(2.0)
         max_rms = min(self._config.target_rms * math.sqrt(2.0), self._config.peak_ceiling)
         if min_rms <= rms <= max_rms:
