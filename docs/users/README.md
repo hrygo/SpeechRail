@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "1.6.9"
-date: 2026-09-05
+version: "1.7.0"
+date: 2026-09-08
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -30,7 +30,7 @@ graph TD
 
 ## ⚡ 1分钟极速接入示例 (Python SDK)
 
-由于 SpeechRail 完全兼容 OpenAI 协议规范，只需配置 `base_url` 即可无缝调用：
+对已承诺的 OpenAI REST 子集，只需配置 `base_url` 即可调用；Realtime 与扩展能力以对应契约为准：
 
 ```python
 from openai import OpenAI
@@ -58,6 +58,14 @@ response = client.audio.speech.create(
 )
 response.stream_to_file("output.mp3")
 ```
+
+---
+
+## 调用前诊断
+
+HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。两者都会给出 ASR、TTS、diarization 的可用状态，以及 realtime worker 状态和已解析的 VAD 引擎；不包含模型绝对路径、音频或转写内容。
+
+`/readyz` 只表示 ASR 或 TTS 至少一个可用。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
 
 ---
 

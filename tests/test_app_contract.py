@@ -48,6 +48,11 @@ def test_health_reports_contract_shell_without_backend() -> None:
         "asr_state": "unconfigured",
         "tts_state": "unconfigured",
         "streaming_state": "unconfigured",
+        "realtime_vad": {
+            "configured_engine": "auto",
+            "resolved_engine": "legacy",
+            "speech_admission_enabled": True,
+        },
         "ready": False,
     }
 
@@ -260,6 +265,11 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
         "asr_state": "unconfigured",
         "tts_state": "active",
         "streaming_state": "unconfigured",
+        "realtime_vad": {
+            "configured_engine": "auto",
+            "resolved_engine": "legacy",
+            "speech_admission_enabled": True,
+        },
         "ready": True,
     }
     assert client.get("/readyz").json() == {

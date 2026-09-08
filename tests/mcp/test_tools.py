@@ -128,7 +128,21 @@ def test_describe_merges_models_voices_health_for_quality(
 ) -> None:
     models = _model("quality", "voice_design")
     voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
-    health = {"status": "ok", "profile": "quality", "diarization_ready": True}
+    health = {
+        "status": "ok",
+        "profile": "quality",
+        "asr_ready": True,
+        "tts_ready": True,
+        "diarization_ready": True,
+        "asr_state": "ready",
+        "tts_state": "ready",
+        "streaming_state": "ready",
+        "realtime_vad": {
+            "configured_engine": "auto",
+            "resolved_engine": "silero",
+            "speech_admission_enabled": True,
+        },
+    }
     client, requests = make_client(_base_handler(models, voices, health))
 
     snapshot = run_async(tools.describe(client))
@@ -136,6 +150,9 @@ def test_describe_merges_models_voices_health_for_quality(
     assert snapshot["tier"] == "quality"
     assert snapshot["profile"] == "quality"
     assert snapshot["diarization_ready"] is True
+    assert snapshot["readiness"] == {"asr": True, "tts": True, "diarization": True}
+    assert snapshot["realtime"]["vad"]["resolved_engine"] == "silero"
+    assert snapshot["realtime"]["streaming_state"] == "ready"
     assert snapshot["clone_supported"] is True
     assert snapshot["preview_supported"] is True
     assert snapshot["models"] == models

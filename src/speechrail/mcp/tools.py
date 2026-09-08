@@ -165,6 +165,19 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
         "tier": _derive_tier(profile=profile, variant=variant),
         "profile": profile,
         "diarization_ready": _bool_flag(health.get("diarization_ready")),
+        "readiness": {
+            "asr": _bool_flag(health.get("asr_ready")),
+            "tts": _bool_flag(health.get("tts_ready")),
+            "diarization": _bool_flag(health.get("diarization_ready")),
+        },
+        "realtime": {
+            "vad": health.get("realtime_vad")
+            if isinstance(health.get("realtime_vad"), dict)
+            else None,
+            "streaming_state": _text(health.get("streaming_state")),
+            "asr_state": _text(health.get("asr_state")),
+            "tts_state": _text(health.get("tts_state")),
+        },
         "clone_supported": variant == "voice_design",
         "preview_supported": variant == "voice_design",
         "models": models,
