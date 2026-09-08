@@ -343,17 +343,22 @@ flowchart TD
     subgraph HostService["FastAPI Host Gateway (Port: 8201)"]
         direction TB
         subgraph Ingress["1. Protocol & Ingress Layer"]
-            Router["Routing & Envelope (/v1/audio/*, /v1/realtime)"]
+            Router["REST / WS Routing, Auth & Error Envelope"]
             Pipeline["In-Memory Audio Pipeline\n(WAV Fast-Path / ffmpeg Stream, 128MB Guard)"]
         end
         subgraph Core["2. Runtime & Coordination Core"]
-            Governor["Resource Governor\n(Priority Queue & WorkerLeaseLock)"]
+            App["Application Services & Realtime Session"]
+            Governor["AdmissionQueue + ResourceGovernor\n(Realtime Capacity Reservation, Batch FIFO/Aging)"]
             Ledger["AttributionLedger & Timeline\n(16 kHz Sample Clock, Immutable Units)"]
-            Evictor["WorkerIdleEvictor\n(5-Min Inactivity Weight & VRAM Eviction)"]
+            DiarizeEngine["Optional In-Process Diarization\n(NeMo Sortformer + CAM++)"]
+            Evictor["WorkerIdleEvictor\n(Configured Idle Weight Eviction)"]
         end
-        Router --> Pipeline --> Governor
-        Governor <--> Ledger
-        Governor -. Idle Monitoring .-> Evictor
+        Router -->|Audio upload| Pipeline --> App
+        Router -->|System, voice, jobs, WS control| App
+        App --> Governor
+        App <--> Ledger
+        App <--> DiarizeEngine
+        App -. Activity / lifecycle .-> Evictor
     end
 
     subgraph SubprocessSandboxes["Subprocess Sandboxes (Physical Process Isolation)"]
@@ -362,14 +367,9 @@ flowchart TD
         TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
     end
 
-    subgraph InServiceEngine["In-Service Evictable Engine"]
-        DiarizeEngine["Speaker Diarization Engine (Optional)\n(NeMo Sortformer + CAM++)"]
-    end
-
     Client <== "HTTP REST / Full-Duplex WS" ==> Router
-    Governor <== "Framed Binary Zero-Copy IPC" ==> ASRWorker
-    Governor <== "Framed Binary Zero-Copy IPC" ==> TTSWorker
-    Governor <== "Continuous Session Streaming" ==> DiarizeEngine
+    App <== "Length-Prefixed JSON + Raw Binary IPC" ==> ASRWorker
+    App <== "Length-Prefixed JSON + Raw Binary IPC" ==> TTSWorker
     Evictor -. Auto Evict Weights .-> ASRWorker
     Evictor -. Auto Evict Weights .-> TTSWorker
     Evictor -. Auto Evict Weights .-> DiarizeEngine
@@ -377,11 +377,11 @@ flowchart TD
 
 #### Core Architectural Principles & Invariants
 
-1. **Subprocess Physical Isolation (Minimized Blast Radius)**: Heavy MLX model runners (Qwen3-ASR and Qwen3-TTS) execute in dedicated child processes communicating over a private framed binary IPC protocol. Any Metal GPU exception or native C++ crash is trapped within the worker sandbox; the FastAPI gateway remains online, automatically restarts the worker, and returns standard error envelopes with traceable `request_id`.
+1. **Subprocess Physical Isolation (Minimized Blast Radius)**: Qwen3-ASR and Qwen3-TTS execute in dedicated child processes. The host uses a private length-prefixed protocol with JSON metadata and optional raw-binary payloads; raw PCM avoids Base64 on this hop, but the protocol is not zero-copy. Worker failures are isolated from the FastAPI process and surface through the standard error envelope with a `request_id`.
 2. **Strict In-Memory Zero-Disk Pipeline**: Audio processing operates entirely in memory through a 3-tier pipeline: Tier 1 WAV fast-path (zero-copy header slicing), Tier 2 streaming in-memory `ffmpeg` pipe (for compressed containers), and Tier 3 128MB hard OOM guardrail. Raw audio, intermediate PCM, embeddings, and transcripts are never written to disk or transmitted across the network.
-3. **Green Hibernation via Coordinated Idle Eviction**: The `WorkerIdleEvictor` monitors request leases across both external MLX worker processes and in-service diarization engines. After 5 minutes without incoming traffic, model weights and GPU buffers are completely purged, returning the idle host footprint to ~50 MB without leaving orphan background processes.
-4. **"Transcript First, Attribution Updated" Invariant (SPK-E2E-1)**: Real-time speaker diarization enforces a strict temporal invariant. Text finalized at ASR commit is the canonical transcript; attribution units (`attribution_units`) are anchored to an integer 16 kHz session timeline. Later speaker re-clustering emits asynchronous attribution updates (`speechrail.diarization.update`) without altering textual content, timestamps, or creating clock drift. The client `finalize` barrier ensures all pending patches settle before meeting summary generation.
-5. **Single-Node Shared Concurrency with WorkerLeaseLock**: Designed as a shared local daemon for multiple desktop tools on a single Mac. Concurrency is arbitrated by `WorkerLeaseLock` and priority scheduling (Realtime sessions take precedence over batch uploads), returning graceful `backend_busy` responses rather than spawning competing duplicate workers that trigger GPU thrashing or OOM.
+3. **Coordinated Idle Eviction**: `WorkerIdleEvictor` manages the external workers and the in-process diarization engine according to configured idle and standby timeouts. It unloads resident weights; measured standby footprint remains a benchmark result, not an architecture promise.
+4. **Session-Scoped Diarization**: Batch diarization yields anonymous labels. The realtime diarization extension is advertised only after its continuous adapter is verified; without that capability, SpeechRail does not claim continuous speaker attribution. Where the extension is enabled, attribution units use the 16 kHz session timeline and later updates do not rewrite transcript text.
+5. **Single-Node Shared Concurrency**: `ResourceGovernor` reserves capacity for realtime work and keeps batch work FIFO with aging. It does not preempt work already admitted to a worker; mode conflicts return stable busy errors instead of spawning duplicate model processes.
 6. **Strict Separation of Concerns**: SpeechRail exclusively provides local inference runtimes, protocol translation, resource boundaries, and session-scoped anonymous speaker labelling (`speaker_0`, `speaker_1`). Calling applications (such as [Sona](https://github.com/hrygo/sona)) retain complete ownership of audio I/O hardware, meeting databases, persistent storage, human-in-the-loop speaker renaming, and LLM business orchestration.
 
 ---

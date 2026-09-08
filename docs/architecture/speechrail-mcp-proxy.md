@@ -67,13 +67,13 @@ SpeechRail 已是 OpenAI-compatible REST + WS。对 agent 而言它是"能调用
 flowchart LR
     Agent["AI Agent\n(Claude / Open-WebUI / Cursor / 任意 MCP 客户端)"]
     Proxy["speechrail-mcp (外置进程)\nstdio 或 HTTP Streamable\n由工具调用 / 能力发现"]
-    Rail["SpeechRail 主服务 (FastAPI :8201)\nOpenAI-compatible REST\nBearer 认证"]
+    Rail["SpeechRail 主服务 (FastAPI :8201)\nOpenAI-compatible REST\nloopback keyless 或可选 Bearer"]
 
     Agent <-->|"MCP 2026-07-28\n(stateless / discover)"| Proxy
-    Proxy <-->|"Authorization: Bearer \\nPOST /v1/audio/* ..."| Rail
+    Proxy <-->|"REST；配置 API key 时 Authorization: Bearer\\nPOST /v1/audio/* ..."| Rail
 ```
 
-- Proxy 是**独立进程**，把 MCP 工具调用翻译成带 `Authorization: Bearer` 的 REST 调用。
+- Proxy 是**独立进程**，把 MCP 工具调用翻译成 REST 调用；服务配置 API key 时才携带 `Authorization: Bearer`，keyless loopback 保持零配置可用。
 - **不内建** MRTR/session 管理进主进程。
 - Transport：**stdio 优先**（本机），可选 HTTP Streamable（供 Open-WebUI 原生 HTTP MCP 直连）。
 
