@@ -213,6 +213,11 @@ def test_diagnose_reports_safe_capabilities_and_recovery(
             "diarization_ready": False,
             "asr_state": "active",
             "tts_state": "warm_standby",
+            "tts_lifecycle": {
+                "cooperative_cancel_supported": False,
+                "fallback_abort_count": 2,
+                "reload_count": 1,
+            },
             "streaming_state": "active",
             "realtime_vad": {"resolved_engine": "silero"},
             "diarization": {"code": "diarization_not_configured"},
@@ -255,6 +260,11 @@ def test_diagnose_reports_safe_capabilities_and_recovery(
     snapshot = json.loads(capsys.readouterr().out)
     assert snapshot["readiness"] == {"asr": True, "tts": True, "diarization": False}
     assert snapshot["realtime_vad"] == {"resolved_engine": "silero"}
+    assert snapshot["tts_lifecycle"] == {
+        "cooperative_cancel_supported": False,
+        "fallback_abort_count": 2,
+        "reload_count": 1,
+    }
     assert snapshot["voices"] == {"available_count": 1, "mode_counts": {"system": 1, "clone": 1}}
     assert snapshot["last_smoke"] == {"status": "unset"}
     assert "private text" not in json.dumps(snapshot)

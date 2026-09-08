@@ -47,6 +47,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
         },
         "asr_state": "unconfigured",
         "tts_state": "unconfigured",
+        "tts_lifecycle": None,
         "streaming_state": "unconfigured",
         "realtime_vad": {
             "configured_engine": "auto",
@@ -54,6 +55,30 @@ def test_health_reports_contract_shell_without_backend() -> None:
             "speech_admission_enabled": True,
         },
         "ready": False,
+    }
+
+
+def test_health_exposes_safe_tts_lifecycle_counters() -> None:
+    class InstrumentedTTS:
+        def __init__(self) -> None:
+            self.lifecycle_stats = {
+                "cooperative_cancel_supported": False,
+                "fallback_abort_count": 2,
+                "reload_count": 1,
+                "private_detail": "must not be exposed",
+            }
+
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=InstrumentedTTS(),
+        )
+    )
+
+    assert client.get("/health").json()["tts_lifecycle"] == {
+        "cooperative_cancel_supported": False,
+        "fallback_abort_count": 2,
+        "reload_count": 1,
     }
 
 
@@ -264,6 +289,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
         },
         "asr_state": "unconfigured",
         "tts_state": "active",
+        "tts_lifecycle": None,
         "streaming_state": "unconfigured",
         "realtime_vad": {
             "configured_engine": "auto",
