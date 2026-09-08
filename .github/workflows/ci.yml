@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-15]
         python-version: ["3.12"]
 
     steps:
@@ -60,7 +60,7 @@ jobs:
         run: uv build --no-sources --wheel
 
       - name: Code style check (Ruff)
-        run: uv run ruff check src tests tools
+        run: uv run ruff check src tests tools hatch_build.py
 
       - name: Static type check (Mypy)
         run: uv run mypy src

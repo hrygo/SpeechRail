@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
@@ -16,11 +17,22 @@ class CustomBuildHook(BuildHookInterface):
         del version
         if self.target_name != "wheel":
             return
+        if sys.platform != "darwin":
+            # The application is macOS-only; Linux CI can build and test the
+            # Python package without attempting to compile its CoreML worker.
+            return
         root = Path(self.root)
         package_dir = Path(self.directory) / "speechrail-native"
         package_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["swift", "build", "--configuration", "release", "--package-path", "native/diarization"],
+            [
+                "swift",
+                "build",
+                "--configuration",
+                "release",
+                "--package-path",
+                "native/diarization",
+            ],
             cwd=root,
             check=True,
         )

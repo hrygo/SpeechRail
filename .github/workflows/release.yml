@@ -15,7 +15,7 @@ concurrency:
 jobs:
   build-and-release:
     name: Build Wheel & Create Release
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 10
     permissions:
       contents: write
