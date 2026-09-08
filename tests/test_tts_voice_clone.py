@@ -515,7 +515,7 @@ def test_clone_synthesis_smooths_chunk_levels_without_touching_builtin(
         "clone_loudness_requests": 1,
         "clone_loudness_calibrated": 1,
     }
-    assert len(clone_levels) == 4
+    assert len(clone_levels) == 2
     assert max(
         abs(clone_levels[index] - clone_levels[index - 1])
         for index in range(1, len(clone_levels))

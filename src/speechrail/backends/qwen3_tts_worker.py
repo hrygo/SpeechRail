@@ -32,6 +32,7 @@ from speechrail.runtime.worker_protocol import (
 )
 
 TTS_BACKEND_ID = "mlx-qwen3-tts-voice-design"
+_CLONE_LOUDNESS_CHUNK_MS = 200
 
 
 def _clear_metal_cache() -> None:
@@ -365,6 +366,22 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             if ref_audio is not None or ref_text is not None
             else None
         )
+        pending_clone_pcm = bytearray()
+        clone_chunk_bytes = self._sample_rate * _CLONE_LOUDNESS_CHUNK_MS // 1000 * 2
+
+        def prepare_output(pcm: bytes) -> bytes:
+            nonlocal first_chunk
+            if first_chunk:
+                pcm = apply_crossfade(
+                    pcm,
+                    sample_rate=self._sample_rate,
+                    fade_ms=5,
+                    fade_in=True,
+                    fade_out=False,
+                )
+                first_chunk = False
+            return pcm
+
         try:
             for sentence in bounded_sentences(clean_text):
                 self._delivery_stats["planner_chunks"] += 1
@@ -381,19 +398,19 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     if not pcm:
                         continue
                     if loudness_controller is not None:
-                        pcm = loudness_controller.process(pcm)
-                    if not pcm:
+                        pending_clone_pcm.extend(pcm)
+                        while len(pending_clone_pcm) >= clone_chunk_bytes:
+                            clone_pcm = bytes(pending_clone_pcm[:clone_chunk_bytes])
+                            del pending_clone_pcm[:clone_chunk_bytes]
+                            clone_pcm = loudness_controller.process(clone_pcm)
+                            if clone_pcm:
+                                yield prepare_output(clone_pcm)
                         continue
-                    if first_chunk:
-                        pcm = apply_crossfade(
-                            pcm,
-                            sample_rate=self._sample_rate,
-                            fade_ms=5,
-                            fade_in=True,
-                            fade_out=False,
-                        )
-                        first_chunk = False
-                    yield pcm
+                    yield prepare_output(pcm)
+            if loudness_controller is not None and pending_clone_pcm:
+                clone_pcm = loudness_controller.process(bytes(pending_clone_pcm))
+                if clone_pcm:
+                    yield prepare_output(clone_pcm)
         finally:
             if loudness_controller is not None:
                 self._delivery_stats["clone_loudness_requests"] += 1
