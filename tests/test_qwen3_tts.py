@@ -429,6 +429,7 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
     worker, fake = _worker(tmp_path)
     started = asyncio.Event()
     release = asyncio.Event()
+    original_receive = fake.receive
 
     async def blocked_receive() -> dict[str, Any]:
         started.set()
@@ -442,12 +443,41 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
             pass
 
     async def scenario() -> None:
+        worker._epoch = 1  # Simulate one completed worker start before this request.
         task = asyncio.create_task(consume())
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert fake.abort_count == 1
+        assert worker.lifecycle_stats == {
+            "cooperative_cancel_supported": False,
+            "fallback_abort_count": 1,
+            "reload_count": 0,
+        }
+
+        # A subsequent request restarts the same supervised worker exactly
+        # once. The diagnostic counter records the reload without exposing
+        # private request or voice data.
+        fake.alive = True
+        fake.receive = original_receive  # type: ignore[method-assign]
+        fake.push(
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+            }
+        )
+        fake.push(_chunk_frame("pending", 0, b"\x00\x00"))
+        fake.push({"type": "completed", "request_id": "pending"})
+        chunks = [
+            chunk async for chunk in worker.synthesize(SpeechRequest(text="恢复", voice="default"))
+        ]
+        assert len(chunks) == 1
+        assert worker.lifecycle_stats["reload_count"] == 1
 
     asyncio.run(scenario())
 

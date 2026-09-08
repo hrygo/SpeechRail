@@ -135,6 +135,8 @@ class Qwen3TtsWorker:
         self._lock = asyncio.Lock()
         self._started = False
         self._epoch: int = 0
+        self._fallback_abort_count = 0
+        self._reload_count = 0
         self.last_active: float = time.monotonic()
         self.model_variant: str | None = None
         try:
@@ -153,6 +155,23 @@ class Qwen3TtsWorker:
         """Return whether the supervised worker can accept another request."""
         return self._started and self._transport.alive
 
+    @property
+    def lifecycle_stats(self) -> dict[str, int | bool]:
+        """Expose path-free cancellation evidence for local diagnostics.
+
+        The current vendor worker serves one synchronous generation at a time
+        and has no verified cooperative cancellation checkpoint.  A cancelled
+        incomplete stream therefore uses the bounded abort fallback.  Keep the
+        counters explicit so a future vendor capability change can be measured
+        instead of being assumed from a successful cancellation response.
+        """
+
+        return {
+            "cooperative_cancel_supported": False,
+            "fallback_abort_count": self._fallback_abort_count,
+            "reload_count": self._reload_count,
+        }
+
     async def start(self) -> None:
         async with self._lock:
             await self._start_locked()
@@ -160,6 +179,7 @@ class Qwen3TtsWorker:
     async def _start_locked(self) -> None:
         if self._started:
             return
+        is_reload = self._epoch > 0
         try:
             await self._transport.start()
             await self._transport.send(
@@ -183,6 +203,8 @@ class Qwen3TtsWorker:
                 raise RuntimeError("backend_identity_mismatch")
             self._started = True
             self._epoch += 1
+            if is_reload:
+                self._reload_count += 1
             self.last_active = time.monotonic()
         except BaseException:
             await self._transport.abort()
@@ -261,6 +283,7 @@ class Qwen3TtsWorker:
                     self.last_active = time.monotonic()
                     if not completed and self._epoch == epoch:
                         self._started = False
+                        self._fallback_abort_count += 1
                         await self._transport.abort()
 
         return stream()
