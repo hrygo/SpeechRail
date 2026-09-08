@@ -102,15 +102,47 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         # Only count a session once the handshake resolved successfully: the
         # finally block below always pairs this with record_realtime_session_end.
         services.metrics.record_realtime_session_start()
-        client_events: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+        client_events: asyncio.Queue[tuple[dict[str, Any], int] | None] = asyncio.Queue(
             maxsize=CLIENT_EVENT_QUEUE_LIMIT
+        )
+        pending_client_event_bytes = 0
+        # JSON/Base64 is larger than decoded PCM.  Leave headroom for one
+        # legal maximum frame so API-level ``buffer_too_large`` remains a
+        # stable error rather than being shadowed by transport backpressure.
+        client_event_byte_limit = 2 * max(
+            settings.max_realtime_frame_bytes,
+            settings.max_realtime_buffer_bytes or 8_388_608,
         )
 
         async def receive_loop() -> None:
+            nonlocal pending_client_event_bytes
             try:
                 while True:
-                    event = _decode(await websocket.receive_text())
-                    client_events.put_nowait(event)
+                    raw = await websocket.receive_text()
+                    raw_size = len(raw.encode("utf-8"))
+                    if raw_size > client_event_byte_limit or (
+                        pending_client_event_bytes + raw_size > client_event_byte_limit
+                    ):
+                        logger.warning(
+                            "realtime client event byte budget exceeded; closing session %s",
+                            session_id,
+                        )
+                        with contextlib.suppress(Exception):
+                            await websocket.close(
+                                code=QUEUE_OVERFLOW_CLOSE_CODE,
+                                reason="event byte budget exceeded",
+                            )
+                        return
+                    try:
+                        event = _decode(raw)
+                    except RealtimeAdapterError as exc:
+                        # A malformed frame is a client protocol error, not a
+                        # task failure.  Keep this session usable and leave its
+                        # admission slot to the normal close path.
+                        await send_event(error_event(code=exc.code, message=exc.message))
+                        continue
+                    client_events.put_nowait((event, raw_size))
+                    pending_client_event_bytes += raw_size
             except WebSocketDisconnect:
                 pass
             except asyncio.QueueFull:
@@ -130,16 +162,19 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                     client_events.put_nowait(None)
 
         async def handle_loop() -> None:
+            nonlocal pending_client_event_bytes
             while True:
                 event = await client_events.get()
                 if event is None:
                     return
+                payload, payload_size = event
+                pending_client_event_bytes -= payload_size
                 client_event_id: str | None = None
                 try:
-                    raw_event_id = event.get("event_id")
+                    raw_event_id = payload.get("event_id")
                     if isinstance(raw_event_id, str) and raw_event_id.strip():
                         client_event_id = raw_event_id
-                    await session.handle(event)
+                    await session.handle(payload)
                 except (WebSocketDisconnect, RuntimeError):
                     logger.debug("realtime client disconnected during event handling")
                     return

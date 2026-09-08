@@ -643,6 +643,27 @@ def test_openai_invalid_audio_fails_closed() -> None:
         assert error["error"]["code"] == "invalid_audio"
 
 
+def test_openai_realtime_bad_json_is_recoverable() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_text("{invalid json")
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_event"
+
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (
+            socket.receive_json()["type"]
+            != "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+
 def test_openai_text_item_triggers_tts_response() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
@@ -1746,6 +1767,22 @@ def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "buffer_too_large"
+
+
+def test_realtime_transport_byte_budget_closes_before_queue_growth() -> None:
+    client, _ = _client(
+        settings_kwargs={"max_realtime_buffer_bytes": 128, "max_realtime_frame_bytes": 128}
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 200)}
+        )
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            socket.receive_json()
+
+    assert exc_info.value.code == 1013
 
 
 def test_realtime_client_disconnect_during_handle_graceful() -> None:
