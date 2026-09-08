@@ -474,13 +474,15 @@ def create_system_router(services: AppServices) -> APIRouter:
             get_voice_registry().delete_custom_profile(voice_id)
             return JSONResponse(status_code=200, content={"status": "deleted", "id": voice_id})
         except VoiceInUseError:
-            return error_response(
+            response = error_response(
                 409,
                 request_id,
                 "voice_in_use",
                 "Custom voice is currently in use",
                 retryable=True,
             )
+            response.headers["Retry-After"] = "1"
+            return response
         except VoiceStoreUnavailableError:
             return error_response(
                 503,

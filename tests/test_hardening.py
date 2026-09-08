@@ -157,6 +157,22 @@ def test_voice_metadata_and_wav_files_are_private_0600(tmp_path: Path) -> None:
     assert (wav_path.stat().st_mode & 0o777) == 0o600
 
 
+def test_voice_registry_refuses_symlinked_metadata_parent(tmp_path: Path) -> None:
+    redirected_root = tmp_path / "redirected"
+    redirected_root.mkdir()
+    metadata_parent = tmp_path / "metadata-parent"
+    metadata_parent.symlink_to(redirected_root, target_is_directory=True)
+    registry = VoiceRegistry(
+        storage_path=metadata_parent / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+
+    with pytest.raises(VoiceStoreUnavailableError):
+        registry.create_custom_profile(name="n", instruction="i", voice_id="custom_x")
+
+    assert not (redirected_root / "custom_voices.json").exists()
+
+
 # --------------------------------------------------------------------------- #
 # 3. Orphan WAV cleanup when the metadata write fails
 # --------------------------------------------------------------------------- #
@@ -280,6 +296,32 @@ def test_voice_lease_blocks_delete_until_generation_finishes(tmp_path: Path) -> 
 
     registry.delete_custom_profile("leased_voice")
     assert not Path(profile.audio_path).exists()
+
+
+def test_voice_in_use_response_includes_retry_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _registry(tmp_path)
+    profile = registry.create_cloned_profile(
+        name="leased",
+        ref_text="参考文本",
+        audio_bytes=_generate_test_wav(3.0),
+        voice_id="leased_voice",
+        duration_seconds=3.0,
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=_CapturingSynth(),
+        )
+    )
+
+    with registry.lease_profile(profile.id):
+        response = client.delete(f"/v1/voices/{profile.id}")
+
+    assert response.status_code == 409
+    assert response.headers["Retry-After"] == "1"
 
 
 # --------------------------------------------------------------------------- #

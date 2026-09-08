@@ -419,6 +419,11 @@ class VoiceRegistry:
             self._load_custom_voices_locked()
 
     def _load_custom_voices_locked(self) -> None:
+        if self._storage_path.parent.is_symlink():
+            self._mark_unavailable(
+                ValueError("custom voice registry parent must not be a symlink")
+            )
+            return
         if not self._storage_path.exists():
             if self._storage_path.is_symlink():
                 self._mark_unavailable(ValueError("custom voice registry symlink is broken"))
@@ -461,6 +466,11 @@ class VoiceRegistry:
 
     def _check_reload(self) -> None:
         with self._lock:
+            if self._storage_path.parent.is_symlink():
+                self._mark_unavailable(
+                    ValueError("custom voice registry parent must not be a symlink")
+                )
+                return
             if not self._storage_path.exists():
                 if self._storage_path.is_symlink():
                     self._mark_unavailable(ValueError("custom voice registry symlink is broken"))
@@ -597,6 +607,8 @@ class VoiceRegistry:
 
     def _prepare_store_dirs_locked(self) -> None:
         try:
+            if self._storage_path.parent.is_symlink():
+                raise OSError("custom voice registry parent must not be a symlink")
             if self._voices_dir.is_symlink():
                 raise OSError("voices directory must not be a symlink")
             self._storage_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
