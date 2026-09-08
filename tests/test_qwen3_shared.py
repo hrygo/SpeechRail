@@ -21,6 +21,7 @@ FAKE_WORKER = Path(__file__).resolve().parent / "fixtures" / "fake_framed_worker
 @dataclass(frozen=True, slots=True)
 class _Config:
     timeout_seconds: float = 0.3
+    io_timeout_seconds: float | None = None
     model_dir: Path = Path("/tmp/speechrail-shared-model")
     device: str = "cpu"
     dtype: str = "float32"
@@ -30,7 +31,7 @@ class _Config:
             command=(sys.executable, str(FAKE_WORKER)),
             cwd=REPOSITORY_ROOT,
             env=offline_environment(REPOSITORY_ROOT),
-            io_timeout_seconds=self.timeout_seconds,
+            io_timeout_seconds=self.io_timeout_seconds or self.timeout_seconds,
             shutdown_timeout_seconds=0.5,
         )
 
