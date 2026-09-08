@@ -1317,6 +1317,65 @@ def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() 
     assert cancelled["response"]["status"] == "cancelled"
 
 
+def test_response_cancel_is_not_blocked_by_hung_asr_commit() -> None:
+    """The control lane cancels TTS while the ordered ASR lane awaits a commit."""
+    import threading
+
+    client, _ = _client(
+        factory=HangingCommitStreamingFactory(),
+        tts_synthesizer=BlockingSpeechSynthesizer(),
+        settings_kwargs={"request_timeout_seconds": 5.0},
+    )
+    done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def scenario() -> None:
+        try:
+            with client.websocket_connect("/v1/realtime") as socket:
+                socket.receive_json()
+                socket.receive_json()
+                socket.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {"model": "whisper-1", "turn_detection": None},
+                    }
+                )
+                socket.receive_json()
+                socket.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "你好"}],
+                        },
+                    }
+                )
+                socket.receive_json()
+                socket.send_json({"type": "response.create"})
+                while socket.receive_json()["type"] != "response.audio.delta":
+                    pass
+
+                socket.send_json(
+                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+                )
+                socket.send_json({"type": "input_audio_buffer.commit"})
+                socket.send_json({"type": "response.cancel"})
+                while True:
+                    event = socket.receive_json()
+                    if event["type"] == "response.done":
+                        outcome["status"] = event["response"]["status"]
+                        return
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            outcome["error"] = repr(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=scenario, daemon=True).start()
+    assert done.wait(2.0), "response.cancel was blocked by the ASR commit"
+    assert outcome == {"status": "cancelled"}
+
+
 def test_realtime_tts_total_deadline_covers_generation() -> None:
     client, _ = _client(
         tts_synthesizer=HangingSpeechSynthesizer(),

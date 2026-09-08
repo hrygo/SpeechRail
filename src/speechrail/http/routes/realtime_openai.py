@@ -31,6 +31,8 @@ OUTBOUND_SEND_TIMEOUT_CLOSE_CODE = 1011
 # Bounded intake so a stalled handler cannot accumulate unbounded base64 audio;
 # 512 events ≈ 16.4s of 32ms audio chunks, accommodating commit/diarization spikes.
 CLIENT_EVENT_QUEUE_LIMIT = 512
+CONTROL_EVENT_QUEUE_LIMIT = 16
+_CONTROL_EVENT_TYPES = frozenset({"response.cancel"})
 
 
 async def _send_json_with_deadline(
@@ -132,6 +134,9 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
         client_events: asyncio.Queue[tuple[dict[str, Any], int] | None] = asyncio.Queue(
             maxsize=CLIENT_EVENT_QUEUE_LIMIT
         )
+        control_events: asyncio.Queue[tuple[dict[str, Any], int] | None] = asyncio.Queue(
+            maxsize=CONTROL_EVENT_QUEUE_LIMIT
+        )
         pending_client_event_bytes = 0
         # JSON/Base64 is larger than decoded PCM.  Leave headroom for one
         # legal maximum frame so API-level ``buffer_too_large`` remains a
@@ -168,7 +173,12 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         # admission slot to the normal close path.
                         await send_event(error_event(code=exc.code, message=exc.message))
                         continue
-                    client_events.put_nowait((event, raw_size))
+                    queue = (
+                        control_events
+                        if event.get("type") in _CONTROL_EVENT_TYPES
+                        else client_events
+                    )
+                    queue.put_nowait((event, raw_size))
                     pending_client_event_bytes += raw_size
             except WebSocketDisconnect:
                 pass
@@ -187,68 +197,88 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             finally:
                 with contextlib.suppress(asyncio.QueueFull):
                     client_events.put_nowait(None)
+                with contextlib.suppress(asyncio.QueueFull):
+                    control_events.put_nowait(None)
+
+        async def handle_client_event(payload: dict[str, Any], payload_size: int) -> None:
+            nonlocal pending_client_event_bytes
+            pending_client_event_bytes -= payload_size
+            client_event_id: str | None = None
+            try:
+                raw_event_id = payload.get("event_id")
+                if isinstance(raw_event_id, str) and raw_event_id.strip():
+                    client_event_id = raw_event_id
+                await session.handle(payload)
+            except (WebSocketDisconnect, RuntimeError):
+                logger.debug("realtime client disconnected during event handling")
+                raise
+            except RealtimeAdapterError as exc:
+                await send_event(
+                    error_event(
+                        code=exc.code,
+                        message=exc.message,
+                        client_event_id=exc.event_id or client_event_id,
+                    )
+                )
+            except DiarizationError as exc:
+                await send_event(
+                    error_event(
+                        code=exc.code, message=str(exc), client_event_id=client_event_id
+                    )
+                )
+            except Exception as exc:
+                logger.exception("realtime event handler failed: %s", exc)
+                await send_event(
+                    error_event(
+                        code="backend_error",
+                        message=str(exc) or "internal backend error",
+                        client_event_id=client_event_id,
+                    )
+                )
 
         async def handle_loop() -> None:
-            nonlocal pending_client_event_bytes
             while True:
                 event = await client_events.get()
                 if event is None:
                     return
                 payload, payload_size = event
-                pending_client_event_bytes -= payload_size
-                client_event_id: str | None = None
                 try:
-                    raw_event_id = payload.get("event_id")
-                    if isinstance(raw_event_id, str) and raw_event_id.strip():
-                        client_event_id = raw_event_id
-                    await session.handle(payload)
+                    await handle_client_event(payload, payload_size)
                 except (WebSocketDisconnect, RuntimeError):
-                    logger.debug("realtime client disconnected during event handling")
                     return
-                except RealtimeAdapterError as exc:
-                    await send_event(
-                        error_event(
-                            code=exc.code,
-                            message=exc.message,
-                            client_event_id=exc.event_id or client_event_id,
-                        )
-                    )
-                except DiarizationError as exc:
-                    await send_event(
-                        error_event(
-                            code=exc.code, message=str(exc), client_event_id=client_event_id
-                        )
-                    )
-                except Exception as exc:
-                    # Do not let the task die with the slot still acquired: the
-                    # factory releases the session in close() below, which only
-                    # runs after both tasks complete normally or are cancelled.
-                    logger.exception("realtime event handler failed: %s", exc)
-                    await send_event(
-                        error_event(
-                            code="backend_error",
-                            message=str(exc) or "internal backend error",
-                            client_event_id=client_event_id,
-                        )
-                    )
+
+        async def control_loop() -> None:
+            while True:
+                event = await control_events.get()
+                if event is None:
+                    return
+                payload, payload_size = event
+                try:
+                    await handle_client_event(payload, payload_size)
+                except (WebSocketDisconnect, RuntimeError):
+                    return
 
         recv_task = asyncio.create_task(receive_loop())
         handle_task = asyncio.create_task(handle_loop())
+        control_task = asyncio.create_task(control_loop())
         try:
             await session.start()
             # Finish when either side completes; the other is cancelled below so a
             # client disconnect interrupts a blocking handle instead of leaking
             # the ASR factory slot until the backend answers.
             await asyncio.wait(
-                {recv_task, handle_task}, return_when=asyncio.FIRST_COMPLETED
+                {recv_task, handle_task, control_task}, return_when=asyncio.FIRST_COMPLETED
             )
         finally:
             recv_task.cancel()
             handle_task.cancel()
+            control_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await recv_task
             with contextlib.suppress(asyncio.CancelledError):
                 await handle_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await control_task
             await session.close()
             services.metrics.record_realtime_session_end()
 

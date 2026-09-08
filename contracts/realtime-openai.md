@@ -53,7 +53,7 @@ ws://127.0.0.1:8201/v1/realtime
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
 | `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 流式合成（使用 `StreamingSentenceSplitter` 分句合成并施加淡入淡出音频平滑）；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的规则校验（`voice_not_found`/`voice_not_available`/`invalid_voice`）。准入与整个生成/交付共享一个总 deadline；超时返回 `backend_timeout` 与 failed `response.done` |
-| `response.cancel` | 取消进行中的 TTS response；丢弃未发送音频并返回 `response.done`（`status: cancelled`） |
+| `response.cancel` | 取消进行中的 TTS response；丢弃未发送音频并返回 `response.done`（`status: cancelled`）。该事件走独立、有界的控制通道，因此不会等待正在进行的 ASR `commit`；其他客户端事件仍按接收顺序执行。 |
 
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
 `conversation.item.truncate`。
