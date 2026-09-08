@@ -317,7 +317,7 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-> **v1.12.0 状态**：本版为功能发布（无状态 MCP 代理、Silero VAD 自动引擎与 setup 自动下载），
+> **v1.13.0 状态**：本版交付 OpenAI Realtime 契约、资源边界、ASR/TTS 交付与安全能力诊断优化；
 > **未重测**三档性能/质量基准（仓库外独立 fixture/语料与人工听测未就绪），对应 gate `unset`。
 > 下方表格为上一可信基线 **v1.11.0** 实测，保留用于对照；完整验收见
 > [v1.12.0 发布验收](docs/archive/performance/2026-09-07-v1.12.0-release-acceptance.md)。
