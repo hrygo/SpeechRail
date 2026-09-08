@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from speechrail.application.realtime_openai import Pcm16RateConverter
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
@@ -35,7 +36,11 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.tts import get_voice_registry
-from speechrail.http.routes.realtime_openai import create_openai_realtime_router
+from speechrail.http.routes.realtime_openai import (
+    OUTBOUND_SEND_TIMEOUT_CLOSE_CODE,
+    _send_json_with_deadline,
+    create_openai_realtime_router,
+)
 
 
 class FakeTranscriber:
@@ -61,6 +66,16 @@ class BlockingSpeechSynthesizer:
     def synthesize(self, request: SpeechRequest):
         async def chunks():
             yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+            await asyncio.sleep(60)
+
+        return chunks()
+
+
+class HangingSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            if False:  # Keep this as an async generator without yielding audio.
+                yield AudioChunk(response_id="internal", chunk_index=0, audio=b"")
             await asyncio.sleep(60)
 
         return chunks()
@@ -339,6 +354,32 @@ def test_openai_session_created_and_updated() -> None:
         updated = socket.receive_json()
         assert updated["type"] == "session.updated"
         assert updated["session"]["model"] == "whisper-1"
+
+
+def test_realtime_send_timeout_closes_slow_consumer() -> None:
+    class SlowWebSocket:
+        def __init__(self) -> None:
+            self.closed: tuple[int, str] | None = None
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            del payload
+            await asyncio.Event().wait()
+
+        async def close(self, *, code: int, reason: str) -> None:
+            self.closed = (code, reason)
+
+    async def scenario() -> SlowWebSocket:
+        websocket = SlowWebSocket()
+        sent = await _send_json_with_deadline(  # type: ignore[arg-type]
+            websocket,
+            {"type": "response.audio.delta"},
+            timeout_seconds=0.01,
+        )
+        assert sent is False
+        return websocket
+
+    websocket = asyncio.run(scenario())
+    assert websocket.closed == (OUTBOUND_SEND_TIMEOUT_CLOSE_CODE, "outbound send timed out")
 
 
 def test_openai_append_commit_produces_transcription_completed() -> None:
@@ -640,6 +681,27 @@ def test_openai_invalid_audio_fails_closed() -> None:
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "invalid_audio"
+
+
+def test_openai_realtime_bad_json_is_recoverable() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_text("{invalid json")
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "invalid_event"
+
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (
+            socket.receive_json()["type"]
+            != "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
 
 
 def test_openai_text_item_triggers_tts_response() -> None:
@@ -974,6 +1036,122 @@ def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None
     assert "".join(deltas) == "你好啊"
 
 
+def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
+    """A non-append partial must not corrupt append-only SDK consumers."""
+    client, _ = _client(partials=("abc", "adc"), completed_text="adc")
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
+    assert deltas == ["abc"]
+    assert events[-1]["transcript"] == "adc"
+
+
+def test_realtime_consecutive_commits_have_distinct_item_ids() -> None:
+    client, _ = _client()
+    created_ids: list[str] = []
+    committed_ids: list[str] = []
+    completed_ids: list[str] = []
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        for _ in range(2):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            )
+            socket.send_json({"type": "input_audio_buffer.commit"})
+            while True:
+                event = socket.receive_json()
+                if event["type"] == "input_audio_buffer.committed":
+                    committed_ids.append(event["item_id"])
+                elif event["type"] == "conversation.item.created":
+                    created_ids.append(event["item"]["id"])
+                elif event["type"] == "conversation.item.input_audio_transcription.completed":
+                    completed_ids.append(event["item_id"])
+                    break
+
+    assert len(set(committed_ids)) == 2
+    assert committed_ids == created_ids == completed_ids
+
+
+def test_realtime_session_update_preserves_effective_turn_detection() -> None:
+    client, _ = _client()
+    vad = {"type": "server_vad", "threshold": 0.6, "prefix_padding_ms": 300}
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "session.update", "session": {"turn_detection": vad}})
+        assert socket.receive_json()["session"]["turn_detection"] == vad
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"language": "zh"}},
+            }
+        )
+        updated = socket.receive_json()
+
+    assert updated["session"]["turn_detection"] == vad
+
+
+def test_realtime_accepts_current_nested_24khz_transcription_session() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "transcription": {"model": "gpt-4o-transcribe", "language": "zh"},
+                            "turn_detection": None,
+                        }
+                    },
+                },
+            }
+        )
+        updated = socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 1200)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (
+            socket.receive_json()["type"]
+            != "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+    assert updated["session"]["turn_detection"] is None
+    assert factory.sessions[0].language == "zh"
+    assert sum(len(chunk) for chunk in factory.sessions[0].received) == 1600
+
+
+def test_pcm24k_converter_is_frame_partition_invariant() -> None:
+    pcm = b"".join(index.to_bytes(2, "little", signed=True) for index in range(1200))
+    one_frame = Pcm16RateConverter(input_rate=24_000).convert(pcm)
+    split_converter = Pcm16RateConverter(input_rate=24_000)
+    split_frames = b"".join(
+        split_converter.convert(pcm[start : start + width])
+        for start, width in ((0, 214), (214, 782), (996, 1404))
+    )
+
+    assert split_frames == one_frame
+
+
 def test_openai_session_update_rejects_non_string_language_hints() -> None:
     with pytest.raises(RealtimeAdapterError, match="languages must be a string array"):
         apply_session_update(
@@ -1137,6 +1315,93 @@ def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() 
 
     assert cancelled["type"] == "response.done"
     assert cancelled["response"]["status"] == "cancelled"
+
+
+def test_response_cancel_is_not_blocked_by_hung_asr_commit() -> None:
+    """The control lane cancels TTS while the ordered ASR lane awaits a commit."""
+    import threading
+
+    client, _ = _client(
+        factory=HangingCommitStreamingFactory(),
+        tts_synthesizer=BlockingSpeechSynthesizer(),
+        settings_kwargs={"request_timeout_seconds": 5.0},
+    )
+    done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def scenario() -> None:
+        try:
+            with client.websocket_connect("/v1/realtime") as socket:
+                socket.receive_json()
+                socket.receive_json()
+                socket.send_json(
+                    {
+                        "type": "session.update",
+                        "session": {"model": "whisper-1", "turn_detection": None},
+                    }
+                )
+                socket.receive_json()
+                socket.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "你好"}],
+                        },
+                    }
+                )
+                socket.receive_json()
+                socket.send_json({"type": "response.create"})
+                while socket.receive_json()["type"] != "response.audio.delta":
+                    pass
+
+                socket.send_json(
+                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+                )
+                socket.send_json({"type": "input_audio_buffer.commit"})
+                socket.send_json({"type": "response.cancel"})
+                while True:
+                    event = socket.receive_json()
+                    if event["type"] == "response.done":
+                        outcome["status"] = event["response"]["status"]
+                        return
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            outcome["error"] = repr(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=scenario, daemon=True).start()
+    assert done.wait(2.0), "response.cancel was blocked by the ASR commit"
+    assert outcome == {"status": "cancelled"}
+
+
+def test_realtime_tts_total_deadline_covers_generation() -> None:
+    client, _ = _client(
+        tts_synthesizer=HangingSpeechSynthesizer(),
+        settings_kwargs={"request_timeout_seconds": 0.01},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        events = [socket.receive_json() for _ in range(5)]
+
+    assert events[-2]["type"] == "error"
+    assert events[-2]["error"]["code"] == "backend_timeout"
+    assert events[-1]["type"] == "response.done"
+    assert events[-1]["response"]["status"] == "failed"
 
 
 def test_openai_query_model_echoed_in_session_created() -> None:
@@ -1535,6 +1800,45 @@ def test_realtime_tts_delegates_sentence_planning_to_shared_backend() -> None:
         assert events[-1] == "response.done"
 
 
+def test_realtime_current_audio_profile_emits_one_current_wire_family() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}}
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "conversation.item.created"
+        socket.send_json({"type": "response.create"})
+        events: list[str] = []
+        while True:
+            event_type = socket.receive_json()["type"]
+            events.append(event_type)
+            if event_type == "response.done":
+                break
+
+    assert "response.output_audio.delta" in events
+    assert "response.output_audio.done" in events
+    assert "response.audio.delta" not in events
+    assert "response.audio.done" not in events
+
+
 def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
     """Verifies that accumulating audio frames drives flush() and produces incremental deltas."""
     client, factory = _client(
@@ -1631,6 +1935,22 @@ def test_realtime_single_frame_exceeds_max_buffer_bytes() -> None:
         assert error["error"]["code"] == "buffer_too_large"
 
 
+def test_realtime_transport_byte_budget_closes_before_queue_growth() -> None:
+    client, _ = _client(
+        settings_kwargs={"max_realtime_buffer_bytes": 128, "max_realtime_frame_bytes": 128}
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * 200)}
+        )
+        with pytest.raises(WebSocketDisconnect) as exc_info:
+            socket.receive_json()
+
+    assert exc_info.value.code == 1013
+
+
 def test_realtime_client_disconnect_during_handle_graceful() -> None:
     """Verifies that abrupt client disconnect is handled without uncaught exceptions."""
     client, _ = _client()
@@ -1715,6 +2035,32 @@ def test_openai_commit_failure_emits_error_and_releases_slot() -> None:
                 raise AssertionError(f"unexpected error event: {event}")
         assert len(factory.sessions) == 2
         assert len(factory.released) == 2
+
+
+def test_openai_commit_total_deadline_releases_hung_reader_slot() -> None:
+    factory = HangingCommitStreamingFactory()
+    client, factory = _client(
+        factory=factory,
+        settings_kwargs={"request_timeout_seconds": 0.01},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1", "turn_detection": None},
+            }
+        )
+        socket.receive_json()
+
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = [socket.receive_json() for _ in range(2)]
+
+        assert events[0]["type"] == "input_audio_buffer.committed"
+        assert events[1]["error"]["code"] == "backend_timeout"
+        assert len(factory.released) == 1
 
 
 def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:

@@ -12,12 +12,14 @@ existing ``RealtimeAsrFactory``/``RealtimeAsrSession`` and TTS ports.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from speechrail.domain.diarization import DiarizationConfig
 from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 
 _PROTOCOL_VERSION = "realtime=v1"
+RealtimeWireProfile = Literal["legacy", "current"]
 _ASR_MODEL_ALIASES = {
     "whisper-1": "speechrail/qwen3-asr-1.7b",
     "gpt-4o-transcribe": "speechrail/qwen3-asr-1.7b",
@@ -223,19 +225,19 @@ def conversation_text_item_created(
     }
 
 
-def transcription_delta(*, session_id: str, delta: str) -> dict[str, object]:
+def transcription_delta(*, item_id: str, delta: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.delta",
-        "item_id": f"item_{session_id}_input",
+        "item_id": item_id,
         "content_index": 0,
         "delta": delta,
     }
 
 
-def transcription_completed(*, session_id: str, transcript: str) -> dict[str, object]:
+def transcription_completed(*, item_id: str, transcript: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.completed",
-        "item_id": f"item_{session_id}_input",
+        "item_id": item_id,
         "content_index": 0,
         "transcript": transcript,
         "usage": {
@@ -381,10 +383,10 @@ def transcription_segment(
     }
 
 
-def transcription_failed(*, session_id: str, code: str, message: str) -> dict[str, object]:
+def transcription_failed(*, item_id: str, code: str, message: str) -> dict[str, object]:
     return {
         "type": "conversation.item.input_audio_transcription.failed",
-        "item_id": f"item_{session_id}_input",
+        "item_id": item_id,
         "content_index": 0,
         "error": {"type": "transcription_error", "code": code, "message": message},
     }
@@ -485,10 +487,15 @@ def response_content_part_done(
 
 
 def response_audio_delta(
-    *, session_id: str, response_id: str, item_id: str, delta: str
+    *,
+    session_id: str,
+    response_id: str,
+    item_id: str,
+    delta: str,
+    wire_profile: RealtimeWireProfile = "legacy",
 ) -> dict[str, object]:
     return {
-        "type": "response.audio.delta",
+        "type": _audio_event_type("delta", wire_profile),
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -498,15 +505,25 @@ def response_audio_delta(
 
 
 def response_audio_done(
-    *, session_id: str, response_id: str, item_id: str
+    *,
+    session_id: str,
+    response_id: str,
+    item_id: str,
+    wire_profile: RealtimeWireProfile = "legacy",
 ) -> dict[str, object]:
     return {
-        "type": "response.audio.done",
+        "type": _audio_event_type("done", wire_profile),
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
         "content_index": 0,
     }
+
+
+def _audio_event_type(kind: Literal["delta", "done"], wire_profile: RealtimeWireProfile) -> str:
+    if wire_profile == "current":
+        return f"response.output_audio.{kind}"
+    return f"response.audio.{kind}"
 
 
 def response_audio_transcript_delta(
@@ -603,19 +620,36 @@ def apply_session_update(
     registered_asr: frozenset[str],
     registered_tts: frozenset[str],
     tts_voice_ids: frozenset[str],
+    current_config: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, object], dict[str, Any]]:
     """Validate an OpenAI ``session.update`` and return (session.updated, config).
 
     The returned config is a SpeechRail-internal dict consumed by the route.
     """
     session = _require_object(event, "session")
+    audio_input: dict[str, Any] | None = None
+    audio_output: dict[str, Any] | None = None
+    if "audio" in session:
+        audio = _require_object(session, "audio")
+        if "input" in audio:
+            audio_input = _require_object(audio, "input")
+        if "output" in audio:
+            audio_output = _require_object(audio, "output")
     transcription = session.get("input_audio_transcription")
+    if transcription is None and audio_input is not None:
+        transcription = audio_input.get("transcription")
     transcription_obj: dict[str, Any] | None = None
     if transcription is not None:
-        transcription_obj = _require_object(session, "input_audio_transcription")
+        if not isinstance(transcription, dict):
+            raise RealtimeAdapterError(
+                "invalid_event", "input_audio_transcription must be an object"
+            )
+        transcription_obj = transcription
+    base_config = dict(current_config or {})
     model = str(
         session.get("model")
         or (transcription_obj or {}).get("model")
+        or base_config.get("model")
         or asr_model
     )
     resolved_asr = canonical_asr_model(model, registered=registered_asr)
@@ -632,6 +666,8 @@ def apply_session_update(
         )
 
     turn_detection = session.get("turn_detection")
+    if "turn_detection" not in session and audio_input is not None:
+        turn_detection = audio_input.get("turn_detection")
     if isinstance(turn_detection, dict):
         mode = turn_detection.get("type")
         if mode not in _SUPPORTED_TURN_DETECTION:
@@ -683,14 +719,36 @@ def apply_session_update(
         raise RealtimeAdapterError(
             "unsupported_audio_format", "only pcm16 audio output is supported"
         )
-    if "audio" in session:
-        audio = _require_object(session, "audio")
-        if "input" in audio:
-            audio_input = _require_object(audio, "input")
-            if audio_input.get("format") not in (None, "pcm16"):
+    input_sample_rate = 16_000
+    if audio_input is not None and "format" in audio_input:
+        nested_format = audio_input["format"]
+        if nested_format == "pcm16":
+            input_sample_rate = 16_000
+        elif isinstance(nested_format, dict):
+            if nested_format.get("type") != "audio/pcm" or nested_format.get("rate") not in {
+                16_000,
+                24_000,
+            }:
                 raise RealtimeAdapterError(
-                    "unsupported_audio_format", "only pcm16 audio input is supported"
+                    "unsupported_audio_format",
+                    "only PCM16 audio at 16000 or 24000 Hz is supported",
                 )
+            input_sample_rate = int(nested_format["rate"])
+        else:
+            raise RealtimeAdapterError(
+                "unsupported_audio_format", "only pcm16 audio input is supported"
+            )
+    if audio_output is not None and "format" in audio_output:
+        nested_output_format = audio_output["format"]
+        valid_output = nested_output_format == "pcm16" or (
+            isinstance(nested_output_format, dict)
+            and nested_output_format.get("type") == "audio/pcm"
+            and nested_output_format.get("rate") == 24_000
+        )
+        if not valid_output:
+            raise RealtimeAdapterError(
+                "unsupported_audio_format", "only PCM16 audio output at 24000 Hz is supported"
+            )
 
     language: str | None = None
     languages: list[str] | None = None
@@ -771,15 +829,38 @@ def apply_session_update(
             ) from None
         voice = preset_voice
 
-    config: dict[str, Any] = {
-        "model": resolved_asr or asr_model,
-        "language": language or session.get("language"),
-        "prompt": prompt or "",
-        "voice": voice,
-    }
-    turn_detection_val = session.get("turn_detection")
-    if turn_detection_val is not None:
+    # ``session.update`` is a patch: absence preserves the effective session,
+    # while a present ``null`` clears the respective option.  Build the whole
+    # candidate before returning it so callers can validate and commit atomically.
+    config: dict[str, Any] = dict(base_config)
+    config["model"] = resolved_asr or asr_model
+    if transcription_obj is not None and "language" in transcription_obj:
+        config["language"] = language
+    elif "language" in session:
+        config["language"] = session["language"]
+    else:
+        config.setdefault("language", None)
+    if transcription_obj is not None and "prompt" in transcription_obj:
+        config["prompt"] = prompt or ""
+    else:
+        config.setdefault("prompt", "")
+    if "voice" in session:
+        config["voice"] = voice
+    else:
+        config.setdefault("voice", None)
+
+    turn_detection_val = config.get("turn_detection")
+    if "turn_detection" in session or (audio_input is not None and "turn_detection" in audio_input):
+        turn_detection_val = turn_detection
         config["turn_detection"] = turn_detection_val
+    if audio_input is not None and "format" in audio_input:
+        config["input_sample_rate"] = input_sample_rate
+    else:
+        config.setdefault("input_sample_rate", 16_000)
+    if audio_input is not None or audio_output is not None:
+        config["wire_profile"] = "current"
+    else:
+        config.setdefault("wire_profile", "legacy")
 
     for key, value in (
         ("languages", languages),
@@ -790,7 +871,9 @@ def apply_session_update(
         ("known_speaker_names", known_speaker_names),
         ("known_speaker_references", known_speaker_references),
     ):
-        if value is not None:
+        if (transcription_obj is not None and key in transcription_obj) or (
+            key == "diarization" and "diarization" in session
+        ) or value is not None:
             config[key] = value
     response = session_updated(
         session_id=session_id, model=model, turn_detection=turn_detection_val
