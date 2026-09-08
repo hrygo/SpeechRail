@@ -19,6 +19,7 @@ from speechrail.domain.diarization import DiarizationConfig
 from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
 
 _PROTOCOL_VERSION = "realtime=v1"
+RealtimeWireProfile = Literal["legacy", "current"]
 _ASR_MODEL_ALIASES = {
     "whisper-1": "speechrail/qwen3-asr-1.7b",
     "gpt-4o-transcribe": "speechrail/qwen3-asr-1.7b",
@@ -486,10 +487,15 @@ def response_content_part_done(
 
 
 def response_audio_delta(
-    *, session_id: str, response_id: str, item_id: str, delta: str
+    *,
+    session_id: str,
+    response_id: str,
+    item_id: str,
+    delta: str,
+    wire_profile: RealtimeWireProfile = "legacy",
 ) -> dict[str, object]:
     return {
-        "type": "response.audio.delta",
+        "type": _audio_event_type("delta", wire_profile),
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
@@ -499,15 +505,25 @@ def response_audio_delta(
 
 
 def response_audio_done(
-    *, session_id: str, response_id: str, item_id: str
+    *,
+    session_id: str,
+    response_id: str,
+    item_id: str,
+    wire_profile: RealtimeWireProfile = "legacy",
 ) -> dict[str, object]:
     return {
-        "type": "response.audio.done",
+        "type": _audio_event_type("done", wire_profile),
         "response_id": response_id,
         "output_index": 0,
         "item_id": item_id,
         "content_index": 0,
     }
+
+
+def _audio_event_type(kind: Literal["delta", "done"], wire_profile: RealtimeWireProfile) -> str:
+    if wire_profile == "current":
+        return f"response.output_audio.{kind}"
+    return f"response.audio.{kind}"
 
 
 def response_audio_transcript_delta(
@@ -612,10 +628,13 @@ def apply_session_update(
     """
     session = _require_object(event, "session")
     audio_input: dict[str, Any] | None = None
+    audio_output: dict[str, Any] | None = None
     if "audio" in session:
         audio = _require_object(session, "audio")
         if "input" in audio:
             audio_input = _require_object(audio, "input")
+        if "output" in audio:
+            audio_output = _require_object(audio, "output")
     transcription = session.get("input_audio_transcription")
     if transcription is None and audio_input is not None:
         transcription = audio_input.get("transcription")
@@ -718,6 +737,17 @@ def apply_session_update(
         else:
             raise RealtimeAdapterError(
                 "unsupported_audio_format", "only pcm16 audio input is supported"
+            )
+    if audio_output is not None and "format" in audio_output:
+        nested_output_format = audio_output["format"]
+        valid_output = nested_output_format == "pcm16" or (
+            isinstance(nested_output_format, dict)
+            and nested_output_format.get("type") == "audio/pcm"
+            and nested_output_format.get("rate") == 24_000
+        )
+        if not valid_output:
+            raise RealtimeAdapterError(
+                "unsupported_audio_format", "only PCM16 audio output at 24000 Hz is supported"
             )
 
     language: str | None = None
@@ -827,6 +857,10 @@ def apply_session_update(
         config["input_sample_rate"] = input_sample_rate
     else:
         config.setdefault("input_sample_rate", 16_000)
+    if audio_input is not None or audio_output is not None:
+        config["wire_profile"] = "current"
+    else:
+        config.setdefault("wire_profile", "legacy")
 
     for key, value in (
         ("languages", languages),

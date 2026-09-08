@@ -48,7 +48,7 @@ ws://127.0.0.1:8201/v1/realtime
 | 事件 | 语义 |
 |---|---|
 | `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。缺失字段保持当前有效值，显式 `null` 清除对应可清除配置；候选配置通过校验后原子生效。兼容 legacy 根字段与当前 transcription session 的 `audio.input.{format,transcription,turn_detection}`：输入为 PCM16，支持 `16000` 或 `24000` Hz；24 kHz 在会话内有状态降采样为内部 16 kHz，首个 PCM 后不得改格式。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受已注册 voice 与 13 个 OpenAI 标准 voice 别名并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`，已注册但当前权重不支持 → `voice_not_available`，非字符串或空白 → `invalid_voice`。失败均保持 session 可用；客户端可改用 `/v1/voices` 中 `available=true` 的系统 preset。返回 `session.updated` |
-| `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；推流累积达到时间窗时服务端自动驱动 partial 识别；未提交缓冲区达到上限时自动分段结转（Auto-Commit Rollover），避免硬断；返回 `input_audio_buffer.committed` 只在 commit、VAD 静音截断或超限结转时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用 |
+| `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；推流累积达到时间窗时服务端自动驱动 partial 识别；未提交缓冲区达到上限时自动分段结转（Auto-Commit Rollover），避免硬断；返回 `input_audio_buffer.committed` 只在 commit、VAD 静音截断或超限结转时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用。接入层同时限制待处理 JSON/Base64 字节与事件数；预算耗尽以 `1013` 关闭，客户端应重新连接而不是重放未确认音频 |
 | `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态；缓冲区为空时幂等完成空闭环，保持 session 正常存活 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
@@ -75,10 +75,11 @@ ws://127.0.0.1:8201/v1/realtime
 | `response.created` | TTS response 开始；`response.id` 用于关联后续事件 |
 | `response.output_item.added` / `done` | TTS 输出 item 生命周期 |
 | `response.content_part.added` / `done` | TTS 输出音频 part 生命周期 |
-| `response.audio.delta` / `done` | TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
+| `response.audio.delta` / `done` | legacy TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
+| `response.output_audio.delta` / `done` | current nested `audio` session profile 的 TTS 音频块；同一 response 只会使用一组 audio event literal，避免客户端重复播放 |
 | `response.audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
 | `response.done` | TTS response 终态（`status: completed` 或 `cancelled`） |
-| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy` |
+| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；格式错误 JSON 或非对象事件返回 `invalid_event`，不使会话任务异常退出；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy` |
 
 每个服务端事件还带顶层 `event_id`、`session_id` 和从 1 开始单调递增的 `sequence`。
 `event_id` 由服务端每次发送时生成、在一个连接内唯一；断线不会恢复旧事件，重连会创建新的 session。
