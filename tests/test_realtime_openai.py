@@ -1376,6 +1376,78 @@ def test_response_cancel_is_not_blocked_by_hung_asr_commit() -> None:
     assert outcome == {"status": "cancelled"}
 
 
+class _DelayedAppendSession(FakeStreamingSession):
+    """Makes the data lane observably slow without blocking TTS cancellation forever."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.append_started = False
+        self.append_completed = False
+
+    async def append_audio(self, audio: bytes) -> None:
+        self.append_started = True
+        await asyncio.sleep(0.05)
+        await super().append_audio(audio)
+        self.append_completed = True
+
+
+class DelayedAppendStreamingFactory(FakeStreamingFactory):
+    def session_class(self) -> type[_DelayedAppendSession]:
+        return _DelayedAppendSession
+
+
+def test_response_cancel_waits_for_preceding_audio_append_dispatch() -> None:
+    """Cancellation may bypass inference, but cannot pass audio dispatch FIFO."""
+    import threading
+
+    client, factory = _client(
+        factory=DelayedAppendStreamingFactory(),
+        tts_synthesizer=BlockingSpeechSynthesizer(),
+    )
+    done = threading.Event()
+    outcome: dict[str, object] = {}
+
+    def scenario() -> None:
+        try:
+            with client.websocket_connect("/v1/realtime") as socket:
+                socket.receive_json()
+                socket.receive_json()
+                socket.send_json(
+                    {
+                        "type": "conversation.item.create",
+                        "item": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "你好"}],
+                        },
+                    }
+                )
+                socket.receive_json()
+                socket.send_json({"type": "response.create"})
+                while socket.receive_json()["type"] != "response.audio.delta":
+                    pass
+
+                socket.send_json(
+                    {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+                )
+                socket.send_json({"type": "response.cancel"})
+                while True:
+                    event = socket.receive_json()
+                    if event["type"] == "response.done":
+                        outcome["append_started"] = bool(
+                            factory.sessions and factory.sessions[0].append_started
+                        )
+                        return
+        except Exception as exc:  # pragma: no cover - diagnostic only
+            outcome["error"] = repr(exc)
+        finally:
+            done.set()
+
+    threading.Thread(target=scenario, daemon=True).start()
+    assert done.wait(2.0), "response.cancel did not finish after the preceding append"
+    assert outcome == {"append_started": True}
+
+
 def test_realtime_tts_total_deadline_covers_generation() -> None:
     client, _ = _client(
         tts_synthesizer=HangingSpeechSynthesizer(),
