@@ -8,7 +8,7 @@ date: 2026-09-08
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
 
-> SpeechRail 对外暴露严格符合 OpenAI 契约规范的 REST 与 WebSocket 接口。所有客户端应用仅需调用公共接口，无需感知底层的模型权重、环境依赖或 Worker 调度。
+> SpeechRail 提供文档所列的 OpenAI-compatible REST 与 Realtime WebSocket 子集。客户端通过公共接口调用，无需感知底层模型权重、环境依赖或 Worker 调度；未列出的 OpenAI 功能不在本服务承诺范围内。
 
 ---
 
@@ -113,7 +113,7 @@ Sona 是专为本地高私密环境打造的实时双工会议助理，通过 `/
   - **TTS Model**：`tts-1`
   - **TTS Voice**：`serena` (或其他系统内置音色)
 
-*配置后，所有 Web 端的语音听写与实时语音通话 (Voice Call) 将 100% 由本地 Apple Silicon 推理，零云端 API 依赖。*
+*已接入的 ASR 与 TTS 请求由本地 Apple Silicon 推理处理。SpeechRail 不实现 Realtime LLM、播放、会议或应用级打断策略；Voice Call 是否可用取决于客户端只使用本服务已承诺的语音子集。*
 
 ### 3.3 [LiveKit Agents / Pipecat 实时语音智能体](https://github.com/livekit/agents)
 在基于 LiveKit Agents 或 [Pipecat](https://github.com/pipecat-ai/pipecat) 构建 2026 年多模态全双工智能体时，直接通过 OpenAI 兼容适配器接入：
