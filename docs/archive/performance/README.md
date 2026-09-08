@@ -2,17 +2,19 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新发布验收（v1.12.0，MINOR；性能/质量 gate unset）
+## 最新性能基准（v1.13.0，MINOR 三档）
 
-> **结论**：v1.12.0 为功能发布（无状态 MCP 代理、Silero VAD 自动引擎与 setup 自动下载），已完成
-> 代码门、wheel、managed 安装、启停、单实例、真实短 TTS/ASR 与运行态验收，当前 `quality` 运行。
-> **未重测三档性能/质量基准**（仓库外独立 fixture/语料与人工听测未就绪），对应 gate 记为 `unset`，
-> 不伪造数字；上一可信基线为 v1.11.0。详见
+> **结论**：v1.13.0 已完成 `quality → balanced → light → quality` 的三档真实基准。冷态、ASR/TTS warm N=5、当前 OpenAI Realtime 三连续 session、server-VAD 功能闭环，以及 batch+TTS `phys_footprint` 采样均通过；最终恢复 `quality`。ASR 复用 v1.11.0 的同一 fixture，结果仅作方向性对照；TTS 文本集和 Realtime wire profile 均不同，不作严格纵向速度结论。独立 CER/WER、VAD FAR/FRR、MOS/ABX、speaker embedding 与长时 soak 仍为 `unset`。详见
+> [v1.13.0 性能与质量基准](2026-09-08-v1.13.0-performance-benchmark.md)。
+
+## 上一发布验收（v1.12.0，MINOR；性能/质量 gate unset）
+
+> **结论**：v1.12.0 为功能发布；其代码门、wheel、managed 安装、启停、单实例、真实短 TTS/ASR 与运行态验收均已完成。v1.13.0 的完整三档基准已取代它作为最新性能证据。详见
 > [v1.12.0 发布验收](2026-09-07-v1.12.0-release-acceptance.md)。
 
-## 最新性能基准（v1.11.0，MINOR 三档）
+## 上一完整性能基准（v1.11.0，MINOR 三档）
 
-> **结论**：v1.11.0 已完成 `quality → balanced → light → quality` 的三档真实基准。ASR/TTS N=5、Realtime 3 session、三档 `phys_footprint` 采样和最终 quality 恢复均通过；独立 CER/WER、MOS/ABX 与 speaker embedding 仍为 `unset`。ASR 与 realtime 复用 v1.10.0 的同一 fixture（SHA-256 一致），可直接纵向比较；TTS 采用本轮固定文本集，仅作本版横向。本轮为纯行为/基础设施改动（`/health` 就绪语义、系统路由鉴权、语音克隆原子持久化、流式计时中间件、`voice_class` 指标降基数），未触碰推理模型。详见
+> **结论**：v1.11.0 已完成 `quality → balanced → light → quality` 的三档真实基准。它是 v1.13.0 的 ASR 与资源方向性对照基线；其独立 CER/WER、MOS/ABX 与 speaker embedding 同样为 `unset`。详见
 > [v1.11.0 性能与质量基准](2026-09-07-v1.11.0-performance-benchmark.md)。
 
 ## 上一发布基线（v1.10.0，MINOR 三档）
@@ -94,6 +96,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.13.0** | [2026-09-08-v1.13.0-performance-benchmark.md](2026-09-08-v1.13.0-performance-benchmark.md) | 三档完整基准：冷态、ASR/TTS N=5、current Realtime、VAD 功能、物理 footprint；质量与长时 soak gate 保持 unset |
 | **v1.12.0** | [2026-09-07-v1.12.0-release-acceptance.md](2026-09-07-v1.12.0-release-acceptance.md) | MINOR 功能发布（MCP 代理、Silero VAD、auto download）；代码门与运行态验收通过，性能/质量 gate 保持 unset |
 | **v1.10.0 operator** | [2026-09-07-v1.10.0-operator-efficiency.md](2026-09-07-v1.10.0-operator-efficiency.md) | 模块化 benchmark、真实资源采样、managed wheel 安装与停启效率复验；N=1 warm，gate 保持 unset |
 | **v1.10.0** | [2026-09-07-v1.10.0-performance-benchmark.md](2026-09-07-v1.10.0-performance-benchmark.md) | MINOR 三档真实性能/资源/Realtime 基准；外部 Sona `backend_busy` 根因与隔离 SOP 已固化 |

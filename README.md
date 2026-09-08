@@ -317,22 +317,20 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-> **v1.13.0 状态**：本版交付 OpenAI Realtime 契约、资源边界、ASR/TTS 交付与安全能力诊断优化；
-> **未重测**三档性能/质量基准（仓库外独立 fixture/语料与人工听测未就绪），对应 gate `unset`。
-> 下方表格为上一可信基线 **v1.11.0** 实测，保留用于对照；完整验收见
-> [v1.12.0 发布验收](docs/archive/performance/2026-09-07-v1.12.0-release-acceptance.md)。
+> **v1.13.0 benchmarked on 2026-09-08**: all three managed profiles completed the `quality → balanced → light → quality` loop. Cold start, ASR/TTS warm N=5, current OpenAI Realtime (3 consecutive sessions per profile), server-VAD smoke, and complete physical-footprint samples passed. Independent CER/WER, VAD FAR/FRR, MOS/ABX, speaker embedding, and long soak remain `unset`.
+>
+> The complete, privacy-preserving report is [v1.13.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md). ASR reuses the v1.11.0 fixtures and is directionally comparable; TTS uses a different fixed text set, while Realtime now verifies the current nested audio wire profile, so those values are reported in-profile only.
 
-Benchmark results below are measured serially on an Apple M5 Max (128GB Unified Memory) using v1.11.0 and the same `quality → balanced → light → quality` switch loop. The complete report is [v1.11.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-07-v1.11.0-performance-benchmark.md). ASR/TTS latency and physical-memory evidence passed for all three profiles; independent CER/WER, MOS/ABX and speaker-embedding quality gates remain unset (same as v1.10.0). ASR and realtime use the same fixtures as the v1.10.0 baseline; TTS uses a fixed text set in this run, so its values are reported in-profile and not compared longitudinally. Historical reports remain in the archive:
-
-| Benchmark Metric | 🟢 Light Profile (v1.11.0) | 🟡 Balanced Profile (v1.11.0) | 🟣 Quality Profile (v1.11.0) | Test Methodology & Scenario |
+| Benchmark Metric | 🟢 Light Profile (v1.13.0) | 🟡 Balanced Profile (v1.13.0) | 🟣 Quality Profile (v1.13.0) | Test Methodology & Scenario |
 |---|---|---|---|---|
-| **ASR 10s warm RTF mean** | **0.019** | **0.028** | **0.028** | Actual fixture 9.36s, warm N=5; lower is faster |
-| **TTS short warm RTF mean** | **0.243** | **0.249** | **0.275** | Actual PCM duration, warm N=5; lower is faster |
-| **Peak Total Physical RAM** | **4.89 GB** (4894.6 MB) | **6.01 GB** (6011.8 MB) | **7.05 GB** (7045.1 MB) | Same-tick macOS `phys_footprint`; complete ticks |
-| **Warm Idle Physical RAM** | **4.24 GB** (4241.3 MB) | **5.46 GB** (5464.0 MB) | **6.70 GB** (6695.9 MB) | Warm-residency sample after model fault-in |
-| **Realtime ASR commit p50** | **390 ms** | **347 ms** | **350 ms** | 16kHz PCM16, three consecutive sessions; terminal success 3/3 |
+| **ASR 10s warm RTF p50** | **0.016** | **0.028** | **0.027** | Actual 9.36s fixture, warm N=5; lower is faster |
+| **TTS short warm RTF p50** | **0.233** | **0.246** | **0.299** | Actual PCM duration, warm N=5; texts are v1.13-specific |
+| **Peak Total Physical RAM** | **5.39 GB** (5385.0 MB) | **6.30 GB** (6304.7 MB) | **7.51 GB** (7512.6 MB) | Same-tick macOS `phys_footprint`; all ticks complete |
+| **Warm Idle Physical RAM** | **4.09 GB** (4088.6 MB) | **5.48 GB** (5483.5 MB) | **6.74 GB** (6742.2 MB) | After model fault-in |
+| **Realtime ASR commit p50** | **238.2 ms** | **348.6 ms** | **373.6 ms** | 16kHz PCM16, current nested profile, three consecutive sessions; terminal success 3/3 |
+| **Realtime TTS first delta p50** | **25.0 ms** | **26.1 ms** | **38.4 ms** | `response.output_audio.delta`, three consecutive sessions |
 
-> `balanced` and `light` use `CustomVoice` and do not support voice cloning; `quality` uses `VoiceDesign` and declares `supports_clone=true`. Concurrent batch ASR is intentionally rejected with `backend_busy` when the shared worker is occupied; it is not reported as usable throughput.
+> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign`. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.
 
 ---
 

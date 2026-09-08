@@ -316,16 +316,20 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 
 ## 📊 真实性能基准实测 (Apple M5 Max)
 
-以下数据来源于 Apple M5 Max (128GB Unified Memory) 上的串行真实基准测试（引自 [v1.8.1 性能与稳定性基准](docs/archive/performance/2026-09-06-v1.8.1-performance-benchmark.md)）。本 patch 只重测当前 `quality` 档；Light/Balanced 与空闲待机数据保留自 v1.8.0，并在下表标注；历史基线仍保留在归档中：
+> **v1.13.0 已于 2026-09-08 完成三档实测**：`quality → balanced → light → quality`；冷态、ASR/TTS warm N=5、当前 OpenAI Realtime（每档连续 3 session）、server-VAD 功能闭环与完整物理 footprint 采样均通过。独立 CER/WER、VAD FAR/FRR、MOS/ABX、speaker embedding 与长时 soak 仍为 `unset`。
+>
+> 完整的脱敏报告见 [v1.13.0 性能与质量基准](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md)。ASR 与 v1.11.0 复用同一 fixture，可作方向性对照；TTS 使用不同固定文本，Realtime 本轮验证 current 嵌套音频 wire profile，均不作严格纵向结论。
 
-| 评测指标 | 🟢 Light 档（v1.8.0） | 🟡 Balanced 档（v1.8.0） | 🟣 Quality 档（v1.8.1） | 评测口径与场景 |
+| 评测指标 | 🟢 Light 档（v1.13.0） | 🟡 Balanced 档（v1.13.0） | 🟣 Quality 档（v1.13.0） | 评测口径与场景 |
 |---|---|---|---|---|
-| **ASR 中文 RTF (均值)** | **0.0204** (约 49 倍实时) | **0.0295** (约 34 倍实时) | **0.0335** (约 30 倍实时) | Quality 当前实测：独立 fixture，N=5；延迟 p50、RTF 均值 |
-| **ASR 英文 RTF (均值)** | **0.0229** (约 44 倍实时) | **0.0339** (约 30 倍实时) | **0.0377** (约 27 倍实时) | Quality 当前实测：独立英文 fixture，N=5；延迟 p50、RTF 均值 |
-| **TTS 生成 RTF (均值)** | **0.2372** (约 4.2 倍实时) | **0.2467** (约 4.1 倍实时) | **0.2832** (约 3.5 倍实时) | Quality 当前实测：统一中文文本、`default` 音色，N=5；延迟 p50 |
-| **最大同时物理占用** | **~4.7 GB** (4709.7 MB) | **~6.3 GB** (6305.9 MB) | **~7.8 GB** (7770.1 MB) | Quality 当前实测：同一 tick `phys_footprint` 较大值 |
-| **稳定物理占用** | **~4.1 GB** (4147.1 MB) | **~5.5 GB** (5542.8 MB) | **~6.6 GB** (6609.9 MB) | Quality 当前实测：持续工作稳定态物理内存 |
-| **空闲卸载待机内存** | **~50 MB**（v1.8.0） | **~50 MB**（v1.8.0） | **~50 MB**（v1.8.0） | v1.8.1 未重测；沿用此前 Worker 空闲卸载观测 |
+| **ASR 10s warm RTF p50** | **0.016** | **0.028** | **0.027** | 实际 9.36s fixture，warm N=5；越低越快 |
+| **TTS short warm RTF p50** | **0.233** | **0.246** | **0.299** | 实测 PCM 时长，warm N=5；文本仅适用于 v1.13.0 |
+| **最大同时物理占用** | **5.39 GB** (5385.0 MB) | **6.30 GB** (6304.7 MB) | **7.51 GB** (7512.6 MB) | 同一 tick `phys_footprint`，采样完整 |
+| **预热常驻物理占用** | **4.09 GB** (4088.6 MB) | **5.48 GB** (5483.5 MB) | **6.74 GB** (6742.2 MB) | 权重 fault-in 后 |
+| **Realtime ASR commit p50** | **238.2 ms** | **348.6 ms** | **373.6 ms** | 16kHz PCM16、current nested profile、连续 3 session，终态成功 3/3 |
+| **Realtime TTS first delta p50** | **25.0 ms** | **26.1 ms** | **38.4 ms** | `response.output_audio.delta`，连续 3 session |
+
+> `balanced` 与 `light` 使用 `CustomVoice`，`quality` 使用 `VoiceDesign`。共享 worker 冲突会稳定返回 `backend_busy`，不把它计为可用的并发 batch 吞吐。
 
 ---
 
