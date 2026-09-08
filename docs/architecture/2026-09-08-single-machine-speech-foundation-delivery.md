@@ -62,6 +62,8 @@ git diff --check
 
 最近的分支结果为 #21 `1272 passed`、#22 `1277 passed`、#23 `1262 passed`；差异来自彼此尚未合并的独立提交。测试包含 FastAPI fake backend，不声明真实模型质量、RTF、TTFA、DER/JER 或物理内存已通过。
 
+随后在临时组合工作树按 #20 → #21 → #22 → #23 合并当前远端 head，未出现冲突；完整 gate 于 2026-09-08 通过 `1281 passed`。该结果验证代码、契约与静态检查的组合，不替代真实模型、客户端或运行态质量验收。
+
 本机只读检查显示已运行服务的 `/health` 和 `/readyz` 可达，quality profile 的 ASR/TTS/diarization 均可按需启动且当时处于 cold-evicted 状态。`tools/probe_diarization_streaming.py` 在开发环境未发现可用的 NeMo streaming 方法，因此连续分人能力继续不广播。这是 fail-closed 结论，不是 native 分人通过。
 
 ## 尚未取得的验收证据
