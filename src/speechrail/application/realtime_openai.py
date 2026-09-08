@@ -1393,16 +1393,6 @@ class OpenAIRealtimeSession:
                 )
             )
 
-            from speechrail.domain.tts import (
-                StreamingSentenceSplitter,
-                create_breath_pause,
-            )
-
-            splitter = StreamingSentenceSplitter()
-            sentences = splitter.feed(text) + splitter.flush()
-            if not sentences:
-                sentences = [text]
-
             try:
                 import time as _time
 
@@ -1416,40 +1406,27 @@ class OpenAIRealtimeSession:
                         self._services.metrics.record_realtime_phase(
                             "tts_admission", _time.monotonic() - _admission_started
                         )
-                        for s_idx, sentence in enumerate(sentences):
-                            request = SpeechRequest(
-                                text=sentence,
-                                voice=voice,
-                                output_format="pcm16",
-                                sample_rate=24_000,
-                                speed=1.0,
-                                language=language,
-                            )
-                            async for chunk in iter_validated_audio(self._tts.synthesize(request)):
-                                if not _ttfa_recorded:
-                                    self._services.metrics.record_ttfa(_time.monotonic() - _ttfa_t0)
-                                    _ttfa_recorded = True
-                                await self._send(
-                                    response_audio_delta(
-                                        session_id=self._session_id,
-                                        response_id=response_id,
-                                        item_id=item_id,
-                                        delta=base64.b64encode(chunk.audio).decode("ascii"),
-                                        wire_profile=wire_profile,
-                                    )
+                        request = SpeechRequest(
+                            text=text,
+                            voice=voice,
+                            output_format="pcm16",
+                            sample_rate=24_000,
+                            speed=1.0,
+                            language=language,
+                        )
+                        async for chunk in iter_validated_audio(self._tts.synthesize(request)):
+                            if not _ttfa_recorded:
+                                self._services.metrics.record_ttfa(_time.monotonic() - _ttfa_t0)
+                                _ttfa_recorded = True
+                            await self._send(
+                                response_audio_delta(
+                                    session_id=self._session_id,
+                                    response_id=response_id,
+                                    item_id=item_id,
+                                    delta=base64.b64encode(chunk.audio).decode("ascii"),
+                                    wire_profile=wire_profile,
                                 )
-                            if s_idx < len(sentences) - 1:
-                                pause_pcm = create_breath_pause(sample_rate=24_000, pause_ms=80)
-                                if pause_pcm:
-                                    await self._send(
-                                        response_audio_delta(
-                                            session_id=self._session_id,
-                                            response_id=response_id,
-                                            item_id=item_id,
-                                            delta=base64.b64encode(pause_pcm).decode("ascii"),
-                                            wire_profile=wire_profile,
-                                        )
-                                    )
+                            )
             except asyncio.CancelledError:
                 raise
             except (TTSDeliveryError, GovernorQueueFullError, TimeoutError) as exc:

@@ -1833,7 +1833,7 @@ def test_realtime_prompt_exactly_at_limit_forwards_to_session() -> None:
     assert factory.sessions[0].prompt == "p" * 2000
 
 
-def test_realtime_multi_sentence_stream_in_tts() -> None:
+def test_realtime_tts_delegates_sentence_planning_to_shared_backend() -> None:
     client, _ = _client()
     with client.websocket_connect("/v1/realtime") as socket:
         socket.receive_json()
@@ -1865,7 +1865,7 @@ def test_realtime_multi_sentence_stream_in_tts() -> None:
         assert "response.created" in events
         assert "response.output_item.added" in events
         assert "response.content_part.added" in events
-        assert len(deltas) >= 2  # multiple sentences with breath pauses
+        assert len(deltas) == 1
         assert "response.audio_transcript.delta" in events
         assert "response.audio_transcript.done" in events
         assert "response.audio.done" in events
