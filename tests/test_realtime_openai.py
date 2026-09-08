@@ -1673,6 +1673,45 @@ def test_realtime_multi_sentence_stream_in_tts() -> None:
         assert events[-1] == "response.done"
 
 
+def test_realtime_current_audio_profile_emits_one_current_wire_family() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "audio": {"output": {"format": {"type": "audio/pcm", "rate": 24000}}}
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "conversation.item.created"
+        socket.send_json({"type": "response.create"})
+        events: list[str] = []
+        while True:
+            event_type = socket.receive_json()["type"]
+            events.append(event_type)
+            if event_type == "response.done":
+                break
+
+    assert "response.output_audio.delta" in events
+    assert "response.output_audio.done" in events
+    assert "response.audio.delta" not in events
+    assert "response.audio.done" not in events
+
+
 def test_realtime_partial_delta_driven_by_periodic_flush() -> None:
     """Verifies that accumulating audio frames drives flush() and produces incremental deltas."""
     client, factory = _client(
