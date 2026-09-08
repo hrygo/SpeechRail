@@ -434,10 +434,16 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
         '502':
           $ref: '#/components/responses/BackendDeliveryInvalid'
         '503':
-          $ref: '#/components/responses/BackendNotReady'
+          description: Model runtime or custom voice storage is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/jobs:
     post:
       operationId: createSpeechJob
