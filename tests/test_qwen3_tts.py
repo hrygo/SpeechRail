@@ -13,6 +13,7 @@ import pytest
 from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import SpeechRequest
+from speechrail.domain.tts import VoiceStoreUnavailableError
 
 
 class _FakeTransport:
@@ -444,6 +445,23 @@ def test_invalid_base64_or_odd_pcm_aborts_the_stream(tmp_path: Path) -> None:
             asyncio.run(consume(worker))
 
         assert fake.abort_count == 1
+
+
+def test_worker_surfaces_voice_store_error_code(tmp_path: Path) -> None:
+    worker, fake = _worker(
+        tmp_path,
+        [{"type": "error", "request_id": "pending", "code": "voice_store_unavailable"}],
+    )
+
+    async def consume() -> list[Any]:
+        return [
+            chunk
+            async for chunk in worker.synthesize(SpeechRequest(text="你好", voice="default"))
+        ]
+
+    with pytest.raises(VoiceStoreUnavailableError):
+        asyncio.run(consume())
+    assert fake.abort_count == 1
 
 
 def test_gap_or_duplicate_chunk_index_aborts_the_stream(tmp_path: Path) -> None:

@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.6.3"
-date: 2026-09-07
+version: "1.6.4"
+date: 2026-09-08
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -116,6 +116,9 @@ flowchart TD
 | 请求返回 429 `queue_full` | 并发请求超出 `MAX_QUEUE_SIZE` 配额 | 检查客户端是否发起了无界请求，按 `Retry-After` 指数退避 |
 | TTS 提示 503 `backend_not_ready` | 未同时配置 TTS 模型目录与 Dedicated Python | 检查 `.env` 中 `SPEECHRAIL_QWEN3_TTS_*` 两项配置并重启服务 |
 | TTS 返回 503 `backend_timeout` | 队列准入、worker 生成或流交付超过 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 总 deadline | 记录 `request_id`，缩短输入或分块；确认同机没有长期占用的 TTS 请求 |
+| `/v1/voices` 或自定义 TTS 返回 503 `voice_store_unavailable` | `custom_voices.json` 损坏/不可读，或受控音频目录无法安全写入/清理 | 停止写入操作，先备份并逐字节保留 registry；修复 JSON 类型、`voices/` 权限或残留音频后重启并复核 `/v1/voices` |
+| 删除音色返回 409 `voice_in_use` | 当前 TTS 请求仍持有该音色的读租约 | 等待请求完成或取消后再删除；不要手工删除受控 WAV |
+| 删除音色返回 503 且 metadata 已消失 | JSON 提交已完成，受控音频 unlink 失败 | 保留 `custom_voices.json`，修复 `~/.speechrail/voices/` 权限/磁盘后按原 voice ID 检查并清理残留 WAV；不要回写过期 metadata |
 
 ---
 

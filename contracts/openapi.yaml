@@ -47,6 +47,7 @@ paths:
                 profile: quality
                 asr_ready: true
                 tts_ready: true
+                tts_warm: true
                 diarization_ready: false
                 diarization:
                   configured: false
@@ -216,6 +217,8 @@ paths:
                 $ref: '#/components/schemas/VoiceList'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
     post:
       operationId: createVoice
       tags: [speech]
@@ -240,6 +243,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/voices/clone/prompts:
     get:
       operationId: listClonePrompts
@@ -284,6 +289,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '413':
           $ref: '#/components/responses/AudioTooLarge'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/voices/previews:
     post:
       operationId: createVoicePreview
@@ -366,6 +373,10 @@ paths:
           description: System voices are protected and cannot be deleted
         '404':
           description: Voice not found
+        '409':
+          $ref: '#/components/responses/VoiceInUse'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
   /v1/audio/speech:
     post:
       operationId: createSpeech
@@ -377,7 +388,9 @@ paths:
         16-bit little-endian mono samples as they are produced. Clients should
         select a voice with `available=true` from `/v1/voices`; a registered
         voice unsupported by the active TTS weights returns
-        `400 voice_not_available` before inference starts.
+        `400 voice_not_available` before inference starts. A corrupt or
+        unreadable custom voice registry returns `503 voice_store_unavailable`;
+        system voices remain available.
       security:
         - BearerAuth: []
         - {}
@@ -1175,6 +1188,23 @@ components:
             $ref: '#/components/schemas/ErrorBody'
     BackendDeliveryInvalid:
       description: TTS worker delivered an invalid audio stream
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    VoiceStoreUnavailable:
+      description: Custom voice metadata or audio storage is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    VoiceInUse:
+      description: Custom voice has an active synthesis reader lease
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
       content:
         application/json:
           schema:

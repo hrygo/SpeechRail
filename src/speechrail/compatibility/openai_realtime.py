@@ -16,7 +16,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from speechrail.domain.diarization import DiarizationConfig
-from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
+from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, resolve_voice
 
 _PROTOCOL_VERSION = "realtime=v1"
 RealtimeWireProfile = Literal["legacy", "current"]
@@ -823,6 +823,10 @@ def apply_session_update(
             profile = get_voice_profile(preset_voice)
             if profile.is_system and preset_voice not in tts_voice_ids:
                 raise ValueError(f"voice {preset_voice} not configured")
+        except VoiceStoreUnavailableError:
+            raise RealtimeAdapterError(
+                "voice_store_unavailable", "custom voice storage is unavailable"
+            ) from None
         except ValueError:
             raise RealtimeAdapterError(
                 "voice_not_found", f"unknown voice: {preset_voice[:200]}"

@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.7.0"
-date: 2026-09-06
+version: "1.8.0"
+date: 2026-09-08
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -213,7 +213,7 @@ Authorization: Bearer <TOKEN>
 - `id` (string, 可选)：自定义音色标识符。若不提供则自动生成 `custom_<timestamp>_<rand>`。
 - `seed` (integer, 可选)：`0`–`4294967295` 的确定性采样种子；传入后固定该 recipe，未传入则由服务生成并持久化。
 
-**持久化机制**：创建成功的音色会使用请求提供的 Seed，或由服务自动分配固定 Seed，并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。切换到 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回 `quality` 后恢复。
+**持久化机制**：创建成功的音色会使用请求提供的 Seed，或由服务自动分配固定 Seed，并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。克隆音频使用受控目录内的不可变文件名（`<voice_id>.<uuid>.wav`）；历史的 `<voice_id>.wav` 引用仍可读取。损坏、不可读或结构非法的 registry 会保留原文件并进入 fail-closed 状态，列表、写入和自定义音色解析返回 `503 voice_store_unavailable`，系统预置音色仍可使用。切换到 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回 `quality` 后恢复。
 
 ### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
 ```http
@@ -222,7 +222,10 @@ Authorization: Bearer <TOKEN>
 ```
 - 若删除成功，返回 `{"status": "deleted", "id": "custom_1788583825_59b3"}`；
 - 若尝试删除九个系统角色或任一保留 alias，系统返回 `403 Forbidden`；
-- 若音色不存在，返回 `404 Not Found`。
+- 若音色不存在，返回 `404 Not Found`；
+- 若音色正在被 TTS 使用，返回可重试的 `409 voice_in_use`，不会修改 registry 或音频；
+- metadata 已删除但音频清理失败时返回 `503 voice_store_unavailable`，调用方应保留
+  `request_id` 并按运维手册处理受控目录中的残留文件。
 
 ### 5.5 在语音合成中使用自定义音色
 创建成功后，自建音色的 `id` 可直接传入任何合成接口：
@@ -308,5 +311,7 @@ Authorization: Bearer <TOKEN>
 | **413** | `audio_too_large` | `false` | 音频大小超出 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制 |
 | **422** | `audio_decode_failed` | `false` | 上传文件损坏或非标准音频容器，检查文件有效性 |
 | **429** | `queue_full` | `true` | 当前并发超出 Governor 配额，按 `Retry-After` 重试 |
+| **409** | `voice_in_use` | `true` | 自定义音色仍有活动 TTS 读者，等待当前合成完成后重试删除 |
 | **503** | `backend_not_ready` | `true` | 对应模型 Worker 尚未启动或预检未通过，等待就绪 |
 | **503** | `backend_timeout` | `true` | 队列准入、worker 生成或音频交付超出总 deadline，减小音频分块 |
+| **503** | `voice_store_unavailable` | `true` | 自定义音色 registry 或音频存储不可读/不可写，先保留原文件并按手册修复 |

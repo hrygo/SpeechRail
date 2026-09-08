@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import wave
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from speechrail.config import Settings
 from speechrail.config.model_catalog import QuantizationSpec, load_catalog
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import (
+    VoiceInUseError,
     VoiceRegistry,
     transcode_and_validate_clone_audio,
 )
@@ -108,6 +110,70 @@ def test_voice_registry_cloned_profile_lifecycle(tmp_path: Path) -> None:
     assert not Path(profile.audio_path).is_file()
     with pytest.raises(ValueError, match="unknown preset voice"):
         registry.get_profile("my_custom_clone_1")
+
+
+def test_clone_replacement_keeps_immutable_reference_until_lease_release(tmp_path: Path) -> None:
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    first = registry.create_cloned_profile(
+        name="first",
+        ref_text="旧文本",
+        audio_bytes=_generate_test_wav(3.0),
+        voice_id="replaceable_clone",
+        duration_seconds=3.0,
+    )
+    assert first.audio_path is not None
+    old_path = Path(first.audio_path)
+
+    with registry.lease_profile("replaceable_clone") as leased:
+        second = registry.create_cloned_profile(
+            name="second",
+            ref_text="新文本",
+            audio_bytes=_generate_test_wav(4.0),
+            voice_id="replaceable_clone",
+            duration_seconds=4.0,
+        )
+        assert second.audio_path is not None
+        assert second.audio_path != first.audio_path
+        assert leased.audio_path == first.audio_path
+        assert old_path.is_file()
+        assert Path(second.audio_path).is_file()
+        with pytest.raises(VoiceInUseError):
+            registry.delete_custom_profile("replaceable_clone")
+
+    assert not old_path.exists()
+    assert Path(second.audio_path).is_file()
+    registry.delete_custom_profile("replaceable_clone")
+    assert not Path(second.audio_path).exists()
+
+
+def test_legacy_voice_audio_filename_remains_readable(tmp_path: Path) -> None:
+    storage_path = tmp_path / "custom_voices.json"
+    voices_dir = tmp_path / "voices"
+    voices_dir.mkdir()
+    legacy_path = voices_dir / "legacy_clone.wav"
+    legacy_path.write_bytes(_generate_test_wav(3.0))
+    storage_path.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "legacy_clone",
+                    "name": "legacy",
+                    "mode": "clone",
+                    "ref_text": "旧格式",
+                    "audio_path": str(legacy_path),
+                    "duration_seconds": 3.0,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    profile = registry.get_profile("legacy_clone")
+    assert profile.audio_path == str(legacy_path.resolve())
 
 
 def test_voice_registry_security_validations(tmp_path: Path) -> None:

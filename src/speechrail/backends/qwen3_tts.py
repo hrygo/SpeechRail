@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
+from speechrail.domain.tts import VoiceStoreUnavailableError
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -223,79 +224,95 @@ class Qwen3TtsWorker:
         """Yield ordered public PCM chunks while serializing private worker access."""
 
         async def stream() -> AsyncIterator[AudioChunk]:
-            async with self._lock:
-                if not self._started:
-                    await self._start_locked()
-                epoch = self._epoch
-                self.last_active = time.monotonic()
-                response_id = f"resp_{uuid4().hex}"
-                frame_payload: dict[str, object] = {
-                    "version": PROTOCOL_VERSION,
-                    "type": "synthesize",
-                    "request_id": response_id,
-                    "text": request.text,
-                    "voice": request.voice,
-                    "speed": request.speed,
-                    "language": request.language,
-                }
-                if request.instruction is not None:
-                    frame_payload["instruction"] = request.instruction
-                if request.seed is not None:
-                    frame_payload["seed"] = request.seed
-                try:
-                    from speechrail.backends.qwen3_voice_binding import resolve_binding
+            from speechrail.backends.qwen3_voice_binding import resolve_binding
+            from speechrail.domain.tts import get_voice_registry
 
-                    binding = resolve_binding(self.model_variant or "voice_design", request.voice)
+            # Keep the immutable clone reference alive until the worker has
+            # completed (or the abort/reap path has finished).  The registry
+            # lock itself is held only for the short snapshot/refcount steps.
+            with get_voice_registry().lease_profile(request.voice) as profile:
+                async with self._lock:
+                    if not self._started:
+                        await self._start_locked()
+                    epoch = self._epoch
+                    self.last_active = time.monotonic()
+                    response_id = f"resp_{uuid4().hex}"
+                    frame_payload: dict[str, object] = {
+                        "version": PROTOCOL_VERSION,
+                        "type": "synthesize",
+                        "request_id": response_id,
+                        "text": request.text,
+                        "voice": request.voice,
+                        "speed": request.speed,
+                        "language": request.language,
+                    }
+                    if request.instruction is not None:
+                        frame_payload["instruction"] = request.instruction
+                    if request.seed is not None:
+                        frame_payload["seed"] = request.seed
+                    binding = resolve_binding(
+                        self.model_variant or "voice_design",
+                        request.voice,
+                        profile=profile,
+                    )
                     if binding.is_clone and binding.ref_audio_path:
                         frame_payload["ref_audio"] = binding.ref_audio_path
                         frame_payload["ref_text"] = binding.ref_text or ""
-                except Exception:
-                    pass
-                await self._transport.send(frame_payload)
-                expected_chunk_index = 0
-                completed = False
-                try:
-                    while True:
-                        frame = await self._receive_profile_frame()
-                        if frame.get("request_id") != response_id:
-                            raise RuntimeError("worker_response_id_mismatch")
-                        if frame.get("type") == "completed":
-                            self._record_completion_stats(frame)
-                            completed = True
-                            return
-                        if frame.get("type") == "error":
-                            raise RuntimeError(error_frame_message(frame, "worker_inference_error"))
-                        if frame.get("type") != "audio":
-                            raise RuntimeError("worker_frame_invalid")
-                        chunk_index = frame.get("chunk_index")
-                        raw_binary = frame.get("_binary")
-                        encoded = frame.get("pcm_b64")
-                        audio: bytes
-                        if isinstance(raw_binary, bytes) and raw_binary:
-                            audio = raw_binary
-                        elif isinstance(encoded, str):
-                            try:
-                                audio = base64.b64decode(encoded, validate=True)
-                            except (ValueError, TypeError) as exc:
-                                raise RuntimeError("worker_audio_frame_invalid") from exc
-                        else:
-                            raise RuntimeError("worker_audio_frame_invalid")
-                        if chunk_index != expected_chunk_index or not audio or len(audio) % 2:
-                            raise RuntimeError("worker_audio_frame_invalid")
+                    await self._transport.send(frame_payload)
+                    expected_chunk_index = 0
+                    completed = False
+                    try:
+                        while True:
+                            frame = await self._receive_profile_frame()
+                            if frame.get("request_id") != response_id:
+                                raise RuntimeError("worker_response_id_mismatch")
+                            if frame.get("type") == "completed":
+                                self._record_completion_stats(frame)
+                                completed = True
+                                return
+                            if frame.get("type") == "error":
+                                if frame.get("code") == "voice_store_unavailable":
+                                    raise VoiceStoreUnavailableError(
+                                        "custom voice storage is unavailable"
+                                    )
+                                raise RuntimeError(
+                                    error_frame_message(frame, "worker_inference_error")
+                                )
+                            if frame.get("type") != "audio":
+                                raise RuntimeError("worker_frame_invalid")
+                            chunk_index = frame.get("chunk_index")
+                            raw_binary = frame.get("_binary")
+                            encoded = frame.get("pcm_b64")
+                            audio: bytes
+                            if isinstance(raw_binary, bytes) and raw_binary:
+                                audio = raw_binary
+                            elif isinstance(encoded, str):
+                                try:
+                                    audio = base64.b64decode(encoded, validate=True)
+                                except (ValueError, TypeError) as exc:
+                                    raise RuntimeError("worker_audio_frame_invalid") from exc
+                            else:
+                                raise RuntimeError("worker_audio_frame_invalid")
+                            if (
+                                chunk_index != expected_chunk_index
+                                or not audio
+                                or len(audio) % 2
+                            ):
+                                raise RuntimeError("worker_audio_frame_invalid")
+                            self.last_active = time.monotonic()
+                            yield AudioChunk(
+                                response_id=response_id,
+                                chunk_index=expected_chunk_index,
+                                audio=audio,
+                            )
+                            expected_chunk_index += 1
+                    finally:
                         self.last_active = time.monotonic()
-                        yield AudioChunk(
-                            response_id=response_id,
-                            chunk_index=expected_chunk_index,
-                            audio=audio,
-                        )
-                        expected_chunk_index += 1
-                finally:
-                    self.last_active = time.monotonic()
-                    if not completed and self._epoch == epoch:
-                        self._started = False
-                        self._fallback_abort_count += 1
-                        self._record_delivery_event("abort_fallback")
-                        await self._transport.abort()
+                        if not completed and self._epoch == epoch:
+                            self._started = False
+                            self._fallback_abort_count += 1
+                            self._record_delivery_event("abort_fallback")
+                            await self._transport.abort()
 
         return stream()
 

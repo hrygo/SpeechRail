@@ -38,7 +38,12 @@ from speechrail.domain.ports import (
     StreamingBatchTranscriber,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice, tts_voice_class
+from speechrail.domain.tts import (
+    DEFAULT_VOICE_ID,
+    VoiceStoreUnavailableError,
+    resolve_voice,
+    tts_voice_class,
+)
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
@@ -1065,6 +1070,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ):
                     pcm_counter.accept(len(chunk.audio))
                     pcm.extend(chunk.audio)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except TTSDeliveryError as exc:
             return error_response(
                 502,
@@ -1174,6 +1187,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
             profile = get_voice_profile(preset_voice)
             if profile.is_system and preset_voice not in resolved.tts_voice_ids:
                 raise ValueError(f"voice {preset_voice} not configured")
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except ValueError:
             return error_response(
                 400,
@@ -1185,6 +1206,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if tts_variant in {"voice_design", "custom_voice"}:
             try:
                 resolve_binding(tts_variant, preset_voice)
+            except VoiceStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_store_unavailable",
+                    "Custom voice storage is unavailable",
+                    retryable=True,
+                )
             except ValueError:
                 return error_response(
                     400,
@@ -1269,6 +1298,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
             _tts_t0 = _time.monotonic()
             try:
                 first = await await_until(anext(pcm_stream, b""), expires_at)
+            except VoiceStoreUnavailableError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_store_unavailable",
+                    "Custom voice storage is unavailable",
+                    retryable=True,
+                )
             except TTSDeliveryError as exc:
                 await _close_audio_stream(pcm_stream)
                 return error_response(
@@ -1360,6 +1398,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
             _tts_t0 = _time.monotonic()
             try:
                 first = await await_until(anext(encoded_stream, b""), expires_at)
+            except VoiceStoreUnavailableError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_store_unavailable",
+                    "Custom voice storage is unavailable",
+                    retryable=True,
+                )
             except TTSDeliveryError as exc:
                 await _close_audio_stream(encoded_stream)
                 return error_response(
@@ -1438,6 +1485,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             async for chunk in audio_stream(counter=pcm_counter):
                 pcm.extend(chunk)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except TTSDeliveryError as exc:
             return error_response(
                 502,
