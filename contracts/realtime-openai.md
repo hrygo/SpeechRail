@@ -86,6 +86,9 @@ ws://127.0.0.1:8201/v1/realtime
 `event_id`/`session_id`/`sequence` 是相对 OpenAI 的加法字段，标准 SDK 宽松解析容忍。
 本服务器不发送 `rate_limits.updated`（单机部署无多租户配额语义）。
 
+`/metrics` 仅记录低基数的 Realtime 阶段耗时：`asr_admission`、`tts_admission` 与 `send`。
+它们分别覆盖准入等待和服务端发送停顿，不能替代客户端实际播放延迟。
+
 ## 转写语义
 
 `conversation.item.input_audio_transcription.delta`（partial）在推流累积达到时间窗时自动驱动，
