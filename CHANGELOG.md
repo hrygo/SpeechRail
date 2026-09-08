@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-09-08
+
+### Fixed
+
+- Sortformer 在 EOF 时补足私有右上下文并裁回真实 PCM 时间轴，避免尾部已讲话 token 因未覆盖的最终帧而使 `diarized_json` 返回 `diarization_unresolved`。
+- CoreML diarization worker 现在有界排空 stderr，并将子进程传输故障映射为稳定的 `diarization_invalid_output`，避免管道反压和私有诊断内容泄露。
+- 本机 managed 首装会准备并校验 CoreML Sortformer 与 Qwen3 ForcedAligner；已修复的活动阈值与音色克隆流式块处理随此 patch 一同交付。
+
 ## [2.0.0] - 2026-09-08
 
 ### Added
