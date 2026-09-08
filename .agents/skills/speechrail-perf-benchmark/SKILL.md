@@ -45,7 +45,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
    worker 为懒加载时，采样器必须在预热后重新发现受管进程；预热前固定 PID 集合而漏掉新 worker 的结果无效。
 7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
-9. API key 只从环境读取，不出现在命令、报告或日志中。
+9. API key 由共享 resolver 读取：显式 `SPEECHRAIL_API_KEY` 优先，其次是 `SPEECHRAIL_APP_HOME`（默认 managed app home）下的 `config/.env`；不得 `source` 配置，不出现在命令、报告或日志中。
 10. 基准开始、每次切档前和最终恢复后都要隔离外部 realtime 客户端：用 `lsof -nP -iTCP:<port>` 排除 `ESTABLISHED` 连接，并用已配置鉴权读取 `/metrics` 确认 `realtime_active_sessions=0`、batch/realtime active requests 均为 0。Sona、浏览器标签页或其它客户端不会随服务 stop 自动断开；发现活动客户端时暂停采集并报告阻塞，等待客户端自行断开，只有用户明确授权才按精确 PID 关闭指定客户端。顺序 ASR 仍返回 `429 backend_busy` 时停止采集并记录根因，不循环重试或复用旧数据。
 
 ## 4. 基础发布套件（每个 profile）
@@ -85,8 +85,9 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 工具入口：
 
 ```bash
-python3 examples/perf/bench_profiles.py \
+uv run python examples/perf/bench_profiles.py \
   --base-url http://127.0.0.1:8201 \
+  --app-home "${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}" \
   --manifest <repo-external-manifest.json> \
   --profile <quality|balanced|light> \
   --phase warm \
@@ -94,6 +95,8 @@ python3 examples/perf/bench_profiles.py \
 ```
 
 正式 benchmark 只接受外部 manifest 和外部 fixture；`prepare_fixtures.py` 仅用于开发调试，不得作为发布基准入口。`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开；fixture 标签必须是安全的 opaque id/language tag。
+
+benchmark 启动后会先访问一个只读受保护路由探测鉴权；若返回 `401`，在任何 ASR/TTS 推理前停止并修正 `--app-home` 或环境变量，不把无鉴权请求写入结果。keyless loopback 服务返回非 `401` 时继续执行。
 
 ## 5. 质量与音色稳定性套件
 
@@ -126,6 +129,8 @@ python3 examples/perf/bench_profiles.py \
 ## 6. 档位切换与恢复
 
 切档是停服事务，不是普通热重启。`launchctl bootout` 返回不代表旧 ASGI 父进程或 vendor worker 已退出；每次切档必须使用本机部署 skill 的生命周期 controller：先 bootout，最多等待 2 秒获取同一个 per-port singleton lock；仍占用时重新核对当前 lock owner、命令行和 executable，只对仍然匹配的精确 PID/进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。lock 未释放、PID 不安全、身份不一致或无法确认旧服务身份时立即停止基准，不启动候选。详见 [speechrail-local-deploy 生命周期 SOP](../speechrail-local-deploy/references/lifecycle.md)。
+
+所有 `service` 和 `profile` 操作都显式传入 `--app-home`；带 `--app-home` 的 CLI 会自动使用 `runtime/current/.venv/bin/python`，因此不再从源码 checkout 手工拼接 managed preflight 或启动命令。
 
 MINOR/MAJOR：
 

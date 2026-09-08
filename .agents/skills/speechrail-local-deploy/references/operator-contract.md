@@ -8,6 +8,8 @@
 - 允许完全停服和数分钟级启动真空。效率来自减少重复检查和重复重启，不来自并行启动第二个实例。
 - 所有替换、切档和回滚都先停旧实例；`launchctl bootout` 成功不等于进程和 vendor worker 已退出。
 - 只使用用户级 LaunchAgent、managed `runtime/current`、私有配置和锁定的模型/runtime 制品。
+- 从源码 checkout 执行带 `--app-home` 的 service 命令时，CLI 会自动转交给
+  `runtime/current/.venv/bin/python`；若 managed runtime 不存在，不得用源码依赖结果代替安装态判断。
 
 ## 唯一生命周期流程
 
@@ -35,6 +37,8 @@
 - 原始 JSON、音频、日志和采样制品放在 app home 外部 benchmark 目录；Git 只保存脱敏汇总报告。
 - release gate 需要真实硬件/模型身份、独立质量证据、成功公共推理和每个 tick 均完整的同 tick 资源采样；通用的 `arm`/`arm64` 只能算架构，不能算芯片身份；缺任何一项、采样线程异常或停止超时就写 `unset`/`fail`。
 - manifest 的 fixture `id` 和 `language` 只能使用安全标签；原始路径、任意 token、文本和音频不得进入结果 JSON 或归档报告。
+- benchmark、CLI diagnose 和本机辅助脚本统一按 `SPEECHRAIL_API_KEY` 环境变量优先、managed
+  `config/.env` 回退的顺序读取 key；不得 `source` 配置、把 key 写进命令行、日志或结果。
 - `PATCH` 测 active profile；`MINOR` 按 `quality → balanced → light → quality` 串行执行并恢复初始档；`MAJOR` 在此基础上加入迁移与兼容验证。
 
 ## 完成证据

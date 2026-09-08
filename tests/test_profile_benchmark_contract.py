@@ -48,6 +48,27 @@ def test_profile_benchmark_has_one_modular_entrypoint() -> None:
     ).exists()
 
 
+def test_perf_clients_use_shared_api_key_discovery() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    client_paths = (
+        project_root / "examples" / "perf" / "bench_asr.py",
+        project_root / "examples" / "perf" / "bench_tts.py",
+        project_root / "examples" / "perf" / "bench_realtime.py",
+        project_root / "examples" / "perf" / "concurrent_realtime_smoke.py",
+        project_root
+        / ".agents"
+        / "skills"
+        / "speechrail-perf-benchmark"
+        / "scripts"
+        / "prepare_fixtures.py",
+    )
+
+    for path in client_paths:
+        content = path.read_text(encoding="utf-8")
+        assert "os.environ.get(\"SPEECHRAIL_API_KEY\")" not in content
+        assert "resolve_api_key" in content or "build_auth_headers" in content
+
+
 def test_process_resource_monitor_records_same_tick_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -748,6 +769,51 @@ def test_auth_header_reads_environment_without_redacting_into_result(
     assert runner.requests
     assert all(request[3].get("Authorization") == f"Bearer {secret}" for request in runner.requests)
     assert secret not in json.dumps(result)
+
+
+def test_explicit_auth_header_rejects_header_injection_characters() -> None:
+    with pytest.raises(ValueError, match="invalid characters"):
+        build_auth_headers("bad\nkey")
+
+
+def test_auth_header_discovers_private_app_home_without_environment_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "config" / ".env"
+    config.parent.mkdir(parents=True)
+    config.write_text('SPEECHRAIL_API_KEY="managed-key"\n', encoding="utf-8")
+    config.chmod(0o600)
+    monkeypatch.delenv("SPEECHRAIL_API_KEY", raising=False)
+
+    assert build_auth_headers(app_home=tmp_path) == {
+        "Authorization": "Bearer managed-key"
+    }
+
+
+def test_benchmark_auth_failure_stops_before_inference_request(tmp_path: Path) -> None:
+    manifest, _ = _manifest(tmp_path)
+    delegate = _FakeHttpRunner()
+
+    def runner(
+        method: str,
+        url: str,
+        body: bytes | None,
+        headers: Mapping[str, str],
+    ) -> HttpResponse:
+        if url.endswith("/v1/jobs/__speechrail_benchmark_auth_probe__"):
+            return HttpResponse(status_code=401)
+        return delegate(method, url, body, headers)
+
+    with pytest.raises(ValueError, match="server rejected benchmark authentication"):
+        run_profile_benchmark(
+            "http://127.0.0.1:8201",
+            manifest,
+            profile="light",
+            phase="quality",
+            dependencies=_dependencies(runner),
+        )
+
+    assert delegate.requests == []
 
 
 def test_default_sampler_keeps_fully_passed_manifest_closed(tmp_path: Path) -> None:

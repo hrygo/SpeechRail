@@ -37,6 +37,12 @@ def test_layout_keeps_current_runtime_as_a_symlink_path(tmp_path: Path) -> None:
     assert layout.current_runtime == app_home / "runtime" / "current"
 
 
+def test_layout_exposes_the_managed_python_path(tmp_path: Path) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+
+    assert layout.current_python == layout.current_runtime / ".venv" / "bin" / "python"
+
+
 def test_layout_rejects_relative_app_home(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="app home must be absolute"):
         ServiceLayout.for_app_home(Path("relative"), user_home=tmp_path)

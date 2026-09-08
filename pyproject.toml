@@ -1,6 +1,6 @@
 [project]
 name = "speechrail"
-version = "2.0.2"
+version = "2.0.3"
 description = "Local-first shared speech recognition service with OpenAI-compatible APIs"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -5,8 +5,8 @@ POST /v1/audio/transcriptions. Requires a running service with a real
 backend (asr_ready=true); do not run against a fake backend.
 
 Usage:
-  python examples/perf/bench_asr.py --audio audio_10s.wav audio_30s.wav
-  python examples/perf/bench_asr.py --audio audio_10s.wav --workers 4 --n 8
+  uv run python examples/perf/bench_asr.py --audio audio_10s.wav audio_30s.wav
+  uv run python examples/perf/bench_asr.py --audio audio_10s.wav --workers 4 --n 8
 """
 
 from __future__ import annotations
@@ -14,20 +14,23 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
-import os
 import statistics
 import subprocess
 import time
 from pathlib import Path
 from urllib import request
 
+try:
+    from .benchmark_http import build_auth_headers
+except ImportError:  # pragma: no cover - exercised when run as a script
+    from benchmark_http import build_auth_headers  # type: ignore[no-redef]
+
 DEFAULT_BASE = "http://127.0.0.1:8201/v1/audio/transcriptions"
 
 
-def auth_headers() -> dict[str, str]:
-    """Return an Authorization header when SPEECHRAIL_API_KEY is configured."""
-    key = os.environ.get("SPEECHRAIL_API_KEY")
-    return {"Authorization": f"Bearer {key}"} if key else {}
+def auth_headers(app_home: Path | None = None) -> dict[str, str]:
+    """Return an Authorization header from the shared local key resolver."""
+    return build_auth_headers(app_home=app_home)
 
 
 def audio_duration(path: Path) -> float:
@@ -39,7 +42,9 @@ def audio_duration(path: Path) -> float:
     return float(out)
 
 
-def transcribe(base: str, path: Path, model: str) -> tuple[float, str | None]:
+def transcribe(
+    base: str, path: Path, model: str, app_home: Path | None = None
+) -> tuple[float, str | None]:
     boundary = "----speechrail-perf"
     body = bytearray()
     for name, value in (("model", model), ("response_format", "json")):
@@ -55,7 +60,7 @@ def transcribe(base: str, path: Path, model: str) -> tuple[float, str | None]:
     body += f"\r\n--{boundary}--\r\n".encode()
     headers = {
         "Content-Type": f"multipart/form-data; boundary={boundary}",
-        **auth_headers(),
+        **auth_headers(app_home),
     }
     req = request.Request(base, data=bytes(body), headers=headers)
     t0 = time.monotonic()
@@ -71,9 +76,13 @@ def run_single(args: argparse.Namespace) -> None:
         duration = audio_duration(path)
         latencies: list[float] = []
         for _ in range(args.n):
-            elapsed, text = transcribe(args.base, path, args.model)
+            elapsed, text = transcribe(args.base, path, args.model, args.app_home)
             latencies.append(elapsed)
-            print(f"  {path.name}: {elapsed:.2f}s text={text!r}")
+            print(
+                f"  {path.name}: {elapsed:.2f}s "
+                f"text_present={bool(text and text.strip())} "
+                f"text_chars={len(text or '')}"
+            )
         mean = statistics.mean(latencies)
         print(
             f"  => {path.name}: duration={duration:.1f}s mean={mean:.2f}s "
@@ -88,7 +97,10 @@ def run_concurrent(args: argparse.Namespace) -> None:
     t0 = time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         results = list(
-            pool.map(lambda _: transcribe(args.base, path, args.model), range(args.n))
+            pool.map(
+                lambda _: transcribe(args.base, path, args.model, args.app_home),
+                range(args.n),
+            )
         )
     wall = time.monotonic() - t0
     latencies = [r[0] for r in results]
@@ -106,6 +118,7 @@ def main() -> None:
     parser.add_argument("--audio", nargs="+", required=True)
     parser.add_argument("--model", default="speechrail/qwen3-asr-1.7b")
     parser.add_argument("--base", default=DEFAULT_BASE)
+    parser.add_argument("--app-home", type=Path, help="managed app home for API-key discovery")
     parser.add_argument("--n", type=int, default=3)
     parser.add_argument("--workers", type=int, default=0, help="0=sequential single")
     args = parser.parse_args()

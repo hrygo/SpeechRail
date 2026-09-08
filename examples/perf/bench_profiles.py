@@ -14,6 +14,7 @@ try:
         _json_body,
         _probe,
         build_auth_headers,
+        ensure_authentication,
         validate_base_url,
     )
     from .benchmark_manifest import (
@@ -56,6 +57,7 @@ except ImportError:  # pragma: no cover - exercised when run as a script
         _json_body,
         _probe,
         build_auth_headers,
+        ensure_authentication,
         validate_base_url,
     )
     from benchmark_manifest import (  # type: ignore[no-redef]
@@ -115,6 +117,7 @@ __all__ = [
     "_sanitize_mapping",
     "_sanitize_model_identity",
     "build_auth_headers",
+    "ensure_authentication",
     "load_manifest",
     "main",
     "required_phases",

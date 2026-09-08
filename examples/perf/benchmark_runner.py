@@ -19,6 +19,7 @@ try:
         _fixture_request,
         _probe,
         build_auth_headers,
+        ensure_authentication,
         validate_base_url,
     )
     from .benchmark_manifest import (
@@ -47,6 +48,7 @@ except ImportError:  # pragma: no cover - exercised when run as a script
         _fixture_request,
         _probe,
         build_auth_headers,
+        ensure_authentication,
         validate_base_url,
     )
     from benchmark_manifest import (  # type: ignore[no-redef]
@@ -87,6 +89,7 @@ def run_profile_benchmark(
     *,
     profile: str,
     phase: str,
+    app_home: Path | None = None,
     dependencies: BenchmarkDependencies | None = None,
 ) -> dict[str, object]:
     """Run one evidence collection phase through the public HTTP API."""
@@ -104,7 +107,7 @@ def run_profile_benchmark(
         else dependencies
     )
     injected_dependencies = dependencies is not None
-    auth_headers = build_auth_headers()
+    auth_headers = build_auth_headers(app_home=app_home)
     runner = _default_http_runner if deps.http_runner is None else deps.http_runner
     clock = deps.clock
     ffprobe = _default_ffprobe if deps.ffprobe is None else deps.ffprobe
@@ -124,6 +127,7 @@ def run_profile_benchmark(
 
     raw_system: Mapping[str, object] = MappingProxyType({})
     try:
+        ensure_authentication(runner, normalized_base, auth_headers)
         health, health_status = _probe(runner, normalized_base, "/health", auth_headers)
         readyz, readyz_status = _probe(runner, normalized_base, "/readyz", auth_headers)
         models, models_status = _probe(runner, normalized_base, "/v1/models", auth_headers)
@@ -310,6 +314,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--phase", required=True)
+    parser.add_argument(
+        "--app-home",
+        type=Path,
+        help="managed SpeechRail app home used for automatic API-key discovery",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -318,6 +327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.manifest,
             profile=args.profile,
             phase=args.phase,
+            app_home=args.app_home,
         )
         write_result(result, args.output)
     except (BenchmarkInputError, OSError, TypeError, ValueError) as exc:

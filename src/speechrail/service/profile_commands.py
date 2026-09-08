@@ -150,7 +150,7 @@ def _switch_prepared(prepared_id: str, app_home: Path) -> ApplyResult:
     preflight = run_preflight(
         layout,
         require_tts=True,
-        host_python=layout.current_runtime / ".venv" / "bin" / "python",
+        host_python=layout.current_python,
     )
     if not preflight.ok:
         raise ProfileCommandError("managed runtime preflight failed")

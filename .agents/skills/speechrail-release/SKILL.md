@@ -57,7 +57,7 @@ curl --fail http://127.0.0.1:8201/health
 
 发布、切档和性能 smoke 前还必须隔离外部 realtime 客户端：用 `lsof -nP -iTCP:8201` 查找 `ESTABLISHED` 连接，用已配置鉴权读取 `/metrics` 确认 `speechrail_realtime_active_sessions=0`、batch/realtime governor active requests 均为 0。Sona、浏览器或其它客户端的连接不会随 SpeechRail `bootout` 自动释放；发现活动客户端时暂停发布并报告阻塞，等待客户端自行断开，只有用户明确授权才按已核验的精确 PID 关闭指定客户端。若公共 ASR 仍返回 `429 backend_busy`，停止发布并保留证据，不循环重试。
 
-执行 `speechrail service preflight --app-home "$APP_HOME"`，确认它通过 managed runtime 的 Python；不要从源码 `.venv` 推断已安装 wheel 的依赖。
+执行 `speechrail service preflight --app-home "$APP_HOME"`。CLI 会在当前进程不是 active managed runtime 时自动转交给 `runtime/current/.venv/bin/python`；不要从源码 `.venv` 推断已安装 wheel 的依赖，也不要手工拼接另一套 preflight 命令。
 
 ## 3. 更新版本材料
 
@@ -107,7 +107,7 @@ rg -F -n 'src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=37
 
 ```bash
 env -u SPEECHRAIL_API_KEY uv run --extra dev pytest
-uv run --extra dev ruff check src tests tools
+uv run --extra dev ruff check src tests tools examples/perf .agents/skills/speechrail-perf-benchmark/scripts/prepare_fixtures.py
 uv run --extra dev mypy src
 npx @redocly/cli lint contracts/openapi.yaml
 plutil -lint deploy/macos/com.speechrail.plist.example
@@ -157,7 +157,7 @@ lsof -nP -iTCP:8201 -sTCP:LISTEN
 - `/health.version`、wheel metadata、`runtime/current` release 和发布记录一致；ASR/TTS ready；
 - `/health.profile`、`/v1/models` 的 profile/artifact/variant/quantization 与 selection 一致；
 - `/readyz` 为 200，`/v1/voices` 的 availability/capabilities 与当前 TTS variant 一致；
-- 真实、非敏感 fixture 的 ASR/TTS 都返回 200、非空结果和 request ID（私有 `.env` 配置 API key 时，须用该 key 鉴权，从 `.env` 读取且**不回显**）；
+- 真实、非敏感 fixture 的 ASR/TTS 都返回 200、非空结果和 request ID（私有 `.env` 配置 API key 时，benchmark/CLI 会自动读取且**不回显**；只有显式 `SPEECHRAIL_API_KEY` 才覆盖文件值）；
 - 没有外部 established realtime connection，`realtime_active_sessions=0`，batch/realtime active requests 均为 0；
 - 通过一次“第二实例应失败”的检查（启动同一端口的 `speechrail serve` 得到 `server_already_running`），然后不留下第二进程。macOS 无 GNU `timeout`，用 `python -c 'import subprocess,os; subprocess.run([...], timeout=30)'` 实现有界等待；`speechrail serve --app-home ...` 可用作显式 app home。
 

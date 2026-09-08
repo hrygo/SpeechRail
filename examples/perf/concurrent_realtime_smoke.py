@@ -8,14 +8,15 @@ Verifies Direction-1 multiplexing end to end:
 - the Nth session is not rejected with backend_busy while others are open
 - batch transcription still succeeds while realtime sessions are live
 
-Requires: SPEECHRAIL_REALTIME_ASR_BACKEND=native on the server, a real
-s16le/16 kHz/mono PCM file, and (if the server requires auth) the key in
-SPEECHRAIL_API_KEY. No server-side model is loaded by this script itself.
+Requires: SPEECHRAIL_REALTIME_ASR_BACKEND=native on the server and a real
+s16le/16 kHz/mono PCM file. API keys are auto-discovered from the managed app
+home (or can be supplied through SPEECHRAIL_API_KEY). No server-side model is
+loaded by this script itself.
 
 Usage:
-  python examples/perf/concurrent_realtime_smoke.py audio_10s.pcm
+  uv run python examples/perf/concurrent_realtime_smoke.py audio_10s.pcm
   SPEECHRAIL_BASE_URL=http://127.0.0.1:8202 \
-    python examples/perf/concurrent_realtime_smoke.py audio_10s.pcm --sessions 2
+    uv run python examples/perf/concurrent_realtime_smoke.py audio_10s.pcm --sessions 2
 """
 
 from __future__ import annotations
@@ -30,6 +31,11 @@ from pathlib import Path
 
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
+
+try:
+    from .benchmark_http import build_auth_headers
+except ImportError:  # pragma: no cover - exercised when run as a script
+    from benchmark_http import build_auth_headers  # type: ignore[no-redef]
 
 CHUNK_BYTES = 96 * 1024
 
@@ -48,6 +54,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--wav-file", type=Path, help="wav used for the batch leg")
     parser.add_argument("--sessions", type=int, default=2, help="concurrent sessions")
     parser.add_argument("--language", default="zh")
+    parser.add_argument("--app-home", type=Path, help="managed app home for API-key discovery")
     return parser.parse_args()
 
 
@@ -143,10 +150,7 @@ async def run_concurrent(
 
 async def main() -> None:
     options = arguments()
-    headers: dict[str, str] = {}
-    key = os.environ.get("SPEECHRAIL_API_KEY")
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
+    headers = build_auth_headers(app_home=options.app_home)
 
     pcm = options.pcm_file.read_bytes()
     results: list[str] = []

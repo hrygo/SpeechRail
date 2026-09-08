@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -15,6 +16,7 @@ from urllib.request import Request, urlopen
 import uvicorn
 
 from speechrail.config import Settings
+from speechrail.config.auth import resolve_api_key
 from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service import (
     PreflightResult,
@@ -73,6 +75,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     diagnose.add_argument("--base-url", default="http://127.0.0.1:8201")
     diagnose.add_argument("--timeout", type=float, default=5.0)
+    diagnose.add_argument(
+        "--app-home", type=Path, help="managed app home used for automatic API-key discovery"
+    )
 
     setup = subcommands.add_parser(
         "setup", help="choose and apply a three-tier model profile"
@@ -269,11 +274,13 @@ def _diagnostic_base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _diagnostic_json(url: str, *, timeout: float) -> object:
+def _diagnostic_json(
+    url: str, *, timeout: float, app_home: Path | None = None
+) -> object:
     if timeout <= 0:
         raise ServiceError("diagnose timeout must be positive")
     headers = {"Accept": "application/json"}
-    api_key = os.getenv("SPEECHRAIL_API_KEY")
+    api_key = resolve_api_key(app_home=app_home)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = Request(url, headers=headers)
@@ -354,9 +361,15 @@ def _diagnostic_snapshot(
 
 def _run_diagnose(args: argparse.Namespace) -> int:
     base_url = _diagnostic_base_url(args.base_url)
-    health = _diagnostic_json(f"{base_url}/health", timeout=args.timeout)
-    models = _diagnostic_json(f"{base_url}/v1/models", timeout=args.timeout)
-    voices = _diagnostic_json(f"{base_url}/v1/voices", timeout=args.timeout)
+    health = _diagnostic_json(
+        f"{base_url}/health", timeout=args.timeout, app_home=args.app_home
+    )
+    models = _diagnostic_json(
+        f"{base_url}/v1/models", timeout=args.timeout, app_home=args.app_home
+    )
+    voices = _diagnostic_json(
+        f"{base_url}/v1/voices", timeout=args.timeout, app_home=args.app_home
+    )
     print(json.dumps(_diagnostic_snapshot(health, models, voices), sort_keys=True))
     return 0
 
@@ -367,15 +380,85 @@ def _print_preflight(result: PreflightResult) -> None:
         print(f"{state} {check.name}: {check.message}")
 
 
+def _venv_roots(executable: Path) -> frozenset[Path]:
+    roots: set[Path] = set()
+    for candidate in (executable.absolute(), executable.resolve()):
+        roots.update(parent for parent in candidate.parents if parent.name == ".venv")
+    return frozenset(roots)
+
+
+def _managed_service_python(app_home: Path) -> Path | None:
+    """Return the active managed interpreter when the CLI is running elsewhere."""
+
+    candidate = ServiceLayout.for_app_home(app_home).current_python
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        return None
+    try:
+        if _venv_roots(candidate) & _venv_roots(Path(sys.executable)):
+            return None
+    except (OSError, RuntimeError):
+        return None
+    return candidate
+
+
+def _delegate_service_command(
+    command: str,
+    app_home: Path,
+    *,
+    managed_python: Path,
+    asr_only: bool,
+    host_python: Path | None,
+) -> int:
+    command_args = [
+        str(managed_python),
+        "-I",
+        "-m",
+        "speechrail",
+        "service",
+        command,
+        "--app-home",
+        str(app_home),
+    ]
+    if command == "preflight" and asr_only:
+        command_args.append("--asr-only")
+    if command == "preflight" and host_python is not None:
+        command_args.extend(("--host-python", str(host_python)))
+    try:
+        completed = subprocess.run(tuple(command_args), check=False)
+    except OSError as exc:
+        raise ServiceError("managed service runtime could not be executed") from exc
+    return completed.returncode
+
+
 def _run_service(
     command: str,
     app_home: Path | None = None,
     asr_only: bool = False,
     host_python: Path | None = None,
-) -> None:
+) -> int | None:
+    if app_home is not None:
+        resolved_app_home = app_home.expanduser().absolute()
+        layout = ServiceLayout.for_app_home(resolved_app_home)
+        managed_python = _managed_service_python(resolved_app_home)
+        if managed_python is not None:
+            return _delegate_service_command(
+                command,
+                resolved_app_home,
+                managed_python=managed_python,
+                asr_only=asr_only,
+                host_python=host_python,
+            )
+        if (
+            (layout.current_runtime.exists() or layout.current_runtime.is_symlink())
+            and (
+                not layout.current_python.is_file()
+                or not os.access(layout.current_python, os.X_OK)
+            )
+        ):
+            raise ServiceError("managed runtime Python is missing or not executable")
     if command == "preflight":
         layout = ServiceLayout.for_app_home(app_home or Path.cwd())
-        managed_python = layout.current_runtime / ".venv" / "bin" / "python"
+        managed_python = layout.current_python
         result = run_preflight(
             layout,
             require_tts=not asr_only,
@@ -386,8 +469,8 @@ def _run_service(
         )
         _print_preflight(result)
         if not result.ok:
-            raise ServiceError("preflight failed; service was not enabled")
-        return
+            raise ServiceError("preflight failed; service state unchanged")
+        return None
     if app_home is None:
         manager = create_launch_agent_manager()
     else:
@@ -395,7 +478,7 @@ def _run_service(
     if command == "install":
         print(f"Installed LaunchAgent plist: {manager.install()}")
         print("Run 'speechrail service start' to start SpeechRail.")
-        return
+        return None
     if command in {"start", "enable", "stop", "disable", "restart"}:
         controller = LaunchAgentServiceController(manager, port=_service_port(app_home))
     else:
@@ -411,12 +494,13 @@ def _run_service(
         controller.restart()
     elif command == "status":
         print(manager.status(), end="")
-        return
+        return None
     elif command == "uninstall":
         manager.uninstall()
     else:
         raise ServiceError("unknown service command")
     print(f"SpeechRail service {command} completed.")
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -432,13 +516,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "diagnose":
             return _run_diagnose(args)
         if args.command == "service":
-            _run_service(
+            service_result = _run_service(
                 args.service_command,
                 getattr(args, "app_home", None),
                 getattr(args, "asr_only", False),
                 getattr(args, "host_python", None),
             )
-            return 0
+            return 0 if service_result is None else service_result
         if args.command == "profile":
             return _run_profile(args)
         if args.command == "setup":

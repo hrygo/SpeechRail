@@ -5,21 +5,25 @@ latency, and (optionally) consecutive-session stability on /v1/realtime.
 Requires the service running with SPEECHRAIL_REALTIME_ASR_BACKEND=native.
 
 Usage:
-  python examples/perf/bench_realtime.py audio_10s.pcm
-  python examples/perf/bench_realtime.py audio_10s.pcm --sessions 3
+  uv run python examples/perf/bench_realtime.py audio_10s.pcm
+  uv run python examples/perf/bench_realtime.py audio_10s.pcm --sessions 3 \
+    --app-home "$HOME/Library/Application Support/SpeechRail"
 """
 
 from __future__ import annotations
 
 import argparse
 import base64
-import os
 import queue
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
+from typing import Any
 
 from openai import OpenAI
+
+from speechrail.config.auth import resolve_api_key
 
 
 def recv_loop(events: queue.Queue[object], errors: list[Exception], conn: object) -> None:
@@ -59,8 +63,18 @@ def recv_until(
 
 def run_session(
     client: OpenAI, pcm: bytes, tts_text: str, session_no: int
-) -> dict[str, float | str]:
+) -> dict[str, object]:
     conn = client.realtime.connect(model="whisper-1").enter()
+    try:
+        return _run_connected_session(conn, pcm, tts_text, session_no)
+    finally:
+        with suppress(Exception):
+            conn.close()
+
+
+def _run_connected_session(
+    conn: Any, pcm: bytes, tts_text: str, session_no: int
+) -> dict[str, object]:
     events: queue.Queue[object] = queue.Queue()
     errors: list[Exception] = []
     threading.Thread(
@@ -128,7 +142,6 @@ def run_session(
         if k == "response.done":
             break
 
-    conn.close()
     return {
         "session": session_no,
         "setup_ms": setup_ms,
@@ -137,7 +150,8 @@ def run_session(
         "asr_rtf": asr_ms / 1000 / duration,
         "tts_first_delta_ms": first_delta_ms,
         "tts_bytes": total_bytes,
-        "transcript": transcript,
+        "transcript_present": bool(transcript.strip()),
+        "transcript_chars": len(transcript),
     }
 
 
@@ -147,10 +161,12 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:8201/v1")
     parser.add_argument("--tts-text", default="本地实时语音合成性能测试。")
     parser.add_argument("--sessions", type=int, default=2)
+    parser.add_argument("--app-home", type=Path, help="managed app home for API-key discovery")
     args = parser.parse_args()
 
+    api_key = resolve_api_key(app_home=args.app_home) or "local"
     client = OpenAI(
-        api_key=os.environ.get("SPEECHRAIL_API_KEY", "local"), base_url=args.base_url
+        api_key=api_key, base_url=args.base_url
     )
     pcm = args.pcm_file.read_bytes()
 
@@ -162,7 +178,9 @@ def main() -> None:
                 f"[session {i}] setup={result['setup_ms']:.0f}ms "
                 f"asr={result['asr_ms']:.0f}ms rtf={result['asr_rtf']:.2f}x "
                 f"tts_first_delta={result['tts_first_delta_ms']:.0f}ms "
-                f"tts_bytes={result['tts_bytes']} transcript={result['transcript']!r}"
+                f"tts_bytes={result['tts_bytes']} "
+                f"transcript_present={result['transcript_present']} "
+                f"transcript_chars={result['transcript_chars']}"
             )
         except Exception as exc:
             print(f"[session {i}] FAILED: {type(exc).__name__}: {exc}")

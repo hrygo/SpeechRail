@@ -5,22 +5,24 @@ POST /v1/audio/speech. Requires a running service with TTS backend ready;
 do not run against a fake backend.
 
 Usage:
-  python examples/perf/bench_tts.py --text "你好, 性能测试."
+  uv run python examples/perf/bench_tts.py --text "你好, 性能测试."
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import statistics
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from urllib import request
 
 try:
+    from .benchmark_http import build_auth_headers
     from .profile_metrics import rtf  # type: ignore[import-not-found]
 except ImportError:  # pragma: no cover - exercised when run as a script
+    from benchmark_http import build_auth_headers  # type: ignore[no-redef]
     from profile_metrics import rtf
 
 
@@ -56,14 +58,13 @@ class SynthesisMetrics:
         return self.block_intervals_seconds
 
 
-def auth_headers() -> dict[str, str]:
-    """Return an Authorization header when SPEECHRAIL_API_KEY is configured."""
-    key = os.environ.get("SPEECHRAIL_API_KEY")
-    return {"Authorization": f"Bearer {key}"} if key else {}
+def auth_headers(app_home: Path | None = None) -> dict[str, str]:
+    """Return an Authorization header from the shared local key resolver."""
+    return build_auth_headers(app_home=app_home)
 
 
 def synthesize_with_metrics(
-    base: str, text: str, voice: str, model: str
+    base: str, text: str, voice: str, model: str, app_home: Path | None = None
 ) -> SynthesisMetrics:
     body = json.dumps(
         {
@@ -73,7 +74,7 @@ def synthesize_with_metrics(
             "response_format": "pcm",
         }
     ).encode()
-    headers = {"Content-Type": "application/json", **auth_headers()}
+    headers = {"Content-Type": "application/json", **auth_headers(app_home)}
     req = request.Request(base, data=body, headers=headers)
     started_at = time.monotonic()
     first_audio_at: float | None = None
@@ -117,10 +118,10 @@ def synthesize_with_metrics(
 
 
 def synthesize(
-    base: str, text: str, voice: str, model: str
+    base: str, text: str, voice: str, model: str, app_home: Path | None = None
 ) -> tuple[float, int]:
     """Synthesize audio while preserving the original tuple return contract."""
-    metrics = synthesize_with_metrics(base, text, voice, model)
+    metrics = synthesize_with_metrics(base, text, voice, model, app_home)
     return metrics.elapsed_seconds, metrics.audio_bytes
 
 
@@ -131,6 +132,7 @@ def main() -> None:
     parser.add_argument("--model", default="speechrail/qwen3-tts")
     parser.add_argument("--base", default=DEFAULT_BASE)
     parser.add_argument("--repeat", type=int, default=3)
+    parser.add_argument("--app-home", type=Path, help="managed app home for API-key discovery")
     args = parser.parse_args()
 
     print(
@@ -141,7 +143,9 @@ def main() -> None:
     out_seconds_list: list[float] = []
     metrics_list: list[SynthesisMetrics] = []
     for i in range(args.repeat):
-        metrics = synthesize_with_metrics(args.base, args.text, args.voice, args.model)
+        metrics = synthesize_with_metrics(
+            args.base, args.text, args.voice, args.model, args.app_home
+        )
         metrics_list.append(metrics)
         latencies.append(metrics.elapsed_seconds)
         out_seconds_list.append(metrics.actual_audio_seconds)

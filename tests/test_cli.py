@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -279,6 +280,28 @@ def test_diagnose_rejects_unsafe_base_url(
     assert "without credentials" in capsys.readouterr().err
 
 
+def test_diagnose_passes_app_home_to_key_discovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    app_homes: list[Path | None] = []
+
+    def diagnostic(
+        url: str, *, timeout: float, app_home: Path | None = None
+    ) -> object:
+        del timeout
+        app_homes.append(app_home)
+        if url.endswith("/health"):
+            return {"status": "ok", "asr_ready": True, "tts_ready": True}
+        if url.endswith("/v1/models"):
+            return {"data": []}
+        return {"data": []}
+
+    monkeypatch.setattr(cli, "_diagnostic_json", diagnostic)
+
+    assert cli.main(["diagnose", "--app-home", str(tmp_path)]) == 0
+    assert app_homes == [tmp_path, tmp_path, tmp_path]
+
+
 def test_profile_list_and_status_are_read_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -397,7 +420,63 @@ def test_service_preflight_reports_failure_without_enabling(
     monkeypatch.setattr(cli, "run_preflight", lambda *args, **kwargs: result)
 
     assert cli.main(["service", "preflight", "--app-home", str(tmp_path)]) == 1
-    assert "FAIL tts_config: TTS is missing" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "FAIL tts_config: TTS is missing" in captured.out
+    assert "service state unchanged" in captured.err
+
+
+@pytest.mark.parametrize("command", ["preflight", "install"])
+def test_service_commands_delegate_to_current_managed_runtime_from_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str
+) -> None:
+    layout = cli.ServiceLayout.for_app_home(tmp_path)
+    managed_python = layout.current_runtime / ".venv" / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.touch()
+    managed_python.chmod(0o700)
+    source_python = tmp_path / "source-python"
+    source_python.touch()
+    source_python.chmod(0o700)
+    monkeypatch.setattr(cli.sys, "executable", str(source_python))
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def run(command_args: tuple[str, ...], *, check: bool) -> subprocess.CompletedProcess[str]:
+        calls.append((command_args, check))
+        return subprocess.CompletedProcess(command_args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    assert cli.main(["service", command, "--app-home", str(tmp_path)]) == 0
+    assert calls == [
+        (
+            (
+                str(managed_python),
+                "-I",
+                "-m",
+                "speechrail",
+                "service",
+                command,
+                "--app-home",
+                str(tmp_path.resolve()),
+            ),
+            False,
+        )
+    ]
+
+
+def test_service_preflight_does_not_fall_back_to_source_when_managed_runtime_is_broken(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = cli.ServiceLayout.for_app_home(tmp_path)
+    layout.current_runtime.mkdir(parents=True)
+    monkeypatch.setattr(
+        cli,
+        "run_preflight",
+        lambda *args, **kwargs: pytest.fail("source preflight must not run"),
+    )
+
+    assert cli.main(["service", "preflight", "--app-home", str(tmp_path)]) == 1
+    assert "managed runtime Python" in capsys.readouterr().err
 
 
 def test_service_preflight_uses_the_managed_runtime_for_optional_profiles(
@@ -407,6 +486,8 @@ def test_service_preflight_uses_the_managed_runtime_for_optional_profiles(
     managed_python = layout.current_runtime / ".venv" / "bin" / "python"
     managed_python.parent.mkdir(parents=True)
     managed_python.touch()
+    managed_python.chmod(0o700)
+    monkeypatch.setattr(cli.sys, "executable", str(managed_python))
     captured: dict[str, object] = {}
 
     def preflight(*args: object, **kwargs: object) -> PreflightResult:

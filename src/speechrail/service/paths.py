@@ -83,6 +83,11 @@ class ServiceLayout:
         return self.vendor_root / "current"
 
     @property
+    def current_python(self) -> Path:
+        """Python executable shipped by the active application release."""
+        return self.current_runtime / ".venv" / "bin" / "python"
+
+    @property
     def vendor_staging(self) -> Path:
         """Recoverable vendor runtime preparation staging directory."""
         return self.vendor_root / ".staging"

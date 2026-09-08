@@ -33,7 +33,7 @@ curl --fail http://127.0.0.1:8201/health
 
 记录当前 commit、wheel SHA-256、runtime target、服务 PID、active profile、generation、`/health` 的模型身份和 listener 数量。必须确认只有一个 listener；路径、label、端口或 PID 不符时先停用并定位，不能继续安装。
 
-发布前执行 `speechrail service preflight --app-home "$APP_HOME"`。preflight 必须使用 `runtime/current/.venv/bin/python`；不要用源码 checkout 的 `.venv` 推断 managed runtime 是否可用。
+发布前执行 `speechrail service preflight --app-home "$APP_HOME"`。CLI 检测到当前进程不是 active managed runtime 时会自动转交给 `runtime/current/.venv/bin/python`；managed runtime 不存在或不可执行时应直接失败，不得用源码 checkout 的 `.venv` 代替安装态判断。
 
 ## 外部 realtime 客户端隔离
 
@@ -149,6 +149,6 @@ speechrail profile rollback --app-home "$APP_HOME" --yes
 | `/readyz` 503 | selection、snapshot hash、共享 runtime、preflight 输出 | 保持停服，修复配置/制品后再启动；不打开下载开关掩盖问题 |
 | `429 backend_busy` 或切档 smoke 不 ready | 外部 established WebSocket、`realtime_active_sessions`、governor active requests、streaming worker state | 报告活动客户端并暂停，等待客户端自行断开或用户明确授权关闭，连接与 session 清零后再重做一次短 smoke；不要循环重试或先换模型 |
 | `launchctl` exit 5 | bootout 后旧父进程/worker 是否还持锁 | 等待 2 秒，按精确 PID 进程组强杀，再等最多 10 秒；不要连续 restart |
-| `service preflight` 可疑失败 | 执行 preflight 的 Python 是否为 `runtime/current/.venv/bin/python` | 重新从 managed runtime 执行，避免源码依赖污染判断 |
+| `service preflight` 可疑失败 | CLI 是否发现并转交到 `runtime/current/.venv/bin/python` | 保留 runtime 身份和具体 FAIL 项；managed runtime 不存在时先修复 release，不要回退到源码依赖 |
 
 交付时报告版本、wheel hash、runtime target、profile、generation、PID/listener、endpoint、真实 smoke、回退目标和未验证项，不含凭据、音频或完整日志。

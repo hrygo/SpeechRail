@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.6.4"
-date: 2026-09-08
+version: "1.6.5"
+date: 2026-09-09
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -64,26 +64,28 @@ curl -s -H "Accept: application/json" http://127.0.0.1:8201/metrics | jq .
 SpeechRail 内建了专为 macOS 设计的非 root 用户级服务管理工具：
 
 ```bash
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+
 # 1. 生成并安装 LaunchAgent 配置文件 (~/Library/LaunchAgents/com.speechrail.plist)
-uv run speechrail service install
+uv run speechrail service install --app-home "$APP_HOME"
 
 # 2. 校验 Plist 格式
 plutil -lint ~/Library/LaunchAgents/com.speechrail.plist
 
 # 3. 启动并启用常驻服务（controller-backed）
-uv run speechrail service start
+uv run speechrail service start --app-home "$APP_HOME"
 
 # 4. 查询服务运行状态与 PID
-uv run speechrail service status
+uv run speechrail service status --app-home "$APP_HOME"
 
 # 5. 安全重启服务（重新加载外部模型）
-uv run speechrail service restart
+uv run speechrail service restart --app-home "$APP_HOME"
 
 # 6. 安全停用服务（保留配置文件）
-uv run speechrail service stop
+uv run speechrail service stop --app-home "$APP_HOME"
 
 # 7. 完全卸载服务（删除 Plist 文件）
-uv run speechrail service uninstall
+uv run speechrail service uninstall --app-home "$APP_HOME"
 ```
 
 ---
@@ -148,8 +150,10 @@ sequenceDiagram
 
 ### 标准发布升级步骤（managed）：
 ```bash
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+
 # 1. 安全停用当前旧服务
-uv run speechrail service stop
+uv run speechrail service stop --app-home "$APP_HOME"
 
 # 2. 构建新版本 Wheel
 uv build --no-sources --wheel

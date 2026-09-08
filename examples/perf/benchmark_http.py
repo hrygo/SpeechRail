@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -13,6 +12,8 @@ from types import MappingProxyType
 from urllib import error as urllib_error
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
+
+from speechrail.config.auth import resolve_api_key
 
 try:
     from .benchmark_manifest import BenchmarkInputError, Fixture
@@ -41,10 +42,17 @@ _AUDIO_CONTENT_TYPES = MappingProxyType(
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
 
-def build_auth_headers(api_key: str | None = None) -> dict[str, str]:
-    """Build a Bearer header from an explicit key or the private environment key."""
+def build_auth_headers(
+    api_key: str | None = None, *, app_home: Path | None = None
+) -> dict[str, str]:
+    """Build a Bearer header from an explicit key or the managed local config."""
 
-    raw_key = os.environ.get("SPEECHRAIL_API_KEY") if api_key is None else api_key
+    try:
+        raw_key = (
+            api_key if api_key is not None else resolve_api_key(app_home=app_home)
+        )
+    except ValueError as exc:
+        raise BenchmarkInputError(str(exc)) from exc
     if raw_key is None or not raw_key.strip():
         return {}
     key = raw_key.strip()
@@ -166,6 +174,26 @@ def _probe(
     except Exception:
         return MappingProxyType({}), None
     return _json_body(response), response.status_code
+
+
+def ensure_authentication(
+    runner: HttpRunner,
+    base_url: str,
+    headers: Mapping[str, str],
+) -> None:
+    """Reject a missing or wrong key before any inference request is issued."""
+
+    _, status_code = _probe(
+        runner,
+        base_url,
+        "/v1/jobs/__speechrail_benchmark_auth_probe__",
+        headers,
+    )
+    if status_code == 401:
+        raise BenchmarkInputError(
+            "server rejected benchmark authentication; check SPEECHRAIL_API_KEY "
+            "or --app-home"
+        )
 
 
 def _audio_content_type(path: Path) -> str:
