@@ -26,7 +26,7 @@
 
 ## Task 1: Correct Realtime session semantics and transcript delivery
 
-**GitHub issue:** `feat(realtime): 修复会话配置、item 关联与稳定 partial`  
+**GitHub issue:** [#16 feat(realtime): 修复会话配置、item 关联与稳定 partial](https://github.com/hrygo/SpeechRail/issues/16)  
 **Branch:** `feat/realtime-session-state`
 
 **Files:**
@@ -51,7 +51,7 @@
 
 ## Task 2: Bound Realtime transport and align the wire protocol
 
-**GitHub issue:** `fix(realtime): 对齐 wire profile、协议错误闭环与有界背压`  
+**GitHub issue:** [#17 fix(realtime): 对齐 wire profile、协议错误闭环与有界背压](https://github.com/hrygo/SpeechRail/issues/17)  
 **Branch:** `fix/realtime-wire-and-backpressure`
 
 **Files:**
@@ -78,7 +78,7 @@
 
 ## Task 3: Reduce ASR/TTS repeated work and make cancellation intentional
 
-**GitHub issue:** `perf(asr-tts): 消除重复缓冲、统一 TTS 规划并改进取消`  
+**GitHub issue:** [#18 perf(asr-tts): 消除重复缓冲、统一 TTS 规划并改进取消](https://github.com/hrygo/SpeechRail/issues/18)  
 **Branch:** `perf/asr-tts-delivery`
 
 **Files:**
@@ -108,7 +108,7 @@
 
 ## Task 4: Establish evidence gates, diagnostics, native diarization, and integration guides
 
-**GitHub issue:** `feat(operations): 建立能力诊断、连续分人和质量验收基线`  
+**GitHub issue:** [#19 feat(operations): 建立能力诊断、连续分人和质量验收基线](https://github.com/hrygo/SpeechRail/issues/19)  
 **Branch:** `feat/capability-diagnostics-and-quality-gates`
 
 **Files:**
