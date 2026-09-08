@@ -523,6 +523,11 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
     list(engine.synthesize(**request))
     list(engine.synthesize(**request))
     assert len(loads) == 1
+    assert engine.consume_delivery_stats() == {
+        "planner_chunks": 2,
+        "reference_cache_hits": 1,
+        "reference_cache_misses": 1,
+    }
 
     reference.write_bytes(b"replaced reference")
     list(engine.synthesize(**request))
@@ -532,6 +537,11 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
     another.write_bytes(b"another")
     list(engine.synthesize(**(request | {"ref_audio": str(another)})))
     assert len(engine._reference_audio_cache) == 1
+    assert engine.consume_delivery_stats() == {
+        "planner_chunks": 2,
+        "reference_cache_misses": 2,
+        "reference_cache_evictions": 2,
+    }
 
 
 def test_mlx_voice_design_engine_rejects_missing_audio_or_text(

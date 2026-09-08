@@ -349,8 +349,9 @@ def test_startup_failure_closes_already_started_runtime_workers(
             raise AssertionError("transcribe is not expected in this lifecycle test")
 
     class FailingTtsWorker:
-        def __init__(self, config: object) -> None:
+        def __init__(self, config: object, *, on_delivery_event: object | None = None) -> None:
             del config
+            del on_delivery_event
 
         async def start(self) -> None:
             lifecycle.append("tts.start")
