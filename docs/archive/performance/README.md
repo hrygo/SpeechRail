@@ -2,7 +2,12 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新性能基准（v1.13.0，MINOR 三档）
+## 最新发布验收（v1.13.1，PATCH quality）
+
+> **结论**：v1.13.1 已完成 wheel、managed runtime、`quality` 模型身份、单实例、公共 TTS/ASR smoke 与当前档 warm N=5 采样；五轮资源采样完整。该轮 fixture 与 v1.13.0 不同，且未重测 cold、切档、独立质量、MOS/ABX、音色稳定性或长时 soak，因此完整 release gate 保持 `unset`，不作纵向性能归因。详见
+> [v1.13.1 性能与运行稳定性基准](2026-09-08-v1.13.1-performance-benchmark.md)。
+
+## 上一完整性能基准（v1.13.0，MINOR 三档）
 
 > **结论**：v1.13.0 已完成 `quality → balanced → light → quality` 的三档真实基准。冷态、ASR/TTS warm N=5、当前 OpenAI Realtime 三连续 session、server-VAD 功能闭环，以及 batch+TTS `phys_footprint` 采样均通过；最终恢复 `quality`。ASR 复用 v1.11.0 的同一 fixture，结果仅作方向性对照；TTS 文本集和 Realtime wire profile 均不同，不作严格纵向速度结论。独立 CER/WER、VAD FAR/FRR、MOS/ABX、speaker embedding 与长时 soak 仍为 `unset`。详见
 > [v1.13.0 性能与质量基准](2026-09-08-v1.13.0-performance-benchmark.md)。
@@ -96,6 +101,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v1.13.1** | [2026-09-08-v1.13.1-performance-benchmark.md](2026-09-08-v1.13.1-performance-benchmark.md) | PATCH quality；wheel/managed runtime、公共 smoke、warm N=5 与完整资源采样通过；完整质量与切换 gate unset |
 | **v1.13.0** | [2026-09-08-v1.13.0-performance-benchmark.md](2026-09-08-v1.13.0-performance-benchmark.md) | 三档完整基准：冷态、ASR/TTS N=5、current Realtime、VAD 功能、物理 footprint；质量与长时 soak gate 保持 unset |
 | **v1.12.0** | [2026-09-07-v1.12.0-release-acceptance.md](2026-09-07-v1.12.0-release-acceptance.md) | MINOR 功能发布（MCP 代理、Silero VAD、auto download）；代码门与运行态验收通过，性能/质量 gate 保持 unset |
 | **v1.10.0 operator** | [2026-09-07-v1.10.0-operator-efficiency.md](2026-09-07-v1.10.0-operator-efficiency.md) | 模块化 benchmark、真实资源采样、managed wheel 安装与停启效率复验；N=1 warm，gate 保持 unset |
