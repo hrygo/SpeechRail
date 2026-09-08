@@ -2,10 +2,10 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新三档性能基准（v2.0.2，显式三档）
+## 最新三档性能基准（v2.0.3，显式三档）
 
-> **结论**：v2.0.2 已按 `quality → balanced → light → quality` 完成三档性能套件。每档 HTTP ASR/TTS 36/36、Realtime 3/3、server-VAD 闭环和 `phys_footprint` 采样均通过，最终恢复 `quality`。独立 ASR 质量、MOS/ABX、speaker embedding、跨重启音色稳定性和长时 soak 未执行，性能回归 gate 保持 `unset`。详见
-> [v2.0.2 性能与质量基准](2026-09-09-v2.0.2-performance-benchmark.md)。
+> **结论**：v2.0.3 已按 `quality → balanced → light → quality` 完成三档性能套件。每档 HTTP ASR/TTS 36/36、Realtime 3/3 与 `phys_footprint` 采样均通过，最终恢复 `quality`；相对 v1.13.0 未观察到大回归。独立 ASR 质量、MOS/ABX、speaker embedding、跨重启音色稳定性和长时 soak 未执行，性能回归 gate 保持 `unset`。详见
+> [v2.0.3 性能与质量基准](2026-09-09-v2.0.3-performance-benchmark.md)。
 
 ## 上一 PATCH 发布验收（v1.13.1，PATCH quality）
 
@@ -111,6 +111,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v2.0.3** | [2026-09-09-v2.0.3-performance-benchmark.md](2026-09-09-v2.0.3-performance-benchmark.md) | 显式三档完整性能基准；HTTP ASR/TTS、Realtime 与物理 footprint 采样通过；固化 managed CLI、自动鉴权发现和 CI runner 修复；独立质量与性能回归 gate unset |
 | **v2.0.2** | [2026-09-09-v2.0.2-performance-benchmark.md](2026-09-09-v2.0.2-performance-benchmark.md) | 显式三档完整性能基准；ASR/TTS、Realtime、VAD 与物理 footprint 采样通过；独立质量、长时 soak 与性能回归 gate unset |
 | **v1.13.1** | [2026-09-08-v1.13.1-performance-benchmark.md](2026-09-08-v1.13.1-performance-benchmark.md) | PATCH quality；wheel/managed runtime、公共 smoke、warm N=5 与完整资源采样通过；完整质量与切换 gate unset |
 | **D1 runtime smoke** | [2026-09-08-d1-diarization-runtime-smoke.md](2026-09-08-d1-diarization-runtime-smoke.md) | 两个分人候选的隔离预置输入对比；A/B 均可运行，未执行 DER/生产选型 gate |
