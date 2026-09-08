@@ -55,6 +55,7 @@ MODEL_MIL_SIGNATURES = {
         "tensor<fp32, [1, 390, 4]> speaker_preds",
     ),
 }
+_ACTIVITY_THRESHOLD = 0.25
 
 
 class CoreMLSortformerEngine:
@@ -314,7 +315,7 @@ def _update_from_response(
                 span=Span(start, min(end, accepted)),
                 scores=tuple(float(score) for score in scores),  # type: ignore[arg-type]
                 active_slots=frozenset(
-                    slot for slot, score in enumerate(scores) if float(score) >= 0.5
+                    slot for slot, score in enumerate(scores) if float(score) >= _ACTIVITY_THRESHOLD
                 ),
             )
         )
