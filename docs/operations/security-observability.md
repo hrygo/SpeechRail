@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 安全与可观测性"
 status: active
-date: 2026-09-03
+date: 2026-09-08
 ---
 
 # SpeechRail 安全与可观测性
@@ -48,6 +48,11 @@ CORS、TLS、网段限制与速率限制。`/metrics` 的 `endpoint` 标签对�
 `Retry-After`。worker 一次只处理一个模型实例，MPS profile 拒绝静默 CPU fallback。运营上
 应监控进程存活、readyz、队列满、worker stderr、内存压力与磁盘空间，并可通过 `/metrics`
 观测 RTF、TTFA、队列饱和度与 worker 生命周期状态。
+
+`SPEECHRAIL_MLX_CACHE_LIMIT_MB` 与 `SPEECHRAIL_MLX_MEMORY_LIMIT_MB` 是 vendor runtime 的
+缓存/分配提示，不等于 ASR、TTS 或 diarization 的驻留峰值。当前无法从它们推导真实模型
+footprint；任一重计算组件启用时，Governor 对 overlap 采用未知预算并保持串行，避免在大内存
+机器上误放行并发推理。
 
 以下控制不在当前能力范围，不构成安全声明：CORS、请求级限速、远程持久化指标聚合与
 集中式导出、非 loopback 的 TLS/Origin/网段防护。需要这些能力时，先实现、测试并更新
