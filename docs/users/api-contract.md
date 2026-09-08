@@ -98,8 +98,10 @@ Content-Type: application/json
 `mp3`、`opus`、`aac`、`flac` 的容器编码具有 15 秒超时和 128 MiB 输出上限。
 编码超限、超时或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
 
-标准接口要求 `voice`，请求中的复数 `instructions` 字段为 OpenAI SDK 兼容保留字段，当前
-不会改变已选音色。自然语言音色设计试听使用下方独立的 `/v1/voices/previews` 扩展。
+标准接口要求 `voice`。质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
+一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
+`400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
+音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
 
 ### 预设音色库 (Preset Voices)
 
