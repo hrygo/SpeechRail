@@ -69,6 +69,19 @@ def test_neural_vad_check_readiness() -> None:
         assert not ready
         assert "onnxruntime is not installed" in str(reason)
 
+    # 4. A discoverable module whose native provider cannot be imported is
+    # still unavailable to the first server_vad frame.
+    with (
+        patch("speechrail.backends.neural_vad.importlib.util.find_spec", return_value=object()),
+        patch(
+            "speechrail.backends.neural_vad.importlib.import_module",
+            side_effect=ImportError("native provider unavailable"),
+        ),
+    ):
+        ready, reason = SileroVadDetector.check_readiness(dummy_file)
+        assert not ready
+        assert "onnxruntime is not installed" in str(reason)
+
 
 def test_neural_vad_settings_validation(tmp_path: Path) -> None:
     model_file = tmp_path / "silero.onnx"
@@ -148,6 +161,34 @@ def test_realtime_session_silero_preflight_failure_fails_explicitly() -> None:
         assert err["type"] == "error"
         assert err["error"]["code"] == "backend_not_ready"
         assert "Silero VAD preflight failed" in err["error"]["message"]
+
+
+def test_realtime_session_reports_missing_onnxruntime_without_fallback(
+    tmp_path: Path,
+) -> None:
+    model_path = tmp_path / "silero_vad.onnx"
+    model_path.touch()
+    with patch("speechrail.backends.neural_vad.importlib.util.find_spec", return_value=None):
+        client, _ = _client(
+            settings_kwargs={
+                "realtime_vad_engine": "auto",
+                "realtime_vad_model_path": model_path,
+            }
+        )
+        with client.websocket_connect("/v1/realtime") as socket:
+            socket.receive_json()
+            socket.receive_json()
+            socket.send_json(
+                {
+                    "type": "session.update",
+                    "session": {"turn_detection": {"type": "server_vad"}},
+                }
+            )
+            error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "backend_not_ready"
+    assert "onnxruntime is not installed" in error["error"]["message"]
 
 
 def test_settings_silero_engine_requires_admission(tmp_path: Path) -> None:

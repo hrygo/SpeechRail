@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.0.0"
+version: "2.0.1"
 date: 2026-09-08
 ---
 
@@ -34,8 +34,8 @@ TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 
 
 | 请求方法 | 路径 | 描述 | 主要参数 / 返回格式 |
 |---|---|---|---|
-| `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息；`tts_ready` 表示可按需服务，`tts_warm` 表示当前无需加载即可服务 |
-| `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 只表示 ASR 或 TTS 至少一项可按需服务；worker 是否驻留请读取 `/health.tts_warm` 与 `/health.tts_state` |
+| `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息；`tts_ready` 表示可按需服务，`tts_warm` 表示当前无需加载即可服务，`realtime_vad` 表示 `server_vad` 子能力的独立状态 |
+| `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 只表示 ASR 或 TTS 至少一项可按需服务；响应中的 `realtime_vad` 仍需单独检查，worker 是否驻留请读取 `/health.tts_warm` 与 `/health.tts_state` |
 | `GET` | `/metrics` | 运行指标导出 | 默认 Prometheus 文本；`Accept: application/json` 返回结构化视图 |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
 | `GET` | `/v1/voices` | 注册与自定义的 TTS 音色列表 | 返回系统预置与自建音色全属性及可用性 |

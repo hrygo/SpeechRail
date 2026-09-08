@@ -273,3 +273,35 @@ def test_preflight_checks_coreml_worker_without_python_optional_profiles(
         "nemo.collections.asr.models" not in command and "onnxruntime" not in command
         for command in commands
     )
+
+
+def test_preflight_rejects_silero_vad_when_host_runtime_lacks_onnxruntime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    vad_model = tmp_path / "silero_vad.onnx"
+    vad_model.write_bytes(b"onnx")
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_REALTIME_VAD_MODEL_PATH={vad_model}\n")
+    commands: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        failed = "import onnxruntime" in " ".join(command)
+        return subprocess.CompletedProcess(command, 1 if failed else 0, stdout="", stderr="")
+
+    result = run_preflight(
+        layout,
+        require_tts=False,
+        runner=runner,
+        host_python=Path(sys.executable),
+    )
+
+    assert result.ok is False
+    vad_runtime = next(check for check in result.checks if check.name == "realtime_vad_runtime")
+    assert vad_runtime.ok is False

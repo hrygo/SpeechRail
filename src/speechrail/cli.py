@@ -123,6 +123,11 @@ def _parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="allow the service to run without a configured TTS profile",
             )
+            command_parser.add_argument(
+                "--host-python",
+                type=Path,
+                help="probe optional service dependencies with this Python executable",
+            )
     return parser
 
 
@@ -362,14 +367,22 @@ def _print_preflight(result: PreflightResult) -> None:
         print(f"{state} {check.name}: {check.message}")
 
 
-def _run_service(command: str, app_home: Path | None = None, asr_only: bool = False) -> None:
+def _run_service(
+    command: str,
+    app_home: Path | None = None,
+    asr_only: bool = False,
+    host_python: Path | None = None,
+) -> None:
     if command == "preflight":
         layout = ServiceLayout.for_app_home(app_home or Path.cwd())
         managed_python = layout.current_runtime / ".venv" / "bin" / "python"
         result = run_preflight(
             layout,
             require_tts=not asr_only,
-            host_python=managed_python if managed_python.is_file() else None,
+            host_python=(
+                host_python
+                or (managed_python if managed_python.is_file() else None)
+            ),
         )
         _print_preflight(result)
         if not result.ok:
@@ -423,6 +436,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.service_command,
                 getattr(args, "app_home", None),
                 getattr(args, "asr_only", False),
+                getattr(args, "host_python", None),
             )
             return 0
         if args.command == "profile":

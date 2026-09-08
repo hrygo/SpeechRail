@@ -1,5 +1,6 @@
 from pathlib import Path
 from sys import executable
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -32,7 +33,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
@@ -46,16 +47,49 @@ def test_health_reports_contract_shell_without_backend() -> None:
             "message": "diarization profile is not configured",
             "profile": None,
         },
-        "asr_state": "unconfigured",
-        "tts_state": "unconfigured",
-        "tts_lifecycle": None,
-        "streaming_state": "unconfigured",
         "realtime_vad": {
             "configured_engine": "auto",
             "resolved_engine": "legacy",
             "speech_admission_enabled": True,
+            "ready": True,
+            "code": None,
+            "message": "legacy VAD is ready",
         },
+        "asr_state": "unconfigured",
+        "tts_state": "unconfigured",
+        "tts_lifecycle": None,
+        "streaming_state": "unconfigured",
         "ready": False,
+    }
+
+
+def test_health_reports_silero_vad_runtime_gap_without_marking_core_unready(
+    tmp_path: Path,
+) -> None:
+    model = tmp_path / "silero_vad.onnx"
+    model.write_bytes(b"onnx")
+    with patch("speechrail.backends.neural_vad.importlib.util.find_spec", return_value=None):
+        client = TestClient(
+            create_app(
+                Settings(
+                    qwen3_model_dir=None,
+                    qwen3_python=None,
+                    backend_ready=True,
+                    realtime_vad_model_path=model,
+                )
+            )
+        )
+        health = client.get("/health")
+
+    assert health.status_code == 200
+    assert health.json()["ready"] is True
+    assert health.json()["realtime_vad"] == {
+        "configured_engine": "auto",
+        "resolved_engine": "silero",
+        "speech_admission_enabled": True,
+        "ready": False,
+        "code": "vad_runtime_missing",
+        "message": "onnxruntime is not installed in the service environment",
     }
 
 
@@ -252,6 +286,14 @@ def test_readyz_is_200_when_runtime_reports_ready() -> None:
             "message": "diarization profile is not configured",
             "profile": None,
         },
+        "realtime_vad": {
+            "configured_engine": "auto",
+            "resolved_engine": "legacy",
+            "speech_admission_enabled": True,
+            "ready": True,
+            "code": None,
+            "message": "legacy VAD is ready",
+        },
     }
 
 
@@ -275,7 +317,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
@@ -289,15 +331,18 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
             "message": "diarization profile is not configured",
             "profile": None,
         },
-        "asr_state": "unconfigured",
-        "tts_state": "active",
-        "tts_lifecycle": None,
-        "streaming_state": "unconfigured",
         "realtime_vad": {
             "configured_engine": "auto",
             "resolved_engine": "legacy",
             "speech_admission_enabled": True,
+            "ready": True,
+            "code": None,
+            "message": "legacy VAD is ready",
         },
+        "asr_state": "unconfigured",
+        "tts_state": "active",
+        "tts_lifecycle": None,
+        "streaming_state": "unconfigured",
         "ready": True,
     }
     assert client.get("/readyz").json() == {
@@ -308,6 +353,14 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
             "code": "diarization_not_configured",
             "message": "diarization profile is not configured",
             "profile": None,
+        },
+        "realtime_vad": {
+            "configured_engine": "auto",
+            "resolved_engine": "legacy",
+            "speech_admission_enabled": True,
+            "ready": True,
+            "code": None,
+            "message": "legacy VAD is ready",
         },
     }
 
@@ -354,6 +407,14 @@ def test_configured_worker_lifecycle_does_not_depend_on_local_env(
                 "code": "diarization_not_configured",
                 "message": "diarization profile is not configured",
                 "profile": None,
+            },
+            "realtime_vad": {
+                "configured_engine": "auto",
+                "resolved_engine": "legacy",
+                "speech_admission_enabled": True,
+                "ready": True,
+                "code": None,
+                "message": "legacy VAD is ready",
             },
         }
 

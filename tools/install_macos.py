@@ -102,6 +102,8 @@ def run_preflight(
         "preflight",
         "--app-home",
         str(layout.app_home),
+        "--host-python",
+        str(runtime_python),
     )
     if not require_tts:
         command += ("--asr-only",)

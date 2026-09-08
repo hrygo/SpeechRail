@@ -182,7 +182,7 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 
 ## 5. 文件、播报与实时字幕的自检和恢复
 
-发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad`。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用。
+发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。
 
 文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送 `session.update`，然后以 16 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`delta` 只含可追加的稳定前缀。
 

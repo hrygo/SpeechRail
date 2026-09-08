@@ -2,7 +2,7 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "1.7.1"
+version: "1.7.2"
 date: 2026-09-08
 ---
 
@@ -63,9 +63,9 @@ response.stream_to_file("output.mp3")
 
 ## 调用前诊断
 
-HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。两者都会给出 ASR、TTS、diarization 的可用状态，以及 realtime worker 状态和已解析的 VAD 引擎；不包含模型绝对路径、音频或转写内容。
+HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。两者都会给出 ASR、TTS、diarization 的可用状态，以及 realtime worker 状态和 VAD 的 `ready/code/message`；不包含模型绝对路径、音频或转写内容。
 
-`/readyz` 只表示 ASR 或 TTS 至少一个可用。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
+`/readyz` 只表示 ASR 或 TTS 至少一个可用；成功响应也包含独立的 `realtime_vad` 诊断。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
 
 ---
 

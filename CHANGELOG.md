@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-09-08
+
+### Fixed
+
+- managed Apple Silicon wheel 直接锁定并安装 `onnxruntime==1.29.0`，修复配置 Silero 模型时 `server_vad` 会话因应用 runtime 缺少 ONNX runtime 而失败的问题。
+- managed install preflight 现在使用候选 release 的应用 Python 检查 `onnxruntime` 与 Silero 模型；`/health`、成功的 `/readyz` 和 `/metrics` 独立报告 `realtime_vad.ready/code/message`，避免把 VAD 子能力故障误报为整个服务离线。
+- 克隆音色的流式响度校准在校准窗口跨 chunk 时保持平滑增益过渡，避免首块和边界处的音量突变。
+
 ## [2.0.1] - 2026-09-08
 
 ### Fixed

@@ -120,7 +120,7 @@ diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无
 
 ### VAD 引擎
 
-`realtime_vad_engine` 选择帧级语音概率评分器：`auto`（默认，配置 `realtime_vad_model_path` 时解析为 `silero`，否则回退 `legacy`）、`legacy`（能量 + 过零率评分）或 `silero`（Silero VAD ONNX，自动探测 v4 `input/h/c/sr` 与 v5/v6 `input/state` schema；不支持的 schema 在加载时明确报错、不静默回退）。解析为 `silero` 时要求 `realtime_speech_admission_enabled=true`（服务端配置校验强制），且要求配置 `realtime_vad_model_path`；`auto` 已配置模型但 preflight 失败时返回 `backend_not_ready`，不降级到 `legacy`。客户端下发的 `turn_detection.threshold` 在 legacy 引擎下映射到能量评分门限、在 silero 引擎下为真实语音概率门限；两者对同一取值的灵敏度不同。
+`realtime_vad_engine` 选择帧级语音概率评分器：`auto`（默认，配置 `realtime_vad_model_path` 时解析为 `silero`，否则回退 `legacy`）、`legacy`（能量 + 过零率评分）或 `silero`（Silero VAD ONNX，自动探测 v4 `input/h/c/sr` 与 v5/v6 `input/state` schema；不支持的 schema 在加载时明确报错、不静默回退）。解析为 `silero` 时要求 `realtime_speech_admission_enabled=true`（服务端配置校验强制），且要求配置 `realtime_vad_model_path`；`auto` 已配置模型但 preflight 失败时返回 `backend_not_ready`，不降级到 `legacy`。受支持的 Apple Silicon managed wheel（macOS 14+）直接携带并锁定 `onnxruntime==1.29.0`；服务启动前的 preflight 使用 ASGI 应用实际 Python 验证该导入，`/health` 与成功的 `/readyz` 以 `realtime_vad.ready/code/message` 暴露结果。客户端不需要安装 VAD SDK；若返回 `vad_runtime_missing`，应修复 SpeechRail release，而不是改变客户端协议或静默改用 legacy。客户端下发的 `turn_detection.threshold` 在 legacy 引擎下映射到能量评分门限、在 silero 引擎下为真实语音概率门限；两者对同一取值的灵敏度不同。
 
 - **双阈值迟滞**（参照 Silero 官方 VADIterator）：起振帧须达到 `threshold`；已进行的话语仅在概率低于 `threshold - 0.15`（服务端 `stop_threshold`，可显式覆盖）时开始收尾。处于迟滞带（低于 entry、不低于 exit）的帧不会截断进行中的话语，也不会从静音新开话语。
 - **server_vad 参数默认值**：`threshold=0.5`、`prefix_padding_ms=300`、`silence_duration_ms=400` 为 SpeechRail 本地默认。注意 `silence_duration_ms` 的 OpenAI 官方默认为 **500ms**：依赖平台默认端点时长的客户端应显式传参以获得确定行为。

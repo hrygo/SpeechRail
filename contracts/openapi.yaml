@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 2.0.1
+  version: 2.0.2
   description: |
     Local-first shared ASR and TTS service.
 
@@ -42,7 +42,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 2.0.1
+                version: 2.0.2
                 backend: asr-1.7b-q8
                 profile: quality
                 asr_ready: true
@@ -55,6 +55,13 @@ paths:
                   code: diarization_not_configured
                   message: diarization profile is not configured
                   profile: null
+                realtime_vad:
+                  configured_engine: auto
+                  resolved_engine: silero
+                  speech_admission_enabled: true
+                  ready: true
+                  code: null
+                  message: Silero VAD runtime and model are ready
                 asr_state: active
                 tts_state: active
                 streaming_state: active
@@ -69,18 +76,20 @@ paths:
       security: [{}]
       responses:
         '200':
-          description: ASR/TTS runtime can accept inference; optional diarization status is informational
+          description: ASR/TTS runtime can accept inference; diarization and realtime VAD statuses are informational capability diagnostics
           content:
             application/json:
               schema:
                 type: object
-                required: [ready, diarization]
+                required: [ready, diarization, realtime_vad]
                 properties:
                   ready:
                     type: boolean
                     const: true
                   diarization:
                     $ref: '#/components/schemas/DiarizationStatus'
+                  realtime_vad:
+                    $ref: '#/components/schemas/RealtimeVADStatus'
         '503':
           $ref: '#/components/responses/BackendNotReady'
         '400':
@@ -552,6 +561,7 @@ components:
         - tts_warm
         - diarization_ready
         - diarization
+        - realtime_vad
         - asr_state
         - tts_state
         - streaming_state
@@ -586,6 +596,8 @@ components:
           type: boolean
         diarization:
           $ref: '#/components/schemas/DiarizationStatus'
+        realtime_vad:
+          $ref: '#/components/schemas/RealtimeVADStatus'
         asr_state:
           type: string
           enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
@@ -616,6 +628,27 @@ components:
         profile:
           type: [string, 'null']
           enum: [sortformer, camplus, null]
+    RealtimeVADStatus:
+      type: object
+      required: [configured_engine, resolved_engine, speech_admission_enabled, ready, code, message]
+      properties:
+        configured_engine:
+          type: string
+          enum: [auto, legacy, silero]
+        resolved_engine:
+          type: string
+          enum: [legacy, silero]
+        speech_admission_enabled:
+          type: boolean
+        ready:
+          type: boolean
+          description: The configured realtime VAD path can accept server_vad frames.
+        code:
+          type: [string, 'null']
+          enum: [vad_runtime_missing, vad_model_missing, vad_not_ready, null]
+          description: Stable VAD diagnostic code; null when the selected path is ready.
+        message:
+          type: string
     Model:
       type: object
       required: [id, object, owned_by, created]

@@ -1,6 +1,6 @@
 [project]
 name = "speechrail"
-version = "2.0.1"
+version = "2.0.2"
 description = "Local-first shared speech recognition service with OpenAI-compatible APIs"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -25,6 +25,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "httpx>=0.28",
     "websockets>=14",
+    "onnxruntime==1.29.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.urls]

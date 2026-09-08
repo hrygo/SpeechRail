@@ -1,14 +1,14 @@
 ---
 title: "SpeechRail 实时 VAD 对齐 2026 行业最佳实践方案"
-status: draft
+status: active
 audience: "SpeechRail 核心开发者、架构评审、质量门"
-version: "0.1.0"
-date: 2026-09-07
+version: "0.2.0"
+date: 2026-09-08
 ---
 
 # SpeechRail 实时 VAD 对齐 2026 行业最佳实践方案
 
-> **方案定位**：改善 SpeechRail `/v1/realtime` 的服务端 VAD（Voice Activity Detection）与打断（Barge-in）能力，使其在质量、维护性与契约保真度上对齐 2026 年实时语音 Agent 行业最佳实践。**本文为设计提案（`draft`），未改动任何代码、契约或服务；决策尚未被接受。**
+> **方案定位**：改善 SpeechRail `/v1/realtime` 的服务端 VAD（Voice Activity Detection）与打断（Barge-in）能力，使其在质量、维护性与契约保真度上对齐 2026 年实时语音 Agent 行业最佳实践。D1–D4 已落地；本文同时记录应用 wheel 依赖与 managed preflight 这一部署不变量。
 >
 > **证据分层**：与 AGENTS.md 一致，本文区分：
 > - **代码可证**：得自 `src/speechrail/` 源码读取、`tests/` 与 `contracts/realtime-openai.md`；
@@ -19,10 +19,11 @@ date: 2026-09-07
 
 ## 一、背景与目标（Context）
 
-**为什么现在改。** 当前 VAD 实现已在架构层显著高于一般水平，但存在两处结构性偏差，导致它无法代表 2026 年行业共识，且对当前 Silero 模型有部署摩擦：
+**为什么现在改。** 当前 VAD 实现已在架构层显著高于一般水平，但存在结构性偏差，导致它无法代表 2026 年行业共识，且对当前 Silero 模型有部署摩擦：
 
-1. **默认引擎是 `legacy`（能量 + 过零率启发式）** —— 2026 年业界明确能量/经典 VAD 不适合做生产 turn detection（见「外部最佳实践」）。
+1. **历史默认引擎是 `legacy`（能量 + 过零率启发式）** —— 当前默认解析已改为 `auto`；配置 Silero 模型时走神经 VAD，未配置模型时才保留 legacy 的零依赖路径。
 2. **`SileroVadDetector` 硬编码 Silero v4 的 ONNX 图 schema，明确拒绝当前 v5/v6** —— 用户无法使用当前官方分发的 `silero_vad_16k.onnx`，必须寻找旧 v4 导出。
+3. **应用 wheel 未声明 Silero 的 ONNX runtime** —— managed 服务可以通过 ASR/TTS readiness，但配置了模型的 `server_vad` 会在会话协商时才发现 `onnxruntime` 缺失；这是 VAD 子能力部署缺口，不应改判为整个 SpeechRail 服务离线。
 
 **目标（不扩大范围）。** 在不引入多租户/分布式/云控制面（AGENTS.md 硬边界）的前提下：
 
@@ -41,12 +42,12 @@ date: 2026-09-07
 | 层 | 位置 | 内容 |
 |---|---|---|
 | **评分器（legacy）** | `src/speechrail/backends/vad.py` | `VoiceActivityDetector`：RMS（噪声底约 -46dBFS，`rms < 120` 即 0）+ 过零率 → sigmoid 打分；16kHz、512 采样帧（32ms）；`VadConfig(threshold=0.5, prefix_padding_ms=300, silence_duration_ms=400, debounce_frames=3)` |
-| **评分器（silero）** | `src/speechrail/backends/neural_vad.py` | `SileroVadDetector`：ONNX；每模型路径共享一个 `InferenceSession`（`InferenceSession.run` 线程安全），每流独立 h/c；`inter/inter_op_threads=1`；`_validate_session` 只接受 v4 `{input,h,c,sr}`，拒绝 v5 `{input,state,sr}` |
+| **评分器（silero）** | `src/speechrail/backends/neural_vad.py` | `SileroVadDetector`：ONNX；每模型路径共享一个 `InferenceSession`（`InferenceSession.run` 线程安全），每流独立 h/c 或 consolidated state/context；`inter/inter_op_threads=1`；按输入名自动识别 v4 与 v5/v6 schema |
 | **决策状态机** | `src/speechrail/realtime/speech_admission.py` | `SpeechAdmission`：`IDLE→CANDIDATE→ACTIVE→HANGOVER→IDLE`；有界 prefix-ring / candidate；整数 16k 样本时钟；双阈值迟滞（entry `threshold`，exit `threshold-0.15`） |
 | **接线层** | `src/speechrail/application/realtime_openai.py` | 接入 OpenAI Realtime `server_vad`：`input_audio_buffer.speech_started/stopped` 事件、自动 commit（`vad_stop`）、全双工打断（`record_bargein` + `_cancel_response`）；`_bargein_pending_audio` 有界（`_bargein_pending_max_bytes` 默认 9600） |
-| **配置** | `src/speechrail/config/__init__.py` | `realtime_vad_engine: Literal["legacy","silero"] = "legacy"`；`realtime_vad_model_path`；`realtime_vad_shadow_enabled`（仅 legacy 可用）；`realtime_speech_admission_enabled=True` |
+| **配置** | `src/speechrail/config/__init__.py` | `realtime_vad_engine: Literal["auto","legacy","silero"] = "auto"`；`realtime_vad_model_path`；`realtime_vad_shadow_enabled`（仅 legacy 可用）；`realtime_speech_admission_enabled=True` |
 | **可观测** | `src/speechrail/observability/metrics.py` | `speechrail_realtime_vad_speech_events_total{event=started|ended}`；`speechrail_realtime_vad_shadow_frames_total{agreement=both_speech|both_silence|primary_only|shadow_only}` |
-| **契约** | `contracts/realtime-openai.md` | server_vad 默认 `threshold=0.5 / prefix_padding_ms=300 / silence_duration_ms=400`；`silero` 引擎要求 `realtime_speech_admission_enabled=true` 且配置 `realtime_vad_model_path`；v5 ONNX 不受支持、加载即报错 |
+| **契约** | `contracts/realtime-openai.md` | server_vad 默认 `threshold=0.5 / prefix_padding_ms=300 / silence_duration_ms=400`；`silero` 引擎要求 `realtime_speech_admission_enabled=true` 且配置 `realtime_vad_model_path`；v4/v5/v6 schema 均受支持；受支持 managed wheel 锁定 `onnxruntime==1.29.0`，preflight/health 单独报告 VAD runtime |
 | **测试** | `tests/test_realtime_vad_bargein.py`、`tests/test_neural_vad.py` | 防抖/静音/hysteresis/barge-in 会话隔离；Silero 帧长校验、schema fail-closed、shadow agreement 指标、sub-frame commit 不崩溃、共享 session 复用 |
 
 **既有亮点（须保持，不回归）：** 双阈值迟滞、有界准入（防 DoS + 防静音幻听）、前置 padding 防首音裁剪、失败关闭（fail-closed）、fake runner 可测试性、shadow/A-B 观测、整数样本时钟对齐、会话级 VAD 状态隔离、单线程低 CPU 神经推理。这些与 2026 最佳实践高度一致，方案只在之上增量改动。
@@ -57,8 +58,8 @@ date: 2026-09-07
 
 | 编号 | 问题 | 证据 | 严重度 |
 |---|---|---|---|
-| **G1** | 默认 `legacy` 能量 VAD，非 2026 主流 | `config/__init__.py` 默认 `legacy`；外部：能量/WebRTC VAD 在 5% FPR 下漏检约一半语音帧，不适用于生产 turn detection；Silero F1≈0.86 | 🔴 结构 |
-| **G2** | `SileroVadDetector` 锁死 v4 schema，拒绝当前 v5/v6 | `_validate_session` 只接受 `{input,h,c,sr}`；当前 silero-vad（v6.2）导出为 `input=[1,576]`(512+64ctx)、`state=[2,1,128]`、输出 `output`+`stateN`、需手动携带最后 64 采样上下文 | 🔴 结构/维护 |
+| **G1** | 历史默认 `legacy` 能量 VAD，非 2026 主流 | 当前默认已解析为 `auto`；配置模型后走 Silero，未配置模型才使用 legacy；外部：能量/WebRTC VAD 在高噪声下不适用于生产 turn detection | 🔴 结构（已修复） |
+| **G2** | 历史 `SileroVadDetector` 锁死 v4 schema，拒绝当前 v5/v6 | 当前适配器按输入名支持 v4 与 v5/v6；v5/v6 使用 `input=[1,576]` 与 consolidated state，并在流内维护 64 sample context | 🔴 结构/维护（已修复） |
 | **G3** | `threshold` 语义随引擎漂移（legacy=能量分值，silero=真实概率） | `config/__init__.py`、`contracts/realtime-openai.md` 已文档化，但对 OpenAI drop-in 客户端是语义失真 | 🟡 契约 |
 | **G4** | 全双工打断无服务端回声/冷却防护 | `realtime_openai.py` 在 `speech_started` 即取消 TTS，无 `cooldown`、无 `playback/silence` 双模式 | 🟡 加固（边界内） |
 | **G5** | 无语义 endpointing、无前置降噪/AEC | 现状为纯 VAD 评分 + 状态机 | 🟢 知悉（非目标） |
@@ -172,13 +173,14 @@ return prob
 
 ## 六、验收标准（Acceptance）
 
-- [ ] `auto` 默认：未配 `realtime_vad_model_path` → silero 预检跳过、走 legacy；已配且就绪 → 走 silero。
-- [ ] `auto` 已配模型但预检失败 → 显式 `backend_not_ready`（不静默降级）。
-- [ ] `SileroVadDetector` 可对 v4 ONNX 与 v5/v6 ONNX 两种模型给出连续、单调合理的概率，且 `reset()` / 会话切换后状态正确清零。
-- [ ] v5/v6 路径下 `score_frame` 输入仍为 1024 字节（512 采样 + 64 上下文在内部处理），接线层无需改动。
-- [ ] shadow 指标在 `auto→silero` 主路径下不失效（或按 D5 定义行为）。
-- [ ] barge-in cooldown 生效：冷却窗口内重复 `speech_started` 不取消在途 TTS；`cooldown=0` 关闭。
-- [ ] 现有 `tests/test_realtime_vad_bargein.py`、`tests/test_neural_vad.py` 全部回归通过。
+- [x] `auto` 默认：未配 `realtime_vad_model_path` → silero 预检跳过、走 legacy；已配且就绪 → 走 silero。
+- [x] `auto` 已配模型但预检失败 → 显式 `backend_not_ready`（不静默降级）。
+- [x] `SileroVadDetector` 可对 v4 ONNX 与 v5/v6 ONNX 两种模型给出连续、单调合理的概率，且 `reset()` / 会话切换后状态正确清零。
+- [x] v5/v6 路径下 `score_frame` 输入仍为 1024 字节（512 采样 + 64 上下文在内部处理），接线层无需改动。
+- [x] shadow 指标在 `auto→silero` 主路径下不失效（或按 D5 定义行为）。
+- [x] barge-in cooldown 生效：冷却窗口内重复 `speech_started` 不取消在途 TTS；`cooldown=0` 关闭。
+- [x] 受支持 Apple Silicon wheel 声明 `onnxruntime==1.29.0`，managed preflight 使用应用 Python 检查模型文件与 runtime 导入；health/readyz 独立呈现 VAD 状态。
+- [x] 现有 `tests/test_realtime_vad_bargein.py`、`tests/test_neural_vad.py` 回归通过。
 
 ---
 
@@ -186,12 +188,12 @@ return prob
 
 | 面 | 影响 |
 |---|---|
-| **配置** | `realtime_vad_engine` 新增 `auto`（默认）；新增 `realtime_vad_bargein_cooldown_ms` |
-| **契约** | `contracts/realtime-openai.md` 更新 v5/v6 支持、`threshold` 语义、`auto` 与冷却说明 |
-| **代码** | `neural_vad.py`（schema 感知）、`config/__init__.py`（字段）、`realtime_openai.py`（引擎解析 + 冷却） |
-| **测试** | `test_neural_vad.py`（v5/v6、auto 三态）、`test_realtime_vad_bargein.py`（cooldown） |
+| **配置** | `realtime_vad_engine` 新增 `auto`（默认）；新增 `realtime_vad_bargein_cooldown_ms`；managed wheel 固定 `onnxruntime==1.29.0` |
+| **契约** | `contracts/realtime-openai.md` 更新 v5/v6 支持、`threshold` 语义、`auto` 与冷却说明；`/health`/`/readyz` 提供 VAD 子能力状态 |
+| **代码** | `neural_vad.py`（schema 感知）、`config/__init__.py`（字段）、`realtime_openai.py`（引擎解析 + 冷却）、`application/services.py` 与 `service/preflight.py`（诊断与安装门） |
+| **测试** | `test_neural_vad.py`（v5/v6、auto 三态、缺 runtime 会话回归）、`test_realtime_vad_bargein.py`（cooldown）、preflight/packaging/health 契约测试 |
 | **文档** | 本文件；`README.md` 或 `docs/architecture/README.md` 索引（可选） |
-| **不涉及** | 服务/runtime profile、LaunchAgent、wheel 协议、公共 REST（`/v1/audio/*`）、diarization |
+| **不涉及** | ASR/TTS 推理协议、模型 profile 选择、diarization wire protocol；LaunchAgent 仍按同一单实例流程管理 |
 
 ---
 

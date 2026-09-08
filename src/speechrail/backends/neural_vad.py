@@ -95,10 +95,14 @@ class SileroVadDetector:
         if not model_path.is_file():
             return False, f"Silero VAD model file does not exist: {model_path}"
         try:
-            runtime_available = importlib.util.find_spec("onnxruntime") is not None
-        except (ImportError, ModuleNotFoundError, ValueError):
-            runtime_available = False
-        if not runtime_available:
+            runtime_spec = importlib.util.find_spec("onnxruntime")
+            if runtime_spec is None:
+                return False, "onnxruntime is not installed in the environment"
+            # A module spec alone does not prove that the native provider can be
+            # loaded. Import through the ASGI interpreter so health and session
+            # preflight agree on the capability that the first frame will use.
+            importlib.import_module("onnxruntime")
+        except (ImportError, ModuleNotFoundError, OSError, ValueError):
             return False, "onnxruntime is not installed in the environment"
         return True, None
 

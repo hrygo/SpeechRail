@@ -21,7 +21,7 @@ date: 2026-09-08
 - `/v1/realtime` 只承载 OpenAI Realtime 协议的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、
   历史或持续会话语义。分人是 `session.speechrail.diarization.enabled` opt-in 扩展；文件
   匿名分人使用 `gpt-4o-transcribe-diarize` / `diarized_json`。
-- `/health` 分别反映 ASR/TTS worker readiness，`/readyz` 在至少一个能力可接受请求时返回 200；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
+- `/health` 分别反映 ASR/TTS worker readiness，并以 `realtime_vad.ready/code/message` 单独报告 `server_vad` 子能力；`/readyz` 在至少一个 ASR/TTS 能力可接受请求时返回 200，同时返回 VAD 诊断；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
 - `diarization_ready` 只表示固定 CoreML bundle 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。D1 仅记录 M5 Max、90 秒输入的 564 MB max RSS；DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。

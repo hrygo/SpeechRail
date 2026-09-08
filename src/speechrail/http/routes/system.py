@@ -173,11 +173,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "tts_state": states.get("tts", "unconfigured"),
             "tts_lifecycle": _tts_lifecycle_diagnostics(services),
             "streaming_state": states.get("streaming", "unconfigured"),
-            "realtime_vad": {
-                "configured_engine": resolved.realtime_vad_engine,
-                "resolved_engine": "silero" if resolved.resolves_to_silero_vad else "legacy",
-                "speech_admission_enabled": resolved.realtime_speech_admission_enabled,
-            },
+            "realtime_vad": services.realtime_vad_status,
             "ready": services.asr_ready or services.tts_ready,
         }
 
@@ -186,7 +182,11 @@ def create_system_router(services: AppServices) -> APIRouter:
         if services.asr_ready or services.tts_ready:
             return JSONResponse(
                 status_code=200,
-                content={"ready": True, "diarization": services.diarization_status},
+                content={
+                    "ready": True,
+                    "diarization": services.diarization_status,
+                    "realtime_vad": services.realtime_vad_status,
+                },
             )
         return error_response(
             503,
@@ -515,6 +515,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "asr": services.asr_ready,
             "tts": services.tts_ready,
             "diarization": services.diarization_ready,
+            "realtime_vad": bool(services.realtime_vad_status["ready"]),
         }
 
         accept = request.headers.get("accept", "")

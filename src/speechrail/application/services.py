@@ -168,6 +168,49 @@ class AppServices:
         return None
 
     @property
+    def realtime_vad_status(self) -> dict[str, object]:
+        """Expose the resolved realtime VAD capability without loading a model."""
+        settings = self.settings
+        resolved_engine = "silero" if settings.resolves_to_silero_vad else "legacy"
+        status: dict[str, object] = {
+            "configured_engine": settings.realtime_vad_engine,
+            "resolved_engine": resolved_engine,
+            "speech_admission_enabled": settings.realtime_speech_admission_enabled,
+        }
+        if resolved_engine == "legacy":
+            status.update({"ready": True, "code": None, "message": "legacy VAD is ready"})
+            return status
+
+        # The adapter performs only bounded path/import checks here.  It opens
+        # the ONNX session lazily on the first admitted frame, so health and
+        # readiness probes never load model state or consume inference budget.
+        from speechrail.backends.neural_vad import SileroVadDetector
+
+        ready, reason = SileroVadDetector.check_readiness(settings.realtime_vad_model_path)
+        if ready:
+            status.update(
+                {
+                    "ready": True,
+                    "code": None,
+                    "message": "Silero VAD runtime and model are ready",
+                }
+            )
+            return status
+
+        reason_text = str(reason or "Silero VAD is not ready")
+        if "onnxruntime" in reason_text:
+            code = "vad_runtime_missing"
+            message = "onnxruntime is not installed in the service environment"
+        elif "model" in reason_text or "file" in reason_text:
+            code = "vad_model_missing"
+            message = "Silero VAD model is unavailable"
+        else:
+            code = "vad_not_ready"
+            message = "Silero VAD is not ready"
+        status.update({"ready": False, "code": code, "message": message})
+        return status
+
+    @property
     def diarization_status(self) -> dict[str, object]:
         """Expose optional profile readiness without filesystem or identity data."""
         if self.diarization_engine is None:

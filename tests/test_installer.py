@@ -48,7 +48,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / "speechrail-2.0.1-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-2.0.2-py3-none-any.whl"
     wheel.touch()
     app_home = tmp_path / "Application Support" / "SpeechRail"
     return wheel, app_home
@@ -861,6 +861,8 @@ def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:
             "preflight",
             "--app-home",
             str(layout.app_home),
+            "--host-python",
+            str(tmp_path / "runtime" / "bin" / "python"),
             "--asr-only",
         )
     ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +93,31 @@ def _file_check(name: str, model_path: Path | None, *, label: str) -> PreflightC
     if not model_path.is_absolute() or not model_path.is_file():
         return _check(name, False, f"{label} file is missing")
     return _check(name, True, f"{label} file is available")
+
+
+def _realtime_vad_checks(
+    settings: Settings,
+    *,
+    host_python: Path | None,
+    runner: CommandRunner,
+) -> tuple[PreflightCheck, ...]:
+    """Validate the VAD model and the interpreter used by the ASGI service."""
+    if not settings.resolves_to_silero_vad:
+        return (_check("realtime_vad", True, "legacy VAD is ready"),)
+
+    model_check = _file_check(
+        "realtime_vad_model",
+        settings.realtime_vad_model_path,
+        label="Silero VAD model",
+    )
+    runtime_python = host_python or Path(sys.executable)
+    runtime_check = _runtime_check(
+        "realtime_vad_runtime",
+        runtime_python,
+        "onnxruntime",
+        runner,
+    )
+    return (model_check, runtime_check)
 
 
 def _controlled_pythonpath(prepared: PreparedRuntime, role: str) -> tuple[str, ...]:
@@ -433,6 +459,8 @@ def run_preflight(
                 WEIGHT_FILE_SETS,
             )
         )
+
+    checks.extend(_realtime_vad_checks(settings, host_python=host_python, runner=runner))
 
     return PreflightResult(ok=all(check.ok for check in checks), checks=tuple(checks))
 
