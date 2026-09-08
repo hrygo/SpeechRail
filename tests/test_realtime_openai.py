@@ -67,6 +67,16 @@ class BlockingSpeechSynthesizer:
         return chunks()
 
 
+class HangingSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            if False:  # Keep this as an async generator without yielding audio.
+                yield AudioChunk(response_id="internal", chunk_index=0, audio=b"")
+            await asyncio.sleep(60)
+
+        return chunks()
+
+
 class InvalidSpeechSynthesizer:
     def synthesize(self, request: SpeechRequest):
         async def chunks():
@@ -1275,6 +1285,34 @@ def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() 
 
     assert cancelled["type"] == "response.done"
     assert cancelled["response"]["status"] == "cancelled"
+
+
+def test_realtime_tts_total_deadline_covers_generation() -> None:
+    client, _ = _client(
+        tts_synthesizer=HangingSpeechSynthesizer(),
+        settings_kwargs={"request_timeout_seconds": 0.01},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        events = [socket.receive_json() for _ in range(5)]
+
+    assert events[-2]["type"] == "error"
+    assert events[-2]["error"]["code"] == "backend_timeout"
+    assert events[-1]["type"] == "response.done"
+    assert events[-1]["response"]["status"] == "failed"
 
 
 def test_openai_query_model_echoed_in_session_created() -> None:
