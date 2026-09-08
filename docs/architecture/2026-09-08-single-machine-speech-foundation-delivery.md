@@ -32,14 +32,14 @@ PR #21 依赖 #20 的 Realtime 状态机改动，#22 依赖 #21 的 wire 与生�
 | C3 | #20 的缺失/`null`/显式值三态配置更新 | session update preservation tests |
 | C4 | #20 的逐 turn 唯一 item ID | multi-commit item correlation tests |
 | C5 | #20 的只追加稳定前缀 | rewritten-prefix regression tests |
-| R1 | #22 的 abort fallback 与 reload counters | cancellation and next-generation worker tests |
+| R1 | #22 的 abort fallback、reload 与低基数 lifecycle metrics | cancellation and next-generation worker tests |
 | R2 | #21 的可恢复 JSON error envelope | malformed-event recovery tests |
 | R3 | #21 的字节预算、慢消费者 deadline 与 `response.cancel` 控制通道 | hung ASR commit does not block TTS cancellation test |
 | R4 | #21 的 ASR commit、TTS 生成与发送总 deadline | hung commit / TTS / slow outbound tests |
-| A1 | #22 的 `capture_alignment` opt-in | streaming session capture tests |
-| A2 | #22 的有界 40 MiB alignment fallback 与 canonical-text verification | alignment mismatch and timestamp tests |
-| T1 | #22 的单一 bounded sentence planner | REST / Realtime delivery planner tests |
-| T2 | #22 的容量为 2 的 revision-aware reference LRU；不支持参数稳定拒绝 | cache hit/invalidation and clone parameter tests |
+| A1 | #22 的 `capture_alignment` opt-in 与 capture metric | streaming session capture tests |
+| A2 | #22 的有界 40 MiB alignment fallback、canonical-text verification 与 outcome metric | alignment mismatch and timestamp tests |
+| T1 | #22 的单一 bounded sentence planner 与 chunk metric | REST / Realtime delivery planner tests |
+| T2 | #22 的容量为 2 的 revision-aware reference LRU、cache metrics；不支持参数稳定拒绝 | cache hit/invalidation and clone parameter tests |
 | D1 | #23 的 fail-closed capability diagnosis 和 native probe / evaluation gate | native extension remains absent unless `supports_stream` is verified |
 | O1 | #21 的 admission / send phase metrics | metric phase tests |
 | U1 | #23 的 `/health`、MCP describe、`speechrail diagnose` 与恢复动作 | CLI and health contract tests |
@@ -60,7 +60,7 @@ npx --no-install @redocly/cli lint contracts/openapi.yaml
 git diff --check
 ```
 
-最近的分支结果为 #21 `1272 passed`、#22 `1275 passed`、#23 `1262 passed`；差异来自彼此尚未合并的独立提交。测试包含 FastAPI fake backend，不声明真实模型质量、RTF、TTFA、DER/JER 或物理内存已通过。
+最近的分支结果为 #21 `1272 passed`、#22 `1277 passed`、#23 `1262 passed`；差异来自彼此尚未合并的独立提交。测试包含 FastAPI fake backend，不声明真实模型质量、RTF、TTFA、DER/JER 或物理内存已通过。
 
 本机只读检查显示已运行服务的 `/health` 和 `/readyz` 可达，quality profile 的 ASR/TTS/diarization 均可按需启动且当时处于 cold-evicted 状态。`tools/probe_diarization_streaming.py` 在开发环境未发现可用的 NeMo streaming 方法，因此连续分人能力继续不广播。这是 fail-closed 结论，不是 native 分人通过。
 
