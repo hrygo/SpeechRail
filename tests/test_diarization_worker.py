@@ -15,6 +15,7 @@ from speechrail.config import Settings, bundled_diarization_worker_path
 from speechrail.domain.diarization import DiarizationError
 from speechrail.runtime import diarization_worker
 from speechrail.runtime.diarization_worker import (
+    _STDERR_TAIL_BYTES,
     MAX_IPC_PAYLOAD_BYTES,
     CoreMLWorkerProcess,
     decode_message,
@@ -143,6 +144,45 @@ def test_worker_request_rejects_an_ipc_protocol_mismatch(monkeypatch) -> None:
     async def scenario() -> None:
         with pytest.raises(RuntimeError, match="protocol mismatch"):
             await worker.request({"operation": "preflight"})
+
+    asyncio.run(scenario())
+
+
+def test_coreml_worker_stderr_tail_is_bounded_and_never_exposed_verbatim() -> None:
+    async def scenario() -> None:
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"x" * (_STDERR_TAIL_BYTES + 1_024))
+        reader.feed_eof()
+        worker = CoreMLWorkerProcess(executable=Path("worker"), model_path=Path("model"))
+
+        await worker._drain_stderr(reader)
+
+        assert len(worker._stderr_tail) == _STDERR_TAIL_BYTES
+        assert worker._failure_summary() == (
+            "CoreML diarization worker transport failed (exit_code=unknown, stderr_bytes=8192)"
+        )
+
+    asyncio.run(scenario())
+
+
+def test_coreml_activity_session_maps_worker_transport_failure_to_stable_error() -> None:
+    class Worker:
+        async def start(self) -> None:
+            return None
+
+        async def request(self, header: dict[str, object], audio: bytes = b""):
+            del header, audio
+            raise RuntimeError("private child diagnostics")
+
+        async def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        session = CoreMLActivitySession(worker=Worker(), epoch="epoch")  # type: ignore[arg-type]
+        with pytest.raises(DiarizationError) as error:
+            await session.append(start_sample=0, pcm16=b"\x00\x00")
+        assert error.value.code == "diarization_invalid_output"
+        assert "private child diagnostics" not in str(error.value)
 
     asyncio.run(scenario())
 

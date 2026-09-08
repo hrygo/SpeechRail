@@ -185,7 +185,7 @@ class CoreMLActivitySession:
             raise DiarizationError("diarization sample continuity broken", code="invalid_audio")
         await self._start()
         samples = len(pcm16) // 2
-        response, _ = await self._worker.request(
+        response, _ = await self._request(
             {
                 "epoch": self._epoch,
                 "operation": "append",
@@ -210,7 +210,7 @@ class CoreMLActivitySession:
             )
         try:
             await self._start()
-            response, _ = await self._worker.request(
+            response, _ = await self._request(
                 {"epoch": self._epoch, "operation": "finish", "through_sample": through_sample}
             )
             await self._publish(response, operation="finish")
@@ -230,8 +230,23 @@ class CoreMLActivitySession:
 
     async def _start(self) -> None:
         if not self._started:
-            await self._worker.start()
+            try:
+                await self._worker.start()
+            except RuntimeError as exc:
+                raise DiarizationError(
+                    "CoreML diarization worker failed", code="diarization_invalid_output"
+                ) from exc
             self._started = True
+
+    async def _request(
+        self, header: dict[str, object], audio: bytes = b""
+    ) -> tuple[dict[str, object], bytes]:
+        try:
+            return await self._worker.request(header, audio)
+        except RuntimeError as exc:
+            raise DiarizationError(
+                "CoreML diarization worker failed", code="diarization_invalid_output"
+            ) from exc
 
     async def _publish(self, response: dict[str, object], *, operation: str) -> None:
         if response.get("epoch") != self._epoch or response.get("operation") != operation:

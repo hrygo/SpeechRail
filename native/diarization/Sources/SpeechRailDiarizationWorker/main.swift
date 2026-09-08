@@ -53,6 +53,7 @@ private final class StreamingWorker {
     private let diarizer: SortformerDiarizer
     private var acceptedSamples = 0
     private var emittedFrames = 0
+    private let finalizationPaddingSamples: Int
 
     init(modelPath: String) throws {
         let url = URL(fileURLWithPath: modelPath)
@@ -61,6 +62,12 @@ private final class StreamingWorker {
         }
         var config = SortformerConfig.balancedV2_1
         config.debugMode = false
+        // The streaming model does not emit its final right-context frames
+        // until enough future features exist. EOF therefore supplies exactly
+        // one private right-context of silence; it is never counted as input
+        // or exposed in the public timebase.
+        self.finalizationPaddingSamples =
+            config.chunkRightContext * config.subsamplingFactor * config.melStride
         self.diarizer = SortformerDiarizer(config: config, timelineConfig: .sortformerDefault)
         let modelConfig = MLModelConfiguration()
         modelConfig.computeUnits = .all
@@ -85,6 +92,8 @@ private final class StreamingWorker {
 
     func finish(through: Int) throws -> [String: Any] {
         guard through == acceptedSamples else { throw WorkerError.invalidRequest }
+        diarizer.addAudio([Float](repeating: 0, count: finalizationPaddingSamples))
+        while try diarizer.process() != nil {}
         _ = try diarizer.finalizeSession()
         return snapshot(finished: true)
     }
@@ -115,9 +124,8 @@ private final class StreamingWorker {
             emittedFrames = totalFrames
         }
         let finalizedSamples = min(totalFrames * frameSamples, acceptedSamples)
-        // EOF padding advances model computation but must never extend the public
-        // timebase. After finalizeSession the whole real input is processed and
-        // stable, including a trailing partial frame.
+        // Private EOF padding advances inference only. Frames and watermarks
+        // stay clipped to the client-supplied PCM timeline.
         let processedSamples = finished ? acceptedSamples : finalizedSamples
         return [
             "protocol_version": protocolVersion,
