@@ -87,7 +87,9 @@ ws://127.0.0.1:8201/v1/realtime
 本服务器不发送 `rate_limits.updated`（单机部署无多租户配额语义）。
 
 `/metrics` 仅记录低基数的 Realtime 阶段耗时：`asr_admission`、`tts_admission` 与 `send`。
-它们分别覆盖准入等待和服务端发送停顿，不能替代客户端实际播放延迟。
+它们分别覆盖准入等待和服务端发送停顿，不能替代客户端实际播放延迟。服务端发送也受
+`SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 约束；慢消费者超过该时限会以 `1011` 关闭连接，
+避免长期占住会话发送锁。
 
 ## 转写语义
 

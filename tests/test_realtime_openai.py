@@ -36,7 +36,11 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.tts import get_voice_registry
-from speechrail.http.routes.realtime_openai import create_openai_realtime_router
+from speechrail.http.routes.realtime_openai import (
+    OUTBOUND_SEND_TIMEOUT_CLOSE_CODE,
+    _send_json_with_deadline,
+    create_openai_realtime_router,
+)
 
 
 class FakeTranscriber:
@@ -350,6 +354,32 @@ def test_openai_session_created_and_updated() -> None:
         updated = socket.receive_json()
         assert updated["type"] == "session.updated"
         assert updated["session"]["model"] == "whisper-1"
+
+
+def test_realtime_send_timeout_closes_slow_consumer() -> None:
+    class SlowWebSocket:
+        def __init__(self) -> None:
+            self.closed: tuple[int, str] | None = None
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            del payload
+            await asyncio.Event().wait()
+
+        async def close(self, *, code: int, reason: str) -> None:
+            self.closed = (code, reason)
+
+    async def scenario() -> SlowWebSocket:
+        websocket = SlowWebSocket()
+        sent = await _send_json_with_deadline(  # type: ignore[arg-type]
+            websocket,
+            {"type": "response.audio.delta"},
+            timeout_seconds=0.01,
+        )
+        assert sent is False
+        return websocket
+
+    websocket = asyncio.run(scenario())
+    assert websocket.closed == (OUTBOUND_SEND_TIMEOUT_CLOSE_CODE, "outbound send timed out")
 
 
 def test_openai_append_commit_produces_transcription_completed() -> None:
