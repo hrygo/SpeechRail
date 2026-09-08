@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -66,7 +67,9 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 payload["session_id"] = session_id
                 payload["sequence"] = sequence
                 try:
+                    send_started = time.monotonic()
                     await websocket.send_json(payload)
+                    services.metrics.record_realtime_phase("send", time.monotonic() - send_started)
                 except (WebSocketDisconnect, RuntimeError):
                     disconnected = True
                     return None
