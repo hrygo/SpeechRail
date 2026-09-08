@@ -239,10 +239,17 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._mode_lease: AsrModeLease | None = None
         self._cleanup_lock = asyncio.Lock()
         self._finalized = False
+        self._capture_alignment = False
 
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    def enable_alignment(self) -> None:
+        """Request bounded alignment capture before this session is connected."""
+        if self._connected:
+            raise RuntimeError("alignment must be enabled before connect")
+        self._capture_alignment = True
 
     async def connect(self) -> None:
         if self._connected:
@@ -266,6 +273,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                     "left_context_sec": self._left_context_sec,
                     "right_context_ms": self._right_context_ms,
                     "max_new_tokens": self._max_new_tokens,
+                    "capture_alignment": self._capture_alignment,
                 }
             )
             assert self._queue is not None

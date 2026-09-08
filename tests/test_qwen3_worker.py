@@ -271,8 +271,10 @@ class _FakeEngine:
         left_context_sec: float = 12.0,
         right_context_ms: int = 640,
         max_new_tokens: int = 256,
+        capture_alignment: bool = True,
     ) -> None:
-        del language, context, chunk_sec, left_context_sec, right_context_ms, max_new_tokens
+        del language, context, chunk_sec, left_context_sec
+        del right_context_ms, max_new_tokens, capture_alignment
         if session_id in self.sessions:
             raise RuntimeError(f"session already open: {session_id}")
         self.sessions[session_id] = []
@@ -504,6 +506,7 @@ class _RecordingAlignEngine(_FakeEngine):
         left_context_sec: float = 12.0,
         right_context_ms: int = 640,
         max_new_tokens: int = 256,
+        capture_alignment: bool = True,
     ) -> None:
         super().open_session(
             session_id=session_id,
@@ -513,6 +516,7 @@ class _RecordingAlignEngine(_FakeEngine):
             left_context_sec=left_context_sec,
             right_context_ms=right_context_ms,
             max_new_tokens=max_new_tokens,
+            capture_alignment=capture_alignment,
         )
         self.recorded_language = language
         self.recorded_context = context

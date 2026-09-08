@@ -466,6 +466,10 @@ class OpenAIRealtimeSession:
                 language=self._config.get("language"),
                 prompt=asr_prompt,
             )
+            if self._diarization is not None:
+                enable_alignment = getattr(asr, "enable_alignment", None)
+                if callable(enable_alignment):
+                    enable_alignment()
             await asr.connect()
         except BaseException as exc:
             with contextlib.suppress(Exception):
