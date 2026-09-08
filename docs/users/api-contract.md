@@ -35,7 +35,7 @@ TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 
 | 请求方法 | 路径 | 描述 | 主要参数 / 返回格式 |
 |---|---|---|---|
 | `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息 |
-| `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 表示 ASR/TTS 引擎已预热并可接受流量 |
+| `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 只表示 ASR 或 TTS 至少一项可按需服务；worker 是否驻留请读取 `/health` |
 | `GET` | `/metrics` | 运行指标导出 | 默认 Prometheus 文本；`Accept: application/json` 返回结构化视图 |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
 | `GET` | `/v1/voices` | 注册与自定义的 TTS 音色列表 | 返回系统预置与自建音色全属性及可用性 |
@@ -98,8 +98,18 @@ Content-Type: application/json
 `mp3`、`opus`、`aac`、`flac` 的容器编码具有 15 秒超时和 128 MiB 输出上限。
 编码超限、超时或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
 
-标准接口要求 `voice`，请求中的复数 `instructions` 字段为 OpenAI SDK 兼容保留字段，当前
-不会改变已选音色。自然语言音色设计试听使用下方独立的 `/v1/voices/previews` 扩展。
+标准接口要求 `voice`。质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
+一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
+`400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
+音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
+
+`seed` 仅属于质量档 VoiceDesign preview 的确定性采样参数；系统 VoiceDesign 音色使用其
+固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
+组合返回稳定错误，不以“已接受”暗示参数生效。
+
+`/metrics` 的 TTS 交付计数只使用固定事件标签：`planner_chunk`、参考缓存命中/未命中/淘汰、
+`abort_fallback` 与 `reload`。它们用于比较同一 runtime 与 profile 下的实现路径，不含文本、
+音色 ID、音频、路径或实际音质结论。
 
 ### 预设音色库 (Preset Voices)
 
@@ -247,7 +257,7 @@ Authorization: Bearer <TOKEN>
 | `input_audio_buffer.speech_started` | 服务端 → 客户端 | Server VAD 触发检测到人声开始 |
 | `input_audio_buffer.speech_stopped` | 服务端 → 客户端 | Server VAD 触发检测到人声结束 |
 | `response.create` | 客户端 → 服务端 | 触发语音合成 (Stream-In TTS) |
-| `response.audio.delta` | 服务端 → 客户端 | 流式返回 24kHz PCM16 音频增量块 |
+| `response.output_audio.delta` / `response.audio.delta` | 服务端 → 客户端 | 流式返回 24kHz PCM16 音频增量块；每个协商 wire profile 只发送其中一种事件 |
 | `response.cancel` | 客户端 → 服务端 | 立即打断并取消正在进行的语音合成 |
 
 ### 6.1 多人会议讲话人分离扩展 (`speechrail.diarization.v1`)

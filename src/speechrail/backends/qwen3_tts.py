@@ -12,7 +12,7 @@ import base64
 import contextlib
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -27,6 +27,8 @@ from speechrail.runtime.worker_process import (
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
+
+DeliveryEventRecorder = Callable[[str, int], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,12 +131,20 @@ class Qwen3TtsWorker:
     ordered ``audio* → completed`` stream, and abort on any unfinished stream.
     """
 
-    def __init__(self, config: Qwen3TtsBackendConfig) -> None:
+    def __init__(
+        self,
+        config: Qwen3TtsBackendConfig,
+        *,
+        on_delivery_event: DeliveryEventRecorder | None = None,
+    ) -> None:
         self.config = config
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
         self._epoch: int = 0
+        self._fallback_abort_count = 0
+        self._reload_count = 0
+        self._on_delivery_event = on_delivery_event
         self.last_active: float = time.monotonic()
         self.model_variant: str | None = None
         try:
@@ -153,6 +163,23 @@ class Qwen3TtsWorker:
         """Return whether the supervised worker can accept another request."""
         return self._started and self._transport.alive
 
+    @property
+    def lifecycle_stats(self) -> dict[str, int | bool]:
+        """Expose path-free cancellation evidence for local diagnostics.
+
+        The current vendor worker serves one synchronous generation at a time
+        and has no verified cooperative cancellation checkpoint.  A cancelled
+        incomplete stream therefore uses the bounded abort fallback.  Keep the
+        counters explicit so a future vendor capability change can be measured
+        instead of being assumed from a successful cancellation response.
+        """
+
+        return {
+            "cooperative_cancel_supported": False,
+            "fallback_abort_count": self._fallback_abort_count,
+            "reload_count": self._reload_count,
+        }
+
     async def start(self) -> None:
         async with self._lock:
             await self._start_locked()
@@ -160,6 +187,7 @@ class Qwen3TtsWorker:
     async def _start_locked(self) -> None:
         if self._started:
             return
+        is_reload = self._epoch > 0
         try:
             await self._transport.start()
             await self._transport.send(
@@ -183,6 +211,9 @@ class Qwen3TtsWorker:
                 raise RuntimeError("backend_identity_mismatch")
             self._started = True
             self._epoch += 1
+            if is_reload:
+                self._reload_count += 1
+                self._record_delivery_event("reload")
             self.last_active = time.monotonic()
         except BaseException:
             await self._transport.abort()
@@ -229,6 +260,7 @@ class Qwen3TtsWorker:
                         if frame.get("request_id") != response_id:
                             raise RuntimeError("worker_response_id_mismatch")
                         if frame.get("type") == "completed":
+                            self._record_completion_stats(frame)
                             completed = True
                             return
                         if frame.get("type") == "error":
@@ -261,9 +293,31 @@ class Qwen3TtsWorker:
                     self.last_active = time.monotonic()
                     if not completed and self._epoch == epoch:
                         self._started = False
+                        self._fallback_abort_count += 1
+                        self._record_delivery_event("abort_fallback")
                         await self._transport.abort()
 
         return stream()
+
+    def _record_completion_stats(self, frame: dict[str, object]) -> None:
+        raw = frame.get("delivery_stats")
+        if not isinstance(raw, dict):
+            return
+        names = {
+            "planner_chunks": "planner_chunk",
+            "reference_cache_hits": "reference_cache_hit",
+            "reference_cache_misses": "reference_cache_miss",
+            "reference_cache_evictions": "reference_cache_eviction",
+        }
+        for field, event in names.items():
+            amount = raw.get(field)
+            if isinstance(amount, int) and not isinstance(amount, bool) and 0 < amount <= 10_000:
+                self._record_delivery_event(event, amount)
+
+    def _record_delivery_event(self, event: str, amount: int = 1) -> None:
+        callback = self._on_delivery_event
+        if callback is not None:
+            callback(event, amount)
 
     async def _receive_profile_frame(self) -> dict[str, object]:
         try:

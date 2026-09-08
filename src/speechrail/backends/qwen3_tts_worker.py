@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -265,6 +266,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         load_fn: ModelLoader | None = None,
         numpy_module: Any | None = None,
         audio_loader_fn: Any | None = None,
+        reference_cache_entries: int = 2,
         warmup: bool = True,
     ) -> None:
         expected = inspect_model(model_dir)
@@ -309,11 +311,19 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             raise RuntimeError("qwen3_tts_output_invalid")
         if chunk_ms <= 0:
             raise ValueError("chunk_ms must be positive")
+        if not 0 <= reference_cache_entries <= 8:
+            raise ValueError("reference_cache_entries must be between 0 and 8")
         self._sample_rate = sample_rate
         self._chunk_ms = chunk_ms
         self._repetition_penalty = repetition_penalty
         self._temperature = temperature
         self._top_p = top_p
+        # ICL reference arrays are sensitive and may be sizeable. They stay
+        # only in this worker process, have a tiny LRU bound, and invalidate
+        # whenever the source file identity changes.
+        self._reference_cache_entries = reference_cache_entries
+        self._reference_audio_cache: OrderedDict[tuple[str, int, int], Any] = OrderedDict()
+        self._delivery_stats: Counter[str] = Counter()
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
@@ -330,6 +340,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if warmup:
             for _ in self._generate("预热。", voice="default", speed=1.0, language="auto"):
                 pass
+            self.consume_delivery_stats()
 
     def synthesize(
         self,
@@ -348,6 +359,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return
         first_chunk = True
         for sentence in bounded_sentences(clean_text):
+            self._delivery_stats["planner_chunks"] += 1
             for pcm in self._generate(
                 sentence,
                 voice=voice,
@@ -384,19 +396,22 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         ref_text: str | None = None,
     ) -> Iterator[bytes]:
         if ref_audio is not None or ref_text is not None:
-            if not ref_audio or not Path(ref_audio).is_file():
+            # The vendor ICL generator accepts neither speaking-rate controls
+            # nor VoiceDesign sampling controls.  Reject them at the adapter
+            # boundary so a successful response never hides an ignored option.
+            if speed != 1.0:
+                raise ValueError("clone_speed_unsupported")
+            if instruction is not None:
+                raise ValueError("clone_instruction_unsupported")
+            if seed is not None:
+                raise ValueError("clone_seed_unsupported")
+            if not ref_audio:
                 raise RuntimeError("failed to load reference audio: file missing")
             if ref_text is None or not ref_text.strip():
                 raise RuntimeError("failed to load reference text: text missing")
             if self._audio_loader_fn is None:
                 raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
-            try:
-                audio_array = self._audio_loader_fn(ref_audio, sample_rate=self._sample_rate)
-            except Exception as exc:
-                raise RuntimeError(f"failed to decode reference audio: {exc}") from exc
-
-            if audio_array is None:
-                raise RuntimeError("failed to decode reference audio: empty array")
+            audio_array = self._load_reference_audio(ref_audio)
             if not hasattr(self._model, "_generate_icl"):
                 raise RuntimeError(
                     "model does not support clone generation (_generate_icl missing)"
@@ -417,10 +432,14 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return
 
         variant = self.identity.model_variant or "voice_design"
+        if variant == "custom_voice" and seed is not None:
+            raise ValueError("custom_voice_seed_unsupported")
         condition = generation_condition(variant, voice, instruction=instruction)
         used_temperature = self._temperature
         if variant == "voice_design":
             if instruction is None:
+                if seed is not None:
+                    raise ValueError("voice_design_seed_requires_instruction")
                 profile = get_voice_profile(voice)
                 used_temperature = profile.temperature
                 seed = profile.seed
@@ -450,6 +469,67 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             pcm = self._to_pcm(result)
             if pcm:
                 yield pcm
+
+    def _load_reference_audio(self, ref_audio: str) -> Any:
+        """Read one local ICL reference with bounded, revision-aware caching."""
+
+        path = Path(ref_audio)
+        try:
+            resolved = path.resolve(strict=True)
+            stat = resolved.stat()
+        except OSError as exc:
+            raise RuntimeError("failed to load reference audio: file missing") from exc
+        if not resolved.is_file():
+            raise RuntimeError("failed to load reference audio: file missing")
+
+        key = (str(resolved), stat.st_mtime_ns, stat.st_size)
+        cached = self._reference_audio_cache.get(key)
+        if cached is not None:
+            self._delivery_stats["reference_cache_hits"] += 1
+            self._reference_audio_cache.move_to_end(key)
+            return cached
+        if self._reference_cache_entries:
+            self._delivery_stats["reference_cache_misses"] += 1
+
+        # A profile may be replaced in place. Drop every obsolete generation
+        # of this path before loading the new one, rather than retaining its
+        # decoded voice reference until ordinary LRU eviction.
+        for stale_key in tuple(self._reference_audio_cache):
+            if stale_key[0] == key[0]:
+                del self._reference_audio_cache[stale_key]
+                self._delivery_stats["reference_cache_evictions"] += 1
+        loader = self._audio_loader_fn
+        if loader is None:
+            raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
+        try:
+            audio_array = loader(str(resolved), sample_rate=self._sample_rate)
+        except Exception as exc:
+            raise RuntimeError(f"failed to decode reference audio: {exc}") from exc
+        if audio_array is None or getattr(audio_array, "size", 1) == 0:
+            raise RuntimeError("failed to decode reference audio: empty array")
+
+        if self._reference_cache_entries:
+            self._reference_audio_cache[key] = audio_array
+            self._reference_audio_cache.move_to_end(key)
+            while len(self._reference_audio_cache) > self._reference_cache_entries:
+                self._reference_audio_cache.popitem(last=False)
+                self._delivery_stats["reference_cache_evictions"] += 1
+        return audio_array
+
+    def consume_delivery_stats(self) -> dict[str, int]:
+        """Return per-request aggregate delivery counters and reset them."""
+        result = {
+            name: count
+            for name in (
+                "planner_chunks",
+                "reference_cache_hits",
+                "reference_cache_misses",
+                "reference_cache_evictions",
+            )
+            if (count := int(self._delivery_stats.get(name, 0))) > 0
+        }
+        self._delivery_stats.clear()
+        return result
 
     def _to_pcm(self, result: Any) -> bytes:
         result_sample_rate = int(result.sample_rate)
@@ -602,9 +682,18 @@ def serve(
                     },
                     binary_payload=pcm,
                 )
+            consume_stats = getattr(engine, "consume_delivery_stats", None)
+            stats = consume_stats() if callable(consume_stats) else {}
+            completed: dict[str, object] = {
+                "version": PROTOCOL_VERSION,
+                "type": "completed",
+                "request_id": request_id,
+            }
+            if stats:
+                completed["delivery_stats"] = stats
             write_frame(
                 output_stream,
-                {"version": PROTOCOL_VERSION, "type": "completed", "request_id": request_id},
+                completed,
             )
             _clear_metal_cache()
         except ProtocolError:

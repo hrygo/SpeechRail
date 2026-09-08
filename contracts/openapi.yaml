@@ -914,7 +914,7 @@ components:
         instructions:
           type: string
           maxLength: 100000
-          description: Accepted and ignored for OpenAI SDK parity; Qwen3-TTS has no instruction channel.
+          description: VoiceDesign instruction for quality profiles. CustomVoice and clone voices reject it with a stable 400 error.
         stream_format:
           type: string
           enum: [audio]

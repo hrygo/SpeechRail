@@ -30,6 +30,21 @@ TTFA_BUCKETS: tuple[float, ...] = (
 REALTIME_TURN_DURATION_BUCKETS: tuple[float, ...] = (
     0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0
 )
+REALTIME_PHASE_BUCKETS: tuple[float, ...] = (
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0
+)
+_REALTIME_PHASES = frozenset({"asr_admission", "tts_admission", "send"})
+_ALIGNMENT_EVENTS = frozenset({"capture_requested", "fallback_completed", "fallback_failed"})
+_TTS_DELIVERY_EVENTS = frozenset(
+    {
+        "planner_chunk",
+        "reference_cache_hit",
+        "reference_cache_miss",
+        "reference_cache_eviction",
+        "abort_fallback",
+        "reload",
+    }
+)
 
 LabelKey = tuple[tuple[str, str], ...]
 
@@ -121,6 +136,14 @@ class Metrics:
             "Streaming TTS Time-To-First-Audio latency in seconds",
         )
         self._describe(
+            "speechrail_tts_delivery_events_total",
+            "TTS delivery lifecycle events by a bounded event label",
+        )
+        self._describe(
+            "speechrail_asr_alignment_events_total",
+            "Optional ASR alignment capture and fallback events by bounded label",
+        )
+        self._describe(
             "speechrail_realtime_sessions_total",
             "Total WebSocket realtime sessions opened",
         )
@@ -152,6 +175,10 @@ class Metrics:
         self._describe(
             "speechrail_realtime_turn_duration_seconds",
             "Realtime turn processing duration in seconds",
+        )
+        self._describe(
+            "speechrail_realtime_phase_duration_seconds",
+            "Realtime phase duration in seconds by a bounded phase label",
         )
         self._describe(
             "speechrail_realtime_active_audio_samples_total",
@@ -296,12 +323,37 @@ class Metrics:
     def record_ttfa(self, ttfa_sec: float) -> None:
         self.observe("speechrail_tts_ttfa_seconds", ttfa_sec, TTFA_BUCKETS)
 
+    def record_alignment_event(self, event: str) -> None:
+        """Record an optional alignment path without session or text labels."""
+        if event not in _ALIGNMENT_EVENTS:
+            raise ValueError(f"unsupported alignment event: {event}")
+        self.inc("speechrail_asr_alignment_events_total", event=event)
+
+    def record_tts_delivery_event(self, event: str, *, amount: int = 1) -> None:
+        """Record one bounded TTS delivery event emitted by the worker adapter."""
+        if event not in _TTS_DELIVERY_EVENTS:
+            raise ValueError(f"unsupported TTS delivery event: {event}")
+        if amount > 0:
+            self.inc("speechrail_tts_delivery_events_total", amount=amount, event=event)
+
     def record_realtime_session_start(self) -> None:
         self.inc("speechrail_realtime_sessions_total")
         self.inc_gauge("speechrail_realtime_active_sessions")
 
     def record_realtime_session_end(self) -> None:
         self.dec_gauge("speechrail_realtime_active_sessions")
+
+    def record_realtime_phase(self, phase: str, duration_sec: float) -> None:
+        """Record a bounded Realtime lifecycle phase without user identifiers."""
+        if phase not in _REALTIME_PHASES:
+            raise ValueError(f"unsupported realtime phase: {phase}")
+        if duration_sec >= 0.0:
+            self.observe(
+                "speechrail_realtime_phase_duration_seconds",
+                duration_sec,
+                REALTIME_PHASE_BUCKETS,
+                phase=phase,
+            )
 
     def record_bargein(self) -> None:
         self.inc("speechrail_realtime_bargein_events_total")

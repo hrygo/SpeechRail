@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -57,7 +57,9 @@ class _FakeTransport:
 
 
 def _worker(
-    tmp_path: Path, responses: list[dict[str, Any]] | None = None
+    tmp_path: Path,
+    responses: list[dict[str, Any]] | None = None,
+    on_delivery_event: Callable[[str, int], None] | None = None,
 ) -> tuple[Qwen3TtsWorker, _FakeTransport]:
     snapshot = tmp_path.parent / "external-qwen3-tts"
     snapshot.mkdir(exist_ok=True)
@@ -70,7 +72,8 @@ def _worker(
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        on_delivery_event=on_delivery_event,
     )
     fake = _FakeTransport(responses)
     worker._transport = fake  # type: ignore[assignment]
@@ -168,6 +171,41 @@ def test_tts_worker_normalizes_private_audio_frames_to_public_chunks(tmp_path: P
     assert chunks[0].chunk_index == 0
     assert chunks[0].audio == b"\x00\x00"
     assert fake.abort_count == 0
+
+
+def test_tts_worker_records_bounded_delivery_stats_from_completed_frame(tmp_path: Path) -> None:
+    events: list[tuple[str, int]] = []
+    worker, _fake = _worker(
+        tmp_path,
+        [
+            _chunk_frame("pending", 0, b"\x00\x00"),
+            {
+                "type": "completed",
+                "request_id": "pending",
+                "delivery_stats": {
+                    "planner_chunks": 2,
+                    "reference_cache_hits": 1,
+                    "reference_cache_misses": 1,
+                    "reference_cache_evictions": 1,
+                    "untrusted_extra": 9,
+                },
+            },
+        ],
+        on_delivery_event=lambda event, amount: events.append((event, amount)),
+    )
+
+    async def collect() -> None:
+        request = SpeechRequest(text="你好", voice="default")
+        _ = [chunk async for chunk in worker.synthesize(request)]
+
+    asyncio.run(collect())
+
+    assert events == [
+        ("planner_chunk", 2),
+        ("reference_cache_hit", 1),
+        ("reference_cache_miss", 1),
+        ("reference_cache_eviction", 1),
+    ]
 
 
 def test_tts_worker_packs_ephemeral_preview_parameters(tmp_path: Path) -> None:
@@ -429,6 +467,7 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
     worker, fake = _worker(tmp_path)
     started = asyncio.Event()
     release = asyncio.Event()
+    original_receive = fake.receive
 
     async def blocked_receive() -> dict[str, Any]:
         started.set()
@@ -442,12 +481,41 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
             pass
 
     async def scenario() -> None:
+        worker._epoch = 1  # Simulate one completed worker start before this request.
         task = asyncio.create_task(consume())
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         assert fake.abort_count == 1
+        assert worker.lifecycle_stats == {
+            "cooperative_cancel_supported": False,
+            "fallback_abort_count": 1,
+            "reload_count": 0,
+        }
+
+        # A subsequent request restarts the same supervised worker exactly
+        # once. The diagnostic counter records the reload without exposing
+        # private request or voice data.
+        fake.alive = True
+        fake.receive = original_receive  # type: ignore[method-assign]
+        fake.push(
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+            }
+        )
+        fake.push(_chunk_frame("pending", 0, b"\x00\x00"))
+        fake.push({"type": "completed", "request_id": "pending"})
+        chunks = [
+            chunk async for chunk in worker.synthesize(SpeechRequest(text="恢复", voice="default"))
+        ]
+        assert len(chunks) == 1
+        assert worker.lifecycle_stats["reload_count"] == 1
 
     asyncio.run(scenario())
 
