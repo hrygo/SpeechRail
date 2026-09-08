@@ -470,6 +470,7 @@ class OpenAIRealtimeSession:
                 enable_alignment = getattr(asr, "enable_alignment", None)
                 if callable(enable_alignment):
                     enable_alignment()
+                    self._services.metrics.record_alignment_event("capture_requested")
             await asr.connect()
         except BaseException as exc:
             with contextlib.suppress(Exception):
@@ -1270,6 +1271,10 @@ class OpenAIRealtimeSession:
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
                     norm_text = apply_light_itn(event.text)
+                    if self._diarization is not None and event.text:
+                        self._services.metrics.record_alignment_event(
+                            "fallback_completed" if event.segments else "fallback_failed"
+                        )
                     self._services.metrics.record_realtime_turn(
                         mode="server_vad" if self._vad is not None else "manual",
                         commit_reason="vad_stop" if self._vad is not None else "client",

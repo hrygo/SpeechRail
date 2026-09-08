@@ -262,9 +262,10 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     captured: dict[str, str] = {}
     real_worker = services_module.Qwen3TtsWorker
 
-    def spy_worker(config: object) -> object:
+    def spy_worker(config: object, *, on_delivery_event: object | None = None) -> object:
         captured["dtype"] = getattr(config, "dtype", "")
-        return real_worker(config)
+        assert callable(on_delivery_event)
+        return real_worker(config, on_delivery_event=on_delivery_event)
 
     monkeypatch.setattr(services_module, "Qwen3TtsWorker", spy_worker)
     asr_snapshot = tmp_path / "asr"

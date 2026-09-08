@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from sys import executable
 from typing import Any
@@ -57,7 +57,9 @@ class _FakeTransport:
 
 
 def _worker(
-    tmp_path: Path, responses: list[dict[str, Any]] | None = None
+    tmp_path: Path,
+    responses: list[dict[str, Any]] | None = None,
+    on_delivery_event: Callable[[str, int], None] | None = None,
 ) -> tuple[Qwen3TtsWorker, _FakeTransport]:
     snapshot = tmp_path.parent / "external-qwen3-tts"
     snapshot.mkdir(exist_ok=True)
@@ -70,7 +72,8 @@ def _worker(
             device="mps",
             dtype="float16",
             sample_rate=24_000,
-        )
+        ),
+        on_delivery_event=on_delivery_event,
     )
     fake = _FakeTransport(responses)
     worker._transport = fake  # type: ignore[assignment]
@@ -168,6 +171,41 @@ def test_tts_worker_normalizes_private_audio_frames_to_public_chunks(tmp_path: P
     assert chunks[0].chunk_index == 0
     assert chunks[0].audio == b"\x00\x00"
     assert fake.abort_count == 0
+
+
+def test_tts_worker_records_bounded_delivery_stats_from_completed_frame(tmp_path: Path) -> None:
+    events: list[tuple[str, int]] = []
+    worker, _fake = _worker(
+        tmp_path,
+        [
+            _chunk_frame("pending", 0, b"\x00\x00"),
+            {
+                "type": "completed",
+                "request_id": "pending",
+                "delivery_stats": {
+                    "planner_chunks": 2,
+                    "reference_cache_hits": 1,
+                    "reference_cache_misses": 1,
+                    "reference_cache_evictions": 1,
+                    "untrusted_extra": 9,
+                },
+            },
+        ],
+        on_delivery_event=lambda event, amount: events.append((event, amount)),
+    )
+
+    async def collect() -> None:
+        request = SpeechRequest(text="你好", voice="default")
+        _ = [chunk async for chunk in worker.synthesize(request)]
+
+    asyncio.run(collect())
+
+    assert events == [
+        ("planner_chunk", 2),
+        ("reference_cache_hit", 1),
+        ("reference_cache_miss", 1),
+        ("reference_cache_eviction", 1),
+    ]
 
 
 def test_tts_worker_packs_ephemeral_preview_parameters(tmp_path: Path) -> None:

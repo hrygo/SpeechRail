@@ -231,6 +231,7 @@ class AppServices:
 
 def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServices:
     """Compose concrete Qwen/NeMo/job components without starting them."""
+    metrics = Metrics()
     job_repository = overrides.job_repository
     if job_repository is None and settings.job_spool_dir is not None:
         job_repository = JobRepository(settings.job_spool_dir)
@@ -289,7 +290,10 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 warmup_on_start=settings.tts_warmup_on_start,
                 cache_limit_mb=settings.mlx_cache_limit_mb,
                 memory_limit_mb=settings.mlx_memory_limit_mb,
-            )
+            ),
+            on_delivery_event=lambda event, amount: metrics.record_tts_delivery_event(
+                event, amount=amount
+            ),
         )
         tts_synthesizer = tts_worker
 
@@ -358,7 +362,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
 
     admission = AdmissionQueue(settings.max_queue_size)
-    metrics = Metrics()
     allow_heavy_overlap, policy_reason = _heavy_overlap_policy(
         settings,
         asr_enabled=(
