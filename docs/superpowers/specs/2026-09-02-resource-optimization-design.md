@@ -16,6 +16,10 @@
 > 9.58→3.44 GB），而"非预量化快照 + 内存即时量化"会先产生 bf16→fp16→int8 的瞬时加载峰值，属降级保底，且
 > 量化失败时按实际加载精度上报（fail-closed），不再谎报 int8。
 
+> **文档定位说明（2026-09-08）**：本文是待实施优化方案；其中的资源目标、基线和验收阈值是设计
+> 假设，不是当前运行时或跨硬件的承诺。当前主进程内 diarization、Realtime native capability gate
+> 与实际物理内存证据以[总体架构](../../architecture/architecture.md)、[能力诊断与质量验收](../../operations/capability-quality-acceptance.md)为准。
+
 ---
 
 ## 1. 背景与核心问题

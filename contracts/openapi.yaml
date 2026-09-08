@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 1.13.1
+  version: 2.0.0
   description: |
     Local-first shared ASR and TTS service.
 
@@ -42,7 +42,7 @@ paths:
               example:
                 status: ok
                 service: speechrail
-                version: 1.13.1
+                version: 2.0.0
                 backend: asr-1.7b-q8
                 profile: quality
                 asr_ready: true
@@ -182,6 +182,11 @@ paths:
                 anyOf:
                   - $ref: '#/components/schemas/TranscriptionResponse'
                   - $ref: '#/components/schemas/VerboseTranscriptionResponse'
+                  - $ref: '#/components/schemas/DiarizedTranscriptionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Available only for diarized_json with stream=true.
             text/plain:
               schema:
                 type: string
@@ -845,7 +850,7 @@ components:
           type: string
           enum: [json, verbose_json, diarized_json, text, srt, vtt]
           default: json
-          description: Use diarized_json with gpt-4o-transcribe-diarize when a diarization profile is available.
+          description: Use diarized_json only with model=gpt-4o-transcribe-diarize.
         temperature:
           type: number
           minimum: 0
@@ -872,20 +877,21 @@ components:
         stream:
           type: boolean
           default: false
-          description: Rejected with stream_unsupported; SpeechRail returns whole bodies.
+          description: For diarized_json, emits transcript.text.delta, transcript.text.segment and transcript.text.done SSE events.
         chunking_strategy:
           type: string
-          description: Rejected with chunking_strategy_unsupported; SpeechRail transcribes whole files.
+          enum: [auto, server_vad]
+          description: Required for diarized uploads longer than 30 seconds.
         include:
           type: array
           items:
             type: string
-          description: Accepted and ignored for OpenAI SDK parity.
+          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
         keywords:
           type: array
           items:
             type: string
-          description: Accepted and ignored for OpenAI SDK parity.
+          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
         known_speaker_names:
           type: array
           items:
@@ -1062,27 +1068,6 @@ components:
           minimum: 0
         text:
           type: string
-        speaker:
-          type: [string, "null"]
-        speakers:
-          type: array
-          description: Optional anonymous speaker attribution, ordered by confidence.
-          items:
-            $ref: '#/components/schemas/DiarizationSpeaker'
-        speaker_revision:
-          type: [integer, "null"]
-          minimum: 1
-    DiarizationSpeaker:
-      type: object
-      required: [id, confidence]
-      properties:
-        id:
-          type: string
-          pattern: '^spk_[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
-        confidence:
-          type: number
-          minimum: 0
-          maximum: 1
     TranscriptWord:
       type: object
       required: [word, start, end]
@@ -1122,6 +1107,42 @@ components:
             $ref: '#/components/schemas/TranscriptWord'
         usage:
           $ref: '#/components/schemas/Usage'
+    DiarizedTranscriptSegment:
+      type: object
+      required: [id, type, start, end, speaker, text]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: transcript.text.segment
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        speaker:
+          type: string
+          pattern: '^[A-D]$'
+        text:
+          type: string
+    DiarizedTranscriptionResponse:
+      type: object
+      required: [task, duration, text, segments]
+      properties:
+        task:
+          type: string
+          const: transcribe
+        duration:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiarizedTranscriptSegment'
     ErrorBody:
       type: object
       required: [error]

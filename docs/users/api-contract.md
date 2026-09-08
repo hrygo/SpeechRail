@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.8.0"
+version: "2.0.0"
 date: 2026-09-08
 ---
 
@@ -41,11 +41,11 @@ TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 
 | `GET` | `/v1/voices` | 注册与自定义的 TTS 音色列表 | 返回系统预置与自建音色全属性及可用性 |
 | `POST` | `/v1/voices` | 自然语言创建自定义音色 (Voice Design) | 接收名称与人设描述，固化专属 Seed 并持久化 |
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
-| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写 | `json`, `verbose_json`, `text`, `srt`, `vtt` |
+| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（可选匿名讲话人分离） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
-| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写、合成与说话人分割 |
+| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启 |
 
 `GET /health` 的 `tts_ready` 保持 v1 兼容含义：TTS 已配置并可按需接收请求；它不承诺权重
 当前驻留。新增的 `tts_warm` 为 `true` 时表示 worker 已完成加载握手，可直接产生 PCM，
@@ -69,7 +69,7 @@ Content-Type: multipart/form-data
 | `model` | String | 否 | `whisper-1` | 模型名（支持 Canonical ID 或 OpenAI 标准别名） |
 | `language` | String | 否 | `auto` | 语言代码（如 `zh`, `en`, `ja`, `auto` 等） |
 | `prompt` | String | 否 | - | 专有名词提示文本（最长 2000 字符） |
-| `response_format` | String | 否 | `json` | 响应格式：`json`, `verbose_json`, `text`, `srt`, `vtt` |
+| `response_format` | String | 否 | `json` | 响应格式：`json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json`；后者仅与 `gpt-4o-transcribe-diarize` 配对 |
 | `timestamp_granularities[]` | Array | 否 | `["segment", "word"]` | 时间戳精度：`segment`, `word`；须配合 `verbose_json` |
 
 标准 multipart 数组使用重复字段，例如 `timestamp_granularities[]=word`。
@@ -81,6 +81,19 @@ Content-Type: multipart/form-data
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 约束。WAV fastpath 在重采样前检查预计输出，其他容器在
 读取 `ffmpeg` 输出时检查，超限即停止处理。取消或解码超时会回收对应子进程；这不构成
 `ffmpeg` 自身内存占用的操作系统硬限制。
+
+### 3.1 批量讲话人分离
+
+文件分人使用 OpenAI 原生参数 `model="gpt-4o-transcribe-diarize"` 与
+`response_format="diarized_json"`。响应为 `task/duration/text/segments`；每个 segment 有
+string `id`、`type="transcript.text.segment"`、`start/end`、匿名 `speaker: "A"…"D"` 与
+`text`，不混入 Whisper confidence、内部 slot 或 revision 字段。`stream=true` 返回
+`transcript.text.delta`、`transcript.text.segment`、`transcript.text.done` SSE。超过 30 秒的
+文件必须提供 `chunking_strategy=auto|server_vad`；known-speaker 参数明确返回
+`unsupported_parameter`，SpeechRail 不把匿名标签映射为真实姓名或跨会议身份。
+
+未配置或未就绪的 profile 不会触发模型下载；请求会返回 `503 diarization_not_available`。
+安装可选依赖、准备仓库外部的绝对权重路径及检查 readiness 的步骤见[运行时部署方案](../operations/runtime-deployment.md)。
 
 ---
 
@@ -273,16 +286,16 @@ Authorization: Bearer <TOKEN>
 | `response.output_audio.delta` / `response.audio.delta` | 服务端 → 客户端 | 流式返回 24kHz PCM16 音频增量块；每个协商 wire profile 只发送其中一种事件 |
 | `response.cancel` | 客户端 → 服务端 | 立即打断并取消正在进行的语音合成 |
 
-### 6.1 多人会议讲话人分离扩展 (`speechrail.diarization.v1`)
-在 `session.update` 中传入 `input_audio_transcription.diarization.extensions = ["speechrail.diarization.v1"]` 协商开启。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
+### 6.1 多人会议讲话人分离扩展
+Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 只增加一个 opt-in 字段：`session.speechrail.diarization.enabled=true`。必须在首个 PCM 前设置，session.updated 回显 `enabled/version/max_speakers`。旧的根级或 `input_audio_transcription.diarization` 形状固定返回 `invalid_diarization`。未开启的普通 OpenAI Realtime 会话不接收任何 `speechrail.*` 事件，也不会创建分人会话。开启后，已完成正文通过本地固定文本对齐获得时间边界，绝不为分人再次识别或替换正文。采用“**正文先固定，归属后更新**”的不可变单元与异步补丁模型：
 
 | 扩展事件名称 (Type) | 方向 | 说明 |
 |---|---|---|
 | `conversation.item.input_audio_transcription.completed` | 服务端 → 客户端 | 携带全局 `audio_start_sample`/`audio_end_sample` 与不可变 `attribution_units`（含稳定 `segment_uid`、字符切片及时间质量） |
-| `speechrail.diarization.update` | 服务端 → 客户端 | 异步推送归属修订（含 `revision`、`status: tentative/stable/unknown`、`speaker`、覆盖与重叠率，及跨会话 `speaker_links`） |
+| `speechrail.diarization.updated` | 服务端 → 客户端 | 异步推送该 item 的完整归属快照；`speaker` 可为 null，标签只在当前 session 有效 |
 | `speechrail.diarization.status` | 服务端 → 客户端 | 发生过载或算子异常时触发单次降级通知（`status: degraded`），正文保持正常转写交付 |
-| `speechrail.diarization.finalize` | 客户端 → 服务端 | 录制结束屏障请求，携带 `finalization_id`，触发服务端排空声学尾部与待定归属 |
-| `speechrail.diarization.finalized` | 服务端 → 客户端 | 屏障终态响应，携带 `last_update_sequence` 与样本水位，客户端校验后安全触发会议纪要 |
+| `speechrail.diarization.finish` | 客户端 → 服务端 | 录制结束屏障请求，携带 `event_id`，触发服务端排空声学尾部与待定归属 |
+| `speechrail.diarization.done` | 服务端 → 客户端 | 屏障终态响应，携带 `last_update_sequence` 与样本水位，客户端校验后安全触发会议纪要 |
 
 ---
 

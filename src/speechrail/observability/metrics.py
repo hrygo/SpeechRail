@@ -34,7 +34,9 @@ REALTIME_PHASE_BUCKETS: tuple[float, ...] = (
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0
 )
 _REALTIME_PHASES = frozenset({"asr_admission", "tts_admission", "send"})
-_ALIGNMENT_EVENTS = frozenset({"capture_requested", "fallback_completed", "fallback_failed"})
+_ALIGNMENT_EVENTS = frozenset(
+    {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
+)
 _TTS_DELIVERY_EVENTS = frozenset(
     {
         "planner_chunk",

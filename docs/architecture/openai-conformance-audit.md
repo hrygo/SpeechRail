@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查"
 status: active
-version: "1.4.1"
-date: 2026-09-02
+version: "1.4.2"
+date: 2026-09-08
 ---
 
 # SpeechRail 语音 API 对 OpenAI 标准 符合度对标审查
@@ -19,6 +19,11 @@ live 复跑本机服务与 sona 消费者代码。修正 6 处过时/错误判�
 
 **v1.4 执行关闭（2026-09-02）**：§七 全部批次已在分支 `feat/openai-conformance` 实施并通过
 全量 gate 与 :8202 live smoke，详见 §九；本报告此前的"只读评估"表述仅适用于 v1.0–v1.3。
+
+**当前运行时提示（2026-09-08）**：上文 live smoke 与后文结论均是该日期的历史审查证据，不能
+替代当前服务状态。生产分人路径已切换为 FluidAudio CoreML FP16 私有 worker；文件接口遵循
+`gpt-4o-transcribe-diarize` / `diarized_json`，Realtime 仅 `session.speechrail.diarization.enabled`
+opt-in。当前 readiness 与内存证据请以[能力诊断与质量验收](../operations/capability-quality-acceptance.md)为准。
 
 ## 结论摘要
 

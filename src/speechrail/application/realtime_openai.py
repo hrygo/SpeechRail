@@ -27,25 +27,28 @@ with warnings.catch_warnings():
     )
     import audioop
 
-from speechrail.application.diarization import DiarizationCoordinator
+from speechrail.application.diarization import (
+    DiarizationSession,
+    ItemAttributionUpdated,
+    SessionDone,
+    StatusChanged,
+)
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
-    SPEECHRAIL_DIARIZATION_V1,
     RealtimeAdapterError,
     conversation_created,
     conversation_item_created,
     conversation_text_item_created,
-    diarization_contract,
-    diarization_finalized_event,
+    diarization_done_event,
     diarization_status_event,
     diarization_update_event,
     diarization_update_item,
     error_event,
     input_audio_buffer_cleared,
     input_audio_buffer_committed,
-    parse_finalize_request,
+    parse_finish_request,
     parse_text_item,
     reject_unsupported,
     response_audio_delta,
@@ -67,14 +70,17 @@ from speechrail.compatibility.openai_realtime import (
     validate_append,
 )
 from speechrail.config.selection import active_model_catalog
-from speechrail.domain.contracts import TranscriptSegment
-from speechrail.domain.diarization import DiarizationConfig, DiarizationError
-from speechrail.domain.diarization_timeline import (
-    AttributionLedger,
-    AttributionResult,
+from speechrail.domain.diarization import (
+    AlignmentRequest,
+    Attribution,
+    DiarizationError,
+    Span,
+    TextUnit,
+)
+from speechrail.domain.diarization.attribution import AttributionLedger
+from speechrail.domain.diarization.timeline import (
     AttributionUnit,
     Timeline,
-    build_alignment_units,
 )
 from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
@@ -84,11 +90,14 @@ from speechrail.domain.tts import (
     resolve_voice,
 )
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
+from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
+from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 
 _MAX_UPDATES_PER_EVENT = 256
+_MAX_ALIGNMENT_PCM_BYTES = 30 * 32_000
 
 logger = logging.getLogger(__name__)
 
@@ -163,12 +172,21 @@ class OpenAIRealtimeSession:
         self._asr_resources: AsyncExitStack | None = None
         self._tts_task: asyncio.Task[None] | None = None
         self._tts_response_id: str | None = None
-        self._diarization: DiarizationCoordinator | None = None
-        self._diarization_config: DiarizationConfig | None = None
+        self._diarization: DiarizationSession | None = None
+        self._diarization_events: asyncio.Task[None] | None = None
+        self._diarization_resources: AsyncExitStack | None = None
+        self._diarization_epoch: str | None = None
+        # Fixed-text alignment owns only the current ASR item's normalized PCM.
+        # It is never retained after that item completes and is hard-capped at
+        # 30 seconds, independently of generic WebSocket buffering.
+        self._alignment_pcm = bytearray()
+        self._alignment_overflow = False
         self._pending_text: str | None = None
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
+        self._alignment_pcm.clear()
+        self._alignment_overflow = False
         self._input_sample_rate = 16_000
         self._input_resampler: Pcm16RateConverter | None = None
         self._vad: Any = None
@@ -197,7 +215,7 @@ class OpenAIRealtimeSession:
         self._timeline = Timeline()
         self._item_start_sample = 0
         self._item_end_sample = 0
-        self._extensions: tuple[str, ...] = ()
+        self._diarization_enabled = False
         # SPK-E2E-1 finalization state: attribution bookkeeping lives in the
         # ledger, phase guards the append barrier, and the degraded fields are
         # first-wins so a flapping stream can only degrade the session once.
@@ -229,23 +247,11 @@ class OpenAIRealtimeSession:
                     session_id=self._session_id,
                     model=self._display_model,
                     tts_ready=self._services.tts_ready,
-                    diarization_extensions=self._diarization_extension_capabilities(),
                 )
             )
         )
 
         await self._send(conversation_created(session_id=self._session_id))
-
-    def _diarization_extension_capabilities(self) -> tuple[str, ...]:
-        """Advertise SPK-E2E-1 only when a verified continuous stream exists."""
-        engine = self._diarization_engine
-        if (
-            self._services.diarization_ready
-            and engine is not None
-            and bool(getattr(engine, "supports_stream", False))
-        ):
-            return (SPEECHRAIL_DIARIZATION_V1,)
-        return ()
 
     async def handle(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
@@ -255,8 +261,8 @@ class OpenAIRealtimeSession:
             await self._append_audio(event)
         elif event_type == "input_audio_buffer.commit":
             await self._commit_audio()
-        elif event_type == "speechrail.diarization.finalize":
-            await self._handle_finalize(event)
+        elif event_type == "speechrail.diarization.finish":
+            await self._handle_finish(event)
         elif event_type == "input_audio_buffer.clear":
             await self._clear_audio()
         elif event_type == "conversation.item.create":
@@ -275,10 +281,7 @@ class OpenAIRealtimeSession:
         await self._stop_asr_reader()
         await self._close_asr_session()
         await self._release_asr()
-        if self._diarization is not None:
-            with contextlib.suppress(Exception):
-                await self._diarization.close()
-            self._diarization = None
+        await self._close_diarization()
         if self._tts_task is not None and not self._tts_task.done():
             self._tts_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -299,8 +302,40 @@ class OpenAIRealtimeSession:
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
 
+        # The public extension is intentionally one small, namespaced switch.
+        # Internally it activates the existing continuous-session machinery;
+        # its legacy wire shape never reaches a client.
+        adapted_event = dict(event)
+        requested_enabled: bool | None = None
+        raw_session = event.get("session")
+        if isinstance(raw_session, dict):
+            raw_transcription = raw_session.get("input_audio_transcription")
+            if "diarization" in raw_session or (
+                isinstance(raw_transcription, dict) and "diarization" in raw_transcription
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_diarization",
+                    "use session.speechrail.diarization.enabled for realtime diarization",
+                )
+        if isinstance(raw_session, dict) and "speechrail" in raw_session:
+            session = dict(raw_session)
+            raw_extension = session.pop("speechrail")
+            if (
+                not isinstance(raw_extension, dict)
+                or set(raw_extension) != {"diarization"}
+                or not isinstance(raw_extension["diarization"], dict)
+                or set(raw_extension["diarization"]) != {"enabled"}
+                or not isinstance(raw_extension["diarization"].get("enabled"), bool)
+            ):
+                raise RealtimeAdapterError(
+                    "invalid_diarization",
+                    "session.speechrail.diarization requires boolean enabled only",
+                )
+            enabled = raw_extension["diarization"]["enabled"]
+            requested_enabled = enabled
+            adapted_event["session"] = session
         updated, config = apply_session_update(
-            event,
+            adapted_event,
             session_id=self._session_id,
             asr_model=self._settings.model_id,
             tts_model=self._settings.tts_model_id,
@@ -316,38 +351,35 @@ class OpenAIRealtimeSession:
                 "invalid_state",
                 "audio input format cannot change after the first audio frame",
             )
-        requested_extensions = tuple(config.get("diarization_extensions") or ())
-        if "diarization_extensions" in config and requested_extensions != self._extensions:
+        previous_enabled = self._diarization_enabled
+        if requested_enabled is not None and requested_enabled != self._diarization_enabled:
             if self._timeline.accepted_samples > 0:
                 raise RealtimeAdapterError(
                     "invalid_state",
-                    "diarization extensions can only be negotiated before the first audio",
+                    "diarization can only be enabled before the first audio",
                 )
-            if requested_extensions != self._diarization_extension_capabilities():
-                raise RealtimeAdapterError(
-                    "unsupported_operation",
-                    f"{SPEECHRAIL_DIARIZATION_V1} is not available on this server",
-                )
-            raw_diarization_config = config.get("diarization")
-            if (
-                not isinstance(raw_diarization_config, dict)
-                or not raw_diarization_config.get("enabled")
+            if requested_enabled and (
+                not self._services.diarization_ready
+                or self._diarization_engine is None
+                or not bool(getattr(self._diarization_engine, "supports_stream", False))
+                or self._services.text_aligner is None
             ):
                 raise RealtimeAdapterError(
-                    "invalid_diarization",
-                    "diarization extensions require enabled diarization",
+                    "diarization_not_available",
+                    str(self._services.diarization_status["message"]),
                 )
-            self._extensions = requested_extensions
-            self._ledger = AttributionLedger()
+            self._diarization_enabled = requested_enabled
         configured_voice = config.get("voice")
         if isinstance(configured_voice, str):
             self._require_voice_available(configured_voice)
-        raw_diarization = config.get("diarization")
-        self._diarization_config = (
-            None if raw_diarization is None else DiarizationConfig.model_validate(raw_diarization)
-        )
-        if self._diarization_config is not None and self._diarization_config.enabled:
-            await self._ensure_diarization()
+        if self._diarization_enabled:
+            try:
+                await self._ensure_diarization()
+            except BaseException:
+                self._diarization_enabled = False
+                await self._close_diarization()
+                self._diarization_enabled = previous_enabled
+                raise
         else:
             await self._close_diarization()
 
@@ -433,13 +465,15 @@ class OpenAIRealtimeSession:
                 else None
             )
         self._config = config
-        if self._extensions:
+        if self._diarization_enabled:
             session_payload = updated.get("session")
             if isinstance(session_payload, dict):
-                # group_generation stays null until R3 wires group isolation.
-                session_payload["diarization_contract"] = diarization_contract(
-                    group_generation=None
-                )
+                session_payload["speechrail"] = {
+                    "diarization": {"enabled": True, "version": 1, "max_speakers": 4}
+                }
+                session_payload["speechrail"] = {
+                    "diarization": {"enabled": True, "version": 1, "max_speakers": 4}
+                }
         await self._send(self._with_speech_capabilities(updated))
 
     def _with_speech_capabilities(
@@ -470,11 +504,6 @@ class OpenAIRealtimeSession:
                 language=self._config.get("language"),
                 prompt=asr_prompt,
             )
-            if self._diarization is not None:
-                enable_alignment = getattr(asr, "enable_alignment", None)
-                if callable(enable_alignment):
-                    enable_alignment()
-                    self._services.metrics.record_alignment_event("capture_requested")
             await asr.connect()
         except BaseException as exc:
             with contextlib.suppress(Exception):
@@ -493,7 +522,23 @@ class OpenAIRealtimeSession:
             )
             raise RealtimeAdapterError(code, message) from exc
         self._asr = asr
+        self._alignment_pcm.clear()
+        self._alignment_overflow = False
         self._asr_reader = asyncio.create_task(self._drain_asr_events())
+
+    async def _append_asr_audio(self, audio: bytes) -> None:
+        """Feed ASR and retain exactly this item's bounded alignment PCM."""
+
+        assert self._asr is not None
+        await self._asr.append_audio(audio)
+        if not self._diarization_enabled:
+            return
+        if len(self._alignment_pcm) + len(audio) > _MAX_ALIGNMENT_PCM_BYTES:
+            if not self._alignment_overflow:
+                self._services.metrics.record_alignment_event("fixed_text_overflow")
+            self._alignment_overflow = True
+            return
+        self._alignment_pcm.extend(audio)
 
     async def _handle_admission_decision(
         self, dec: AdmissionDecision, *, in_commit: bool = False
@@ -542,7 +587,7 @@ class OpenAIRealtimeSession:
 
             max_item_bytes = (
                 256_000
-                if self._extensions
+                if self._diarization_enabled
                 else (self._settings.max_realtime_buffer_bytes or 8_388_608)
             )
             if self._buffered_audio_bytes > 0 and (
@@ -558,7 +603,7 @@ class OpenAIRealtimeSession:
                 await self._ensure_asr_for_turn()
 
             if self._asr is not None:
-                await self._asr.append_audio(dec.pcm)
+                await self._append_asr_audio(dec.pcm)
                 self._admitted_end_sample = dec.end_sample
                 self._item_end_sample = dec.end_sample
                 self._buffered_audio_bytes += len(dec.pcm)
@@ -614,7 +659,7 @@ class OpenAIRealtimeSession:
         await self._ensure_diarization()
         self._item_end_sample = self._timeline.accept(audio)[1]
         if self._diarization is not None:
-            await self._diarization.append_audio(audio)
+            await self._diarization.append(audio)
 
         # 1. SpeechAdmission path (server_vad with admission enabled)
         if self._speech_admission is not None and self._vad is not None:
@@ -678,7 +723,7 @@ class OpenAIRealtimeSession:
                         )
                     )
                     if self._asr is not None:
-                        await self._asr.append_audio(audio)
+                        await self._append_asr_audio(audio)
                         self._buffered_audio_bytes += len(audio)
                         self._unflushed_bytes += len(audio)
                         await self._commit_audio()
@@ -713,14 +758,14 @@ class OpenAIRealtimeSession:
             self._item_start_sample = self._timeline.accepted_samples - (len(audio) // 2)
             if self._bargein_pending_audio and self._asr is not None:
                 for pending_chunk in self._bargein_pending_audio:
-                    await self._asr.append_audio(pending_chunk)
+                    await self._append_asr_audio(pending_chunk)
                     self._buffered_audio_bytes += len(pending_chunk)
                     self._unflushed_bytes += len(pending_chunk)
                 self._bargein_pending_audio.clear()
                 self._bargein_pending_bytes = 0
 
         if self._asr is not None:
-            await self._asr.append_audio(audio)
+            await self._append_asr_audio(audio)
             self._buffered_audio_bytes += len(audio)
             self._unflushed_bytes += len(audio)
 
@@ -820,7 +865,7 @@ class OpenAIRealtimeSession:
             # terminal event.  Keep commit, final event delivery and teardown
             # under one request deadline so its governor lane is recoverable.
             async with asyncio.timeout(self._settings.request_timeout_seconds):
-                await self._asr.commit(want_segments=self._diarization is not None)
+                await self._asr.commit(want_segments=False)
                 if self._asr_reader is not None:
                     await self._asr_reader
                     self._asr_reader = None
@@ -979,30 +1024,18 @@ class OpenAIRealtimeSession:
 
     def _completed_event(self, *, transcript: str) -> dict[str, object]:
         """Render the terminal completed event for the current ASR item."""
-        if self._extensions:
+        if self._diarization_enabled:
             return transcription_completed_extension(
                 item_id=self._current_item_id,
                 transcript=transcript,
                 audio_start_sample=self._item_start_sample,
                 audio_end_sample=max(self._item_end_sample, self._item_start_sample),
-                attribution_units=self._render_units(
-                    self._build_units(transcript, ())
-                ),
+                attribution_units=[],
             )
         return transcription_completed(item_id=self._current_item_id, transcript=transcript)
 
-    def _build_units(
-        self, canonical: str, segments: tuple[TranscriptSegment, ...]
-    ) -> tuple[AttributionUnit, ...]:
-        """Build immutable attribution units over the canonical transcript.
-
-        Align segments carry item-local millisecond bounds; they are ITN'd
-        with the same rule as the canonical text and mapped onto canonical
-        code point ranges, then lifted into session-global samples exactly
-        once.  Any inconsistency — or an already degraded session — degrades
-        the whole item to one ``timing_quality="unavailable"`` unit instead
-        of re-timing words.
-        """
+    async def _build_units(self, canonical: str) -> tuple[AttributionUnit, ...]:
+        """Directly align the frozen completed text; never reuse ASR segments."""
         item_start = self._item_start_sample
         item_end = max(self._item_end_sample, self._item_start_sample)
         item_samples = item_end - item_start
@@ -1010,33 +1043,41 @@ class OpenAIRealtimeSession:
             return ()
         if self._degraded_reason is not None:
             return (self._unavailable_unit(canonical, item_start, item_end),)
-        parts: list[str] = []
-        words: list[tuple[int, int, int, int]] = []
-        cursor = 0
-        for segment in segments:
-            text = apply_light_itn(segment.text)
-            if not text:
-                continue
-            start = cursor
-            cursor += len(text)
-            parts.append(text)
-            words.append((start, cursor, segment.start_ms * 16, segment.end_ms * 16))
-        candidate = "".join(parts)
-        units = build_alignment_units(
-            canonical, candidate, tuple(words), item_samples=item_samples
-        )
-        if units is None:
+        aligner = self._services.text_aligner
+        if (
+            aligner is None
+            or self._diarization_epoch is None
+            or self._alignment_overflow
+            or len(self._alignment_pcm) // 2 != item_samples
+        ):
+            return (self._unavailable_unit(canonical, item_start, item_end),)
+        try:
+            async with self._services.alignment_admission.reserve():
+                result = await aligner.align(
+                    AlignmentRequest(
+                        epoch=self._diarization_epoch,
+                        item_id=self._current_item_id,
+                        pcm16=bytes(self._alignment_pcm),
+                        span=Span(item_start, item_end),
+                        text=canonical,
+                        language=self._config.get("language"),
+                    )
+                )
+        except AlignmentAdmissionFullError:
+            self._services.metrics.record_alignment_event("fixed_text_overflow")
+            return (self._unavailable_unit(canonical, item_start, item_end),)
+        if result.failure is not None:
             return (self._unavailable_unit(canonical, item_start, item_end),)
         return tuple(
             AttributionUnit(
                 segment_uid=f"seg_{uuid4().hex[:12]}",
                 text_start=unit.text_start,
                 text_end=unit.text_end,
-                start_sample=item_start + unit.start_sample,
-                end_sample=item_start + unit.end_sample,
+                start_sample=unit.audio_span.start if unit.audio_span is not None else item_start,
+                end_sample=unit.audio_span.end if unit.audio_span is not None else item_end,
                 timing_quality="aligned",
             )
-            for unit in units
+            for unit in result.units
         )
 
     def _unavailable_unit(self, canonical: str, item_start: int, item_end: int) -> AttributionUnit:
@@ -1064,72 +1105,61 @@ class OpenAIRealtimeSession:
         ]
 
     async def _register_units(self, units: tuple[AttributionUnit, ...]) -> None:
-        """Feed delivered units to the ledger, then fold fresh activities."""
-        if self._ledger is None or not units:
-            return
-        immediate_results: list[AttributionResult] = []
-        try:
-            for unit in units:
-                res = self._ledger.register(unit)
-                if res is not None:
-                    immediate_results.append(res)
-        except DiarizationError as exc:
-            await self._handle_degradation(exc)
-            return
-        if immediate_results:
-            await self._send_diarization_updates(tuple(immediate_results))
-        if self._degraded_reason is not None:
-            # Degraded attribution keeps delivering text: any unit not already
-            # delivered as an immediate result is terminated as unknown.
-            delivered_uids = {r.segment_uid for r in immediate_results}
-            pending = [
-                self._unknown_result(u)
-                for u in units
-                if u.segment_uid not in delivered_uids
-            ]
-            if pending:
-                await self._send_diarization_updates(tuple(pending))
-            return
-        await self._fold_stream_activities()
-
-    async def _fold_stream_activities(self) -> None:
-        """Query the continuous stream and emit changed attribution revisions."""
-        if (
-            self._ledger is None
-            or self._diarization is None
-            or not self._diarization.is_continuous
-        ):
+        """Register immutable text units; actor events carry only speaker revisions."""
+        if self._diarization is None or not units:
             return
         try:
-            snapshot = await self._diarization.activities(self._timeline.accepted_samples)
+            await self._diarization.register_completed(
+                self._current_item_id,
+                tuple(
+                    TextUnit(
+                        id=unit.segment_uid,
+                        text_start=unit.text_start,
+                        text_end=unit.text_end,
+                        audio_span=(
+                            None
+                            if unit.timing_quality == "unavailable"
+                            else Span(unit.start_sample, unit.end_sample)
+                        ),
+                    )
+                    for unit in units
+                ),
+            )
         except DiarizationError as exc:
             await self._handle_degradation(exc)
-            return
-        if snapshot is not None:
-            await self._send_diarization_updates(self._ledger.apply_activity(snapshot))
+        except ValueError as exc:
+            await self._handle_degradation(
+                DiarizationError(str(exc), code="diarization_invalid_output")
+            )
 
-    async def _send_diarization_updates(self, results: tuple[AttributionResult, ...]) -> None:
-        """Emit attribution revisions in bounded batches on one serializer."""
-        if self._ledger is None or not results:
+    async def _send_diarization_updates(self, attributions: tuple[Attribution, ...]) -> None:
+        """Project domain speaker revisions into the established extension DTO."""
+        if self._ledger is None or not attributions:
             return
         items = [
             diarization_update_item(
-                segment_uid=result.segment_uid,
-                revision=result.revision,
-                status=result.status,
-                speaker=result.speaker,
-                coverage_ratio=result.coverage_ratio,
-                overlap_ratio=result.overlap_ratio,
-                candidates=result.candidates,
+                segment_uid=attribution.unit_id,
+                revision=attribution.revision,
+                status=(
+                    "stable"
+                    if attribution.state == "final" and attribution.speaker is not None
+                    else "unknown"
+                    if attribution.state == "final"
+                    else "tentative"
+                ),
+                speaker=attribution.speaker,
+                coverage_ratio=0.0,
+                overlap_ratio=0.0,
+                candidates=(),
             )
-            for result in results
+            for attribution in attributions
         ]
         for start in range(0, len(items), _MAX_UPDATES_PER_EVENT):
             chunk = items[start : start + _MAX_UPDATES_PER_EVENT]
             sequence = await self._send(
                 diarization_update_event(
                     group_generation=None,
-                    stable_through_sample=self._ledger.stable_through_sample,
+                    stable_through_sample=self._ledger.stable_through,
                     updates=chunk,
                     speaker_links=[],
                 )
@@ -1137,46 +1167,30 @@ class OpenAIRealtimeSession:
             if sequence is not None:
                 self._last_update_sequence = sequence
 
-    @staticmethod
-    def _unknown_result(unit: AttributionUnit) -> AttributionResult:
-        return AttributionResult(
-            segment_uid=unit.segment_uid,
-            revision=1,
-            status="unknown",
-            speaker=None,
-            coverage_ratio=0.0,
-            overlap_ratio=0.0,
-            candidates=(),
-        )
-
     def _mark_degraded(self, reason: str) -> None:
         if self._degraded_reason is None:
             self._degraded_reason = reason
 
     async def _handle_degradation(self, exc: DiarizationError) -> None:
-        """First-wins degradation: freeze units unknown, then one status event."""
+        """First-wins transport projection for an actor degradation."""
         reason = (
             exc.code
             if exc.code in {"diarization_overloaded", "diarization_invalid_output"}
             else "diarization_invalid_output"
         )
         through = self._timeline.accepted_samples
-        if self._ledger is not None and self._degraded_reason is None:
-            self._stable_through_at_degradation = self._ledger.stable_through_sample
         self._mark_degraded(reason)
-        if self._ledger is not None:
-            await self._send_diarization_updates(self._ledger.freeze(through))
         if not self._status_sent:
             self._status_sent = True
             await self._send(diarization_status_event(reason=reason, since_sample=through))
 
-    async def _handle_finalize(self, event: dict[str, Any]) -> None:
+    async def _handle_finish(self, event: dict[str, Any]) -> None:
         if self._ledger is None:
             raise RealtimeAdapterError(
                 "unsupported_operation",
-                f"{SPEECHRAIL_DIARIZATION_V1} is not negotiated on this session",
+                "diarization is not enabled on this session",
             )
-        finalization_id = parse_finalize_request(event)
+        finalization_id = parse_finish_request(event)
         if self._diarization_phase == "finalized":
             if self._finalization_id != finalization_id or self._finalized_payload is None:
                 raise RealtimeAdapterError(
@@ -1196,45 +1210,27 @@ class OpenAIRealtimeSession:
         await self._drain_and_finalize()
 
     async def _drain_and_finalize(self) -> None:
-        """Drain the native stream under a bounded deadline, then finalize."""
+        """Ask the actor to close its append barrier and drain its activity port."""
         deadline = self._settings.realtime_diarization_drain_deadline_seconds
         assert self._finalization_id is not None
+        done: SessionDone | None = None
         try:
             async with asyncio.timeout(deadline):
-                if self._diarization is not None and self._diarization.is_continuous:
-                    try:
-                        snapshot = await self._diarization.finish_stream(
-                            self._timeline.accepted_samples
-                        )
-                    except DiarizationError as exc:
-                        await self._handle_degradation(exc)
-                    else:
-                        if snapshot is not None and self._ledger is not None:
-                            await self._send_diarization_updates(
-                                self._ledger.apply_activity(snapshot)
-                            )
-                if self._ledger is not None and self._degraded_reason is None:
-                    await self._send_diarization_updates(
-                        self._ledger.freeze(self._timeline.accepted_samples)
-                    )
+                if self._diarization is not None:
+                    done = await self._diarization.finish(self._finalization_id)
         except TimeoutError:
             through = self._timeline.accepted_samples
-            if self._ledger is not None and self._degraded_reason is None:
-                self._stable_through_at_degradation = self._ledger.stable_through_sample
             self._mark_degraded("finalization_timeout")
-            if self._ledger is not None:
-                await self._send_diarization_updates(self._ledger.freeze(through))
             if not self._status_sent:
                 self._status_sent = True
                 await self._send(
                     diarization_status_event(reason="finalization_timeout", since_sample=through)
                 )
         through = self._timeline.accepted_samples
-        if self._degraded_reason is None:
-            stable_through = through
-        else:
-            stable_through = min(through, self._stable_through_at_degradation)
-        payload = diarization_finalized_event(
+        if done is not None and done.status == "degraded" and self._degraded_reason is None:
+            self._mark_degraded("finalization_incomplete")
+        stable_through = self._ledger.stable_through if self._ledger is not None else 0
+        payload = diarization_done_event(
             finalization_id=self._finalization_id,
             through_sample=through,
             stable_through_sample=stable_through,
@@ -1283,10 +1279,6 @@ class OpenAIRealtimeSession:
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
                     norm_text = apply_light_itn(event.text)
-                    if self._diarization is not None and event.text:
-                        self._services.metrics.record_alignment_event(
-                            "fallback_completed" if event.segments else "fallback_failed"
-                        )
                     self._services.metrics.record_realtime_turn(
                         mode="server_vad" if self._vad is not None else "manual",
                         commit_reason="vad_stop" if self._vad is not None else "client",
@@ -1294,7 +1286,7 @@ class OpenAIRealtimeSession:
                         characters=len(norm_text),
                         active_samples=max(0, self._item_end_sample - self._item_start_sample),
                     )
-                    if self._extensions:
+                    if self._diarization_enabled:
                         # Extension mode: unique item, session-sample bounds and
                         # immutable units; legacy .segment events are never sent
                         # alongside the negotiated contract.
@@ -1305,7 +1297,12 @@ class OpenAIRealtimeSession:
                                 item_id=self._current_item_id,
                             )
                         )
-                        units = self._build_units(norm_text, event.segments)
+                        units = await self._build_units(norm_text)
+                        self._services.metrics.record_alignment_event(
+                            "fixed_text_completed"
+                            if all(unit.timing_quality == "aligned" for unit in units)
+                            else "fixed_text_unavailable"
+                        )
                         await self._send(
                             transcription_completed_extension(
                                 item_id=self._current_item_id,
@@ -1327,29 +1324,23 @@ class OpenAIRealtimeSession:
                         )
                     )
                     segments = event.segments
-                    if self._diarization is not None and segments:
-                        try:
-                            segments = await self._diarization.annotate(segments)
-                        except DiarizationError as exc:
-                            await self._send(error_event(code=exc.code, message=str(exc)))
-                            return
-                        offset_ms = (
-                            int(self._item_start_sample / 16)
-                            if self._speech_admission is not None
-                            else 0
-                        )
-                        for segment in segments:
-                            await self._send(
-                                transcription_segment(
-                                    session_id=self._session_id,
-                                    item_id=self._current_item_id,
-                                    segment_id=segment.id,
-                                    text=apply_light_itn(segment.text),
-                                    speaker=segment.speaker,
-                                    start_ms=segment.start_ms + offset_ms,
-                                    end_ms=segment.end_ms + offset_ms,
-                                )
+                    offset_ms = (
+                        int(self._item_start_sample / 16)
+                        if self._speech_admission is not None
+                        else 0
+                    )
+                    for segment in segments:
+                        await self._send(
+                            transcription_segment(
+                                session_id=self._session_id,
+                                item_id=self._current_item_id,
+                                segment_id=segment.id,
+                                text=apply_light_itn(segment.text),
+                                speaker=segment.speaker,
+                                start_ms=segment.start_ms + offset_ms,
+                                end_ms=segment.end_ms + offset_ms,
                             )
+                        )
                     await self._send(
                         transcription_completed(item_id=self._current_item_id, transcript=norm_text)
                     )
@@ -1571,7 +1562,7 @@ class OpenAIRealtimeSession:
     async def _ensure_diarization(self) -> None:
         if self._diarization is not None:
             return
-        if self._diarization_config is None or not self._diarization_config.enabled:
+        if not self._diarization_enabled:
             return
         engine = self._diarization_engine
         if not self._services.diarization_ready or engine is None:
@@ -1579,17 +1570,69 @@ class OpenAIRealtimeSession:
                 "diarization_not_available",
                 str(self._services.diarization_status["message"]),
             )
-        if self._extensions:
-            self._diarization = DiarizationCoordinator(
-                continuous=engine.create_stream(config=self._diarization_config)
+        await self._reserve_diarization()
+        try:
+            holder: dict[str, DiarizationSession] = {}
+            epoch = f"rt-{uuid4().hex}"
+            self._ledger = AttributionLedger(
+                accepted_samples=lambda: holder["session"].accepted_samples
             )
-        else:
-            self._diarization = DiarizationCoordinator(
-                engine.create(config=self._diarization_config)
+            self._diarization = DiarizationSession(
+                activity=engine.open(epoch=epoch), ledger=self._ledger
             )
+            self._diarization_epoch = epoch
+            holder["session"] = self._diarization
+            await self._diarization.start()
+            self._diarization_events = asyncio.create_task(self._consume_diarization_events())
+        except BaseException:
+            await self._release_diarization()
+            raise
 
     async def _close_diarization(self) -> None:
         if self._diarization is not None:
             with contextlib.suppress(Exception):
-                await self._diarization.close()
+                await self._diarization.cancel()
             self._diarization = None
+        if self._diarization_events is not None:
+            self._diarization_events.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._diarization_events
+            self._diarization_events = None
+        self._ledger = None
+        self._diarization_epoch = None
+        await self._release_diarization()
+
+    async def _reserve_diarization(self) -> None:
+        self._diarization_resources = AsyncExitStack()
+        try:
+            await self._diarization_resources.enter_async_context(
+                self._services.diarization_admission.reserve()
+            )
+        except DiarizationAdmissionFullError as exc:
+            await self._diarization_resources.aclose()
+            self._diarization_resources = None
+            raise RealtimeAdapterError(
+                "backend_busy", "another diarization session is active"
+            ) from exc
+
+    async def _release_diarization(self) -> None:
+        if self._diarization_resources is not None:
+            await self._diarization_resources.aclose()
+            self._diarization_resources = None
+
+    async def _consume_diarization_events(self) -> None:
+        """Project actor output without allowing transport code into its state."""
+
+        assert self._diarization is not None
+        async for event in self._diarization.events():
+            if isinstance(event, ItemAttributionUpdated):
+                await self._send_diarization_updates(event.attributions)
+            elif isinstance(event, StatusChanged):
+                self._mark_degraded(event.reason)
+                if not self._status_sent:
+                    self._status_sent = True
+                    await self._send(
+                        diarization_status_event(
+                            reason=event.reason, since_sample=self._timeline.accepted_samples
+                        )
+                    )

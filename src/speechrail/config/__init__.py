@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Any, Literal, Self
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -12,10 +13,27 @@ from speechrail.domain.resource_limits import GovernorLimits
 from speechrail.domain.tts import VOICE_PROFILES, resolve_voice
 
 
+def bundled_diarization_worker_path() -> Path:
+    """Return the macOS worker installed beside the Python package."""
+
+    return Path(__file__).resolve().parents[1] / "_native" / "SpeechRailDiarizationWorker"
+
+
 class Settings(BaseSettings):
     """Validated, environment-backed service configuration."""
 
     model_config = SettingsConfigDict(env_prefix="SPEECHRAIL_", env_file=".env", extra="ignore")
+
+    _LEGACY_DIARIZATION_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "diarization_model_path",
+            "diarization_embedding_model_path",
+            "diarization_max_buffer_bytes",
+            "diarization_max_groups",
+            "diarization_group_ttl_seconds",
+            "diarization_similarity_threshold",
+        }
+    )
 
     @classmethod
     def from_env_file(cls, env_file: Path | None = None) -> Self:
@@ -25,7 +43,7 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "1.13.1"
+    version: str = "2.0.0"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
@@ -49,12 +67,9 @@ class Settings(BaseSettings):
     qwen3_streaming_stable_iterations: int = Field(default=2, ge=1, le=16)
     qwen3_streaming_max_new_tokens: int = Field(default=256, ge=32, le=2048)
     qwen3_streaming_context: str = ""
-    diarization_model_path: Path | None = None
-    diarization_embedding_model_path: Path | None = None
-    diarization_max_buffer_bytes: int = Field(default=64_000_000, ge=2, le=256_000_000)
-    diarization_max_groups: int = Field(default=64, ge=1, le=4096)
-    diarization_group_ttl_seconds: float = Field(default=900, gt=0, le=86_400)
-    diarization_similarity_threshold: float = Field(default=0.8, gt=0, le=1)
+    qwen3_aligner_model_dir: Path | None = None
+    diarization_coreml_model_path: Path | None = None
+    diarization_worker_path: Path = Field(default_factory=bundled_diarization_worker_path)
     job_spool_dir: Path | None = None
     job_poll_seconds: float = Field(default=0.1, gt=0, le=60)
     compatibility_model_ids: tuple[str, ...] = (
@@ -101,6 +116,27 @@ class Settings(BaseSettings):
     def blank_api_key_is_unset(cls, value: Any) -> Any:
         return None if value == "" else value
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_diarization_configuration(cls, data: Any) -> Any:
+        """Reject removed diarization knobs instead of silently ignoring them."""
+
+        configured = {
+            field
+            for field in cls._LEGACY_DIARIZATION_FIELDS
+            if os.environ.get(f"SPEECHRAIL_{field.upper()}") not in (None, "")
+        }
+        if isinstance(data, dict):
+            configured.update(
+                field for field in cls._LEGACY_DIARIZATION_FIELDS if data.get(field) is not None
+            )
+        if configured:
+            raise ValueError(
+                "legacy diarization configuration is unsupported: "
+                + ", ".join(sorted(configured))
+            )
+        return data
+
     @field_validator("tts_voice_ids", mode="after")
     @classmethod
     def normalize_tts_voice_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -118,8 +154,9 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
-        "diarization_model_path",
-        "diarization_embedding_model_path",
+        "diarization_coreml_model_path",
+        "diarization_worker_path",
+        "qwen3_aligner_model_dir",
         "realtime_vad_model_path",
     )
     @classmethod
@@ -166,11 +203,6 @@ class Settings(BaseSettings):
             )
         if self.realtime_reserved_capacity >= self.runtime_total_capacity:
             raise ValueError("realtime_reserved_capacity must be lower than runtime_total_capacity")
-        if (
-            self.diarization_embedding_model_path is not None
-            and self.diarization_model_path is None
-        ):
-            raise ValueError("diarization_embedding_model_path requires diarization_model_path")
         if not self.tts_voice_ids or any(
             not voice.strip() or voice not in VOICE_PROFILES for voice in self.tts_voice_ids
         ):

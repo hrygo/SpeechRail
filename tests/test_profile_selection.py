@@ -90,7 +90,8 @@ def test_preserves_unrelated_user_configurations(
         api_key="secret-test-key",
         compatibility_model_ids=("whisper-1", "custom-alias"),
         worker_idle_timeout_seconds=450.0,
-        diarization_model_path=Path("/tmp/fake-diarization"),
+        diarization_coreml_model_path=Path("/tmp/SortformerNvidiaLow_v2.1.mlmodelc"),
+        diarization_worker_path=Path("/tmp/SpeechRailDiarizationWorker"),
         max_upload_bytes=100_000_000,
     )
     selection = _make_selection()
@@ -102,7 +103,10 @@ def test_preserves_unrelated_user_configurations(
     assert resolved.api_key == "secret-test-key"
     assert resolved.compatibility_model_ids == ("whisper-1", "custom-alias")
     assert resolved.worker_idle_timeout_seconds == 450.0
-    assert resolved.diarization_model_path == Path("/tmp/fake-diarization")
+    assert resolved.diarization_coreml_model_path == Path(
+        "/tmp/SortformerNvidiaLow_v2.1.mlmodelc"
+    )
+    assert resolved.diarization_worker_path == Path("/tmp/SpeechRailDiarizationWorker")
     assert resolved.max_upload_bytes == 100_000_000
 
 

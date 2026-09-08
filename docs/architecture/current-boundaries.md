@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-date: 2026-09-03
+date: 2026-09-08
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -11,16 +11,19 @@ date: 2026-09-03
 1. REST 文件转写使用仓库外 Qwen3-ASR worker；运行时明确设置离线环境变量。
 2. 默认 Apple Silicon profile 为 MPS / `float16`，worker 拒绝自动 CPU fallback。
 3. 未配置 profile 路径时不加载模型；已配置 ASR/TTS profile 各自最多启动一个隔离 worker，
-   WLK 只可连接外部已运行 endpoint。
+   WLK 只可连接外部已运行 endpoint。分人由一个按需启动的私有 Swift/CoreML worker 执行，
+   固定 FluidAudio Sortformer FP16 bundle，不是 NeMo 或第三个 MLX worker。
 4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
 
 ## 明确限制
 
 - `/v1/realtime` 只承载 OpenAI Realtime 协议的 ASR/TTS 子集；不伪装 LLM 对话、工具调用、
-  历史或持续会话语义。
+  历史或持续会话语义。分人是 `session.speechrail.diarization.enabled` opt-in 扩展；文件
+  匿名分人使用 `gpt-4o-transcribe-diarize` / `diarized_json`。
 - `/health` 分别反映 ASR/TTS worker readiness，`/readyz` 在至少一个能力可接受请求时返回 200；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
+- `diarization_ready` 只表示固定 CoreML bundle 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。D1 仅记录 M5 Max、90 秒输入的 564 MB max RSS；DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。
 
 ## 已实测基准（本机，MPS/float16）
@@ -34,12 +37,14 @@ date: 2026-09-03
 | Realtime ASR commit→completed（10s） | 1.8-4.2s（RTF 0.18-0.42x） |
 | Realtime TTS 首音频块 | 51-223ms |
 | worker 常驻内存（ASR/streaming/TTS） | 1.96GB / 1.96GB / 4.76GB |
+| diarization 真实质量与物理内存 | 未纳入当前 v1.13.0 基准，`unset` |
 
 ## 验收门（未实测，须在对应场景完成）
 
 - Hermes 的 STT 配置和聊天 endpoint 隔离 smoke；
 - `sona` 的真实 ASR/TTS worker 端到端音频、播放与回滚验收；
 - 多语言/长文件（>60s）的质量、失败恢复与长时间运行基准；
+- diarization 的真实 CoreML smoke、DER/JER、稳定延迟、活跃与驱逐后 `phys_footprint`；
 - 非 loopback 的 TLS、CORS、网段控制、速率限制和 legacy auth 实现；
 - 日志收集策略与集中化导出实现；
 - FastAPI startup/shutdown event 迁移到 lifespan 的未来兼容性处理。

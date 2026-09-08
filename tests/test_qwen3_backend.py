@@ -1,6 +1,9 @@
+import asyncio
 from pathlib import Path
 from sys import executable
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -132,6 +135,34 @@ def test_snapshot_preflight_rejects_missing_or_repository_local_models(tmp_path:
     inside_repository.mkdir(parents=True)
     with pytest.raises(ValueError, match="outside"):
         validate_snapshot(inside_repository, repository_root=tmp_path)
+
+
+def test_worker_fixed_text_alignment_uses_one_private_ipc_request(tmp_path: Path) -> None:
+    worker, fake = _worker(
+        tmp_path,
+        [
+            {"type": "ready", "model_loaded": True, "device": "mps", "dtype": "float16"},
+            {
+                "type": "align_result",
+                "request_id": f"align_{'0' * 32}",
+                "tokens": [{"text": "你好", "start": 0.0, "end": 0.5}],
+            },
+        ],
+    )
+
+    async def scenario() -> tuple[tuple[str, float, float], ...]:
+        with patch(
+            "speechrail.backends.qwen3_native.uuid4",
+            return_value=SimpleNamespace(hex="0" * 32),
+        ):
+            return await worker.align_text(b"\0\0" * 8_000, text="你好", language="zh")
+
+    assert asyncio.run(scenario()) == (("你好", 0.0, 0.5),)
+    payload, binary = fake.requests[0]
+    assert payload["type"] == "align_text"
+    assert payload["text"] == "你好"
+    assert binary == b"\0\0" * 8_000
+    assert fake.mode_gate.active_mode is None
 
 
 def test_weight_files_accepts_both_layouts_and_rejects_missing(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import shutil
 import struct
 import time as _time
@@ -17,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.deadline import await_until
-from speechrail.application.diarization import DiarizationCoordinator
+from speechrail.application.diarization import diarize_transcript
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import (
     PcmOutputCounter,
@@ -32,7 +33,7 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptResult
-from speechrail.domain.diarization import DiarizationConfig, DiarizationError
+from speechrail.domain.diarization import DiarizationError
 from speechrail.domain.ports import (
     SpeechRequest,
     StreamingBatchTranscriber,
@@ -46,9 +47,16 @@ from speechrail.domain.tts import (
 )
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
-from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
+from speechrail.http.formatters import (
+    format_diarized,
+    format_json,
+    format_srt,
+    format_verbose,
+    format_vtt,
+)
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
+from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
@@ -63,6 +71,7 @@ _FFMPEG_IO_CHUNK_BYTES = 64 * 1024
 _FFMPEG_QUEUE_MAX_CHUNKS = 4
 _FFMPEG_TIMEOUT_SECONDS = 15.0
 _MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
+_DIARIZATION_UNCHUNKED_MAX_SECONDS = 30
 
 
 class _SpeechHTTPBody(BaseModel):
@@ -680,6 +689,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
     active = active_model_catalog(resolved)
     tts_variant = active.tts.variant if active.tts is not None else None
     diarization_engine = services.diarization_engine
+    text_aligner = services.text_aligner
 
     @router.post("/v1/audio/transcriptions")
     async def transcription(
@@ -697,10 +707,19 @@ def create_audio_router(services: AppServices) -> APIRouter:
         ),
         stream: bool = Form(default=False),
         chunking_strategy: str | None = Form(default=None),
+        chunking_strategy_type: str | None = Form(
+            default=None, alias="chunking_strategy[type]"
+        ),
         include: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
         keywords: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
         known_speaker_names: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        known_speaker_names_bracketed: list[str] = Form(  # noqa: B008 - multipart marker.
+            default=[], alias="known_speaker_names[]"
+        ),
         known_speaker_references: list[str] = Form(default=[]),  # noqa: B008 - multipart marker.
+        known_speaker_references_bracketed: list[str] = Form(  # noqa: B008 - multipart marker.
+            default=[], alias="known_speaker_references[]"
+        ),
     ) -> Response:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
@@ -714,6 +733,19 @@ def create_audio_router(services: AppServices) -> APIRouter:
         diarization_requested = (
             model.strip() == "gpt-4o-transcribe-diarize" or response_format == "diarized_json"
         )
+        if (
+            chunking_strategy is not None
+            and chunking_strategy_type is not None
+            and chunking_strategy != chunking_strategy_type
+        ):
+            return error_response(
+                422,
+                request_id,
+                "invalid_chunking_strategy",
+                "conflicting chunking_strategy values",
+                param="chunking_strategy",
+            )
+        chunking_strategy = chunking_strategy or chunking_strategy_type
         if response_format not in {
             "json",
             "verbose_json",
@@ -729,6 +761,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Unsupported response format",
                 param="response_format",
             )
+        if diarization_requested and model.strip() != "gpt-4o-transcribe-diarize":
+            return error_response(
+                422,
+                request_id,
+                "invalid_diarization_model",
+                "diarized_json requires model=gpt-4o-transcribe-diarize",
+                param="model",
+            )
         if diarization_requested and not services.diarization_ready:
             return error_response(
                 503,
@@ -737,7 +777,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "diarization profile is not available",
                 retryable=False,
             )
-        if stream:
+        if diarization_requested and text_aligner is None:
+            return error_response(
+                503,
+                request_id,
+                "diarization_not_available",
+                "fixed-text diarization alignment is not available",
+                retryable=False,
+            )
+        if stream and not diarization_requested:
             return error_response(
                 422,
                 request_id,
@@ -745,13 +793,38 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "SpeechRail does not support streaming file transcription",
                 param="stream",
             )
-        if chunking_strategy is not None:
+        if chunking_strategy is not None and not diarization_requested:
             return error_response(
                 422,
                 request_id,
                 "chunking_strategy_unsupported",
                 "SpeechRail transcribes whole files without chunking",
                 param="chunking_strategy",
+            )
+        if diarization_requested and chunking_strategy not in {None, "auto", "server_vad"}:
+            return error_response(
+                422,
+                request_id,
+                "invalid_chunking_strategy",
+                "diarized transcription requires chunking_strategy=auto or server_vad",
+                param="chunking_strategy",
+            )
+        known_speaker_names = [*known_speaker_names, *known_speaker_names_bracketed]
+        known_speaker_references = [
+            *known_speaker_references,
+            *known_speaker_references_bracketed,
+        ]
+        if diarization_requested and (known_speaker_names or known_speaker_references):
+            return error_response(
+                422,
+                request_id,
+                "unsupported_parameter",
+                "known speaker references are not supported by this anonymous diarization service",
+                param=(
+                    "known_speaker_names"
+                    if known_speaker_names
+                    else "known_speaker_references"
+                ),
             )
         if temperature is not None and not 0 <= temperature <= 2:
             return error_response(
@@ -817,19 +890,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
 
         effective_prompt = compose_hotword_prompt(prompt, keywords)
         want_timestamps = response_format in {"verbose_json", "diarized_json", "srt", "vtt"}
-        coordinator: DiarizationCoordinator | None = None
-        if diarization_requested:
-            assert diarization_engine is not None
-            coordinator = DiarizationCoordinator(
-                diarization_engine.create(config=DiarizationConfig(enabled=True))
-            )
         audio_bytes = 0
-
-        async def close_coordinator() -> None:
-            nonlocal coordinator
-            if coordinator is not None:
-                current, coordinator = coordinator, None
-                await current.close()
+        diarization_audio = bytearray()
 
         async def run_inference() -> TranscriptResult:
             nonlocal audio_bytes
@@ -842,12 +904,34 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         ffmpeg_path=resolved.ffmpeg_path,
                     )
 
+                    if diarization_requested and chunking_strategy is None:
+                        buffered = bytearray()
+                        async with contextlib.aclosing(decoded):
+                            async for chunk in decoded:
+                                buffered.extend(chunk)
+                        audio_bytes = len(buffered)
+                        if audio_bytes > _DIARIZATION_UNCHUNKED_MAX_SECONDS * 32_000:
+                            raise ValueError("diarization_chunking_required")
+                        if diarization_requested:
+                            diarization_audio.extend(buffered)
+
+                        async def buffered_audio() -> AsyncIterator[bytes]:
+                            yield bytes(buffered)
+
+                        return await streaming_batch.transcribe_stream(
+                            request_id,
+                            buffered_audio(),
+                            language,
+                            effective_prompt,
+                            want_timestamps,
+                        )
+
                     async def observed_audio() -> AsyncIterator[bytes]:
                         nonlocal audio_bytes
                         async for chunk in decoded:
                             audio_bytes += len(chunk)
-                            if coordinator is not None:
-                                await coordinator.append_audio(chunk)
+                            if diarization_requested:
+                                diarization_audio.extend(chunk)
                             yield chunk
 
                     async with contextlib.aclosing(decoded):
@@ -875,8 +959,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     if fast_pcm is not None:
                         audio = fast_pcm
                 audio_bytes = len(audio)
-                if coordinator is not None:
-                    await coordinator.append_audio(audio)
+                if (
+                    diarization_requested
+                    and chunking_strategy is None
+                    and audio_bytes > _DIARIZATION_UNCHUNKED_MAX_SECONDS * 32_000
+                ):
+                    raise ValueError("diarization_chunking_required")
+                if diarization_requested:
+                    diarization_audio.extend(audio)
                 if batch_transcriber is not None:
                     return await batch_transcriber.transcribe(
                         TranscriptionRequest(
@@ -890,7 +980,6 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 assert transcribe is not None
                 return await transcribe(audio, language, effective_prompt, want_timestamps)
             except BaseException:
-                await close_coordinator()
                 raise
 
         try:
@@ -920,11 +1009,18 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     f"Audio duration exceeds maximum limit of {resolved.max_audio_seconds} seconds",
                     param="file",
                 )
+            if str(exc) == "diarization_chunking_required":
+                return error_response(
+                    422,
+                    request_id,
+                    "diarization_chunking_required",
+                    "diarized transcription longer than 30 seconds requires chunking_strategy",
+                    param="chunking_strategy",
+                )
             return error_response(
                 422, request_id, str(exc), "Unsupported audio upload", param="file"
             )
         except QueueFullError:
-            await close_coordinator()
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -937,7 +1033,6 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 headers={"Retry-After": "1"},
             )
         except GovernorQueueFullError:
-            await close_coordinator()
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -950,7 +1045,6 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 headers={"Retry-After": "1"},
             )
         except AsrModeBusy:
-            await close_coordinator()
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -963,12 +1057,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 headers={"Retry-After": "1"},
             )
         except TimeoutError:
-            await close_coordinator()
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
         except DiarizationError as exc:
-            await close_coordinator()
             return error_response(
                 502,
                 request_id,
@@ -976,10 +1068,38 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Diarization backend returned an invalid result",
                 retryable=True,
             )
-        if coordinator is not None:
+        # Freeze ASR text before deriving units.  Diarization can revise only
+        # speakers; it must never be allowed to rewrite canonical text.
+        result = result.model_copy(
+            update={
+                "text": apply_light_itn(result.text),
+                "segments": [
+                    segment.model_copy(update={"text": apply_light_itn(segment.text)})
+                    for segment in result.segments
+                ],
+            }
+        )
+        if diarization_requested:
             try:
-                segments = await coordinator.annotate(result.segments)
-                result = result.model_copy(update={"segments": segments})
+                assert diarization_engine is not None
+                assert text_aligner is not None
+                async with services.diarization_admission.reserve():
+                    result = await diarize_transcript(
+                        activity_port=diarization_engine,
+                        aligner=text_aligner,
+                        audio=bytes(diarization_audio),
+                        result=result,
+                        epoch=f"batch-{request_id}",
+                        new_unit_id=lambda index: f"segment-{index}",
+                    )
+            except DiarizationAdmissionFullError:
+                return error_response(
+                    429,
+                    request_id,
+                    "backend_busy",
+                    "another diarization session is active",
+                    retryable=True,
+                )
             except DiarizationError as exc:
                 return error_response(
                     502,
@@ -988,25 +1108,41 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "Diarization backend returned an invalid result",
                     retryable=True,
                 )
-            finally:
-                await close_coordinator()
-
-        # Apply Light ITN to output text and segments
-        result = result.model_copy(
-            update={
-                "text": apply_light_itn(result.text),
-                "segments": [
-                    s.model_copy(update={"text": apply_light_itn(s.text)})
-                    for s in result.segments
-                ],
-            }
-        )
         if response_format == "json":
             return JSONResponse(format_json(result))
-        if response_format in {"verbose_json", "diarized_json"}:
+        if response_format == "diarized_json":
+            try:
+                payload = format_diarized(result)
+            except ValueError as exc:
+                return error_response(
+                    502,
+                    request_id,
+                    str(exc),
+                    "Diarization could not resolve every transcript segment",
+                    retryable=True,
+                )
+            if stream:
+                diarized_segments = payload["segments"]
+                diarized_text = payload["text"]
+                assert isinstance(diarized_segments, list)
+                assert isinstance(diarized_text, str)
+
+                async def diarized_events() -> AsyncIterator[bytes]:
+                    for segment in diarized_segments:
+                        assert isinstance(segment, dict)
+                        delta = {
+                            "type": "transcript.text.delta",
+                            "delta": segment["text"],
+                        }
+                        yield f"data: {json.dumps(delta, ensure_ascii=False)}\n\n".encode()
+                        yield f"data: {json.dumps(segment, ensure_ascii=False)}\n\n".encode()
+                    done = {"type": "transcript.text.done", "text": diarized_text}
+                    yield f"data: {json.dumps(done, ensure_ascii=False)}\n\n".encode()
+
+                return StreamingResponse(diarized_events(), media_type="text/event-stream")
+            return JSONResponse(payload)
+        if response_format == "verbose_json":
             granularities = frozenset(timestamp_granularities) or frozenset({"segment", "word"})
-            if response_format == "diarized_json":
-                granularities = frozenset({"segment"})
             return JSONResponse(format_verbose(result, granularities=granularities))
         if response_format == "text":
             return PlainTextResponse(result.text)

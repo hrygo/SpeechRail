@@ -20,7 +20,7 @@
 
 <p align="center">
   🤝 <strong>为 <a href="https://github.com/hrygo/sona">Sona</a> 打造</strong><br>
-  <em>为 Sona 提供私有、本地、实时 ASR/TTS 与多人讲话人分离能力。</em>
+  <em>为 Sona 提供私有、本地、实时 ASR/TTS 与可选的 OpenAI 兼容匿名讲话人分离能力。</em>
 </p>
 
 ---
@@ -35,9 +35,9 @@
 
 - 🔒 **数据零离机与强隐私**：默认绑定本地环回（`127.0.0.1`），亦支持内网受控暴露。音频纯内存处理不落盘，全链路本地私有推理，绝无任何数据外呼与云端泄露。
 - 🔌 **OpenAI 协议 1:1 无缝替换**：完整实现 `whisper-1`（文件转录）、`tts-1`（语音合成）与 `/v1/realtime`（低延迟双工流式 ASR/TTS），客户端改一行 `base_url` 即可接入。
-- 🛡️ **双物理进程隔离架构**：HTTP 网关与重型 MLX 推理引擎运行在不同物理进程中，通过高效 IPC 管道通信。Worker 崩溃绝不拖垮网关。
-- 🍃 **智能两阶段空闲卸载 (Idle Eviction)**：推理完毕后，默认 **5 分钟无请求自动卸载模型权重并释放显存**，常驻待机内存仅约 **50 MB**，绝不霸占 Mac 宝贵内存。
-- 👥 **原生多讲话人分离 (Speaker Diarization)**：集成 NeMo Sortformer 与 CAM++ 声纹模型，自动区分并标注不同发言人（如 `speaker_0`, `speaker_1`），轻松驾驭多人会议与访谈；支持批量 `diarized_json` 与 `/v1/realtime` 流式持续分人扩展（`speechrail.diarization.v1`），践行“正文先固定，归属后更新”与结束落库屏障。
+- 🛡️ **进程隔离架构**：HTTP 网关、MLX ASR/TTS Worker 与原生 CoreML 分人 Worker 都运行在独立进程，通过私有帧化 IPC 通信。Worker 崩溃不会拖垮网关。
+- 🍃 **可配置空闲卸载 (Idle Eviction)**：默认 **300 秒**无活动后，按生命周期配置释放常驻模型权重。卸载后的物理内存取决于档位、运行时和分配器，不承诺固定的待机内存数值。
+- 👥 **可选多人讲话人分离 (Speaker Diarization)**：`gpt-4o-transcribe-diarize` 返回 OpenAI 风格、会话范围的匿名标签 `diarized_json`。它使用锁定的 FluidAudio CoreML FP16 Sortformer Worker；Realtime 通过 `session.speechrail.diarization.enabled` 显式开启扩展。
 - 🎚️ **动态三档资源匹配**：针对 8GB 到 128GB 的 Apple Silicon 芯片深度调优（Light / Balanced / Quality），一键无感热切换。
 - 🎙️ **9 种跨档高质量内置音色**：原生集成 Qwen3-TTS 语音能力，涵盖中文、英语、粤语、日语、韩语等丰富声学角色。
 
@@ -50,7 +50,7 @@
 | **数据隐私** | 🔒 **100% 本机私有推理，数据零离机**（默认本地免密直连，支持内网鉴权暴露，绝不上云） | ❌ 音频必须上传云端，面临合规与泄露风险 |
 | **长期调用成本** | 💰 **$0（一次安装，全机及内网无限量免费调用）** | 💸 按音频时长/Token 持续计费，高频使用昂贵 |
 | **网络环境依赖** | ⚡ **纯离线本地计算，0 公网延迟，断网可用** | ⚠️ 依赖稳定外网与跨境链路，受网络抖动影响 |
-| **全机复用与内存管理**| 🍃 **单常驻 Daemon 供全机共享，空闲自动卸载权重 (~50MB)** | 统一云端网关，无本地模型负载 |
+| **全机复用与内存管理**| 🍃 **单常驻 Daemon 供全机共享，可配置空闲卸载权重；实际占用以基准为准** | 统一云端网关，无本地模型负载 |
 | **系统健壮性** | 🛡️ **网关与推理 Worker 物理进程隔离，异常自动拉起** | 依赖外部云服务商 SLA 与网络状态 |
 | **OpenAI 协议兼容** | ✅ **原生 1:1 兼容 (`whisper-1` / `tts-1` / `/v1/realtime`)** | ✅ 官方标准协议规范 |
 
@@ -130,6 +130,8 @@ SpeechRail 遵循**本地零摩擦、对外硬防护**的安全设计：
 
 ### 1. Python (OpenAI SDK)
 
+下方分人示例需要先配置本地 CoreML bundle；macOS wheel 已内置原生 Worker（见[可选讲话人分离模型](#3-可选讲话人分离模型)）。
+
 ```python
 from openai import OpenAI
 
@@ -152,7 +154,7 @@ with open("speech.wav", "rb") as audio_file:
 # 👥 多人会议转录与发言人区分 (Speaker Diarization)
 with open("meeting.wav", "rb") as audio_file:
     meeting = client.audio.transcriptions.create(
-        model="gpt-4o-transcribe-diarize",  # 调度本地 NeMo Sortformer 讲话人分离引擎
+        model="gpt-4o-transcribe-diarize",  # 调度本地 CoreML 分人 Worker
         file=audio_file,
         response_format="diarized_json",  # 返回带 speaker 标签的分段转写
     )
@@ -198,6 +200,15 @@ async function main() {
     model: "whisper-1",
   });
   console.log("转写结果:", transcription.text);
+
+  // 3. 原生讲话人分离：无需 SpeechRail 专用 SDK。
+  const meeting = await openai.audio.transcriptions.create({
+    file: fs.createReadStream("meeting.wav"),
+    model: "gpt-4o-transcribe-diarize",
+    response_format: "diarized_json",
+    chunking_strategy: { type: "server_vad" },
+  });
+  console.log("分人转写:", meeting);
 }
 
 main();
@@ -255,13 +266,13 @@ SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适�
 
 | 预设档位 (Profile) | ASR 模型权重 | TTS 模型权重与变体 | 最低物理内存推荐 | 活跃最大占用 (Peak) | 稳定占用 (Steady) | 空闲待机 (Idle) |
 |---|---|---|---|---|---|---|
-| 🟢 **`light` (轻量档)** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB 基础款 Mac (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **~50 MB** (自动卸载) |
-| 🟡 **`balanced` (平衡档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB 主流 Mac (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **~50 MB** (自动卸载) |
-| 🟣 **`quality` (高保真档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ 旗舰款 Mac (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **~50 MB** (自动卸载) |
+| 🟢 **`light` (轻量档)** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB 基础款 Mac (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **取决于运行时** (按配置卸载) |
+| 🟡 **`balanced` (平衡档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB 主流 Mac (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **取决于运行时** (按配置卸载) |
+| 🟣 **`quality` (高保真档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ 旗舰款 Mac (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **取决于运行时** (按配置卸载) |
 
 - **全档 8-bit 高精度量化**：全档位模型严格保证 8-bit 量化精度，拒绝低位量化带来的音频失真与发音崩塌。
 - **权重高效复用**：`balanced` 与 `quality` 共享同一个 1.7B ASR 模型；`balanced` 与 `light` 共享同一个 0.6B CustomVoice TTS 模型。
-- **智能两阶段空闲卸载 (Idle Eviction)**：默认 5 分钟无请求时自动触发冷卸载释放显存与内存，常驻待机仅占用约 **~50 MB**，新请求秒级懒拉起。
+- **可配置空闲卸载 (Idle Eviction)**：默认空闲超时为 **300 秒**，可通过 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 修改，设为 `0` 可禁用；卸载后的实测物理内存取决于运行时与档位。
 - **音色设计边界**：仅 `quality` 档支持通过自然语言设计自定义新音色（VoiceDesign）；在 `balanced`/`light` 档下，自定义音色会自动声明为 `available=false`，切回 `quality` 自动恢复。
 
 ### 2. 9 种跨档系统内置音色
@@ -298,25 +309,23 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 
 ### 3. 可选讲话人分离模型
 
-针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 原生集成了高性能多讲话人时序切分与角色分离能力：
+针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 在本地 CoreML profile 就绪后提供可选的讲话人切分与会话级匿名标签能力：
 
 | 核心组件 | 底层模型架构 | 职责与能力边界 | 活跃推理开销 (Active RAM) | 客户端调用入口 |
 |---|---|---|---|---|
-| **时序切分引擎** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | 在线/离线流式切分不同发言人时间边界，支持最多 4 人重叠语音分离 | **+约 0.5 GB** (500 MB) | `model="gpt-4o-transcribe-diarize"` 或 `response_format="diarized_json"` |
-| **声纹特征提取 (可选)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | 提取 16kHz PCM 声纹特征向量，跨会话短时重聚类，确保发言人归一 | **极轻量** (~数十 MB) | 会话内断线重连或长会议平滑映射 |
+| **时序切分引擎** | **FluidAudio CoreML FP16 Sortformer** (`SortformerNvidiaLow_v2.1.mlmodelc`) | 原生 Swift Worker 直接加载已编译 bundle，最多四个匿名讲话人 | **D1 峰值 RSS 564 MB** | `model="gpt-4o-transcribe-diarize"` 与 `response_format="diarized_json"` |
 
-- **活跃内存开销**：启用并在处理多人会议转录时，额外常驻约 **+0.5 GB** 物理内存（未配置模型时零额外开销）。
-- **统一空闲卸载**：深度接入 `EvictableWorker` 机制，**连续 5 分钟无调用自动触发冷卸载释放全部权重与显存**，常驻待机内存回落至 **~50 MB**。
-- **端到端持续分人扩展 (SPK-E2E-1)**：针对多人连续会议，在 `/v1/realtime` 中提供 `speechrail.diarization.v1` 扩展。采用“**正文先固定，归属后更新**”范式与全局整数采样时标（16 kHz session samples），根治跨分钟时钟漂移和二次文字篡改；配合客户端 `finalize` 结束屏障，确保所有归属补丁落库后方触发最终纪要（详见 [端到端设计](docs/architecture/speaker-diarization-e2e-design.md) 与 [验收报告](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)）。
-- **与消费端 Sona 100% 接线**：已与 [Sona](https://github.com/hrygo/sona) 桌面会议助手完成全链路接线，支持流式补丁更新、人工改名优先仲裁与纪要终态落库屏障。
+- **运行时与范围**：生产只有一个分人运行时：私有 Swift Worker 中的 FluidAudio CoreML FP16。它直接加载锁定的已编译 bundle，请求路径不会下载、编译、切换精度、调用 NeMo/CAM++ 或回退。
+- **实测资源**：D1 在 M5 Max 固定 90 秒 streaming 输入上耗时 7.077 秒（RTFx 12.716），峰值 RSS 564 MB。该 smoke 不证明 DER/JER、长会话行为或通用内存上限。
+- **Realtime 扩展**：`session.speechrail.diarization.enabled=true` 开启命名空间扩展。它输出不可变正文与 `speechrail.diarization.updated` 归属更新，并在 `speechrail.diarization.finish` 后以 `speechrail.diarization.done` 结束。
+- **配置**：设置绝对路径 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。macOS wheel 已携带 `SpeechRailDiarizationWorker`；`SPEECHRAIL_DIARIZATION_WORKER_PATH` 仅用于受控排障覆盖。未配置分人路径时，普通 ASR/TTS 调用不受影响，也不会启动分人 Worker。
 - **离线端到端评测套件**：内置 `tools/evaluate_diarization_e2e.py`，支持基于全局最优二分匹配（Kuhn-Munkres）的 DER、Collar/Overlap 容差与 unknown 惩罚字级归属错误率（SACER）计算。
-- **按需可选安装**：执行 `uv sync --extra diarization` 安装可选依赖并在配置中启用即可。
 
 ---
 
 ## 📊 真实性能基准实测 (Apple M5 Max)
 
-> **v1.13.0 已于 2026-09-08 完成三档实测**：`quality → balanced → light → quality`；冷态、ASR/TTS warm N=5、当前 OpenAI Realtime（每档连续 3 session）、server-VAD 功能闭环与完整物理 footprint 采样均通过。独立 CER/WER、VAD FAR/FRR、MOS/ABX、speaker embedding 与长时 soak 仍为 `unset`。
+> **v1.13.0 已于 2026-09-08 完成三档实测**：`quality → balanced → light → quality`；冷态、ASR/TTS warm N=5、当前 OpenAI Realtime（每档连续 3 session）、server-VAD 功能闭环与完整物理 footprint 采样均通过。独立 CER/WER、VAD FAR/FRR、MOS/ABX、讲话人分离质量、speaker embedding 与长时 soak 仍为 `unset`。
 >
 > 完整的脱敏报告见 [v1.13.0 性能与质量基准](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md)。ASR 与 v1.11.0 复用同一 fixture，可作方向性对照；TTS 使用不同固定文本，Realtime 本轮验证 current 嵌套音频 wire profile，均不作严格纵向结论。
 
@@ -349,8 +358,8 @@ flowchart TD
             App["应用服务与 Realtime 会话"]
             Governor["AdmissionQueue + ResourceGovernor\n(Realtime 容量预留、Batch FIFO/Aging)"]
             Ledger["AttributionLedger 归属账本\n(16 kHz 采样时钟, 不可变单元)"]
-            DiarizeEngine["可选进程内分人引擎\n(NeMo Sortformer + CAM++)"]
-            Evictor["WorkerIdleEvictor\n(按配置空闲卸载权重)"]
+            DiarizeEngine["可选分人 Port\n(FluidAudio CoreML FP16 Swift Worker)"]
+            Evictor["WorkerIdleEvictor\n(默认 300 秒；可配置)"]
         end
         Router -->|音频上传| Pipeline --> App
         Router -->|系统、音色、任务、WS 控制| App
@@ -364,22 +373,24 @@ flowchart TD
         direction LR
         ASRWorker["Qwen3-ASR Worker\n(MLX / Metal 独立子进程)"]
         TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
+        DiarizationWorker["分人 Worker\n(FluidAudio / CoreML FP16)"]
     end
 
     Client <== "HTTP REST / 全双工 WS" ==> Router
     App <== "长度前缀 JSON + 原始二进制 IPC" ==> ASRWorker
     App <== "长度前缀 JSON + 原始二进制 IPC" ==> TTSWorker
-    Evictor -. 自动卸载释放权重 .-> ASRWorker
-    Evictor -. 自动卸载释放权重 .-> TTSWorker
-    Evictor -. 自动卸载释放权重 .-> DiarizeEngine
+    App <== "长度前缀 JSON + 原始 PCM IPC" ==> DiarizationWorker
+    Evictor -. 尝试释放常驻权重 .-> ASRWorker
+    Evictor -. 尝试释放常驻权重 .-> TTSWorker
+    Evictor -. Worker 生命周期 .-> DiarizationWorker
 ```
 
 #### 核心架构原则与设计不变量
 
 1. **子进程物理隔离（故障爆炸半径最小化）**：Qwen3-ASR 与 Qwen3-TTS 在独立子进程中运行。主进程使用“长度前缀 + JSON metadata + 可选原始二进制 payload”的私有协议；原始 PCM 在此跳不经 Base64，但该协议并非严格零拷贝。Worker 故障与 FastAPI 主进程隔离，对外通过带 `request_id` 的标准错误 Envelope 返回。
 2. **纯内存零磁盘音频流水线**：请求音频在内存中经三级防护流式处理：Tier 1 WAV 快速通道（无转码切片直读）、Tier 2 管道级内存 `ffmpeg` 流式解码（适配 MP3/Opus/FLAC 等容器）、Tier 3 128MB 硬上限门禁。源音频、中间 PCM、声纹特征向量与转写文本均不落盘，全链路本地闭环，严禁网络静默外呼。
-3. **协同空闲驱逐**：`WorkerIdleEvictor` 按配置的 idle 与 standby 超时管理外部 Worker 和进程内分人引擎，并卸载常驻权重。待机物理内存以实际基准为准，不作为架构承诺。
-4. **会话级分人边界**：批量分人只输出匿名 label。Realtime 分人扩展仅在连续 adapter 已验证时才广播；未具备该能力时，SpeechRail 不宣称连续说话人归属。扩展启用后，归属单元使用 16 kHz 会话时钟，后续更新不改写转写正文。
+3. **协同空闲驱逐**：`WorkerIdleEvictor` 按配置的 idle 与 standby 超时管理外部 Worker。待机物理内存以实际基准为准，不作为架构承诺。
+4. **会话级分人边界**：批量分人只输出匿名 label。命名空间 Realtime 扩展使用 16 kHz 会话时钟，后续归属更新不改写转写正文。
 5. **单机共享并发**：`ResourceGovernor` 为 Realtime 预留容量，并让 Batch 以 FIFO 加 aging 规则等待；它不抢占已经进入 Worker 的工作。模式冲突稳定返回 busy 错误，而不是复制模型进程。
 6. **严格职责分离与边界清晰**：SpeechRail 专注于提供纯粹的本地推理运行时、协议转换、资源护栏与会话级匿名标签（`speaker_0`, `speaker_1`）。麦克风硬件调用、扬声器播放、会议议程与数据库持久化、实名声纹库映射、UI 交互以及 LLM 业务编排由调用方应用（如 [Sona](https://github.com/hrygo/sona)）全权负责。
 
@@ -432,9 +443,9 @@ SpeechRail 的核心性能来自于 Apple MLX 框架对 **Apple Silicon 统一�
 <details>
 <summary><strong>Q5: 如何开启多人会议讲话人分离 (Speaker Diarization)？它占用多少内存？</strong></summary>
 
-讲话人分离属于按需扩展能力。您只需执行 `uv sync --extra diarization` 安装配套依赖，并在 `.env` 中指定 NVIDIA NeMo Sortformer 权重文件路径（`SPEECHRAIL_DIARIZATION_MODEL_PATH`）。
-- **内存占用**：未配置时为 **0 MB**；启用并处理多人转录时，宿主额外占用约 **0.5 GB** 物理内存。
-- **自动卸载**：同样深度接入系统空闲驱逐器，**连续 5 分钟无调用自动释放全部权重**，完全归还内存，绝不长期霸占系统资源。
+讲话人分离是可选的原生能力。安装 macOS wheel 后，设置 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH`（锁定的 `SortformerNvidiaLow_v2.1.mlmodelc` bundle）与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` 的绝对路径。wheel 已内置 Swift Worker；`SPEECHRAIL_DIARIZATION_WORKER_PATH` 仅用于受控覆盖。请求路径不会下载或编译模型。
+- **内存占用**：D1 在 M5 Max 单条固定 90 秒输入上测得峰值 RSS 564 MB；其他设备和输入需独立测量。
+- **API**：文件转录使用 OpenAI 分人模型和 `diarized_json`。Realtime 通过 `session.speechrail.diarization.enabled=true` 开启，扩展仅携带匿名、会话级标签。
 </details>
 
 ---

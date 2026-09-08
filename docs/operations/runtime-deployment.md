@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-03
+date: 2026-09-08
 ---
 
 # SpeechRail 运行时与部署
@@ -19,14 +19,17 @@ date: 2026-09-03
                            ├─ 固定 ffmpeg 解码（REST ASR）
                            ├─ Qwen3 ASR worker（专用 Python）
                            │      └─ 外部 Qwen3-ASR snapshot
+                           ├─ 可选 Swift/CoreML diarization worker（惰性启动）
+                           │      └─ 外部 FluidAudio Sortformer FP16 `.mlmodelc`
                            └─ Qwen3 TTS worker（专用 Python，可选）
                                   └─ 外部 VoiceDesign snapshot
 ```
 
 ASR worker 仅在同时设置 `SPEECHRAIL_QWEN3_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_PYTHON` 时
-创建；TTS worker 仅在对应两条 TTS 路径同时设置时创建；两者都在 ASGI startup 加载。
+创建并由 ASGI lifecycle 管理；TTS worker 仅在对应两条 TTS 路径同时设置时创建。是否在
+startup 还是首次请求加载权重由 `SPEECHRAIL_WORKER_LAZY_LOAD` 决定。
 主进程与 worker 使用长度前缀 JSON 私有协议，ASR worker 接受 16 kHz / 单声道 / PCM16 音频，
-TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录不在仓库内，请求路径启用离线环境变量，
+TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权重不在仓库内；请求路径
 不会下载模型。
 
 ## 模型与设备 profile
@@ -37,7 +40,7 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录不在仓库内，请
 | 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` (默认) 或 `int8` | 启动时加载一份；性能基准待对应硬件验收 |
 | 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
 | TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
-| diarization profile | Sortformer（可选 CAM++） | 由 profile/runtime 决定 | `/v1/realtime` opt-in；只保留有界匿名状态 |
+| diarization profile | 私有 Swift/CoreML Sortformer FP16 worker | 活跃会话时惰性启动；仅一条连续状态链路 | `/v1/audio/transcriptions` 的 `gpt-4o-transcribe-diarize` / `diarized_json`；Realtime 通过 `session.speechrail.diarization.enabled` opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。
 
@@ -59,12 +62,23 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_MAX_REALTIME_*` | WebSocket 单帧和缓存字节上限 |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | 一个 worker 调用的 deadline |
 | `SPEECHRAIL_JOB_SPOOL_DIR` | 可选、仓库外绝对 SQLite spool；启用 `/v1/jobs` 元数据与启动恢复 |
-| `SPEECHRAIL_DIARIZATION_*` | 可选的 Sortformer/CAM++ profile；路径外置，状态有界且匿名 |
+| `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` | 固定 `SortformerNvidiaLow_v2.1.mlmodelc` bundle 的外部绝对路径 |
+| `SPEECHRAIL_DIARIZATION_WORKER_PATH` | 可选覆盖；未设置时使用 macOS wheel 内置的 `SpeechRailDiarizationWorker` |
+| `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` | 分人必需的仓库外 `Qwen3-ForcedAligner-0.6B` snapshot；私有 ASR worker 仅对固定正文调用它，不再次识别音频 |
+| `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；物理内存回收取决于运行时 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
 
 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS` 必须为 `false`。`allowed_origins` 与
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 是预留配置字段：CORS middleware 与解码后时长拒绝逻辑
 不在当前能力范围，不应视为已启用的安全/容量控制。
+
+启用 diarization 前，安装 macOS 平台 wheel 并准备仓库外部的
+`v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc` bundle；只需设置模型的绝对路径。wheel 会随包安装
+锁定 revision 的 `SpeechRailDiarizationWorker`，通常不必设置 worker 路径；仅在受控排障或自定义
+release 目录时才覆盖它。服务不会在请求路径下载、编译或切换模型；worker 直接以
+`computeUnits=.all` 加载已编译 bundle。重启后用 `/health`
+与 `/v1/models` 检查 profile 是否就绪。D1 的 564 MB max RSS 是单次 smoke 证据，不是质量、P95
+或通用物理内存承诺。
 
 启用 job spool 时，目录须是项目外的绝对路径，并由运行账户独占。服务以 `0700` 创建目录、
 以 `0600` 创建数据库，保存的仅是 owner 指纹、任务状态和不透明输入/结果引用；不保存原始
@@ -74,9 +88,10 @@ Governor。默认部署不包含内建的 `input_ref` 路径/URL resolver，不�
 
 ## wheel 与本地安装器
 
-发布安装与源码开发分开处理。wheel 只包含服务代码和普通依赖；ASR/TTS vendor runtime、模型
-snapshot、`ffmpeg` 和 `.env` 均由本机预先准备。发布目录应同时提供 wheel、`tools/install_macos.py`、
-`configs/speechrail.example.env`、plist 模板和校验文件。
+发布安装与源码开发分开处理。macOS wheel 会编译并包含私有 CoreML diarization executable；其
+wheel tag 因而与当前 Python/Apple Silicon 平台绑定。ASR/TTS vendor runtime、全部模型 snapshot、
+`ffmpeg` 和 `.env` 仍由本机预先准备，CoreML bundle 也不打进 wheel。发布目录应同时提供 wheel、
+`tools/install_macos.py`、`configs/speechrail.example.env`、plist 模板和校验文件。
 
 在发布目录中构建并通过唯一 managed installer 安装：
 
@@ -118,6 +133,11 @@ python3 scripts/verify_release.py \
 升级先安装到新的 release runtime，完成 preflight 和真实 ASR/TTS smoke 后才切换
 `runtime/current` 并重启；失败时恢复旧 `current`。README 不固定发布版本，包文件名和 package
 metadata 仍保留用于升级、回滚和审计的版本信息。
+
+若 private `.env` 设置 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH`，managed installer 会将该
+release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wheel 内
+`SpeechRailDiarizationWorker` 与 fixed-text aligner snapshot。切换后还须确认 `/v1/models` 包含
+`gpt-4o-transcribe-diarize`；任何一项失败都不切换 `runtime/current`，或恢复上一 release。
 
 ## 端口与进程策略
 

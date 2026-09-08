@@ -2,13 +2,13 @@
 title: "SpeechRail 产品范围与职责边界"
 status: active
 audience: "产品经理、系统架构师、业务集成方"
-version: "1.3.0"
-date: 2026-09-02
+version: "1.3.2"
+date: 2026-09-08
 ---
 
 # 📋 SpeechRail 产品范围与职责边界
 
-> **核心定位**：SpeechRail 是一项本地优先的共享 ASR/TTS 运行时服务。它负责一次性管理外部模型运行时，向多个本机应用提供标准、稳定、高性能的语音识别与合成接口。
+> **核心定位**：SpeechRail 是一项本地优先的共享 ASR/TTS 运行时服务，并按需提供匿名讲话人分离。它负责管理仓库外部模型运行时，向多个本机应用提供标准、稳定、高性能的语音识别与合成接口；分人能力仍受 profile readiness 与 Realtime native capability gate 约束。
 
 ---
 
@@ -28,7 +28,7 @@ graph TD
         Sched["Resource Governor 调度 & 显存管理"]
         ASR_M["Qwen3-ASR 离线转写 & 时间戳对齐"]
         TTS_M["Qwen3-TTS 24kHz 高保真语音合成"]
-        Diar_M["Sortformer 匿名声纹分割与会话重连"]
+        Diar_M["可选 CoreML Sortformer 匿名分人<br/>OpenAI diarized_json；Realtime 单一 opt-in"]
     end
 
     Sona -.->|"仅通过标准 API 通信 (无直接代码依赖)"| Rail
@@ -40,7 +40,7 @@ graph TD
 | **音频输出与播放** | 24kHz PCM16 / WAV / MP3 极速合成与流式分块 | 扬声器硬件播放、播放队列管理、本地音频文件存档 |
 | **语音识别 (ASR)** | 批量/流式转写、多语种识别、分段与时间戳对齐 | 会议转写持久化、实时会议笔记生成、敏感词过滤 |
 | **语音合成 (TTS)** | VoiceDesign / CustomVoice 合成、预设音色路由；quality 档的 voice design、preview 与 clone API（不保留原始参考音频） | 参考音频采集与同意、调用方侧文件选择、扬声器播放与业务化音色管理 |
-| **声纹分割 (Diarization)** | 匿名说话人标签 (`spk_0`, `spk_1`)、短期会话重连质心聚类 | 说话人实名映射库、声纹库管理、用户身份识别与认证 |
+| **讲话人分离 (Diarization)** | profile 就绪后通过 OpenAI `gpt-4o-transcribe-diarize` / `diarized_json` 提供 A–D 匿名标签；Realtime 仅在 `session.speechrail.diarization.enabled=true` 时发送 session-scoped 归属更新。固定正文由本地 Qwen3 ForcedAligner 对齐，CoreML 只提供活动证据 | 说话人实名映射库、声纹库管理、跨会议身份关联、用户身份识别与认证 |
 | **业务逻辑与编排** | Request ID 追踪、统一错误 Envelope、有界队列管理 | LLM 对话上下文、业务 Prompt 工程、多租户权限控制 |
 
 ---
@@ -51,7 +51,7 @@ graph TD
 |---|---|---|---|
 | **QwenPaw** | 桌面听写：通过 `whisper_api` 发送短音频录音 | 🟢 生产就绪 | 本机真实短音频 Smoke 验证通过 |
 | **OpenAI 官方 SDK** | Python / Node.js SDK 直连 REST 与 Realtime | 🟢 生产就绪 | 单元测试、契约测试与真实推理完成 |
-| **Sona 会议助理** | 实时全双工会议字幕、声纹分割与语音助手合成 | 🟢 契约就绪 | `/v1/realtime` 端点接入与协议回归测试通过 |
+| **Sona 会议助理** | 实时全双工会议字幕与语音助手合成；可选分人扩展按服务端 capability 广播启用 | 🟡 契约就绪、能力依赖 | `/v1/realtime` 端点接入与协议回归测试通过；连续 native 分人另需独立 gate |
 | **Hermes Agent** | 桌面智能体：专用 STT 接口接入 | 🟢 文档就绪 | 独立 STT 路由配置完成，待端到端验收 |
 | **通用 WebSocket 客户端** | 自研客户端对接 `/v1/realtime` | 🟢 生产就绪 | 标准 WebSocket 协议测试通过 |
 

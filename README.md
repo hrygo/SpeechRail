@@ -20,7 +20,7 @@
 
 <p align="center">
   🤝 <strong>Built for <a href="https://github.com/hrygo/sona">Sona</a></strong><br>
-  <em>Private, local, real-time ASR/TTS and speaker diarization for Sona.</em>
+  <em>Private, local, real-time ASR/TTS with optional OpenAI-compatible anonymous speaker diarization for Sona.</em>
 </p>
 
 ---
@@ -35,9 +35,9 @@ When adding speech capabilities to personal desktop agents, local meeting transc
 
 - 🔒 **Zero Data Egress & Strict Privacy**: Binds to loopback (`127.0.0.1`) by default, with controlled LAN exposure support. Audio is processed purely in-memory without disk caching. Fully local inference with zero telemetry or cloud leakage.
 - 🔌 **1:1 Seamless OpenAI Compatibility**: Full drop-in replacement for `whisper-1` (transcription), `tts-1` (speech synthesis), and `/v1/realtime` (low-latency full-duplex streaming ASR/TTS). Switch your client by updating just one `base_url`.
-- 🛡️ **Dual-Process Physical Isolation**: The HTTP gateway and heavy MLX inference engine run in separate OS processes communicating via an efficient framed IPC pipe. A worker crash will never bring down the gateway.
-- 🍃 **Two-Stage Automatic Idle Eviction**: When idle for **5 minutes (default)** without incoming requests, model weights and VRAM are automatically unloaded. Standby memory drops to just **~50 MB**, never hoarding your Mac's precious memory.
-- 👥 **Native Multi-Speaker Diarization**: Integrated NeMo Sortformer and CAM++ speaker embedding models automatically segment and label different speakers (e.g., `speaker_0`, `speaker_1`), easily handling multi-party meetings and interviews. Supports both batch `diarized_json` and real-time streaming `speechrail.diarization.v1` protocol extensions with immutable transcript units and asynchronous attribution updates.
+- 🛡️ **Process Isolation**: The HTTP gateway, MLX ASR/TTS workers, and the native CoreML diarization worker run in separate OS processes over private framed IPC. A worker crash does not bring down the gateway.
+- 🍃 **Configurable Idle Eviction**: After the default **300 seconds** without activity, resident model weights are released according to the configured lifecycle. The resulting physical footprint depends on the profile, runtime, and allocator; it is not a fixed standby-memory guarantee.
+- 👥 **Optional Multi-Speaker Diarization**: `gpt-4o-transcribe-diarize` returns OpenAI-style `diarized_json` with session-scoped anonymous labels. It runs the pinned FluidAudio CoreML FP16 Sortformer worker; Realtime uses the opt-in `session.speechrail.diarization.enabled` extension.
 - 🎚️ **Dynamic Three-Tier Profiles**: Deeply tuned for Apple Silicon Macs from 8GB to 128GB (Light / Balanced / Quality) with seamless zero-downtime hot switching.
 - 🎙️ **9 High-Quality Built-In Voices Across Profiles**: Natively integrates Qwen3-TTS speech synthesis, featuring rich acoustic personas for Chinese, English, Cantonese, Japanese, Korean, and more.
 
@@ -50,7 +50,7 @@ When adding speech capabilities to personal desktop agents, local meeting transc
 | **Data Privacy** | 🔒 **100% local private inference, zero data egress** (Default keyless loopback, optional LAN auth, never touches the cloud) | ❌ Audio must be uploaded to the cloud, risking compliance and privacy leaks |
 | **Long-Term Cost** | 💰 **$0 (Install once, unlimited free requests across local apps and LAN)** | 💸 Pay-per-minute / pay-per-token pricing; expensive for frequent use |
 | **Network Dependency** | ⚡ **Purely offline local computation, 0 public network latency, works offline** | ⚠️ Relies on stable Internet and cross-border connectivity; vulnerable to jitter |
-| **System-Wide Reuse & Memory**| 🍃 **Single shared daemon for all apps, automatic idle weight eviction (~50MB idle)** | Unified cloud gateway, no local model footprint |
+| **System-Wide Reuse & Memory**| 🍃 **Single shared daemon for all apps, configurable idle weight eviction; footprint is benchmark-dependent** | Unified cloud gateway, no local model footprint |
 | **System Robustness** | 🛡️ **Gateway & inference worker physically isolated; automatic worker recovery** | Bound by external cloud provider SLA and connectivity |
 | **OpenAI Compatibility** | ✅ **Native 1:1 compatibility (`whisper-1` / `tts-1` / `/v1/realtime`)** | ✅ Official standard specification |
 
@@ -131,6 +131,8 @@ Any application supporting a custom OpenAI base URL (`OPENAI_BASE_URL`) can use 
 
 ### 1. Python (OpenAI SDK)
 
+The diarization example requires a configured local CoreML bundle; the macOS wheel already contains its native worker (see [Optional Speaker Diarization](#3-optional-speaker-diarization)).
+
 ```python
 from openai import OpenAI
 
@@ -153,7 +155,7 @@ with open("speech.wav", "rb") as audio_file:
 # 👥 Multi-Speaker Meeting Transcription & Diarization
 with open("meeting.wav", "rb") as audio_file:
     meeting = client.audio.transcriptions.create(
-        model="gpt-4o-transcribe-diarize",  # Dispatches local NeMo Sortformer diarization engine
+        model="gpt-4o-transcribe-diarize",  # Dispatches the local CoreML diarization worker
         file=audio_file,
         response_format="diarized_json",  # Returns segmented transcript with speaker labels
     )
@@ -199,6 +201,15 @@ async function main() {
     model: "whisper-1",
   });
   console.log("Transcript:", transcription.text);
+
+  // 3. Native speaker diarization: no SpeechRail-specific SDK is needed.
+  const meeting = await openai.audio.transcriptions.create({
+    file: fs.createReadStream("meeting.wav"),
+    model: "gpt-4o-transcribe-diarize",
+    response_format: "diarized_json",
+    chunking_strategy: { type: "server_vad" },
+  });
+  console.log("Diarized transcript:", meeting);
 }
 
 main();
@@ -256,13 +267,13 @@ SpeechRail exposes a unified API contract while internally adapting across Apple
 
 | Profile | ASR Model Weight | TTS Model Weight & Variant | Min Recommended RAM | Peak Active Footprint | Steady Footprint | Idle Standby |
 |---|---|---|---|---|---|---|
-| 🟢 **`light`** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB Base Macs (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **~50 MB** (Auto-eviction) |
-| 🟡 **`balanced`** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB Mainstream Macs (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **~50 MB** (Auto-eviction) |
-| 🟣 **`quality`** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ Flagship Macs (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **~50 MB** (Auto-eviction) |
+| 🟢 **`light`** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB Base Macs (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **Runtime-dependent** (configured eviction) |
+| 🟡 **`balanced`** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB Mainstream Macs (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **Runtime-dependent** (configured eviction) |
+| 🟣 **`quality`** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ Flagship Macs (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **Runtime-dependent** (configured eviction) |
 
 - **Strict 8-bit Quantization**: All profile models strictly maintain 8-bit quantization precision, rejecting lower-bit quantization artifacts and pronunciation degradation.
 - **Efficient Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR model; `balanced` and `light` share the same 0.6B CustomVoice TTS model.
-- **Two-Stage Automatic Idle Eviction**: When idle for 5 minutes without requests, cold eviction releases VRAM and memory. Standby memory drops to **~50 MB**, and new requests wake up workers in seconds.
+- **Configurable Idle Eviction**: The default idle timeout is **300 seconds**. It can be changed with `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` or disabled with `0`; measured post-eviction footprint remains runtime- and profile-dependent.
 - **VoiceDesign Boundary**: Only the `quality` tier supports creating novel custom voices via natural language prompts (VoiceDesign). In `balanced`/`light`, custom voices are declared as `available=false`, restoring automatically when switched back to `quality`.
 
 ### 2. 9 Cross-Profile Built-in Voices
@@ -299,25 +310,23 @@ Note: **The underlying generation mechanism differs by profile**—`balanced` / 
 
 ### 3. Optional Speaker Diarization
 
-For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail natively integrates high-performance speaker segmentation and role identification:
+For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail provides optional speaker segmentation and session-scoped anonymous labels when the local CoreML profile is ready:
 
 | Core Component | Model Architecture | Responsibility & Capabilities | Active RAM | Client Entry Point |
 |---|---|---|---|---|
-| **Temporal Segmentation Engine** | **NVIDIA NeMo Sortformer** (`diar_streaming_sortformer_4spk-v2`) | Online/offline streaming speaker boundary segmentation, up to 4 overlapping speakers | **+~0.5 GB** (500 MB) | `model="gpt-4o-transcribe-diarize"` or `response_format="diarized_json"` |
-| **Speaker Embedding Extraction (Optional)** | **3D-Speaker CAM++** (`3dspeaker_speech_campplus_sv_zh-cn_16k-common`) | Extracts 16kHz PCM speaker embeddings, cross-session re-clustering for speaker normalization | **Ultra-lightweight** (~tens of MB) | Reconnection recovery or smooth long-meeting mapping |
+| **Temporal Segmentation Engine** | **FluidAudio CoreML FP16 Sortformer** (`SortformerNvidiaLow_v2.1.mlmodelc`) | Native Swift worker, direct compiled-bundle load, maximum four anonymous speakers | **564 MB peak RSS in D1** | `model="gpt-4o-transcribe-diarize"` with `response_format="diarized_json"` |
 
-- **Active RAM**: Adds approx. **+0.5 GB** physical memory during active multi-speaker transcription (zero additional footprint when unconfigured).
-- **Unified Idle Eviction**: Integrated into `EvictableWorker`; **automatically unloads all weights and VRAM after 5 minutes of inactivity**, returning memory to **~50 MB**.
-- **End-to-End Continuous Diarization Extension (SPK-E2E-1)**: Provides the `speechrail.diarization.v1` extension under `/v1/realtime`. Employs a **"transcript first, attribution updated"** paradigm with integer sample clocking (16 kHz session samples) to eliminate clock drift and retroactive text tampering; pairs with client `finalize` barrier to ensure consistent persistence before final summary generation (see [End-to-End Diarization Design](docs/architecture/speaker-diarization-e2e-design.md) and [Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md)).
-- **Consumer Wiring with Sona**: 100% wired with [Sona](https://github.com/hrygo/sona) desktop meeting assistant, supporting streaming attribution patches, manual speaker rename precedence, and crash-resilient recovery journaling.
+- **Runtime and scope**: Production has one diarization runtime: FluidAudio CoreML FP16 in a private Swift worker. It directly loads the pinned compiled bundle and does not download, compile, change precision, use NeMo/CAM++, or fall back at request time.
+- **Measured footprint**: D1 on an M5 Max processed the fixed 90-second streaming input in 7.077 seconds (RTFx 12.716) with 564 MB peak RSS. This smoke does not establish DER/JER, long-session behavior, or a universal memory promise.
+- **Realtime extension**: `session.speechrail.diarization.enabled=true` enables the namespaced extension. It emits immutable transcript text and `speechrail.diarization.updated` attribution updates, then terminates with `speechrail.diarization.done` after `speechrail.diarization.finish`.
+- **Configuration**: Set `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` and `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` (`Qwen3-ForcedAligner-0.6B`). The macOS wheel supplies `SpeechRailDiarizationWorker`; `SPEECHRAIL_DIARIZATION_WORKER_PATH` is only an optional diagnostic override. The existing private ASR worker directly aligns fixed completed text; it does not transcribe it again. With the diarization paths unset, normal ASR/TTS requests run unchanged and no diarization worker starts.
 - **Offline E2E Evaluation Suite**: Includes `tools/evaluate_diarization_e2e.py` supporting DER calculation via Kuhn-Munkres optimal permutation matching, collar/overlap tolerance, and speaker-attributed character error rate (SACER) with unknown penalties.
-- **Optional On-Demand Installation**: Run `uv sync --extra diarization` to install optional dependencies and enable in configuration.
 
 ---
 
 ## 📊 Real Performance Benchmarks (Apple M5 Max)
 
-> **v1.13.0 benchmarked on 2026-09-08**: all three managed profiles completed the `quality → balanced → light → quality` loop. Cold start, ASR/TTS warm N=5, current OpenAI Realtime (3 consecutive sessions per profile), server-VAD smoke, and complete physical-footprint samples passed. Independent CER/WER, VAD FAR/FRR, MOS/ABX, speaker embedding, and long soak remain `unset`.
+> **v1.13.0 benchmarked on 2026-09-08**: all three managed profiles completed the `quality → balanced → light → quality` loop. Cold start, ASR/TTS warm N=5, current OpenAI Realtime (3 consecutive sessions per profile), server-VAD smoke, and complete physical-footprint samples passed. Independent CER/WER, VAD FAR/FRR, MOS/ABX, speaker diarization/embedding, and long soak remain `unset`.
 >
 > The complete, privacy-preserving report is [v1.13.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md). ASR reuses the v1.11.0 fixtures and is directionally comparable; TTS uses a different fixed text set, while Realtime now verifies the current nested audio wire profile, so those values are reported in-profile only.
 
@@ -350,8 +359,8 @@ flowchart TD
             App["Application Services & Realtime Session"]
             Governor["AdmissionQueue + ResourceGovernor\n(Realtime Capacity Reservation, Batch FIFO/Aging)"]
             Ledger["AttributionLedger & Timeline\n(16 kHz Sample Clock, Immutable Units)"]
-            DiarizeEngine["Optional In-Process Diarization\n(NeMo Sortformer + CAM++)"]
-            Evictor["WorkerIdleEvictor\n(Configured Idle Weight Eviction)"]
+            DiarizeEngine["Optional Diarization Port\n(FluidAudio CoreML FP16 Swift worker)"]
+            Evictor["WorkerIdleEvictor\n(300s default; configurable)"]
         end
         Router -->|Audio upload| Pipeline --> App
         Router -->|System, voice, jobs, WS control| App
@@ -365,22 +374,24 @@ flowchart TD
         direction LR
         ASRWorker["Qwen3-ASR Worker\n(MLX / Metal Subprocess)"]
         TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
+        DiarizationWorker["Diarization Worker\n(FluidAudio / CoreML FP16)"]
     end
 
     Client <== "HTTP REST / Full-Duplex WS" ==> Router
     App <== "Length-Prefixed JSON + Raw Binary IPC" ==> ASRWorker
     App <== "Length-Prefixed JSON + Raw Binary IPC" ==> TTSWorker
-    Evictor -. Auto Evict Weights .-> ASRWorker
-    Evictor -. Auto Evict Weights .-> TTSWorker
-    Evictor -. Auto Evict Weights .-> DiarizeEngine
+    App <== "Length-Prefixed JSON + Raw PCM IPC" ==> DiarizationWorker
+    Evictor -. Attempt to release resident weights .-> ASRWorker
+    Evictor -. Attempt to release resident weights .-> TTSWorker
+    Evictor -. Worker lifecycle .-> DiarizationWorker
 ```
 
 #### Core Architectural Principles & Invariants
 
 1. **Subprocess Physical Isolation (Minimized Blast Radius)**: Qwen3-ASR and Qwen3-TTS execute in dedicated child processes. The host uses a private length-prefixed protocol with JSON metadata and optional raw-binary payloads; raw PCM avoids Base64 on this hop, but the protocol is not zero-copy. Worker failures are isolated from the FastAPI process and surface through the standard error envelope with a `request_id`.
 2. **Strict In-Memory Zero-Disk Pipeline**: Audio processing operates entirely in memory through a 3-tier pipeline: Tier 1 WAV fast-path (zero-copy header slicing), Tier 2 streaming in-memory `ffmpeg` pipe (for compressed containers), and Tier 3 128MB hard OOM guardrail. Raw audio, intermediate PCM, embeddings, and transcripts are never written to disk or transmitted across the network.
-3. **Coordinated Idle Eviction**: `WorkerIdleEvictor` manages the external workers and the in-process diarization engine according to configured idle and standby timeouts. It unloads resident weights; measured standby footprint remains a benchmark result, not an architecture promise.
-4. **Session-Scoped Diarization**: Batch diarization yields anonymous labels. The realtime diarization extension is advertised only after its continuous adapter is verified; without that capability, SpeechRail does not claim continuous speaker attribution. Where the extension is enabled, attribution units use the 16 kHz session timeline and later updates do not rewrite transcript text.
+3. **Coordinated Idle Eviction**: `WorkerIdleEvictor` manages the external workers according to configured idle and standby timeouts. Measured standby footprint remains a benchmark result, not an architecture promise.
+4. **Session-Scoped Diarization**: Batch diarization yields anonymous labels. The namespaced Realtime extension uses the 16 kHz session timeline and later attribution updates do not rewrite transcript text.
 5. **Single-Node Shared Concurrency**: `ResourceGovernor` reserves capacity for realtime work and keeps batch work FIFO with aging. It does not preempt work already admitted to a worker; mode conflicts return stable busy errors instead of spawning duplicate model processes.
 6. **Strict Separation of Concerns**: SpeechRail exclusively provides local inference runtimes, protocol translation, resource boundaries, and session-scoped anonymous speaker labelling (`speaker_0`, `speaker_1`). Calling applications (such as [Sona](https://github.com/hrygo/sona)) retain complete ownership of audio I/O hardware, meeting databases, persistent storage, human-in-the-loop speaker renaming, and LLM business orchestration.
 
@@ -433,9 +444,9 @@ No. Model weights are cached persistently in the managed directory. When switchi
 <details>
 <summary><strong>Q5: How do I enable Speaker Diarization, and how much RAM does it consume?</strong></summary>
 
-Diarization is an optional capability. Run `uv sync --extra diarization` to install dependencies, and set the path to the NVIDIA NeMo Sortformer model checkpoint (`SPEECHRAIL_DIARIZATION_MODEL_PATH`) in `.env`.
-- **RAM Usage**: **0 MB** when not configured; approximately **+0.5 GB** physical RAM when active during multi-speaker transcription.
-- **Auto Eviction**: Automatically unloads after **5 minutes of inactivity**, returning memory to ~50 MB without hoarding system resources.
+Diarization is an optional native capability. Install the macOS wheel, then set absolute paths for `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` (the pinned `SortformerNvidiaLow_v2.1.mlmodelc` bundle) and `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` (`Qwen3-ForcedAligner-0.6B`). The wheel contains the Swift worker; `SPEECHRAIL_DIARIZATION_WORKER_PATH` is only an optional override. It never downloads or compiles models on a request path; the existing ASR worker uses the aligner only to timestamp fixed completed text and never performs a second ASR decode.
+- **Memory**: D1 measured 564 MB peak RSS on an M5 Max for one fixed 90-second input. Other machines and inputs require their own measurement.
+- **API**: File transcription uses the OpenAI diarization model and `diarized_json`. Realtime opt-in is `session.speechrail.diarization.enabled=true`; the extension only carries anonymous, session-scoped labels.
 </details>
 
 <details>

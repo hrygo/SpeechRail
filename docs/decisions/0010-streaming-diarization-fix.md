@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted — 2026-09-04（流式分人修复已实现并验证，工作交接转为落地记录）
+Superseded — 2026-09-08（由 [ADR-0012](0012-openai-native-coreml-diarization.md) 替代）
+
+> 本 ADR 记录的 `DiarizationCoordinator`、NeMo/CAM++ 与旧 Realtime 字段已经移除，不能作为当前实现或迁移依据。当前生产链路为 CoreML 活动 worker、Qwen3 固定文本对齐和 `session.speechrail.diarization.enabled` 单开关。
 
 ## Context
 

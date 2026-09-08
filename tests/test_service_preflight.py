@@ -205,12 +205,19 @@ def test_preflight_checks_configured_diarization_profile(
     layout.ensure_directories()
     asr_model = tmp_path / "asr-model"
     _complete_snapshot(asr_model)
-    sortformer = tmp_path / "sortformer.nemo"
-    sortformer.touch()
+    aligner_model = tmp_path / "aligner-model"
+    _complete_snapshot(aligner_model)
+    sortformer = tmp_path / "SortformerNvidiaLow_v2.1.mlmodelc"
+    sortformer.mkdir()
+    worker = tmp_path / "SpeechRailDiarizationWorker"
+    worker.write_text("worker", encoding="utf-8")
+    worker.chmod(0o700)
     monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
     _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
     with layout.config_file.open("a", encoding="utf-8") as stream:
-        stream.write(f"SPEECHRAIL_DIARIZATION_MODEL_PATH={sortformer}\n")
+        stream.write(f"SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH={sortformer}\n")
+        stream.write(f"SPEECHRAIL_DIARIZATION_WORKER_PATH={worker}\n")
+        stream.write(f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={aligner_model}\n")
 
     result = run_preflight(layout, require_tts=False, runner=_successful_runner)
 
@@ -218,19 +225,25 @@ def test_preflight_checks_configured_diarization_profile(
     assert next(check for check in result.checks if check.name == "diarization_config").ok is True
     assert next(check for check in result.checks if check.name == "diarization_snapshot").ok is True
     assert next(check for check in result.checks if check.name == "diarization_runtime").ok is True
+    assert next(
+        check for check in result.checks if check.name == "diarization_aligner_snapshot"
+    ).ok is True
 
 
-def test_preflight_uses_explicit_host_python_for_optional_profiles(
+def test_preflight_checks_coreml_worker_without_python_optional_profiles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
     layout.ensure_directories()
     asr_model = tmp_path / "asr-model"
     _complete_snapshot(asr_model)
-    sortformer = tmp_path / "sortformer.nemo"
-    embedding = tmp_path / "embedding.onnx"
-    sortformer.touch()
-    embedding.touch()
+    aligner_model = tmp_path / "aligner-model"
+    _complete_snapshot(aligner_model)
+    sortformer = tmp_path / "SortformerNvidiaLow_v2.1.mlmodelc"
+    sortformer.mkdir()
+    worker = tmp_path / "SpeechRailDiarizationWorker"
+    worker.write_text("worker", encoding="utf-8")
+    worker.chmod(0o700)
     host_python = tmp_path / "installed" / "bin" / "python"
     host_python.parent.mkdir(parents=True)
     host_python.write_text("fixture python\n", encoding="utf-8")
@@ -238,8 +251,9 @@ def test_preflight_uses_explicit_host_python_for_optional_profiles(
     monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
     _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
     with layout.config_file.open("a", encoding="utf-8") as stream:
-        stream.write(f"SPEECHRAIL_DIARIZATION_MODEL_PATH={sortformer}\n")
-        stream.write(f"SPEECHRAIL_DIARIZATION_EMBEDDING_MODEL_PATH={embedding}\n")
+        stream.write(f"SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH={sortformer}\n")
+        stream.write(f"SPEECHRAIL_DIARIZATION_WORKER_PATH={worker}\n")
+        stream.write(f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={aligner_model}\n")
     commands: list[tuple[str, ...]] = []
 
     def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -254,9 +268,8 @@ def test_preflight_uses_explicit_host_python_for_optional_profiles(
     )
 
     assert result.ok is True
-    assert any(command[0] == str(host_python) for command in commands)
+    assert not any(command[0] == str(host_python) for command in commands)
     assert all(
-        command[0] == str(host_python)
+        "nemo.collections.asr.models" not in command and "onnxruntime" not in command
         for command in commands
-        if "nemo.collections.asr.models" in command or "onnxruntime" in command
     )

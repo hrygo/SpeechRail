@@ -47,7 +47,7 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 语义 |
 |---|---|
-| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。缺失字段保持当前有效值，显式 `null` 清除对应可清除配置；候选配置通过校验后原子生效。兼容 legacy 根字段与当前 transcription session 的 `audio.input.{format,transcription,turn_detection}`：输入为 PCM16，支持 `16000` 或 `24000` Hz；24 kHz 在会话内有状态降采样为内部 16 kHz，首个 PCM 后不得改格式。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受已注册 voice 与 13 个 OpenAI 标准 voice 别名并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`，已注册但当前权重不支持 → `voice_not_available`，非字符串或空白 → `invalid_voice`。失败均保持 session 可用；客户端可改用 `/v1/voices` 中 `available=true` 的系统 preset。返回 `session.updated` |
+| `session.update` | 更新 session 配置；缺失字段保持当前有效值，显式 `null` 清除对应可清除配置；候选配置通过校验后原子生效。兼容 legacy 根字段与当前 transcription session 的 `audio.input.{format,transcription,turn_detection}`：输入为 PCM16，支持 `16000` 或 `24000` Hz；24 kHz 在会话内有状态降采样为内部 16 kHz，首个 PCM 后不得改格式。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names` 与 `known_speaker_references`。分人仅接受 `session.speechrail.diarization.enabled`；旧 `diarization` 请求形态 → `invalid_diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道）；`voice` 接受已注册 voice 与 13 个 OpenAI 标准 voice 别名并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`，已注册但当前权重不支持 → `voice_not_available`，非字符串或空白 → `invalid_voice`。失败均保持 session 可用；客户端可改用 `/v1/voices` 中 `available=true` 的系统 preset。返回 `session.updated` |
 | `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；推流累积达到时间窗时服务端自动驱动 partial 识别；未提交缓冲区达到上限时自动分段结转（Auto-Commit Rollover），避免硬断；返回 `input_audio_buffer.committed` 只在 commit、VAD 静音截断或超限结转时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用。接入层同时限制待处理 JSON/Base64 字节与事件数；预算耗尽以 `1013` 关闭，客户端应重新连接而不是重放未确认音频 |
 | `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态。ASR 的 commit、终态读取与资源回收共享 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 总 deadline；超时返回 `backend_timeout` 并释放该 turn 的 worker lane。缓冲区为空时幂等完成空闭环，保持 session 正常存活 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
@@ -70,7 +70,7 @@ ws://127.0.0.1:8201/v1/realtime
 | `input_audio_buffer.committed` / `cleared` | 缓冲状态变化；`committed` 携带 `item_id` |
 | `conversation.item.created` | 每次 committed 输入或文本 item 创建（item ID 仅当前 WebSocket 会话有效）；item 含 `object: "realtime.item"` |
 | `conversation.item.input_audio_transcription.delta` | partial 转写（native 流式后端产出时）；携带 `item_id`/`content_index`/`delta`。只发送可直接追加的稳定前缀；改写中的尾部保留到 `completed` |
-| `conversation.item.input_audio_transcription.segment` | 启用 diarization 且 backend 返回已验证 segment 时发送；携带 `id`/`text`/`speaker`/`start`/`end`/`item_id`/`content_index`，时间单位为秒；未启用时不伪造 speaker |
+| `conversation.item.input_audio_transcription.segment` | 非分人会话在 backend 返回已验证 segment 时发送；携带 `id`/`text`/`start`/`end`/`item_id`/`content_index`，时间单位为秒。分人扩展用 `attribution_units` 与 `speechrail.diarization.updated`，不在该事件混入 speaker |
 | `conversation.item.input_audio_transcription.completed` / `failed` | ASR 终态；`completed` 携带 `item_id`/`content_index`/`transcript`/`usage`（经轻量 ITN 规整），在 commit 后必然发送 |
 | `response.created` | TTS response 开始；`response.id` 用于关联后续事件 |
 | `response.output_item.added` / `done` | TTS 输出 item 生命周期 |
@@ -127,29 +127,22 @@ diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无
 - **ONNX 会话共享**：`InferenceSession` 按模型文件路径跨 WebSocket 连接共享（`Run()` 官方线程安全）；递归状态（v4 的 h/c，v5/v6 的合并 state + 64 采样上下文）按连接隔离并在 `reset`/`clear` 时清零。
 - **shadow 观测**：`realtime_vad_shadow_enabled`（仅 legacy 主引擎可用）下 shadow 引擎逐帧打分仅用于观测对比，不改任何协议行为；指标 `speechrail_realtime_vad_shadow_frames_total{agreement=both_speech|both_silence|primary_only|shadow_only}` 按帧记录主引擎与 shadow 引擎相对 entry threshold 的判定一致性。`auto` 解析为 silero 主引擎时不启用 shadow。
 
-## Diarization 扩展 `speechrail.diarization.v1`（SPK-E2E-1）
+## Diarization 扩展
 
-本节为 opt-in 加法扩展：未协商的会话行为与本文件其余部分完全一致。设计事实源为
-`docs/architecture/speaker-diarization-e2e-design.md` 第 5 节；JSON Schema 与 fixtures
-位于 `contracts/diarization/v1/`（schema + 语义规则共同构成校验标准）。连续分人的
-native 能力未经 R1 探针与真实 CPU smoke 验证前，本扩展不会被广播，也不可协商成功。
+本节为 opt-in 加法扩展：未协商的会话行为与本文件其余部分完全一致。运行时固定为
+FluidAudio CoreML FP16 私有 worker；D1 已确认 runtime 选择，但真实质量、尾部和长期资源仍
+需要独立验收。
 
 ### 协商
 
-- `session.created.capabilities` 仅在连续分人 adapter 与契约实现均可用时包含
-  `speechrail.diarization.v1`。
-- 客户端必须先读 capability，再在 `session.update` 中显式请求：
-  `input_audio_transcription.diarization.extensions = ["speechrail.diarization.v1"]`
-  （数组去重，只接受登记值；未知值 → `invalid_diarization`）。
-- 协商成功后 `session.updated.session.diarization_contract` 固定为
-  `{version: 1, timebase: "session_samples", sample_rate: 16000, max_speakers: 4,
-  max_item_duration_ms: 8000, max_revision_delay_ms: 3000, group_generation}`；
-  未成功回显即未启用。
+- 客户端在首个 PCM 前以 `session.update.session.speechrail.diarization.enabled=true` 开启。
+  此对象只允许 boolean `enabled`；服务未就绪时只拒绝该请求，普通 ASR 会话保持可用。
+- 协商成功后 `session.updated.session.speechrail.diarization` 回显
+  `{enabled: true, version: 1, max_speakers: 4}`；未成功回显即未启用。
 - 扩展只能在首个 PCM 前协商；已接受音频后的首次协商 → `invalid_state`，
-  能力未广播时请求 → `unsupported_operation`，扩展模式下 `speaker_count_hint > 4`
-  → `speaker_limit_exceeded`（1–4 不裁掉模型活动输出）。
-- 新旧组合：旧客户端保持旧事件集合；新客户端连旧服务收到
-  `unsupported_operation` 后继续 legacy 模式。
+  能力未广播时请求 → `unsupported_operation`。最多四名匿名说话人由固定模型约束。
+- 不需要分人的客户端继续使用标准 Realtime 调用；需要分人的客户端只增加该 namespaced
+  opt-in，并处理扩展事件。
 
 ### 扩展模式下的事件差异
 
@@ -162,17 +155,17 @@ native 能力未经 R1 探针与真实 CPU smoke 验证前，本扩展不会被�
   `aligned | unavailable`）。单元完整分割 canonical text；空 transcript 为空数组；
   无法与固定正文一致对齐时整 item 使用一个 `timing_quality="unavailable"` 单元。
   这些字段在归属修订中不可变。
-- 扩展模式**不再发送**旧 `.segment` 事件，避免双写；legacy 会话不受影响。
-- `speechrail.diarization.update`：服务端推送的归属修订事件，携带 `stable_through_sample`、
+- 扩展模式**不发送** `.segment` speaker 事件，避免双写；未启用扩展的标准会话不受影响。
+- `speechrail.diarization.updated`：服务端推送的归属修订事件，携带 `stable_through_sample`、
   `updates`（含 `segment_uid`、`revision` 从 1 严格递增、`status: tentative | stable | unknown`、
   `speaker`、`coverage_ratio`、`overlap_ratio`、`candidates`）以及会话级 `speaker_links` 声学建议；
   无法对齐或过期的单元直接归属为 `unknown`（`speaker: null`）。
 - `speechrail.diarization.status`：发生不可恢复故障（如 `diarization_overloaded`、
   `diarization_invalid_output` 或 `finalization_timeout`）时触发单次 active→degraded 转换，
   先为未定态单元发送 `unknown` update，再发送本事件；此后正文正常交付，归属保持 `unknown`。
-- `speechrail.diarization.finalize`（客户端）与 `speechrail.diarization.finalized`（服务端终态）：
-  客户端推流完毕后发送 finalize 请求（携带 `finalization_id`）；服务端进入 DRAINING 屏障，
-  冲刷声学尾部并排空所有 pending updates，最后发送 finalized 事件（携带 `through_sample`、
+- 客户端 `speechrail.diarization.finish` 与服务端终态 `speechrail.diarization.done`：
+  客户端推流完毕后发送 `{event_id}`；服务端进入 DRAINING 屏障，
+  冲刷声学尾部并排空所有 pending updates，最后发送 done 事件（携带 `through_sample`、
   `stable_through_sample`、`status: complete | degraded` 与 `last_update_sequence`）。
-  相同 `finalization_id` 重试幂等回显；不同 ID 请求拒绝返回 `invalid_state`；finalize
+  相同 `event_id` 重试幂等回显；不同 ID 请求拒绝返回 `invalid_state`；finish
   后追加音频返回 `invalid_state`。

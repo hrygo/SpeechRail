@@ -12,6 +12,11 @@
 > **结论**：v1.13.0 已完成 `quality → balanced → light → quality` 的三档真实基准。冷态、ASR/TTS warm N=5、当前 OpenAI Realtime 三连续 session、server-VAD 功能闭环，以及 batch+TTS `phys_footprint` 采样均通过；最终恢复 `quality`。ASR 复用 v1.11.0 的同一 fixture，结果仅作方向性对照；TTS 文本集和 Realtime wire profile 均不同，不作严格纵向速度结论。独立 CER/WER、VAD FAR/FRR、MOS/ABX、speaker embedding 与长时 soak 仍为 `unset`。详见
 > [v1.13.0 性能与质量基准](2026-09-08-v1.13.0-performance-benchmark.md)。
 
+## D1 分人模型窄运行时对比（2026-09-08）
+
+> **结论**：使用同一份预置 90 秒输入分别运行 FluidAudio CoreML FP16 与 NVIDIA NeMo CPU native streaming。两者 runtime smoke 均可运行；A 的本轮处理 RTFx 为 12.716，B 为 1.537。该报告没有 RTTM/UEM、DER、完整资源采样或生产选型结论。详见
+> [D1 分人模型窄运行时对比](2026-09-08-d1-diarization-runtime-smoke.md)。
+
 ## 上一发布验收（v1.12.0，MINOR；性能/质量 gate unset）
 
 > **结论**：v1.12.0 为功能发布；其代码门、wheel、managed 安装、启停、单实例、真实短 TTS/ASR 与运行态验收均已完成。v1.13.0 的完整三档基准已取代它作为最新性能证据。详见
@@ -102,6 +107,7 @@
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
 | **v1.13.1** | [2026-09-08-v1.13.1-performance-benchmark.md](2026-09-08-v1.13.1-performance-benchmark.md) | PATCH quality；wheel/managed runtime、公共 smoke、warm N=5 与完整资源采样通过；完整质量与切换 gate unset |
+| **D1 runtime smoke** | [2026-09-08-d1-diarization-runtime-smoke.md](2026-09-08-d1-diarization-runtime-smoke.md) | 两个分人候选的隔离预置输入对比；A/B 均可运行，未执行 DER/生产选型 gate |
 | **v1.13.0** | [2026-09-08-v1.13.0-performance-benchmark.md](2026-09-08-v1.13.0-performance-benchmark.md) | 三档完整基准：冷态、ASR/TTS N=5、current Realtime、VAD 功能、物理 footprint；质量与长时 soak gate 保持 unset |
 | **v1.12.0** | [2026-09-07-v1.12.0-release-acceptance.md](2026-09-07-v1.12.0-release-acceptance.md) | MINOR 功能发布（MCP 代理、Silero VAD、auto download）；代码门与运行态验收通过，性能/质量 gate 保持 unset |
 | **v1.10.0 operator** | [2026-09-07-v1.10.0-operator-efficiency.md](2026-09-07-v1.10.0-operator-efficiency.md) | 模块化 benchmark、真实资源采样、managed wheel 安装与停启效率复验；N=1 warm，gate 保持 unset |

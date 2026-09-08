@@ -5,12 +5,12 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from speechrail.backends.diarization.coreml import MODEL_BUNDLE_NAME
 from speechrail.backends.qwen3_native import MODEL_FILES, WEIGHT_FILE_SETS
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_runtime_lock
@@ -388,8 +388,7 @@ def run_preflight(
     if not asr_configured and not tts_configured:
         checks.extend(_managed_runtime_checks(layout, runner))
 
-    optional_profile_python = host_python or Path(sys.executable)
-    diarization_configured = settings.diarization_model_path is not None
+    diarization_configured = settings.diarization_coreml_model_path is not None
     checks.append(
         _check(
             "diarization_config",
@@ -401,36 +400,39 @@ def run_preflight(
     )
     if diarization_configured:
         checks.append(
-            _file_check(
+            _check(
                 "diarization_snapshot",
-                settings.diarization_model_path,
-                label="diarization model",
+                settings.diarization_coreml_model_path is not None
+                and settings.diarization_coreml_model_path.is_dir()
+                and settings.diarization_coreml_model_path.name == MODEL_BUNDLE_NAME,
+                "compiled CoreML diarization bundle is available"
+                if settings.diarization_coreml_model_path is not None
+                and settings.diarization_coreml_model_path.is_dir()
+                and settings.diarization_coreml_model_path.name == MODEL_BUNDLE_NAME
+                else "compiled CoreML diarization bundle is missing or incorrect",
             )
         )
         checks.append(
-            _runtime_check(
+            _check(
                 "diarization_runtime",
-                optional_profile_python,
-                "nemo.collections.asr.models",
-                runner,
+                settings.diarization_worker_path is not None
+                and settings.diarization_worker_path.is_file()
+                and os.access(settings.diarization_worker_path, os.X_OK),
+                "CoreML diarization worker is executable"
+                if settings.diarization_worker_path is not None
+                and settings.diarization_worker_path.is_file()
+                and os.access(settings.diarization_worker_path, os.X_OK)
+                else "CoreML diarization worker is missing or not executable",
             )
         )
-        if settings.diarization_embedding_model_path is not None:
-            checks.append(
-                _file_check(
-                    "diarization_embedding_snapshot",
-                    settings.diarization_embedding_model_path,
-                    label="diarization embedding model",
-                )
+        checks.append(
+            _snapshot_check(
+                "diarization_aligner_snapshot",
+                settings.qwen3_aligner_model_dir,
+                ("config.json",),
+                WEIGHT_FILE_SETS,
             )
-            checks.append(
-                _runtime_check(
-                    "diarization_embedding_runtime",
-                    optional_profile_python,
-                    "onnxruntime",
-                    runner,
-                )
-            )
+        )
 
     return PreflightResult(ok=all(check.ok for check in checks), checks=tuple(checks))
 

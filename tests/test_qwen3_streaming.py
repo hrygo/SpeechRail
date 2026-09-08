@@ -573,6 +573,26 @@ def test_streaming_command_passes_dtype_and_metal_limits(tmp_path: Path) -> None
     assert "--worker-role" in cmd and cmd[cmd.index("--worker-role") + 1] == "streaming"
 
 
+def test_streaming_command_passes_only_a_validated_local_forced_aligner(tmp_path: Path) -> None:
+    model = tmp_path / "asr"
+    model.mkdir()
+    aligner = tmp_path.parent / "external-forced-aligner"
+    aligner.mkdir()
+    (aligner / "config.json").write_text("{}", encoding="utf-8")
+    (aligner / "model.safetensors").touch()
+
+    cfg = Qwen3StreamingBackendConfig(
+        repository_root=tmp_path,
+        python_executable=Path("/usr/bin/python3"),
+        model_dir=model,
+        aligner_model_dir=aligner,
+        device="mps",
+    )
+
+    cmd = cfg.command()
+    assert cmd[cmd.index("--aligner-model-dir") + 1] == str(aligner.resolve())
+
+
 def test_backend_config_rejects_invalid_dtype_for_device(tmp_path: Path) -> None:
     """MPS must not silently accept float32, and CPU must reject float16."""
     snapshot = tmp_path / "external-qwen3-streaming-snapshot"

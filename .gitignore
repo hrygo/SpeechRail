@@ -5,10 +5,30 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .coverage
+.coverage.*
 htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Local scratch files
+/tmp/
+
+# JavaScript dependency trees and package-manager diagnostics
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Native SwiftPM/Xcode build artifacts
+.build/
+.swiftpm/
+DerivedData/
+*.dSYM/
+*.xcarchive/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
 
 .env
 .env.*

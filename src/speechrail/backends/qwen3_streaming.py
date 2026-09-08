@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+from speechrail.backends.qwen3_native import validate_forced_aligner_snapshot
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, StreamingAsrEvent
@@ -68,6 +69,7 @@ class Qwen3StreamingBackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
+    aligner_model_dir: Path | None = None
     dtype: Literal["float16", "float32", "int8"] = "float16"
     cache_limit_mb: int = 256
     memory_limit_mb: int = 0
@@ -104,6 +106,12 @@ class Qwen3StreamingBackendConfig:
         object.__setattr__(self, "repository_root", root)
         object.__setattr__(self, "python_executable", python)
         object.__setattr__(self, "model_dir", resolved_model)
+        if self.aligner_model_dir is not None:
+            object.__setattr__(
+                self,
+                "aligner_model_dir",
+                validate_forced_aligner_snapshot(self.aligner_model_dir, repository_root=root),
+            )
 
     def command(self) -> list[str]:
         cmd = [
@@ -125,6 +133,8 @@ class Qwen3StreamingBackendConfig:
         ]
         if self.memory_limit_mb > 0:
             cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
+        if self.aligner_model_dir is not None:
+            cmd.extend(["--aligner-model-dir", str(self.aligner_model_dir)])
         return cmd
 
     def worker_spec(self) -> WorkerProcessSpec:

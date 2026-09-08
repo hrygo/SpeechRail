@@ -1,6 +1,6 @@
 [project]
 name = "speechrail"
-version = "1.13.1"
+version = "2.0.0"
 description = "Local-first shared speech recognition service with OpenAI-compatible APIs"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -44,12 +44,8 @@ dev = [
     "pyyaml>=6.0",
     "numpy>=1.26,<3.0",
     "mcp>=1.12,<2",
-]
-diarization = [
-    "kaldi-native-fbank>=1.22",
-    "nemo-toolkit[asr]>=2.0",
-    "numpy>=1.26,<2.0",
-    "onnxruntime>=1.20",
+    "openai>=2.0,<3.0",
+    "pyannote-metrics==4.1",
 ]
 mcp = ["mcp>=1.12,<2"]
 
@@ -63,6 +59,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/speechrail"]
+
+[tool.hatch.build.hooks.custom]
 
 [tool.ruff]
 line-length = 100
@@ -102,12 +100,7 @@ exclude = ["tests/"]
 module = [
     "numpy",
     "numpy.*",
-    "kaldi_native_fbank",
-    "kaldi_native_fbank.*",
-    "nemo",
-    "nemo.*",
     "onnxruntime",
-    "onnxruntime.*",
     "mlx",
     "mlx.*",
     "mlx_qwen3_asr",

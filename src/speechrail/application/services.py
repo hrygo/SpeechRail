@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from speechrail.application.diarization.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
-from speechrail.backends.camplus import CamPlusEmbeddingExtractor
-from speechrail.backends.nemo_sortformer import NemoSortformerEngine
+from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -26,6 +26,7 @@ from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationReadiness
+from speechrail.domain.diarization.ports import AlignTextPort
 from speechrail.domain.ports import (
     BatchTranscriber,
     DiarizationEngine,
@@ -35,6 +36,8 @@ from speechrail.domain.ports import (
 )
 from speechrail.observability.metrics import Metrics
 from speechrail.runtime.admission import AdmissionQueue
+from speechrail.runtime.alignment_admission import AlignmentAdmission
+from speechrail.runtime.diarization_admission import DiarizationAdmission
 from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRepository
 from speechrail.runtime.model_budget import (
@@ -44,7 +47,6 @@ from speechrail.runtime.model_budget import (
     detect_system_memory_bytes,
 )
 from speechrail.runtime.resource_governor import ResourceGovernor
-from speechrail.runtime.speaker_centroids import SpeakerCentroidStore
 from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
@@ -116,6 +118,7 @@ class AppOverrides:
     batch_transcriber: BatchTranscriber | None = None
     realtime_asr_factory: RealtimeAsrFactory | None = None
     diarization_engine: DiarizationEngine | None = None
+    text_aligner: AlignTextPort | None = None
     tts_synthesizer: SpeechSynthesizer | None = None
     job_repository: JobRepository | None = None
     job_processor: JobProcessor | None = None
@@ -136,6 +139,9 @@ class AppServices:
     admission: AdmissionQueue
     governor: ResourceGovernor
     lifecycle: RuntimeLifecycle
+    text_aligner: AlignTextPort | None = None
+    alignment_admission: AlignmentAdmission = field(default_factory=AlignmentAdmission)
+    diarization_admission: DiarizationAdmission = field(default_factory=DiarizationAdmission)
     metrics: Metrics = field(default_factory=Metrics)
 
     @property
@@ -170,6 +176,17 @@ class AppServices:
                 "ready": False,
                 "code": "diarization_not_configured",
                 "message": "diarization profile is not configured",
+                "profile": None,
+            }
+        if (
+            isinstance(self.diarization_engine, CoreMLSortformerEngine)
+            and self.settings.qwen3_aligner_model_dir is None
+        ):
+            return {
+                "configured": False,
+                "ready": False,
+                "code": "diarization_alignment_not_configured",
+                "message": "diarization requires a local fixed-text aligner snapshot",
                 "profile": None,
             }
         readiness = getattr(self.diarization_engine, "readiness", None)
@@ -260,6 +277,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             repository_root=_package_root(),
             python_executable=settings.qwen3_python,
             model_dir=settings.qwen3_model_dir,
+            aligner_model_dir=settings.qwen3_aligner_model_dir,
             device=settings.device,
             dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
             cache_limit_mb=settings.mlx_cache_limit_mb,
@@ -320,6 +338,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             repository_root=_package_root(),
             python_executable=settings.qwen3_python,
             model_dir=settings.qwen3_model_dir,
+            aligner_model_dir=settings.qwen3_aligner_model_dir,
             device=settings.device,
             dtype=resolve_backend_dtype(settings.qwen3_model_dir, settings.dtype),
             cache_limit_mb=settings.mlx_cache_limit_mb,
@@ -349,26 +368,11 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
 
     diarization_engine = overrides.diarization_engine
-    if diarization_engine is None and settings.diarization_model_path is not None:
-        embedding = (
-            None
-            if settings.diarization_embedding_model_path is None
-            else CamPlusEmbeddingExtractor(model_path=settings.diarization_embedding_model_path)
-        )
-        centroids = (
-            None
-            if embedding is None
-            else SpeakerCentroidStore(
-                max_groups=settings.diarization_max_groups,
-                ttl_seconds=settings.diarization_group_ttl_seconds,
-                similarity_threshold=settings.diarization_similarity_threshold,
-            )
-        )
-        diarization_engine = NemoSortformerEngine(
-            model_path=settings.diarization_model_path,
-            max_buffer_bytes=settings.diarization_max_buffer_bytes,
-            embedding=embedding,
-            centroids=centroids,
+    if diarization_engine is None and settings.diarization_coreml_model_path is not None:
+        assert settings.diarization_worker_path is not None
+        diarization_engine = CoreMLSortformerEngine(
+            model_path=settings.diarization_coreml_model_path,
+            executable=settings.diarization_worker_path,
         )
 
     admission = AdmissionQueue(settings.max_queue_size)
@@ -399,19 +403,22 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
 
+    text_aligner = overrides.text_aligner
+    if (
+        text_aligner is None
+        and asr_worker is not None
+        and settings.qwen3_aligner_model_dir is not None
+    ):
+        text_aligner = FixedTextAligner(asr_worker)
+
     evictor: WorkerIdleEvictor | None = None
     if settings.worker_idle_timeout_seconds > 0:
-        # The in-service diarization engine participates in idle eviction too:
-        # once resident it holds ~0.5GB in the host process and is otherwise
-        # never released. Its close() drops the weights; the next diarize
-        # reloads lazily under the load lock. The domain DiarizationEngine
-        # protocol intentionally knows nothing about lifecycle, so the engine
-        # is narrowed to the runtime EvictableWorker protocol it implements.
+        # The CoreML engine creates one Swift child for each session and that
+        # child is closed at finish/cancel. It is not a long-lived evictable
+        # worker, so only persistent ASR/TTS owners belong in this list.
         evictable: list[EvictableWorker] = [
             w for w in (shared_owner, tts_worker) if w is not None
         ]
-        if isinstance(diarization_engine, EvictableWorker):
-            evictable.append(diarization_engine)
         if evictable:
             evictor = WorkerIdleEvictor(
                 evictable,
@@ -449,5 +456,6 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         admission=admission,
         governor=governor,
         lifecycle=lifecycle,
+        text_aligner=text_aligner,
         metrics=metrics,
     )

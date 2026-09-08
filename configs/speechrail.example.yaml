@@ -2,7 +2,7 @@
 # Values are placeholders; never put API keys, model weights, audio, or full transcripts here.
 service:
   name: speechrail
-  version: 1.13.1
+  version: 2.0.0
   host: 127.0.0.1
   port: 8201
 
@@ -28,9 +28,11 @@ limits:
   request_timeout_seconds: 120
 
 diarization:
-  # Optional external snapshots; configure Sortformer before CAM++.
-  model_path: /absolute/path/outside/SpeechRail/diar_streaming_sortformer_4spk-v2.nemo
-  embedding_model_path: /absolute/path/outside/SpeechRail/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx
+# One external FluidAudio CoreML FP16 bundle and the wheel-installed worker.
+  # No NeMo/CAM++, provider switch, model download, or precision fallback exists.
+  coreml_model_path: /absolute/path/outside/SpeechRail/SortformerNvidiaLow_v2.1.mlmodelc
+# Optional override. Omit to use the executable bundled in the macOS wheel.
+# worker_path: /absolute/path/outside/SpeechRail/SpeechRailDiarizationWorker
   max_buffer_bytes: 64000000
   max_groups: 64
   group_ttl_seconds: 900

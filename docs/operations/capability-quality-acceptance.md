@@ -2,7 +2,7 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "1.0.0"
+version: "1.0.1"
 date: 2026-09-08
 ---
 
@@ -37,9 +37,21 @@ uv run python examples/perf/bench_profiles.py \
 
 结果需要同时保留日期、commit、profile、公开模型 identity、硬件摘要、阶段、资源采样完整性和聚合指标。单个退出码、`readyz`、模型存在或旧报告都不足以证明当前的性能、质量、VAD 或长稳通过。
 
+## Diarization profile 与内存证据
+
+`diarization_ready=true` 只表示配置的 profile、文件路径与运行时检查通过，表示服务可以按需
+尝试处理；它不表示权重已经驻留，也不证明真实模型质量或物理内存开销。未配置 profile 时不
+创建分人模型权重；当前 v1.13.0 基准未包含 diarization，不能据此发布通用的 `+0.5 GB` 数字。
+
+`SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 默认是 `300` 秒，设为 `0` 可禁用空闲驱逐。驱逐器
+会尝试调用可驱逐组件的 `close()` 并丢弃常驻引用；这不保证操作系统物理内存精确回到固定基线，
+尤其是 CoreML/ANE 统一内存的实际回收取决于系统时。若需要发布内存数字，必须在明确的 profile、硬件、
+模型快照和请求条件下，用同一时刻的 macOS `phys_footprint` 采样记录活跃与驱逐后的结果，并把
+它作为该条件下的 benchmark，不得写成架构不变量。
+
 ## 连续分人 gate
 
-当前生产 `NemoSortformerEngine.supports_stream` 为 `False`，因此不会广播或接受 `speechrail.diarization.v1` 的连续 native 能力。先运行只读静态探针：
+当前生产路径是 FluidAudio CoreML FP16 私有 worker。D1 已确认固定制品能 direct-load 并完成 runtime smoke；它不替代后续的真实质量门。先运行只读静态探针：
 
 ```bash
 uv run python tools/probe_diarization_streaming.py

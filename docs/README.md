@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "1.5.0"
-date: 2026-09-06
+version: "1.5.1"
+date: 2026-09-08
 ---
 
 # 📚 SpeechRail 文档中心
@@ -29,7 +29,7 @@ date: 2026-09-06
 | 角色领域 | 关注重点 | 推荐入口文档 |
 |:---|:---|:---|
 | 🎯 **产品经理 / 业务方** | 业务价值、应用场景、功能矩阵、边界与规划 | [📖 产品白皮书与全景概述](product/overview.md) <br/> [📋 产品边界与职责划分](architecture/product-scope.md) |
-| 🏛️ **架构师 / 技术决策** | 架构拓扑、进程隔离、零拷贝 IPC、状态机、ADR | [🏛️ 总体架构设计](architecture/architecture.md) <br/> [⚖️ OpenAI 兼容性审计](architecture/openai-conformance-audit.md) <br/> [📜 架构决策记录 (ADR)](decisions/README.md) <br/> [👥 分人端到端设计](architecture/speaker-diarization-e2e-design.md) |
+| 🏛️ **架构师 / 技术决策** | 架构拓扑、进程隔离、私有 IPC、状态机、ADR | [🏛️ 总体架构设计](architecture/architecture.md) <br/> [⚖️ OpenAI 兼容性审计](architecture/openai-conformance-audit.md) <br/> [📜 架构决策记录 (ADR)](decisions/README.md) <br/> [👥 分人整洁架构](superpowers/specs/2026-09-08-diarization-clean-architecture-design.md) |
 | 🔌 **API 用户 / 客户端集成** | REST / WebSocket 契约、SDK 接入、音色库、错误码 | [🔌 客户端与 SDK 接入指南](users/integrations.md) <br/> [📡 公共 API 契约手册](users/api-contract.md) <br/> [⚡ OpenAI Realtime 协议规范](../contracts/realtime-openai.md) <br/> [👥 分人协议契约](../contracts/diarization/v1/) |
 | 🛠️ **核心开发者 / 贡献者** | 5分钟启动、代码分层、测试金字塔、Worker 扩展 | [🛠️ 开发者开发指南](developers/development-guide.md) <br/> [🧪 测试与质量验收规范](developers/testing-acceptance.md) |
 | 📦 **运维工程师 / SRE** | LaunchAgent 常驻、Wheel 发布、排障决策树、监控 | [📖 运维操作手册 (Runbook)](operations/operations-runbook.md) <br/> [🚀 运行时部署方案](operations/runtime-deployment.md) <br/> [🔒 安全与可观测性](operations/security-observability.md) |
@@ -49,10 +49,12 @@ flowchart TD
         API["OpenAI 兼容协议层 & Request ID & 统一错误 Envelope"]
         Dec["3-Tier 内存解码器 (WAV Fast-path / ffmpeg 流式解码)"]
         Gov["Resource Governor 资源调度器 & 有界队列与 WorkerLeaseLock"]
+        Diar["可选 CoreML 分人 worker<br/>• Sortformer FP16 匿名标签<br/>• 原生 diarized_json<br/>• Realtime 单一 opt-in"]
+        Life["RuntimeLifecycle + WorkerIdleEvictor<br/>默认 300 秒，可配置"]
         API --> Dec --> Gov
     end
 
-    subgraph Workers ["🛡️ 独立 Python 隔离推理 Worker (零拷贝 IPC 协议)"]
+    subgraph Workers ["🛡️ 独立 Python 隔离推理 Worker (私有长度前缀 IPC)"]
         direction LR
         subgraph ASR_Box ["Qwen3-ASR Worker (MLX / MPS)"]
             ASR["• 批量转写 & 时间戳对齐<br/>• 原生 MLX 流式转写<br/>• Server VAD & 打断"]
@@ -60,15 +62,16 @@ flowchart TD
         subgraph TTS_Box ["Qwen3-TTS Worker (VoiceDesign)"]
             TTS["• 24kHz 高保真语音合成<br/>• 流式逐句合成 & 音频平滑<br/>• 预设音色库 (warm, calm...)"]
         end
-        subgraph Diar_Box ["Diarization 引擎 (Sortformer)"]
-            Diar["• Sortformer 持续在线分人<br/>• 匿名说话人映射与修订<br/>• 会议结束 EOF 水位屏障"]
-        end
     end
 
     Client -->|"HTTP REST / WebSocket"| Host
-    Gov -->|"二进制零拷贝 IPC"| ASR_Box
-    Gov -->|"二进制零拷贝 IPC"| TTS_Box
-    Gov -->|"二进制零拷贝 IPC"| Diar_Box
+    Gov -->|"私有长度前缀 JSON + binary IPC"| ASR_Box
+    Gov -->|"私有长度前缀 JSON + binary IPC"| TTS_Box
+    Gov --> Diar
+    Gov -. 活动与生命周期 .-> Life
+    Life -. 尝试释放常驻权重 .-> ASR_Box
+    Life -. 尝试释放常驻权重 .-> TTS_Box
+    Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
 
 ---
@@ -77,10 +80,10 @@ flowchart TD
 
 | 功能模块 | 运行状态 | 协议与入口 | 核心能力特征 | 验证证据 |
 |---|---|---|---|---|
-| **批量语音识别 (ASR)** | 🟢 生产就绪 | `POST /v1/audio/transcriptions` | OpenAI 格式全兼容，WAV 零开销 Fast-path 直读，支持 `verbose_json`、`srt`、`vtt` | 真实短音频与长音频基准测试通过 |
+| **批量语音识别 (ASR)** | 🟢 生产就绪 | `POST /v1/audio/transcriptions` | OpenAI 格式全兼容，WAV 零开销 Fast-path 直读，支持 `verbose_json`、`srt`、`vtt`；可选 `diarized_json` | 真实短音频与长音频基准测试通过；分人另见能力验收 |
 | **高保真语音合成 (TTS)** | 🟢 生产就绪 | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 输出，预设音色路由 (`default`, `warm`, `calm` 等) | 真实合成端到端验证通过 |
 | **实时全双工流式 (Realtime)** | 🟢 生产就绪 | `WS /v1/realtime` | 纯净 ASR/TTS 子集，支持 Server VAD、打断 (Barge-in)、逐句流式 TTS；多会话按 `session_id` 路由共享单个 streaming worker（`SPEECHRAIL_REALTIME_MAX_SESSIONS`，默认 2） | OpenAI SDK 与 Sona 接入实测完成；并发多会话冒烟通过 |
-| **说话人分离 (Diarization)** | 🟢 生产就绪 | Realtime session 协议扩展 (`speechrail.diarization.v1`) | Sortformer 持续在线匿名分人，分人事件双通道推送与水位屏障 | [SPK-E2E-1 端到端规范](architecture/speaker-diarization-e2e-design.md) & 67 项全量测试通过 |
+| **说话人分离 (Diarization)** | 🟡 可选、按 profile 就绪 | 原生 `diarized_json`；Realtime `session.speechrail.diarization.enabled` | 私有 CoreML Sortformer FP16 worker；仅输出匿名 label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实内存与质量仍需独立实测 |
 | **macOS 常驻运维服务** | 🟢 生产就绪 | `speechrail service` CLI | 用户级 LaunchAgent 管理，支持原子安装、状态感知与一键回滚 | 自动化测试与实机验证通过 |
 
 ---

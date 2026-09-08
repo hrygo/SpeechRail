@@ -48,7 +48,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / "speechrail-1.13.1-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-2.0.0-py3-none-any.whl"
     wheel.touch()
     app_home = tmp_path / "Application Support" / "SpeechRail"
     return wheel, app_home
@@ -251,7 +251,7 @@ def test_managed_install_adds_diarization_when_configured(
     runtime = _fake_runtime(tmp_path)
     env_file = tmp_path / "diarization.env"
     env_file.write_text(
-        "SPEECHRAIL_DIARIZATION_MODEL_PATH=/models/diar/sortformer\n",
+        "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=/models/diar/SortformerNvidiaLow_v2.1.mlmodelc\n",
         encoding="utf-8",
     )
 

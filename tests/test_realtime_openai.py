@@ -23,10 +23,13 @@ from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization import (
-    DiarizationAssignment,
+    ActivityFrame,
+    ActivityUpdate,
+    AlignmentRequest,
+    AlignmentResult,
     DiarizationError,
-    DiarizationSpeaker,
-    DiarizationUpdate,
+    Span,
+    TextUnit,
 )
 from speechrail.domain.ports import (
     AudioChunk,
@@ -230,30 +233,39 @@ class FakeDiarizationSession:
     def __init__(self) -> None:
         self.received: list[bytes] = []
         self.closed = False
+        self.epoch = ""
+        self._updates: asyncio.Queue[ActivityUpdate | None] = asyncio.Queue()
+        self._step = 0
 
-    async def append_audio(self, audio: bytes) -> None:
-        self.received.append(audio)
-
-    async def annotate(self, segments):
-        return DiarizationUpdate(
-            assignments=tuple(
-                DiarizationAssignment(
-                    segment_id=segment.id,
-                    speakers=(
-                        DiarizationSpeaker(
-                            id=f"spk_{index + 1:02d}", confidence=0.95
-                        ),
-                    ),
-                )
-                for index, segment in enumerate(segments)
+    async def append(self, *, start_sample: int, pcm16: bytes) -> None:
+        assert start_sample == sum(len(audio) // 2 for audio in self.received)
+        self.received.append(pcm16)
+        end = start_sample + len(pcm16) // 2
+        await self._updates.put(
+            ActivityUpdate(
+                epoch=self.epoch,
+                step_id=self._step,
+                replace_span=Span(start_sample, end),
+                frames=(
+                    ActivityFrame(Span(start_sample, end), (0.95, 0.0, 0.0, 0.0), frozenset({0})),
+                ),
+                processed_through=end,
+                stable_through=end,
             )
         )
+        self._step += 1
 
-    async def finalize(self) -> DiarizationUpdate:
-        return DiarizationUpdate()
+    async def updates(self):
+        while update := await self._updates.get():
+            yield update
 
-    async def close(self) -> None:
+    async def finish(self, *, through_sample: int) -> None:
+        assert through_sample == sum(len(audio) // 2 for audio in self.received)
+        await self._updates.put(None)
+
+    async def cancel(self) -> None:
         self.closed = True
+        await self._updates.put(None)
 
 
 class FakeDiarizationEngine:
@@ -261,24 +273,31 @@ class FakeDiarizationEngine:
         self.supports_stream = supports_stream
         self.sessions: list[FakeDiarizationSession] = []
 
-    def create(self, *, config):
+    def open(self, *, epoch: str):
         session = FakeDiarizationSession()
+        session.epoch = epoch
         self.sessions.append(session)
         return session
 
-    def create_stream(self, *, config):
-        session = FakeDiarizationSession()
-        self.sessions.append(session)
-        return session
+
+class FakeTextAligner:
+    async def align(self, request: AlignmentRequest) -> AlignmentResult:
+        return AlignmentResult(
+            request.epoch,
+            request.item_id,
+            (TextUnit("fixed", 0, len(request.text), request.span),),
+        )
 
 
 class FailingDiarizationSession(FakeDiarizationSession):
-    async def annotate(self, segments):
+    async def append(self, *, start_sample: int, pcm16: bytes) -> None:
+        del start_sample, pcm16
         raise DiarizationError("invalid diarization output", code="diarization_invalid_output")
 
 
 class FailingDiarizationEngine:
-    def create(self, *, config):
+    def open(self, *, epoch: str):
+        del epoch
         return FailingDiarizationSession()
 
 
@@ -290,6 +309,7 @@ def _client(
     completed_text: str = "你好",
     emit_text_on_flush: str | None = None,
     diarization_engine=None,
+    text_aligner=None,
     tts_synthesizer=None,
     api_key: str | None = None,
     factory: FakeStreamingFactory | None = None,
@@ -319,6 +339,8 @@ def _client(
             tts_synthesizer=tts_synthesizer or FakeSpeechSynthesizer(),
             realtime_asr_factory=streaming_factory,
             diarization_engine=diarization_engine,
+            text_aligner=text_aligner
+            or (FakeTextAligner() if diarization_engine is not None else None),
         ),
     )
     app = FastAPI()
@@ -500,7 +522,7 @@ def test_openai_model_alias_resolves_to_asr_profile() -> None:
         assert len(factory.sessions) == 1
 
 
-def test_openai_diarized_model_alias_enables_diarization() -> None:
+def test_openai_diarized_model_alias_does_not_enable_realtime_diarization() -> None:
     engine = FakeDiarizationEngine()
     segment = TranscriptSegment(id=1, start_ms=0, end_ms=500, text="你好")
     client, factory = _client(segments=(segment,), diarization_engine=engine)
@@ -525,9 +547,9 @@ def test_openai_diarized_model_alias_enables_diarization() -> None:
             if event["type"] == "conversation.item.input_audio_transcription.completed":
                 break
 
-    assert len(engine.sessions) == 1
-    assert any(event["type"].endswith(".segment") for event in events)
-    assert factory.sessions and factory.sessions[0].want_segments is True
+    assert engine.sessions == []
+    assert all(not event["type"].startswith("speechrail.diarization") for event in events)
+    assert factory.sessions and factory.sessions[0].want_segments is False
 
 
 def test_openai_commit_without_diarization_does_not_request_segments() -> None:
@@ -839,7 +861,7 @@ def test_openai_segment_formatter_uses_standard_fields() -> None:
     assert event["end"] == 1.2
 
 
-def test_openai_session_update_preserves_diarization_and_standard_hints() -> None:
+def test_openai_session_update_preserves_standard_hints_without_diarization_state() -> None:
     _, config = apply_session_update(
         {
             "type": "session.update",
@@ -850,7 +872,6 @@ def test_openai_session_update_preserves_diarization_and_standard_hints() -> Non
                     "languages": ["zh", "en"],
                     "keywords": ["SpeechRail"],
                     "timestamp_granularities": ["segment"],
-                    "diarization": {"enabled": True, "speaker_count_hint": 2},
                     "known_speaker_names": ["Alice"],
                     "known_speaker_references": ["ref_opaque"],
                 }
@@ -869,60 +890,26 @@ def test_openai_session_update_preserves_diarization_and_standard_hints() -> Non
     assert config["languages"] == ["zh", "en"]
     assert config["keywords"] == ["SpeechRail"]
     assert config["timestamp_granularities"] == ["segment"]
-    assert config["diarization"]["enabled"] is True
-    assert config["diarization"]["speaker_count_hint"] == 2
+    assert "diarization" not in config
     assert config["known_speaker_names"] == ["Alice"]
     assert config["known_speaker_references"] == ["ref_opaque"]
 
 
-def test_openai_realtime_emits_diarized_segments_before_completed_with_ordered_events() -> None:
-    from speechrail.domain.contracts import TranscriptSegment
-
-    segments = (
-        TranscriptSegment(id=1, start_ms=0, end_ms=800, text="你好"),
-        TranscriptSegment(id=2, start_ms=800, end_ms=1600, text="世界"),
-    )
-    diarization = FakeDiarizationEngine()
-    client, _ = _client(segments=segments, diarization_engine=diarization)
-
+def test_openai_realtime_rejects_retired_diarization_request_shape() -> None:
+    client, _ = _client(diarization_engine=FakeDiarizationEngine())
     with client.websocket_connect("/v1/realtime") as socket:
-        events = [socket.receive_json(), socket.receive_json()]
+        socket.receive_json()
+        socket.receive_json()
         socket.send_json(
             {
                 "type": "session.update",
-                "session": {
-                    "input_audio_transcription": {
-                        "model": "gpt-4o-transcribe-diarize",
-                        "diarization": {"enabled": True},
-                    }
-                },
+                "session": {"input_audio_transcription": {"diarization": {"enabled": True}}},
             }
         )
-        events.append(socket.receive_json())
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            events.append(event)
-            if event["type"] == "conversation.item.input_audio_transcription.completed":
-                break
+        error = socket.receive_json()
 
-    types = [event["type"] for event in events]
-    segment_types = "conversation.item.input_audio_transcription.segment"
-    assert types.count(segment_types) == 2
-    segment_events = [event for event in events if event["type"] == segment_types]
-    assert [event["speaker"] for event in segment_events] == ["spk_01", "spk_02"]
-    assert [event["start"] for event in segment_events] == [0.0, 0.8]
-    assert types.index(segment_types) < types.index(
-        "conversation.item.input_audio_transcription.completed"
-    )
-    assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
-    assert len({event["event_id"] for event in events}) == len(events)
-    assert {event["session_id"] for event in events} == {events[0]["session_id"]}
-    assert diarization.sessions[0].received == [b"\x00\x00"]
-    assert diarization.sessions[0].closed is True
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "invalid_diarization"
 
 
 def test_openai_realtime_rejects_diarization_without_profile() -> None:
@@ -933,44 +920,13 @@ def test_openai_realtime_rejects_diarization_without_profile() -> None:
         socket.send_json(
             {
                 "type": "session.update",
-                "session": {
-                    "input_audio_transcription": {
-                        "diarization": {"enabled": True},
-                    }
-                },
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
             }
         )
         error = socket.receive_json()
 
     assert error["type"] == "error"
     assert error["error"]["code"] == "diarization_not_available"
-
-
-def test_openai_realtime_reports_diarization_backend_error() -> None:
-    client, _ = _client(
-        segments=(TranscriptSegment(id=1, start_ms=0, end_ms=100, text="你好"),),
-        diarization_engine=FailingDiarizationEngine(),
-    )
-    with client.websocket_connect("/v1/realtime") as socket:
-        socket.receive_json()
-        socket.receive_json()
-        socket.send_json(
-            {
-                "type": "session.update",
-                "session": {"input_audio_transcription": {"diarization": {"enabled": True}}},
-            }
-        )
-        socket.receive_json()
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
-        socket.send_json({"type": "input_audio_buffer.commit"})
-        while True:
-            event = socket.receive_json()
-            if event["type"] == "error":
-                break
-
-    assert event["error"]["code"] == "diarization_invalid_output"
 
 
 def test_openai_realtime_clear_discards_active_audio_session() -> None:
@@ -997,13 +953,10 @@ def test_openai_realtime_clear_closes_diarization_session() -> None:
         socket.send_json(
             {
                 "type": "session.update",
-                "session": {"input_audio_transcription": {"diarization": {"enabled": True}}},
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
             }
         )
         socket.receive_json()
-        socket.send_json(
-            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
-        )
         socket.send_json({"type": "input_audio_buffer.clear"})
         assert socket.receive_json()["type"] == "input_audio_buffer.cleared"
 
@@ -1152,6 +1105,122 @@ def test_pcm24k_converter_is_frame_partition_invariant() -> None:
     assert split_frames == one_frame
 
 
+def test_realtime_diarization_receives_identical_16khz_pcm_for_24khz_frame_partitions() -> None:
+    pcm = b"".join(index.to_bytes(2, "little", signed=True) for index in range(1200))
+
+    def capture(frames: tuple[bytes, ...]) -> bytes:
+        engine = FakeDiarizationEngine()
+        client, _ = _client(diarization_engine=engine)
+        with client.websocket_connect("/v1/realtime") as socket:
+            socket.receive_json()
+            socket.receive_json()
+            socket.send_json(
+                {
+                    "type": "session.update",
+                    "session": {
+                        "type": "transcription",
+                        "audio": {
+                            "input": {
+                                "format": {"type": "audio/pcm", "rate": 24000},
+                                "transcription": {"model": "gpt-4o-transcribe", "language": "zh"},
+                                "turn_detection": None,
+                            }
+                        },
+                        "speechrail": {"diarization": {"enabled": True}},
+                    },
+                }
+            )
+            assert socket.receive_json()["type"] == "session.updated"
+            for frame in frames:
+                socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(frame)})
+            socket.send_json({"type": "input_audio_buffer.commit"})
+            while (
+                socket.receive_json()["type"]
+                != "conversation.item.input_audio_transcription.completed"
+            ):
+                pass
+        return b"".join(engine.sessions[0].received)
+
+    one_frame = capture((pcm,))
+    partitioned = capture((pcm[:214], pcm[214:996], pcm[996:]))
+
+    assert partitioned == one_frame
+    assert len(one_frame) == 1600
+
+
+def test_realtime_diarization_aligns_frozen_completed_text_without_asr_segments() -> None:
+    class RecordingAligner:
+        request: AlignmentRequest | None = None
+
+        async def align(self, request: AlignmentRequest) -> AlignmentResult:
+            self.request = request
+            return AlignmentResult(
+                request.epoch,
+                request.item_id,
+                (TextUnit("direct", 0, len(request.text), request.span),),
+            )
+
+    aligner = RecordingAligner()
+    client, _ = _client(
+        segments=(TranscriptSegment(id=0, start_ms=0, end_ms=100, text="错误分段"),),
+        diarization_engine=FakeDiarizationEngine(),
+        text_aligner=aligner,
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (completed := socket.receive_json())["type"] != (
+            "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+    assert aligner.request is not None
+    assert aligner.request.text == "你好"
+    assert len(aligner.request.pcm16) == 1600
+    assert completed["attribution_units"][0]["timing_quality"] == "aligned"
+
+
+def test_regular_realtime_transcription_never_calls_the_fixed_text_aligner() -> None:
+    class CountingAligner:
+        calls = 0
+
+        async def align(self, request: AlignmentRequest) -> AlignmentResult:
+            self.calls += 1
+            return AlignmentResult(
+                request.epoch,
+                request.item_id,
+                (TextUnit("unexpected", 0, len(request.text), request.span),),
+            )
+
+    aligner = CountingAligner()
+    client, _ = _client(
+        diarization_engine=FakeDiarizationEngine(), text_aligner=aligner
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 800)})
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (
+            socket.receive_json()["type"]
+            != "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+    assert aligner.calls == 0
+
+
 def test_openai_session_update_rejects_non_string_language_hints() -> None:
     with pytest.raises(RealtimeAdapterError, match="languages must be a string array"):
         apply_session_update(
@@ -1191,7 +1260,7 @@ def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
 
 
 def test_openai_session_update_rejects_invalid_diarization_config() -> None:
-    with pytest.raises(RealtimeAdapterError, match="speaker_count_hint"):
+    with pytest.raises(RealtimeAdapterError, match=r"use session\.speechrail"):
         apply_session_update(
             {
                 "type": "session.update",
@@ -2496,7 +2565,7 @@ def test_server_vad_admission_admitted_speech_transcription_and_events() -> None
 
 def test_server_vad_admission_diarization_sample_mapping() -> None:
     """R2: Session sample clock and diarization units accurately preserve timing under admission."""
-    from test_diarization_extensions import EXTENSION, _FakeDiarizationEngine
+    from test_diarization_extensions import _FakeDiarizationEngine
     from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
 
     client, _ = _client(
@@ -2517,12 +2586,7 @@ def test_server_vad_admission_diarization_sample_mapping() -> None:
                         "prefix_padding_ms": 100,
                         "silence_duration_ms": 100,
                     },
-                    "input_audio_transcription": {
-                        "diarization": {
-                            "enabled": True,
-                            "extensions": [EXTENSION],
-                        }
-                    },
+                    "speechrail": {"diarization": {"enabled": True}},
                 },
             }
         )

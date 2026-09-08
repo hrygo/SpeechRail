@@ -86,6 +86,15 @@ async function main() {
   });
   const buffer = Buffer.from(await mp3.arrayBuffer());
   await fs.promises.writeFile("speech.mp3", buffer);
+
+  // 3. 原生讲话人分离：标准 OpenAI multipart 参数直接可用。
+  const meeting = await openai.audio.transcriptions.create({
+    file: fs.createReadStream("meeting.wav"),
+    model: "gpt-4o-transcribe-diarize",
+    response_format: "diarized_json",
+    chunking_strategy: { type: "server_vad" },
+  });
+  console.log("分人转写:", meeting);
 }
 
 main();

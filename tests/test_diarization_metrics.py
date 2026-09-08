@@ -11,14 +11,37 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
 from tools.evaluate_diarization_e2e import (
+    EvaluationRegion,
     ManifestItem,
     SpeakerTurn,
     TextAttributionUnit,
+    compute_conditional_attribution_error,
+    compute_cpcer,
     compute_der,
+    compute_pyannote_metrics,
     compute_speaker_attribution_cer,
     evaluate_manifest,
     validate_manifest,
 )
+
+
+def test_custom_der_cross_checks_pyannote_der_and_jer_with_uem() -> None:
+    reference = [
+        SpeakerTurn(speaker="S1", start=0.0, end=4.0),
+        SpeakerTurn(speaker="S2", start=4.0, end=8.0),
+    ]
+    hypothesis = [
+        SpeakerTurn(speaker="spk_a", start=0.0, end=4.0),
+        SpeakerTurn(speaker="spk_b", start=4.0, end=6.0),
+    ]
+    uem = (EvaluationRegion(start=0.0, end=8.0),)
+
+    custom = compute_der(reference, hypothesis, collar=0.0, uem=uem)
+    reference_metrics = compute_pyannote_metrics(reference, hypothesis, collar=0.0, uem=uem)
+
+    assert custom.der == pytest.approx(0.25)
+    assert reference_metrics.der == pytest.approx(custom.der)
+    assert reference_metrics.jer == pytest.approx(0.25)
 
 
 def test_der_is_zero_under_consistent_speaker_permutation() -> None:
@@ -179,9 +202,17 @@ def test_manifest_validation_enforces_license_and_splits(tmp_path: Path) -> None
             "license": "CC-BY-4.0",
             "reference_rttm": "ref_01.rttm",
             "hypothesis_rttm": "hyp_01.rttm",
+            "uem": "eval.uem",
         }
     ]
     manifest_file = tmp_path / "manifest.json"
+    (tmp_path / "ref_01.rttm").write_text(
+        "SPEAKER clip 1 0.0 1.0 <NA> <NA> ref <NA> <NA>\n", encoding="utf-8"
+    )
+    (tmp_path / "hyp_01.rttm").write_text(
+        "SPEAKER clip 1 0.0 1.0 <NA> <NA> hyp <NA> <NA>\n", encoding="utf-8"
+    )
+    (tmp_path / "eval.uem").write_text("clip 1 0.0 1.0\n", encoding="utf-8")
     manifest_file.write_text(json.dumps(valid_manifest), encoding="utf-8")
     items = validate_manifest(manifest_file)
     assert len(items) == 1
@@ -215,6 +246,161 @@ def test_manifest_validation_enforces_license_and_splits(tmp_path: Path) -> None
         validate_manifest(manifest_file)
 
 
+def test_manifest_rejects_missing_rttm_and_der_rejects_empty_reference(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "clip_id": "missing-rttm",
+                    "split": "eval",
+                    "license": "authorized",
+                    "reference_rttm": "missing-reference.rttm",
+                    "hypothesis_rttm": "missing-hypothesis.rttm",
+                    "uem": "eval.uem",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "eval.uem").write_text("clip 1 0.0 1.0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="RTTM file is missing"):
+        validate_manifest(manifest)
+    with pytest.raises(ValueError, match="reference speech"):
+        compute_der([], [SpeakerTurn(speaker="hyp", start=0.0, end=1.0)])
+
+
+def test_manifest_rejects_missing_uem(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    (tmp_path / "reference.rttm").write_text(
+        "SPEAKER clip 1 0.0 1.0 <NA> <NA> ref <NA> <NA>\n", encoding="utf-8"
+    )
+    (tmp_path / "hypothesis.rttm").write_text(
+        "SPEAKER clip 1 0.0 1.0 <NA> <NA> hyp <NA> <NA>\n", encoding="utf-8"
+    )
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "clip_id": "missing-uem",
+                    "split": "eval",
+                    "license": "authorized",
+                    "reference_rttm": "reference.rttm",
+                    "hypothesis_rttm": "hypothesis.rttm",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="requires uem"):
+        validate_manifest(manifest)
+
+
+def test_manifest_loads_paired_text_attribution_sidecars_and_reports_cpcer(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "reference.rttm").write_text(
+        "SPEAKER clip 1 0.0 1.0 <NA> <NA> S1 <NA> <NA>\n", encoding="utf-8"
+    )
+    (tmp_path / "hypothesis.rttm").write_text(
+        "SPEAKER clip 1 0.0 1.0 <NA> <NA> A <NA> <NA>\n", encoding="utf-8"
+    )
+    (tmp_path / "eval.uem").write_text("clip 1 0.0 1.0\n", encoding="utf-8")
+    (tmp_path / "reference-text.json").write_text(
+        json.dumps([{"text": "确认", "speaker": "S1"}]), encoding="utf-8"
+    )
+    (tmp_path / "hypothesis-text.json").write_text(
+        json.dumps([{"text": "确认", "speaker": "A", "status": "stable"}]),
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            [
+                {
+                    "clip_id": "anon-text",
+                    "split": "eval",
+                    "license": "authorized",
+                    "reference_rttm": "reference.rttm",
+                    "hypothesis_rttm": "hypothesis.rttm",
+                    "uem": "eval.uem",
+                    "reference_text_json": "reference-text.json",
+                    "hypothesis_text_json": "hypothesis-text.json",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    items = validate_manifest(manifest)
+    report = evaluate_manifest(items)
+
+    assert report["items"][0]["cpcer"] == 0.0
+    assert report["aggregate"]["cpcer"] == 0.0
+
+    manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+    del manifest_data[0]["hypothesis_text_json"]
+    manifest.write_text(json.dumps(manifest_data), encoding="utf-8")
+    with pytest.raises(ValueError, match="text sidecars"):
+        validate_manifest(manifest)
+
+
+def test_speaker_attribution_cer_counts_text_substitution_and_insertion() -> None:
+    reference = [TextAttributionUnit(text="同意", speaker="S1")]
+    hypothesis = [TextAttributionUnit(text="不同意", speaker="spk", status="stable")]
+
+    score = compute_speaker_attribution_cer(reference, hypothesis, {"spk": "S1"})
+
+    assert score.error_characters >= 1
+    assert score.attribution_cer > 0.0
+
+
+def test_conditional_attribution_error_uses_only_exactly_aligned_characters() -> None:
+    reference = [TextAttributionUnit(text="甲乙", speaker="S1")]
+    hypothesis = [TextAttributionUnit(text="甲丙乙", speaker="A", status="stable")]
+
+    score = compute_conditional_attribution_error(reference, hypothesis, {"A": "S1"})
+
+    assert score.total_matched_characters == 2
+    assert score.error_characters == 0
+    assert score.error_rate == 0.0
+
+
+def test_cpcer_uses_one_global_speaker_mapping_and_counts_text_edits() -> None:
+    """cpCER groups each speaker's whole transcript before global matching."""
+    reference = [
+        TextAttributionUnit(text="甲乙", speaker="S1"),
+        TextAttributionUnit(text="丙丁", speaker="S2"),
+    ]
+    hypothesis = [
+        TextAttributionUnit(text="丙戊", speaker="B"),
+        TextAttributionUnit(text="甲乙", speaker="A"),
+    ]
+
+    score = compute_cpcer(reference, hypothesis)
+
+    assert score.speaker_mapping == {"A": "S1", "B": "S2"}
+    assert score.total_characters == 4
+    assert score.error_characters == 1
+    assert score.cpcer == pytest.approx(0.25)
+
+
+def test_cpcer_treats_unknown_as_an_unmatched_speaker_and_rejects_empty_reference() -> None:
+    reference = [TextAttributionUnit(text="确认", speaker="S1")]
+    hypothesis = [TextAttributionUnit(text="确认", speaker=None, status="unknown")]
+
+    score = compute_cpcer(reference, hypothesis)
+
+    # Unknown may not be mapped to an oracle reference speaker. Its emitted
+    # text is an insertion and the reference transcript is a deletion.
+    assert score.error_characters == 4
+    assert score.unknown_characters == 2
+    assert score.cpcer == pytest.approx(2.0)
+    with pytest.raises(ValueError, match="reference text"):
+        compute_cpcer([], hypothesis)
+
+
 def test_evaluation_report_does_not_leak_private_data() -> None:
     """Generated evaluation summary must not contain raw audio paths, transcripts, or names."""
     ref = [SpeakerTurn(speaker="Alice_RealName", start=0.0, end=5.0)]
@@ -226,6 +412,7 @@ def test_evaluation_report_does_not_leak_private_data() -> None:
         license="CC0",
         reference_turns=ref,
         hypothesis_turns=hyp,
+        uem_regions=(EvaluationRegion(0.0, 5.0),),
     )
     report = evaluate_manifest([item], collar=0.0)
 

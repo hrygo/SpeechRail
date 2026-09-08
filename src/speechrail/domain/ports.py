@@ -8,11 +8,7 @@ from typing import Literal, Protocol
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
-from speechrail.domain.diarization import (
-    ActivitySnapshot,
-    DiarizationConfig,
-    DiarizationUpdate,
-)
+from speechrail.domain.diarization.ports import StreamingActivityPort
 
 
 class TranscriptionRequest(BaseModel):
@@ -123,40 +119,5 @@ class RealtimeAsrFactory(Protocol):
         del session
 
 
-class DiarizationSession(Protocol):
-    """One bounded acoustic attribution session owned by a public runtime."""
-
-    async def append_audio(self, audio: bytes) -> None: ...
-
-    async def annotate(self, segments: tuple[TranscriptSegment, ...]) -> DiarizationUpdate: ...
-
-    async def finalize(self) -> DiarizationUpdate: ...
-
-    async def close(self) -> None: ...
-
-
-class ContinuousDiarizationSession(Protocol):
-    """One bounded streaming diarization state spanning a whole public session.
-
-    ASR commits end items, never this state.  Native state stays opaque to
-    callers; implementations must keep bounded caches and return only the
-    unconsumed activity tail, never whole-meeting prediction tensors.
-    """
-
-    async def append(self, pcm: bytes, start_sample: int) -> None: ...
-
-    async def activities(self, through_sample: int) -> ActivitySnapshot: ...
-
-    async def finish(self, through_sample: int) -> ActivitySnapshot: ...
-
-    async def close(self) -> None: ...
-
-
-class DiarizationEngine(Protocol):
-    """Creates a session-local diarization stream after input validation."""
-
-    def create(self, *, config: DiarizationConfig) -> DiarizationSession: ...
-
-    def create_stream(self, *, config: DiarizationConfig) -> ContinuousDiarizationSession:
-        """Create a continuous SPK-E2E-1 stream session (extension mode)."""
-        ...
+class DiarizationEngine(StreamingActivityPort, Protocol):
+    """The only public application port for anonymous speaker activity."""

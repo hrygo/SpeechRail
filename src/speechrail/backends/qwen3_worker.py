@@ -16,7 +16,6 @@ from typing import BinaryIO, Protocol
 
 from speechrail.backends.model_identity import SnapshotIdentity, inspect_model, read_quantization
 from speechrail.config.model_catalog import QuantizationSpec
-from speechrail.domain.diarization_timeline import verify_alignment
 from speechrail.runtime.worker_protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
@@ -160,6 +159,10 @@ class WorkerEngine(Protocol):
         include_timestamps: bool = False,
     ) -> tuple[str, str, list[dict[str, object]]]: ...
 
+    def align_text(
+        self, audio: bytes, *, text: str, language: str
+    ) -> list[dict[str, object]]: ...
+
     def open_session(
         self,
         *,
@@ -180,7 +183,7 @@ class WorkerEngine(Protocol):
     def finish_streaming(self, session_id: str) -> tuple[str, str]: ...
 
     def align_session_audio(
-        self, session_id: str, canonical_text: str
+        self, session_id: str, canonical_text: str, language: str
     ) -> list[dict[str, object]]: ...
 
     def close_session(self, session_id: str) -> None: ...
@@ -252,6 +255,50 @@ def _handle_transcribe(
                 "segments": segments,
                 "device": identity.device,
                 "dtype": identity.dtype,
+            },
+        )
+    except ProtocolError:
+        write_frame(
+            output_stream,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "error",
+                "code": "worker_invalid_request",
+                "request_id": request_id,
+            },
+        )
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        write_frame(
+            output_stream,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "error",
+                "code": "worker_inference_error",
+                "request_id": request_id,
+            },
+        )
+
+
+def _handle_align_text(
+    frame: dict[str, object], output_stream: BinaryIO, engine: WorkerEngine
+) -> None:
+    request_id = frame.get("request_id") if isinstance(frame.get("request_id"), str) else None
+    try:
+        request_id, pcm, language, _prompt, _timestamps = _decode_request(
+            {**frame, "prompt": "", "include_timestamps": False}
+        )
+        text = frame.get("text")
+        if not isinstance(text, str) or not text:
+            raise ProtocolError("invalid fixed text alignment request")
+        tokens = engine.align_text(pcm, text=text, language=language)
+        write_frame(
+            output_stream,
+            {
+                "version": PROTOCOL_VERSION,
+                "type": "align_result",
+                "request_id": request_id,
+                "tokens": tokens,
             },
         )
     except ProtocolError:
@@ -466,7 +513,7 @@ def _handle_commit(
         text, language = engine.finish_streaming(session_id)
         segments: list[dict[str, object]] = []
         if want_segments and text:
-            segments = engine.align_session_audio(session_id, text)
+            segments = engine.align_session_audio(session_id, text, language)
         if text:
             write_frame(
                 output_stream,
@@ -659,6 +706,7 @@ def serve(
     device: str,
     dtype: str = "float16",
     max_new_tokens: int = 512,
+    aligner_model_dir: Path | None = None,
     engine_factory: EngineFactory | None = None,
 ) -> None:
     if engine_factory is None:
@@ -681,7 +729,17 @@ def serve(
         )
         return
     try:
-        engine = engine_factory(model_dir, device, dtype, max_new_tokens)
+        engine: WorkerEngine
+        if engine_factory is Qwen3Engine:
+            engine = Qwen3Engine(
+                model_dir,
+                device,
+                dtype,
+                max_new_tokens,
+                aligner_model_dir=aligner_model_dir,
+            )
+        else:
+            engine = engine_factory(model_dir, device, dtype, max_new_tokens)
     except Exception:
         traceback.print_exc(file=sys.stderr)
         write_frame(
@@ -728,6 +786,9 @@ def serve(
         kind = frame.get("type")
         if kind == "transcribe":
             _handle_transcribe(frame, output_stream, engine, identity)
+            _clear_metal_cache()
+        elif kind == "align_text":
+            _handle_align_text(frame, output_stream, engine)
             _clear_metal_cache()
         elif kind == "session.open":
             _handle_session_open(frame, output_stream, engine)
@@ -889,6 +950,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         device: str,
         dtype: str = "float16",
         max_new_tokens: int = 512,
+        *,
+        aligner_model_dir: Path | None = None,
     ) -> None:
         expected = inspect_model(model_dir)
         if expected.family != "qwen3_asr" or expected.variant != "asr":
@@ -932,6 +995,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         if runtime_quantized:
             quantization = QuantizationSpec(bits=8, group_size=64, format="affine")
         self._max_new_tokens = max_new_tokens
+        self._aligner_model_dir = aligner_model_dir
+        self._forced_aligner: object | None = None
         self.identity = WorkerIdentity(
             device=device,
             dtype=resolved_dtype,
@@ -1037,29 +1102,56 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         )
 
     def align_session_audio(
-        self, session_id: str, canonical_text: str
+        self, session_id: str, canonical_text: str, language: str
     ) -> list[dict[str, object]]:
-        """Re-decode the item audio with the session's own language and context.
-
-        The candidate transcript must describe exactly the canonical streaming
-        text (same normalization rules as ``domain.diarization_timeline``);
-        otherwise the word timestamps cannot be trusted and the item is
-        delivered without timing instead of with re-written text.
-        """
+        """Forced-align already decoded text; never invoke ASR a second time."""
         audio = self._align_buffers.pop(session_id, None)
-        if not audio or not canonical_text:
+        if not audio or not canonical_text or self._aligner_model_dir is None:
             return []
-        language, context = self._session_contexts.get(session_id, ("auto", ""))
+        return _to_streaming_segments(
+            self._align_fixed_text(bytes(audio), canonical_text, language)
+        )
+
+    def align_text(
+        self, audio: bytes, *, text: str, language: str
+    ) -> list[dict[str, object]]:
+        """Return raw fixed-text tokens for the application alignment adapter."""
+        if not audio or not text or self._aligner_model_dir is None:
+            return []
+        return self._align_fixed_text(audio, text, language)
+
+    def _align_fixed_text(
+        self, audio: bytes, text: str, language: str
+    ) -> list[dict[str, object]]:
         try:
-            text, _language, raw = self.transcribe(
-                bytes(audio), language=language, prompt=context, include_timestamps=True
+            if self._forced_aligner is None:
+                from mlx_qwen3_asr import ForcedAligner  # type: ignore[import-not-found]
+
+                self._forced_aligner = ForcedAligner(model_path=str(self._aligner_model_dir))
+            import numpy as np
+
+            waveform = np.frombuffer(audio, dtype="<i2").astype(np.float32) / np.float32(32768)
+            aligned = self._forced_aligner.align(  # type: ignore[union-attr]
+                waveform, text, language=language or "auto"
             )
         except Exception:
             traceback.print_exc(file=sys.stderr)
             return []
-        if not text or not verify_alignment(canonical_text, text):
-            return []
-        return _to_streaming_segments(raw)
+        raw: list[dict[str, object]] = []
+        for item in aligned:
+            token = getattr(item, "text", None)
+            start = getattr(item, "start_time", None)
+            end = getattr(item, "end_time", None)
+            if (
+                not isinstance(token, str)
+                or isinstance(start, bool)
+                or not isinstance(start, (int, float))
+                or isinstance(end, bool)
+                or not isinstance(end, (int, float))
+            ):
+                return []
+            raw.append({"text": token, "start": start, "end": end})
+        return raw
 
     def close_session(self, session_id: str) -> None:
         self._streaming_states.pop(session_id, None)
@@ -1081,6 +1173,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--cache-limit-mb", type=int, default=256)
     parser.add_argument("--memory-limit-mb", type=int, default=0)
+    parser.add_argument("--aligner-model-dir")
     # process self-description tag; serve() ignores it, tooling reads it
     parser.add_argument(
         "--worker-role", choices=("batch", "streaming"), default="batch"
@@ -1106,6 +1199,11 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - proces
             device=args.device,
             dtype=args.dtype,
             max_new_tokens=args.max_new_tokens,
+            aligner_model_dir=(
+                Path(args.aligner_model_dir).resolve(strict=True)
+                if args.aligner_model_dir is not None
+                else None
+            ),
             engine_factory=Qwen3Engine,
         )
     finally:

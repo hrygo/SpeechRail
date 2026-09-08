@@ -19,6 +19,14 @@ npx @redocly/cli lint contracts/openapi.yaml
 git diff --check
 ```
 
+官方 Node SDK 的分人 multipart wire contract 单独锁定在 `tests/openai-sdk-node/`，不参与服务的
+运行时依赖：
+
+```bash
+npm ci --prefix tests/openai-sdk-node --ignore-scripts --no-audit --no-fund
+npm test --prefix tests/openai-sdk-node
+```
+
 测试使用 fake backend 和合成/脱敏数据，不加载模型、不访问网络，也不提交真实音频。
 至少覆盖：模型 aliases、ASR/TTS 错误 envelope、上传限制、队列、REST 响应格式、voice
 registry、worker frame 协议、snapshot preflight、Realtime v1 的 update/append/flush/commit/

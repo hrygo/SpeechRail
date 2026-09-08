@@ -1,14 +1,16 @@
 ---
 title: "SpeechRail × Sona 讲话人分离端到端设计"
-status: active
+status: superseded
 audience: "SpeechRail 与 Sona 实施者、接口与质量评审者"
-version: "1.1.0"
-date: 2026-09-06
+version: "1.2.0"
+date: 2026-09-08
 ---
 
 # SpeechRail × Sona 讲话人分离端到端设计
 
-> 设计编号：`SPK-E2E-1`。本文是两项目讲话人分离端到端规范。SpeechRail 侧 R0–R4 实施与 R5 评测工具已闭环验收，公共契约已冻结并写入 `contracts/realtime-openai.md` 与 `contracts/diarization/v1/`。
+> 本文保留为旧 SPK-E2E-1 设计的历史背景，不能作为当前事实源。现行架构、公共接口和验收边界见[CoreML 整洁架构设计](../superpowers/specs/2026-09-08-diarization-clean-architecture-design.md)、[OpenAI 实施方案](../superpowers/plans/2026-09-08-diarization-openai-implementation.md)与 `contracts/realtime-openai.md`。
+
+> **替代结论（2026-09-08）**：生产路径固定为 FluidAudio CoreML FP16 私有 worker，禁止 NeMo/CAM++、provider 自动选择及运行期 fallback。文件分人使用 `gpt-4o-transcribe-diarize` / `diarized_json`；Realtime 使用 `session.speechrail.diarization.enabled`。D1 只确认 runtime smoke，真实 DER/JER、尾部 flush、共存 P95 与两小时 soak 仍需以[能力诊断与质量验收](../operations/capability-quality-acceptance.md)为准。
 
 配套：[SpeechRail 实施计划](../superpowers/plans/2026-09-05-speaker-diarization-e2e.md)。Sona 配套文件为 `sona/docs/architecture/speaker-diarization-e2e-design.md` 和同日期实施计划；若两仓库同级检出，可直接打开 [Sona 设计](../../../sona/docs/architecture/speaker-diarization-e2e-design.md)。公共扩展以本文第 5 节为唯一设计事实源，两仓不得分别发明字段。
 
@@ -241,6 +243,7 @@ ratio 必须是有限 `[0,1]` 数字且不接受 bool；候选最多 4 位不同
 - 若 native API 累积 total_preds，adapter 必须在消费后裁剪并保留全局 frame offset；两小时测试验证 tensor 元素数有界。
 - 相邻纯静音保持时钟，减少无价值 CAM++ 提取；有 active lease 的模型禁止 idle eviction。回收必须同时考虑引用计数、队列任务和最后活动。
 - 本期不要求新增独立分人进程。当前 NeMo adapter 通过线程调用 CPU 模型是源码现状；若实测需进程隔离，另立运行时 ADR 与部署回退方案，不能冒充现有 worker IPC 已包含分人。
+- 当前 profile 的空闲驱逐沿用 `WorkerIdleEvictor`，默认 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS=300`，设为 `0` 可禁用。驱逐会尝试释放 Sortformer 常驻引用；物理内存是否归还及 CAM++ 独立 session 的开销必须用指定硬件和模型快照另行实测。
 - Sona 会议模式不同时启动助手麦克风消费；内心 OS/摘要不得拖垮 ASR 队列。batch ASR 必须在 streaming lease 释放后才能运行。
 
 ## 7. 模型选择与验收门

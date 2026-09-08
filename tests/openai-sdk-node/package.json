@@ -1,0 +1,14 @@
+{
+  "name": "speechrail-openai-sdk-contract",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test diarization.test.mjs"
+  },
+  "dependencies": {
+    "openai": "7.10.0"
+  }
+}

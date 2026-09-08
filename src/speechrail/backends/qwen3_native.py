@@ -142,6 +142,21 @@ def validate_snapshot(model_dir: Path, *, repository_root: Path) -> Path:
     return resolved_model
 
 
+def validate_forced_aligner_snapshot(model_dir: Path, *, repository_root: Path) -> Path:
+    """Require the local fixed-text aligner snapshot without any hub fallback."""
+
+    if not model_dir.is_absolute():
+        raise ValueError("forced aligner snapshot must be an absolute path")
+    resolved_model = model_dir.resolve(strict=True)
+    resolved_root = repository_root.resolve(strict=True)
+    if resolved_model.is_relative_to(resolved_root):
+        raise ValueError("forced aligner snapshot must be outside repository")
+    if not resolved_model.is_dir() or not (resolved_model / "config.json").is_file():
+        raise ValueError("forced aligner snapshot is incomplete")
+    weight_files(resolved_model)
+    return resolved_model
+
+
 def snapshot_fingerprint(model_dir: Path) -> str:
     """Produce a stable manifest fingerprint without reading audio or model weights."""
 
@@ -158,6 +173,7 @@ class Qwen3BackendConfig:
     python_executable: Path
     model_dir: Path
     device: Literal["mps", "cpu"]
+    aligner_model_dir: Path | None = None
     dtype: Literal["float16", "float32", "int8"] = "float16"
     cache_limit_mb: int = 256
     memory_limit_mb: int = 0
@@ -183,6 +199,14 @@ class Qwen3BackendConfig:
         object.__setattr__(
             self, "model_dir", validate_snapshot(self.model_dir, repository_root=repository_root)
         )
+        if self.aligner_model_dir is not None:
+            object.__setattr__(
+                self,
+                "aligner_model_dir",
+                validate_forced_aligner_snapshot(
+                    self.aligner_model_dir, repository_root=repository_root
+                ),
+            )
 
     def command(self) -> list[str]:
         cmd = [
@@ -204,6 +228,8 @@ class Qwen3BackendConfig:
         ]
         if self.memory_limit_mb > 0:
             cmd.extend(["--memory-limit-mb", str(self.memory_limit_mb)])
+        if self.aligner_model_dir is not None:
+            cmd.extend(["--aligner-model-dir", str(self.aligner_model_dir)])
         return cmd
 
     def worker_spec(self) -> WorkerProcessSpec:
@@ -314,6 +340,53 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             )
         finally:
             self._shared_owner.mode_gate.release(lease)
+
+    async def align_text(
+        self, pcm: bytes, *, text: str, language: str | None
+    ) -> tuple[tuple[str, float, float], ...]:
+        """Ask the already-running worker to align immutable text to PCM16."""
+
+        if not pcm or len(pcm) % 2 or not text:
+            raise ValueError("fixed-text alignment requires non-empty PCM16 and text")
+        lease = self._shared_owner.mode_gate.acquire("batch")
+        request_id = f"align_{uuid4().hex}"
+        try:
+            await self.start()
+            result = await self._shared_owner.request(
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "align_text",
+                    "request_id": request_id,
+                    "sample_rate": 16_000,
+                    "channels": 1,
+                    "sample_width_bytes": 2,
+                    "language": language or "auto",
+                    "text": text,
+                },
+                binary=pcm,
+            )
+        finally:
+            self._shared_owner.mode_gate.release(lease)
+        if result.get("type") != "align_result" or result.get("request_id") != request_id:
+            raise RuntimeError(error_frame_message(result, "worker_alignment_failed"))
+        raw_tokens = result.get("tokens")
+        if not isinstance(raw_tokens, list):
+            raise RuntimeError("worker_alignment_invalid")
+        tokens: list[tuple[str, float, float]] = []
+        for item in raw_tokens:
+            if not isinstance(item, Mapping):
+                raise RuntimeError("worker_alignment_invalid")
+            token, start, end = item.get("text"), item.get("start"), item.get("end")
+            if (
+                not isinstance(token, str)
+                or isinstance(start, bool)
+                or not isinstance(start, (int, float))
+                or isinstance(end, bool)
+                or not isinstance(end, (int, float))
+            ):
+                raise RuntimeError("worker_alignment_invalid")
+            tokens.append((token, float(start), float(end)))
+        return tuple(tokens)
 
     async def transcribe_stream(
         self,

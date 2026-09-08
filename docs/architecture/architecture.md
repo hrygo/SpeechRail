@@ -2,7 +2,7 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.13.0"
+version: "1.13.1"
 date: 2026-09-08
 ---
 
@@ -26,8 +26,8 @@ flowchart TD
         App["应用服务：ASR/TTS 用例、Realtime 会话、可选 JobRunner"]
         Admit["AdmissionQueue + ResourceGovernor<br/>Realtime 容量预留；Batch FIFO + aging"]
         VAD["Silero 或 legacy VAD、SpeechAdmission、Barge-in"]
-        Diar["可选进程内 CPU 分人<br/>NeMo Sortformer + CAM++"]
-        Life["RuntimeLifecycle + WorkerIdleEvictor<br/>按配置空闲卸载"]
+        Diar["可选 CoreML 分人 worker<br/>FluidAudio Sortformer FP16<br/>单一连续会话与私有二进制 IPC"]
+        Life["RuntimeLifecycle + WorkerIdleEvictor<br/>默认 300 秒；可配置"]
 
         Ingress -->|音频上传| Decode --> App
         Ingress -->|系统、音色、任务、WS 控制| App
@@ -44,18 +44,19 @@ flowchart TD
     MCP -->|REST；仅配置 API key 时带 Bearer| Ingress
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| ASR
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| TTS
-    Life -. 卸载权重 .-> ASR
-    Life -. 卸载权重 .-> TTS
-    Life -. 卸载权重 .-> Diar
+    Life -. 尝试释放常驻权重 .-> ASR
+    Life -. 尝试释放常驻权重 .-> TTS
+    Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
 
 ### 运行时事实
 
-- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsWorker`、可选 `NemoSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。分人引擎在主进程中惰性加载，不是第三个 MLX 子进程。
+- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsWorker`、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
+- 分人生产制品固定为 FluidAudio CoreML FP16 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`，使用 `computeUnits=.all` 直接加载已编译 bundle；没有 provider 自动选择、精度降级或 NeMo 回退。运行时选择证据见 D1 报告，质量、尾部和长期资源门仍须单独验收。
 - ASR 的 batch 与 native streaming facade 共享一个物理 owner；它们不是同机同时工作的产品场景，冲突稳定返回 `backend_busy`。
 - `ResourceGovernor` 为 realtime 留出容量，并让 batch 按 FIFO/aging 准入；它不取消或抢占已经进入推理的 batch 工作。
 - Worker IPC 使用长度前缀、JSON metadata 和可选 raw binary payload。它避免在主进程与 worker 间对 PCM 使用 Base64，但编码、拼接和读取仍会复制字节，不能称为 zero-copy。
-- `WorkerIdleEvictor` 卸载模型权重；实际 idle footprint 与卸载时机由配置和基准决定，文档不把特定内存数值当作不变量。
+- 分人 worker 在活跃会话结束时由 supervisor 定向取消并回收；IPC 是长度前缀 JSON header 加 PCM16 binary payload。不存在活跃分人会话时，普通 ASR/TTS 不创建或租用该 worker。
 
 ## 2. 输入、调度与持久化边界
 
@@ -118,7 +119,7 @@ sequenceDiagram
 
 ## 4. Diarization 边界
 
-批量分人输出 session-scoped 匿名 label。Realtime 分人扩展只会在连续 adapter 经过验证后广告和协商；当前 adapter 未验证连续能力时，服务不会伪造该能力。实名映射、跨会议声纹库、会议数据库和最终播放仍属于调用方。
+文件分人使用原生 `gpt-4o-transcribe-diarize` / `diarized_json`，每个 segment 的匿名标签为 A–D。文件与 Realtime 都把 PCM、固定文本单元和活动更新交给同一个 `application.diarization.DiarizationSession` actor：transport 只投影领域事件，正文一经 completed 不会被分人改写。Qwen3 `ForcedAligner` 从显式的本地 `Qwen3-ForcedAligner-0.6B` snapshot 取得固定正文的时间边界；它复用私有 ASR worker，不执行第二次 `Session.transcribe`，未配置时分人能力不就绪。Realtime 通过 `session.speechrail.diarization.enabled=true` opt-in；没有开启时不会创建 actor、启动 CoreML worker 或初始化对齐器。实名映射、跨会议声纹库、会议数据库和最终播放仍属于调用方。
 
 ## 5. 目录职责映射
 
@@ -127,7 +128,7 @@ sequenceDiagram
 | `src/speechrail/app.py` | FastAPI 组合根、middleware、lifespan、路由注册 |
 | `src/speechrail/application/` | 用例组装、Realtime 会话、音频流与分人协调 |
 | `src/speechrail/domain/` | vendor-neutral types、ports、timeline 与 attribution ledger |
-| `src/speechrail/backends/` | Qwen3 ASR/TTS、VAD、Sortformer/CAM++ adapters |
+| `src/speechrail/backends/` | Qwen3 ASR/TTS、VAD、唯一 CoreML Sortformer adapter |
 | `src/speechrail/runtime/` | queue、ResourceGovernor、worker lifecycle、IPC、jobs |
 | `src/speechrail/http/` | REST/WebSocket 传输、鉴权、错误与 metrics middleware |
 | `src/speechrail/compatibility/` | OpenAI model alias、Realtime event mapping 与稳定 envelope |

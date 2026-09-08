@@ -2,7 +2,7 @@
 title: "SpeechRail 运维与 SRE 文档中心"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.5.0"
+version: "1.5.1"
 date: 2026-09-08
 ---
 
@@ -25,8 +25,9 @@ graph TD
 2. **[📖 运维操作手册 (operations-runbook.md)](operations-runbook.md)**：macOS `launchd` 用户级服务管理、原子化升级/回滚流程与故障排查决策树。
 3. **[🔒 安全防护与可观测性 (security-observability.md)](security-observability.md)**：网络访问控制、日志脱敏规范、内存配额与健康探针标准。
 4. **[🔄 客户端迁移与平滑回滚 (migration-runbook.md)](migration-runbook.md)**：QwenPaw 与 Sona 的平滑切换、影子流量验证与旧端点退役流程。
-5. **[📊 会议分人端到端验收报告 (speaker-diarization-e2e-acceptance-2026-09-06.md)](speaker-diarization-e2e-acceptance-2026-09-06.md)**：SPK-E2E-1 持续分人协议扩展与 Sona 联合端到端验收与发布就绪报告。
-6. **[🧪 能力诊断与质量验收](capability-quality-acceptance.md)**：读取当前能力、运行外部语料 benchmark，并以 fail-closed 方式管理连续分人验收。
+5. **[📊 会议分人端到端验收报告 (speaker-diarization-e2e-acceptance-2026-09-06.md)](speaker-diarization-e2e-acceptance-2026-09-06.md)**：SPK-E2E-1 的 2026-09-06 历史验收快照；不替代当前 runtime 能力状态，也不等同于连续 Realtime 已发布。
+6. **[🧪 能力诊断与质量验收](capability-quality-acceptance.md)**：读取当前能力、运行外部语料 benchmark，并以 fail-closed 方式管理 CoreML 连续分人验收；当前状态与内存证据以此页为准。
+7. **[🤝 Speaker Diarization 质量验收交接](diarization-quality-evaluation-handoff.md)**：准备受权 RTTM/UEM、两小时运行窗口与脱敏报告的最小输入。
 
 ---
 

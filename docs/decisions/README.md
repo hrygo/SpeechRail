@@ -8,10 +8,11 @@
 | [0004](0004-wlk-legacy-compatibility.md) | 保留 WLK legacy `/asr` | Superseded by 0008 |
 | [0005](0005-application-ownership.md) | 会议/音频/LLM 所有权留在 sona | Accepted |
 | [0006](0006-public-asr-tts-runtime.md) | 公共 ASR/TTS runtime 与 Realtime 直迁移 | Superseded by 0009 |
-| [0007](0007-public-speaker-diarization.md) | 公共 Realtime 匿名说话人分离与应用侧身份映射 | Accepted |
+| [0007](0007-public-speaker-diarization.md) | 公共 Realtime 匿名说话人分离与应用侧身份映射 | Superseded in diarization scope by 0012 |
 | [0008](0008-remove-legacy-ws-endpoints.md) | 移除 legacy WS 端点与外部 WLK streaming 后端 | Accepted |
 | [0009](0009-openai-realtime-only.md) | 移除 `/v2/realtime`，统一 OpenAI Realtime `/v1/realtime` | Accepted |
-| [0010](0010-streaming-diarization-fix.md) | 修复流式路径说话人分离（segments 硬编码空 + Sortformer 解析） | Accepted |
+| [0010](0010-streaming-diarization-fix.md) | 修复流式路径说话人分离（segments 硬编码空 + Sortformer 解析） | Superseded by 0012 |
 | [0011](0011-unified-runtime-model-tiers.md) | 统一 ASR/TTS 运行时、仅权重三档与可恢复本地切换 | Accepted（已在 v1.8.0 实施并在本机质量档验收通过） |
+| [0012](0012-openai-native-coreml-diarization.md) | OpenAI 原生分人接口与唯一 CoreML 运行时 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

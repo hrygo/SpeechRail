@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 迁移 Runbook"
 status: active
-date: 2026-08-31
+date: 2026-09-08
 ---
 
 # SpeechRail 迁移 Runbook
@@ -70,11 +70,12 @@ VR_INTERACTION_TTS_LANGUAGE=auto
 `sona` 保留 Pipecat、播放、回声、persona、会议、PostgreSQL 与 UI，仅消费
 SpeechRail 返回的 PCM 和公开 preset。SpeechRail 不接管 AudioHub、LLM、会议、PostgreSQL 或 UI。
 
-多人会议另需在 SpeechRail 启用本地 Sortformer profile。`sona` 的 meeting adapter
-会请求 `diarization.enabled`、传入应用派生的不透明 group ID，并消费 completed segment 的
-匿名 `speaker`/`speakers` 与 commit 前的 remap；缺少 profile 时以
-`SPEECHRAIL_DIARIZATION_UNAVAILABLE` fail closed，不会降级为单 speaker 会议。CAM++ 只用于
-短 TTL 内的匿名重连归并，姓名、人工改名和 PostgreSQL 事务仍归 meeting application。
+多人会议的文件分人使用 OpenAI 原生 `model="gpt-4o-transcribe-diarize"` 与
+`response_format="diarized_json"`，消费匿名 A–D `speaker`。Realtime 分人只需在首个 PCM 前发送
+`session.speechrail.diarization.enabled=true`，随后处理 `speechrail.diarization.updated`、
+`speechrail.diarization.status` 与 `speechrail.diarization.done`。普通 OpenAI SDK 消费者无需迁移。
+缺少固定 CoreML profile 时以 `diarization_not_available` fail closed，不会静默降级为已标注的单
+speaker 会议。姓名、人工改名和 PostgreSQL 事务仍归 meeting application。
 
 此状态是**运行时唯一切换**；旧 `vr-bridge` 的 console entry、TTS 专属依赖、模型缓存模块和
 旧 TTS 源码已退役。ASR 的历史兼容配置仍按各自 deprecation 计划处理。

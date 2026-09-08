@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-08
+
+### Added
+
+- 在 OpenAI-compatible `/v1/realtime` 中新增唯一的 `session.speechrail.diarization.enabled` opt-in；固定转写正文通过 `speechrail.diarization.updated` 异步补充匿名、会话内的 A–D 归属，并以 `finish` / `done` 完成尾部屏障。
+- `POST /v1/audio/transcriptions` 的 `diarized_json` 支持匿名分人结果与 SSE 流式交付；CoreML FP16 讲话人分离 worker 通过受控 IPC 与 Python 服务隔离运行。
+
+### Changed
+
+- 分人领域改为独立的 application/domain/backend/runtime 边界；文本对齐、准入控制、归属 revision 和可观测性均以不可变转写正文为基础。
+- OpenAI SDK 兼容调用保持标准请求形状；仅需要讲话人分离的调用方额外发送 namespaced opt-in。
+
+### Removed
+
+- 移除 NeMo Sortformer、CAM++、跨会话 group/centroid、旧 batch overlay，以及 `speechrail.diarization.v1`、`input_audio_transcription.diarization`、`speaker_count_hint`、`group_id`、`speechrail.diarization.update` / `finalized` 等旧协议路径。
+
+### Migration
+
+- 升级前按 [迁移手册](docs/operations/migration-runbook.md) 移除旧 diarization 配置和事件处理；需要实时归属时改在首个 PCM 前发送新的 session opt-in。
+
 ## [1.13.1] - 2026-09-08
 
 ### Fixed

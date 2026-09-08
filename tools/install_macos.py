@@ -108,7 +108,7 @@ def _config_enables_diarization(env_file: Path) -> bool:
     """Detect an opted-in diarization profile without logging configuration values."""
     for raw_line in env_file.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
-        if line.startswith("SPEECHRAIL_DIARIZATION_MODEL_PATH="):
+        if line.startswith("SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH="):
             return bool(line.partition("=")[2].strip())
     return False
 
