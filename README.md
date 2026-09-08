@@ -325,8 +325,8 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 |---|---|---|---|---|
 | **ASR 10s warm RTF p50** | **0.016** | **0.028** | **0.027** | Actual 9.36s fixture, warm N=5; lower is faster |
 | **TTS short warm RTF p50** | **0.233** | **0.246** | **0.299** | Actual PCM duration, warm N=5; texts are v1.13-specific |
-| **Peak Total Physical RAM** | **5.39 GB** (5385.0 MB) | **6.30 GB** (6304.7 MB) | **7.51 GB** (7512.6 MB) | Same-tick macOS `phys_footprint`; all ticks complete |
-| **Warm Idle Physical RAM** | **4.09 GB** (4088.6 MB) | **5.48 GB** (5483.5 MB) | **6.74 GB** (6742.2 MB) | After model fault-in |
+| **Peak Total Physical RAM** | **5.39 GB。** | **6.30 GB。** | **7.51 GB。** | Same-tick macOS `phys_footprint`; all ticks complete |
+| **Warm Idle Physical RAM** | **4.09 GB。** | **5.48 GB。** | **6.74 GB。** | After model fault-in |
 | **Realtime ASR commit p50** | **238.2 ms** | **348.6 ms** | **373.6 ms** | 16kHz PCM16, current nested profile, three consecutive sessions; terminal success 3/3 |
 | **Realtime TTS first delta p50** | **25.0 ms** | **26.1 ms** | **38.4 ms** | `response.output_audio.delta`, three consecutive sessions |
 
