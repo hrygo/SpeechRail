@@ -152,6 +152,16 @@ class AppServices:
         return self.tts_synthesizer is not None or self.settings.backend_ready
 
     @property
+    def tts_warm(self) -> bool | None:
+        """Whether TTS can produce audio without a worker load transition."""
+        if self.tts_synthesizer is None:
+            return False
+        ready = getattr(self.tts_synthesizer, "ready", None)
+        if isinstance(ready, bool):
+            return ready
+        return None
+
+    @property
     def diarization_status(self) -> dict[str, object]:
         """Expose optional profile readiness without filesystem or identity data."""
         if self.diarization_engine is None:

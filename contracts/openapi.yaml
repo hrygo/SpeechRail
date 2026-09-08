@@ -525,6 +525,7 @@ components:
         - profile
         - asr_ready
         - tts_ready
+        - tts_warm
         - diarization_ready
         - diarization
         - asr_state
@@ -554,6 +555,9 @@ components:
         tts_ready:
           type: boolean
           description: TTS is configured and able to serve on demand.
+        tts_warm:
+          type: [boolean, 'null']
+          description: TTS worker is loaded and ready without a load transition; null when the injected backend does not expose this signal.
         diarization_ready:
           type: boolean
         diarization:

@@ -54,6 +54,7 @@ def error_response(
             retryable=retryable,
             param=param,
         ),
+        headers={"X-SpeechRail-Error-Code": code},
     )
 
 

@@ -26,6 +26,12 @@ endpoint、错误 code、retryable、耗时、设备/dtype 和资源摘要。
 `X-Request-ID` 可由客户端提供或由服务生成。用它关联服务日志与客户端故障，不要用
 文件名、用户 ID、文本或音频散列做高基数指标标签。
 
+HTTP access 记录在响应完成或异常退出时各写一条，字段固定为 `timestamp`、`request_id`、
+模板化 `route`、`status`、`outcome`、`duration_ms`、`error_code`、`tts_warm` 和低基数
+`worker_state`。`outcome` 只允许 `completed`、`error`、`cancelled`、`disconnected`；记录
+不会复制请求体、响应体、Authorization 或自定义 voice 值。流式响应在已发送响应头后失败时，
+记录已发送的 HTTP status 与失败 outcome，客户端不会收到第二个 JSON 错误响应。
+
 ## 指标与可观测性
 
 `GET /metrics` 提供 Prometheus 文本（默认，`text/plain; version=0.0.4`）与 `Accept:

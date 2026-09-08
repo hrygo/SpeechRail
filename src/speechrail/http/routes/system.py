@@ -160,6 +160,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "profile": active.profile,
             "asr_ready": services.asr_ready,
             "tts_ready": services.tts_ready,
+            "tts_warm": services.tts_warm,
             "diarization_ready": services.diarization_ready,
             "diarization": services.diarization_status,
             "asr_state": states.get("asr", "unconfigured"),

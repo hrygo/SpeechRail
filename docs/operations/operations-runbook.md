@@ -55,6 +55,7 @@ curl -s -H "Accept: application/json" http://127.0.0.1:8201/metrics | jq .
 
 > [!NOTE]
 > `/readyz` 返回 HTTP 200 表示至少一个 ASR/TTS 模型 Worker 已完成 Snapshot 预检并准备好接收流量。发布和 profile 切换还必须检查候选 profile 所需的每个能力，以及 `/v1/models` 的 artifact/variant/quantization 身份。
+> `/health` 中 `tts_ready` 表示 TTS 可按需服务，`tts_warm` 才表示权重当前已驻留；`tts_state=cold_evicted` 可以与 `tts_ready=true` 同时出现。排查单次请求时使用 access 记录的 `request_id`、`error_code`、`outcome` 和 `duration_ms`，不要依据响应体内容拼接日志。
 
 ---
 
