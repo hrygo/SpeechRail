@@ -92,29 +92,32 @@ def session_created(
     session_id: str,
     model: str,
     tts_ready: bool,
+    tts_loudness_profile: str | None = None,
 ) -> dict[str, object]:
     """The OpenAI ``session.created`` payload scoped to SpeechRail capabilities."""
     capabilities: list[str] = ["transcription"]
     if tts_ready:
         capabilities.append("speech")
-    return {
-        "type": "session.created",
-        "session": {
-            "id": session_id,
-            "model": model,
-            "modalities": ["text", "audio"],
-            "instructions": "",
-            "voice": DEFAULT_VOICE_ID if tts_ready else None,
-            "input_audio_format": "pcm16",
-            "output_audio_format": "pcm16",
-            "turn_detection": None,
-            "tools": [],
-            "tool_choice": "none",
-            "temperature": 0.8,
-            "max_response_output_tokens": "inf",
-            "capabilities": capabilities,
-        },
+    session: dict[str, object] = {
+        "id": session_id,
+        "model": model,
+        "modalities": ["text", "audio"],
+        "instructions": "",
+        "voice": DEFAULT_VOICE_ID if tts_ready else None,
+        "input_audio_format": "pcm16",
+        "output_audio_format": "pcm16",
+        "turn_detection": None,
+        "tools": [],
+        "tool_choice": "none",
+        "temperature": 0.8,
+        "max_response_output_tokens": "inf",
+        "capabilities": capabilities,
     }
+    if tts_loudness_profile is not None:
+        session["speech_capabilities"] = {
+            "audio_loudness_profile": tts_loudness_profile,
+        }
+    return {"type": "session.created", "session": session}
 
 
 def session_updated(
@@ -123,6 +126,7 @@ def session_updated(
     model: str,
     turn_detection: dict[str, object] | None = None,
     speechrail_diarization: dict[str, object] | None = None,
+    tts_loudness_profile: str | None = None,
 ) -> dict[str, object]:
     session: dict[str, object] = {
         "id": session_id,
@@ -136,6 +140,10 @@ def session_updated(
     }
     if speechrail_diarization is not None:
         session["speechrail"] = {"diarization": speechrail_diarization}
+    if tts_loudness_profile is not None:
+        session["speech_capabilities"] = {
+            "audio_loudness_profile": tts_loudness_profile,
+        }
     return {
         "type": "session.updated",
         "session": session,

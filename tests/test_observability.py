@@ -174,6 +174,9 @@ def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> Non
     metrics.record_alignment_event("fixed_text_unavailable")
     metrics.record_tts_delivery_event("planner_chunk", amount=2)
     metrics.record_tts_delivery_event("reference_cache_hit")
+    metrics.record_tts_delivery_event("clone_loudness_request")
+    metrics.record_tts_delivery_event("clone_loudness_calibrated")
+    metrics.record_tts_delivery_event("clone_loudness_peak_ceiling", amount=2)
     metrics.record_tts_delivery_event("abort_fallback")
     metrics.record_tts_delivery_event("reload")
 
@@ -182,6 +185,9 @@ def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> Non
     assert 'speechrail_asr_alignment_events_total{event="fixed_text_unavailable"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="planner_chunk"} 2' in text
     assert 'speechrail_tts_delivery_events_total{event="reference_cache_hit"} 1' in text
+    assert 'speechrail_tts_delivery_events_total{event="clone_loudness_request"} 1' in text
+    assert 'speechrail_tts_delivery_events_total{event="clone_loudness_calibrated"} 1' in text
+    assert 'speechrail_tts_delivery_events_total{event="clone_loudness_peak_ceiling"} 2' in text
     assert 'speechrail_tts_delivery_events_total{event="abort_fallback"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="reload"} 1' in text
 

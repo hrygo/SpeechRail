@@ -325,6 +325,9 @@ class Qwen3TtsWorker:
             "reference_cache_hits": "reference_cache_hit",
             "reference_cache_misses": "reference_cache_miss",
             "reference_cache_evictions": "reference_cache_eviction",
+            "clone_loudness_requests": "clone_loudness_request",
+            "clone_loudness_calibrated": "clone_loudness_calibrated",
+            "clone_loudness_peak_ceiling": "clone_loudness_peak_ceiling",
         }
         for field, event in names.items():
             amount = raw.get(field)

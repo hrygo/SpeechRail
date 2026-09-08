@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import math
+import struct
 import subprocess
 import wave
 from collections.abc import AsyncIterator
@@ -366,6 +368,35 @@ class FakeIclMlxModel:
         yield FakeIclGenerationResult()
 
 
+class AlternatingIclMlxModel:
+    config = SimpleNamespace(tts_model_type="voice_design")
+
+    def __init__(self) -> None:
+        self.icl_calls: list[dict[str, object]] = []
+
+    def _generate_icl(self, **kwargs: object):
+        self.icl_calls.append(kwargs)
+        for amplitude in (0.05, 0.40, 0.05, 0.40):
+            yield SimpleNamespace(
+                sample_rate=24_000,
+                audio=np.full(1_920, amplitude, dtype=np.float32),
+                is_final_chunk=False,
+            )
+
+    def generate(self, **kwargs: object):
+        yield SimpleNamespace(
+            sample_rate=24_000,
+            audio=np.full(1_920, 0.20, dtype=np.float32),
+            is_final_chunk=False,
+        )
+
+
+def _pcm_rms_dbfs(pcm: bytes) -> float:
+    samples = np.asarray(struct.unpack(f"<{len(pcm) // 2}h", pcm), dtype=np.float32)
+    rms = float(np.sqrt(np.mean(np.square(samples / 32768.0))))
+    return 20.0 * math.log10(max(rms, 1e-9))
+
+
 class FakePreviewMlxModel:
     config = SimpleNamespace(tts_model_type="voice_design")
 
@@ -431,6 +462,189 @@ def test_mlx_voice_design_engine_accepts_ephemeral_preview_instruction(
                 seed=42,
             )
         )
+
+
+def test_clone_synthesis_smooths_chunk_levels_without_touching_builtin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = AlternatingIclMlxModel()
+    reference = tmp_path / "ref.wav"
+    reference.write_bytes(b"reference")
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("s" * 64),
+        ),
+    )
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        sample_rate=24_000,
+        load_fn=lambda _: model,
+        numpy_module=np,
+        audio_loader_fn=lambda path, sample_rate, volume_normalize: np.ones(
+            100, dtype=np.float32
+        ),
+        warmup=False,
+    )
+
+    clone_chunks = list(
+        engine.synthesize(
+            "第一句。",
+            voice="clone_sample",
+            speed=1.0,
+            language="zh",
+            ref_audio=str(reference),
+            ref_text="参考朗读文本",
+        )
+    )
+    clone_stats = engine.consume_delivery_stats()
+    builtin_chunks = list(
+        engine.synthesize("内置音色。", voice="serena", speed=1.0, language="zh")
+    )
+
+    clone_levels = [_pcm_rms_dbfs(chunk) for chunk in clone_chunks]
+    raw_jump = 20.0 * math.log10(0.40 / 0.05)
+    assert clone_stats == {
+        "planner_chunks": 1,
+        "reference_cache_misses": 1,
+        "clone_loudness_requests": 1,
+        "clone_loudness_calibrated": 1,
+    }
+    assert len(clone_levels) == 4
+    assert max(
+        abs(clone_levels[index] - clone_levels[index - 1])
+        for index in range(1, len(clone_levels))
+    ) < 8.0
+    assert max(abs(value) for value in struct.unpack("<1920h", builtin_chunks[0])) == round(
+        0.20 * 32767
+    )
+    assert raw_jump > 8.0
+
+
+def test_clone_controller_spans_sentences_and_resets_on_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakeIclMlxModel()
+    reference = tmp_path / "ref.wav"
+    reference.write_bytes(b"reference")
+    controllers: list[object] = []
+
+    class RecordingController:
+        def __init__(self, *, sample_rate: int) -> None:
+            assert sample_rate == 24_000
+            self.reset_count = 0
+            controllers.append(self)
+
+        def process(self, pcm: bytes) -> bytes:
+            return pcm
+
+        def reset(self) -> None:
+            self.reset_count += 1
+
+    monkeypatch.setattr(worker_module, "StreamingPcm16LoudnessController", RecordingController)
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("t" * 64),
+        ),
+    )
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        sample_rate=24_000,
+        load_fn=lambda _: model,
+        numpy_module=np,
+        audio_loader_fn=lambda path, sample_rate, volume_normalize: np.ones(
+            100, dtype=np.float32
+        ),
+        warmup=False,
+    )
+
+    list(
+        engine.synthesize(
+            "这是一个很长的第一句话，需要跨过句子调度边界。" * 20,
+            voice="clone_sample",
+            speed=1.0,
+            language="zh",
+            ref_audio=str(reference),
+            ref_text="参考朗读文本",
+        )
+    )
+
+    assert len(model.icl_calls) > 1
+    assert len(controllers) == 1
+    assert controllers[0].reset_count == 1
+
+
+def test_clone_controller_resets_when_generation_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingIclMlxModel(FakeIclMlxModel):
+        def _generate_icl(self, **kwargs: object):
+            self.icl_calls.append(kwargs)
+            yield FakeIclGenerationResult()
+            raise RuntimeError("synthetic generation failure")
+
+    model = FailingIclMlxModel()
+    reference = tmp_path / "ref.wav"
+    reference.write_bytes(b"reference")
+    reset_count = 0
+
+    class RecordingController:
+        def __init__(self, *, sample_rate: int) -> None:
+            assert sample_rate == 24_000
+
+        def process(self, pcm: bytes) -> bytes:
+            return pcm
+
+        def reset(self) -> None:
+            nonlocal reset_count
+            reset_count += 1
+
+    monkeypatch.setattr(worker_module, "StreamingPcm16LoudnessController", RecordingController)
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("u" * 64),
+        ),
+    )
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        load_fn=lambda _: model,
+        numpy_module=np,
+        audio_loader_fn=lambda path, sample_rate, volume_normalize: np.ones(
+            100, dtype=np.float32
+        ),
+        warmup=False,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic generation failure"):
+        list(
+            engine.synthesize(
+                "发生异常。",
+                voice="clone_sample",
+                speed=1.0,
+                language="zh",
+                ref_audio=str(reference),
+                ref_text="参考朗读文本",
+            )
+        )
+
+    assert reset_count == 1
 
 
 def test_mlx_custom_voice_engine_forwards_supported_controls_and_rejects_seed(
@@ -505,7 +719,9 @@ def test_mlx_voice_design_engine_routes_icl_generation(
         sample_rate=24_000,
         load_fn=lambda _: model,
         numpy_module=np,
-        audio_loader_fn=lambda p, sample_rate: np.zeros(100, dtype=np.float32),
+        audio_loader_fn=lambda p, sample_rate, volume_normalize: np.zeros(
+            100, dtype=np.float32
+        ),
         warmup=False,
     )
 
@@ -521,6 +737,7 @@ def test_mlx_voice_design_engine_routes_icl_generation(
     )
 
     assert len(chunks) == 1
+    assert struct.unpack("<4h", chunks[0])[-1] == 0
     assert len(model.icl_calls) == 1
     call = model.icl_calls[0]
     assert call["text"] == "测试克隆语音生成。"
@@ -545,6 +762,49 @@ def test_mlx_voice_design_engine_routes_icl_generation(
             list(engine.synthesize("测试克隆语音生成。", **options))
 
 
+def test_mlx_voice_design_reference_loader_requests_volume_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakeIclMlxModel()
+    reference = tmp_path / "ref.wav"
+    reference.write_bytes(b"reference")
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("n" * 64),
+        ),
+    )
+
+    def load_audio(path: str, **kwargs: object) -> np.ndarray:
+        calls.append({"path": path, **kwargs})
+        return np.ones(100, dtype=np.float32)
+
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        load_fn=lambda _: model,
+        numpy_module=np,
+        audio_loader_fn=load_audio,
+        warmup=False,
+    )
+
+    engine._load_reference_audio(str(reference))
+
+    assert calls == [
+        {
+            "path": str(reference.resolve()),
+            "sample_rate": 24_000,
+            "volume_normalize": True,
+        }
+    ]
+
+
 def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,8 +823,11 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
     reference.write_bytes(b"first")
     loads: list[str] = []
 
-    def load_audio(path: str, *, sample_rate: int) -> np.ndarray:
+    def load_audio(
+        path: str, *, sample_rate: int, volume_normalize: bool
+    ) -> np.ndarray:
         assert sample_rate == 24_000
+        assert volume_normalize is True
         loads.append(path)
         return np.ones(100, dtype=np.float32)
 
@@ -593,6 +856,7 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
         "planner_chunks": 2,
         "reference_cache_hits": 1,
         "reference_cache_misses": 1,
+        "clone_loudness_requests": 2,
     }
 
     reference.write_bytes(b"replaced reference")
@@ -607,6 +871,7 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
         "planner_chunks": 2,
         "reference_cache_misses": 2,
         "reference_cache_evictions": 2,
+        "clone_loudness_requests": 2,
     }
 
 
@@ -629,7 +894,9 @@ def test_mlx_voice_design_engine_rejects_missing_audio_or_text(
         sample_rate=24_000,
         load_fn=lambda _: FakeIclMlxModel(),
         numpy_module=np,
-        audio_loader_fn=lambda p, sample_rate: np.zeros(100, dtype=np.float32),
+        audio_loader_fn=lambda p, sample_rate, volume_normalize: np.zeros(
+            100, dtype=np.float32
+        ),
         warmup=False,
     )
 
@@ -655,7 +922,7 @@ def test_mlx_voice_design_engine_rejects_missing_audio_or_text(
         sample_rate=24_000,
         load_fn=lambda _: FakeIclMlxModel(),
         numpy_module=np,
-        audio_loader_fn=lambda p, sample_rate: None,
+        audio_loader_fn=lambda p, sample_rate, volume_normalize: None,
         warmup=False,
     )
     with pytest.raises(RuntimeError, match="failed to decode reference audio: empty array"):

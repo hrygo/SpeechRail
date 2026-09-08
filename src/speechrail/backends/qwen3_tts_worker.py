@@ -23,6 +23,7 @@ from speechrail.domain.tts import (
     get_voice_profile,
     normalize_tts_text,
 )
+from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -359,30 +360,52 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if not clean_text:
             return
         first_chunk = True
-        for sentence in bounded_sentences(clean_text):
-            self._delivery_stats["planner_chunks"] += 1
-            for pcm in self._generate(
-                sentence,
-                voice=voice,
-                speed=speed,
-                language=language,
-                instruction=instruction,
-                seed=seed,
-                ref_audio=ref_audio,
-                ref_text=ref_text,
-            ):
-                if not pcm:
-                    continue
-                if first_chunk:
-                    pcm = apply_crossfade(
-                        pcm,
-                        sample_rate=self._sample_rate,
-                        fade_ms=5,
-                        fade_in=True,
-                        fade_out=False,
-                    )
-                    first_chunk = False
-                yield pcm
+        loudness_controller = (
+            StreamingPcm16LoudnessController(sample_rate=self._sample_rate)
+            if ref_audio is not None or ref_text is not None
+            else None
+        )
+        try:
+            for sentence in bounded_sentences(clean_text):
+                self._delivery_stats["planner_chunks"] += 1
+                for pcm in self._generate(
+                    sentence,
+                    voice=voice,
+                    speed=speed,
+                    language=language,
+                    instruction=instruction,
+                    seed=seed,
+                    ref_audio=ref_audio,
+                    ref_text=ref_text,
+                ):
+                    if not pcm:
+                        continue
+                    if loudness_controller is not None:
+                        pcm = loudness_controller.process(pcm)
+                    if not pcm:
+                        continue
+                    if first_chunk:
+                        pcm = apply_crossfade(
+                            pcm,
+                            sample_rate=self._sample_rate,
+                            fade_ms=5,
+                            fade_in=True,
+                            fade_out=False,
+                        )
+                        first_chunk = False
+                    yield pcm
+        finally:
+            if loudness_controller is not None:
+                self._delivery_stats["clone_loudness_requests"] += 1
+                consume_stats = getattr(loudness_controller, "consume_stats", None)
+                stats = consume_stats() if callable(consume_stats) else {}
+                if isinstance(stats, dict):
+                    if stats.get("calibrated"):
+                        self._delivery_stats["clone_loudness_calibrated"] += 1
+                    peak_count = stats.get("peak_ceiling")
+                    if isinstance(peak_count, int) and peak_count > 0:
+                        self._delivery_stats["clone_loudness_peak_ceiling"] += peak_count
+                loudness_controller.reset()
 
     def _generate(
         self,
@@ -503,7 +526,11 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if loader is None:
             raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
         try:
-            audio_array = loader(str(resolved), sample_rate=self._sample_rate)
+            audio_array = loader(
+                str(resolved),
+                sample_rate=self._sample_rate,
+                volume_normalize=True,
+            )
         except Exception as exc:
             raise RuntimeError(f"failed to decode reference audio: {exc}") from exc
         if audio_array is None or getattr(audio_array, "size", 1) == 0:
@@ -526,6 +553,9 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 "reference_cache_hits",
                 "reference_cache_misses",
                 "reference_cache_evictions",
+                "clone_loudness_requests",
+                "clone_loudness_calibrated",
+                "clone_loudness_peak_ceiling",
             )
             if (count := int(self._delivery_stats.get(name, 0))) > 0
         }

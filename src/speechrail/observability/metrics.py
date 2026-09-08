@@ -43,6 +43,9 @@ _TTS_DELIVERY_EVENTS = frozenset(
         "reference_cache_hit",
         "reference_cache_miss",
         "reference_cache_eviction",
+        "clone_loudness_request",
+        "clone_loudness_calibrated",
+        "clone_loudness_peak_ceiling",
         "abort_fallback",
         "reload",
     }

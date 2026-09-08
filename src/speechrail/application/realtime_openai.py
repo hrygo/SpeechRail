@@ -156,12 +156,19 @@ class OpenAIRealtimeSession:
         active = active_model_catalog(self._settings)
         self._tts_variant = active.tts.variant if active.tts is not None else None
         tts_available = services.tts_ready
+        self._tts_loudness_profile = (
+            "stable_loudness_v1"
+            if tts_available and self._tts_variant == "voice_design"
+            else None
+        )
         self._speech_capabilities: dict[str, object] = {
             "available": tts_available,
             "variant": self._tts_variant,
             "supports_speaker": tts_available and self._tts_variant == "custom_voice",
             "supports_instruction": tts_available and self._tts_variant == "voice_design",
         }
+        if self._tts_loudness_profile is not None:
+            self._speech_capabilities["audio_loudness_profile"] = self._tts_loudness_profile
         self._registered_asr = frozenset(
             {self._settings.model_id, *self._settings.compatibility_model_ids}
         )
@@ -247,6 +254,7 @@ class OpenAIRealtimeSession:
                     session_id=self._session_id,
                     model=self._display_model,
                     tts_ready=self._services.tts_ready,
+                    tts_loudness_profile=self._tts_loudness_profile,
                 )
             )
         )

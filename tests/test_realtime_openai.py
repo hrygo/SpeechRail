@@ -17,6 +17,7 @@ from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
     apply_session_update,
+    session_created,
     transcription_segment,
 )
 from speechrail.config import Settings
@@ -376,6 +377,38 @@ def test_openai_session_created_and_updated() -> None:
         updated = socket.receive_json()
         assert updated["type"] == "session.updated"
         assert updated["session"]["model"] == "whisper-1"
+
+
+def test_session_created_advertises_stable_clone_loudness_profile() -> None:
+    event = session_created(
+        session_id="sess-1",
+        model="speechrail/qwen3-tts",
+        tts_ready=True,
+        tts_loudness_profile="stable_loudness_v1",
+    )
+
+    assert event["session"]["speech_capabilities"]["audio_loudness_profile"] == (
+        "stable_loudness_v1"
+    )
+
+
+def test_realtime_quality_session_repeats_stable_clone_loudness_profile() -> None:
+    preset = load_catalog().preset("quality")
+    client, _ = _client(
+        settings_kwargs={
+            "qwen3_model_dir": Path(preset.asr),
+            "qwen3_tts_model_dir": Path(preset.tts),
+        }
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        created = socket.receive_json()
+        capabilities = created["session"]["speech_capabilities"]
+        assert capabilities["audio_loudness_profile"] == "stable_loudness_v1"
+        socket.receive_json()
+
+        socket.send_json({"type": "session.update", "session": {"voice": "warm"}})
+        updated = socket.receive_json()
+        assert updated["session"]["speech_capabilities"] == capabilities
 
 
 def test_realtime_send_timeout_closes_slow_consumer() -> None:
