@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
+from speechrail.application.realtime_openai import Pcm16RateConverter
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
@@ -972,6 +973,122 @@ def test_openai_realtime_forwards_multiple_partial_events_before_final() -> None
     # Verify concatenated deltas reconstruct the full text
     deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
     assert "".join(deltas) == "你好啊"
+
+
+def test_realtime_partial_rewrite_is_withheld_until_final() -> None:
+    """A non-append partial must not corrupt append-only SDK consumers."""
+    client, _ = _client(partials=("abc", "adc"), completed_text="adc")
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+    deltas = [event["delta"] for event in events if event["type"].endswith(".delta")]
+    assert deltas == ["abc"]
+    assert events[-1]["transcript"] == "adc"
+
+
+def test_realtime_consecutive_commits_have_distinct_item_ids() -> None:
+    client, _ = _client()
+    created_ids: list[str] = []
+    committed_ids: list[str] = []
+    completed_ids: list[str] = []
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        for _ in range(2):
+            socket.send_json(
+                {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+            )
+            socket.send_json({"type": "input_audio_buffer.commit"})
+            while True:
+                event = socket.receive_json()
+                if event["type"] == "input_audio_buffer.committed":
+                    committed_ids.append(event["item_id"])
+                elif event["type"] == "conversation.item.created":
+                    created_ids.append(event["item"]["id"])
+                elif event["type"] == "conversation.item.input_audio_transcription.completed":
+                    completed_ids.append(event["item_id"])
+                    break
+
+    assert len(set(committed_ids)) == 2
+    assert committed_ids == created_ids == completed_ids
+
+
+def test_realtime_session_update_preserves_effective_turn_detection() -> None:
+    client, _ = _client()
+    vad = {"type": "server_vad", "threshold": 0.6, "prefix_padding_ms": 300}
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json({"type": "session.update", "session": {"turn_detection": vad}})
+        assert socket.receive_json()["session"]["turn_detection"] == vad
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"input_audio_transcription": {"language": "zh"}},
+            }
+        )
+        updated = socket.receive_json()
+
+    assert updated["session"]["turn_detection"] == vad
+
+
+def test_realtime_accepts_current_nested_24khz_transcription_session() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "type": "transcription",
+                    "audio": {
+                        "input": {
+                            "format": {"type": "audio/pcm", "rate": 24000},
+                            "transcription": {"model": "gpt-4o-transcribe", "language": "zh"},
+                            "turn_detection": None,
+                        }
+                    },
+                },
+            }
+        )
+        updated = socket.receive_json()
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 1200)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while (
+            socket.receive_json()["type"]
+            != "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+    assert updated["session"]["turn_detection"] is None
+    assert factory.sessions[0].language == "zh"
+    assert sum(len(chunk) for chunk in factory.sessions[0].received) == 1600
+
+
+def test_pcm24k_converter_is_frame_partition_invariant() -> None:
+    pcm = b"".join(index.to_bytes(2, "little", signed=True) for index in range(1200))
+    one_frame = Pcm16RateConverter(input_rate=24_000).convert(pcm)
+    split_converter = Pcm16RateConverter(input_rate=24_000)
+    split_frames = b"".join(
+        split_converter.convert(pcm[start : start + width])
+        for start, width in ((0, 214), (214, 782), (996, 1404))
+    )
+
+    assert split_frames == one_frame
 
 
 def test_openai_session_update_rejects_non_string_language_hints() -> None:

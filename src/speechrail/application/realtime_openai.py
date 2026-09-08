@@ -6,8 +6,8 @@ import asyncio
 import base64
 import contextlib
 import logging
-import os
 import time
+import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
@@ -15,6 +15,17 @@ from typing import Any
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
+
+with warnings.catch_warnings():
+    # SpeechRail supports Python 3.12 only.  ``ratecv`` is a stateful C
+    # implementation that preserves sample continuity across WebSocket frames;
+    # suppress its Python-3.13 removal warning until the supported runtime moves.
+    warnings.filterwarnings(
+        "ignore",
+        message="'audioop' is deprecated and slated for removal in Python 3.13",
+        category=DeprecationWarning,
+    )
+    import audioop
 
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
@@ -78,6 +89,31 @@ _MAX_UPDATES_PER_EVENT = 256
 logger = logging.getLogger(__name__)
 
 
+class Pcm16RateConverter:
+    """Stateful PCM16 mono rate conversion for the public 24 kHz profile."""
+
+    def __init__(self, *, input_rate: int, output_rate: int = 16_000) -> None:
+        self._input_rate = input_rate
+        self._output_rate = output_rate
+        self._state: Any = None
+
+    def convert(self, audio: bytes) -> bytes:
+        if len(audio) % 2:
+            raise RealtimeAdapterError("invalid_audio", "PCM16 audio must contain whole samples")
+        converted, self._state = audioop.ratecv(
+            audio,
+            2,
+            1,
+            self._input_rate,
+            self._output_rate,
+            self._state,
+        )
+        return converted
+
+    def reset(self) -> None:
+        self._state = None
+
+
 class OpenAIRealtimeSession:
     """Own one protocol-independent ASR/TTS session lifecycle.
 
@@ -129,6 +165,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
+        self._input_sample_rate = 16_000
+        self._input_resampler: Pcm16RateConverter | None = None
         self._vad: Any = None
         self._shadow_vad: Any = None
         self._speech_admission: SpeechAdmission | None = None
@@ -167,12 +205,18 @@ class OpenAIRealtimeSession:
         self._finalized_payload: dict[str, object] | None = None
         self._last_update_sequence = 0
         self._stable_through_at_degradation = 0
-        self._current_item_id = f"item_{self._session_id}_input"
+        self._current_item_id = self._new_item_id()
         self._config: dict[str, Any] = {
             "model": self._initial_model,
             "language": None,
             "prompt": "",
+            "input_sample_rate": 16_000,
         }
+
+    @staticmethod
+    def _new_item_id() -> str:
+        """Return an opaque id for exactly one input-audio transcription turn."""
+        return f"item_{uuid4().hex[:12]}"
 
     async def start(self) -> None:
         await self._send(
@@ -185,6 +229,7 @@ class OpenAIRealtimeSession:
                 )
             )
         )
+
         await self._send(conversation_created(session_id=self._session_id))
 
     def _diarization_extension_capabilities(self) -> tuple[str, ...]:
@@ -244,6 +289,8 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._unflushed_bytes = 0
         self._last_partial_text = ""
+        if self._input_resampler is not None:
+            self._input_resampler.reset()
 
     async def _update_session(self, event: dict[str, Any]) -> None:
         from speechrail.compatibility.openai_realtime import apply_session_update
@@ -257,7 +304,14 @@ class OpenAIRealtimeSession:
             registered_asr=self._registered_asr,
             registered_tts=self._registered_tts,
             tts_voice_ids=self._tts_voice_ids,
+            current_config=self._config,
         )
+        input_sample_rate = int(config.get("input_sample_rate", 16_000))
+        if self._timeline.accepted_samples > 0 and input_sample_rate != self._input_sample_rate:
+            raise RealtimeAdapterError(
+                "invalid_state",
+                "audio input format cannot change after the first audio frame",
+            )
         requested_extensions = tuple(config.get("diarization_extensions") or ())
         if "diarization_extensions" in config and requested_extensions != self._extensions:
             if self._timeline.accepted_samples > 0:
@@ -367,6 +421,13 @@ class OpenAIRealtimeSession:
             self._speech_admission = None
             self._vad_raw_buffer.clear()
 
+        if input_sample_rate != self._input_sample_rate:
+            self._input_sample_rate = input_sample_rate
+            self._input_resampler = (
+                Pcm16RateConverter(input_rate=input_sample_rate)
+                if input_sample_rate != 16_000
+                else None
+            )
         self._config = config
         if self._extensions:
             session_payload = updated.get("session")
@@ -458,7 +519,7 @@ class OpenAIRealtimeSession:
                 input_audio_buffer_speech_started(
                     session_id=self._session_id,
                     audio_start_ms=audio_start_ms,
-                    item_id=f"item_{self._session_id}_input",
+                    item_id=self._current_item_id,
                 )
             )
             await self._ensure_asr_for_turn()
@@ -509,7 +570,7 @@ class OpenAIRealtimeSession:
                 input_audio_buffer_speech_stopped(
                     session_id=self._session_id,
                     audio_end_ms=audio_end_ms,
-                    item_id=f"item_{self._session_id}_input",
+                    item_id=self._current_item_id,
                 )
             )
             # A commit flushing the state machine is already the commit in
@@ -530,6 +591,8 @@ class OpenAIRealtimeSession:
             buffered_bytes=0,
             max_buffer_bytes=None,
         )
+        if self._input_resampler is not None:
+            audio = self._input_resampler.convert(audio)
         max_buf = self._settings.max_realtime_buffer_bytes
         if max_buf is not None and len(audio) > max_buf:
             raise RealtimeAdapterError(
@@ -592,7 +655,7 @@ class OpenAIRealtimeSession:
                         input_audio_buffer_speech_started(
                             session_id=self._session_id,
                             audio_start_ms=v_event.audio_start_ms,
-                            item_id=f"item_{self._session_id}_input",
+                            item_id=self._current_item_id,
                         )
                     )
                 elif v_event.speech_ended:
@@ -602,7 +665,7 @@ class OpenAIRealtimeSession:
                         input_audio_buffer_speech_stopped(
                             session_id=self._session_id,
                             audio_end_ms=v_event.audio_end_ms,
-                            item_id=f"item_{self._session_id}_input",
+                            item_id=self._current_item_id,
                         )
                     )
                     if self._asr is not None:
@@ -660,10 +723,6 @@ class OpenAIRealtimeSession:
                     await self._asr.flush()
 
     async def _commit_audio(self, reason: str = "client") -> None:
-        if self._extensions:
-            # SPK-E2E-1: every commit gets a unique item id in extension mode.
-            self._current_item_id = f"item_{uuid4().hex[:12]}"
-
         # If speech admission is active, flush any remaining sub-frame leftover.
         # The remainder is always below one 512-sample frame (append drains full
         # frames), so it never forms a VAD decision here: admission parks it in
@@ -710,6 +769,7 @@ class OpenAIRealtimeSession:
                 characters=0,
                 active_samples=0,
             )
+            self._current_item_id = self._new_item_id()
             return
 
         if self._asr is None:
@@ -737,6 +797,7 @@ class OpenAIRealtimeSession:
                 characters=0,
                 active_samples=0,
             )
+            self._current_item_id = self._new_item_id()
             return
 
         await self._send(
@@ -764,6 +825,7 @@ class OpenAIRealtimeSession:
         self._buffered_audio_bytes = 0
         self._last_partial_text = ""
         self._unflushed_bytes = 0
+        self._current_item_id = self._new_item_id()
 
     async def _discard_failed_commit(self) -> None:
         """Tear down a commit that will never finish.
@@ -783,6 +845,7 @@ class OpenAIRealtimeSession:
         self._unflushed_bytes = 0
         self._item_start_sample = self._timeline.accepted_samples
         self._item_end_sample = self._timeline.accepted_samples
+        self._current_item_id = self._new_item_id()
 
     async def _clear_audio(self) -> None:
         self._turn_generation += 1
@@ -807,6 +870,7 @@ class OpenAIRealtimeSession:
         self._last_partial_text = ""
         self._item_start_sample = self._timeline.accepted_samples
         self._item_end_sample = self._timeline.accepted_samples
+        self._current_item_id = self._new_item_id()
         await self._send(input_audio_buffer_cleared(session_id=self._session_id))
 
     async def _create_text_item(self, event: dict[str, Any]) -> None:
@@ -903,7 +967,7 @@ class OpenAIRealtimeSession:
                     self._build_units(transcript, ())
                 ),
             )
-        return transcription_completed(session_id=self._session_id, transcript=transcript)
+        return transcription_completed(item_id=self._current_item_id, transcript=transcript)
 
     def _build_units(
         self, canonical: str, segments: tuple[TranscriptSegment, ...]
@@ -1180,15 +1244,16 @@ class OpenAIRealtimeSession:
                     current_text = event.text
                     if not current_text:
                         continue
-                    if current_text.startswith(self._last_partial_text):
-                        delta = current_text[len(self._last_partial_text):]
-                    else:
-                        common = os.path.commonprefix([self._last_partial_text, current_text])
-                        delta = current_text[len(common):]
+                    if not current_text.startswith(self._last_partial_text):
+                        # This wire event is append-only. Keep a changed suffix
+                        # private until the terminal completed event can replace
+                        # the provisional transcript atomically.
+                        continue
+                    delta = current_text[len(self._last_partial_text):]
                     self._last_partial_text = current_text
                     if delta:
                         await self._send(
-                            transcription_delta(session_id=self._session_id, delta=delta)
+                            transcription_delta(item_id=self._current_item_id, delta=delta)
                         )
                 elif event.kind == "completed":
                     if self._asr is not asr:
@@ -1251,7 +1316,7 @@ class OpenAIRealtimeSession:
                             await self._send(
                                 transcription_segment(
                                     session_id=self._session_id,
-                                    item_id=f"item_{self._session_id}_input",
+                                    item_id=self._current_item_id,
                                     segment_id=segment.id,
                                     text=apply_light_itn(segment.text),
                                     speaker=segment.speaker,
@@ -1260,14 +1325,14 @@ class OpenAIRealtimeSession:
                                 )
                             )
                     await self._send(
-                        transcription_completed(session_id=self._session_id, transcript=norm_text)
+                        transcription_completed(item_id=self._current_item_id, transcript=norm_text)
                     )
                 elif event.kind == "error":
                     self._last_partial_text = ""
                     self._unflushed_bytes = 0
                     await self._send(
                         transcription_failed(
-                            session_id=self._session_id,
+                            item_id=self._current_item_id,
                             code=event.error_code or "backend_error",
                             message="streaming transcription failed",
                         )
@@ -1281,7 +1346,7 @@ class OpenAIRealtimeSession:
             with contextlib.suppress(Exception):
                 await self._send(
                     transcription_failed(
-                        session_id=self._session_id,
+                        item_id=self._current_item_id,
                         code="backend_error",
                         message="streaming transcription failed",
                     )
