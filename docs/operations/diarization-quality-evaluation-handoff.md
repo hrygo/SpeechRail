@@ -9,6 +9,13 @@ date: 2026-09-08
 CoreML FP16 运行时、OpenAI 文件接口、Realtime opt-in 与确定性回归已完成；以下验收无法由
 fake backend、D1 runtime smoke 或代码审查替代。需要由项目方安排一次受权的本机验证。
 
+2026-09-08 的本机功能回归确认了一个 EOF 语义修复：Sortformer 在 10 秒匿名 fixture 上原先只
+输出到 `9.68s` 的最终帧，却把 `stable_through` 报为 `10.00s`，使尾部 token 无法达到归属证据
+门槛。native worker 现在在 finish 时加入一个仅供模型右上下文使用的静音窗，并把帧、watermark
+与公开时间轴裁回真实 PCM 末尾。修复后同一请求的 `gpt-4o-transcribe-diarize` / `diarized_json`
+返回 200，全部输出片段带匿名 label；标准 ASR 与 TTS smoke 也通过。此结果只证明该尾部功能
+回归已消除，不构成多人 DER/JER、尾部讲话质量或长时稳定性验收。
+
 ## 需要提供的最小输入
 
 - 一份**可在本机短期处理**的匿名评测 manifest，包含每条音频的本机路径、RTTM、UEM 和唯一
