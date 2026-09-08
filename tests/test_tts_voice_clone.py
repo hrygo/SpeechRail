@@ -516,6 +516,9 @@ def test_clone_synthesis_smooths_chunk_levels_without_touching_builtin(
         "clone_loudness_calibrated": 1,
     }
     assert len(clone_levels) == 2
+    assert len(clone_chunks[0]) == 4_800 * 2  # private 200 ms normalization buffer
+    assert len(clone_chunks[1]) == (4 * 1_920 - 4_800) * 2
+    assert sum(len(chunk) for chunk in clone_chunks) == 4 * 1_920 * 2
     assert max(
         abs(clone_levels[index] - clone_levels[index - 1])
         for index in range(1, len(clone_levels))

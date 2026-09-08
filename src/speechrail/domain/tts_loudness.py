@@ -14,7 +14,7 @@ class Pcm16LoudnessConfig:
     target_rms: float = 10 ** (-20 / 20)
     peak_ceiling: float = 10 ** (-1 / 20)
     silence_rms: float = 10 ** (-60 / 20)
-    calibration_ms: int = 240
+    calibration_ms: int = 200
     attack_ms: int = 250
     release_ms: int = 800
     max_gain_db: float = 18.0
@@ -85,6 +85,7 @@ class StreamingPcm16LoudnessController:
         self._calibration_active_samples = 0
         self._calibration_sum_squares = 0.0
         self._calibration_gain_db: float | None = None
+        self._calibration_applied = False
         self._current_gain_db: float | None = None
         self._peak_ceiling_count = 0
 
@@ -121,6 +122,13 @@ class StreamingPcm16LoudnessController:
             20.0 * math.log10(max(self._config.target_rms, 1e-12))
             - 20.0 * math.log10(max(chunk_rms, 1e-12))
         )
+        if (
+            self._calibration_gain_db is not None
+            and not self._calibration_applied
+            and self._current_gain_db is None
+        ):
+            desired_gain_db = self._calibration_gain_db
+            self._calibration_applied = True
         previous_gain_db = self._current_gain_db
         if previous_gain_db is None:
             gain_start_db = (

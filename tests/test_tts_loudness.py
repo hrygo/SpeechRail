@@ -108,6 +108,16 @@ def test_controller_reset_starts_a_new_request() -> None:
     assert controller.process(chunk) == first
 
 
+def test_controller_applies_calibration_when_first_chunk_covers_window() -> None:
+    controller = StreamingPcm16LoudnessController(sample_rate=24_000)
+    first_chunk = _constant_pcm16(0.02, 4_800)  # 200 ms
+
+    controller.process(first_chunk)
+
+    assert controller._calibration_gain_db is not None
+    assert controller._current_gain_db == pytest.approx(controller._calibration_gain_db)
+
+
 def test_controller_rejects_invalid_sample_rate() -> None:
     with pytest.raises(ValueError, match="sample_rate must be positive"):
         StreamingPcm16LoudnessController(sample_rate=0)
