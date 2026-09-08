@@ -429,10 +429,14 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return
 
         variant = self.identity.model_variant or "voice_design"
+        if variant == "custom_voice" and seed is not None:
+            raise ValueError("custom_voice_seed_unsupported")
         condition = generation_condition(variant, voice, instruction=instruction)
         used_temperature = self._temperature
         if variant == "voice_design":
             if instruction is None:
+                if seed is not None:
+                    raise ValueError("voice_design_seed_requires_instruction")
                 profile = get_voice_profile(voice)
                 used_temperature = profile.temperature
                 seed = profile.seed

@@ -103,6 +103,10 @@ Content-Type: application/json
 `400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
 音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
 
+`seed` 仅属于质量档 VoiceDesign preview 的确定性采样参数；系统 VoiceDesign 音色使用其
+固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
+组合返回稳定错误，不以“已接受”暗示参数生效。
+
 ### 预设音色库 (Preset Voices)
 
 九个 canonical 角色与 Qwen CustomVoice speaker 一一对应：`serena`、`vivian`、

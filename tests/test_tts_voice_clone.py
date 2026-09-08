@@ -311,6 +311,10 @@ class FakePreviewMlxModel:
         yield FakeIclGenerationResult()
 
 
+class FakeCustomVoiceMlxModel(FakePreviewMlxModel):
+    config = SimpleNamespace(tts_model_type="custom_voice")
+
+
 def test_mlx_voice_design_engine_accepts_ephemeral_preview_instruction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -350,6 +354,66 @@ def test_mlx_voice_design_engine_accepts_ephemeral_preview_instruction(
     call = model.generate_calls[0]
     assert call["instruct"] == "温暖自然的中文女声。"
     assert "voice" not in call
+
+    with pytest.raises(ValueError, match="voice_design_seed_requires_instruction"):
+        list(
+            engine.synthesize(
+                "固定音色不接受调用方 seed。",
+                voice="serena",
+                speed=1.0,
+                language="zh",
+                seed=42,
+            )
+        )
+
+
+def test_mlx_custom_voice_engine_forwards_supported_controls_and_rejects_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakeCustomVoiceMlxModel()
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="custom_voice",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("v" * 64),
+        ),
+    )
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        sample_rate=24_000,
+        load_fn=lambda _: model,
+        numpy_module=np,
+        warmup=False,
+    )
+
+    assert list(
+        engine.synthesize(
+            "CustomVoice 参数契约。",
+            voice="serena",
+            speed=1.25,
+            language="zh",
+        )
+    )
+    call = model.generate_calls[0]
+    assert call["speed"] == 1.25
+    assert call["lang_code"] == "zh"
+    assert isinstance(call["max_tokens"], int)
+    assert "voice" in call
+
+    with pytest.raises(ValueError, match="custom_voice_seed_unsupported"):
+        list(
+            engine.synthesize(
+                "CustomVoice 不接受 seed。",
+                voice="serena",
+                speed=1.0,
+                language="zh",
+                seed=42,
+            )
+        )
 
 
 def test_mlx_voice_design_engine_routes_icl_generation(
