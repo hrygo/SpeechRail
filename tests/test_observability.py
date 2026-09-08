@@ -88,6 +88,17 @@ def test_metrics_record_asr_records_rtf() -> None:
     assert "speechrail_asr_rtf" in text
 
 
+def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
+    metrics = Metrics()
+    metrics.record_realtime_phase("asr_admission", 0.04)
+    metrics.record_realtime_phase("send", 0.01)
+    text = metrics.render_prometheus()
+
+    assert "speechrail_realtime_phase_duration_seconds_bucket" in text
+    assert 'phase="asr_admission"' in text
+    assert 'phase="send"' in text
+
+
 def test_metrics_escapes_label_values() -> None:
     """Verify label values with special chars stay parser-compatible."""
     m = Metrics()

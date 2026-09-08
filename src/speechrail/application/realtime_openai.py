@@ -1399,9 +1399,13 @@ class OpenAIRealtimeSession:
 
                 _ttfa_t0 = _time.monotonic()
                 _ttfa_recorded = False
+                _admission_started = _time.monotonic()
                 async with self._services.governor.reserve(
                     WorkClass.REALTIME_TTS, deadline=self._settings.request_timeout_seconds
                 ):
+                    self._services.metrics.record_realtime_phase(
+                        "tts_admission", _time.monotonic() - _admission_started
+                    )
                     for s_idx, sentence in enumerate(sentences):
                         request = SpeechRequest(
                             text=sentence,
@@ -1509,11 +1513,15 @@ class OpenAIRealtimeSession:
 
     async def _reserve_asr(self) -> None:
         self._asr_resources = AsyncExitStack()
+        admission_started = time.monotonic()
         try:
             await self._asr_resources.enter_async_context(
                 self._services.governor.reserve(
                     WorkClass.REALTIME_ASR, deadline=self._settings.request_timeout_seconds
                 )
+            )
+            self._services.metrics.record_realtime_phase(
+                "asr_admission", time.monotonic() - admission_started
             )
         except GovernorQueueFullError as exc:
             await self._asr_resources.aclose()
