@@ -2,158 +2,141 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.5.0"
-date: 2026-09-02
+version: "1.13.0"
+date: 2026-09-08
 ---
 
 # 🏛️ SpeechRail 系统总体架构
 
-> SpeechRail 采用**主控调度与推理运行时强隔离**的现代微内核设计理念。主服务负责协议接入、身份路由、有界缓冲与调度控制；推理后端作为独立子进程，通过私有二进制零拷贝 IPC 协议执行模型运算。
-
----
+> SpeechRail 是单机、单用户共享的 ASR/TTS 运行时。FastAPI 主进程负责公共契约、会话、输入边界、准入和生命周期；ASR 与 TTS 在独立 MLX 子进程中执行。调用方保留音频采集、播放、会议与 LLM 编排。
 
 ## 1. 系统分层与运行时拓扑
 
 ```mermaid
 flowchart TD
-    %% 客户端生态
-    subgraph Clients ["📱 客户端应用生态 (OpenAI API 兼容)"]
-        direction LR
-        C1["OpenAI 官方 SDK<br/>(Python / Node / Go)"]
-        C2["QwenPaw / Sona<br/>(实时会议 / 智能助理)"]
-        C3["Hermes Agent / 本地应用<br/>(cURL / REST / WebSocket)"]
+    subgraph Clients["客户端与可选工具进程"]
+        SDK["OpenAI SDK / REST / WebSocket 客户端"]
+        MCP["speechrail-mcp 外置 Proxy<br/>（stdio 或 Streamable HTTP）"]
     end
 
-    %% 主服务进程
-    subgraph Host ["🚀 SpeechRail 主服务核心 (FastAPI / ASGI :8201)"]
+    subgraph Host["单个 SpeechRail ASGI 主进程 :8201"]
         direction TB
-        subgraph Gateway ["1. 协议接入与路由网关"]
-            REST["REST 控制器<br/>/v1/audio/transcriptions<br/>/v1/audio/speech, /v1/models"]
-            WS["WebSocket 状态机<br/>/v1/realtime (全双工流式)"]
-            Sec["统一鉴权 & Request ID<br/>OpenAI 标准 Error Envelope"]
-        end
+        Ingress["REST / WebSocket 路由、鉴权、Request ID、错误 Envelope"]
+        Decode["仅音频上传：WAV fast-path 或按需 ffmpeg 管道<br/>有界内存与输入校验"]
+        App["应用服务：ASR/TTS 用例、Realtime 会话、可选 JobRunner"]
+        Admit["AdmissionQueue + ResourceGovernor<br/>Realtime 容量预留；Batch FIFO + aging"]
+        VAD["Silero 或 legacy VAD、SpeechAdmission、Barge-in"]
+        Diar["可选进程内 CPU 分人<br/>NeMo Sortformer + CAM++"]
+        Life["RuntimeLifecycle + WorkerIdleEvictor<br/>按配置空闲卸载"]
 
-        subgraph Pipeline ["2. 内存音频流水线 (Zero-Disk-IO)"]
-            WAV_Fast["Tier 1: 16kHz WAV Fast-Path (无转码直读)"]
-            FF_Stream["Tier 2: In-Memory ffmpeg (管道流式解码)"]
-            OOM_Guard["Tier 3: 128MB 有界安全门禁 (防 OOM)"]
-        end
-
-        subgraph Governor ["3. 资源调度与守护 (Resource Governor)"]
-            Priority["双通道调度: Realtime 抢占优先 | Batch 有序排队"]
-            Lease["WorkerLeaseLock (协程租约锁 & 待机显存自动释放)"]
-        end
-
-        Gateway --> Pipeline --> Governor
+        Ingress -->|音频上传| Decode --> App
+        Ingress -->|系统、音色、任务、WS 控制| App
+        App --> Admit
+        App <--> VAD
+        App <--> Diar
+        App -. 活动与生命周期 .-> Life
     end
 
-    %% 推理 Worker 隔离层
-    subgraph Workers ["🛡️ 独立 Python 推理隔离层 (二进制零拷贝 IPC 协议)"]
-        direction LR
-        subgraph ASR_Worker ["🎙️ Qwen3-ASR Worker (MLX / MPS)"]
-            ASR_Core["• 1.7B / 0.6B 本地模型 (FP16 / INT8)<br/>• 句子/词级端到端高精度时间戳<br/>• Server VAD 与实时打断 (Barge-in)"]
-        end
+    ASR["一个共享 Qwen3-ASR MLX Worker<br/>batch 与 native streaming 复用物理模型<br/>模式冲突受限"]
+    TTS["一个 Qwen3-TTS MLX Worker<br/>quality: VoiceDesign；balanced/light: CustomVoice"]
 
-        subgraph TTS_Worker ["🔊 Qwen3-TTS Worker (VoiceDesign)"]
-            TTS_Core["• VoiceDesign 本地模型 (FP16)<br/>• 24kHz PCM16 / WAV 极速流式生成<br/>• 丰富预设音色 (warm, calm, bright...)"]
-        end
-
-        subgraph Diar_Worker ["👥 Diarization 引擎 (可选)"]
-            Diar_Core["• Sortformer 匿名说话人实时分割<br/>• CAM++ 会话重连声学聚类"]
-        end
-    end
-
-    %% 交互流向
-    Clients -->|"HTTP REST / WS 流式音频"| Gateway
-    Governor ==>|"私有全双工 IPC 管道"| ASR_Worker
-    Governor ==>|"私有全双工 IPC 管道"| TTS_Worker
-    Governor -.->|"按需协调"| Diar_Worker
+    SDK -->|OpenAI-compatible HTTP / WS| Ingress
+    MCP -->|REST；仅配置 API key 时带 Bearer| Ingress
+    App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| ASR
+    App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| TTS
+    Life -. 卸载权重 .-> ASR
+    Life -. 卸载权重 .-> TTS
+    Life -. 卸载权重 .-> Diar
 ```
 
----
+### 运行时事实
 
-## 2. 核心架构组件与机制解析
+- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsWorker`、可选 `NemoSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。分人引擎在主进程中惰性加载，不是第三个 MLX 子进程。
+- ASR 的 batch 与 native streaming facade 共享一个物理 owner；它们不是同机同时工作的产品场景，冲突稳定返回 `backend_busy`。
+- `ResourceGovernor` 为 realtime 留出容量，并让 batch 按 FIFO/aging 准入；它不取消或抢占已经进入推理的 batch 工作。
+- Worker IPC 使用长度前缀、JSON metadata 和可选 raw binary payload。它避免在主进程与 worker 间对 PCM 使用 Base64，但编码、拼接和读取仍会复制字节，不能称为 zero-copy。
+- `WorkerIdleEvictor` 卸载模型权重；实际 idle footprint 与卸载时机由配置和基准决定，文档不把特定内存数值当作不变量。
 
-### 2.1 3-Tier 内存音频解码流水线 (3-Tier In-Memory Audio Pipeline)
-为了兼顾高吞吐与严苛的内存安全，REST 上传路径实现了三级防御机制：
-1. **Tier 1 (WAV Fast-Path 直读)**：针对标准 16 kHz 单声道 16-bit PCM WAV 音频，直接解析 Header 并内存切片，绕过 `ffmpeg` 子进程调用，CPU 消耗归零。
-2. **Tier 2 (In-Memory ffmpeg 流式解码)**：针对 MP3、FLAC、WebM、Opus 等压缩容器，通过 `stdin` 管道送入 `ffmpeg`，直接在内存输出标准 PCM 字节流，**全过程无任何磁盘临时文件落盘**。
-3. **Tier 3 (128MB 安全硬截断)**：在读取与解码流中严格施加 128MB 有界安全门槛，杜绝超大恶意音频引发的宿主 OOM 崩溃。
+## 2. 输入、调度与持久化边界
 
-### 2.2 资源守卫与租约锁 (Resource Governor & WorkerLeaseLock)
-- **通道优先级**：系统划分 `Realtime` 与 `Batch` 两个独立资源通道。实时全双工会话享有优先调度权；批量任务在剩余配额中有序排队。
-- **WorkerLeaseLock**：主进程通过租约锁协调 Worker 调用，保证多协程环境下单个 Worker 的顺序安全，防止并发指令串扰。
-- **Two-Phase Standby Eviction（两阶段待机显存驱逐）**：长时间无请求时，Worker 自动进入待机模式并执行显存垃圾回收（释放 MPS 缓存），保护本机宿主系统的可用内存。
+REST 音频上传才经过解码流水线。`/health`、`/v1/models`、`/v1/voices`、voice 管理、jobs 与 WebSocket 控制事件直接进入应用服务，不应被画成统一经过音频解码。
 
-### 2.3 私有二进制零拷贝 IPC 协议 (Binary Zero-Copy IPC)
-主进程与 Python Worker 之间通过标准输入输出建立全双工 IPC 通道：
-- **协议帧结构**：`[Magic 2B] [MsgType 1B] [PayloadLen 4B] [Payload (MsgPack/Raw PCM)]`
-- **零额外序列化**：音频 PCM 数据以原始二进制块追加传输，无需 Base64 编码，通信开销小于 0.1ms。
+`/v1/jobs` 只有在本地 job repository 与 processor 被配置时才启用。它属于主进程的可选能力，不引入外部队列、控制面或第二个常驻服务。
 
----
+音频、PCM 与转写在请求路径中保持瞬态。自定义 voice 的注册信息可以持久化，但请求不保留原始参考音频；客户端负责参考音频采集、同意与播放。
 
-## 3. 全双工 Realtime 协议状态机
+## 3. OpenAI Realtime ASR/TTS 子集
 
-SpeechRail `/v1/realtime` 端点严格实现了 OpenAI Realtime 协议的语音交互状态流：
+`/v1/realtime` 只承载 ASR/TTS，不承载 LLM response、工具调用、播放控制或会议策略。详细事件契约以 [realtime-openai.md](../../contracts/realtime-openai.md) 为准。
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Client as 客户端应用 (Sona / SDK)
-    participant Host as SpeechRail 主进程
-    participant ASR as ASR Worker (MLX)
-    participant TTS as TTS Worker (VoiceDesign)
+    participant Client as 客户端
+    participant Host as SpeechRail ASGI / 会话
+    participant VAD as 主进程 VAD / Admission
+    participant ASR as 共享 ASR Worker
+    participant TTS as TTS Worker
 
-    Client->>Host: 1. session.update (配置 VAD / 音色 / 语种)
+    Client->>Host: WebSocket handshake（可选 Bearer）
+    Host-->>Client: session.created
+    Host-->>Client: conversation.created
+    Client->>Host: session.update（语种、voice、manual 或 server_vad）
     Host-->>Client: session.updated
 
-    loop 实时音频流 (Microphone Stream)
-        Client->>Host: input_audio_buffer.append (16kHz PCM16)
-        Host->>ASR: IPC 送入音频块
-        opt Server VAD 检测到语音开始
-            ASR-->>Host: VAD Speech Started
-            Host-->>Client: input_audio_buffer.speech_started
-        end
-        opt 客户端打断 (Barge-in)
-            Client->>Host: response.cancel
-            Host->>TTS: 立即中止当前合成流
-            Host-->>Client: response.cancelled
-        end
-        opt Server VAD 检测到语音结束
-            ASR-->>Host: VAD Speech Stopped & Final Text
-            Host-->>Client: input_audio_buffer.speech_stopped
-            Host-->>Client: conversation.item.created (转写文本)
+    loop 已接纳的输入音频
+        Client->>Host: input_audio_buffer.append（base64 PCM16）
+        Host->>VAD: 帧级判定与样本时钟
+        opt server_vad 语音起止
+            VAD-->>Host: start / stop decision
+            Host-->>Client: speech_started / speech_stopped
         end
     end
+    Client->>Host: input_audio_buffer.commit（manual；VAD 可自动提交）
+    Host->>ASR: open / append / commit（private IPC）
+    ASR-->>Host: partial 或 final transcript
+    Host-->>Client: committed → item.created → transcription.delta* → completed/failed
 
-    opt 语音合成流 (Stream-In TTS)
-        Client->>Host: response.create (输入合成文本)
-        Host->>TTS: 逐句分词并流式送入
-        loop 音频块流式返回
-            TTS-->>Host: 24kHz PCM16 增量块
-            Host-->>Client: response.audio.delta (Base64 PCM)
-        end
-        TTS-->>Host: 合成完毕
-        Host-->>Client: response.audio.done & response.done
+    Client->>Host: conversation.item.create（input_text）
+    Host-->>Client: conversation.item.created
+    Client->>Host: response.create
+    Host->>TTS: streaming synthesis（private IPC）
+    loop 输出音频
+        TTS-->>Host: 24 kHz PCM16 chunks
+        Host-->>Client: response.output_audio.delta（current）或 response.audio.delta（legacy）
+    end
+    Host-->>Client: response.output_audio.done / response.audio.done → response.done
+
+    opt 取消正在输出的 TTS
+        Client->>Host: response.cancel
+        Host->>TTS: cancel task
+        Host-->>Client: response.done（status=cancelled）
     end
 ```
 
----
+`server_vad` 的判定、SpeechAdmission 与 Barge-in 位于主进程会话层；它们决定何时把音频推进 ASR，而不是由 ASR worker 直接向客户端发送 VAD 事件。当前 nested `audio` session profile 使用 `response.output_audio.*`；legacy profile 保持 `response.audio.*`，同一 response 不会混用两组事件。
 
-## 4. 目录职责分层映射
+## 4. Diarization 边界
 
-| 代码目录 | 职责范畴 | 设计模式与原则 |
-|---|---|---|
-| `src/speechrail/app.py` | FastAPI 组合根、生命周期 (Lifespan)、路由注册 | 组合根 (Composition Root) |
-| `src/speechrail/application/` | 用例编排、Realtime 会话管理、Diarization 协调 | 应用服务层 (Application Service) |
-| `src/speechrail/domain/` | Vendor-Neutral 结果、请求契约、端口协议 (Ports) | 纯净领域层 (Domain Ports / Models) |
-| `src/speechrail/backends/` | Qwen3-ASR/TTS 适配器、Sortformer/CAM++ 引擎 | 适配器层 (Infrastructure Adapters) |
-| `src/speechrail/runtime/` | 队列调度、Resource Governor、WorkerLeaseLock、IPC 协议 | 运行时内核 (Runtime Core) |
-| `src/speechrail/http/routes/` | REST 端点与 `/v1/realtime` WebSocket 传输实现 | 接入控制器 (HTTP/WS Controllers) |
-| `src/speechrail/compatibility/` | OpenAI 模型别名路由、标准 Error Envelope 封装 | 兼容适配层 (Compatibility Layer) |
-| `src/speechrail/config/` | 环境变量解析与组合校验 | 配置管理器 (Settings Object) |
+批量分人输出 session-scoped 匿名 label。Realtime 分人扩展只会在连续 adapter 经过验证后广告和协商；当前 adapter 未验证连续能力时，服务不会伪造该能力。实名映射、跨会议声纹库、会议数据库和最终播放仍属于调用方。
 
----
+## 5. 目录职责映射
 
-> [!TIP]
-> 更多深入设计细节可参考 [ASR/TTS 最佳实践规范](asr-tts-best-practices-and-optimization-spec.md) 与 [OpenAI 兼容性审计](openai-conformance-audit.md)。
+| 代码目录 | 责任 |
+|---|---|
+| `src/speechrail/app.py` | FastAPI 组合根、middleware、lifespan、路由注册 |
+| `src/speechrail/application/` | 用例组装、Realtime 会话、音频流与分人协调 |
+| `src/speechrail/domain/` | vendor-neutral types、ports、timeline 与 attribution ledger |
+| `src/speechrail/backends/` | Qwen3 ASR/TTS、VAD、Sortformer/CAM++ adapters |
+| `src/speechrail/runtime/` | queue、ResourceGovernor、worker lifecycle、IPC、jobs |
+| `src/speechrail/http/` | REST/WebSocket 传输、鉴权、错误与 metrics middleware |
+| `src/speechrail/compatibility/` | OpenAI model alias、Realtime event mapping 与稳定 envelope |
+| `src/speechrail/mcp/` | 独立 `speechrail-mcp` 进程的 REST client 与工具组合根 |
+
+## 6. 不变边界
+
+- 默认 loopback；非 loopback 必须使用 API key 与明确 origin 策略。
+- 请求路径不下载模型、不读取远程音频 URL、不持久化原始音频或完整转写。
+- 一个 SpeechRail 服务、一个 ASGI worker；不得通过复制模型进程提高吞吐。
+- 三档只替换权重与量化组合，公共 API、调度和 worker 协议保持一致。
+- 客户端拥有麦克风、播放、会议、数据库和 LLM 编排；SpeechRail 提供本地推理、协议与资源边界。
