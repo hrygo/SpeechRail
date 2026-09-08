@@ -806,10 +806,15 @@ class OpenAIRealtimeSession:
             )
         )
         try:
-            await self._asr.commit(want_segments=self._diarization is not None)
-            if self._asr_reader is not None:
-                await self._asr_reader
-                self._asr_reader = None
+            # The worker's own protocol timeout cannot bound a reader that has
+            # already received the commit acknowledgement but never reaches its
+            # terminal event.  Keep commit, final event delivery and teardown
+            # under one request deadline so its governor lane is recoverable.
+            async with asyncio.timeout(self._settings.request_timeout_seconds):
+                await self._asr.commit(want_segments=self._diarization is not None)
+                if self._asr_reader is not None:
+                    await self._asr_reader
+                    self._asr_reader = None
         except TimeoutError as exc:
             await self._discard_failed_commit()
             raise RealtimeAdapterError(
