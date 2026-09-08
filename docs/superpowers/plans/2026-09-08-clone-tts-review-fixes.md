@@ -4,7 +4,7 @@
 
 **Goal:** Make the clone loudness controller actually apply its calibration result on the default 200 ms streaming path and add regression evidence for the internal framing behavior.
 
-**Architecture:** Keep the existing request-scoped PCM16 controller and 200 ms bounded clone buffer. When the 240 ms calibration window completes mid-stream, use its bounded gain as the baseline for that transition once, then return to live chunk tracking. Keep the 200 ms framing private and verify that it preserves sample order/count while explicitly measuring its latency-sensitive boundary.
+**Architecture:** Keep the existing request-scoped PCM16 controller and 200 ms bounded clone buffer. Align the default calibration window with that first normalized block so its bounded gain is used for initial calibration; once live gain tracking has started, do not replace a sparse chunk's target with a late calibration estimate. Keep the 200 ms framing private and verify that it preserves sample order/count while explicitly measuring its latency-sensitive boundary.
 
 **Tech Stack:** Python 3.12, `uv`, pytest, Ruff, mypy, Markdown acceptance records.
 
@@ -26,19 +26,19 @@
 
 **Interfaces:**
 - Consumes: `StreamingPcm16LoudnessController.process()` with 200 ms PCM16 chunks.
-- Produces: A regression test proving that calibration completed after the second chunk becomes the active request baseline.
+- Produces: A regression test proving that the default 200 ms first block becomes the active request baseline.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
-  Feed a 200 ms quiet chunk followed by a 200 ms loud chunk and assert that the current request gain equals the computed calibration gain after the calibration window completes.
+  Feed one 200 ms quiet chunk and assert that the current request gain equals the computed calibration gain.
 
-- [ ] **Step 2: Run the focused test and verify it fails**
+- [x] **Step 2: Run the focused test and verify it fails**
 
   Run `uv run --extra dev pytest --no-cov tests/test_tts_loudness.py -q`.
 
-  Expected: the new test fails because `_current_gain_db` remains the live chunk target instead of the completed calibration target.
+  Expected: the new test fails because the 240 ms default calibration window is not complete after the first 200 ms block.
 
-### Task 2: Apply calibration once at the transition
+### Task 2: Align initial calibration with clone framing
 
 **Files:**
 - Modify: `src/speechrail/domain/tts_loudness.py`
@@ -46,17 +46,21 @@
 
 **Interfaces:**
 - Consumes: the existing request-scoped `_calibration_gain_db`.
-- Produces: a bounded one-time calibration baseline with existing peak ceiling and reset semantics.
+- Produces: a bounded initial calibration baseline with existing peak ceiling and reset semantics.
 
-- [ ] **Step 1: Add request state for one-time calibration application**
+- [x] **Step 1: Add request state for one-time calibration application**
 
   Reset a `_calibration_applied` flag with the rest of request state.
 
-- [ ] **Step 2: Use the bounded calibration gain when it first becomes available**
+- [x] **Step 2: Set the default calibration window to the private clone buffer duration**
 
-  After `_advance_calibration()`, if active audio exists and calibration is complete but has not been applied, select `_calibration_gain_db` as the current desired gain for that chunk and mark it applied. Subsequent chunks continue using live RMS control.
+  Use a 200 ms default so the first normalized clone block completes calibration before it is emitted.
 
-- [ ] **Step 3: Run the focused test and verify it passes**
+- [x] **Step 3: Use the bounded calibration gain only before live tracking starts**
+
+  After `_advance_calibration()`, select `_calibration_gain_db` only while request gain state is still uninitialized. Subsequent chunks continue using live RMS control so sparse late chunks do not pump toward the aggregate calibration estimate.
+
+- [x] **Step 4: Run the focused test and verify it passes**
 
   Run `uv run --extra dev pytest --no-cov tests/test_tts_loudness.py -q`.
 
@@ -70,15 +74,15 @@
 - Consumes: `MlxQwenTtsEngine.synthesize()` clone PCM stream.
 - Produces: deterministic evidence that 200 ms coalescing preserves PCM sample count/order and emits only a bounded residual chunk.
 
-- [ ] **Step 1: Extend the fake clone test with output-size assertions**
+- [x] **Step 1: Extend the fake clone test with output-size assertions**
 
   Assert the first coalesced output is 4,800 samples at 24 kHz and the residual contains the remaining samples; retain the existing loudness and builtin passthrough assertions.
 
-- [ ] **Step 2: Run the focused worker tests**
+- [x] **Step 2: Run the focused worker tests**
 
   Run `uv run --extra dev pytest --no-cov tests/test_tts_voice_clone.py -q`.
 
-- [ ] **Step 3: Keep the framing constant private**
+- [x] **Step 3: Keep the framing constant private**
 
   Document in the test and acceptance record that 200 ms is an internal normalization buffer, not a new public Realtime chunk-size promise.
 
@@ -88,11 +92,11 @@
 - Create: `docs/archive/performance/2026-09-08-clone-tts-loudness-acceptance.md`
 - Modify: `/Users/hrygo/Documents/sona/docs/operations/clone-tts-loudness-acceptance-2026-09-08.md` in the Sona repository only.
 
-- [ ] **Step 1: Add aggregate-only final acceptance evidence**
+- [x] **Step 1: Add aggregate-only final acceptance evidence**
 
   Record the verified profile, test gates, aggregate clone/builtin statistics, remaining per-text outlier, and the unverified physical-speaker/cancel boundary without storing raw media.
 
-- [ ] **Step 2: Mark the Sona record as superseded by the final verification**
+- [x] **Step 2: Mark the Sona record as superseded by the final verification**
 
   Preserve its historical measurements but link the current SpeechRail#34 and Sona#10 verification comments so the stale “profile missing” statement is not treated as current.
 

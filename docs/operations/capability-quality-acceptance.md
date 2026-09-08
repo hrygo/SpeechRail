@@ -2,7 +2,7 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "1.0.1"
+version: "1.0.2"
 date: 2026-09-08
 ---
 
@@ -19,6 +19,20 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 `GET /readyz` 仅表示 ASR 或 TTS 至少一个可用，不能替代上述逐项检查。`backend_busy`、`queue_full` 和 `backend_timeout` 是某次请求的稳定错误，调用方应依据 `retryable` 和 `retry_after` 退避；不要把瞬时忙碌当作全局健康状态。
 
 恢复顺序固定为：`uv run speechrail service status` → `uv run speechrail service preflight` → `curl http://127.0.0.1:8201/health`。若 profile 未配置或 artifact 不可用，再用 `uv run speechrail profile status` 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史报告或 `readyz=200` 记作当前质量通过。
+
+## Clone TTS 响度能力
+
+当前 `voice_design` Realtime worker 若启用 clone 响度控制，会在
+`session.created.session.speech_capabilities.audio_loudness_profile` 声明
+`stable_loudness_v1`；Sona 等客户端据此只保留 peak safety，未声明能力的旧服务走有界
+compatibility guard。SpeechRail 的 clone PCM normalization 使用请求级状态，并以私有的
+200 ms 缓冲合并稀疏模型 chunk；200 ms 是内部处理边界，不是客户端可依赖的公共 Realtime
+delta 大小承诺。
+
+当前代码级 review 修复与脱敏证据见
+[2026-09-08 clone TTS 响度验收记录](../archive/performance/2026-09-08-clone-tts-loudness-acceptance.md)。
+真实 managed runtime 的部署后复测、物理扬声器主观试听和 cancel/interruption 覆盖仍须单独
+记录；本节不把静态测试或 `readyz=200` 当作声音质量通过。
 
 ## 外部语料与 benchmark
 
