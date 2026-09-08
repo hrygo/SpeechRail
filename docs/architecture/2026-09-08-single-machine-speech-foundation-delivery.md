@@ -21,7 +21,7 @@ date: 2026-09-08
 | [#18](https://github.com/hrygo/SpeechRail/issues/18) | [#22](https://github.com/hrygo/SpeechRail/pull/22) | R1、A1、A2、T1、T2：取消、对齐缓冲、分句和 TTS 参数/缓存 |
 | [#19](https://github.com/hrygo/SpeechRail/issues/19) | [#23](https://github.com/hrygo/SpeechRail/pull/23) | D1、U1、S0、S4：能力诊断、连续分人 gate、benchmark 规则与本文 |
 
-PR #21 依赖 #20 的 Realtime 状态机改动；其余 PR 以 `main` 为基线，合并时仍应按依赖顺序审查与执行完整 gate。
+PR #21 依赖 #20 的 Realtime 状态机改动，#22 依赖 #21 的 wire 与生命周期改动；#23 以 `main` 为基线。合并时按 #20 → #21 → #22 → #23 的顺序审查，并在组合后的工作树执行完整 gate。
 
 ## 计划覆盖矩阵
 
