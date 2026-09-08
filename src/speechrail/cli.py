@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 import uvicorn
 
@@ -63,6 +67,12 @@ def _parser() -> argparse.ArgumentParser:
     serve.add_argument(
         "--app-home", type=Path, help="use this installed app home's private configuration"
     )
+
+    diagnose = subcommands.add_parser(
+        "diagnose", help="read a safe capability snapshot from a running local service"
+    )
+    diagnose.add_argument("--base-url", default="http://127.0.0.1:8201")
+    diagnose.add_argument("--timeout", type=float, default=5.0)
 
     setup = subcommands.add_parser(
         "setup", help="choose and apply a three-tier model profile"
@@ -240,6 +250,109 @@ def _run_setup(args: argparse.Namespace) -> int:
     return _print_apply_result(profile_commands.apply_profile(preset, app_home=app_home))
 
 
+def _diagnostic_base_url(value: str) -> str:
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ServiceError("diagnose requires an HTTP base URL without credentials or query")
+    return value.rstrip("/")
+
+
+def _diagnostic_json(url: str, *, timeout: float) -> object:
+    if timeout <= 0:
+        raise ServiceError("diagnose timeout must be positive")
+    headers = {"Accept": "application/json"}
+    api_key = os.getenv("SPEECHRAIL_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(url, headers=headers)
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            if response.status != 200:
+                raise ServiceError("diagnose service returned a non-success status")
+            return json.loads(response.read().decode("utf-8"))
+    except ServiceError:
+        raise
+    except (HTTPError, URLError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ServiceError(
+            "diagnose could not read the service; run 'speechrail service status' and "
+            "'speechrail service preflight'"
+        ) from exc
+
+
+def _diagnostic_snapshot(
+    health: object, models: object, voices: object
+) -> dict[str, object]:
+    if not isinstance(health, dict):
+        raise ServiceError("diagnose received an invalid health payload")
+    raw_models = models.get("data") if isinstance(models, dict) else None
+    raw_voices = voices.get("data") if isinstance(voices, dict) else None
+    model_rows = raw_models if isinstance(raw_models, list) else []
+    voice_rows = raw_voices if isinstance(raw_voices, list) else []
+    mode_counts: dict[str, int] = {}
+    available_voice_count = 0
+    for voice in voice_rows:
+        if not isinstance(voice, dict):
+            continue
+        mode = voice.get("mode")
+        if isinstance(mode, str):
+            mode_counts[mode] = mode_counts.get(mode, 0) + 1
+        if voice.get("available") is True:
+            available_voice_count += 1
+
+    readiness = {
+        name: health.get(f"{name}_ready") is True
+        for name in ("asr", "tts", "diarization")
+    }
+    recovery: list[str] = []
+    if not readiness["asr"] or not readiness["tts"]:
+        recovery.append("speechrail service preflight")
+    if not all(readiness.values()):
+        recovery.append("speechrail profile status")
+    recovery.append("GET /health")
+    return {
+        "status": health.get("status"),
+        "profile": health.get("profile"),
+        "readiness": readiness,
+        "worker_state": {
+            name: health.get(f"{name}_state")
+            for name in ("asr", "tts", "streaming")
+        },
+        "realtime_vad": health.get("realtime_vad")
+        if isinstance(health.get("realtime_vad"), dict)
+        else None,
+        "diarization": health.get("diarization")
+        if isinstance(health.get("diarization"), dict)
+        else None,
+        "models": {
+            "count": len(model_rows),
+            "ids": [
+                item["id"]
+                for item in model_rows
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            ],
+        },
+        "voices": {"available_count": available_voice_count, "mode_counts": mode_counts},
+        "last_smoke": {"status": "unset"},
+        "recovery": recovery,
+    }
+
+
+def _run_diagnose(args: argparse.Namespace) -> int:
+    base_url = _diagnostic_base_url(args.base_url)
+    health = _diagnostic_json(f"{base_url}/health", timeout=args.timeout)
+    models = _diagnostic_json(f"{base_url}/v1/models", timeout=args.timeout)
+    voices = _diagnostic_json(f"{base_url}/v1/voices", timeout=args.timeout)
+    print(json.dumps(_diagnostic_snapshot(health, models, voices), sort_keys=True))
+    return 0
+
+
 def _print_preflight(result: PreflightResult) -> None:
     for check in result.checks:
         state = "OK" if check.ok else "FAIL"
@@ -300,6 +413,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "serve":
             run_server(args.env_file, getattr(args, "app_home", None))
             return 0
+        if args.command == "diagnose":
+            return _run_diagnose(args)
         if args.command == "service":
             _run_service(
                 args.service_command,

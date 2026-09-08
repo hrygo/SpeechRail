@@ -14,6 +14,8 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 先读取 `GET /health`：`asr_ready`、`tts_ready`、`diarization_ready` 分别表示可按需服务；`asr_state`、`tts_state`、`streaming_state` 表示 worker 的当前生命周期；`realtime_vad` 给出配置值、实际解析的引擎和语音准入是否启用。`GET /v1/models` 和 `GET /v1/voices` 说明当前 profile 的 artifact、音色和功能边界，MCP 使用 `describe()` 获得同一快照。
 
+不使用 MCP 的终端可运行 `uv run speechrail diagnose`。它只读取上述三个公开端点，输出 profile、readiness、worker 状态、VAD、模型 ID、音色数量、`last_smoke: unset` 与恢复动作；不会输出 API key、参考文本、音频或模型路径。服务启用 key 时可通过现有 `SPEECHRAIL_API_KEY` 环境变量鉴权，命令不会回显该值。
+
 `GET /readyz` 仅表示 ASR 或 TTS 至少一个可用，不能替代上述逐项检查。`backend_busy`、`queue_full` 和 `backend_timeout` 是某次请求的稳定错误，调用方应依据 `retryable` 和 `retry_after` 退避；不要把瞬时忙碌当作全局健康状态。
 
 恢复顺序固定为：`uv run speechrail service status` → `uv run speechrail service preflight` → `curl http://127.0.0.1:8201/health`。若 profile 未配置或 artifact 不可用，再用 `uv run speechrail profile status` 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史报告或 `readyz=200` 记作当前质量通过。
