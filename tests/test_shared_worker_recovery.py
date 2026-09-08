@@ -248,12 +248,13 @@ def test_receive_side_loss_preserves_transport_cause_and_restarts_generation(
     action: str,
 ) -> None:
     async def scenario() -> None:
-        worker = Qwen3SharedWorker(_Config(timeout_seconds=0.05))
+        # A request deadline is an end-to-end policy while the private frame
+        # deadline classifies EOF/partial-frame faults.  Keeping both at 50 ms
+        # lets a busy macOS runner race the request timeout ahead of the
+        # dispatcher, so this test would assert scheduler speed instead of the
+        # transport cause it is intended to cover.
+        worker = Qwen3SharedWorker(_Config(timeout_seconds=2.0, io_timeout_seconds=0.5))
         try:
-            if action.startswith("partial"):
-                # Keep the request wait longer than the transport's partial-frame
-                # deadline so the dispatcher owns the failure classification.
-                worker.config = replace(worker.config, timeout_seconds=0.5)
             with pytest.raises(WorkerTransportError) as exc_info:
                 await worker.request({"action": action, "request_id": f"loss-{action}"})
             assert isinstance(exc_info.value.__cause__, ProtocolError)
