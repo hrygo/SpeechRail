@@ -63,6 +63,14 @@ class PreflightOutcome:
     ok: bool
 
 
+@dataclass(frozen=True)
+class DiarizationInstallPaths:
+    """Verified external assets that make diarization part of a fresh install."""
+
+    coreml_model_path: Path
+    aligner_model_dir: Path
+
+
 def _runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
@@ -231,6 +239,7 @@ def _managed_config(
     *,
     asr_key: str,
     tts_key: str,
+    diarization_assets: DiarizationInstallPaths | None = None,
 ) -> str:
     """Render the minimal loopback configuration for a catalog selection."""
     model_root = layout.models_root
@@ -247,6 +256,11 @@ def _managed_config(
         "SPEECHRAIL_ALLOW_MODEL_DOWNLOADS=false",
         "SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS=false",
     )
+    if diarization_assets is not None:
+        lines += (
+            f"SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH={diarization_assets.coreml_model_path}",
+            f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={diarization_assets.aligner_model_dir}",
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -473,6 +487,7 @@ def install_managed(
     env_file: Path | None = None,
     server_lock_directory: Path | None = None,
     post_enable: Callable[[Path, str], None] | None = None,
+    diarization_assets: DiarizationInstallPaths | None = None,
 ) -> InstallResult:
     """Install one catalog preset with a shared, lock-keyed vendor runtime."""
     if not wheel.is_file() or wheel.suffix != ".whl":
@@ -481,6 +496,11 @@ def install_managed(
         raise InstallerError("configuration file is missing")
     if post_enable is not None and not enable:
         raise InstallerError("post-enable verifier requires enable=True")
+    if diarization_assets is not None and (
+        not diarization_assets.coreml_model_path.is_dir()
+        or not diarization_assets.aligner_model_dir.is_dir()
+    ):
+        raise InstallerError("diarization assets must be verified directories")
     runtime_paths_type = _load_managed_dependencies()
 
     try:
@@ -529,9 +549,12 @@ def install_managed(
             uv_executable=uv_executable,
             runner=runner,
             install_diarization=(
-                _config_enables_diarization(layout.config_file)
-                if layout.config_file.is_file()
-                else env_file is not None and _config_enables_diarization(env_file)
+                diarization_assets is not None
+                or (
+                    _config_enables_diarization(layout.config_file)
+                    if layout.config_file.is_file()
+                    else env_file is not None and _config_enables_diarization(env_file)
+                )
             ),
         )
         prepared_id = _prepare_models_for_install(
@@ -567,6 +590,7 @@ def install_managed(
                     layout,
                     asr_key=selected_preset.asr,
                     tts_key=selected_preset.tts,
+                    diarization_assets=diarization_assets,
                 ),
             )
             config_created = True

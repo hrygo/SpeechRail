@@ -72,8 +72,9 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 是预留配置字段：CORS middleware 与解码后时长拒绝逻辑
 不在当前能力范围，不应视为已启用的安全/容量控制。
 
-启用 diarization 前，安装 macOS 平台 wheel 并准备仓库外部的
-`v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc` bundle；只需设置模型的绝对路径。wheel 会随包安装
+`speechrail-zero-setup` 在空白 Mac 上会自动准备 diarization：从固定 Hugging Face revision 下载并逐文件校验
+`v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc` 与 `Qwen3-ForcedAligner-0.6B`，然后将两条绝对路径写入私有配置。常规
+managed 升级保留已有私有配置；如需首次手工安装，则须预先准备同一套仓库外部制品并设置两条路径。wheel 会随包安装
 锁定 revision 的 `SpeechRailDiarizationWorker`，通常不必设置 worker 路径；仅在受控排障或自定义
 release 目录时才覆盖它。服务不会在请求路径下载、编译或切换模型；worker 直接以
 `computeUnits=.all` 加载已编译 bundle。重启后用 `/health`

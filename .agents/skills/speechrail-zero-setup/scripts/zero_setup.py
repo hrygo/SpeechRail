@@ -103,10 +103,12 @@ if not ((3, 12) <= sys.version_info < (3, 13)):
 # ==============================================================================
 import argparse  # noqa: E402
 import hashlib  # noqa: E402
+import io  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
+import wave  # noqa: E402
 from email.parser import BytesParser  # noqa: E402
 from pathlib import Path  # noqa: E402
 from zipfile import ZipFile  # noqa: E402
@@ -117,11 +119,16 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(REPO_ROOT))
 
 from tools.install_macos import (  # noqa: E402
+    DiarizationInstallPaths,
     InstallerError,
     install_managed,
 )
 
 from speechrail import __version__  # noqa: E402
+from speechrail.service.diarization_assets import (  # noqa: E402
+    DiarizationAssetError,
+    prepare_diarization_assets,
+)
 from speechrail.service.launchd import ServiceError  # noqa: E402
 from speechrail.service.model_store import resolve_prepared_models  # noqa: E402
 from speechrail.service.modelscope import ModelScopeDownloader  # noqa: E402
@@ -187,7 +194,9 @@ def _get_physical_memory_bytes() -> int:
 
 def _wheel_version(wheel: Path) -> str:
     with ZipFile(wheel) as archive:
-        metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+        metadata_names = [
+            name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+        ]
         if len(metadata_names) != 1:
             raise InstallerError("构建 wheel 缺少唯一 METADATA")
         metadata = BytesParser().parsebytes(archive.read(metadata_names[0]))
@@ -291,6 +300,48 @@ def _run_smoke_test(
     _success("公共 API 冒烟测试通过（健康、模型、TTS、ASR）")
 
 
+def _run_diarization_smoke_test(base_url: str, *, api_key: str | None = None) -> None:
+    """Exercise the public diarization model without retaining audio or transcript data."""
+    _log("SMOKE", "执行分人模型公共 API 冒烟测试...")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(b"\x00\x00" * 16_000)
+    try:
+        with httpx.Client(base_url=base_url, timeout=60.0) as client:
+            health = client.get("/health", headers=headers)
+            models = client.get("/v1/models", headers=headers)
+            response = client.post(
+                "/v1/audio/transcriptions",
+                headers=headers,
+                data={"model": "gpt-4o-transcribe-diarize", "response_format": "diarized_json"},
+                files={"file": ("diarization-smoke.wav", audio.getvalue(), "audio/wav")},
+            )
+    except httpx.HTTPError as exc:
+        raise InstallerError("diarization public API smoke failed") from exc
+    try:
+        model_ids = {
+            item.get("id") for item in models.json().get("data", []) if isinstance(item, dict)
+        }
+        segments = response.json().get("segments")
+    except (ValueError, AttributeError) as exc:
+        raise InstallerError("diarization public API smoke returned invalid JSON") from exc
+    if (
+        health.status_code != 200
+        or health.json().get("diarization_ready") is not True
+        or models.status_code != 200
+        or "gpt-4o-transcribe-diarize" not in model_ids
+        or response.status_code != 200
+        or not response.headers.get("X-Request-ID")
+        or not isinstance(segments, list)
+    ):
+        raise InstallerError("diarization public API smoke failed")
+    _success("分人模型公共 API 冒烟测试通过")
+
+
 def run_zero_setup(
     *,
     preset: str | None = None,
@@ -325,10 +376,11 @@ def run_zero_setup(
         install_video_podcast_skill(REPO_ROOT / ".agents" / "skills" / "video-podcast")
         _success("video-podcast skill 已安装到用户级 .agents/skills/video-podcast")
 
-    _log("INSTALL", f"开始拉取 ModelScope 权重并安装隔离运行时 (预设: {selected_preset})...")
+    _log("INSTALL", f"开始拉取锁定模型并安装隔离运行时 (预设: {selected_preset})...")
     _log(
         "INSTALL",
-        "提示：首次下载需获取约 1.5GB~5GB 模型快照并完成 SHA-256 校验，请保持网络连接稳定。",
+        "首次下载含 ASR/TTS、CoreML Sortformer 与 ForcedAligner，并完成 SHA-256 校验；"
+        "请保持网络连接稳定。",
     )
 
     post_enable = None
@@ -343,6 +395,7 @@ def run_zero_setup(
                     prepared_id=prepared_id,
                     api_key=_read_api_key(candidate_home),
                 )
+                _run_diarization_smoke_test(base_url, api_key=_read_api_key(candidate_home))
             elif not _wait_for_ready(base_url, timeout_seconds=45):
                 raise InstallerError("service did not become ready")
 
@@ -351,6 +404,10 @@ def run_zero_setup(
     timeout = httpx.Timeout(connect=30.0, read=timeout_seconds, write=30.0, pool=30.0)
     with httpx.Client(timeout=timeout) as client:
         downloader = ModelScopeDownloader(client=client)
+        try:
+            assets = prepare_diarization_assets(resolved_app_home, client=client)
+        except DiarizationAssetError as exc:
+            raise InstallerError("diarization asset preparation failed") from exc
         result = install_managed(
             wheel_path,
             app_home=resolved_app_home,
@@ -358,6 +415,10 @@ def run_zero_setup(
             downloader=downloader,
             enable=enable,
             post_enable=post_enable,
+            diarization_assets=DiarizationInstallPaths(
+                coreml_model_path=assets.coreml_model_path,
+                aligner_model_dir=assets.aligner_model_dir,
+            ),
         )
 
     _log("INFO", f"应用主目录: {result.app_home}")

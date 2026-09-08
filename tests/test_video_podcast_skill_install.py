@@ -226,6 +226,14 @@ def test_zero_setup_keeps_video_skill_install_optional(
         )
 
     monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
+    monkeypatch.setattr(
+        zero_setup,
+        "prepare_diarization_assets",
+        lambda app_home, **kwargs: SimpleNamespace(
+            coreml_model_path=app_home / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
+            aligner_model_dir=app_home / "diarization" / "Qwen3-ForcedAligner-0.6B",
+        ),
+    )
 
     zero_setup.run_zero_setup(
         preset="light",
