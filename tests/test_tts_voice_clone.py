@@ -398,6 +398,61 @@ def test_mlx_voice_design_engine_routes_icl_generation(
     assert call["stream"] is True
 
 
+def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    model = FakeIclMlxModel()
+    monkeypatch.setattr(
+        worker_module,
+        "inspect_model",
+        lambda _: SnapshotIdentity(
+            family="qwen3_tts",
+            variant="voice_design",
+            quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
+            weight_fingerprint="shape:" + ("c" * 64),
+        ),
+    )
+    reference = tmp_path / "ref.wav"
+    reference.write_bytes(b"first")
+    loads: list[str] = []
+
+    def load_audio(path: str, *, sample_rate: int) -> np.ndarray:
+        assert sample_rate == 24_000
+        loads.append(path)
+        return np.ones(100, dtype=np.float32)
+
+    engine = MlxVoiceDesignEngine(
+        tmp_path,
+        device="mps",
+        load_fn=lambda _: model,
+        numpy_module=np,
+        audio_loader_fn=load_audio,
+        reference_cache_entries=1,
+        warmup=False,
+    )
+    request = {
+        "text": "测试克隆缓存。",
+        "voice": "clone_sample",
+        "speed": 1.0,
+        "language": "zh",
+        "ref_audio": str(reference),
+        "ref_text": "参考朗读文本",
+    }
+
+    list(engine.synthesize(**request))
+    list(engine.synthesize(**request))
+    assert len(loads) == 1
+
+    reference.write_bytes(b"replaced reference")
+    list(engine.synthesize(**request))
+    assert len(loads) == 2
+
+    another = tmp_path / "another.wav"
+    another.write_bytes(b"another")
+    list(engine.synthesize(**(request | {"ref_audio": str(another)})))
+    assert len(engine._reference_audio_cache) == 1
+
+
 def test_mlx_voice_design_engine_rejects_missing_audio_or_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
