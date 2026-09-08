@@ -385,7 +385,7 @@ def test_composition_serializes_heavy_work_when_footprints_are_unknown(
     assert "unknown" in snapshot.policy_reason.lower()
 
 
-def test_composition_allows_overlap_with_explicit_caps_on_large_hardware(
+def test_composition_keeps_overlap_serial_when_vendor_caps_do_not_measure_footprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 128 * 1024**3)
@@ -402,5 +402,26 @@ def test_composition_allows_overlap_with_explicit_caps_on_large_hardware(
     )
 
     snapshot = services.governor.snapshot()
-    assert snapshot.allow_heavy_overlap is True
-    assert "within budget" in snapshot.policy_reason.lower()
+    assert snapshot.allow_heavy_overlap is False
+    assert "unknown" in snapshot.policy_reason.lower()
+
+
+def test_composition_ignores_mlx_cache_and_memory_limits_for_overlap_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 128 * 1024**3)
+    baseline = Settings(_env_file=None, qwen3_model_dir=None, qwen3_python=None)
+    capped = baseline.model_copy(update={"mlx_cache_limit_mb": 64, "mlx_memory_limit_mb": 4096})
+
+    baseline_snapshot = build_app_services(
+        baseline,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=object()),
+    ).governor.snapshot()
+    capped_snapshot = build_app_services(
+        capped,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=object()),
+    ).governor.snapshot()
+
+    assert baseline_snapshot.allow_heavy_overlap is False
+    assert capped_snapshot.allow_heavy_overlap is False
+    assert "unknown" in capped_snapshot.policy_reason.lower()

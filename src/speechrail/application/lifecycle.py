@@ -89,6 +89,18 @@ class RuntimeLifecycle:
                 states[name] = "active" if is_alive else "inactive"
         return states
 
+    def tts_warm(self) -> bool | None:
+        """Return whether the managed TTS worker is loaded and ready now.
+
+        ``None`` is used for an injected synthesizer that does not expose a
+        lifecycle signal.  A missing TTS component is a known cold state and
+        therefore returns ``False``.
+        """
+        if self._tts is None:
+            return False
+        ready = getattr(self._tts, "ready", None)
+        return ready if isinstance(ready, bool) else None
+
     @asynccontextmanager
     async def run(self) -> AsyncIterator[None]:
         await self.start()

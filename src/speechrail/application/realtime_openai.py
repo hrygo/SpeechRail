@@ -78,7 +78,11 @@ from speechrail.domain.diarization_timeline import (
 )
 from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
-from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice
+from speechrail.domain.tts import (
+    DEFAULT_VOICE_ID,
+    VoiceStoreUnavailableError,
+    resolve_voice,
+)
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
@@ -913,6 +917,10 @@ class OpenAIRealtimeSession:
             from speechrail.domain.tts import get_voice_profile
             try:
                 get_voice_profile(response_voice)
+            except VoiceStoreUnavailableError:
+                raise RealtimeAdapterError(
+                    "voice_store_unavailable", "custom voice storage is unavailable"
+                ) from None
             except ValueError:
                 raise RealtimeAdapterError(
                     "voice_not_found", f"unknown voice: {response_voice[:200]}"
@@ -937,6 +945,10 @@ class OpenAIRealtimeSession:
             return
         try:
             resolve_binding(self._tts_variant, voice)
+        except VoiceStoreUnavailableError:
+            raise RealtimeAdapterError(
+                "voice_store_unavailable", "custom voice storage is unavailable"
+            ) from None
         except ValueError:
             raise RealtimeAdapterError(
                 "voice_not_available",
@@ -1434,7 +1446,12 @@ class OpenAIRealtimeSession:
                             )
             except asyncio.CancelledError:
                 raise
-            except (TTSDeliveryError, GovernorQueueFullError, TimeoutError) as exc:
+            except (
+                TTSDeliveryError,
+                GovernorQueueFullError,
+                TimeoutError,
+                VoiceStoreUnavailableError,
+            ) as exc:
                 code = getattr(exc, "code", None) or (
                     "queue_full" if isinstance(exc, GovernorQueueFullError) else "backend_timeout"
                 )

@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 音色克隆（Voice Cloning）架构设计与工程交接方案"
 status: active
-date: 2026-09-05
+date: 2026-09-08
 ---
 
 # SpeechRail 音色克隆（Voice Cloning）架构设计与工程交接方案
@@ -121,7 +121,8 @@ date: 2026-09-05
      - 限制转码输出 PCM16 字节上限为 `2,160,000` 字节（对应 45.0 秒 24kHz 单声道 16-bit 音频），杜绝解压炸弹。
   4. **时长校验**：解码后时长必须处于 `[2.0s, 45.0s]` 区间；过短返回 `400 audio_too_short`，过长返回 `400 audio_too_long`。
   5. **受控物理落盘**：
-     - 写入 `~/.speechrail/voices/{voice_id}.wav`；
+     - 写入 `~/.speechrail/voices/{voice_id}.{uuid}.wav`；历史 metadata 中合法的
+       `~/.speechrail/voices/{voice_id}.wav` 路径仍可读取；
      - 校验 `resolved_path.parent == voices_dir`，坚决拦截路径逃逸；
      - 权限设置：目录 `0700`，文件 `0600`。
   6. **元数据持久化**：注册并持久化至 `~/.speechrail/custom_voices.json`。
@@ -160,7 +161,9 @@ date: 2026-09-05
 - `DELETE /v1/voices/{voice_id}`：
   - 校验 `voice_id` 正则合法性，阻断路径遍历；
   - 删除内存元数据并写回 `custom_voices.json`；
-  - 同步安全删除 `~/.speechrail/voices/{voice_id}.wav`（断言路径在受控目录内后执行 `unlink(missing_ok=True)`）。
+  - 同步安全删除当前 metadata 引用的受控 WAV（断言路径在受控目录内后执行
+    `unlink(missing_ok=True)`）；有活动读者时返回 `409 voice_in_use`，清理失败返回
+    `503 voice_store_unavailable`，不重新发布过期 metadata。
 
 ---
 

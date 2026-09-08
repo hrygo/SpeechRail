@@ -291,6 +291,55 @@ def test_queue_limit_is_reported() -> None:
     asyncio.run(scenario())
 
 
+def test_operation_timeout_covers_work_after_admission() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=2, realtime_reserved_capacity=1, max_pending_per_class=2)
+        )
+        with pytest.raises(TimeoutError):
+            await governor.run(
+                lambda: asyncio.sleep(0.2),
+                WorkClass.BATCH_TTS,
+                deadline=0.02,
+            )
+        assert governor.snapshot().active_tts == 0
+        assert governor.snapshot().pending_batch == 0
+
+    asyncio.run(scenario())
+
+
+def test_tts_requests_share_one_admitted_worker_slot() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=2)
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+
+        async def first() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def second() -> None:
+            second_started.set()
+
+        first_task = asyncio.create_task(governor.run(first, WorkClass.BATCH_TTS))
+        await first_started.wait()
+        second_task = asyncio.create_task(governor.run(second, WorkClass.BATCH_TTS))
+        await asyncio.sleep(0)
+        assert governor.snapshot().active_tts == 1
+        assert governor.snapshot().pending_batch == 1
+        assert not second_started.is_set()
+
+        release_first.set()
+        await asyncio.gather(first_task, second_task)
+        assert second_started.is_set()
+        assert governor.snapshot().active_tts == 0
+
+    asyncio.run(scenario())
+
+
 def test_settings_validate_resource_governor_reservation() -> None:
     with pytest.raises(ValueError, match="realtime_reserved_capacity"):
         Settings(runtime_total_capacity=2, realtime_reserved_capacity=2)

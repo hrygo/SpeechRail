@@ -87,16 +87,16 @@ def _heavy_overlap_policy(
     tts_enabled: bool,
     diarization_enabled: bool,
 ) -> tuple[bool, str]:
-    """使用共同预算, 未知组件占用时保持保守串行。"""
+    """Use a shared budget and fail closed when model peaks are unmeasured.
 
-    configured_limit = (
-        settings.mlx_memory_limit_mb * 1024**2
-        if settings.mlx_memory_limit_mb > 0
-        else None
-    )
+    MLX cache and memory limits constrain allocator behavior, but they do not
+    describe the resident peak of a loaded model.  Treat enabled inference
+    components as unknown until a measured footprint source exists.
+    """
+
     footprint = ComponentFootprint(
-        asr_bytes=configured_limit if asr_enabled else 0,
-        tts_bytes=configured_limit if tts_enabled else 0,
+        asr_bytes=None if asr_enabled else 0,
+        tts_bytes=None if tts_enabled else 0,
         diarization_bytes=None if diarization_enabled else 0,
         service_bytes=_SERVICE_OVERHEAD_BYTES,
         device=settings.device,
@@ -150,6 +150,16 @@ class AppServices:
     @property
     def tts_ready(self) -> bool:
         return self.tts_synthesizer is not None or self.settings.backend_ready
+
+    @property
+    def tts_warm(self) -> bool | None:
+        """Whether TTS can produce audio without a worker load transition."""
+        if self.tts_synthesizer is None:
+            return False
+        ready = getattr(self.tts_synthesizer, "ready", None)
+        if isinstance(ready, bool):
+            return ready
+        return None
 
     @property
     def diarization_status(self) -> dict[str, object]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from sys import executable
@@ -24,6 +25,43 @@ class FakeSpeechSynthesizer:
             yield AudioChunk(response_id="resp-test", chunk_index=1, audio=b"\x01\x00")
 
         return chunks()
+
+
+class SlowFirstSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        del request
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            await asyncio.sleep(0.05)
+            yield AudioChunk(response_id="slow", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
+def test_speech_timeout_covers_worker_output_after_admission() -> None:
+    client = TestClient(
+        create_app(
+            Settings(
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                request_timeout_seconds=0.01,
+            ),
+            tts_synthesizer=SlowFirstSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "backend_timeout"
 
 
 def test_openai_compatible_speech_endpoint_streams_pcm() -> None:

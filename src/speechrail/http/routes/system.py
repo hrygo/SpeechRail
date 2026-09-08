@@ -18,7 +18,13 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
-from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile, get_voice_registry
+from speechrail.domain.tts import (
+    VOICE_ALIASES,
+    VoiceInUseError,
+    VoiceProfile,
+    VoiceStoreUnavailableError,
+    get_voice_registry,
+)
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
 
@@ -160,6 +166,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "profile": active.profile,
             "asr_ready": services.asr_ready,
             "tts_ready": services.tts_ready,
+            "tts_warm": services.tts_warm,
             "diarization_ready": services.diarization_ready,
             "diarization": services.diarization_status,
             "asr_state": states.get("asr", "unconfigured"),
@@ -245,11 +252,20 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         return {"object": "list", "data": data}
 
-    @router.get("/v1/voices")
-    async def voices() -> dict[str, Any]:
+    @router.get("/v1/voices", response_model=None)
+    async def voices(request: Request) -> dict[str, Any] | Response:
         """List system preset voices and custom user-designed voices."""
         registry = get_voice_registry()
-        profiles = registry.list_profiles()
+        try:
+            profiles = registry.list_profiles()
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request.state.request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         return {
             "object": "list",
             "data": [
@@ -327,6 +343,14 @@ def create_system_router(services: AppServices) -> APIRouter:
             return JSONResponse(
                 status_code=201,
                 content=_voice_entry(profile, active, services.tts_ready),
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
             )
         except ValueError as exc:
             return error_response(
@@ -429,6 +453,14 @@ def create_system_router(services: AppServices) -> APIRouter:
                 status_code=201,
                 content=_voice_entry(profile, active, services.tts_ready),
             )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except ValueError as exc:
             return error_response(400, request_id, "voice_creation_failed", str(exc))
 
@@ -441,6 +473,24 @@ def create_system_router(services: AppServices) -> APIRouter:
         try:
             get_voice_registry().delete_custom_profile(voice_id)
             return JSONResponse(status_code=200, content={"status": "deleted", "id": voice_id})
+        except VoiceInUseError:
+            response = error_response(
+                409,
+                request_id,
+                "voice_in_use",
+                "Custom voice is currently in use",
+                retryable=True,
+            )
+            response.headers["Retry-After"] = "1"
+            return response
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except ValueError as exc:
             return error_response(
                 403,

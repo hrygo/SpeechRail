@@ -37,6 +37,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
         "profile": None,
         "asr_ready": False,
         "tts_ready": False,
+        "tts_warm": False,
         "diarization_ready": False,
         "diarization": {
             "configured": False,
@@ -279,6 +280,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
         "profile": None,
         "asr_ready": False,
         "tts_ready": True,
+        "tts_warm": True,
         "diarization_ready": False,
         "diarization": {
             "configured": False,

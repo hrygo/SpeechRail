@@ -2,8 +2,8 @@
 
 Covers: voice mutating-route auth when api_key is configured, private voice
 metadata/audio permissions, orphan WAV cleanup on a failed metadata write,
-corrupt-registry fail-open with a surfaced log, low-cardinality TTS metric
-labels and the granular per-subsystem readiness state.
+corrupt-registry fail-closed behavior, low-cardinality TTS metric labels and
+the granular per-subsystem readiness state.
 """
 
 from __future__ import annotations
@@ -21,7 +21,12 @@ from fastapi.testclient import TestClient
 from speechrail.app import create_app
 from speechrail.config import Settings
 from speechrail.domain.ports import AudioChunk, SpeechRequest
-from speechrail.domain.tts import VoiceRegistry, tts_voice_class
+from speechrail.domain.tts import (
+    VoiceInUseError,
+    VoiceRegistry,
+    VoiceStoreUnavailableError,
+    tts_voice_class,
+)
 from speechrail.observability.metrics import Metrics
 
 
@@ -145,10 +150,27 @@ def test_voice_metadata_and_wav_files_are_private_0600(tmp_path: Path) -> None:
     storage = tmp_path / "custom_voices.json"
     assert storage.exists()
     assert (storage.stat().st_mode & 0o777) == 0o600
+    assert (tmp_path / "voices").stat().st_mode & 0o777 == 0o700
 
     wav_path = Path(profile.audio_path)
     assert wav_path.exists()
     assert (wav_path.stat().st_mode & 0o777) == 0o600
+
+
+def test_voice_registry_refuses_symlinked_metadata_parent(tmp_path: Path) -> None:
+    redirected_root = tmp_path / "redirected"
+    redirected_root.mkdir()
+    metadata_parent = tmp_path / "metadata-parent"
+    metadata_parent.symlink_to(redirected_root, target_is_directory=True)
+    registry = VoiceRegistry(
+        storage_path=metadata_parent / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+
+    with pytest.raises(VoiceStoreUnavailableError):
+        registry.create_custom_profile(name="n", instruction="i", voice_id="custom_x")
+
+    assert not (redirected_root / "custom_voices.json").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -172,29 +194,134 @@ def test_clone_metadata_save_failure_does_not_leave_orphan_wav(
             name="n", ref_text="t", audio_bytes=wav, voice_id="orphan_check", duration_seconds=3.0
         )
 
-    assert not (tmp_path / "voices" / "orphan_check.wav").exists()
+    assert list((tmp_path / "voices").glob("*.wav")) == []
     assert "orphan_check" not in {p.id for p in registry.list_profiles()}
 
 
 # --------------------------------------------------------------------------- #
-# 4. Corrupt registry fails open but surfaces a log (not silent)
+# 4. Corrupt registry fails closed but preserves the source bytes
 # --------------------------------------------------------------------------- #
 
 
-def test_corrupt_registry_fails_open_and_logs(
+def test_corrupt_registry_fails_closed_and_preserves_bytes(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     storage = tmp_path / "custom_voices.json"
-    storage.write_text("{ this is not valid json ]", encoding="utf-8")
+    original = b"{ this is not valid json ]"
+    storage.write_bytes(original)
 
     with caplog.at_level(logging.WARNING, logger="speechrail.domain.tts"):
         registry = VoiceRegistry(storage_path=storage, voices_dir=tmp_path / "voices")
 
     assert "failed to load custom voices" in caplog.text
-    # Fail-open: the service still starts and lists the built-in system voices.
-    system_ids = [p.id for p in registry.list_profiles() if p.is_system]
-    assert len(system_ids) == 9
-    assert "serena" in system_ids
+    with pytest.raises(VoiceStoreUnavailableError):
+        registry.list_profiles()
+    with pytest.raises(VoiceStoreUnavailableError):
+        registry.create_custom_profile(name="n", instruction="i", voice_id="x")
+    assert storage.read_bytes() == original
+    # Built-in profiles remain usable even while custom storage is unavailable.
+    assert registry.get_profile("serena").is_system is True
+
+
+def test_corrupt_registry_routes_return_stable_503_and_system_tts_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = tmp_path / "custom_voices.json"
+    storage.write_bytes(b"{broken")
+    registry = _registry(tmp_path)
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=_CapturingSynth(),
+        )
+    )
+
+    listed = client.get("/v1/voices")
+    assert listed.status_code == 503
+    assert listed.json()["error"]["code"] == "voice_store_unavailable"
+
+    created = client.post(
+        "/v1/voices", json={"name": "n", "instruction": "i", "id": "custom_x"}
+    )
+    assert created.status_code == 503
+    assert created.json()["error"]["code"] == "voice_store_unavailable"
+
+    deleted = client.delete("/v1/voices/custom_x")
+    assert deleted.status_code == 503
+    assert deleted.json()["error"]["code"] == "voice_store_unavailable"
+
+    custom_speech = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "测试",
+            "voice": "custom_x",
+            "response_format": "pcm",
+        },
+    )
+    assert custom_speech.status_code == 503
+    assert custom_speech.json()["error"]["code"] == "voice_store_unavailable"
+
+    system_speech = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "测试",
+            "voice": "serena",
+            "response_format": "pcm",
+        },
+    )
+    assert system_speech.status_code == 200
+
+
+def test_voice_lease_blocks_delete_until_generation_finishes(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    profile = registry.create_cloned_profile(
+        name="leased",
+        ref_text="参考文本",
+        audio_bytes=_generate_test_wav(3.0),
+        voice_id="leased_voice",
+        duration_seconds=3.0,
+    )
+    assert profile.audio_path is not None
+
+    with registry.lease_profile("leased_voice") as leased:
+        assert leased.audio_path == profile.audio_path
+        with pytest.raises(VoiceInUseError):
+            registry.delete_custom_profile("leased_voice")
+        assert registry.get_profile("leased_voice").audio_path == profile.audio_path
+        assert Path(profile.audio_path).is_file()
+
+    registry.delete_custom_profile("leased_voice")
+    assert not Path(profile.audio_path).exists()
+
+
+def test_voice_in_use_response_includes_retry_after(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _registry(tmp_path)
+    profile = registry.create_cloned_profile(
+        name="leased",
+        ref_text="参考文本",
+        audio_bytes=_generate_test_wav(3.0),
+        voice_id="leased_voice",
+        duration_seconds=3.0,
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=_CapturingSynth(),
+        )
+    )
+
+    with registry.lease_profile(profile.id):
+        response = client.delete(f"/v1/voices/{profile.id}")
+
+    assert response.status_code == 409
+    assert response.headers["Retry-After"] == "1"
 
 
 # --------------------------------------------------------------------------- #

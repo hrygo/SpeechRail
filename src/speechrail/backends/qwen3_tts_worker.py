@@ -16,6 +16,7 @@ from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
+    VoiceStoreUnavailableError,
     apply_crossfade,
     bounded_sentences,
     generation_token_budget,
@@ -703,6 +704,17 @@ def serve(
                     "version": PROTOCOL_VERSION,
                     "type": "error",
                     "code": "worker_invalid_request",
+                    "request_id": request_id,
+                },
+            )
+            _clear_metal_cache()
+        except VoiceStoreUnavailableError:
+            write_frame(
+                output_stream,
+                {
+                    "version": PROTOCOL_VERSION,
+                    "type": "error",
+                    "code": "voice_store_unavailable",
                     "request_id": request_id,
                 },
             )

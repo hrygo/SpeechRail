@@ -9,6 +9,7 @@ from typing import Final
 
 from speechrail.domain.tts import (
     VoiceCapabilities,
+    VoiceProfile,
     get_voice_profile,
     resolve_voice,
 )
@@ -53,7 +54,9 @@ class VoiceBinding:
         )
 
 
-def resolve_binding(variant: str, voice: str) -> VoiceBinding:
+def resolve_binding(
+    variant: str, voice: str, *, profile: VoiceProfile | None = None
+) -> VoiceBinding:
     """Resolve a public voice for a model variant while preserving alias casing."""
 
     if variant not in _SUPPORTED_VARIANTS:
@@ -62,7 +65,10 @@ def resolve_binding(variant: str, voice: str) -> VoiceBinding:
         raise ValueError(f"unknown preset voice: {voice}")
 
     preset_voice = resolve_voice(voice)
-    profile = get_voice_profile(preset_voice)
+    if profile is None:
+        profile = get_voice_profile(preset_voice)
+    elif profile.id != preset_voice:
+        raise ValueError("voice profile does not match requested voice")
     if variant == "voice_design":
         if profile.mode == "clone":
             return VoiceBinding(

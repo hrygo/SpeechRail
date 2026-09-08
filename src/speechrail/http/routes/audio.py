@@ -16,11 +16,13 @@ from fastapi.responses import JSONResponse, PlainTextResponse, Response, Streami
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from speechrail.application.audio_stream import decode_upload
+from speechrail.application.deadline import await_until
 from speechrail.application.diarization import DiarizationCoordinator
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import (
     PcmOutputCounter,
     TTSDeliveryError,
+    iter_until,
     iter_validated_audio,
 )
 from speechrail.backends.qwen3_voice_binding import resolve_binding
@@ -36,7 +38,12 @@ from speechrail.domain.ports import (
     StreamingBatchTranscriber,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import DEFAULT_VOICE_ID, resolve_voice, tts_voice_class
+from speechrail.domain.tts import (
+    DEFAULT_VOICE_ID,
+    VoiceStoreUnavailableError,
+    resolve_voice,
+    tts_voice_class,
+)
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import format_json, format_srt, format_verbose, format_vtt
@@ -1053,13 +1060,24 @@ def create_audio_router(services: AppServices) -> APIRouter:
         pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
         pcm = bytearray()
         preview_t0 = _time.monotonic()
+        expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
         try:
             async with services.governor.reserve(
-                WorkClass.BATCH_TTS, deadline=resolved.request_timeout_seconds
+                WorkClass.BATCH_TTS, expires_at=expires_at
             ):
-                async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
+                async for chunk in iter_until(
+                    iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
+                ):
                     pcm_counter.accept(len(chunk.audio))
                     pcm.extend(chunk.audio)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except TTSDeliveryError as exc:
             return error_response(
                 502,
@@ -1124,13 +1142,20 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
                 media_type = "audio/wav"
             else:
-                content = await _encode_container(
-                    bytes(pcm),
-                    sample_rate=resolved.tts_sample_rate,
-                    response_format=body.response_format,
-                    ffmpeg_path=resolved.ffmpeg_path,
+                content = await await_until(
+                    _encode_container(
+                        bytes(pcm),
+                        sample_rate=resolved.tts_sample_rate,
+                        response_format=body.response_format,
+                        ffmpeg_path=resolved.ffmpeg_path,
+                    ),
+                    expires_at,
                 )
                 media_type = _TTS_CONTAINER_ENCODERS[body.response_format][0]
+        except TimeoutError:
+            return error_response(
+                503, request_id, "backend_timeout", "Inference timed out", retryable=True
+            )
         except (OverflowError, ValueError):
             return error_response(
                 502,
@@ -1162,6 +1187,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
             profile = get_voice_profile(preset_voice)
             if profile.is_system and preset_voice not in resolved.tts_voice_ids:
                 raise ValueError(f"voice {preset_voice} not configured")
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except ValueError:
             return error_response(
                 400,
@@ -1173,6 +1206,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if tts_variant in {"voice_design", "custom_voice"}:
             try:
                 resolve_binding(tts_variant, preset_voice)
+            except VoiceStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_store_unavailable",
+                    "Custom voice storage is unavailable",
+                    retryable=True,
+                )
             except ValueError:
                 return error_response(
                     400,
@@ -1233,6 +1274,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             language=body.language,
             instruction=body.instructions,
         )
+        expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
 
         async def audio_stream(
             *, counter: PcmOutputCounter | None = None
@@ -1241,9 +1283,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             # reserved realtime TTS lane; the reserve is held while the stream
             # is consumed and released as soon as the generator closes.
             async with services.governor.reserve(
-                WorkClass.BATCH_TTS, deadline=resolved.request_timeout_seconds
+                WorkClass.BATCH_TTS, expires_at=expires_at
             ):
-                async for chunk in iter_validated_audio(synthesizer.synthesize(synthesis)):
+                async for chunk in iter_until(
+                    iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
+                ):
                     if counter is not None:
                         counter.accept(len(chunk.audio))
                     yield chunk.audio
@@ -1253,7 +1297,16 @@ def create_audio_router(services: AppServices) -> APIRouter:
             pcm_stream = audio_stream(counter=pcm_counter)
             _tts_t0 = _time.monotonic()
             try:
-                first = await anext(pcm_stream, b"")
+                first = await await_until(anext(pcm_stream, b""), expires_at)
+            except VoiceStoreUnavailableError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_store_unavailable",
+                    "Custom voice storage is unavailable",
+                    retryable=True,
+                )
             except TTSDeliveryError as exc:
                 await _close_audio_stream(pcm_stream)
                 return error_response(
@@ -1324,7 +1377,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 try:
                     yield first
                     _emitted_bytes += len(first)
-                    async for chunk in pcm_stream:
+                    async for chunk in iter_until(pcm_stream, expires_at):
                         _emitted_bytes += len(chunk)
                         yield chunk
                     await _record_if_complete()
@@ -1344,7 +1397,16 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
             _tts_t0 = _time.monotonic()
             try:
-                first = await anext(encoded_stream, b"")
+                first = await await_until(anext(encoded_stream, b""), expires_at)
+            except VoiceStoreUnavailableError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_store_unavailable",
+                    "Custom voice storage is unavailable",
+                    retryable=True,
+                )
             except TTSDeliveryError as exc:
                 await _close_audio_stream(encoded_stream)
                 return error_response(
@@ -1403,7 +1465,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             async def streamed_encoded() -> AsyncIterator[bytes]:
                 try:
                     yield first
-                    async for chunk in encoded_stream:
+                    async for chunk in iter_until(encoded_stream, expires_at):
                         yield chunk
                     services.metrics.record_tts(
                         voice_class=tts_voice_class(preset_voice),
@@ -1423,6 +1485,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
         try:
             async for chunk in audio_stream(counter=pcm_counter):
                 pcm.extend(chunk)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
         except TTSDeliveryError as exc:
             return error_response(
                 502,

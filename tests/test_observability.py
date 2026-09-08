@@ -1,5 +1,7 @@
 import logging
 
+import pytest
+
 from speechrail.domain.errors import BackendNotReadyError
 from speechrail.observability.logging import event
 from speechrail.observability.metrics import Metrics
@@ -13,6 +15,44 @@ def test_observability_uses_low_cardinality_metadata_only(caplog: object) -> Non
     logger = logging.getLogger("speechrail.test")
     event(logger, "request", request_id="req_1", model="model", transcript="private")
     assert BackendNotReadyError().code == "backend_not_ready"
+
+
+def test_access_event_keeps_bounded_fields_and_drops_sensitive_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from speechrail.observability.logging import access
+
+    logger = logging.getLogger("speechrail.test.access")
+    with caplog.at_level(logging.INFO, logger=logger.name):
+        access(
+            logger,
+            timestamp="2026-09-08T00:00:00Z",
+            request_id="req_test",
+            route="/v1/audio/speech",
+            status=503,
+            outcome="error",
+            duration_ms=12.5,
+            error_code="backend_timeout",
+            tts_warm=False,
+            Authorization="Bearer secret",
+            body="private audio",
+            voice="custom-secret",
+        )
+
+    record = caplog.records[-1].speechrail
+    assert record == {
+        "timestamp": "2026-09-08T00:00:00Z",
+        "request_id": "req_test",
+        "route": "/v1/audio/speech",
+        "status": 503,
+        "outcome": "error",
+        "duration_ms": 12.5,
+        "error_code": "backend_timeout",
+        "tts_warm": False,
+    }
+    assert "secret" not in str(record)
+    assert "private" not in str(record)
+    assert "custom-secret" not in str(record)
 
 
 def test_metrics_endpoint_prometheus_format() -> None:
@@ -29,6 +69,34 @@ def test_metrics_endpoint_prometheus_format() -> None:
     assert "speechrail_governor_active_requests" in text
     assert "speechrail_governor_pending_requests" in text
     assert "speechrail_health_status" in text
+
+
+def test_http_access_record_is_emitted_with_request_id_and_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from speechrail.app import create_app
+    from speechrail.config import Settings
+
+    with caplog.at_level(logging.INFO, logger="speechrail.app"), TestClient(
+        create_app(Settings(qwen3_model_dir=None, qwen3_python=None))
+    ) as client:
+        response = client.get("/readyz", headers={"X-Request-ID": "req_access"})
+
+    assert response.status_code == 503
+    records = [
+        record.speechrail
+        for record in caplog.records
+        if record.name == "speechrail.app" and hasattr(record, "speechrail")
+    ]
+    assert len(records) == 1
+    assert records[0]["request_id"] == "req_access"
+    assert records[0]["route"] == "/readyz"
+    assert records[0]["status"] == 503
+    assert records[0]["outcome"] == "completed"
+    assert records[0]["error_code"] == "backend_not_ready"
+    assert records[0]["tts_warm"] is False
 
 
 def test_metrics_endpoint_json_format() -> None:

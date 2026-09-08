@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI
 
@@ -26,6 +28,7 @@ from speechrail.http.routes.audio import create_audio_router
 from speechrail.http.routes.jobs import create_jobs_router
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 from speechrail.http.routes.system import create_system_router
+from speechrail.observability.logging import access
 from speechrail.runtime.job_runner import JobProcessor
 from speechrail.runtime.jobs import JobRepository
 
@@ -98,9 +101,22 @@ def create_app(
             start = _time.monotonic()
             status = 0
             endpoint = "<unmatched>"
+            outcome = "completed"
+            error_code: str | None = None
+            final_body_sent = False
+
+            state = scope.get("state")
+            request_id = state.get("request_id") if isinstance(state, dict) else None
+            if not isinstance(request_id, str) or not request_id:
+                request_id = None
+                for name, value in scope.get("headers", []):
+                    if name.lower() == b"x-request-id" and isinstance(value, bytes):
+                        request_id = value.decode("utf-8", errors="ignore")[:128]
+                        break
+                request_id = request_id or "req_unknown"
 
             async def send_wrapper(message: MutableMapping[str, Any]) -> None:
-                nonlocal status, endpoint
+                nonlocal status, endpoint, error_code, final_body_sent, outcome, request_id
                 if message.get("type") == "http.response.start":
                     status_raw = message.get("status", 0)
                     status = status_raw if isinstance(status_raw, int) else 0
@@ -108,15 +124,64 @@ def create_app(
                     route_path = getattr(route, "path", None)
                     if isinstance(route_path, str) and route_path:
                         endpoint = route_path
+                    raw_headers = message.get("headers", [])
+                    if isinstance(raw_headers, list):
+                        headers: list[Any] = []
+                        for header in raw_headers:
+                            if not isinstance(header, (tuple, list)) or len(header) != 2:
+                                headers.append(header)
+                                continue
+                            name, value = header
+                            normalized_name = name.lower() if isinstance(name, bytes) else name
+                            if normalized_name == b"x-speechrail-error-code":
+                                if isinstance(value, bytes):
+                                    error_code = value.decode("ascii", errors="ignore")[:128]
+                                elif isinstance(value, str):
+                                    error_code = value[:128]
+                                continue
+                            if normalized_name == b"x-request-id" and isinstance(value, bytes):
+                                request_id = value.decode("utf-8", errors="ignore")[:128]
+                            headers.append(header)
+                        message["headers"] = headers
+                elif message.get("type") == "http.response.body":
+                    final_body_sent = not bool(message.get("more_body", False))
                 await send(message)
 
-            await self._app(scope, receive, send_wrapper)
-            services.metrics.record_http_request(
-                endpoint=endpoint,
-                method=scope["method"],
-                status=status,
-                duration_sec=_time.monotonic() - start,
-            )
+            try:
+                await self._app(scope, receive, send_wrapper)
+            except asyncio.CancelledError:
+                outcome = "cancelled"
+                raise
+            except BaseException as exc:
+                outcome = (
+                    "disconnected"
+                    if isinstance(exc, (ConnectionError, BrokenPipeError))
+                    or "disconnect" in type(exc).__name__.lower()
+                    else "error"
+                )
+                raise
+            finally:
+                if outcome == "completed" and status and not final_body_sent:
+                    outcome = "error"
+                duration_sec = _time.monotonic() - start
+                services.metrics.record_http_request(
+                    endpoint=endpoint,
+                    method=scope["method"],
+                    status=status,
+                    duration_sec=duration_sec,
+                )
+                access(
+                    logger,
+                    timestamp=datetime.now(UTC).isoformat(),
+                    request_id=request_id,
+                    route=endpoint,
+                    status=status if status else None,
+                    outcome=outcome,
+                    duration_ms=duration_sec * 1000.0,
+                    error_code=error_code,
+                    tts_warm=services.tts_warm,
+                    worker_state=services.subsystem_states.get("tts"),
+                )
 
     app.add_middleware(_MetricsMiddleware)
 

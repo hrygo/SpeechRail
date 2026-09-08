@@ -5,16 +5,18 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
 import random
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import wave
-from collections.abc import Mapping
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -273,7 +275,7 @@ def tts_voice_class(voice: str) -> str:
     """
     try:
         profile = get_voice_profile(voice)
-    except ValueError:
+    except (ValueError, VoiceStoreUnavailableError):
         return "custom"
     if profile.mode == "clone":
         return "clone"
@@ -375,103 +377,389 @@ def transcode_and_validate_clone_audio(
     return wav_bytes, duration
 
 
+class VoiceStoreUnavailableError(RuntimeError):
+    """The persistent custom voice registry cannot be trusted or updated."""
+
+    code = "voice_store_unavailable"
+
+
+class VoiceInUseError(RuntimeError):
+    """A custom voice still has an active immutable audio reader lease."""
+
+    code = "voice_in_use"
+
+
 class VoiceRegistry:
-    """Thread-safe registry managing system preset voices and custom cloned voices."""
+    """Thread-safe registry with atomic metadata commits and reader leases."""
 
     def __init__(
         self,
         storage_path: Path | None = None,
         voices_dir: Path | None = None,
     ) -> None:
-        self._storage_path = storage_path or (Path.home() / ".speechrail" / "custom_voices.json")
-        self._voices_dir = voices_dir or (Path.home() / ".speechrail" / "voices")
-        self._last_loaded_mtime: float = 0.0
+        self._storage_path = Path(
+            storage_path or (Path.home() / ".speechrail" / "custom_voices.json")
+        )
+        self._voices_dir = Path(voices_dir or (Path.home() / ".speechrail" / "voices"))
+        self._lock = threading.RLock()
+        self._last_loaded_mtime_ns = 0
         self._custom_voices: dict[str, VoiceProfile] = {}
+        self._store_error: str | None = None
+        self._pending_profiles: dict[str, VoiceProfile] | None = None
+        self._audio_readers: dict[Path, int] = {}
+        self._retired_audio: set[Path] = set()
         self._load_custom_voices()
 
+    def _mark_unavailable(self, exc: BaseException) -> None:
+        self._store_error = "custom voice registry is unavailable"
+        logger.warning("failed to load custom voices: %s", type(exc).__name__)
+
     def _load_custom_voices(self) -> None:
+        with self._lock:
+            self._load_custom_voices_locked()
+
+    def _load_custom_voices_locked(self) -> None:
+        if self._storage_path.parent.is_symlink():
+            self._mark_unavailable(
+                ValueError("custom voice registry parent must not be a symlink")
+            )
+            return
+        if not self._storage_path.exists():
+            if self._storage_path.is_symlink():
+                self._mark_unavailable(ValueError("custom voice registry symlink is broken"))
+                return
+            self._custom_voices = {}
+            self._last_loaded_mtime_ns = 0
+            self._store_error = None
+            return
         if not self._storage_path.is_file():
-            self._last_loaded_mtime = 0.0
+            self._mark_unavailable(ValueError("custom voice registry is not a file"))
             return
         try:
-            mtime = self._storage_path.stat().st_mtime
+            stat = self._storage_path.stat()
+            if self._storage_path.is_symlink():
+                raise ValueError("custom voice registry must not be a symlink")
+            if stat.st_mode & 0o077:
+                self._storage_path.chmod(0o600)
             data = json.loads(self._storage_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                loaded: dict[str, VoiceProfile] = {}
-                for item in data:
-                    if isinstance(item, dict) and "id" in item:
-                        vid = str(item["id"]).strip().lower()
-                        if vid not in SYSTEM_VOICE_PROFILES and vid not in VOICE_ALIASES:
-                            default_mode = "instruction" if item.get("instruction") else "clone"
-                            mode = str(item.get("mode", default_mode))
-                            ref_text = (
-                                str(item["ref_text"])
-                                if item.get("ref_text") is not None
-                                else None
-                            )
-                            audio_path = (
-                                str(item["audio_path"])
-                                if item.get("audio_path") is not None
-                                else None
-                            )
-                            loaded[vid] = VoiceProfile(
-                                id=vid,
-                                name=str(item.get("name", vid)),
-                                instruction=str(item.get("instruction", "")),
-                                seed=int(item.get("seed", 42)),
-                                temperature=float(item.get("temperature", 0.1)),
-                                is_default=False,
-                                is_system=False,
-                                created_at=float(item.get("created_at", 0.0)),
-                                mode=mode,
-                                ref_text=ref_text,
-                                audio_path=audio_path,
-                                duration_seconds=float(item.get("duration_seconds", 0.0)),
-                            )
-                self._custom_voices = loaded
-                self._last_loaded_mtime = mtime
+            if not isinstance(data, list):
+                raise ValueError("custom voice registry must be a JSON list")
+            loaded: dict[str, VoiceProfile] = {}
+            for item in data:
+                profile = self._profile_from_record(item)
+                if profile.id in loaded:
+                    raise ValueError(f"duplicate custom voice id: {profile.id}")
+                loaded[profile.id] = profile
         except Exception as exc:
-            # A corrupt or unreadable registry must not silently drop every
-            # custom voice; surface it so the operator can repair the store.
-            logger.warning(
-                "failed to load custom voices from %s: %s", self._storage_path, exc
-            )
+            self._last_loaded_mtime_ns = self._safe_mtime_ns()
+            self._mark_unavailable(exc)
+            return
+        self._custom_voices = loaded
+        self._last_loaded_mtime_ns = stat.st_mtime_ns
+        self._store_error = None
+
+    def _safe_mtime_ns(self) -> int:
+        try:
+            return self._storage_path.stat().st_mtime_ns
+        except OSError:
+            return 0
 
     def _check_reload(self) -> None:
-        if self._storage_path.is_file():
+        with self._lock:
+            if self._storage_path.parent.is_symlink():
+                self._mark_unavailable(
+                    ValueError("custom voice registry parent must not be a symlink")
+                )
+                return
+            if not self._storage_path.exists():
+                if self._storage_path.is_symlink():
+                    self._mark_unavailable(ValueError("custom voice registry symlink is broken"))
+                    return
+                if self._last_loaded_mtime_ns or self._custom_voices:
+                    self._custom_voices = {}
+                    self._last_loaded_mtime_ns = 0
+                    self._store_error = None
+                return
+            if not self._storage_path.is_file():
+                self._mark_unavailable(ValueError("custom voice registry is not a file"))
+                return
             try:
-                mtime = self._storage_path.stat().st_mtime
-                if mtime > self._last_loaded_mtime:
-                    self._load_custom_voices()
-            except Exception:
-                pass
+                mtime_ns = self._storage_path.stat().st_mtime_ns
+            except OSError as exc:
+                self._mark_unavailable(exc)
+                return
+            if mtime_ns != self._last_loaded_mtime_ns:
+                self._load_custom_voices_locked()
+
+    def _ensure_available_locked(self, *, reload: bool = False) -> None:
+        if reload:
+            self._load_custom_voices_locked()
+        else:
+            self._check_reload()
+        if self._store_error is not None:
+            raise VoiceStoreUnavailableError(self._store_error)
+
+    def _profile_from_record(self, item: object) -> VoiceProfile:
+        if not isinstance(item, dict):
+            raise ValueError("custom voice record must be an object")
+        raw_id = item.get("id")
+        if not isinstance(raw_id, str):
+            raise ValueError("custom voice id must be a string")
+        vid = raw_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("custom voice id has invalid format")
+        if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
+            raise ValueError(f"custom voice id is reserved: {vid}")
+
+        name = item.get("name", vid)
+        instruction = item.get("instruction", "")
+        if not isinstance(name, str) or not isinstance(instruction, str):
+            raise ValueError("custom voice name and instruction must be strings")
+        raw_mode = item.get("mode")
+        if raw_mode is None:
+            raw_mode = "instruction" if instruction.strip() else "clone"
+        if not isinstance(raw_mode, str) or raw_mode not in {"instruction", "clone"}:
+            raise ValueError("custom voice mode is invalid")
+
+        ref_text = item.get("ref_text")
+        if ref_text is not None and not isinstance(ref_text, str):
+            raise ValueError("custom voice ref_text must be a string")
+        audio_raw = item.get("audio_path")
+        if audio_raw is not None and not isinstance(audio_raw, str):
+            raise ValueError("custom voice audio_path must be a string")
+        audio_path: str | None = None
+        if audio_raw is not None:
+            audio_path = str(self._controlled_audio_path(audio_raw, vid, require_exists=True))
+        if raw_mode == "clone" and (
+            ref_text is None or not ref_text.strip() or audio_path is None
+        ):
+            raise ValueError("clone voice record is incomplete")
+
+        seed = item.get("seed", 42)
+        if type(seed) is not int or not 0 <= seed <= 2**32 - 1:
+            raise ValueError("custom voice seed is invalid")
+        temperature = item.get("temperature", 0.1)
+        created_at = item.get("created_at", 0.0)
+        duration_seconds = item.get("duration_seconds", 0.0)
+        for value, field in (
+            (temperature, "temperature"),
+            (created_at, "created_at"),
+            (duration_seconds, "duration_seconds"),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0
+            ):
+                raise ValueError(f"custom voice {field} is invalid")
+        return VoiceProfile(
+            id=vid,
+            name=name,
+            instruction=instruction,
+            seed=seed,
+            temperature=float(temperature),
+            is_default=False,
+            is_system=False,
+            created_at=float(created_at),
+            mode=raw_mode,
+            ref_text=ref_text,
+            audio_path=audio_path,
+            duration_seconds=float(duration_seconds),
+        )
+
+    def _controlled_audio_path(
+        self, raw_path: str, voice_id: str, *, require_exists: bool
+    ) -> Path:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            raise ValueError("voice audio path must be absolute")
+        if self._voices_dir.is_symlink():
+            raise ValueError("voices directory must not be a symlink")
+        try:
+            resolved = candidate.resolve(strict=False)
+            voices_root = self._voices_dir.resolve()
+        except OSError as exc:
+            raise ValueError("voice audio path cannot be resolved") from exc
+        if resolved.parent != voices_root:
+            raise ValueError("voice audio path escapes voices directory")
+        if candidate.is_symlink():
+            raise ValueError("voice audio path must not be a symlink")
+        if not (
+            resolved.name == f"{voice_id}.wav"
+            or re.fullmatch(
+                rf"{re.escape(voice_id)}\.(?:[0-9a-f]{{32}}|[0-9a-f-]{{36}})\.wav",
+                resolved.name,
+                flags=re.IGNORECASE,
+            )
+        ):
+            raise ValueError("voice audio path has an invalid filename")
+        if require_exists and (not resolved.is_file() or not candidate.is_file()):
+            raise ValueError("voice audio file is missing")
+        if require_exists:
+            try:
+                mode = resolved.stat().st_mode
+                if mode & 0o077:
+                    resolved.chmod(0o600)
+            except OSError as exc:
+                raise ValueError("voice audio file permissions are unsafe") from exc
+        return resolved
+
+    def _prepare_store_dirs_locked(self) -> None:
+        try:
+            if self._storage_path.parent.is_symlink():
+                raise OSError("custom voice registry parent must not be a symlink")
+            if self._voices_dir.is_symlink():
+                raise OSError("voices directory must not be a symlink")
+            self._storage_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self._voices_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if self._voices_dir.stat().st_mode & 0o077:
+                self._voices_dir.chmod(0o700)
+        except OSError as exc:
+            raise VoiceStoreUnavailableError("custom voice store cannot be prepared") from exc
 
     def _save_custom_voices(self) -> None:
         # Atomic (temp + fsync + rename) and 0600 so a hard kill during a write
-        # can never corrupt the registry, and sibling processes/accounts cannot
-        # read the private voice metadata. Failures propagate to the caller so
-        # a persistence error is observable instead of silently swallowed.
-        data = [profile.to_dict() for profile in self._custom_voices.values()]
+        # cannot leave a half-written registry.  ``_pending_profiles`` lets a
+        # caller persist a private candidate before publishing it in memory.
+        profiles = (
+            self._pending_profiles
+            if self._pending_profiles is not None
+            else self._custom_voices
+        )
+        self._prepare_store_dirs_locked()
+        data = [profile.to_dict() for profile in profiles.values()]
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         written = _atomic_write_bytes(self._storage_path, payload, mode=0o600)
-        self._last_loaded_mtime = written.stat().st_mtime
+        self._last_loaded_mtime_ns = written.stat().st_mtime_ns
+
+    def _storage_state(self) -> tuple[bool, bytes | None]:
+        try:
+            if not self._storage_path.is_file():
+                return False, None
+            return True, self._storage_path.read_bytes()
+        except OSError:
+            return True, None
+
+    def _commit_candidate(
+        self,
+        candidate: dict[str, VoiceProfile],
+        *,
+        new_audio: Path | None = None,
+    ) -> None:
+        previous = self._custom_voices
+        before = self._storage_state()
+        self._pending_profiles = candidate
+        try:
+            self._save_custom_voices()
+        except BaseException as exc:
+            self._pending_profiles = None
+            self._custom_voices = previous
+            after = self._storage_state()
+            safe_to_remove = after == before and (not before[0] or before[1] is not None)
+            if new_audio is not None and safe_to_remove:
+                with suppress(OSError):
+                    new_audio.unlink(missing_ok=True)
+            elif new_audio is not None or after != before:
+                self._mark_unavailable(RuntimeError("registry commit outcome is uncertain"))
+                raise VoiceStoreUnavailableError(
+                    "custom voice registry commit is uncertain"
+                ) from exc
+            raise
+        finally:
+            self._pending_profiles = None
+        self._custom_voices = candidate
+        self._store_error = None
+
+    def _retire_audio_locked(self, raw_path: str | None, voice_id: str) -> None:
+        if raw_path is None:
+            return
+        path = self._controlled_audio_path(raw_path, voice_id, require_exists=False)
+        if not path.exists():
+            return
+        if self._audio_readers.get(path, 0) > 0:
+            self._retired_audio.add(path)
+            return
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            self._retired_audio.add(path)
+            logger.warning("failed to clean retired voice audio: %s", type(exc).__name__)
+
+    def _cleanup_retired_locked(self) -> None:
+        for path in tuple(self._retired_audio):
+            if self._audio_readers.get(path, 0) > 0:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("failed to clean retired voice audio: %s", type(exc).__name__)
+                continue
+            self._retired_audio.discard(path)
+
+    def _voice_has_readers_locked(self, voice_id: str) -> bool:
+        prefix = f"{voice_id}."
+        legacy = f"{voice_id}.wav"
+        for path, readers in self._audio_readers.items():
+            if readers > 0 and (path.name == legacy or path.name.startswith(prefix)):
+                return True
+        return False
 
     def list_profiles(self) -> list[VoiceProfile]:
-        self._check_reload()
-        system = list(SYSTEM_VOICE_PROFILES.values())
-        custom = sorted(self._custom_voices.values(), key=lambda v: v.created_at, reverse=True)
-        return system + custom
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            system = list(SYSTEM_VOICE_PROFILES.values())
+            custom = sorted(
+                self._custom_voices.values(), key=lambda v: v.created_at, reverse=True
+            )
+            return system + custom
 
     def get_profile(self, voice: str) -> VoiceProfile:
         resolved = resolve_voice(voice)
         if resolved in SYSTEM_VOICE_PROFILES:
             return SYSTEM_VOICE_PROFILES[resolved]
-        if resolved in self._custom_voices:
-            return self._custom_voices[resolved]
-        self._check_reload()
-        if resolved in self._custom_voices:
-            return self._custom_voices[resolved]
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            if resolved in self._custom_voices:
+                return self._custom_voices[resolved]
         raise ValueError(f"unknown preset voice: {voice}")
+
+    @contextmanager
+    def lease_profile(self, voice: str) -> Iterator[VoiceProfile]:
+        """Lease an immutable profile snapshot while a backend reads its audio."""
+
+        resolved = resolve_voice(voice)
+        audio_path: Path | None = None
+        with self._lock:
+            if resolved in SYSTEM_VOICE_PROFILES:
+                profile = SYSTEM_VOICE_PROFILES[resolved]
+            else:
+                self._ensure_available_locked(reload=True)
+                custom_profile = self._custom_voices.get(resolved)
+                if custom_profile is None:
+                    raise ValueError(f"unknown preset voice: {voice}")
+                profile = custom_profile
+                if profile.audio_path is not None:
+                    try:
+                        audio_path = self._controlled_audio_path(
+                            profile.audio_path, profile.id, require_exists=True
+                        )
+                    except ValueError as exc:
+                        raise VoiceStoreUnavailableError(
+                            "custom voice audio is unavailable"
+                        ) from exc
+                    self._audio_readers[audio_path] = self._audio_readers.get(audio_path, 0) + 1
+        try:
+            yield profile
+        finally:
+            if audio_path is not None:
+                with self._lock:
+                    readers = self._audio_readers.get(audio_path, 0)
+                    if readers <= 1:
+                        self._audio_readers.pop(audio_path, None)
+                    else:
+                        self._audio_readers[audio_path] = readers - 1
+                    self._cleanup_retired_locked()
 
     def create_custom_profile(
         self,
@@ -486,33 +774,35 @@ class VoiceRegistry:
             raise ValueError("voice instruction must not be empty")
         if voice_id:
             vid = voice_id.strip().lower()
-            if not VOICE_ID_RE.match(vid):
+            if not VOICE_ID_RE.fullmatch(vid):
                 raise ValueError("voice_id must match regex ^[a-zA-Z0-9_-]{1,64}$")
         else:
             vid = f"custom_{int(time.time())}_{uuid.uuid4().hex[:4]}"
-
         if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"cannot override system voice ID: {vid}")
+        if seed is not None and (type(seed) is not int or not 0 <= seed <= 2**32 - 1):
+            raise ValueError("voice seed must be between 0 and 4294967295")
 
-        used_seed = seed if seed is not None else random.randint(1000, 999999)
         profile = VoiceProfile(
             id=vid,
             name=name.strip(),
             instruction=instruction.strip(),
-            seed=used_seed,
+            seed=seed if seed is not None else random.randint(1000, 999999),
             temperature=0.1,
             is_default=False,
             is_system=False,
             created_at=time.time(),
             mode="instruction",
         )
-        self._custom_voices[vid] = profile
-        try:
-            self._save_custom_voices()
-        except BaseException:
-            self._custom_voices.pop(vid, None)
-            raise
-        return profile
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            previous = self._custom_voices.get(vid)
+            candidate = dict(self._custom_voices)
+            candidate[vid] = profile
+            self._commit_candidate(candidate)
+            if previous is not None:
+                self._retire_audio_locked(previous.audio_path, vid)
+            return profile
 
     def create_cloned_profile(
         self,
@@ -529,73 +819,76 @@ class VoiceRegistry:
             raise ValueError("ref_text must not be empty")
         if voice_id:
             vid = voice_id.strip().lower()
-            if not VOICE_ID_RE.match(vid):
+            if not VOICE_ID_RE.fullmatch(vid):
                 raise ValueError("voice_id must match regex ^[a-zA-Z0-9_-]{1,64}$")
         else:
             vid = f"clone_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-
         if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"cannot override system voice ID: {vid}")
+        if (
+            isinstance(duration_seconds, bool)
+            or not isinstance(duration_seconds, (int, float))
+            or not math.isfinite(float(duration_seconds))
+            or duration_seconds < 0
+        ):
+            raise ValueError("duration_seconds must be a non-negative number")
 
-        self._voices_dir.mkdir(parents=True, exist_ok=True)
-        with suppress(Exception):
-            self._voices_dir.chmod(0o700)
-
-        target_file = (self._voices_dir / f"{vid}.wav").resolve()
-        try:
-            if target_file.parent != self._voices_dir.resolve():
-                raise ValueError("voice audio path escapes voices directory")
-        except ValueError as exc:
-            raise ValueError("voice audio path escapes voices directory") from exc
-
-        _atomic_write_bytes(target_file, audio_bytes, mode=0o600)
-
-        profile = VoiceProfile(
-            id=vid,
-            name=name.strip(),
-            instruction="",
-            seed=42,
-            temperature=0.1,
-            is_default=False,
-            is_system=False,
-            created_at=time.time(),
-            mode="clone",
-            ref_text=ref_text.strip(),
-            audio_path=str(target_file),
-            duration_seconds=round(duration_seconds, 2),
-        )
-        self._custom_voices[vid] = profile
-        try:
-            self._save_custom_voices()
-        except BaseException:
-            with suppress(Exception):
-                target_file.unlink(missing_ok=True)
-            self._custom_voices.pop(vid, None)
-            raise
-        return profile
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            self._prepare_store_dirs_locked()
+            target_file = (self._voices_dir / f"{vid}.{uuid.uuid4().hex}.wav").resolve()
+            self._controlled_audio_path(str(target_file), vid, require_exists=False)
+            _atomic_write_bytes(target_file, audio_bytes, mode=0o600)
+            previous = self._custom_voices.get(vid)
+            profile = VoiceProfile(
+                id=vid,
+                name=name.strip(),
+                instruction="",
+                seed=42,
+                temperature=0.1,
+                is_default=False,
+                is_system=False,
+                created_at=time.time(),
+                mode="clone",
+                ref_text=ref_text.strip(),
+                audio_path=str(target_file),
+                duration_seconds=round(float(duration_seconds), 2),
+            )
+            candidate = dict(self._custom_voices)
+            candidate[vid] = profile
+            self._commit_candidate(candidate, new_audio=target_file)
+            if previous is not None:
+                self._retire_audio_locked(previous.audio_path, vid)
+            return profile
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()
-        if not VOICE_ID_RE.match(vid):
+        if not VOICE_ID_RE.fullmatch(vid):
             raise ValueError("invalid voice ID format")
         if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"system voice cannot be deleted: {vid}")
-        self._check_reload()
-        if vid not in self._custom_voices:
-            raise KeyError(f"custom voice not found: {vid}")
-        profile = self._custom_voices[vid]
-        del self._custom_voices[vid]
-        try:
-            self._save_custom_voices()
-        except BaseException:
-            self._custom_voices[vid] = profile
-            raise
-
-        if profile.audio_path:
-            p = Path(profile.audio_path).resolve()
-            with suppress(Exception):
-                if p.parent == self._voices_dir.resolve() and p.is_file():
-                    p.unlink(missing_ok=True)
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            profile = self._custom_voices.get(vid)
+            if profile is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            if self._voice_has_readers_locked(vid):
+                raise VoiceInUseError(f"custom voice is in use: {vid}")
+            candidate = dict(self._custom_voices)
+            del candidate[vid]
+            self._commit_candidate(candidate)
+            if profile.audio_path is not None:
+                try:
+                    path = self._controlled_audio_path(
+                        profile.audio_path, vid, require_exists=False
+                    )
+                    path.unlink(missing_ok=True)
+                except OSError as exc:
+                    self._retired_audio.add(path)
+                    self._mark_unavailable(exc)
+                    raise VoiceStoreUnavailableError(
+                        "custom voice metadata deleted but audio cleanup failed"
+                    ) from exc
 
 
 _GLOBAL_VOICE_REGISTRY = VoiceRegistry()

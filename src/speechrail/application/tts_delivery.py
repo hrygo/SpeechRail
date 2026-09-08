@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+from speechrail.application.deadline import await_until
 from speechrail.domain.ports import AudioChunk
 
 
@@ -62,6 +63,20 @@ async def iter_validated_audio(
                 raise TTSDeliveryError("tts_audio_invalid")
             expected_index += 1
             yield chunk
+    finally:
+        close = getattr(source, "aclose", None)
+        if close is not None:
+            await close()
+
+
+async def iter_until[T](source: AsyncIterator[T], expires_at: float) -> AsyncIterator[T]:
+    """Consume an async iterator with one shared absolute deadline."""
+    try:
+        while True:
+            try:
+                yield await await_until(anext(source), expires_at)
+            except StopAsyncIteration:
+                return
     finally:
         close = getattr(source, "aclose", None)
         if close is not None:
