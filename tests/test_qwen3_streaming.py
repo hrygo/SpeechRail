@@ -163,6 +163,31 @@ def test_session_open_forwards_window_and_generation_limits() -> None:
         assert opened["left_context_sec"] == 8.5
         assert opened["right_context_ms"] == 320
         assert opened["max_new_tokens"] == 128
+        assert opened["capture_alignment"] is False
+        await session.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_open_can_opt_into_alignment_capture() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        session.enable_alignment()
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+        opened = next(frame for frame in worker.sent if frame.get("type") == "session.open")
+        assert opened["capture_alignment"] is True
         await session.close()
 
     asyncio.run(scenario())

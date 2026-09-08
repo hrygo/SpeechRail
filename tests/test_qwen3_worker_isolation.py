@@ -46,8 +46,9 @@ class _IsolationEngine:
         left_context_sec: float = 12.0,
         right_context_ms: int = 640,
         max_new_tokens: int = 256,
+        capture_alignment: bool = True,
     ) -> None:
-        del language, context
+        del language, context, capture_alignment
         if session_id in self.sessions:
             raise RuntimeError(f"session already open: {session_id}")
         self.sessions[session_id] = []

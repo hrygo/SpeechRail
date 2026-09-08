@@ -170,6 +170,7 @@ class WorkerEngine(Protocol):
         left_context_sec: float = 12.0,
         right_context_ms: int = 640,
         max_new_tokens: int = 256,
+        capture_alignment: bool = True,
     ) -> None: ...
 
     def append_audio(self, session_id: str, audio: bytes) -> str: ...
@@ -340,8 +341,11 @@ def _handle_session_open(
         left_context_sec = _coerce_session_float(frame.get("left_context_sec", 12.0))
         right_context_ms = _coerce_session_int(frame.get("right_context_ms", 640))
         max_new_tokens = _coerce_session_int(frame.get("max_new_tokens", 256))
+        capture_alignment = frame.get("capture_alignment", False)
         if chunk_sec <= 0 or left_context_sec < 0 or right_context_ms < 0 or max_new_tokens <= 0:
             raise ValueError("invalid session option")
+        if not isinstance(capture_alignment, bool):
+            raise ValueError("invalid capture_alignment")
     except (OverflowError, TypeError, ValueError):
         _write_error(output_stream, "session_open_failed", session_id=session_id)
         return
@@ -357,6 +361,7 @@ def _handle_session_open(
             left_context_sec=left_context_sec,
             right_context_ms=right_context_ms,
             max_new_tokens=max_new_tokens,
+            capture_alignment=capture_alignment,
         )
     except Exception:
         traceback.print_exc(file=sys.stderr)
@@ -976,6 +981,7 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
         left_context_sec: float = 12.0,
         right_context_ms: int = 640,
         max_new_tokens: int = 256,
+        capture_alignment: bool = True,
     ) -> None:
         if not session_id:
             raise ValueError("session_id is required")
@@ -991,7 +997,8 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
             max_context_sec=max_context_sec,
             max_new_tokens=max_new_tokens,
         )
-        self._align_buffers[session_id] = bytearray()
+        if capture_alignment:
+            self._align_buffers[session_id] = bytearray()
 
     def append_audio(self, session_id: str, audio: bytes) -> str:
         import numpy as np
