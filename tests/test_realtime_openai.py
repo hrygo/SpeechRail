@@ -1948,6 +1948,32 @@ def test_openai_commit_failure_emits_error_and_releases_slot() -> None:
         assert len(factory.released) == 2
 
 
+def test_openai_commit_total_deadline_releases_hung_reader_slot() -> None:
+    factory = HangingCommitStreamingFactory()
+    client, factory = _client(
+        factory=factory,
+        settings_kwargs={"request_timeout_seconds": 0.01},
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"model": "whisper-1", "turn_detection": None},
+            }
+        )
+        socket.receive_json()
+
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")})
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events = [socket.receive_json() for _ in range(2)]
+
+        assert events[0]["type"] == "input_audio_buffer.committed"
+        assert events[1]["error"]["code"] == "backend_timeout"
+        assert len(factory.released) == 1
+
+
 def test_realtime_vad_speech_end_does_not_drop_chunk_audio() -> None:
     """The chunk where VAD fires speech_ended must still be appended before commit."""
     from test_realtime_vad_bargein import _silence_pcm, _sine_pcm
