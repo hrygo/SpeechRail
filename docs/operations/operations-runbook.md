@@ -115,6 +115,7 @@ flowchart TD
 | 转写请求返回 422 | 上传文件不是合法音频或系统缺失 `ffmpeg` | 确认系统 `ffmpeg` 存在，并尝试使用标准 WAV/MP3 重试 |
 | 请求返回 429 `queue_full` | 并发请求超出 `MAX_QUEUE_SIZE` 配额 | 检查客户端是否发起了无界请求，按 `Retry-After` 指数退避 |
 | TTS 提示 503 `backend_not_ready` | 未同时配置 TTS 模型目录与 Dedicated Python | 检查 `.env` 中 `SPEECHRAIL_QWEN3_TTS_*` 两项配置并重启服务 |
+| TTS 返回 503 `backend_timeout` | 队列准入、worker 生成或流交付超过 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 总 deadline | 记录 `request_id`，缩短输入或分块；确认同机没有长期占用的 TTS 请求 |
 
 ---
 

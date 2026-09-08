@@ -91,20 +91,36 @@ class ResourceGovernor:
         work_class: WorkClass,
         *,
         deadline: float | None = None,
+        expires_at: float | None = None,
     ) -> T:
         """Run work after capacity admission, respecting an optional deadline."""
-        async with self.reserve(work_class, deadline=deadline):
-            return await operation()
+        expiry = self._resolve_expiry(deadline=deadline, expires_at=expires_at)
+        async with self.reserve(work_class, expires_at=expiry):
+            if expiry is None:
+                return await operation()
+            remaining = expiry - self._clock()
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
+                return await operation()
 
     @asynccontextmanager
     async def reserve(
-        self, work_class: WorkClass, *, deadline: float | None = None
+        self,
+        work_class: WorkClass,
+        *,
+        deadline: float | None = None,
+        expires_at: float | None = None,
     ) -> AsyncIterator[None]:
         """Hold one resource lane while an operation yields streamed output."""
-        if deadline is None:
+        expiry = self._resolve_expiry(deadline=deadline, expires_at=expires_at)
+        if expiry is None:
             await self._acquire(work_class)
         else:
-            async with asyncio.timeout(deadline):
+            remaining = expiry - self._clock()
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining):
                 await self._acquire(work_class)
         try:
             yield
@@ -175,6 +191,14 @@ class ResourceGovernor:
     def _can_admit(self, waiter: _Waiter) -> bool:
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
+        if (
+            waiter.work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
+            and self._active_tts > 0
+        ):
+            # The service owns one physical TTS worker.  Keep the request in
+            # the bounded governor queue instead of letting it wait on the
+            # backend's private lock outside an observable scheduling lane.
+            return False
         if not self._allow_heavy_overlap:
             is_asr = waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR)
             if is_asr and self._active_tts > 0:
@@ -206,6 +230,23 @@ class ResourceGovernor:
 
     def _waiters_for(self, work_class: WorkClass) -> deque[_Waiter]:
         return self._realtime_waiters if work_class.is_realtime else self._batch_waiters
+
+    def _resolve_expiry(
+        self, *, deadline: float | None, expires_at: float | None
+    ) -> float | None:
+        if deadline is not None and expires_at is not None:
+            raise ValueError("deadline and expires_at are mutually exclusive")
+        if expires_at is not None:
+            if isinstance(expires_at, bool) or not isinstance(expires_at, (int, float)):
+                raise ValueError("expires_at must be a number")
+            return float(expires_at)
+        if deadline is None:
+            return None
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            raise ValueError("deadline must be a non-negative number")
+        if deadline < 0:
+            raise ValueError("deadline must be a non-negative number")
+        return self._clock() + float(deadline)
 
 
 __all__ = [

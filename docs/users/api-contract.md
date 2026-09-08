@@ -102,7 +102,11 @@ Content-Type: application/json
 ```
 
 `mp3`、`opus`、`aac`、`flac` 的容器编码具有 15 秒超时和 128 MiB 输出上限。
-编码超限、超时或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
+编码超限或失败返回 `502 audio_encode_failed`；取消请求时回收编码子进程。
+`/v1/audio/speech` 与 `/v1/voices/previews` 共享一个由
+`SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 定义的绝对总 deadline，覆盖队列准入、worker
+生成、首块等待和后续流交付。响应头发送前超时返回 `503 backend_timeout`；响应头发送后
+则关闭流并在 access 记录中标记 `outcome=cancelled` 或 `outcome=error`。
 
 标准接口要求 `voice`。质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
 一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
@@ -305,4 +309,4 @@ Authorization: Bearer <TOKEN>
 | **422** | `audio_decode_failed` | `false` | 上传文件损坏或非标准音频容器，检查文件有效性 |
 | **429** | `queue_full` | `true` | 当前并发超出 Governor 配额，按 `Retry-After` 重试 |
 | **503** | `backend_not_ready` | `true` | 对应模型 Worker 尚未启动或预检未通过，等待就绪 |
-| **504** | `backend_timeout` | `true` | 单次推理超出超时硬截断限制，减小音频分块 |
+| **503** | `backend_timeout` | `true` | 队列准入、worker 生成或音频交付超出总 deadline，减小音频分块 |
