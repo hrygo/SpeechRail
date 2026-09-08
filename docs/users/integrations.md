@@ -2,8 +2,8 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.6.9"
-date: 2026-09-05
+version: "1.7.0"
+date: 2026-09-08
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -98,7 +98,7 @@ main();
 ### 3.1 [Sona (Voice-Realtime 会议助理)](https://github.com/hrygo/sona)
 Sona 是专为本地高私密环境打造的实时双工会议助理，通过 `/v1/realtime` 端点连接 SpeechRail：
 - **WebSocket URL**：`ws://127.0.0.1:8201/v1/realtime`
-- **核心能力**：毫秒级全双工流式 ASR、Server VAD 自动断句、Sortformer 匿名说话人时序分离、流式逐句 TTS。
+- **核心能力**：全双工流式 ASR、Server VAD 自动断句与流式 TTS。连续 native diarization 未通过独立 gate 时不会广播；客户端应先读取 Realtime capability。
 - **架构权责**：Sona 负责麦克风音频采集、会话状态机、UI 字幕渲染与 LLM 业务编排；SpeechRail 负责本地模型推理与物理内存隔离治理。
 
 ### 3.2 [Open-WebUI 个人 AI 工作台](https://github.com/open-webui/open-webui)
@@ -170,3 +170,11 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
   }' \
   --output test.mp3
 ```
+
+## 5. 文件、播报与实时字幕的自检和恢复
+
+发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad`。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用。
+
+文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送 `session.update`，然后以 16 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`delta` 只含可追加的稳定前缀。
+
+遇到 `backend_busy`、`queue_full` 或 `backend_timeout` 时，不重放未确认的实时音频。按 `retryable`/`retry_after` 退避，实时连接关闭后建立新会话；文件任务可改用 Jobs 并轮询。服务侧恢复顺序是 `uv run speechrail service status`、`uv run speechrail service preflight`、再读取 `/health`。完整能力与质量证据见[能力诊断与质量验收](../operations/capability-quality-acceptance.md)。
