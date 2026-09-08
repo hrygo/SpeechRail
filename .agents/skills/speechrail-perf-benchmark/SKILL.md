@@ -3,7 +3,7 @@ name: speechrail-perf-benchmark
 description: >-
   SpeechRail 性能与质量基准 SOP。用于按 SemVer 选择单档或三档范围，测量 ASR/TTS/Realtime
   延迟、RTF、吞吐和 Apple Silicon 物理内存，验证三档质量与音色稳定性，并用统一模板生成
-  版本纵向变化和档位横向对比报告，同时把可信摘要同步到 README。
+  版本纵向变化和档位横向对比报告；仅在用户明确要求时才把可信摘要同步到 README。
 ---
 
 # SpeechRail 性能与质量基准 SOP
@@ -251,11 +251,11 @@ PATCH 报告只保留当前档列，并注明三档横向对比不适用。
 记录可移植命令、fixture digest、参数和报告生成方式；不写凭据与私人路径。
 ```
 
-## 9. README 同步
+## 9. README 同步（仅用户明确要求）
 
-生成或更新正式基准报告后，必须在同一个逻辑变更中更新根目录 `README.md` 的“真实性能基准实测”区。README 是用户入口，不能只新增归档报告而留下过期摘要。
+只有用户明确要求修改 README 时，才在同一个逻辑变更中同步相应 README 的“真实性能基准实测”区。用户没有明确要求时，不得因生成报告、发布、基准结果、接口或其他文档变化而修改任何 README（含语言版本）；此时只更新正式报告和性能归档索引。
 
-同步时遵守以下规则：
+获授权同步时遵守以下规则：
 
 1. 报告是唯一数据来源。README 中的版本、报告链接、硬件、物理内存、样本数、RTF 和质量结论必须逐项来自报告，不根据原始日志重新计算，也不复制计划值。
 2. PATCH 只测当前部署档时，只更新该档的可信数据和最新报告链接；其他档位只可保留上一份三档报告的已验证数据，并明确标注其来源版本。不得把未重测档位表述为本 patch 实测。
@@ -264,7 +264,7 @@ PATCH 报告只保留当前档列，并注明三档横向对比不适用。
 5. README 只保留用户需要的简表、测试机器与内存、测量口径、报告链接和必要限制；完整分位数、fixture digest、进程采样和 gate 留在归档报告。
 6. 更新后逐项核对 README 数值与报告一致、相对链接可解析，并确认顶部 Release badge 仍存在；不得在整理 README 时删除或改坏该 badge。
 
-README 更新至少包含：
+获授权更新 README 时至少包含：
 
 - 标题中的实测硬件；
 - 指向本次正式报告的相对链接；
@@ -272,7 +272,7 @@ README 更新至少包含：
 - `N`、cold/warm 口径和不能直接比较的限制；
 - 数据来自不同版本时，每个保留值的来源版本。
 
-完成前检查：
+仅在本次 README 位于用户明确授权范围内时执行：
 
 ```bash
 git diff -- README.md docs/archive/performance/
@@ -280,13 +280,13 @@ rg -n 'github/v/release/hrygo/SpeechRail|性能基准|performance-benchmark' REA
 git diff --check
 ```
 
-如果本次没有可信指标可写入 README，仍应更新报告链接或“本版本未验证”状态，并在报告和交接中说明原因；不能静默跳过 README。
+如果用户明确要求同步但本次没有可信指标可写入 README，更新报告链接或“本版本未验证”状态，并在报告和交接中说明原因。用户没有要求同步时，README 保持不变，不得以此为由跳过报告或归档索引。
 
 ## 10. 归档与完成条件
 
 1. 原始 JSON、音频、embedding 和日志保存到仓库外 `<app-home>/benchmarks/<run-id>/`，权限最小化。
 2. Git 报告只保留脱敏指标、digest、可比性和 gate；更新 `docs/archive/performance/README.md`。
-3. 根目录 `README.md` 已按第 9 节同步；报告链接、实测硬件、版本来源和关键指标可追溯且一致。
-4. README 顶部 GitHub Release badge 仍存在且链接、图片 URL 正确。
+3. 性能归档索引已更新；只有用户明确要求 README 同步时，才核对 README 的报告链接、实测硬件、版本来源和关键指标可追溯且一致。
+4. 只有本次修改 README 时，才确认顶部 GitHub Release badge 仍存在且链接、图片 URL 正确。
 5. 最终 active profile 与开始一致；服务、模型、音色和公共 smoke 再次通过。
 6. 缺少真实质量、完整物理采样或目标设备证据时，对应 gate 必须为 `unset`/`fail`，不得写“通过”。
