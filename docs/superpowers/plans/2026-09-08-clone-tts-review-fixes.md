@@ -102,12 +102,16 @@
 
 ### Task 5: Run gates and commit atomic changes
 
-- [ ] **Step 1: Run targeted tests, Ruff, mypy, and `git diff --check`**
-- [ ] **Step 2: Review staged paths and exclude all concurrent changes**
-- [ ] **Step 3: Commit the SpeechRail implementation/test/doc slice**
+- [x] **Step 1: Run targeted tests, Ruff, mypy, and `git diff --check`**
+- [x] **Step 2: Review staged paths and exclude all concurrent changes**
+- [x] **Step 3: Commit the SpeechRail implementation/test/doc slice**
 
   Use `fix(tts): apply clone loudness calibration baseline`.
 
-- [ ] **Step 4: Commit the isolated Sona documentation update only**
+- [x] **Step 4: Commit the isolated Sona documentation update only**
 
   Use `docs(tts): link final clone loudness acceptance`.
+
+The post-fix managed-runtime rerun remains intentionally separate: the SpeechRail and Sona worktrees
+contain unrelated concurrent diarization/release changes, so this slice does not replace the running
+managed wheel or claim a post-fix physical-speaker acceptance.
