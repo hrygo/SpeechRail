@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import traceback
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -323,6 +323,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         # whenever the source file identity changes.
         self._reference_cache_entries = reference_cache_entries
         self._reference_audio_cache: OrderedDict[tuple[str, int, int], Any] = OrderedDict()
+        self._delivery_stats: Counter[str] = Counter()
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
@@ -339,6 +340,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if warmup:
             for _ in self._generate("预热。", voice="default", speed=1.0, language="auto"):
                 pass
+            self.consume_delivery_stats()
 
     def synthesize(
         self,
@@ -357,6 +359,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return
         first_chunk = True
         for sentence in bounded_sentences(clean_text):
+            self._delivery_stats["planner_chunks"] += 1
             for pcm in self._generate(
                 sentence,
                 voice=voice,
@@ -482,8 +485,11 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         key = (str(resolved), stat.st_mtime_ns, stat.st_size)
         cached = self._reference_audio_cache.get(key)
         if cached is not None:
+            self._delivery_stats["reference_cache_hits"] += 1
             self._reference_audio_cache.move_to_end(key)
             return cached
+        if self._reference_cache_entries:
+            self._delivery_stats["reference_cache_misses"] += 1
 
         # A profile may be replaced in place. Drop every obsolete generation
         # of this path before loading the new one, rather than retaining its
@@ -491,6 +497,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         for stale_key in tuple(self._reference_audio_cache):
             if stale_key[0] == key[0]:
                 del self._reference_audio_cache[stale_key]
+                self._delivery_stats["reference_cache_evictions"] += 1
         loader = self._audio_loader_fn
         if loader is None:
             raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
@@ -506,7 +513,23 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             self._reference_audio_cache.move_to_end(key)
             while len(self._reference_audio_cache) > self._reference_cache_entries:
                 self._reference_audio_cache.popitem(last=False)
+                self._delivery_stats["reference_cache_evictions"] += 1
         return audio_array
+
+    def consume_delivery_stats(self) -> dict[str, int]:
+        """Return per-request aggregate delivery counters and reset them."""
+        result = {
+            name: count
+            for name in (
+                "planner_chunks",
+                "reference_cache_hits",
+                "reference_cache_misses",
+                "reference_cache_evictions",
+            )
+            if (count := int(self._delivery_stats.get(name, 0))) > 0
+        }
+        self._delivery_stats.clear()
+        return result
 
     def _to_pcm(self, result: Any) -> bytes:
         result_sample_rate = int(result.sample_rate)
@@ -659,9 +682,18 @@ def serve(
                     },
                     binary_payload=pcm,
                 )
+            consume_stats = getattr(engine, "consume_delivery_stats", None)
+            stats = consume_stats() if callable(consume_stats) else {}
+            completed: dict[str, object] = {
+                "version": PROTOCOL_VERSION,
+                "type": "completed",
+                "request_id": request_id,
+            }
+            if stats:
+                completed["delivery_stats"] = stats
             write_frame(
                 output_stream,
-                {"version": PROTOCOL_VERSION, "type": "completed", "request_id": request_id},
+                completed,
             )
             _clear_metal_cache()
         except ProtocolError:

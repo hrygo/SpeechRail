@@ -99,6 +99,25 @@ def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
     assert 'phase="send"' in text
 
 
+def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> None:
+    metrics = Metrics()
+
+    metrics.record_alignment_event("capture_requested")
+    metrics.record_alignment_event("fallback_completed")
+    metrics.record_tts_delivery_event("planner_chunk", amount=2)
+    metrics.record_tts_delivery_event("reference_cache_hit")
+    metrics.record_tts_delivery_event("abort_fallback")
+    metrics.record_tts_delivery_event("reload")
+
+    text = metrics.render_prometheus()
+    assert 'speechrail_asr_alignment_events_total{event="capture_requested"} 1' in text
+    assert 'speechrail_asr_alignment_events_total{event="fallback_completed"} 1' in text
+    assert 'speechrail_tts_delivery_events_total{event="planner_chunk"} 2' in text
+    assert 'speechrail_tts_delivery_events_total{event="reference_cache_hit"} 1' in text
+    assert 'speechrail_tts_delivery_events_total{event="abort_fallback"} 1' in text
+    assert 'speechrail_tts_delivery_events_total{event="reload"} 1' in text
+
+
 def test_metrics_escapes_label_values() -> None:
     """Verify label values with special chars stay parser-compatible."""
     m = Metrics()
