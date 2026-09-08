@@ -76,11 +76,11 @@ curl --fail http://127.0.0.1:8201/health
 | `tests/test_release_verification.py` | dist-info fixture 名 |
 | `uv.lock` | 项目包版本，由 `uv lock` 生成 |
 | `CHANGELOG.md` | 新版本条目，并保留空的 `[Unreleased]` |
-| `README.md` | 用户可见版本和本轮可信 benchmark 摘要 |
+| `README.md` | 仅在用户明确要求同步 README 时，更新用户可见版本和本轮可信 benchmark 摘要 |
 
 不要改 worker 帧协议的整数 `version: 1`、历史 CHANGELOG 标题或归档报告中的旧版本。正式文档 front matter 的 `version`/`date` 只在正文实质变化时更新。
 
-README 顶部必须保留动态 GitHub Release badge：
+只有本次获用户明确授权修改 README 时，才确认顶部动态 GitHub Release badge 仍保留：
 
 ```html
 <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=3776AB&label=release" alt="Release" /></a>
@@ -90,6 +90,11 @@ README 顶部必须保留动态 GitHub Release badge：
 uv lock
 uv run python scripts/check_version_consistency.py
 uv run python -c "from speechrail.config import Settings; print(Settings().version)"
+```
+
+本次修改 README 时，再执行：
+
+```bash
 rg -F -n 'href="https://github.com/hrygo/SpeechRail/releases"' README.md
 rg -F -n 'src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=3776AB&label=release"' README.md
 ```
@@ -206,6 +211,6 @@ git tag v<version>
 - [ ] 只有一个 listener，PID/executable、version、profile、generation 与 selection 一致
 - [ ] `/health`、`/readyz`、`/v1/models`、`/v1/voices` 和真实 ASR/TTS smoke 通过
 - [ ] PATCH 当前档或 MINOR/MAJOR 三档基准已归档，gate 和限制如实记录
-- [ ] 性能归档索引、README 摘要和动态 Release badge 已同步
+- [ ] 性能归档索引已同步；只有用户明确要求 README 同步时，README 摘要和动态 Release badge 已核对
 - [ ] active profile 已恢复，旧 release、selection、vendor runtime 和回退点仍存在
 - [ ] tag/远端操作符合当前授权，发布证据不含秘密或原始音频
