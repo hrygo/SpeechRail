@@ -11,7 +11,7 @@ import warnings
 from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from starlette.websockets import WebSocketDisconnect
@@ -1368,6 +1368,9 @@ class OpenAIRealtimeSession:
                 error_event(code="backend_not_ready", message="TTS backend is not ready")
             )
             return
+        wire_profile: Literal["legacy", "current"] = (
+            "current" if self._config.get("wire_profile") == "current" else "legacy"
+        )
         try:
             await self._send(response_created(session_id=self._session_id, response_id=response_id))
             await self._send(
@@ -1418,6 +1421,7 @@ class OpenAIRealtimeSession:
                                     response_id=response_id,
                                     item_id=item_id,
                                     delta=base64.b64encode(chunk.audio).decode("ascii"),
+                                    wire_profile=wire_profile,
                                 )
                             )
                         if s_idx < len(sentences) - 1:
@@ -1429,6 +1433,7 @@ class OpenAIRealtimeSession:
                                         response_id=response_id,
                                         item_id=item_id,
                                         delta=base64.b64encode(pause_pcm).decode("ascii"),
+                                        wire_profile=wire_profile,
                                     )
                                 )
             except asyncio.CancelledError:
@@ -1463,7 +1468,10 @@ class OpenAIRealtimeSession:
             )
             await self._send(
                 response_audio_done(
-                    session_id=self._session_id, response_id=response_id, item_id=item_id
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    wire_profile=wire_profile,
                 )
             )
             await self._send(
