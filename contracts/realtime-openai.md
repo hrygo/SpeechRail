@@ -21,8 +21,9 @@ ws://127.0.0.1:8201/v1/realtime
   （默认 `2`，范围 `1-8`）。达到上限后，触发 backend 会话创建的
   `input_audio_buffer.append` 返回 `error`（`backend_busy`），该连接自身的
   session 保持可用并可在其他会话释放后继续。
-- 仅接受 JSON 文本事件；音频放在 Base64 字段，**ASR 输入固定为 16 kHz、单声道、
-  16-bit little-endian PCM**。
+- 仅接受 JSON 文本事件；音频放在 Base64 字段，输入为单声道、16-bit little-endian PCM。
+  legacy profile 使用 16 kHz；当前 transcription profile 也接受 24 kHz，并在会话内转换为
+  ASR 的 16 kHz 内核格式。
 - `?model=` 查询参数在握手即生效（对应标准 `client.realtime.connect(model=...)`）：已知模型在
   `session.created.session.model` 中回显请求名，内部归一化到 SpeechRail canonical profile；
   缺省使用 canonical ASR profile。未登记模型在 accept 后发送 `error`（`model_not_found`）并以
@@ -46,7 +47,7 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 语义 |
 |---|---|
-| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受已注册 voice 与 13 个 OpenAI 标准 voice 别名并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`，已注册但当前权重不支持 → `voice_not_available`，非字符串或空白 → `invalid_voice`。失败均保持 session 可用；客户端可改用 `/v1/voices` 中 `available=true` 的系统 preset。返回 `session.updated` |
+| `session.update` | 更新 session 配置；仅接受 ASR/TTS 允许字段。缺失字段保持当前有效值，显式 `null` 清除对应可清除配置；候选配置通过校验后原子生效。兼容 legacy 根字段与当前 transcription session 的 `audio.input.{format,transcription,turn_detection}`：输入为 PCM16，支持 `16000` 或 `24000` Hz；24 kHz 在会话内有状态降采样为内部 16 kHz，首个 PCM 后不得改格式。`turn_detection` 支持 `null`/`manual` 以及 `{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 400}`；`tools` 非空 → `unsupported_tools`；`modalities` 仅 `text`/`audio`；`input_audio_format`/`output_audio_format` 仅 `pcm16`；支持 `input_audio_transcription.language`、`languages`、`prompt`（≤2000 字符，超限 → `prompt_too_long`）、`keywords`（动态热词注入）、`timestamp_granularities`、`known_speaker_names`、`known_speaker_references` 和可选 `diarization`。`instructions`、`temperature`、`max_response_output_tokens`、`tool_choice` 接受但**无效果**（本服务器不承载 LLM，无对应语义通道；拒绝会伤害按标准发完整载荷的客户端）；`voice` 接受已注册 voice 与 13 个 OpenAI 标准 voice 别名并驱动 TTS 合成；配置入口即校验：未知 voice → `voice_not_found`，已注册但当前权重不支持 → `voice_not_available`，非字符串或空白 → `invalid_voice`。失败均保持 session 可用；客户端可改用 `/v1/voices` 中 `available=true` 的系统 preset。返回 `session.updated` |
 | `input_audio_buffer.append` | 追加 base64 PCM16；在启用 `server_vad` 时进行实时语音活动检测与防抖，并在检测到用户说话时触发当前会话内的 Barge-in 打断；推流累积达到时间窗时服务端自动驱动 partial 识别；未提交缓冲区达到上限时自动分段结转（Auto-Commit Rollover），避免硬断；返回 `input_audio_buffer.committed` 只在 commit、VAD 静音截断或超限结转时；不支持语言或后端忙返回 `error`（`language_not_supported`/`backend_busy`），session 保持可用 |
 | `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态；缓冲区为空时幂等完成空闭环，保持 session 正常存活 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
@@ -68,7 +69,7 @@ ws://127.0.0.1:8201/v1/realtime
 | `input_audio_buffer.speech_stopped` | 启用 `server_vad` 时，检测到静音持续超过 `silence_duration_ms` 后触发；随后自动执行 committed 转写 |
 | `input_audio_buffer.committed` / `cleared` | 缓冲状态变化；`committed` 携带 `item_id` |
 | `conversation.item.created` | 每次 committed 输入或文本 item 创建（item ID 仅当前 WebSocket 会话有效）；item 含 `object: "realtime.item"` |
-| `conversation.item.input_audio_transcription.delta` | partial 转写（native 流式后端产出时）；携带 `item_id`/`content_index`/`delta` |
+| `conversation.item.input_audio_transcription.delta` | partial 转写（native 流式后端产出时）；携带 `item_id`/`content_index`/`delta`。只发送可直接追加的稳定前缀；改写中的尾部保留到 `completed` |
 | `conversation.item.input_audio_transcription.segment` | 启用 diarization 且 backend 返回已验证 segment 时发送；携带 `id`/`text`/`speaker`/`start`/`end`/`item_id`/`content_index`，时间单位为秒；未启用时不伪造 speaker |
 | `conversation.item.input_audio_transcription.completed` / `failed` | ASR 终态；`completed` 携带 `item_id`/`content_index`/`transcript`/`usage`（经轻量 ITN 规整），在 commit 后必然发送 |
 | `response.created` | TTS response 开始；`response.id` 用于关联后续事件 |
@@ -87,8 +88,10 @@ ws://127.0.0.1:8201/v1/realtime
 ## 转写语义
 
 `conversation.item.input_audio_transcription.delta`（partial）在推流累积达到时间窗时自动驱动，
-下发相对上一窗口的增量增量切片（客户端直接追加无文本重复）；客户端亦以 `commit` 后的
-`completed` 作为最终全量结果。
+只下发相对已发送稳定前缀的可追加切片。若上游改写已有前缀，服务端不发送无法安全追加的
+文本，客户端以 `commit` 后的 `completed` 全量结果为准。每个 committed 输入都有唯一的
+会话内 `item_id`；`committed`、`conversation.item.created`、partial、segment、completed 与 failed
+均使用该同一 ID。
 
 启用 diarization 时，`completed` 事件携带词级 `segments`（worker 对已累积音频做一次
 强制对齐，按 `{text, start_ms, end_ms}` 产出），WS 层据此按 segment 粒度发送
@@ -144,9 +147,9 @@ native 能力未经 R1 探针与真实 CPU smoke 验证前，本扩展不会被�
 
 ### 扩展模式下的事件差异
 
-- `input_audio_buffer.committed`、`conversation.item.created` 与
-  `conversation.item.input_audio_transcription.completed` 使用每次 commit 唯一的
-  `item_id`（不再是 `item_{session_id}_input`）。
+- 所有模式下 `input_audio_buffer.committed`、`conversation.item.created`、partial、segment 与
+  `conversation.item.input_audio_transcription.completed` / `failed` 都使用每次 commit 唯一的
+  `item_id`。
 - `completed` 新增 `audio_start_sample`/`audio_end_sample`（session-global 16 kHz
   整数样本域）与 `attribution_units`（`segment_uid`、`text_start`/`text_end`
   canonical 码点区间、`audio_start_sample`/`audio_end_sample`、`timing_quality`，
