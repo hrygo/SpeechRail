@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-09-08
+
+### Added
+
+- Realtime transcription 支持当前 OpenAI session 形状、24 kHz PCM 有状态适配、逐 turn `item_id` 与只追加的稳定 partial；current wire profile 发送 `response.output_audio.delta`。
+- 新增安全的能力诊断（`/health`、MCP describe、`speechrail diagnose`）、外部 benchmark manifest 和连续 diarization 的 fail-closed capability gate。
+
+### Changed
+
+- Realtime 接收、排队、推理和发送采用有界字节/时长预算与总 deadline；慢消费者、非法事件和取消均有稳定恢复路径与低基数阶段指标。
+- ASR 对齐缓冲改为按需捕获；REST、Realtime 与 preview 共享 TTS 文本规划，克隆参考缓存受容量、版本和失效规则约束。
+
+### Fixed
+
+- TTS 取消先尝试协作停止，未确认停止时才执行有界 abort/reload；worker 恢复测试拆分请求与传输超时，消除慢速 macOS runner 的时序竞态。
+
 ## [1.12.0] - 2026-09-07
 
 ### Added
