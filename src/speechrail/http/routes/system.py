@@ -42,6 +42,22 @@ def _load_clone_prompts() -> list[dict[str, Any]]:
 
 _CACHED_CLONE_PROMPTS: list[dict[str, Any]] = _load_clone_prompts()
 _MAX_VOICE_SEED = 2**32 - 1
+_TTS_LIFECYCLE_FIELDS = frozenset(
+    {"cooperative_cancel_supported", "fallback_abort_count", "reload_count"}
+)
+
+
+def _tts_lifecycle_diagnostics(services: AppServices) -> dict[str, int | bool] | None:
+    """Return safe TTS lifecycle counters when this backend exposes them."""
+
+    stats = getattr(services.tts_synthesizer, "lifecycle_stats", None)
+    if not isinstance(stats, dict):
+        return None
+    return {
+        name: value
+        for name, value in stats.items()
+        if name in _TTS_LIFECYCLE_FIELDS and isinstance(value, (bool, int))
+    }
 
 
 def _model_entry(
@@ -148,6 +164,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "diarization": services.diarization_status,
             "asr_state": states.get("asr", "unconfigured"),
             "tts_state": states.get("tts", "unconfigured"),
+            "tts_lifecycle": _tts_lifecycle_diagnostics(services),
             "streaming_state": states.get("streaming", "unconfigured"),
             "realtime_vad": {
                 "configured_engine": resolved.realtime_vad_engine,

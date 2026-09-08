@@ -324,6 +324,9 @@ def _diagnostic_snapshot(
             name: health.get(f"{name}_state")
             for name in ("asr", "tts", "streaming")
         },
+        "tts_lifecycle": health.get("tts_lifecycle")
+        if isinstance(health.get("tts_lifecycle"), dict)
+        else None,
         "realtime_vad": health.get("realtime_vad")
         if isinstance(health.get("realtime_vad"), dict)
         else None,
