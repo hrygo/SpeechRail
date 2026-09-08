@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -198,6 +199,74 @@ def test_no_argument_remains_compatible_with_serve(monkeypatch: pytest.MonkeyPat
 
     assert cli.main([]) == 0
     assert calls == ["serve"]
+
+
+def test_diagnose_reports_safe_capabilities_and_recovery(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    payloads = {
+        "/health": {
+            "status": "ok",
+            "profile": "quality",
+            "asr_ready": True,
+            "tts_ready": True,
+            "diarization_ready": False,
+            "asr_state": "active",
+            "tts_state": "warm_standby",
+            "streaming_state": "active",
+            "realtime_vad": {"resolved_engine": "silero"},
+            "diarization": {"code": "diarization_not_configured"},
+        },
+        "/v1/models": {"data": [{"id": "whisper-1"}, {"id": "tts-1"}]},
+        "/v1/voices": {
+            "data": [
+                {"mode": "system", "available": True},
+                {"mode": "clone", "available": False, "ref_text": "private text"},
+            ]
+        },
+    }
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload: object) -> None:
+            self._payload = payload
+
+        def read(self) -> bytes:
+            return json.dumps(self._payload).encode("utf-8")
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    requests: list[object] = []
+
+    def open_request(request: object, *, timeout: float) -> Response:
+        assert timeout == 2.0
+        requests.append(request)
+        path = request.full_url.removeprefix("http://127.0.0.1:8201")  # type: ignore[attr-defined]
+        return Response(payloads[path])
+
+    monkeypatch.setattr(cli, "urlopen", open_request)
+
+    assert cli.main(["diagnose", "--timeout", "2"]) == 0
+    snapshot = json.loads(capsys.readouterr().out)
+    assert snapshot["readiness"] == {"asr": True, "tts": True, "diarization": False}
+    assert snapshot["realtime_vad"] == {"resolved_engine": "silero"}
+    assert snapshot["voices"] == {"available_count": 1, "mode_counts": {"system": 1, "clone": 1}}
+    assert snapshot["last_smoke"] == {"status": "unset"}
+    assert "private text" not in json.dumps(snapshot)
+    assert len(requests) == 3
+
+
+@pytest.mark.parametrize("base_url", ["file:///tmp/x", "http://user:secret@127.0.0.1"])
+def test_diagnose_rejects_unsafe_base_url(
+    base_url: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["diagnose", "--base-url", base_url]) == 1
+    assert "without credentials" in capsys.readouterr().err
 
 
 def test_profile_list_and_status_are_read_only(
