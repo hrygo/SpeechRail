@@ -149,6 +149,11 @@ def create_system_router(services: AppServices) -> APIRouter:
             "asr_state": states.get("asr", "unconfigured"),
             "tts_state": states.get("tts", "unconfigured"),
             "streaming_state": states.get("streaming", "unconfigured"),
+            "realtime_vad": {
+                "configured_engine": resolved.realtime_vad_engine,
+                "resolved_engine": "silero" if resolved.resolves_to_silero_vad else "legacy",
+                "speech_admission_enabled": resolved.realtime_speech_admission_enabled,
+            },
             "ready": services.asr_ready or services.tts_ready,
         }
 
