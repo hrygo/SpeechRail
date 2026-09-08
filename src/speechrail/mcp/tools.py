@@ -170,6 +170,9 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
             "tts": _bool_flag(health.get("tts_ready")),
             "diarization": _bool_flag(health.get("diarization_ready")),
         },
+        "tts_lifecycle": health.get("tts_lifecycle")
+        if isinstance(health.get("tts_lifecycle"), dict)
+        else None,
         "realtime": {
             "vad": health.get("realtime_vad")
             if isinstance(health.get("realtime_vad"), dict)

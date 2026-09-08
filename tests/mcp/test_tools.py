@@ -137,6 +137,11 @@ def test_describe_merges_models_voices_health_for_quality(
         "asr_state": "ready",
         "tts_state": "ready",
         "streaming_state": "ready",
+        "tts_lifecycle": {
+            "cooperative_cancel": True,
+            "fallback_aborts": 2,
+            "fallback_reloads": 1,
+        },
         "realtime_vad": {
             "configured_engine": "auto",
             "resolved_engine": "silero",
@@ -151,6 +156,11 @@ def test_describe_merges_models_voices_health_for_quality(
     assert snapshot["profile"] == "quality"
     assert snapshot["diarization_ready"] is True
     assert snapshot["readiness"] == {"asr": True, "tts": True, "diarization": True}
+    assert snapshot["tts_lifecycle"] == {
+        "cooperative_cancel": True,
+        "fallback_aborts": 2,
+        "fallback_reloads": 1,
+    }
     assert snapshot["realtime"]["vad"]["resolved_engine"] == "silero"
     assert snapshot["realtime"]["streaming_state"] == "ready"
     assert snapshot["clone_supported"] is True
@@ -179,6 +189,7 @@ def test_describe_derives_balanced_from_custom_voice_profile(
     assert snapshot["clone_supported"] is False
     assert snapshot["preview_supported"] is False
     assert snapshot["diarization_ready"] is False
+    assert snapshot["tts_lifecycle"] is None
 
 
 # ---------------------------------------------------------------------------

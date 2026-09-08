@@ -12,7 +12,7 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 ## 调用前诊断
 
-先读取 `GET /health`：`asr_ready`、`tts_ready`、`diarization_ready` 分别表示可按需服务；`asr_state`、`tts_state`、`streaming_state` 表示 worker 的当前生命周期；`tts_lifecycle` 在 TTS worker 支持时给出取消是否可协作、回退中止数与重载数；`realtime_vad` 给出配置值、实际解析的引擎和语音准入是否启用。`GET /v1/models` 和 `GET /v1/voices` 说明当前 profile 的 artifact、音色和功能边界，MCP 使用 `describe()` 获得同一快照。
+先读取 `GET /health`：`asr_ready`、`tts_ready`、`diarization_ready` 分别表示可按需服务；`asr_state`、`tts_state`、`streaming_state` 表示 worker 的当前生命周期；`tts_lifecycle` 在 TTS worker 支持时给出取消是否可协作、回退中止数与重载数；`realtime_vad` 给出配置值、实际解析的引擎和语音准入是否启用。`GET /v1/models` 和 `GET /v1/voices` 说明当前 profile 的 artifact、音色和功能边界；MCP 的 `describe()` 转发同一安全健康字段及模型、音色快照。
 
 不使用 MCP 的终端可运行 `uv run speechrail diagnose`。它只读取上述三个公开端点，输出 profile、readiness、worker 状态、TTS lifecycle、VAD、模型 ID、音色数量、`last_smoke: unset` 与恢复动作；不会输出 API key、参考文本、音频或模型路径。服务启用 key 时可通过现有 `SPEECHRAIL_API_KEY` 环境变量鉴权，命令不会回显该值。
 
