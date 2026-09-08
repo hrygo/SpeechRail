@@ -8,8 +8,9 @@
 - 允许完全停服和数分钟级启动真空。效率来自减少重复检查和重复重启，不来自并行启动第二个实例。
 - 所有替换、切档和回滚都先停旧实例；`launchctl bootout` 成功不等于进程和 vendor worker 已退出。
 - 只使用用户级 LaunchAgent、managed `runtime/current`、私有配置和锁定的模型/runtime 制品。
-- 从源码 checkout 执行带 `--app-home` 的 service 命令时，CLI 会自动转交给
-  `runtime/current/.venv/bin/python`；若 managed runtime 不存在，不得用源码依赖结果代替安装态判断。
+- 从源码 checkout 执行带 `--app-home` 的 service 命令，以及会改变 profile/selection 的
+  `profile`/`setup` 命令时，CLI 会自动转交给 `runtime/current/.venv/bin/python`；若 managed
+  runtime 不存在，不得用源码依赖结果代替安装态判断。
 
 ## 唯一生命周期流程
 

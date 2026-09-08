@@ -7,6 +7,7 @@
 ### Fixed
 
 - 带 `--app-home` 的 service CLI 会自动使用 active managed runtime，避免从源码环境执行 preflight 造成 bundled worker 误判，并将失败提示改为准确的“service state unchanged”。
+- 带 `--app-home` 的 `profile`/`setup` 状态变更命令同样转交 active managed runtime，避免源码包路径导致切档 preflight 误报。
 - benchmark、CLI diagnose、MCP 与本机性能脚本统一自动发现 managed `config/.env` 中的 API key；benchmark 在首个推理前发现 `401` 时立即停止，不再产生整批无鉴权请求。
 - Realtime benchmark 在异常路径也会关闭 WebSocket，并仅输出转写存在性与长度，避免残留 session 和敏感转写影响后续验收。
 - CI 在 Linux 跳过 macOS CoreML worker 构建，并在 macOS 15 runner 上执行原生 wheel 构建，避免跨平台构建失败。

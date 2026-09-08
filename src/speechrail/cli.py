@@ -226,12 +226,26 @@ def _run_profile(args: argparse.Namespace) -> int:
         if not _confirm(args.yes):
             print("Cancelled.")
             return 1
+        managed_python = _managed_runtime_for_mutation(app_home)
+        if managed_python is not None:
+            return _delegate_managed_command(
+                ("profile", "apply", args.preset, "--yes"),
+                app_home,
+                managed_python=managed_python,
+            )
         return _print_apply_result(profile_commands.apply_profile(args.preset, app_home=app_home))
     if args.profile_command == "rollback":
         print("Restore the previously committed profile.")
         if not _confirm(args.yes):
             print("Cancelled.")
             return 1
+        managed_python = _managed_runtime_for_mutation(app_home)
+        if managed_python is not None:
+            return _delegate_managed_command(
+                ("profile", "rollback", "--yes"),
+                app_home,
+                managed_python=managed_python,
+            )
         return _print_apply_result(profile_commands.rollback_profile(app_home=app_home))
     raise ServiceError("unknown profile command")
 
@@ -257,6 +271,13 @@ def _run_setup(args: argparse.Namespace) -> int:
     if not _confirm(args.yes):
         print("Cancelled.")
         return 1
+    managed_python = _managed_runtime_for_mutation(app_home)
+    if managed_python is not None:
+        return _delegate_managed_command(
+            ("setup", "--preset", preset, "--yes"),
+            app_home,
+            managed_python=managed_python,
+        )
     return _print_apply_result(profile_commands.apply_profile(preset, app_home=app_home))
 
 
@@ -430,6 +451,46 @@ def _delegate_service_command(
     return completed.returncode
 
 
+def _delegate_managed_command(
+    command_args: Sequence[str],
+    app_home: Path,
+    *,
+    managed_python: Path,
+) -> int:
+    child_args = (
+        str(managed_python),
+        "-I",
+        "-m",
+        "speechrail",
+        *command_args,
+        "--app-home",
+        str(app_home),
+    )
+    try:
+        completed = subprocess.run(child_args, check=False)
+    except OSError as exc:
+        raise ServiceError("managed service runtime could not be executed") from exc
+    return completed.returncode
+
+
+def _managed_runtime_for_mutation(app_home: Path) -> Path | None:
+    """Return the managed interpreter or fail closed for a broken install."""
+
+    layout = ServiceLayout.for_app_home(app_home)
+    managed_python = _managed_service_python(app_home)
+    if managed_python is not None:
+        return managed_python
+    if (
+        (layout.current_runtime.exists() or layout.current_runtime.is_symlink())
+        and (
+            not layout.current_python.is_file()
+            or not os.access(layout.current_python, os.X_OK)
+        )
+    ):
+        raise ServiceError("managed runtime Python is missing or not executable")
+    return None
+
+
 def _run_service(
     command: str,
     app_home: Path | None = None,
@@ -439,7 +500,7 @@ def _run_service(
     if app_home is not None:
         resolved_app_home = app_home.expanduser().absolute()
         layout = ServiceLayout.for_app_home(resolved_app_home)
-        managed_python = _managed_service_python(resolved_app_home)
+        managed_python = _managed_runtime_for_mutation(resolved_app_home)
         if managed_python is not None:
             return _delegate_service_command(
                 command,
@@ -448,14 +509,6 @@ def _run_service(
                 asr_only=asr_only,
                 host_python=host_python,
             )
-        if (
-            (layout.current_runtime.exists() or layout.current_runtime.is_symlink())
-            and (
-                not layout.current_python.is_file()
-                or not os.access(layout.current_python, os.X_OK)
-            )
-        ):
-            raise ServiceError("managed runtime Python is missing or not executable")
     if command == "preflight":
         layout = ServiceLayout.for_app_home(app_home or Path.cwd())
         managed_python = layout.current_python

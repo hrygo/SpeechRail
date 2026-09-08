@@ -499,3 +499,56 @@ def test_service_preflight_uses_the_managed_runtime_for_optional_profiles(
 
     assert cli.main(["service", "preflight", "--app-home", str(tmp_path)]) == 0
     assert captured["kwargs"] == {"require_tts": True, "host_python": managed_python}
+
+
+@pytest.mark.parametrize(
+    ("argv", "forbidden_call"),
+    [
+        (["profile", "apply", "balanced"], "apply_profile"),
+        (["profile", "rollback"], "rollback_profile"),
+        (["setup", "--preset", "light"], "apply_profile"),
+    ],
+)
+def test_mutating_profile_commands_delegate_to_current_managed_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    argv: list[str],
+    forbidden_call: str,
+) -> None:
+    from speechrail.service import profile_commands
+
+    layout = cli.ServiceLayout.for_app_home(tmp_path)
+    managed_python = layout.current_runtime / ".venv" / "bin" / "python"
+    managed_python.parent.mkdir(parents=True)
+    managed_python.touch()
+    managed_python.chmod(0o700)
+    source_python = tmp_path / "source-python"
+    source_python.touch()
+    source_python.chmod(0o700)
+    monkeypatch.setattr(cli.sys, "executable", str(source_python))
+    monkeypatch.setattr(cli, "_confirm", lambda assume_yes: True)
+    monkeypatch.setattr(
+        profile_commands,
+        forbidden_call,
+        lambda *args, **kwargs: pytest.fail(f"source {forbidden_call} must not run"),
+    )
+    calls: list[tuple[tuple[str, ...], bool]] = []
+
+    def run(command_args: tuple[str, ...], *, check: bool) -> subprocess.CompletedProcess[str]:
+        calls.append((command_args, check))
+        return subprocess.CompletedProcess(command_args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli.subprocess, "run", run)
+
+    assert cli.main([*argv, "--app-home", str(tmp_path), "--yes"]) == 0
+    expected = (
+        str(managed_python),
+        "-I",
+        "-m",
+        "speechrail",
+        *argv,
+        "--yes",
+        "--app-home",
+        str(tmp_path.resolve()),
+    )
+    assert calls == [(expected, False)]

@@ -57,7 +57,7 @@ curl --fail http://127.0.0.1:8201/health
 
 发布、切档和性能 smoke 前还必须隔离外部 realtime 客户端：用 `lsof -nP -iTCP:8201` 查找 `ESTABLISHED` 连接，用已配置鉴权读取 `/metrics` 确认 `speechrail_realtime_active_sessions=0`、batch/realtime governor active requests 均为 0。Sona、浏览器或其它客户端的连接不会随 SpeechRail `bootout` 自动释放；发现活动客户端时暂停发布并报告阻塞，等待客户端自行断开，只有用户明确授权才按已核验的精确 PID 关闭指定客户端。若公共 ASR 仍返回 `429 backend_busy`，停止发布并保留证据，不循环重试。
 
-执行 `speechrail service preflight --app-home "$APP_HOME"`。CLI 会在当前进程不是 active managed runtime 时自动转交给 `runtime/current/.venv/bin/python`；不要从源码 `.venv` 推断已安装 wheel 的依赖，也不要手工拼接另一套 preflight 命令。
+执行 `speechrail service preflight --app-home "$APP_HOME"`。CLI 会在当前进程不是 active managed runtime 时，自动把 service 以及 profile/setup 状态变更转交给 `runtime/current/.venv/bin/python`；不要从源码 `.venv` 推断已安装 wheel 的依赖，也不要手工拼接另一套 preflight 或切档命令。
 
 ## 3. 更新版本材料
 

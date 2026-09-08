@@ -33,7 +33,7 @@ curl --fail http://127.0.0.1:8201/health
 
 记录当前 commit、wheel SHA-256、runtime target、服务 PID、active profile、generation、`/health` 的模型身份和 listener 数量。必须确认只有一个 listener；路径、label、端口或 PID 不符时先停用并定位，不能继续安装。
 
-发布前执行 `speechrail service preflight --app-home "$APP_HOME"`。CLI 检测到当前进程不是 active managed runtime 时会自动转交给 `runtime/current/.venv/bin/python`；managed runtime 不存在或不可执行时应直接失败，不得用源码 checkout 的 `.venv` 代替安装态判断。
+发布前执行 `speechrail service preflight --app-home "$APP_HOME"`。CLI 检测到当前进程不是 active managed runtime 时，会把 `service` 以及会改变 profile/selection 的 `profile`、`setup` 命令自动转交给 `runtime/current/.venv/bin/python`；managed runtime 不存在或不可执行时应直接失败，不得用源码 checkout 的 `.venv` 代替安装态判断。
 
 ## 外部 realtime 客户端隔离
 

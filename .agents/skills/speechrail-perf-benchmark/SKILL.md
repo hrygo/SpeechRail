@@ -130,7 +130,7 @@ benchmark 启动后会先访问一个只读受保护路由探测鉴权；若返�
 
 切档是停服事务，不是普通热重启。`launchctl bootout` 返回不代表旧 ASGI 父进程或 vendor worker 已退出；每次切档必须使用本机部署 skill 的生命周期 controller：先 bootout，最多等待 2 秒获取同一个 per-port singleton lock；仍占用时重新核对当前 lock owner、命令行和 executable，只对仍然匹配的精确 PID/进程组发送 `SIGKILL`，再最多等待 10 秒确认 lock 释放。lock 未释放、PID 不安全、身份不一致或无法确认旧服务身份时立即停止基准，不启动候选。详见 [speechrail-local-deploy 生命周期 SOP](../speechrail-local-deploy/references/lifecycle.md)。
 
-所有 `service` 和 `profile` 操作都显式传入 `--app-home`；带 `--app-home` 的 CLI 会自动使用 `runtime/current/.venv/bin/python`，因此不再从源码 checkout 手工拼接 managed preflight 或启动命令。
+所有 `service`、`profile` 和 `setup` 操作都显式传入 `--app-home`；带 `--app-home` 的 CLI 会自动使用 `runtime/current/.venv/bin/python` 执行 managed 状态变更，因此不再从源码 checkout 手工拼接 managed preflight、切档或启动命令。
 
 MINOR/MAJOR：
 
