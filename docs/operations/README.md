@@ -2,8 +2,8 @@
 title: "SpeechRail 运维与 SRE 文档中心"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.4.0"
-date: 2026-09-02
+version: "1.5.0"
+date: 2026-09-08
 ---
 
 # 📦 SpeechRail 运维与 SRE 文档
@@ -26,6 +26,7 @@ graph TD
 3. **[🔒 安全防护与可观测性 (security-observability.md)](security-observability.md)**：网络访问控制、日志脱敏规范、内存配额与健康探针标准。
 4. **[🔄 客户端迁移与平滑回滚 (migration-runbook.md)](migration-runbook.md)**：QwenPaw 与 Sona 的平滑切换、影子流量验证与旧端点退役流程。
 5. **[📊 会议分人端到端验收报告 (speaker-diarization-e2e-acceptance-2026-09-06.md)](speaker-diarization-e2e-acceptance-2026-09-06.md)**：SPK-E2E-1 持续分人协议扩展与 Sona 联合端到端验收与发布就绪报告。
+6. **[🧪 能力诊断与质量验收](capability-quality-acceptance.md)**：读取当前能力、运行外部语料 benchmark，并以 fail-closed 方式管理连续分人验收。
 
 ---
 
