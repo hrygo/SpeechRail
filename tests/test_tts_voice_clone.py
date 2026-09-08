@@ -56,7 +56,7 @@ class CapturingSpeechSynthesizer:
 
 def _make_test_client(
     tmp_path: Path, preset_id: str = "quality"
-) -> tuple[TestClient, VoiceRegistry]:
+) -> tuple[TestClient, VoiceRegistry, CapturingSpeechSynthesizer]:
     preset = load_catalog().preset(preset_id)
     storage_path = tmp_path / "custom_voices.json"
     voices_dir = tmp_path / "voices"
@@ -68,8 +68,9 @@ def _make_test_client(
         qwen3_tts_model_dir=tmp_path / preset.tts,
         qwen3_tts_python=None,
     )
-    app = create_app(settings, tts_synthesizer=CapturingSpeechSynthesizer())
-    return TestClient(app), registry
+    synthesizer = CapturingSpeechSynthesizer()
+    app = create_app(settings, tts_synthesizer=synthesizer)
+    return TestClient(app), registry, synthesizer
 
 
 # ===================== 1. Domain & VoiceRegistry =====================
@@ -397,6 +398,22 @@ def test_mlx_voice_design_engine_routes_icl_generation(
     assert call["language"] == "zh"
     assert call["stream"] is True
 
+    for option, value, code in (
+        ("speed", 1.25, "clone_speed_unsupported"),
+        ("instruction", "不应被静默忽略", "clone_instruction_unsupported"),
+        ("seed", 42, "clone_seed_unsupported"),
+    ):
+        options: dict[str, object] = {
+            "voice": "clone_sample",
+            "speed": 1.0,
+            "language": "zh",
+            "ref_audio": str(ref_audio_file),
+            "ref_text": "参考朗读文本",
+        }
+        options[option] = value
+        with pytest.raises(ValueError, match=code):
+            list(engine.synthesize("测试克隆语音生成。", **options))
+
 
 def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -537,7 +554,7 @@ def test_api_voices_clone_prompts() -> None:
 def test_api_voices_clone_success_in_quality_tier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    client, reg = _make_test_client(tmp_path, "quality")
+    client, reg, _synthesizer = _make_test_client(tmp_path, "quality")
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg)
     monkeypatch.setattr(
         "speechrail.backends.qwen3_voice_binding.get_voice_profile", reg.get_profile
@@ -581,7 +598,7 @@ def test_api_voices_clone_success_in_quality_tier(
 
 
 def test_api_voices_clone_rejected_in_balanced_tier(tmp_path: Path) -> None:
-    client, _reg = _make_test_client(tmp_path, "balanced")
+    client, _reg, _synthesizer = _make_test_client(tmp_path, "balanced")
     wav_bytes = _generate_test_wav(duration_seconds=3.0)
 
     resp = client.post(
@@ -709,7 +726,7 @@ def test_audio_speech_with_cloned_voice_across_tiers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 1. Quality tier: clone is available, /v1/audio/speech accepts it
-    client_q, reg_q = _make_test_client(tmp_path / "q", "quality")
+    client_q, reg_q, synth_q = _make_test_client(tmp_path / "q", "quality")
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg_q)
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg_q)
     monkeypatch.setattr(
@@ -735,8 +752,44 @@ def test_audio_speech_with_cloned_voice_across_tiers(
     )
     assert resp_q.status_code == 200
 
+    resp_instruction = client_q.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "播放测试音频",
+            "voice": "serena",
+            "instructions": "清晰自然的中文女声。",
+        },
+    )
+    assert resp_instruction.status_code == 200
+    assert synth_q.requests[-1].instruction == "清晰自然的中文女声。"
+
+    resp_speed = client_q.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "播放测试音频",
+            "voice": "quality_clone_voice",
+            "speed": 1.25,
+        },
+    )
+    assert resp_speed.status_code == 400
+    assert resp_speed.json()["error"]["code"] == "clone_speed_unsupported"
+
+    resp_clone_instruction = client_q.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "播放测试音频",
+            "voice": "quality_clone_voice",
+            "instructions": "清晰自然的中文女声。",
+        },
+    )
+    assert resp_clone_instruction.status_code == 400
+    assert resp_clone_instruction.json()["error"]["code"] == "clone_instruction_unsupported"
+
     # 2. Balanced tier: clone is unavailable, /v1/audio/speech rejects it with 400
-    client_b, reg_b = _make_test_client(tmp_path / "b", "balanced")
+    client_b, reg_b, _synth_b = _make_test_client(tmp_path / "b", "balanced")
     monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", reg_b)
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: reg_b)
     monkeypatch.setattr(

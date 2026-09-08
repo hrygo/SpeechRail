@@ -393,6 +393,15 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         ref_text: str | None = None,
     ) -> Iterator[bytes]:
         if ref_audio is not None or ref_text is not None:
+            # The vendor ICL generator accepts neither speaking-rate controls
+            # nor VoiceDesign sampling controls.  Reject them at the adapter
+            # boundary so a successful response never hides an ignored option.
+            if speed != 1.0:
+                raise ValueError("clone_speed_unsupported")
+            if instruction is not None:
+                raise ValueError("clone_instruction_unsupported")
+            if seed is not None:
+                raise ValueError("clone_seed_unsupported")
             if not ref_audio:
                 raise RuntimeError("failed to load reference audio: file missing")
             if ref_text is None or not ref_text.strip():

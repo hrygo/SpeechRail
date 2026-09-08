@@ -264,7 +264,7 @@ def test_transcription_languages_falls_back_to_first_language() -> None:
     assert seen == ["zh"]
 
 
-def test_speech_accepts_instructions_and_rejects_other_stream_format() -> None:
+def test_speech_rejects_unsupported_instructions_and_other_stream_format() -> None:
     class FakeTTS:
         def synthesize(self, request: object):
             async def chunks():
@@ -290,7 +290,8 @@ def test_speech_accepts_instructions_and_rejects_other_stream_format() -> None:
             "response_format": "pcm",
         },
     )
-    assert ok.status_code == 200
+    assert ok.status_code == 400
+    assert ok.json()["error"]["code"] == "instructions_unsupported"
 
     bad = client.post(
         "/v1/audio/speech",

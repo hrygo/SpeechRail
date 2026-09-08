@@ -1184,6 +1184,30 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     ),
                     param="voice",
                 )
+        if profile.mode == "clone" and body.speed != 1.0:
+            return error_response(
+                400,
+                request_id,
+                "clone_speed_unsupported",
+                "The active clone backend does not support speed control",
+                param="speed",
+            )
+        if body.instructions is not None and tts_variant != "voice_design":
+            return error_response(
+                400,
+                request_id,
+                "instructions_unsupported",
+                "Instructions require an active VoiceDesign TTS profile",
+                param="instructions",
+            )
+        if profile.mode == "clone" and body.instructions is not None:
+            return error_response(
+                400,
+                request_id,
+                "clone_instruction_unsupported",
+                "The active clone backend does not support instructions",
+                param="instructions",
+            )
         if body.stream_format not in (None, "audio"):
             return error_response(
                 422,
@@ -1207,6 +1231,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             output_format="pcm16",
             speed=body.speed,
             language=body.language,
+            instruction=body.instructions,
         )
 
         async def audio_stream(
