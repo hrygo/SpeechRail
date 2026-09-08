@@ -27,9 +27,30 @@ logger = logging.getLogger(__name__)
 
 HANDSHAKE_MODEL_CLOSE_CODE = 4004
 QUEUE_OVERFLOW_CLOSE_CODE = 1013
+OUTBOUND_SEND_TIMEOUT_CLOSE_CODE = 1011
 # Bounded intake so a stalled handler cannot accumulate unbounded base64 audio;
 # 512 events ≈ 16.4s of 32ms audio chunks, accommodating commit/diarization spikes.
 CLIENT_EVENT_QUEUE_LIMIT = 512
+
+
+async def _send_json_with_deadline(
+    websocket: WebSocket, payload: dict[str, object], *, timeout_seconds: float
+) -> bool:
+    """Send one server event without letting a slow consumer pin the session."""
+
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            await websocket.send_json(payload)
+    except TimeoutError:
+        with contextlib.suppress(Exception):
+            await websocket.close(
+                code=OUTBOUND_SEND_TIMEOUT_CLOSE_CODE,
+                reason="outbound send timed out",
+            )
+        return False
+    except (WebSocketDisconnect, RuntimeError):
+        return False
+    return True
 
 
 def create_openai_realtime_router(services: AppServices) -> APIRouter:
@@ -66,13 +87,16 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 payload["event_id"] = f"event_{uuid4().hex}"
                 payload["session_id"] = session_id
                 payload["sequence"] = sequence
-                try:
-                    send_started = time.monotonic()
-                    await websocket.send_json(payload)
-                    services.metrics.record_realtime_phase("send", time.monotonic() - send_started)
-                except (WebSocketDisconnect, RuntimeError):
+                send_started = time.monotonic()
+                sent = await _send_json_with_deadline(
+                    websocket,
+                    payload,
+                    timeout_seconds=settings.request_timeout_seconds,
+                )
+                if not sent:
                     disconnected = True
                     return None
+                services.metrics.record_realtime_phase("send", time.monotonic() - send_started)
                 return sequence
 
         registered_asr = frozenset({settings.model_id, *settings.compatibility_model_ids})
