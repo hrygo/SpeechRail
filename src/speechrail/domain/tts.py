@@ -46,6 +46,7 @@ class VoiceProfile:
     ref_text: str | None = None
     audio_path: str | None = None
     duration_seconds: float = 0.0
+    quality: dict[str, Any] | None = None
 
     @property
     def description(self) -> str:
@@ -70,6 +71,8 @@ class VoiceProfile:
             data["audio_path"] = self.audio_path
         if self.duration_seconds > 0:
             data["duration_seconds"] = self.duration_seconds
+        if self.quality is not None:
+            data["quality"] = self.quality
         return data
 
 
@@ -293,8 +296,15 @@ def transcode_and_validate_clone_audio(
     min_duration: float = 2.0,
     max_duration: float = 45.0,
     target_sample_rate: int = 24_000,
+    skip_signal_validation: bool = False,
 ) -> tuple[bytes, float]:
-    """Transcode user audio into 24kHz mono PCM16 WAV and validate duration limits."""
+    """Transcode user audio into 24kHz mono PCM16 WAV and validate duration limits.
+
+    When ``skip_signal_validation`` is True the clipping/silence/speech signal
+    check is skipped so the authoritative quality gate (``grade_reference_quality``)
+    remains the single classifier for reference audio quality. Size, duration and
+    container-format checks are always enforced.
+    """
     if not audio_bytes:
         raise ValueError("audio content must not be empty")
     if len(audio_bytes) > 15 * 1024 * 1024:
@@ -376,7 +386,8 @@ def transcode_and_validate_clone_audio(
     if duration > max_duration:
         raise ValueError(f"audio duration {duration:.1f}s is too long (maximum {max_duration}s)")
 
-    _validate_clone_audio_signal(wav_bytes, target_sample_rate=target_sample_rate)
+    if not skip_signal_validation:
+        _validate_clone_audio_signal(wav_bytes, target_sample_rate=target_sample_rate)
     return wav_bytes, duration
 
 
@@ -601,6 +612,12 @@ class VoiceRegistry:
                 or float(value) < 0
             ):
                 raise ValueError(f"custom voice {field} is invalid")
+        quality_raw = item.get("quality")
+        quality: dict[str, Any] | None = None
+        if quality_raw is not None:
+            if not isinstance(quality_raw, dict):
+                raise ValueError("custom voice quality must be an object")
+            quality = quality_raw
         return VoiceProfile(
             id=vid,
             name=name,
@@ -614,6 +631,7 @@ class VoiceRegistry:
             ref_text=ref_text,
             audio_path=audio_path,
             duration_seconds=float(duration_seconds),
+            quality=quality,
         )
 
     def _controlled_audio_path(
@@ -860,6 +878,7 @@ class VoiceRegistry:
         audio_bytes: bytes,
         voice_id: str | None = None,
         duration_seconds: float,
+        quality: dict[str, Any] | None = None,
     ) -> VoiceProfile:
         if not name.strip():
             raise ValueError("voice name must not be empty")
@@ -880,6 +899,8 @@ class VoiceRegistry:
             or duration_seconds < 0
         ):
             raise ValueError("duration_seconds must be a non-negative number")
+        if quality is not None and not isinstance(quality, dict):
+            raise ValueError("quality must be an object")
 
         with self._lock:
             self._ensure_available_locked(reload=True)
@@ -901,6 +922,7 @@ class VoiceRegistry:
                 ref_text=ref_text.strip(),
                 audio_path=str(target_file),
                 duration_seconds=round(float(duration_seconds), 2),
+                quality=quality,
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
