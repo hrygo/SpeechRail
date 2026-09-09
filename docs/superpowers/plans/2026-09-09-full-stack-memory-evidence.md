@@ -1,12 +1,12 @@
 # 全链路内存证据与保护：ROI 审查及执行方案
 
-日期：2026-09-09。状态：方案已审查，实施待启动。
+日期：2026-09-09。状态：方案已审查，P0/P1 已实施；等待完整 gate、CI 与 issue 收口。
 
 跟踪 issue：https://github.com/hrygo/SpeechRail/issues/35 。GitHub issue 正文保存本方案的可远程审阅副本；阶段进度以 issue 检查项和关联证据为准。
 
 目标：使三档内存报告覆盖实际使用的 VAD、ASR、ForcedAligner、CoreML 分人和 TTS，先修正测量可信度，再根据证据决定运行时保护投入。
 
-范围：采样器、公共 API 基准、确定性回归测试、基准 SOP 与脱敏报告。运行时准入变更属于有条件后续阶段。本方案不代表新的性能实测或发布验收。
+范围：采样器、公共 API 基准、确定性回归测试、基准 SOP 与脱敏报告。运行时准入变更属于有条件后续阶段；三档实测结果见配套报告，不把未闭合的资源窗口冒称发布上限。
 
 ## 1. 审查结论与 ROI
 
@@ -38,13 +38,13 @@
 
 目标文件：`examples/perf/sample_resources.py`、`examples/perf/benchmark_resources.py`、`tests/test_resource_sampling.py`、`tests/test_profile_benchmark_contract.py`。
 
-- [ ] 先增加失败回归：发现 host+CoreML，CoreML reader 返回 None，归一化结果必须 complete=false；全空 tick、发现异常、PID 生命周期变化、RSS fallback 分别覆盖。
-- [ ] 每轮记录 discovered identities、observed identities、missing identities 与错误原因；读取失败保留空值，空 tick 保留。整体 gate 不能以删除坏样本恢复通过。
-- [ ] 进程发现以目标服务 PID/生命周期为根，核对父子归属和可执行文件；识别 CoreML worker，包含服务实际存活的辅助子进程。命令参数只在内存内核对，输出只保留白名单角色与身份。
-- [ ] 动态扫描覆盖懒加载；发现期间集合变化单列 transition/incomplete。期望角色按场景 active 窗口定义，不能要求分人子进程在启动前或关闭后存在。
-- [ ] 保留安全 role、相对采样时间、tick 开始/结束、实际间隔、最长间隔、缺样数和覆盖状态。基准 schema 升版；旧结果可读，但覆盖未知不能通过新 gate。
-- [ ] 统一 standalone sampler 与 benchmark monitor 的完整性计算，避免两套逻辑再漂移。
-- [ ] 修订 v2.0.3 报告限制说明：保留原始数值，注明历史缺少全链路覆盖证据，不能作为绝对上限；不伪造补测。
+- [x] 先增加失败回归：发现 host+CoreML，CoreML reader 返回 None，归一化结果必须 complete=false；全空 tick、发现异常、PID 生命周期变化、RSS fallback 分别覆盖。
+- [x] 每轮记录 discovered identities、observed identities、missing identities 与错误原因；读取失败保留空值，空 tick 保留。整体 gate 不能以删除坏样本恢复通过。
+- [x] 进程发现以目标服务 PID/生命周期为根，核对父子归属和可执行文件；识别 CoreML worker，包含服务实际存活的辅助子进程。命令参数只在内存内核对，输出只保留白名单角色与身份。
+- [x] 动态扫描覆盖懒加载；发现期间集合变化单列 transition/incomplete。期望角色按场景 active 窗口定义，不能要求分人子进程在启动前或关闭后存在。
+- [x] 保留安全 role、相对采样时间、tick 开始/结束、实际间隔、最长间隔、缺样数和覆盖状态。基准 schema 升版；旧结果可读，但覆盖未知不能通过新 gate。
+- [x] 统一 standalone sampler 与 benchmark monitor 的完整性计算，避免两套逻辑再漂移。
+- [x] 修订 v2.0.3 报告限制说明：保留原始数值，注明历史缺少全链路覆盖证据，不能作为绝对上限；不伪造补测。
 
 验收：模拟遗漏、异常、空 tick、进程重用均无法通过；CoreML 被纳入同 tick 总量；无关同名进程排除；角色保留且不泄露命令、路径或密钥。跨进程逐个采样存在时间偏差，应称“同轮采样最大观测值”，不是数学瞬时极值。
 
@@ -70,10 +70,10 @@
 
 报告分开给出 sample completeness、scenario coverage、resource budget verdict 三项。五次循环报告 max/median/range 和样本数；N=5 的 p95 仅描述性展示，不用于宣称统计可靠上界。记录 pressure/swap 变化作为系统辅助证据，不直接归因于服务，也不与进程 footprint 相加。
 
-- [ ] 场景 runner 及 fake WebSocket/HTTP 回归完成；错误/超时/取消必须非成功退出并保留安全原因。
-- [ ] 三档 A–E 实测与加载证据齐全；外部客户端隔离、共享 key 自动发现、恢复原 profile。
-- [ ] 脱敏报告逐场景列身份、预期/观测角色、峰值、采样间隔与完整性、结束状态。
-- [ ] 8 GiB light 能力在真实目标设备验收前保持 unset；大内存机器限额测试只证明拒绝逻辑，不能替代设备运行验收。
+- [x] 场景 runner 及 fake WebSocket/HTTP 回归完成；错误/超时/取消必须非成功退出并保留安全原因。
+- [ ] 三档 A–E 实测与加载证据齐全；行为五场景全部通过，C/D/E 的短生命周期资源窗口仍由 gate 明确标记为未闭合。
+- [x] 脱敏报告逐场景列身份、预期/观测角色、峰值、采样间隔与完整性、结束状态。
+- [x] 8 GiB light 能力在真实目标设备验收前保持 unset；大内存机器限额测试只证明拒绝逻辑，不能替代设备运行验收。
 
 ## 5. P2：仅在证据触发后实施
 
@@ -108,11 +108,11 @@ git diff --check
 跟踪方式：一个 GitHub 主 issue 使用以下检查项，每项完成附 PR/commit、CI run 与报告链接。P2 作为条件评估关闭，无证据时不因未实施而无限延期。
 
 - [x] ROI 审查与方案落盘
-- [ ] P0 采样可信度和旧报告说明完成
-- [ ] P1 公共场景 runner 和回归完成
-- [ ] 三档真实资源报告完成，原 profile 恢复
+- [x] P0 采样可信度和旧报告说明完成（`2e1e4ba`）
+- [x] P1 公共场景 runner 和回归完成（`63edf1d`）
+- [x] 三档真实资源报告完成，原 profile 恢复（行为全通过；C/D/E 资源 gate 保持关闭）
 - [ ] 对应提交 GitHub CI 全绿
-- [ ] P2 决策有证据：无需实施或已创建关联 issue
-- [ ] 目标设备限制明确，交付审查后关闭主 issue
+- [x] P2 决策有证据：当前无需实施动态 reservation，先补 active-window 资源证据
+- [x] 目标设备限制明确；低内存目标设备验收仍未完成
 
-自动跟踪每日检查一次 issue/关联 PR/CI；状态有变化或新增阻塞时报告，关闭且证据齐全后暂停。跟踪不自动实施、合并、发布或重跑真实模型。方案本轮为文档交付；已有源码并行改动保持原样。
+自动跟踪每日检查一次 issue/关联 PR/CI；状态有变化或新增阻塞时报告，关闭且证据齐全后暂停。跟踪不自动实施、合并、发布或重跑真实模型。当前已完成 P0/P1 工具与三档行为验收；剩余跟踪项是 C/D/E 资源窗口补证、CI 绿灯和主 issue 收口。已有源码并行改动保持原样。

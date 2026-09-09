@@ -4,6 +4,9 @@
 
 ## 最新三档性能基准（v2.0.3，显式三档）
 
+> **全链路复核**：在原有基础基准之外，v2.0.3 已执行包含 `server_vad`、REST/RealtIme 分人、TTS 共存和生命周期的三档场景套件。行为场景全部通过；A/B 资源采样完整，C/D/E 因短生命周期 CoreML 身份 transition 或角色窗口未闭合而保持资源 gate closed，不把部分观测值冒称上限。最终恢复 `quality`。详见
+> [v2.0.3 全链路内存证据与三档场景基准](2026-09-09-v2.0.3-full-stack-memory-evidence.md)。
+
 > **结论**：v2.0.3 已按 `quality → balanced → light → quality` 完成三档性能套件。每档 HTTP ASR/TTS 36/36、Realtime 3/3 与 `phys_footprint` 采样均通过，最终恢复 `quality`；相对 v1.13.0 未观察到大回归。独立 ASR 质量、MOS/ABX、speaker embedding、跨重启音色稳定性和长时 soak 未执行，性能回归 gate 保持 `unset`。详见
 > [v2.0.3 性能与质量基准](2026-09-09-v2.0.3-performance-benchmark.md)。
 
@@ -111,6 +114,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v2.0.3 全链路复核** | [2026-09-09-v2.0.3-full-stack-memory-evidence.md](2026-09-09-v2.0.3-full-stack-memory-evidence.md) | VAD、REST/Realtime 分人、TTS 共存与生命周期；三档行为全通过；A/B 资源证据完整，C/D/E 资源 gate 保持关闭；不提前实施动态 reservation |
 | **v2.0.3** | [2026-09-09-v2.0.3-performance-benchmark.md](2026-09-09-v2.0.3-performance-benchmark.md) | 显式三档完整性能基准；HTTP ASR/TTS、Realtime 与物理 footprint 采样通过；固化 managed CLI、自动鉴权发现和 CI runner 修复；独立质量与性能回归 gate unset |
 | **v2.0.2** | [2026-09-09-v2.0.2-performance-benchmark.md](2026-09-09-v2.0.2-performance-benchmark.md) | 显式三档完整性能基准；ASR/TTS、Realtime、VAD 与物理 footprint 采样通过；独立质量、长时 soak 与性能回归 gate unset |
 | **v1.13.1** | [2026-09-08-v1.13.1-performance-benchmark.md](2026-09-08-v1.13.1-performance-benchmark.md) | PATCH quality；wheel/managed runtime、公共 smoke、warm N=5 与完整资源采样通过；完整质量与切换 gate unset |
