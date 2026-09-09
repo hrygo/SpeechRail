@@ -268,6 +268,62 @@ Authorization: Bearer <TOKEN>
 因此后端或编码失败时仍能返回统一错误 envelope。`balanced` 和 `light` 返回
 `400 voice_preview_unsupported`；预览错误仍包含 `code`、`request_id` 和 `retryable`。
 
+### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
+
+质量档（`quality` / `voice_design`）支持从参考音频 + 脚本文本克隆自定义音色。克隆走 `voice_design` 权重；`balanced` / `light` 档调用返回 `400 voice_cloning_unsupported`。三个接口共用同一套 `VoiceQualityReport` 结构，由 `voice_quality_v1` 策略门控。
+
+#### 5.7.1 克隆并注册音色 (`POST /v1/voices/clone`)
+
+与 `POST /v1/voices`（自然语言设计）不同，克隆使用 `multipart/form-data`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `audio` | binary | 是 | 参考音频（WebM/WAV/MP3 等），最大 15MB |
+| `ref_text` | string | 是 | 用户朗读的参考脚本文本，最长 2000 字符 |
+| `name` | string | 是 | 克隆音色展示名称，最长 32 字符 |
+| `id` | string | 否 | 可选音色标识符，匹配 `^[a-zA-Z0-9_-]{1,64}$` |
+
+- **幂等**：可选 `Idempotency-Key` 请求头用于去重重试。缓存键为 `(Idempotency-Key, audio 的 SHA-256, ref_text)`；命中时直接 `201` 回放已注册的 `VoiceProfile`，不重复推理。缓存为进程内内存态，服务重启即失效，非持久化幂等。同一 key 下音频或 `ref_text` 变化即视为新请求，重新走质量分级，仍可能被 `voice_quality_reject` 拒绝。
+- **质量门控**：参考音频通过信号校验后按 `voice_quality_v1` 策略打分。
+  - `status=reject`：拒绝注册，返回 `400`，错误 envelope 为 `{"error": {"code": "voice_quality_reject", ...}, "quality_report": {...}}`（`quality_report` 与 `error` 同级）。客户端以响应体 `error.code` 作为可见的错误码信号；服务端内部通过 `X-SpeechRail-Error-Code` 响应头把错误码交给观测中间件消费，该头在到达客户端前已被中间件移除，不属于客户端可见契约。
+  - `status=warn` 或 `pass`：正常注册，`201` 返回的 `VoiceProfile` 携带 `quality` 字段（即该报告，含 `status` 与 `run_id`）。
+- 注册写入受控目录失败返回 `503 voice_store_unavailable`（可重试）；注册结构非法返回 `400 voice_creation_failed`。
+
+#### 5.7.2 仅校验不注册 (`POST /v1/voices/clone/validate`)
+
+请求体与 `/v1/voices/clone` 完全一致（同样的 multipart 与档位/字段校验），但不创建也不持久化任何 `VoiceProfile`，不写 `custom_voices.json` 或音频文件。只要通过字段与音频格式校验，无论结果如何都返回 `200` + 完整 `VoiceQualityReport`——包括 `status=reject` 的报告，供调用方在注册前预检。
+
+#### 5.7.3 音色质量探针 (`POST /v1/voices/{voice_id}/quality-runs`)
+
+对已注册音色运行有界质量探针并返回 `VoiceQualityReport`。请求体为 JSON：
+
+```json
+{ "probe_set": "voice_quality_v1_zh", "runs": 3, "include_audio": false }
+```
+
+- `probe_set`：仅支持 `voice_quality_v1_zh`（默认值，可省略）；其他值返回 `422 validation_error`。
+- `runs`：整数，范围 `1..3`（默认 `3`）；越界返回 `422 validation_error`。
+- `include_audio`：布尔，默认 `false`。当前未实现内联音频试听，传入 `true` 直接返回 `422 include_audio_unsupported`。
+- 探针按 `voice_quality_v1_zh` 内置固定脚本逐条合成，首条为“请进行自我介绍”。
+- 全部探针合成成功返回 `status=pass`、`failure_codes=[]`；合成失败返回 `status=reject`，`failure_codes` 取合成侧码 `probe_failed`、`clone_speed_unsupported` 或 `output_invalid`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
+- 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
+
+#### 5.7.4 `VoiceQualityReport` 结构与向后兼容
+
+报告顶层字段：
+
+| 字段 | 说明 |
+|---|---|
+| `policy_version` | 门控策略版本，当前固定 `voice_quality_v1` |
+| `status` | `pass` / `warn` / `reject`。服务端响应对象永远不会下发 `status=unevaluated`；该值仅存在于 schema 枚举中，客户端在 `quality` 字段缺失时自行按“未评估”展示 |
+| `run_id` | 本次质量运行的唯一标识 |
+| `tested_at` | 测试时间（ISO 8601 UTC） |
+| `reference` | 参考音频信号指标（时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；`transcript_match` 始终为 `null`，因为实现未启用 ASR 文本匹配，从不计算该分数） |
+| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`） |
+| `failure_codes` | 失败原因数组。参考侧（克隆参考音频门禁）：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧（质量探针输出）：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded` |
+
+**向后兼容**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及历史遗留记录不携带 `quality` 字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过；服务端不会在响应中下发 `status=unevaluated`。
+
 ---
 
 ## 6. 全双工 Realtime WebSocket (`WS /v1/realtime`)
