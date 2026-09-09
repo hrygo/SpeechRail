@@ -488,6 +488,9 @@ def test_negotiated_session_sends_unique_items_without_legacy_segments() -> None
         assert committed1["type"] == "input_audio_buffer.committed"
         assert not committed1["item_id"].endswith("_input")
         assert completed1["type"] == "conversation.item.input_audio_transcription.completed"
+        assert completed1["event_version"] == 1
+        assert completed1["diagnostics"]["alignment"]["status"] == "aligned"
+        assert completed1["diagnostics"]["unit_count"] == len(completed1["attribution_units"])
         assert completed1["audio_start_sample"] == 0
         assert completed1["audio_end_sample"] == 8000
         units = completed1["attribution_units"]

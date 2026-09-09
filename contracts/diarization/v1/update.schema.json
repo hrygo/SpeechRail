@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": [
     "type",
+    "event_version",
     "group_generation",
     "stable_through_sample",
     "updates",
@@ -14,6 +15,7 @@
   ],
   "properties": {
     "type": {"const": "speechrail.diarization.update"},
+    "event_version": {"const": 1},
     "group_generation": {"type": ["string", "null"], "minLength": 1},
     "stable_through_sample": {"type": "integer", "minimum": 0},
     "updates": {

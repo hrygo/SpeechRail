@@ -1042,6 +1042,13 @@ class OpenAIRealtimeSession:
                 audio_start_sample=self._item_start_sample,
                 audio_end_sample=max(self._item_end_sample, self._item_start_sample),
                 attribution_units=[],
+                diagnostics={
+                    "alignment": {
+                        "status": "not_applicable",
+                        "reason": "empty_transcript",
+                    },
+                    "unit_count": 0,
+                },
             )
         return transcription_completed(item_id=self._current_item_id, transcript=transcript)
 
@@ -1326,6 +1333,29 @@ class OpenAIRealtimeSession:
                                     self._item_end_sample, self._item_start_sample
                                 ),
                                 attribution_units=self._render_units(units),
+                                diagnostics={
+                                    "alignment": {
+                                        "status": (
+                                            "aligned"
+                                            if units
+                                            and all(
+                                                unit.timing_quality == "aligned"
+                                                for unit in units
+                                            )
+                                            else "unavailable"
+                                        ),
+                                        "reason": (
+                                            None
+                                            if units
+                                            and all(
+                                                unit.timing_quality == "aligned"
+                                                for unit in units
+                                            )
+                                            else self._degraded_reason or "alignment_unavailable"
+                                        ),
+                                    },
+                                    "unit_count": len(units),
+                                },
                             )
                         )
                         await self._register_units(units)

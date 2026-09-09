@@ -1,5 +1,6 @@
 {
   "type": "conversation.item.input_audio_transcription.completed",
+  "event_version": 1,
   "item_id": "item_example_2",
   "content_index": 0,
   "transcript": "同意。",
@@ -14,5 +15,9 @@
       "audio_end_sample": 52800,
       "timing_quality": "aligned"
     }
-  ]
+  ],
+  "diagnostics": {
+    "alignment": {"status": "aligned", "reason": null},
+    "unit_count": 1
+  }
 }

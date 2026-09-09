@@ -1,5 +1,6 @@
 {
   "type": "speechrail.diarization.update",
+  "event_version": 1,
   "group_generation": null,
   "stable_through_sample": 52800,
   "updates": [

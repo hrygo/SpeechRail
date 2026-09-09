@@ -1,5 +1,6 @@
 {
   "type": "conversation.item.input_audio_transcription.completed",
+  "event_version": 1,
   "item_id": "item_example_3",
   "content_index": 0,
   "transcript": "那个信号不太好。",
@@ -14,5 +15,9 @@
       "audio_end_sample": 104000,
       "timing_quality": "unavailable"
     }
-  ]
+  ],
+  "diagnostics": {
+    "alignment": {"status": "unavailable", "reason": "alignment_unavailable"},
+    "unit_count": 1
+  }
 }

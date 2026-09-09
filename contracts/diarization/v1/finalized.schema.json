@@ -7,6 +7,7 @@
   "additionalProperties": false,
   "required": [
     "type",
+    "event_version",
     "finalization_id",
     "through_sample",
     "stable_through_sample",
@@ -16,6 +17,7 @@
   ],
   "properties": {
     "type": {"const": "speechrail.diarization.finalized"},
+    "event_version": {"const": 1},
     "finalization_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "through_sample": {"type": "integer", "minimum": 0},
     "stable_through_sample": {"type": "integer", "minimum": 0},

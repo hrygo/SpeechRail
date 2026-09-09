@@ -7,15 +7,18 @@
   "additionalProperties": false,
   "required": [
     "type",
+    "event_version",
     "item_id",
     "content_index",
     "transcript",
     "audio_start_sample",
     "audio_end_sample",
-    "attribution_units"
+    "attribution_units",
+    "diagnostics"
   ],
   "properties": {
     "type": {"const": "conversation.item.input_audio_transcription.completed"},
+    "event_version": {"const": 1},
     "item_id": {"type": "string", "minLength": 1, "maxLength": 128},
     "content_index": {"type": "integer", "minimum": 0},
     "transcript": {"type": "string"},
@@ -25,6 +28,23 @@
       "type": "array",
       "maxItems": 4096,
       "items": {"$ref": "#/$defs/unit"}
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["alignment", "unit_count"],
+      "properties": {
+        "alignment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason"],
+          "properties": {
+            "status": {"enum": ["aligned", "unavailable", "not_applicable"]},
+            "reason": {"type": ["string", "null"], "minLength": 1}
+          }
+        },
+        "unit_count": {"type": "integer", "minimum": 0}
+      }
     }
   },
   "$defs": {

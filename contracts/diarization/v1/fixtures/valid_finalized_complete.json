@@ -1,5 +1,6 @@
 {
   "type": "speechrail.diarization.finalized",
+  "event_version": 1,
   "finalization_id": "final_example_1",
   "through_sample": 716800,
   "stable_through_sample": 716800,

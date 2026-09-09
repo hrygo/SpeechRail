@@ -5,9 +5,10 @@
   "description": "speechrail.diarization.status: delivered at most once per session on the active-to-degraded transition, after terminating pending attribution units as unknown.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["type", "status", "reason", "since_sample"],
+  "required": ["type", "event_version", "status", "reason", "since_sample"],
   "properties": {
     "type": {"const": "speechrail.diarization.status"},
+    "event_version": {"const": 1},
     "status": {"const": "degraded"},
     "reason": {
       "enum": [

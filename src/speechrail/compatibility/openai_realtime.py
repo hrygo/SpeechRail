@@ -19,6 +19,7 @@ from typing import Any, Literal
 from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, resolve_voice
 
 _PROTOCOL_VERSION = "realtime=v1"
+_DIARIZATION_EVENT_VERSION = 1
 RealtimeWireProfile = Literal["legacy", "current"]
 _ASR_MODEL_ALIASES = {
     "whisper-1": "speechrail/qwen3-asr-1.7b",
@@ -243,10 +244,12 @@ def transcription_completed_extension(
     audio_start_sample: int,
     audio_end_sample: int,
     attribution_units: list[dict[str, object]],
+    diagnostics: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """Opted-in diarization mode: session-sample bounds and immutable units."""
-    return {
+    """Opted-in diarization mode: source item bounds, units and diagnostics."""
+    payload: dict[str, object] = {
         "type": "conversation.item.input_audio_transcription.completed",
+        "event_version": _DIARIZATION_EVENT_VERSION,
         "item_id": item_id,
         "content_index": 0,
         "transcript": transcript,
@@ -254,6 +257,9 @@ def transcription_completed_extension(
         "audio_end_sample": audio_end_sample,
         "attribution_units": attribution_units,
     }
+    if diagnostics is not None:
+        payload["diagnostics"] = diagnostics
+    return payload
 
 
 def diarization_update_item(
@@ -291,6 +297,7 @@ def diarization_update_event(
     """Render a ``speechrail.diarization.updated`` event."""
     return {
         "type": "speechrail.diarization.updated",
+        "event_version": _DIARIZATION_EVENT_VERSION,
         "group_generation": group_generation,
         "stable_through_sample": stable_through_sample,
         "updates": updates,
@@ -306,6 +313,7 @@ def diarization_status_event(
     """Render the one-shot ``speechrail.diarization.status`` degraded notice."""
     return {
         "type": "speechrail.diarization.status",
+        "event_version": _DIARIZATION_EVENT_VERSION,
         "status": "degraded",
         "reason": reason,
         "since_sample": since_sample,
@@ -324,6 +332,7 @@ def diarization_done_event(
     """Render the terminal ``speechrail.diarization.done`` barrier event."""
     return {
         "type": "speechrail.diarization.done",
+        "event_version": _DIARIZATION_EVENT_VERSION,
         "finalization_id": finalization_id,
         "through_sample": through_sample,
         "stable_through_sample": stable_through_sample,
