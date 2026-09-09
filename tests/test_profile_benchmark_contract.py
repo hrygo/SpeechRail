@@ -38,6 +38,7 @@ def test_profile_benchmark_has_one_modular_entrypoint() -> None:
     assert (examples_root / "benchmark_http.py").is_file()
     assert (examples_root / "benchmark_resources.py").is_file()
     assert (examples_root / "benchmark_runner.py").is_file()
+    assert (examples_root / "benchmark_scenarios.py").is_file()
     assert not (
         Path(__file__).resolve().parents[1]
         / ".agents"
@@ -54,6 +55,7 @@ def test_perf_clients_use_shared_api_key_discovery() -> None:
         project_root / "examples" / "perf" / "bench_asr.py",
         project_root / "examples" / "perf" / "bench_tts.py",
         project_root / "examples" / "perf" / "bench_realtime.py",
+        project_root / "examples" / "perf" / "benchmark_scenarios.py",
         project_root / "examples" / "perf" / "concurrent_realtime_smoke.py",
         project_root
         / ".agents"
@@ -234,6 +236,46 @@ def test_resource_normalisation_retains_empty_tick_as_incomplete() -> None:
         {"at_seconds": 1.0, "processes": [], "complete": False}
     ]
     assert normalised["sampling_complete"] is False
+
+
+def test_resource_normalisation_keeps_timing_and_role_transitions() -> None:
+    process = {
+        "role": "host-fastapi",
+        "pid": 100,
+        "start_time_ns": 1,
+        "rss_bytes": 100,
+        "phys_footprint_bytes": 200,
+    }
+    normalised = benchmark_resources._normalise_resources(
+        {
+            "process_samples": [
+                {
+                    "at_seconds": 0.0,
+                    "ended_at_seconds": 0.01,
+                    "duration_seconds": 0.01,
+                    "discovered_roles": ["host-fastapi"],
+                    "processes": [process],
+                },
+                {
+                    "at_seconds": 0.5,
+                    "ended_at_seconds": 0.51,
+                    "duration_seconds": 0.01,
+                    "discovered_roles": ["host-fastapi", "tts"],
+                    "processes": [process],
+                },
+            ],
+            "resource_sampler": {
+                "sampling_span_seconds": 0.52,
+                "observation_seconds": 0.02,
+                "max_tick_span_seconds": 0.01,
+            },
+        }
+    )
+
+    assert normalised["role_transitions"] == [1]
+    assert normalised["observed_roles"] == ["host-fastapi", "tts"]
+    assert normalised["samples"][1]["ended_at_seconds"] == 0.51
+    assert normalised["sampler"]["sampling_span_seconds"] == 0.52
 
 
 class _FakeHttpRunner:

@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Protocol, cast
 
 try:
@@ -127,8 +128,14 @@ class ProcessResourceMonitor:
         self._samples: list[dict[str, object]] = []
         self._error: BaseException | None = None
         self._started = False
+        self._started_at: float | None = None
+        self._observation_seconds = 0.0
+        self._max_tick_span_seconds = 0.0
 
     def _collect_tick(self) -> None:
+        tick_started_at = time.monotonic()
+        if self._started_at is None:
+            self._started_at = tick_started_at
         discovered = dict(self._discover())
         processes: list[dict[str, object]] = []
         missing_roles: list[str] = []
@@ -153,9 +160,17 @@ class ProcessResourceMonitor:
                     "phys_footprint_bytes": footprint_bytes,
                 }
             )
+        tick_ended_at = time.monotonic()
+        tick_duration = max(0.0, tick_ended_at - tick_started_at)
+        self._observation_seconds += tick_duration
+        self._max_tick_span_seconds = max(self._max_tick_span_seconds, tick_duration)
+        relative_started = max(0.0, tick_started_at - self._started_at)
+        relative_ended = max(0.0, tick_ended_at - self._started_at)
         self._samples.append(
             {
-                "at_seconds": time.monotonic(),
+                "at_seconds": relative_started,
+                "ended_at_seconds": relative_ended,
+                "duration_seconds": tick_duration,
                 "processes": processes,
                 "discovered_roles": sorted(discovered),
                 "missing_roles": sorted(missing_roles),
@@ -176,6 +191,7 @@ class ProcessResourceMonitor:
         if self._started:
             raise RuntimeError("resource monitor already started")
         self._started = True
+        self._started_at = time.monotonic()
         self._thread = threading.Thread(
             target=self._run,
             name="speechrail-resource-monitor",
@@ -193,6 +209,7 @@ class ProcessResourceMonitor:
                 raise RuntimeError("resource monitor stop timed out")
         if self._error is not None:
             raise RuntimeError("resource monitor failed") from self._error
+        started_at = self._started_at if self._started_at is not None else time.monotonic()
         hardware = _hardware_snapshot(source="sample_resources")
         return {
             "hardware": hardware,
@@ -205,6 +222,10 @@ class ProcessResourceMonitor:
                 "source": "sample_resources",
                 "schema_version": 2,
                 "role_aware": True,
+                "interval_seconds": self._interval_seconds,
+                "sampling_span_seconds": max(0.0, time.monotonic() - started_at),
+                "observation_seconds": self._observation_seconds,
+                "max_tick_span_seconds": self._max_tick_span_seconds,
             },
         }
 
@@ -353,6 +374,8 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
     raw_tick_count = 0
     complete_tick_count = 0
     invalid_tick_seen = False
+    observed_roles: set[str] = set()
+    role_sets: list[tuple[str, ...]] = []
     if isinstance(raw_ticks, Sequence) and not isinstance(raw_ticks, (str, bytes, bytearray)):
         for tick in raw_ticks:
             raw_tick_count += 1
@@ -436,12 +459,32 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
                 and set(rss_tick) == set(footprint_tick)
                 and tick.get("complete", True) is not False
             )
-            at = tick.get("at", tick.get("at_seconds"))
+            at_raw = tick.get("at", tick.get("at_seconds"))
+            at = (
+                float(at_raw)
+                if isinstance(at_raw, (int, float))
+                and not isinstance(at_raw, bool)
+                and math.isfinite(float(at_raw))
+                and float(at_raw) >= 0
+                else None
+            )
             sanitized_tick: dict[str, object] = {
-                "at_seconds": at if isinstance(at, (int, float)) else None,
+                "at_seconds": at,
                 "processes": output_processes,
                 "complete": tick_complete,
             }
+            for timing_key in ("ended_at_seconds", "duration_seconds"):
+                timing_value = tick.get(timing_key)
+                if (
+                    isinstance(timing_value, (int, float))
+                    and not isinstance(timing_value, bool)
+                    and math.isfinite(float(timing_value))
+                    and float(timing_value) >= 0
+                ):
+                    sanitized_tick[timing_key] = float(timing_value)
+            if at is None:
+                invalid_tick_seen = True
+                sanitized_tick["complete"] = False
             discovered_roles = tick.get("discovered_roles")
             missing_roles = tick.get("missing_roles")
             role_fields = (
@@ -463,8 +506,16 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
                         )
                     ]
                     sanitized_tick[key] = safe_roles
+                    if key == "discovered_roles":
+                        role_set = tuple(sorted(set(safe_roles)))
+                        role_sets.append(role_set)
+                        observed_roles.update(role_set)
+            for process in output_processes:
+                role = process.get("role")
+                if isinstance(role, str):
+                    observed_roles.add(role)
             sanitized_ticks.append(sanitized_tick)
-            if tick_complete:
+            if sanitized_tick["complete"] is True:
                 complete_tick_count += 1
                 rss_snapshots.append(rss_tick)
                 footprint_snapshots.append(footprint_tick)
@@ -479,9 +530,16 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
 
     rss_peak = _peak(rss_snapshots)
     footprint_peak = _peak(footprint_snapshots)
+    role_transitions = [
+        index
+        for index, (previous, current) in enumerate(pairwise(role_sets), start=1)
+        if previous != current
+    ]
     return {
         "sampler": sampler,
         "samples": sanitized_ticks,
+        "observed_roles": sorted(observed_roles),
+        "role_transitions": role_transitions,
         "simultaneous_peak": {
             "rss_bytes": rss_peak,
             "phys_footprint_bytes": footprint_peak,
