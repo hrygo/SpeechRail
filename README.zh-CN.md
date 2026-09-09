@@ -40,6 +40,7 @@
 - 👥 **可选多人讲话人分离 (Speaker Diarization)**：`gpt-4o-transcribe-diarize` 返回 OpenAI 风格、会话范围的匿名标签 `diarized_json`。它使用锁定的 FluidAudio CoreML FP16 Sortformer Worker；Realtime 通过 `session.speechrail.diarization.enabled` 显式开启扩展。
 - 🎚️ **动态三档资源匹配**：针对 8GB 到 128GB 的 Apple Silicon 芯片深度调优（Light / Balanced / Quality），一键无感热切换。
 - 🎙️ **9 种跨档高质量内置音色**：原生集成 Qwen3-TTS 语音能力，涵盖中文、英语、粤语、日语、韩语等丰富声学角色。
+- 🛡️ **质量门控音色克隆**：`quality` 档支持从参考音频 + 朗读脚本文本克隆自定义音色（`POST /v1/voices/clone`），可在不落库的情况下预检参考音频质量（`POST /v1/voices/clone/validate`），并可对任意已注册音色执行有界质量探针（`POST /v1/voices/{voice_id}/quality-runs`）。三者共用 `voice_quality_v1` 报告契约，详见[克隆音色质量门禁与自量保障契约](docs/architecture/voice-clone-quality-gates-and-contract.md)。
 
 ---
 
@@ -458,7 +459,7 @@ SpeechRail 的核心性能来自于 Apple MLX 框架对 **Apple Silicon 统一�
 | 🔌 **API 开发者** | [用户与客户端集成指南](docs/users/README.md) · [OpenAI 兼容契约详解](docs/users/api-contract.md) · [OpenAPI 规范](contracts/openapi.yaml) |
 | 🛠️ **系统运维** | [运维中心](docs/operations/README.md) · [受管运行时部署说明](docs/operations/runtime-deployment.md) · [分人验收报告](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md) · [安全与可观测性](docs/operations/security-observability.md) |
 | 🧪 **代码贡献者** | [开发者中心](docs/developers/README.md) · [本地测试与验收套件](docs/developers/testing-acceptance.md) |
-| 📐 **架构评审** | [系统架构全景](docs/architecture/README.md) · [分人端到端设计](docs/architecture/speaker-diarization-e2e-design.md) · [当前边界与权衡](docs/architecture/current-boundaries.md) · [架构决策记录 (ADRs)](docs/decisions/README.md) |
+| 📐 **架构评审** | [系统架构全景](docs/architecture/README.md) · [分人端到端设计](docs/architecture/speaker-diarization-e2e-design.md) · [克隆音色质量门禁与自量保障契约](docs/architecture/voice-clone-quality-gates-and-contract.md) · [当前边界与权衡](docs/architecture/current-boundaries.md) · [架构决策记录 (ADRs)](docs/decisions/README.md) |
 
 ---
 

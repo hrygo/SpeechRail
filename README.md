@@ -275,6 +275,7 @@ SpeechRail exposes a unified API contract while internally adapting across Apple
 - **Efficient Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR model; `balanced` and `light` share the same 0.6B CustomVoice TTS model.
 - **Configurable Idle Eviction**: The default idle timeout is **300 seconds**. It can be changed with `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` or disabled with `0`; measured post-eviction footprint remains runtime- and profile-dependent.
 - **VoiceDesign Boundary**: Only the `quality` tier supports creating novel custom voices via natural language prompts (VoiceDesign). In `balanced`/`light`, custom voices are declared as `available=false`, restoring automatically when switched back to `quality`.
+- **Quality-Gated Voice Cloning**: On the `quality` tier, clone a custom voice from a reference audio clip + read script (`POST /v1/voices/clone`), pre-flight validate the reference without persisting (`POST /v1/voices/clone/validate`), and run bounded quality probes on any registered voice (`POST /v1/voices/{voice_id}/quality-runs`). All three share the `voice_quality_v1` report contract. See the [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).
 
 ### 2. 9 Cross-Profile Built-in Voices
 
@@ -467,7 +468,7 @@ The realtime voice-activity detector uses `realtime_vad_engine` (`auto` by defau
 | 🔌 **API Developers** | [User & Client Integration Guide](docs/users/README.md) · [OpenAI Compatibility Contract](docs/users/api-contract.md) · [OpenAPI Specification](contracts/openapi.yaml) |
 | 🛠️ **System Operators** | [Operations Center](docs/operations/README.md) · [Managed Runtime Deployment](docs/operations/runtime-deployment.md) · [Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md) · [Security & Observability](docs/operations/security-observability.md) |
 | 🧪 **Code Contributors** | [Developer Center](docs/developers/README.md) · [Testing & Acceptance Suite](docs/developers/testing-acceptance.md) |
-| 📐 **Architecture Review** | [System Architecture Overview](docs/architecture/README.md) · [Speaker Diarization E2E](docs/architecture/speaker-diarization-e2e-design.md) · [Current Boundaries & Trade-offs](docs/architecture/current-boundaries.md) · [Architecture Decision Records (ADRs)](docs/decisions/README.md) |
+| 📐 **Architecture Review** | [System Architecture Overview](docs/architecture/README.md) · [Speaker Diarization E2E](docs/architecture/speaker-diarization-e2e-design.md) · [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md) · [Current Boundaries & Trade-offs](docs/architecture/current-boundaries.md) · [Architecture Decision Records (ADRs)](docs/decisions/README.md) |
 
 ---
 

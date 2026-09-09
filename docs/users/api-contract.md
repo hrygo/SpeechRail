@@ -376,8 +376,10 @@ Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 
 |---|---|---|---|
 | **400** | `model_not_found` | `false` | 请求的模型名不存在，核对 `/v1/models` 清单 |
 | **400** | `audio_too_long` | `false` | 音频时长超出 `SPEECHRAIL_MAX_AUDIO_SECONDS` 限制 |
+| **400** | `voice_quality_reject` | `false` | 克隆参考音频未通过 `voice_quality_v1` 门禁（详见 §5.7），响应同级的 `quality_report` 含失败原因 |
 | **401** | `invalid_api_key` | `false` | 未提供有效的 API Key 或 Token 错误 |
 | **413** | `audio_too_large` | `false` | 音频大小超出 `SPEECHRAIL_MAX_UPLOAD_BYTES` 限制 |
+| **500** | `dependency_missing` | `false` | `ffmpeg` 等外部依赖缺失导致转码失败（克隆/校验路径），配置依赖后重试 |
 | **422** | `audio_decode_failed` | `false` | 上传文件损坏或非标准音频容器，检查文件有效性 |
 | **429** | `queue_full` | `true` | 当前并发超出 Governor 配额，按 `Retry-After` 重试 |
 | **409** | `voice_in_use` | `true` | 自定义音色仍有活动 TTS 读者，等待当前合成完成后重试删除 |
