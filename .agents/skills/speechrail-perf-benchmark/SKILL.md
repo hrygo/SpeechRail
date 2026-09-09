@@ -80,6 +80,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 - 16 kHz mono PCM16，连续 3 个 session；
 - setup、首 delta、commit、TTFA、terminal event、成功率；
 - 单独启动 streaming 模式并采样 host + streaming ASR；结束后恢复原模式。
+- 证据通过 `examples/perf/bench_realtime_json.py` 落盘（见下方工具入口）：默认先跑一次不计入统计的 warm-up session，再测 N 个 session；`--no-warmup` 仅在确认模型未加载/已重置状态、确需真冷测时使用，且须在报告注明口径。
 
 开始任何一档的基础套件前，先记录外部连接快照：listener、established client PID、`realtime_active_sessions`、两类 governor active requests 和 streaming worker state。只有客户端连接清零后，`/health`、`/readyz` 和短 ASR smoke 都通过，才允许开始该档数据采集。
 
@@ -100,6 +101,19 @@ uv run python examples/perf/bench_profiles.py \
 benchmark 启动后会先访问一个只读受保护路由探测鉴权；若返回 `401`，在任何 ASR/TTS 推理前停止并修正 `--app-home` 或环境变量，不把无鉴权请求写入结果。keyless loopback 服务返回非 `401` 时继续执行。
 
 `examples/perf/benchmark_scenarios.py` 默认执行 A–E；工具或采样器只影响部分场景时，可显式传入 `--scenarios C D E` 只重测受影响范围。结果必须记录 `scenario_ids`，正式报告仍须覆盖 A–E；未重测但仍可复用的证据必须说明相同服务版本、fixture、运行环境和仅工具后处理的理由。
+
+Realtime 证据（正式基准）：
+
+```bash
+uv run python examples/perf/bench_realtime_json.py <external-16khz-pcm> \
+  --profile <quality|balanced|light> \
+  --output <repo-external-realtime.json> \
+  --app-home "${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+```
+
+- `bench_realtime_json.py` 在 `bench_realtime.run_session` 外包裹真实 `ProcessResourceMonitor`，落盘 `speechrail-bench-realtime` schema v1 JSON（含 session 分位数与 `sampling_complete`）；默认先跑一次不计入统计的 warm-up。
+- `--sessions N` 控制测量 session 数（默认 3）；`--no-warmup` 仅在确认模型未加载/已重置状态时用于真冷测，该档 cold 才可记为严格 cold。
+- `bench_realtime.py` 仍保留为 stdout 快速预览入口（不产 JSON、不带资源采样），不得作为发布基准证据。
 
 ## 5. 质量与音色稳定性套件
 
@@ -256,7 +270,7 @@ PATCH 报告只保留当前档列，并注明三档横向对比不适用。
 
 ## 复现
 
-记录可移植命令、fixture digest、参数和报告生成方式；不写凭据与私人路径。
+记录可移植命令、fixture digest、参数和报告生成方式；不写凭据与私人路径。Realtime 证据命令使用 `examples/perf/bench_realtime_json.py`，与第 4 节工具入口一致；报告必须注明 `--warmup`/`--no-warmup` 口径与 `sampling_complete`。
 ```
 
 ## 9. README 同步（仅用户明确要求）
