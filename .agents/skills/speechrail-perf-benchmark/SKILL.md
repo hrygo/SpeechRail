@@ -41,8 +41,9 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 3. 每项先预热至少 1 次；基础发布基准测 5 次，报告 p50、p95、min/max 和样本数。cold 只统计从确认未加载或已重置状态发出的首次推理；此前已执行过推理（含前置 smoke）时标记为 warm 或 `cold_unavailable`，不混入 warm 分位数。
 4. RTF 使用 `ffprobe` 实测音频时长：`latency / actual_audio_seconds`。不得使用文件名中的 3s/10s/30s/60s 标签代替。
 5. Apple Silicon 内存使用 `footprint -p <pid> -f bytes` 的 `phys_footprint`。不要用 RSS 代替，也不要相加发生在不同时刻的进程峰值。
-6. 总峰值必须来自每个完整采样 tick 内各目标 PID+start-time 的总和；任一 tick 缺样、PID 重用、sampler 线程异常或停止超时都标记 N/A 并关闭 gate。
+6. 总峰值必须来自每个完整采样 tick 内各目标 PID+start-time 的总和；全局采样 gate 仍在任一 tick 缺样、PID 重用、sampler 线程异常或停止超时时关闭。
    worker 为懒加载时，采样器必须在预热后重新发现受管进程；预热前固定 PID 集合而漏掉新 worker 的结果无效。
+   对于 REST/Realtime 分人这类合法的短生命周期 worker，额外按稳定的 PID+start-time incarnation 建立 active window：身份切换边界的缺样只能归入窗口外 transition（下一完整 tick 必须确认身份/角色已变化）；同一 incarnation 内部的缺样仍使该 window 无效。不得合并不同 incarnation 的进程峰值，也不得把 active-window 证据伪装成全局 `sampling_complete`。
 7. batch ASR 与 streaming ASR 分开测量，不制造二者同时工作的场景。TTS 负载也单独给出，组合峰值只反映产品真实允许的组合。
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
 9. API key 由共享 resolver 读取：显式 `SPEECHRAIL_API_KEY` 优先，其次是 `SPEECHRAIL_APP_HOME`（默认 managed app home）下的 `config/.env`；不得 `source` 配置，不出现在命令、报告或日志中。
@@ -97,6 +98,8 @@ uv run python examples/perf/bench_profiles.py \
 正式 benchmark 只接受外部 manifest 和外部 fixture；`prepare_fixtures.py` 仅用于开发调试，不得作为发布基准入口。`bench_profiles.py` 的 release gate 只有在硬件、模型身份、独立质量证据、成功公共推理和完整资源采样均为真实证据时才可打开；fixture 标签必须是安全的 opaque id/language tag。
 
 benchmark 启动后会先访问一个只读受保护路由探测鉴权；若返回 `401`，在任何 ASR/TTS 推理前停止并修正 `--app-home` 或环境变量，不把无鉴权请求写入结果。keyless loopback 服务返回非 `401` 时继续执行。
+
+`examples/perf/benchmark_scenarios.py` 默认执行 A–E；工具或采样器只影响部分场景时，可显式传入 `--scenarios C D E` 只重测受影响范围。结果必须记录 `scenario_ids`，正式报告仍须覆盖 A–E；未重测但仍可复用的证据必须说明相同服务版本、fixture、运行环境和仅工具后处理的理由。
 
 ## 5. 质量与音色稳定性套件
 

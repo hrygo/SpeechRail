@@ -114,6 +114,76 @@ def test_resource_summary_reports_expected_roles_and_complete_ticks() -> None:
     assert summary["role_transitions"] == [1]
 
 
+def test_resource_summary_accepts_complete_active_window_for_incarnated_worker() -> None:
+    summary = benchmark_scenarios._resource_summary(
+        {
+            "sampling_complete": False,
+            "active_window_sampling_complete": True,
+            "active_windows": [
+                {
+                    "roles": ["batch-asr", "diarization", "host-fastapi"],
+                    "complete": True,
+                    "simultaneous_peak": {
+                        "phys_footprint_bytes": 987,
+                    },
+                }
+            ],
+            "samples": [],
+        },
+        ("host-fastapi", "batch-asr", "diarization"),
+    )
+
+    assert summary["resource_evidence_verdict"] == "active_window_complete"
+    assert summary["active_window_count"] == 1
+    assert summary["active_window_peak"]["phys_footprint_bytes"] == 987
+
+
+def test_lifecycle_prime_keeps_lazy_diarization_worker_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[dict[str, object]] = []
+    waits: list[float] = []
+
+    class Connection:
+        def send(self, event: dict[str, object]) -> None:
+            sent.append(event)
+
+    monkeypatch.setattr(benchmark_scenarios.time, "sleep", waits.append)
+
+    benchmark_scenarios._prime_lifecycle_session(Connection(), b"\x00\x00" * 40_000)
+
+    assert sent[0]["type"] == "input_audio_buffer.append"
+    assert isinstance(sent[0]["audio"], str)
+    assert waits == [benchmark_scenarios._LIFECYCLE_PRIME_WAIT_SECONDS]
+
+
+def test_lifecycle_close_waits_for_server_side_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[bool] = []
+    waits: list[float] = []
+
+    class Connection:
+        def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(benchmark_scenarios.time, "sleep", waits.append)
+
+    benchmark_scenarios._close_lifecycle_connection(Connection())
+
+    assert closed == [True]
+    assert waits == [benchmark_scenarios._LIFECYCLE_CLOSE_SETTLE_SECONDS]
+
+
+def test_scenario_selection_is_explicit_and_duplicate_free() -> None:
+    assert benchmark_scenarios._normalise_scenario_ids(["e", "C"]) == ("E", "C")
+    assert benchmark_scenarios._normalise_scenario_ids(None) == ("A", "B", "C", "D", "E")
+    with pytest.raises(ValueError, match="duplicate"):
+        benchmark_scenarios._normalise_scenario_ids(["A", "a"])
+    with pytest.raises(ValueError, match="unknown"):
+        benchmark_scenarios._normalise_scenario_ids(["Z"])
+
+
 def test_rest_diarization_runner_keeps_transcript_out_of_evidence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

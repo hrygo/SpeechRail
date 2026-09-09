@@ -56,6 +56,11 @@ except ImportError:  # pragma: no cover - exercised when run as a script
 
 type ScenarioAction = Callable[[], list[dict[str, object]]]
 
+_LIFECYCLE_PRIME_BYTES = 32_000  # one second of 16 kHz mono PCM16
+_LIFECYCLE_PRIME_WAIT_SECONDS = 0.5
+_LIFECYCLE_CLOSE_SETTLE_SECONDS = 1.0
+_ALL_SCENARIO_IDS = ("A", "B", "C", "D", "E")
+
 _SCENARIO_ROLES: dict[str, tuple[str, ...]] = {
     # The managed runtime uses one physical qwen3 worker for batch and
     # realtime logical modes.  The command-line role is therefore the
@@ -66,6 +71,20 @@ _SCENARIO_ROLES: dict[str, tuple[str, ...]] = {
     "D": ("host-fastapi", "batch-asr", "tts", "diarization"),
     "E": ("host-fastapi", "diarization"),
 }
+
+
+def _normalise_scenario_ids(scenario_ids: Sequence[str] | None) -> tuple[str, ...]:
+    if scenario_ids is None:
+        return _ALL_SCENARIO_IDS
+    selected = tuple(item.strip().upper() for item in scenario_ids if item.strip())
+    if not selected:
+        raise ValueError("scenarios must contain at least one id")
+    if len(set(selected)) != len(selected):
+        raise ValueError("scenarios must not contain duplicate ids")
+    unknown = sorted(set(selected) - set(_ALL_SCENARIO_IDS))
+    if unknown:
+        raise ValueError(f"unknown scenarios: {', '.join(unknown)}")
+    return selected
 
 
 def _safe_error(exc: BaseException) -> dict[str, object]:
@@ -128,6 +147,16 @@ def _numeric_summary(runs: Sequence[Mapping[str, object]], key: str) -> dict[str
     }
 
 
+def _role_matches(observed: object, expected: str) -> bool:
+    return observed == expected or (
+        isinstance(observed, str) and observed.startswith(f"{expected}#")
+    )
+
+
+def _roles_cover(observed: Sequence[object], expected: Sequence[str]) -> bool:
+    return all(any(_role_matches(role, wanted) for role in observed) for wanted in expected)
+
+
 def _resource_summary(
     resources: Mapping[str, object], expected_roles: Sequence[str]
 ) -> dict[str, object]:
@@ -156,16 +185,68 @@ def _resource_summary(
                     roles.add(role)
         observed_roles.update(roles)
         role_sets.append(tuple(sorted(roles)))
-        if sample.get("complete") is True and set(expected_roles).issubset(roles):
+        if sample.get("complete") is True and _roles_cover(tuple(roles), expected_roles):
             expected_complete_ticks += 1
 
     expected = set(expected_roles)
+    active_windows_raw = resources.get("active_windows")
+    active_windows = active_windows_raw if isinstance(active_windows_raw, list) else []
+    matching_windows = [
+        window
+        for window in active_windows
+        if isinstance(window, Mapping)
+        and isinstance(window.get("roles"), Sequence)
+        and not isinstance(window.get("roles"), (str, bytes, bytearray))
+        and _roles_cover(list(window["roles"]), expected_roles)
+    ]
+    complete_matching_windows = [
+        window for window in matching_windows if window.get("complete") is True
+    ]
+
+    def window_peak(metric: str) -> int | None:
+        values = [
+            peak[metric]
+            for window in complete_matching_windows
+            if isinstance((peak := window.get("simultaneous_peak")), Mapping)
+            and isinstance(peak.get(metric), int)
+            and not isinstance(peak.get(metric), bool)
+        ]
+        return max(values) if values else None
+
+    active_window_peak = {
+        "rss_bytes": window_peak("rss_bytes"),
+        "phys_footprint_bytes": window_peak("phys_footprint_bytes"),
+    }
+    active_window_sampling_complete = bool(
+        matching_windows
+        and len(complete_matching_windows) == len(matching_windows)
+        and resources.get("active_window_sampling_complete") is True
+    )
+    global_sampling_complete = bool(
+        resources.get("sampling_complete") is True
+        and not (expected - observed_roles)
+        and expected_complete_ticks > 0
+    )
+    if global_sampling_complete:
+        resource_evidence_verdict = "complete"
+    elif active_window_sampling_complete:
+        resource_evidence_verdict = "active_window_complete"
+    else:
+        resource_evidence_verdict = "incomplete"
     return {
         "expected_roles": list(expected_roles),
         "observed_roles": sorted(observed_roles),
-        "missing_expected_roles": sorted(expected - observed_roles),
+        "missing_expected_roles": sorted(
+            role
+            for role in expected
+            if not any(_role_matches(observed, role) for observed in observed_roles)
+        ),
         "expected_roles_in_complete_tick": expected_complete_ticks > 0,
         "sampling_complete": resources.get("sampling_complete") is True,
+        "active_window_sampling_complete": active_window_sampling_complete,
+        "active_window_count": len(matching_windows),
+        "active_window_complete_count": len(complete_matching_windows),
+        "active_window_peak": active_window_peak,
         "sample_count": len(samples),
         "complete_sample_count": sum(
             1
@@ -175,13 +256,7 @@ def _resource_summary(
         "role_transitions": resources.get("role_transitions", []),
         "simultaneous_peak": resources.get("simultaneous_peak", {}),
         "observed_role_sets": sorted(set(role_sets)),
-        "resource_evidence_verdict": (
-            "complete"
-            if resources.get("sampling_complete") is True
-            and not (expected - observed_roles)
-            and expected_complete_ticks > 0
-            else "incomplete"
-        ),
+        "resource_evidence_verdict": resource_evidence_verdict,
     }
 
 
@@ -450,6 +525,29 @@ def _open_lifecycle_connection(
     return conn, events, errors, event_log
 
 
+def _prime_lifecycle_session(conn: Any, pcm: bytes) -> None:
+    """Keep the session open long enough for the lazy diarization worker to run."""
+
+    if not pcm:
+        raise ValueError("lifecycle priming audio must not be empty")
+    conn.send(
+        {
+            "type": "input_audio_buffer.append",
+            "audio": base64.b64encode(pcm[:_LIFECYCLE_PRIME_BYTES]).decode("ascii"),
+        }
+    )
+    time.sleep(_LIFECYCLE_PRIME_WAIT_SECONDS)
+
+
+def _close_lifecycle_connection(conn: Any) -> None:
+    """Give the server-side session cleanup a bounded settle window."""
+
+    try:
+        conn.close()
+    finally:
+        time.sleep(_LIFECYCLE_CLOSE_SETTLE_SECONDS)
+
+
 def _lifecycle_scenario(
     client: OpenAI,
     pcm: bytes,
@@ -467,12 +565,7 @@ def _lifecycle_scenario(
                     client,
                     session_no=session_no,
                 )
-                conn.send(
-                    {
-                        "type": "input_audio_buffer.append",
-                        "audio": base64.b64encode(pcm[: min(len(pcm), 6400)]).decode("ascii"),
-                    }
-                )
+                _prime_lifecycle_session(conn, pcm)
                 runs.append(
                     {
                         "session": session_no,
@@ -488,7 +581,7 @@ def _lifecycle_scenario(
             finally:
                 if conn is not None:
                     try:
-                        conn.close()
+                        _close_lifecycle_connection(conn)
                         if runs[-1].get("session") == session_no:
                             runs[-1]["closed"] = True
                     except Exception as exc:
@@ -508,6 +601,7 @@ def _lifecycle_scenario(
                     client,
                     session_no=loops + 1,
                 )
+                _prime_lifecycle_session(conn, pcm)
                 while time.monotonic() - started < soak_seconds:
                     time.sleep(min(1.0, max(0.0, soak_seconds - (time.monotonic() - started))))
                 runs.append(
@@ -526,7 +620,7 @@ def _lifecycle_scenario(
             finally:
                 if conn is not None:
                     try:
-                        conn.close()
+                        _close_lifecycle_connection(conn)
                         if runs[-1].get("session") == loops + 1:
                             runs[-1]["closed"] = True
                     except Exception as exc:
@@ -572,6 +666,7 @@ def run_scenario_suite(
     lifecycle_loops: int,
     soak_seconds: float,
     interval_seconds: float,
+    scenario_ids: Sequence[str] | None = None,
 ) -> dict[str, object]:
     normalized_base = validate_base_url(base_url)
     if iterations < 1 or lifecycle_loops < 1:
@@ -580,6 +675,7 @@ def run_scenario_suite(
         raise ValueError("soak_seconds must be finite and non-negative")
     if not math.isfinite(interval_seconds) or interval_seconds <= 0:
         raise ValueError("interval_seconds must be finite and positive")
+    selected_scenarios = _normalise_scenario_ids(scenario_ids)
     pcm = pcm_file.read_bytes()
     if not pcm or len(pcm) % 2:
         raise ValueError("pcm_file must contain non-empty even-length PCM16")
@@ -600,61 +696,77 @@ def run_scenario_suite(
     )
     api_key = auth_headers.get("Authorization", "local").removeprefix("Bearer ")
     client = OpenAI(api_key=api_key, base_url=normalized_base)
-    scenarios = [
-        _realtime_scenario(
-            client,
-            pcm,
-            scenario_id="A",
-            description="manual realtime ASR followed by fixed TTS",
-            iterations=iterations,
-            turn_detection="manual",
-            diarization=False,
-            interval_seconds=interval_seconds,
-        ),
-        _realtime_scenario(
-            client,
-            pcm,
-            scenario_id="B",
-            description="server_vad realtime ASR followed by fixed TTS",
-            iterations=iterations,
-            turn_detection="server_vad",
-            diarization=False,
-            interval_seconds=interval_seconds,
-        ),
-        _rest_diarization_scenario(
-            normalized_base,
-            audio_file,
-            auth_headers,
-            iterations=iterations,
-            interval_seconds=interval_seconds,
-        ),
-        _realtime_scenario(
-            client,
-            pcm,
-            scenario_id="D",
-            description="server_vad + realtime diarization + TTS",
-            iterations=iterations,
-            turn_detection="server_vad",
-            diarization=True,
-            interval_seconds=interval_seconds,
-        ),
-        _lifecycle_scenario(
-            client,
-            pcm,
-            loops=lifecycle_loops,
-            soak_seconds=soak_seconds,
-            interval_seconds=interval_seconds,
-        ),
-    ]
-    resource_evidence_complete = all(
-        scenario.get("resource_summary", {}).get("resource_evidence_verdict") == "complete"
+    scenarios: list[dict[str, object]] = []
+    if "A" in selected_scenarios:
+        scenarios.append(
+            _realtime_scenario(
+                client,
+                pcm,
+                scenario_id="A",
+                description="manual realtime ASR followed by fixed TTS",
+                iterations=iterations,
+                turn_detection="manual",
+                diarization=False,
+                interval_seconds=interval_seconds,
+            )
+        )
+    if "B" in selected_scenarios:
+        scenarios.append(
+            _realtime_scenario(
+                client,
+                pcm,
+                scenario_id="B",
+                description="server_vad realtime ASR followed by fixed TTS",
+                iterations=iterations,
+                turn_detection="server_vad",
+                diarization=False,
+                interval_seconds=interval_seconds,
+            )
+        )
+    if "C" in selected_scenarios:
+        scenarios.append(
+            _rest_diarization_scenario(
+                normalized_base,
+                audio_file,
+                auth_headers,
+                iterations=iterations,
+                interval_seconds=interval_seconds,
+            )
+        )
+    if "D" in selected_scenarios:
+        scenarios.append(
+            _realtime_scenario(
+                client,
+                pcm,
+                scenario_id="D",
+                description="server_vad + realtime diarization + TTS",
+                iterations=iterations,
+                turn_detection="server_vad",
+                diarization=True,
+                interval_seconds=interval_seconds,
+            )
+        )
+    if "E" in selected_scenarios:
+        scenarios.append(
+            _lifecycle_scenario(
+                client,
+                pcm,
+                loops=lifecycle_loops,
+                soak_seconds=soak_seconds,
+                interval_seconds=interval_seconds,
+            )
+        )
+    resource_evidence_complete = bool(scenarios) and all(
+        isinstance(scenario.get("resource_summary"), Mapping)
+        and scenario["resource_summary"].get("resource_evidence_verdict")
+        in {"complete", "active_window_complete"}
         for scenario in scenarios
-        if isinstance(scenario.get("resource_summary"), Mapping)
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "tool": "speechrail-benchmark-scenarios",
         "profile": profile.strip().lower(),
+        "scenario_ids": list(selected_scenarios),
         "base_url": normalized_base,
         "iterations": iterations,
         "lifecycle_loops": lifecycle_loops,
@@ -687,6 +799,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--lifecycle-loops", type=int, default=10)
     parser.add_argument("--soak-seconds", type=float, default=600.0)
     parser.add_argument("--sample-interval", type=float, default=0.1)
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=_ALL_SCENARIO_IDS,
+        help="run only selected scenarios (default: A B C D E)",
+    )
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
@@ -700,6 +818,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             lifecycle_loops=args.lifecycle_loops,
             soak_seconds=args.soak_seconds,
             interval_seconds=args.sample_interval,
+            scenario_ids=args.scenarios,
         )
         write_result(result, validate_output_path(args.output))
     except (OSError, TypeError, ValueError) as exc:

@@ -278,6 +278,95 @@ def test_resource_normalisation_keeps_timing_and_role_transitions() -> None:
     assert normalised["sampler"]["sampling_span_seconds"] == 0.52
 
 
+def test_resource_normalisation_derives_complete_worker_incarnation_windows() -> None:
+    def process(
+        role: str,
+        pid: int,
+        start_time_ns: int,
+        footprint: int | None,
+    ) -> dict[str, object]:
+        return {
+            "role": role,
+            "pid": pid,
+            "start_time_ns": start_time_ns,
+            "rss_bytes": footprint,
+            "phys_footprint_bytes": footprint,
+        }
+
+    host = process("host-fastapi", 100, 1, 100)
+    batch = process("batch-asr", 200, 2, 200)
+    first_diarization = process("diarization", 300, 3, 300)
+    missing_first_diarization = process("diarization", 300, 3, None)
+    second_diarization = process("diarization", 400, 4, 400)
+    normalised = benchmark_resources._normalise_resources(
+        {
+            "process_samples": [
+                {"at_seconds": 0.0, "processes": [host, batch]},
+                {
+                    "at_seconds": 0.1,
+                    "processes": [host, batch, first_diarization],
+                },
+                {
+                    "at_seconds": 0.2,
+                    "processes": [host, batch, first_diarization],
+                },
+                {
+                    "at_seconds": 0.3,
+                    "processes": [host, batch, missing_first_diarization],
+                },
+                {"at_seconds": 0.4, "processes": [host, batch]},
+                {
+                    "at_seconds": 0.5,
+                    "processes": [host, batch, second_diarization],
+                },
+                {
+                    "at_seconds": 0.6,
+                    "processes": [host, batch, second_diarization],
+                },
+            ]
+        }
+    )
+
+    windows = [
+        window
+        for window in normalised["active_windows"]
+        if "diarization" in window["roles"]
+    ]
+    assert len(windows) == 2
+    assert all(window["complete"] is True for window in windows)
+    assert windows[0]["boundary_incomplete_ticks"] == 1
+    assert windows[0]["simultaneous_peak"]["phys_footprint_bytes"] == 600
+    assert windows[1]["simultaneous_peak"]["phys_footprint_bytes"] == 700
+    assert normalised["sampling_complete"] is False
+    assert normalised["active_window_sampling_complete"] is True
+
+
+def test_resource_normalisation_does_not_hide_internal_window_gap() -> None:
+    def process(footprint: int | None) -> dict[str, object]:
+        return {
+            "role": "diarization",
+            "pid": 300,
+            "start_time_ns": 3,
+            "rss_bytes": footprint,
+            "phys_footprint_bytes": footprint,
+        }
+
+    normalised = benchmark_resources._normalise_resources(
+        {
+            "process_samples": [
+                {"at_seconds": 0.0, "processes": [process(300)]},
+                {"at_seconds": 0.1, "processes": [process(None)]},
+                {"at_seconds": 0.2, "processes": [process(320)]},
+            ]
+        }
+    )
+
+    window = normalised["active_windows"][0]
+    assert window["complete"] is False
+    assert window["internal_incomplete_ticks"] == 1
+    assert normalised["active_window_sampling_complete"] is False
+
+
 class _FakeHttpRunner:
     def __init__(
         self,

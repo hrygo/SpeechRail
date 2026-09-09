@@ -220,7 +220,7 @@ class ProcessResourceMonitor:
                 "available": True,
                 "real": True,
                 "source": "sample_resources",
-                "schema_version": 2,
+                "schema_version": 3,
                 "role_aware": True,
                 "interval_seconds": self._interval_seconds,
                 "sampling_span_seconds": max(0.0, time.monotonic() - started_at),
@@ -361,6 +361,215 @@ def _sanitize_evidence(value: Mapping[str, object]) -> dict[str, object]:
         for key, item in value.items()
         if key in allowed and (_safe_scalar(key, item) is not None or item is None)
     }
+
+
+def _tick_identities(tick: Mapping[str, object]) -> frozenset[ProcessIdentity]:
+    processes = tick.get("processes")
+    if not isinstance(processes, Sequence) or isinstance(processes, (str, bytes, bytearray)):
+        return frozenset()
+    identities: set[ProcessIdentity] = set()
+    for process in processes:
+        if not isinstance(process, Mapping):
+            continue
+        pid = process.get("pid")
+        start_time_ns = process.get("start_time_ns")
+        if (
+            isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or pid < 0
+            or isinstance(start_time_ns, bool)
+            or not isinstance(start_time_ns, int)
+            or start_time_ns < 0
+        ):
+            continue
+        identities.add(ProcessIdentity(pid=pid, start_time_ns=start_time_ns))
+    return frozenset(identities)
+
+
+def _tick_roles(tick: Mapping[str, object]) -> frozenset[str]:
+    processes = tick.get("processes")
+    if not isinstance(processes, Sequence) or isinstance(processes, (str, bytes, bytearray)):
+        return frozenset()
+    return frozenset(
+        role
+        for process in processes
+        if isinstance(process, Mapping)
+        and isinstance((role := process.get("role")), str)
+        and role
+    )
+
+
+def _tick_snapshots(
+    tick: Mapping[str, object],
+) -> tuple[dict[ProcessIdentity, int], dict[ProcessIdentity, int]]:
+    processes = tick.get("processes")
+    if not isinstance(processes, Sequence) or isinstance(processes, (str, bytes, bytearray)):
+        return {}, {}
+    rss: dict[ProcessIdentity, int] = {}
+    footprint: dict[ProcessIdentity, int] = {}
+    for process in processes:
+        if not isinstance(process, Mapping):
+            continue
+        pid = process.get("pid")
+        start_time_ns = process.get("start_time_ns")
+        if (
+            isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or pid < 0
+            or isinstance(start_time_ns, bool)
+            or not isinstance(start_time_ns, int)
+            or start_time_ns < 0
+        ):
+            continue
+        identity = ProcessIdentity(pid=pid, start_time_ns=start_time_ns)
+        rss_value = process.get("rss_bytes")
+        footprint_value = process.get("phys_footprint_bytes")
+        if isinstance(rss_value, int) and not isinstance(rss_value, bool) and rss_value >= 0:
+            rss[identity] = rss_value
+        if (
+            isinstance(footprint_value, int)
+            and not isinstance(footprint_value, bool)
+            and footprint_value >= 0
+        ):
+            footprint[identity] = footprint_value
+    return rss, footprint
+
+
+def _derive_active_windows(
+    samples: Sequence[Mapping[str, object]],
+) -> list[dict[str, object]]:
+    """Build complete process-incarnation windows without hiding internal gaps.
+
+    A worker can legitimately disappear between two sessions.  A missing tick
+    at that boundary belongs to neither active window; a missing tick followed
+    by the same identity is an internal gap and invalidates that window.
+    Raw samples remain unchanged and the global ``sampling_complete`` gate is
+    still fail-closed.
+    """
+
+    windows: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    pending_boundary_incomplete = 0
+
+    def close_current() -> None:
+        nonlocal current, pending_boundary_incomplete
+        if current is None:
+            pending_boundary_incomplete = 0
+            return
+        snapshots = current.pop("_footprint_snapshots")
+        rss_snapshots = current.pop("_rss_snapshots")
+        assert isinstance(snapshots, list)
+        assert isinstance(rss_snapshots, list)
+        try:
+            footprint_peak = cast(int, simultaneous_peak_by_identity(snapshots))
+        except (TypeError, ValueError):
+            footprint_peak = None
+        try:
+            rss_peak = cast(int, simultaneous_peak_by_identity(rss_snapshots))
+        except (TypeError, ValueError):
+            rss_peak = None
+        roles = current.pop("_roles")
+        identities = current.pop("_identities")
+        assert isinstance(roles, set)
+        assert isinstance(identities, frozenset)
+        current["roles"] = sorted(roles)
+        current["process_identities"] = [
+            {"pid": identity.pid, "start_time_ns": identity.start_time_ns}
+            for identity in sorted(
+                identities,
+                key=lambda item: (item.pid, item.start_time_ns),
+            )
+        ]
+        current["boundary_incomplete_ticks"] = pending_boundary_incomplete
+        current["simultaneous_peak"] = {
+            "rss_bytes": rss_peak,
+            "phys_footprint_bytes": footprint_peak,
+        }
+        current["complete"] = bool(
+            snapshots
+            and current["internal_incomplete_ticks"] == 0
+            and rss_peak is not None
+            and footprint_peak is not None
+        )
+        windows.append(current)
+        current = None
+        pending_boundary_incomplete = 0
+
+    def start_window(
+        tick: Mapping[str, object],
+        identities: frozenset[ProcessIdentity],
+        roles: frozenset[str],
+    ) -> None:
+        nonlocal current
+        at_seconds = tick.get("at_seconds")
+        ended_at_seconds = tick.get("ended_at_seconds", at_seconds)
+        rss_snapshot, footprint_snapshot = _tick_snapshots(tick)
+        current = {
+            "start_at_seconds": at_seconds,
+            "end_at_seconds": ended_at_seconds,
+            "sample_count": 1,
+            "complete_sample_count": 1,
+            "internal_incomplete_ticks": 0,
+            "_identities": identities,
+            "_roles": set(roles),
+            "_rss_snapshots": [rss_snapshot],
+            "_footprint_snapshots": [footprint_snapshot],
+        }
+
+    for tick in samples:
+        identities = _tick_identities(tick)
+        roles = _tick_roles(tick)
+        complete = tick.get("complete") is True
+        if current is None:
+            if complete and identities:
+                start_window(tick, identities, roles)
+            continue
+
+        current_identities = current["_identities"]
+        assert isinstance(current_identities, frozenset)
+        if not complete:
+            if identities == current_identities:
+                pending_boundary_incomplete += 1
+            else:
+                close_current()
+            continue
+
+        if identities != current_identities:
+            close_current()
+            start_window(tick, identities, roles)
+            continue
+
+        if pending_boundary_incomplete:
+            internal_incomplete_ticks = current["internal_incomplete_ticks"]
+            assert isinstance(internal_incomplete_ticks, int)
+            current["internal_incomplete_ticks"] = (
+                internal_incomplete_ticks + pending_boundary_incomplete
+            )
+            pending_boundary_incomplete = 0
+        sample_count = current["sample_count"]
+        complete_sample_count = current["complete_sample_count"]
+        assert isinstance(sample_count, int)
+        assert isinstance(complete_sample_count, int)
+        current["sample_count"] = sample_count + 1
+        current["complete_sample_count"] = complete_sample_count + 1
+        current["end_at_seconds"] = tick.get(
+            "ended_at_seconds", tick.get("at_seconds", current["end_at_seconds"])
+        )
+        current_roles = current["_roles"]
+        assert isinstance(current_roles, set)
+        current_roles.update(roles)
+        rss_snapshot, footprint_snapshot = _tick_snapshots(tick)
+        rss_snapshots = current["_rss_snapshots"]
+        footprint_snapshots = current["_footprint_snapshots"]
+        assert isinstance(rss_snapshots, list)
+        assert isinstance(footprint_snapshots, list)
+        rss_snapshots.append(rss_snapshot)
+        footprint_snapshots.append(footprint_snapshot)
+
+    close_current()
+    for index, window in enumerate(windows):
+        window["window_index"] = index
+    return windows
 
 
 def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
@@ -535,11 +744,16 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
         for index, (previous, current) in enumerate(pairwise(role_sets), start=1)
         if previous != current
     ]
+    active_windows = _derive_active_windows(sanitized_ticks)
     return {
         "sampler": sampler,
         "samples": sanitized_ticks,
         "observed_roles": sorted(observed_roles),
         "role_transitions": role_transitions,
+        "active_windows": active_windows,
+        "active_window_sampling_complete": bool(
+            active_windows and all(window.get("complete") is True for window in active_windows)
+        ),
         "simultaneous_peak": {
             "rss_bytes": rss_peak,
             "phys_footprint_bytes": footprint_peak,
