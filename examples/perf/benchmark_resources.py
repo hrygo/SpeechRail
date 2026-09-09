@@ -50,6 +50,10 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 
+_SAFE_ROLE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.#-"
+)
+
 
 type SystemSampler = Callable[[], Mapping[str, object]]
 
@@ -125,16 +129,21 @@ class ProcessResourceMonitor:
         self._started = False
 
     def _collect_tick(self) -> None:
+        discovered = dict(self._discover())
         processes: list[dict[str, object]] = []
-        for role, identity in self._discover().items():
+        missing_roles: list[str] = []
+        for role, identity in discovered.items():
             observation = self._reader(identity)
             if observation is None:
-                continue
-            _, current_mb, _, metric = observation
-            rss_bytes = _read_rss_bytes(identity.pid)
-            footprint_bytes = (
-                int(current_mb * 1024 * 1024) if metric == FOOTPRINT_METRIC else None
-            )
+                missing_roles.append(role)
+                rss_bytes = None
+                footprint_bytes = None
+            else:
+                _, current_mb, _, metric = observation
+                rss_bytes = _read_rss_bytes(identity.pid)
+                footprint_bytes = (
+                    int(current_mb * 1024 * 1024) if metric == FOOTPRINT_METRIC else None
+                )
             processes.append(
                 {
                     "role": role,
@@ -144,13 +153,15 @@ class ProcessResourceMonitor:
                     "phys_footprint_bytes": footprint_bytes,
                 }
             )
-        if processes:
-            self._samples.append(
-                {
-                    "at_seconds": time.monotonic(),
-                    "processes": processes,
-                }
-            )
+        self._samples.append(
+            {
+                "at_seconds": time.monotonic(),
+                "processes": processes,
+                "discovered_roles": sorted(discovered),
+                "missing_roles": sorted(missing_roles),
+                "complete": bool(processes) and not missing_roles,
+            }
+        )
 
     def _run(self) -> None:
         try:
@@ -192,6 +203,8 @@ class ProcessResourceMonitor:
                 "available": True,
                 "real": True,
                 "source": "sample_resources",
+                "schema_version": 2,
+                "role_aware": True,
             },
         }
 
@@ -345,17 +358,26 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
             raw_tick_count += 1
             if not isinstance(tick, Mapping):
                 invalid_tick_seen = True
+                sanitized_ticks.append({"at_seconds": None, "processes": [], "complete": False})
                 continue
             raw_processes = tick.get("processes", [])
             if not isinstance(raw_processes, Sequence) or isinstance(
                 raw_processes, (str, bytes, bytearray)
             ):
                 invalid_tick_seen = True
+                sanitized_ticks.append(
+                    {
+                        "at_seconds": tick.get("at_seconds", tick.get("at")),
+                        "processes": [],
+                        "complete": False,
+                    }
+                )
                 continue
             rss_tick: dict[ProcessIdentity, int] = {}
             footprint_tick: dict[ProcessIdentity, int] = {}
             output_processes: list[dict[str, object]] = []
             invalid_process = False
+            seen_identities: set[ProcessIdentity] = set()
             for process in raw_processes:
                 if not isinstance(process, Mapping):
                     invalid_process = True
@@ -373,6 +395,9 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
                     invalid_process = True
                     continue
                 identity = ProcessIdentity(pid=pid, start_time_ns=started)
+                if identity in seen_identities:
+                    invalid_process = True
+                seen_identities.add(identity)
                 rss = process.get("rss_bytes")
                 footprint = process.get("phys_footprint_bytes")
                 rss_valid = isinstance(rss, int) and not isinstance(rss, bool) and rss >= 0
@@ -385,31 +410,60 @@ def _normalise_resources(raw: Mapping[str, object]) -> dict[str, object]:
                     rss_tick[identity] = cast(int, rss)
                 if footprint_valid:
                     footprint_tick[identity] = cast(int, footprint)
-                output_processes.append(
-                    {
-                        "pid": pid,
-                        "start_time_ns": started,
-                        "rss_bytes": rss if rss_valid else None,
-                        "phys_footprint_bytes": (
-                            footprint if footprint_valid else None
-                        ),
-                    }
-                )
-            if output_processes:
-                at = tick.get("at", tick.get("at_seconds"))
-                sanitized_ticks.append(
-                    {
-                        "at_seconds": at if isinstance(at, (int, float)) else None,
-                        "processes": output_processes,
-                    }
-                )
+                safe_process: dict[str, object] = {
+                    "pid": pid,
+                    "start_time_ns": started,
+                    "rss_bytes": rss if rss_valid else None,
+                    "phys_footprint_bytes": footprint if footprint_valid else None,
+                }
+                role = process.get("role")
+                if role is not None:
+                    if (
+                        not isinstance(role, str)
+                        or not role
+                        or len(role) > 64
+                        or any(character not in _SAFE_ROLE_CHARS for character in role)
+                    ):
+                        invalid_process = True
+                    else:
+                        safe_process["role"] = role
+                output_processes.append(safe_process)
             tick_complete = bool(
                 output_processes
                 and not invalid_process
                 and len(rss_tick) == len(output_processes)
                 and len(footprint_tick) == len(output_processes)
                 and set(rss_tick) == set(footprint_tick)
+                and tick.get("complete", True) is not False
             )
+            at = tick.get("at", tick.get("at_seconds"))
+            sanitized_tick: dict[str, object] = {
+                "at_seconds": at if isinstance(at, (int, float)) else None,
+                "processes": output_processes,
+                "complete": tick_complete,
+            }
+            discovered_roles = tick.get("discovered_roles")
+            missing_roles = tick.get("missing_roles")
+            role_fields = (
+                ("discovered_roles", discovered_roles),
+                ("missing_roles", missing_roles),
+            )
+            for key, roles in role_fields:
+                if isinstance(roles, Sequence) and not isinstance(roles, (str, bytes, bytearray)):
+                    safe_roles = [
+                        role
+                        for role in roles
+                        if isinstance(role, str)
+                        and role
+                        and len(role) <= 64
+                        and all(
+                            character
+                            in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.#-"
+                            for character in role
+                        )
+                    ]
+                    sanitized_tick[key] = safe_roles
+            sanitized_ticks.append(sanitized_tick)
             if tick_complete:
                 complete_tick_count += 1
                 rss_snapshots.append(rss_tick)

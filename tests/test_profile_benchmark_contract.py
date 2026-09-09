@@ -193,6 +193,49 @@ def test_resource_normalisation_rejects_any_incomplete_tick() -> None:
     }
 
 
+def test_resource_normalisation_preserves_safe_roles_and_marks_missing_process() -> None:
+    normalised = benchmark_resources._normalise_resources(
+        {
+            "process_samples": [
+                {
+                    "at_seconds": 1.0,
+                    "processes": [
+                        {
+                            "role": "host-fastapi",
+                            "pid": 100,
+                            "start_time_ns": 1,
+                            "rss_bytes": 100,
+                            "phys_footprint_bytes": 200,
+                        },
+                        {
+                            "role": "diarization",
+                            "pid": 300,
+                            "start_time_ns": 3,
+                            "rss_bytes": None,
+                            "phys_footprint_bytes": None,
+                        },
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert normalised["sampling_complete"] is False
+    processes = normalised["samples"][0]["processes"]
+    assert {item["role"] for item in processes} == {"host-fastapi", "diarization"}
+
+
+def test_resource_normalisation_retains_empty_tick_as_incomplete() -> None:
+    normalised = benchmark_resources._normalise_resources(
+        {"process_samples": [{"at_seconds": 1.0, "processes": []}]}
+    )
+
+    assert normalised["samples"] == [
+        {"at_seconds": 1.0, "processes": [], "complete": False}
+    ]
+    assert normalised["sampling_complete"] is False
+
+
 class _FakeHttpRunner:
     def __init__(
         self,

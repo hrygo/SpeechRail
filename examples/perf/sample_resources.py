@@ -1,8 +1,8 @@
 """SpeechRail worker resource sampling during concurrent load.
 
-Samples all qwen3 worker processes (batch/streaming/tts/host) for CPU% and Physical
-Memory Footprint (using macOS ``footprint`` tool or ``ps rss`` fallback) while a load
-test runs. Requires a running service.
+Samples all SpeechRail host and worker processes (batch/streaming/tts/diarization/host)
+for CPU% and Physical Memory Footprint (using macOS ``footprint`` tool or ``ps rss``
+fallback) while a load test runs. Requires a running service.
 
 Usage:
   python examples/perf/sample_resources.py --audio audio_30s.wav --n 6 --warmup
@@ -31,6 +31,7 @@ from profile_metrics import ProcessIdentity
 
 type SampleValue = tuple[float, float, float, str]
 type ProcessReader = Callable[[ProcessIdentity], SampleValue | None]
+type ProcessDiscovery = Callable[[], Mapping[str, ProcessIdentity]]
 
 FOOTPRINT_METRIC = "Footprint"
 RSS_FALLBACK_METRIC = "RSS (not phys_footprint gate)"
@@ -104,8 +105,68 @@ def _current_process_identity(pid: int, *, start_hint: str | None = None) -> Pro
     return ProcessIdentity(pid=pid, start_time_ns=start_time_ns)
 
 
+def _read_process_parent(pid: int) -> int | None:
+    """Read a process parent PID so child workers can be tied to this service."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1.0,
+            env={"PATH": os.defpath, "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        parent = int(proc.stdout.strip())
+    except ValueError:
+        return None
+    return parent if parent >= 0 else None
+
+
+def _is_descendant(pid: int, roots: set[int]) -> bool:
+    """Return whether pid belongs to one of the service's process trees."""
+    current = pid
+    visited: set[int] = set()
+    for _ in range(32):
+        if current in roots:
+            return True
+        if current in visited:
+            return False
+        visited.add(current)
+        parent = _read_process_parent(current)
+        if parent is None or parent == current:
+            return False
+        current = parent
+    return False
+
+
+def _process_role(command: str) -> str | None:
+    """Classify a managed command without exposing its command line."""
+    if "speechrail serve" in command or "python -m speechrail serve" in command:
+        return "host-fastapi"
+    if "speechrail.backends.qwen3_tts_worker" in command:
+        return "tts"
+    if "--worker-role streaming" in command:
+        return "streaming-asr"
+    if "speechrail.backends.qwen3_worker" in command:
+        return "batch-asr"
+    if "qwen3_streaming_worker" in command or "streaming_worker" in command:
+        return "streaming-asr"
+    if (
+        "--protocol-version" in command
+        and "--model" in command
+        and ".mlmodelc" in command
+    ):
+        return "diarization"
+    return None
+
+
 def worker_pids() -> dict[str, ProcessIdentity]:
-    """Finds PIDs for host and backend worker processes."""
+    """Find host and service-owned backend worker process identities."""
     out = subprocess.run(
         ["ps", "aux"],
         capture_output=True,
@@ -114,8 +175,8 @@ def worker_pids() -> dict[str, ProcessIdentity]:
         timeout=1.0,
         env={"PATH": os.defpath, "LC_ALL": "C"},
     ).stdout
-    found: dict[str, ProcessIdentity] = {}
-    seen: set[ProcessIdentity] = set()
+    entries: list[tuple[int, str]] = []
+    host_pids: set[int] = set()
     for line in out.splitlines():
         if "resource_tracker" in line or "sample_resources" in line:
             continue
@@ -126,23 +187,21 @@ def worker_pids() -> dict[str, ProcessIdentity]:
             pid = int(parts[1])
         except ValueError:
             continue
+        role = _process_role(line)
+        if role is None:
+            continue
+        entries.append((pid, line))
+        if role == "host-fastapi":
+            host_pids.add(pid)
 
-        label: str | None = None
-        if "speechrail serve" in line or "python -m speechrail serve" in line:
-            label = "host-fastapi"
-        elif "speechrail.backends.qwen3_tts_worker" in line:
-            label = "tts"
-        elif "--worker-role streaming" in line:
-            # batch and streaming run the same worker module; attribute by the
-            # self-description --worker-role tag rather than module name, which
-            # is identical for both (a native streaming worker would otherwise
-            # be mis-matched as batch-asr and double-count the footprint).
-            label = "streaming-asr"
-        elif "speechrail.backends.qwen3_worker" in line:
-            label = "batch-asr"
-        elif "qwen3_streaming_worker" in line or "streaming_worker" in line:
-            label = "streaming-asr"
+    found: dict[str, ProcessIdentity] = {}
+    seen: set[ProcessIdentity] = set()
+    for pid, line in entries:
+        parts = line.split()
+        label = _process_role(line)
         if label is None:
+            continue
+        if host_pids and label != "host-fastapi" and not _is_descendant(pid, host_pids):
             continue
 
         parts_start = parts[8] if len(parts) > 8 else None
@@ -267,6 +326,9 @@ def _record_tick(
         state.max_tick_span_seconds = max(state.max_tick_span_seconds, duration)
 
     state.ticks += 1
+    if not unique:
+        state.incomplete_ticks += 1
+        return
     if len(observations) != len(unique):
         state.incomplete_ticks += 1
         return
@@ -284,7 +346,7 @@ def _record_tick(
 
 
 def _sampler_loop(
-    pids: Mapping[str, ProcessIdentity],
+    pids: Mapping[str, ProcessIdentity] | ProcessDiscovery,
     stop: threading.Event,
     state: SamplingStats,
     *,
@@ -296,10 +358,11 @@ def _sampler_loop(
     reader = _sample_process if reader is None else reader
     sleep = time.sleep if sleep_fn is None else sleep_fn
     monotonic = time.monotonic if clock is None else clock
+    discover: ProcessDiscovery = pids if callable(pids) else lambda: pids
     started_at = monotonic()
     try:
         while not stop.is_set():
-            _record_tick(pids, state, reader, clock=monotonic)
+            _record_tick(discover(), state, reader, clock=monotonic)
             sleep(interval_seconds)
     except Exception as exc:
         state.error = exc
@@ -432,7 +495,7 @@ def main() -> None:
     stop = threading.Event()
     t = threading.Thread(
         target=_sampler_loop,
-        args=(pids, stop, state),
+        args=(worker_pids, stop, state),
         daemon=True,
         name="speechrail-resource-sampler",
     )

@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from examples.perf import benchmark_resources
 from examples.perf import sample_resources as resources
 from examples.perf.profile_metrics import ProcessIdentity
 
@@ -39,6 +40,59 @@ def test_worker_pids_deduplicates_same_process_identity(monkeypatch: pytest.Monk
     found = resources.worker_pids()
 
     assert found == {"batch-asr": identity}
+
+
+def test_worker_pids_finds_only_service_owned_coreml_diarization_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ps_output = "\n".join(
+        [
+            "USER PID %CPU %MEM VSZ RSS TT STAT STARTED TIME COMMAND",
+            "u 100 0.0 0.1 1 1 ?? S 10:00AM 0:00 speechrail serve",
+            "u 300 0.0 0.1 1 1 ?? S 10:00AM 0:00 "
+            "/runtime/diarization-worker --model /models/SortformerNvidiaLow_v2.1.mlmodelc "
+            "--protocol-version 1",
+            "u 400 0.0 0.1 1 1 ?? S 10:00AM 0:00 "
+            "/runtime/diarization-worker --model /models/SortformerNvidiaLow_v2.1.mlmodelc "
+            "--protocol-version 1",
+        ]
+    )
+    identities = {
+        100: ProcessIdentity(pid=100, start_time_ns=1),
+        300: ProcessIdentity(pid=300, start_time_ns=3),
+        400: ProcessIdentity(pid=400, start_time_ns=4),
+    }
+    monkeypatch.setattr(
+        resources.subprocess,
+        "run",
+        lambda *_args, **_kwargs: _Completed(ps_output),
+    )
+    monkeypatch.setattr(
+        resources,
+        "_current_process_identity",
+        lambda pid, **_kwargs: identities.get(pid),
+    )
+    monkeypatch.setattr(
+        resources,
+        "_read_process_parent",
+        lambda pid: {100: 1, 300: 100, 400: 999}.get(pid),
+        raising=False,
+    )
+
+    found = resources.worker_pids()
+
+    assert found == {"host-fastapi": identities[100], "diarization": identities[300]}
+
+
+def test_empty_discovery_tick_is_incomplete() -> None:
+    state = resources.SamplingStats()
+
+    resources._record_tick({}, state, lambda _: (0.0, 1.0, 1.0, resources.FOOTPRINT_METRIC))
+
+    assert state.ticks == 1
+    assert state.complete_ticks == 0
+    assert state.incomplete_ticks == 1
+    assert state.peak_concurrent_mb is None
 
 
 def test_missing_ps_output_is_incomplete_instead_of_zero(
@@ -113,6 +167,26 @@ def test_missing_process_does_not_make_a_false_complete_peak() -> None:
     assert state.complete_ticks == 0
     assert state.incomplete_ticks == 1
     assert state.missing_observations == 1
+
+
+def test_process_monitor_retains_missing_process_in_the_tick() -> None:
+    host = ProcessIdentity(pid=100, start_time_ns=1)
+    diarization = ProcessIdentity(pid=300, start_time_ns=3)
+    monitor = benchmark_resources.ProcessResourceMonitor(
+        discover=lambda: {"host-fastapi": host, "diarization": diarization},
+        reader=lambda process: (
+            (0.0, 10.0, 10.0, resources.FOOTPRINT_METRIC) if process == host else None
+        ),
+    )
+
+    monitor._collect_tick()
+
+    processes = monitor._samples[0]["processes"]
+    assert isinstance(processes, list)
+    assert len(processes) == 2
+    missing = next(item for item in processes if item["role"] == "diarization")
+    assert missing["phys_footprint_bytes"] is None
+    assert "diarization" in monitor._samples[0]["missing_roles"]
 
 
 def test_pid_reuse_is_missing_for_the_original_process_lifetime(
@@ -226,3 +300,42 @@ def test_sampler_thread_records_and_cleans_up_reader_exception() -> None:
     assert not thread.is_alive()
     assert isinstance(state.error, RuntimeError)
     assert state.sampling_span_seconds is not None
+
+
+def test_sampler_loop_rediscovers_lazy_workers_each_tick() -> None:
+    host = ProcessIdentity(pid=100, start_time_ns=1)
+    diarization = ProcessIdentity(pid=300, start_time_ns=3)
+    discoveries = iter(
+        (
+            {"host-fastapi": host},
+            {"host-fastapi": host, "diarization": diarization},
+        )
+    )
+    discover_calls = 0
+    sleep_calls = 0
+    stop = threading.Event()
+    state = resources.SamplingStats()
+
+    def discover() -> dict[str, ProcessIdentity]:
+        nonlocal discover_calls
+        discover_calls += 1
+        return next(discoveries)
+
+    def sleep(_seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        if sleep_calls == 2:
+            stop.set()
+
+    resources._sampler_loop(
+        discover,
+        stop,
+        state,
+        reader=lambda _process: (0.0, 10.0, 10.0, resources.FOOTPRINT_METRIC),
+        sleep_fn=sleep,
+        interval_seconds=0.0,
+    )
+
+    assert discover_calls == 2
+    assert state.complete_ticks == 2
+    assert "diarization" in state.process_peaks
