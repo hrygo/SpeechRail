@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-09-09
+
+### Added
+
+- 新增音色克隆质量门控：`POST /v1/voices/clone` 接入 `voice_quality_v1` 参考音频门禁，不达标返回 `400 voice_quality_reject` 并附同级 `quality_report`；克隆接口支持 `Idempotency-Key` 幂等去重（进程内、有界 128 条，键含音频与脚本 SHA-256）。
+- 新增 `POST /v1/voices/clone/validate`：仅校验不注册，任何结果一律返回 `200` + `VoiceQualityReport`，便于注册前预检。
+- 新增 `POST /v1/voices/{voice_id}/quality-runs`：对已注册音色执行有界固定脚本质量探针（`voice_quality_v1_zh`，`runs` 1..3），区分 `probe_failed` / `clone_speed_unsupported` / `output_invalid` 失败码；`include_audio` 声明未实现并返回 `422 include_audio_unsupported`。
+- `VoiceProfile` 增加可选 `quality` 字段（仅已评估克隆音色携带）；旧客户端与预置音色不受影响，缺失即视为未评估。
+
+### Fixed
+
+- 质量探针对空输出（零音频 chunk）不再误计为成功，避免出现 `status=pass` 但 `successful_probe_count=0` 的矛盾报告，统一归类为 `output_invalid`。
+- 克隆幂等命中已删除音色时不再泄漏裸 `500`：快路径与锁内镜像查找均将过期条目视为未命中，删除后重新注册。
+- 域层失败码枚举补齐 `clone_speed_unsupported` / `output_invalid`，与 OpenAPI 九码契约一致，`from_dict` 回读不再静默丢弃合成侧失败码。
+
+### Verification
+
+- `1441 passed, 1 skipped`；`ruff`、`mypy`（102 文件）、OpenAPI redocly lint、`git diff --check` 全通过。
+- 三路严格复审通过（代码正确性 / 实测 QA / 契约同步），新增回归测试覆盖空探针、过期幂等与失败码回读。
+- 真实模型三档 smoke 与性能基准见本轮发布验收报告；派生质量（MOS/ABX）与长时资源不在本轮门禁内。
+
 ## [2.0.4] - 2026-09-09
 
 ### Added
