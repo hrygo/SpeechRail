@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [2.0.4] - 2026-09-09
+
+### Added
+
+- 增加 Realtime `response.create` 的 namespaced TTS speed 扩展，并保持标准 OpenAI envelope 兼容。
+- 增加全链路内存场景 benchmark runner 与资源证据保护，缺失观测时 fail closed。
+
+### Fixed
+
+- 修复 diarization revision 队列丢失 revision 1、bounded backlog 跳号和 EOF 对齐问题。
+- 修复 `speaker=null` 状态非法落入 `tentative/stable`、ForcedAligner 零时长 token 使整段 timing 降级，以及 EOF unknown 覆盖已有 speaker patch 的问题。
+- 稳定 clone ICL 推理：请求级确定性 seed、低温度/top-p、repetition penalty、校准后响度冻结、峰值保护与参考音频信号校验；非 `1.0` clone speed 明确返回不支持。
+
+### Verification
+
+- `1357 passed, 1 skipped`，覆盖率 `82.24%`；`mypy` strict 与 `ruff` 全通过。
+- quality managed runtime `/health`：ASR/TTS/diarization ready，`auto → silero`，`speech_admission_enabled=true`。
+- Sona 字幕重入、会议 EOF 水位屏障和 clone 稳定性联合复验已记录；DER/JER、长时资源与主观音质仍不在本版本门禁内。
+
 ## [2.0.3] - 2026-09-09
 
 ### Fixed
