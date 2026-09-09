@@ -1,12 +1,12 @@
 # 全链路内存证据与保护：ROI 审查及执行方案
 
-日期：2026-09-09。状态：方案已审查，P0/P1 已实施，完整 gate 与 GitHub CI 已通过；C/D/E 资源窗口补证继续由 issue 跟踪。
+日期：2026-09-09。状态：方案已审查，P0/P1 已实施，三档 active-window 资源证据已闭合；P2 reservation 不实施，目标低内存设备验收继续由 issue 跟踪。
 
 跟踪 issue：https://github.com/hrygo/SpeechRail/issues/35 。GitHub issue 正文保存本方案的可远程审阅副本；阶段进度以 issue 检查项和关联证据为准。
 
 目标：使三档内存报告覆盖实际使用的 VAD、ASR、ForcedAligner、CoreML 分人和 TTS，先修正测量可信度，再根据证据决定运行时保护投入。
 
-范围：采样器、公共 API 基准、确定性回归测试、基准 SOP 与脱敏报告。运行时准入变更属于有条件后续阶段；三档实测结果见配套报告，不把未闭合的资源窗口冒称发布上限。
+范围：采样器、公共 API 基准、确定性回归测试、基准 SOP 与脱敏报告。运行时准入变更属于有条件后续阶段；三档 active-window 实测结果见配套报告，8 GiB light 目标仍不作承诺。
 
 ## 1. 审查结论与 ROI
 
@@ -71,7 +71,7 @@
 报告分开给出 sample completeness、scenario coverage、resource budget verdict 三项。五次循环报告 max/median/range 和样本数；N=5 的 p95 仅描述性展示，不用于宣称统计可靠上界。记录 pressure/swap 变化作为系统辅助证据，不直接归因于服务，也不与进程 footprint 相加。
 
 - [x] 场景 runner 及 fake WebSocket/HTTP 回归完成；错误/超时/取消必须非成功退出并保留安全原因。
-- [ ] 三档 A–E 实测与加载证据齐全；行为五场景全部通过，C/D/E 的短生命周期资源窗口仍由 gate 明确标记为未闭合。
+- [x] 三档 A–E 实测与加载证据齐全；行为五场景全部通过，C/D/E 均以 incarnation/active-window gate 闭合，全局 transition 另行保留。
 - [x] 脱敏报告逐场景列身份、预期/观测角色、峰值、采样间隔与完整性、结束状态。
 - [x] 8 GiB light 能力在真实目标设备验收前保持 unset；大内存机器限额测试只证明拒绝逻辑，不能替代设备运行验收。
 
@@ -109,10 +109,10 @@ git diff --check
 
 - [x] ROI 审查与方案落盘
 - [x] P0 采样可信度和旧报告说明完成（`2e1e4ba`）
-- [x] P1 公共场景 runner 和回归完成（`63edf1d`）
-- [x] 三档真实资源报告完成，原 profile 恢复（行为全通过；C/D/E 资源 gate 保持关闭）
-- [x] 对应提交 GitHub CI 全绿（run `34307363481`，Ubuntu/macOS required checks）
-- [x] P2 决策有证据：当前无需实施动态 reservation，先补 active-window 资源证据
+- [x] P1 公共场景 runner、active-window 归一化、生命周期 settle 和回归完成（`63edf1d`、`d4b3d54`）
+- [x] 三档真实 A–E 资源报告完成，原 profile 恢复（A/B 全局 complete；C/D/E active-window complete）
+- [ ] 对应提交 GitHub CI 全绿（`d4b3d54` 及报告提交待推送验证）
+- [x] P2 决策有证据：当前不实施动态 reservation；先验收目标低内存设备并以 active-window 报告为基线
 - [x] 目标设备限制明确；低内存目标设备验收仍未完成
 
-自动跟踪每日检查一次 issue/关联 PR/CI；状态有变化或新增阻塞时报告，关闭且证据齐全后暂停。跟踪不自动实施、合并、发布或重跑真实模型。当前已完成 P0/P1 工具、三档行为验收和 CI；剩余跟踪项是 C/D/E 资源窗口补证与主 issue 收口。已有源码并行改动保持原样。
+自动跟踪每日检查一次 issue/关联 PR/CI；状态有变化或新增阻塞时报告，关闭且证据齐全后暂停。跟踪不自动实施、合并、发布或重跑真实模型。当前已完成 P0/P1 工具、三档 A–E 验收和 active-window 证据；剩余跟踪项是目标低内存设备验收、CI 收口和主 issue 关闭。已有源码并行改动保持原样。
