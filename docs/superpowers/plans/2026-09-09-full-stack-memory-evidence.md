@@ -1,6 +1,6 @@
 # 全链路内存证据与保护：ROI 审查及执行方案
 
-日期：2026-09-09。状态：方案已审查，P0/P1 已实施；等待完整 gate、CI 与 issue 收口。
+日期：2026-09-09。状态：方案已审查，P0/P1 已实施，完整 gate 与 GitHub CI 已通过；C/D/E 资源窗口补证继续由 issue 跟踪。
 
 跟踪 issue：https://github.com/hrygo/SpeechRail/issues/35 。GitHub issue 正文保存本方案的可远程审阅副本；阶段进度以 issue 检查项和关联证据为准。
 
@@ -111,8 +111,8 @@ git diff --check
 - [x] P0 采样可信度和旧报告说明完成（`2e1e4ba`）
 - [x] P1 公共场景 runner 和回归完成（`63edf1d`）
 - [x] 三档真实资源报告完成，原 profile 恢复（行为全通过；C/D/E 资源 gate 保持关闭）
-- [ ] 对应提交 GitHub CI 全绿
+- [x] 对应提交 GitHub CI 全绿（run `34307363481`，Ubuntu/macOS required checks）
 - [x] P2 决策有证据：当前无需实施动态 reservation，先补 active-window 资源证据
 - [x] 目标设备限制明确；低内存目标设备验收仍未完成
 
-自动跟踪每日检查一次 issue/关联 PR/CI；状态有变化或新增阻塞时报告，关闭且证据齐全后暂停。跟踪不自动实施、合并、发布或重跑真实模型。当前已完成 P0/P1 工具与三档行为验收；剩余跟踪项是 C/D/E 资源窗口补证、CI 绿灯和主 issue 收口。已有源码并行改动保持原样。
+自动跟踪每日检查一次 issue/关联 PR/CI；状态有变化或新增阻塞时报告，关闭且证据齐全后暂停。跟踪不自动实施、合并、发布或重跑真实模型。当前已完成 P0/P1 工具、三档行为验收和 CI；剩余跟踪项是 C/D/E 资源窗口补证与主 issue 收口。已有源码并行改动保持原样。
