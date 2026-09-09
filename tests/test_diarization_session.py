@@ -90,6 +90,39 @@ def test_session_keeps_text_fixed_then_publishes_final_attribution_before_done()
     asyncio.run(scenario())
 
 
+def test_update_queue_preserves_every_revision_for_sona_continuity() -> None:
+    async def scenario() -> None:
+        session, _ = _session()
+        await session._emit(
+            ItemAttributionUpdated(
+                "item_1",
+                (Attribution("unit_1", None, (), "provisional", "pending", 1),),
+                1,
+            )
+        )
+        await session._emit(
+            ItemAttributionUpdated(
+                "item_1",
+                (Attribution("unit_1", "A", ("A",), "provisional", None, 2),),
+                2,
+            )
+        )
+        await session._emit(
+            ItemAttributionUpdated(
+                "item_1",
+                (Attribution("unit_1", "B", ("B",), "provisional", None, 3),),
+                3,
+            )
+        )
+        await session._close_events()
+
+        events = [event async for event in session.events()]
+        updates = [event for event in events if isinstance(event, ItemAttributionUpdated)]
+        assert [event.attributions[0].revision for event in updates] == [1, 2, 3]
+
+    asyncio.run(scenario())
+
+
 def test_finish_is_idempotent_and_rejects_a_different_finish_id() -> None:
     async def scenario() -> None:
         session, _ = _session()
@@ -223,9 +256,9 @@ def test_slow_event_consumer_gets_a_bounded_latest_snapshot_with_final_units() -
         events = [event async for event in session.events()]
 
         updates = [event for event in events if isinstance(event, ItemAttributionUpdated)]
-        assert len(updates) == 1
-        delivered = {attribution.unit_id: attribution for attribution in updates[0].attributions}
-        assert delivered["unit_1"] == final_one
-        assert delivered["unit_2"] == final_two
+        assert updates == []
+        statuses = [event for event in events if isinstance(event, StatusChanged)]
+        assert len(statuses) == 1
+        assert statuses[0].reason == "diarization_event_backlog_exceeded"
 
     asyncio.run(scenario())

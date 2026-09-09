@@ -65,6 +65,7 @@ class DiarizationSession:
         self._done: dict[str, SessionDone] = {}
         self._closed = False
         self._degraded_reason: str | None = None
+        self._discard_attribution_updates = False
         self._activity_terminated = False
 
     @property
@@ -202,41 +203,38 @@ class DiarizationSession:
                 self._events_changed.notify()
 
     def _append_or_coalesce_update(self, event: ItemAttributionUpdated) -> None:
-        """Keep attribution snapshots bounded without discarding final unit state.
+        """Keep every revision or fail closed when the pending queue is full.
 
-        The actor publishes revisions faster than a WebSocket can occasionally
-        send them.  An attribution snapshot is replaceable per unit, so a slow
-        consumer needs the latest revision, not every provisional transition.
-        Transport-level transcription-completed events do not enter this buffer.
+        Sona and the persistence layer require per-unit revisions to arrive
+        strictly consecutively.  Replacing a queued revision with a newer
+        snapshot would therefore turn ``1, 2, 3`` into ``1, 3`` for a slow
+        consumer.  Once the bounded queue is exhausted, discard pending
+        attribution updates and publish one degraded status instead of emitting
+        a protocol-invalid revision sequence.
         """
 
-        updates = [queued for queued in self._events if isinstance(queued, ItemAttributionUpdated)]
-        same_item = [queued for queued in updates if queued.item_id == event.item_id]
-        if same_item:
-            self._replace_updates(same_item, event)
+        if self._discard_attribution_updates:
             return
-        if len(updates) < self._max_pending_update_events:
+
+        pending_updates = sum(
+            isinstance(queued, ItemAttributionUpdated) for queued in self._events
+        )
+        if pending_updates < self._max_pending_update_events:
             self._events.append(event)
             return
-        self._replace_updates(updates, event)
 
-    def _replace_updates(
-        self,
-        replaced: list[ItemAttributionUpdated],
-        incoming: ItemAttributionUpdated,
-    ) -> None:
-        latest_by_unit: dict[str, Attribution] = {}
-        for event in (*replaced, incoming):
-            for attribution in event.attributions:
-                latest_by_unit[attribution.unit_id] = attribution
-        merged = ItemAttributionUpdated(
-            item_id=incoming.item_id if len(replaced) == 1 else "",
-            attributions=tuple(latest_by_unit.values()),
-            sequence=incoming.sequence,
+        self._mark_update_backlog_exceeded()
+
+    def _mark_update_backlog_exceeded(self) -> None:
+        reason = "diarization_event_backlog_exceeded"
+        if self._degraded_reason is not None:
+            return
+        self._degraded_reason = reason
+        self._discard_attribution_updates = True
+        self._events = deque(
+            queued
+            for queued in self._events
+            if not isinstance(queued, ItemAttributionUpdated)
         )
-        replacement_ids = {id(event) for event in replaced}
-        queue = list(self._events)
-        first = next(index for index, event in enumerate(queue) if id(event) in replacement_ids)
-        retained = [event for event in queue if id(event) not in replacement_ids]
-        retained.insert(first, merged)
-        self._events = deque(retained)
+        if not any(isinstance(queued, StatusChanged) for queued in self._events):
+            self._events.append(StatusChanged("degraded", reason, self._next_sequence()))

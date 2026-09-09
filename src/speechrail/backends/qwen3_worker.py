@@ -1150,6 +1150,14 @@ class Qwen3Engine:  # pragma: no cover - requires an external Qwen snapshot and 
                 or not isinstance(end, (int, float))
             ):
                 return []
+            # Qwen3-ForcedAligner uses a coarse timestamp grid for some
+            # character-level tokens.  A token can consequently collapse to
+            # ``start == end`` even when the surrounding alignment is valid.
+            # FixedTextAligner preserves that token's text gap on the next
+            # valid token; forwarding a zero-duration token would invalidate
+            # the entire otherwise usable alignment.
+            if end <= start:
+                continue
             raw.append({"text": token, "start": start, "end": end})
         return raw
 

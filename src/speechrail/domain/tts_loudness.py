@@ -67,11 +67,13 @@ class StreamingPcm16LoudnessController:
         *,
         sample_rate: int,
         config: Pcm16LoudnessConfig | None = None,
+        freeze_gain_after_calibration: bool = False,
     ) -> None:
         if sample_rate <= 0:
             raise ValueError("sample_rate must be positive")
         self._sample_rate = sample_rate
         self._config = config or Pcm16LoudnessConfig()
+        self._freeze_gain_after_calibration = freeze_gain_after_calibration
         self._calibration_samples = max(
             1,
             round(self._sample_rate * self._config.calibration_ms / 1000),
@@ -129,25 +131,35 @@ class StreamingPcm16LoudnessController:
         ):
             desired_gain_db = self._calibration_gain_db
             self._calibration_applied = True
-        previous_gain_db = self._current_gain_db
-        if previous_gain_db is None:
-            gain_start_db = (
-                self._calibration_gain_db
-                if self._calibration_gain_db is not None
-                else desired_gain_db
-            )
+        if self._freeze_gain_after_calibration:
+            if self._current_gain_db is None:
+                self._current_gain_db = (
+                    self._calibration_gain_db
+                    if self._calibration_gain_db is not None
+                    else desired_gain_db
+                )
+            gain_start_db = self._current_gain_db
+            gain_end_db = self._current_gain_db
         else:
-            slewed_gain_db = self._move_gain(
-                previous_gain_db,
-                desired_gain_db,
-                len(normalized),
-            )
-            gain_start_db = min(
-                desired_gain_db + self._MAX_GAIN_TRANSITION_DB,
-                max(desired_gain_db - self._MAX_GAIN_TRANSITION_DB, slewed_gain_db),
-            )
-        gain_end_db = desired_gain_db
-        self._current_gain_db = gain_end_db
+            previous_gain_db = self._current_gain_db
+            if previous_gain_db is None:
+                gain_start_db = (
+                    self._calibration_gain_db
+                    if self._calibration_gain_db is not None
+                    else desired_gain_db
+                )
+            else:
+                slewed_gain_db = self._move_gain(
+                    previous_gain_db,
+                    desired_gain_db,
+                    len(normalized),
+                )
+                gain_start_db = min(
+                    desired_gain_db + self._MAX_GAIN_TRANSITION_DB,
+                    max(desired_gain_db - self._MAX_GAIN_TRANSITION_DB, slewed_gain_db),
+                )
+            gain_end_db = desired_gain_db
+            self._current_gain_db = gain_end_db
         output = [
             sample
             * 10 ** (
@@ -156,7 +168,8 @@ class StreamingPcm16LoudnessController:
             )
             for index, sample in enumerate(normalized)
         ]
-        output = self._apply_rms_window(output)
+        if not self._freeze_gain_after_calibration:
+            output = self._apply_rms_window(output)
         output = self._apply_peak_ceiling(output)
         return self._encode(output)
 

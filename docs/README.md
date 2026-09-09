@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "1.5.1"
-date: 2026-09-08
+version: "2.0.3"
+date: 2026-09-09
 ---
 
 # 📚 SpeechRail 文档中心
@@ -19,6 +19,14 @@ date: 2026-09-08
 </p>
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
+
+## 当前实现基线（2026-09-09）
+
+- 当前受管质量档为 SpeechRail `2.0.3`，由本源码仓库构建 wheel 后经 `tools.install_macos.install_managed` 部署；`runtime/current` 只接受 release 切换，不作为源码编辑目标。
+- `/health` 当前应报告 `asr_ready=true`、`tts_ready=true`、`diarization_ready=true`；`realtime_vad` 为 `configured_engine=auto`、`resolved_engine=silero`、`speech_admission_enabled=true`、`ready=true`。
+- Realtime `server_vad` 是服务端 endpointing 能力。调用方可传递自己的窗口：Sona 标准字幕使用 `threshold=0.65/prefix=300ms/silence=400ms`，会议使用同 threshold/prefix、`silence=900ms`；这些不是 SpeechRail 公共 API 的全局默认值。
+- 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
+- clone ICL 路径已加入稳定采样、请求级响度冻结、峰值保护和参考音频信号校验；当前 active clone backend 对非 `1.0` speed 明确返回 `clone_speed_unsupported`。
 
 ---
 

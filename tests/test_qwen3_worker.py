@@ -667,6 +667,22 @@ def test_align_session_audio_is_unavailable_when_no_local_aligner_is_configured(
     assert calls == []
 
 
+def test_fixed_text_alignment_drops_zero_duration_quantized_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, _ = _align_engine(
+        monkeypatch,
+        raw_words=[("你", 0.0, 0.5), ("好", 0.5, 0.5), ("。", 0.5, 1.0)],
+    )
+
+    aligned = engine.align_text(b"\x00\x00" * 1600, text="你好。", language="zh")
+
+    assert aligned == [
+        {"text": "你", "start": 0.0, "end": 0.5},
+        {"text": "。", "start": 0.5, "end": 1.0},
+    ]
+
+
 def test_align_session_audio_rejects_malformed_forced_aligner_items(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

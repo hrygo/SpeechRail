@@ -14,5 +14,7 @@
 | [0010](0010-streaming-diarization-fix.md) | 修复流式路径说话人分离（segments 硬编码空 + Sortformer 解析） | Superseded by 0012 |
 | [0011](0011-unified-runtime-model-tiers.md) | 统一 ASR/TTS 运行时、仅权重三档与可恢复本地切换 | Accepted（已在 v1.8.0 实施并在本机质量档验收通过） |
 | [0012](0012-openai-native-coreml-diarization.md) | OpenAI 原生分人接口与唯一 CoreML 运行时 | Accepted |
+| [0013](0013-realtime-vad-and-diarization-boundary.md) | Realtime endpointing 与 continuous diarization activity 分离 | Accepted |
+| [0014](0014-source-built-managed-runtime.md) | 所有运行时变更必须从源码构建并经 managed release 部署 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

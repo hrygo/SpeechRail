@@ -78,6 +78,25 @@ def test_controller_smooths_alternating_chunk_levels() -> None:
     assert max(abs(levels[i] - levels[i - 1]) for i in range(1, len(levels))) < raw_jump
 
 
+def test_controller_can_freeze_clone_gain_after_request_calibration() -> None:
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+    low = _constant_pcm16(0.05, 4_800)
+    high = _constant_pcm16(0.40, 1_920)
+
+    first = controller.process(low)
+    first_gain_db = controller._current_gain_db
+    second = controller.process(high)
+    third = controller.process(low)
+
+    assert first_gain_db is not None
+    assert controller._current_gain_db == pytest.approx(first_gain_db)
+    assert _rms_dbfs(third) == pytest.approx(_rms_dbfs(first), abs=0.1)
+    assert _rms_dbfs(second) - _rms_dbfs(first) > 15.0
+
+
 def test_controller_applies_peak_ceiling_without_wraparound() -> None:
     controller = StreamingPcm16LoudnessController(sample_rate=24_000)
 

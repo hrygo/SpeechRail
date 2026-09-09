@@ -10,6 +10,18 @@ date: 2026-09-08
 
 本审计对应[优化方案](2026-09-08-single-machine-speech-foundation-optimization.md)，以代码、契约、确定性测试和本机只读探针为依据。它说明计划项是否已有可审查实现；不将未取得的真实模型质量与性能测量写成通过。
 
+> **当前基线补充（2026-09-09）**：本文第 1–5 节保留 2026-09-08 交付审计快照；当前运行时事实以本补充和 [能力诊断与质量验收](../operations/capability-quality-acceptance.md) 为准。SpeechRail 当前为 v2.0.3 quality managed release，且由本源码仓库构建 wheel 安装。
+
+## 2026-09-09 当前源码与运行态补充
+
+- SpeechRail full gate：`1351 passed, 1 skipped`，覆盖率 `82.24%`；`mypy src/` 与 `ruff check src/` 全通过。
+- `/health`：ASR/TTS/diarization ready；`realtime_vad` 为 `auto → silero`、speech admission ready；CoreML Sortformer FP16 profile ready。
+- Realtime 分人修复已落地：更新队列保留 revision 1 baseline；缺失 provisional speaker 编码为 `unknown`；forced alignment 丢弃零时长量化 token；终态 unknown 不覆盖已有 speaker patch。
+- clone 稳定性修复已落地：请求级稳定 seed、`temperature=0.1`、`top_p=0.95`、repetition penalty、校准后冻结响度增益、peak ceiling、参考音频信号校验；非 `1.0` clone speed 明确拒绝。
+- 真实联调：标准字幕连续两轮重入均产生各自 A/B speaker；会议链路 2 个 completed item、2 次 speaker patch、无 degraded 调用并完成 EOF barrier。
+
+本补充不把 DER/JER、主观听感、两小时 soak 或长文件质量写成已通过；这些仍需独立语料和设备条件验收。
+
 ## 交付边界
 
 本轮保持单个 ASGI 进程、单个 ASR worker 与单个 TTS worker 的边界。没有下载模型、修改 profile、重启服务或引入云控制面；可回退方式是分别关闭或还原下列四个 PR。

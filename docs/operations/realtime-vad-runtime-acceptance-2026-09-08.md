@@ -14,6 +14,17 @@ date: 2026-09-08
 
 `2.0.2` 已将 `onnxruntime==1.29.0` 纳入 Apple Silicon（macOS 14+）应用 wheel，并把应用 Python 的导入检查与 Silero 模型文件检查接入 managed preflight。`/health`、成功的 `/readyz` 和 `/metrics` 现在独立返回 `realtime_vad.ready/code/message`；配置了 Silero 模型但运行时不完整时继续 fail closed，不静默改用 legacy。
 
+## 2026-09-09 v2.0.3 追验补充
+
+本文件前半部分保留 v2.0.2 的 `onnxruntime` 修复记录；当前受管质量档已从 SpeechRail 源码构建 v2.0.3 wheel 后重新安装。当前 `/health` 脱敏摘要：
+
+- `version=2.0.3`、`asr_ready=true`、`tts_ready=true`、`tts_warm=true`、`diarization_ready=true`；diarization profile 为 `coreml-sortformer-fp16`。
+- `realtime_vad.configured_engine=auto`、`resolved_engine=silero`、`speech_admission_enabled=true`、`ready=true`。
+- 当前 Sona 调用方不使用统一静音值：标准字幕显式传 `silence_duration_ms=400`，会议显式传 `900`；两者 threshold 均为 `0.65`、prefix padding 均为 `300`。
+- SpeechRail 以 32ms 帧执行边界状态机，400/900ms 在停止判定上量化为约 416/928ms；这属于同一 VAD 链的帧时钟，不是 Sona 与 SpeechRail 双重 VAD。
+
+v2.0.3 复验同时覆盖真实字幕两轮重入和会议 EOF：字幕两轮各自产生 A/B speaker，会议写入 2 个 completed item、产生 2 次 speaker patch、无 degraded 调用并以 `diarization_status=complete` 收尾。SpeechRail full gate 为 `1351 passed, 1 skipped`，覆盖率 `82.24%`。
+
 ## 交付与静态门
 
 - 修复提交：`6fed764` (`fix: bundle VAD runtime and expose capability readiness`)

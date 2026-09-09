@@ -12,6 +12,7 @@ existing ``RealtimeAsrFactory``/``RealtimeAsrSession`` and TTS ports.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -870,6 +871,45 @@ def parse_text_item(event: dict[str, Any]) -> str:
     if len(text) > 100_000:
         raise RealtimeAdapterError("text_too_long", "text exceeds the 100k character limit")
     return text
+
+
+def parse_tts_response_speed(response: object) -> float:
+    """Read the optional namespaced TTS speed from ``response.create``.
+
+    OpenAI's realtime response object has no portable speed field.  SpeechRail
+    therefore accepts one narrowly scoped extension while keeping the standard
+    top-level envelope unchanged.
+    """
+
+    if response is None:
+        return 1.0
+    if not isinstance(response, dict):
+        raise RealtimeAdapterError("invalid_tts", "response must be an object")
+    extension = response.get("speechrail")
+    if extension is None:
+        return 1.0
+    if (
+        not isinstance(extension, dict)
+        or set(extension) != {"tts"}
+        or not isinstance(extension["tts"], dict)
+        or set(extension["tts"]) != {"speed"}
+    ):
+        raise RealtimeAdapterError(
+            "invalid_tts",
+            "response.speechrail.tts requires numeric speed only",
+        )
+    speed = extension["tts"]["speed"]
+    if (
+        isinstance(speed, bool)
+        or not isinstance(speed, (int, float))
+        or not math.isfinite(float(speed))
+        or not 0.25 <= float(speed) <= 4.0
+    ):
+        raise RealtimeAdapterError(
+            "invalid_tts",
+            "response.speechrail.tts.speed must be between 0.25 and 4.0",
+        )
+    return float(speed)
 
 
 def validate_append(

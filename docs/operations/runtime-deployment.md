@@ -94,6 +94,21 @@ wheel tag 因而与当前 Python/Apple Silicon 平台绑定。ASR/TTS vendor run
 `ffmpeg` 和 `.env` 仍由本机预先准备，CoreML bundle 也不打进 wheel。发布目录应同时提供 wheel、
 `tools/install_macos.py`、`configs/speechrail.example.env`、plist 模板和校验文件。
 
+### 源码到 managed runtime 的不变量（2026-09-09）
+
+SpeechRail 的任何修复、协议变更或 worker 变更都必须先落在本源码仓库，再由源码构建 wheel；managed runtime 只消费 wheel release。禁止直接编辑 `runtime/current`、release venv 或 worker 安装目录，因为这些修改会在下一次 release 切换时丢失且无法审计。
+
+最小发布顺序：
+
+1. 在 SpeechRail 源码根目录完成测试、类型、lint、契约与 `git diff --check`。
+2. 使用 `uv build --no-sources --wheel` 构建当前源码 wheel。
+3. 使用 `tools.install_macos.install_managed` 安装候选 release；installer 负责 preflight、LaunchAgent 切换、公共 smoke 和失败回退。
+4. 通过 `/health`、`/readyz`、`/v1/models` 和目标 Realtime smoke 验证后，才把 `runtime/current` 指向新 release。
+
+源码构建与安装沿用下方唯一的 managed installer 示例，避免维护两份可能漂移的命令。
+
+验证时应记录当前 release 路径、package version、health readiness 和 smoke 摘要，不记录密钥、完整参考文本、PCM 或模型绝对路径。
+
 在发布目录中构建并通过唯一 managed installer 安装：
 
 ```bash

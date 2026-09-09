@@ -477,6 +477,46 @@ def test_session_commit_defaults_want_segments_false() -> None:
     asyncio.run(scenario())
 
 
+def test_wait_finalized_waits_for_terminal_cleanup_and_releases_streaming_lease() -> None:
+    async def scenario() -> None:
+        worker = FakeStreamingWorker()
+        session = Qwen3StreamingSession(
+            worker=worker,  # type: ignore[arg-type]
+            language="zh",
+            prompt="",
+            session_id="sess_test",
+        )
+        connect = asyncio.create_task(session.connect())
+        await asyncio.sleep(0)
+        worker.push(
+            "sess_test",
+            {"type": "session.opened", "session_id": "sess_test", "language": "zh"},
+        )
+        await connect
+
+        worker.push(
+            "sess_test",
+            {
+                "type": "event",
+                "session_id": "sess_test",
+                "kind": "completed",
+                "text": "你好",
+            },
+        )
+        await asyncio.sleep(0)
+        waiter = asyncio.create_task(session.wait_finalized())
+        await asyncio.sleep(0)
+        assert not waiter.done()
+        assert worker.mode_gate.active_mode == "streaming"
+
+        worker.push("sess_test", {"type": "finished", "session_id": "sess_test"})
+        await asyncio.wait_for(waiter, timeout=1)
+        assert worker.mode_gate.active_mode is None
+        await session.close()
+
+    asyncio.run(scenario())
+
+
 async def _collect(
     session: Qwen3StreamingSession,
     out: list[StreamingAsrEvent],

@@ -18,6 +18,21 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 `GET /readyz` 仍仅表示 ASR 或 TTS 至少一个可用；成功响应中的 `realtime_vad` 是独立的能力诊断，不能把顶层 `ready=true` 当作 `server_vad` 已可用。`backend_busy`、`queue_full` 和 `backend_timeout` 是某次请求的稳定错误，调用方应依据 `retryable` 和 `retry_after` 退避；不要把瞬时忙碌当作全局健康状态。
 
+### 当前 v2.0.3 运行快照
+
+当前 quality managed release 的有效组合为：
+
+| 能力 | 当前事实 |
+|---|---|
+| Realtime VAD | `auto → silero`，`speech_admission_enabled=true`，`ready=true` |
+| Sona subtitle policy | threshold `0.65`、prefix `300ms`、silence `400ms` |
+| Sona meeting policy | threshold `0.65`、prefix `300ms`、silence `900ms` |
+| diarization | CoreML Sortformer FP16 profile ready；activity 与 endpointing 分离 |
+| clone TTS | deterministic seed、clone-only sampling、request-local loudness freeze、peak ceiling、reference signal validation |
+| clone speed | 非 `1.0` 明确返回 `clone_speed_unsupported` |
+
+上述 subtitle/meeting policy 是调用方通过 Realtime `session.update` 传入的策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
+
 先设 `APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"`。恢复顺序固定为：`uv run speechrail service status --app-home "$APP_HOME"` → `uv run speechrail service preflight --app-home "$APP_HOME"` → `curl http://127.0.0.1:8201/health`。带 `--app-home` 的 service CLI 会自动使用 active managed runtime；不需要手工从源码 `.venv` 运行 preflight。若 `realtime_vad.code=vad_runtime_missing`，应修复当前 managed release 并重新发布，再重复 preflight；不要在客户端单独安装 SDK，也不要把已配置的 Silero 模型静默降级成 legacy。若 profile 未配置或 artifact 不可用，再用 `uv run speechrail profile status --app-home "$APP_HOME"` 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史报告或 `readyz=200` 记作当前质量通过。
 
 ## Clone TTS 响度能力
@@ -31,8 +46,8 @@ delta 大小承诺。
 
 当前代码级 review 修复与脱敏证据见
 [2026-09-08 clone TTS 响度验收记录](../archive/performance/2026-09-08-clone-tts-loudness-acceptance.md)。
-真实 managed runtime 的部署后复测、物理扬声器主观试听和 cancel/interruption 覆盖仍须单独
-记录；本节不把静态测试或 `readyz=200` 当作声音质量通过。
+真实 managed runtime 的 clone 重复生成复测已完成：同一请求连续 3 次输出 hash 一致，输出
+24kHz mono PCM16，active RMS 约 `-21.03 dBFS`，peak 约 `-3.81 dBFS`，未发现 chunk 边界点击型突变证据。物理扬声器主观试听和 cancel/interruption 覆盖仍须单独记录；本节不把静态测试或 `readyz=200` 当作完整声音质量通过。
 
 ## 外部语料与 benchmark
 
@@ -56,7 +71,7 @@ uv run python examples/perf/bench_profiles.py \
 
 `diarization_ready=true` 只表示配置的 profile、文件路径与运行时检查通过，表示服务可以按需
 尝试处理；它不表示权重已经驻留，也不证明真实模型质量或物理内存开销。未配置 profile 时不
-创建分人模型权重；当前 v1.13.0 基准未包含 diarization，不能据此发布通用的 `+0.5 GB` 数字。
+创建分人模型权重；历史 v1.13.0 基准未包含 diarization，不能据此发布通用的 `+0.5 GB` 数字。
 
 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 默认是 `300` 秒，设为 `0` 可禁用空闲驱逐。驱逐器
 会尝试调用可驱逐组件的 `close()` 并丢弃常驻引用；这不保证操作系统物理内存精确回到固定基线，

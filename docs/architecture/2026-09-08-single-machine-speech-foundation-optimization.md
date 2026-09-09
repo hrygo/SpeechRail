@@ -8,6 +8,8 @@ date: 2026-09-08
 
 # SpeechRail 单机语音基座优化方案
 
+> **文档边界**：本文是 2026-09-08 的 draft 研究与优化提案，不是当前运行事实源。当前 v2.0.3 的 VAD、CoreML diarization、clone 稳定性和源码构建部署事实以 [当前边界](current-boundaries.md)、[实时 VAD 方案](realtime-vad-2026-best-practices.md)、[能力验收](../operations/capability-quality-acceptance.md) 和 [ADR-0013/0014](../decisions/README.md) 为准。
+
 ## 1. 决策摘要
 
 **建议保留现有分层、共享 ASR worker 与三档模型体系，先修复契约和生命周期，再优化重复计算与缓冲，最后以真实质量数据决定推理参数。** 当前最高收益的工作不是换模型、增加 worker 或重写服务，而是让现有能力准确、可测、可恢复地交付给客户端。
@@ -352,5 +354,5 @@ env -u SPEECHRAIL_API_KEY uv run --no-sync pytest --no-cov \
 | 调度、预算与 IPC | [resource_governor.py](../../src/speechrail/runtime/resource_governor.py)、[model_budget.py](../../src/speechrail/runtime/model_budget.py)、[worker_protocol.py](../../src/speechrail/runtime/worker_protocol.py) |
 | ASR 推理与对齐缓存 | [qwen3_worker.py](../../src/speechrail/backends/qwen3_worker.py)、[qwen3_streaming.py](../../src/speechrail/backends/qwen3_streaming.py)、[transcript_merge.py](../../src/speechrail/application/transcript_merge.py) |
 | TTS 取消、参数与分句 | [qwen3_tts.py](../../src/speechrail/backends/qwen3_tts.py)、[qwen3_tts_worker.py](../../src/speechrail/backends/qwen3_tts_worker.py)、[tts_delivery.py](../../src/speechrail/application/tts_delivery.py) |
-| VAD 与生产分人能力 | [neural_vad.py](../../src/speechrail/backends/neural_vad.py)、[nemo_sortformer.py](../../src/speechrail/backends/nemo_sortformer.py) |
+| VAD 与生产分人能力 | [neural_vad.py](../../src/speechrail/backends/neural_vad.py)、[CoreML diarization](../../src/speechrail/backends/diarization/coreml.py) |
 | 配置与可观测性 | [Settings](../../src/speechrail/config/__init__.py)、[metrics.py](../../src/speechrail/observability/metrics.py)、[system.py](../../src/speechrail/http/routes/system.py) |

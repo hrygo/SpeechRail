@@ -1,7 +1,8 @@
 ---
 title: "SpeechRail 音色克隆（Voice Cloning）架构设计与工程交接方案"
 status: active
-date: 2026-09-08
+date: 2026-09-09
+last_updated: 2026-09-09
 ---
 
 # SpeechRail 音色克隆（Voice Cloning）架构设计与工程交接方案
@@ -54,6 +55,19 @@ date: 2026-09-08
 1. `GET /v1/voices`：每个音色对象中的 `capabilities` 显式声明 `supports_clone: bool`。在 `custom_voice` 变体下，克隆音色的 `available` 字段计算为 `False`。
 2. `POST /v1/voices/clone`：在 API 边界前置检查当前 TTS 变体。若非 `voice_design`，稳定返回 `400 voice_cloning_unsupported` Envelope（提示需切换至 `quality` 档位）。
 3. `POST /v1/audio/speech` 与 `/v1/realtime`：若客户端尝试在 `custom_voice` 档位下请求克隆音色，`resolve_binding` 抛出明确异常，系统稳定返回 `400 voice_not_available`。
+
+### 2.4 v2.0.3 克隆稳定性基线
+
+当前 clone ICL 路径不再依赖未约束的全局随机采样：
+
+- 每个请求使用绑定音色与参考文本的稳定 seed，不把目标文本纳入 seed，避免同一音色因内容变化产生不必要的采样风格漂移。
+- clone 使用 `temperature=0.1`、`top_p=0.95` 和至少 `1.3` 的 repetition penalty；preset/custom voice 的非 clone 生成路径不复用这组 clone-only 参数。
+- clone PCM 使用请求级 `StreamingPcm16LoudnessController`：首个有效窗口完成 calibration，后续 chunk 冻结增益；peak ceiling 独立持续保护。内部 `200ms` 合并边界不是公共 delta 大小承诺。
+- 参考音频在 registry 写入前必须通过 mono PCM16/目标采样率、削波比例、有效语音窗口和首尾静音检查；Sona 录音端关闭 browser echo cancellation、noise suppression 和 auto gain control，减少处理伪影进入参考音频。
+
+当前 quality managed runtime 的脱敏复验：同一 clone 请求连续生成 3 次，24kHz mono PCM16 输出 hash 一致，时长均为 `9.840s`，总体 RMS `-22.80 dBFS`，有效语音 RMS `-21.03 dBFS`，峰值 `-3.81 dBFS`；自动边界检查未发现 chunk-boundary click 型突变证据。
+
+**速度边界**：active clone backend 的非 `1.0` speed 不受支持。REST `/v1/audio/speech` 明确返回 `clone_speed_unsupported`，Realtime clone 也不得静默忽略 speed。若未来需要任意 clone 变速，应增加独立的 PCM rate/pitch 后处理并重新验收音质、音高、边界和实时延迟。
 
 ---
 

@@ -32,10 +32,21 @@ from speechrail.domain.tts import (
 )
 
 
-def _generate_test_wav(duration_seconds: float = 3.0, sample_rate: int = 24_000) -> bytes:
+def _generate_test_wav(
+    duration_seconds: float = 3.0,
+    sample_rate: int = 24_000,
+    *,
+    signal: bool = True,
+) -> bytes:
     """Generate in-memory mono PCM16 WAV bytes for testing."""
     num_samples = int(duration_seconds * sample_rate)
     samples = np.zeros(num_samples, dtype="<i2")
+    if signal:
+        timeline = np.arange(num_samples, dtype=np.float32) / sample_rate
+        samples = np.asarray(
+            0.12 * np.sin(2 * np.pi * 220 * timeline), dtype="<f4"
+        )
+        samples = np.asarray(np.round(samples * 32767), dtype="<i2")
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
@@ -270,6 +281,14 @@ def test_transcode_and_validate_clone_audio_duration_bounds() -> None:
         wav_out, dur = transcode_and_validate_clone_audio(b"fake_raw_audio")
         assert len(wav_out) == len(valid_wav)
         assert abs(dur - 5.0) < 0.1
+
+
+def test_transcode_rejects_reference_audio_without_usable_speech() -> None:
+    silent_wav = _generate_test_wav(duration_seconds=5.0, signal=False)
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = SimpleNamespace(returncode=0, stdout=silent_wav, stderr=b"")
+        with pytest.raises(ValueError, match="usable speech"):
+            transcode_and_validate_clone_audio(b"fake_raw_audio")
 
 
 def test_transcode_accepts_pipe_wav_with_unknown_riff_sizes() -> None:
@@ -538,8 +557,11 @@ def test_clone_controller_spans_sentences_and_resets_on_completion(
     controllers: list[object] = []
 
     class RecordingController:
-        def __init__(self, *, sample_rate: int) -> None:
+        def __init__(
+            self, *, sample_rate: int, freeze_gain_after_calibration: bool
+        ) -> None:
             assert sample_rate == 24_000
+            assert freeze_gain_after_calibration is True
             self.reset_count = 0
             controllers.append(self)
 
@@ -603,8 +625,11 @@ def test_clone_controller_resets_when_generation_raises(
     reset_count = 0
 
     class RecordingController:
-        def __init__(self, *, sample_rate: int) -> None:
+        def __init__(
+            self, *, sample_rate: int, freeze_gain_after_calibration: bool
+        ) -> None:
             assert sample_rate == 24_000
+            assert freeze_gain_after_calibration is True
 
         def process(self, pcm: bytes) -> bytes:
             return pcm
@@ -747,6 +772,8 @@ def test_mlx_voice_design_engine_routes_icl_generation(
     assert call["ref_text"] == "参考朗读文本"
     assert call["language"] == "zh"
     assert call["stream"] is True
+    assert call["temperature"] == pytest.approx(0.1)
+    assert call["top_p"] == pytest.approx(0.95)
 
     for option, value, code in (
         ("speed", 1.25, "clone_speed_unsupported"),
@@ -763,6 +790,28 @@ def test_mlx_voice_design_engine_routes_icl_generation(
         options[option] = value
         with pytest.raises(ValueError, match=code):
             list(engine.synthesize("测试克隆语音生成。", **options))
+
+
+def test_clone_generation_seed_is_stable_for_a_voice_reference_without_request_text() -> None:
+    first = worker_module._clone_generation_seed(
+        voice="clone_sample",
+        text="第一段文本。",
+        ref_text="参考朗读文本",
+    )
+    second = worker_module._clone_generation_seed(
+        voice="clone_sample",
+        text="另一段文本。",
+        ref_text="参考朗读文本",
+    )
+    different = worker_module._clone_generation_seed(
+        voice="clone_sample",
+        text="第一段文本。",
+        ref_text="另一条参考朗读文本",
+    )
+
+    assert first == second
+    assert first != different
+    assert 0 <= first <= 2**32 - 1
 
 
 def test_mlx_voice_design_reference_loader_requests_volume_normalization(

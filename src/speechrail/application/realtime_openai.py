@@ -50,6 +50,7 @@ from speechrail.compatibility.openai_realtime import (
     input_audio_buffer_committed,
     parse_finish_request,
     parse_text_item,
+    parse_tts_response_speed,
     reject_unsupported,
     response_audio_delta,
     response_audio_done,
@@ -960,6 +961,7 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError("invalid_state", "a TTS response is already in progress")
         response_body = event.get("response")
         response_voice: str | None = None
+        response_speed = parse_tts_response_speed(response_body)
         if isinstance(response_body, dict) and response_body.get("voice") is not None:
             raw_voice = response_body["voice"]
             if not isinstance(raw_voice, str) or not raw_voice.strip():
@@ -987,6 +989,7 @@ class OpenAIRealtimeSession:
                 self._pending_text,
                 voice=response_voice or str(self._config.get("voice") or DEFAULT_VOICE_ID),
                 language=str(self._config.get("language") or "auto"),
+                speed=response_speed,
                 response_id=response_id,
                 item_id=item_id,
             )
@@ -1152,7 +1155,7 @@ class OpenAIRealtimeSession:
                     "stable"
                     if attribution.state == "final" and attribution.speaker is not None
                     else "unknown"
-                    if attribution.state == "final"
+                    if attribution.speaker is None
                     else "tentative"
                 ),
                 speaker=attribution.speaker,
@@ -1305,6 +1308,9 @@ class OpenAIRealtimeSession:
                                 item_id=self._current_item_id,
                             )
                         )
+                        wait_finalized = getattr(asr, "wait_finalized", None)
+                        if callable(wait_finalized):
+                            await wait_finalized()
                         units = await self._build_units(norm_text)
                         self._services.metrics.record_alignment_event(
                             "fixed_text_completed"
@@ -1383,6 +1389,7 @@ class OpenAIRealtimeSession:
         *,
         voice: str,
         language: str,
+        speed: float,
         response_id: str,
         item_id: str,
     ) -> None:
@@ -1427,7 +1434,7 @@ class OpenAIRealtimeSession:
                             voice=voice,
                             output_format="pcm16",
                             sample_rate=24_000,
-                            speed=1.0,
+                            speed=speed,
                             language=language,
                         )
                         async for chunk in iter_validated_audio(self._tts.synthesize(request)):

@@ -2,8 +2,8 @@
 title: "SpeechRail 实时 VAD 对齐 2026 行业最佳实践方案"
 status: active
 audience: "SpeechRail 核心开发者、架构评审、质量门"
-version: "0.2.0"
-date: 2026-09-08
+version: "0.3.0"
+date: 2026-09-09
 ---
 
 # SpeechRail 实时 VAD 对齐 2026 行业最佳实践方案
@@ -51,6 +51,22 @@ date: 2026-09-08
 | **测试** | `tests/test_realtime_vad_bargein.py`、`tests/test_neural_vad.py` | 防抖/静音/hysteresis/barge-in 会话隔离；Silero 帧长校验、schema fail-closed、shadow agreement 指标、sub-frame commit 不崩溃、共享 session 复用 |
 
 **既有亮点（须保持，不回归）：** 双阈值迟滞、有界准入（防 DoS + 防静音幻听）、前置 padding 防首音裁剪、失败关闭（fail-closed）、fake runner 可测试性、shadow/A-B 观测、整数样本时钟对齐、会话级 VAD 状态隔离、单线程低 CPU 神经推理。这些与 2026 最佳实践高度一致，方案只在之上增量改动。
+
+### 当前调用方策略：generic contract 与 Sona mode policy 分离
+
+SpeechRail 的 `server_vad` 字段支持通用默认值 `threshold=0.5`、`prefix_padding_ms=300`、`silence_duration_ms=400`；这是缺省协议值，不代表所有客户端业务都使用相同窗口。调用方可以在 `session.update` 显式传递策略，SpeechRail 负责校验、评分和边界状态机。
+
+Sona 当前显式传递的策略如下：
+
+| 调用场景 | threshold | prefix padding | silence duration | endpointing owner |
+|---|---:|---:|---:|---|
+| 标准字幕 | `0.65` | `300ms` | `400ms` | SpeechRail `auto → silero` + `SpeechAdmission` |
+| 会议 | `0.65` | `300ms` | `900ms` | SpeechRail `auto → silero` + `SpeechAdmission` |
+| 语音助手 | 不发送 server VAD | — | Sona 本地 `0.45s` | Sona/Pipecat；SpeechRail `manual` |
+
+当前 managed quality runtime 的健康事实是 `resolved_engine=silero`、`speech_admission_enabled=true`。`SileroVadDetector` 输出每帧概率，`SpeechAdmission` 执行 `IDLE → CANDIDATE → ACTIVE → HANGOVER → IDLE`；两者是同一 endpointing 链的评分器与状态机，不是两个互相竞争的 VAD。16kHz/512-sample 帧为 32ms，因此 Sona 的 `400ms/900ms` 在停止判定上分别量化为约 `416ms/928ms`。
+
+连续 diarization activity 不参与 endpointing 竞争：它接收连续 PCM，输出 speaker evidence 和 revision；`completed` 正文仍由 Realtime ASR item 确认，speaker-only patch 不改文本或时间事实。
 
 ---
 

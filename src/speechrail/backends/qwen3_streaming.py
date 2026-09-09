@@ -336,6 +336,16 @@ class Qwen3StreamingSession(RealtimeAsrSession):
             self._finished.wait(), timeout=max(self._worker.timeout_seconds, 1.0)
         )
 
+    async def wait_finalized(self) -> None:
+        """Wait until the worker session and its streaming mode lease are released.
+
+        The worker emits the completed transcript before its terminal frame.  A
+        caller that needs to enter batch mode (for example, fixed-text alignment)
+        must wait for the terminal cleanup rather than racing the streaming lease.
+        """
+
+        await self._finished.wait()
+
     def events(self) -> AsyncIterator[StreamingAsrEvent]:
         async def iterator() -> AsyncIterator[StreamingAsrEvent]:
             while True:
@@ -369,17 +379,15 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                             await self._finalize(cancel=True)
                         return
                 elif kind == "finished":
-                    self._finished.set()
                     queue_full = not self._put_terminal()
                     if queue_full:
                         with contextlib.suppress(BaseException):
                             await self._finalize(cancel=True)
                     else:
                         await self._finalize(cancel=False)
-                    return
+                        return
                 elif kind == "error":
                     code = frame.get("code")
-                    self._finished.set()
                     queue_full = self._events_queue.full()
                     if queue_full:
                         self._replace_events_with_error("session_queue_full")

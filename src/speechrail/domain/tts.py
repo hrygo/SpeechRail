@@ -10,11 +10,13 @@ import os
 import random
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 import wave
+from array import array
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -374,7 +376,53 @@ def transcode_and_validate_clone_audio(
     if duration > max_duration:
         raise ValueError(f"audio duration {duration:.1f}s is too long (maximum {max_duration}s)")
 
+    _validate_clone_audio_signal(wav_bytes, target_sample_rate=target_sample_rate)
     return wav_bytes, duration
+
+
+def _validate_clone_audio_signal(wav_bytes: bytes, *, target_sample_rate: int) -> None:
+    """Reject reference files that would make ICL cloning learn silence/noise."""
+
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            if (
+                wf.getnchannels() != 1
+                or wf.getsampwidth() != 2
+                or wf.getframerate() != target_sample_rate
+            ):
+                raise ValueError("reference audio must be mono PCM16 at the target sample rate")
+            pcm = wf.readframes(wf.getnframes())
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("reference audio quality cannot be inspected") from exc
+
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        raise ValueError("reference audio contains no usable speech")
+
+    clipped_samples = sum(abs(sample) >= 32_767 for sample in samples)
+    if clipped_samples > max(8, int(len(samples) * 0.005)):
+        raise ValueError("reference audio is clipped")
+
+    active_threshold = 10 ** (-45 / 20)
+    window_samples = max(1, round(target_sample_rate * 0.02))
+    active_windows: list[int] = []
+    total_windows = 0
+    for start in range(0, len(samples), window_samples):
+        window = samples[start : start + window_samples]
+        rms = math.sqrt(sum(sample * sample for sample in window) / len(window)) / 32_768.0
+        if rms > active_threshold:
+            active_windows.append(total_windows)
+        total_windows += 1
+
+    if not active_windows or len(active_windows) / total_windows < 0.15:
+        raise ValueError("reference audio contains insufficient usable speech")
+    if active_windows[0] * 0.02 > 1.5 or (total_windows - 1 - active_windows[-1]) * 0.02 > 1.5:
+        raise ValueError("reference audio has too much leading or trailing silence")
 
 
 class VoiceStoreUnavailableError(RuntimeError):

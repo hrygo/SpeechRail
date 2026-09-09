@@ -269,6 +269,26 @@ class FakeDiarizationSession:
         await self._updates.put(None)
 
 
+class _NoEvidenceDiarizationSession(FakeDiarizationSession):
+    """Emit processed audio without a speaker so provisional units stay unknown."""
+
+    async def append(self, *, start_sample: int, pcm16: bytes) -> None:
+        assert start_sample == sum(len(audio) // 2 for audio in self.received)
+        self.received.append(pcm16)
+        end = start_sample + len(pcm16) // 2
+        await self._updates.put(
+            ActivityUpdate(
+                epoch=self.epoch,
+                step_id=self._step,
+                replace_span=Span(start_sample, end),
+                frames=(),
+                processed_through=end,
+                stable_through=0,
+            )
+        )
+        self._step += 1
+
+
 class FakeDiarizationEngine:
     def __init__(self, *, supports_stream: bool = True) -> None:
         self.supports_stream = supports_stream
@@ -276,6 +296,14 @@ class FakeDiarizationEngine:
 
     def open(self, *, epoch: str):
         session = FakeDiarizationSession()
+        session.epoch = epoch
+        self.sessions.append(session)
+        return session
+
+
+class _NoEvidenceDiarizationEngine(FakeDiarizationEngine):
+    def open(self, *, epoch: str) -> _NoEvidenceDiarizationSession:
+        session = _NoEvidenceDiarizationSession()
         session.epoch = epoch
         self.sessions.append(session)
         return session
@@ -583,6 +611,55 @@ def test_openai_diarized_model_alias_does_not_enable_realtime_diarization() -> N
     assert engine.sessions == []
     assert all(not event["type"].startswith("speechrail.diarization") for event in events)
     assert factory.sessions and factory.sessions[0].want_segments is False
+
+
+def test_realtime_diarization_encodes_missing_provisional_speaker_as_unknown() -> None:
+    client, _ = _client(
+        diarization_engine=_NoEvidenceDiarizationEngine(),
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        assert socket.receive_json()["type"] == "session.created"
+        assert socket.receive_json()["type"] == "conversation.created"
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"speechrail": {"diarization": {"enabled": True}}},
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 8000)}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        events: list[dict[str, Any]] = []
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+
+        socket.send_json(
+            {"type": "speechrail.diarization.finish", "event_id": "final-no-evidence"}
+        )
+        while True:
+            event = socket.receive_json()
+            events.append(event)
+            if event["type"] in {"speechrail.diarization.done", "error"}:
+                break
+
+    updates = [
+        update
+        for event in events
+        if event["type"] == "speechrail.diarization.updated"
+        for update in event["updates"]
+    ]
+    assert updates
+    assert any(update["status"] == "unknown" and update["speaker"] is None for update in updates)
+    assert all(
+        update["speaker"] is not None
+        for update in updates
+        if update["status"] in {"tentative", "stable"}
+    )
 
 
 def test_openai_commit_without_diarization_does_not_request_segments() -> None:
@@ -1786,6 +1863,36 @@ def test_realtime_session_update_voice_alias_resolves_to_registered_preset() -> 
         events = _drive_tts(socket)
     assert events[-1]["type"] == "response.done"
     assert synthesizer.requests[0].voice == "vivian"
+
+
+def test_realtime_tts_uses_namespaced_response_speed() -> None:
+    synthesizer = RecordingSpeechSynthesizer()
+    client, _ = _client(tts_synthesizer=synthesizer)
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        events = _drive_tts(
+            socket,
+            {
+                "voice": "warm",
+                "speechrail": {"tts": {"speed": 1.35}},
+            },
+        )
+
+    assert events[-1]["type"] == "response.done"
+    assert synthesizer.requests[0].speed == pytest.approx(1.35)
+
+
+@pytest.mark.parametrize("speed", [0.24, 4.01, True, "fast"])
+def test_realtime_tts_rejects_invalid_namespaced_response_speed(speed: object) -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        events = _drive_tts(socket, {"speechrail": {"tts": {"speed": speed}}})
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["error"]["code"] == "invalid_tts"
 
 
 def test_realtime_session_update_rejects_unknown_voice_and_session_survives() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 import traceback
 from collections import Counter, OrderedDict
@@ -33,6 +34,30 @@ from speechrail.runtime.worker_protocol import (
 
 TTS_BACKEND_ID = "mlx-qwen3-tts-voice-design"
 _CLONE_LOUDNESS_CHUNK_MS = 200
+_CLONE_TEMPERATURE = 0.1
+_CLONE_TOP_P = 0.95
+
+
+def _clone_generation_seed(*, voice: str, text: str, ref_text: str) -> int:
+    """Derive a stable per-voice seed without retaining or logging request text."""
+
+    del text
+    material = "\x1f".join((voice, ref_text)).encode("utf-8")
+    digest = hashlib.blake2s(material, digest_size=4).digest()
+    return int.from_bytes(digest, "little")
+
+
+def _seed_clone_generation(*, voice: str, text: str, ref_text: str) -> None:
+    """Seed MLX's request-local sampling stream when the optional runtime exists."""
+
+    try:
+        import mlx.core as mx  # type: ignore[import-not-found]
+
+        mx.random.seed(_clone_generation_seed(voice=voice, text=text, ref_text=ref_text))
+    except Exception:
+        # The worker still has to start in environments without the vendor runtime;
+        # the production MLX path provides the deterministic seed operation.
+        pass
 
 
 def _clear_metal_cache() -> None:
@@ -362,7 +387,10 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return
         first_chunk = True
         loudness_controller = (
-            StreamingPcm16LoudnessController(sample_rate=self._sample_rate)
+            StreamingPcm16LoudnessController(
+                sample_rate=self._sample_rate,
+                freeze_gain_after_calibration=True,
+            )
             if ref_audio is not None or ref_text is not None
             else None
         )
@@ -458,6 +486,8 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     "model does not support clone generation (_generate_icl missing)"
                 )
 
+            _seed_clone_generation(voice=voice, text=text, ref_text=ref_text)
+
             for result in self._model._generate_icl(
                 text=text,
                 ref_audio=audio_array,
@@ -465,6 +495,8 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 language=language,
                 stream=True,
                 streaming_interval=self._chunk_ms / 1000,
+                temperature=_CLONE_TEMPERATURE,
+                top_p=_CLONE_TOP_P,
                 repetition_penalty=max(self._repetition_penalty, 1.3),
             ):
                 pcm = self._to_pcm(result)
