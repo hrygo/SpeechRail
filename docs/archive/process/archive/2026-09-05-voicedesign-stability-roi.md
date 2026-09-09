@@ -16,7 +16,7 @@ VoiceDesign 的定位应是**创造声线和角色**。CustomVoice 的定位应�
 
 ## 当前实测基线
 
-完整方法和原始证据见 [v1.7.0 三档完整本机验收与音色稳定性研究](../performance/2026-09-05-v1.7.0-full-three-tier-acceptance.md)。以下为母语文本集，每档 9 角色 × 3 文本 × 3 次：
+完整方法和原始证据见 [v1.7.0 三档完整本机验收与音色稳定性研究](../../archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md)。以下为母语文本集，每档 9 角色 × 3 文本 × 3 次：
 
 | 指标 | `quality` VoiceDesign 1.7B | `balanced` CustomVoice 0.6B | `light` CustomVoice 0.6B |
 |---|---:|---:|---:|

@@ -4,7 +4,7 @@
 发布验收尚未执行。
 本文件替代本轮前期“各档固定 VoiceDesign”“轻量档另用 Kokoro/ONNX”等候选建议。
 实施入口：[详细实施计划](2026-09-05-three-tier-implementation-plan.md)；
-决策记录：[ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
+决策记录：[ADR-0011](../../../decisions/0011-unified-runtime-model-tiers.md)。
 
 ## 1. 已采纳组合
 

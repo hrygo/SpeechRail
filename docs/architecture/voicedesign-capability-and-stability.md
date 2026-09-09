@@ -63,7 +63,7 @@ VoiceDesign 的描述能力不等于跨文本的 speaker identity 稳定性。�
 
 ## 3. 当前实测能证明什么
 
-本节引用 [三档音色稳定性研究](../archive/performance/2026-09-05-v1.7.0-full-three-tier-acceptance.md) 的已保存结果；原始音频、embedding 和 benchmark 制品仍在仓库外。
+本节引用 [三档音色稳定性研究](../archive/archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md) 的已保存结果；原始音频、embedding 和 benchmark 制品仍在仓库外。
 
 | 指标 | `quality` VoiceDesign | `balanced` CustomVoice | `light` CustomVoice |
 |---|---:|---:|---:|
@@ -77,7 +77,7 @@ VoiceDesign 的描述能力不等于跨文本的 speaker identity 稳定性。�
 
 人工 ABX 尚未执行。`instruction × seed` 联合搜索已经执行，但独立 holdout 未通过 separation margin 和可懂度回归门槛。因此当前不能宣称 VoiceDesign 已达到 CustomVoice 的跨文本同一人稳定性。
 
-2026-09-06 搜索与 holdout 的详细结果见 [VoiceDesign recipe 搜索验收](../archive/process/2026-09-06-voicedesign-recipe-search.md)。
+2026-09-06 搜索与 holdout 的详细结果见 [VoiceDesign recipe 搜索验收](../archive/process/archive/2026-09-06-voicedesign-recipe-search.md)。
 
 ## 4. 产品声明边界
 
@@ -120,5 +120,5 @@ VoiceDesign 的描述能力不等于跨文本的 speaker identity 稳定性。�
 - [Qwen3-TTS 官方推理接口](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py)：`generate_voice_design`、`create_voice_clone_prompt` 和 `generate_voice_clone` 的参数与模型路径说明。
 - [Qwen3-TTS Technical Report](https://arxiv.org/abs/2601.15621)：description-based voice control 与 novel voice creation 的研究说明。
 - [Qwen3-TTS CustomVoice 模型卡](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice)：官方九个 speaker 和 CustomVoice 能力说明。
-- [VoiceDesign 音色稳定性 ROI 评估](../archive/process/2026-09-05-voicedesign-stability-roi.md)：本项目的 ROI、预注册门槛和未完成项。
-- [三档音色稳定性研究](../archive/performance/2026-09-05-v1.7.0-full-three-tier-acceptance.md)：本项目三档实测数据和资源边界。
+- [VoiceDesign 音色稳定性 ROI 评估](../archive/process/archive/2026-09-05-voicedesign-stability-roi.md)：本项目的 ROI、预注册门槛和未完成项。
+- [三档音色稳定性研究](../archive/archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md)：本项目三档实测数据和资源边界。

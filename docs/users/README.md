@@ -70,4 +70,4 @@ HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。�
 ---
 
 > [!TIP]
-> 遇到接口调用问题？请先查阅 [API 契约手册中的错误码定义](api-contract.md#6-统一错误-envelope-与状态码) 或查看 [故障排查 Runbook](../operations/operations-runbook.md)。
+> 遇到接口调用问题？请先查阅 [API 契约手册中的错误码定义](api-contract.md#7-统一错误-envelope-与状态码) 或查看 [故障排查 Runbook](../operations/operations-runbook.md)。

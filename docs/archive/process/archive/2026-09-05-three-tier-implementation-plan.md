@@ -11,7 +11,7 @@
 档位仅引用权重/量化。安装器准备制品；单机切档允许停服，由管理命令完成可恢复的原子切换。
 **Tech Stack:** Python >=3.12,<3.13、uv、FastAPI、Pydantic、MLX、mlx-qwen3-asr、mlx-audio、ffmpeg、macOS LaunchAgent。
 **Spec:** [用户已采纳的设计](2026-09-05-low-memory-mac-architecture-proposal.md)。
-**Decision:** [ADR-0011](../../decisions/0011-unified-runtime-model-tiers.md)。
+**Decision:** [ADR-0011](../../../decisions/0011-unified-runtime-model-tiers.md)。
 **状态:** 核心实现和本机三档技术验收已完成；人工 MOS/ABX、60 分钟热稳定性、扩大真人语料与
 干净机器分发仍未完成。日期：2026-09-05。原始代码勘察基线：`001e744`（v1.6.8）；实施证据
 以 rebase 后各任务卡 commit、已安装 wheel 和本机公共 API 报告为准。未勾选项仍是扩大质量或

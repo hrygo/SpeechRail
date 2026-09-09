@@ -51,7 +51,7 @@
 > `worker_load_error` 回滚，并保留同端口单实例与 managed preflight runtime 修复。
 > 当前 `quality` 的公共 ASR/TTS smoke、三档切换、profile 身份和第二实例拒绝均通过；
 > 完整性能 gate 未打开。详见
-> [v1.9.2 性能与运行稳定性基准](2026-09-06-v1.9.2-performance-benchmark.md)。
+> [v1.9.2 性能与运行稳定性基准](../archive/2026-09-06-v1.9.2-performance-benchmark.md)。
 
 ## 历史安装验收（v1.9.0，MINOR 三档）
 
@@ -59,14 +59,14 @@
 > preview smoke 与一轮真实 warm fixture 均成功；`balanced`、`light` 切换在候选 worker
 > 启动 smoke 报 `worker_load_error` 后自动回滚，最终恢复 `quality`。三档性能 gate 未完成，
 > 不把历史数字冒充本版本结果。详见
-> [v1.9.0 安装与性能验收](2026-09-06-v1.9.0-performance-benchmark.md)。
+> [v1.9.0 安装与性能验收](../archive/2026-09-06-v1.9.0-performance-benchmark.md)。
 
 ## 上一发布基线（v1.8.1，PATCH quality）
 
 > **结论**：v1.8.1 按 PATCH 范围仅复测当前 `quality`；公共 ASR/TTS warm N=5 均成功，
 > 真实 `phys_footprint` 采样 17/17 tick 完整，稳态 6609.9 MB、同 tick 峰值 7770.1 MB，
 > 最终恢复 `quality`。单轮性能差异未设置冻结噪声带，不作代码回归归因。详见
-> [v1.8.1 性能与稳定性基准](2026-09-06-v1.8.1-performance-benchmark.md)。
+> [v1.8.1 性能与稳定性基准](../archive/2026-09-06-v1.8.1-performance-benchmark.md)。
 
 ## 历史发布基线（v1.8.0，MINOR 三档）
 
@@ -74,13 +74,13 @@
 > `quality`。首轮 `balanced → light` smoke 失败后自动回滚，第二次切换通过；SPK-E2E-1
 > 完整架构与契约已进入发布 wheel，但连续 native diarization 仍由 `supports_stream` gate
 > 保护，当前未广播扩展能力。详见
-> [v1.8.0 性能、架构与发布验收报告](2026-09-06-v1.8.0-performance-benchmark.md)。
+> [v1.8.0 性能、架构与发布验收报告](../archive/2026-09-06-v1.8.0-performance-benchmark.md)。
 
 ## 历史发布基线（v1.7.1，PATCH quality）
 
 > **结论**：v1.7.1 修复 profile smoke 的 CustomVoice 空转写误回滚；当前 `quality`
 > ASR/TTS 各 N=5、完整物理采样和 `quality → balanced → light → quality` 连续切换均通过。
-> 详见 [v1.7.1 性能与稳定性基准](2026-09-05-v1.7.1-performance-benchmark.md)。
+> 详见 [v1.7.1 性能与稳定性基准](../archive/2026-09-05-v1.7.1-performance-benchmark.md)。
 
 ## 历史三档研究基线（v1.7.0，MINOR 三档）
 
@@ -90,11 +90,11 @@
 > 一致。后续完整套件加入真人 ASR、Realtime、短时 soak、每档 81 条九角色压力集和
 > speaker embedding；`balanced/light` 的同名角色中心高度一致，`quality` 的 VoiceDesign
 > 跨文本角色分离较弱，人工 ABX 仍未执行。详见
-> [v1.7.0 三档完整本机验收与音色稳定性研究](2026-09-05-v1.7.0-full-three-tier-acceptance.md)。
+> [v1.7.0 三档完整本机验收与音色稳定性研究](../archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md)。
 
 ## 历史发布基线（v1.6.8，发布后重测）
 
-> **结论**：v1.6.8 在发布后的真实服务 runtime 上完成完整 7 步基准，ASR/TTS/Realtime 和 4/8 并发请求全部成功。预热总物理常驻 **9.15 GB**，与 v1.6.7 的 9.17 GB 基本持平；本轮单次压测峰值 **10.36 GB**、并发吞吐 **2.74 req/s**，较历史单次读数更高，暂不据此归因性能回归。详见 [v1.6.8 完整报告](2026-09-05-v1.6.8-performance-benchmark.md)。
+> **结论**：v1.6.8 在发布后的真实服务 runtime 上完成完整 7 步基准，ASR/TTS/Realtime 和 4/8 并发请求全部成功。预热总物理常驻 **9.15 GB**，与 v1.6.7 的 9.17 GB 基本持平；本轮单次压测峰值 **10.36 GB**、并发吞吐 **2.74 req/s**，较历史单次读数更高，暂不据此归因性能回归。详见 [v1.6.8 完整报告](../archive/2026-09-05-v1.6.8-performance-benchmark.md)。
 
 | 指标 | v1.6.8（发布后重测） | v1.6.7（修正后重跑） |
 |---|---|---|
@@ -123,25 +123,25 @@
 | **v1.12.0** | [2026-09-07-v1.12.0-release-acceptance.md](2026-09-07-v1.12.0-release-acceptance.md) | MINOR 功能发布（MCP 代理、Silero VAD、auto download）；代码门与运行态验收通过，性能/质量 gate 保持 unset |
 | **v1.10.0 operator** | [2026-09-07-v1.10.0-operator-efficiency.md](2026-09-07-v1.10.0-operator-efficiency.md) | 模块化 benchmark、真实资源采样、managed wheel 安装与停启效率复验；N=1 warm，gate 保持 unset |
 | **v1.10.0** | [2026-09-07-v1.10.0-performance-benchmark.md](2026-09-07-v1.10.0-performance-benchmark.md) | MINOR 三档真实性能/资源/Realtime 基准；外部 Sona `backend_busy` 根因与隔离 SOP 已固化 |
-| **v1.9.2** | [2026-09-06-v1.9.2-performance-benchmark.md](2026-09-06-v1.9.2-performance-benchmark.md) | PATCH 当前 `quality`；三档切换与停机恢复通过；完整性能 gate 未完成 |
-| **v1.9.1** | [2026-09-06-v1.9.1-performance-benchmark.md](2026-09-06-v1.9.1-performance-benchmark.md) | PATCH 当前 `quality`；修复重复服务进程与 smoke 误测；完整性能 gate 未完成 |
-| **v1.9.0** | [2026-09-06-v1.9.0-performance-benchmark.md](2026-09-06-v1.9.0-performance-benchmark.md) | MINOR 安装验收；quality 公共推理通过；balanced/light 自动回滚；三档性能 gate 未完成 |
-| **v1.8.1** | [2026-09-06-v1.8.1-performance-benchmark.md](2026-09-06-v1.8.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；公共推理与完整 `phys_footprint` 采样；性能噪声带未冻结 |
-| **v1.8.0** | [2026-09-06-v1.8.0-performance-benchmark.md](2026-09-06-v1.8.0-performance-benchmark.md) | MINOR 三档真实基准；Voice clone；SPK-E2E-1 完整架构与 fail-closed native gate |
-| **v1.7.1** | [2026-09-05-v1.7.1-performance-benchmark.md](2026-09-05-v1.7.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；有界空转写重试；三档切换连续通过 |
-| **v1.7.0 完整研究** | [2026-09-05-v1.7.0-full-three-tier-acceptance.md](2026-09-05-v1.7.0-full-three-tier-acceptance.md) | 真人 ASR、3/10/30/60s、Realtime、短时 soak、九角色 243 条生成与 speaker embedding |
-| **v1.7.0** | [2026-09-05-v1.7.0-performance-benchmark.md](2026-09-05-v1.7.0-performance-benchmark.md) | MINOR 三档 N=5 基础基准；版本纵向与档位横向对比；加入同文本/跨重启音色稳定性证据 |
+| **v1.9.2** | [2026-09-06-v1.9.2-performance-benchmark.md](../archive/2026-09-06-v1.9.2-performance-benchmark.md) | PATCH 当前 `quality`；三档切换与停机恢复通过；完整性能 gate 未完成 |
+| **v1.9.1** | [2026-09-06-v1.9.1-performance-benchmark.md](../archive/2026-09-06-v1.9.1-performance-benchmark.md) | PATCH 当前 `quality`；修复重复服务进程与 smoke 误测；完整性能 gate 未完成 |
+| **v1.9.0** | [2026-09-06-v1.9.0-performance-benchmark.md](../archive/2026-09-06-v1.9.0-performance-benchmark.md) | MINOR 安装验收；quality 公共推理通过；balanced/light 自动回滚；三档性能 gate 未完成 |
+| **v1.8.1** | [2026-09-06-v1.8.1-performance-benchmark.md](../archive/2026-09-06-v1.8.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；公共推理与完整 `phys_footprint` 采样；性能噪声带未冻结 |
+| **v1.8.0** | [2026-09-06-v1.8.0-performance-benchmark.md](../archive/2026-09-06-v1.8.0-performance-benchmark.md) | MINOR 三档真实基准；Voice clone；SPK-E2E-1 完整架构与 fail-closed native gate |
+| **v1.7.1** | [2026-09-05-v1.7.1-performance-benchmark.md](../archive/2026-09-05-v1.7.1-performance-benchmark.md) | PATCH 当前 `quality` 基准；有界空转写重试；三档切换连续通过 |
+| **v1.7.0 完整研究** | [2026-09-05-v1.7.0-full-three-tier-acceptance.md](../archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md) | 真人 ASR、3/10/30/60s、Realtime、短时 soak、九角色 243 条生成与 speaker embedding |
+| **v1.7.0** | [2026-09-05-v1.7.0-performance-benchmark.md](../archive/2026-09-05-v1.7.0-performance-benchmark.md) | MINOR 三档 N=5 基础基准；版本纵向与档位横向对比；加入同文本/跨重启音色稳定性证据 |
 | **三档专项** | [2026-09-05-three-tier-feasibility.md](2026-09-05-three-tier-feasibility.md) | 同一共享 runtime 的三档公共 API、准确率代理和完整物理内存采样；结束时恢复 quality |
-| **v1.6.8** | [2026-09-05-v1.6.8-performance-benchmark.md](2026-09-05-v1.6.8-performance-benchmark.md) | 发布后完整 7 步重测；总常驻 9.15 GB，单次并发 2.74 req/s；因仅一轮测量暂不改写长期趋势 |
-| **v1.6.7** | [2026-09-05-v1.6.7-performance-benchmark.md](2026-09-05-v1.6.7-performance-benchmark.md) | Sortformer 空闲自动卸载，主服务回落 0.54 GB；修复 sample_resources 进程误分类，batch-asr 回真实基线 2.51 GB |
-| **v1.6.6** | [2026-09-04-v1.6.6-performance-benchmark.md](2026-09-04-v1.6.6-performance-benchmark.md) | 静默环境重跑为正式基线；流式分人落地（见 ADR-0010） |
-| **v1.6.5** | [2026-09-03-v1.6.5-performance-benchmark.md](2026-09-03-v1.6.5-performance-benchmark.md) | TTS/streaming 走 int8，历史最精简内存基线（6.60 GB）；含稳定性探针 [2026-09-04-v1.6.5-stability-probe.md](2026-09-04-v1.6.5-stability-probe.md) |
-| **v1.6.3** | [2026-09-03-v1.6.3-performance-benchmark.md](2026-09-03-v1.6.3-performance-benchmark.md) | 修复 `_clear_metal_cache()` 分支排序，ASR 常驻从 v1.6.2 的 4.69 GB 回落 |
-| **v1.6.2** | [2026-09-03-v1.6.2-performance-benchmark.md](2026-09-03-v1.6.2-performance-benchmark.md) | 零依赖 Prometheus 指标引擎；金属缓存回归（常驻峰值 10.17 GB） |
-| **v1.6.0** | [2026-09-03-v1.6.0-performance-benchmark.md](2026-09-03-v1.6.0-performance-benchmark.md) | 共享权重 realtime 多会话引擎 |
-| **v1.5.2** | [2026-09-03-v1.5.2-performance-benchmark.md](2026-09-03-v1.5.2-performance-benchmark.md) | 缺陷修复版：realtime 槽位释放、断开即释放 |
-| **v1.5.0** | [2026-09-02-v1.5.0-performance-benchmark.md](2026-09-02-v1.5.0-performance-benchmark.md) | 统一 ASR worker（常驻 7.85 GB，v1.5.2 拆分后回落） |
-| **v1.3.1** | [2026-09-02-v1.3.1-performance-benchmark.md](2026-09-02-v1.3.1-performance-benchmark.md) | 早期基线 |
+| **v1.6.8** | [2026-09-05-v1.6.8-performance-benchmark.md](../archive/2026-09-05-v1.6.8-performance-benchmark.md) | 发布后完整 7 步重测；总常驻 9.15 GB，单次并发 2.74 req/s；因仅一轮测量暂不改写长期趋势 |
+| **v1.6.7** | [2026-09-05-v1.6.7-performance-benchmark.md](../archive/2026-09-05-v1.6.7-performance-benchmark.md) | Sortformer 空闲自动卸载，主服务回落 0.54 GB；修复 sample_resources 进程误分类，batch-asr 回真实基线 2.51 GB |
+| **v1.6.6** | [2026-09-04-v1.6.6-performance-benchmark.md](../archive/2026-09-04-v1.6.6-performance-benchmark.md) | 静默环境重跑为正式基线；流式分人落地（见 ADR-0010） |
+| **v1.6.5** | [2026-09-03-v1.6.5-performance-benchmark.md](../archive/2026-09-03-v1.6.5-performance-benchmark.md) | TTS/streaming 走 int8，历史最精简内存基线（6.60 GB）；含稳定性探针 [2026-09-04-v1.6.5-stability-probe.md](../archive/2026-09-04-v1.6.5-stability-probe.md) |
+| **v1.6.3** | [2026-09-03-v1.6.3-performance-benchmark.md](../archive/2026-09-03-v1.6.3-performance-benchmark.md) | 修复 `_clear_metal_cache()` 分支排序，ASR 常驻从 v1.6.2 的 4.69 GB 回落 |
+| **v1.6.2** | [2026-09-03-v1.6.2-performance-benchmark.md](../archive/2026-09-03-v1.6.2-performance-benchmark.md) | 零依赖 Prometheus 指标引擎；金属缓存回归（常驻峰值 10.17 GB） |
+| **v1.6.0** | [2026-09-03-v1.6.0-performance-benchmark.md](../archive/2026-09-03-v1.6.0-performance-benchmark.md) | 共享权重 realtime 多会话引擎 |
+| **v1.5.2** | [2026-09-03-v1.5.2-performance-benchmark.md](../archive/2026-09-03-v1.5.2-performance-benchmark.md) | 缺陷修复版：realtime 槽位释放、断开即释放 |
+| **v1.5.0** | [2026-09-02-v1.5.0-performance-benchmark.md](../archive/2026-09-02-v1.5.0-performance-benchmark.md) | 统一 ASR worker（常驻 7.85 GB，v1.5.2 拆分后回落） |
+| **v1.3.1** | [2026-09-02-v1.3.1-performance-benchmark.md](../archive/2026-09-02-v1.3.1-performance-benchmark.md) | 早期基线 |
 | **首份** | [2026-09-02-baseline-benchmark.md](2026-09-02-baseline-benchmark.md) | 项目首份基准（v1.3 前） |
 
 ## 跨版本趋势概览（v1.5.2 → v1.6.7；v1.6.8 暂不纳入趋势）

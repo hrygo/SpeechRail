@@ -56,7 +56,7 @@ M1 Air 8GB 的 ASR/TTS 通用服务，且不同用户不应手工修改模型路
 
 ## References
 
-- [已采纳设计](../archive/process/2026-09-05-low-memory-mac-architecture-proposal.md)
-- [详细实施计划](../archive/process/2026-09-05-three-tier-implementation-plan.md)
+- [已采纳设计](../archive/process/archive/2026-09-05-low-memory-mac-architecture-proposal.md)
+- [详细实施计划](../archive/process/archive/2026-09-05-three-tier-implementation-plan.md)
 - [ADR-0003：运行时隔离](0003-runtime-isolation.md)
 - [现有公共契约](../../contracts/openapi.yaml)
