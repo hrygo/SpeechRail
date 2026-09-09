@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import logging
+import threading
+import wave
+from collections import OrderedDict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
@@ -18,6 +24,8 @@ from speechrail.compatibility.openai_realtime import (
 )
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
+from speechrail.domain import voice_quality as vq
+from speechrail.domain.ports import SpeechRequest, SpeechSynthesizer
 from speechrail.domain.tts import (
     VOICE_ALIASES,
     VoiceInUseError,
@@ -25,8 +33,9 @@ from speechrail.domain.tts import (
     VoiceStoreUnavailableError,
     get_voice_registry,
 )
+from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.http.auth import http_auth_error
-from speechrail.http.errors import error_response
+from speechrail.http.errors import error, error_response
 
 _CLONE_PROMPTS_ASSET = (
     Path(__file__).resolve().parent.parent.parent
@@ -51,6 +60,31 @@ _MAX_VOICE_SEED = 2**32 - 1
 _TTS_LIFECYCLE_FIELDS = frozenset(
     {"cooperative_cancel_supported", "fallback_abort_count", "reload_count"}
 )
+_LOGGER = logging.getLogger(__name__)
+
+# Bounded idempotency store keyed by (Idempotency-Key, audio sha256, sha256 of
+# ref_text). It retains only the created profile id — never the raw ref_text or
+# the full VoiceProfile — and evicts the oldest entry past 128 keys.
+_CLONE_IDEMPOTENCY_MAX_ENTRIES = 128
+_clone_idempotency: OrderedDict[tuple[str, str, str], str] = OrderedDict()
+_clone_idempotency_lock = threading.Lock()
+
+
+def _clone_idempotency_key(
+    idempotency_key: str, audio_content: bytes, ref_text: str
+) -> tuple[str, str, str]:
+    audio_hash = hashlib.sha256(audio_content).hexdigest()
+    ref_hash = hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest()
+    return (idempotency_key, audio_hash, ref_hash)
+
+
+def _store_clone_idempotency_locked(
+    cache_key: tuple[str, str, str], profile_id: str
+) -> None:
+    _clone_idempotency[cache_key] = profile_id
+    _clone_idempotency.move_to_end(cache_key)
+    while len(_clone_idempotency) > _CLONE_IDEMPOTENCY_MAX_ENTRIES:
+        _clone_idempotency.popitem(last=False)
 
 
 def _tts_lifecycle_diagnostics(services: AppServices) -> dict[str, int | bool] | None:
@@ -146,7 +180,175 @@ def _voice_entry(
         entry["ref_text"] = profile.ref_text
     if profile.duration_seconds > 0:
         entry["duration_seconds"] = profile.duration_seconds
+    if profile.quality is not None:
+        entry["quality"] = profile.quality
     return entry
+
+
+def _empty_reference() -> vq.VoiceQualityReference:
+    return vq.VoiceQualityReference(
+        duration_seconds=0.0,
+        sample_rate=24_000,
+        channels=1,
+        speech_active_ratio=0.0,
+        noise_floor_dbfs=0.0,
+        estimated_snr_db=0.0,
+        clipping_ratio=0.0,
+        leading_silence_seconds=0.0,
+        trailing_silence_seconds=0.0,
+        transcript_match=None,
+    )
+
+
+def _empty_synthesis() -> vq.VoiceQualitySynthesis:
+    return vq.VoiceQualitySynthesis(
+        probe_count=0,
+        successful_probe_count=0,
+        active_rms_dbfs=0.0,
+        peak_dbfs=0.0,
+        chunk_jump_p95_db=0.0,
+        clipping_ratio=0.0,
+        deterministic=False,
+    )
+
+
+def _grade_clone_audio(wav_bytes: bytes) -> vq.VoiceQualityReport:
+    with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+        sample_rate = wf.getframerate()
+        channels = wf.getnchannels()
+        pcm = wf.readframes(wf.getnframes())
+    leading, trailing = vq.leading_trailing_silence_seconds(pcm, sample_rate)
+    reference = vq.VoiceQualityReference(
+        duration_seconds=vq.duration_seconds(pcm, sample_rate),
+        sample_rate=sample_rate,
+        channels=channels,
+        speech_active_ratio=vq.speech_active_ratio(pcm, sample_rate),
+        noise_floor_dbfs=vq.noise_floor_dbfs(pcm),
+        estimated_snr_db=vq.estimated_snr_db(pcm, sample_rate),
+        clipping_ratio=vq.clipping_ratio(pcm),
+        leading_silence_seconds=leading,
+        trailing_silence_seconds=trailing,
+        transcript_match=None,
+    )
+    return vq.make_quality_report(reference, _empty_synthesis())
+
+
+def _quality_reject_response(
+    request_id: str, report: vq.VoiceQualityReport
+) -> JSONResponse:
+    content = error(
+        message="Reference audio failed the voice quality gate",
+        error_type="invalid_request_error",
+        code="voice_quality_reject",
+        request_id=request_id,
+        retryable=False,
+    )
+    content["quality_report"] = report.to_dict()
+    return JSONResponse(
+        status_code=400,
+        content=content,
+        headers={"X-SpeechRail-Error-Code": "voice_quality_reject"},
+    )
+
+
+async def _read_uploaded_audio(
+    audio: UploadFile, request_id: str
+) -> tuple[bytes, JSONResponse | None]:
+    content = bytearray()
+    while chunk := await audio.read(64 * 1024):
+        content.extend(chunk)
+        if len(content) > 15 * 1024 * 1024:
+            return b"", error_response(
+                413, request_id, "audio_too_large", "Audio file exceeds 15MB limit"
+            )
+    if len(content) < 1024:
+        return b"", error_response(
+            400, request_id, "audio_too_short", "Audio content is empty or too short"
+        )
+    return bytes(content), None
+
+
+def _transcode_clone_audio(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes, float]:
+    from speechrail.domain.tts import transcode_and_validate_clone_audio
+
+    return transcode_and_validate_clone_audio(
+        audio_content,
+        ffmpeg_path=ffmpeg_cmd,
+        min_duration=2.0,
+        max_duration=45.0,
+        target_sample_rate=24_000,
+        skip_signal_validation=True,
+    )
+
+
+_CLONE_SPEED_UNSUPPORTED_CODE = vq.VoiceQualityFailureCode.CLONE_SPEED_UNSUPPORTED.value
+_OUTPUT_INVALID_CODE = vq.VoiceQualityFailureCode.OUTPUT_INVALID.value
+
+
+def _classify_probe_failure(exc: BaseException) -> str:
+    if isinstance(exc, RuntimeError) and "speed" in str(exc).lower():
+        return _CLONE_SPEED_UNSUPPORTED_CODE
+    if isinstance(exc, (ValueError, TypeError)):
+        return _OUTPUT_INVALID_CODE
+    return vq.VoiceQualityFailureCode.PROBE_FAILED.value
+
+
+async def _synthesize_probes(
+    synthesizer: SpeechSynthesizer, voice_id: str, runs: int
+) -> tuple[bytes, int, list[str]]:
+    pcm = bytearray()
+    ok = 0
+    failure_codes: list[str] = []
+    probes = vq.VOICE_QUALITY_V1_ZH_PROBES
+    for index in range(runs):
+        synthesis = SpeechRequest(
+            text=probes[index % len(probes)]["text"],
+            voice=voice_id,
+            output_format="pcm16",
+            sample_rate=24_000,
+        )
+        probe_pcm = bytearray()
+        try:
+            async for chunk in synthesizer.synthesize(synthesis):
+                probe_pcm.extend(chunk.audio)
+        except Exception as exc:
+            failure_codes.append(_classify_probe_failure(exc))
+            continue
+        if not probe_pcm or len(probe_pcm) % 2 != 0:
+            failure_codes.append(_OUTPUT_INVALID_CODE)
+            continue
+        pcm.extend(probe_pcm)
+        ok += 1
+    return bytes(pcm), ok, failure_codes
+
+
+def _synthesis_report(pcm: bytes, runs: int, ok: int) -> vq.VoiceQualitySynthesis:
+    if not pcm or ok == 0:
+        return vq.VoiceQualitySynthesis(
+            probe_count=runs,
+            successful_probe_count=0,
+            active_rms_dbfs=-240.0,
+            peak_dbfs=-240.0,
+            chunk_jump_p95_db=0.0,
+            clipping_ratio=0.0,
+            deterministic=False,
+        )
+    metrics = compute_output_quality_metrics(
+        pcm,
+        sample_rate=24_000,
+        probe_count=runs,
+        successful_probe_count=ok,
+        deterministic=True,
+    )
+    return vq.VoiceQualitySynthesis(
+        probe_count=cast(int, metrics["probe_count"]),
+        successful_probe_count=cast(int, metrics["successful_probe_count"]),
+        active_rms_dbfs=cast(float, metrics["active_rms_dbfs"]),
+        peak_dbfs=cast(float, metrics["peak_dbfs"]),
+        chunk_jump_p95_db=cast(float, metrics["chunk_jump_p95_db"]),
+        clipping_ratio=cast(float, metrics["clipping_ratio"]),
+        deterministic=cast(bool, metrics["deterministic"]),
+    )
 
 
 def create_system_router(services: AppServices) -> APIRouter:
@@ -399,31 +601,33 @@ def create_system_router(services: AppServices) -> APIRouter:
                 400, request_id, "invalid_ref_text", "Reference text (ref_text) is required"
             )
 
-        audio_content = bytearray()
-        max_limit = 15 * 1024 * 1024
-        while chunk := await audio.read(64 * 1024):
-            audio_content.extend(chunk)
-            if len(audio_content) > max_limit:
-                return error_response(
-                    413, request_id, "audio_too_large", "Audio file exceeds 15MB limit"
-                )
+        audio_content, read_error = await _read_uploaded_audio(audio, request_id)
+        if read_error is not None:
+            return read_error
 
-        if len(audio_content) < 1024:
-            return error_response(
-                400, request_id, "audio_too_short", "Audio content is empty or too short"
-            )
+        idempotency_key = request.headers.get("Idempotency-Key")
+        cache_key: tuple[str, str, str] | None = None
+        if idempotency_key:
+            cache_key = _clone_idempotency_key(idempotency_key, audio_content, ref_text)
+            cached_id = _clone_idempotency.get(cache_key)
+            if cached_id is not None:
+                try:
+                    profile = get_voice_registry().get_profile(cached_id)
+                except ValueError:
+                    # Stale idempotency entry: the cached profile was deleted after
+                    # the original clone. Drop the key and fall through to normal
+                    # creation instead of leaking a bare 500.
+                    with _clone_idempotency_lock:
+                        _clone_idempotency.pop(cache_key, None)
+                else:
+                    return JSONResponse(
+                        status_code=201,
+                        content=_voice_entry(profile, active, services.tts_ready),
+                    )
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
-            from speechrail.domain.tts import transcode_and_validate_clone_audio
-
-            wav_bytes, duration = transcode_and_validate_clone_audio(
-                bytes(audio_content),
-                ffmpeg_path=ffmpeg_cmd,
-                min_duration=2.0,
-                max_duration=45.0,
-                target_sample_rate=24_000,
-            )
+            wav_bytes, duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
         except RuntimeError as exc:
             return error_response(500, request_id, "dependency_missing", str(exc))
         except ValueError as exc:
@@ -436,23 +640,44 @@ def create_system_router(services: AppServices) -> APIRouter:
                 code = "invalid_audio"
             return error_response(400, request_id, code, err_str)
 
+        report = _grade_clone_audio(wav_bytes)
+        if report.status == vq.VoiceQualityStatus.REJECT.value:
+            return _quality_reject_response(request_id, report)
+
         vid_str = (
             voice_id.strip().lower()
             if isinstance(voice_id, str) and voice_id.strip()
             else None
         )
-        try:
-            profile = get_voice_registry().create_cloned_profile(
+
+        def _build_profile() -> VoiceProfile:
+            return get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
                 audio_bytes=wav_bytes,
                 voice_id=vid_str,
                 duration_seconds=duration,
+                quality=report.to_dict(),
             )
-            return JSONResponse(
-                status_code=201,
-                content=_voice_entry(profile, active, services.tts_ready),
-            )
+
+        def _create_or_reuse() -> VoiceProfile:
+            if cache_key is None:
+                return _build_profile()
+            with _clone_idempotency_lock:
+                existing_id = _clone_idempotency.get(cache_key)
+                if existing_id is not None:
+                    try:
+                        return get_voice_registry().get_profile(existing_id)
+                    except ValueError:
+                        # Stale idempotency entry: the cached profile was deleted.
+                        # Drop the key and re-create instead of failing the request.
+                        _clone_idempotency.pop(cache_key, None)
+                profile = _build_profile()
+                _store_clone_idempotency_locked(cache_key, profile.id)
+                return profile
+
+        try:
+            profile = _create_or_reuse()
         except VoiceStoreUnavailableError:
             return error_response(
                 503,
@@ -463,6 +688,174 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         except ValueError as exc:
             return error_response(400, request_id, "voice_creation_failed", str(exc))
+
+        return JSONResponse(
+            status_code=201,
+            content=_voice_entry(profile, active, services.tts_ready),
+        )
+
+    @router.post("/v1/voices/clone/validate")
+    async def validate_voice_clone(
+        request: Request,
+        audio: UploadFile = File(...),  # noqa: B008 - FastAPI parameter marker.
+        ref_text: str = Form(...),
+        name: str = Form(...),
+        voice_id: str | None = Form(default=None, alias="id"),
+    ) -> JSONResponse:
+        """Validate clone input quality without creating a profile."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_validate"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        variant = active.tts.variant if active.tts is not None else None
+        if variant != "voice_design":
+            tier_name = active.profile or "custom"
+            return error_response(
+                400,
+                request_id,
+                "voice_cloning_unsupported",
+                (
+                    f"Active TTS tier ({tier_name}) variant '{variant}' "
+                    "does not support voice cloning; switch to quality profile"
+                ),
+            )
+        if not name or not name.strip():
+            return error_response(400, request_id, "invalid_name", "Voice name is required")
+        if not ref_text or not ref_text.strip():
+            return error_response(
+                400, request_id, "invalid_ref_text", "Reference text (ref_text) is required"
+            )
+
+        audio_content, read_error = await _read_uploaded_audio(audio, request_id)
+        if read_error is not None:
+            return read_error
+
+        ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
+        try:
+            wav_bytes, _duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
+        except RuntimeError as exc:
+            return error_response(500, request_id, "dependency_missing", str(exc))
+        except ValueError as exc:
+            err_str = str(exc)
+            if "too short" in err_str:
+                code = "audio_too_short"
+            elif "too long" in err_str:
+                code = "audio_too_long"
+            else:
+                code = "invalid_audio"
+            return error_response(400, request_id, code, err_str)
+
+        report = _grade_clone_audio(wav_bytes)
+        return JSONResponse(status_code=200, content=report.to_dict())
+
+    @router.post("/v1/voices/{voice_id}/quality-runs")
+    async def run_voice_quality(voice_id: str, request: Request) -> JSONResponse:
+        """Run bounded quality probes against a voice profile."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_quality"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(400, request_id, "invalid_json", "Invalid JSON payload")
+        if not isinstance(body, dict):
+            return error_response(400, request_id, "invalid_payload", "JSON object expected")
+
+        probe_set = body.get("probe_set", "voice_quality_v1_zh")
+        if probe_set != "voice_quality_v1_zh":
+            return error_response(
+                422,
+                request_id,
+                "validation_error",
+                "Unknown probe_set; expected voice_quality_v1_zh",
+            )
+        runs = body.get("runs", 3)
+        if type(runs) is not int or not 1 <= runs <= 3:
+            return error_response(
+                422, request_id, "validation_error", "runs must be an integer between 1 and 3"
+            )
+
+        if body.get("include_audio"):
+            return error_response(
+                422,
+                request_id,
+                "include_audio_unsupported",
+                "include_audio is not supported; probe audio is not returned",
+            )
+
+        synthesizer = services.tts_synthesizer
+        if synthesizer is None or not services.tts_ready:
+            return error_response(
+                503,
+                request_id,
+                "backend_not_ready",
+                "SpeechRail TTS backend is not ready",
+                retryable=True,
+            )
+
+        registry = get_voice_registry()
+        try:
+            with registry.lease_profile(voice_id) as profile:
+                pcm, ok, probe_failure_codes = await _synthesize_probes(
+                    synthesizer, profile.id, runs
+                )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except ValueError:
+            return error_response(
+                404, request_id, "voice_not_found", f"Voice {voice_id} not found"
+            )
+
+        output_invalid = False
+        try:
+            synthesis = _synthesis_report(pcm, runs, ok)
+        except (ValueError, TypeError):
+            synthesis = vq.VoiceQualitySynthesis(
+                probe_count=runs,
+                successful_probe_count=ok,
+                active_rms_dbfs=-240.0,
+                peak_dbfs=-240.0,
+                chunk_jump_p95_db=0.0,
+                clipping_ratio=0.0,
+                deterministic=False,
+            )
+            output_invalid = True
+
+        failure_codes = list(dict.fromkeys(probe_failure_codes))
+        if output_invalid and _OUTPUT_INVALID_CODE not in failure_codes:
+            failure_codes.append(_OUTPUT_INVALID_CODE)
+
+        status = (
+            vq.VoiceQualityStatus.PASS.value
+            if ok == runs and not failure_codes
+            else vq.VoiceQualityStatus.REJECT.value
+        )
+        report = vq.VoiceQualityReport(
+            policy_version=vq.POLICY_VERSION,
+            status=status,
+            run_id=vq.new_run_id(),
+            tested_at=vq.now_iso8601_z(),
+            reference=_empty_reference(),
+            synthesis=synthesis,
+            failure_codes=failure_codes,
+        )
+        variant_name = active.tts.variant if active.tts is not None else None
+        _LOGGER.info(
+            "voice quality run: policy=%s status=%s probes=%d/%d model=%s variant=%s service=%s",
+            vq.POLICY_VERSION,
+            status,
+            ok,
+            runs,
+            resolved.tts_model_id,
+            variant_name,
+            resolved.version,
+        )
+        return JSONResponse(status_code=200, content=report.to_dict())
 
     @router.delete("/v1/voices/{voice_id}")
     async def delete_voice(voice_id: str, request: Request) -> JSONResponse:
