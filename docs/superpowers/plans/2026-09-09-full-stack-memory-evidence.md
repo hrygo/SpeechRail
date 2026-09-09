@@ -111,7 +111,7 @@ git diff --check
 - [x] P0 采样可信度和旧报告说明完成（`2e1e4ba`）
 - [x] P1 公共场景 runner、active-window 归一化、生命周期 settle 和回归完成（`63edf1d`、`d4b3d54`）
 - [x] 三档真实 A–E 资源报告完成，原 profile 恢复（A/B 全局 complete；C/D/E active-window complete）
-- [ ] 对应提交 GitHub CI 全绿（`d4b3d54` 及报告提交待推送验证）
+- [x] 对应提交 GitHub CI 全绿（run `34311711173`，Ubuntu/macOS required checks）
 - [x] P2 决策有证据：当前不实施动态 reservation；先验收目标低内存设备并以 active-window 报告为基线
 - [x] 目标设备限制明确；低内存目标设备验收仍未完成
 
