@@ -2,8 +2,8 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "1.4.0"
-date: 2026-09-02
+version: "2.0.4"
+date: 2026-09-09
 ---
 
 # 🛠️ SpeechRail 开发者文档

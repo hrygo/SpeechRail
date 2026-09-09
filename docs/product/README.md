@@ -2,8 +2,8 @@
 title: "SpeechRail 产品与业务文档"
 status: active
 audience: "产品经理、技术决策者、业务集成方"
-version: "1.2.0"
-date: 2026-09-02
+version: "2.0.4"
+date: 2026-09-09
 ---
 
 # 🎯 产品与业务文档中心

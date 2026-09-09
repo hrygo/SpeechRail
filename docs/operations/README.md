@@ -2,8 +2,8 @@
 title: "SpeechRail 运维与 SRE 文档中心"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.5.1"
-date: 2026-09-08
+version: "2.0.4"
+date: 2026-09-09
 ---
 
 # 📦 SpeechRail 运维与 SRE 文档

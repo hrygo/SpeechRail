@@ -2,7 +2,7 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "2.0.3"
+version: "2.0.4"
 date: 2026-09-09
 ---
 
