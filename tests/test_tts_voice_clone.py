@@ -56,6 +56,30 @@ def _generate_test_wav(
     return buf.getvalue()
 
 
+def _clean_clone_wav(
+    duration_seconds: float = 4.0, sample_rate: int = 24_000
+) -> bytes:
+    """Speech-like WAV (loud bursts + quiet gaps) that passes the quality gate."""
+    num_samples = int(duration_seconds * sample_rate)
+    timeline = np.arange(num_samples, dtype=np.float32) / sample_rate
+    amplitude = np.full(num_samples, 0.4, dtype=np.float32)
+    period = int(0.5 * sample_rate)
+    dip = int(0.16 * sample_rate)
+    for start in range(period, num_samples, period):
+        amplitude[start : start + dip] = 0.002
+    samples = np.asarray(
+        np.round(amplitude * np.sin(2 * np.pi * 220 * timeline) * 32767),
+        dtype="<i2",
+    )
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(samples.tobytes())
+    return buf.getvalue()
+
+
 class CapturingSpeechSynthesizer:
     def __init__(self) -> None:
         self.requests: list[SpeechRequest] = []
@@ -1019,7 +1043,7 @@ def test_api_voices_clone_success_in_quality_tier(
         "speechrail.backends.qwen3_voice_binding.get_voice_profile", reg.get_profile
     )
 
-    wav_bytes = _generate_test_wav(duration_seconds=4.0)
+    wav_bytes = _clean_clone_wav(duration_seconds=4.0)
 
     # Mock transcode_and_validate_clone_audio to return the sample wav
     monkeypatch.setattr(
