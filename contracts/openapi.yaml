@@ -281,9 +281,22 @@ paths:
       operationId: cloneVoice
       tags: [speech]
       summary: Clone and register a voice from reference audio and script text
+      description: |
+        Clones a voice profile from reference audio and text, runs quality gates,
+        and registers the cloned profile. If quality status is `warn`, the voice
+        is created and returned with `quality.status=warn`. If quality status is
+        `reject`, the request is rejected with a stable `voice_quality_reject`
+        error.
       security:
         - BearerAuth: []
         - {}
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+          description: Optional idempotency key to deduplicate retry attempts.
       requestBody:
         required: true
         content:
@@ -303,8 +316,47 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '413':
           $ref: '#/components/responses/AudioTooLarge'
+        '500':
+          $ref: '#/components/responses/DependencyMissing'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voices/clone/validate:
+    post:
+      operationId: validateVoiceClone
+      tags: [speech]
+      summary: Validate clone input quality without creating a profile
+      description: |
+        Validates voice clone inputs with the same pipeline as `POST /v1/voices/clone`
+        and returns `VoiceQualityReport` without creating or persisting a
+        `VoiceProfile`.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/VoiceCloneRequest'
+      responses:
+        '200':
+          description: Quality report for clone validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceQualityReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          $ref: '#/components/responses/AudioTooLarge'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/DependencyMissing'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
   /v1/voices/previews:
     post:
       operationId: createVoicePreview
@@ -391,6 +443,44 @@ paths:
           $ref: '#/components/responses/VoiceInUse'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voices/{voice_id}/quality-runs:
+    post:
+      operationId: runVoiceQuality
+      tags: [speech]
+      summary: Run quality probes for a voice profile
+      description: |
+        Runs bounded quality probes against a voice profile and returns a full
+        `VoiceQualityReport` summary.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceQualityRunRequest'
+      responses:
+        '200':
+          description: Voice quality report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceQualityReport'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: Voice not found
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
   /v1/audio/speech:
     post:
       operationId: createSpeech
@@ -771,6 +861,8 @@ components:
           type: [string, 'null']
         duration_seconds:
           type: number
+        quality:
+          $ref: '#/components/schemas/VoiceQualityReport'
     VoiceCapabilities:
       type: object
       required: [supports_speaker, supports_instruction]
@@ -802,6 +894,137 @@ components:
           type: string
           pattern: '^[a-zA-Z0-9_-]{1,64}$'
           description: Optional identifier for the cloned voice
+    VoiceQualityReference:
+      type: object
+      required:
+        - duration_seconds
+        - sample_rate
+        - channels
+        - speech_active_ratio
+        - noise_floor_dbfs
+        - estimated_snr_db
+        - clipping_ratio
+        - leading_silence_seconds
+        - trailing_silence_seconds
+        - transcript_match
+      properties:
+        duration_seconds:
+          type: number
+        sample_rate:
+          type: integer
+          minimum: 1
+        channels:
+          type: integer
+          minimum: 1
+        speech_active_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        noise_floor_dbfs:
+          type: number
+        estimated_snr_db:
+          type: number
+        clipping_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        leading_silence_seconds:
+          type: number
+          minimum: 0
+        trailing_silence_seconds:
+          type: number
+          minimum: 0
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+    VoiceQualitySynthesis:
+      type: object
+      required:
+        - probe_count
+        - successful_probe_count
+        - active_rms_dbfs
+        - peak_dbfs
+        - chunk_jump_p95_db
+        - clipping_ratio
+        - deterministic
+      properties:
+        probe_count:
+          type: integer
+          minimum: 0
+        successful_probe_count:
+          type: integer
+          minimum: 0
+        active_rms_dbfs:
+          type: number
+        peak_dbfs:
+          type: number
+        chunk_jump_p95_db:
+          type: number
+        clipping_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        deterministic:
+          type: boolean
+    VoiceQualityReport:
+      type: object
+      required:
+        - policy_version
+        - status
+        - run_id
+        - tested_at
+        - reference
+        - synthesis
+        - failure_codes
+      properties:
+        policy_version:
+          type: string
+          enum: [voice_quality_v1]
+        status:
+          type: string
+          enum: [pass, warn, reject, unevaluated]
+        run_id:
+          type: string
+        tested_at:
+          type: string
+          format: date-time
+        reference:
+          $ref: '#/components/schemas/VoiceQualityReference'
+        synthesis:
+          $ref: '#/components/schemas/VoiceQualitySynthesis'
+        failure_codes:
+          type: array
+          minItems: 0
+          items:
+            type: string
+            enum:
+              - audio_too_short
+              - low_snr
+              - high_noise_floor
+              - clipping
+              - transcript_mismatch
+              - probe_failed
+              - clone_speed_unsupported
+              - output_invalid
+              - output_peak_exceeded
+    VoiceQualityRunRequest:
+      type: object
+      properties:
+        probe_set:
+          type: string
+          default: voice_quality_v1_zh
+        runs:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 3
+        include_audio:
+          type: boolean
+          default: false
+          description: |
+            Reserved for inline audio probes; not implemented. Sending
+            `include_audio=true` is rejected with `422 include_audio_unsupported`.
     ClonePromptItem:
       type: object
       required: [id, category, title, script, tips]
@@ -1242,6 +1465,12 @@ components:
             $ref: '#/components/schemas/ErrorBody'
     BackendNotReady:
       description: Model runtime is not ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    DependencyMissing:
+      description: A required external dependency (e.g. ffmpeg) is missing
       content:
         application/json:
           schema:
