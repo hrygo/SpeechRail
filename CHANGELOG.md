@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [2.2.1] - 2026-09-10
+
+### Fixed
+
+- 解耦 worker 启动握手超时与稳态帧 IO 超时——`WorkerProcessSpec` 新增 `handshake_timeout_seconds`（缺省回落 `io_timeout_seconds`，生产行为不变），`AsyncFramedWorkerProcess.exchange(handshake=True)` 使用握手超时，`Qwen3SharedWorker.start()` 的 ready 握手不再复用 50ms 级帧超时；修复真实子进程 worker 测试在 CI 满载下的握手 `TimeoutError` 时序 flake。
+
+### Verification
+
+- 全量 pytest 1532 passed/1 skipped；ruff/mypy/redocly/git diff --check 通过；8× CPU 负载下连续 6 轮通过。
+
 ## [2.2.0] - 2026-09-10
 
 ### Added
