@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-09-10
+
+### Added
+
+- 落地 durable job 执行闭环：新增 owner 维度的 `GET /v1/jobs` 列表（`limit`/`cursor` 分页）、`GET /v1/jobs/{id}`（返回队列位置与 `eta_seconds`/`deadline`）和 `GET /v1/jobs/{id}/result`；`error_message` 脱敏；引入有界重试（`attempts` 与 `max_job_attempts`）与跨 kind 公平调度。
+- diarization realtime 全部事件新增 `event_version: 1`；`conversation.item.input_audio_transcription.completed` 新增 `diagnostics` 对象（`alignment.status`/`alignment.reason`/`unit_count`）；diarization v1 JSON schema 现将这些字段标记为必填。
+
+### Perf
+
+- jobs 表新增 `(state, updated_at, id)` 与 `(owner, updated_at)` 索引，消除随任务历史增长的全表扫描；`recover_interrupted` 在重试预算耗尽时记录有界 `error_message`，并要求显式传入 `max_attempts`。
+
+### Fixed
+
+- 修复 real-child 音频子进程测试在全量套件 CPU 负载下的偶发超时（放宽测试侧看门狗）。
+
+### Dependencies
+
+- 开发依赖升级：mcp `>=1.12,<3`、openai `>=2.0,<4.0`。
+
 ## [2.1.1] - 2026-09-10
 
 ### Fixed
