@@ -302,6 +302,47 @@ def test_two_stage_standby_and_eviction() -> None:
     asyncio.run(run())
 
 
+def test_evicted_worker_stays_cold_even_if_close_refreshes_last_active() -> None:
+    """A worker (like Qwen3SharedWorker) whose close() updates its own
+    last_active must NOT be resurrected to ACTIVE on the next tick: the
+    evictor stamps its idle clock AFTER close completes."""
+
+    import time
+
+    from speechrail.runtime.worker_lease import WorkerLifecycleState
+
+    class _ClosingWorker:
+        def __init__(self) -> None:
+            self.alive = True
+            self.closed = False
+            self.last_active: float = time.monotonic()
+
+        async def close(self) -> None:
+            self.closed = True
+            self.alive = False
+            self.last_active = time.monotonic()  # mimics Qwen3SharedWorker.close()
+
+    async def run() -> None:
+        worker = _ClosingWorker()
+        evictor = WorkerIdleEvictor(
+            (worker,), idle_timeout_seconds=0.04, check_interval_seconds=0.01
+        )
+        await evictor.start()
+        try:
+            await asyncio.sleep(0.06)
+            assert worker.closed is True
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+
+            # Several ticks later it must stay evicted, not resurrected.
+            await asyncio.sleep(0.04)
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+            assert worker.alive is False
+        finally:
+            await evictor.close()
+
+    asyncio.run(run())
+
+
 def test_lease_lock_protects_against_eviction() -> None:
     from speechrail.runtime.worker_lease import WorkerLifecycleState
 

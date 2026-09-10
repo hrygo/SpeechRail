@@ -316,20 +316,31 @@ class Qwen3SharedWorker:
         self,
         frame: Mapping[str, object],
         binary_payload: bytes | None = None,
+        *,
+        touch_last_active: bool = True,
     ) -> None:
-        """向已 ready 的子进程发送帧, 不读取返回值。"""
+        """向已 ready 的子进程发送帧, 不读取返回值。
+
+        默认把发送视为一次活动并刷新空闲时钟; 由 evictor 主动触发的维护帧
+        (如 trim_memory) 必须传 ``touch_last_active=False``, 否则 standby
+        降内存动作会重置空闲计时, 冷淘汰 (idle eviction) 将永不触发。
+        """
 
         if not self._ready:
             raise RuntimeError("worker_not_ready")
         await self._transport.send(frame, binary_payload=binary_payload)
-        self.last_active = time.monotonic()
+        if touch_last_active:
+            self.last_active = time.monotonic()
 
     async def trim_memory(self) -> None:
-        """向运行中的 worker 请求受控内存整理。"""
+        """向运行中的 worker 请求受控内存整理, 不视为一次活动。"""
 
         if self.alive and self._ready:
             with contextlib.suppress(Exception):
-                await self.send({"version": PROTOCOL_VERSION, "type": "trim_memory"})
+                await self.send(
+                    {"version": PROTOCOL_VERSION, "type": "trim_memory"},
+                    touch_last_active=False,
+                )
 
     async def close(self) -> None:
         """取消 dispatcher, 清理 session/future 并终止当前子进程。"""

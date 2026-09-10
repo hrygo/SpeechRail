@@ -125,6 +125,11 @@ class WorkerIdleEvictor:
             if getattr(w, "alive", False) or getattr(w, "ready", False):
                 with contextlib.suppress(Exception):
                     await w.close()
+            # Record the idle stamp AFTER close: workers like Qwen3SharedWorker
+            # refresh their own last_active at end of close(), and a stale
+            # stamp here would let the next tick resurrect the dead worker
+            # back to ACTIVE.
+            self._last_active[w] = time.monotonic()
             self._states[w] = WorkerLifecycleState.COLD_EVICTED
 
     def _in_use(self, worker: EvictableWorker) -> bool:
@@ -182,7 +187,9 @@ class WorkerIdleEvictor:
                         with contextlib.suppress(Exception):
                             await worker.close()
                     self._states[worker] = WorkerLifecycleState.COLD_EVICTED
-                    self._last_active[worker] = now
+                    # Stamp AFTER close so worker.last_active (refreshed at end of
+                    # Qwen3SharedWorker.close) cannot out-datestamp this tick.
+                    self._last_active[worker] = time.monotonic()
                     if self._on_eviction is not None:
                         self._on_eviction(type(worker).__name__, "cold_evict")
                 # Stage 1: Warm Standby (idle >= _warm_standby_timeout)

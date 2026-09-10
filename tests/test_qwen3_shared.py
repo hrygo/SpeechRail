@@ -11,6 +11,7 @@ import pytest
 
 from speechrail.backends.qwen3_shared import FrameRouter, Qwen3SharedWorker
 from speechrail.runtime.asr_mode import AsrModeGate
+from speechrail.runtime.worker_lease import WorkerIdleEvictor, WorkerLifecycleState
 from speechrail.runtime.worker_process import WorkerProcessSpec, offline_environment
 from speechrail.runtime.worker_protocol import ProtocolError
 
@@ -456,6 +457,67 @@ def test_unknown_and_duplicate_frames_use_bounded_metrics() -> None:
             assert worker.metrics["duplicate_frames"] >= 1
             assert worker.pending_request_count == 0
         finally:
+            await worker.close()
+
+    _run(scenario())
+
+
+def test_trim_memory_does_not_refresh_last_active_but_request_does() -> None:
+    """Regression: evictor-triggered trim must not reset the idle clock,
+    while a real request still counts as activity."""
+
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(_Config())
+        try:
+            await worker.start()
+            snapshot = worker.last_active
+            await asyncio.sleep(0.02)
+            await worker.trim_memory()
+            assert worker.last_active == snapshot  # trim 不刷新空闲时钟
+            assert worker.alive is True
+
+            await asyncio.sleep(0.02)
+            await worker.request(
+                {"action": "shared_batch", "request_id": "touch-check", "text": "hi"}
+            )
+            assert worker.last_active > snapshot  # 真实请求仍视为活动
+        finally:
+            await worker.close()
+
+    _run(scenario())
+
+
+def test_evictor_reaches_cold_eviction_after_standby_trim() -> None:
+    """Regression: standby trim_memory must not pull the worker back to
+    ACTIVE and keep it resident forever; it reaches cold eviction and the
+    evicted state must NOT be resurrected by close()'s own last_active."""
+
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(_Config())
+        await worker.start()
+        evictor = WorkerIdleEvictor(
+            (worker,),
+            warm_standby_timeout_seconds=0.05,
+            idle_timeout_seconds=0.15,
+            check_interval_seconds=0.01,
+        )
+        try:
+            await evictor.start()
+
+            await asyncio.sleep(0.08)
+            assert evictor.state_of(worker) == WorkerLifecycleState.WARM_STANDBY
+            assert worker.alive is True
+
+            await asyncio.sleep(0.12)
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+            assert worker.alive is False
+
+            # The evicted state must persist: Qwen3SharedWorker.close() refreshes
+            # its own last_active; evictor must not resurrect the dead worker.
+            await asyncio.sleep(0.05)
+            assert evictor.state_of(worker) == WorkerLifecycleState.COLD_EVICTED
+        finally:
+            await evictor.close()
             await worker.close()
 
     _run(scenario())
