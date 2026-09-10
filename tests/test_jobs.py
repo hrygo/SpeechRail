@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from speechrail.runtime.jobs import JobRepository
+from speechrail.runtime.jobs import _INTERRUPTED_EXHAUSTED_MESSAGE, JobRepository
 
 
 def test_job_repository_scopes_records_to_owner_and_cancels_queued_work(tmp_path: Path) -> None:
@@ -27,11 +27,12 @@ def test_job_repository_claim_is_atomic_and_restart_marks_running_work_failed(
     assert repository.claim_next() is not None
     assert repository.claim_next() is None
 
-    assert repository.recover_interrupted() == 1
+    assert repository.recover_interrupted(max_attempts=1) == 1
     recovered = repository.get(job.id, owner="owner-a")
     assert recovered is not None
     assert recovered.state == "failed"
     assert recovered.error_code == "worker_interrupted"
+    assert recovered.error_message == _INTERRUPTED_EXHAUSTED_MESSAGE
 
 
 def test_job_repository_completes_deletes_result_and_expires_by_completion_time(
@@ -90,6 +91,7 @@ def test_job_repository_claim_increments_attempts_and_bounds_restart_retries(
     assert requeued is not None
     assert requeued.state == "queued"
     assert requeued.attempts == 1
+    assert requeued.error_message is None
 
     second = repository.claim_next()
     assert second is not None
@@ -101,6 +103,7 @@ def test_job_repository_claim_increments_attempts_and_bounds_restart_retries(
     assert failed is not None
     assert failed.state == "failed"
     assert failed.error_code == "worker_interrupted"
+    assert failed.error_message == _INTERRUPTED_EXHAUSTED_MESSAGE
     assert failed.attempts == 2
 
 
@@ -260,3 +263,19 @@ def test_claim_next_with_a_preference_remains_single_claim(tmp_path: Path) -> No
 
     assert repository.claim_next(prefer_kind="transcription") is not None
     assert repository.claim_next(prefer_kind="transcription") is None
+
+
+def test_job_repository_creates_claim_and_list_indexes_idempotently(
+    tmp_path: Path,
+) -> None:
+    repository = JobRepository(tmp_path / "speechrail-job-spool")
+
+    JobRepository(repository.spool_dir)
+
+    with repository._connect() as connection:
+        names = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA index_list(jobs)").fetchall()
+        }
+
+    assert {"idx_jobs_state_updated", "idx_jobs_owner_updated"} <= names

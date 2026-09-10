@@ -15,6 +15,7 @@ JobKind = Literal["speech", "transcription"]
 JobState = Literal["queued", "running", "completed", "failed", "cancelled", "expired"]
 
 _CURSOR_SEPARATOR = "\x1f"
+_INTERRUPTED_EXHAUSTED_MESSAGE = "job interrupted by restart; retry budget exhausted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,7 +241,7 @@ class JobRepository:
             )
         return self.get(job_id, owner=owner)
 
-    def recover_interrupted(self, *, max_attempts: int = 1) -> int:
+    def recover_interrupted(self, *, max_attempts: int) -> int:
         # Restart-only bounded retry. Under-budget running rows return to the
         # queue with their counted attempt intact; the remainder fail terminally.
         # The two updates are ordered so rows already requeued are not failed by
@@ -259,10 +260,11 @@ class JobRepository:
             exhausted = connection.execute(
                 """
                 UPDATE jobs
-                SET state = 'failed', error_code = 'worker_interrupted', updated_at = ?
+                SET state = 'failed', error_code = 'worker_interrupted',
+                    error_message = ?, updated_at = ?
                 WHERE state = 'running'
                 """,
-                (_now(),),
+                (_INTERRUPTED_EXHAUSTED_MESSAGE, _now()),
             )
         return requeued.rowcount + exhausted.rowcount
 
@@ -315,6 +317,14 @@ class JobRepository:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
                 )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_state_updated "
+                "ON jobs(state, updated_at, id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_owner_updated "
+                "ON jobs(owner, updated_at DESC)"
+            )
 
     def _connect(self) -> sqlite3.Connection:
         # busy_timeout makes concurrent claim_next BEGIN IMMEDIATE transactions
