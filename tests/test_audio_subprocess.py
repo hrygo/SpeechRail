@@ -20,6 +20,10 @@ from speechrail.http.routes.audio import (
 )
 
 _CHUNK_BYTES = 64 * 1024
+# Generous watchdog for tests that spawn a real Python subprocess: interpreter
+# startup can spike well past a second when the full suite loads the machine,
+# so a tight 1s bound makes these tests flaky under contention.
+_REAL_CHILD_WATCHDOG_SECONDS = 10.0
 
 
 @pytest.fixture
@@ -318,7 +322,7 @@ else:
 async def _wait_for_process(
     processes: list[asyncio.subprocess.Process],
 ) -> asyncio.subprocess.Process:
-    deadline = asyncio.get_running_loop().time() + 2
+    deadline = asyncio.get_running_loop().time() + _REAL_CHILD_WATCHDOG_SECONDS
     while asyncio.get_running_loop().time() < deadline:
         if processes:
             return processes[0]
@@ -597,7 +601,7 @@ async def test_decode_timeout_kills_and_reaps_real_child(
     try:
         process = await _wait_for_process(captured_processes)
         with pytest.raises(ValueError, match="audio_decode_timeout"):
-            await asyncio.wait_for(task, timeout=1.0)
+            await asyncio.wait_for(task, timeout=_REAL_CHILD_WATCHDOG_SECONDS)
         _assert_process_reaped(process)
     finally:
         if not task.done():
@@ -625,7 +629,7 @@ async def test_encode_timeout_uses_encode_error_and_reaps_real_child(
     try:
         process = await _wait_for_process(captured_processes)
         with pytest.raises(ValueError, match="audio_encode_failed"):
-            await asyncio.wait_for(task, timeout=1.0)
+            await asyncio.wait_for(task, timeout=_REAL_CHILD_WATCHDOG_SECONDS)
         _assert_process_reaped(process)
     finally:
         if not task.done():
@@ -679,7 +683,7 @@ async def test_decode_limit_reaps_real_child_with_continuous_stdout(
     try:
         process = await _wait_for_process(captured_processes)
         with pytest.raises(OverflowError, match="audio_too_large"):
-            await asyncio.wait_for(task, timeout=1.0)
+            await asyncio.wait_for(task, timeout=_REAL_CHILD_WATCHDOG_SECONDS)
         _assert_process_reaped(process)
     finally:
         if not task.done():
