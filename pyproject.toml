@@ -45,7 +45,7 @@ dev = [
     "pyyaml>=6.0",
     "numpy>=1.26,<3.0",
     "mcp>=1.12,<2",
-    "openai>=2.0,<3.0",
+    "openai>=2.0,<4.0",
     "pyannote-metrics==4.1",
 ]
 mcp = ["mcp>=1.12,<2"]
