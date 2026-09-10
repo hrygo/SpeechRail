@@ -55,6 +55,7 @@ class WorkerProcessSpec:
     env: Mapping[str, str]
     io_timeout_seconds: float
     shutdown_timeout_seconds: float = _TERMINATE_GRACE_SECONDS
+    handshake_timeout_seconds: float | None = None
 
 
 def offline_environment(repository_root: Path) -> dict[str, str]:
@@ -108,6 +109,11 @@ class AsyncFramedWorkerProcess:
         process = self._process
         return process is not None and process.returncode is None
 
+    @property
+    def handshake_timeout_seconds(self) -> float:
+        """Return the startup handshake deadline, defaulting to the frame deadline."""
+        return self._spec.handshake_timeout_seconds or self._spec.io_timeout_seconds
+
     async def start(self) -> None:
         async with self._lifecycle_lock:
             if self.alive:
@@ -146,10 +152,18 @@ class AsyncFramedWorkerProcess:
         self, payload: Mapping[str, object], binary_payload: bytes | None = None
     ) -> None:
         async with self._write_lock:
-            await self._send_unlocked(payload, binary_payload=binary_payload)
+            await self._send_unlocked(
+                payload,
+                binary_payload=binary_payload,
+                deadline=self._spec.io_timeout_seconds,
+            )
 
     async def exchange(
-        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+        self,
+        payload: Mapping[str, object],
+        binary_payload: bytes | None = None,
+        *,
+        handshake: bool = False,
     ) -> dict[str, object]:
         """Send one request frame and read its response atomically.
 
@@ -160,19 +174,30 @@ class AsyncFramedWorkerProcess:
         dedicated streaming worker because its read loop parks on ``readexactly``
         while append/commit tries to write on the same lock.
         """
+        deadline = (
+            self.handshake_timeout_seconds
+            if handshake
+            else self._spec.io_timeout_seconds
+        )
         async with self._write_lock:
-            await self._send_unlocked(payload, binary_payload=binary_payload)
+            await self._send_unlocked(
+                payload, binary_payload=binary_payload, deadline=deadline
+            )
             async with self._read_lock:
-                return await self._receive_unlocked()
+                return await self._receive_unlocked(deadline=deadline)
 
     async def _send_unlocked(
-        self, payload: Mapping[str, object], binary_payload: bytes | None = None
+        self,
+        payload: Mapping[str, object],
+        binary_payload: bytes | None = None,
+        *,
+        deadline: float,
     ) -> None:
         process = self._require_process()
         if process.stdin is None:
             raise RuntimeError("worker_transport_invalid")
         frame = encode_frame(payload, binary_payload=binary_payload)
-        async with asyncio.timeout(self._spec.io_timeout_seconds):
+        async with asyncio.timeout(deadline):
             process.stdin.write(frame)
             await process.stdin.drain()
 
@@ -187,15 +212,20 @@ class AsyncFramedWorkerProcess:
         async with self._read_lock:
             return await self._receive_unlocked(wait_for_frame=wait_for_frame)
 
-    async def _receive_unlocked(self, *, wait_for_frame: bool = False) -> dict[str, object]:
+    async def _receive_unlocked(
+        self, *, wait_for_frame: bool = False, deadline: float | None = None
+    ) -> dict[str, object]:
         process = self._require_process()
         if process.stdout is None:
             raise RuntimeError("worker_transport_invalid")
+        effective_timeout = (
+            self._spec.io_timeout_seconds if deadline is None else deadline
+        )
         first = b""
         try:
             if wait_for_frame:
                 first = await process.stdout.readexactly(1)
-            async with asyncio.timeout(self._spec.io_timeout_seconds):
+            async with asyncio.timeout(effective_timeout):
                 header = first + await process.stdout.readexactly(4 - len(first))
         except TimeoutError as exc:
             if wait_for_frame:
@@ -212,7 +242,7 @@ class AsyncFramedWorkerProcess:
         if not 0 < size <= MAX_FRAME_BYTES:
             raise ProtocolError("invalid worker frame size")
         try:
-            async with asyncio.timeout(self._spec.io_timeout_seconds):
+            async with asyncio.timeout(effective_timeout):
                 body = await process.stdout.readexactly(size)
         except TimeoutError as exc:
             if wait_for_frame:

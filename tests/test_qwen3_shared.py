@@ -34,6 +34,7 @@ class _Config:
             env=offline_environment(REPOSITORY_ROOT),
             io_timeout_seconds=self.io_timeout_seconds or self.timeout_seconds,
             shutdown_timeout_seconds=0.5,
+            handshake_timeout_seconds=30.0,
         )
 
 
@@ -266,6 +267,23 @@ def test_idle_dispatch_receive_does_not_become_a_worker_failure() -> None:
                 }
             )
             assert (await asyncio.wait_for(queue.get(), 1))["text"] == "after-idle"
+        finally:
+            await worker.close()
+
+    _run(scenario())
+
+
+def test_start_handshake_survives_io_timeout_via_decoupled_deadline() -> None:
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(
+            _Config(
+                timeout_seconds=0.05,
+                model_dir=Path("/tmp/speechrail-shared-model-shared-delayed-ready"),
+            )
+        )
+        try:
+            await worker.start()
+            assert worker.ready is True
         finally:
             await worker.close()
 

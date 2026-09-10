@@ -226,7 +226,8 @@ class Qwen3SharedWorker:
                         "model_dir": str(self.config.model_dir),
                         "device": self.config.device,
                         "dtype": self.config.dtype,
-                    }
+                    },
+                    handshake=True,
                 )
                 if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
                     raise RuntimeError(error_frame_message(ready, "worker_start_failed"))

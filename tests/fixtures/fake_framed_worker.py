@@ -34,6 +34,8 @@ def main() -> None:
                     },
                 )
             else:
+                if model_dir.endswith("shared-delayed-ready"):
+                    time.sleep(0.3)
                 write_frame(
                     stdout,
                     {
