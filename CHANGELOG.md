@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-09-10
+
+### Fixed
+
+- 修复 ASR shared worker 空闲永不淘汰（常驻内存）的根因：`Qwen3SharedWorker.trim_memory()` 经 `send()` 发送 trim 帧时无条件刷新 `last_active` 空闲时钟，导致 `WorkerIdleEvictor` 的 standby 降内存动作每 ~60 秒重置自己的空闲计时，链式抵消冷淘汰 (300s idle eviction)。`send()` 新增 `touch_last_active` 参数，trim_memory 传 `False` 不视为活动。
+- 修复 `WorkerIdleEvictor` 冷淘汰与 `force_evict` 的 idle 戳记录时序：在 `close()` 完成后才盖章，避免 `Qwen3SharedWorker.close()` 结尾刷新自身 `last_active` 使已被淘汰的死进程在下一 tick 复活为 `active`（worker_status 指标误报、重复调度空淘汰）。
+- 补齐回归测试：`trim_memory` 不刷新空闲时钟、真实请求仍刷新；真实 shared worker + evictor 全流程 standby→cold 且淘汰状态不复活。
+
+### Verification
+
+- 新增 3 个回归测试（`tests/test_qwen3_shared.py` ×2、`tests/test_worker_lease.py` ×1）；全套 pytest、ruff、mypy、OpenAPI redocly lint、`git diff --check` 通过。
+- 本轮为 bug 修复 patch，按用户要求跳过性能基准；真实模型 smoke 见发布证据 ledger。
+
 ## [2.1.0] - 2026-09-09
 
 ### Added

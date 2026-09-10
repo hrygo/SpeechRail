@@ -48,7 +48,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / "speechrail-2.1.0-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-2.1.1-py3-none-any.whl"
     wheel.touch()
     app_home = tmp_path / "Application Support" / "SpeechRail"
     return wheel, app_home
