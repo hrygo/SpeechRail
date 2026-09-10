@@ -26,7 +26,7 @@ class StartableComponent(Protocol):
 class RecoveryRepository(Protocol):
     """Narrow shape of the durable job spool recovery entry point."""
 
-    def recover_interrupted(self) -> int: ...
+    def recover_interrupted(self, *, max_attempts: int) -> int: ...
 
 
 async def run_job_runner(runner: JobRunner, *, poll_seconds: float) -> None:
@@ -55,6 +55,7 @@ class RuntimeLifecycle:
         evictor: WorkerIdleEvictor | None = None,
         lazy_load: bool = False,
         poll_seconds: float = 1.0,
+        max_job_attempts: int = 2,
     ) -> None:
         self._repository = repository
         self._asr = asr
@@ -68,6 +69,7 @@ class RuntimeLifecycle:
         self._evictor = evictor
         self._lazy_load = lazy_load
         self._poll_seconds = poll_seconds
+        self._max_job_attempts = max_job_attempts
         self._started_components: list[StartableComponent] = []
         self._runner_task: asyncio.Task[None] | None = None
         self._running = False
@@ -114,7 +116,9 @@ class RuntimeLifecycle:
             return
         try:
             if self._repository is not None:
-                self._repository.recover_interrupted()
+                self._repository.recover_interrupted(
+                    max_attempts=self._max_job_attempts
+                )
             if not self._lazy_load:
                 for component in self._pending:
                     await component.start()

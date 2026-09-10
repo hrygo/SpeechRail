@@ -66,6 +66,7 @@ paths:
                 tts_state: active
                 streaming_state: active
                 ready: true
+                job_spool_ready: false
         '400':
           $ref: '#/components/responses/BadRequest'
   /readyz:
@@ -586,6 +587,49 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+    get:
+      operationId: listSpeechJobs
+      tags: [jobs]
+      summary: List owner-scoped asynchronous speech jobs
+      description: |
+        Returns metadata for jobs owned by the authenticated caller, newest
+        first. Pagination uses an opaque `cursor`; pass the returned
+        `next_cursor` to fetch the following page. Raw audio, transcripts, and
+        artifacts are never returned.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          description: Maximum number of job records to return per page.
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque pagination cursor returned as `next_cursor`.
+      responses:
+        '200':
+          description: A page of owner-scoped job metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
   /v1/jobs/{job_id}:
     parameters:
       - name: job_id
@@ -634,6 +678,44 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/JobNotFound'
+        '409':
+          $ref: '#/components/responses/JobNotCancellable'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
+  /v1/jobs/{job_id}/result:
+    parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^job_[a-f0-9]{32}$'
+    get:
+      operationId: getSpeechJobResult
+      tags: [jobs]
+      summary: Fetch the result reference of a completed job
+      description: Returns the opaque result reference only when the job is completed and the caller has the same authenticated owner scope.
+      security:
+        - BearerAuth: []
+        - {}
+      responses:
+        '200':
+          description: Job result reference
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [result_ref]
+                properties:
+                  result_ref:
+                    type: string
+                    description: Opaque result reference stored at completion.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/JobNotFound'
+        '409':
+          $ref: '#/components/responses/JobNotReady'
         '503':
           $ref: '#/components/responses/BackendNotReady'
 components:
@@ -662,6 +744,7 @@ components:
         - tts_state
         - streaming_state
         - ready
+        - job_spool_ready
       properties:
         status:
           type: string
@@ -708,6 +791,9 @@ components:
           description: Granular streaming ASR lifecycle state.
         ready:
           type: boolean
+        job_spool_ready:
+          type: boolean
+          description: True when a job spool repository is configured and available.
     DiarizationStatus:
       type: object
       required: [configured, ready, code, message, profile]
@@ -1262,6 +1348,9 @@ components:
           minLength: 1
           maxLength: 1000
           description: Opaque external input reference; no raw content or credentials.
+        params:
+          type: object
+          description: Opaque caller-supplied parameters; stored and echoed back on GET.
     Job:
       type: object
       additionalProperties: false
@@ -1280,9 +1369,67 @@ components:
         error_code:
           type: [string, 'null']
           maxLength: 200
+        error_message:
+          type: [string, 'null']
+          maxLength: 256
+          description: >
+            Bounded, desensitized failure detail. Optional; populated only on
+            single-job reads (GET /v1/jobs/{job_id}) for failed jobs, and null
+            in list, create, cancel and terminal responses. Never contains raw
+            audio, transcripts, credentials, URLs, absolute paths, emails or
+            exception dumps.
+        attempts:
+          type: integer
+          minimum: 0
+          description: >
+            Number of times this job has been claimed, incremented atomically on
+            each queued-to-running transition. Optional; populated only on
+            single-job reads (GET /v1/jobs/{job_id}), and absent from list,
+            create, cancel and result responses.
         result_ref:
           type: [string, 'null']
           description: Opaque result reference, present only for completed jobs.
+        params:
+          type: [object, 'null']
+          description: Opaque caller-supplied parameters, echoed back from creation.
+        queue_position:
+          type: [integer, 'null']
+          minimum: 1
+          description: >
+            Best-effort 1-based position among queued jobs. Optional; populated
+            only on single-job reads (GET /v1/jobs/{job_id}) while the job is
+            queued, and null in list, create, cancel and terminal responses.
+        eta_seconds:
+          type: [number, 'null']
+          minimum: 0
+          description: >
+            Bounded best-effort queue-wait estimate in seconds. Optional;
+            populated only on single-job reads while the job is queued, and
+            null otherwise.
+        deadline:
+          type: [string, 'null']
+          description: >
+            ISO-8601 UTC timestamp approximating the run deadline. Optional;
+            populated only on single-job reads while the job is running, and
+            null otherwise.
+    JobList:
+      type: object
+      additionalProperties: false
+      required: [object, data, next_cursor, has_more]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+        next_cursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; null when exhausted.
+        has_more:
+          type: boolean
+          description: Whether more job records are available after this page.
     Usage:
       type: object
       required: [type, seconds]
@@ -1506,6 +1653,18 @@ components:
             $ref: '#/components/schemas/ErrorBody'
     JobNotFound:
       description: Job does not exist or is outside the caller owner scope
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotCancellable:
+      description: Job is not in a cancellable state (running or failed)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotReady:
+      description: Job is not yet completed; result is unavailable
       content:
         application/json:
           schema:

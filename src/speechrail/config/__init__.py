@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     diarization_worker_path: Path = Field(default_factory=bundled_diarization_worker_path)
     job_spool_dir: Path | None = None
     job_poll_seconds: float = Field(default=0.1, gt=0, le=60)
+    job_estimate_seconds: float = Field(default=30.0, gt=0, le=3600)
+    job_result_ttl_seconds: float = Field(default=86_400.0, gt=0, le=31_536_000)
+    max_job_attempts: int = Field(default=2, ge=1, le=10)
     compatibility_model_ids: tuple[str, ...] = (
         "Qwen3-ASR-1.7B",
         "qwen3-asr-1.7b",

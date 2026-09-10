@@ -71,7 +71,8 @@ class _FakeRepository:
     def __init__(self, calls: list[str]) -> None:
         self._calls = calls
 
-    def recover_interrupted(self) -> None:
+    def recover_interrupted(self, *, max_attempts: int = 2) -> None:
+        del max_attempts
         self._calls.append("repository.recover")
 
 

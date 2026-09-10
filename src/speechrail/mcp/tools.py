@@ -187,6 +187,10 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
         },
         "clone_supported": variant == "voice_design",
         "preview_supported": variant == "voice_design",
+        "jobs": {
+            "spool_ready": _bool_flag(health.get("job_spool_ready")),
+            "runner_active": _bool_flag(health.get("job_runner_active")),
+        },
         "models": models,
         "voices": voices,
     }
@@ -587,8 +591,8 @@ async def create_job(
     """Create a durable job (``transcription`` or ``speech``).
 
     ``input_ref`` reuses the same path/URI convention as ``audio_ref``.
-    ``params`` is reserved for future request options; the current SpeechRail
-    ``/v1/jobs`` contract stores only ``kind`` + ``input_ref``.
+    ``params`` is an opaque caller-supplied JSON object that the server stores
+    and echoes back on GET; it is reserved for future request options.
     """
     if kind not in _JOB_KINDS:
         raise ToolCallError(
@@ -605,7 +609,7 @@ async def create_job(
         )
     if params is not None and not isinstance(params, dict):
         raise ToolCallError(code="invalid_params", message="params must be a JSON object")
-    return await client.create_job(kind=kind, input_ref=stripped_ref)
+    return await client.create_job(kind=kind, input_ref=stripped_ref, params=params)
 
 
 async def get_job(client: SpeechRailClient, *, job_id: str) -> dict[str, Any]:

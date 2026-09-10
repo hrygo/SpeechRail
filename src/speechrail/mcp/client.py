@@ -137,6 +137,12 @@ def parse_error_response(response: httpx.Response) -> SpeechRailError:
             raw_param = error.get("param")
             if isinstance(raw_param, str):
                 param = raw_param
+    hint = hint_for_code(code)
+    if code == "backend_not_ready" and "SPEECHRAIL_JOB_SPOOL_DIR" in message:
+        hint = (
+            "SpeechRail job spool is not ready; configure SPEECHRAIL_JOB_SPOOL_DIR "
+            "and restart the daemon"
+        )
     return SpeechRailError(
         status=status,
         code=code,
@@ -145,7 +151,7 @@ def parse_error_response(response: httpx.Response) -> SpeechRailError:
         error_type=error_type,
         request_id=request_id,
         param=param,
-        hint=hint_for_code(code),
+        hint=hint,
     )
 
 
@@ -324,11 +330,18 @@ class SpeechRailClient:
         response = await self._request("DELETE", f"voices/{voice_id}")
         return self._object(response)
 
-    async def create_job(self, *, kind: str, input_ref: str) -> dict[str, Any]:
+    async def create_job(
+        self,
+        *,
+        kind: str,
+        input_ref: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """POST /v1/jobs and return the created job record."""
-        response = await self._request(
-            "POST", "jobs", json={"kind": kind, "input_ref": input_ref}
-        )
+        body: dict[str, Any] = {"kind": kind, "input_ref": input_ref}
+        if params is not None:
+            body["params"] = params
+        response = await self._request("POST", "jobs", json=body)
         return self._object(response)
 
     async def get_job(self, *, job_id: str) -> dict[str, Any]:

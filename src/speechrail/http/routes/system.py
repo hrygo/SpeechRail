@@ -376,6 +376,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "tts_lifecycle": _tts_lifecycle_diagnostics(services),
             "streaming_state": states.get("streaming", "unconfigured"),
             "realtime_vad": services.realtime_vad_status,
+            "job_spool_ready": services.job_repository is not None,
             "ready": services.asr_ready or services.tts_ready,
         }
 

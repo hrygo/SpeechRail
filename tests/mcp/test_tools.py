@@ -828,3 +828,42 @@ def test_get_job_not_found_surfaces_job_error_code(
         run_async(tools.get_job(client, job_id="job_nope"))
     assert excinfo.value.code == "job_not_found"
     assert excinfo.value.status == 404
+
+
+def test_create_job_forwards_params_to_client(make_client: Any, run_async: Any) -> None:
+    job = {"id": "job_x", "kind": "transcription", "state": "queued", "params": {"k": "v"}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/jobs"
+        body = _json_body(request)
+        assert body == {
+            "kind": "transcription",
+            "input_ref": "/tmp/meeting.wav",
+            "params": {"k": "v"},
+        }
+        return _ok(job, status=202)
+
+    client, requests = make_client(handler)
+    result = run_async(
+        tools.create_job(
+            client, kind="transcription", input_ref="/tmp/meeting.wav", params={"k": "v"}
+        )
+    )
+    assert result == job
+    assert len(requests) == 1
+
+
+def test_create_job_rejects_non_dict_params(make_client: Any, run_async: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request expected")
+
+    client, requests = make_client(handler)
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(
+            tools.create_job(
+                client, kind="speech", input_ref="/tmp/in.wav", params=["not", "a", "dict"]
+            )
+        )
+    assert excinfo.value.code == "invalid_params"
+    assert requests == []

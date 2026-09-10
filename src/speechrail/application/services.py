@@ -40,6 +40,7 @@ from speechrail.runtime.alignment_admission import AlignmentAdmission
 from speechrail.runtime.diarization_admission import DiarizationAdmission
 from speechrail.runtime.job_runner import JobProcessor, JobRunner
 from speechrail.runtime.jobs import JobRepository
+from speechrail.runtime.local_file_processor import LocalFileJobProcessor
 from speechrail.runtime.model_budget import (
     ComponentFootprint,
     budget_for_hardware,
@@ -435,16 +436,28 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         allow_heavy_overlap=allow_heavy_overlap,
         policy_reason=policy_reason,
     )
+    if batch_transcriber is None and transcribe is not None:
+        batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
     job_runner: JobRunner | None = None
-    if job_repository is not None and overrides.job_processor is not None:
+    if job_repository is not None:
+        processor = overrides.job_processor
+        if processor is None:
+            processor = LocalFileJobProcessor(
+                spool_dir=job_repository.spool_dir,
+                batch_transcriber=batch_transcriber,
+                tts_synthesizer=tts_synthesizer,
+                max_upload_bytes=settings.max_upload_bytes,
+                max_audio_seconds=settings.max_audio_seconds,
+                tts_sample_rate=settings.tts_sample_rate,
+                ffmpeg_path=settings.ffmpeg_path,
+            )
         job_runner = JobRunner(
             repository=job_repository,
             governor=governor,
-            processor=overrides.job_processor,
+            processor=processor,
             deadline_seconds=settings.request_timeout_seconds,
+            result_ttl_seconds=settings.job_result_ttl_seconds,
         )
-    if batch_transcriber is None and transcribe is not None:
-        batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
 
     text_aligner = overrides.text_aligner
     if (
@@ -486,6 +499,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         evictor=evictor,
         lazy_load=settings.worker_lazy_load,
         poll_seconds=settings.job_poll_seconds,
+        max_job_attempts=settings.max_job_attempts,
     )
     return AppServices(
         settings=settings,
