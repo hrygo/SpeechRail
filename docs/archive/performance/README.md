@@ -2,7 +2,12 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
-## 最新三档性能基准（v2.2.0，MINOR）
+## 最新 PATCH 发布验收（v2.2.1，PATCH quality）
+
+> **结论**：v2.2.1 已按 PATCH 范围只测当前 `quality` 档，全程未切换档位。HTTP ASR/TTS 36/36、Realtime 3/3 与 `phys_footprint` 采样均通过；相对 v2.2.0 的 ASR/TTS warm RTF 差值在 ±2.2% 内、Realtime commit −3.8%、峰值 −1.2%，按持平处理（本版仅解耦 worker 启动握手超时，未改推理权重/量化/推理图）。性能回归与独立质量 gate 保持 `unset`。详见
+> [v2.2.1 性能与质量基准](2026-09-10-v2.2.1-performance-benchmark.md)。
+
+## 上一三档性能基准（v2.2.0，MINOR）
 
 > **结论**：v2.2.0 已按 `quality → balanced → light → quality` 完成三档性能套件。每档 HTTP ASR/TTS 36/36、Realtime 3/3 与 `phys_footprint` 采样均通过，最终恢复 `quality`；相对 v2.1.0 的三档 ASR/TTS warm RTF 与 Realtime commit 普遍下降、`light` HTTP 峰值小幅上升，均为方向性观察（范围未改推理权重/量化/推理图），性能回归 gate 保持 `unset`。独立 ASR 质量、MOS/ABX、speaker embedding、跨重启音色稳定性和长时 soak 未执行。详见
 > [v2.2.0 性能与质量基准](2026-09-10-v2.2.0-performance-benchmark.md)。
@@ -124,6 +129,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v2.2.1** | [2026-09-10-v2.2.1-performance-benchmark.md](2026-09-10-v2.2.1-performance-benchmark.md) | PATCH quality；HTTP ASR/TTS 36/36、Realtime 3/3 与物理 footprint 采样通过；相对 v2.2.0 持平（仅解耦 worker 启动握手超时）；未切换档位，性能回归与独立质量 gate unset |
 | **v2.2.0** | [2026-09-10-v2.2.0-performance-benchmark.md](2026-09-10-v2.2.0-performance-benchmark.md) | MINOR 三档完整性能基准；HTTP ASR/TTS、Realtime 与物理 footprint 采样通过；相对 v2.1.0 的 RTF/commit 下降与 `light` 峰值上升为方向性观察，性能回归与独立质量 gate unset |
 | **v2.1.0** | [2026-09-09-v2.1.0-performance-benchmark.md](2026-09-09-v2.1.0-performance-benchmark.md) | MINOR 三档完整性能基准；HTTP ASR/TTS、Realtime 与物理 footprint 采样通过；固化 `bench_realtime_json.py` 项目脚本；相对 v2.0.3 波动为方向性观察，性能回归与独立质量 gate unset |
 | **v2.0.3 全链路 active-window 复核** | [2026-09-09-v2.0.3-full-stack-memory-evidence.md](2026-09-09-v2.0.3-full-stack-memory-evidence.md) | schema v3 资源 incarnation/active-window 证据；三档 A–E 行为与资源窗口通过；`light` D 为 8.02 GiB，8 GiB 目标保持 unset；不实施动态 reservation |
