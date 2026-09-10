@@ -35,6 +35,10 @@ from speechrail.mcp.client import SpeechRailClient
 _MAX_TTS_TEXT = 4_096
 _MAX_PREVIEW_TEXT = 4_096
 _MAX_PREVIEW_INSTRUCTION = 10_000
+_MAX_VOICE_NAME = 200
+_MAX_VOICE_INSTRUCTION = 10_000
+_MAX_VOICE_SEED = 2**32 - 1
+_VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _MAX_JOB_REF = 1_000
 _SPEED_RANGE = (0.25, 4.0)
 _TTS_OUTPUT_FORMATS = frozenset({"mp3", "wav", "pcm"})
@@ -443,7 +447,15 @@ async def preview_voice(
 
     Lets an agent audition a natural-language voice instruction before
     committing to it.  The binary audio is written to a temporary file and
-    returned as ``audio_path``.
+    returned as ``audio_path``.  Nothing is persisted: call ``create_voice``
+    to register the chosen instruction, then ``synthesize`` by its id.
+
+    Instruction guidance (Qwen3-TTS VoiceDesign): write in Chinese or
+    English only (30-200 words); be specific across gender/age/pitch/speed/
+    emotion/characteristics/use-case; describe acoustic traits, never a real
+    person; avoid contradictory dimensions (e.g. calm + frantic) and vague
+    fillers (nice/normal).  Same instruction may yield slightly different
+    voices per generation: audition again before rewording.
     """
     stripped_instruction = instruction.strip()
     if not stripped_instruction:
@@ -494,6 +506,75 @@ async def preview_voice(
         "output_format": _PREVIEW_FORMAT,
         "bytes": len(content),
     }
+
+
+async def create_voice(
+    client: SpeechRailClient,
+    *,
+    name: str,
+    instruction: str,
+    voice_id: str | None = None,
+    seed: int | None = None,
+) -> dict[str, Any]:
+    """Register a persistent instruction-driven voice (``POST /v1/voices``).
+
+    Completes the preview → persist → synthesize loop: audition with
+    ``preview_voice`` first, then persist the chosen instruction here and
+    synthesize by the returned ``id``. The voice only synthesizes on the
+    quality (voice_design) tier; on other tiers it is listed with
+    ``available=false`` until the profile switches back.
+    """
+    stripped_name = name.strip()
+    if not stripped_name:
+        raise ToolCallError(code="invalid_name", message="name must not be blank")
+    if len(stripped_name) > _MAX_VOICE_NAME:
+        raise ToolCallError(
+            code="invalid_name",
+            message=f"name exceeds the {_MAX_VOICE_NAME} character limit",
+        )
+    stripped_instruction = instruction.strip()
+    if not stripped_instruction:
+        raise ToolCallError(
+            code="invalid_instruction", message="instruction must not be blank"
+        )
+    if len(stripped_instruction) > _MAX_VOICE_INSTRUCTION:
+        raise ToolCallError(
+            code="invalid_instruction",
+            message=(
+                f"instruction exceeds the {_MAX_VOICE_INSTRUCTION} character limit"
+            ),
+        )
+    normalized_id: str | None = None
+    if voice_id is not None:
+        normalized_id = voice_id.strip().lower()
+        if not _VOICE_ID_RE.fullmatch(normalized_id):
+            raise ToolCallError(
+                code="invalid_voice_id",
+                message="voice_id must match ^[a-zA-Z0-9_-]{1,64}$",
+            )
+    if seed is not None and (
+        type(seed) is not int or not 0 <= seed <= _MAX_VOICE_SEED
+    ):
+        raise ToolCallError(
+            code="invalid_seed",
+            message=f"seed must be an integer between 0 and {_MAX_VOICE_SEED}",
+        )
+    return await client.create_voice(
+        name=stripped_name,
+        instruction=stripped_instruction,
+        voice_id=normalized_id,
+        seed=seed,
+    )
+
+
+async def delete_voice(client: SpeechRailClient, *, voice_id: str) -> dict[str, Any]:
+    """Delete a persistent custom voice (``DELETE /v1/voices/{id}``)."""
+    stripped = voice_id.strip()
+    if not stripped:
+        raise ToolCallError(
+            code="invalid_voice_id", message="voice_id must not be blank"
+        )
+    return await client.delete_voice(voice_id=stripped)
 
 
 async def create_job(

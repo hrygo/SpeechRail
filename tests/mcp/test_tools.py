@@ -630,6 +630,124 @@ def test_preview_voice_requires_instruction(make_client: Any, run_async: Any) ->
 
 
 # ---------------------------------------------------------------------------
+# create_voice() / delete_voice() — preview → persist → synthesize loop
+# ---------------------------------------------------------------------------
+
+
+def test_create_voice_posts_exact_body_and_returns_entry(
+    make_client: Any, run_async: Any
+) -> None:
+    entry = {"id": "custom_test", "mode": "instruction", "available": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/voices"
+        assert _json_body(request) == {
+            "name": "知性女声",
+            "instruction": "温和自然的中文女声。",
+            "id": "custom_test",
+            "seed": 7,
+        }
+        return _ok(entry, status=201)
+
+    client, requests = make_client(handler)
+    result = run_async(
+        tools.create_voice(
+            client,
+            name="知性女声",
+            instruction="温和自然的中文女声。",
+            voice_id="Custom_Test",
+            seed=7,
+        )
+    )
+    assert result == entry
+    assert len(requests) == 1
+
+
+def test_create_voice_rejects_overlong_instruction_before_network(
+    make_client: Any, run_async: Any
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request expected")
+
+    client, requests = make_client(handler)
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(tools.create_voice(client, name="n", instruction="x" * 10_001))
+    assert excinfo.value.code == "invalid_instruction"
+    assert requests == []
+
+
+def test_create_voice_rejects_bad_id_and_seed_before_network(
+    make_client: Any, run_async: Any
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request expected")
+
+    client, requests = make_client(handler)
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(tools.create_voice(client, name="n", instruction="ok", voice_id="bad id!"))
+    assert excinfo.value.code == "invalid_voice_id"
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(tools.create_voice(client, name="n", instruction="ok", seed=-1))
+    assert excinfo.value.code == "invalid_seed"
+    assert requests == []
+
+
+def test_delete_voice_forwards_id(make_client: Any, run_async: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "DELETE"
+        assert request.url.path == "/v1/voices/custom_test"
+        return _ok({"status": "deleted", "id": "custom_test"})
+
+    client, requests = make_client(handler)
+    result = run_async(tools.delete_voice(client, voice_id="custom_test"))
+    assert result == {"status": "deleted", "id": "custom_test"}
+    assert len(requests) == 1
+
+
+def test_preview_create_synthesize_loop_closes_over_mcp(
+    make_client: Any, run_async: Any
+) -> None:
+    models = _model("quality", "voice_design")
+    voices = [_voice("serena", mode="system", available=True, variant="voice_design")]
+    entry = {"id": "custom_loop", "mode": "instruction", "available": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/models":
+            return _ok({"object": "list", "data": models})
+        if request.url.path == "/v1/voices/previews":
+            return httpx.Response(status_code=200, content=b"RIFF-preview")
+        if request.method == "POST" and request.url.path == "/v1/voices":
+            return _ok(entry, status=201)
+        if request.url.path == "/v1/voices" and request.method == "GET":
+            created_entry = dict(
+                entry,
+                variant="voice_design",
+                name="custom_loop",
+                is_default=False,
+                aliases=[],
+                capabilities={
+                    "supports_speaker": False,
+                    "supports_instruction": True,
+                    "supports_clone": False,
+                },
+            )
+            return _ok({"object": "list", "data": [*voices, created_entry]})
+        if request.url.path == "/v1/audio/speech":
+            assert _json_body(request)["voice"] == "custom_loop"
+            return httpx.Response(status_code=200, content=b"ID3-x")
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, _requests = make_client(handler)
+    preview = run_async(tools.preview_voice(client, instruction="温和的中文女声。", text="你好"))
+    Path(preview["audio_path"]).unlink()
+    created = run_async(tools.create_voice(client, name="loop", instruction="温和的中文女声。"))
+    assert created["id"] == "custom_loop"
+    spoken = run_async(tools.synthesize(client, text="hi", voice="custom_loop"))
+    Path(spoken["audio_path"]).unlink()
+
+
+# ---------------------------------------------------------------------------
 # create_job / get_job / cancel_job
 # ---------------------------------------------------------------------------
 

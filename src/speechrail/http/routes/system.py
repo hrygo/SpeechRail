@@ -521,6 +521,13 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "invalid_instruction",
                 "Voice instruction is required",
             )
+        if len(instruction.strip()) > 10_000:
+            return error_response(
+                400,
+                request_id,
+                "invalid_instruction",
+                "Voice instruction exceeds the 10000 character limit",
+            )
         if seed is not None and (
             type(seed) is not int or seed < 0 or seed > _MAX_VOICE_SEED
         ):
