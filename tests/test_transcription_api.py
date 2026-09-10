@@ -596,3 +596,37 @@ def test_governor_queue_full_maps_to_429_queue_full() -> None:
 
     codes = sorted(asyncio.run(scenario()))
     assert codes == [200, 200, 429], codes
+
+
+def test_speech_instructions_over_domain_limit_use_stable_envelope() -> None:
+    """instructions >10k must 422 at the HTTP boundary, never a bare 500."""
+
+    class FakeTTS:
+        def synthesize(self, request: object):
+            async def chunks():
+                yield __import__("speechrail.domain.ports", fromlist=["AudioChunk"]).AudioChunk(
+                    response_id="r", chunk_index=0, audio=b"\x00\x00"
+                )
+
+            return chunks()
+
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=FakeTTS(),
+        )
+    )
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "hello",
+            "voice": "default",
+            "instructions": "x" * 10_001,
+            "response_format": "pcm",
+        },
+    )
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "validation_error"
+    assert "request_id" in body["error"]

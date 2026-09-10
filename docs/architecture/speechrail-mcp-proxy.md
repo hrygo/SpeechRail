@@ -2,8 +2,8 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.0.1"
-date: 2026-09-07
+version: "1.1.0"
+date: 2026-09-10
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
 
@@ -12,6 +12,12 @@ supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 > **状态声明**：本文档描述**已实现**的外置 `speechrail-mcp` 进程（合并于 `feat/speechrail-mcp`，
 > PR #15，2026-09-07）。当前行为以 `src/speechrail/mcp/` 代码与实测为准；REST 契约仍以
 > `contracts/openapi.yaml` 为唯一事实来源。本文档记录 MCP 工具清单与设计取舍。
+>
+> **v1.1.0 变更**（2026-09-10）：
+> - **新增** `create_voice` / `delete_voice`（`POST /v1/voices` / `DELETE /v1/voices/{id}` 的透传），
+>   闭环 preview → persist → synthesize；创建不限档位、可用性随档位声明；
+> - `preview_voice` 文档补 VoiceDesign 指令写法指引（中英文、维度、禁模仿真人）；
+> - REST `instructions` 上限 100000 → 10000，与 `SpeechRequest`/preview 对齐，超限走稳定 422。
 >
 > **v1.0.0 状态演进** —— 自 v0.2.0 草案实现后的收敛（与代码核对）：
 > - 状态从 `draft` 提升为 `active`；实现采用**无状态**设计（`describe()` 每次实时查询
@@ -178,8 +184,25 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 - **Proxy 调用**：`POST /v1/voices/previews`（`audio.py:1010`，`extra="forbid"`）。
 - **仅 `quality` 档**。非 quality → 结构化错误：*"试听需 `quality` 档（voice_design）；当前档位不支持。可用 `describe()` 确认。"*
 - **作用**：让 agent 先试听再选音色，是"精准选择"的关键能力——**不作为普通工具暴露**，仅 quality 档可用。
+  试听是 ephemeral（不落库）；选定后调 **`create_voice`** 持久化（见 §4.5），再按 id `synthesize`。
+- **指令写法**：中/英文、30–200 词；覆盖 gender/age/pitch/speed/emotion/characteristics/use-case；
+  描述声音特质、不模仿真人、不写矛盾维度与 `nice`/`normal` 类模糊词。同指令多次生成可能略有差异，
+  先复听再改词。
 
-### 4.5 `create_job` / `get_job` / `cancel_job`（可选长任务句柄）
+### 4.5 `create_voice` / `delete_voice`（持久化指令音色，闭环 preview → synthesize）
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `name` | string | 是 | 显示名（≤200） |
+| `instruction` | string | 是 | 已试听的 VoiceDesign 指令（≤10000，中/英文，写法同 §4.4） |
+| `voice_id` | string | 否 | 稳定 id（`^[a-zA-Z0-9_-]{1,64}$`，小写归一；缺省服务端分配） |
+| `seed` | integer | 否 | 0–4294967295，用于可复现合成 |
+
+- **Proxy 调用**：`POST /v1/voices` / `DELETE /v1/voices/{id}`（`system.py:484` / `:860`）。
+- **档位语义**：创建不限档位；非 quality 档下新建音色 `available=false`，切回 quality 自动恢复。
+  `delete_voice` 只需 `voice_id`。
+
+### 4.6 `create_job` / `get_job` / `cancel_job`（可选长任务句柄）
 
 | 工具 | 参数 | 说明 |
 |---|---|---|

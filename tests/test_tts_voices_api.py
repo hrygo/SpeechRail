@@ -338,3 +338,25 @@ def test_custom_voice_cannot_override_canonical_or_alias_ids(reserved_id: str) -
     )
 
     assert response.status_code == 400
+
+
+def test_custom_voice_rejects_instruction_over_domain_limit() -> None:
+    """POST /v1/voices instruction >10k must 400, mirroring SpeechRequest."""
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/voices",
+        json={
+            "name": "超长指令音色",
+            "instruction": "x" * 10_001,
+            "id": "test_overlong_instruction_voice",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_instruction"

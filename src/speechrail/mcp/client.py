@@ -302,6 +302,28 @@ class SpeechRailClient:
         response = await self._request("POST", "voices/previews", json=body)
         return response.content
 
+    async def create_voice(
+        self,
+        *,
+        name: str,
+        instruction: str,
+        voice_id: str | None = None,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        """POST /v1/voices and return the created voice entry."""
+        body: dict[str, Any] = {"name": name, "instruction": instruction}
+        if voice_id is not None:
+            body["id"] = voice_id
+        if seed is not None:
+            body["seed"] = seed
+        response = await self._request("POST", "voices", json=body)
+        return self._object(response)
+
+    async def delete_voice(self, *, voice_id: str) -> dict[str, Any]:
+        """DELETE /v1/voices/{voice_id} and return the deletion record."""
+        response = await self._request("DELETE", f"voices/{voice_id}")
+        return self._object(response)
+
     async def create_job(self, *, kind: str, input_ref: str) -> dict[str, Any]:
         """POST /v1/jobs and return the created job record."""
         response = await self._request(

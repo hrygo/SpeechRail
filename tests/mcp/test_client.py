@@ -273,3 +273,37 @@ def test_connection_errors_map_to_retryable_speechrail_error(
         assert "cannot reach SpeechRail" in exc.message
     else:
         raise AssertionError("expected SpeechRailError")
+
+
+def test_create_and_delete_voice_use_exact_rest_shapes(
+    make_client: Any, run_async: Any, json_response: Any
+) -> None:
+    entry = {"id": "custom_test", "mode": "instruction", "available": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/voices":
+            body = json.loads(request.content)
+            assert body == {
+                "name": "知性女声",
+                "instruction": "温和自然的中文女声。",
+                "id": "custom_test",
+                "seed": 7,
+            }
+            return json_response(entry, status=201)
+        if request.method == "DELETE" and request.url.path == "/v1/voices/custom_test":
+            return json_response({"status": "deleted", "id": "custom_test"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    client, requests = make_client(handler)
+    created = run_async(
+        client.create_voice(
+            name="知性女声",
+            instruction="温和自然的中文女声。",
+            voice_id="custom_test",
+            seed=7,
+        )
+    )
+    assert created == entry
+    deleted = run_async(client.delete_voice(voice_id="custom_test"))
+    assert deleted == {"status": "deleted", "id": "custom_test"}
+    assert [request.method for request in requests] == ["POST", "DELETE"]
