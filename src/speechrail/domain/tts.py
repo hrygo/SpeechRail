@@ -838,6 +838,8 @@ class VoiceRegistry:
             raise ValueError("voice name must not be empty")
         if not instruction.strip():
             raise ValueError("voice instruction must not be empty")
+        if len(instruction.strip()) > 10_000:
+            raise ValueError("voice instruction exceeds the 10000 character limit")
         if voice_id:
             vid = voice_id.strip().lower()
             if not VOICE_ID_RE.fullmatch(vid):

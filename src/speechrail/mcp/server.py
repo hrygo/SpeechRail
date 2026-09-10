@@ -165,13 +165,47 @@ def create_server() -> FastMCP:
         """Audition a VoiceDesign instruction (quality tier only).
 
         instruction: natural-language voice description to audition.
+            Chinese or English only (30-200 words); describe acoustic traits
+            across gender/age/pitch/speed/emotion, never a real person.
         text: sample text to speak with the provisional voice.
-        Returns {audio_path, content_type, output_format, bytes}. Non-quality
-        profiles are rejected up front; call describe() to confirm support.
+        Returns {audio_path, content_type, output_format, bytes}. Ephemeral:
+            nothing is persisted; call create_voice to register the chosen
+            instruction. Non-quality profiles are rejected up front; call
+            describe() to confirm support.
         """
         return await _map_errors(
             tools.preview_voice(client, instruction=instruction, text=text)
         )
+
+    @mcp.tool()
+    async def create_voice(
+        name: str,
+        instruction: str,
+        voice_id: str | None = None,
+        seed: int | None = None,
+    ) -> dict[str, Any]:
+        """Register a persistent instruction-driven voice.
+
+        name: display name for the voice (required).
+        instruction: the auditioned VoiceDesign instruction (required,
+            up to 10000 chars, Chinese or English).
+        voice_id: optional stable id matching ^[a-zA-Z0-9_-]{1,64}$;
+            omitted means server-assigned.
+        seed: optional integer 0..4294967295 for reproducible synthesis.
+        Returns the created voice entry (id, mode, available, capabilities).
+            The voice synthesizes on the quality tier only; elsewhere it is
+            listed with available=false.
+        """
+        return await _map_errors(
+            tools.create_voice(
+                client, name=name, instruction=instruction, voice_id=voice_id, seed=seed
+            )
+        )
+
+    @mcp.tool()
+    async def delete_voice(voice_id: str) -> dict[str, Any]:
+        """Delete a persistent custom voice by voice_id."""
+        return await _map_errors(tools.delete_voice(client, voice_id=voice_id))
 
     @mcp.tool()
     async def create_job(

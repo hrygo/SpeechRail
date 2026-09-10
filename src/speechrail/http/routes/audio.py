@@ -83,7 +83,7 @@ class _SpeechHTTPBody(BaseModel):
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
-    instructions: str | None = Field(default=None, max_length=100_000)
+    instructions: str | None = Field(default=None, max_length=10_000)
     stream_format: str | None = Field(default=None, max_length=16)
 
     @field_validator("input", "voice")

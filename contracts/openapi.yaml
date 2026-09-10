@@ -1204,7 +1204,7 @@ components:
           default: auto
         instructions:
           type: string
-          maxLength: 100000
+          maxLength: 10000
           description: VoiceDesign instruction for quality profiles. CustomVoice and clone voices reject it with a stable 400 error.
         stream_format:
           type: string

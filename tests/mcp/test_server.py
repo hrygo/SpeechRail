@@ -15,7 +15,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def test_server_registers_the_seven_planned_tools() -> None:
+def test_server_registers_the_nine_planned_tools() -> None:
     app = server.create_server()
     registered = _run(app.list_tools())
     names = {tool.name for tool in registered}
@@ -24,6 +24,8 @@ def test_server_registers_the_seven_planned_tools() -> None:
         "transcribe",
         "synthesize",
         "preview_voice",
+        "create_voice",
+        "delete_voice",
         "create_job",
         "get_job",
         "cancel_job",
@@ -45,6 +47,12 @@ def test_tool_schemas_never_leak_client_context() -> None:
 
     preview_props = set(by_name["preview_voice"].inputSchema.get("properties", {}))
     assert preview_props == {"instruction", "text"}
+
+    create_voice_props = set(by_name["create_voice"].inputSchema.get("properties", {}))
+    assert create_voice_props == {"name", "instruction", "voice_id", "seed"}
+
+    delete_voice_props = set(by_name["delete_voice"].inputSchema.get("properties", {}))
+    assert delete_voice_props == {"voice_id"}
 
     create_job_props = set(by_name["create_job"].inputSchema.get("properties", {}))
     assert create_job_props == {"kind", "input_ref", "params"}
