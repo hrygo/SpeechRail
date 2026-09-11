@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-09-11
+
+### Fixed
+
+- `install_managed(..., enable=True)` 现按目标档位自行供给分人 aligner（`aligner-q8`/`aligner-bf16`）后再写配置与执行 preflight，修复既有分人档从旧 release 升级时"新 wheel preflight 对旧 selection fail-closed、而 `profile apply` 又依赖新 runtime"的循环失败；供给失败按既有事务回滚，`resolve_selection` 的 fail-closed 守卫不变。
+- `ModelCatalog.precision_policy` 现可安全深拷贝（`copy.deepcopy` / `model_copy(deep=True)`），JSON 序列化形状不变。
+- `profile apply` 的 env 写入现能识别 `export KEY=...` 与 `KEY = ...` 形式并原地替换，不再追加重复键。
+
+### Changed
+
+- 文档：验收记录将 E1 记为 `UNVERIFIED-BLOCKING（仅代理语料）`；补齐分人档安装/升级的 aligner 前置条件说明；刷新陈旧版本基线。
+
 ## [2.3.0] - 2026-09-11
 
 ### Added
