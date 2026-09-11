@@ -28,11 +28,15 @@ limits:
   request_timeout_seconds: 120
 
 diarization:
-# One external FluidAudio CoreML FP16 bundle and the wheel-installed worker.
+  # Tier-scoped: required for balanced/quality (diarization ON). Omit for light
+  # (diarization OFF: neither the CoreML bundle nor the aligner is provisioned).
+  # One external FluidAudio CoreML FP16 bundle and the wheel-installed worker.
   # No NeMo/CAM++, provider switch, model download, or precision fallback exists.
   coreml_model_path: /absolute/path/outside/SpeechRail/SortformerNvidiaLow_v2.1.mlmodelc
-# Optional override. Omit to use the executable bundled in the macOS wheel.
-# worker_path: /absolute/path/outside/SpeechRail/SpeechRailDiarizationWorker
+  # Tier-scoped: q8 aligner snapshot for balanced, bf16 for quality; omit for light.
+  aligner_model_dir: /absolute/path/outside/SpeechRail/Qwen3-ForcedAligner-0.6B
+  # Optional override. Omit to use the executable bundled in the macOS wheel.
+  # worker_path: /absolute/path/outside/SpeechRail/SpeechRailDiarizationWorker
   max_buffer_bytes: 64000000
   max_groups: 64
   group_ttl_seconds: 900

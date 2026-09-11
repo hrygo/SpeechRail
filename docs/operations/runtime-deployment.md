@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-08
+date: 2026-09-11
 ---
 
 # SpeechRail 运行时与部署
@@ -31,6 +31,27 @@ startup 还是首次请求加载权重由 `SPEECHRAIL_WORKER_LAZY_LOAD` 决定�
 主进程与 worker 使用长度前缀 JSON 私有协议，ASR worker 接受 16 kHz / 单声道 / PCM16 音频，
 TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权重不在仓库内；请求路径
 不会下载模型。
+
+## 三档组成与按档位精度（catalog v2）
+
+`catalog schema_version=2` 用顶层 `precision_policy` 取代旧的“全档 8-bit”规则，并按用户定位重排三档。
+档位仍然只选择权重与量化，公共 API 形状、worker 协议、调度与并发保持不变（ADR-0011；三档组成重排见 ADR-0015）。
+
+| profile | ASR | TTS | Aligner（分人专用） | Diarization | VAD | 安装体积 |
+|---|---|---|---|---|---|---|
+| `light`（Embedded） | `asr-0.6b-q4`（4-bit） | `tts-0.6b-custom-q4`（4-bit） | —（无） | ✗ | ✓ | **≈2.41 GB** |
+| `balanced`（Pro Workflow） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ | ✓ | **≈5.96 GB** |
+| `quality`（Studio） | `asr-1.7b-q8`（8-bit） | `tts-1.7b-design-q8`（8-bit） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈7.63 GB** |
+
+- aligner 是**分人专用制品**，不进入 `PreparedModelSet` / `prepare_models`；它由安装器与 `profile apply` 经
+  `diarization_assets.prepare_diarization_assets(app_home, preset_id=..., downloader=...)` 供给到
+  `app_home/diarization/<aligner-key>`（`aligner-q8` / `aligner-bf16`）。
+- `light` 不供给 Sortformer 与 aligner：`prepare_diarization_assets` 返回 `None`，不写
+  `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` / `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。
+- 内置 BF16 `Qwen3-ForcedAligner-0.6B` Hugging Face 常量已移除；aligner revision 与逐文件哈希随 catalog 锁定。
+- 词级时间戳由 ASR 原生提供，与 aligner 无关；aligner 只在分人路径对固定正文做对齐。
+- `speechrail profile apply <tier>` 按上述组成切换，顺序固定为：准备模型 → 准备可选 VAD → 准备分人制品 →
+  切换 selection。分人档位写入两条分人路径键；`light` 则移除它们。
 
 ## 模型与设备 profile
 
@@ -62,9 +83,9 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_MAX_REALTIME_*` | WebSocket 单帧和缓存字节上限 |
 | `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` | 一个 worker 调用的 deadline |
 | `SPEECHRAIL_JOB_SPOOL_DIR` | 可选、仓库外绝对 SQLite spool；启用 `/v1/jobs` 元数据与启动恢复 |
-| `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` | 固定 `SortformerNvidiaLow_v2.1.mlmodelc` bundle 的外部绝对路径 |
+| `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` | 分人档位（`balanced`/`quality`）由 `profile apply` 供给到 `app_home/diarization/` 的 `SortformerNvidiaLow_v2.1.mlmodelc` bundle 绝对路径；`light` 不设置 |
 | `SPEECHRAIL_DIARIZATION_WORKER_PATH` | 可选覆盖；未设置时使用 macOS wheel 内置的 `SpeechRailDiarizationWorker` |
-| `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` | 分人必需的仓库外 `Qwen3-ForcedAligner-0.6B` snapshot；私有 ASR worker 仅对固定正文调用它，不再次识别音频 |
+| `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` | 分人档位由 `profile apply` 写入 `app_home/diarization/<aligner-key>` 的 tier 专用 aligner snapshot；私有 ASR worker 仅对固定正文调用它，不再次识别音频；`light` 不设置 |
 | `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；物理内存回收取决于运行时 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
 
@@ -72,14 +93,15 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 是预留配置字段：CORS middleware 与解码后时长拒绝逻辑
 不在当前能力范围，不应视为已启用的安全/容量控制。
 
-`speechrail-zero-setup` 在空白 Mac 上会自动准备 diarization：从固定 Hugging Face revision 下载并逐文件校验
-`v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc` 与 `Qwen3-ForcedAligner-0.6B`，然后将两条绝对路径写入私有配置。常规
-managed 升级保留已有私有配置；如需首次手工安装，则须预先准备同一套仓库外部制品并设置两条路径。wheel 会随包安装
-锁定 revision 的 `SpeechRailDiarizationWorker`，通常不必设置 worker 路径；仅在受控排障或自定义
-release 目录时才覆盖它。服务不会在请求路径下载、编译或切换模型；worker 直接以
-`computeUnits=.all` 加载已编译 bundle。重启后用 `/health`
-与 `/v1/models` 检查 profile 是否就绪。D1 的 564 MB max RSS 是单次 smoke 证据，不是质量、P95
-或通用物理内存承诺。
+`speechrail-zero-setup` 在空白 Mac 上按**所选档位**准备 diarization：仅当 `preset.diarization` 为真时，从固定
+Hugging Face revision 下载并逐文件校验 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`，并从 catalog 供给该档 aligner
+（`balanced` 用 `aligner-q8`、`quality` 用 `aligner-bf16`）到 `app_home/diarization/<aligner-key>`，再把两条绝对
+路径写入私有配置。`light` 档不供给任何分人制品，也不运行分人 smoke。常规 managed 升级保留已有私有配置；如需首次
+手工安装，则须预先准备同一套仓库外部制品并设置两条路径。wheel 会随包安装锁定 revision 的
+`SpeechRailDiarizationWorker`，通常不必设置 worker 路径；仅在受控排障或自定义 release 目录时才覆盖它。服务不会
+在请求路径下载、编译或切换模型；worker 直接以 `computeUnits=.all` 加载已编译 bundle。重启后用 `/health` 与
+`/v1/models` 检查 profile 是否就绪（`light` 的 `/v1/models` 不含 `gpt-4o-transcribe-diarize`）。D1 的 564 MB max
+RSS 是单次 smoke 证据，不是质量、P95 或通用物理内存承诺。
 
 启用 job spool 时，目录须是项目外的绝对路径，并由运行账户独占。服务以 `0700` 创建目录、
 以 `0600` 创建数据库，保存的仅是 owner 指纹、任务状态和不透明输入/结果引用；不保存原始
@@ -152,8 +174,9 @@ metadata 仍保留用于升级、回滚和审计的版本信息。
 
 若 private `.env` 设置 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH`，managed installer 会将该
 release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wheel 内
-`SpeechRailDiarizationWorker` 与 fixed-text aligner snapshot。切换后还须确认 `/v1/models` 包含
-`gpt-4o-transcribe-diarize`；任何一项失败都不切换 `runtime/current`，或恢复上一 release。
+`SpeechRailDiarizationWorker` 与 fixed-text aligner snapshot（aligner 校验由 `preset.aligner` 驱动，
+`light` 无 aligner 时跳过）。切换后还须确认 `/v1/models` 包含 `gpt-4o-transcribe-diarize`；任何一项
+失败都不切换 `runtime/current`，或恢复上一 release。
 
 ## 端口与进程策略
 

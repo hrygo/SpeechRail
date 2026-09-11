@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 运行时评估：mlx-qwen3-asr 端到端、性能与清理"
 status: active
-version: "1.1.0"
-date: 2026-09-02
+version: "1.2.0"
+date: 2026-09-11
 ---
 
 # SpeechRail 运行时评估
@@ -10,6 +10,10 @@ date: 2026-09-02
 本报告记录 SpeechRail 将 Qwen3-ASR 后端迁移到 Apple Silicon 原生 MLX 运行时
 `mlx-qwen3-asr` 之后的端到端、性能与架构清理实测。评估对象为本机
 `127.0.0.1:8201`（release `speechrail-1.1.0-...`，`asr_ready=true`、`tts_ready=true`）。
+
+> §1–§6 是迁移期（release `1.1.0`）的历史实测，其中涉及 aligner 的表述属于当时的评估上下文。当前 catalog v2
+> 已把 aligner 明确为**分人专用**制品、词级时间戳改由 ASR 原生提供；按档位精度策略下的评估框架见 §7，§7 不
+> 替换或重算上文任何历史数字。
 
 ## 1. 后端迁移背景
 
@@ -97,3 +101,26 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
   configs/speechrail.example.env docs/operations/operations-runbook.md`；服务
   `service stop` → 恢复 `runtime/current` → `service start`；worker venv 死依赖
   可 `uv pip install qwen-asr==0.0.6 qwen3-asr-causal==0.1.0` 复原。
+
+## 7. 当前档位评估框架（catalog v2，2026-09-11）
+
+> 本节只定义按档位评估的口径，**不引入新的测量数字**；三档新精度组合尚未重新实测。
+
+当前三档各有独立精度与 aligner 变体，评估必须按档位分别记录，不得跨档套用单一数字：
+
+| 档位 | ASR / TTS | Aligner（分人专用） | 分人 | 评估重点 |
+|---|---|---|---|---|
+| `light` | `asr-0.6b-q4` / `tts-0.6b-custom-q4` | — | ✗ | 4-bit ASR CER/WER 与 TTS 客观质量（相对 q8）|
+| `balanced` | `asr-1.7b-q8` / `tts-0.6b-custom-q8` | `aligner-q8` | ✓ | `aligner-q8` 的分人 DER/SACER 与资源包络 |
+| `quality` | `asr-1.7b-q8` / `tts-1.7b-design-q8` | `aligner-bf16` | ✓ | `aligner-bf16` 的分人 DER/SACER 与 Studio 资源包络 |
+
+评估口径：
+
+- **精度策略**：`light` 为 4-bit，`balanced`/`quality` 为 8-bit，`quality` 的 aligner 为 bf16；旧的“全档
+  8-bit”结论不再适用。§3 的 q8 数字对 `light` 只能作为同架构的**方向性参考**，不能当作 4-bit 档的实测。
+- **aligner 变体**：`balanced`/`quality` 的 aligner 由 catalog 按档供给（`aligner-q8` / `aligner-bf16`），
+  评估须报告该档实际供给的变体；`light` 无 aligner、无分人，不做分人评估。word-level timestamps 由 ASR
+  原生提供，不依赖 aligner，因此不列入 aligner 评估。
+- **未测即 `unset`**：三档新精度组合的 RTF、物理内存、ASR/TTS 质量与分人 DER/SACER 尚未重新实测，必须记为
+  `unset`，直到按[能力诊断与质量验收](capability-quality-acceptance.md) 的 E1–E7 门完成并留存聚合证据。
+- 不得把 §2/§3 的历史数字、`readyz=200` 或模型存在当作当前档位的性能或质量结论。

@@ -38,8 +38,8 @@ SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、[Son
 - 不在日志、fixture 或报告中记录 API key、Authorization、原始音频、Base64、完整 prompt、完整转写、embedding、姓名或绝对模型路径。
 - 一次只运行一个 SpeechRail 服务和一个 ASGI worker；不要通过复制模型进程提高吞吐。
 - batch ASR 与 streaming ASR 不作为同机同时工作的产品场景；共享 worker 的模式冲突应稳定返回 `backend_busy`。
-- 三档只改变权重与量化组合，API、worker 协议、调度和服务架构保持一致；档位对调用方透明。
-- `quality` 使用 1.7B VoiceDesign；`balanced/light` 使用同名 CustomVoice speaker。API 按当前权重声明能力，不伪造不可用功能。
+- 三档改变权重、按档位量化精度与是否供给分人制品；API 契约形状、worker 协议、调度和服务架构保持共享，但对外声明能力随档位不同，必须如实声明、不伪造不可用功能（light 不声明分人）。
+- 精度按档位：`light` 0.6B ASR + 0.6B CustomVoice 4-bit、无 aligner/分人/CoreML；`balanced` 1.7B ASR + 0.6B CustomVoice 8-bit、`aligner-q8`、分人开启；`quality` 1.7B ASR + 1.7B VoiceDesign 8-bit、`aligner-bf16`、分人开启。词级时间戳由 ASR 原生提供、不依赖 aligner；仅供给分人的档位声明 `gpt-4o-transcribe-diarize`。
 - `/v1/realtime` 只实现 ASR/TTS 子集，不承载 LLM response、tool call、播放、会议或应用打断策略。
 - diarization 只输出 session-scoped 匿名 label；不管理实名、声纹库、跨会议身份或持久化 PCM/embedding。
 - 所有公共错误使用稳定 envelope 并包含 request ID；输入在 API 边界校验，vendor 输出在 adapter 边界校验。

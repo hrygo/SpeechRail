@@ -31,6 +31,7 @@
 - [单机语音基座计划](plans/2026-09-08-single-machine-speech-foundation.md)
 - [v1.13.0 高 ROI 优化计划](plans/2026-09-09-full-stack-memory-evidence.md)
 - [v1.13.0 高 ROI 优化计划](plans/2026-09-08-v1.13.0-high-roi-optimization.md)
+- [三档用户定位重排与按档位精度策略](plans/2026-09-11-tier-user-repositioning-and-precision-policy.md)
 
 ## 当前正式架构文档
 

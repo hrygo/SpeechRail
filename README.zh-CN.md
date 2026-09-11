@@ -38,7 +38,7 @@
 - 🛡️ **进程隔离架构**：HTTP 网关、MLX ASR/TTS Worker 与原生 CoreML 分人 Worker 都运行在独立进程，通过私有帧化 IPC 通信。Worker 崩溃不会拖垮网关。
 - 🍃 **可配置空闲卸载 (Idle Eviction)**：默认 **300 秒**无活动后，按生命周期配置释放常驻模型权重。卸载后的物理内存取决于档位、运行时和分配器，不承诺固定的待机内存数值。
 - 👥 **可选多人讲话人分离 (Speaker Diarization)**：`gpt-4o-transcribe-diarize` 返回 OpenAI 风格、会话范围的匿名标签 `diarized_json`。它使用锁定的 FluidAudio CoreML FP16 Sortformer Worker；Realtime 通过 `session.speechrail.diarization.enabled` 显式开启扩展。
-- 🎚️ **动态三档资源匹配**：针对 8GB 到 128GB 的 Apple Silicon 芯片深度调优（Light / Balanced / Quality），一键无感热切换。
+- 🎚️ **动态三档用户定位**：按用户场景分为 **Embedded（`light`）/ Pro Workflow（`balanced`）/ Studio（`quality`）** 三档，覆盖 8GB 到 128GB 的 Apple Silicon 芯片，各档采用自己的按档位精度策略（Embedded 4-bit；Pro Workflow / Studio 8-bit），一键无感热切换。
 - 🎙️ **9 种跨档高质量内置音色**：原生集成 Qwen3-TTS 语音能力，涵盖中文、英语、粤语、日语、韩语等丰富声学角色。
 - 🛡️ **质量门控音色克隆**：`quality` 档支持从参考音频 + 朗读脚本文本克隆自定义音色（`POST /v1/voices/clone`），可在不落库的情况下预检参考音频质量（`POST /v1/voices/clone/validate`），并可对任意已注册音色执行有界质量探针（`POST /v1/voices/{voice_id}/quality-runs`）。三者共用 `voice_quality_v1` 报告契约，详见[克隆音色质量门禁与自量保障契约](docs/architecture/voice-clone-quality-gates-and-contract.md)。
 
@@ -261,20 +261,22 @@ curl http://127.0.0.1:8201/v1/audio/speech \
 
 ## 🎛️ 三档模型预设与 9 种跨档内置音色
 
-SpeechRail 对外暴露统一 API 契约，内部通过轻巧的分档组合适配不同配置的 Apple Silicon Mac。全档位严格采用 **8-bit (q8)** 高精度量化权重：
+SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Embedded（`light`）/ Pro Workflow（`balanced`）/ Studio（`quality`）** 三档，而非单纯缩放模型大小。各档位遵循自己的精度策略：`light` 采用 4-bit ASR/TTS 权重，`balanced` 与 `quality` 采用 8-bit 权重（`quality` 的 aligner 保持 bf16 未量化）：
 
 ### 1. 硬件分档矩阵
 
-| 预设档位 (Profile) | ASR 模型权重 | TTS 模型权重与变体 | 最低物理内存推荐 | 活跃最大占用 (Peak) | 稳定占用 (Steady) | 空闲待机 (Idle) |
-|---|---|---|---|---|---|---|
-| 🟢 **`light` (轻量档)** | Qwen3-ASR 0.6B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 8GB 基础款 Mac (Air / Mini) | **~4.4 GB** | **~4.1 GB** | **取决于运行时** (按配置卸载) |
-| 🟡 **`balanced` (平衡档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 0.6B CustomVoice (q8) | 16GB / 24GB 主流 Mac (Pro / Max) | **~6.0 GB** | **~5.5 GB** | **取决于运行时** (按配置卸载) |
-| 🟣 **`quality` (高保真档)** | Qwen3-ASR 1.7B (q8) | Qwen3-TTS 1.7B VoiceDesign (q8) | 32GB+ 旗舰款 Mac (Max / Ultra) | **~6.9 GB** | **~6.6 GB** | **取决于运行时** (按配置卸载) |
+| 预设档位 (Profile) | ASR 模型权重 | TTS 模型权重与变体 | Aligner / 分人 | 最低物理内存推荐 | 安装体积 (v2) | 活跃最大占用 (pre-v2) | 稳定占用 (pre-v2) | 空闲待机 (Idle) |
+|---|---|---|---|---|---|---|---|---|
+| 🟢 **`light`（Embedded 嵌入档）** | Qwen3-ASR 0.6B（`asr-0.6b-q4`，4-bit） | Qwen3-TTS 0.6B CustomVoice（`tts-0.6b-custom-q4`，4-bit） | ✗ 无 aligner / 无分人 | 8GB 基础款 Mac (Air / Mini) | **≈2.41 GB** (2408.7 MB) | **~4.4 GB** | **~4.1 GB** | **取决于运行时** (按配置卸载) |
+| 🟡 **`balanced`（Pro Workflow 工作流档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | Qwen3-TTS 0.6B CustomVoice（`tts-0.6b-custom-q8`，8-bit） | ✓ `aligner-q8` + Sortformer | 16GB / 24GB 主流 Mac (Pro / Max) | **≈5.96 GB** (5955.3 MB) | **~6.0 GB** | **~5.5 GB** | **取决于运行时** (按配置卸载) |
+| 🟣 **`quality`（Studio 工作室档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | Qwen3-TTS 1.7B VoiceDesign（`tts-1.7b-design-q8`，8-bit） | ✓ `aligner-bf16` + Sortformer | 32GB+ 旗舰款 Mac (Max / Ultra) | **≈7.63 GB** (7625.4 MB) | **~6.9 GB** | **~6.6 GB** | **取决于运行时** (按配置卸载) |
 
-- **全档 8-bit 高精度量化**：全档位模型严格保证 8-bit 量化精度，拒绝低位量化带来的音频失真与发音崩塌。
-- **权重高效复用**：`balanced` 与 `quality` 共享同一个 1.7B ASR 模型；`balanced` 与 `light` 共享同一个 0.6B CustomVoice TTS 模型。
+*占位说明：`活跃最大占用` / `稳定占用` 两列沿用此前全 q8 档位的实测值（pre-v2），在新的按档位精度策略下仅具方向性。按档位精度的重新实测尚未完成，这些数值不是新档位的实测结果；`安装体积` 列为 v2 catalog 实测体积。*
+
+- **按档位精度策略**：`light`（Embedded）使用 4-bit ASR/TTS（`asr-0.6b-q4` / `tts-0.6b-custom-q4`）以适配 8GB 基础款 Mac；`balanced` 与 `quality` 使用 8-bit 权重（`asr-1.7b-q8`，以及 `tts-0.6b-custom-q8` / `tts-1.7b-design-q8`），其中 `quality` 的 aligner 保持 bf16。三档对外 API 契约完全一致；4-bit 是用户显式选择的档位，不是静默降级。
+- **权重共享关系**：`balanced` 与 `quality` 共享同一个 1.7B ASR 制品；`balanced` 与 `light` 共享同一个 0.6B CustomVoice 基座，但精度不同（q8 vs q4），因此不再是同一个完全相同的 TTS 制品。
 - **可配置空闲卸载 (Idle Eviction)**：默认空闲超时为 **300 秒**，可通过 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 修改，设为 `0` 可禁用；卸载后的实测物理内存取决于运行时与档位。
-- **音色设计边界**：仅 `quality` 档支持通过自然语言设计自定义新音色（VoiceDesign）；在 `balanced`/`light` 档下，自定义音色会自动声明为 `available=false`，切回 `quality` 自动恢复。
+- **音色设计边界**：仅 `quality` 档使用 VoiceDesign（1.7B）合成，并支持通过自然语言设计自定义新音色；`balanced` / `light` 使用 CustomVoice（0.6B），其自定义音色声明为 `available=false`，切回 `quality` 自动恢复。
 
 ### 2. 9 种跨档系统内置音色
 
@@ -290,7 +292,7 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 | **声线稳定性 (Identity)** | 🔒 **极高 (近 100% 同一人一致性)**<br>跨不同长文本、不同语境音色完全恒定 | 🎨 **良好 (相同输入 100% 确定性复现)**<br>跨极端差异文本时偶有微小情绪/声调发散 | 长篇朗读、新闻播报、严肃客服选 **CustomVoice**；<br>允许或需要自然语调起伏选 **VoiceDesign** |
 | **情感张力与表现力** | 规范、平稳、标准，情绪起伏小 | 丰富、生动、富有自然呼吸感与戏剧表现力 | 故事旁白、游戏 NPC、虚拟陪伴智能体首选 **VoiceDesign** |
 | **开放自定义扩展** | 仅限 9 个固定角色，不支持自由创造 | 🌟 **支持自然语言 Prompt 任意创造新声线** | 需要探索或定制独一无二的新角色时必选 **`quality`** |
-| **硬件内存与吞吐** | 极轻量 (~4.4-6.0GB 峰值)，推理极速 | 1.7B 高精度 (~6.9GB 峰值)，算力开销略高 | 8GB/16GB Mac 推荐前者；32GB+ 旗舰 Mac 畅享后者 |
+| **硬件内存与吞吐** | 极轻量 (~4.4-6.0GB 峰值, pre-v2)，推理极速 | 1.7B 高精度 (~6.9GB 峰值, pre-v2)，算力开销略高 | 8GB/16GB Mac 推荐前者；32GB+ 旗舰 Mac 畅享后者 |
 
 > 深入对比数据与声学嵌入实测详见专题架构文档：[VoiceDesign 能力优势与音色稳定性边界](docs/architecture/voicedesign-capability-and-stability.md)。
 
@@ -310,7 +312,7 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 
 ### 3. 可选讲话人分离模型
 
-针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 在本地 CoreML profile 就绪后提供可选的讲话人切分与会话级匿名标签能力：
+针对会议纪要、多人访谈和双工讨论等场景，SpeechRail 在本地 CoreML profile 就绪后提供可选的讲话人切分与会话级匿名标签能力。该能力仅 `balanced` / `quality` 档提供；`light`（Embedded）不含 aligner 与分人，因此不声明 `gpt-4o-transcribe-diarize`：
 
 | 核心组件 | 底层模型架构 | 职责与能力边界 | 活跃推理开销 (Active RAM) | 客户端调用入口 |
 |---|---|---|---|---|
@@ -319,7 +321,7 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 - **运行时与范围**：生产只有一个分人运行时：私有 Swift Worker 中的 FluidAudio CoreML FP16。它直接加载锁定的已编译 bundle，请求路径不会下载、编译、切换精度、调用 NeMo/CAM++ 或回退。
 - **实测资源**：D1 在 M5 Max 固定 90 秒 streaming 输入上耗时 7.077 秒（RTFx 12.716），峰值 RSS 564 MB。该 smoke 不证明 DER/JER、长会话行为或通用内存上限。
 - **Realtime 扩展**：`session.speechrail.diarization.enabled=true` 开启命名空间扩展。它输出不可变正文与 `speechrail.diarization.updated` 归属更新，并在 `speechrail.diarization.finish` 后以 `speechrail.diarization.done` 结束。
-- **配置**：设置绝对路径 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。macOS wheel 已携带 `SpeechRailDiarizationWorker`；`SPEECHRAIL_DIARIZATION_WORKER_PATH` 仅用于受控排障覆盖。未配置分人路径时，普通 ASR/TTS 调用不受影响，也不会启动分人 Worker。
+- **配置**：设置绝对路径 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。macOS wheel 已携带 `SpeechRailDiarizationWorker`；`SPEECHRAIL_DIARIZATION_WORKER_PATH` 仅用于受控排障覆盖。未配置分人路径时，普通 ASR/TTS 调用不受影响，也不会启动分人 Worker。aligner 是分人专用制品，由 catalog 按档位供给（`balanced` 为 `aligner-q8`，`quality` 为 `aligner-bf16`）；它不用于词级时间戳，词级时间戳由 ASR 原生提供。
 - **离线端到端评测套件**：内置 `tools/evaluate_diarization_e2e.py`，支持基于全局最优二分匹配（Kuhn-Munkres）的 DER、Collar/Overlap 容差与 unknown 惩罚字级归属错误率（SACER）计算。
 
 ---
@@ -329,6 +331,8 @@ SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色
 > **v1.13.0 已于 2026-09-08 完成三档实测**：`quality → balanced → light → quality`；冷态、ASR/TTS warm N=5、当前 OpenAI Realtime（每档连续 3 session）、server-VAD 功能闭环与完整物理 footprint 采样均通过。独立 CER/WER、VAD FAR/FRR、MOS/ABX、讲话人分离质量、speaker embedding 与长时 soak 仍为 `unset`。
 >
 > 完整的脱敏报告见 [v1.13.0 性能与质量基准](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md)。ASR 与 v1.11.0 复用同一 fixture，可作方向性对照；TTS 使用不同固定文本，Realtime 本轮验证 current 嵌套音频 wire profile，均不作严格纵向结论。
+>
+> **v2 档位/精度说明**：catalog 现已按档位选择精度（`light` 4-bit；`balanced`/`quality` 8-bit），因此下方 v1.13.0 的全 q8 数值对当前档位仅具方向性。按档位精度的重新实测尚未完成；原有数值保持不变，不得当作新档位的实测结果。
 
 | 评测指标 | 🟢 Light 档（v1.13.0） | 🟡 Balanced 档（v1.13.0） | 🟣 Quality 档（v1.13.0） | 评测口径与场景 |
 |---|---|---|---|---|

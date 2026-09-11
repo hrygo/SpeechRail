@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 迁移 Runbook"
 status: active
-date: 2026-09-08
+date: 2026-09-11
 ---
 
 # SpeechRail 迁移 Runbook
@@ -79,6 +79,33 @@ speaker 会议。姓名、人工改名和 PostgreSQL 事务仍归 meeting applic
 
 此状态是**运行时唯一切换**；旧 `vr-bridge` 的 console entry、TTS 专属依赖、模型缓存模块和
 旧 TTS 源码已退役。ASR 的历史兼容配置仍按各自 deprecation 计划处理。
+
+## 三档重排与 aligner 供给升级（catalog v2）
+
+catalog v2 把 aligner 改为**分人专用、按档位供给**的制品，并以按档位精度策略取代旧的“全档 8-bit”规则。
+升级已有安装的步骤如下：
+
+1. **部署新 release**：按[运行时与部署](runtime-deployment.md) 的 ADR-0014 managed 流程构建 wheel 并安装候选
+   release；安装机制本身不变。
+2. **执行一次 `profile apply <tier>`**：它按固定顺序“准备模型 → 准备可选 VAD → 准备分人制品 → 切换
+   selection”，为 `balanced` 供给 `aligner-q8`、为 `quality` 供给 `aligner-bf16` 到
+   `app_home/diarization/<aligner-key>`，并写入 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与
+   `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`；`light` 移除这两个键。**先完成这次供给再重启服务**，否则会因
+   aligner snapshot 缺失而 fail closed。
+3. **清理旧 aligner 目录**：新 release 不再引用旧的 `app_home/diarization/Qwen3-ForcedAligner-0.6B`
+   （内置 BF16 Hugging Face 常量已移除）。`profile apply` 成功且
+   `uv run speechrail service preflight --app-home "$APP_HOME"` 通过后，即可清理该旧目录。
+
+**无 prepared_id / registry 迁移**：aligner 不进入 `PreparedModelSet`，`prepare_models` / `_prepared_id` /
+selection schema 均不变。`resolve_selection` 仅依 preset 派生 `qwen3_aligner_model_dir` 与
+`diarization_coreml_model_path`（`light` 置空），因此无需任何注册表迁移。
+
+### 回滚
+
+- **按档精度回退**：把 `precision_policy` 指向该档上一更高精度（例如 `light` 由 4-bit 回 q8），重建 catalog，
+  再执行一次 `profile apply <tier>`。更高精度制品仍保留，可直接供给。
+- **全量回退**：按 ADR-0014 回退到上一 managed release（其私有配置仍引用
+  `diarization/Qwen3-ForcedAligner-0.6B`）；因无 prepared_id 迁移，回退可直接生效。
 
 ## 通用回滚
 

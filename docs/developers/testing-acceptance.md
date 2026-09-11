@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 测试与验收"
 status: active
-date: 2026-08-31
+date: 2026-09-11
 ---
 
 # SpeechRail 测试与验收
@@ -55,6 +55,21 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 验收 HTTP 状态、非空文本/偶数字节音频、`X-Request-ID`、模型设备/dtype 与预期 profile。
 测试音频和 `/tmp/speechrail-smoke.pcm` 由操作者本地保存，结束后删除；提交/报告只保留最小
 结果摘要而非文本、音频或 PCM。
+
+## 档位与分人供给测试清单
+
+catalog v2（按档位精度策略、aligner 作为分人制品、diarization 按档门控）由以下确定性测试文件覆盖：
+
+| 关注点 | 测试文件与代表用例 |
+|---|---|
+| v2 catalog 契约：`precision_policy`、preset `aligner`/`diarization`、schema v2、aligner 身份 | `tests/test_model_presets.py`（`test_load_catalog_matches_tier_precision_policy`、`test_four_bit_tier_is_legal_under_schema_v2`）、`tests/test_model_identity.py`（`test_aligner_artifact_*`）、`tests/test_model_catalog_builder.py`（`test_legal_metadata_produces_schema_v2_with_precision_policy`）|
+| selection 依档覆盖 aligner 目录、`light` 清空分人、aligner snapshot 缺失 fail closed | `tests/test_profile_selection.py`（`test_selection_overlays_aligner_dir_by_preset`、`test_light_selection_clears_aligner_and_diarization`、`test_missing_aligner_directory_raises`）|
+| `diarization_assets` 按档供给：`light` 不产物、`balanced`=`aligner-q8`、`quality`=`aligner-bf16`、复用/损坏/未知档 | `tests/test_installer.py`（`test_prepare_diarization_assets_*`）|
+| preflight aligner 门控：未设置时跳过、缺 CoreML 时仍校验、不完整 snapshot 拒绝 | `tests/test_service_preflight.py`（`test_preflight_skips_aligner_snapshot_when_aligner_dir_unset`、`test_preflight_checks_aligner_snapshot_without_coreml_bundle`、`test_preflight_rejects_incomplete_aligner_snapshot`）|
+| `profile apply` 写/删分人键、三档互切、供给失败显式报错 | `tests/test_profile_commands.py`（`test_apply_light_removes_diarization_env`、`test_apply_balanced_writes_diarization_env`、`test_diarization_prepare_failure_is_explicit`）|
+| installer / zero-setup 按档门控分人供给与 smoke | `tests/test_installer.py`（`test_managed_install_*diarization*`）、`tests/test_video_podcast_skill_install.py`（`test_zero_setup_light_skips_diarization_smoke`、`test_zero_setup_balanced_runs_diarization_smoke`）|
+
+这些测试使用 fake backend 与脱敏 fixture，不加载真实模型、不下载 aligner。
 
 ## 集成验收矩阵
 

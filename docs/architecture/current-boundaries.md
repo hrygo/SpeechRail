@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 当前边界与剩余风险"
 status: active
-date: 2026-09-09
+date: 2026-09-11
 ---
 
 # SpeechRail 当前边界与剩余风险
@@ -12,13 +12,16 @@ date: 2026-09-09
 2. 默认 Apple Silicon profile 为 MPS / `float16`，worker 拒绝自动 CPU fallback。
 3. 未配置 profile 路径时不加载模型；已配置 ASR/TTS profile 各自最多启动一个隔离 worker，
    WLK 只可连接外部已运行 endpoint。分人由一个按需启动的私有 Swift/CoreML worker 执行，
-   固定 FluidAudio Sortformer FP16 bundle，不是 NeMo 或第三个 MLX worker。
+   固定 FluidAudio Sortformer FP16 bundle，不是 NeMo 或第三个 MLX worker。分人制品（Sortformer
+   与 aligner）仅由分人档位（`balanced`/`quality`）按 catalog 供给到 `app_home/diarization/<aligner-key>`；
+   `light` 不供给 aligner 与 CoreML 路径。
 4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
 6. 当前受管质量档为 `2.0.3`，由源码 wheel 安装；运行时 health 已验证 `auto → silero`、`speech_admission_enabled=true`、CoreML Sortformer FP16 ready。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
 7. `server_vad` 的 generic contract 默认值与调用方策略分离：Sona subtitle 为 `0.65/300ms/400ms`，meeting 为 `0.65/300ms/900ms`（threshold/prefix/silence）。SpeechRail 不替调用方决定其业务 endpointing 窗口。
 8. Realtime VAD 评分与 `SpeechAdmission` 状态机是一条 endpointing 链；continuous diarization activity 是另一条 speaker evidence 链，不是重复 VAD，也不改写 canonical completed text。
 9. clone ICL 的当前稳定性保证包括请求级确定性 seed、低温度采样、首次有效片段后冻结响度增益、峰值 ceiling 与参考音频有效信号校验；非 `1.0` clone speed 明确拒绝。
+10. 词级时间戳由 ASR 原生输出提供（`timestamp_granularities`），不依赖 aligner；aligner 仅为分人路径服务，不是通用 ASR 依赖。分人（含 aligner）只在 `balanced`/`quality` 档位供给。
 
 ## 明确限制
 
@@ -28,7 +31,7 @@ date: 2026-09-09
 - `/health` 分别反映 ASR/TTS worker readiness，并以 `realtime_vad.ready/code/message` 单独报告 `server_vad` 子能力；`/readyz` 在至少一个 ASR/TTS 能力可接受请求时返回 200，同时返回 VAD 诊断；`/metrics` 提供 Prometheus 纯文本与 JSON 指标。
 - VAD 使用 512 samples/16kHz 的 32ms 帧；因此 Sona 的 `400ms/900ms` 停止配置实际量化为约 `416ms/928ms`。该量化属于帧时钟行为，不应被误读为两个 VAD 同时运行。
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
-- `diarization_ready` 只表示固定 CoreML bundle 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。D1 仅记录 M5 Max、90 秒输入的 564 MB max RSS；DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
+- `diarization_ready` 只表示固定 CoreML bundle 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。它只在分人档位（`balanced`/`quality`）有意义：`light` 不供给 aligner 与 CoreML 路径，`/v1/models` 不出现 `gpt-4o-transcribe-diarize`。D1 仅记录 M5 Max、90 秒输入的 564 MB max RSS；DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。
 
 ## 已实测基准（本机，MPS/float16）

@@ -2,8 +2,8 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "1.4.0"
-date: 2026-09-02
+version: "1.5.0"
+date: 2026-09-11
 ---
 
 # 🌟 SpeechRail 产品全景白皮书
@@ -50,9 +50,9 @@ mindmap
 - **最小化日志审计**：日志中仅记录 Request ID、时长与耗时指标，严禁打印原始音频与转写正文。
 
 ### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
-- **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS（ASR 支持 `float16`/`int8`；TTS 默认 `float16`/`float32`，预量化 `-8bit` 快照自动解析为 `int8`），单模型显存占用低至 3GB。
+- **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS，并按档位执行精度策略——🟢 `light` 使用 4-bit 权重，🟡 `balanced`/🟣 `quality` 使用 8-bit 权重（`quality` 的 aligner 保持 bf16）；4-bit 是显式选择的档位，不是静默降级。
 - **全链路极速吞吐**：WAV 容器 Fast-Path 直读避免转码开销；端到端流式转写首字延迟低至百毫秒级。
-- **整句高质量合成**：VoiceDesign 驱动 24 kHz 高保真自然语音生成，支持多语种与丰富预设音色。
+- **整句高质量合成**：24 kHz 高保真自然语音生成，支持多语种与丰富预设音色；🟣 `quality` 由 VoiceDesign（1.7B）驱动并支持以自然语言创建新音色，🟡/🟢 由 CustomVoice（0.6B）提供固定预设音色。
 
 ### 🔌 3. 标准兼容与无缝接入 (Zero-Migration Cost)
 - **Drop-in 替换**：全面兼容 OpenAI `/v1/audio/transcriptions`、`/v1/audio/speech` 及 `/v1/realtime`。
@@ -83,17 +83,25 @@ journey
       导出媒体音频: 5: WAV/MP3/PCM 批量产出
 ```
 
-### 画像一：桌面智能体与语音输入用户 (Desktop Agents)
+SpeechRail 以三个**用户差异化档位**交付同一套 API 契约；档位只选择权重、按档位量化精度与是否供给分人制品，公共 API 形状、worker 协议与调度保持共享：
+
+| 档位 | 用户定位 | 适配硬件 | 权重精度 | 分人 |
+|---|---|---|---|---|
+| 🟢 `light`（Embedded） | 嵌入/听写、个人桌面助手 | 8GB 基础机（Air / Mini） | 4-bit | ✗ 不供给 aligner / CoreML |
+| 🟡 `balanced`（Pro Workflow） | 会议、播客、访谈 | 16–24GB 主流机（Pro / Max） | 8-bit | ✓ Sortformer + `aligner-q8` |
+| 🟣 `quality`（Studio） | 创作者、R&D | 32GB+ 旗舰机（Max / Ultra） | 8-bit（aligner bf16） | ✓ Sortformer + `aligner-bf16` |
+
+### 画像一：🟢 `light`（Embedded）— 桌面智能体与语音输入用户 (Desktop Agents)
 - **典型应用**：QwenPaw、Hermes Agent、本地听写工具。
 - **核心诉求**：随时按下快捷键说话，极速返回精准转写文本；绝不上传麦克风录音至云端。
 - **SpeechRail 解法**：通过 `/v1/audio/transcriptions` 或 `whisper-1` 别名直连，秒级返回识别结果。
 
-### 画像二：沉浸式会议与协同办公用户 (Meeting & Collaboration)
+### 画像二：🟡 `balanced`（Pro Workflow）— 沉浸式会议与协同办公用户 (Meeting & Collaboration)
 - **典型应用**：Sona 会议助理、团队协作套件。
 - **核心诉求**：长时间连续会议流式字幕、说话人分离（Diarization）、低延迟无缝对齐。
-- **SpeechRail 解法**：通过 `/v1/realtime` 提供全双工流式 ASR、Server VAD 及 Sortformer/CAM++ 匿名声纹分割。
+- **SpeechRail 解法**：通过 `/v1/realtime` 提供全双工流式 ASR、Server VAD 及 Sortformer 匿名声纹分割（分人仅在 `balanced`/`quality` 档位供给）。
 
-### 画像三：内容创作者与自动化配音系统 (Content Creators)
+### 画像三：🟣 `quality`（Studio）— 内容创作者与自动化配音系统 (Content Creators)
 - **典型应用**：播客生成器、小说朗读器、短视频配音脚本。
 - **核心诉求**：多情感、多角色、高保真自然声音输出，支持长文案与流式断句播放。
 - **SpeechRail 解法**：通过 `/v1/audio/speech` 输出 24 kHz 广播级音频，提供 `warm`、`calm`、`bright` 等预设音色。
@@ -109,6 +117,17 @@ journey
 | **全双工语音助手** | Server VAD + 打断 + 流式 TTS | `WS /v1/realtime` (full-duplex) | 打断响应 < 50ms，TTS 流式平滑输出 | 智能桌面 Assistant, Sona |
 | **高保真文案朗读** | 24kHz 整句/分段语音合成 | `POST /v1/audio/speech` | RTF < 0.35, 输出格式 PCM/WAV/MP3 | 听书工具, 配音工作流 |
 | **长音频异步离线处理** | 任务队列与 Spool 调度 | `POST/GET/DELETE /v1/jobs` | 队列削峰填谷，防 OOM | 后台自动化任务, SRE 批处理 |
+
+### 4.1 三档能力矩阵（API 声明契约）
+
+| 能力 | 🟢 `light` | 🟡 `balanced` | 🟣 `quality` |
+|---|---|---|---|
+| 批量 ASR / Realtime / 分段与词级时间戳 | ✓ | ✓ | ✓ |
+| 说话人分离 (Diarization) | ✗ | ✓ | ✓ |
+| 翻译 | ✓ | ✓ | ✓ |
+| VoiceDesign / 音色克隆 | ✗ | ✗ | ✓ |
+
+> 说明：词级时间戳由 ASR 原生提供（`timestamp_granularities`），与 aligner 无关，三档均可用。分人仅在 🟡/🟣 供给 aligner 与 CoreML 制品，🟢 不声明 `gpt-4o-transcribe-diarize`；VoiceDesign 与音色克隆仅在 🟣 可用，🟡/🟢 的克隆音色 `available=false` 并按契约稳定拒绝。公共 API 请求/响应形状三档一致。
 
 ---
 
@@ -149,16 +168,16 @@ graph LR
 gantt
     title SpeechRail 产品演进路线
     dateFormat  YYYY-MM
-    section 已就绪 (v1.0 - v1.4)
+    section 已就绪 (v1.0 - v2.0)
     OpenAI 契约文件转写 (ASR)           :done, a1, 2026-08, 2026-08
     24kHz 整句与流式语音合成 (TTS)      :done, a2, 2026-08, 2026-09
     OpenAI Realtime WebSocket 双向流式  :done, a3, 2026-08, 2026-09
-    Sortformer/CAM++ 说话人分割        :done, a4, 2026-08, 2026-09
+    Sortformer 说话人分割               :done, a4, 2026-08, 2026-09
     macOS LaunchAgent 常驻服务 CLI       :done, a5, 2026-08, 2026-09
-    section 演进中 (v1.5+)
+    三档用户定位重排与按档位精度策略      :done, a6, 2026-09, 2026-09
+    section 演进中 (v2.x+)
     本地局域网安全访问与配额控制          :active, b1, 2026-09, 2026-10
     更多特色音色预设库扩充              :b2, 2026-10, 2026-11
-    端侧量化加速 (MLX 4-bit / 8-bit)    :b3, 2026-10, 2026-12
 ```
 
 ---

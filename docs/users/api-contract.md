@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.0.1"
-date: 2026-09-08
+version: "2.0.2"
+date: 2026-09-11
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -28,6 +28,28 @@ TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 
 `supports_instruction`；`voice_design`（quality）为 `true`，`custom_voice`
 （balanced/light）为 `false`。这些字段描述当前权重能力，不能由客户端自行推断。
 
+### 1.1 档位与能力可用性矩阵
+
+SpeechRail 有三档运行 profile（🟢 `light` Embedded / 🟡 `balanced` Pro Workflow / 🟣 `quality`
+Studio）。三档**共享同一套** Canonical 模型名、OpenAI 别名、端点路径、请求/响应 schema、错误
+envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”。客户端应以 `GET /v1/models`、
+`GET /health`/`/readyz` 的运行时字段为准，不要假定某能力在全部档位都存在。
+
+| 能力 | 🟢 `light` (Embedded) | 🟡 `balanced` (Pro Workflow) | 🟣 `quality` (Studio) |
+|---|---|---|---|
+| 批量文件转写 / Realtime / `segment`+`word` 时间戳 / translation | ✓ | ✓ | ✓ |
+| 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ |
+| 自然语言音色设计 / 试听 / 克隆（`/v1/voices`、`/v1/voices/previews`、`/v1/voices/clone`） | ✗ | ✗ | ✓ |
+
+> - **词级时间戳由 ASR 原生提供**：`timestamp_granularities=["segment", "word"]` 在三档均可用，
+>   与 aligner 无关。aligner 是分人专用制品，不是词级时间戳的依赖。
+> - **分人只在支持分人的档位声明**：`gpt-4o-transcribe-diarize` 与 `diarized_json` 仅在
+>   `balanced`、`quality` 可用；`light` 不供给 aligner/Sortformer，`/v1/models` 不列出该别名，
+>   文件分人与 Realtime 分人扩展（`session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
+> - **音色设计 / 试听 / 克隆仅 `quality`**：`balanced`、`light` 上 `supports_instruction`、
+>   `supports_preview`、`supports_clone` 为 `false`，预览返回 `400 voice_preview_unsupported`，
+>   克隆返回 `400 voice_cloning_unsupported`。
+
 ---
 
 ## 2. API 端点全览
@@ -41,11 +63,11 @@ TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 
 | `GET` | `/v1/voices` | 注册与自定义的 TTS 音色列表 | 返回系统预置与自建音色全属性及可用性 |
 | `POST` | `/v1/voices` | 自然语言创建自定义音色 (Voice Design) | 接收名称与人设描述，固化专属 Seed 并持久化 |
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
-| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（可选匿名讲话人分离） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
+| `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
-| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启 |
+| `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
 
 `GET /health` 的 `tts_ready` 保持 v1 兼容含义：TTS 已配置并可按需接收请求；它不承诺权重
 当前驻留。新增的 `tts_warm` 为 `true` 时表示 worker 已完成加载握手，可直接产生 PCM，
@@ -92,7 +114,9 @@ string `id`、`type="transcript.text.segment"`、`start/end`、匿名 `speaker: 
 文件必须提供 `chunking_strategy=auto|server_vad`；known-speaker 参数明确返回
 `unsupported_parameter`，SpeechRail 不把匿名标签映射为真实姓名或跨会议身份。
 
-未配置或未就绪的 profile 不会触发模型下载；请求会返回 `503 diarization_not_available`。
+文件分人只在支持分人的档位可用：`balanced`、`quality` 已供给 aligner 与 Sortformer，`light`
+（Embedded）不供给且不在 `/v1/models` 声明 `gpt-4o-transcribe-diarize`。在未配置、未就绪或不支持
+分人的 profile 上，请求不会触发模型下载，而是返回 `503 diarization_not_available`。
 安装可选依赖、准备仓库外部的绝对权重路径及检查 readiness 的步骤见[运行时部署方案](../operations/runtime-deployment.md)。
 
 ---
@@ -138,8 +162,9 @@ Content-Type: application/json
 
 九个 canonical 角色与 Qwen CustomVoice speaker 一一对应：`serena`、`vivian`、
 `uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。
-`default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；客户端
-无需感知或上送 `quality/balanced/light`。
+`default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；别名解析与档位
+无关，客户端无需上送 `quality/balanced/light`。但能力的**可用性**随档位不同（分人仅支持分人的档位、
+VoiceDesign 预览/克隆仅 `quality`），见 §1.1。
 
 ---
 

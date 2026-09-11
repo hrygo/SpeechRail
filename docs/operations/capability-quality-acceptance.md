@@ -2,8 +2,8 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "1.0.3"
-date: 2026-09-09
+version: "1.0.4"
+date: 2026-09-11
 ---
 
 # 能力诊断与质量验收
@@ -34,6 +34,24 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 上述 subtitle/meeting policy 是调用方通过 Realtime `session.update` 传入的策略，不是 SpeechRail 把一个全局 VAD 值复制到所有业务。16kHz/512-sample 帧为 32ms，停止边界存在约一帧量化。
 
 先设 `APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"`。恢复顺序固定为：`uv run speechrail service status --app-home "$APP_HOME"` → `uv run speechrail service preflight --app-home "$APP_HOME"` → `curl http://127.0.0.1:8201/health`。带 `--app-home` 的 service CLI 会自动使用 active managed runtime；不需要手工从源码 `.venv` 运行 preflight。若 `realtime_vad.code=vad_runtime_missing`，应修复当前 managed release 并重新发布，再重复 preflight；不要在客户端单独安装 SDK，也不要把已配置的 Silero 模型静默降级成 legacy。若 profile 未配置或 artifact 不可用，再用 `uv run speechrail profile status --app-home "$APP_HOME"` 检查选择状态。诊断中没有“最近 smoke”字段时，结论必须记为 `unset`，不得把历史报告或 `readyz=200` 记作当前质量通过。
+
+## 三档能力门控与按档位精度
+
+三档的公共 API 形状一致，但按档位门控分人制品与精度策略（完整组成见[运行时与部署](runtime-deployment.md)）：
+
+| 能力 | `light` | `balanced` | `quality` |
+|---|---|---|---|
+| batch / realtime / segment + word timestamps | ✓ | ✓ | ✓ |
+| diarization（`gpt-4o-transcribe-diarize`） | ✗ | ✓ | ✓ |
+| aligner（分人专用） | — | `aligner-q8` | `aligner-bf16` |
+| 精度策略 | 4-bit ASR/TTS | 8-bit ASR/TTS | 8-bit ASR/TTS，aligner bf16 |
+
+- **diarization 门控**：只有 `balanced` / `quality` 供给 CoreML Sortformer 与 aligner，因此仅这两档声明
+  `gpt-4o-transcribe-diarize`；`light` 不声明，`/v1/models` 中不出现该别名。
+- **aligner 是分人专用制品**：由安装器与 `profile apply` 供给到 `app_home/diarization/<aligner-key>`，只服务
+  分人对固定正文的对齐；它不进入 `PreparedModelSet`，也不参与词级时间戳。
+- **词级时间戳由 ASR 原生提供**（`timestamp_granularities`），三档均可用，与 aligner 是否存在无关。
+- `diarization_ready` 是动态能力声明：该档未启用分人时不存在，不得用 `readyz=200` 推断分人可用。
 
 ## Clone TTS 响度能力
 
@@ -97,3 +115,20 @@ uv run python tools/evaluate_diarization_e2e.py \
 ```
 
 报告只应提交聚合值、manifest SHA-256 与测试条件；不得提交原始音频、文本、路径或真实讲话人身份。
+
+## 三档重排验收门（E1–E7）
+
+三档重排与按档位精度策略以可证伪的验收门收口；任一档未过则该档回退上一精度。若某门缺少工具，必须先补齐或在
+记录中显式标注 `UNVERIFIED-BLOCKING`，不得留空阈值：
+
+| 门 | 范围 | 通过条件 |
+|---|---|---|
+| E1 | ASR 精度 | 固定 fixture 上 `asr-0.6b-q4` vs `asr-0.6b-q8` 的 CER/WER 绝对增幅 ≤ 0.5pp；命令与报告路径写入记录 |
+| E2 | TTS 质量 | 用既有 `voice_quality_v1` 客观指标（与 `tests/test_voice_quality_metrics.py` 同源）比较 `tts-0.6b-custom-q4` vs `q8`，不劣化超过既定阈值；不使用未实测的 MOS/ABX |
+| E3 | 分人/对齐 | `tools/evaluate_diarization_e2e.py` 上 `aligner-q8` vs `aligner-bf16` 的 DER/SACER 不劣化（阈值写入记录）|
+| E4 | 资源包络 | 三档实测 `phys_footprint` 分别 ≤ light 8GB / balanced 16GB / quality 32GB 目标包络 |
+| E5 | 切换闭环 | `quality → balanced → light → quality` 热切换，每步 `/health` 正确、分人状态正确 |
+| E6 | 能力诚实 | `light` 的 `/v1/models` 不含 `gpt-4o-transcribe-diarize`；`balanced`/`quality` 含且可用 |
+| E7 | 记录 | 聚合证据写入 `docs/operations/<日期>-tier-repositioning-acceptance.md`，不落原始媒体/文本 |
+
+E1–E7 全过前，不得把任一档的新精度组合记作已验收；结果必须与实测证据一致。

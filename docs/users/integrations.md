@@ -2,8 +2,8 @@
 title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "1.7.0"
-date: 2026-09-08
+version: "1.7.1"
+date: 2026-09-11
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -20,6 +20,25 @@ date: 2026-09-08
 | **OpenAI Base URL** | `http://127.0.0.1:8201/v1` | `http://<lan-ip>:8201/v1` | SDK 与标准应用接入地址 |
 | **Realtime WebSocket URL** | `ws://127.0.0.1:8201/v1/realtime` | `ws://<lan-ip>:8201/v1/realtime` | 全双工实时交互端点 |
 | **API Key** | 留空或任意占位字符 | 必须配置 `SPEECHRAIL_API_KEY` | 通过 `Authorization: Bearer <key>` 鉴权 |
+
+### 1.1 档位与能力可用性
+
+三档 profile（🟢 `light` Embedded / 🟡 `balanced` Pro Workflow / 🟣 `quality` Studio）共享同一套
+Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能力可用性**。客户端应查运行时能力，
+不要假定所有能力在全部档位都存在：
+
+| 能力 | 🟢 `light` | 🟡 `balanced` | 🟣 `quality` |
+|---|---|---|---|
+| ASR 文件转写 / Realtime / `segment`+`word` 时间戳 / translation | ✓ | ✓ | ✓ |
+| 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ |
+| 自然语言音色设计 / 试听与音色克隆 | ✗ | ✗ | ✓ |
+
+- **分人需要支持分人的档位**：只有 `balanced`、`quality` 供给 aligner 与 Sortformer；`light` 不声明
+  `gpt-4o-transcribe-diarize`，文件分人返回 `503 diarization_not_available`，Realtime 分人扩展也不会开启。
+- **词级时间戳三档都有**：由 ASR 原生提供（`timestamp_granularities`），与分人 / aligner 无关。
+- **音色设计 / 克隆仅 `quality`**：`balanced`、`light` 上预览返回 `400 voice_preview_unsupported`，
+  克隆返回 `400 voice_cloning_unsupported`。
+- 权威能力矩阵与运行时字段见 [公共 API 契约手册 §1.1](api-contract.md#11-档位与能力可用性矩阵)。
 
 ---
 
@@ -100,6 +119,10 @@ async function main() {
 main();
 ```
 
+> 上面第 3 段讲话人分离只在 `balanced` / `quality` 生效；在 `light` 上调用返回
+> `503 diarization_not_available`，`/v1/models` 也不列出 `gpt-4o-transcribe-diarize`。第 1 段的文件
+> 转写与 `segment`/`word` 时间戳在 `light` 上正常可用（ASR 原生提供）。
+
 ---
 
 ## 3. 主流 Agent 与客户端接入实战
@@ -107,7 +130,7 @@ main();
 ### 3.1 [Sona (Voice-Realtime 会议助理)](https://github.com/hrygo/sona)
 Sona 是专为本地高私密环境打造的实时双工会议助理，通过 `/v1/realtime` 端点连接 SpeechRail：
 - **WebSocket URL**：`ws://127.0.0.1:8201/v1/realtime`
-- **核心能力**：全双工流式 ASR、Server VAD 自动断句与流式 TTS。连续 native diarization 未通过独立 gate 时不会广播；客户端应先读取 Realtime capability。
+- **核心能力**：全双工流式 ASR、Server VAD 自动断句与流式 TTS。连续 native diarization 未通过独立 gate 时不会广播；客户端应先读取 Realtime capability。该分人扩展仅在支持分人的档位（`balanced`/`quality`）可用，`light` 不声明。
 - **架构权责**：Sona 负责麦克风音频采集、会话状态机、UI 字幕渲染与 LLM 业务编排；SpeechRail 负责本地模型推理与物理内存隔离治理。
 
 ### 3.2 [Open-WebUI 个人 AI 工作台](https://github.com/open-webui/open-webui)
@@ -182,7 +205,7 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
 
 ## 5. 文件、播报与实时字幕的自检和恢复
 
-发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。
+发起推理前先读取 `GET /health`：文件转写检查 `asr_ready`，文本播报检查 `tts_ready`，实时字幕同时检查 `asr_ready`、`streaming_state` 与 `realtime_vad.ready`。当 `realtime_vad.ready=false` 时，读取其稳定 `code`；客户端不需要安装额外 VAD SDK，`vad_runtime_missing` 由 SpeechRail 的 managed release 修复。`/readyz=200` 只代表 ASR 或 TTS 至少一个可用，成功响应中的 `realtime_vad` 仅用于逐项能力诊断。分人能力另查 `diarization_ready`：它仅在支持分人的档位（`balanced`/`quality`）可能为 `true`，`light` 不声明。
 
 文件转写和文本播报可使用上节的 OpenAI SDK 或 cURL 示例。实时字幕使用 `ws://127.0.0.1:8201/v1/realtime`，先发送 `session.update`，然后以 16 kHz、单声道、PCM16 little-endian 的 Base64 音频发送 `input_audio_buffer.append`，以 `input_audio_buffer.commit` 结束一段输入。以同一 `item_id` 的 `conversation.item.input_audio_transcription.completed` 作为最终字幕；`delta` 只含可追加的稳定前缀。
 
