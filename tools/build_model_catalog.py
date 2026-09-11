@@ -18,7 +18,7 @@ from typing import Final
 
 _IMMUTABLE_REVISION: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{40}")
 _SHA256: Final[re.Pattern[str]] = re.compile(r"[0-9a-fA-F]{64}")
-_SCHEMA_VERSION: Final[int] = 1
+_SCHEMA_VERSION: Final[int] = 2
 _PRESET_IDS: Final[frozenset[str]] = frozenset({"quality", "balanced", "light"})
 _ARTIFACT_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -36,7 +36,7 @@ _SOURCE_FIELDS: Final[frozenset[str]] = frozenset({"provider", "repository", "re
 _SOURCE_ALLOWED_FIELDS: Final[frozenset[str]] = _SOURCE_FIELDS | frozenset({"files"})
 _FILE_FIELDS: Final[frozenset[str]] = frozenset({"path", "size", "sha256"})
 _QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset({"bits", "group_size", "format"})
-_PRESET_FIELDS: Final[frozenset[str]] = frozenset({"id", "asr", "tts"})
+_PRESET_FIELDS: Final[frozenset[str]] = frozenset({"id", "asr", "tts", "aligner", "diarization"})
 
 
 def _mapping(value: object, *, context: str) -> Mapping[str, object]:
@@ -283,7 +283,7 @@ def _normalise_artifact(value: object, *, index: int) -> dict[str, object]:
     }
 
 
-def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> dict[str, str]:
+def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> dict[str, object]:
     context = f"preset {index}"
     data = _mapping(value, context=context)
     _check_fields(data, _PRESET_FIELDS, context=context)
@@ -296,7 +296,57 @@ def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> 
         raise ValueError(f"{context}.asr references unknown artifact: {asr}")
     if tts not in artifact_keys:
         raise ValueError(f"{context}.tts references unknown artifact: {tts}")
-    return {"id": preset_id, "asr": asr, "tts": tts}
+    aligner = data["aligner"]
+    if aligner is not None:
+        if not isinstance(aligner, str) or not aligner:
+            raise ValueError(f"{context}.aligner must be null or a non-empty string")
+        if aligner not in artifact_keys:
+            raise ValueError(f"{context}.aligner references unknown artifact: {aligner}")
+    diarization = data["diarization"]
+    if not isinstance(diarization, bool):
+        raise ValueError(f"{context}.diarization must be a boolean")
+    return {
+        "id": preset_id,
+        "asr": asr,
+        "tts": tts,
+        "aligner": aligner,
+        "diarization": diarization,
+    }
+
+
+def _normalise_precision(
+    value: object, *, preset_id: str, context: str
+) -> dict[str, object]:
+    tier = _mapping(value, context=f"{context}.{preset_id}")
+    _check_fields(
+        tier, frozenset({"asr", "tts", "aligner"}), context=f"{context}.{preset_id}"
+    )
+    asr = tier["asr"]
+    tts = tier["tts"]
+    if not isinstance(asr, int) or isinstance(asr, bool) or asr <= 0:
+        raise ValueError(f"{context}.{preset_id}.asr must be a positive integer")
+    if not isinstance(tts, int) or isinstance(tts, bool) or tts <= 0:
+        raise ValueError(f"{context}.{preset_id}.tts must be a positive integer")
+    aligner = tier["aligner"]
+    if (
+        aligner is not None
+        and aligner != "bf16"
+        and (not isinstance(aligner, int) or isinstance(aligner, bool) or aligner <= 0)
+    ):
+        raise ValueError(
+            f"{context}.{preset_id}.aligner must be null, 'bf16', or a positive integer"
+        )
+    return {"asr": asr, "tts": tts, "aligner": aligner}
+
+
+def _normalise_precision_policy(value: object) -> dict[str, dict[str, object]]:
+    context = "catalog.precision_policy"
+    data = _mapping(value, context=context)
+    _check_fields(data, _PRESET_IDS, context=context)
+    return {
+        preset_id: _normalise_precision(data[preset_id], preset_id=preset_id, context=context)
+        for preset_id in sorted(data)
+    }
 
 
 def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
@@ -308,11 +358,11 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
 
     if not isinstance(entries, Mapping):
         raise ValueError("catalog input must be an object")
-    expected_top_level = frozenset({"schema_version", "artifacts", "presets"})
+    expected_top_level = frozenset({"schema_version", "artifacts", "presets", "precision_policy"})
     _check_fields(entries, expected_top_level, context="catalog")
     schema_version = entries["schema_version"]
     if not isinstance(schema_version, int) or isinstance(schema_version, bool):
-        raise ValueError("catalog.schema_version must be integer 1")
+        raise ValueError(f"catalog.schema_version must be integer {_SCHEMA_VERSION}")
     if schema_version != _SCHEMA_VERSION:
         raise ValueError(f"catalog.schema_version must be {_SCHEMA_VERSION}")
 
@@ -328,22 +378,25 @@ def build_catalog(entries: Mapping[str, object]) -> dict[str, object]:
         seen_keys.add(key)
         artifacts.append(artifact)
 
-    presets: list[dict[str, str]] = []
+    presets: list[dict[str, object]] = []
     seen_preset_ids: set[str] = set()
     for preset_index, raw_preset in enumerate(
         _list(entries["presets"], context="catalog.presets")
     ):
         preset = _normalise_preset(raw_preset, index=preset_index, artifact_keys=seen_keys)
-        preset_id = preset["id"]
+        preset_id = str(preset["id"])
         if preset_id in seen_preset_ids:
             raise ValueError(f"catalog has duplicate preset id: {preset_id}")
         seen_preset_ids.add(preset_id)
         presets.append(preset)
 
+    precision_policy = _normalise_precision_policy(entries["precision_policy"])
+
     return {
         "schema_version": _SCHEMA_VERSION,
         "artifacts": sorted(artifacts, key=lambda item: str(item["key"])),
-        "presets": sorted(presets, key=lambda item: item["id"]),
+        "presets": sorted(presets, key=lambda item: str(item["id"])),
+        "precision_policy": precision_policy,
     }
 
 

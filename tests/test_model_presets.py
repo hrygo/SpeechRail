@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -37,7 +36,9 @@ def _artifact(
     key: str,
     family: str,
     variant: str,
-    bits: int = 8,
+    bits: int | None = 8,
+    group_size: int | None = 64,
+    format_name: str = "mlx",
     files: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     if files is None:
@@ -58,7 +59,7 @@ def _artifact(
         "revision": REVISION,
         "family": family,
         "variant": variant,
-        "quantization": {"bits": bits, "group_size": 64, "format": "mlx"},
+        "quantization": {"bits": bits, "group_size": group_size, "format": format_name},
         "files": files,
         "sources": [
             {
@@ -72,18 +73,52 @@ def _artifact(
 
 def _catalog_payload() -> dict[str, object]:
     artifacts = [
-        _artifact(key="asr", family="qwen3_asr", variant="asr"),
-        _artifact(key="tts-custom", family="qwen3_tts", variant="custom_voice"),
-        _artifact(key="tts-design", family="qwen3_tts", variant="voice_design"),
+        _artifact(key="asr-q4", family="qwen3_asr", variant="asr", bits=4),
+        _artifact(key="asr-q8", family="qwen3_asr", variant="asr", bits=8),
+        _artifact(key="tts-custom-q4", family="qwen3_tts", variant="custom_voice", bits=4),
+        _artifact(key="tts-custom-q8", family="qwen3_tts", variant="custom_voice", bits=8),
+        _artifact(key="tts-design-q8", family="qwen3_tts", variant="voice_design", bits=8),
+        _artifact(key="aligner-q8", family="qwen3_forced_aligner", variant="aligner", bits=8),
+        _artifact(
+            key="aligner-bf16",
+            family="qwen3_forced_aligner",
+            variant="aligner",
+            bits=None,
+            group_size=None,
+            format_name="none",
+        ),
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifacts": artifacts,
         "presets": [
-            {"id": "quality", "asr": "asr", "tts": "tts-design"},
-            {"id": "balanced", "asr": "asr", "tts": "tts-custom"},
-            {"id": "light", "asr": "asr", "tts": "tts-custom"},
+            {
+                "id": "quality",
+                "asr": "asr-q8",
+                "tts": "tts-design-q8",
+                "aligner": "aligner-bf16",
+                "diarization": True,
+            },
+            {
+                "id": "balanced",
+                "asr": "asr-q8",
+                "tts": "tts-custom-q8",
+                "aligner": "aligner-q8",
+                "diarization": True,
+            },
+            {
+                "id": "light",
+                "asr": "asr-q4",
+                "tts": "tts-custom-q4",
+                "aligner": None,
+                "diarization": False,
+            },
         ],
+        "precision_policy": {
+            "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
+            "balanced": {"asr": 8, "tts": 8, "aligner": 8},
+            "light": {"asr": 4, "tts": 4, "aligner": None},
+        },
     }
 
 
@@ -93,24 +128,50 @@ def _hashed_requirement(name: str) -> str:
 
 def test_preset_cannot_override_execution_policy() -> None:
     with pytest.raises(ValidationError):
-        ModelPreset(id="light", asr="asr-small-q8", tts="tts-small-q8", chunk_ms=50)
+        ModelPreset(
+            id="light",
+            asr="asr-small-q8",
+            tts="tts-small-q8",
+            aligner=None,
+            diarization=False,
+            chunk_ms=50,
+        )
 
 
-def test_load_catalog_contains_complete_eight_bit_presets() -> None:
+def test_load_catalog_matches_tier_precision_policy() -> None:
     catalog = load_catalog()
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
 
-    assert catalog.schema_version == 1
+    assert catalog.schema_version == 2
+    assert len(catalog.artifacts) == 8
     assert {item.id for item in catalog.presets} == {"quality", "balanced", "light"}
     assert catalog.preset("quality") == preset("quality")
-    assert artifacts["asr-1.7b-q8"].quantization.bits == 8
-    assert artifacts["tts-0.6b-custom-q4"].quantization.bits == 4
-    assert all(
-        artifacts[key].quantization.bits == 8
-        for item in catalog.presets
-        for key in (item.asr, item.tts)
-    )
-    assert "tts-0.6b-custom-q4" not in {item.tts for item in catalog.presets}
+
+    by_id = {item.id: item for item in catalog.presets}
+    for preset_id in ("light", "balanced", "quality"):
+        item = by_id[preset_id]
+        tier = catalog.precision_policy[preset_id]
+        assert artifacts[item.asr].quantization.bits == tier.asr
+        assert artifacts[item.tts].quantization.bits == tier.tts
+        if tier.aligner is None:
+            assert item.aligner is None
+        else:
+            assert item.aligner is not None
+            aligner_bits = artifacts[item.aligner].quantization.bits
+            assert aligner_bits == (None if tier.aligner == "bf16" else tier.aligner)
+
+    assert by_id["light"].asr == "asr-0.6b-q4"
+    assert by_id["light"].tts == "tts-0.6b-custom-q4"
+    assert by_id["light"].aligner is None
+    assert by_id["light"].diarization is False
+    assert by_id["balanced"].asr == "asr-1.7b-q8"
+    assert by_id["balanced"].tts == "tts-0.6b-custom-q8"
+    assert by_id["balanced"].aligner == "aligner-q8"
+    assert by_id["balanced"].diarization is True
+    assert by_id["quality"].asr == "asr-1.7b-q8"
+    assert by_id["quality"].tts == "tts-1.7b-design-q8"
+    assert by_id["quality"].aligner == "aligner-bf16"
+    assert by_id["quality"].diarization is True
 
 
 def test_preset_relationships_keep_weight_changes_only() -> None:
@@ -118,18 +179,20 @@ def test_preset_relationships_keep_weight_changes_only() -> None:
     by_id = {item.id: item for item in catalog.presets}
 
     assert by_id["quality"].asr == by_id["balanced"].asr
-    assert by_id["balanced"].tts == by_id["light"].tts
+    assert by_id["balanced"].tts != by_id["light"].tts
 
 
 def test_catalog_and_nested_models_are_immutable() -> None:
     catalog = ModelCatalog.model_validate(_catalog_payload())
 
     with pytest.raises(ValidationError):
-        catalog.schema_version = 2
+        catalog.schema_version = 3
     with pytest.raises(ValidationError):
         catalog.artifacts[0].key = "changed"
     with pytest.raises(TypeError):
         catalog.artifacts[0] = catalog.artifacts[0]  # type: ignore[index]
+    with pytest.raises(TypeError):
+        catalog.precision_policy["light"] = catalog.precision_policy["light"]  # type: ignore[index]
 
 
 def test_unknown_catalog_and_artifact_keys_fail_closed() -> None:
@@ -218,7 +281,11 @@ def test_complete_tokenizer_json_can_replace_split_tokenizer_files() -> None:
 
 @pytest.mark.parametrize(
     ("family", "variant"),
-    [("qwen3_asr", "custom_voice"), ("qwen3_tts", "asr")],
+    [
+        ("qwen3_asr", "custom_voice"),
+        ("qwen3_tts", "asr"),
+        ("qwen3_forced_aligner", "asr"),
+    ],
 )
 def test_artifact_rejects_unsupported_family_variant(family: str, variant: str) -> None:
     artifact = _artifact(key="bad", family=family, variant=variant)
@@ -230,7 +297,13 @@ def test_catalog_rejects_bad_reference() -> None:
     payload = _catalog_payload()
     presets = payload["presets"]
     assert isinstance(presets, list)
-    presets[0] = {"id": "quality", "asr": "missing", "tts": "tts-design"}
+    presets[0] = {
+        "id": "quality",
+        "asr": "missing",
+        "tts": "tts-design-q8",
+        "aligner": "aligner-bf16",
+        "diarization": True,
+    }
 
     with pytest.raises(ValidationError, match=r"artifact|reference|asr"):
         ModelCatalog.model_validate(payload)
@@ -262,24 +335,58 @@ def test_at_least_one_source_revision_must_match_artifact() -> None:
         ModelArtifact.model_validate(artifact)
 
 
-def test_catalog_rejects_four_bit_default_tts() -> None:
+def test_catalog_rejects_precision_policy_bits_mismatch() -> None:
+    payload = _catalog_payload()
+    policy = payload["precision_policy"]
+    assert isinstance(policy, dict)
+    light = policy["light"]
+    assert isinstance(light, dict)
+    light["asr"] = 8
+
+    with pytest.raises(ValidationError, match=r"precision_policy|bits"):
+        ModelCatalog.model_validate(payload)
+
+
+def test_catalog_rejects_aligner_policy_mismatch() -> None:
+    payload = _catalog_payload()
+    presets = payload["presets"]
+    assert isinstance(presets, list)
+    light = presets[2]
+    assert isinstance(light, dict)
+    light["aligner"] = "aligner-q8"
+
+    with pytest.raises(ValidationError, match=r"aligner|precision_policy"):
+        ModelCatalog.model_validate(payload)
+
+
+def test_catalog_rejects_aligner_reference_with_wrong_identity() -> None:
     payload = _catalog_payload()
     artifacts = payload["artifacts"]
     assert isinstance(artifacts, list)
-    q4 = deepcopy(artifacts[1])
-    assert isinstance(q4, dict)
-    q4["key"] = "tts-custom-q4"
-    quantization = q4["quantization"]
-    assert isinstance(quantization, dict)
-    quantization["bits"] = 4
-    artifacts.append(q4)
-    presets = payload["presets"]
-    assert isinstance(presets, list)
-    presets[1] = {"id": "balanced", "asr": "asr", "tts": "tts-custom-q4"}
-    presets[2] = {"id": "light", "asr": "asr", "tts": "tts-custom-q4"}
+    artifacts.append(_artifact(key="fake-aligner", family="qwen3_asr", variant="asr", bits=8))
+    assert isinstance(payload["presets"], list)
+    policy = payload["precision_policy"]
+    assert isinstance(policy, dict)
+    assert isinstance(policy["light"], dict)
+    policy["light"]["aligner"] = 8
+    payload["presets"][2] = {
+        "id": "light",
+        "asr": "asr-q4",
+        "tts": "tts-custom-q4",
+        "aligner": "fake-aligner",
+        "diarization": True,
+    }
 
-    with pytest.raises(ValidationError, match=r"8|quantization|bit"):
+    with pytest.raises(ValidationError, match=r"aligner|variant|family"):
         ModelCatalog.model_validate(payload)
+
+
+def test_four_bit_tier_is_legal_under_schema_v2() -> None:
+    catalog = ModelCatalog.model_validate(_catalog_payload())
+    by_id = {item.id: item for item in catalog.presets}
+
+    assert by_id["light"].asr == "asr-q4"
+    assert by_id["light"].tts == "tts-custom-q4"
 
 
 def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> None:

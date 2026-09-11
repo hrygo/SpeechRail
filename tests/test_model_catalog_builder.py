@@ -53,13 +53,91 @@ def _artifact(
     }
 
 
-def _catalog(*artifacts: dict[str, Any]) -> dict[str, Any]:
+def _default_precision_policy() -> dict[str, Any]:
+    return {
+        "quality": {"asr": 8, "tts": 8, "aligner": None},
+        "balanced": {"asr": 8, "tts": 8, "aligner": None},
+        "light": {"asr": 8, "tts": 8, "aligner": None},
+    }
+
+
+def _catalog(
+    *artifacts: dict[str, Any],
+    precision_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     artifact_keys = [artifact["key"] for artifact in artifacts]
     first_key = artifact_keys[0] if artifact_keys else "missing"
+    presets = [
+        {"id": preset_id, "asr": first_key, "tts": first_key, "aligner": None, "diarization": False}
+        for preset_id in ("quality", "balanced", "light")
+    ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "artifacts": list(artifacts),
-        "presets": [{"id": "light", "asr": first_key, "tts": first_key}],
+        "presets": presets,
+        "precision_policy": precision_policy or _default_precision_policy(),
+    }
+
+
+def _aligner_artifact(*, key: str = "aligner-q8", bits: int | None = 8) -> dict[str, Any]:
+    return {
+        "key": key,
+        "model_id": "fixture/Qwen3-ForcedAligner-0.6B",
+        "revision": REVISION,
+        "family": "qwen3_forced_aligner",
+        "variant": "aligner",
+        "quantization": {
+            "bits": bits,
+            "group_size": 64 if bits is not None else None,
+            "format": "mlx" if bits is not None else "none",
+        },
+        "files": [_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
+        "sources": [
+            {
+                "provider": "offline",
+                "repository": "fixture/qwen3-forced-aligner",
+                "revision": REVISION,
+            }
+        ],
+    }
+
+
+def _legal_metadata() -> dict[str, Any]:
+    asr = _artifact(
+        key="asr-1.7b-q8",
+        files=[_file("config.json"), _file("model.safetensors"), _file("tokenizer.json")],
+    )
+    return {
+        "schema_version": 2,
+        "artifacts": [asr, _aligner_artifact()],
+        "presets": [
+            {
+                "id": "quality",
+                "asr": "asr-1.7b-q8",
+                "tts": "asr-1.7b-q8",
+                "aligner": "aligner-q8",
+                "diarization": True,
+            },
+            {
+                "id": "balanced",
+                "asr": "asr-1.7b-q8",
+                "tts": "asr-1.7b-q8",
+                "aligner": "aligner-q8",
+                "diarization": True,
+            },
+            {
+                "id": "light",
+                "asr": "asr-1.7b-q8",
+                "tts": "asr-1.7b-q8",
+                "aligner": None,
+                "diarization": False,
+            },
+        ],
+        "precision_policy": {
+            "quality": {"asr": 8, "tts": 8, "aligner": 8},
+            "balanced": {"asr": 8, "tts": 8, "aligner": 8},
+            "light": {"asr": 8, "tts": 8, "aligner": None},
+        },
     }
 
 
@@ -85,7 +163,7 @@ def test_build_catalog_normalizes_artifacts_and_sorts_files() -> None:
 
     catalog = build_catalog(_catalog(artifact))
 
-    assert catalog["schema_version"] == 1
+    assert catalog["schema_version"] == 2
     assert [item["path"] for item in catalog["artifacts"][0]["files"]] == [
         "config.json",
         "model.safetensors",
@@ -188,4 +266,86 @@ def test_cli_writes_only_to_an_explicit_output_path(
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(_catalog(_artifact()))))
 
     assert _catalog_builder.main(["-", "--output", str(output)]) == 0
-    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 1
+    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == 2
+
+
+def test_preset_without_aligner_or_diarization_is_rejected() -> None:
+    entries = _catalog(_artifact())
+    presets = entries["presets"]
+    assert isinstance(presets, list)
+    presets[0] = {"id": "quality", "asr": "qwen3-asr-0.6b-8bit", "tts": "qwen3-asr-0.6b-8bit"}
+
+    with pytest.raises(ValueError, match=r"aligner|diarization"):
+        build_catalog(entries)
+
+
+def test_preset_diarization_must_be_a_real_bool() -> None:
+    entries = _catalog(_artifact())
+    presets = entries["presets"]
+    assert isinstance(presets, list)
+    preset = presets[0]
+    assert isinstance(preset, dict)
+    preset["diarization"] = 1
+
+    with pytest.raises(ValueError, match="bool"):
+        build_catalog(entries)
+
+
+def test_preset_aligner_must_reference_a_known_artifact() -> None:
+    entries = _catalog(_artifact())
+    presets = entries["presets"]
+    assert isinstance(presets, list)
+    preset = presets[0]
+    assert isinstance(preset, dict)
+    preset["aligner"] = "aligner-missing"
+
+    with pytest.raises(ValueError, match="unknown artifact"):
+        build_catalog(entries)
+
+
+def test_legal_metadata_produces_schema_v2_with_precision_policy() -> None:
+    catalog = build_catalog(_legal_metadata())
+
+    assert catalog["schema_version"] == 2
+    policy = catalog["precision_policy"]
+    assert isinstance(policy, dict)
+    assert set(policy) == {"quality", "balanced", "light"}
+    assert policy["light"]["aligner"] is None
+    assert policy["quality"]["aligner"] == 8
+
+
+@pytest.mark.parametrize(
+    "precision_policy",
+    [
+        {
+            "quality": {"asr": 8, "tts": 8, "aligner": None},
+            "balanced": {"asr": 8, "tts": 8, "aligner": None},
+        },
+        {
+            "quality": {"asr": 8, "tts": 8},
+            "balanced": {"asr": 8, "tts": 8, "aligner": None},
+            "light": {"asr": 8, "tts": 8, "aligner": None},
+        },
+        {
+            "quality": {"asr": 0, "tts": 8, "aligner": None},
+            "balanced": {"asr": 8, "tts": 8, "aligner": None},
+            "light": {"asr": 8, "tts": 8, "aligner": None},
+        },
+        {
+            "quality": {"asr": True, "tts": 8, "aligner": None},
+            "balanced": {"asr": 8, "tts": 8, "aligner": None},
+            "light": {"asr": 8, "tts": 8, "aligner": None},
+        },
+        {
+            "quality": {"asr": 8, "tts": 8, "aligner": "q8"},
+            "balanced": {"asr": 8, "tts": 8, "aligner": None},
+            "light": {"asr": 8, "tts": 8, "aligner": None},
+        },
+    ],
+    ids=["missing-tier", "missing-inner-key", "non-positive", "bool", "bad-aligner"],
+)
+def test_illegal_precision_policy_is_rejected(precision_policy: dict[str, Any]) -> None:
+    entries = _catalog(_artifact(), precision_policy=precision_policy)
+
+    with pytest.raises(ValueError, match=r"precision_policy|aligner|asr|tts|missing|unsupported"):
+        build_catalog(entries)

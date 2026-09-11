@@ -15,17 +15,18 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     StrictStr,
     field_validator,
     model_validator,
 )
 
-Family = Literal["qwen3_asr", "qwen3_tts"]
-Variant = Literal["asr", "voice_design", "custom_voice"]
+Family = Literal["qwen3_asr", "qwen3_tts", "qwen3_forced_aligner"]
+Variant = Literal["asr", "voice_design", "custom_voice", "aligner"]
 PresetId = Literal["quality", "balanced", "light"]
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _REVISION_RE = re.compile(r"[0-9a-fA-F]{40}")
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _PINNED_REQUIREMENT_RE = re.compile(
@@ -171,6 +172,8 @@ class ModelArtifact(BaseModel):
             raise ValueError("qwen3_asr artifacts must use variant=asr")
         if self.family == "qwen3_tts" and self.variant == "asr":
             raise ValueError("qwen3_tts artifacts cannot use variant=asr")
+        if self.family == "qwen3_forced_aligner" and self.variant != "aligner":
+            raise ValueError("qwen3_forced_aligner artifacts must use variant=aligner")
 
         file_paths = tuple(file.path for file in self.files)
         if len(set(file_paths)) != len(file_paths):
@@ -201,13 +204,32 @@ class ModelArtifact(BaseModel):
 
 
 class ModelPreset(BaseModel):
-    """只引用 ASR 与 TTS 模型制品的预设。"""
+    """只引用 ASR、TTS 与可选 aligner 制品的预设。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: PresetId
     asr: StrictStr = Field(min_length=1)
     tts: StrictStr = Field(min_length=1)
+    aligner: StrictStr | None
+    diarization: StrictBool
+
+
+class TierPrecision(BaseModel):
+    """单个档位的 ASR/TTS/aligner 量化精度约束。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    asr: StrictInt = Field(gt=0)
+    tts: StrictInt = Field(gt=0)
+    aligner: StrictInt | Literal["bf16"] | None
+
+    @field_validator("aligner")
+    @classmethod
+    def validate_aligner(cls, value: int | Literal["bf16"] | None) -> int | Literal["bf16"] | None:
+        if isinstance(value, int) and value <= 0:
+            raise ValueError("aligner precision must be positive, 'bf16', or null")
+        return value
 
 
 class RuntimeLock(BaseModel):
@@ -252,6 +274,14 @@ class ModelCatalog(BaseModel):
     schema_version: StrictInt
     artifacts: tuple[ModelArtifact, ...] = Field(min_length=1)
     presets: tuple[ModelPreset, ...] = Field(min_length=3)
+    precision_policy: Mapping[PresetId, TierPrecision]
+
+    @field_validator("precision_policy")
+    @classmethod
+    def freeze_precision_policy(
+        cls, value: Mapping[PresetId, TierPrecision]
+    ) -> Mapping[PresetId, TierPrecision]:
+        return MappingProxyType(dict(value))
 
     @model_validator(mode="after")
     def validate_catalog(self) -> Self:
@@ -272,28 +302,57 @@ class ModelCatalog(BaseModel):
         expected_ids = {"quality", "balanced", "light"}
         if set(presets) != expected_ids:
             raise ValueError("catalog must contain exactly quality, balanced, and light presets")
+        if set(self.precision_policy) != expected_ids:
+            raise ValueError(
+                "precision_policy must define exactly quality, balanced, and light"
+            )
 
-        for item in presets.values():
+        for preset_id, item in presets.items():
             asr = artifacts.get(item.asr)
             tts = artifacts.get(item.tts)
             if asr is None:
-                raise ValueError(f"preset {item.id} references unknown ASR artifact")
+                raise ValueError(f"preset {preset_id} references unknown ASR artifact")
             if tts is None:
-                raise ValueError(f"preset {item.id} references unknown TTS artifact")
+                raise ValueError(f"preset {preset_id} references unknown TTS artifact")
             if asr.family != "qwen3_asr" or asr.variant != "asr":
-                raise ValueError(f"preset {item.id} ASR reference has invalid variant")
+                raise ValueError(f"preset {preset_id} ASR reference has invalid variant")
             if tts.family != "qwen3_tts" or tts.variant == "asr":
-                raise ValueError(f"preset {item.id} TTS reference has invalid variant")
-            if asr.quantization.bits != 8 or tts.quantization.bits != 8:
-                raise ValueError(f"preset {item.id} must use 8-bit artifacts")
+                raise ValueError(f"preset {preset_id} TTS reference has invalid variant")
+
+            policy = self.precision_policy[preset_id]
+            if asr.quantization.bits != policy.asr:
+                raise ValueError(f"preset {preset_id} ASR bits do not match precision_policy")
+            if tts.quantization.bits != policy.tts:
+                raise ValueError(f"preset {preset_id} TTS bits do not match precision_policy")
+
+            if policy.aligner is None:
+                if item.aligner is not None:
+                    raise ValueError(
+                        f"preset {preset_id} declares an aligner but precision_policy has none"
+                    )
+                continue
+            if item.aligner is None:
+                raise ValueError(f"preset {preset_id} is missing its aligner artifact")
+            aligner = artifacts.get(item.aligner)
+            if aligner is None:
+                raise ValueError(f"preset {preset_id} references unknown aligner artifact")
+            if aligner.family != "qwen3_forced_aligner" or aligner.variant != "aligner":
+                raise ValueError(f"preset {preset_id} aligner reference has invalid variant")
+            if policy.aligner == "bf16":
+                if aligner.quantization.bits is not None:
+                    raise ValueError(
+                        f"preset {preset_id} aligner bits do not match precision_policy"
+                    )
+            elif aligner.quantization.bits != policy.aligner:
+                raise ValueError(
+                    f"preset {preset_id} aligner bits do not match precision_policy"
+                )
 
         quality = presets["quality"]
         balanced = presets["balanced"]
         light = presets["light"]
         if quality.asr != balanced.asr:
             raise ValueError("quality and balanced presets must share the ASR artifact")
-        if balanced.tts != light.tts:
-            raise ValueError("balanced and light presets must share the TTS artifact")
         if artifacts[quality.tts].variant != "voice_design":
             raise ValueError("quality preset must use a voice_design artifact")
         if artifacts[balanced.tts].variant != "custom_voice":
@@ -359,6 +418,7 @@ __all__ = [
     "QuantizationSpec",
     "RuntimeLock",
     "SourceLocation",
+    "TierPrecision",
     "Variant",
     "load_catalog",
     "load_runtime_lock",

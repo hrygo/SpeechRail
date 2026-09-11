@@ -4,11 +4,6 @@
       "family": "qwen3_forced_aligner",
       "files": [
         {
-          "path": "README.md",
-          "sha256": "a6e90f1df31c4acfa7325c3725d7b2e45feb6df9c0b822ed444034f55007e6c2",
-          "size": 1068
-        },
-        {
           "path": "chat_template.json",
           "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
           "size": 1161
@@ -44,6 +39,11 @@
           "size": 330
         },
         {
+          "path": "README.md",
+          "sha256": "a6e90f1df31c4acfa7325c3725d7b2e45feb6df9c0b822ed444034f55007e6c2",
+          "size": 1068
+        },
+        {
           "path": "tokenizer_config.json",
           "sha256": "3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c",
           "size": 12666
@@ -74,11 +74,6 @@
     {
       "family": "qwen3_forced_aligner",
       "files": [
-        {
-          "path": "README.md",
-          "sha256": "28c8a32f6bb223a4082f6bc38062890abbc1c702b13957388e52465dfdc06a56",
-          "size": 1068
-        },
         {
           "path": "chat_template.json",
           "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
@@ -115,6 +110,11 @@
           "size": 330
         },
         {
+          "path": "README.md",
+          "sha256": "28c8a32f6bb223a4082f6bc38062890abbc1c702b13957388e52465dfdc06a56",
+          "size": 1068
+        },
+        {
           "path": "tokenizer_config.json",
           "sha256": "3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c",
           "size": 12666
@@ -145,11 +145,6 @@
     {
       "family": "qwen3_asr",
       "files": [
-        {
-          "path": "README.md",
-          "sha256": "4d54132d09a2d3d12410ef13c94d7afcfc936bdca8239a3e6cd0797d6a28dd1c",
-          "size": 1008
-        },
         {
           "path": "chat_template.json",
           "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
@@ -184,6 +179,11 @@
           "path": "preprocessor_config.json",
           "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d",
           "size": 330
+        },
+        {
+          "path": "README.md",
+          "sha256": "4d54132d09a2d3d12410ef13c94d7afcfc936bdca8239a3e6cd0797d6a28dd1c",
+          "size": 1008
         },
         {
           "path": "tokenizer_config.json",

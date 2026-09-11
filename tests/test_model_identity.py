@@ -7,6 +7,7 @@ import struct
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from speechrail.backends.model_identity import (
     inspect_model,
@@ -387,6 +388,62 @@ def test_snapshot_identity_is_frozen(tmp_path: Path) -> None:
 
     with pytest.raises(AttributeError):
         identity.family = "qwen3_tts"  # type: ignore[misc]
+
+
+def _aligner_artifact(*, bits: int | None = 8) -> ModelArtifact:
+    files = [
+        {"path": "config.json", "size": 1, "sha256": SHA256},
+        {"path": "model.safetensors", "size": 1, "sha256": SHA256},
+        {"path": "tokenizer_config.json", "size": 1, "sha256": SHA256},
+        {"path": "vocab.json", "size": 1, "sha256": SHA256},
+        {"path": "merges.txt", "size": 1, "sha256": SHA256},
+    ]
+    return ModelArtifact(
+        key="aligner-q8",
+        model_id="fixture/aligner",
+        revision=REVISION,
+        family="qwen3_forced_aligner",
+        variant="aligner",
+        quantization={
+            "bits": bits,
+            "group_size": 64 if bits is not None else None,
+            "format": "mlx" if bits is not None else "none",
+        },
+        files=files,
+        sources=[{"provider": "fixture", "repository": "fixture/aligner", "revision": REVISION}],
+    )
+
+
+def test_aligner_artifact_accepts_aligner_variant_without_codec() -> None:
+    artifact = _aligner_artifact()
+
+    assert artifact.family == "qwen3_forced_aligner"
+    assert artifact.variant == "aligner"
+    assert artifact.quantization.bits == 8
+
+
+def test_aligner_artifact_rejects_non_aligner_variant() -> None:
+    with pytest.raises(ValidationError, match=r"aligner|variant"):
+        ModelArtifact(
+            key="aligner-bad",
+            model_id="fixture/aligner",
+            revision=REVISION,
+            family="qwen3_forced_aligner",
+            variant="asr",
+            quantization={"bits": 8, "group_size": 64, "format": "mlx"},
+            files=[
+                {"path": "config.json", "size": 1, "sha256": SHA256},
+                {"path": "model.safetensors", "size": 1, "sha256": SHA256},
+                {"path": "tokenizer.json", "size": 1, "sha256": SHA256},
+            ],
+            sources=[
+                {"provider": "fixture", "repository": "fixture/aligner", "revision": REVISION}
+            ],
+        )
+
+
+def test_aligner_artifact_accepts_unquantized_bits() -> None:
+    assert _aligner_artifact(bits=None).quantization.bits is None
 
 
 def test_verify_loaded_identity_accepts_matching_ready_data() -> None:
