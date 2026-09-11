@@ -13,7 +13,11 @@ from typing import Any
 
 import httpx
 
-from speechrail.mcp.client import SpeechRailError, parse_error_response
+from speechrail.mcp.client import (
+    SpeechRailClient,
+    SpeechRailError,
+    parse_error_response,
+)
 
 _FAKE_WAV = b"RIFF-fake-wav-data-for-contract-tests"
 
@@ -271,6 +275,52 @@ def test_connection_errors_map_to_retryable_speechrail_error(
         assert exc.code == "connection_error"
         assert exc.retryable is True
         assert "cannot reach SpeechRail" in exc.message
+    else:
+        raise AssertionError("expected SpeechRailError")
+
+
+def test_connection_errors_redact_url_userinfo(run_async: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client = SpeechRailClient(
+        base_url="http://operator:s3cret@rail.test:8201/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        run_async(client.fetch_health())
+    except SpeechRailError as exc:
+        assert exc.code == "connection_error"
+        assert "s3cret" not in exc.message
+        assert "operator:" not in exc.message
+        assert "http://rail.test:8201/health" in exc.message
+    else:
+        raise AssertionError("expected SpeechRailError")
+
+
+def test_connection_errors_redact_schemeless_userinfo(run_async: Any) -> None:
+    """A base URL with no scheme must not leak its userinfo on connection errors.
+
+    ``_root_url`` for ``user:s3cret@rail.test:8201/v1`` is
+    ``user:s3cret@rail.test:8201`` (the ``/v1`` suffix is stripped), so the
+    health URL is ``user:s3cret@rail.test:8201/health``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    client = SpeechRailClient(
+        base_url="user:s3cret@rail.test:8201/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        run_async(client.fetch_health())
+    except SpeechRailError as exc:
+        assert exc.code == "connection_error"
+        assert exc.retryable is True
+        assert "s3cret" not in exc.message
+        assert "user:" not in exc.message
+        assert "rail.test:8201/health" in exc.message
     else:
         raise AssertionError("expected SpeechRailError")
 

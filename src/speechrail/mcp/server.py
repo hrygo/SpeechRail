@@ -1,21 +1,28 @@
 """MCPServer composition root for the ``speechrail-mcp`` proxy process.
 
 Wires the stateless tool logic (``speechrail.mcp.tools``) onto a REST client
-(``speechrail.mcp.client``) and registers them as MCPServer tools.  The proxy is
-a dedicated process: it never imports the SpeechRail FastAPI application and
-never instantiates any model worker.
+(``speechrail.mcp.client``) and registers them as MCPServer tools and
+resources.  The proxy is a dedicated process: it never imports the SpeechRail
+FastAPI application and never instantiates any model worker.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
-from collections.abc import Awaitable
-from typing import Any, Literal, cast
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from typing import Annotated, Any, Literal, cast
 
 from mcp.server import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.caching import CacheableMethod, CacheHint
+from mcp.server.mcpserver.context import Context
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
+from mcp.types import Annotations, ToolAnnotations
+from pydantic import Field
 
+from speechrail import __version__
 from speechrail.config.auth import resolve_api_key
 from speechrail.mcp import tools
 from speechrail.mcp.client import (
@@ -24,10 +31,30 @@ from speechrail.mcp.client import (
     SpeechRailClient,
     SpeechRailError,
 )
+from speechrail.mcp.models import (
+    AudioArtifact,
+    DescribeResult,
+    JobRecord,
+    TranscribeResult,
+    VoiceRecord,
+)
 from speechrail.mcp.tools import ToolCallError
 
 _SERVER_NAME = "speechrail-mcp"
+_SERVER_TITLE = "SpeechRail"
+_SERVER_DESCRIPTION = (
+    "Local SpeechRail ASR/TTS service exposed as MCP tools for agents."
+)
 _TRANSPORTS = frozenset({"stdio", "streamable-http"})
+
+# List methods are safe to cache publicly: the tool set and the three resource
+# URIs are static metadata. resources/read is deliberately absent because the
+# capability snapshot it returns changes with the active profile.
+_CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
+    "tools/list": CacheHint(ttl_ms=300_000, scope="public"),
+    "prompts/list": CacheHint(ttl_ms=300_000, scope="public"),
+    "resources/list": CacheHint(ttl_ms=300_000, scope="public"),
+}
 
 _INSTRUCTIONS = (
     "SpeechRail MCP exposes the local SpeechRail ASR/TTS service as a small "
@@ -61,6 +88,36 @@ async def _map_errors(coro: Awaitable[dict[str, Any]]) -> dict[str, Any]:
         raise ToolError(exc.to_message()) from exc
 
 
+async def _resource_json(
+    coro: Awaitable[Any],
+    transform: Callable[[Any], Any] | None = None,
+) -> str:
+    """Await a resource payload, map REST failures, and serialize to JSON."""
+    try:
+        payload = await coro
+    except SpeechRailError as exc:
+        raise ResourceError(exc.to_message()) from exc
+    if transform is not None:
+        payload = transform(payload)
+    return json.dumps(payload)
+
+
+def _tool_annotations(
+    title: str,
+    *,
+    read_only: bool,
+    destructive: bool,
+    idempotent: bool,
+) -> ToolAnnotations:
+    return ToolAnnotations(
+        title=title,
+        read_only_hint=read_only,
+        destructive_hint=destructive,
+        idempotent_hint=idempotent,
+        open_world_hint=False,
+    )
+
+
 def _timeout_from_env() -> float:
     raw = os.getenv("SPEECHRAIL_MCP_TIMEOUT_SECONDS")
     if not raw:
@@ -75,8 +132,12 @@ def _timeout_from_env() -> float:
 _resolve_api_key = resolve_api_key
 
 
-def create_server() -> MCPServer:
+def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
     """Build an MCPServer bound to the configured SpeechRail daemon.
+
+    Args:
+        client: Optional pre-built REST client. When omitted, one is created
+            from the environment below; tests inject a ``MockTransport`` client.
 
     Environment:
       SPEECHRAIL_BASE_URL             server base (default http://127.0.0.1:8201/v1)
@@ -85,17 +146,43 @@ def create_server() -> MCPServer:
       SPEECHRAIL_APP_HOME             app home for key discovery (default ~/Library/...)
       SPEECHRAIL_MCP_TIMEOUT_SECONDS  per-request timeout in seconds
     """
-    base_url = os.getenv("SPEECHRAIL_BASE_URL", DEFAULT_BASE_URL)
-    api_key = _resolve_api_key()
-    client = SpeechRailClient(
-        base_url=base_url,
-        api_key=api_key,
-        timeout_seconds=_timeout_from_env(),
-    )
-    mcp = MCPServer(name=_SERVER_NAME, instructions=_INSTRUCTIONS)
+    if client is None:
+        base_url = os.getenv("SPEECHRAIL_BASE_URL", DEFAULT_BASE_URL)
+        api_key = _resolve_api_key()
+        client = SpeechRailClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout_seconds=_timeout_from_env(),
+        )
+    rest_client = client
 
-    @mcp.tool()
-    async def describe() -> dict[str, Any]:
+    # The server owns its REST client for its whole lifetime; ``aclose`` is
+    # idempotent, so an injected test client is closed here too.
+    @asynccontextmanager
+    async def lifespan(_: MCPServer[None]) -> AsyncIterator[None]:
+        yield
+        await rest_client.aclose()
+
+    mcp = MCPServer(
+        name=_SERVER_NAME,
+        title=_SERVER_TITLE,
+        description=_SERVER_DESCRIPTION,
+        version=__version__,
+        instructions=_INSTRUCTIONS,
+        cache_hints=_CACHE_HINTS,
+        lifespan=lifespan,
+    )
+
+    @mcp.tool(
+        title="Current capability snapshot",
+        annotations=_tool_annotations(
+            "Current capability snapshot",
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+        ),
+    )
+    async def describe() -> DescribeResult:
         """Return the current capability snapshot.
 
         Merges GET /v1/models, GET /v1/voices and GET /health into one
@@ -104,15 +191,46 @@ def create_server() -> MCPServer:
         mode, available and capability discriminators; only choose voices
         with available=true.
         """
-        return await _map_errors(tools.describe(client))
+        return DescribeResult.model_validate(await _map_errors(tools.describe(client)))
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Transcribe audio",
+        annotations=_tool_annotations(
+            "Transcribe audio",
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+        ),
+    )
     async def transcribe(
-        audio_ref: str,
-        language: str | None = None,
-        diarize: bool = False,
-        timestamps: bool = False,
-    ) -> dict[str, Any]:
+        audio_ref: Annotated[
+            str,
+            Field(description="Local audio file path or file:// URI; base64 is rejected."),
+        ],
+        ctx: Context,
+        language: Annotated[
+            str | None,
+            Field(description="Optional ISO 639-1 language code; omitted means auto-detect."),
+        ] = None,
+        diarize: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Return diarized segments with anonymous speaker labels; "
+                    "requires diarization_ready=true on describe()."
+                )
+            ),
+        ] = False,
+        timestamps: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Return verbose_json segments (and words when available); "
+                    "ignored when diarize is true."
+                )
+            ),
+        ] = False,
+    ) -> TranscribeResult:
         """Transcribe audio referenced by a local path or file:// URI.
 
         audio_ref: local file path or file:// URI (base64 is rejected).
@@ -123,7 +241,8 @@ def create_server() -> MCPServer:
             available). Output shapes: default {text}; timestamps
             {text, segments}; diarize {segments:[{speaker,start,end,text}]}.
         """
-        return await _map_errors(
+        await ctx.report_progress(0.0, 1.0, "started")
+        raw = await _map_errors(
             tools.transcribe(
                 client,
                 audio_ref=audio_ref,
@@ -132,14 +251,34 @@ def create_server() -> MCPServer:
                 timestamps=timestamps,
             )
         )
+        await ctx.report_progress(1.0, 1.0, "done")
+        return TranscribeResult.model_validate(raw)
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Synthesize speech to a file",
+        annotations=_tool_annotations(
+            "Synthesize speech to a file",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
     async def synthesize(
-        text: str,
-        voice: str = "serena",
-        output_format: str = "mp3",
-        speed: float = 1.0,
-    ) -> dict[str, Any]:
+        text: Annotated[str, Field(description="Text to synthesize (up to 4096 characters).")],
+        ctx: Context,
+        voice: Annotated[
+            str,
+            Field(description="A voice id from describe().voices; defaults to serena."),
+        ] = "serena",
+        output_format: Annotated[
+            str,
+            Field(description="Audio container: mp3 (default), wav or pcm."),
+        ] = "mp3",
+        speed: Annotated[
+            float,
+            Field(description="Speaking rate from 0.25 to 4.0."),
+        ] = 1.0,
+    ) -> AudioArtifact:
         """Synthesize text to a local audio file and return its path.
 
         text: text to speak (up to 4096 chars).
@@ -150,7 +289,8 @@ def create_server() -> MCPServer:
         Returns {audio_path, content_type, output_format, bytes}; delete the
         temp file after the host plays/sends it.
         """
-        return await _map_errors(
+        await ctx.report_progress(0.0, 1.0, "started")
+        raw = await _map_errors(
             tools.synthesize(
                 client,
                 text=text,
@@ -159,9 +299,33 @@ def create_server() -> MCPServer:
                 speed=speed,
             )
         )
+        await ctx.report_progress(1.0, 1.0, "done")
+        return AudioArtifact.model_validate(raw)
 
-    @mcp.tool()
-    async def preview_voice(instruction: str, text: str) -> dict[str, Any]:
+    @mcp.tool(
+        title="Audition a voice instruction",
+        annotations=_tool_annotations(
+            "Audition a voice instruction",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
+    async def preview_voice(
+        instruction: Annotated[
+            str,
+            Field(
+                description=(
+                    "Natural-language VoiceDesign instruction "
+                    "(Chinese or English, 30-200 words)."
+                )
+            ),
+        ],
+        text: Annotated[
+            str,
+            Field(description="Sample text to speak with the provisional voice."),
+        ],
+    ) -> AudioArtifact:
         """Audition a VoiceDesign instruction (quality tier only).
 
         instruction: natural-language voice description to audition.
@@ -173,17 +337,44 @@ def create_server() -> MCPServer:
             instruction. Non-quality profiles are rejected up front; call
             describe() to confirm support.
         """
-        return await _map_errors(
-            tools.preview_voice(client, instruction=instruction, text=text)
+        return AudioArtifact.model_validate(
+            await _map_errors(tools.preview_voice(client, instruction=instruction, text=text))
         )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create a persistent voice",
+        annotations=_tool_annotations(
+            "Create a persistent voice",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
     async def create_voice(
-        name: str,
-        instruction: str,
-        voice_id: str | None = None,
-        seed: int | None = None,
-    ) -> dict[str, Any]:
+        name: Annotated[str, Field(description="Display name for the voice (required).")],
+        instruction: Annotated[
+            str,
+            Field(
+                description=(
+                    "The auditioned VoiceDesign instruction (up to 10000 "
+                    "characters, Chinese or English)."
+                )
+            ),
+        ],
+        voice_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional stable id matching ^[a-zA-Z0-9_-]{1,64}$; "
+                    "omitted means server-assigned."
+                )
+            ),
+        ] = None,
+        seed: Annotated[
+            int | None,
+            Field(description="Optional integer 0..4294967295 for reproducible synthesis."),
+        ] = None,
+    ) -> VoiceRecord:
         """Register a persistent instruction-driven voice.
 
         name: display name for the voice (required).
@@ -196,23 +387,60 @@ def create_server() -> MCPServer:
             The voice synthesizes on the quality tier only; elsewhere it is
             listed with available=false.
         """
-        return await _map_errors(
-            tools.create_voice(
-                client, name=name, instruction=instruction, voice_id=voice_id, seed=seed
+        return VoiceRecord.model_validate(
+            await _map_errors(
+                tools.create_voice(
+                    client,
+                    name=name,
+                    instruction=instruction,
+                    voice_id=voice_id,
+                    seed=seed,
+                )
             )
         )
 
-    @mcp.tool()
-    async def delete_voice(voice_id: str) -> dict[str, Any]:
+    @mcp.tool(
+        title="Delete a voice",
+        annotations=_tool_annotations(
+            "Delete a voice",
+            read_only=False,
+            destructive=True,
+            idempotent=True,
+        ),
+    )
+    async def delete_voice(
+        voice_id: Annotated[str, Field(description="Id of the persistent voice to delete.")],
+    ) -> VoiceRecord:
         """Delete a persistent custom voice by voice_id."""
-        return await _map_errors(tools.delete_voice(client, voice_id=voice_id))
+        return VoiceRecord.model_validate(
+            await _map_errors(tools.delete_voice(client, voice_id=voice_id))
+        )
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create a durable job",
+        annotations=_tool_annotations(
+            "Create a durable job",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
     async def create_job(
-        kind: str,
-        input_ref: str,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+        kind: Annotated[str, Field(description="Job kind: transcription or speech.")],
+        input_ref: Annotated[
+            str,
+            Field(
+                description=(
+                    "Local path or file:// URI reused by the worker "
+                    "(up to 1000 characters)."
+                )
+            ),
+        ],
+        params: Annotated[
+            dict[str, Any] | None,
+            Field(description="Opaque JSON object stored and echoed back by the server."),
+        ] = None,
+    ) -> JobRecord:
         """Create a durable transcription/speech job and return its handle.
 
         kind: transcription or speech.
@@ -222,19 +450,87 @@ def create_server() -> MCPServer:
         Returns the job record {id, kind, state, result_ref}; poll with
         get_job and cancel with cancel_job.
         """
-        return await _map_errors(
-            tools.create_job(client, kind=kind, input_ref=input_ref, params=params)
+        return JobRecord.model_validate(
+            await _map_errors(
+                tools.create_job(client, kind=kind, input_ref=input_ref, params=params)
+            )
         )
 
-    @mcp.tool()
-    async def get_job(job_id: str) -> dict[str, Any]:
+    @mcp.tool(
+        title="Get a job record",
+        annotations=_tool_annotations(
+            "Get a job record",
+            read_only=True,
+            destructive=False,
+            idempotent=True,
+        ),
+    )
+    async def get_job(
+        job_id: Annotated[str, Field(description="Id of the durable job.")],
+        ctx: Context,
+    ) -> JobRecord:
         """Fetch a durable job by job_id and return its current record."""
-        return await _map_errors(tools.get_job(client, job_id=job_id))
+        await ctx.report_progress(0.0, 1.0, "started")
+        raw = await _map_errors(tools.get_job(client, job_id=job_id))
+        await ctx.report_progress(1.0, 1.0, "done")
+        return JobRecord.model_validate(raw)
 
-    @mcp.tool()
-    async def cancel_job(job_id: str) -> dict[str, Any]:
+    @mcp.tool(
+        title="Cancel a job",
+        annotations=_tool_annotations(
+            "Cancel a job",
+            read_only=False,
+            destructive=True,
+            idempotent=True,
+        ),
+    )
+    async def cancel_job(
+        job_id: Annotated[str, Field(description="Id of the durable job.")],
+    ) -> JobRecord:
         """Cancel a durable job by job_id and return its updated record."""
-        return await _map_errors(tools.cancel_job(client, job_id=job_id))
+        return JobRecord.model_validate(
+            await _map_errors(tools.cancel_job(client, job_id=job_id))
+        )
+
+    @mcp.resource(
+        "speechrail://capabilities",
+        name="capabilities",
+        title="SpeechRail capabilities",
+        description=(
+            "Merged capability snapshot: active tier/profile, readiness, "
+            "models and voices."
+        ),
+        mime_type="application/json",
+        annotations=Annotations(audience=["user", "assistant"]),
+    )
+    async def capabilities_resource() -> str:
+        return await _resource_json(tools.describe(client))
+
+    @mcp.resource(
+        "speechrail://voices",
+        name="voices",
+        title="SpeechRail voices",
+        description="Read-only voice list from GET /v1/voices for the active profile.",
+        mime_type="application/json",
+        annotations=Annotations(audience=["user", "assistant"]),
+    )
+    async def voices_resource() -> str:
+        return await _resource_json(
+            client.fetch_voices(), lambda voices: {"data": voices}
+        )
+
+    @mcp.resource(
+        "speechrail://models",
+        name="models",
+        title="SpeechRail models",
+        description="Read-only model list from GET /v1/models for the active profile.",
+        mime_type="application/json",
+        annotations=Annotations(audience=["user", "assistant"]),
+    )
+    async def models_resource() -> str:
+        return await _resource_json(
+            client.fetch_models(), lambda models: {"data": models}
+        )
 
     return mcp
 

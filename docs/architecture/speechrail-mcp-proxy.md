@@ -2,16 +2,29 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.1.0"
-date: 2026-09-10
+version: "1.2.0"
+date: 2026-09-11
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
 
-# 🎙️ SpeechRail MCP Proxy 工具与契约 (v1.0.0)
+# 🎙️ SpeechRail MCP Proxy 工具与契约 (v1.2.0)
 
 > **状态声明**：本文档描述**已实现**的外置 `speechrail-mcp` 进程（合并于 `feat/speechrail-mcp`，
 > PR #15，2026-09-07）。当前行为以 `src/speechrail/mcp/` 代码与实测为准；REST 契约仍以
 > `contracts/openapi.yaml` 为唯一事实来源。本文档记录 MCP 工具清单与设计取舍。
+>
+> **v1.2.0 变更**（2026-09-11，MCP 2026-07-28 最佳实践升级）：
+> - **serverInfo** 补齐 `title`/`description`/`version`（`version` 取自 `speechrail.__version__`，不再是空串）；
+> - **9 工具全部带 `title` 与 `ToolAnnotations`**（`read_only_hint`/`destructive_hint`/`idempotent_hint`，`open_world_hint` 恒为 `false`），
+>   `delete_voice`/`cancel_job` 标记为破坏性；
+> - **结构化输出**：每个工具的 `outputSchema` 由其返回的 Pydantic 结果模型派生并校验，同时发出 `structuredContent`
+>   （模型 `extra="allow"` + 可选字段默认值，未知键/缺字段不会让工具调用失败）；
+> - **cache hints**：`tools/list`、`prompts/list`、`resources/list` 配置 300000ms `public` 提示（三者均为静态元数据）；
+>   `resources/read` 不缓存（内容随档位动态变化）；
+> - **read-only resources**：新增 `speechrail://capabilities`、`speechrail://voices`、`speechrail://models`（同一 REST client，JSON）；
+> - **progress**：`transcribe`、`synthesize`、`get_job` 注入 `Context` 并发起进度通知（`ctx` 不出现在输入 schema）；
+>   `get_job` 只报 started/done（daemon job 响应无数值进度）；
+> - 参数带 `Annotated[..., Field(description=...)]`，工具名/参数名/必填性/工具数完全不变。
 >
 > **v1.1.0 变更**（2026-09-10）：
 > - **新增** `create_voice` / `delete_voice`（`POST /v1/voices` / `DELETE /v1/voices/{id}` 的透传），
@@ -106,7 +119,10 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 
 > `instructions` 是**静态常量**（`server.py` 的 `_INSTRUCTIONS`），不随 profile 动态变化；**动态能力发现
 > 走 `describe()` 工具**（实时读 `GET /v1/models` + `GET /v1/voices` + `GET /health`）。上方示例仅示意响应
-> 结构；实际 `discover` 由 MCPServer SDK（MCP Python SDK v2）生成，`ttlMs`/`cacheScope` 不生效（无状态设计，不缓存能力快照）。
+> 结构；实际 `discover` 由 MCPServer SDK（MCP Python SDK v2）生成。能力快照内容（`describe()` 的实时查询与
+> `resources/read`）**不缓存**；仅 `tools/list`、`prompts/list`、`resources/list` 配置 `ttlMs`/`cacheScope`
+> 提示（三者均为静态元数据），且只在
+> 2026-07-28 无状态 era 下随响应下发（见 §11）。
 
 ---
 
@@ -218,18 +234,23 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 
 ---
 
-## 5. 资源映射
+## 5. 资源映射（read-only resources）
+
+当前注册**三个**只读资源，全部复用与工具相同的 `SpeechRailClient`，返回 `application/json` 文本：
 
 | MCP 资源 | 对应 REST | 说明 |
 |---|---|---|
-| `speechrail://health` | `GET /health`（`system.py:136`） | worker readiness |
-| `speechrail://readyz` | `GET /readyz`（`system.py:155`） | 至少一能力可接受时 200 |
-| `speechrail://metrics` | `GET /metrics`（`system.py:437`） | Prometheus/JSON；`Cache-Control:no-store` 已设 |
-| `speechrail://voices`（列表） | `GET /v1/voices` | describe 的快照源 |
-| `speechrail://models`（列表） | `GET /v1/models` | describe 的快照源 |
+| `speechrail://capabilities` | `GET /v1/models` + `GET /v1/voices` + `GET /health` | 与 `describe()` 等价的合并能力快照 |
+| `speechrail://voices` | `GET /v1/voices` | `{"data": [...]}` 原始音色列表 |
+| `speechrail://models` | `GET /v1/models` | `{"data": [...]}` 原始模型列表 |
 
-> 注：MCP 标准 `resources.list` 可暴露上述读端点；但**主要的"选能力"入口是 `describe()` 工具**（带判别字段），
-> 资源仅作原始读。
+> 注：**主要的"选能力"入口仍是 `describe()` 工具**（带 `mode`/`available`/`is_default` 等判别字段），
+> 资源仅作原始读。三个资源经统一 helper 处理 REST 失败：`SpeechRailError` 映射为 MCP `ResourceError`
+> 并保留原始消息。`resources/list` 作为静态元数据可缓存；`resources/read` **不设** cache hint（内容随档位动态变化）。
+> MCP `Annotations` 无 readOnlyHint 字段；资源在协议层即只读，这里以 `audience=["user","assistant"]` 标注。
+>
+> **已知 SDK 限制**：MCPServer 总会注册 prompt handler，因而 `prompts` 能力会被广告为一个空能力，
+> 当前 MCP Python SDK v2 **没有受支持的关闭方式**；proxy 不通过私有 API 篡改 handler，而是维持现状。
 
 ---
 
@@ -323,6 +344,143 @@ per-tool 授权矩阵属**运维安全**，降为附录 B。
 
 ---
 
+## 11. MCP 2026-07-28 协议升级（v1.2.0）
+
+本节覆盖 server metadata、tool annotations、结构化输出、cache hints、read-only resources、progress 以及
+SDK 双 era 行为。事实来源为 `src/speechrail/mcp/server.py`、`models.py` 与 MCP Python SDK v2 实测。
+
+### 11.1 serverInfo
+
+`create_server()` 构造 `MCPServer(name="speechrail-mcp", title="SpeechRail", description=..., version=__version__)`；
+`version` 取自 `speechrail.__version__`（此前 SDK 默认为空串）。`title`/`description` 供 `server/discover` 与
+初始化握手暴露。
+
+### 11.2 Tool annotations
+
+9 个工具全部声明 `title` 与 `ToolAnnotations`；`open_world_hint` 恒为 `false`（proxy 只访问本机 daemon）：
+
+| 工具 | title | read_only_hint | destructive_hint | idempotent_hint |
+|---|---|---|---|---|
+| `describe` | Current capability snapshot | ✅ | — | ✅ |
+| `transcribe` | Transcribe audio | ✅ | — | ✅ |
+| `synthesize` | Synthesize speech to a file | — | — | — |
+| `preview_voice` | Audition a voice instruction | — | — | — |
+| `create_voice` | Create a persistent voice | — | — | — |
+| `delete_voice` | Delete a voice | — | ✅ | ✅ |
+| `create_job` | Create a durable job | — | — | — |
+| `get_job` | Get a job record | ✅ | — | ✅ |
+| `cancel_job` | Cancel a job | — | ✅ | ✅ |
+
+### 11.3 结构化输出（outputSchema / structuredContent）
+
+每个工具的返回类型注解为一个 Pydantic 结果模型（`speechrail/mcp/models.py`），SDK 据此派生 `outputSchema`
+并校验返回值、发出 `structuredContent`。因为模型全部 `extra="allow"` 且非键字段都有默认值，
+**未知键保留、可选字段缺省都不会拒绝真实 payload**；`_map_errors` 仍返回原始 dict，工具层再做
+`Model.model_validate(...)`。
+
+| 工具 | 结果模型 | 已知键 |
+|---|---|---|
+| `describe` | `DescribeResult` | tier/profile/readiness/realtime/jobs/models/voices/… |
+| `transcribe` | `TranscribeResult` | text/segments/words/language/duration |
+| `synthesize` / `preview_voice` | `AudioArtifact` | audio_path/content_type/output_format/bytes |
+| `create_voice` / `delete_voice` | `VoiceRecord` | id/name/mode/available/capabilities |
+| `create_job` / `get_job` / `cancel_job` | `JobRecord` | id/kind/state/result_ref/params |
+
+### 11.4 Cache hints
+
+`MCPServer(cache_hints={...})` 配置三个 **list** 方法（`ttlMs=300000`、`cacheScope=public`）：
+
+- `tools/list`：工具集在进程生命周期内静态，可公开缓存；
+- `prompts/list`：无自定义 prompt，空列表可公开缓存；
+- `resources/list`：三个资源的 URI/name/description **是静态元数据**，可公开缓存。
+
+**不**给 `resources/read` 配置提示——其内容（能力快照/音色/模型）随 profile 切换动态变化，
+缓存会返回过期数据。
+
+### 11.5 Progress notifications
+
+`transcribe`、`synthesize`、`get_job` 增加 `ctx: Context` 参数（SDK 自动注入并从 `inputSchema` 排除）。
+调用前 `report_progress(0.0, 1.0, "started")`，成功后 `report_progress(1.0, 1.0, "done")`，
+与 `transcribe`/`synthesize` 同形。daemon 的 job 响应**不暴露数值进度**
+（`_job_response` 只有 id/kind/state/error_code/result_msg/result_ref/params/queue_position/eta_seconds），
+因此 `get_job` 只报 started/done，不臆造派生进度值。
+
+### 11.6 双 era 行为（2026-07-28 vs 2025-11-25）
+
+SDK 选择协议 era 的判据是**连接上的第一条消息**：若首条消息携带 2026 `_meta` 信封，则进入
+**2026-07-28 无状态 era**；否则走 **2025-11-25 握手 era**。`ttlMs`/`cacheScope`（以及 2026 的
+`resources`/`listChanged` 语义）**只在 2026-era 响应中出现**。
+
+因此：
+
+- 支持 2026 `_meta` 的客户端可看到 cache hints；
+- **opencode 使用 2025-11-25 握手**，看不到 `ttlMs`/`cacheScope`——这是预期行为，proxy 不强行改写协议。
+
+> 该双 era 事实在 SDK v2 的 `get_capabilities(protocol_version=...)` 与消息分发层实测确认；本 proxy 不做
+> 任何 era 覆写。
+
+### 11.7 预发布加固（v1.2.0 同批次）
+
+本节记录 v1.2.0 发布前针对 SDK 兼容性、连接错误隐私与进程生命周期追加的加固。所有条目均有对应测试锁定。
+
+#### 11.7.1 依赖下限收紧：`mcp>=2.1,<3`
+
+`pyproject.toml` 的 `dev` 与 `mcp` 两个 extras 均从 `mcp>=2,<3` 收紧为 `mcp>=2.1,<3`（`pyproject.toml:47,51`）。
+原因：`MCPServer(cache_hints=...)` 在 mcp 2.0.x 上对 pre-2026 会话（如 opencode 使用的 2025-11-25 握手）
+调用 `list_tools()` 会崩溃；该问题在 mcp 2.1.0 修复。`uv.lock` 同步更新。
+
+锁定测试：`tests/mcp/test_sdk_contract.py`
+
+- `test_pyproject_pins_mcp_floor_at_2_1`：逐条校验 `dev`/`mcp` extras 中所有 `mcp` 依赖均含 `>=2.1`；
+- `test_installed_mcp_minor_supports_cache_hints`：运行时校验已安装 mcp 的 minor ≥ 1；
+- `test_cache_hints_api_is_importable_and_accepted`：构造 `MCPServer(cache_hints={"tools/list": CacheHint(ttl_ms=300_000, scope="public")})` 并断言 `ttl_ms == 300_000`。
+
+#### 11.7.2 连接错误凭证脱敏
+
+`src/speechrail/mcp/client.py` 新增纯文本函数 `_redact_userinfo()`（`:158`），在连接失败路径上
+从 URL authority 中剥离 `user:pass@`，保留 scheme/host/port/path。选择纯文本而非 URL 解析，
+是因为该函数运行在异常路径上，畸形 base URL 不应再抛异常而掩盖原始故障。`//` 仅当位于串首或
+紧跟 scheme 分隔符 `://` 时才视为 authority 起始，因此无 scheme 的 `user:pass@host` 同样被剥离，
+而无 scheme 路径中的 `//` 不会被误判为 authority。
+
+`SpeechRailClient._request()` 在 `httpx.HTTPError` 分支构造 `SpeechRailError` 时调用
+`_redact_userinfo(url)`（`:237`），确保错误消息不泄露凭证。
+
+锁定测试：`tests/mcp/test_client.py::test_connection_errors_redact_url_userinfo`
+（`:282`）——以 `http://operator:s3cret@rail.test:8201/v1` 为 base URL 触发连接错误，
+断言 `exc.message` 不含 `s3cret` 与 `operator:`，但包含 `http://rail.test:8201/health`；
+`test_connection_errors_redact_schemeless_userinfo`（`:301`）覆盖无 scheme 的
+`user:s3cret@rail.test:8201/v1`（构造器会剥离尾部 `/v1`），断言无凭证残留且 host 保留。
+
+#### 11.7.3 客户端生命周期：lifespan 内 `aclose`
+
+`src/speechrail/mcp/server.py::create_server()`（`:135`）在构造 `MCPServer` 前，用
+`@asynccontextmanager` 定义 `lifespan`（`:161`），在 yield 后 `await rest_client.aclose()`，
+并将该 lifespan 传入 `MCPServer(lifespan=lifespan)`（`:173`）。
+
+- stdio `run` 路径：MCPServer SDK 在 server 关闭时自动执行 lifespan 的 teardown；
+- 进程内 `Client` 退出路径：测试直接 `async with app._lowlevel_server.lifespan(...)` 触发 teardown。
+
+`aclose` 在 `httpx.AsyncClient` 上是幂等的，注入的测试 client 同样被正确关闭。
+
+锁定测试：`tests/mcp/test_lifecycle.py::test_lifespan_closes_the_rest_client_on_shutdown`（`:31`）
+——spy client 记录 `aclose` 调用次数，断言 lifespan 进入前为 0、退出后为 1。
+
+#### 11.7.4 Era 门与成功路径测试
+
+`tests/mcp/test_server.py` 新增三条测试，将 §11.6 的双 era 行为与 progress 语义固化为回归用例：
+
+- `test_cache_hints_are_emitted_per_protocol_era`（`:481`）：以 `2026-07-28` 模式连接，
+  断言 `tools/list` 与 `resources/list` 均返回 `ttl_ms=300_000`、`cache_scope=public`；
+  以 `legacy` 模式连接，断言两者均返回 `ttl_ms=0`、`cache_scope=private`。
+- `test_describe_success_returns_structured_content`（`:399`）：调用 `describe`，
+  断言 `is_error=False`、`structured_content["tier"]=="quality"`、`content[0]` 为 `TextContent`。
+- `test_transcribe_success_reports_started_and_done_progress`（`:426`）：调用 `transcribe`，
+  断言 session 收到 `[(0.0, 1.0, "started"), (1.0, 1.0, "done")]`，
+  且 `structured_content["text"]=="hello"`。
+
+---
+
 ## 附录 A：证据
 
 - SpeechRail 端点 file:line 取自当前工作树实测（契约/代码/文档三层核验）。
@@ -334,6 +492,22 @@ per-tool 授权矩阵属**运维安全**，降为附录 B。
 - 外部先例：`docker-talkies`（内置 `/v1/mcp`）、`trongnguyenbinh/voice-mcp`（MCP proxy→Bearer REST）、
   `agent-voice-mcp`/`whisper-transcribe-mcp`（`audio_ref` vs base64 踩坑）、`modelcontextprotocol/ext-apps/say-server`（实时 TTS queue-polling）。
 - 本功能已实现于 `src/speechrail/mcp/`（PR #15，2026-09-07 合并到 main）；本文档随之从 draft 演进为 active。
+- **依赖下限**：`pyproject.toml` `dev`/`mcp` extras 均 pin `mcp>=2.1,<3`（`:47,51`）；
+  `uv.lock` 同步；锁定测试 `tests/mcp/test_sdk_contract.py::test_pyproject_pins_mcp_floor_at_2_1`、
+  `test_installed_mcp_minor_supports_cache_hints`、`test_cache_hints_api_is_importable_and_accepted`。
+- **凭证脱敏**：`src/speechrail/mcp/client.py::_redact_userinfo()`（`:158`）在连接错误路径
+  剥离 `user:pass@`（含无 scheme 情形）；`_request()` 在 `httpx.HTTPError` 分支调用（`:237`）；
+  锁定测试 `tests/mcp/test_client.py::test_connection_errors_redact_url_userinfo`（`:282`）
+  与 `test_connection_errors_redact_schemeless_userinfo`（`:301`）。
+- **lifespan 生命周期**：`src/speechrail/mcp/server.py::create_server()` 构造
+  `@asynccontextmanager lifespan`（`:161`），yield 后 `await rest_client.aclose()`（`:164`），
+  传入 `MCPServer(lifespan=lifespan)`（`:173`）；
+  锁定测试 `tests/mcp/test_lifecycle.py::test_lifespan_closes_the_rest_client_on_shutdown`（`:31`）。
+- **Era 门与成功路径**：`tests/mcp/test_server.py::test_cache_hints_are_emitted_per_protocol_era`（`:481`）
+  断言 2026-era `ttl_ms=300_000`/`cache_scope=public`、legacy era `ttl_ms=0`/`private`；
+  `test_describe_success_returns_structured_content`（`:399`）断言 `structured_content["tier"]=="quality"`；
+  `test_transcribe_success_reports_started_and_done_progress`（`:426`）断言 progress 序列
+  `[(0.0, 1.0, "started"), (1.0, 1.0, "done")]`。
 
 ## 附录 B：per-tool 授权矩阵（运维安全，非工具契约）
 

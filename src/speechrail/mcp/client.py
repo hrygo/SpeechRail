@@ -155,6 +155,33 @@ def parse_error_response(response: httpx.Response) -> SpeechRailError:
     )
 
 
+def _redact_userinfo(url: str) -> str:
+    """Drop any ``user:pass@`` userinfo from the URL authority.
+
+    Pure text rather than URL parsing: this runs on the connection-error path,
+    where a malformed base URL must not raise and mask the original failure.
+    ``//`` only starts a network-path authority at the string start or right
+    after a scheme delimiter ``://``; a ``//`` inside a scheme-less path is not
+    an authority.
+    """
+    sep = url.find("//")
+    if sep == 0:
+        authority_start = 2
+    elif sep > 0 and url[sep - 1] == ":":
+        authority_start = sep + 2
+    else:
+        authority_start = 0
+    end = len(url)
+    for delimiter in "/?#":
+        found = url.find(delimiter, authority_start)
+        if found != -1:
+            end = min(end, found)
+    authority = url[authority_start:end]
+    if "@" not in authority:
+        return url
+    return url[:authority_start] + authority.rpartition("@")[2] + url[end:]
+
+
 class SpeechRailClient:
     """Minimal async REST client bound to one SpeechRail daemon."""
 
@@ -207,7 +234,7 @@ class SpeechRailClient:
             raise SpeechRailError(
                 status=0,
                 code="connection_error",
-                message=f"cannot reach SpeechRail at {url}: {exc}",
+                message=f"cannot reach SpeechRail at {_redact_userinfo(url)}: {exc}",
                 retryable=True,
                 hint="make sure the SpeechRail daemon is running and reachable",
             ) from exc

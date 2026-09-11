@@ -44,11 +44,11 @@ dev = [
     "jsonschema>=4.23",
     "pyyaml>=6.0",
     "numpy>=1.26,<3.0",
-    "mcp>=2,<3",
+    "mcp>=2.1,<3",
     "openai>=2.0,<4.0",
     "pyannote-metrics==4.1",
 ]
-mcp = ["mcp>=2,<3"]
+mcp = ["mcp>=2.1,<3"]
 
 [project.scripts]
 speechrail = "speechrail.__main__:main"

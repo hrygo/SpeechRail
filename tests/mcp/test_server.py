@@ -3,10 +3,57 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
+from mcp.client import Client
+from mcp.server.context import ServerRequestContext
+from mcp.types import CallToolRequestParams, TextContent
 
+import speechrail
 from speechrail.mcp import server
+from speechrail.mcp.client import SpeechRailClient
+from speechrail.mcp.models import DescribeResult, TranscribeResult, VoiceRecord
+
+# Per-tool (title, read_only_hint, destructive_hint, idempotent_hint) contract.
+_TOOL_ANNOTATIONS: dict[str, tuple[str, bool, bool, bool]] = {
+    "describe": ("Current capability snapshot", True, False, True),
+    "transcribe": ("Transcribe audio", True, False, True),
+    "synthesize": ("Synthesize speech to a file", False, False, False),
+    "preview_voice": ("Audition a voice instruction", False, False, False),
+    "create_voice": ("Create a persistent voice", False, False, False),
+    "delete_voice": ("Delete a voice", False, True, True),
+    "create_job": ("Create a durable job", False, False, False),
+    "get_job": ("Get a job record", True, False, True),
+    "cancel_job": ("Cancel a job", False, True, True),
+}
+
+# Each tool's published outputSchema must expose these known model keys.
+_TOOL_OUTPUT_KEYS: dict[str, set[str]] = {
+    "describe": {"tier", "readiness", "realtime", "jobs", "models", "voices"},
+    "transcribe": {"text", "segments", "words", "language", "duration"},
+    "synthesize": {"audio_path", "content_type", "output_format", "bytes"},
+    "preview_voice": {"audio_path", "content_type", "output_format", "bytes"},
+    "create_voice": {"id", "name", "mode", "available", "capabilities"},
+    "delete_voice": {"id", "name", "mode", "available", "capabilities"},
+    "create_job": {"id", "kind", "state", "result_ref", "params"},
+    "get_job": {"id", "kind", "state", "result_ref", "params"},
+    "cancel_job": {"id", "kind", "state", "result_ref", "params"},
+}
+
+# Each tool's required input set must survive Annotated descriptions and ctx.
+_TOOL_REQUIRED: dict[str, list[str]] = {
+    "describe": [],
+    "transcribe": ["audio_ref"],
+    "synthesize": ["text"],
+    "preview_voice": ["instruction", "text"],
+    "create_voice": ["name", "instruction"],
+    "delete_voice": ["voice_id"],
+    "create_job": ["kind", "input_ref"],
+    "get_job": ["job_id"],
+    "cancel_job": ["job_id"],
+}
 
 
 def _run(coro):
@@ -111,3 +158,342 @@ def test_resolve_api_key_keyless_when_absent(
     (cfg / ".env").write_text("SPEECHRAIL_PORT=8201\n", encoding="utf-8")
     monkeypatch.setenv("SPEECHRAIL_APP_HOME", str(tmp_path))
     assert server._resolve_api_key() is None
+
+
+def _tools_by_name() -> dict[str, Any]:
+    app = server.create_server()
+    return {tool.name: tool for tool in _run(app.list_tools())}
+
+
+def test_server_info_exposes_name_title_and_version() -> None:
+    app = server.create_server()
+    assert app.name == "speechrail-mcp"
+    assert app.title == "SpeechRail"
+    assert app.description
+    assert app.version == speechrail.__version__
+    assert app.version
+    assert app.instructions == server._INSTRUCTIONS
+
+
+def test_every_tool_has_title_and_expected_annotations() -> None:
+    by_name = _tools_by_name()
+    assert set(by_name) == set(_TOOL_ANNOTATIONS)
+
+    for name, (title, read_only, destructive, idempotent) in _TOOL_ANNOTATIONS.items():
+        tool = by_name[name]
+        assert tool.title == title, name
+        annotations = tool.annotations
+        assert annotations is not None, name
+        assert annotations.title == title, name
+        assert annotations.read_only_hint is read_only, name
+        assert annotations.destructive_hint is destructive, name
+        assert annotations.idempotent_hint is idempotent, name
+        assert annotations.open_world_hint is False, name
+
+
+def test_delete_voice_and_cancel_job_are_destructive() -> None:
+    by_name = _tools_by_name()
+    assert by_name["delete_voice"].annotations.destructive_hint is True
+    assert by_name["cancel_job"].annotations.destructive_hint is True
+
+
+def test_every_tool_publishes_concrete_output_schema() -> None:
+    by_name = _tools_by_name()
+
+    for name, expected_keys in _TOOL_OUTPUT_KEYS.items():
+        schema = by_name[name].output_schema
+        assert schema is not None, name
+        assert schema.get("type") == "object", name
+        assert schema.get("additionalProperties") is True, name
+        properties = schema.get("properties", {})
+        assert properties, f"{name} has no properties"
+        assert expected_keys <= set(properties), name
+
+
+def test_tool_parameters_carry_descriptions() -> None:
+    by_name = _tools_by_name()
+
+    for tool in by_name.values():
+        for param, schema in tool.input_schema.get("properties", {}).items():
+            assert schema.get("description"), f"{tool.name}.{param}"
+
+
+def test_tool_required_parameters_are_preserved() -> None:
+    by_name = _tools_by_name()
+
+    for name, expected in _TOOL_REQUIRED.items():
+        required = by_name[name].input_schema.get("required", [])
+        assert sorted(required) == sorted(expected), name
+
+
+def test_transcribe_error_flows_through_injected_context() -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[float, float | None, str | None]] = []
+
+        async def report_progress(
+            self, progress: float, total: float | None = None, message: str | None = None
+        ) -> None:
+            self.calls.append((progress, total, message))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected HTTP {request.method} {request.url.path}")
+
+    client = SpeechRailClient(
+        base_url="http://rail.test/v1", transport=httpx.MockTransport(handler)
+    )
+    app = server.create_server(client=client)
+    session = FakeSession()
+    request_context = ServerRequestContext(
+        session=session,
+        lifespan_context=None,
+        protocol_version="2025-11-25",
+        method="tools/call",
+    )
+
+    result = _run(
+        app._handle_call_tool(
+            request_context,
+            CallToolRequestParams(
+                name="transcribe",
+                arguments={"audio_ref": "data:audio/wav;base64,AAAA"},
+            ),
+        )
+    )
+
+    assert result.is_error is True
+    text = result.content[0].text
+    assert "base64_not_supported" in text
+    assert session.calls == [(0.0, 1.0, "started")]
+
+
+def test_context_is_injected_but_absent_from_input_schema() -> None:
+    app = server.create_server()
+    by_name = {tool.name: tool for tool in _run(app.list_tools())}
+    internal = {tool.name: tool for tool in app._tool_manager.list_tools()}
+
+    for name in ("transcribe", "synthesize", "get_job"):
+        assert "ctx" not in by_name[name].input_schema.get("properties", {})
+        assert internal[name].context_kwarg == "ctx"
+
+    for name in ("describe", "create_job", "cancel_job", "delete_voice"):
+        assert internal[name].context_kwarg is None
+
+
+def test_cache_hints_cover_list_methods_only() -> None:
+    app = server.create_server()
+    hints = app._lowlevel_server.cache_hints
+
+    assert hints["tools/list"].ttl_ms == 300_000
+    assert hints["tools/list"].scope == "public"
+    assert hints["prompts/list"].ttl_ms == 300_000
+    assert hints["prompts/list"].scope == "public"
+    assert hints["resources/list"].ttl_ms == 300_000
+    assert hints["resources/list"].scope == "public"
+    # The three resource URIs are static metadata, but resource CONTENT is
+    # dynamic (profile-dependent), so resources/read must stay uncached.
+    assert "resources/read" not in hints
+
+
+def test_transcribe_result_tolerates_unknown_and_partial_payloads() -> None:
+    result = TranscribeResult.model_validate(
+        {"text": "hello", "usage": {"seconds": 1.5}, "unexpected": {"a": 1}}
+    )
+
+    assert result.text == "hello"
+    assert result.segments is None
+    assert result.words is None
+    dumped = result.model_dump()
+    assert dumped["usage"] == {"seconds": 1.5}
+    assert dumped["unexpected"] == {"a": 1}
+
+
+def test_describe_result_tolerates_unknown_and_partial_nested_payloads() -> None:
+    result = DescribeResult.model_validate(
+        {
+            "tier": "quality",
+            "readiness": {"asr": True, "diarization_extra": 3},
+            "realtime": {},
+            "jobs": {},
+            "models": [{"id": "speechrail/qwen3-asr", "unexpected_field": 7}],
+            "voices": [],
+            "top_level_extra": "kept",
+        }
+    )
+
+    assert result.tier == "quality"
+    assert result.readiness.asr is True
+    assert result.models[0].id == "speechrail/qwen3-asr"
+    dumped = result.model_dump()
+    assert dumped["top_level_extra"] == "kept"
+    assert dumped["models"][0]["unexpected_field"] == 7
+    assert dumped["readiness"]["diarization_extra"] == 3
+
+
+def test_voice_record_accepts_fully_optional_payload() -> None:
+    record = VoiceRecord.model_validate({"id": "custom_1", "future": True})
+
+    assert record.id == "custom_1"
+    assert record.name is None
+    assert record.mode is None
+    assert record.available is None
+    assert record.model_dump()["future"] is True
+
+
+def _quality_rest_handler(request: httpx.Request) -> httpx.Response:
+    """Serve the three GETs ``describe`` reads for a quality-tier snapshot."""
+    path = request.url.path
+    if request.method == "GET" and path == "/v1/models":
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "speechrail/qwen3-asr",
+                        "object": "model",
+                        "profile": "quality",
+                        "family": "qwen3_asr",
+                        "variant": "asr",
+                    },
+                    {
+                        "id": "speechrail/qwen3-tts",
+                        "object": "model",
+                        "profile": "quality",
+                        "family": "qwen3_tts",
+                        "variant": "voice_design",
+                    },
+                ],
+            },
+        )
+    if request.method == "GET" and path == "/v1/voices":
+        return httpx.Response(
+            200,
+            json={
+                "object": "list",
+                "data": [
+                    {
+                        "id": "serena",
+                        "name": "serena",
+                        "mode": "system",
+                        "available": True,
+                        "variant": "voice_design",
+                    }
+                ],
+            },
+        )
+    if request.method == "GET" and path == "/health":
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "profile": "quality",
+                "asr_ready": True,
+                "tts_ready": True,
+                "diarization_ready": True,
+            },
+        )
+    raise AssertionError(f"unexpected HTTP {request.method} {path}")
+
+
+def test_describe_success_returns_structured_content() -> None:
+    """A successful tools/call returns is_error=False, a tier dict and text."""
+    client = SpeechRailClient(
+        base_url="http://rail.test/v1",
+        transport=httpx.MockTransport(_quality_rest_handler),
+    )
+    app = server.create_server(client=client)
+    request_context = ServerRequestContext(
+        session=None,
+        lifespan_context=None,
+        protocol_version="2026-07-28",
+        method="tools/call",
+    )
+
+    result = _run(
+        app._handle_call_tool(
+            request_context,
+            CallToolRequestParams(name="describe", arguments={}),
+        )
+    )
+
+    assert result.is_error is False
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["tier"] == "quality"
+    assert isinstance(result.content[0], TextContent)
+
+
+def test_transcribe_success_reports_started_and_done_progress(tmp_path: Path) -> None:
+    """A successful transcribe reports both progress edges and the transcript."""
+    audio_path = tmp_path / "sample.wav"
+    audio_path.write_bytes(
+        b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00"
+        b"\x01\x00\x01\x00\x80\x3e\x00\x00\x00\x7d\x00\x00"
+        b"\x02\x00\x10\x00data\x00\x00\x00\x00"
+    )
+    recorded: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recorded.append(request)
+        if request.method == "POST" and request.url.path == "/v1/audio/transcriptions":
+            return httpx.Response(200, json={"text": "hello"})
+        raise AssertionError(f"unexpected HTTP {request.method} {request.url.path}")
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.calls: list[tuple[float, float | None, str | None]] = []
+
+        async def report_progress(
+            self, progress: float, total: float | None = None, message: str | None = None
+        ) -> None:
+            self.calls.append((progress, total, message))
+
+    client = SpeechRailClient(
+        base_url="http://rail.test/v1", transport=httpx.MockTransport(handler)
+    )
+    app = server.create_server(client=client)
+    session = FakeSession()
+    request_context = ServerRequestContext(
+        session=session,
+        lifespan_context=None,
+        protocol_version="2026-07-28",
+        method="tools/call",
+    )
+
+    result = _run(
+        app._handle_call_tool(
+            request_context,
+            CallToolRequestParams(
+                name="transcribe", arguments={"audio_ref": str(audio_path)}
+            ),
+        )
+    )
+
+    assert result.is_error is False
+    assert session.calls == [(0.0, 1.0, "started"), (1.0, 1.0, "done")]
+    assert [(request.method, request.url.path) for request in recorded] == [
+        ("POST", "/v1/audio/transcriptions")
+    ]
+    assert isinstance(result.structured_content, dict)
+    assert result.structured_content["text"] == "hello"
+
+
+def test_cache_hints_are_emitted_per_protocol_era() -> None:
+    """The 2026 era advertises public cache hints; legacy stays uncached/private."""
+
+    async def probe(mode: str) -> tuple[str | None, tuple[int, str], tuple[int, str]]:
+        app = server.create_server()
+        async with Client(app, mode=mode) as client:
+            tools = await client.list_tools(cache_mode="bypass")
+            resources = await client.list_resources(cache_mode="bypass")
+            return (
+                client.session.protocol_version,
+                (tools.ttl_ms, tools.cache_scope),
+                (resources.ttl_ms, resources.cache_scope),
+            )
+
+    modern = _run(probe("2026-07-28"))
+    assert modern == ("2026-07-28", (300_000, "public"), (300_000, "public"))
+
+    legacy = _run(probe("legacy"))
+    assert legacy == ("2025-11-25", (0, "private"), (0, "private"))
