@@ -16,5 +16,6 @@
 | [0012](0012-openai-native-coreml-diarization.md) | OpenAI 原生分人接口与唯一 CoreML 运行时 | Accepted |
 | [0013](0013-realtime-vad-and-diarization-boundary.md) | Realtime endpointing 与 continuous diarization activity 分离 | Accepted |
 | [0014](0014-source-built-managed-runtime.md) | 所有运行时变更必须从源码构建并经 managed release 部署 | Accepted |
+| [0015](0015-tier-user-positioning-and-precision-policy.md) | 三档按用户定位重排与按档位精度策略 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。

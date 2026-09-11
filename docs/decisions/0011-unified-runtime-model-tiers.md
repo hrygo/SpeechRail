@@ -8,6 +8,12 @@ Accepted（用户已采纳目标设计；尚未实施，真实硬件门尚未通
 
 2026-09-05
 
+## Superseded scope
+
+本 ADR 的 §2（三档组成）与 §8（0.6B CustomVoice 4-bit 仅作同档候选）已被
+[ADR-0015：三档用户定位与按档位精度策略](0015-tier-user-positioning-and-precision-policy.md)
+取代；本 ADR 其余决策保持不变。
+
 ## Context
 
 SpeechRail 面向本机单人语音服务。用户已明确 Batch ASR 与 Streaming ASR 不同时工作，
