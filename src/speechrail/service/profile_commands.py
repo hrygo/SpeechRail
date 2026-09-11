@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +15,10 @@ import httpx
 from speechrail.config import Settings
 from speechrail.config.model_catalog import ModelCatalog, load_catalog, load_runtime_lock
 from speechrail.service import vad_model
+from speechrail.service.diarization_assets import (
+    _COREML_FILE_SIZES,
+    prepare_diarization_assets,
+)
 from speechrail.service.launchd import create_launch_agent_manager
 from speechrail.service.model_store import prepare_models, resolve_prepared_selection
 from speechrail.service.modelscope import ModelScopeDownloader
@@ -31,7 +37,12 @@ PrepareProfile = Callable[[str, Path], str]
 SwitchPrepared = Callable[[str, Path], ApplyResult]
 ResolvePrevious = Callable[[Mapping[str, object], Path], str]
 PrepareVadModel = Callable[[Path], None]
+PrepareDiarization = Callable[[str, Path], None]
 _ORDER: tuple[PresetId, ...] = ("quality", "balanced", "light")
+_DIARIZATION_ENV_KEYS = (
+    "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH",
+    "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR",
+)
 
 
 class ProfileCommandError(RuntimeError):
@@ -44,6 +55,7 @@ class ProfileSummary:
     asr: str
     tts: str
     download_bytes: int
+    aligner: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,16 +72,21 @@ def list_profiles(catalog: ModelCatalog | None = None) -> tuple[ProfileSummary, 
     summaries: list[ProfileSummary] = []
     for preset_id in _ORDER:
         preset = selected_catalog.preset(preset_id)
+        artifact_keys = [preset.asr, preset.tts]
+        if preset.aligner is not None:
+            artifact_keys.append(preset.aligner)
+        download_bytes = sum(
+            item.size for key in artifact_keys for item in artifacts[key].files
+        )
+        if preset.diarization:
+            download_bytes += sum(_COREML_FILE_SIZES)
         summaries.append(
             ProfileSummary(
                 id=preset_id,
                 asr=preset.asr,
                 tts=preset.tts,
-                download_bytes=sum(
-                    item.size
-                    for key in (preset.asr, preset.tts)
-                    for item in artifacts[key].files
-                ),
+                download_bytes=download_bytes,
+                aligner=preset.aligner,
             )
         )
     return tuple(summaries)
@@ -87,13 +104,17 @@ def model_changes(
 ) -> frozenset[str]:
     return frozenset(
         name
-        for name in ("asr", "tts")
+        for name in ("asr", "tts", "aligner")
         if _model_value(old, name) != _model_value(new, name)
     )
 
 
 def recommend_profile(total_memory_bytes: int) -> PresetId:
-    """Recommend by physical memory only; no marketing-model detection."""
+    """Return a memory fallback suggestion (内存兜底建议) only.
+
+    The tier is the user's explicit choice; this helper merely maps physical
+    memory to a starting point and keeps the historical 10/16 GiB thresholds.
+    """
     if total_memory_bytes <= 0:
         raise ValueError("physical memory must be positive")
     if total_memory_bytes < 10 * 1024**3:
@@ -186,6 +207,96 @@ def _prepare_optional_vad_model(app_home: Path) -> None:
         vad_model.logger.exception("optional Silero VAD model preparation failed")
 
 
+def _atomic_write_private(target: Path, content: bytes) -> None:
+    """Atomically replace a private file, leaving mode 0600 and no partial file."""
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_name = tempfile.mkstemp(dir=target.parent, prefix=".env.")
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.chmod(0o600)
+        temporary.replace(target)
+        dir_fd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _update_env_keys(config_file: Path, updates: Mapping[str, str | None]) -> None:
+    """Set, replace or remove env keys, preserving every unrelated line."""
+    content = config_file.read_text(encoding="utf-8") if config_file.is_file() else ""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for line in content.splitlines():
+        key = line.split("=", 1)[0] if "=" in line else None
+        if key is not None and key in updates:
+            seen.add(key)
+            value = updates[key]
+            if value is not None:
+                lines.append(f"{key}={value}")
+            continue
+        lines.append(line)
+    appended = False
+    for key, value in updates.items():
+        if value is None or key in seen:
+            continue
+        if not appended and lines and lines[-1] != "":
+            lines.append("")
+        lines.append(f"{key}={value}")
+        appended = True
+    _atomic_write_private(config_file, ("\n".join(lines) + "\n").encode("utf-8"))
+
+
+def _prepare_diarization_assets(preset: str, app_home: Path) -> None:
+    """Provision the tier's diarization assets and mirror them into the private config.
+
+    Unlike the optional Silero VAD, diarization is a hard tier capability: a
+    failure here must surface as :class:`ProfileCommandError` rather than being
+    silently skipped when the preset declares ``diarization``.
+    """
+    try:
+        catalog = load_catalog()
+        preset_model = catalog.preset(preset)
+    except KeyError as exc:
+        raise ProfileCommandError("unknown profile preset") from exc
+
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+    with httpx.Client(timeout=timeout) as client:
+        downloader = ModelScopeDownloader(client=client)
+        try:
+            paths = prepare_diarization_assets(
+                app_home, preset_id=preset, downloader=downloader
+            )
+        except Exception as exc:
+            raise ProfileCommandError("diarization asset preparation failed") from exc
+
+    updates: Mapping[str, str | None]
+    if not preset_model.diarization:
+        updates = dict.fromkeys(_DIARIZATION_ENV_KEYS)
+    else:
+        if paths is None:
+            raise ProfileCommandError("diarization assets were not prepared")
+        updates = {
+            "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH": str(paths.coreml_model_path),
+            "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR": str(paths.aligner_model_dir),
+        }
+
+    layout = ServiceLayout.for_app_home(app_home)
+    config_file = layout.config_file
+    if not config_file.is_file() and not preset_model.diarization:
+        return
+    try:
+        _update_env_keys(config_file, updates)
+    except Exception as exc:
+        raise ProfileCommandError("diarization configuration update failed") from exc
+
+
 def apply_profile(
     preset: PresetId,
     *,
@@ -193,10 +304,12 @@ def apply_profile(
     prepare: PrepareProfile = _prepare_profile,
     switch: SwitchPrepared = _switch_prepared,
     prepare_vad: PrepareVadModel = _prepare_optional_vad_model,
+    prepare_diarization: PrepareDiarization = _prepare_diarization_assets,
 ) -> ApplyResult:
     resolved_home = app_home.resolve()
     prepared_id = prepare(preset, resolved_home)
     prepare_vad(resolved_home)
+    prepare_diarization(preset, resolved_home)
     return switch(prepared_id, resolved_home)
 
 

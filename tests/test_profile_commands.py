@@ -5,9 +5,15 @@ from pathlib import Path
 import pytest
 
 from speechrail.config.model_catalog import load_catalog
+from speechrail.service import profile_commands as commands
+from speechrail.service.diarization_assets import (
+    _COREML_FILE_SIZES,
+    DiarizationAssetPaths,
+)
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.profile_commands import (
     ProfileCommandError,
+    _prepare_diarization_assets,
     _prepare_optional_vad_model,
     apply_profile,
     list_profiles,
@@ -32,13 +38,36 @@ def _selection(preset: str, generation: int) -> dict[str, object]:
     }
 
 
-def test_catalog_lists_exact_three_tiers_and_balanced_to_light_only_changes_asr() -> None:
-    profiles = list_profiles(load_catalog())
+def test_catalog_lists_exact_three_tiers_and_balanced_to_light_changes_models() -> None:
+    catalog = load_catalog()
+    profiles = list_profiles(catalog)
     assert [profile.id for profile in profiles] == ["quality", "balanced", "light"]
-    balanced = next(profile for profile in profiles if profile.id == "balanced")
-    light = next(profile for profile in profiles if profile.id == "light")
-    assert balanced.tts == light.tts
-    assert model_changes(balanced, light) == frozenset({"asr"})
+    by_id = {profile.id: profile for profile in profiles}
+    balanced = by_id["balanced"]
+    light = by_id["light"]
+    quality = by_id["quality"]
+    assert balanced.tts != light.tts
+    assert model_changes(balanced, light) == frozenset({"asr", "tts", "aligner"})
+    assert balanced.aligner == "aligner-q8"
+    assert quality.aligner == "aligner-bf16"
+    assert light.aligner is None
+
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+
+    def artifact_bytes(key: str) -> int:
+        return sum(file.size for file in artifacts[key].files)
+
+    sortformer_bytes = sum(_COREML_FILE_SIZES)
+    balanced_asr_tts = artifact_bytes("asr-1.7b-q8") + artifact_bytes("tts-0.6b-custom-q8")
+    for profile in profiles:
+        assert profile.download_bytes > 0
+    assert light.download_bytes == (
+        artifact_bytes("asr-0.6b-q4") + artifact_bytes("tts-0.6b-custom-q4")
+    )
+    assert balanced.download_bytes == (
+        balanced_asr_tts + artifact_bytes("aligner-q8") + sortformer_bytes
+    )
+    assert quality.download_bytes > balanced_asr_tts
 
 
 def test_model_changes_accepts_the_public_mapping_shape() -> None:
@@ -75,19 +104,95 @@ def test_apply_prepares_then_switches_exact_preset(tmp_path: Path) -> None:
     def prepare_vad(app_home: Path) -> None:
         events.append(f"prepare_vad:{app_home.name}")
 
+    def prepare_diarization(preset: str, app_home: Path) -> None:
+        events.append(f"prepare_diarization:{preset}:{app_home.name}")
+
     result = apply_profile(
         "light",
         app_home=tmp_path,
         prepare=prepare,
         switch=switch,
         prepare_vad=prepare_vad,
+        prepare_diarization=prepare_diarization,
     )
     assert result.status == "committed"
     assert events == [
         f"prepare:light:{tmp_path.name}",
         f"prepare_vad:{tmp_path.name}",
+        f"prepare_diarization:light:{tmp_path.name}",
         f"switch:prepared-light:{tmp_path.name}",
     ]
+
+
+def test_apply_light_removes_diarization_env(tmp_path: Path, monkeypatch) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, mode=0o700)
+    layout.config_file.write_text(
+        "SPEECHRAIL_PORT=8201\n"
+        "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=/old/coreml\n"
+        "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR=/old/aligner\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        commands,
+        "prepare_diarization_assets",
+        lambda app_home, *, preset_id, downloader: None,
+    )
+    monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
+
+    _prepare_diarization_assets("light", tmp_path)
+
+    text = layout.config_file.read_text(encoding="utf-8")
+    assert "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH" not in text
+    assert "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR" not in text
+    assert "SPEECHRAIL_PORT=8201\n" in text
+    assert (layout.config_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_apply_balanced_writes_diarization_env(tmp_path: Path, monkeypatch) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, mode=0o700)
+    layout.config_file.write_text(
+        "SPEECHRAIL_PORT=8201\n"
+        "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=/stale/coreml\n",
+        encoding="utf-8",
+    )
+    paths = DiarizationAssetPaths(
+        coreml_model_path=tmp_path / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
+        aligner_model_dir=tmp_path / "diarization" / "aligner-q8",
+    )
+
+    monkeypatch.setattr(
+        commands,
+        "prepare_diarization_assets",
+        lambda app_home, *, preset_id, downloader: paths,
+    )
+    monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
+
+    _prepare_diarization_assets("balanced", tmp_path)
+
+    text = layout.config_file.read_text(encoding="utf-8")
+    assert f"SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH={paths.coreml_model_path}\n" in text
+    assert f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={paths.aligner_model_dir}\n" in text
+    assert text.count("SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=") == 1
+    assert "SPEECHRAIL_PORT=8201\n" in text
+    assert (layout.config_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_diarization_prepare_failure_is_explicit(tmp_path: Path, monkeypatch) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path)
+    layout.config_file.parent.mkdir(parents=True, mode=0o700)
+    layout.config_file.write_text("SPEECHRAIL_PORT=8201\n", encoding="utf-8")
+
+    def boom(app_home, *, preset_id, downloader):
+        raise RuntimeError("download failed")
+
+    monkeypatch.setattr(commands, "prepare_diarization_assets", boom)
+    monkeypatch.setattr(commands, "ModelScopeDownloader", lambda *, client: object())
+
+    with pytest.raises(ProfileCommandError):
+        _prepare_diarization_assets("balanced", tmp_path)
 
 
 def test_rollback_uses_previous_complete_pair_without_download(tmp_path: Path) -> None:
