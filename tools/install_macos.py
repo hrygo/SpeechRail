@@ -473,6 +473,37 @@ def _prepare_models_for_install(
         raise InstallerError("model preparation failed") from exc
 
 
+def _provision_managed_diarization_assets(
+    app_home: Path,
+    *,
+    preset_id: str,
+    downloader: Any,
+) -> DiarizationInstallPaths:
+    """Provision the tier's locked diarization assets inside a managed install.
+
+    The release workflow may already hand over verified paths.  When it does
+    not, the installer still owns the invariant that the selection's aligner
+    directory exists before the new wheel's preflight resolves it; otherwise an
+    upgrade whose previous layout predates the per-tier directory fails closed.
+    """
+    from speechrail.service.diarization_assets import prepare_diarization_assets
+
+    try:
+        provisioned = prepare_diarization_assets(
+            app_home,
+            preset_id=preset_id,
+            downloader=downloader,
+        )
+    except Exception as exc:
+        raise InstallerError("diarization asset preparation failed") from exc
+    if provisioned is None:
+        raise InstallerError("diarization assets were not prepared")
+    return DiarizationInstallPaths(
+        coreml_model_path=provisioned.coreml_model_path,
+        aligner_model_dir=provisioned.aligner_model_dir,
+    )
+
+
 def install_managed(
     wheel: Path,
     *,
@@ -544,6 +575,14 @@ def install_managed(
     current_python: Path | None = None
     selection_path = layout.app_home / "config" / "selection.json"
     try:
+        # Provision before the managed config and preflight so the selection's
+        # per-tier aligner directory exists when resolve_selection reads it.
+        if diarization_assets is None and selected_preset.diarization:
+            diarization_assets = _provision_managed_diarization_assets(
+                layout.app_home,
+                preset_id=preset_id,
+                downloader=downloader,
+            )
         # Keep the application wheel in its own release before touching model/runtime state.
         release_dir, runtime_python, release_created = _stage_wheel(
             wheel,

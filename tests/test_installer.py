@@ -12,12 +12,14 @@ from typing import cast, final, override
 import httpx
 import pytest
 
+from speechrail.config import Settings
 from speechrail.config.model_catalog import (
     ModelCatalog,
     SourceLocation,
     load_catalog,
     load_runtime_lock,
 )
+from speechrail.config.selection import resolve_selection
 from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service import diarization_assets
 from speechrail.service.bootstrap import RuntimePaths
@@ -25,6 +27,7 @@ from speechrail.service.diarization_assets import DiarizationAssetError
 from speechrail.service.modelscope import ModelScopeDownloader
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
+from speechrail.service.profile_store import recover_selection
 
 _INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
 _SPEC = importlib.util.spec_from_file_location("speechrail_test_installer", _INSTALLER_PATH)
@@ -32,6 +35,8 @@ assert _SPEC is not None and _SPEC.loader is not None
 install_macos = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = install_macos
 _SPEC.loader.exec_module(install_macos)
+
+_REAL_MANAGED_DIARIZATION_PROVISIONING = install_macos._provision_managed_diarization_assets
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +52,18 @@ def _isolate_managed_service_lock(
     monkeypatch.setattr(install_macos, "install_managed", isolated_install_managed)
 
 
+@pytest.fixture(autouse=True)
+def _stub_managed_diarization_provisioning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep offline tests from downloading assets; the upgrade regression opts back in."""
+
+    def fake_provisioning(app_home: Path, *, preset_id: str, downloader: object) -> None:
+        del app_home, preset_id, downloader
+
+    monkeypatch.setattr(
+        install_macos, "_provision_managed_diarization_assets", fake_provisioning
+    )
+
+
 def _runner_that_creates_python(calls: list[tuple[str, ...]]):
     def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         calls.append(command)
@@ -60,7 +77,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / "speechrail-2.3.0-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-2.3.1-py3-none-any.whl"
     wheel.touch()
     app_home = tmp_path / "Application Support" / "SpeechRail"
     return wheel, app_home
@@ -1218,3 +1235,138 @@ def test_prepare_diarization_assets_unknown_preset_raises(
         diarization_assets.prepare_diarization_assets(
             tmp_path / "app", preset_id="turbo", downloader=downloader
         )
+
+
+def _preflight_selection_exit_code(app_home: Path) -> int:
+    """Emulate the installed wheel preflight's selection resolution, which fail-closes."""
+
+    layout = ServiceLayout.for_app_home(app_home)
+    try:
+        settings = Settings.from_env_file(layout.config_file)
+        selection = recover_selection(app_home)
+        if selection is not None:
+            resolve_selection(settings, selection, load_catalog(), app_home)
+    except Exception:
+        return 1
+    return 0
+
+
+def test_managed_upgrade_provisions_tier_aligner_before_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        install_macos,
+        "_provision_managed_diarization_assets",
+        _REAL_MANAGED_DIARIZATION_PROVISIONING,
+    )
+    downloader = _b2_setup(monkeypatch)
+    wheel, app_home = _inputs(tmp_path)
+    layout = ServiceLayout.for_app_home(app_home)
+    layout.ensure_directories()
+    selected = load_catalog().preset("quality")
+    for key in (selected.asr, selected.tts):
+        (app_home / "models" / key).mkdir(parents=True, exist_ok=True)
+    # Simulate the 2.2.2 layout: the selection is already committed, but only
+    # the legacy aligner directory exists, not the per-tier aligner-bf16.
+    legacy_aligner = app_home / "diarization" / "Qwen3-ForcedAligner-0.6B"
+    legacy_aligner.mkdir(parents=True, exist_ok=True)
+    selection_path = app_home / "config" / "selection.json"
+    selection_path.write_bytes(_selection_payload())
+    selection_path.chmod(0o600)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-quality"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(
+        install_macos,
+        "prepare_runtime",
+        lambda lock, prepared_app_home, runner: _fake_runtime_switching(prepared_app_home),
+    )
+
+    def runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+        calls.append(command)
+        if command[:2] == ("uv", "venv"):
+            venv = Path(command[-1])
+            venv.joinpath("bin").mkdir(parents=True)
+            venv.joinpath("bin", "python").touch()
+        if "preflight" in command:
+            code = _preflight_selection_exit_code(app_home)
+            return subprocess.CompletedProcess(command, code, stdout="", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    result = install_macos.install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id="quality",
+        downloader=downloader,
+        runtime_runner=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+        runner=runner,
+    )
+
+    aligner_dir = app_home / "diarization" / "aligner-bf16"
+    assert result.enabled is False
+    assert result.prepared_id == "prepared-quality"
+    assert aligner_dir.is_dir()
+    assert (aligner_dir / "config.json").is_file()
+    assert _preflight_selection_exit_code(app_home) == 0
+    resolved = resolve_selection(
+        Settings.from_env_file(layout.config_file),
+        recover_selection(app_home),
+        load_catalog(),
+        app_home,
+    )
+    assert resolved.qwen3_aligner_model_dir == aligner_dir
+
+
+def test_managed_diarization_provisioning_failure_rolls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        install_macos,
+        "_provision_managed_diarization_assets",
+        _REAL_MANAGED_DIARIZATION_PROVISIONING,
+    )
+    downloader = _b2_setup(monkeypatch)
+    wheel, app_home = _inputs(tmp_path)
+    layout = ServiceLayout.for_app_home(app_home)
+    layout.ensure_directories()
+    old_release = layout.runtime_root / "releases" / "old"
+    old_release.mkdir(parents=True)
+    layout.current_runtime.symlink_to(old_release, target_is_directory=True)
+    old_vendor = layout.vendor_root / "runtime-old"
+    old_vendor.mkdir(parents=True)
+    layout.vendor_current.symlink_to(old_vendor, target_is_directory=True)
+    original_config = b"SPEECHRAIL_HOST=127.0.0.1\r\n"
+    layout.config_file.write_bytes(original_config)
+    layout.config_file.chmod(0o600)
+    selection_path = app_home / "config" / "selection.json"
+    original_selection = _selection_payload()
+    selection_path.write_bytes(original_selection)
+    selection_path.chmod(0o600)
+    corrupt = app_home / "diarization" / "aligner-bf16"
+    corrupt.mkdir(parents=True)
+    (corrupt / "config.json").write_bytes(b"tampered")
+
+    with pytest.raises(
+        install_macos.InstallerError, match="diarization asset preparation failed"
+    ):
+        install_macos.install_managed(
+            wheel,
+            app_home=app_home,
+            preset_id="quality",
+            downloader=downloader,
+            runtime_runner=lambda command: subprocess.CompletedProcess(
+                command, 0, stdout="", stderr=""
+            ),
+            runner=_runner_that_creates_python([]),
+        )
+
+    assert layout.current_runtime.resolve() == old_release.resolve()
+    assert layout.vendor_current.resolve() == old_vendor.resolve()
+    assert layout.config_file.read_bytes() == original_config
+    assert selection_path.read_bytes() == original_selection
