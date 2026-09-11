@@ -18,6 +18,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -282,6 +283,13 @@ class ModelCatalog(BaseModel):
         cls, value: Mapping[PresetId, TierPrecision]
     ) -> Mapping[PresetId, TierPrecision]:
         return MappingProxyType(dict(value))
+
+    @field_serializer("precision_policy")
+    def serialize_precision_policy(
+        self, value: Mapping[PresetId, TierPrecision]
+    ) -> dict[PresetId, TierPrecision]:
+        """Emit a plain mapping so the catalog stays JSON-serializable while frozen."""
+        return dict(value)
 
     @model_validator(mode="after")
     def validate_catalog(self) -> Self:
