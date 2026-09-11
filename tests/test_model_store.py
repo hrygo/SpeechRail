@@ -121,13 +121,36 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                 payloads[(f"mirror/{key}", name)] = payload
     catalog = ModelCatalog.model_validate(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "artifacts": artifacts,
             "presets": [
-                {"id": "quality", "asr": "asr", "tts": "design"},
-                {"id": "balanced", "asr": "asr", "tts": "custom"},
-                {"id": "light", "asr": "asr", "tts": "custom"},
+                {
+                    "id": "quality",
+                    "asr": "asr",
+                    "tts": "design",
+                    "aligner": None,
+                    "diarization": False,
+                },
+                {
+                    "id": "balanced",
+                    "asr": "asr",
+                    "tts": "custom",
+                    "aligner": None,
+                    "diarization": False,
+                },
+                {
+                    "id": "light",
+                    "asr": "asr",
+                    "tts": "custom",
+                    "aligner": None,
+                    "diarization": False,
+                },
             ],
+            "precision_policy": {
+                "quality": {"asr": 8, "tts": 8, "aligner": None},
+                "balanced": {"asr": 8, "tts": 8, "aligner": None},
+                "light": {"asr": 8, "tts": 8, "aligner": None},
+            },
         }
     )
     return catalog, payloads
