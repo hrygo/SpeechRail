@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import Mapping
@@ -18,6 +19,7 @@ from speechrail.config.model_catalog import (
     ModelPreset,
     RuntimeLock,
     SourceLocation,
+    TierPrecision,
     load_catalog,
     load_runtime_lock,
     preset,
@@ -193,6 +195,23 @@ def test_catalog_and_nested_models_are_immutable() -> None:
         catalog.artifacts[0] = catalog.artifacts[0]  # type: ignore[index]
     with pytest.raises(TypeError):
         catalog.precision_policy["light"] = catalog.precision_policy["light"]  # type: ignore[index]
+
+
+def test_catalog_deep_copy_is_independent_and_json_stable() -> None:
+    catalog = load_catalog()
+    expected_policy = json.loads(catalog.model_dump_json())["precision_policy"]
+
+    for clone in (copy.deepcopy(catalog), catalog.model_copy(deep=True)):
+        assert clone == catalog
+        assert clone is not catalog
+        assert isinstance(clone.precision_policy["light"], TierPrecision)
+        assert json.loads(clone.model_dump_json())["precision_policy"] == expected_policy
+        with pytest.raises(TypeError):
+            clone.precision_policy["light"] = clone.precision_policy["light"]  # type: ignore[index]
+
+    restored = ModelCatalog.model_validate_json(catalog.model_dump_json())
+    assert restored.precision_policy == catalog.precision_policy
+    assert json.loads(restored.model_dump_json())["precision_policy"] == expected_policy
 
 
 def test_unknown_catalog_and_artifact_keys_fail_closed() -> None:

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Literal, Self
+from typing import Literal, Self, override
 
 from pydantic import (
     BaseModel,
@@ -290,6 +290,18 @@ class ModelCatalog(BaseModel):
     ) -> dict[PresetId, TierPrecision]:
         """Emit a plain mapping so the catalog stays JSON-serializable while frozen."""
         return dict(value)
+
+    @override
+    def __deepcopy__(self, memo: dict[int, object] | None = None) -> ModelCatalog:
+        """Rebuild the catalog instead of pickling the frozen policy mapping.
+
+        ``precision_policy`` is a ``MappingProxyType`` to keep the catalog
+        read-only, but that proxy cannot be pickled and therefore breaks the
+        default ``copy.deepcopy``/``model_copy(deep=True)`` path. Re-validating
+        the serialized payload yields a fully independent, JSON-shaped copy and
+        keeps the read-only, round-trip behavior unchanged.
+        """
+        return ModelCatalog.model_validate(self.model_dump())
 
     @model_validator(mode="after")
     def validate_catalog(self) -> Self:

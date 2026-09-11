@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -42,6 +43,9 @@ _ORDER: tuple[PresetId, ...] = ("quality", "balanced", "light")
 _DIARIZATION_ENV_KEYS = (
     "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH",
     "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR",
+)
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"^\s*(?P<export>export\s+)?(?P<key>[^\s=]+)\s*="
 )
 
 
@@ -228,18 +232,32 @@ def _atomic_write_private(target: Path, content: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _env_assignment(line: str) -> tuple[str, str] | None:
+    """Return ``(export_prefix, key)`` for an assignment line, else ``None``.
+
+    Recognizes ``KEY=...``, ``KEY = ...`` and ``export KEY=...`` so a spaced or
+    exported assignment is replaced in place instead of appended as a duplicate.
+    """
+    match = _ENV_ASSIGNMENT_RE.match(line)
+    if match is None:
+        return None
+    prefix = "export " if match.group("export") else ""
+    return prefix, match.group("key")
+
+
 def _update_env_keys(config_file: Path, updates: Mapping[str, str | None]) -> None:
     """Set, replace or remove env keys, preserving every unrelated line."""
     content = config_file.read_text(encoding="utf-8") if config_file.is_file() else ""
     lines: list[str] = []
     seen: set[str] = set()
     for line in content.splitlines():
-        key = line.split("=", 1)[0] if "=" in line else None
-        if key is not None and key in updates:
+        assignment = _env_assignment(line)
+        if assignment is not None and assignment[1] in updates:
+            prefix, key = assignment
             seen.add(key)
             value = updates[key]
             if value is not None:
-                lines.append(f"{key}={value}")
+                lines.append(f"{prefix}{key}={value}")
             continue
         lines.append(line)
     appended = False

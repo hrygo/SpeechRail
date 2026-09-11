@@ -15,6 +15,7 @@ from speechrail.service.profile_commands import (
     ProfileCommandError,
     _prepare_diarization_assets,
     _prepare_optional_vad_model,
+    _update_env_keys,
     apply_profile,
     list_profiles,
     model_changes,
@@ -178,6 +179,34 @@ def test_apply_balanced_writes_diarization_env(tmp_path: Path, monkeypatch) -> N
     assert text.count("SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=") == 1
     assert "SPEECHRAIL_PORT=8201\n" in text
     assert (layout.config_file.stat().st_mode & 0o777) == 0o600
+
+
+def test_env_writer_replaces_exported_and_spaced_keys_in_place(tmp_path: Path) -> None:
+    config_file = tmp_path / ".env"
+    config_file.write_text(
+        "export SPEECHRAIL_PORT=8201\n"
+        "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR = /old/aligner\n"
+        "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=/old/coreml\n",
+        encoding="utf-8",
+    )
+
+    _update_env_keys(
+        config_file,
+        {
+            "SPEECHRAIL_PORT": "8300",
+            "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR": "/new/aligner",
+            "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH": "/new/coreml",
+        },
+    )
+
+    text = config_file.read_text(encoding="utf-8")
+    assert text.count("SPEECHRAIL_PORT=") == 1
+    assert text.count("SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR") == 1
+    assert text.count("SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH") == 1
+    assert "export SPEECHRAIL_PORT=8300\n" in text
+    assert "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR=/new/aligner\n" in text
+    assert "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH=/new/coreml\n" in text
+    assert (config_file.stat().st_mode & 0o777) == 0o600
 
 
 def test_diarization_prepare_failure_is_explicit(tmp_path: Path, monkeypatch) -> None:
