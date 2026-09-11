@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "2.3.2"
+    version: str = "2.4.0"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
@@ -106,6 +106,13 @@ class Settings(BaseSettings):
     realtime_reserved_capacity: int = Field(default=1, ge=1, le=127)
     runtime_max_pending_per_class: int = Field(default=8, ge=1, le=1024)
     batch_aging_seconds: float = Field(default=30, gt=0, le=3600)
+    # "true" forces heavy overlap and BYPASSES the hardware memory budget; use it
+    # only with measured resident bytes. "auto" stays fail-closed until every
+    # enabled component declares a non-zero resident peak.
+    allow_heavy_overlap: Literal["auto", "true", "false"] = "auto"
+    asr_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
+    tts_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
+    diarization_resident_bytes: int = Field(default=0, ge=0, le=(1 << 40))
     request_timeout_seconds: float = Field(default=120, gt=0, le=3600)
     realtime_diarization_drain_deadline_seconds: float = Field(default=20.0, gt=0, le=120)
     realtime_speech_admission_enabled: bool = True

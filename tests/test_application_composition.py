@@ -428,3 +428,117 @@ def test_composition_ignores_mlx_cache_and_memory_limits_for_overlap_policy(
     assert baseline_snapshot.allow_heavy_overlap is False
     assert capped_snapshot.allow_heavy_overlap is False
     assert "unknown" in capped_snapshot.policy_reason.lower()
+
+
+def test_composition_allows_overlap_when_declared_footprints_fit_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 128 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        asr_resident_bytes=2 * 1024**3,
+        tts_resident_bytes=2 * 1024**3,
+    )
+
+    services = build_app_services(
+        settings,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=object()),
+    )
+
+    snapshot = services.governor.snapshot()
+    assert snapshot.allow_heavy_overlap is True
+    assert "within budget" in snapshot.policy_reason.lower()
+
+
+def test_composition_serializes_when_declared_footprints_exceed_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 8 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        asr_resident_bytes=3 * 1024**3,
+        tts_resident_bytes=2 * 1024**3,
+    )
+
+    services = build_app_services(
+        settings,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=object()),
+    )
+
+    snapshot = services.governor.snapshot()
+    assert snapshot.allow_heavy_overlap is False
+    assert "exceeds" in snapshot.policy_reason.lower()
+
+
+def test_composition_force_allows_overlap_regardless_of_unknown_footprints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 128 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        allow_heavy_overlap="true",
+    )
+
+    services = build_app_services(
+        settings,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=object()),
+    )
+
+    snapshot = services.governor.snapshot()
+    assert snapshot.allow_heavy_overlap is True
+    assert "forced" in snapshot.policy_reason.lower()
+
+
+def test_composition_force_serializes_overlap_regardless_of_declared_footprints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 128 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        allow_heavy_overlap="false",
+        asr_resident_bytes=2 * 1024**3,
+        tts_resident_bytes=2 * 1024**3,
+    )
+
+    services = build_app_services(
+        settings,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=object()),
+    )
+
+    snapshot = services.governor.snapshot()
+    assert snapshot.allow_heavy_overlap is False
+    assert "disabled" in snapshot.policy_reason.lower()
+
+
+def test_composition_keeps_serial_when_enabled_diarization_footprint_is_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 128 * 1024**3)
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        asr_resident_bytes=2 * 1024**3,
+        tts_resident_bytes=5 * 1024**3,
+    )
+
+    services = build_app_services(
+        settings,
+        AppOverrides(
+            batch_transcriber=object(),
+            tts_synthesizer=object(),
+            diarization_engine=object(),
+        ),
+    )
+
+    snapshot = services.governor.snapshot()
+    assert snapshot.allow_heavy_overlap is False
+    assert "unknown" in snapshot.policy_reason.lower()

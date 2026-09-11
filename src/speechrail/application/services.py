@@ -90,20 +90,30 @@ def _heavy_overlap_policy(
     tts_enabled: bool,
     diarization_enabled: bool,
 ) -> tuple[bool, str]:
-    """Use a shared budget and fail closed when model peaks are unmeasured.
+    """Decide whether heavy ASR/TTS compute may overlap.
 
-    MLX cache and memory limits constrain allocator behavior, but they do not
-    describe the resident peak of a loaded model.  Treat enabled inference
-    components as unknown until a measured footprint source exists.
+    Declared `*_resident_bytes` settings feed a shared hardware budget. An
+    enabled component with 0 declared bytes is still unknown and fail-closes
+    under `auto`. `allow_heavy_overlap` may force the decision: "true" always
+    allows overlap and "false" always serializes, both recorded in the reason.
     """
+    if settings.allow_heavy_overlap == "false":
+        return False, "heavy overlap disabled by configuration"
+
+    def _bytes(enabled: bool, declared: int) -> int | None:
+        if not enabled:
+            return 0
+        return declared if declared > 0 else None
 
     footprint = ComponentFootprint(
-        asr_bytes=None if asr_enabled else 0,
-        tts_bytes=None if tts_enabled else 0,
-        diarization_bytes=None if diarization_enabled else 0,
+        asr_bytes=_bytes(asr_enabled, settings.asr_resident_bytes),
+        tts_bytes=_bytes(tts_enabled, settings.tts_resident_bytes),
+        diarization_bytes=_bytes(diarization_enabled, settings.diarization_resident_bytes),
         service_bytes=_SERVICE_OVERHEAD_BYTES,
         device=settings.device,
     )
+    if settings.allow_heavy_overlap == "true":
+        return True, "heavy overlap forced on by configuration"
     try:
         budget = budget_for_hardware(detect_system_memory_bytes())
     except (RuntimeError, ValueError) as exc:

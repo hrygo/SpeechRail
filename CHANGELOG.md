@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-09-11
+
+### Added
+
+- 新增可选的重计算重叠（ASR∥TTS）能力：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP`（`auto`/`true`/`false`，默认 `auto`）与 `SPEECHRAIL_ASR_RESIDENT_BYTES` / `SPEECHRAIL_TTS_RESIDENT_BYTES` / `SPEECHRAIL_DIARIZATION_RESIDENT_BYTES`；仅在显式声明 worker 常驻字节且合计不超过本机物理内存预算时放行 ASR 与 TTS 的重计算重叠，未声明或超预算时 `auto` 保持 fail-closed。
+
+### Changed
+
+- `ResourceGovernor` 的重计算重叠由硬编码关闭改为按声明字节 + 预算判定，默认行为不变（仍 fail-closed）；`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=true` 强制放行并绕过预算，由操作者显式承担内存风险。
+
 ## [2.3.2] - 2026-09-11
 
 ### Fixed
