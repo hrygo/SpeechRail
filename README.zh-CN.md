@@ -361,7 +361,7 @@ flowchart TD
         end
         subgraph Core["2. 运行时调度与协同核心"]
             App["应用服务与 Realtime 会话"]
-            Governor["AdmissionQueue + ResourceGovernor\n(Realtime 容量预留、Batch FIFO/Aging)"]
+            Governor["AdmissionQueue + ResourceGovernor\n(Realtime 容量预留、Batch FIFO/Aging、\n可配置 ASR∥TTS 重计算重叠)"]
             Ledger["AttributionLedger 归属账本\n(16 kHz 采样时钟, 不可变单元)"]
             DiarizeEngine["可选分人 Port\n(FluidAudio CoreML FP16 Swift Worker)"]
             Evictor["WorkerIdleEvictor\n(默认 300 秒；可配置)"]
@@ -396,7 +396,7 @@ flowchart TD
 2. **纯内存零磁盘音频流水线**：请求音频在内存中经三级防护流式处理：Tier 1 WAV 快速通道（无转码切片直读）、Tier 2 管道级内存 `ffmpeg` 流式解码（适配 MP3/Opus/FLAC 等容器）、Tier 3 128MB 硬上限门禁。源音频、中间 PCM、声纹特征向量与转写文本均不落盘，全链路本地闭环，严禁网络静默外呼。
 3. **协同空闲驱逐**：`WorkerIdleEvictor` 按配置的 idle 与 standby 超时管理外部 Worker。待机物理内存以实际基准为准，不作为架构承诺。
 4. **会话级分人边界**：批量分人只输出匿名 label。命名空间 Realtime 扩展使用 16 kHz 会话时钟，后续归属更新不改写转写正文。
-5. **单机共享并发**：`ResourceGovernor` 为 Realtime 预留容量，并让 Batch 以 FIFO 加 aging 规则等待；它不抢占已经进入 Worker 的工作。模式冲突稳定返回 busy 错误，而不是复制模型进程。
+5. **单机共享并发**：`ResourceGovernor` 为 Realtime 预留容量，并让 Batch 以 FIFO 加 aging 规则等待；它不抢占已经进入 Worker 的工作。模式冲突稳定返回 busy 错误，而不是复制模型进程。ASR∥TTS 重计算重叠是可配置、按预算判定的策略（默认 `SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`，启用组件未声明常驻峰值前 fail-closed）：重叠轴仅 ASR∥TTS，TTS∥TTS 与 ASR∥ASR 仍返回 `backend_busy`，不复制 Worker。
 6. **严格职责分离与边界清晰**：SpeechRail 专注于提供纯粹的本地推理运行时、协议转换、资源护栏与会话级匿名标签（`speaker_0`, `speaker_1`）。麦克风硬件调用、扬声器播放、会议议程与数据库持久化、实名声纹库映射、UI 交互以及 LLM 业务编排由调用方应用（如 [Sona](https://github.com/hrygo/sona)）全权负责。
 
 ---

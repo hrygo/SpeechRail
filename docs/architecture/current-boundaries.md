@@ -22,6 +22,7 @@ date: 2026-09-11
 8. Realtime VAD 评分与 `SpeechAdmission` 状态机是一条 endpointing 链；continuous diarization activity 是另一条 speaker evidence 链，不是重复 VAD，也不改写 canonical completed text。
 9. clone ICL 的当前稳定性保证包括请求级确定性 seed、低温度采样、首次有效片段后冻结响度增益、峰值 ceiling 与参考音频有效信号校验；非 `1.0` clone speed 明确拒绝。
 10. 词级时间戳由 ASR 原生输出提供（`timestamp_granularities`），不依赖 aligner；aligner 仅为分人路径服务，不是通用 ASR 依赖。分人（含 aligner）只在 `balanced`/`quality` 档位供给。
+11. ASR∥TTS 重计算重叠是可配置策略（ADR-0016）：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）按声明常驻字节与 `max(4 GiB, host_memory // 2)` 预算 fail-closed 判定——任一启用组件未声明非零峰或总量超预算即串行；`true`/`false` 为运维强制。重叠轴仅 ASR∥TTS，TTS∥TTS 与 ASR∥ASR 仍分别受单 worker 约束返回 `backend_busy`，不复制进程。本机 128 GiB 预算 64 GiB、声明总量 6.66 GiB 时放行；受控 A/B 证据见 [v2.4.0 重叠 ON/OFF 对照](../archive/performance/2026-09-11-v2.4.0-overlap-ab.md)。
 
 ## 明确限制
 

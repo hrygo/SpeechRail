@@ -362,7 +362,7 @@ flowchart TD
         end
         subgraph Core["2. Runtime & Coordination Core"]
             App["Application Services & Realtime Session"]
-            Governor["AdmissionQueue + ResourceGovernor\n(Realtime Capacity Reservation, Batch FIFO/Aging)"]
+            Governor["AdmissionQueue + ResourceGovernor\n(Realtime Capacity Reservation, Batch FIFO/Aging,\nConfigurable ASR∥TTS Overlap)"]
             Ledger["AttributionLedger & Timeline\n(16 kHz Sample Clock, Immutable Units)"]
             DiarizeEngine["Optional Diarization Port\n(FluidAudio CoreML FP16 Swift worker)"]
             Evictor["WorkerIdleEvictor\n(300s default; configurable)"]
@@ -397,7 +397,7 @@ flowchart TD
 2. **Strict In-Memory Zero-Disk Pipeline**: Audio processing operates entirely in memory through a 3-tier pipeline: Tier 1 WAV fast-path (zero-copy header slicing), Tier 2 streaming in-memory `ffmpeg` pipe (for compressed containers), and Tier 3 128MB hard OOM guardrail. Raw audio, intermediate PCM, embeddings, and transcripts are never written to disk or transmitted across the network.
 3. **Coordinated Idle Eviction**: `WorkerIdleEvictor` manages the external workers according to configured idle and standby timeouts. Measured standby footprint remains a benchmark result, not an architecture promise.
 4. **Session-Scoped Diarization**: Batch diarization yields anonymous labels. The namespaced Realtime extension uses the 16 kHz session timeline and later attribution updates do not rewrite transcript text.
-5. **Single-Node Shared Concurrency**: `ResourceGovernor` reserves capacity for realtime work and keeps batch work FIFO with aging. It does not preempt work already admitted to a worker; mode conflicts return stable busy errors instead of spawning duplicate model processes.
+5. **Single-Node Shared Concurrency**: `ResourceGovernor` reserves capacity for realtime work and keeps batch work FIFO with aging. It does not preempt work already admitted to a worker; mode conflicts return stable busy errors instead of spawning duplicate model processes. ASR∥TTS heavy-compute overlap is a configurable, budget-gated policy (`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` by default, fail-closed until enabled components declare their resident peaks): the axis is ASR∥TTS only — TTS∥TTS and ASR∥ASR still return `backend_busy` without duplicating workers.
 6. **Strict Separation of Concerns**: SpeechRail exclusively provides local inference runtimes, protocol translation, resource boundaries, and session-scoped anonymous speaker labelling (`speaker_0`, `speaker_1`). Calling applications (such as [Sona](https://github.com/hrygo/sona)) retain complete ownership of audio I/O hardware, meeting databases, persistent storage, human-in-the-loop speaker renaming, and LLM business orchestration.
 
 ---

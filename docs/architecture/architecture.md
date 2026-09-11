@@ -2,7 +2,7 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.15.0"
+version: "1.16.0"
 date: 2026-09-11
 ---
 
@@ -24,7 +24,7 @@ flowchart TD
         Ingress["REST / WebSocket 路由、鉴权、Request ID、错误 Envelope"]
         Decode["仅音频上传：WAV fast-path 或按需 ffmpeg 管道<br/>有界内存与输入校验"]
         App["应用服务：ASR/TTS 用例、Realtime 会话、可选 JobRunner"]
-        Admit["AdmissionQueue + ResourceGovernor<br/>Realtime 容量预留；Batch FIFO + aging"]
+        Admit["AdmissionQueue + ResourceGovernor<br/>Realtime 容量预留；Batch FIFO + aging<br/>可选 ASR∥TTS 重计算重叠"]
         VAD["Silero 或 legacy VAD、SpeechAdmission、Barge-in"]
         Diar["可选 CoreML 分人 worker<br/>FluidAudio Sortformer FP16<br/>单一连续会话与私有二进制 IPC"]
         Life["RuntimeLifecycle + WorkerIdleEvictor<br/>默认 300 秒；可配置"]
@@ -55,6 +55,7 @@ flowchart TD
 - 分人生产制品固定为 FluidAudio CoreML FP16 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`，使用 `computeUnits=.all` 直接加载已编译 bundle；没有 provider 自动选择、精度降级或 NeMo 回退。运行时选择证据见 D1 报告，质量、尾部和长期资源门仍须单独验收。
 - ASR 的 batch 与 native streaming facade 共享一个物理 owner；它们不是同机同时工作的产品场景，冲突稳定返回 `backend_busy`。
 - `ResourceGovernor` 为 realtime 留出容量，并让 batch 按 FIFO/aging 准入；它不取消或抢占已经进入推理的 batch 工作。
+- ASR∥TTS 重计算重叠是可配置策略（ADR-0016），由声明常驻字节与物理内存预算判定：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）在任一启用组件未声明非零峰、或声明的总量超过 `budget_for_hardware = max(4 GiB, host_memory // 2)` 时 fail-closed 串行，否则放行 ASR 与 TTS 并行；`true`/`false` 是运维与实验强制开关。重叠轴严格限定为 ASR∥TTS：TTS∥TTS 仍受单一 TTS worker 约束，ASR∥ASR（batch 与 native streaming）仍返回 `backend_busy`，且不复制任何 worker 进程。
 - Worker IPC 使用长度前缀、JSON metadata 和可选 raw binary payload。它避免在主进程与 worker 间对 PCM 使用 Base64，但编码、拼接和读取仍会复制字节，不能称为 zero-copy。
 - 分人 worker 在活跃会话结束时由 supervisor 定向取消并回收；IPC 是长度前缀 JSON header 加 PCM16 binary payload。不存在活跃分人会话时，普通 ASR/TTS 不创建或租用该 worker。
 
@@ -153,6 +154,6 @@ sequenceDiagram
 
 - 默认 loopback；非 loopback 必须使用 API key 与明确 origin 策略。
 - 请求路径不下载模型、不读取远程音频 URL、不持久化原始音频或完整转写。
-- 一个 SpeechRail 服务、一个 ASGI worker；不得通过复制模型进程提高吞吐。
+- 一个 SpeechRail 服务、一个 ASGI worker；不得通过复制模型进程提高吞吐（ASR∥TTS 重计算重叠是既有单 worker 进程内的准入策略，不复制进程）。
 - 三档只替换权重与量化组合（含按档位精度策略与是否供给分人制品）；公共 API 契约形状、调度和 worker 协议保持一致，但对外声明能力随档位不同，必须如实声明。
 - 客户端拥有麦克风、播放、会议、数据库和 LLM 编排；SpeechRail 提供本地推理、协议与资源边界。
