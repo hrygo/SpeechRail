@@ -13,7 +13,7 @@ description: >-
 
 - Apple Silicon `arm64`，macOS 14+，Python `>=3.12,<3.13`；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
 - 预留至少 25 GB 磁盘空间，并可访问项目锁定的下载源。
-- profile 推荐以代码中的 `recommend_profile()` 为唯一事实源；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。
+- profile 推荐以代码中的 `recommend_profile()` 为内存兜底建议；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。
 - 安装前确认脚本解析到包含 `pyproject.toml` 的项目根目录；不得从未知目录继续执行。
 
 ## 首选入口
@@ -53,10 +53,10 @@ uv run --python 3.12 python \
 确认后依次完成：
 
 1. 检查架构、macOS、磁盘和依赖；缺失 Xcode CLT、Homebrew、`ffmpeg`、`uv` 或 Python 3.12 时按入口提示安装。
-2. 构建并验证精确 wheel；从 ModelScope 准备 catalog 锁定且逐文件校验的 ASR/TTS 制品，并从固定 Hugging Face revision 准备 CoreML Sortformer FP16 bundle 与 `Qwen3-ForcedAligner-0.6B`。每个文件的 size 与 SHA-256 均须匹配锁定 manifest。
-3. 将四组已校验制品原子发布到 app home，创建隔离 worker runtime，写入权限为 `0600` 的私有配置（含 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`），并执行 managed-runtime preflight。
+2. 构建并验证精确 wheel；从 ModelScope 准备 catalog 锁定且逐文件校验的 ASR/TTS 制品。`balanced`/`quality` 另按档位供给分人制品：从固定 Hugging Face revision 准备 CoreML Sortformer FP16 bundle，并从 ModelScope 按 `preset.aligner` 供给 `aligner-q8` / `aligner-bf16`；`light` 不供给任何分人制品。每个文件的 size 与 SHA-256 均须匹配锁定 manifest。
+3. 将已校验制品原子发布到 app home，创建隔离 worker runtime，写入权限为 `0600` 的私有配置，并执行 managed-runtime preflight。`balanced`/`quality` 的私有配置包含 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与 `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`；`light` 不写这两键。
 4. 安装用户级 `com.speechrail` LaunchAgent；启用时使用统一生命周期 controller。
-5. 使用 `PublicApiSmokeProbe` 在进程内读取必要凭据，验证 health、ready、models、voices、TTS 和 ASR；再以不落盘的短 PCM 调用 `gpt-4o-transcribe-diarize` / `diarized_json`。失败时由安装事务恢复旧指针或清理首次安装状态，并返回非零。
+5. 使用 `PublicApiSmokeProbe` 在进程内读取必要凭据，验证 health、ready、models、voices、TTS 和 ASR；`balanced`/`quality` 再以不落盘的短 PCM 调用 `gpt-4o-transcribe-diarize` / `diarized_json`（`light` 跳过分人 smoke）。失败时由安装事务恢复旧指针或清理首次安装状态，并返回非零。
 
 不要把真实 API key 放进命令参数或 shell 历史，不在仓库内生成测试音频，也不输出完整转写。手工复查仍使用统一探针；只记录 HTTP 状态、request ID、非空音频/转写校验和脱敏错误。
 
@@ -69,7 +69,7 @@ uv run --python 3.12 python \
 - 架构、系统版本、磁盘和 Python 3.12 检查通过；任何回退假设都已披露。
 - 本次 wheel 的 metadata 版本与项目一致，SHA-256 已记录。
 - managed runtime preflight 通过，只有一个目标 listener，PID/executable、profile 和 selection 一致。
-- `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过；`diarization_ready=true`，`/v1/models` 包含 `gpt-4o-transcribe-diarize`，匿名分人 smoke 返回有效 `segments` 数组。
+- `/health`、`/readyz`、`/v1/models`、`/v1/voices` 以及真实 TTS→ASR smoke 通过。`balanced`/`quality` 额外要求 `diarization_ready=true`、`/v1/models` 包含 `gpt-4o-transcribe-diarize`，且匿名分人 smoke 返回有效 `segments` 数组；`light` 应报告分人未配置且 `/v1/models` 不含该别名。
 - 安装失败时旧 runtime/selection 保持可恢复；首次安装失败时不留下可误启动的半配置。
 - 只有显式请求安装 `video-podcast` 时才验证其用户级副本；该技能不是 SpeechRail 服务安装的完成条件。
 
