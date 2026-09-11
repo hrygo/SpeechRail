@@ -2,6 +2,11 @@
 
 本目录保存 SpeechRail 历次性能基准与资源监控报告。归档用于追溯测量与版本演进，**最新基线以时序最新的报告为准**；历史报告反映当时版本与运行条件，非当前承诺。
 
+## 最新三档性能基准（v2.4.0，MINOR）
+
+> **结论**：v2.4.0 已按 `quality → balanced → light → quality` 完成三档性能套件。每档 HTTP ASR/TTS 36/36、Realtime 3/3 与 `phys_footprint` 采样均通过，最终恢复 `quality`。本版新增并启用了可配置的 ASR∥TTS 重计算重叠（`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` + 声明字节），本轮基准在**重叠开启**状态下采集，基线 v2.2.0 为重叠关闭：三档 ASR/TTS warm RTF 与 Realtime commit 普遍上升、内存基本持平，但存在“重叠状态不同 + 背景负载未受控”混淆项，只作方向性观察，性能回归与独立质量 gate 保持 `unset`。详见
+> [v2.4.0 性能与质量基准](2026-09-11-v2.4.0-performance-benchmark.md)。
+
 ## 最新 PATCH 发布验收（v2.2.2，PATCH quality）
 
 > **结论**：v2.2.2 已按 PATCH 范围只测当前 `quality` 档，全程未切换档位。HTTP ASR/TTS 36/36 与 `phys_footprint` 采样通过；本版唯一产品改动是把 `speechrail-mcp` 代理迁移到 MCP Python SDK v2（修复安装态 `-32000 Connection closed`），managed runtime stdio 握手返回 9 个工具。相对 v2.2.1 的 ASR/TTS warm RTF 差值在 −3.7%…+0.7% 内、峰值 +3.7%，按持平处理；Realtime 未执行（本版未改该路径）。性能回归与独立质量 gate 保持 `unset`。详见
@@ -134,6 +139,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v2.4.0** | [2026-09-11-v2.4.0-performance-benchmark.md](2026-09-11-v2.4.0-performance-benchmark.md) | MINOR 三档完整性能基准；新增并启用 ASR∥TTS 重计算重叠；每档 HTTP 36/36、Realtime 3/3 与物理 footprint 采样通过；相对 v2.2.0 RTF/commit 上升、内存持平（重叠状态与背景差异不可比）；性能回归与独立质量 gate unset |
 | **v2.2.2** | [2026-09-11-v2.2.2-performance-benchmark.md](2026-09-11-v2.2.2-performance-benchmark.md) | PATCH quality；HTTP ASR/TTS 36/36 与物理 footprint 采样通过；迁移 `speechrail-mcp` 至 MCP Python SDK v2（修复安装态 `-32000`），managed stdio 握手 9 工具；相对 v2.2.1 持平；Realtime 未执行；性能回归与独立质量 gate unset |
 | **v2.2.1** | [2026-09-10-v2.2.1-performance-benchmark.md](2026-09-10-v2.2.1-performance-benchmark.md) | PATCH quality；HTTP ASR/TTS 36/36、Realtime 3/3 与物理 footprint 采样通过；相对 v2.2.0 持平（仅解耦 worker 启动握手超时）；未切换档位，性能回归与独立质量 gate unset |
 | **v2.2.0** | [2026-09-10-v2.2.0-performance-benchmark.md](2026-09-10-v2.2.0-performance-benchmark.md) | MINOR 三档完整性能基准；HTTP ASR/TTS、Realtime 与物理 footprint 采样通过；相对 v2.1.0 的 RTF/commit 下降与 `light` 峰值上升为方向性观察，性能回归与独立质量 gate unset |
