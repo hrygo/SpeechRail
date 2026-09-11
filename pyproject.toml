@@ -1,6 +1,6 @@
 [project]
 name = "speechrail"
-version = "2.2.1"
+version = "2.2.2"
 description = "Local-first shared speech recognition service with OpenAI-compatible APIs"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -44,11 +44,11 @@ dev = [
     "jsonschema>=4.23",
     "pyyaml>=6.0",
     "numpy>=1.26,<3.0",
-    "mcp>=1.12,<3",
+    "mcp>=2,<3",
     "openai>=2.0,<4.0",
     "pyannote-metrics==4.1",
 ]
-mcp = ["mcp>=1.12,<3"]
+mcp = ["mcp>=2,<3"]
 
 [project.scripts]
 speechrail = "speechrail.__main__:main"

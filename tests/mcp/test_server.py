@@ -1,4 +1,4 @@
-"""Registration/CLI tests for the speechrail-mcp FastMCP server surface."""
+"""Registration/CLI tests for the speechrail-mcp MCPServer surface."""
 
 from __future__ import annotations
 
@@ -37,28 +37,28 @@ def test_tool_schemas_never_leak_client_context() -> None:
     registered = _run(app.list_tools())
     by_name = {tool.name: tool for tool in registered}
 
-    assert set(by_name["describe"].inputSchema.get("properties", {})) == set()
+    assert set(by_name["describe"].input_schema.get("properties", {})) == set()
 
-    transcribe_props = set(by_name["transcribe"].inputSchema.get("properties", {}))
+    transcribe_props = set(by_name["transcribe"].input_schema.get("properties", {}))
     assert transcribe_props == {"audio_ref", "language", "diarize", "timestamps"}
 
-    synthesize_props = set(by_name["synthesize"].inputSchema.get("properties", {}))
+    synthesize_props = set(by_name["synthesize"].input_schema.get("properties", {}))
     assert synthesize_props == {"text", "voice", "output_format", "speed"}
 
-    preview_props = set(by_name["preview_voice"].inputSchema.get("properties", {}))
+    preview_props = set(by_name["preview_voice"].input_schema.get("properties", {}))
     assert preview_props == {"instruction", "text"}
 
-    create_voice_props = set(by_name["create_voice"].inputSchema.get("properties", {}))
+    create_voice_props = set(by_name["create_voice"].input_schema.get("properties", {}))
     assert create_voice_props == {"name", "instruction", "voice_id", "seed"}
 
-    delete_voice_props = set(by_name["delete_voice"].inputSchema.get("properties", {}))
+    delete_voice_props = set(by_name["delete_voice"].input_schema.get("properties", {}))
     assert delete_voice_props == {"voice_id"}
 
-    create_job_props = set(by_name["create_job"].inputSchema.get("properties", {}))
+    create_job_props = set(by_name["create_job"].input_schema.get("properties", {}))
     assert create_job_props == {"kind", "input_ref", "params"}
 
     for tool in registered:
-        schema = tool.inputSchema.get("properties", {})
+        schema = tool.input_schema.get("properties", {})
         assert "client" not in schema
         assert "ctx" not in schema
         assert "context" not in schema

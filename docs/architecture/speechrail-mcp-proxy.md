@@ -106,7 +106,7 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 
 > `instructions` 是**静态常量**（`server.py` 的 `_INSTRUCTIONS`），不随 profile 动态变化；**动态能力发现
 > 走 `describe()` 工具**（实时读 `GET /v1/models` + `GET /v1/voices` + `GET /health`）。上方示例仅示意响应
-> 结构；实际 `discover` 由 FastMCP SDK 生成，`ttlMs`/`cacheScope` 不生效（无状态设计，不缓存能力快照）。
+> 结构；实际 `discover` 由 MCPServer SDK（MCP Python SDK v2）生成，`ttlMs`/`cacheScope` 不生效（无状态设计，不缓存能力快照）。
 
 ---
 

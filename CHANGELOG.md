@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-09-11
+
+### Fixed
+
+- 修复 `speechrail-mcp` 代理在 managed runtime 下启动即崩溃（宿主报 `MCP error -32000: Connection closed`）：`mcp` 依赖上限从 `<2` 被自动放宽到 `<3` 后，安装态解析到 mcp 2.2.0，而代码仍使用 v1 的 `FastMCP` API（`mcp.server.fastmcp` 在 v2 已删除）。
+- 将 `speechrail-mcp` 迁移到 MCP Python SDK v2：`FastMCP` → `MCPServer`，`ToolError` 由 `mcp.server.fastmcp.exceptions` 移至 `mcp.server.mcpserver.exceptions`；工具注册、`stdio`/`streamable-http` 传输与 `ToolError → is_error` 语义保持不变。
+
+### Dependencies
+
+- `mcp` 约束收紧为 `>=2,<3`；`uv.lock` 解析 `mcp 1.29.1 → 2.2.0`，新增 `httpx2`/`httpcore2`/`mcp-types`/`opentelemetry-api`/`truststore`，移除 `httpx-sse`。
+
+### Verification
+
+- 全量 pytest 1535 passed/1 skipped（覆盖率 82.33%）；ruff/mypy/redocly/plutil/git diff --check 通过；真实 stdio `initialize` + `tools/list` 握手返回全部 9 个工具。
+
 ## [2.2.1] - 2026-09-10
 
 ### Fixed

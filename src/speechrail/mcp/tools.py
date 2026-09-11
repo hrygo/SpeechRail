@@ -3,7 +3,7 @@
 Each function is a plain typed async function that takes an explicit
 :class:`~speechrail.mcp.client.SpeechRailClient`, so it can be unit-tested
 against ``httpx.MockTransport`` without the MCP transport.  ``server.py``
-wraps these functions into FastMCP tools whose arguments stay free of any
+wraps these functions into MCPServer tools whose arguments stay free of any
 client/context plumbing.
 
 Proxy policy implemented here (per docs/architecture/speechrail-mcp-proxy-draft.md):

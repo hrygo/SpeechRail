@@ -1,7 +1,7 @@
-"""FastMCP composition root for the ``speechrail-mcp`` proxy process.
+"""MCPServer composition root for the ``speechrail-mcp`` proxy process.
 
 Wires the stateless tool logic (``speechrail.mcp.tools``) onto a REST client
-(``speechrail.mcp.client``) and registers them as FastMCP tools.  The proxy is
+(``speechrail.mcp.client``) and registers them as MCPServer tools.  The proxy is
 a dedicated process: it never imports the SpeechRail FastAPI application and
 never instantiates any model worker.
 """
@@ -13,8 +13,8 @@ import sys
 from collections.abc import Awaitable
 from typing import Any, Literal, cast
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from speechrail.config.auth import resolve_api_key
 from speechrail.mcp import tools
@@ -75,8 +75,8 @@ def _timeout_from_env() -> float:
 _resolve_api_key = resolve_api_key
 
 
-def create_server() -> FastMCP:
-    """Build a FastMCP server bound to the configured SpeechRail daemon.
+def create_server() -> MCPServer:
+    """Build an MCPServer bound to the configured SpeechRail daemon.
 
     Environment:
       SPEECHRAIL_BASE_URL             server base (default http://127.0.0.1:8201/v1)
@@ -92,7 +92,7 @@ def create_server() -> FastMCP:
         api_key=api_key,
         timeout_seconds=_timeout_from_env(),
     )
-    mcp = FastMCP(name=_SERVER_NAME, instructions=_INSTRUCTIONS)
+    mcp = MCPServer(name=_SERVER_NAME, instructions=_INSTRUCTIONS)
 
     @mcp.tool()
     async def describe() -> dict[str, Any]:
