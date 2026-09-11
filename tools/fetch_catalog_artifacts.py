@@ -6,12 +6,24 @@ import json
 import sys
 import urllib.request
 
-# 与既有 5 制品一致：剔除 .gitattributes 与根级 configuration.json；保留 README.md 与 *.index.json
+# 与既有 5 制品一致: 剔除 .gitattributes 与根级 configuration.json; 保留 README.md 与 *.index.json
 EXCLUDE_EXACT = {".gitattributes", "configuration.json"}
 NEW = [
     ("asr-0.6b-q4", "mlx-community/Qwen3-ASR-0.6B-4bit", "qwen3_asr", "asr", (4, 64, "mlx")),
-    ("aligner-q8", "mlx-community/Qwen3-ForcedAligner-0.6B-8bit", "qwen3_forced_aligner", "aligner", (8, 64, "mlx")),
-    ("aligner-bf16", "mlx-community/Qwen3-ForcedAligner-0.6B-bf16", "qwen3_forced_aligner", "aligner", (None, None, "none")),
+    (
+        "aligner-q8",
+        "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
+        "qwen3_forced_aligner",
+        "aligner",
+        (8, 64, "mlx"),
+    ),
+    (
+        "aligner-bf16",
+        "mlx-community/Qwen3-ForcedAligner-0.6B-bf16",
+        "qwen3_forced_aligner",
+        "aligner",
+        (None, None, "none"),
+    ),
 ]
 
 

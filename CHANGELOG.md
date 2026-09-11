@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-09-11
+
+### Added
+
+- 三档按用户定位重排并显式声明各自能力：`light`（Embedded）为 4-bit、不分人；`balanced`（Pro Workflow）为 8-bit 并对齐器 `aligner-q8`；`quality`（Studio）为 8-bit 并对齐器 `aligner-bf16`。
+- 分人能力改为按档位声明：仅 `balanced`/`quality` 对外提供 `gpt-4o-transcribe-diarize`；`light` 不声明分人、也不供给 aligner。
+- `profile apply` 按目标档位供给 aligner 等档位专属制品。
+
+### Changed
+
+- 模型精度改为按档位的 `precision_policy`，取代此前“三档统一 8-bit”的规则；`light` 使用 4-bit ASR/TTS。
+- aligner 改为 catalog 中 diarization-scoped 资产，不再进入 `PreparedModelSet`，因此无需 `prepared_id` 迁移；词级时间戳仍由 ASR 原生提供，不依赖 aligner。
+
 ## [2.2.2] - 2026-09-11
 
 ### Fixed
