@@ -7,6 +7,11 @@
 > **结论**：v2.4.0 已按 `quality → balanced → light → quality` 完成三档性能套件。每档 HTTP ASR/TTS 36/36、Realtime 3/3 与 `phys_footprint` 采样均通过，最终恢复 `quality`。本版新增并启用了可配置的 ASR∥TTS 重计算重叠（`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` + 声明字节），本轮基准在**重叠开启**状态下采集，基线 v2.2.0 为重叠关闭：三档 ASR/TTS warm RTF 与 Realtime commit 普遍上升、内存基本持平，但存在“重叠状态不同 + 背景负载未受控”混淆项，只作方向性观察，性能回归与独立质量 gate 保持 `unset`。详见
 > [v2.4.0 性能与质量基准](2026-09-11-v2.4.0-performance-benchmark.md)。
 
+## 最新专项 A/B（v2.4.0，重叠 ON/OFF）
+
+> **结论**：在同一 `quality` 档用 ABBA（`OFF → ON → ON → OFF`）隔离 `SPEECHRAIL_ALLOW_HEAVY_OVERLAP` 单个变量。重叠开启使 TTS 活跃时放行 ASR：场景 C1 的 governor batch 峰值 1→2、ASR 延迟 ~3.78 s→~0.31 s（≈12×），两半稳定复现。顺序 warm RTF 与 Realtime commit/TTFA 差值接近或落在既有噪声带内（ASR +3.4%、TTS +4.8~5.9%、commit +2.9%、TTFA +4.8%）且受轮次漂移混淆，未见实质退化。由此三档基准「方向性变慢」不能归因于重叠本身。性能回归与独立质量 gate 保持 `unset`。详见
+> [v2.4.0 ASR∥TTS 重计算重叠 ON/OFF A/B 对照](2026-09-11-v2.4.0-overlap-ab.md)。
+
 ## 最新 PATCH 发布验收（v2.2.2，PATCH quality）
 
 > **结论**：v2.2.2 已按 PATCH 范围只测当前 `quality` 档，全程未切换档位。HTTP ASR/TTS 36/36 与 `phys_footprint` 采样通过；本版唯一产品改动是把 `speechrail-mcp` 代理迁移到 MCP Python SDK v2（修复安装态 `-32000 Connection closed`），managed runtime stdio 握手返回 9 个工具。相对 v2.2.1 的 ASR/TTS warm RTF 差值在 −3.7%…+0.7% 内、峰值 +3.7%，按持平处理；Realtime 未执行（本版未改该路径）。性能回归与独立质量 gate 保持 `unset`。详见
@@ -139,6 +144,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **v2.4.0 重叠 A/B** | [2026-09-11-v2.4.0-overlap-ab.md](2026-09-11-v2.4.0-overlap-ab.md) | 单档重叠 ON/OFF ABBA 受控对照；ON 使 C1 governor 峰值 1→2、ASR 延迟 ~3.78→~0.31 s；顺序/Realtime 差在噪声带内；三档变慢不可归因于重叠 |
 | **v2.4.0** | [2026-09-11-v2.4.0-performance-benchmark.md](2026-09-11-v2.4.0-performance-benchmark.md) | MINOR 三档完整性能基准；新增并启用 ASR∥TTS 重计算重叠；每档 HTTP 36/36、Realtime 3/3 与物理 footprint 采样通过；相对 v2.2.0 RTF/commit 上升、内存持平（重叠状态与背景差异不可比）；性能回归与独立质量 gate unset |
 | **v2.2.2** | [2026-09-11-v2.2.2-performance-benchmark.md](2026-09-11-v2.2.2-performance-benchmark.md) | PATCH quality；HTTP ASR/TTS 36/36 与物理 footprint 采样通过；迁移 `speechrail-mcp` 至 MCP Python SDK v2（修复安装态 `-32000`），managed stdio 握手 9 工具；相对 v2.2.1 持平；Realtime 未执行；性能回归与独立质量 gate unset |
 | **v2.2.1** | [2026-09-10-v2.2.1-performance-benchmark.md](2026-09-10-v2.2.1-performance-benchmark.md) | PATCH quality；HTTP ASR/TTS 36/36、Realtime 3/3 与物理 footprint 采样通过；相对 v2.2.0 持平（仅解耦 worker 启动握手超时）；未切换档位，性能回归与独立质量 gate unset |
