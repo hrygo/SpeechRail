@@ -48,6 +48,12 @@ def _settings(**kwargs: object) -> Settings:
     return Settings(_env_file=None, **kwargs)  # type: ignore[arg-type,call-arg]
 
 
+def _aligner_dir(app_home: Path, key: str) -> Path:
+    aligner_dir = app_home / "diarization" / key
+    aligner_dir.mkdir(parents=True, exist_ok=True)
+    return aligner_dir
+
+
 def test_existing_install_without_selection_is_unchanged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -64,17 +70,18 @@ def test_selection_overlays_asr_model_dir_and_keeps_public_identity(
     tmp_path: Path,
     catalog_artifacts: ModelCatalog,
 ) -> None:
-    asr_dir = tmp_path / "models" / "asr-0.6b-q8"
+    asr_dir = tmp_path / "models" / "asr-0.6b-q4"
     asr_dir.mkdir(parents=True)
 
     original = _settings(port=8201, device="mps", dtype="float16")
-    selection = _make_selection(preset="light", asr="asr-0.6b-q8", tts="tts-0.6b-custom-q8")
+    selection = _make_selection(preset="light", asr="asr-0.6b-q4", tts="tts-0.6b-custom-q4")
 
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
     assert resolved.qwen3_model_dir == asr_dir.resolve()
     assert resolved.model_id == original.model_id
-    assert resolved.dtype == "int8"
+    assert resolved.dtype == original.dtype
+    assert resolved.dtype == "float16"
 
 
 def test_preserves_unrelated_user_configurations(
@@ -83,6 +90,7 @@ def test_preserves_unrelated_user_configurations(
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
+    _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings(
         host="127.0.0.2",
@@ -116,6 +124,7 @@ def test_disabled_tts_is_not_automatically_enabled(
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
+    _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings(qwen3_tts_model_dir=None, qwen3_tts_python=None)
     selection = _make_selection()
@@ -133,6 +142,7 @@ def test_enabled_tts_is_updated_to_selected_model(
     asr_dir.mkdir(parents=True)
     tts_dir = tmp_path / "models" / "tts-1.7b-design-q8"
     tts_dir.mkdir(parents=True)
+    _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings(
         qwen3_tts_python=Path("/fake/python"),
@@ -201,6 +211,7 @@ def test_selection_accepts_injected_published_runtime_lock(
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
+    _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings()
     selection = _make_selection()
@@ -252,6 +263,7 @@ def test_disabled_realtime_is_not_automatically_enabled(
 ) -> None:
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
+    _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings(realtime_asr_backend="disabled")
     selection = _make_selection()
@@ -267,7 +279,7 @@ def test_missing_model_directory_raises_error(
 ) -> None:
     original = _settings()
     selection = _make_selection(
-        preset="light", asr="asr-0.6b-q8", tts="tts-0.6b-custom-q8"
+        preset="light", asr="asr-0.6b-q4", tts="tts-0.6b-custom-q4"
     )
 
     with pytest.raises(ValueError, match="missing"):
@@ -332,6 +344,7 @@ def test_accepts_model_catalog_instance_directly(
     catalog = load_catalog()
     asr_dir = tmp_path / "models" / "asr-1.7b-q8"
     asr_dir.mkdir(parents=True)
+    _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings()
     selection = _make_selection()
@@ -368,6 +381,10 @@ def test_preflight_integrates_selection_successfully(
     tts_model = app_home / "models" / "tts-1.7b-design-q8"
     tts_model.mkdir(parents=True)
     (tts_model / "config.json").write_text("{}", encoding="utf-8")
+
+    aligner_dir = _aligner_dir(app_home, "aligner-bf16")
+    (aligner_dir / "config.json").write_text("{}", encoding="utf-8")
+    (aligner_dir / "model.safetensors").touch()
 
     vendor = app_home / "vendor" / "current"
     for executable in (vendor / "bin" / "python", vendor / "ffmpeg" / "bin" / "ffmpeg"):
@@ -415,3 +432,69 @@ def test_preflight_fails_when_selected_model_is_missing(
     settings_check = next(c for c in result.checks if c.name == "settings")
     assert settings_check.ok is False
     assert "configuration validation failed" in settings_check.message
+
+
+def test_selection_overlays_aligner_dir_by_preset(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+    tts_dir = tmp_path / "models" / "tts-0.6b-custom-q8"
+    tts_dir.mkdir(parents=True)
+    aligner_dir = _aligner_dir(tmp_path, "aligner-q8")
+
+    original = _settings(
+        qwen3_tts_python=Path("/fake/python"),
+        qwen3_tts_model_dir=Path("/old/tts/dir"),
+    )
+    selection = _make_selection(
+        preset="balanced", asr="asr-1.7b-q8", tts="tts-0.6b-custom-q8"
+    )
+
+    resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
+
+    assert resolved.qwen3_aligner_model_dir == aligner_dir.resolve()
+    assert resolved.diarization_coreml_model_path is original.diarization_coreml_model_path
+
+
+def test_light_selection_clears_aligner_and_diarization(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-0.6b-q4"
+    asr_dir.mkdir(parents=True)
+
+    original = _settings(
+        qwen3_aligner_model_dir=Path("/old/aligner"),
+        diarization_coreml_model_path=Path("/old/SortformerNvidiaLow_v2.1.mlmodelc"),
+    )
+    selection = _make_selection(
+        preset="light", asr="asr-0.6b-q4", tts="tts-0.6b-custom-q4"
+    )
+
+    resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
+
+    assert resolved.qwen3_aligner_model_dir is None
+    assert resolved.diarization_coreml_model_path is None
+
+
+def test_missing_aligner_directory_raises(
+    tmp_path: Path,
+    catalog_artifacts: ModelCatalog,
+) -> None:
+    asr_dir = tmp_path / "models" / "asr-1.7b-q8"
+    asr_dir.mkdir(parents=True)
+    tts_dir = tmp_path / "models" / "tts-0.6b-custom-q8"
+    tts_dir.mkdir(parents=True)
+
+    original = _settings(
+        qwen3_tts_python=Path("/fake/python"),
+        qwen3_tts_model_dir=Path("/old/tts/dir"),
+    )
+    selection = _make_selection(
+        preset="balanced", asr="asr-1.7b-q8", tts="tts-0.6b-custom-q8"
+    )
+
+    with pytest.raises(ValueError, match="aligner"):
+        resolve_selection(original, selection, catalog_artifacts, tmp_path)

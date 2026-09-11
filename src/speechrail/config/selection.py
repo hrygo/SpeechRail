@@ -17,6 +17,10 @@ from speechrail.config.model_catalog import (
 from speechrail.service.profile_store import SelectionRecord
 
 
+class SelectionError(ValueError):
+    """Raised when managed selection cannot be resolved into runtime settings."""
+
+
 @dataclass(frozen=True, slots=True)
 class ActiveModelCatalog:
     """Public model identity matched from already-resolved managed paths."""
@@ -24,6 +28,8 @@ class ActiveModelCatalog:
     profile: str | None
     asr: ModelArtifact | None
     tts: ModelArtifact | None
+    aligner: str | None
+    diarization: bool
 
 
 def active_model_catalog(
@@ -38,15 +44,27 @@ def active_model_catalog(
     tts_key = settings.qwen3_tts_model_dir.name if settings.qwen3_tts_model_dir else None
     asr = artifacts.get(asr_key) if asr_key else None
     tts = artifacts.get(tts_key) if tts_key else None
-    profile = next(
+    matched_preset = next(
         (
-            preset.id
+            preset
             for preset in resolved_catalog.presets
             if preset.asr == asr_key and preset.tts == tts_key
         ),
         None,
     )
-    return ActiveModelCatalog(profile=profile, asr=asr, tts=tts)
+    aligner = (
+        settings.qwen3_aligner_model_dir.name
+        if settings.qwen3_aligner_model_dir
+        else None
+    )
+    diarization = matched_preset.diarization if matched_preset is not None else False
+    return ActiveModelCatalog(
+        profile=matched_preset.id if matched_preset is not None else None,
+        asr=asr,
+        tts=tts,
+        aligner=aligner,
+        diarization=diarization,
+    )
 
 
 def resolve_selection(
@@ -148,6 +166,18 @@ def resolve_selection(
         "qwen3_python": vendor_python,
         "ffmpeg_path": vendor_ffmpeg,
     }
+
+    if expected_preset.aligner is None:
+        updates["qwen3_aligner_model_dir"] = None
+        updates["diarization_coreml_model_path"] = None
+    else:
+        aligner_dir = (resolved_app_home / "diarization" / expected_preset.aligner)
+        if not aligner_dir.is_dir():
+            raise SelectionError(f"aligner snapshot is missing: {expected_preset.aligner}")
+        updates["qwen3_aligner_model_dir"] = aligner_dir
+        if not expected_preset.diarization:
+            updates["diarization_coreml_model_path"] = None
+
     if asr_artifact.quantization.bits == 8:
         updates["dtype"] = "int8"
 
@@ -158,4 +188,4 @@ def resolve_selection(
     return settings.model_copy(update=updates)
 
 
-__all__ = ["ActiveModelCatalog", "active_model_catalog", "resolve_selection"]
+__all__ = ["ActiveModelCatalog", "SelectionError", "active_model_catalog", "resolve_selection"]
