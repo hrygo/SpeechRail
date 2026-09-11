@@ -48,6 +48,7 @@ profile 对 API 调用方透明。报告必须记录 `/v1/models` 与 `/v1/voice
 8. 同轮比较使用同一 fixture 字节、文本、请求参数、运行环境和静默背景负载。任何变化都标记为“不可直接比较”。
 9. API key 由共享 resolver 读取：显式 `SPEECHRAIL_API_KEY` 优先，其次是 `SPEECHRAIL_APP_HOME`（默认 managed app home）下的 `config/.env`；不得 `source` 配置，不出现在命令、报告或日志中。
 10. 基准开始、每次切档前和最终恢复后都要隔离外部 realtime 客户端：用 `lsof -nP -iTCP:<port>` 排除 `ESTABLISHED` 连接，并用已配置鉴权读取 `/metrics` 确认 `realtime_active_sessions=0`、batch/realtime active requests 均为 0。Sona、浏览器标签页或其它客户端不会随服务 stop 自动断开；发现活动客户端时暂停采集并报告阻塞，等待客户端自行断开，只有用户明确授权才按精确 PID 关闭指定客户端。顺序 ASR 仍返回 `429 backend_busy` 时停止采集并记录根因，不循环重试或复用旧数据。
+11. 重计算重叠是 v2.4.0 起已启用并经 A/B 验证的固定策略：所有发布基准默认在 `SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（叠加声明的 `*_RESIDENT_BYTES` 物理预算）下采集，并在报告「测量身份与可比性」中记录该状态；**不再执行重叠 OFF 对照**——该问题已由 `docs/archive/performance/2026-09-11-v2.4.0-overlap-ab.md` 结案，如需重开必须有用户明确要求。重叠轴是 ASR∥TTS 而非 ASR∥ASR：单 ASR worker 同时只放行一个 batch 请求，多路并发 ASR 超出部分稳定返回 `429 backend_busy`，不得当作重叠生效或性能回归的证据（重叠路径测量入口为 `examples/perf/bench_overlap.py`，默认 `--concurrency 1`）。
 
 ## 4. 基础发布套件（每个 profile）
 
@@ -200,6 +201,7 @@ MINOR/MAJOR：
 | profile / artifact / quantization | ... | ... | 是/否 |
 | fixture digest / benchmark schema | ... | ... | 是/否 |
 | warmup / N / 背景负载 | ... | ... | 是/否 |
+| 重计算重叠状态 | auto (ON) | auto (ON) | 是/否 |
 
 说明任何不可比较项；原始制品只记录仓库外相对位置与 digest，不记录私人绝对路径。
 
