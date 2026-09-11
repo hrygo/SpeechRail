@@ -17,7 +17,7 @@ date: 2026-09-11
    `light` 不供给 aligner 与 CoreML 路径。
 4. QwenPaw 的历史接入记录不能替代当前配置/模型状态；再次切换前必须单独 smoke。
 5. 默认 loopback，非 loopback 配置必须有 API key；敏感音频/文本不写入仓库或常规日志。
-6. 当前受管质量档为 `2.0.3`，由源码 wheel 安装；运行时 health 已验证 `auto → silero`、`speech_admission_enabled=true`、CoreML Sortformer FP16 ready。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
+6. 当前受管质量档为 `2.3.0`，由源码 wheel 安装；运行时 health 已验证 `auto → silero`、`speech_admission_enabled=true`、CoreML Sortformer FP16 ready。源码修改必须重新构建并走 managed release，不能直接改 `runtime/current`。
 7. `server_vad` 的 generic contract 默认值与调用方策略分离：Sona subtitle 为 `0.65/300ms/400ms`，meeting 为 `0.65/300ms/900ms`（threshold/prefix/silence）。SpeechRail 不替调用方决定其业务 endpointing 窗口。
 8. Realtime VAD 评分与 `SpeechAdmission` 状态机是一条 endpointing 链；continuous diarization activity 是另一条 speaker evidence 链，不是重复 VAD，也不改写 canonical completed text。
 9. clone ICL 的当前稳定性保证包括请求级确定性 seed、低温度采样、首次有效片段后冻结响度增益、峰值 ceiling 与参考音频有效信号校验；非 `1.0` clone speed 明确拒绝。
@@ -45,7 +45,7 @@ date: 2026-09-11
 | Realtime ASR commit→completed（10s） | 1.8-4.2s（RTF 0.18-0.42x） |
 | Realtime TTS 首音频块 | 51-223ms |
 | worker 常驻内存（ASR/streaming/TTS） | 1.96GB / 1.96GB / 4.76GB |
-| 当前 v2.0.3 health / Realtime VAD / CoreML profile | ready；Silero + speech admission；CoreML Sortformer FP16 configured/ready |
+| 当前 v2.3.0 health / Realtime VAD / CoreML profile | ready；Silero + speech admission；CoreML Sortformer FP16 configured/ready |
 | diarization DER/JER、unknown 比例与两小时资源行为 | 仍需独立真实语料验收，保持 `unset` |
 
 ## 验收门（未实测，须在对应场景完成）

@@ -86,7 +86,11 @@ catalog v2 把 aligner 改为**分人专用、按档位供给**的制品，并�
 升级已有安装的步骤如下：
 
 1. **部署新 release**：按[运行时与部署](runtime-deployment.md) 的 ADR-0014 managed 流程构建 wheel 并安装候选
-   release；安装机制本身不变。
+   release。对 `balanced`/`quality`，本步要求目标档 aligner snapshot（`aligner-q8` / `aligner-bf16`）已存在：
+   否则新 wheel 的 preflight 会在启用候选 release 前 fail closed，而负责供给 aligner 的 `profile apply <tier>`
+   此时也执行不了，形成循环。`install_managed` 正在修复为自行按档位供给 aligner（见 2.3.1）；在该安装版本
+   具备此行为之前，须先用一个能够供给的 runtime 执行 `speechrail setup` / `profile apply <tier>` 确保目标档
+   资产存在，再部署新 release。
 2. **执行一次 `profile apply <tier>`**：它按固定顺序“准备模型 → 准备可选 VAD → 准备分人制品 → 切换
    selection”，为 `balanced` 供给 `aligner-q8`、为 `quality` 供给 `aligner-bf16` 到
    `app_home/diarization/<aligner-key>`，并写入 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` 与
@@ -95,6 +99,9 @@ catalog v2 把 aligner 改为**分人专用、按档位供给**的制品，并�
 3. **清理旧 aligner 目录**：新 release 不再引用旧的 `app_home/diarization/Qwen3-ForcedAligner-0.6B`
    （内置 BF16 Hugging Face 常量已移除）。`profile apply` 成功且
    `uv run speechrail service preflight --app-home "$APP_HOME"` 通过后，即可清理该旧目录。
+
+> 注：managed 三档使用 `aligner-q8` / `aligner-bf16`；`configs/*.example.*` 里的
+> `Qwen3-ForcedAligner-0.6B` 只是 manual-explicit-env 示例占位，不是 managed 供给的资产。
 
 **无 prepared_id / registry 迁移**：aligner 不进入 `PreparedModelSet`，`prepare_models` / `_prepared_id` /
 selection schema 均不变。`resolve_selection` 仅依 preset 派生 `qwen3_aligner_model_dir` 与

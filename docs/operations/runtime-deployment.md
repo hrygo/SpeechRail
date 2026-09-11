@@ -50,6 +50,7 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权�
   `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` / `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR`。
 - 内置 BF16 `Qwen3-ForcedAligner-0.6B` Hugging Face 常量已移除；aligner revision 与逐文件哈希随 catalog 锁定。
 - 词级时间戳由 ASR 原生提供，与 aligner 无关；aligner 只在分人路径对固定正文做对齐。
+- managed 三档使用 catalog 固定的 tier aligner（`balanced` → `aligner-q8`、`quality` → `aligner-bf16`）；`configs/*.example.*` 里的 `Qwen3-ForcedAligner-0.6B` 只是手工显式环境（manual explicit env）的示例占位，不是 managed 路径实际供给的资产。
 - `speechrail profile apply <tier>` 按上述组成切换，顺序固定为：准备模型 → 准备可选 VAD → 准备分人制品 →
   切换 selection。分人档位写入两条分人路径键；`light` 则移除它们。
 
@@ -171,6 +172,14 @@ python3 scripts/verify_release.py \
 升级先安装到新的 release runtime，完成 preflight 和真实 ASR/TTS smoke 后才切换
 `runtime/current` 并重启；失败时恢复旧 `current`。README 不固定发布版本，包文件名和 package
 metadata 仍保留用于升级、回滚和审计的版本信息。
+
+> [!IMPORTANT]
+> **分人档升级的 aligner 前置条件**：对 `balanced`/`quality`，安装步骤的前提是该档 aligner snapshot
+> （`aligner-q8` / `aligner-bf16`）已经存在。若目标 app home 尚无该档 aligner，新 wheel 的 preflight
+> 会在候选 release 启用前 fail closed；此时用于供给 aligner 的 `profile apply <tier>` 也执行不了，形成循环。
+> `install_managed` 正在修复为自行按档位供给 aligner（见 2.3.1）；在具体安装版本具备该行为之前，操作者
+> 必须先确保目标档位资产已存在（例如用一个能够供给的 runtime 先执行 `speechrail setup` /
+> `profile apply <tier>`），再切换新 release。
 
 若 private `.env` 设置 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH`，managed installer 会将该
 release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wheel 内

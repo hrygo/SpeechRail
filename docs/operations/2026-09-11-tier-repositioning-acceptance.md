@@ -3,7 +3,7 @@ title: "SpeechRail v2.3.0 三档重定位验收报告 (TIER-REPOS-E)"
 status: active
 type: acceptance_report
 category: tier-repositioning
-version: "1.1.0"
+version: "1.2.0"
 date: 2026-09-11
 ---
 
@@ -17,7 +17,7 @@ date: 2026-09-11
 
 | 门 | 结果 | 证据 |
 |---|---|---|
-| E1 ASR 精度（0.6B q4 vs q8） | **pass（代理语料）**；正式真人语料仍 `unset` | 6 条独立 macOS `say` 语料直连生产 ASR worker：q4=q8=0.0556，绝对增量 0.0pp ≤ 0.5pp，见 E1 节 |
+| E1 ASR 精度（0.6B q4 vs q8） | **UNVERIFIED-BLOCKING（仅代理语料）**；正式真人语料仍 `unset` | 6 条独立 macOS `say` 语料直连生产 ASR worker：q4=q8=0.0556，绝对增量 0.0pp ≤ 0.5pp，见 E1 节 |
 | E2 TTS 质量（q4 vs q8） | **pass**（客观指标）；MOS/ABX `unset` | 同一 `serena` 音色、同一短句/长文，`voice_quality_v1` 客观指标已测，见 E2 节 |
 | E3 分人/对齐（aligner-q8 vs bf16） | **UNVERIFIED-BLOCKING** | 已用构造式多说话人参考实测尝试，服务稳定拒收合成语料（`diarization_unresolved`/`diarization_invalid_output`）；缺授权真人参考 RTTM/UEM，见 E3 节 |
 | E4 资源包络（三档） | **pass** | 同 tick `phys_footprint` 峰值 3.37 / 5.31 / 6.40 GiB，均低于 8/16/32 GB 包络，`gate_complete=True` |
@@ -97,9 +97,9 @@ date: 2026-09-11
 
 **MOS / ABX / 人工自然度**：这些档位从未做过人工听测，按 SOP 记为 `unset`，本报告不编造任何 MOS 或偏好分数。
 
-## E1 ASR 精度（0.6B q4 vs q8）— pass（代理语料）
+## E1 ASR 精度（0.6B q4 vs q8）— UNVERIFIED-BLOCKING（仅代理语料）
 
-**结果**：`pass`（相对增量门满足），但基于**合成代理语料**，不构成本机正式的人声质量结论。
+**结果**：`UNVERIFIED-BLOCKING（仅代理语料）`。相对增量门仅在该**合成代理语料**集合上满足，不构成本门 gate pass，也不构成本机正式的人声质量结论。
 
 **方法**：用与 SpeechRail TTS 无关的 macOS `say` 生成 6 条独立语料（zh×3、en×3），`ffmpeg` 转 16 kHz mono PCM16，直接驱动生产 `speechrail.backends.qwen3_worker`（`--dtype int8`，`PYTHONPATH` 指向 managed release site-packages，无需第二 HTTP 实例），分别对 `asr-0.6b-q4` 与 `asr-0.6b-q8` 转写；中文按字符级 CER、英文按词级 WER，并对参考单元数做长度加权聚合。
 
@@ -129,7 +129,7 @@ date: 2026-09-11
 
 | Gate | 结果 | 证据 / 原因 |
 |---|---|---|
-| E1 ASR 精度（代理） | pass | 6 条独立 `say` 语料，q4=q8=0.0556，Δ0.0pp ≤ 0.5pp |
+| E1 ASR 精度（代理） | UNVERIFIED-BLOCKING（仅代理语料） | 6 条独立 `say` 语料，q4=q8=0.0556，Δ0.0pp ≤ 0.5pp；仅代理，不构成 gate pass |
 | E1 ASR 精度（真人语料） | unset | 无版本固定、人工核对的独立真人语料 |
 | E2 TTS 质量（客观） | pass | `voice_quality_v1` 指标已测，q4/q8 差异见 E2 表 |
 | E2 MOS/ABX | unset | 从未对这两档做人工听测 |
@@ -148,7 +148,7 @@ date: 2026-09-11
 
 ## 限制与未验证
 
-- E1 仅用合成代理语料得出相对增量；真人语料 CER/WER 为 `unset`。
+- E1 不是 gate pass：仅用合成代理语料得出相对增量，按 `UNVERIFIED-BLOCKING（仅代理语料）` 记录；真人语料 CER/WER 为 `unset`。
 - E3 为 `UNVERIFIED-BLOCKING`，未产生 DER/SACER 数字；已实证合成多说话人语料不可用，且确认 2.3.0 分人路径在真实短音频上无回归。
 - E2 只测客观输出指标；MOS/ABX、人工自然度、跨文本身份相似度、跨重启一致性均为 `unset`。
 - E4 是单轮、单机测量；分人 worker 懒加载，未常驻采样窗口，未计入峰值。这些数值不构成跨机器的通用内存承诺，也非"常驻内存保证"。
