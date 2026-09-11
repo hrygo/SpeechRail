@@ -38,6 +38,7 @@ SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、[Son
 - 不在日志、fixture 或报告中记录 API key、Authorization、原始音频、Base64、完整 prompt、完整转写、embedding、姓名或绝对模型路径。
 - 一次只运行一个 SpeechRail 服务和一个 ASGI worker；不要通过复制模型进程提高吞吐。
 - batch ASR 与 streaming ASR 不作为同机同时工作的产品场景；共享 worker 的模式冲突应稳定返回 `backend_busy`。
+- ASR∥TTS 重计算重叠是唯一受支持的重计算并发：由 `SPEECHRAIL_ALLOW_HEAVY_OVERLAP`（默认 `auto`）与声明的 `*_RESIDENT_BYTES` 按 `max(4 GiB, 物理内存 // 2)` 预算判定，任一启用组件未声明非零峰或总量超预算即 fail-closed 串行；只重叠 ASR∥TTS，TTS∥TTS 与 ASR∥ASR 仍受单 worker 约束返回 `backend_busy`，不复制进程（ADR-0016）。
 - 三档改变权重、按档位量化精度与是否供给分人制品；API 契约形状、worker 协议、调度和服务架构保持共享，但对外声明能力随档位不同，必须如实声明、不伪造不可用功能（light 不声明分人）。
 - 精度按档位：`light` 0.6B ASR + 0.6B CustomVoice 8-bit（`asr-0.6b-q8` / `tts-0.6b-custom-q8`）、无 aligner/分人/CoreML；`balanced` 1.7B ASR + 0.6B CustomVoice 8-bit、`aligner-q8`、分人开启；`quality` 1.7B ASR + 1.7B VoiceDesign 8-bit、`aligner-bf16`、分人开启。三档均 8-bit，仅 `quality` aligner 为 bf16。4-bit `asr-0.6b-q4` / `tts-0.6b-custom-q4` 经 E1 在公开真人语料实测（相对 8-bit 基线劣化 1.38pp > 0.5pp 阈值）未采纳，制品保留在 catalog 但不再被任何档位使用。词级时间戳由 ASR 原生提供、不依赖 aligner；仅供给分人的档位声明 `gpt-4o-transcribe-diarize`。
 - `/v1/realtime` 只实现 ASR/TTS 子集，不承载 LLM response、tool call、播放、会议或应用打断策略。
