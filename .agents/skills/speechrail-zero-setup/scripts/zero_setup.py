@@ -125,6 +125,7 @@ from tools.install_macos import (  # noqa: E402
 )
 
 from speechrail import __version__  # noqa: E402
+from speechrail.config.model_catalog import load_catalog  # noqa: E402
 from speechrail.service.diarization_assets import (  # noqa: E402
     DiarizationAssetError,
     prepare_diarization_assets,
@@ -379,9 +380,11 @@ def run_zero_setup(
     _log("INSTALL", f"开始拉取锁定模型并安装隔离运行时 (预设: {selected_preset})...")
     _log(
         "INSTALL",
-        "首次下载含 ASR/TTS、CoreML Sortformer 与 ForcedAligner，并完成 SHA-256 校验；"
-        "请保持网络连接稳定。",
+        "首次下载含 ASR/TTS 制品，并按档位供给分人资产（balanced/quality 含 CoreML Sortformer 与 "
+        "ForcedAligner；light 不供给），全程完成 SHA-256 校验；请保持网络连接稳定。",
     )
+
+    diarization_enabled = load_catalog().preset(selected_preset).diarization
 
     post_enable = None
     if enable:
@@ -395,7 +398,8 @@ def run_zero_setup(
                     prepared_id=prepared_id,
                     api_key=_read_api_key(candidate_home),
                 )
-                _run_diarization_smoke_test(base_url, api_key=_read_api_key(candidate_home))
+                if diarization_enabled:
+                    _run_diarization_smoke_test(base_url, api_key=_read_api_key(candidate_home))
             elif not _wait_for_ready(base_url, timeout_seconds=45):
                 raise InstallerError("service did not become ready")
 
@@ -405,7 +409,9 @@ def run_zero_setup(
     with httpx.Client(timeout=timeout) as client:
         downloader = ModelScopeDownloader(client=client)
         try:
-            assets = prepare_diarization_assets(resolved_app_home, client=client)
+            assets = prepare_diarization_assets(
+                resolved_app_home, preset_id=selected_preset, downloader=downloader
+            )
         except DiarizationAssetError as exc:
             raise InstallerError("diarization asset preparation failed") from exc
         result = install_managed(
@@ -415,9 +421,13 @@ def run_zero_setup(
             downloader=downloader,
             enable=enable,
             post_enable=post_enable,
-            diarization_assets=DiarizationInstallPaths(
-                coreml_model_path=assets.coreml_model_path,
-                aligner_model_dir=assets.aligner_model_dir,
+            diarization_assets=(
+                DiarizationInstallPaths(
+                    coreml_model_path=assets.coreml_model_path,
+                    aligner_model_dir=assets.aligner_model_dir,
+                )
+                if assets is not None
+                else None
             ),
         )
 

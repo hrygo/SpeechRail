@@ -339,6 +339,45 @@ def test_managed_install_writes_verified_diarization_paths_for_fresh_install(
     assert f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={aligner}" in config
 
 
+def test_managed_install_without_diarization_assets_omits_diarization_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel, app_home = _inputs(tmp_path)
+    calls: list[tuple[str, ...]] = []
+    runtime = _fake_runtime(tmp_path)
+
+    async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
+        del preset_id, kwargs
+        return "prepared-light"
+
+    monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)
+    monkeypatch.setattr(install_macos, "prepare_runtime", lambda *args, **kwargs: runtime)
+    monkeypatch.setattr(
+        install_macos,
+        "run_preflight",
+        lambda *args, **kwargs: PreflightResult(ok=True, checks=()),
+    )
+
+    install_macos.install_managed(
+        wheel,
+        app_home=app_home,
+        preset_id="light",
+        downloader=object(),
+        runtime_runner=lambda command: subprocess.CompletedProcess(
+            command, 0, stdout="", stderr=""
+        ),
+        runner=_runner_that_creates_python(calls),
+        diarization_assets=None,
+    )
+
+    requirement = next(command[-1] for command in calls if command[:2] == ("uv", "pip"))
+    assert requirement.endswith("[mcp]")
+    assert "[diarization]" not in requirement
+    config = (app_home / "config" / ".env").read_text(encoding="utf-8")
+    assert "SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH" not in config
+    assert "SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR" not in config
+
+
 def test_managed_install_same_preset_reuses_wheel_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

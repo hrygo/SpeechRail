@@ -5,6 +5,7 @@ import shutil
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -226,13 +227,20 @@ def test_zero_setup_keeps_video_skill_install_optional(
         )
 
     monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
-    monkeypatch.setattr(
-        zero_setup,
-        "prepare_diarization_assets",
-        lambda app_home, **kwargs: SimpleNamespace(
+
+    def fake_prepare_diarization_assets(
+        app_home: Path, *, preset_id: str, downloader: object
+    ) -> SimpleNamespace | None:
+        del downloader
+        if preset_id == "light":
+            return None
+        return SimpleNamespace(
             coreml_model_path=app_home / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
             aligner_model_dir=app_home / "diarization" / "Qwen3-ForcedAligner-0.6B",
-        ),
+        )
+
+    monkeypatch.setattr(
+        zero_setup, "prepare_diarization_assets", fake_prepare_diarization_assets
     )
 
     zero_setup.run_zero_setup(
@@ -344,3 +352,127 @@ def test_zero_setup_smoke_failure_is_fatal(
             app_home=tmp_path / "app",
             prepared_id="prepared-quality",
         )
+
+
+def _load_zero_setup(module_name: str) -> Any:
+    zero_setup_path = (
+        PROJECT_ROOT
+        / ".agents"
+        / "skills"
+        / "speechrail-zero-setup"
+        / "scripts"
+        / "zero_setup.py"
+    )
+    spec = importlib.util.spec_from_file_location(module_name, zero_setup_path)
+    assert spec is not None and spec.loader is not None
+    zero_setup = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = zero_setup
+    spec.loader.exec_module(zero_setup)
+    return zero_setup
+
+
+class _FakeZeroSetupClient:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+
+    def __enter__(self) -> _FakeZeroSetupClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        del args
+
+
+def _drive_smoke_provisioning(
+    zero_setup: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    preset: str,
+    assets: object,
+) -> tuple[list[str], list[object]]:
+    events: list[str] = []
+    captured_assets: list[object] = []
+    wheel = tmp_path / "speechrail.whl"
+    wheel.write_bytes(b"test wheel")
+
+    monkeypatch.setattr(zero_setup, "_check_system_prerequisites", lambda: None)
+    monkeypatch.setattr(zero_setup, "_get_physical_memory_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(zero_setup, "_build_wheel", lambda: wheel)
+    monkeypatch.setattr(zero_setup.httpx, "Client", _FakeZeroSetupClient)
+    monkeypatch.setattr(zero_setup, "_run_smoke_test", lambda *a, **k: events.append("asr_tts"))
+    monkeypatch.setattr(
+        zero_setup,
+        "_run_diarization_smoke_test",
+        lambda *a, **k: events.append("diarization"),
+    )
+
+    def fake_prepare(
+        app_home: Path, *, preset_id: str, downloader: object
+    ) -> object:
+        del app_home, downloader
+        assert preset_id == preset
+        return assets
+
+    monkeypatch.setattr(zero_setup, "prepare_diarization_assets", fake_prepare)
+
+    def fake_install_managed(*args: object, **kwargs: object) -> SimpleNamespace:
+        del args
+        captured_assets.append(kwargs.get("diarization_assets"))
+        post_enable = kwargs.get("post_enable")
+        assert callable(post_enable)
+        post_enable(tmp_path / "app", f"prepared-{preset}")
+        return SimpleNamespace(
+            app_home=tmp_path / "app",
+            plist_path=tmp_path / "com.speechrail.plist",
+            enabled=True,
+        )
+
+    monkeypatch.setattr(zero_setup, "install_managed", fake_install_managed)
+
+    zero_setup.run_zero_setup(
+        preset=preset,
+        app_home=tmp_path / "app",
+        enable=True,
+        run_smoke=True,
+        confirmed=True,
+    )
+    return events, captured_assets
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
+    reason="zero-setup is a macOS Python 3.12 entry point",
+)
+def test_zero_setup_light_skips_diarization_smoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zero_setup = _load_zero_setup("speechrail_zero_setup_light_gate_test")
+
+    events, captured_assets = _drive_smoke_provisioning(
+        zero_setup, tmp_path, monkeypatch, preset="light", assets=None
+    )
+
+    assert events == ["asr_tts"]
+    assert captured_assets == [None]
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin" or not ((3, 12) <= sys.version_info < (3, 13)),
+    reason="zero-setup is a macOS Python 3.12 entry point",
+)
+def test_zero_setup_balanced_runs_diarization_smoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    zero_setup = _load_zero_setup("speechrail_zero_setup_balanced_gate_test")
+    assets = SimpleNamespace(
+        coreml_model_path=tmp_path / "app" / "diarization" / "SortformerNvidiaLow_v2.1.mlmodelc",
+        aligner_model_dir=tmp_path / "app" / "diarization" / "aligner-q8",
+    )
+
+    events, captured_assets = _drive_smoke_provisioning(
+        zero_setup, tmp_path, monkeypatch, preset="balanced", assets=assets
+    )
+
+    assert events == ["asr_tts", "diarization"]
+    assert len(captured_assets) == 1
+    assert captured_assets[0] is not None
