@@ -133,6 +133,59 @@ def test_main_prints_help_without_running(capsys: pytest.CaptureFixture[str]) ->
     assert "usage: speechrail-mcp" in captured.out
 
 
+def test_streamable_http_defaults_to_loopback_8202(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SPEECHRAIL_MCP_HOST", raising=False)
+    monkeypatch.delenv("SPEECHRAIL_MCP_PORT", raising=False)
+    assert server._host_from_env() == "127.0.0.1"
+    assert server._port_from_env() == 8202
+
+
+def test_mcp_host_and_port_are_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPEECHRAIL_MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("SPEECHRAIL_MCP_PORT", "9200")
+    assert server._host_from_env() == "0.0.0.0"
+    assert server._port_from_env() == 9200
+
+
+def test_invalid_mcp_port_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SPEECHRAIL_MCP_PORT", "not-a-port")
+    assert server._port_from_env() == 8202
+    monkeypatch.setenv("SPEECHRAIL_MCP_PORT", "70000")
+    assert server._port_from_env() == 8202
+
+
+def _capturing_server(recorded: dict[str, Any]) -> Any:
+    class _Spy:
+        def run(self, **kwargs: Any) -> None:
+            recorded.update(kwargs)
+
+    return _Spy()
+
+
+def test_main_streamable_http_binds_configured_host_and_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: dict[str, Any] = {}
+    monkeypatch.setattr(server, "create_server", lambda: _capturing_server(recorded))
+    monkeypatch.delenv("SPEECHRAIL_MCP_HOST", raising=False)
+    monkeypatch.delenv("SPEECHRAIL_MCP_PORT", raising=False)
+    assert server.main(["--transport", "streamable-http", "--port", "9001"]) == 0
+    assert recorded == {"transport": "streamable-http", "host": "127.0.0.1", "port": 9001}
+
+
+def test_main_stdio_does_not_bind_a_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded: dict[str, Any] = {}
+    monkeypatch.setattr(server, "create_server", lambda: _capturing_server(recorded))
+    assert server.main([]) == 0
+    assert recorded == {"transport": "stdio"}
+
+
+def test_main_rejects_invalid_port(capsys: pytest.CaptureFixture[str]) -> None:
+    assert server.main(["--transport", "streamable-http", "--port", "abc"]) == 2
+    captured = capsys.readouterr()
+    assert "invalid port" in captured.err
+
+
 def test_resolve_api_key_prefers_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SPEECHRAIL_API_KEY", "env-key")
     assert server._resolve_api_key() == "env-key"

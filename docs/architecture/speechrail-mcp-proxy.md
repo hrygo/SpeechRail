@@ -2,7 +2,7 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.2.0"
+version: "1.2.1"
 date: 2026-09-11
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
@@ -12,6 +12,11 @@ supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 > **状态声明**：本文档描述**已实现**的外置 `speechrail-mcp` 进程（合并于 `feat/speechrail-mcp`，
 > PR #15，2026-09-07）。当前行为以 `src/speechrail/mcp/` 代码与实测为准；REST 契约仍以
 > `contracts/openapi.yaml` 为唯一事实来源。本文档记录 MCP 工具清单与设计取舍。
+>
+> **v1.2.1 变更**（2026-09-11）：
+> - **streamable-http 绑定可配置**：默认从 MCP SDK 默认 `127.0.0.1:8000` 改为 `127.0.0.1:8202`
+>   （避开本地常见的 8000 端口占用），并支持 `SPEECHRAIL_MCP_HOST` / `SPEECHRAIL_MCP_PORT`
+>   或 `--host` / `--port` 覆盖；`stdio`（默认 transport）不绑定任何端口，行为不变。
 >
 > **v1.2.0 变更**（2026-09-11，MCP 2026-07-28 最佳实践升级）：
 > - **serverInfo** 补齐 `title`/`description`/`version`（`version` 取自 `speechrail.__version__`，不再是空串）；
@@ -314,8 +319,9 @@ per-tool 授权矩阵属**运维安全**，降为附录 B。
   3. 均无 → keyless（本机 loopback 免 key）。
 - **零配置**：本机服务已配置 key 时，`speechrail-mcp` 启动即自动从 `config/.env` 读取并鉴权，无需手动设
   `SPEECHRAIL_API_KEY`；keyless 本机连接也无需填占位符。
-- 其余环境变量：`SPEECHRAIL_BASE_URL`（默认 `http://127.0.0.1:8201`）、`SPEECHRAIL_MCP_TIMEOUT_SECONDS`、
-  `SPEECHRAIL_MCP_TRANSPORT`（`stdio|streamable-http`）。
+- 其余环境变量：`SPEECHRAIL_BASE_URL`（默认 `http://127.0.0.1:8201/v1`，不带 `/v1` 亦可）、`SPEECHRAIL_MCP_TIMEOUT_SECONDS`、
+  `SPEECHRAIL_MCP_TRANSPORT`（`stdio|streamable-http`）、`SPEECHRAIL_MCP_HOST`（默认 `127.0.0.1`）、
+  `SPEECHRAIL_MCP_PORT`（默认 `8202`）。host/port 仅在 streamable-http 下生效，可被 `--host`/`--port` 覆盖。
 - `allowed_origins` 已定义但**无 CORSMiddleware 实例化**（`config:66`，全库仅定义无引用）——若 Proxy 走
   HTTP Streamable 对外，需在 Proxy 侧自行处理 origin 策略，**不能依赖主服务**。
 
@@ -326,8 +332,10 @@ per-tool 授权矩阵属**运维安全**，降为附录 B。
 1. **`describe()` 无缓存**：采用无状态设计，每次调用实时读 daemon；不做 `ttlMs`/`cacheScope` 缓存
    与失效信号（单机场景缓存收益低，且避免失效复杂度）。
 2. **`preview_voice` 不节流**：单机本机使用，保持简单；若未来对外暴露再考虑节流。
-3. **transport 已提供**：`stdio`（默认，host-local 客户端）+ `streamable-http`（可选，经
+3. **transport 已提供**：`stdio`（默认，host-local 客户端，不绑定端口）+ `streamable-http`（可选，经
    `SPEECHRAIL_MCP_TRANSPORT` 或 `--transport` 指定，供 Open-WebUI 原生 HTTP MCP 直连）。
+   streamable-http 默认绑定 `127.0.0.1:8202`（非 SDK 默认 8000），可用 `SPEECHRAIL_MCP_HOST`/
+   `SPEECHRAIL_MCP_PORT` 或 `--host`/`--port` 覆盖。
 
 ---
 

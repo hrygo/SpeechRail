@@ -47,6 +47,17 @@ _SERVER_DESCRIPTION = (
 )
 _TRANSPORTS = frozenset({"stdio", "streamable-http"})
 
+# Deviate from the MCP SDK default 8000, which is commonly occupied by local
+# model servers. stdio binds no port at all.
+_DEFAULT_HTTP_HOST = "127.0.0.1"
+_DEFAULT_HTTP_PORT = 8202
+_USAGE = (
+    "usage: speechrail-mcp [--transport stdio|streamable-http] [--host HOST] [--port PORT]\n\n"
+    "Environment: SPEECHRAIL_BASE_URL, SPEECHRAIL_API_KEY, "
+    "SPEECHRAIL_MCP_TIMEOUT_SECONDS, SPEECHRAIL_MCP_TRANSPORT, "
+    "SPEECHRAIL_MCP_HOST, SPEECHRAIL_MCP_PORT"
+)
+
 # List methods are safe to cache publicly: the tool set and the three resource
 # URIs are static metadata. resources/read is deliberately absent because the
 # capability snapshot it returns changes with the active profile.
@@ -127,6 +138,21 @@ def _timeout_from_env() -> float:
     except ValueError:
         return DEFAULT_TIMEOUT_SECONDS
     return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
+
+
+def _host_from_env() -> str:
+    return os.getenv("SPEECHRAIL_MCP_HOST") or _DEFAULT_HTTP_HOST
+
+
+def _port_from_env() -> int:
+    raw = os.getenv("SPEECHRAIL_MCP_PORT")
+    if not raw:
+        return _DEFAULT_HTTP_PORT
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_HTTP_PORT
+    return value if 1 <= value <= 65535 else _DEFAULT_HTTP_PORT
 
 
 _resolve_api_key = resolve_api_key
@@ -541,25 +567,38 @@ def main(argv: list[str] | None = None) -> int:
     Transport comes from SPEECHRAIL_MCP_TRANSPORT (stdio | streamable-http)
     or from ``--transport`` on the command line.  Defaults to stdio for
     host-local MCP clients (Claude Code / Cursor / Open-WebUI agent).
+
+    streamable-http binds SPEECHRAIL_MCP_HOST:SPEECHRAIL_MCP_PORT (or
+    ``--host``/``--port``), default 127.0.0.1:8202. stdio ignores both.
     """
     args = argv if argv is not None else list(sys.argv[1:])
     transport = os.getenv("SPEECHRAIL_MCP_TRANSPORT", "stdio")
-    if args:
-        if args in (["--help"], ["-h"]):
-            print(
-                "usage: speechrail-mcp [--transport stdio|streamable-http]\n\n"
-                "Environment: SPEECHRAIL_BASE_URL, SPEECHRAIL_API_KEY, "
-                "SPEECHRAIL_MCP_TIMEOUT_SECONDS, SPEECHRAIL_MCP_TRANSPORT"
-            )
+    host = _host_from_env()
+    port = _port_from_env()
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("--help", "-h"):
+            print(_USAGE)
             return 0
-        if len(args) == 2 and args[0] == "--transport":
-            transport = args[1]
-        else:
-            print(
-                "usage: speechrail-mcp [--transport stdio|streamable-http]",
-                file=sys.stderr,
-            )
+        if arg not in ("--transport", "--host", "--port") or index + 1 >= len(args):
+            print(_USAGE, file=sys.stderr)
             return 2
+        value = args[index + 1]
+        if arg == "--transport":
+            transport = value
+        elif arg == "--host":
+            host = value
+        else:
+            try:
+                port = int(value)
+            except ValueError:
+                print(f"invalid port {value!r}", file=sys.stderr)
+                return 2
+            if not 1 <= port <= 65535:
+                print(f"invalid port {value!r}", file=sys.stderr)
+                return 2
+        index += 2
     if transport not in _TRANSPORTS:
         print(
             f"unsupported transport {transport!r}; choose from {sorted(_TRANSPORTS)}",
@@ -570,5 +609,8 @@ def main(argv: list[str] | None = None) -> int:
         Literal["stdio", "streamable-http"], transport
     )
     server = create_server()
-    server.run(transport=validated)
+    if validated == "streamable-http":
+        server.run(transport=validated, host=host, port=port)
+    else:
+        server.run(transport=validated)
     return 0
