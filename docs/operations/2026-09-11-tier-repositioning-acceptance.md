@@ -1,15 +1,15 @@
 ---
-title: "SpeechRail v2.3.0 三档重定位验收报告 (TIER-REPOS-E)"
+title: "SpeechRail v2.3.1 三档重定位验收报告 (TIER-REPOS-E)"
 status: active
 type: acceptance_report
 category: tier-repositioning
-version: "1.2.0"
+version: "1.3.0"
 date: 2026-09-11
 ---
 
-# SpeechRail v2.3.0 三档重定位验收报告 (TIER-REPOS-E)
+# SpeechRail v2.3.1 三档重定位验收报告 (TIER-REPOS-E)
 
-本报告记录 2.3.0 三档按用户定位重排（`light` 4-bit、`balanced`/`quality` 8-bit、`quality` aligner 保持 bf16、aligner 按档位供给、分人能力按档位声明）后，Workstream E 验收门 E1–E6 在**本机 managed 服务**上的实测结果。所有行为变更前的状态以 `contracts/` 与 active 文档为准；本报告只承载本轮实测、契约身份与明确标注的未验证项。
+本报告记录 2.3.0 引入、2.3.1 修复收口的三档按用户定位重排（`light` 4-bit、`balanced`/`quality` 8-bit、`quality` aligner 保持 bf16、aligner 按档位供给、分人能力按档位声明）后，Workstream E 验收门 E1–E6 在**本机 managed 服务**上的实测结果。所有行为变更前的状态以 `contracts/` 与 active 文档为准；本报告只承载本轮实测、契约身份与明确标注的未验证项。
 
 原始 JSON、日志与合成音频保存在仓库外 `$HOME/Library/Application Support/SpeechRail/benchmarks/20260911-tier-repositioning-e7/`；Git 只保留本脱敏汇总。报告不含原始音频、转写文本、API key、PID 或绝对路径。
 
@@ -21,23 +21,25 @@ date: 2026-09-11
 | E2 TTS 质量（q4 vs q8） | **pass**（客观指标）；MOS/ABX `unset` | 同一 `serena` 音色、同一短句/长文，`voice_quality_v1` 客观指标已测，见 E2 节 |
 | E3 分人/对齐（aligner-q8 vs bf16） | **UNVERIFIED-BLOCKING** | 已用构造式多说话人参考实测尝试，服务稳定拒收合成语料（`diarization_unresolved`/`diarization_invalid_output`）；缺授权真人参考 RTTM/UEM，见 E3 节 |
 | E4 资源包络（三档） | **pass** | 同 tick `phys_footprint` 峰值 3.37 / 5.31 / 6.40 GiB，均低于 8/16/32 GB 包络，`gate_complete=True` |
-| E5 切换闭环 | **pass** | `quality → balanced → light → balanced → quality` 完成并断言，闭环结束于 `quality` |
+| E5 切换闭环 | **pass** | `quality → balanced → light → balanced → quality` 完成并断言，闭环结束于 `quality`；并在 2.3.1 上复验 |
 | E6 能力诚实 | **pass** | `light` 不声明 `gpt-4o-transcribe-diarize` 且 `diarization_ready=false`；`balanced`/`quality` 声明且 ready |
 
 ## 测量身份与可比性
 
 | 项目 | 值 |
 |---|---|
-| 发布版本 | `2.3.0` |
-| 提交 | `16af6fb` |
-| wheel | `speechrail-2.3.0-cp312-cp312-macosx_26_0_arm64.whl` |
-| wheel SHA-256 | `0615b023385378f966f8653d91cf61b140cf1510fce7ac12352ca0e54fc87987` |
-| runtime target basename | `speechrail-2.3.0-cp312-cp312-macosx_26_0_arm64-0615b0233853` |
+| 发布版本 | `2.3.1` |
+| 提交 | `cb3c4c9` |
+| wheel | `speechrail-2.3.1-cp312-cp312-macosx_26_0_arm64.whl` |
+| wheel SHA-256 | `c33c8b4d819b9e2fb4f60acebb5d4ac732d6be616b71309ff98695b84b03d8e5` |
+| runtime target basename | `speechrail-2.3.1-cp312-cp312-macosx_26_0_arm64-c33c8b4d819b` |
 | 硬件 / 内存 | Apple M5 Max / 128 GB |
 | macOS / Python | macOS 26.6.2 (25G83) / CPython 3.12.14（managed runtime） |
 | 运行态 | 单一 managed 服务，单 `127.0.0.1:8201` listener，`readyz=200` |
 | 鉴权 | loopback + 私有 `config/.env` API key；ASR/TTS 走鉴权路径，`/metrics` 只读取 governor 计数 |
 | 采样口径 | E4 用仓库 `examples/perf/sample_resources.py`，`footprint -p <pid> -f bytes`，同 tick 当前 footprint 求和；E1 直连生产 `qwen3_worker` IPC，不回退 HTTP 第二实例 |
+
+版本说明：E2/E4 的数值在 2.3.0 构建上测得；2.3.1 与 2.3.0 的差异仅为 `install_managed` 档位 aligner 供给、`ModelCatalog` 深拷贝、`profile apply` env 写键与文档，**不含推理路径变更**，故 E2/E4 的模型与资源结论对 2.3.1 同样成立。E5/E6 已在 2.3.1 上重新实测。
 
 可比性限制：本报告是本轮单机、单次实测；E2 的两档输出时长不同，因此是"同输入不同档位"的客观指标对比，不是同一 PCM 的 A/B。MOS/ABX 从未对这些档位测量，一律标 `unset`。
 
@@ -53,7 +55,7 @@ date: 2026-09-11
 
 ## E5 切换闭环
 
-本轮执行 `quality → balanced → light → balanced → quality`，每段：先确认外部客户端隔离（`lsof` 无 `ESTABLISHED`、`/metrics` 两类 governor active requests 均为 0），再 `profile apply <tier> --app-home <app-home> --yes`，有界等待 `/readyz=200`，断言 `/health.profile` 等于目标档后才测量。`quality→balanced`（generation 76）与 `balanced→light`（generation 77）在本轮更早完成，随后 `light→balanced`、`balanced→quality` 补全闭环，结束 generation 79：
+本轮执行 `quality → balanced → light → balanced → quality`，每段：先确认外部客户端隔离（`lsof` 无 `ESTABLISHED`、`/metrics` 两类 governor active requests 均为 0），再 `profile apply <tier> --app-home <app-home> --yes`，有界等待 `/readyz=200`，断言 `/health.profile` 等于目标档后才测量。`quality→balanced`（generation 76）与 `balanced→light`（generation 77）在 2.3.0 构建上先完成，随后 `light→balanced`、`balanced→quality` 补全闭环。
 
 | 步骤 | 断言结果 |
 |---|---|
@@ -62,7 +64,9 @@ date: 2026-09-11
 | `light → balanced` | `/health.profile=balanced`，分人 ready，`readyz=200` |
 | `balanced → quality` | `/health.profile=quality`，分人 ready，`readyz=200` |
 
-每次 `profile apply` 均以 "Profile applied and public API smoke passed." 结束；`profile status` 最终为 `quality (generation 79, ASR=asr-1.7b-q8, TTS=tts-1.7b-design-q8)`。全过程保持单一 listener，未出现第二实例。
+每次 `profile apply` 均以 "Profile applied and public API smoke passed." 结束。全过程保持单一 listener，未出现第二实例。
+
+**2.3.1 复验**：在 2.3.1 release 上再次执行 `quality → balanced → light → balanced → quality`，逐步断言 `/health.profile` 与能力诚实（`light`：`diarization_ready=false`、`/v1/models` 不含 `gpt-4o-transcribe-diarize`；`balanced`/`quality`：`diarization_ready=true`、含该别名），最终停在 `quality`，单 listener。
 
 ## E4 资源包络（三档）
 
@@ -119,7 +123,7 @@ date: 2026-09-11
 
 - 合成双说话人音频（混合语种与纯中文两种版本）经公共 `gpt-4o-transcribe-diarize` 均稳定返回 `502 diarization_unresolved`（"Diarization could not resolve every transcript segment"）。
 - D1 的 90 s 合成 voiceover（`preset_voiceover_16k_mono.wav`）在补齐 `chunking_strategy=server_vad|auto` 后返回 `502 diarization_invalid_output`（"Diarization backend returned an invalid result"）。
-- 对照：真实短单说话人片段（`asr-zh.wav`、`asr-en.wav`）经分人路径返回 `200`、各 1 段、speaker `A`——说明 **2.3.0 分人路径本身工作正常、无回归**，失败局限于合成 TTS 多说话人语料无法被 Sortformer/aligner 稳定归因。
+- 对照：真实短单说话人片段（`asr-zh.wav`、`asr-en.wav`）经分人路径返回 `200`、各 1 段、speaker `A`——说明 **2.3.x 分人路径本身工作正常、无回归**，失败局限于合成 TTS 多说话人语料无法被 Sortformer/aligner 稳定归因。
 
 **具体原因**：`tools/evaluate_diarization_e2e.py` 需要外部 manifest，条目必须带 `reference_rttm`、`hypothesis_rttm`、`uem`；在 app home 与仓库外均无任何 `.rttm`/`.uem` 或含 `reference_turns`/`hypothesis_turns` 的 manifest。D1 目录只有 `preset_timeline.json`/`preset_segments_meta.json` 合成时间线 metadata，其 `comparison-report.md` 亦明确写：没有 RTTM/UEM，preset timeline 不能充当真值，DER 为 `N/A`。合成的多说话人假设又无法由服务产出，因此不产生 DER/SACER 数字，也不把它伪装成对齐质量结论。
 
@@ -135,21 +139,21 @@ date: 2026-09-11
 | E2 MOS/ABX | unset | 从未对这两档做人工听测 |
 | E3 分人对齐 | UNVERIFIED-BLOCKING | 无授权参考 RTTM/UEM；合成多说话人语料被服务稳定拒收（已实证） |
 | E4 资源包络 | pass | 3.37 / 5.31 / 6.40 GiB，均低于包络，`gate_complete=True` |
-| E5 切换闭环 | pass | 闭环结束于 `quality`，generation 79，单 listener |
-| E6 能力诚实 | pass | 三档 `/v1/models` 与 `diarization_ready` 均如实声明 |
+| E5 切换闭环 | pass | 闭环结束于 `quality`，单 listener；2.3.1 上复验通过 |
+| E6 能力诚实 | pass | 三档 `/v1/models` 与 `diarization_ready` 均如实声明；2.3.1 上复验通过 |
 
-## 运维发现（已根因，记录为已知约束）
+## 运维发现（已在 2.3.1 修复）
 
-`tools.install_macos.install_managed(..., enable=True)` 只供给 preset 的 ASR/TTS 模型，**不供给该档位的分人 aligner snapshot**。因此直接安装分人档（`balanced`/`quality`）并 `enable`，新服务会以 `aligner snapshot is missing: aligner-bf16` fail-closed，直到随后执行一次 `speechrail profile apply <tier>` 供给 aligner 才能启动。
+2.3.0 的 `tools.install_macos.install_managed(..., enable=True)` 只供给 preset 的 ASR/TTS 模型，**不供给该档位的分人 aligner snapshot**。因此直接安装分人档（`balanced`/`quality`）并 `enable`，会使服务 fail-closed：`aligner snapshot is missing: aligner-bf16`。更严重的是，既有分人档从旧 release 升级时，新 wheel 的 preflight 会对旧 `selection.json` 的 `resolve_selection` fail-closed，而供给 aligner 的 `profile apply <tier>` 又委托给尚未切换的旧 runtime——构成循环，使文档所述"deploy → profile apply"升级路径失效。（Oracle 终审定位；当日修复。）
 
-**缓解（已应用）**：安装后追加一次 `profile apply <tier>`。这正是 `docs/operations/migration-runbook.md`「三档重排与 aligner 供给升级（catalog v2）」记载的两步升级流程，本轮所有切档均按此执行。
+**修复（2.3.1，commit `89ee79f`）**：`install_managed` 在 `preset.diarization` 且调用方未提供 `diarization_assets` 时，自行调用 `prepare_diarization_assets(app_home, preset_id=<tier>, downloader=<injected>)` 供给该档 aligner，**在写配置与 preflight 之前**完成，供给失败按既有事务回滚；`resolve_selection` 的 fail-closed 守卫不变。新增一条**无 stub**的升级回归测试（含 provisioning 失败回滚用例）。
 
-**后续建议（不在本轮改动代码）**：二选一——让 `install_managed` 在 `enable=True` 时自行按档位供给 aligner，或让 preflight 在 cutover 前对缺失 aligner 直接判失败，避免出现"安装成功但服务起不来"的中间态。本轮不改代码。
+**回退/边界**：`light`（无分人）与调用方显式传入 `diarization_assets` 的路径行为不变。本轮升级部署即经由该修复后的路径完成并 `verify_release` 7/7。
 
 ## 限制与未验证
 
 - E1 不是 gate pass：仅用合成代理语料得出相对增量，按 `UNVERIFIED-BLOCKING（仅代理语料）` 记录；真人语料 CER/WER 为 `unset`。
-- E3 为 `UNVERIFIED-BLOCKING`，未产生 DER/SACER 数字；已实证合成多说话人语料不可用，且确认 2.3.0 分人路径在真实短音频上无回归。
+- E3 为 `UNVERIFIED-BLOCKING`，未产生 DER/SACER 数字；已实证合成多说话人语料不可用，且确认 2.3.x 分人路径在真实短音频上无回归。
 - E2 只测客观输出指标；MOS/ABX、人工自然度、跨文本身份相似度、跨重启一致性均为 `unset`。
 - E4 是单轮、单机测量；分人 worker 懒加载，未常驻采样窗口，未计入峰值。这些数值不构成跨机器的通用内存承诺，也非"常驻内存保证"。
 - 未执行 Realtime、吞吐、cold start、长时 soak；本报告范围仅为 E1–E6。
