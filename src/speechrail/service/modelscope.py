@@ -29,6 +29,11 @@ class ModelScopeDownloader:
         self._client = client
         self._chunk_size = chunk_size
 
+    @property
+    def client(self) -> httpx.Client:
+        """Underlying HTTP client, reused for non-ModelScope locked assets (CoreML)."""
+        return self._client
+
     @staticmethod
     def _validate(source: SourceLocation, relative_path: str) -> None:
         if (

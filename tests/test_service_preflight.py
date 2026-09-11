@@ -230,6 +230,74 @@ def test_preflight_checks_configured_diarization_profile(
     ).ok is True
 
 
+def test_preflight_skips_aligner_snapshot_when_aligner_dir_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    sortformer = tmp_path / "SortformerNvidiaLow_v2.1.mlmodelc"
+    sortformer.mkdir()
+    worker = tmp_path / "SpeechRailDiarizationWorker"
+    worker.write_text("worker", encoding="utf-8")
+    worker.chmod(0o700)
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH={sortformer}\n")
+        stream.write(f"SPEECHRAIL_DIARIZATION_WORKER_PATH={worker}\n")
+
+    result = run_preflight(layout, require_tts=False, runner=_successful_runner)
+
+    assert result.ok is True
+    assert not any(check.name == "diarization_aligner_snapshot" for check in result.checks)
+
+
+def test_preflight_checks_aligner_snapshot_without_coreml_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    aligner_model = tmp_path / "aligner-model"
+    _complete_snapshot(aligner_model)
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={aligner_model}\n")
+
+    result = run_preflight(layout, require_tts=False, runner=_successful_runner)
+
+    assert result.ok is True
+    assert next(
+        check for check in result.checks if check.name == "diarization_aligner_snapshot"
+    ).ok is True
+
+
+def test_preflight_rejects_incomplete_aligner_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    _complete_snapshot(asr_model)
+    aligner_model = tmp_path / "aligner-model"
+    aligner_model.mkdir()
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(layout, asr=(asr_model, Path(sys.executable)), tts=None)
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR={aligner_model}\n")
+
+    result = run_preflight(layout, require_tts=False, runner=_successful_runner)
+
+    assert result.ok is False
+    assert next(
+        check for check in result.checks if check.name == "diarization_aligner_snapshot"
+    ).ok is False
+
+
 def test_preflight_checks_coreml_worker_without_python_optional_profiles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -451,6 +451,10 @@ def run_preflight(
                 else "CoreML diarization worker is missing or not executable",
             )
         )
+
+    # The aligner is a diarization-only asset driven by its own setting:
+    # light tiers clear it (None) and must not fail preflight for its absence.
+    if settings.qwen3_aligner_model_dir is not None:
         checks.append(
             _snapshot_check(
                 "diarization_aligner_snapshot",

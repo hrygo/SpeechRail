@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import cast, final, override
 
+import httpx
 import pytest
 
-from speechrail.config.model_catalog import load_catalog, load_runtime_lock
+from speechrail.config.model_catalog import (
+    ModelCatalog,
+    SourceLocation,
+    load_catalog,
+    load_runtime_lock,
+)
 from speechrail.runtime.server_lock import ServerInstanceLock
+from speechrail.service import diarization_assets
 from speechrail.service.bootstrap import RuntimePaths
+from speechrail.service.diarization_assets import DiarizationAssetError
+from speechrail.service.modelscope import ModelScopeDownloader
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
 
@@ -866,3 +878,304 @@ def test_preflight_runs_from_the_newly_installed_wheel(tmp_path: Path) -> None:
             "--asr-only",
         )
     ]
+
+
+_B2_REVISION = "a" * 40
+_B2_REPOSITORY = "fixture/model"
+_B2_ALIGNER_PAYLOADS = {
+    "config.json": b"aligner-config",
+    "model.safetensors": b"aligner-weights",
+    "tokenizer.json": b"aligner-tokenizer",
+}
+_B2_COREML_PATH = "coremldata.bin"
+_B2_COREML_BYTES = b"coreml-bundle"
+_B2_BUNDLE_NAME = "SortformerNvidiaLow_v2.1.mlmodelc"
+
+
+def _b2_file(path: str, payload: bytes) -> dict[str, object]:
+    return {
+        "path": path,
+        "size": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _b2_files(payloads: dict[str, bytes]) -> list[dict[str, object]]:
+    return [_b2_file(path, payload) for path, payload in payloads.items()]
+
+
+def _b2_artifact(
+    key: str, family: str, variant: str, bits: int | None, files: list[dict[str, object]]
+) -> dict[str, object]:
+    return {
+        "key": key,
+        "model_id": _B2_REPOSITORY,
+        "revision": _B2_REVISION,
+        "family": family,
+        "variant": variant,
+        "quantization": {
+            "bits": bits,
+            "group_size": 64 if bits is not None else None,
+            "format": "mlx" if bits is not None else "none",
+        },
+        "files": files,
+        "sources": [
+            {
+                "provider": "modelscope",
+                "repository": _B2_REPOSITORY,
+                "revision": _B2_REVISION,
+            }
+        ],
+    }
+
+
+def _b2_asr_variant(prefix: bytes) -> list[dict[str, object]]:
+    return _b2_files(
+        {
+            "config.json": prefix + b"cfg",
+            "model.safetensors": prefix + b"weights",
+            "tokenizer.json": prefix + b"tok",
+        }
+    )
+
+
+def _b2_tts_variant(prefix: bytes) -> list[dict[str, object]]:
+    return _b2_files(
+        {
+            "config.json": prefix + b"cfg",
+            "model.safetensors": prefix + b"weights",
+            "tokenizer.json": prefix + b"tok",
+            "speech_tokenizer/config.json": prefix + b"codec",
+            "speech_tokenizer/weights.safetensors": prefix + b"codecw",
+        }
+    )
+
+
+def _b2_catalog() -> ModelCatalog:
+    aligner_files = _b2_files(_B2_ALIGNER_PAYLOADS)
+    return ModelCatalog.model_validate(
+        {
+            "schema_version": 2,
+            "artifacts": [
+                _b2_artifact("asr-17b-q8", "qwen3_asr", "asr", 8, _b2_asr_variant(b"a17")),
+                _b2_artifact("asr-06b-q4", "qwen3_asr", "asr", 4, _b2_asr_variant(b"a06")),
+                _b2_artifact(
+                    "tts-17b-design-q8",
+                    "qwen3_tts",
+                    "voice_design",
+                    8,
+                    _b2_tts_variant(b"d17"),
+                ),
+                _b2_artifact(
+                    "tts-06b-custom-q8",
+                    "qwen3_tts",
+                    "custom_voice",
+                    8,
+                    _b2_tts_variant(b"c06"),
+                ),
+                _b2_artifact(
+                    "tts-06b-custom-q4",
+                    "qwen3_tts",
+                    "custom_voice",
+                    4,
+                    _b2_tts_variant(b"c04"),
+                ),
+                _b2_artifact("aligner-q8", "qwen3_forced_aligner", "aligner", 8, aligner_files),
+                _b2_artifact(
+                    "aligner-bf16", "qwen3_forced_aligner", "aligner", None, aligner_files
+                ),
+            ],
+            "presets": [
+                {
+                    "id": "light",
+                    "asr": "asr-06b-q4",
+                    "tts": "tts-06b-custom-q4",
+                    "aligner": None,
+                    "diarization": False,
+                },
+                {
+                    "id": "balanced",
+                    "asr": "asr-17b-q8",
+                    "tts": "tts-06b-custom-q8",
+                    "aligner": "aligner-q8",
+                    "diarization": True,
+                },
+                {
+                    "id": "quality",
+                    "asr": "asr-17b-q8",
+                    "tts": "tts-17b-design-q8",
+                    "aligner": "aligner-bf16",
+                    "diarization": True,
+                },
+            ],
+            "precision_policy": {
+                "light": {"asr": 4, "tts": 4, "aligner": None},
+                "balanced": {"asr": 8, "tts": 8, "aligner": 8},
+                "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
+            },
+        }
+    )
+
+
+@final
+class _B2StreamResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> _B2StreamResponse:
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def iter_bytes(self, chunk_size: int = 0) -> Iterator[bytes]:
+        del chunk_size
+        yield self._payload
+
+
+@final
+class _B2HttpClient:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self.urls: list[str] = []
+
+    def stream(
+        self, method: str, url: str, *, follow_redirects: bool = False
+    ) -> _B2StreamResponse:
+        del method, follow_redirects
+        self.urls.append(url)
+        return _B2StreamResponse(self._payload)
+
+
+@final
+class _B2Downloader(ModelScopeDownloader):
+    def __init__(self, payloads: dict[str, bytes], coreml_payload: bytes) -> None:
+        self.payloads = payloads
+        self.http = _B2HttpClient(coreml_payload)
+        self.download_calls: list[str] = []
+        super().__init__(client=cast(httpx.Client, cast(object, self.http)))
+
+    @override
+    def download(self, source: SourceLocation, relative_path: str) -> Iterator[bytes]:
+        del source
+        self.download_calls.append(relative_path)
+        return iter([self.payloads[relative_path]])
+
+
+def _b2_setup(monkeypatch: pytest.MonkeyPatch) -> _B2Downloader:
+    monkeypatch.setattr(diarization_assets, "load_catalog", _b2_catalog)
+    monkeypatch.setattr(
+        diarization_assets,
+        "MODEL_FILE_SHA256",
+        {_B2_COREML_PATH: hashlib.sha256(_B2_COREML_BYTES).hexdigest()},
+    )
+    monkeypatch.setattr(diarization_assets, "_COREML_FILE_SIZES", (len(_B2_COREML_BYTES),))
+    return _B2Downloader(dict(_B2_ALIGNER_PAYLOADS), _B2_COREML_BYTES)
+
+
+def test_prepare_diarization_assets_light_provisions_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader = _b2_setup(monkeypatch)
+    app_home = tmp_path / "app"
+
+    result = diarization_assets.prepare_diarization_assets(
+        app_home, preset_id="light", downloader=downloader
+    )
+
+    assert result is None
+    assert not (app_home / "diarization").exists()
+    assert downloader.download_calls == []
+    assert downloader.http.urls == []
+
+
+def test_prepare_diarization_assets_balanced_provisions_aligner_q8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader = _b2_setup(monkeypatch)
+    app_home = tmp_path / "app"
+
+    result = diarization_assets.prepare_diarization_assets(
+        app_home, preset_id="balanced", downloader=downloader
+    )
+
+    assert result is not None
+    assert result.coreml_model_path == app_home / "diarization" / _B2_BUNDLE_NAME
+    assert result.aligner_model_dir.name == "aligner-q8"
+    aligner_dir = app_home / "diarization" / "aligner-q8"
+    for relative, payload in _B2_ALIGNER_PAYLOADS.items():
+        artifact = aligner_dir / relative
+        assert artifact.read_bytes() == payload
+        assert artifact.stat().st_size == len(payload)
+        assert hashlib.sha256(artifact.read_bytes()).hexdigest() == (
+            hashlib.sha256(payload).hexdigest()
+        )
+    assert sorted(downloader.download_calls) == sorted(_B2_ALIGNER_PAYLOADS)
+    assert downloader.http.urls and downloader.http.urls[0].startswith(
+        "https://huggingface.co/"
+    )
+
+
+def test_prepare_diarization_assets_quality_provisions_aligner_bf16(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader = _b2_setup(monkeypatch)
+    app_home = tmp_path / "app"
+
+    result = diarization_assets.prepare_diarization_assets(
+        app_home, preset_id="quality", downloader=downloader
+    )
+
+    assert result is not None
+    assert result.aligner_model_dir.name == "aligner-bf16"
+    assert (app_home / "diarization" / "aligner-bf16" / "config.json").is_file()
+
+
+def test_prepare_diarization_assets_reuses_verified_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader = _b2_setup(monkeypatch)
+    app_home = tmp_path / "app"
+
+    first = diarization_assets.prepare_diarization_assets(
+        app_home, preset_id="balanced", downloader=downloader
+    )
+    downloads_after_first = list(downloader.download_calls)
+    urls_after_first = list(downloader.http.urls)
+
+    second = diarization_assets.prepare_diarization_assets(
+        app_home, preset_id="balanced", downloader=downloader
+    )
+
+    assert second == first
+    assert downloader.download_calls == downloads_after_first
+    assert downloader.http.urls == urls_after_first
+
+
+def test_prepare_diarization_assets_rejects_corrupt_existing_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader = _b2_setup(monkeypatch)
+    app_home = tmp_path / "app"
+    corrupt = app_home / "diarization" / "aligner-q8"
+    corrupt.mkdir(parents=True)
+    (corrupt / "config.json").write_bytes(b"tampered")
+
+    with pytest.raises(DiarizationAssetError):
+        diarization_assets.prepare_diarization_assets(
+            app_home, preset_id="balanced", downloader=downloader
+        )
+
+
+def test_prepare_diarization_assets_unknown_preset_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    downloader = _b2_setup(monkeypatch)
+
+    with pytest.raises(DiarizationAssetError):
+        diarization_assets.prepare_diarization_assets(
+            tmp_path / "app", preset_id="turbo", downloader=downloader
+        )
