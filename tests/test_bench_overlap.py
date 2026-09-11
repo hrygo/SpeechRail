@@ -431,3 +431,18 @@ def test_help_exits_zero() -> None:
     with pytest.raises(SystemExit) as exit_info:
         bench_overlap.main(["--help"])
     assert exit_info.value.code == 0
+
+
+def test_cli_defaults_to_single_asr_concurrency() -> None:
+    parser = bench_overlap._build_parser()
+    args = parser.parse_args(
+        [
+            "--base-url",
+            "http://127.0.0.1:8201",
+            "--manifest",
+            "manifest.json",
+            "--output",
+            "overlap.json",
+        ]
+    )
+    assert args.concurrency == 1

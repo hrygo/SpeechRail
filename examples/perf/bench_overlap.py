@@ -1,21 +1,23 @@
-"""Measure ASR||TTS heavy-compute overlap through the public HTTP API.
+"""Measure the ASR||TTS heavy-compute overlap path through the public HTTP API.
 
-C1 starts one long TTS request and fires ``--concurrency`` concurrent ASR
-requests ``--delay-seconds`` later; C2 reverses the order (ASR wave first, TTS
-after the delay).  The governor active-request peaks (sampled from ``/metrics``
-inside each scenario window), per-request latency, and scenario wall time form
-the A/B signal for ``SPEECHRAIL_ALLOW_HEAVY_OVERLAP``: ON admits ASR while TTS
-is active (batch peak >= 2), OFF refuses it (batch peak == 1).  Every scenario
-runs under a fresh ``ProcessResourceMonitor``; one warm ASR and one warm TTS
-precede the measured windows and are excluded from all metrics.  The result is
-written as one sanitized, repo-external JSON evidence file (O_EXCL, mode 0600).
+Run under the fixed product policy ``SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`` (ON).
+C1 starts one long TTS request and fires ``--concurrency`` ASR requests
+``--delay-seconds`` later; C2 reverses the order (ASR wave first, TTS after the
+delay).  The overlap axis is ASR||TTS, so ``--concurrency 1`` (one ASR against
+one TTS) is the default: a single ASR worker admits only one batch request at a
+time, and extra concurrent ASR returns ``429 backend_busy`` regardless of the
+overlap policy.  With overlap ON the governor admits the concurrent ASR while
+TTS is active (batch peak >= 2).  Every scenario runs under a fresh
+``ProcessResourceMonitor``; one warm ASR and one warm TTS precede the measured
+windows and are excluded from all metrics.  The result is written as one
+sanitized, repo-external JSON evidence file (O_EXCL, mode 0600).
 
 Usage:
   uv run python examples/perf/bench_overlap.py \
     --base-url http://127.0.0.1:8201 \
     --manifest "$HOME/Library/Application Support/SpeechRail/benchmarks/manifest.json" \
     --app-home "$HOME/Library/Application Support/SpeechRail" \
-    --output /tmp/overlap-arm.json
+    --output /tmp/overlap.json
 """
 
 from __future__ import annotations
@@ -455,7 +457,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--asr-fixture-id", default="asr10-w01")
     parser.add_argument("--tts-fixture-id", default="tts-long-w01")
-    parser.add_argument("--concurrency", type=int, default=3)
+    parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--delay-seconds", type=float, default=1.5)
     parser.add_argument(
         "--scenario",
