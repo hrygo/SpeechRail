@@ -43,15 +43,15 @@ last_updated: 2026-09-11
 
 ### 2.3 三档体系（Quality / Balanced / Light）能力声明边界
 
-遵循 `AGENTS.md` 核心约束：三档改变权重、按档位量化精度（`light` 4-bit；`balanced`/`quality` 8-bit）与是否供给分人制品；公共 API 契约形状、worker 协议、调度和服务架构保持共享，但**对外声明能力随档位不同**，必须如实声明、不伪造不可用功能。
+遵循 `AGENTS.md` 核心约束：三档改变权重、按档位量化精度（三档均 8-bit，仅 `quality` aligner 为 bf16）与是否供给分人制品；公共 API 契约形状、worker 协议、调度和服务架构保持共享，但**对外声明能力随档位不同**，必须如实声明、不伪造不可用功能。
 
 | 运行档位 | TTS 变体 (Variant) | 权重规格 | 音色机制 | 克隆支持 (`supports_clone`) |
 |---|---|---|---|---|
 | **Quality（Studio）** | `voice_design` | 1.7B-VoiceDesign-8bit | 自然语言 Prompt + ICL 参考音频 | **`True`（原生可用）** |
 | **Balanced（Pro Workflow）** | `custom_voice` | 0.6B-CustomVoice-8bit | 9 种固定预设 Speaker ID | **`False`（当前档位不支持）** |
-| **Light（Embedded）** | `custom_voice` | 0.6B-CustomVoice-4bit | 9 种固定预设 Speaker ID | **`False`（当前档位不支持）** |
+| **Light（Embedded）** | `custom_voice` | 0.6B-CustomVoice-8bit | 9 种固定预设 Speaker ID | **`False`（当前档位不支持）** |
 
-> 说明：VoiceDesign 与音色克隆仅在 `quality` 档位可用；`balanced`/`light` 使用 CustomVoice（分别为 8-bit / 4-bit），克隆能力声明为不可用。分人制品（Sortformer + aligner）同样按档位门控，仅在分人档位供给，与克隆边界相互独立。
+> 说明：VoiceDesign 与音色克隆仅在 `quality` 档位可用；`balanced`/`light` 使用 CustomVoice（均为 8-bit），克隆能力声明为不可用。分人制品（Sortformer + aligner）同样按档位门控，仅在分人档位供给，与克隆边界相互独立。
 
 **档位行为规范**：
 1. `GET /v1/voices`：每个音色对象中的 `capabilities` 显式声明 `supports_clone: bool`。在 `custom_voice` 变体下，克隆音色的 `available` 字段计算为 `False`。

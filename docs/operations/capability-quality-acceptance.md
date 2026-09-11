@@ -2,7 +2,7 @@
 title: "SpeechRail 能力诊断与质量验收"
 status: active
 audience: "本机运维人员、发布负责人、集成工程师"
-version: "1.0.4"
+version: "1.0.5"
 date: 2026-09-11
 ---
 
@@ -44,7 +44,7 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 | batch / realtime / segment + word timestamps | ✓ | ✓ | ✓ |
 | diarization（`gpt-4o-transcribe-diarize`） | ✗ | ✓ | ✓ |
 | aligner（分人专用） | — | `aligner-q8` | `aligner-bf16` |
-| 精度策略 | 4-bit ASR/TTS | 8-bit ASR/TTS | 8-bit ASR/TTS，aligner bf16 |
+| 精度策略 | 8-bit ASR/TTS | 8-bit ASR/TTS | 8-bit ASR/TTS，aligner bf16 |
 
 - **diarization 门控**：只有 `balanced` / `quality` 供给 CoreML Sortformer 与 aligner，因此仅这两档声明
   `gpt-4o-transcribe-diarize`；`light` 不声明，`/v1/models` 中不出现该别名。
@@ -52,6 +52,10 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
   分人对固定正文的对齐；它不进入 `PreparedModelSet`，也不参与词级时间戳。
 - **词级时间戳由 ASR 原生提供**（`timestamp_granularities`），三档均可用，与 aligner 是否存在无关。
 - `diarization_ready` 是动态能力声明：该档未启用分人时不存在，不得用 `readyz=200` 推断分人可用。
+- **E1 结果（2026-09-11）**：公开真人语料实测 light 的 0.6B 4-bit ASR 相对 8-bit 基线劣化
+  **1.38pp**（en WER +1.25pp、zh CER +1.46pp）> 0.5pp 阈值，**E1 FAILED**；依计划「未过即回退
+  上一精度」，light 回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`（8-bit）。因此 E2 不再对 light 构成
+  门控；`asr-0.6b-q4` / `tts-0.6b-custom-q4` 制品保留在 catalog 但不被任何档位使用。
 
 ## Clone TTS 响度能力
 

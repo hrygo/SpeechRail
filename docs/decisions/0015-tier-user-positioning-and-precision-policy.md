@@ -6,6 +6,24 @@ date: 2026-09-11
 
 # ADR-0015：三档用户定位与按档位精度策略
 
+## 修订（2026-09-11，E1 之后）
+
+本 ADR 的 light 4-bit 决策在验收门 E1 未通过后回退。本节记录修订后的事实，**不重写原决策历史**；
+下方「决策」保持原文，其被取代的条目已就近标注。
+
+- **E1 结果**：在公开真人语料上，light 的 0.6B 4-bit ASR 相对其 8-bit 基线劣化 **1.38pp**
+  （en WER +1.25pp、zh CER +1.46pp），超过 0.5pp 阈值，E1 **FAILED**。依据实施计划
+  「每档必须全过；未过则该档回退上一精度」，light 回退至上一精度。
+- **现行 light 组成**：ASR `asr-0.6b-q8`（8-bit）+ TTS `tts-0.6b-custom-q8`
+  （8-bit CustomVoice），无 aligner、无分人，安装体积 **2986.6 MB ≈ 2.99 GB**
+  （`asr-0.6b-q8` 1010.8 MB + `tts-0.6b-custom-q8` 1973.6 MB + VAD 2.3 MB）。
+- **现行按档位精度策略**：三档均为 8-bit，仅 `quality` 的 aligner 为 `"bf16"`。
+  `balanced` = `asr-1.7b-q8` + `tts-0.6b-custom-q8` + `aligner-q8`；
+  `quality` = `asr-1.7b-q8` + `tts-1.7b-design-q8` + `aligner-bf16`。
+- **q4 制品保留但不再使用**：`asr-0.6b-q4` 与 `tts-0.6b-custom-q4` 仍在 catalog 中，
+  可继续加载，但不被任何档位引用。
+- **门控影响**：E2（TTS q4 vs q8）不再对 light 构成门控；light 已回到 8-bit 组合。
+
 ## 背景
 
 ADR-0011 把三档设计成"同一能力按内存缩小/放大"：三档都取 `asr-0.6b`/`asr-1.7b` 的
@@ -21,6 +39,8 @@ ADR-0011 把三档设计成"同一能力按内存缩小/放大"：三档都取 `
 1. catalog `schema_version` 1→2；三档按用户定位重排，而非同一能力的缩放：
    - 🟢 `light` — Embedded（8GB 基础机）：ASR `asr-0.6b-q4`（4-bit）、TTS
      `tts-0.6b-custom-q4`（4-bit CustomVoice），**无 aligner、无分人**，安装体积 ≈2.41GB。
+     **〔此项已被 2026-09-11 修订取代：E1 未通过，light 回退 `asr-0.6b-q8` +
+     `tts-0.6b-custom-q8`（8-bit），安装体积 ≈2.99GB；见「修订」节。〕**
    - 🟡 `balanced` — Pro Workflow（16–24GB）：ASR `asr-1.7b-q8`、TTS
      `tts-0.6b-custom-q8`、aligner `aligner-q8`，分人开启，≈5.96GB。
    - 🟣 `quality` — Studio（32GB+）：ASR `asr-1.7b-q8`、TTS `tts-1.7b-design-q8`、
@@ -29,6 +49,8 @@ ADR-0011 把三档设计成"同一能力按内存缩小/放大"：三档都取 `
    （`model_catalog.ModelCatalog.precision_policy`，`TierPrecision`：light 为 4-bit，
    balanced/quality 为 8-bit，quality aligner 为 `"bf16"`）。4-bit 是显式档位决策，
    不是静默降级；质量门未通过则该档回退上一精度。
+   **〔其中 light 4-bit 部分已被 2026-09-11 修订取代；现行精度策略为三档均 8-bit、仅
+   `quality` aligner 为 `"bf16"`，见「修订」节。〕**
 3. `ModelPreset` 增加 `aligner: str | None` 与 `diarization: bool`（`ModelPreset.aligner` /
    `ModelPreset.diarization`）。aligner 升为 catalog 一等制品
    （`family=qwen3_forced_aligner`、`variant=aligner`），但它是**分人专用资产**：由
@@ -43,6 +65,8 @@ ADR-0011 把三档设计成"同一能力按内存缩小/放大"：三档都取 `
 
 **Supersedes:** ADR-0011 §2（三档组成）与 §8（4-bit 仅作同档候选）。ADR-0011 其余决策
 （统一 runtime、仅权重分档、可恢复本地切换、资源保护）继续有效。
+**修订说明（2026-09-11）：** light 的 4-bit 决策已在 E1 未通过后回退到 8-bit，因此 §8 的
+4-bit 候选未被采纳；本 ADR 对三档用户定位、aligner 分人一等制品与按档位精度策略的取代仍然有效。
 
 ## 迁移
 
@@ -64,7 +88,9 @@ ADR-0011 把三档设计成"同一能力按内存缩小/放大"：三档都取 `
 - 三档从"同能力大小档"变为按用户定位的差异化产品；light 安装体积较旧设计约减少
   2.65GB，balanced 约减少 0.56GB，quality 基本持平。
 - 4-bit 的 light ASR/TTS 与量化 aligner 的可加载性/质量必须由独立质量门与真机验收决定，
-  未通过即回退上一精度。
+  未通过即回退上一精度。**（2026-09-11 修订：E1 实测 light 0.6B 4-bit ASR 劣化 1.38pp >
+  0.5pp 阈值，未通过，light 已回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`；现行三档均 8-bit，
+  仅 `quality` aligner 为 bf16。）**
 - `precision_policy` 与 `preset.aligner/diarization` 成为 catalog 契约的一部分，测试须按
   精度策略与分人门控校验。
 - 公共 API 形状、worker IPC、调度与并发不变；分人供给仅在 install / `profile apply`

@@ -110,8 +110,8 @@ def _catalog_payload() -> dict[str, object]:
             },
             {
                 "id": "light",
-                "asr": "asr-q4",
-                "tts": "tts-custom-q4",
+                "asr": "asr-q8",
+                "tts": "tts-custom-q8",
                 "aligner": None,
                 "diarization": False,
             },
@@ -119,7 +119,7 @@ def _catalog_payload() -> dict[str, object]:
         "precision_policy": {
             "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
             "balanced": {"asr": 8, "tts": 8, "aligner": 8},
-            "light": {"asr": 4, "tts": 4, "aligner": None},
+            "light": {"asr": 8, "tts": 8, "aligner": None},
         },
     }
 
@@ -162,8 +162,8 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
             aligner_bits = artifacts[item.aligner].quantization.bits
             assert aligner_bits == (None if tier.aligner == "bf16" else tier.aligner)
 
-    assert by_id["light"].asr == "asr-0.6b-q4"
-    assert by_id["light"].tts == "tts-0.6b-custom-q4"
+    assert by_id["light"].asr == "asr-0.6b-q8"
+    assert by_id["light"].tts == "tts-0.6b-custom-q8"
     assert by_id["light"].aligner is None
     assert by_id["light"].diarization is False
     assert by_id["balanced"].asr == "asr-1.7b-q8"
@@ -181,7 +181,8 @@ def test_preset_relationships_keep_weight_changes_only() -> None:
     by_id = {item.id: item for item in catalog.presets}
 
     assert by_id["quality"].asr == by_id["balanced"].asr
-    assert by_id["balanced"].tts != by_id["light"].tts
+    assert by_id["quality"].tts != by_id["balanced"].tts
+    assert by_id["balanced"].tts == by_id["light"].tts
 
 
 def test_catalog_and_nested_models_are_immutable() -> None:
@@ -360,7 +361,7 @@ def test_catalog_rejects_precision_policy_bits_mismatch() -> None:
     assert isinstance(policy, dict)
     light = policy["light"]
     assert isinstance(light, dict)
-    light["asr"] = 8
+    light["asr"] = 4
 
     with pytest.raises(ValidationError, match=r"precision_policy|bits"):
         ModelCatalog.model_validate(payload)
@@ -390,8 +391,8 @@ def test_catalog_rejects_aligner_reference_with_wrong_identity() -> None:
     policy["light"]["aligner"] = 8
     payload["presets"][2] = {
         "id": "light",
-        "asr": "asr-q4",
-        "tts": "tts-custom-q4",
+        "asr": "asr-q8",
+        "tts": "tts-custom-q8",
         "aligner": "fake-aligner",
         "diarization": True,
     }
@@ -400,12 +401,12 @@ def test_catalog_rejects_aligner_reference_with_wrong_identity() -> None:
         ModelCatalog.model_validate(payload)
 
 
-def test_four_bit_tier_is_legal_under_schema_v2() -> None:
+def test_light_tier_uses_q8_quantization_under_schema_v2() -> None:
     catalog = ModelCatalog.model_validate(_catalog_payload())
     by_id = {item.id: item for item in catalog.presets}
 
-    assert by_id["light"].asr == "asr-q4"
-    assert by_id["light"].tts == "tts-custom-q4"
+    assert by_id["light"].asr == "asr-q8"
+    assert by_id["light"].tts == "tts-custom-q8"
 
 
 def test_runtime_lock_requires_hashed_requirements_and_read_only_hashes() -> None:

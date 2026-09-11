@@ -77,7 +77,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / "speechrail-2.3.1-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-2.3.2-py3-none-any.whl"
     wheel.touch()
     app_home = tmp_path / "Application Support" / "SpeechRail"
     return wheel, app_home
@@ -1014,6 +1014,7 @@ def _b2_catalog() -> ModelCatalog:
             "schema_version": 2,
             "artifacts": [
                 _b2_artifact("asr-17b-q8", "qwen3_asr", "asr", 8, _b2_asr_variant(b"a17")),
+                _b2_artifact("asr-06b-q8", "qwen3_asr", "asr", 8, _b2_asr_variant(b"a06")),
                 _b2_artifact("asr-06b-q4", "qwen3_asr", "asr", 4, _b2_asr_variant(b"a06")),
                 _b2_artifact(
                     "tts-17b-design-q8",
@@ -1044,8 +1045,8 @@ def _b2_catalog() -> ModelCatalog:
             "presets": [
                 {
                     "id": "light",
-                    "asr": "asr-06b-q4",
-                    "tts": "tts-06b-custom-q4",
+                    "asr": "asr-06b-q8",
+                    "tts": "tts-06b-custom-q8",
                     "aligner": None,
                     "diarization": False,
                 },
@@ -1065,7 +1066,7 @@ def _b2_catalog() -> ModelCatalog:
                 },
             ],
             "precision_policy": {
-                "light": {"asr": 4, "tts": 4, "aligner": None},
+                "light": {"asr": 8, "tts": 8, "aligner": None},
                 "balanced": {"asr": 8, "tts": 8, "aligner": 8},
                 "quality": {"asr": 8, "tts": 8, "aligner": "bf16"},
             },

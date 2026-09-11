@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时评估：mlx-qwen3-asr 端到端、性能与清理"
 status: active
-version: "1.2.0"
+version: "1.3.0"
 date: 2026-09-11
 ---
 
@@ -104,23 +104,27 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
 
 ## 7. 当前档位评估框架（catalog v2，2026-09-11）
 
-> 本节只定义按档位评估的口径，**不引入新的测量数字**；三档新精度组合尚未重新实测。
+> 本节定义按档位评估的口径。`light` 的 4-bit 组合已完成 E1 评估并因未通过而回退 8-bit；
+> 三档在当前 catalog v2 下的 RTF、物理内存与分人 DER/SACER 尚未重新实测。
 
 当前三档各有独立精度与 aligner 变体，评估必须按档位分别记录，不得跨档套用单一数字：
 
 | 档位 | ASR / TTS | Aligner（分人专用） | 分人 | 评估重点 |
 |---|---|---|---|---|
-| `light` | `asr-0.6b-q4` / `tts-0.6b-custom-q4` | — | ✗ | 4-bit ASR CER/WER 与 TTS 客观质量（相对 q8）|
+| `light` | `asr-0.6b-q8` / `tts-0.6b-custom-q8` | — | ✗ | 8-bit ASR CER/WER 与 TTS 客观质量；4-bit 组合已评估并回退（E1 未过）|
 | `balanced` | `asr-1.7b-q8` / `tts-0.6b-custom-q8` | `aligner-q8` | ✓ | `aligner-q8` 的分人 DER/SACER 与资源包络 |
 | `quality` | `asr-1.7b-q8` / `tts-1.7b-design-q8` | `aligner-bf16` | ✓ | `aligner-bf16` 的分人 DER/SACER 与 Studio 资源包络 |
 
 评估口径：
 
-- **精度策略**：`light` 为 4-bit，`balanced`/`quality` 为 8-bit，`quality` 的 aligner 为 bf16；旧的“全档
-  8-bit”结论不再适用。§3 的 q8 数字对 `light` 只能作为同架构的**方向性参考**，不能当作 4-bit 档的实测。
+- **精度策略**：三档均为 8-bit，仅 `quality` 的 aligner 为 bf16；`light` 的 4-bit 组合已完成评估并在
+  E1 未通过（公开真人语料 1.38pp > 0.5pp）后回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`，不再是 pending
+  4-bit 档。§3 的 q8 数字仍是 release `1.1.0` 的历史实测，对当前 8-bit `light` 只能作为**方向性参考**，
+  不能替代 catalog v2 下按档位重新实测的结论。
 - **aligner 变体**：`balanced`/`quality` 的 aligner 由 catalog 按档供给（`aligner-q8` / `aligner-bf16`），
   评估须报告该档实际供给的变体；`light` 无 aligner、无分人，不做分人评估。word-level timestamps 由 ASR
   原生提供，不依赖 aligner，因此不列入 aligner 评估。
-- **未测即 `unset`**：三档新精度组合的 RTF、物理内存、ASR/TTS 质量与分人 DER/SACER 尚未重新实测，必须记为
+- **未测即 `unset`**：当前 catalog v2 下三档的 RTF、物理内存与分人 DER/SACER 尚未重新实测，必须记为
   `unset`，直到按[能力诊断与质量验收](capability-quality-acceptance.md) 的 E1–E7 门完成并留存聚合证据。
+  `light` 的 ASR 精度（E1）已完成并落定为回退 q8；其余指标仍为 `unset`。
 - 不得把 §2/§3 的历史数字、`readyz=200` 或模型存在当作当前档位的性能或质量结论。

@@ -38,7 +38,7 @@ When adding speech capabilities to personal desktop agents, local meeting transc
 - 🛡️ **Process Isolation**: The HTTP gateway, MLX ASR/TTS workers, and the native CoreML diarization worker run in separate OS processes over private framed IPC. A worker crash does not bring down the gateway.
 - 🍃 **Configurable Idle Eviction**: After the default **300 seconds** without activity, resident model weights are released according to the configured lifecycle. The resulting physical footprint depends on the profile, runtime, and allocator; it is not a fixed standby-memory guarantee.
 - 👥 **Optional Multi-Speaker Diarization**: `gpt-4o-transcribe-diarize` returns OpenAI-style `diarized_json` with session-scoped anonymous labels. It runs the pinned FluidAudio CoreML FP16 Sortformer worker; Realtime uses the opt-in `session.speechrail.diarization.enabled` extension.
-- 🎚️ **Dynamic Three-Tier Profiles**: Three user-differentiated tiers—**Embedded (`light`)**, **Pro Workflow (`balanced`)**, and **Studio (`quality`)**—spanning 8GB to 128GB Apple Silicon Macs, each with its own per-tier precision policy (4-bit Embedded; 8-bit Pro Workflow / Studio) and seamless zero-downtime hot switching.
+- 🎚️ **Dynamic Three-Tier Profiles**: Three user-differentiated tiers—**Embedded (`light`)**, **Pro Workflow (`balanced`)**, and **Studio (`quality`)**—spanning 8GB to 128GB Apple Silicon Macs, all on 8-bit weights (only the `quality` aligner stays bf16) with seamless zero-downtime hot switching.
 - 🎙️ **9 High-Quality Built-In Voices Across Profiles**: Natively integrates Qwen3-TTS speech synthesis, featuring rich acoustic personas for Chinese, English, Cantonese, Japanese, Korean, and more.
 
 ---
@@ -261,20 +261,20 @@ curl http://127.0.0.1:8201/v1/audio/speech \
 
 ## 🎛️ Three Model Profiles & 9 Built-in Voices
 
-SpeechRail exposes a unified API contract while internally adapting across Apple Silicon Macs through three user-differentiated tiers—**Embedded (`light`)**, **Pro Workflow (`balanced`)**, and **Studio (`quality`)**—rather than merely scaling model size. Each tier follows its own precision policy: `light` runs 4-bit ASR/TTS weights, while `balanced`/`quality` run 8-bit weights (the `quality` aligner stays unquantized bf16):
+SpeechRail exposes a unified API contract while internally adapting across Apple Silicon Macs through three user-differentiated tiers—**Embedded (`light`)**, **Pro Workflow (`balanced`)**, and **Studio (`quality`)**—rather than merely scaling model size. The per-tier precision policy keeps all three tiers on 8-bit weights (the `quality` aligner stays unquantized bf16):
 
 ### 1. Hardware Profile Matrix
 
 | Profile | ASR Model Weight | TTS Model Weight & Variant | Aligner / Diarization | Min Recommended RAM | Install Size (v2) | Peak Active Footprint (pre-v2) | Steady Footprint (pre-v2) | Idle Standby |
 |---|---|---|---|---|---|---|---|---|
-| 🟢 **`light`** (Embedded) | Qwen3-ASR 0.6B (`asr-0.6b-q4`, 4-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q4`, 4-bit) | ✗ No aligner / no diarization | 8GB Base Macs (Air / Mini) | **≈2.41 GB** (2408.7 MB) | **~4.4 GB** | **~4.1 GB** | **Runtime-dependent** (configured eviction) |
+| 🟢 **`light`** (Embedded) | Qwen3-ASR 0.6B (`asr-0.6b-q8`, 8-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q8`, 8-bit) | ✗ No aligner / no diarization | 8GB Base Macs (Air / Mini) | **≈2.99 GB** (2986.6 MB) | **~4.4 GB** | **~4.1 GB** | **Runtime-dependent** (configured eviction) |
 | 🟡 **`balanced`** (Pro Workflow) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q8`, 8-bit) | ✓ `aligner-q8` + Sortformer | 16GB / 24GB Mainstream Macs (Pro / Max) | **≈5.96 GB** (5955.3 MB) | **~6.0 GB** | **~5.5 GB** | **Runtime-dependent** (configured eviction) |
 | 🟣 **`quality`** (Studio) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | Qwen3-TTS 1.7B VoiceDesign (`tts-1.7b-design-q8`, 8-bit) | ✓ `aligner-bf16` + Sortformer | 32GB+ Flagship Macs (Max / Ultra) | **≈7.63 GB** (7625.4 MB) | **~6.9 GB** | **~6.6 GB** | **Runtime-dependent** (configured eviction) |
 
 *Footprint note: the `Peak Active` / `Steady` columns retain the previously measured all-q8 values (pre-v2) and are directional only under the new per-tier precision policy. Per-tier precision re-measurement is pending, so these are not the new tiers' measured figures. `Install Size` values are measured v2 catalog footprints.*
 
-- **Per-Tier Precision Policy**: `light` (Embedded) runs 4-bit ASR/TTS (`asr-0.6b-q4` / `tts-0.6b-custom-q4`) to fit 8GB base Macs; `balanced` and `quality` run 8-bit weights (`asr-1.7b-q8`, and `tts-0.6b-custom-q8` / `tts-1.7b-design-q8`), with the `quality` aligner kept at bf16. The public API contract is identical across tiers; 4-bit is an explicit user-selected tier, not a silent downgrade.
-- **Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR artifact; `balanced` and `light` share the same 0.6B CustomVoice base but at different precision (q8 vs q4), so they are no longer one identical TTS artifact.
+- **Per-Tier Precision Policy**: all three tiers run 8-bit weights — `light` (`asr-0.6b-q8` / `tts-0.6b-custom-q8`), `balanced` (`asr-1.7b-q8` / `tts-0.6b-custom-q8`), and `quality` (`asr-1.7b-q8` / `tts-1.7b-design-q8`) — with only the `quality` aligner kept at bf16. The 4-bit `asr-0.6b-q4` / `tts-0.6b-custom-q4` light option was evaluated but not adopted: acceptance gate E1 measured the 0.6B 4-bit ASR as 1.38pp worse than its 8-bit baseline on a public human corpus, above the 0.5pp threshold. The public API contract is identical across tiers, and the 4-bit artifacts remain in the catalog but are no longer used by any tier.
+- **Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR artifact; `balanced` and `light` share the same 0.6B CustomVoice 8-bit artifact (`tts-0.6b-custom-q8`).
 - **Configurable Idle Eviction**: The default idle timeout is **300 seconds**. It can be changed with `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` or disabled with `0`; measured post-eviction footprint remains runtime- and profile-dependent.
 - **VoiceDesign Boundary**: Only the `quality` tier synthesizes with VoiceDesign (1.7B) and supports creating novel custom voices via natural language prompts. `balanced`/`light` use CustomVoice (0.6B); custom voices are declared as `available=false` there, restoring automatically when switched back to `quality`.
 - **Quality-Gated Voice Cloning**: On the `quality` tier, clone a custom voice from a reference audio clip + read script (`POST /v1/voices/clone`), pre-flight validate the reference without persisting (`POST /v1/voices/clone/validate`), and run bounded quality probes on any registered voice (`POST /v1/voices/{voice_id}/quality-runs`). All three share the `voice_quality_v1` report contract. See the [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).
@@ -333,7 +333,7 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 >
 > The complete, privacy-preserving report is [v1.13.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md). ASR reuses the v1.11.0 fixtures and is directionally comparable; TTS uses a different fixed text set, while Realtime now verifies the current nested audio wire profile, so those values are reported in-profile only.
 >
-> **v2 tier/precision note**: The catalog now applies a per-tier precision policy (`light` 4-bit; `balanced`/`quality` 8-bit), so the v1.13.0 all-q8 figures below are directional only for the current tiers. Per-tier precision re-measurement is pending; the published numbers are unchanged and must not be read as the new tiers' measurements.
+> **v2 tier/precision note**: The catalog applies a per-tier precision policy of 8-bit weights for all three tiers (only the `quality` aligner is bf16); the evaluated 4-bit `light` variant was rejected by gate E1 and is not used. The v1.13.0 all-q8 figures below are directionally comparable to this 8-bit policy; the published numbers are unchanged and retain their v1.13.0 provenance.
 
 | Benchmark Metric | 🟢 Light Profile (v1.13.0) | 🟡 Balanced Profile (v1.13.0) | 🟣 Quality Profile (v1.13.0) | Test Methodology & Scenario |
 |---|---|---|---|---|

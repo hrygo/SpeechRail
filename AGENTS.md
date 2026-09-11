@@ -39,7 +39,7 @@ SpeechRail 是单人本机使用的独立 ASR/TTS 服务，为 OpenAI SDK、[Son
 - 一次只运行一个 SpeechRail 服务和一个 ASGI worker；不要通过复制模型进程提高吞吐。
 - batch ASR 与 streaming ASR 不作为同机同时工作的产品场景；共享 worker 的模式冲突应稳定返回 `backend_busy`。
 - 三档改变权重、按档位量化精度与是否供给分人制品；API 契约形状、worker 协议、调度和服务架构保持共享，但对外声明能力随档位不同，必须如实声明、不伪造不可用功能（light 不声明分人）。
-- 精度按档位：`light` 0.6B ASR + 0.6B CustomVoice 4-bit、无 aligner/分人/CoreML；`balanced` 1.7B ASR + 0.6B CustomVoice 8-bit、`aligner-q8`、分人开启；`quality` 1.7B ASR + 1.7B VoiceDesign 8-bit、`aligner-bf16`、分人开启。词级时间戳由 ASR 原生提供、不依赖 aligner；仅供给分人的档位声明 `gpt-4o-transcribe-diarize`。
+- 精度按档位：`light` 0.6B ASR + 0.6B CustomVoice 8-bit（`asr-0.6b-q8` / `tts-0.6b-custom-q8`）、无 aligner/分人/CoreML；`balanced` 1.7B ASR + 0.6B CustomVoice 8-bit、`aligner-q8`、分人开启；`quality` 1.7B ASR + 1.7B VoiceDesign 8-bit、`aligner-bf16`、分人开启。三档均 8-bit，仅 `quality` aligner 为 bf16。4-bit `asr-0.6b-q4` / `tts-0.6b-custom-q4` 经 E1 在公开真人语料实测（相对 8-bit 基线劣化 1.38pp > 0.5pp 阈值）未采纳，制品保留在 catalog 但不再被任何档位使用。词级时间戳由 ASR 原生提供、不依赖 aligner；仅供给分人的档位声明 `gpt-4o-transcribe-diarize`。
 - `/v1/realtime` 只实现 ASR/TTS 子集，不承载 LLM response、tool call、播放、会议或应用打断策略。
 - diarization 只输出 session-scoped 匿名 label；不管理实名、声纹库、跨会议身份或持久化 PCM/embedding。
 - 所有公共错误使用稳定 envelope 并包含 request ID；输入在 API 边界校验，vendor 输出在 adapter 边界校验。

@@ -47,8 +47,9 @@ def test_catalog_lists_exact_three_tiers_and_balanced_to_light_changes_models() 
     balanced = by_id["balanced"]
     light = by_id["light"]
     quality = by_id["quality"]
-    assert balanced.tts != light.tts
-    assert model_changes(balanced, light) == frozenset({"asr", "tts", "aligner"})
+    assert balanced.asr != light.asr
+    assert balanced.tts == light.tts
+    assert model_changes(balanced, light) == frozenset({"asr", "aligner"})
     assert balanced.aligner == "aligner-q8"
     assert quality.aligner == "aligner-bf16"
     assert light.aligner is None
@@ -63,7 +64,7 @@ def test_catalog_lists_exact_three_tiers_and_balanced_to_light_changes_models() 
     for profile in profiles:
         assert profile.download_bytes > 0
     assert light.download_bytes == (
-        artifact_bytes("asr-0.6b-q4") + artifact_bytes("tts-0.6b-custom-q4")
+        artifact_bytes("asr-0.6b-q8") + artifact_bytes("tts-0.6b-custom-q8")
     )
     assert balanced.download_bytes == (
         balanced_asr_tts + artifact_bytes("aligner-q8") + sortformer_bytes

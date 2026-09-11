@@ -622,8 +622,8 @@
     },
     "light": {
       "aligner": null,
-      "asr": 4,
-      "tts": 4
+      "asr": 8,
+      "tts": 8
     },
     "quality": {
       "aligner": "bf16",
@@ -641,10 +641,10 @@
     },
     {
       "aligner": null,
-      "asr": "asr-0.6b-q4",
+      "asr": "asr-0.6b-q8",
       "diarization": false,
       "id": "light",
-      "tts": "tts-0.6b-custom-q4"
+      "tts": "tts-0.6b-custom-q8"
     },
     {
       "aligner": "aligner-bf16",

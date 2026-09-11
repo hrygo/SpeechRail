@@ -70,18 +70,18 @@ def test_selection_overlays_asr_model_dir_and_keeps_public_identity(
     tmp_path: Path,
     catalog_artifacts: ModelCatalog,
 ) -> None:
-    asr_dir = tmp_path / "models" / "asr-0.6b-q4"
+    asr_dir = tmp_path / "models" / "asr-0.6b-q8"
     asr_dir.mkdir(parents=True)
 
     original = _settings(port=8201, device="mps", dtype="float16")
-    selection = _make_selection(preset="light", asr="asr-0.6b-q4", tts="tts-0.6b-custom-q4")
+    selection = _make_selection(preset="light", asr="asr-0.6b-q8", tts="tts-0.6b-custom-q8")
 
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
     assert resolved.qwen3_model_dir == asr_dir.resolve()
     assert resolved.model_id == original.model_id
-    assert resolved.dtype == original.dtype
-    assert resolved.dtype == "float16"
+    assert resolved.device == original.device
+    assert resolved.dtype == "int8"
 
 
 def test_preserves_unrelated_user_configurations(
@@ -279,7 +279,7 @@ def test_missing_model_directory_raises_error(
 ) -> None:
     original = _settings()
     selection = _make_selection(
-        preset="light", asr="asr-0.6b-q4", tts="tts-0.6b-custom-q4"
+        preset="light", asr="asr-0.6b-q8", tts="tts-0.6b-custom-q8"
     )
 
     with pytest.raises(ValueError, match="missing"):
@@ -462,7 +462,7 @@ def test_light_selection_clears_aligner_and_diarization(
     tmp_path: Path,
     catalog_artifacts: ModelCatalog,
 ) -> None:
-    asr_dir = tmp_path / "models" / "asr-0.6b-q4"
+    asr_dir = tmp_path / "models" / "asr-0.6b-q8"
     asr_dir.mkdir(parents=True)
 
     original = _settings(
@@ -470,7 +470,7 @@ def test_light_selection_clears_aligner_and_diarization(
         diarization_coreml_model_path=Path("/old/SortformerNvidiaLow_v2.1.mlmodelc"),
     )
     selection = _make_selection(
-        preset="light", asr="asr-0.6b-q4", tts="tts-0.6b-custom-q4"
+        preset="light", asr="asr-0.6b-q8", tts="tts-0.6b-custom-q8"
     )
 
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)

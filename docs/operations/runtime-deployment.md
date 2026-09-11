@@ -35,11 +35,13 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权�
 ## 三档组成与按档位精度（catalog v2）
 
 `catalog schema_version=2` 用顶层 `precision_policy` 取代旧的“全档 8-bit”规则，并按用户定位重排三档。
-档位仍然只选择权重与量化，公共 API 形状、worker 协议、调度与并发保持不变（ADR-0011；三档组成重排见 ADR-0015）。
+其中 `light` 的 4-bit 候选在验收门 E1 未通过（公开真人语料劣化 1.38pp > 0.5pp）后已回退到 8-bit，
+现行精度策略为三档均 8-bit、仅 `quality` aligner 为 bf16。档位仍然只选择权重与量化，公共 API 形状、
+worker 协议、调度与并发保持不变（ADR-0011；三档组成重排见 ADR-0015）。
 
 | profile | ASR | TTS | Aligner（分人专用） | Diarization | VAD | 安装体积 |
 |---|---|---|---|---|---|---|
-| `light`（Embedded） | `asr-0.6b-q4`（4-bit） | `tts-0.6b-custom-q4`（4-bit） | —（无） | ✗ | ✓ | **≈2.41 GB** |
+| `light`（Embedded） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ | ✓ | **≈2.99 GB** |
 | `balanced`（Pro Workflow） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ | ✓ | **≈5.96 GB** |
 | `quality`（Studio） | `asr-1.7b-q8`（8-bit） | `tts-1.7b-design-q8`（8-bit） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈7.63 GB** |
 

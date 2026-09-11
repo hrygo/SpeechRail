@@ -2,7 +2,7 @@
 title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
-version: "1.5.0"
+version: "1.6.0"
 date: 2026-09-11
 ---
 
@@ -50,7 +50,7 @@ mindmap
 - **最小化日志审计**：日志中仅记录 Request ID、时长与耗时指标，严禁打印原始音频与转写正文。
 
 ### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
-- **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS，并按档位执行精度策略——🟢 `light` 使用 4-bit 权重，🟡 `balanced`/🟣 `quality` 使用 8-bit 权重（`quality` 的 aligner 保持 bf16）；4-bit 是显式选择的档位，不是静默降级。
+- **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS，并按档位执行精度策略——🟢 `light`、🟡 `balanced`、🟣 `quality` 三档均使用 8-bit 权重（`quality` 的 aligner 保持 bf16）。曾评估的 4-bit `light` 方案因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳。
 - **全链路极速吞吐**：WAV 容器 Fast-Path 直读避免转码开销；端到端流式转写首字延迟低至百毫秒级。
 - **整句高质量合成**：24 kHz 高保真自然语音生成，支持多语种与丰富预设音色；🟣 `quality` 由 VoiceDesign（1.7B）驱动并支持以自然语言创建新音色，🟡/🟢 由 CustomVoice（0.6B）提供固定预设音色。
 
@@ -87,7 +87,7 @@ SpeechRail 以三个**用户差异化档位**交付同一套 API 契约；档位
 
 | 档位 | 用户定位 | 适配硬件 | 权重精度 | 分人 |
 |---|---|---|---|---|
-| 🟢 `light`（Embedded） | 嵌入/听写、个人桌面助手 | 8GB 基础机（Air / Mini） | 4-bit | ✗ 不供给 aligner / CoreML |
+| 🟢 `light`（Embedded） | 嵌入/听写、个人桌面助手 | 8GB 基础机（Air / Mini） | 8-bit | ✗ 不供给 aligner / CoreML |
 | 🟡 `balanced`（Pro Workflow） | 会议、播客、访谈 | 16–24GB 主流机（Pro / Max） | 8-bit | ✓ Sortformer + `aligner-q8` |
 | 🟣 `quality`（Studio） | 创作者、R&D | 32GB+ 旗舰机（Max / Ultra） | 8-bit（aligner bf16） | ✓ Sortformer + `aligner-bf16` |
 

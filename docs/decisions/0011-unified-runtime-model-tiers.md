@@ -12,7 +12,9 @@ Accepted（用户已采纳目标设计；尚未实施，真实硬件门尚未通
 
 本 ADR 的 §2（三档组成）与 §8（0.6B CustomVoice 4-bit 仅作同档候选）已被
 [ADR-0015：三档用户定位与按档位精度策略](0015-tier-user-positioning-and-precision-policy.md)
-取代；本 ADR 其余决策保持不变。
+取代。ADR-0015 于 2026-09-11 修订：E1 未通过后 light 从 4-bit 回退 8-bit
+（`asr-0.6b-q8` + `tts-0.6b-custom-q8`），故 §8 的 4-bit 候选最终未被采纳；本 ADR 其余
+决策保持不变。
 
 ## Context
 

@@ -109,8 +109,10 @@ selection schema 均不变。`resolve_selection` 仅依 preset 派生 `qwen3_ali
 
 ### 回滚
 
-- **按档精度回退**：把 `precision_policy` 指向该档上一更高精度（例如 `light` 由 4-bit 回 q8），重建 catalog，
-  再执行一次 `profile apply <tier>`。更高精度制品仍保留，可直接供给。
+- **按档精度回退**：把 `precision_policy` 指向该档上一更高精度，重建 catalog，再执行一次
+  `profile apply <tier>`。更高精度制品仍保留，可直接供给。该回退已实际执行过一次：`light` 的 0.6B
+  4-bit 组合在 E1 未通过（公开真人语料劣化 1.38pp > 0.5pp）后回退到 `asr-0.6b-q8` +
+  `tts-0.6b-custom-q8`；此后 `light` 即以此 8-bit 组合运行。
 - **全量回退**：按 ADR-0014 回退到上一 managed release（其私有配置仍引用
   `diarization/Qwen3-ForcedAligner-0.6B`）；因无 prepared_id 迁移，回退可直接生效。
 

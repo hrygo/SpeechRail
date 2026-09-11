@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-09-11
+
+### Fixed
+
+- `light` 档精度回退：验收门 E1 在公开真人语料（LibriSpeech test-clean + FLEURS cmn_hans_cn，CC BY 4.0）上实测 0.6B 4-bit ASR 相对 8-bit 基线劣化 **1.38pp**（en WER +1.25pp、zh CER +1.46pp），超过 0.5pp 阈值；依计划「未过即回退上一精度」，`light` 由 `asr-0.6b-q4` + `tts-0.6b-custom-q4` 回退为 `asr-0.6b-q8` + `tts-0.6b-custom-q8`（均 8-bit）。`asr-0.6b-q4` / `tts-0.6b-custom-q4` 制品保留在 catalog 但不被任何档位引用。
+
+### Changed
+
+- 三档精度策略统一为 8-bit（仅 `quality` 的 aligner 保持 bf16）；`light` 安装体积约 2.99 GB，catalog 与全部 active 文档同步更新。
+- 验收记录更新：E1 由「仅代理语料」改为公开真人语料实测并触发 `light` 回退；E3 以公开 VoxConverse（CC BY 4.0）收口，aligner-q8 vs aligner-bf16 未劣化（DER 2.40% vs 5.04%），并如实记录 4/11 覆盖限制。
+
 ## [2.3.1] - 2026-09-11
 
 ### Fixed
