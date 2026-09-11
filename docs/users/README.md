@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "2.0.4"
-date: 2026-09-09
+version: "2.0.6"
+date: 2026-09-11
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -16,15 +16,17 @@ date: 2026-09-09
 
 ```mermaid
 graph TD
-    A[🔌 1. 客户端与 SDK 快速接入<br/>integrations.md] --> B[📡 2. 公共 API 契约手册<br/>api-contract.md]
-    B --> C[⚡ 3. OpenAI Realtime 协议规范<br/>../../contracts/realtime-openai.md]
-    C --> D[📑 4. OpenAPI 3.1 机器可读定义<br/>../../contracts/openapi.yaml]
+    A[🔌 1. 客户端与 SDK 快速接入<br/>integrations.md] --> A2[🤖 2. MCP Agent 集成指南<br/>mcp-agent-integration.md]
+    A2 --> B[📡 3. 公共 API 契约手册<br/>api-contract.md]
+    B --> C[⚡ 4. OpenAI Realtime 协议规范<br/>../../contracts/realtime-openai.md]
+    C --> D[📑 5. OpenAPI 3.1 机器可读定义<br/>../../contracts/openapi.yaml]
 ```
 
 1. **[🔌 客户端与 SDK 快速接入 (integrations.md)](integrations.md)**：包含 [Sona](https://github.com/hrygo/sona) 会议助理、Open-WebUI、LiveKit / Pipecat 实时智能体、OpenClaw、官方 OpenAI Python SDK 与 cURL 的实战示例。
-2. **[📡 公共 API 契约手册 (api-contract.md)](api-contract.md)**：包含原生 OpenAI `diarized_json` 文件分人、TTS 语音合成、异步 Jobs、音色目录及标准错误 Envelope 的详细规范。
-3. **[⚡ OpenAI Realtime 协议规范](../../contracts/realtime-openai.md)**：包含 `/v1/realtime` WebSocket 全双工流式 ASR/TTS、Server VAD、打断机制与一个 namespaced diarization opt-in。
-4. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。
+2. **[🤖 MCP 主流 Agent 集成指南 (mcp-agent-integration.md)](mcp-agent-integration.md)**：六个主流客户端（Codex、Claude Code、Cursor、WorkBuddy、Qoder、ZCode）的 `speechrail-mcp` 配置示例、传输选择与故障排查。
+3. **[📡 公共 API 契约手册 (api-contract.md)](api-contract.md)**：包含原生 OpenAI `diarized_json` 文件分人、TTS 语音合成、异步 Jobs、音色目录及标准错误 Envelope 的详细规范。
+4. **[⚡ OpenAI Realtime 协议规范](../../contracts/realtime-openai.md)**：包含 `/v1/realtime` WebSocket 全双工流式 ASR/TTS、Server VAD、打断机制与一个 namespaced diarization opt-in。
+5. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。
 
 ---
 
