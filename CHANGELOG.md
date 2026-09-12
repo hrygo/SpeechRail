@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-09-13
+
+### Fixed
+
+- 修复 macOS 控制面与 managed runtime 的机器输出协议版本不一致导致启动、停止、重启和档位操作全部显示 `managed command failed` 的问题。
+
+### Changed
+
+- macOS 控制应用统一使用 `SpeechRail` 产品名并随 patch 发布品牌 icon，保持控制面与 managed runtime 同步发布。
+
 ## [2.5.0] - 2026-09-13
 
 ### Added
