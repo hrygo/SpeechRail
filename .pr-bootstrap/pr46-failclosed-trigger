@@ -1,1 +1,1 @@
-apply fail-closed model variant patch
+apply fail-closed model variant patch retry 2
