@@ -6,7 +6,7 @@
 
 **Architecture:** `SpeechRailApp` 是 SwiftUI 控制面；签名的 `SpeechRailControlAgent` 由 `SMAppService` 管理并通过受签名验证的 XPC 暴露有限命令；Agent 使用绝对路径调用现有 managed Python CLI；`com.speechrail` 仍是唯一的 ASR/TTS 服务 LaunchAgent 和生命周期所有者。UI 与服务端通过 loopback HTTP 读取公开状态，所有改变本机服务状态的操作经过 XPC Agent 串行执行。
 
-**Tech Stack:** Xcode 26.6 stable, Swift 6.3, SwiftUI, Observation, XPC (`XPCSession`/`XPCPeerRequirement`), `SMAppService`, Hardened Runtime, Developer ID Application signing, notarization, Python 3.12, `uv`, existing SpeechRail service CLI, Swift Testing/XCTest.
+**Tech Stack:** Xcode 26.6 stable, Swift 6.3, SwiftUI, Observation, `NSXPCConnection`/`NSXPCListener`, `SMAppService`, Hardened Runtime, Developer ID Application signing, notarization, Python 3.12, `uv`, existing SpeechRail service CLI, Swift Testing/XCTest.
 
 **Spec:** `docs/superpowers/specs/2026-09-12-macos-app-environment-design.md`
 
@@ -139,7 +139,7 @@ public enum ControlErrorCode: String, Codable, Sendable {
 }
 
 public struct OperationSnapshot: Codable, Sendable {
-    public let operationID: UUID
+    public let operationID: String
     public let command: ControlCommand
     public let state: OperationState
     public let errorCode: ControlErrorCode?
@@ -231,7 +231,7 @@ xcodebuild test -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
 - `macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist`
 
 - [ ] 先用 fake/in-process transport 写客户端和 Agent handler 测试，验证 request ID、错误映射、单次响应、operation polling 和断开重连。
-- [ ] 在编译可用的 macOS 14 API 范围内采用 `XPCSession` 与 `XPCPeerRequirement.isFromSameTeam(andMatchesSigningIdentifier:)`；若 SDK 实测 API 形状不同，只在该隔离层按 SDK 适配，不改变 ControlKit 协议。
+- [ ] 在 macOS 14 可用范围内采用 `NSXPCConnection`/`NSXPCListener` 承载严格类型 `Data` envelope，并在连接两端使用 `setCodeSigningRequirement`；macOS 26 的 `XPCPeerRequirement` 不作为最低版本依赖。
 - [ ] Agent listener 设置 same-team/signing-identifier peer requirement；拒绝未签名、错误 team 或错误 bundle signing identifier 的 peer，并返回 `unauthorizedPeer`，不执行命令。
 - [ ] App 侧用 `SMAppService.agent(plistName:)` 注册、查询 `status`、注销 helper；注册/注销错误在 UI 显示可操作提示，引导用户查看 System Settings 的 Login Items & Extensions。
 - [ ] App 首次控制操作前确保 helper 已注册；重复注册必须幂等。注销 helper 不停止现有 `com.speechrail` 服务，不删除 app home 或模型。
