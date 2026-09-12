@@ -111,7 +111,7 @@ SPEECHRAIL_MCP_TRANSPORT=streamable-http /ABSOLUTE/PATH/TO/speechrail-mcp
 
 ## 4. 客户端配置
 
-> 以下六个客户端均支持 **stdio**（默认）：把 `/ABSOLUTE/PATH/TO/speechrail-mcp` 替换为 §2.1 的绝对路径。
+> 以下客户端均支持 **stdio**（默认）：把 `/ABSOLUTE/PATH/TO/speechrail-mcp` 替换为 §2.1 的绝对路径。
 > 需要 HTTP 模式时参见 §3.1。
 
 #### 4.1 OpenAI Codex
@@ -220,6 +220,27 @@ claude mcp add --scope user speechrail \
 
 ---
 
+#### 4.7 Google Antigravity
+
+用户全局配置 `~/.gemini/config/mcp_config.json`：
+
+```json
+{
+  "mcpServers": {
+    "speechrail": {
+      "command": "/Users/hrygo/.local/bin/speechrail-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+- **架构适配**：Antigravity 支持标准 Stdio 协议与 Lazy MCP 按需加载机制。
+- **Schema 缓存**：工具 Schema 位于 `~/.gemini/antigravity-ide/mcp/speechrail/`（包含 9 个工具的 JSON 契约与 `instructions.md`）。
+- **全局调用准则**：在 `~/.gemini/config/rules/speechrail.md` 中约束统一调用契约（统一使用 `call_mcp_tool(ServerName="speechrail", ...)` 调用；音频一律传本地绝对路径，严禁传 base64）。
+
+---
+
 ## 5. 客户端能力与传输对照
 
 | 客户端 | stdio | streamable-http | 配置载体 |
@@ -230,6 +251,7 @@ claude mcp add --scope user speechrail \
 | WorkBuddy | ✅ | ✅ | `~/.workbuddy/mcp.json` / 界面配置 |
 | Qoder | ✅ | ✅ | `~/.qoder/settings.json` / `qoder mcp add` |
 | ZCode | ✅ | ✅ | `~/.zcode/cli/config.json` / `.agents/mcp.json` |
+| Google Antigravity | ✅ | ✅ | `~/.gemini/config/mcp_config.json` |
 
 ---
 
