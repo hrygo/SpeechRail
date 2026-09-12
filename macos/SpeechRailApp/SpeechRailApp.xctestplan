@@ -1,0 +1,30 @@
+{
+  "configurations" : [
+    {
+      "name" : "Default Configuration",
+      "options" : {
+        "testExecutionOrdering" : "lexical"
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "codeCoverage" : false
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:SpeechRailApp.xcodeproj",
+        "identifier" : "A20000000000000000000005",
+        "name" : "SpeechRailAppTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:SpeechRailApp.xcodeproj",
+        "identifier" : "A20000000000000000000006",
+        "name" : "SpeechRailAppUITests"
+      }
+    }
+  ],
+  "version" : 1
+}

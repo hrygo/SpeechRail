@@ -1,490 +1,312 @@
 # SpeechRail 🎙️
 
 <p align="center">
-  <strong>Production-Ready Local ASR / TTS Speech Infrastructure for Apple Silicon Mac</strong><br>
-  <em>Dual-Process Physical Isolation · Automatic Idle Eviction · Fully Offline Zero-Latency · 100% Private · 1:1 OpenAI Compatible</em>
+  <strong>Local speech infrastructure for Apple Silicon macOS</strong><br>
+  <em>Shared ASR, TTS, and Realtime endpoints for desktop agents and local apps</em>
 </p>
 
 <p align="center">
-  <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?color=3776AB&label=release" alt="Release" /></a>
-  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20(M--Series)-000000.svg?logo=apple&logoColor=white" alt="Apple Silicon" />
+  <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
+  <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?label=release" alt="Release" /></a>
+  <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Apple Silicon" />
   <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white" alt="Python 3.12" />
-  <img src="https://img.shields.io/badge/API-OpenAI%20v1%20Compatible-412991.svg?logo=openai&logoColor=white" alt="OpenAI Compatible" />
-  <img src="https://img.shields.io/badge/Inference-Apple%20MLX-F58220.svg" alt="MLX Inference" />
+  <img src="https://img.shields.io/badge/API-OpenAI%20compatible-412991.svg?logo=openai" alt="OpenAI compatible" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" /></a>
 </p>
 
 <p align="center">
-  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 <p align="center">
-  🤝 <strong>Built for <a href="https://github.com/hrygo/sona">Sona</a></strong><br>
-  <em>Private, local, real-time ASR/TTS with optional OpenAI-compatible anonymous speaker diarization for Sona.</em>
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#openai-compatible-usage">Usage</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/hrygo/SpeechRail/discussions">Discussions</a>
 </p>
 
----
+SpeechRail is a single-user local speech service for desktop agents, meeting
+tools, content workflows, and other applications that need reusable speech
+capabilities. It hosts shared ASR/TTS workers behind one local endpoint and
+exposes the narrow OpenAI-compatible subset that SpeechRail can verify.
 
-## 💡 Why SpeechRail?
+The service owns protocol translation, model adapters, worker lifecycle,
+resource admission, and capability reporting. Calling applications own
+microphone capture, playback, meeting storage, UI, and LLM orchestration.
 
-When adding speech capabilities to personal desktop agents, local meeting transcription assistants, podcast editors, or various AI tools, developers often face a difficult trade-off:
-- **Calling Commercial Cloud APIs (e.g., OpenAI Whisper / TTS)**: Every minute of audio is uploaded to the cloud, posing privacy and compliance risks; public network jitter adds hundreds of milliseconds of latency; high-frequency requests incur continuous and steep API bills.
-- **Local Apps Loading Models Individually**: Each desktop app packaging its own model triggers memory explosion; VRAM leaks or runtime exceptions can easily crash the host application.
+> [!NOTE]
+> SpeechRail is currently published as **Beta**. `/readyz` and a successful
+> smoke request confirm service readiness, not universal quality, latency, or
+> performance guarantees.
 
-**The SpeechRail Solution**: A **high-performance local speech daemon running silently in the macOS background**, listening on a single port, providing plug-and-play speech capabilities for all local and LAN clients/agents:
+## Why SpeechRail
 
-- 🔒 **Zero Data Egress & Strict Privacy**: Binds to loopback (`127.0.0.1`) by default, with controlled LAN exposure support. Audio is processed purely in-memory without disk caching. Fully local inference with zero telemetry or cloud leakage.
-- 🔌 **1:1 Seamless OpenAI Compatibility**: Full drop-in replacement for `whisper-1` (transcription), `tts-1` (speech synthesis), and `/v1/realtime` (low-latency full-duplex streaming ASR/TTS). Switch your client by updating just one `base_url`.
-- 🛡️ **Process Isolation**: The HTTP gateway, MLX ASR/TTS workers, and the native CoreML diarization worker run in separate OS processes over private framed IPC. A worker crash does not bring down the gateway.
-- 🍃 **Configurable Idle Eviction**: After the default **300 seconds** without activity, resident model weights are released according to the configured lifecycle. The resulting physical footprint depends on the profile, runtime, and allocator; it is not a fixed standby-memory guarantee.
-- 👥 **Optional Multi-Speaker Diarization**: `gpt-4o-transcribe-diarize` returns OpenAI-style `diarized_json` with session-scoped anonymous labels. It runs the pinned FluidAudio CoreML FP16 Sortformer worker; Realtime uses the opt-in `session.speechrail.diarization.enabled` extension.
-- 🎚️ **Dynamic Three-Tier Profiles**: Three user-differentiated tiers—**Embedded (`light`)**, **Pro Workflow (`balanced`)**, and **Studio (`quality`)**—spanning 8GB to 128GB Apple Silicon Macs, all on 8-bit weights (only the `quality` aligner stays bf16) with seamless zero-downtime hot switching.
-- 🎙️ **9 High-Quality Built-In Voices Across Profiles**: Natively integrates Qwen3-TTS speech synthesis, featuring rich acoustic personas for Chinese, English, Cantonese, Japanese, Korean, and more.
+SpeechRail is designed for one Apple Silicon Mac shared by several local
+clients. It keeps model execution and request scheduling in one bounded
+runtime, so applications do not each need to load their own speech models or
+invent their own OpenAI-compatible adapter.
 
----
+It is a good fit when you need:
 
-## ⚖️ Core Comparison (Why SpeechRail?)
+- local processing for ordinary ASR/TTS requests;
+- one reusable HTTP/WebSocket service for multiple desktop applications;
+- a narrow, inspectable OpenAI-compatible surface;
+- optional Realtime ASR/TTS, anonymous session-scoped diarization, or MCP
+  access.
 
-| Core Feature | **SpeechRail 🎙️ (Local Resident Infrastructure)** | **Commercial Cloud APIs (e.g., OpenAI)** |
+## What is available
+
+| Surface | Capability | Notes |
 |---|---|---|
-| **Data Privacy** | 🔒 **100% local private inference, zero data egress** (Default keyless loopback, optional LAN auth, never touches the cloud) | ❌ Audio must be uploaded to the cloud, risking compliance and privacy leaks |
-| **Long-Term Cost** | 💰 **$0 (Install once, unlimited free requests across local apps and LAN)** | 💸 Pay-per-minute / pay-per-token pricing; expensive for frequent use |
-| **Network Dependency** | ⚡ **Purely offline local computation, 0 public network latency, works offline** | ⚠️ Relies on stable Internet and cross-border connectivity; vulnerable to jitter |
-| **System-Wide Reuse & Memory**| 🍃 **Single shared daemon for all apps, configurable idle weight eviction; footprint is benchmark-dependent** | Unified cloud gateway, no local model footprint |
-| **System Robustness** | 🛡️ **Gateway & inference worker physically isolated; automatic worker recovery** | Bound by external cloud provider SLA and connectivity |
-| **OpenAI Compatibility** | ✅ **Native 1:1 compatibility (`whisper-1` / `tts-1` / `/v1/realtime`)** | ✅ Official standard specification |
+| `GET /health`, `/readyz`, `/metrics` | Service diagnostics | Inspect process, subsystem, readiness, and metrics state. |
+| `POST /v1/audio/transcriptions` | File ASR | OpenAI-compatible multipart input; `json`, `verbose_json`, `text`, `srt`, `vtt`, and optional `diarized_json` responses. |
+| `POST /v1/audio/speech` | TTS | Streaming `mp3`, `opus`, `aac`, `flac`, `wav`, or raw `pcm`; select an `available=true` voice from `/v1/voices`. |
+| `GET /v1/models`, `GET /v1/voices` | Capability discovery | Results describe the active profile and currently available artifacts and voices. |
+| `WS /v1/realtime` | Realtime ASR/TTS | OpenAI Realtime event subset, server-side speech admission, and an opt-in namespaced diarization extension. |
+| `/v1/jobs` | Asynchronous job metadata | Optional owner-scoped durable job records; callers provide opaque references, not raw audio or transcripts. |
+| `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it calls the local REST service and does not host models. |
 
----
+Speaker diarization is available only when the active `balanced` or `quality`
+profile has its local CoreML assets ready. It returns session-scoped anonymous
+labels; it does not identify people or maintain a cross-session speaker
+database.
 
-## ⚡ Quick Start (5 Minutes)
+The repository also contains a SwiftUI macOS control plane under
+`macos/SpeechRailApp`. It reports service state and delegates profile/service
+operations to the existing Python CLI. It is not the audio runtime and does
+not capture microphones, play audio, load models, or replace the user-level
+`com.speechrail` LaunchAgent.
 
-### Hardware and System Requirements
+## Scope and boundaries
 
-- **Hardware Architecture**: Mac with **Apple Silicon M-Series chip** (Intel x86_64 Macs are not supported).
-- **Operating System**: macOS 14.0 (Sonoma) or later.
-- **Python Runtime**: **Python 3.12** required (deployment scripts automatically provision an isolated official runtime and self-heal; no manual setup needed).
-- **Fresh Mac Zero-Setup Guide**: For a fully automated setup SOP on fresh/blank MacBooks, see [`speechrail-zero-setup`](.agents/skills/speechrail-zero-setup/SKILL.md).
+SpeechRail is deliberately a speech runtime, not a complete voice-agent
+application. It does not provide:
 
----
+- microphone capture, speaker playback, conference management, or UI;
+- LLM responses, tool calls, or application-level interruption policy;
+- named-speaker identity, voiceprint databases, or cross-session attribution;
+- cloud inference, multi-tenant isolation, high availability, or a distributed queue.
 
-### Method 1: Recommended Managed Setup
+Realtime is the sole public WebSocket entry point and implements ASR/TTS
+events only. Read the contract before relying on an OpenAI feature that is not
+listed above.
 
-Use the automated deployment engine, which detects physical RAM, fetches verified quantized models from the ModelScope mirror, builds the MLX worker in an isolated sandbox, and registers a startup `LaunchAgent` service:
+## Requirements
+
+- Apple Silicon Mac with macOS 14 or later for the native managed runtime;
+  Intel Macs are not a supported target.
+- Python `>=3.12,<3.13` for source development and the Python service CLI.
+- [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
+- `ffmpeg` for the audio decoding/transcoding paths used by local setup and
+  selected audio formats.
+- Local model snapshots and vendor runtimes stored outside the repository.
+
+Inference requests do not download models, fetch remote audio URLs, or make
+silent cloud calls. Explicit setup and operator commands may provision local
+artifacts; review the relevant operation guide before running them.
+
+## Quick start
+
+### Managed installation
+
+Use this path for a fresh Apple Silicon Mac or a user-level background service.
+The bootstrap flow installs prerequisites, prepares the selected local model
+artifacts, and registers the `com.speechrail` LaunchAgent. It performs external
+setup work and therefore requires the explicit `--yes` confirmation.
 
 ```bash
-# 1. Clone the repository
 git clone https://github.com/hrygo/SpeechRail.git
 cd SpeechRail
-
-# 2. One-click bootstrap installer (ideal for fresh/blank Macs, sets up environment & dependencies):
-./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh
-
-# (Or run directly with any python3; the self-healing engine will fetch Python 3.12 and seamlessly re-execute):
-# python3 .agents/skills/speechrail-zero-setup/scripts/zero_setup.py
+./.agents/skills/speechrail-zero-setup/scripts/bootstrap_mac.sh \
+  --yes \
+  --preset balanced
 ```
 
-After installation:
-1. The service runs silently in the background as a macOS `LaunchAgent` (listening on port `8201`).
-2. A double-clickable `SpeechRail 设置.command` script is generated in App Home for easy graphical profile switching anytime.
-3. Optionally, the bundled `video-podcast` skill can be installed at `~/.agents/skills/video-podcast` by passing `--install-video-podcast-skill`.
+Read the [zero-setup guide](.agents/skills/speechrail-zero-setup/SKILL.md)
+before using the bootstrap entry point. It documents disk requirements,
+profile selection, model verification, and recovery behavior.
 
----
-
-### Method 2: Explicit Custom Environment (Explicit Env)
-
-For advanced developers wishing to use existing local model weights or custom virtual environments:
+After installation, inspect the service without starting a second instance:
 
 ```bash
-# 1. Configure private environment variables
+uv run speechrail service status
+uv run speechrail diagnose --app-home "$HOME/Library/Application Support/SpeechRail"
+curl http://127.0.0.1:8201/health
+curl http://127.0.0.1:8201/readyz
+```
+
+### Source development
+
+This path is useful for deterministic contract and application development.
+It can start the HTTP surface without real model snapshots; inference then
+returns `503 backend_not_ready` until a local ASR/TTS runtime is configured.
+
+```bash
+git clone https://github.com/hrygo/SpeechRail.git
+cd SpeechRail
+uv sync --extra dev
 cp configs/speechrail.example.env .env
 chmod 600 .env
-
-# 2. In .env, set the absolute paths to external models and the worker Python interpreter
-# SPEECHRAIL_QWEN3_MODEL_DIR=/Users/yourname/models/Qwen3-ASR-1.7B
-# SPEECHRAIL_QWEN3_PYTHON=/Users/yourname/venvs/worker/bin/python
-
-# 3. Start the foreground service
 uv run speechrail serve
 ```
 
-In another terminal, verify the readiness probe (returns HTTP 200 when fully ready):
+For real local inference, set the documented ASR and TTS snapshot/interpreter
+pairs in the private `.env`, then run `speechrail service preflight` before
+starting the service. Keep snapshots, `.env`, audio, logs, and benchmark
+raw data outside the repository.
+
+Useful read-only checks are:
+
 ```bash
-curl -i http://127.0.0.1:8201/readyz
+curl http://127.0.0.1:8201/health
+curl http://127.0.0.1:8201/readyz
+curl http://127.0.0.1:8201/v1/models
+curl http://127.0.0.1:8201/v1/voices
+uv run speechrail diagnose
 ```
 
----
+`/health` reports process and subsystem state. `/readyz` reports whether the
+ASR/TTS runtime can accept inference; a successful readiness response is not a
+quality or performance certification.
 
-## 🔐 Authentication & Network Security Policy
+## OpenAI-compatible usage
 
-SpeechRail follows a **zero-friction locally, hardened externally** security design:
-
-- **Local Loopback (Default)**: Bound to `127.0.0.1`, requiring no API key. Local clients connect directly; pass any placeholder key in the OpenAI SDK (e.g., `api_key="local"`).
-- **LAN / Remote Exposure**: When bound to `0.0.0.0` or a specific network interface IP, **`SPEECHRAIL_API_KEY` must be explicitly configured** (service fails to start otherwise). All API requests must include `Authorization: Bearer <key>` in headers. Passing keys via URL query parameters is forbidden to prevent logging leaks.
-
-*Note: `/health`, `/readyz`, `/v1/models`, and `/v1/voices` are system health and discovery probe endpoints, and remain open without authentication.*
-
----
-
-## 💻 Client Ecosystem Integration
-
-Any application supporting a custom OpenAI base URL (`OPENAI_BASE_URL`) can use SpeechRail as its underlying speech engine.
-
-### 1. Python (OpenAI SDK)
-
-The diarization example requires a configured local CoreML bundle; the macOS wheel already contains its native worker (see [Optional Speaker Diarization](#3-optional-speaker-diarization)).
+The standard OpenAI Python client can target the local service by changing its
+base URL. Loopback access uses a placeholder key; use a real bearer key only
+when the service is deliberately exposed beyond loopback.
 
 ```python
 from openai import OpenAI
 
-# Point to local SpeechRail port; use any placeholder key in keyless local mode
 client = OpenAI(
     base_url="http://127.0.0.1:8201/v1",
     api_key="local",
 )
 
-# 🎙️ Speech-to-Text (ASR)
-with open("speech.wav", "rb") as audio_file:
-    transcript = client.audio.transcriptions.create(
-        model="whisper-1",  # Automatically routed to local Qwen3-ASR
-        file=audio_file,
+with open("speech.wav", "rb") as audio:
+    result = client.audio.transcriptions.create(
+        model="whisper-1",
+        file=audio,
         response_format="verbose_json",
-        timestamp_granularities=["segment", "word"],
     )
-    print("Transcript:", transcript.text)
+    print(result.text)
 
-# 👥 Multi-Speaker Meeting Transcription & Diarization
-with open("meeting.wav", "rb") as audio_file:
-    meeting = client.audio.transcriptions.create(
-        model="gpt-4o-transcribe-diarize",  # Dispatches the local CoreML diarization worker
-        file=audio_file,
-        response_format="diarized_json",  # Returns segmented transcript with speaker labels
-    )
-    for seg in meeting.segments:
-        print(f"[{seg.speaker}] {seg.text}")
-
-# 🔊 Text-to-Speech (TTS)
 speech = client.audio.speech.create(
-    model="tts-1",  # Supports tts-1 / tts-1-hd
-    voice="serena",  # Built-in serena (default), vivian, uncle_fu, etc. (9 voices)
-    input="Hello! I am SpeechRail, your high-performance local speech assistant running on Apple Silicon.",
-    response_format="wav",  # Supports wav / mp3 / opus / aac / flac / pcm
+    model="tts-1",
+    voice="serena",
+    input="SpeechRail is running locally.",
+    response_format="wav",
 )
-speech.stream_to_file("output.wav")
+speech.stream_to_file("speech-output.wav")
 ```
 
----
+For Realtime clients, connect to:
 
-### 2. TypeScript / Node.js (OpenAI SDK)
-
-```typescript
-import fs from "node:fs";
-import OpenAI from "openai";
-
-const openai = new OpenAI({
-  baseURL: "http://127.0.0.1:8201/v1",
-  apiKey: "local",
-});
-
-async function main() {
-  // 1. Text-to-Speech (TTS)
-  const response = await openai.audio.speech.create({
-    model: "tts-1",
-    voice: "serena",
-    input: "SpeechRail is fully ready and delivering high-speed local speech synthesis.",
-  });
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.promises.writeFile("speech.mp3", buffer);
-
-  // 2. Speech-to-Text (ASR)
-  const transcription = await openai.audio.transcriptions.create({
-    file: fs.createReadStream("speech.mp3"),
-    model: "whisper-1",
-  });
-  console.log("Transcript:", transcription.text);
-
-  // 3. Native speaker diarization: no SpeechRail-specific SDK is needed.
-  const meeting = await openai.audio.transcriptions.create({
-    file: fs.createReadStream("meeting.wav"),
-    model: "gpt-4o-transcribe-diarize",
-    response_format: "diarized_json",
-    chunking_strategy: { type: "server_vad" },
-  });
-  console.log("Diarized transcript:", meeting);
-}
-
-main();
+```text
+ws://127.0.0.1:8201/v1/realtime
 ```
 
----
+Then follow [`contracts/realtime-openai.md`](contracts/realtime-openai.md).
+For SDK, cURL, Sona, Open-WebUI, LiveKit/Pipecat, and OpenClaw examples, see
+[`docs/users/integrations.md`](docs/users/integrations.md).
 
-### 3. cURL CLI Direct Calls
+## Model profiles
 
-Use terminal commands directly without installing any SDKs:
+The public API shape is shared across profiles, but the advertised capability
+set follows the active catalog selection. All active ASR/TTS profile weights
+are 8-bit; only the `quality` diarization aligner remains bf16.
 
-```bash
-# Speech-to-Text (ASR)
-curl http://127.0.0.1:8201/v1/audio/transcriptions \
-  -H "Authorization: Bearer local" \
-  -F "file=@meeting.wav" \
-  -F "model=whisper-1" \
-  -F "response_format=json"
+| Profile | ASR | TTS | Diarization and voice behavior |
+|---|---|---|---|
+| `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | No aligner and no diarization; fixed CustomVoice roles. |
+| `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8` and optional anonymous diarization; fixed CustomVoice roles. |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`, optional anonymous diarization, VoiceDesign preview/design, and quality-gated Base cloning. The two TTS capability workers may stay resident and different lanes may run concurrently; each lane remains serialized. |
 
-# Text-to-Speech (TTS)
-curl http://127.0.0.1:8201/v1/audio/speech \
-  -H "Authorization: Bearer local" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "tts-1",
-    "input": "SpeechRail is fully ready and delivering high-speed local speech synthesis.",
-    "voice": "serena",
-    "response_format": "wav"
-  }' \
-  --output output.wav
-```
-
----
-
-### 4. Supported Agents & Desktop AI Clients Table
-
-| Client / Agent Platform | Base URL / Endpoint | API Key | Protocol | Recommended Models & Capabilities |
-|---|---|---|---|---|
-| **[Sona](https://github.com/hrygo/sona)** | `ws://127.0.0.1:8201/v1/realtime` | `local` | WebSocket | Full-duplex streaming ASR + VAD + Diarization + Streaming TTS |
-| **[Open-WebUI](https://github.com/open-webui/open-webui)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (Dictation) / `tts-1` (Real-time voice calls) |
-| **[LiveKit](https://github.com/livekit/agents) / [Pipecat](https://github.com/pipecat-ai/pipecat)** | `ws://.../v1/realtime` or `/v1` | `local` | WS / REST | Real-time full-duplex multimodal Voice Agent pipelines |
-| **[Cherry Studio](https://github.com/Kang-k/Cherry-Studio)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (Voice input) / `tts-1` (Text readout) |
-| **[OpenClaw](https://github.com/openclaw/openclaw)** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` (Voice commands) / `tts-1` (Status announcement) |
-| **[Dify](https://github.com/langgenius/dify) / FastGPT** | `http://127.0.0.1:8201/v1` | `local` | REST | `whisper-1` / `tts-1` (Agentic knowledge base workflows) |
-
-*Note: The table above shows local default keyless examples. For LAN access, replace `127.0.0.1` with the host Mac's local IP, and `local` with your configured `SPEECHRAIL_API_KEY`.*
-
----
-
-## 🎛️ Three Model Profiles & 9 Built-in Voices
-
-SpeechRail exposes a unified API contract while internally adapting across Apple Silicon Macs through three user-differentiated tiers—**Embedded (`light`)**, **Pro Workflow (`balanced`)**, and **Studio (`quality`)**—rather than merely scaling model size. The per-tier precision policy keeps all three tiers on 8-bit weights (the `quality` aligner stays unquantized bf16):
-
-### 1. Hardware Profile Matrix
-
-| Profile | ASR Model Weight | TTS Model Weight & Variant | Aligner / Diarization | Min Recommended RAM | Install Size (v2) | Peak Active Footprint (pre-v2) | Steady Footprint (pre-v2) | Idle Standby |
-|---|---|---|---|---|---|---|---|---|
-| 🟢 **`light`** (Embedded) | Qwen3-ASR 0.6B (`asr-0.6b-q8`, 8-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q8`, 8-bit) | ✗ No aligner / no diarization | 8GB Base Macs (Air / Mini) | **≈2.99 GB** (2986.6 MB) | **~4.4 GB** | **~4.1 GB** | **Runtime-dependent** (configured eviction) |
-| 🟡 **`balanced`** (Pro Workflow) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q8`, 8-bit) | ✓ `aligner-q8` + Sortformer | 16GB / 24GB Mainstream Macs (Pro / Max) | **≈5.96 GB** (5955.3 MB) | **~6.0 GB** | **~5.5 GB** | **Runtime-dependent** (configured eviction) |
-| 🟣 **`quality`** (Studio) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | VoiceDesign 1.7B (`tts-1.7b-design-q8`) + independent Base clone capability (`tts-1.7b-base-q8`), both 8-bit | ✓ `aligner-bf16` + Sortformer | 32GB+ Flagship Macs (Max / Ultra) | **≈10.73 GB** (≈10729.6 MB) | **Requires re-benchmark** | **Requires re-benchmark** | **Runtime-dependent** (configured eviction) |
-
-*Footprint note: the `Peak Active` / `Steady` columns retain the previously measured all-q8 values (pre-v2) and are directional only under the new per-tier precision policy. Per-tier precision re-measurement is pending, so these are not the new tiers' measured figures. `Install Size` values are measured v2 catalog footprints.*
-
-- **Per-Tier Precision Policy**: all three tiers run 8-bit weights — `light` (`asr-0.6b-q8` / `tts-0.6b-custom-q8`), `balanced` (`asr-1.7b-q8` / `tts-0.6b-custom-q8`), and `quality` (`asr-1.7b-q8` / primary `tts-1.7b-design-q8` / clone capability `tts-1.7b-base-q8`) — with only the `quality` aligner kept at bf16. The 4-bit `asr-0.6b-q4` / `tts-0.6b-custom-q4` light option was evaluated but not adopted: acceptance gate E1 measured the 0.6B 4-bit ASR as 1.38pp worse than its 8-bit baseline on a public human corpus, above the 0.5pp threshold. The public API contract is identical across tiers, and the 4-bit artifacts remain in the catalog but are no longer used by any tier.
-- **Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR artifact; `balanced` and `light` share the same 0.6B CustomVoice 8-bit artifact (`tts-0.6b-custom-q8`).
-- **Configurable Idle Eviction**: The default idle timeout is **300 seconds**. It can be changed with `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` or disabled with `0`; measured post-eviction footprint remains runtime- and profile-dependent.
-- **Quality Voice-Creation Boundary**: `quality` owns two distinct capabilities. Natural-language voice creation uses **VoiceDesign 1.7B**; reference-audio cloning uses **Base 1.7B**. `balanced`/`light` use CustomVoice 0.6B and do not advertise either creation capability.
-- **Quality TTS Capability Workers**: Base is installed as the Quality `tts_clone` artifact and is managed by an independent `voice_clone` worker alongside the `voice_design` VoiceDesign worker. Both workers may remain resident, and requests on different capability lanes may run concurrently; requests on the same lane remain serialized by that worker. The Quality group can still be trimmed/closed after the configured idle cooldown and lazily restored for the next request.
-- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. The synthesis gate covers all six fixed probes, rejects silent/clipped output, compares repeated PCM, and uses local Batch ASR to check the spoken text after the TTS lane lease is released. ASR unavailable means `unevaluated`, never an automatic pass. Passing this gate is not proof of cross-text speaker identity or universal noise rejection; real-model calibration and independent speaker evidence remain required. Existing instruction voices still use VoiceDesign. The explicit `POST /v1/voices/designs` endpoint creates a **new Base-bound voice** from a generated reference after local ASR validation; it does not overwrite existing voices or claim that Base synthesis/identity validation has passed. See [Generated Voice Registration](docs/architecture/generated-voice-registration.md). See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md), [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md), and [Output Intelligibility / ASR Validation](docs/architecture/voice-quality-intelligibility-validation.md).
+Quality keeps VoiceDesign and Base as independent TTS capability lanes. They do
+not need to be repeatedly loaded and unloaded when switching voice workflows;
+the Quality capability group can still trim/close both workers after the
+configured idle cooldown and restore them lazily for the next request.
 
 ![Three-tier model and Quality dual-TTS capability relationship](docs/architecture/diagrams/three-tier-model-architecture.svg)
 
-The diagram is the canonical overview of profile routing, model sharing, Quality's two TTS capability lanes, and the shared resource/lifecycle boundary.
+The diagram is the canonical overview of profile routing, model sharing,
+Quality's two TTS capability lanes, and the shared resource/lifecycle boundary.
 
-### 2. 9 Cross-Profile Built-in Voices
-
-SpeechRail preconfigures 9 acoustically fine-tuned voice personas consistent across all profiles (compatible with OpenAI official aliases such as `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu`, etc.).
-
-Note: **The underlying generation mechanism differs by profile and capability**—`balanced` / `light` use **CustomVoice (0.6B)**; `quality` uses **VoiceDesign (1.7B)** for normal/prompt-designed speech and an independent **Base (1.7B)** capability worker for reference clones. Users can choose between a structurally fixed preset-voice path and a more expressive instruction-conditioned path based on application needs. Cross-text identity stability must be measured rather than assumed:
-
-#### ⚖️ VoiceDesign vs. CustomVoice: Core Differences & Selection Guide
-
-| Dimension | 🟡 / 🟢 `balanced` / `light` (CustomVoice) | 🟣 `quality` (VoiceDesign) | Recommendation & Use Cases |
-|---|---|---|---|
-| **Underlying Implementation** | Fixed Speaker Embedding weights (physical constants) | Driven by natural language instruction and acoustic prompt fitting | CustomVoice: structural embedding; VoiceDesign: algorithmic synthesis |
-| **Vocal Consistency (Identity)** | Structurally fixed preset-speaker path; expected to be steadier across text than open-ended design, but no universal percentage is claimed | Instruction-conditioned path; a fixed seed can improve same-input reproducibility, but it does not prove cross-text speaker-identity stability | Long-form/strict identity workloads should benchmark CustomVoice; expressive workloads can prefer **VoiceDesign** |
-| **Emotional Expressiveness** | Measured, stable, standardized, minimal pitch fluctuation | Expressive, vibrant, with natural breathing and dramatic range | Story narration, game NPCs, virtual companions: choose **VoiceDesign** |
-| **Custom Extensibility** | Limited to 9 predefined roles, no free creation | 🌟 **Create any custom voice persona using natural language prompts** | Choose **`quality`** when creating or exploring unique personas |
-| **RAM & Throughput** | Ultra-lightweight (~4.4–6.0 GB peak, pre-v2), fast inference | 1.7B high precision (~6.9 GB peak, pre-v2), higher compute demand | Recommended for 8GB/16GB Macs; 32GB+ flagship Macs enjoy quality tier |
-
-> For comprehensive benchmark data and acoustic embedding evaluation, see [VoiceDesign Capabilities and Stability Boundaries](docs/architecture/voicedesign-capability-and-stability.md).
-
-#### 🎙️ 9 Official Cross-Profile Built-In Voice Personas
-
-| Voice ID (`voice`) | Persona Name | Voice Profile & Characteristics | Best For |
-|---|---|---|---|
-| `serena` | Gentle Chinese Female (Default) | Warm and soft young Chinese female voice; natural and friendly | Personal desktop assistant, daily chat, short video voiceover |
-| `vivian` | Bright Chinese Female | Crisp and clear young Chinese female voice; energetic and articulated | News bulletins, long-form reading, tech explainers |
-| `uncle_fu` | Resonant Chinese Male | Mature, calm, and grounded Chinese male voice; deep and composed | Audiobooks, business lectures, documentary narration |
-| `dylan` | Beijing Youth Male | Clear and natural young male voice with subtle Beijing accent; straightforward | Fitness, gaming interactions, live commerce |
-| `eric` | Dynamic Chengdu Male | Lively young Chinese male voice with slight rasp and natural Sichuan accent | Emotional companion, fun interactions, vlogs |
-| `ryan` | Dynamic English Male | Energetic and rhythmic English male voice; articulate and driving | English presentations, brand commercials, announcements |
-| `aiden` | Sunny American Male | Bright, natural American English young male voice; clear mid-range, friendly | International meetings, ESL tutoring, casual dialogue |
-| `ono_anna` | Playful Japanese Female | Light and nimble young Japanese female voice; cheerful and upbeat | Anime, VTubers, Japanese language reading |
-| `sohee` | Warm Korean Female | Warm and gentle Korean female voice; emotionally rich and natural | Drama commentary, Korean learning, storytelling |
-
-### 3. Optional Speaker Diarization
-
-For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail provides optional speaker segmentation and session-scoped anonymous labels when the local CoreML profile is ready. It is available on the `balanced` and `quality` tiers only; `light` (Embedded) provisions no aligner and no diarization, so it does not advertise `gpt-4o-transcribe-diarize`:
-
-| Core Component | Model Architecture | Responsibility & Capabilities | Active RAM | Client Entry Point |
-|---|---|---|---|---|
-| **Temporal Segmentation Engine** | **FluidAudio CoreML FP16 Sortformer** (`SortformerNvidiaLow_v2.1.mlmodelc`) | Native Swift worker, direct compiled-bundle load, maximum four anonymous speakers | **564 MB peak RSS in D1** | `model="gpt-4o-transcribe-diarize"` with `response_format="diarized_json"` |
-
-- **Runtime and scope**: Production has one diarization runtime: FluidAudio CoreML FP16 in a private Swift worker. It directly loads the pinned compiled bundle and does not download, compile, change precision, use NeMo/CAM++, or fall back at request time.
-- **Measured footprint**: D1 on an M5 Max processed the fixed 90-second streaming input in 7.077 seconds (RTFx 12.716) with 564 MB peak RSS. This smoke does not establish DER/JER, long-session behavior, or a universal memory promise.
-- **Realtime extension**: `session.speechrail.diarization.enabled=true` enables the namespaced extension. It emits immutable transcript text and `speechrail.diarization.updated` attribution updates, then terminates with `speechrail.diarization.done` after `speechrail.diarization.finish`.
-- **Configuration**: Set `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` and `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` (`Qwen3-ForcedAligner-0.6B`). The macOS wheel supplies `SpeechRailDiarizationWorker`; `SPEECHRAIL_DIARIZATION_WORKER_PATH` is only an optional diagnostic override. The existing private ASR worker directly aligns fixed completed text; it does not transcribe it again. With the diarization paths unset, normal ASR/TTS requests run unchanged and no diarization worker starts. The aligner is a diarization-scoped asset provisioned per tier from the model catalog (`aligner-q8` on `balanced`, `aligner-bf16` on `quality`); it is not used for word-level timestamps, which come from native ASR.
-- **Offline E2E Evaluation Suite**: Includes `tools/evaluate_diarization_e2e.py` supporting DER calculation via Kuhn-Munkres optimal permutation matching, collar/overlap tolerance, and speaker-attributed character error rate (SACER) with unknown penalties.
-
----
-
-## 📊 Real Performance Benchmarks (Apple M5 Max)
-
-> **v1.13.0 benchmarked on 2026-09-08**: all three managed profiles completed the `quality → balanced → light → quality` loop. Cold start, ASR/TTS warm N=5, current OpenAI Realtime (3 consecutive sessions per profile), server-VAD smoke, and complete physical-footprint samples passed. Independent CER/WER, VAD FAR/FRR, MOS/ABX, speaker diarization/embedding, and long soak remain `unset`.
->
-> The complete, privacy-preserving report is [v1.13.0 Performance and Quality Benchmark](docs/archive/performance/2026-09-08-v1.13.0-performance-benchmark.md). ASR reuses the v1.11.0 fixtures and is directionally comparable; TTS uses a different fixed text set, while Realtime now verifies the current nested audio wire profile, so those values are reported in-profile only.
->
-> **v2 tier/precision note**: The catalog applies a per-tier precision policy of 8-bit weights for all three tiers (only the `quality` aligner is bf16); the evaluated 4-bit `light` variant was rejected by gate E1 and is not used. The v1.13.0 all-q8 figures below are directionally comparable to this 8-bit policy; the published numbers are unchanged and retain their v1.13.0 provenance.
-
-| Benchmark Metric | 🟢 Light Profile (v1.13.0) | 🟡 Balanced Profile (v1.13.0) | 🟣 Quality Profile (v1.13.0) | Test Methodology & Scenario |
-|---|---|---|---|---|
-| **ASR 10s warm RTF p50** | **0.016** | **0.028** | **0.027** | Actual 9.36s fixture, warm N=5; lower is faster |
-| **TTS short warm RTF p50** | **0.233** | **0.246** | **0.299** | Actual PCM duration, warm N=5; texts are v1.13-specific |
-| **Peak Total Physical RAM** | **5.39 GB。** | **6.30 GB。** | **7.51 GB。** | Same-tick macOS `phys_footprint`; all ticks complete |
-| **Warm Idle Physical RAM** | **4.09 GB。** | **5.48 GB。** | **6.74 GB。** | After model fault-in |
-| **Realtime ASR commit p50** | **238.2 ms** | **348.6 ms** | **373.6 ms** | 16kHz PCM16, current nested profile, three consecutive sessions; terminal success 3/3 |
-| **Realtime TTS first delta p50** | **25.0 ms** | **26.1 ms** | **38.4 ms** | `response.output_audio.delta`, three consecutive sessions |
-
-> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign` for normal/prompt-designed TTS and an independent `Base` capability worker for reference clones. Quality allows cross-lane VD/Base concurrency while same-lane work remains serialized; shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.
-
----
-
-## 🏛️ Physical Isolation Architecture & Design Philosophy
-
-```mermaid
-flowchart TD
-    Client["Client Applications (Sona / OpenAI SDK / WebUI / LiveKit)"]
-
-    subgraph HostService["FastAPI Host Gateway (Port: 8201)"]
-        direction TB
-        subgraph Ingress["1. Protocol & Ingress Layer"]
-            Router["REST / WS Routing, Auth & Error Envelope"]
-            Pipeline["In-Memory Audio Pipeline\n(WAV Fast-Path / ffmpeg Stream, 128MB Guard)"]
-        end
-        subgraph Core["2. Runtime & Coordination Core"]
-            App["Application Services & Realtime Session"]
-            Governor["AdmissionQueue + ResourceGovernor\n(Realtime Capacity Reservation, Batch FIFO/Aging,\nConfigurable ASR∥TTS Overlap)"]
-            Ledger["AttributionLedger & Timeline\n(16 kHz Sample Clock, Immutable Units)"]
-            DiarizeEngine["Optional Diarization Port\n(FluidAudio CoreML FP16 Swift worker)"]
-            Evictor["WorkerIdleEvictor\n(300s default; configurable)"]
-        end
-        Router -->|Audio upload| Pipeline --> App
-        Router -->|System, voice, jobs, WS control| App
-        App --> Governor
-        App <--> Ledger
-        App <--> DiarizeEngine
-        App -. Activity / lifecycle .-> Evictor
-    end
-
-    subgraph SubprocessSandboxes["Subprocess Sandboxes (Physical Process Isolation)"]
-        direction LR
-        ASRWorker["Qwen3-ASR Worker\n(MLX / Metal Subprocess)"]
-        TTSWorker["Qwen3-TTS capability slot\n(Quality: VoiceDesign ↔ Base clone; others: CustomVoice)"]
-        DiarizationWorker["Diarization Worker\n(FluidAudio / CoreML FP16)"]
-    end
-
-    Client <== "HTTP REST / Full-Duplex WS" ==> Router
-    App <== "Length-Prefixed JSON + Raw Binary IPC" ==> ASRWorker
-    App <== "Length-Prefixed JSON + Raw Binary IPC" ==> TTSWorker
-    App <== "Length-Prefixed JSON + Raw PCM IPC" ==> DiarizationWorker
-    Evictor -. Attempt to release resident weights .-> ASRWorker
-    Evictor -. Attempt to release resident weights .-> TTSWorker
-    Evictor -. Worker lifecycle .-> DiarizationWorker
-```
-
-#### Core Architectural Principles & Invariants
-
-1. **Subprocess Physical Isolation (Minimized Blast Radius)**: Qwen3-ASR and Qwen3-TTS execute in dedicated child processes. The host uses a private length-prefixed protocol with JSON metadata and optional raw-binary payloads; raw PCM avoids Base64 on this hop, but the protocol is not zero-copy. Worker failures are isolated from the FastAPI process and surface through the standard error envelope with a `request_id`.
-2. **Strict In-Memory Zero-Disk Pipeline**: Audio processing operates entirely in memory through a 3-tier pipeline: Tier 1 WAV fast-path (zero-copy header slicing), Tier 2 streaming in-memory `ffmpeg` pipe (for compressed containers), and Tier 3 128MB hard OOM guardrail. Raw audio, intermediate PCM, embeddings, and transcripts are never written to disk or transmitted across the network.
-3. **Coordinated Idle Eviction**: `WorkerIdleEvictor` manages the external workers according to configured idle and standby timeouts. Measured standby footprint remains a benchmark result, not an architecture promise.
-4. **Session-Scoped Diarization**: Batch diarization yields anonymous labels. The namespaced Realtime extension uses the 16 kHz session timeline and later attribution updates do not rewrite transcript text.
-5. **Single-Node Shared Concurrency**: `ResourceGovernor` reserves capacity for realtime work and keeps batch work FIFO with aging. It does not preempt work already admitted to a worker; mode conflicts return stable busy errors instead of spawning duplicate model processes. ASR∥TTS heavy-compute overlap is a configurable, budget-gated policy (`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` by default, fail-closed until enabled components declare their resident peaks): the axis is ASR∥TTS only — TTS∥TTS and ASR∥ASR still return `backend_busy` without duplicating workers.
-6. **Strict Separation of Concerns**: SpeechRail exclusively provides local inference runtimes, protocol translation, resource boundaries, and session-scoped anonymous speaker labelling (`speaker_0`, `speaker_1`). Calling applications (such as [Sona](https://github.com/hrygo/sona)) retain complete ownership of audio I/O hardware, meeting databases, persistent storage, human-in-the-loop speaker renaming, and LLM business orchestration.
-
----
-
-## 🛠️ Daemon Service Management (LaunchAgent)
-
-SpeechRail follows the macOS standard user LaunchAgent daemon mechanism, managed via native commands:
+Use the CLI to inspect or change a managed selection. `setup` provides a
+memory-based starting suggestion; it is not a hard hardware guarantee.
 
 ```bash
-# Check service status and PID
-uv run speechrail service status
-
-# Restart daemon service
-uv run speechrail service restart
-
-# Stop or uninstall daemon service
-uv run speechrail service stop
-uv run speechrail service uninstall
+uv run speechrail profile list
+uv run speechrail profile status
+uv run speechrail profile apply balanced
+uv run speechrail profile rollback
 ```
 
----
+Select voices from `/v1/voices` rather than assuming that a registered custom
+voice is usable on every profile. The quality-only voice endpoints include
+`POST /v1/voices/previews`, `POST /v1/voices`, `POST /v1/voices/designs`, and the quality-gated clone
+endpoints documented in [`docs/users/api-contract.md`](docs/users/api-contract.md).
 
-## ❓ Frequently Asked Questions (FAQ)
+## Security and data handling
 
-<details>
-<summary><strong>Q1: My system runs Python 3.13 or 3.9. Will there be version conflicts?</strong></summary>
+- The default bind address is `127.0.0.1`; loopback development does not need
+  an API key.
+- Any non-loopback exposure requires `SPEECHRAIL_API_KEY`, bearer
+  authentication, and an explicit origin policy. Never put a key in a URL
+  query string.
+- Ordinary ASR/TTS request data is processed locally and is not sent to a
+  cloud service. Explicit voice registration and cloning are persistent
+  features and may write managed custom-voice data outside the repository.
+- Logs, fixtures, and reports must not contain credentials, authorization
+  headers, raw audio, Base64 payloads, full prompts, full transcripts,
+  embeddings, names, or absolute model paths.
 
-**Not at all.** The installer and bootstrap tools include automated environment isolation and self-healing. They do not modify your global Python installation. Instead, `uv` provisions an isolated CPython 3.12 runtime inside a sandbox, completely separated from your system Python.
-</details>
+## Documentation
 
-<details>
-<summary><strong>Q2: Why are Intel (x86_64) Macs not supported?</strong></summary>
-
-SpeechRail's performance relies heavily on Apple MLX optimizations for **Apple Silicon Unified Memory Architecture (UMA) and Metal GPU**. Intel Macs lack unified memory, and MLX does not provide pre-compiled wheels for macOS x86_64. If you are on an Intel Mac, consider lightweight alternatives such as `whisper.cpp` or connect across LAN to a SpeechRail instance running on an Apple Silicon Mac.
-</details>
-
-<details>
-<summary><strong>Q3: Why is no API key required for local calls?</strong></summary>
-
-To deliver an out-of-the-box zero-friction experience for local desktop development, SpeechRail defaults to listening strictly on loopback (`127.0.0.1`), allowing keyless access. If you expose the listening address to the network (e.g., `0.0.0.0`), the service mandates `SPEECHRAIL_API_KEY` and refuses to start without one.
-</details>
-
-<details>
-<summary><strong>Q4: Do I need to re-download all models when switching profiles?</strong></summary>
-
-No. Model weights are cached persistently in the managed directory. When switching between `light`, `balanced`, and `quality`, previously downloaded weights are reused immediately within seconds.
-</details>
-
-<details>
-<summary><strong>Q5: How do I enable Speaker Diarization, and how much RAM does it consume?</strong></summary>
-
-Diarization is an optional native capability. Install the macOS wheel, then set absolute paths for `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` (the pinned `SortformerNvidiaLow_v2.1.mlmodelc` bundle) and `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` (`Qwen3-ForcedAligner-0.6B`). The wheel contains the Swift worker; `SPEECHRAIL_DIARIZATION_WORKER_PATH` is only an optional override. It never downloads or compiles models on a request path; the existing ASR worker uses the aligner only to timestamp fixed completed text and never performs a second ASR decode.
-- **Memory**: D1 measured 564 MB peak RSS on an M5 Max for one fixed 90-second input. Other machines and inputs require their own measurement.
-- **API**: File transcription uses the OpenAI diarization model and `diarized_json`. Realtime opt-in is `session.speechrail.diarization.enabled=true`; the extension only carries anonymous, session-scoped labels.
-</details>
-
-<details>
-<summary><strong>Q6: How is the Silero VAD model for /v1/realtime installed?</strong></summary>
-
-The realtime voice-activity detector uses `realtime_vad_engine` (`auto` by default): it resolves to the Silero ONNX model when `SPEECHRAIL_REALTIME_VAD_MODEL_PATH` is configured, and otherwise falls back to a zero-dependency legacy engine. The managed `speechrail setup` downloads the pinned `silero_vad.onnx` (about 2.3 MB, MIT, from `snakers4/silero-vad`) automatically when the network is reachable, so no manual step is normally required. If the download is unreachable, setup logs a warning and keeps the legacy engine — you can later place the model manually and set `SPEECHRAIL_REALTIME_VAD_MODEL_PATH` in `.env` (see `configs/speechrail.example.env`).
-- **RAM Usage**: **0 MB** when not configured; roughly a few MB of resident weights when the Silero engine is active.
-- **Auto Eviction**: Not evicted — the VAD runs in-process and its ~2.3 MB footprint is negligible next to the ASR/TTS workers.
-</details>
-
----
-
-## 📚 Complete Documentation Center
-
-| Role | Recommended Guides |
+| Need | Start here |
 |---|---|
-| 🚀 **Quick Start / Setup** | [Blank Mac Zero-Setup Guide (`speechrail-zero-setup`)](.agents/skills/speechrail-zero-setup/SKILL.md) · [Operations Runbook](docs/operations/operations-runbook.md) |
-| 🔌 **API Developers** | [User & Client Integration Guide](docs/users/README.md) · [OpenAI Compatibility Contract](docs/users/api-contract.md) · [OpenAPI Specification](contracts/openapi.yaml) |
-| 🛠️ **System Operators** | [Operations Center](docs/operations/README.md) · [Managed Runtime Deployment](docs/operations/runtime-deployment.md) · [Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md) · [Security & Observability](docs/operations/security-observability.md) |
-| 🧪 **Code Contributors** | [Developer Center](docs/developers/README.md) · [Testing & Acceptance Suite](docs/developers/testing-acceptance.md) |
-| 📐 **Architecture Review** | [System Architecture Overview](docs/architecture/README.md) · [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md) · [Voice Cloning Design](docs/architecture/voice-cloning-design-and-handoff.md) · [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md) · [Current Boundaries & Trade-offs](docs/architecture/current-boundaries.md) · [Architecture Decision Records (ADRs)](docs/decisions/README.md) |
+| Documentation overview | [`docs/README.md`](docs/README.md) |
+| API and client integration | [`docs/users/README.md`](docs/users/README.md), [`docs/users/api-contract.md`](docs/users/api-contract.md), [`contracts/openapi.yaml`](contracts/openapi.yaml) |
+| Realtime protocol | [`contracts/realtime-openai.md`](contracts/realtime-openai.md) |
+| MCP agent integration | [`docs/users/mcp-agent-integration.md`](docs/users/mcp-agent-integration.md) |
+| Operations and rollback | [`docs/operations/README.md`](docs/operations/README.md), [`docs/operations/operations-runbook.md`](docs/operations/operations-runbook.md) |
+| Development and testing | [`docs/developers/README.md`](docs/developers/README.md), [`docs/developers/testing-acceptance.md`](docs/developers/testing-acceptance.md) |
+| macOS control plane | [`docs/developers/macos-app-development.md`](docs/developers/macos-app-development.md), [`docs/developers/macos-app-release.md`](docs/developers/macos-app-release.md) |
+| Architecture and boundaries | [`docs/architecture/README.md`](docs/architecture/README.md), [`docs/architecture/current-boundaries.md`](docs/architecture/current-boundaries.md), [`docs/decisions/README.md`](docs/decisions/README.md) |
+| Release history | [`CHANGELOG.md`](CHANGELOG.md) |
 
----
+## Contributing
 
-## 🤝 Contributing & License
+Before opening a pull request, read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+run the deterministic quality gates:
 
-- Review [Contributing Guidelines (CONTRIBUTING.md)](CONTRIBUTING.md) before submitting code.
-- Report security issues according to our [Security Policy (SECURITY.md)](SECURITY.md).
-- Community interactions should adhere to the [Code of Conduct (CODE_OF_CONDUCT.md)](CODE_OF_CONDUCT.md).
+```bash
+uv sync --extra dev
+uv run --extra dev pytest
+uv run --extra dev ruff check src tests
+uv run --extra dev mypy src
+npx @redocly/cli lint contracts/openapi.yaml
+git diff --check
+```
 
-SpeechRail is open-source software licensed under the permissive [MIT License](LICENSE). Free for personal use and commercial integrations.
+The CI workflow also builds the wheel and tests the SwiftUI macOS control
+plane. Please use the repository's issue templates for bug reports and feature
+requests. Questions and integration discussions belong in
+[GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions).
+
+Please also follow the [Code of Conduct](CODE_OF_CONDUCT.md) when participating
+in the project.
+
+## Support and security
+
+For usage questions and troubleshooting, start with [`SUPPORT.md`](SUPPORT.md)
+and [GitHub Discussions](https://github.com/hrygo/SpeechRail/discussions). For
+confirmed bugs, use the [issue templates](https://github.com/hrygo/SpeechRail/issues/new/choose).
+
+For security vulnerabilities, follow [`SECURITY.md`](SECURITY.md) instead of
+opening a public issue.
+
+## License
+
+SpeechRail is released under the [MIT License](LICENSE).

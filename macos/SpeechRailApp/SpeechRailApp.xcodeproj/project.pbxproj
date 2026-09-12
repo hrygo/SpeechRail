@@ -1,0 +1,247 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A50000000000000000000001 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000001 /* App.swift */; };
+		A50000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000002 /* AppModel.swift */; };
+		A50000000000000000000003 /* ControlAgentRegistration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000003 /* ControlAgentRegistration.swift */; };
+		A50000000000000000000004 /* ControlMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000004 /* ControlMenuView.swift */; };
+		A50000000000000000000005 /* ProfilePickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000005 /* ProfilePickerView.swift */; };
+		A50000000000000000000006 /* ServiceAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000006 /* ServiceAPIClient.swift */; };
+		A50000000000000000000007 /* ServiceStatusView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000007 /* ServiceStatusView.swift */; };
+		A50000000000000000000008 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000008 /* SettingsView.swift */; };
+		A50000000000000000000009 /* SpeechRailControlKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeechRailControlKit.framework */; };
+		A50000000000000000000010 /* ControlTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000009 /* ControlTypes.swift */; };
+		A50000000000000000000011 /* XPCControlTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000010 /* XPCControlTransport.swift */; };
+		A50000000000000000000026 /* ControlTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000026 /* ControlTransport.swift */; };
+		A50000000000000000000012 /* SpeechRailControlKit.framework in AgentCore Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeechRailControlKit.framework */; };
+		A50000000000000000000013 /* AgentCommandRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000011 /* AgentCommandRunner.swift */; };
+		A50000000000000000000014 /* AgentOperationStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000012 /* AgentOperationStore.swift */; };
+		A50000000000000000000015 /* XPCControlService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000013 /* XPCControlService.swift */; };
+		A50000000000000000000016 /* XPCPeerPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000014 /* XPCPeerPolicy.swift */; };
+		A50000000000000000000017 /* SpeechRailControlAgentCore.framework in Agent Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* SpeechRailControlAgentCore.framework */; };
+		A50000000000000000000018 /* SpeechRailControlKit.framework in Agent Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeechRailControlKit.framework */; };
+		A50000000000000000000019 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000015 /* main.swift */; };
+		A50000000000000000000020 /* SpeechRailControlKit.framework in Tests Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeechRailControlKit.framework */; };
+		A50000000000000000000021 /* SpeechRailControlAgentCore.framework in Tests Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* SpeechRailControlAgentCore.framework */; };
+		A50000000000000000000022 /* ControlKitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000016 /* ControlKitTests.swift */; };
+		A50000000000000000000023 /* AgentCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000017 /* AgentCoreTests.swift */; };
+		A50000000000000000000024 /* SpeechRailAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000018 /* SpeechRailAppUITests.swift */; };
+		A50000000000000000000025 /* SpeechRailApp.app in UI Test Host */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* SpeechRailApp.app */; };
+		A50000000000000000000027 /* SpeechRailControlKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeechRailControlKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy,); }; };
+		A50000000000000000000028 /* SpeechRailControlAgentCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* SpeechRailControlAgentCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy,); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A90000000000000000000001 /* Proxy App to ControlKit */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000002; remoteInfo = SpeechRailControlKit; };
+		A90000000000000000000002 /* Proxy App to Agent */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000004; remoteInfo = SpeechRailControlAgent; };
+		A90000000000000000000003 /* Proxy AgentCore to ControlKit */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000002; remoteInfo = SpeechRailControlKit; };
+		A90000000000000000000004 /* Proxy Agent to AgentCore */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000003; remoteInfo = SpeechRailControlAgentCore; };
+		A90000000000000000000005 /* Proxy Agent to ControlKit */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000002; remoteInfo = SpeechRailControlKit; };
+		A90000000000000000000006 /* Proxy Tests to ControlKit */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000002; remoteInfo = SpeechRailControlKit; };
+		A90000000000000000000007 /* Proxy Tests to AgentCore */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000003; remoteInfo = SpeechRailControlAgentCore; };
+		A90000000000000000000008 /* Proxy UI Tests to App */ = {isa = PBXContainerItemProxy; containerPortal = A10000000000000000000001; proxyType = 1; remoteGlobalIDString = A20000000000000000000001; remoteInfo = SpeechRailApp; };
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A70000000000000000000009 /* Embed Agent */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 0;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/SpeechRailControlAgent",
+			);
+			name = "Embed SpeechRailControlAgent";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Resources/SpeechRailControlAgent",
+				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/Library/LaunchAgents/com.speechrail.desktop.control.plist",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\nagent=\"${BUILT_PRODUCTS_DIR}/SpeechRailControlAgent\"\ndestination=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Resources/SpeechRailControlAgent\"\nplist_destination=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Library/LaunchAgents/com.speechrail.desktop.control.plist\"\nmkdir -p \"$(dirname \"$destination\")\" \"$(dirname \"$plist_destination\")\"\ninstall -m 755 \"$agent\" \"$destination\"\ninstall -m 644 \"${SRCROOT}/Resources/LaunchAgents/com.speechrail.desktop.control.plist\" \"$plist_destination\"\nif [ \"${CONFIGURATION}\" = \"Distribution\" ]; then\n  /usr/bin/plutil -remove EnvironmentVariables.SPEECHRAIL_ALLOW_UNSIGNED_XPC \"$plist_destination\"\nfi\nif [ -n \"${DEVELOPMENT_TEAM:-}\" ]; then\n  /usr/bin/plutil -insert EnvironmentVariables.SPEECHRAIL_DEVELOPMENT_TEAM -string \"${DEVELOPMENT_TEAM}\" \"$plist_destination\" 2>/dev/null || /usr/bin/plutil -replace EnvironmentVariables.SPEECHRAIL_DEVELOPMENT_TEAM -string \"${DEVELOPMENT_TEAM}\" \"$plist_destination\"\nfi\n";
+		};
+		A70000000000000000000017 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				A50000000000000000000027 /* SpeechRailControlKit.framework in Embed Frameworks */,
+				A50000000000000000000028 /* SpeechRailControlAgentCore.framework in Embed Frameworks */,
+			);
+			name = Frameworks;
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		F10000000000000000000001 /* SpeechRailControlKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SpeechRailControlKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000002 /* SpeechRailControlAgentCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = SpeechRailControlAgentCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000003 /* SpeechRailControlAgent */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = SpeechRailControlAgent; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000004 /* SpeechRailApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpeechRailApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000005 /* SpeechRailAppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpeechRailAppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F10000000000000000000006 /* SpeechRailAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpeechRailAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A40000000000000000000001 /* App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App.swift; sourceTree = "<group>"; };
+		A40000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		A40000000000000000000003 /* ControlAgentRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlAgentRegistration.swift; sourceTree = "<group>"; };
+		A40000000000000000000004 /* ControlMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlMenuView.swift; sourceTree = "<group>"; };
+		A40000000000000000000005 /* ProfilePickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilePickerView.swift; sourceTree = "<group>"; };
+		A40000000000000000000006 /* ServiceAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceAPIClient.swift; sourceTree = "<group>"; };
+		A40000000000000000000007 /* ServiceStatusView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceStatusView.swift; sourceTree = "<group>"; };
+		A40000000000000000000008 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		A40000000000000000000009 /* ControlTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTypes.swift; sourceTree = "<group>"; };
+		A40000000000000000000010 /* XPCControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XPCControlTransport.swift; sourceTree = "<group>"; };
+		A40000000000000000000026 /* ControlTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlTransport.swift; sourceTree = "<group>"; };
+		A40000000000000000000011 /* AgentCommandRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCommandRunner.swift; sourceTree = "<group>"; };
+		A40000000000000000000012 /* AgentOperationStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentOperationStore.swift; sourceTree = "<group>"; };
+		A40000000000000000000013 /* XPCControlService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XPCControlService.swift; sourceTree = "<group>"; };
+		A40000000000000000000014 /* XPCPeerPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XPCPeerPolicy.swift; sourceTree = "<group>"; };
+		A40000000000000000000015 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		A40000000000000000000016 /* ControlKitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlKitTests.swift; sourceTree = "<group>"; };
+		A40000000000000000000017 /* AgentCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCoreTests.swift; sourceTree = "<group>"; };
+		A40000000000000000000018 /* SpeechRailAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechRailAppUITests.swift; sourceTree = "<group>"; };
+		A40000000000000000000019 /* Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Debug.xcconfig; sourceTree = "<group>"; };
+		A40000000000000000000020 /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Release.xcconfig; sourceTree = "<group>"; };
+		A40000000000000000000021 /* Distribution.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Distribution.xcconfig; sourceTree = "<group>"; };
+		A40000000000000000000022 /* SpeechRailApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = SpeechRailApp.entitlements; sourceTree = "<group>"; };
+		A40000000000000000000023 /* com.speechrail.desktop.control.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = com.speechrail.desktop.control.plist; sourceTree = "<group>"; };
+		A40000000000000000000024 /* SpeechRailApp.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text.xctestplan; path = SpeechRailApp.xctestplan; sourceTree = "<group>"; };
+		A40000000000000000000025 /* SpeechRailMacControl-Package.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Package.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A70000000000000000000002 /* ControlKit Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000004 /* AgentCore Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000012 /* SpeechRailControlKit.framework in AgentCore Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000006 /* Agent Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000017 /* SpeechRailControlAgentCore.framework in Agent Frameworks */, A50000000000000000000018 /* SpeechRailControlKit.framework in Agent Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000008 /* App Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000009 /* SpeechRailControlKit.framework in Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000011 /* Unit Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000020 /* SpeechRailControlKit.framework in Tests Frameworks */, A50000000000000000000021 /* SpeechRailControlAgentCore.framework in Tests Frameworks */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000013 /* UI Test Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A30000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A30000000000000000000008, A30000000000000000000009, A30000000000000000000010, A40000000000000000000024 /* SpeechRailApp.xctestplan */, A40000000000000000000025 /* Package.swift */, A30000000000000000000011 /* Products */,); sourceTree = "<group>"; };
+		A30000000000000000000002 /* SpeechRailApp */ = {isa = PBXGroup; children = (A40000000000000000000001, A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005, A40000000000000000000006, A40000000000000000000007, A40000000000000000000008,); path = SpeechRailApp; sourceTree = "<group>"; };
+		A30000000000000000000003 /* SpeechRailControlKit */ = {isa = PBXGroup; children = (A40000000000000000000009, A40000000000000000000010, A40000000000000000000026,); path = SpeechRailControlKit; sourceTree = "<group>"; };
+		A30000000000000000000004 /* SpeechRailControlAgentCore */ = {isa = PBXGroup; children = (A40000000000000000000011, A40000000000000000000012, A40000000000000000000013, A40000000000000000000014,); path = SpeechRailControlAgentCore; sourceTree = "<group>"; };
+		A30000000000000000000005 /* SpeechRailControlAgent */ = {isa = PBXGroup; children = (A40000000000000000000015,); path = SpeechRailControlAgent; sourceTree = "<group>"; };
+		A30000000000000000000006 /* SpeechRailMacControlTests */ = {isa = PBXGroup; children = (A40000000000000000000016, A40000000000000000000017,); path = SpeechRailMacControlTests; sourceTree = "<group>"; };
+		A30000000000000000000007 /* SpeechRailAppUITests */ = {isa = PBXGroup; children = (A40000000000000000000018,); path = SpeechRailAppUITests; sourceTree = "<group>"; };
+		A30000000000000000000008 /* Config */ = {isa = PBXGroup; children = (A40000000000000000000019, A40000000000000000000020, A40000000000000000000021,); path = Config; sourceTree = "<group>"; };
+		A30000000000000000000009 /* Entitlements */ = {isa = PBXGroup; children = (A40000000000000000000022,); path = Entitlements; sourceTree = "<group>"; };
+		A30000000000000000000010 /* Resources */ = {isa = PBXGroup; children = (A30000000000000000000023,); path = Resources/LaunchAgents; sourceTree = "<group>"; };
+		A30000000000000000000011 /* Products */ = {isa = PBXGroup; children = (F10000000000000000000004 /* SpeechRailApp.app */, F10000000000000000000001 /* SpeechRailControlKit.framework */, F10000000000000000000002 /* SpeechRailControlAgentCore.framework */, F10000000000000000000003 /* SpeechRailControlAgent */, F10000000000000000000005 /* SpeechRailAppTests.xctest */, F10000000000000000000006 /* SpeechRailAppUITests.xctest */,); name = Products; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A20000000000000000000001 /* SpeechRailApp */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000001; buildPhases = (A70000000000000000000001, A70000000000000000000008, A70000000000000000000010, A70000000000000000000009, A70000000000000000000017); buildRules = (); dependencies = (A80000000000000000000001, A80000000000000000000002); name = SpeechRailApp; productName = SpeechRailApp; productReference = F10000000000000000000004 /* SpeechRailApp.app */; productType = "com.apple.product-type.application"; };
+		A20000000000000000000002 /* SpeechRailControlKit */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000002; buildPhases = (A70000000000000000000003, A70000000000000000000002); buildRules = (); dependencies = (); name = SpeechRailControlKit; productName = SpeechRailControlKit; productReference = F10000000000000000000001 /* SpeechRailControlKit.framework */; productType = "com.apple.product-type.framework"; };
+		A20000000000000000000003 /* SpeechRailControlAgentCore */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000003; buildPhases = (A70000000000000000000005, A70000000000000000000004); buildRules = (); dependencies = (A80000000000000000000003); name = SpeechRailControlAgentCore; productName = SpeechRailControlAgentCore; productReference = F10000000000000000000002 /* SpeechRailControlAgentCore.framework */; productType = "com.apple.product-type.framework"; };
+		A20000000000000000000004 /* SpeechRailControlAgent */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000004; buildPhases = (A70000000000000000000007, A70000000000000000000006); buildRules = (); dependencies = (A80000000000000000000004, A80000000000000000000005); name = SpeechRailControlAgent; productName = SpeechRailControlAgent; productReference = F10000000000000000000003 /* SpeechRailControlAgent */; productType = "com.apple.product-type.tool"; };
+		A20000000000000000000005 /* SpeechRailAppTests */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000005; buildPhases = (A70000000000000000000012, A70000000000000000000011, A70000000000000000000014); buildRules = (); dependencies = (A80000000000000000000006, A80000000000000000000007); name = SpeechRailAppTests; productName = SpeechRailAppTests; productReference = F10000000000000000000005 /* SpeechRailAppTests.xctest */; productType = "com.apple.product-type.bundle.unit-test"; };
+		A20000000000000000000006 /* SpeechRailAppUITests */ = {isa = PBXNativeTarget; buildConfigurationList = A60000000000000000000006; buildPhases = (A70000000000000000000015, A70000000000000000000013, A70000000000000000000016); buildRules = (); dependencies = (A80000000000000000000008); name = SpeechRailAppUITests; productName = SpeechRailAppUITests; productReference = F10000000000000000000006 /* SpeechRailAppUITests.xctest */; productType = "com.apple.product-type.bundle.ui-testing"; };
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					A20000000000000000000001 = { CreatedOnToolsVersion = 26.6; };
+					A20000000000000000000002 = { CreatedOnToolsVersion = 26.6; };
+					A20000000000000000000003 = { CreatedOnToolsVersion = 26.6; };
+					A20000000000000000000004 = { CreatedOnToolsVersion = 26.6; };
+					A20000000000000000000005 = { CreatedOnToolsVersion = 26.6; };
+					A20000000000000000000006 = { CreatedOnToolsVersion = 26.6; TestTargetID = A20000000000000000000001; };
+				};
+			};
+			buildConfigurationList = A60000000000000000000007;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base,);
+			mainGroup = A30000000000000000000001;
+			productRefGroup = A30000000000000000000011 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004, A20000000000000000000005, A20000000000000000000006,);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A70000000000000000000010 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000014 /* Unit Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000016 /* UI Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A70000000000000000000001 /* App Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000001 /* App.swift in Sources */, A50000000000000000000002 /* AppModel.swift in Sources */, A50000000000000000000003 /* ControlAgentRegistration.swift in Sources */, A50000000000000000000004 /* ControlMenuView.swift in Sources */, A50000000000000000000005 /* ProfilePickerView.swift in Sources */, A50000000000000000000006 /* ServiceAPIClient.swift in Sources */, A50000000000000000000007 /* ServiceStatusView.swift in Sources */, A50000000000000000000008 /* SettingsView.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000003 /* ControlKit Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000010 /* ControlTypes.swift in Sources */, A50000000000000000000011 /* XPCControlTransport.swift in Sources */, A50000000000000000000026 /* ControlTransport.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000005 /* AgentCore Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000013 /* AgentCommandRunner.swift in Sources */, A50000000000000000000014 /* AgentOperationStore.swift in Sources */, A50000000000000000000015 /* XPCControlService.swift in Sources */, A50000000000000000000016 /* XPCPeerPolicy.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000007 /* Agent Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000019 /* main.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000012 /* Unit Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000022 /* ControlKitTests.swift in Sources */, A50000000000000000000023 /* AgentCoreTests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000015 /* UI Test Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000024 /* SpeechRailAppUITests.swift in Sources */,); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		A80000000000000000000001 /* App depends on ControlKit */ = {isa = PBXTargetDependency; target = A20000000000000000000002 /* SpeechRailControlKit */; targetProxy = A90000000000000000000001; };
+		A80000000000000000000002 /* App depends on Agent */ = {isa = PBXTargetDependency; target = A20000000000000000000004 /* SpeechRailControlAgent */; targetProxy = A90000000000000000000002; };
+		A80000000000000000000003 /* AgentCore depends on ControlKit */ = {isa = PBXTargetDependency; target = A20000000000000000000002 /* SpeechRailControlKit */; targetProxy = A90000000000000000000003; };
+		A80000000000000000000004 /* Agent depends on AgentCore */ = {isa = PBXTargetDependency; target = A20000000000000000000003 /* SpeechRailControlAgentCore */; targetProxy = A90000000000000000000004; };
+		A80000000000000000000005 /* Agent depends on ControlKit */ = {isa = PBXTargetDependency; target = A20000000000000000000002 /* SpeechRailControlKit */; targetProxy = A90000000000000000000005; };
+		A80000000000000000000006 /* Tests depend on ControlKit */ = {isa = PBXTargetDependency; target = A20000000000000000000002 /* SpeechRailControlKit */; targetProxy = A90000000000000000000006; };
+		A80000000000000000000007 /* Tests depend on AgentCore */ = {isa = PBXTargetDependency; target = A20000000000000000000003 /* SpeechRailControlAgentCore */; targetProxy = A90000000000000000000007; };
+		A80000000000000000000008 /* UI Tests depend on App */ = {isa = PBXTargetDependency; target = A20000000000000000000001 /* SpeechRailApp */; targetProxy = A90000000000000000000008; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		A61000000000000000000001 /* Project Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 6.0; }; name = Debug; };
+		A61000000000000000000002 /* Project Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 6.0; }; name = Release; };
+		A61000000000000000000003 /* Project Distribution */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; SWIFT_VERSION = 6.0; }; name = Distribution; };
+		A61000000000000000000004 /* App Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */; buildSettings = { CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = SpeechRail; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks"); PRODUCT_NAME = SpeechRailApp; SWIFT_EMIT_LOC_STRINGS = YES; }; name = Debug; };
+		A61000000000000000000005 /* App Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */; buildSettings = { CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = SpeechRail; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks"); PRODUCT_NAME = SpeechRailApp; SWIFT_EMIT_LOC_STRINGS = YES; }; name = Release; };
+		A61000000000000000000006 /* App Distribution */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */; buildSettings = { CODE_SIGN_ENTITLEMENTS = Entitlements/SpeechRailApp.entitlements; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_CFBundleDisplayName = SpeechRail; INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools"; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks"); PRODUCT_NAME = SpeechRailApp; SWIFT_EMIT_LOC_STRINGS = YES; }; name = Distribution; };
+		A61000000000000000000007 /* ControlKit Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */; buildSettings = { DEFINES_MODULE = YES; DYLIB_INSTALL_NAME_BASE = "@rpath"; GENERATE_INFOPLIST_FILE = YES; INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.controlkit; PRODUCT_NAME = SpeechRailControlKit; SKIP_INSTALL = YES; }; name = Debug; };
+		A61000000000000000000008 /* ControlKit Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */; buildSettings = { DEFINES_MODULE = YES; DYLIB_INSTALL_NAME_BASE = "@rpath"; GENERATE_INFOPLIST_FILE = YES; INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.controlkit; PRODUCT_NAME = SpeechRailControlKit; SKIP_INSTALL = YES; }; name = Release; };
+		A61000000000000000000009 /* ControlKit Distribution */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */; buildSettings = { DEFINES_MODULE = YES; DYLIB_INSTALL_NAME_BASE = "@rpath"; GENERATE_INFOPLIST_FILE = YES; INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.controlkit; PRODUCT_NAME = SpeechRailControlKit; SKIP_INSTALL = YES; }; name = Distribution; };
+		A61000000000000000000010 /* AgentCore Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */; buildSettings = { DEFINES_MODULE = YES; DYLIB_INSTALL_NAME_BASE = "@rpath"; GENERATE_INFOPLIST_FILE = YES; INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.controlagentcore; PRODUCT_NAME = SpeechRailControlAgentCore; SKIP_INSTALL = YES; }; name = Debug; };
+		A61000000000000000000011 /* AgentCore Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */; buildSettings = { DEFINES_MODULE = YES; DYLIB_INSTALL_NAME_BASE = "@rpath"; GENERATE_INFOPLIST_FILE = YES; INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.controlagentcore; PRODUCT_NAME = SpeechRailControlAgentCore; SKIP_INSTALL = YES; }; name = Release; };
+		A61000000000000000000012 /* AgentCore Distribution */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */; buildSettings = { DEFINES_MODULE = YES; DYLIB_INSTALL_NAME_BASE = "@rpath"; GENERATE_INFOPLIST_FILE = YES; INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Frameworks"; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.controlagentcore; PRODUCT_NAME = SpeechRailControlAgentCore; SKIP_INSTALL = YES; }; name = Distribution; };
+		A61000000000000000000013 /* Agent Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */; buildSettings = { LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.control; PRODUCT_NAME = SpeechRailControlAgent; SKIP_INSTALL = YES; }; name = Debug; };
+		A61000000000000000000014 /* Agent Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */; buildSettings = { LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.control; PRODUCT_NAME = SpeechRailControlAgent; SKIP_INSTALL = YES; }; name = Release; };
+		A61000000000000000000015 /* Agent Distribution */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */; buildSettings = { LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/../Frameworks"); PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.control; PRODUCT_NAME = SpeechRailControlAgent; SKIP_INSTALL = YES; }; name = Distribution; };
+		A61000000000000000000016 /* Tests Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.tests; PRODUCT_NAME = SpeechRailAppTests; }; name = Debug; };
+		A61000000000000000000017 /* Tests Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.tests; PRODUCT_NAME = SpeechRailAppTests; }; name = Release; };
+		A61000000000000000000018 /* Tests Distribution */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.tests; PRODUCT_NAME = SpeechRailAppTests; }; name = Distribution; };
+		A61000000000000000000019 /* UI Tests Debug */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000019 /* Debug.xcconfig */; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.uitests; PRODUCT_NAME = SpeechRailAppUITests; TEST_TARGET_NAME = SpeechRailApp; }; name = Debug; };
+		A61000000000000000000020 /* UI Tests Release */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000020 /* Release.xcconfig */; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.uitests; PRODUCT_NAME = SpeechRailAppUITests; TEST_TARGET_NAME = SpeechRailApp; }; name = Release; };
+		A61000000000000000000021 /* UI Tests Distribution */ = {isa = XCBuildConfiguration; baseConfigurationReference = A40000000000000000000021 /* Distribution.xcconfig */; buildSettings = { GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop.uitests; PRODUCT_NAME = SpeechRailAppUITests; TEST_TARGET_NAME = SpeechRailApp; }; name = Distribution; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A60000000000000000000001 /* App Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000004, A61000000000000000000005, A61000000000000000000006,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A60000000000000000000002 /* ControlKit Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000007, A61000000000000000000008, A61000000000000000000009,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A60000000000000000000003 /* AgentCore Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000010, A61000000000000000000011, A61000000000000000000012,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A60000000000000000000004 /* Agent Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000013, A61000000000000000000014, A61000000000000000000015,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A60000000000000000000005 /* Tests Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000016, A61000000000000000000017, A61000000000000000000018,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A60000000000000000000006 /* UI Tests Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000019, A61000000000000000000020, A61000000000000000000021,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+		A60000000000000000000007 /* Project Config */ = {isa = XCConfigurationList; buildConfigurations = (A61000000000000000000001, A61000000000000000000002, A61000000000000000000003,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Debug; };
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000001 /* Project object */;
+}
