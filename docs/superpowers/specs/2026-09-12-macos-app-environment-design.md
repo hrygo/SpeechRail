@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail macOS App 开发测试环境与控制面设计"
-status: under_review
+status: active
 audience: "核心开发者、macOS App 开发者、发布维护者"
 version: "0.1.0"
 date: 2026-09-12
@@ -48,7 +48,7 @@ SpeechRailApp
   ├─ SwiftUI settings window + MenuBarExtra
   ├─ URLSession → http://127.0.0.1:8201
   │                /health /readyz /v1/models /v1/voices /metrics
-  └─ XPCSession → com.speechrail.desktop.control
+  └─ NSXPCConnection → com.speechrail.desktop.control
                     └─ SpeechRailControlAgent
                          └─ fixed argv → managed Python CLI
                               └─ existing com.speechrail LaunchAgent
@@ -66,11 +66,11 @@ SpeechRailApp
 
 - 作为 App bundle 内的 signed executable，放在 `Contents/Resources`；LaunchAgent plist 放在 `Contents/Library/LaunchAgents`，使用 `BundleProgram`，由 `SMAppService.agent(plistName:)` 注册。
 - 以当前登录用户运行，不使用 root，不安装 `LaunchDaemon`。
-- 通过 Mach service 接收 XPC 请求；请求使用版本化 Codable 消息或等价的严格类型协议，操作集合固定为：`status`、`start`、`stop`、`restart`、`preflight`、`profileList`、`profileStatus`、`profileApply`、`profileRollback`、`operationStatus`、`operationCancel`。
+- 通过 Mach service 接收 XPC 请求；首期以 macOS 14 可用的 `NSXPCConnection` 承载版本化 Codable `Data` envelope，操作集合固定为：`status`、`start`、`stop`、`restart`、`preflight`、`profileList`、`profileStatus`、`profileApply`、`profileRollback`、`operationStatus`、`operationCancel`。macOS 26 的新 Swift `XPCSession` peer API 不作为最低系统版本的必要依赖。
 - helper 串行执行会改变运行态或配置的操作；同一时间只允许一个 mutation。profile apply 作为异步 operation，返回 opaque `operation_id` 和脱敏阶段状态，不把完整子进程输出传给 UI。
 - helper 只接受固定的 profile enum 和布尔确认，不接受任意 executable、shell 字符串、模型路径、日志路径或任意 `app_home`。首期 app home 固定为用户的 `~/Library/Application Support/SpeechRail`；现有自定义路径用户先继续使用 CLI。
 - helper 使用 `Process` 直接传递 argv，禁止 `shell`、`system()`、字符串拼接命令和隐式网络下载。实际 profile 供给仍由用户明确触发的既有 Python 命令完成。
-- App 与 helper 使用同一 Developer Team 签名；helper 对 XPC peer 做 code-signing / team identity 校验，拒绝未授权调用方。
+- App 与 helper 使用同一 Developer Team 签名；helper 通过 `NSXPCConnection.setCodeSigningRequirement` 对 XPC peer 做 code-signing / team identity 校验，拒绝未授权调用方。该 API 在 macOS 13 已可用，满足最低 macOS 14；`XPCPeerRequirement` 仅作为 macOS 26 可选实现，不写入最低版本路径。
 
 ### 4.3 Python 兼容边界
 
@@ -116,7 +116,7 @@ macos/SpeechRailApp/
 
 ### 6.3 测试分层
 
-1. Swift Testing：覆盖 XPC 消息编码、peer rejection、状态 reducer、profile enum、错误映射和 operation 状态机；所有外部进程和网络均 fake。
+1. Swift Testing：覆盖 XPC 消息编码、code-signing requirement 配置、peer rejection、状态 reducer、profile enum、错误映射和 operation 状态机；所有外部进程和网络均 fake。
 2. XCTest UI Tests：覆盖首次启动、helper 未注册、服务未就绪、启动/停止/重启、profile apply confirmation、失败回滚和后台服务被用户禁用的界面状态。使用 `--ui-test` 注入 deterministic fake transport，不能触碰真实 LaunchAgent。
 3. ControlAgent integration：使用独立 Mach service label、临时 app home、临时 port 和 fake managed Python runner；禁止写入生产 `~/Library/Application Support/SpeechRail`、生产 `com.speechrail` 或真实模型目录。
 4. Authorized local smoke：单独、显式执行签名 debug App 的 `SMAppService` register/unregister，以及真实 `com.speechrail` start/stop/profile 操作；每次操作前显示目标 label 和 app home，结束后核对 PID、端口、`/health`、`/readyz` 和 profile 状态。
@@ -136,7 +136,7 @@ macos/SpeechRailApp/
 1. 安装并验证 Xcode 26.6，确认 macOS 14 SDK、Swift compiler、`xcodebuild`、`xcrun`、codesigning 和 host macOS test destination 可用。
 2. 建立 Xcode project、shared scheme、targets、xcconfig、最小 Hardened Runtime 配置、helper plist 和 test plan。
 3. 建立 `SpeechRailControlKit` 的协议与 fake transport，先用 Swift Testing 锁定状态和错误行为。
-4. 建立 ControlAgent 的 XPC listener、固定命令 runner 和 `SMAppService` register/status/unregister 流程；先只接 fake runner。
+4. 建立 ControlAgent 的 `NSXPCListener`、固定命令 runner 和 `SMAppService` register/status/unregister 流程；先只接 fake runner。
 5. 给 Python CLI 增加机器输出并补契约测试，再接入真实 managed runtime 命令；保持默认 CLI 文本输出兼容。
 6. 建立 UI 状态流和 XCTest UI 测试；加入测试隔离保护，验证不会操作生产 label/home。
 7. 建立本地 `xcodebuild test`、SwiftPM test、Python gate 和 macOS App CI job。
@@ -157,6 +157,7 @@ macos/SpeechRailApp/
 - [SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)
 - [Updating helper executables from earlier versions of macOS](https://developer.apple.com/documentation/servicemanagement/updating-helper-executables-from-earlier-versions-of-macos)
 - [Creating XPC services](https://developer.apple.com/documentation/xpc/creating-xpc-services)
+- [NSXPCConnection](https://developer.apple.com/documentation/foundation/nsxpcconnection)
 - [Managing ongoing background processes in your Mac](https://developer.apple.com/documentation/appkit/managing-ongoing-background-processes-in-your-mac)
 - [Configuring the Hardened Runtime](https://developer.apple.com/documentation/security/hardened-runtime)
 - [Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)

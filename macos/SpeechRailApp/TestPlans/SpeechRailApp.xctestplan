@@ -1,0 +1,31 @@
+{
+  "configurations" : [
+    {
+      "id" : "default",
+      "name" : "Default Configuration",
+      "options" : {
+        "commandLineArgument" : [
+          "--ui-test"
+        ]
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "target" : {
+        "containerPath" : "container:SpeechRailApp.xcodeproj",
+        "identifier" : "SpeechRailAppTests"
+      }
+    },
+    {
+      "target" : {
+        "containerPath" : "container:SpeechRailApp.xcodeproj",
+        "identifier" : "SpeechRailAppUITests"
+      }
+    }
+  ],
+  "version" : 1
+}
