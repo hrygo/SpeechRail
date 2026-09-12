@@ -5,7 +5,7 @@
      role="img"
      aria-labelledby="diagram-title diagram-desc">
   <title id="diagram-title">SpeechRail 三档模型与 Quality 双 TTS capability 关系图</title>
-  <desc id="diagram-desc">客户端通过共享的 FastAPI OpenAI-compatible Gateway 和 profile capability router 进入三档运行时。Quality 同时管理 VoiceDesign 与 Base 两个独立 TTS worker，跨 capability lane 可以并发，同一 lane 串行，冷却后按 Quality group 回收并在下一次请求时惰性恢复。</desc>
+  <desc id="diagram-desc">客户端通过共享的 FastAPI OpenAI-compatible Gateway 和 profile capability router 进入三档运行时。Light 与 Balanced 的普通 /v1/audio/speech 请求进入 CustomVoice；Quality 再按请求入口分流：preset、instruction、preview 和 generated voice design 进入 VoiceDesign，reference audio clone 或 clone voice synthesis 进入 Base。设计音色的 generated reference 通过 VoiceDesign → Base handoff 形成 clone voice。Quality 同时管理两个独立 TTS worker，跨 capability lane 可以并发，同一 lane 串行，冷却后按 Quality group 回收并在下一次请求时惰性恢复。</desc>
 
   <defs>
     <style>
@@ -34,10 +34,13 @@
         .footer-copy { font-size: 15px; font-weight: 500; fill: #38516e; }
         .flow { fill: none; stroke: #1f5fae; stroke-width: 2.75; stroke-linecap: round; stroke-linejoin: round; }
         .route-flow { fill: none; stroke: #1f5fae; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+        .route-label { font-size: 12px; font-weight: 700; fill: #4b2e8c; }
         .lifecycle { fill: none; stroke: #a56600; stroke-width: 2.5; stroke-dasharray: 10 8; stroke-linecap: round; stroke-linejoin: round; }
         .shared-line { fill: none; stroke: #6e87a5; stroke-width: 2; stroke-dasharray: 6 7; stroke-linecap: round; }
+        .handoff-line { fill: none; stroke: #7652bf; stroke-width: 2; stroke-dasharray: 4 4; stroke-linecap: round; }
         .top-box { fill: #ffffff; stroke: #b9c8d9; stroke-width: 2; }
         .shared-box { fill: #edf4fc; stroke: #7ea6d1; stroke-width: 2; }
+        .route-pill { fill: #ffffff; stroke: #ab91df; stroke-width: 1.6; }
         .profile-card { fill: #ffffff; stroke-width: 2.5; }
         .model-card { fill: #ffffff; stroke: #c5d2e0; stroke-width: 1.8; }
         .quality-model-card { fill: #fbf9ff; stroke: #ab91df; stroke-width: 1.8; }
@@ -62,6 +65,9 @@
     <marker id="lifecycle-arrow" markerWidth="11" markerHeight="11" refX="10" refY="5.5" orient="auto" markerUnits="userSpaceOnUse">
       <path d="M0,0 L11,5.5 L0,11 Z" fill="#a56600"/>
     </marker>
+    <marker id="handoff-arrow" markerWidth="11" markerHeight="11" refX="10" refY="5.5" orient="auto" markerUnits="userSpaceOnUse">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#7652bf"/>
+    </marker>
   </defs>
 
   <rect class="canvas" x="0" y="0" width="1920" height="1200"/>
@@ -82,8 +88,8 @@
 
   <rect class="top-box" x="930" y="130" width="360" height="120" rx="16"/>
   <text class="box-title" x="955" y="169">Profile + capability Router</text>
-  <text class="box-copy" x="955" y="198">select one tier · route by capability</text>
-  <text class="box-copy-small" x="955" y="224">voice_design / voice_clone</text>
+  <text class="box-copy" x="955" y="198">select tier → default TTS worker</text>
+  <text class="box-copy-small" x="955" y="224">Quality → voice_design / voice_clone lane</text>
 
   <rect class="shared-box" x="1370" y="130" width="490" height="120" rx="16"/>
   <text class="box-title" x="1395" y="169">Shared host session layer</text>
@@ -114,7 +120,7 @@
   <rect class="model-card" x="75" y="545" width="520" height="100" rx="13"/>
   <text class="model-title" x="100" y="574">TTS capability worker</text>
   <text class="model-key" x="100" y="602">tts-0.6b-custom-q8</text>
-  <text class="model-copy" x="100" y="628">Qwen3-TTS CustomVoice · 8-bit</text>
+  <text class="model-copy" x="100" y="628">/v1/audio/speech → CustomVoice · 8-bit</text>
 
   <rect class="aux-card" x="75" y="665" width="520" height="100" rx="13"/>
   <text class="section-label" x="100" y="695">OPTIONAL COMPONENTS</text>
@@ -141,7 +147,7 @@
   <rect class="model-card" x="700" y="545" width="520" height="100" rx="13"/>
   <text class="model-title" x="725" y="574">TTS capability worker</text>
   <text class="model-key" x="725" y="602">tts-0.6b-custom-q8</text>
-  <text class="model-copy" x="725" y="628">Qwen3-TTS CustomVoice · 8-bit</text>
+  <text class="model-copy" x="725" y="628">/v1/audio/speech → CustomVoice · 8-bit</text>
 
   <rect class="aux-card" x="700" y="665" width="520" height="120" rx="13"/>
   <text class="section-label" x="725" y="695">DIARIZATION PATH</text>
@@ -166,35 +172,46 @@
   <text class="model-key" x="1350" y="472">asr-1.7b-q8</text>
   <text class="model-copy" x="1585" y="472">Qwen3-ASR 1.7B · 8-bit</text>
 
-  <rect class="quality-model-card" x="1325" y="520" width="520" height="250" rx="13"/>
-  <text class="section-label quality-text" x="1350" y="548">TTS CAPABILITY WORKERS · 双常驻允许</text>
+  <rect class="quality-model-card" x="1325" y="520" width="520" height="300" rx="13"/>
+  <text class="section-label quality-text" x="1350" y="548">TTS CAPABILITY ROUTER · 双常驻允许</text>
+  <text class="model-copy-small quality-text" x="1350" y="573">设计音色：VoiceDesign → generated reference → Base clone voice</text>
 
-  <rect class="quality-model-card quality-stroke" x="1345" y="565" width="230" height="145" rx="12"/>
-  <text class="model-title quality-text" x="1365" y="592">VoiceDesign</text>
-  <text class="model-key-small" x="1365" y="620">tts-1.7b-design-q8</text>
-  <text class="model-copy-small" x="1365" y="646">lane: voice_design</text>
-  <text class="model-copy-small" x="1365" y="673">普通 / instruction</text>
-  <text class="model-copy-small" x="1365" y="696">自然语言设计音色</text>
+  <rect class="route-pill" x="1345" y="585" width="230" height="32" rx="10"/>
+  <text class="route-label" x="1460" y="606" text-anchor="middle">preset · instruction · preview</text>
+  <path class="route-flow" d="M1460 617 V636" marker-end="url(#flow-arrow)"/>
 
-  <rect class="quality-model-card quality-stroke" x="1595" y="565" width="230" height="145" rx="12"/>
-  <text class="model-title quality-text" x="1615" y="592">Base</text>
-  <text class="model-key-small" x="1615" y="620">tts-1.7b-base-q8</text>
-  <text class="model-copy-small" x="1615" y="646">lane: voice_clone</text>
-  <text class="model-copy-small" x="1615" y="673">reference-audio clone</text>
-  <text class="model-copy-small" x="1615" y="696">不可用时显式失败</text>
+  <rect class="route-pill" x="1595" y="585" width="230" height="32" rx="10"/>
+  <text class="route-label" x="1710" y="606" text-anchor="middle">reference audio · clone voice</text>
+  <path class="route-flow" d="M1710 617 V636" marker-end="url(#flow-arrow)"/>
 
-  <path class="shared-line" d="M1575 638 H1595"/>
-  <text class="callout quality-text" x="1350" y="742">跨 lane 可并发 · 同 lane worker lock 串行</text>
+  <rect class="quality-model-card quality-stroke" x="1345" y="636" width="230" height="157" rx="12"/>
+  <text class="model-title quality-text" x="1365" y="663">VoiceDesign</text>
+  <text class="model-key-small" x="1365" y="689">tts-1.7b-design-q8</text>
+  <text class="model-copy-small" x="1365" y="713">lane: voice_design</text>
+  <text class="model-copy-small" x="1365" y="738">/v1/audio/speech</text>
+  <text class="model-copy-small" x="1365" y="759">/v1/voices/previews</text>
+  <text class="model-copy-small" x="1365" y="780">/v1/voices/designs → ref</text>
 
-  <rect class="aux-card" x="1325" y="790" width="520" height="90" rx="13"/>
-  <text class="section-label" x="1350" y="819">DIARIZATION PATH</text>
-  <text class="model-key-small" x="1350" y="848">aligner-bf16</text>
-  <text class="model-copy" x="1510" y="848">+ CoreML Sortformer · 仅分人路径</text>
+  <rect class="quality-model-card quality-stroke" x="1595" y="636" width="230" height="157" rx="12"/>
+  <text class="model-title quality-text" x="1615" y="663">Base</text>
+  <text class="model-key-small" x="1615" y="689">tts-1.7b-base-q8</text>
+  <text class="model-copy-small" x="1615" y="713">lane: voice_clone</text>
+  <text class="model-copy-small" x="1615" y="738">/v1/voices/clone</text>
+  <text class="model-copy-small" x="1615" y="759">clone_id → /v1/audio/speech</text>
+  <text class="model-copy-small" x="1615" y="780">voice.variant=base</text>
 
-  <rect class="lifecycle-box" x="1325" y="900" width="520" height="88" rx="13"/>
-  <text class="section-label orange-text" x="1350" y="927">QUALITY GROUP LIFECYCLE</text>
-  <text class="model-copy" x="1350" y="953">VD + Base resident → cooldown → trim/close group</text>
-  <text class="model-copy" x="1350" y="976">next request → lazy restore selected worker</text>
+  <path class="handoff-line" d="M1575 715 H1595" marker-end="url(#handoff-arrow)"/>
+  <text class="callout quality-text" x="1350" y="812">跨 lane 可并发 · 同 lane worker lock 串行</text>
+
+  <rect class="aux-card" x="1325" y="840" width="520" height="80" rx="13"/>
+  <text class="section-label" x="1350" y="869">DIARIZATION PATH</text>
+  <text class="model-key-small" x="1350" y="898">aligner-bf16</text>
+  <text class="model-copy" x="1510" y="898">+ CoreML Sortformer · 仅分人路径</text>
+
+  <rect class="lifecycle-box" x="1325" y="935" width="520" height="75" rx="13"/>
+  <text class="section-label orange-text" x="1350" y="961">QUALITY GROUP LIFECYCLE</text>
+  <text class="model-copy" x="1350" y="984">VD + Base resident → cooldown → trim/close group</text>
+  <text class="model-copy" x="1350" y="1004">next request → lazy restore selected worker</text>
 
   <!-- Shared scheduling and artifact relationship -->
   <rect class="shared-box" x="45" y="1045" width="1830" height="115" rx="18"/>
