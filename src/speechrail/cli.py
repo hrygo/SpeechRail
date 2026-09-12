@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -26,6 +27,8 @@ from speechrail.service import (
     run_preflight,
 )
 from speechrail.service.profile_switch import LaunchAgentServiceController
+
+_MACHINE_SCHEMA_VERSION = 1
 
 
 def _discover_env_file() -> Path | None:
@@ -93,14 +96,23 @@ def _parser() -> argparse.ArgumentParser:
     for command in ("list", "status"):
         command_parser = profile_commands.add_parser(command)
         command_parser.add_argument("--app-home", type=Path, help="use this installed app home")
+        command_parser.add_argument(
+            "--json", action="store_true", help="emit one machine-readable JSON envelope"
+        )
     apply = profile_commands.add_parser("apply")
     apply.add_argument("preset", choices=("quality", "balanced", "light"))
     apply.add_argument("--app-home", type=Path, help="use this installed app home")
     apply.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
+    apply.add_argument(
+        "--json", action="store_true", help="emit one machine-readable JSON envelope"
+    )
     rollback = profile_commands.add_parser("rollback")
     rollback.add_argument("--app-home", type=Path, help="use this installed app home")
     rollback.add_argument(
         "--yes", action="store_true", help="roll back without an interactive prompt"
+    )
+    rollback.add_argument(
+        "--json", action="store_true", help="emit one machine-readable JSON envelope"
     )
 
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
@@ -121,6 +133,9 @@ def _parser() -> argparse.ArgumentParser:
             "--app-home",
             type=Path,
             help="use this installed app home as the service working directory",
+        )
+        command_parser.add_argument(
+            "--json", action="store_true", help="emit one machine-readable JSON envelope"
         )
         if command == "preflight":
             command_parser.add_argument(
@@ -179,8 +194,62 @@ def _confirm(assume_yes: bool) -> bool:
     return answer.strip().lower() in {"y", "yes"}
 
 
-def _print_apply_result(result: object) -> int:
+def _print_machine(payload: dict[str, object]) -> None:
+    envelope = {"schema_version": _MACHINE_SCHEMA_VERSION, **payload}
+    print(json.dumps(envelope, sort_keys=True))
+
+
+def _machine_command(args: argparse.Namespace) -> str:
+    if args.command == "service":
+        return f"service.{args.service_command}"
+    if args.command == "profile":
+        return f"profile.{args.profile_command}"
+    return str(args.command)
+
+
+def _machine_error_code(exc: BaseException) -> str:
+    message = str(exc).lower()
+    if "managed runtime" in message:
+        return "managed_runtime_missing"
+    if "backend_busy" in message:
+        return "backend_busy"
+    if "in progress" in message or "already running" in message:
+        return "operation_in_progress"
+    if "unsupported" in message or "only on macos" in message:
+        return "unsupported"
+    if "invalid" in message:
+        return "invalid_request"
+    if "not installed" in message or ("service" in message and "launchctl" in message):
+        return "service_unavailable"
+    return "command_failed"
+
+
+def _machine_message(value: object) -> str:
+    """Keep machine errors short and free of paths or common secret values."""
+    message = str(value)
+    message = re.sub(
+        r"(?i)\b(api[_-]?key|authorization|token|secret|password)\b\s*[:=]\s*\S+",
+        r"\1=[redacted]",
+        message,
+    )
+    message = re.sub(r"(?<![:\w])/[^\s\"']+", "[path]", message)
+    return message[:240]
+
+
+def _print_apply_result(
+    result: object, *, machine_output: bool = False, command: str = "profile.apply"
+) -> int:
     status = getattr(result, "status", "not_ready")
+    if machine_output:
+        _print_machine(
+            {
+                "command": command,
+                "error_code": getattr(result, "error_code", None),
+                "operation_id": getattr(result, "operation_id", None),
+                "status": status,
+            }
+        )
+        return 0 if status in {"unchanged", "committed"} else 1
     if status == "unchanged":
         print("Profile is already active.")
         return 0
@@ -198,9 +267,30 @@ def _run_profile(args: argparse.Namespace) -> int:
     from speechrail.service import profile_commands
 
     app_home = (args.app_home or _default_app_home()).resolve()
+    machine_output = bool(getattr(args, "json", False))
     if args.profile_command == "list":
         current = profile_commands.profile_status(app_home).preset
-        for item in profile_commands.list_profiles():
+        profiles = profile_commands.list_profiles()
+        if machine_output:
+            _print_machine(
+                {
+                    "command": "profile.list",
+                    "current": current,
+                    "profiles": [
+                        {
+                            "aligner": item.aligner,
+                            "asr": item.asr,
+                            "download_bytes": item.download_bytes,
+                            "id": item.id,
+                            "tts": item.tts,
+                        }
+                        for item in profiles
+                    ],
+                    "status": "ok",
+                }
+            )
+            return 0
+        for item in profiles:
             marker = " *" if item.id == current else ""
             print(
                 f"{item.id}{marker}: ASR={item.asr}, TTS={item.tts}, "
@@ -209,6 +299,18 @@ def _run_profile(args: argparse.Namespace) -> int:
         return 0
     if args.profile_command == "status":
         status = profile_commands.profile_status(app_home)
+        if machine_output:
+            _print_machine(
+                {
+                    "asr": status.asr,
+                    "command": "profile.status",
+                    "generation": status.generation,
+                    "preset": status.preset,
+                    "status": "ok",
+                    "tts": status.tts,
+                }
+            )
+            return 0
         if status.preset is None:
             print("Profile: unconfigured")
         else:
@@ -219,34 +321,69 @@ def _run_profile(args: argparse.Namespace) -> int:
         return 0
     if args.profile_command == "apply":
         summary = next(item for item in profile_commands.list_profiles() if item.id == args.preset)
-        print(
-            f"Apply profile '{summary.id}' "
-            f"(up to {_format_bytes(summary.download_bytes)} download)."
+        if not machine_output:
+            print(
+                f"Apply profile '{summary.id}' "
+                f"(up to {_format_bytes(summary.download_bytes)} download)."
+            )
+        if not _confirm(args.yes):
+            if machine_output:
+                _print_machine(
+                    {
+                        "command": "profile.apply",
+                        "error_code": "confirmation_required",
+                        "operation_id": None,
+                        "status": "cancelled",
+                    }
+                )
+            else:
+                print("Cancelled.")
+            return 1
+        managed_python = _managed_runtime_for_mutation(app_home)
+        if managed_python is not None:
+            command_args: tuple[str, ...] = ("profile", "apply", args.preset, "--yes")
+            if machine_output:
+                command_args += ("--json",)
+            return _delegate_managed_command(
+                command_args,
+                app_home,
+                managed_python=managed_python,
+            )
+        return _print_apply_result(
+            profile_commands.apply_profile(args.preset, app_home=app_home),
+            machine_output=machine_output,
         )
-        if not _confirm(args.yes):
-            print("Cancelled.")
-            return 1
-        managed_python = _managed_runtime_for_mutation(app_home)
-        if managed_python is not None:
-            return _delegate_managed_command(
-                ("profile", "apply", args.preset, "--yes"),
-                app_home,
-                managed_python=managed_python,
-            )
-        return _print_apply_result(profile_commands.apply_profile(args.preset, app_home=app_home))
     if args.profile_command == "rollback":
-        print("Restore the previously committed profile.")
+        if not machine_output:
+            print("Restore the previously committed profile.")
         if not _confirm(args.yes):
-            print("Cancelled.")
+            if machine_output:
+                _print_machine(
+                    {
+                        "command": "profile.rollback",
+                        "error_code": "confirmation_required",
+                        "operation_id": None,
+                        "status": "cancelled",
+                    }
+                )
+            else:
+                print("Cancelled.")
             return 1
         managed_python = _managed_runtime_for_mutation(app_home)
         if managed_python is not None:
+            command_args = ("profile", "rollback", "--yes")
+            if machine_output:
+                command_args += ("--json",)
             return _delegate_managed_command(
-                ("profile", "rollback", "--yes"),
+                command_args,
                 app_home,
                 managed_python=managed_python,
             )
-        return _print_apply_result(profile_commands.rollback_profile(app_home=app_home))
+        return _print_apply_result(
+            profile_commands.rollback_profile(app_home=app_home),
+            machine_output=machine_output,
+            command="profile.rollback",
+        )
     raise ServiceError("unknown profile command")
 
 
@@ -401,6 +538,23 @@ def _print_preflight(result: PreflightResult) -> None:
         print(f"{state} {check.name}: {check.message}")
 
 
+def _print_machine_preflight(result: PreflightResult) -> None:
+    _print_machine(
+        {
+            "checks": [
+                {
+                    "message": _machine_message(check.message),
+                    "name": check.name,
+                    "ok": check.ok,
+                }
+                for check in result.checks
+            ],
+            "command": "service.preflight",
+            "status": "ok" if result.ok else "failed",
+        }
+    )
+
+
 def _venv_roots(executable: Path) -> frozenset[Path]:
     roots: set[Path] = set()
     for candidate in (executable.absolute(), executable.resolve()):
@@ -429,6 +583,7 @@ def _delegate_service_command(
     managed_python: Path,
     asr_only: bool,
     host_python: Path | None,
+    json_output: bool,
 ) -> int:
     command_args = [
         str(managed_python),
@@ -444,6 +599,8 @@ def _delegate_service_command(
         command_args.append("--asr-only")
     if command == "preflight" and host_python is not None:
         command_args.extend(("--host-python", str(host_python)))
+    if json_output:
+        command_args.append("--json")
     try:
         completed = subprocess.run(tuple(command_args), check=False)
     except OSError as exc:
@@ -496,6 +653,7 @@ def _run_service(
     app_home: Path | None = None,
     asr_only: bool = False,
     host_python: Path | None = None,
+    json_output: bool = False,
 ) -> int | None:
     if app_home is not None:
         resolved_app_home = app_home.expanduser().absolute()
@@ -508,6 +666,7 @@ def _run_service(
                 managed_python=managed_python,
                 asr_only=asr_only,
                 host_python=host_python,
+                json_output=json_output,
             )
     if command == "preflight":
         layout = ServiceLayout.for_app_home(app_home or Path.cwd())
@@ -520,6 +679,9 @@ def _run_service(
                 or (managed_python if managed_python.is_file() else None)
             ),
         )
+        if json_output:
+            _print_machine_preflight(result)
+            return None if result.ok else 1
         _print_preflight(result)
         if not result.ok:
             raise ServiceError("preflight failed; service state unchanged")
@@ -529,6 +691,10 @@ def _run_service(
     else:
         manager = create_launch_agent_manager(working_directory=app_home)
     if command == "install":
+        if json_output:
+            manager.install()
+            _print_machine({"command": "service.install", "status": "completed"})
+            return None
         print(f"Installed LaunchAgent plist: {manager.install()}")
         print("Run 'speechrail service start' to start SpeechRail.")
         return None
@@ -546,13 +712,35 @@ def _run_service(
         assert controller is not None
         controller.restart()
     elif command == "status":
-        print(manager.status(), end="")
+        status_output = manager.status()
+        if json_output:
+            state = "unknown"
+            lowered = status_output.lower()
+            if (
+                "state = running" in lowered
+                or status_output.strip().lower() in {"running", "active"}
+            ):
+                state = "running"
+            elif "state = stopped" in lowered or "state = exited" in lowered:
+                state = "stopped"
+            _print_machine(
+                {
+                    "command": "service.status",
+                    "service_state": state,
+                    "status": "ok",
+                }
+            )
+        else:
+            print(status_output, end="")
         return None
     elif command == "uninstall":
         manager.uninstall()
     else:
         raise ServiceError("unknown service command")
-    print(f"SpeechRail service {command} completed.")
+    if json_output:
+        _print_machine({"command": f"service.{command}", "status": "completed"})
+    else:
+        print(f"SpeechRail service {command} completed.")
     return None
 
 
@@ -574,6 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 getattr(args, "app_home", None),
                 getattr(args, "asr_only", False),
                 getattr(args, "host_python", None),
+                getattr(args, "json", False),
             )
             return 0 if service_result is None else service_result
         if args.command == "profile":
@@ -582,6 +771,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_setup(args)
         raise ServiceError("unknown command")
     except (ServiceError, RuntimeError, ValueError) as exc:
+        if getattr(args, "json", False):
+            _print_machine(
+                {
+                    "command": _machine_command(args),
+                    "error_code": _machine_error_code(exc),
+                    "message": _machine_message(exc),
+                    "status": "failed",
+                }
+            )
+            return 1
         prefix = "SpeechRail service" if args.command == "service" else "SpeechRail"
         print(f"{prefix}: {exc}", file=sys.stderr)
         return 1
