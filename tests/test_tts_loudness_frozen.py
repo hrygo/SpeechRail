@@ -260,3 +260,33 @@ def test_frozen_stats_storage_is_bounded_for_sparse_collection() -> None:
         subject.process(tone(count=240) + bytes(2400 * 2))
     assert len(subject._frozen_frame_powers) < 20
     assert subject._frozen_state == "fallback"
+
+
+def test_frozen_calibration_requires_multiple_frames_with_small_window() -> None:
+    # calibration_ms below one 10 ms analysis frame must not lock a gain from a
+    # single frame: the median needs at least the minimum number of frames.
+    subject = StreamingPcm16LoudnessController(
+        sample_rate=SR,
+        config=Pcm16LoudnessConfig(calibration_ms=5),
+        freeze_gain_after_calibration=True,
+    )
+    subject.process(tone(count=240))
+    subject.process(tone(count=240))
+    assert subject._current_gain_db is None
+    subject.process(tone(count=240))
+    assert subject.consume_stats().get("calibrated") == 1
+
+
+def test_frozen_sub_twenty_percent_duty_onset_stays_waiting_at_unity() -> None:
+    # Energy is well above the gate but fewer than 20% of each frame's samples
+    # are above it, so no frame is eligible: collection never starts, the
+    # deadline never arms, and the request stays at unity in "waiting".
+    subject = new()
+    frame = [0] * 240
+    for index in range(10):
+        frame[index * 24] = 16384
+    signal = pcm(frame * 20)
+    assert subject.process(signal) == signal
+    assert subject._frozen_state == "waiting"
+    assert subject._current_gain_db is None
+    assert subject.consume_stats().get("calibrated", 0) == 0

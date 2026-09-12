@@ -68,6 +68,9 @@ class StreamingPcm16LoudnessController:
     """
 
     _MAX_GAIN_TRANSITION_DB = 6.0
+    # A median needs more than one sample: require several eligible frames so a
+    # misconfigured sub-frame calibration_ms cannot lock from a single frame.
+    _MIN_CALIBRATION_FRAMES = 3
 
     def __init__(
         self,
@@ -216,7 +219,10 @@ class StreamingPcm16LoudnessController:
         if self._frozen_state == "collecting":
             self._frozen_wait_samples += count
             self._calibration_elapsed_samples = self._frozen_wait_samples
-        if self._calibration_active_samples >= self._calibration_samples:
+        if (
+            self._calibration_active_samples >= self._calibration_samples
+            and len(self._frozen_frame_powers) >= self._MIN_CALIBRATION_FRAMES
+        ):
             reference_rms = math.sqrt(median(self._frozen_frame_powers))
             self._calibration_gain_db = self._bounded_gain_db(
                 20.0 * math.log10(self._config.target_rms / reference_rms)
