@@ -1,15 +1,15 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.1.0"
-date: 2026-09-12
+version: "0.1.1"
+date: 2026-09-13
 ---
 
 # SpeechRail macOS App 分发与签名
 
 ## 当前状态
 
-当前开发机按无 Apple Developer ID 模式运行：Debug/Release 使用 ad hoc 本地签名构建并关闭 Hardened Runtime，测试脚本使用 unsigned build 验证 SwiftUI、XPC 协议、控制 Agent 和 UI test；不会生成可分发的 archive，不会上传 notarization，也不会修改钥匙串或用户的登录项。Distribution 配置才启用 Hardened Runtime。
+当前开发机按无 Apple Developer ID 模式运行：Debug/Release 使用 ad hoc 本地签名构建并关闭 Hardened Runtime，测试脚本默认保留该本地签名，以便 Xcode UI test runner 正常加载 `Testing.framework` 运行库；不会生成可分发的 archive，不会上传 notarization，也不会修改钥匙串或用户的登录项。只有显式设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=0` 才会请求 unsigned test bundle；Distribution 配置才启用 Hardened Runtime。
 
 这不等同于可交付给其他 Mac 的发布包。站外直接分发仍保留 Developer ID Application + notarization 路径，待用户准备 Apple Developer 账号、证书和 notarization credential 后再启用。
 

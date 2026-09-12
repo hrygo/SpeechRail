@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.1.0"
-date: 2026-09-12
+version: "0.1.1"
+date: 2026-09-13
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -12,7 +12,7 @@ date: 2026-09-12
 - Xcode 26.6 stable，Swift 6.3，macOS deployment target 14.0，首期只构建 `arm64`。
 - Python 仍固定为 `>=3.12,<3.13`，使用仓库现有 `uv` 环境。
 - 运行 App 前，首次安装 Xcode 的管理员需要在本机接受 Apple 许可；不要把管理员密码写入脚本或仓库。
-- 当前本机不依赖 Apple Developer ID；Debug/Release 可用 ad hoc 本地签名且关闭 Hardened Runtime，测试脚本显式使用 unsigned build，Distribution 才启用 Hardened Runtime 并保留发布模板。
+- 当前本机不依赖 Apple Developer ID；Debug/Release 可用 ad hoc 本地签名且关闭 Hardened Runtime，测试脚本默认保留 ad hoc 签名，Distribution 才启用 Hardened Runtime 并保留发布模板。
 
 ## 边界
 
@@ -23,7 +23,7 @@ App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志
 ## 本地开发
 
 1. 在 Xcode 中打开 `macos/SpeechRailApp/SpeechRailApp.xcodeproj`，选择 `SpeechRailApp` scheme。
-2. Debug/Release 默认使用 `Sign to Run Locally` 的 ad hoc 本地签名；测试脚本默认关闭签名，若本机后来配置了 development signing，可设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=1` 运行签名测试。
+2. Debug/Release 默认使用 `Sign to Run Locally` 的 ad hoc 本地签名；测试脚本默认保留签名，以满足当前 Xcode UI test runner 的 `Testing.framework` 运行库要求。只有明确需要未签名 bundle 时才设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=0`。
 3. 修改 Python 服务后先执行 `uv sync --extra dev`，再运行 `scripts/macos_app_test.sh` 与 Python 定向测试。
 4. UI test 通过 `--ui-test` 使用 fake transport；不会注册生产 helper、启动 `com.speechrail` 或访问真实模型。
 
