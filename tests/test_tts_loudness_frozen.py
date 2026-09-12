@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import random
 import struct
+from itertools import pairwise
 
 import pytest
 
@@ -94,7 +95,7 @@ def test_frozen_peak_release_survives_process_boundary() -> None:
     assert tail[0] < before[-1] // 2
     assert 0 <= tail[1] - tail[0] <= 3
     assert tail[-1] > tail[0]
-    assert max(abs(b - a) for a, b in zip(tail, tail[1:], strict=False)) <= 3
+    assert max(abs(b - a) for a, b in pairwise(tail)) <= 3
 
 
 def test_frozen_near_silence_does_not_toggle_whole_chunk_gain() -> None:
@@ -146,7 +147,7 @@ def test_frozen_trusted_lock_is_gradual_not_a_step() -> None:
     samples = decode(subject.process(pcm([655] * (N * 2))))
     assert samples[N - 2] == 655
     assert samples[N - 1] - samples[N - 2] <= 10
-    assert max(abs(b - a) for a, b in zip(samples, samples[1:], strict=False)) <= 10
+    assert max(abs(b - a) for a, b in pairwise(samples)) <= 10
     assert samples[-1] > samples[0] * 4
 
 
