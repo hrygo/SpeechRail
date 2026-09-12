@@ -2,7 +2,7 @@
 title: "VoiceDesign 能力优势与音色稳定性边界"
 status: active
 audience: "架构师、TTS 质量负责人、Sona Voice Studio 开发者"
-version: "2.0"
+version: "2.1"
 date: 2026-09-12
 ---
 
@@ -47,7 +47,7 @@ Quality catalog 同时安装：
 
 本 PR 保持兼容：已有 prompt-created profile 仍直接由 VoiceDesign 合成，不自动修改 voice asset。
 
-下一阶段将显式增加“稳定化/物化”动作：
+当前已通过 `/v1/voices/designs` 提供显式生成参考注册：创建全新 Base-bound clone，保存来源 hash，原音色不变。下面的完整 VoiceRevision 与输出声纹验收仍是目标流程，不能将参考注册完成视为整体完成：
 
 ```text
 instruction

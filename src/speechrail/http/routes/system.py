@@ -215,6 +215,8 @@ def _voice_entry(
         entry["duration_seconds"] = profile.duration_seconds
     if profile.quality is not None:
         entry["quality"] = profile.quality
+    if profile.creation is not None:
+        entry["creation"] = profile.creation.model_dump(mode="json")
     return entry
 
 

@@ -2,7 +2,7 @@
 title: "Quality 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
-version: "1.1"
+version: "1.2"
 date: 2026-09-12
 ---
 
@@ -46,7 +46,7 @@ flowchart LR
 
 1. prompt-created voice 继续由 VoiceDesign 合成；
 2. VoiceDesign 不再被允许承接 reference clone；
-3. catalog/runtime 已为后续 **VoiceDesign → canonical reference → Base stabilization** 提供 Base capability，但自动物化 canonical reference 与 VoiceRevision 迁移不在本次实现中静默完成，必须作为显式、可回滚的注册操作落地并单独验收。
+3. 新增显式 `POST /v1/voices/designs`：输入描述、参考文本、seed 和一个未占用的目标 ID，生成并核验规范参考，再保存为 Base-bound clone；已有 `/v1/voices` metadata-only 创建行为不变。生成与 ASR 阶段结束前不发布候选音色；旧音色不自动迁移。该注册操作不执行 Base 合成，响应明确为 `synthesis_validation=unevaluated`，后续通过普通 TTS 与 `quality-runs` 验收。当前仅开放中文实验门。详见[生成式音色注册](generated-voice-registration.md)。
 
 长期目标是“VoiceDesign 负责创造，Base 负责稳定复现”：设计成功后生成一段经过质量门的 canonical reference，再由 Base 建立稳定 clone revision；后续目标文本不再每次重新进行开放式音色设计。
 
@@ -132,7 +132,7 @@ quality:
   run_id: ...
 ```
 
-对于 prompt-created voice，`origin=generated`；对于 Sona 录音，`origin=recorded`。两者在完成 Base 稳定化后都可以成为同一种可复用 VoiceRevision。当前 `VoiceProfile` 数据结构尚未一次性引入上述全部字段，避免在没有迁移/回滚策略时破坏已有音色资产；这是后续 schema evolution 的目标模型。
+对于 prompt-created voice，`origin=generated`；对于 Sona 录音，`origin=recorded`。两者在完成 Base 稳定化后都可以成为同一种可复用 VoiceRevision。当前 `VoiceProfile.creation` 已为新生成参考记录模型制品/revision、seed、文本/指令/规范音频 hash 和前处理版本，旧记录可缺省该字段。它是来源元数据，并不是完整 revision 历史或声纹相似度证据；上述其余字段与旧资产迁移仍是后续 schema evolution 的目标。
 
 ## 6. Reference conditioning 最佳实践与 Sona 边界
 
@@ -183,7 +183,7 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 - 同时记录首次可听延迟、统一定义 RTF、换模冷启动、内存与取消行为；
 - 主观比较需响度匹配，避免“更响=更好”的偏差。
 
-现有 `voice_quality_v1` 仍是公共报告壳，但之前审计发现 synthesis pass/deterministic 判定存在需要单独修复的缺口；在这些门禁修复并经过真实音频 A/B 前，绿色质量报告不能被解释为“跨文本身份与纯净度已证明”。
+现有 `voice_quality_v1` 已有输出信号、重复 PCM 与阶段化 ASR 检查，但独立声纹、真实音频 A/B 和噪声评估仍未完成。生成式注册只填写参考侧报告、输出侧 probe_count=0；绿色参考报告不能被解释为“Base 输出、跨文本身份与纯净度已证明”。
 
 ## 9. 分阶段演进
 
@@ -208,8 +208,8 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 
 ### Phase C — Prompt voice 稳定化
 
-- VoiceDesign 输出 canonical reference；
-- Base 创建新 VoiceRevision；
+- 已实现显式 `/v1/voices/designs` 生成/验证 canonical reference，并创建新的 Base-bound clone（不覆盖旧 ID）；
+- 完整 VoiceRevision 历史与已有音色迁移尚未实现；
 - 显式迁移与回滚；
 - 跨文本 speaker similarity 与 ABX 门。
 

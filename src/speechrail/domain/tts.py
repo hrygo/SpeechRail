@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -25,6 +26,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from speechrail.domain.voice_creation import VoiceCreation
+
 logger = logging.getLogger(__name__)
 
 VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -47,6 +50,7 @@ class VoiceProfile:
     audio_path: str | None = None
     duration_seconds: float = 0.0
     quality: dict[str, Any] | None = None
+    creation: VoiceCreation | None = None
 
     @property
     def description(self) -> str:
@@ -73,6 +77,8 @@ class VoiceProfile:
             data["duration_seconds"] = self.duration_seconds
         if self.quality is not None:
             data["quality"] = self.quality
+        if self.creation is not None:
+            data["creation"] = self.creation.model_dump(mode="json")
         return data
 
 
@@ -547,6 +553,12 @@ class VoiceStoreUnavailableError(RuntimeError):
     code = "voice_store_unavailable"
 
 
+class VoiceAlreadyExistsError(ValueError):
+    """A create-only registration must not replace an existing voice."""
+
+    code = "voice_already_exists"
+
+
 class VoiceInUseError(RuntimeError):
     """A custom voice still has an active immutable audio reader lease."""
 
@@ -723,6 +735,10 @@ class VoiceRegistry:
             if not isinstance(quality_raw, dict):
                 raise ValueError("custom voice quality must be an object")
             quality = quality_raw
+        creation_raw = item.get("creation")
+        creation = None if creation_raw is None else VoiceCreation.model_validate(creation_raw)
+        if creation is not None and raw_mode != "clone":
+            raise ValueError("generated reference provenance requires clone mode")
         return VoiceProfile(
             id=vid,
             name=name,
@@ -737,6 +753,7 @@ class VoiceRegistry:
             audio_path=audio_path,
             duration_seconds=float(duration_seconds),
             quality=quality,
+            creation=creation,
         )
 
     def _controlled_audio_path(
@@ -986,6 +1003,8 @@ class VoiceRegistry:
         voice_id: str | None = None,
         duration_seconds: float,
         quality: dict[str, Any] | None = None,
+        creation: VoiceCreation | None = None,
+        create_only: bool = False,
     ) -> VoiceProfile:
         if not name.strip():
             raise ValueError("voice name must not be empty")
@@ -1008,9 +1027,21 @@ class VoiceRegistry:
             raise ValueError("duration_seconds must be a non-negative number")
         if quality is not None and not isinstance(quality, dict):
             raise ValueError("quality must be an object")
+        if creation is not None and not isinstance(creation, VoiceCreation):
+            raise ValueError("creation must be validated voice provenance")
+        if creation is not None and (
+            creation.reference_audio_sha256 != hashlib.sha256(audio_bytes).hexdigest()
+            or creation.reference_text_sha256
+            != hashlib.sha256(ref_text.strip().encode()).hexdigest()
+        ):
+            raise ValueError("reference does not match voice provenance")
 
         with self._lock:
             self._ensure_available_locked(reload=True)
+            # This check shares the metadata commit lock; the HTTP preflight
+            # alone cannot protect against concurrent registration of the ID.
+            if create_only and vid in self._custom_voices:
+                raise VoiceAlreadyExistsError("target voice already exists")
             self._prepare_store_dirs_locked()
             target_file = (self._voices_dir / f"{vid}.{uuid.uuid4().hex}.wav").resolve()
             self._controlled_audio_path(str(target_file), vid, require_exists=False)
@@ -1030,6 +1061,7 @@ class VoiceRegistry:
                 audio_path=str(target_file),
                 duration_seconds=round(float(duration_seconds), 2),
                 quality=quality,
+                creation=creation,
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = profile

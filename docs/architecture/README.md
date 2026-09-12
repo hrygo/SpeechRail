@@ -2,7 +2,7 @@
 title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
-version: "2.0.5"
+version: "2.0.6"
 date: 2026-09-12
 ---
 
@@ -39,6 +39,10 @@ graph TD
 14. **[克隆音色输出可懂度与 ASR 复核设计](voice-quality-intelligibility-validation.md)**（`active`）：实现 TTS probe 完成并释放模型槽后再批量 ASR 的阶段化验收，避免 Base TTS 与 ASR 形成未治理重模型重叠，并为随机噪声、错读/漏读提供独立文本证据。
 
 ---
+
+## 生成式注册补充入口
+
+[生成式音色注册](generated-voice-registration.md) 说明 `/v1/voices/designs` 的发布时点、资源边界、来源记录、失败回退，以及 Sona 新旧入口的兼容策略。
 
 ## 🔑 核心架构原则
 

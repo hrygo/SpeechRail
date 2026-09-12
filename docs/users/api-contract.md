@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.1.0"
+version: "2.1.1"
 date: 2026-09-12
 ---
 
@@ -415,3 +415,27 @@ Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 
 | **503** | `backend_not_ready` | `true` | 对应模型 Worker 尚未启动或预检未通过，等待就绪 |
 | **503** | `backend_timeout` | `true` | 队列准入、worker 生成或音频交付超出总 deadline，减小音频分块 |
 | **503** | `voice_store_unavailable` | `true` | 自定义音色 registry 或音频存储不可读/不可写，先保留原文件并按手册修复 |
+
+
+## 生成参考并注册新的 Base 音色
+
+`POST /v1/voices/designs` 是 SpeechRail 专用、Quality-only 的增量接口。它不改变 `/v1/voices` 仅保存提示词的语义，也不改变录音上传的 `/v1/voices/clone`。
+
+```json
+{
+  "id": "narrator_base",
+  "name": "Narrator",
+  "instruction": "清晰自然的中文声音，表达平稳。",
+  "reference_text": "请用自然清晰的声音朗读这段参考文字，保持平稳的语气和适中的节奏。",
+  "seed": 42,
+  "language": "zh"
+}
+```
+
+`id` 必须为新的小写字母、数字、下划线或连字符组合（1–64 字符），不得使用系统 ID/alias；`name` 1–64 字符；`instruction` 1–10000 字符；`reference_text` 20–240 字符；seed 为 0..2^32−1 的整数，默认 42。当前仅支持 `language=zh`，不接受 URL、参考音频、速度控制或其他额外字段。
+
+201 响应包含 `voice`（标准 VoiceProfile，mode=clone、variant=base、含 creation 来源信息）以及 `synthesis_validation: "unevaluated"`。`voice.quality` 只描述生成参考与 ASR 内容核验，输出 probe_count=0；后续使用 `/v1/audio/speech` 调用 Base，并用 `/v1/voices/{id}/quality-runs` 单独验证输出。
+
+ID 已存在（含并发创建）返回 409 `voice_already_exists`，不会覆盖旧资产；没有幂等缓存，重试同一 ID 也返回 409，客户端可从 `/v1/voices` 确认资产。资源繁忙为 429，超时或 ASR 不可用为 503，内容不匹配为 400 `transcript_mismatch`，无效输出为 400/502。任何模型或 ASR 阶段失败都不会发布半成品。
+
+语料质量与声纹稳定性尚需实机校准；详见[生成式音色注册架构](../architecture/generated-voice-registration.md)。

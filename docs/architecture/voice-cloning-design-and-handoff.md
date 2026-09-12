@@ -2,7 +2,7 @@
 title: "SpeechRail 音色克隆架构设计与工程交接"
 status: active
 audience: "SpeechRail / Sona 核心开发者"
-version: "2.0"
+version: "2.1"
 date: 2026-09-12
 ---
 
@@ -131,7 +131,7 @@ Sona 保留两个明确入口：
 1. **描述声音** → `quality` VoiceDesign；
 2. **克隆我的声音** → `quality` Base reference clone。
 
-Sona 不应知道具体模型目录，只消费 SpeechRail capability。创建后都进入统一“我的音色”资产体验。Prompt-created voice 的 canonical-reference→Base 稳定化是下一阶段显式注册流程，不能由客户端猜测或用同一个 clone endpoint 偷渡。
+Sona 不应知道具体模型目录，只消费 SpeechRail capability。创建后都进入统一“我的音色”资产体验。Prompt-created voice 现可通过显式 `/v1/voices/designs` 生成并核验规范参考，注册为新的 Base-bound clone；原 `/v1/voices` 与 `/v1/voices/clone` 行为不变。注册不执行 Base 输出验收，也不自动迁移旧音色，详见[生成式音色注册](generated-voice-registration.md)。
 
 ## 10. 回归门
 

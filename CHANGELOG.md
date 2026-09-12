@@ -4,6 +4,7 @@
 
 ### Added
 
+- 新增 Quality-only `POST /v1/voices/designs`：VoiceDesign 生成有界参考，经规范化和无提示 ASR 核验后，create-only 注册新 Base 音色；记录模型/seed/hash 来源，明确输出验收仍为 `unevaluated`，不迁移或覆盖旧音色。
 - 音色质量复测新增本地 Batch ASR 内容复核：六类探针各取一个有效样本，缺少验证器时返回 `unevaluated` / `transcription_unavailable`；文本相似度阈值仍需真实语料校准。
 - Quality TTS capability 新增锁定的 Qwen3-TTS Base 1.7B 8-bit `tts_clone` 制品；安装/切档、preflight 与 `/v1/models` 统一按 catalog 声明 reference-clone 能力。
 - 新增 `Qwen3TtsCapabilityRouter`：默认预热 VoiceDesign，reference clone 首次请求按需加载 Base，并在单一逻辑 TTS 槽内互斥换模，避免有意让两套 1.7B TTS 权重同时常驻。
