@@ -242,8 +242,12 @@ def test_failure_codes_are_deduplicated_preserving_order() -> None:
 def test_transcript_match_normalizes_itn_punctuation_and_case() -> None:
     assert normalize_transcript_for_match("精度达到百分之九十九点九。") == "精度达到99.9%"
     assert transcript_match_score("Hello，World!", "hello world") == pytest.approx(1.0)
-    assert transcript_match_score("精度达到百分之九十九点九。", "精度达到99.9%") == pytest.approx(1.0)
-    assert transcript_match_score("请按 3、6、9 的顺序读。", "请按三六九的顺序读") == pytest.approx(1.0)
+    assert transcript_match_score(
+        "精度达到百分之九十九点九。", "精度达到99.9%"
+    ) == pytest.approx(1.0)
+    assert transcript_match_score(
+        "请按 3、6、9 的顺序读。", "请按三六九的顺序读"
+    ) == pytest.approx(1.0)
     assert transcript_match_score("温度是22.5℃", "温度是225℃") < 1.0
 
 

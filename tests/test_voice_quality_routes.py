@@ -21,9 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
-from speechrail.domain import voice_quality as vq
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
+from speechrail.domain import voice_quality as vq
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.ports import (
     AudioChunk,
@@ -265,7 +265,7 @@ def _make_client(
     tmp_path: Path,
     synthesizer: SineSynthesizer | None = None,
     *,
-    batch_transcriber: BatchTranscriber | None | object = _DEFAULT_TRANSCRIBER,
+    batch_transcriber: BatchTranscriber | object | None = _DEFAULT_TRANSCRIBER,
 ) -> tuple[TestClient, VoiceRegistry, SineSynthesizer, Path]:
     preset = load_catalog().preset("quality")
     storage_path = tmp_path / "custom_voices.json"

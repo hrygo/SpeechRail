@@ -802,7 +802,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
-            wav_bytes, duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
+            wav_bytes, _duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
         except RuntimeError as exc:
             return error_response(500, request_id, "dependency_missing", str(exc))
         except ValueError as exc:

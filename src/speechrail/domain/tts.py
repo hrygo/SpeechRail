@@ -380,7 +380,7 @@ def canonicalize_clone_reference_audio(
 
     conditioned = array("h")
     for sample in samples[start:end]:
-        value = int(round(sample * gain))
+        value = round(sample * gain)
         conditioned.append(max(-32_768, min(32_767, value)))
     if sys.byteorder != "little":
         conditioned.byteswap()
@@ -1383,13 +1383,13 @@ __all__ = [
     "VoiceRegistry",
     "apply_crossfade",
     "bounded_sentences",
+    "canonicalize_clone_reference_audio",
     "create_breath_pause",
     "generation_token_budget",
     "get_voice_profile",
     "get_voice_registry",
     "normalize_tts_text",
     "resolve_voice",
-    "canonicalize_clone_reference_audio",
     "transcode_and_validate_clone_audio",
     "tts_voice_class",
 ]
