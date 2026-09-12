@@ -1,0 +1,37 @@
+name: tmp-fix-pr46-mypy-lambda
+on:
+  push:
+    branches:
+      - feat/quality-voice-capabilities
+    paths:
+      - .tmp-pr46-mypy-lambda-trigger
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quality-voice-capabilities
+          fetch-depth: 0
+      - name: Fix admission lambda typing
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/speechrail/http/routes/system.py')
+          text = path.read_text()
+          old = 'lambda request=request: transcriber.transcribe(request),'
+          new = 'lambda: transcriber.transcribe(request),'
+          if text.count(old) != 1:
+              raise SystemExit(f'expected one mypy lambda target, found {text.count(old)}')
+          path.write_text(text.replace(old, new))
+          PY
+          rm -f .tmp-pr46-mypy-lambda-trigger .github/workflows/tmp-fix-pr46-mypy-lambda.yml
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(types): make ASR admission closure inferable'
+          git push origin HEAD:feat/quality-voice-capabilities
