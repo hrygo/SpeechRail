@@ -1,0 +1,42 @@
+name: tmp-fix-pr46-partial
+on:
+  push:
+    branches:
+      - feat/quality-voice-capabilities
+    paths:
+      - .tmp-pr46-partial-trigger
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quality-voice-capabilities
+          fetch-depth: 0
+      - name: Bind ASR admission request with partial
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path('src/speechrail/http/routes/system.py')
+          text = path.read_text()
+          import_old = 'from collections import OrderedDict\n'
+          import_new = 'from collections import OrderedDict\nfrom functools import partial\n'
+          call_old = 'lambda: transcriber.transcribe(request),'
+          call_new = 'partial(transcriber.transcribe, request),'
+          if text.count(import_old) != 1:
+              raise SystemExit(f'expected one import anchor, found {text.count(import_old)}')
+          if text.count(call_old) != 1:
+              raise SystemExit(f'expected one call target, found {text.count(call_old)}')
+          text = text.replace(import_old, import_new).replace(call_old, call_new)
+          path.write_text(text)
+          PY
+          rm -f .tmp-pr46-partial-trigger .github/workflows/tmp-fix-pr46-partial.yml
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(types): bind ASR admission request with partial'
+          git push origin HEAD:feat/quality-voice-capabilities
