@@ -480,6 +480,10 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
     instances: list[object] = []
 
     class FakeConfiguredWorker:
+        @property
+        def ready(self) -> bool:
+            return self.started and not self.closed
+
         def __init__(self, config: object, *, on_delivery_event: object | None = None) -> None:
             self.config = config
             self.on_delivery_event = on_delivery_event

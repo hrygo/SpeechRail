@@ -4,6 +4,7 @@
 
 ### Added
 
+- 音色质量复测新增本地 Batch ASR 内容复核：六类探针各取一个有效样本，缺少验证器时返回 `unevaluated` / `transcription_unavailable`；文本相似度阈值仍需真实语料校准。
 - Quality TTS capability 新增锁定的 Qwen3-TTS Base 1.7B 8-bit `tts_clone` 制品；安装/切档、preflight 与 `/v1/models` 统一按 catalog 声明 reference-clone 能力。
 - 新增 `Qwen3TtsCapabilityRouter`：默认预热 VoiceDesign，reference clone 首次请求按需加载 Base，并在单一逻辑 TTS 槽内互斥换模，避免有意让两套 1.7B TTS 权重同时常驻。
 
@@ -11,6 +12,11 @@
 
 - reference-audio clone 从 VoiceDesign 私有 ICL 调用迁移到 Base 的公开 reference-generation 接口；VoiceDesign 仅承担 prompt voice design，不再作为 clone fallback。
 - README、公共 API 契约与架构文档同步新的 Quality 双 capability、Sona 两条音色创建链路、后续 VoiceDesign → canonical reference → Base 稳定化路线及当前质量门禁限制。
+
+### Fixed
+
+- 修复质量探针超限、流式调用提前结束时的生成器关闭与模型槽释放顺序；重复启动不旁路加载另一 TTS capability。
+- ASR 前模型 eviction 受统一绝对 deadline 约束；验证器异常不再把原始错误正文和 traceback 写入日志。
 
 ## [2.4.0] - 2026-09-11
 

@@ -278,7 +278,7 @@ SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Emb
 - **可配置空闲卸载 (Idle Eviction)**：默认空闲超时为 **300 秒**，可通过 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 修改，设为 `0` 可禁用；卸载后的实测物理内存取决于运行时与档位。
 - **Quality 音色创造边界**：`quality` 独享两类能力——自然语言创造音色由 **VoiceDesign 1.7B** 负责；参考音频克隆由 **Base 1.7B** 负责。`balanced` / `light` 使用 CustomVoice 0.6B，不声明这两类创建能力。
 - **Base 按需加载**：Base 作为 Quality 的 `tts_clone` 制品安装，但不在服务启动时预热。capability router 在一个逻辑 TTS 槽内互斥切换 VoiceDesign ↔ Base；切换前关闭另一 worker，避免有意让两套 1.7B TTS 权重同时常驻，代价是 capability switch 冷启动。
-- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前 synthesis 门禁已覆盖全部 6 类固定 probe，可拒绝静音/削波输出，并用固定 seed 下的重复 PCM 比较验证确定性；但绿色报告仍**不能**证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。
+- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前合成门禁覆盖全部 6 类固定探针，检查静音/削波及重复 PCM，并在释放 TTS 模型槽后复用本地 Batch ASR 核对朗读内容；ASR 不可用时为 `unevaluated`，不能自动通过。通过此门禁仍不等于跨文本声纹稳定或任意噪声识别能力已获验证，仍需真实模型校准与独立声纹证据。提示词创建的音色目前继续由 VoiceDesign 合成，自动生成规范参考并通过 Base 固化仍是独立的待实现注册能力。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。
 
 ### 2. 9 种跨档系统内置音色
 

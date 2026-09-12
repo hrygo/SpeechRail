@@ -2,7 +2,7 @@
 title: "Quality 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
-version: "1.0"
+version: "1.1"
 date: 2026-09-12
 ---
 
@@ -107,7 +107,8 @@ Quality 不采用“VoiceDesign + Base 永久双常驻”。`Qwen3TtsCapabilityR
 8. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 VoiceDesign / Base / CustomVoice 身份由独立的 `model_variant` 表达；
 9. 父进程在 composition 阶段确定期望 `model_variant`（受管模型优先取 catalog；非受管本地快照才执行本地 identity inspection），并在 worker `ready` 握手中逐项比对；variant 缺失或不匹配必须 `backend_identity_mismatch` fail-closed，禁止回退成 VoiceDesign；
 10. `quality-runs` 作为批量 TTS 工作必须进入 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界；
-11. capability lock 覆盖完整流式请求，避免换模过程和另一条 TTS 流交叉。
+11. capability lock 覆盖完整流式请求，包括提前终止时关闭子生成器、abort/reap 和释放参考租约；重复 `start()` 保留已 warm 的 capability，不再旁路加载 primary；
+12. 合成门通过后，先在同一请求 deadline 内释放 TTS 模型槽，再进入受治理的 Batch ASR 回转录阶段；ASR 缺失或异常为 `unevaluated`，不得给出假通过。详见[输出可懂度 / ASR 复核](voice-quality-intelligibility-validation.md)。
 
 这样增加的是**安装体积与换模冷启动成本**，而不是强制把两个 1.7B TTS 权重同时计入常驻内存。TTS∥TTS 仍然不是当前产品并发模型。
 
@@ -156,7 +157,9 @@ SpeechRail 应成为 canonical reference 的权威处理边界：
 - 严重削波、混响、多人重叠优先重录，不承诺靠增强模型恢复；
 - 可评估 DeepFilterNet3，但它是条件式 enhancer，不是 clone 的必经路径。
 
-当前 Sona 的整段 RMS 增益和 SpeechRail/vendor reference normalize 需要在独立质量 PR 中进一步统一；本 PR 的模型职责拆分不等价于参考音频链路已经完成全部声学整改。
+当前服务端已对新注册参考执行一次有界规范化，并关闭 vendor 的 `volume_normalize`：20 ms 窗口以 -45 dBFS 能量阈值筛选，目标 -20 dBFS，增益最多 +9 dB、衰减最多 12 dB，并以 0.95 样本峰值上限优先约束；仅裁剪首尾低能量区并保留约 200 ms 边界，内部停顿不改写。这些是工程初始值，并非目标机实测最优参数。
+
+该能量筛选**不是神经 VAD 或降噪器**，不能保证移除背景噪声，也不能识别多人或修复混响。Sona 的录音端增益仍需协同整改；现有参考不会自动重写或迁移，因此本 PR 不宣称全链路单次归一、专业表达或旧音色迁移已经完成。旧音色必须重新注册或通过显式 revision 迁移验证，禁止用静默更换参考掩盖模型变化。
 
 ## 7. “像本人”与“播得专业”必须解耦
 

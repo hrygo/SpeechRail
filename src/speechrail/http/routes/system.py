@@ -18,6 +18,7 @@ from typing import Any, cast
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
+from speechrail.application.deadline import await_until
 from speechrail.application.services import AppServices
 from speechrail.application.tts_delivery import (
     TTSDeliveryError,
@@ -359,10 +360,15 @@ async def _synthesize_probes(
                 bounded = (
                     iter_until(source, expires_at) if expires_at is not None else source
                 )
-                async for chunk in bounded:
-                    if len(probe_pcm) + len(chunk.audio) > _MAX_QUALITY_PROBE_PCM_BYTES:
-                        raise ValueError("quality probe audio exceeds 30 seconds")
-                    probe_pcm.extend(chunk.audio)
+                try:
+                    async for chunk in bounded:
+                        if len(probe_pcm) + len(chunk.audio) > _MAX_QUALITY_PROBE_PCM_BYTES:
+                            raise ValueError("quality probe audio exceeds 30 seconds")
+                        probe_pcm.extend(chunk.audio)
+                finally:
+                    close = getattr(bounded, "aclose", None)
+                    if close is not None:
+                        await close()
             except TimeoutError:
                 raise
             except Exception as exc:
@@ -480,10 +486,12 @@ def _resample_quality_pcm_24k_to_16k(pcm: bytes) -> bytes:
     return bytes(output)
 
 
-async def _evict_quality_tts_if_supported(synthesizer: SpeechSynthesizer) -> None:
+async def _evict_quality_tts_if_supported(
+    synthesizer: SpeechSynthesizer, *, expires_at: float,
+) -> None:
     evict = getattr(synthesizer, "evict_warm_capability", None)
     if callable(evict):
-        await evict()
+        await await_until(evict(), expires_at)
 
 
 async def _evaluate_probe_intelligibility(
@@ -1036,7 +1044,9 @@ def create_system_router(services: AppServices) -> APIRouter:
                 intelligibility_unavailable = True
             else:
                 try:
-                    await _evict_quality_tts_if_supported(synthesizer)
+                    await _evict_quality_tts_if_supported(
+                        synthesizer, expires_at=expires_at,
+                    )
                     transcript_match = await _evaluate_probe_intelligibility(
                         services,
                         transcriber,
@@ -1066,8 +1076,11 @@ def create_system_router(services: AppServices) -> APIRouter:
                         retryable=True,
                     )
                 except Exception:
-                    _LOGGER.exception(
-                        "voice intelligibility validation unavailable: request_id=%s",
+                    # Vendor exception messages/tracebacks may contain audio,
+                    # reference text, or local paths. Log only a stable code.
+                    _LOGGER.warning(
+                        "voice intelligibility validation unavailable: "
+                        "code=transcription_unavailable request_id=%s",
                         request_id,
                     )
                     intelligibility_unavailable = True

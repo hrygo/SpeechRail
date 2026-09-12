@@ -2,7 +2,7 @@
 title: "克隆音色输出可懂度与 ASR 复核设计"
 status: active
 audience: "SpeechRail/Sona 维护者、质量工程与架构评审者"
-version: "1.0"
+version: "1.1"
 date: 2026-09-12
 ---
 
@@ -89,6 +89,9 @@ ASR 复核必须满足：
 4. 接受现有 admission/governor 的拒绝与超时；
 5. 临时 PCM 有明确上限，验收完成后释放，不写磁盘；
 6. ASR 不可用时报告“未评估”，不得把“未评估”伪装成通过。
+7. 超长输出、异常、取消或消费者提前结束时，显式关闭整条生成器链；子 worker 的 abort/reap 与参考租约释放完成后，才能放开 TTS capability lock。不能依赖垃圾回收代替关闭。
+8. eviction 获取模型槽和释放 worker 的等待必须共享原请求的绝对 deadline，不能在 TTS 与 ASR 两阶段之间形成无界等待。
+9. 验证器异常仅记录稳定错误码和 request ID；禁止输出 vendor 异常正文或 traceback，防止转写、参考内容和本地路径进入日志。
 
 ## 6. 当前实现与阈值边界
 
@@ -106,7 +109,7 @@ ASR 复核必须满足：
 
 ## 7. 验收标准
 
-进入实现阶段后至少验证：
+代码回归与目标机验收分别覆盖以下项目：
 
 - 干净正确语音：六类 probe 均达到校准后的 transcript-match 门；
 - 随机噪声：不能通过文本一致性门；

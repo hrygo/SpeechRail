@@ -187,3 +187,53 @@ async def test_router_can_evict_current_capability_without_loading_another(
     assert router.warm_capability is None
     assert primary.alive is False
     assert clone.alive is False
+
+
+@pytest.mark.anyio
+async def test_router_closes_child_stream_before_releasing_model_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import aclosing
+
+    registry = _Registry({"cloned": "clone"})
+    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
+
+    class RetainedStreamWorker(_Worker):
+        finalized = False
+
+        def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+            async def stream() -> AsyncIterator[AudioChunk]:
+                try:
+                    yield AudioChunk(response_id="retained", chunk_index=0, audio=b"\0\0")
+                finally:
+                    self.finalized = True
+
+            # Retain a reference: correctness must not depend on GC scheduling.
+            self.source = stream()
+            return self.source
+
+    primary = _Worker("voice_design")
+    clone = RetainedStreamWorker("base")
+    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    request = SpeechRequest(text="test", voice="cloned")
+    async with aclosing(router.synthesize(request)) as source:
+        await anext(source)
+    assert clone.finalized
+    assert not router._capability_lock.locked()
+
+
+@pytest.mark.anyio
+async def test_start_preserves_already_warm_clone_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _Registry({"cloned": "clone"})
+    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
+    primary = _Worker("voice_design")
+    clone = _Worker("base")
+    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    request = SpeechRequest(text="test", voice="cloned")
+    assert [chunk async for chunk in router.synthesize(request)]
+    await router.start()
+    assert router.warm_capability == "voice_clone"
+    assert primary.started == 0
+    assert clone.alive

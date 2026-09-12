@@ -424,9 +424,14 @@ class Qwen3TtsCapabilityRouter:
         }
 
     async def start(self) -> None:
-        # Keep the default speech path warm.  Base remains unloaded until the
-        # first clone request explicitly selects that capability.
-        await self.primary.start()
+        # Start is idempotent for either warm capability, including a concurrent
+        # clone request. Never start primary outside the mutually-exclusive slot.
+        async with self._capability_lock:
+            if self.ready:
+                return
+            if self.clone is not None and self.clone.alive:
+                await self.clone.close()
+            await self.primary.start()
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         from speechrail.domain.tts import get_voice_registry
@@ -456,8 +461,17 @@ class Qwen3TtsCapabilityRouter:
             async with self._capability_lock:
                 if other is not None and other.alive:
                     await other.close()
-                async for chunk in selected.synthesize(request):
-                    yield chunk
+                source = selected.synthesize(request)
+                try:
+                    async for chunk in source:
+                        yield chunk
+                finally:
+                    # Closing the outer generator does not automatically close
+                    # an async-for child. Finish abort/reap and reference leases
+                    # before another request can acquire the model slot.
+                    close = getattr(source, "aclose", None)
+                    if close is not None:
+                        await close()
 
         return stream()
 

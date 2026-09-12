@@ -981,3 +981,76 @@ def test_reject_response_keeps_error_code_header() -> None:
     body = json.loads(resp.body)
     assert body["error"]["code"] == "voice_quality_reject"
     assert "quality_report" in body
+
+
+@pytest.mark.anyio
+async def test_oversized_probe_closes_source_before_next_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from speechrail.http.routes.system import _synthesize_probes
+
+    class RetainedSynthesizer:
+        def __init__(self) -> None:
+            self.sources: list[AsyncIterator[AudioChunk]] = []
+            self.closed = 0
+
+        def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+            async def stream() -> AsyncIterator[AudioChunk]:
+                try:
+                    yield AudioChunk(response_id="large", chunk_index=0, audio=b"\0\0" * 8)
+                finally:
+                    self.closed += 1
+
+            source = stream()
+            self.sources.append(source)
+            return source
+
+    monkeypatch.setattr("speechrail.http.routes.system._MAX_QUALITY_PROBE_PCM_BYTES", 8)
+    synth = RetainedSynthesizer()
+    result = await _synthesize_probes(synth, "serena", 1)
+    assert result[2] == 0
+    assert synth.closed == len(vq.VOICE_QUALITY_V1_ZH_PROBES)
+
+
+def test_asr_validation_error_does_not_log_backend_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    private = "private-transcript-DO-NOT-LOG /private/model/path"
+
+    class FailingTranscriber(ProbeEchoTranscriber):
+        async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+            raise RuntimeError(private)
+
+    client, registry, _, _ = _make_client(tmp_path, batch_transcriber=FailingTranscriber())
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    with caplog.at_level(logging.WARNING):
+        response = client.post("/v1/voices/serena/quality-runs", json={"runs": 1})
+    assert response.status_code == 200
+    assert response.json()["status"] == "unevaluated"
+    assert "transcription_unavailable" in response.json()["failure_codes"]
+    assert private not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_quality_eviction_obeys_request_deadline() -> None:
+    import asyncio
+
+    from speechrail.http.routes.system import _evict_quality_tts_if_supported
+
+    class SlowEviction(SineSynthesizer):
+        cancelled = False
+
+        async def evict_warm_capability(self) -> None:
+            try:
+                await asyncio.sleep(0.3)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    synth = SlowEviction()
+    with pytest.raises(TimeoutError):
+        await _evict_quality_tts_if_supported(
+            synth, expires_at=asyncio.get_running_loop().time() + 0.02,
+        )
+    assert synth.cancelled
