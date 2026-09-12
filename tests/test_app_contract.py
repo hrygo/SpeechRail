@@ -130,6 +130,7 @@ def test_managed_profile_publishes_active_model_identity(
         qwen3_model_dir=tmp_path / preset.asr,
         qwen3_python=None,
         qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_clone_model_dir=(tmp_path / preset.tts_clone if preset.tts_clone else None),
         qwen3_tts_python=None,
     )
     client = TestClient(create_app(settings))
@@ -168,7 +169,7 @@ def test_managed_profile_publishes_active_model_identity(
         "quantization": tts.quantization.model_dump(mode="json"),
         "capabilities": {
             "supports_preview": tts.variant == "voice_design",
-            "supports_clone": tts.variant == "voice_design",
+            "supports_clone": preset.tts_clone is not None,
             "supports_instruction": tts.variant == "voice_design",
         },
     }

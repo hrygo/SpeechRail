@@ -2,8 +2,8 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.16.0"
-date: 2026-09-11
+version: "1.17.0"
+date: 2026-09-12
 ---
 
 # 🏛️ SpeechRail 系统总体架构
@@ -38,7 +38,7 @@ flowchart TD
     end
 
     ASR["一个共享 Qwen3-ASR MLX Worker<br/>batch 与 native streaming 复用物理模型<br/>模式冲突受限"]
-    TTS["一个 Qwen3-TTS MLX Worker<br/>quality: VoiceDesign；balanced/light: CustomVoice"]
+    TTS["一个逻辑 TTS capability slot<br/>quality: VoiceDesign ↔ Base clone（互斥按需换模）<br/>balanced/light: CustomVoice"]
 
     SDK -->|OpenAI-compatible HTTP / WS| Ingress
     MCP -->|REST；仅配置 API key 时带 Bearer| Ingress
@@ -51,7 +51,7 @@ flowchart TD
 
 ### 运行时事实
 
-- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsWorker`、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
+- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsCapabilityRouter`（内部拥有 primary `Qwen3TtsWorker` 与可选 clone worker）、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。Quality 的 primary 是 VoiceDesign，clone capability 是 Base；Base 首次 clone 请求才加载，能力切换时先关闭另一 TTS worker。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
 - 分人生产制品固定为 FluidAudio CoreML FP16 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`，使用 `computeUnits=.all` 直接加载已编译 bundle；没有 provider 自动选择、精度降级或 NeMo 回退。运行时选择证据见 D1 报告，质量、尾部和长期资源门仍须单独验收。
 - ASR 的 batch 与 native streaming facade 共享一个物理 owner；它们不是同机同时工作的产品场景，冲突稳定返回 `backend_busy`。
 - `ResourceGovernor` 为 realtime 留出容量，并让 batch 按 FIFO/aging 准入；它不取消或抢占已经进入推理的 batch 工作。
@@ -67,12 +67,13 @@ flowchart TD
 |---|---|---|---|---|---|
 | 🟢 `light` | Embedded（8GB 基础机） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ |
 | 🟡 `balanced` | Pro Workflow（16–24GB） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ |
-| 🟣 `quality` | Studio（32GB+） | `asr-1.7b-q8`（8-bit） | `tts-1.7b-design-q8`（8-bit） | `aligner-bf16`（bf16） | ✓ |
+| 🟣 `quality` | Studio（32GB+） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8`（8-bit） + on-demand clone `tts-1.7b-base-q8`（8-bit） | `aligner-bf16`（bf16） | ✓ |
 
 - **按档位精度策略**：三档均 8-bit 权重，`quality` 的 aligner 保持 bf16；曾评估的 4-bit `light`（`asr-0.6b-q4` / `tts-0.6b-custom-q4`）因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳，制品保留在 catalog 但不再被任何档位使用。
 - **aligner 是分人专用制品**：aligner 是 catalog 一等制品，但**不进入 `PreparedModelSet` / `prepare_models`**，而由 `diarization_assets.prepare_diarization_assets` 按档位供给到 `app_home/diarization/<aligner-key>`，因此无 `prepared_id` / registry 迁移。词级时间戳来自 ASR 原生输出，不依赖 aligner。
 - **选择与供给**：`config.selection.resolve_selection` 按档位覆盖 `qwen3_aligner_model_dir`，在 `light` 清空它并同时清空 `diarization_coreml_model_path`；aligner 快照缺失时 fail closed（清晰报错，不半启动）。`profile apply <tier>` 在切换时供给该档分人制品并写入/移除 CoreML 与 aligner 环境键。
-- **契约与声明**：三档的公共 API 契约形状、worker 协议、调度与进程隔离保持一致；**对外声明的能力随档位不同**——`gpt-4o-transcribe-diarize` 仅在分人就绪（`balanced`/`quality`）时出现在 `/v1/models`，`light` 不声明。
+- **TTS capability**：`tts` 是档位默认合成 artifact；可选 `tts_clone` 是独立 capability。只有 `quality` 配置 Base clone artifact。`Qwen3TtsCapabilityRouter` 使用 capability lock 保证 VoiceDesign/Base 不被有意同时常驻；TTS∥TTS 仍串行。
+- **契约与声明**：三档的公共 API 契约形状、worker 协议、调度与进程隔离保持一致；**对外声明的能力随档位不同**——`gpt-4o-transcribe-diarize` 仅在分人就绪（`balanced`/`quality`）时出现在 `/v1/models`；`supports_clone` 只有实际 Base capability 可用时才为 true。
 
 ## 2. 输入、调度与持久化边界
 

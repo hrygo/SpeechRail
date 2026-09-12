@@ -426,6 +426,7 @@ def test_realtime_quality_session_repeats_stable_clone_loudness_profile() -> Non
         settings_kwargs={
             "qwen3_model_dir": Path(preset.asr),
             "qwen3_tts_model_dir": Path(preset.tts),
+            "qwen3_tts_clone_model_dir": Path(preset.tts_clone),
         }
     )
     with client.websocket_connect("/v1/realtime") as socket:
@@ -1935,6 +1936,7 @@ def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
                 "variant": "custom_voice",
                 "supports_speaker": True,
                 "supports_instruction": False,
+                "supports_clone": False,
             }
             socket.receive_json()
             socket.send_json(
@@ -1957,6 +1959,41 @@ def test_realtime_rejects_custom_voice_unavailable_for_active_weights(
     finally:
         registry.delete_custom_profile(voice_id)
 
+
+
+def test_realtime_quality_accepts_clone_voice_with_base_capability() -> None:
+    preset = load_catalog().preset("quality")
+    assert preset.tts_clone is not None
+    synthesizer = FakeSpeechSynthesizer()
+    client, _ = _client(
+        tts_synthesizer=synthesizer,
+        settings_kwargs={
+            "qwen3_model_dir": Path(preset.asr),
+            "qwen3_tts_model_dir": Path(preset.tts),
+            "qwen3_tts_clone_model_dir": Path(preset.tts_clone),
+        },
+    )
+    registry = get_voice_registry()
+    voice_id = "test_realtime_base_clone"
+    registry.create_cloned_profile(
+        name="Realtime Base Clone",
+        ref_text="这是参考文本。",
+        audio_bytes=b"RIFF-test-reference",
+        voice_id=voice_id,
+        duration_seconds=3.0,
+    )
+    try:
+        with client.websocket_connect("/v1/realtime") as socket:
+            created = socket.receive_json()
+            assert created["session"]["speech_capabilities"]["supports_clone"] is True
+            assert created["session"]["speech_capabilities"]["variant"] == "voice_design"
+            socket.receive_json()
+            socket.send_json({"type": "session.update", "session": {"voice": voice_id}})
+            assert socket.receive_json()["type"] == "session.updated"
+            events = _drive_tts(socket, {"voice": voice_id})
+            assert events[-1]["type"] == "response.done"
+    finally:
+        registry.delete_custom_profile(voice_id)
 
 def test_realtime_response_create_voice_override_resolves_alias_and_type() -> None:
     synthesizer = RecordingSpeechSynthesizer()

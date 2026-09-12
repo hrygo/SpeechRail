@@ -22,7 +22,11 @@ from speechrail.backends.qwen3_streaming import (
     Qwen3StreamingBackendConfig,
     Qwen3StreamingWorker,
 )
-from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
+from speechrail.backends.qwen3_tts import (
+    Qwen3TtsBackendConfig,
+    Qwen3TtsCapabilityRouter,
+    Qwen3TtsWorker,
+)
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationReadiness
@@ -346,36 +350,54 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         transcribe = asr_worker.transcribe
         batch_transcriber = Qwen3BatchTranscriber(worker=asr_worker, model_id=settings.model_id)
 
-    tts_worker: Qwen3TtsWorker | None = None
+    tts_worker: Qwen3TtsWorker | Qwen3TtsCapabilityRouter | None = None
     tts_synthesizer = overrides.tts_synthesizer
     if (
         tts_synthesizer is None
         and settings.qwen3_tts_model_dir is not None
         and settings.qwen3_tts_python is not None
     ):
-        tts_worker = Qwen3TtsWorker(
-            Qwen3TtsBackendConfig(
-                repository_root=_package_root(),
-                python_executable=settings.qwen3_tts_python,
-                model_dir=settings.qwen3_tts_model_dir,
-                device=settings.device,
-                dtype=resolve_backend_dtype(
-                    settings.qwen3_tts_model_dir,
-                    "float16" if settings.device == "mps" else "float32",
+        tts_python = settings.qwen3_tts_python
+        assert tts_python is not None
+
+        def make_tts_worker(model_dir: Path, *, warmup: bool) -> Qwen3TtsWorker:
+            return Qwen3TtsWorker(
+                Qwen3TtsBackendConfig(
+                    repository_root=_package_root(),
+                    python_executable=tts_python,
+                    model_dir=model_dir,
+                    device=settings.device,
+                    dtype=resolve_backend_dtype(
+                        model_dir,
+                        "float16" if settings.device == "mps" else "float32",
+                    ),
+                    sample_rate=settings.tts_sample_rate,
+                    timeout_seconds=settings.request_timeout_seconds,
+                    chunk_ms=settings.tts_chunk_ms,
+                    repetition_penalty=settings.tts_repetition_penalty,
+                    temperature=settings.tts_temperature,
+                    top_p=settings.tts_top_p,
+                    warmup_on_start=warmup,
+                    cache_limit_mb=settings.mlx_cache_limit_mb,
+                    memory_limit_mb=settings.mlx_memory_limit_mb,
                 ),
-                sample_rate=settings.tts_sample_rate,
-                timeout_seconds=settings.request_timeout_seconds,
-                chunk_ms=settings.tts_chunk_ms,
-                repetition_penalty=settings.tts_repetition_penalty,
-                temperature=settings.tts_temperature,
-                top_p=settings.tts_top_p,
-                warmup_on_start=settings.tts_warmup_on_start,
-                cache_limit_mb=settings.mlx_cache_limit_mb,
-                memory_limit_mb=settings.mlx_memory_limit_mb,
-            ),
-            on_delivery_event=lambda event, amount: metrics.record_tts_delivery_event(
-                event, amount=amount
-            ),
+                on_delivery_event=lambda event, amount: metrics.record_tts_delivery_event(
+                    event, amount=amount
+                ),
+            )
+
+        primary_tts_worker = make_tts_worker(
+            settings.qwen3_tts_model_dir,
+            warmup=settings.tts_warmup_on_start,
+        )
+        clone_tts_worker = (
+            make_tts_worker(settings.qwen3_tts_clone_model_dir, warmup=False)
+            if settings.qwen3_tts_clone_model_dir is not None
+            else None
+        )
+        tts_worker = Qwen3TtsCapabilityRouter(
+            primary_tts_worker,
+            clone=clone_tts_worker,
         )
         tts_synthesizer = tts_worker
 

@@ -356,3 +356,108 @@ class Qwen3TtsWorker:
             self._started = False
             self._epoch += 1
             await self._transport.abort()
+
+class Qwen3TtsCapabilityRouter:
+    """Route TTS capabilities through one mutually-exclusive model slot.
+
+    Normal synthesis uses the preset's primary VoiceDesign/CustomVoice worker.
+    Registered clone voices use the Quality-only Base worker.  The router keeps
+    Base lazy and swaps workers on capability changes so both large TTS models
+    are never intentionally resident at the same time.
+    """
+
+    def __init__(
+        self,
+        primary: Qwen3TtsWorker,
+        *,
+        clone: Qwen3TtsWorker | None = None,
+    ) -> None:
+        self.primary = primary
+        self.clone = clone
+        self._capability_lock = asyncio.Lock()
+
+    @property
+    def alive(self) -> bool:
+        return self.primary.alive or bool(self.clone is not None and self.clone.alive)
+
+    @property
+    def ready(self) -> bool:
+        return self.primary.ready or bool(self.clone is not None and self.clone.ready)
+
+    @property
+    def last_active(self) -> float:
+        values = [self.primary.last_active]
+        if self.clone is not None:
+            values.append(self.clone.last_active)
+        return max(values)
+
+    @property
+    def model_variant(self) -> str | None:
+        return self.primary.model_variant
+
+    @property
+    def lifecycle_stats(self) -> dict[str, int | bool]:
+        primary = self.primary.lifecycle_stats
+        clone = self.clone.lifecycle_stats if self.clone is not None else None
+        return {
+            "cooperative_cancel_supported": bool(
+                primary["cooperative_cancel_supported"]
+                and (clone is None or clone["cooperative_cancel_supported"])
+            ),
+            "fallback_abort_count": int(primary["fallback_abort_count"])
+            + (int(clone["fallback_abort_count"]) if clone is not None else 0),
+            "reload_count": int(primary["reload_count"])
+            + (int(clone["reload_count"]) if clone is not None else 0),
+        }
+
+    async def start(self) -> None:
+        # Keep the default speech path warm.  Base remains unloaded until the
+        # first clone request explicitly selects that capability.
+        await self.primary.start()
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(request.voice)
+        if profile.mode == "clone":
+            if self.clone is None:
+
+                async def unavailable() -> AsyncIterator[AudioChunk]:
+                    raise RuntimeError("voice_clone_base_model_unavailable")
+                    yield  # pragma: no cover
+
+                return unavailable()
+            selected: Qwen3TtsWorker = self.clone
+            other = self.primary
+        else:
+            selected = self.primary
+            other = self.clone
+
+        async def stream() -> AsyncIterator[AudioChunk]:
+            # Hold the capability lock for the stream lifetime.  This makes a
+            # model swap atomic with respect to another synthesis request and
+            # prevents primary/Base workers from becoming resident together.
+            async with self._capability_lock:
+                if other is not None and other.alive:
+                    await other.close()
+                async for chunk in selected.synthesize(request):
+                    yield chunk
+
+        return stream()
+
+    async def trim_memory(self) -> None:
+        await self.primary.trim_memory()
+        if self.clone is not None:
+            await self.clone.trim_memory()
+
+    async def close(self) -> None:
+        primary_error: BaseException | None = None
+        try:
+            await self.primary.close()
+        except BaseException as exc:
+            primary_error = exc
+        finally:
+            if self.clone is not None:
+                await self.clone.close()
+        if primary_error is not None:
+            raise primary_error

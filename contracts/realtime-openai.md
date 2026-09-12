@@ -62,7 +62,7 @@ ws://127.0.0.1:8201/v1/realtime
 
 | 事件 | 说明 |
 |---|---|
-| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）、`capabilities` 列表及由当前权重生成的 `speech_capabilities`（`available`、`variant`、`supports_speaker`、`supports_instruction`）。当当前 `voice_design` worker 的 clone 响度控制已启用时，额外声明 `audio_loudness_profile: stable_loudness_v1`；其他 variant 不声明该字段 |
+| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）、`capabilities` 列表及由当前权重生成的 `speech_capabilities`（`available`、默认 TTS `variant`、`supports_speaker`、`supports_instruction`、`supports_clone`）。`supports_clone=true` 表示独立 Base clone capability 已配置；此时同时声明 `audio_loudness_profile: stable_loudness_v1`。clone voice 可触发 Quality capability router 从默认 VoiceDesign 按需互斥切换到 Base |
 | `conversation.created` | 会话容器；SpeechRail 不实现可查询/可编辑的消息历史 |
 | `session.updated` | `session.update` 的确认；重复当前 `speech_capabilities`（包括可选的 `audio_loudness_profile`），调用方无需上传或感知本机档位 |
 | `input_audio_buffer.speech_started` | 启用 `server_vad` 时，检测到连续有效语音帧（$\ge 96\text{ms}$ 防抖通过）后触发；自动打断当前会话正在进行的 TTS 合成输出 |

@@ -46,7 +46,7 @@ def _model(profile: str, variant: str) -> list[dict[str, Any]]:
             "variant": variant,
             "capabilities": {
                 "supports_preview": variant == "voice_design",
-                "supports_clone": variant == "voice_design",
+                "supports_clone": profile == "quality",
                 "supports_instruction": variant == "voice_design",
             },
         },

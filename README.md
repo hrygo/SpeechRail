@@ -269,21 +269,22 @@ SpeechRail exposes a unified API contract while internally adapting across Apple
 |---|---|---|---|---|---|---|---|---|
 | 🟢 **`light`** (Embedded) | Qwen3-ASR 0.6B (`asr-0.6b-q8`, 8-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q8`, 8-bit) | ✗ No aligner / no diarization | 8GB Base Macs (Air / Mini) | **≈2.99 GB** (2986.6 MB) | **~4.4 GB** | **~4.1 GB** | **Runtime-dependent** (configured eviction) |
 | 🟡 **`balanced`** (Pro Workflow) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | Qwen3-TTS 0.6B CustomVoice (`tts-0.6b-custom-q8`, 8-bit) | ✓ `aligner-q8` + Sortformer | 16GB / 24GB Mainstream Macs (Pro / Max) | **≈5.96 GB** (5955.3 MB) | **~6.0 GB** | **~5.5 GB** | **Runtime-dependent** (configured eviction) |
-| 🟣 **`quality`** (Studio) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | Qwen3-TTS 1.7B VoiceDesign (`tts-1.7b-design-q8`, 8-bit) | ✓ `aligner-bf16` + Sortformer | 32GB+ Flagship Macs (Max / Ultra) | **≈7.63 GB** (7625.4 MB) | **~6.9 GB** | **~6.6 GB** | **Runtime-dependent** (configured eviction) |
+| 🟣 **`quality`** (Studio) | Qwen3-ASR 1.7B (`asr-1.7b-q8`, 8-bit) | Primary: VoiceDesign 1.7B (`tts-1.7b-design-q8`); on-demand clone: Base 1.7B (`tts-1.7b-base-q8`), both 8-bit | ✓ `aligner-bf16` + Sortformer | 32GB+ Flagship Macs (Max / Ultra) | **≈10.73 GB** (≈10729.6 MB) | **Requires re-benchmark** | **Requires re-benchmark** | **Runtime-dependent** (configured eviction) |
 
 *Footprint note: the `Peak Active` / `Steady` columns retain the previously measured all-q8 values (pre-v2) and are directional only under the new per-tier precision policy. Per-tier precision re-measurement is pending, so these are not the new tiers' measured figures. `Install Size` values are measured v2 catalog footprints.*
 
-- **Per-Tier Precision Policy**: all three tiers run 8-bit weights — `light` (`asr-0.6b-q8` / `tts-0.6b-custom-q8`), `balanced` (`asr-1.7b-q8` / `tts-0.6b-custom-q8`), and `quality` (`asr-1.7b-q8` / `tts-1.7b-design-q8`) — with only the `quality` aligner kept at bf16. The 4-bit `asr-0.6b-q4` / `tts-0.6b-custom-q4` light option was evaluated but not adopted: acceptance gate E1 measured the 0.6B 4-bit ASR as 1.38pp worse than its 8-bit baseline on a public human corpus, above the 0.5pp threshold. The public API contract is identical across tiers, and the 4-bit artifacts remain in the catalog but are no longer used by any tier.
+- **Per-Tier Precision Policy**: all three tiers run 8-bit weights — `light` (`asr-0.6b-q8` / `tts-0.6b-custom-q8`), `balanced` (`asr-1.7b-q8` / `tts-0.6b-custom-q8`), and `quality` (`asr-1.7b-q8` / primary `tts-1.7b-design-q8` / clone capability `tts-1.7b-base-q8`) — with only the `quality` aligner kept at bf16. The 4-bit `asr-0.6b-q4` / `tts-0.6b-custom-q4` light option was evaluated but not adopted: acceptance gate E1 measured the 0.6B 4-bit ASR as 1.38pp worse than its 8-bit baseline on a public human corpus, above the 0.5pp threshold. The public API contract is identical across tiers, and the 4-bit artifacts remain in the catalog but are no longer used by any tier.
 - **Weight Sharing**: `balanced` and `quality` share the same 1.7B ASR artifact; `balanced` and `light` share the same 0.6B CustomVoice 8-bit artifact (`tts-0.6b-custom-q8`).
 - **Configurable Idle Eviction**: The default idle timeout is **300 seconds**. It can be changed with `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` or disabled with `0`; measured post-eviction footprint remains runtime- and profile-dependent.
-- **VoiceDesign Boundary**: Only the `quality` tier synthesizes with VoiceDesign (1.7B) and supports creating novel custom voices via natural language prompts. `balanced`/`light` use CustomVoice (0.6B); custom voices are declared as `available=false` there, restoring automatically when switched back to `quality`.
-- **Quality-Gated Voice Cloning**: On the `quality` tier, clone a custom voice from a reference audio clip + read script (`POST /v1/voices/clone`), pre-flight validate the reference without persisting (`POST /v1/voices/clone/validate`), and run bounded quality probes on any registered voice (`POST /v1/voices/{voice_id}/quality-runs`). All three share the `voice_quality_v1` report contract. See the [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).
+- **Quality Voice-Creation Boundary**: `quality` owns two distinct capabilities. Natural-language voice creation uses **VoiceDesign 1.7B**; reference-audio cloning uses **Base 1.7B**. `balanced`/`light` use CustomVoice 0.6B and do not advertise either creation capability.
+- **On-Demand Base Clone Model**: Base is installed as the Quality `tts_clone` artifact but is not warmed at startup. A capability router swaps VoiceDesign ↔ Base under a single TTS slot, closing the other worker before loading the requested capability. This avoids intentionally keeping both 1.7B TTS models resident at once, at the cost of model-switch cold-start latency.
+- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. Validation and quality-run endpoints retain the `voice_quality_v1` report contract, but the 2026-09-12 audit identified synthesis-gate false-positive gaps; a green report is not yet sufficient evidence of cross-text speaker identity. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md) and [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).
 
 ### 2. 9 Cross-Profile Built-in Voices
 
 SpeechRail preconfigures 9 acoustically fine-tuned voice personas consistent across all profiles (compatible with OpenAI official aliases such as `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu`, etc.).
 
-Note: **The underlying generation mechanism differs by profile**—`balanced` / `light` are powered by **CustomVoice (0.6B)**, whereas `quality` is powered by **VoiceDesign (1.7B)**. Users can choose between "absolute vocal consistency" and "expressive emotional range" based on their application needs:
+Note: **The underlying generation mechanism differs by profile and capability**—`balanced` / `light` use **CustomVoice (0.6B)**; `quality` uses **VoiceDesign (1.7B)** for normal/prompt-designed speech and an on-demand **Base (1.7B)** model for reference clones. Users can choose between "absolute vocal consistency" and "expressive emotional range" based on their application needs:
 
 #### ⚖️ VoiceDesign vs. CustomVoice: Core Differences & Selection Guide
 
@@ -378,7 +379,7 @@ flowchart TD
     subgraph SubprocessSandboxes["Subprocess Sandboxes (Physical Process Isolation)"]
         direction LR
         ASRWorker["Qwen3-ASR Worker\n(MLX / Metal Subprocess)"]
-        TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
+        TTSWorker["Qwen3-TTS capability slot\n(Quality: VoiceDesign ↔ Base clone; others: CustomVoice)"]
         DiarizationWorker["Diarization Worker\n(FluidAudio / CoreML FP16)"]
     end
 
@@ -472,7 +473,7 @@ The realtime voice-activity detector uses `realtime_vad_engine` (`auto` by defau
 | 🔌 **API Developers** | [User & Client Integration Guide](docs/users/README.md) · [OpenAI Compatibility Contract](docs/users/api-contract.md) · [OpenAPI Specification](contracts/openapi.yaml) |
 | 🛠️ **System Operators** | [Operations Center](docs/operations/README.md) · [Managed Runtime Deployment](docs/operations/runtime-deployment.md) · [Acceptance Report](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md) · [Security & Observability](docs/operations/security-observability.md) |
 | 🧪 **Code Contributors** | [Developer Center](docs/developers/README.md) · [Testing & Acceptance Suite](docs/developers/testing-acceptance.md) |
-| 📐 **Architecture Review** | [System Architecture Overview](docs/architecture/README.md) · [Speaker Diarization E2E](docs/architecture/speaker-diarization-e2e-design.md) · [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md) · [Current Boundaries & Trade-offs](docs/architecture/current-boundaries.md) · [Architecture Decision Records (ADRs)](docs/decisions/README.md) |
+| 📐 **Architecture Review** | [System Architecture Overview](docs/architecture/README.md) · [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md) · [Voice Cloning Design](docs/architecture/voice-cloning-design-and-handoff.md) · [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md) · [Current Boundaries & Trade-offs](docs/architecture/current-boundaries.md) · [Architecture Decision Records (ADRs)](docs/decisions/README.md) |
 
 ---
 

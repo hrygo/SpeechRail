@@ -29,7 +29,7 @@ from speechrail.service.model_store import (
 )
 
 _HASH = "b" * 64
-_REVISIONS = {"asr": "a" * 40, "design": "c" * 40, "custom": "d" * 40}
+_REVISIONS = {"asr": "a" * 40, "design": "c" * 40, "custom": "d" * 40, "base": "f" * 40}
 
 
 def _runtime_lock(lock_id: str = "fixture-lock") -> RuntimeLock:
@@ -81,6 +81,7 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
         ("asr", "qwen3_asr", "asr"),
         ("design", "qwen3_tts", "voice_design"),
         ("custom", "qwen3_tts", "custom_voice"),
+        ("base", "qwen3_tts", "base"),
     )
     artifacts: list[dict[str, object]] = []
     payloads: dict[tuple[str, str], bytes] = {}
@@ -128,6 +129,7 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                     "id": "quality",
                     "asr": "asr",
                     "tts": "design",
+                    "tts_clone": "base",
                     "aligner": None,
                     "diarization": False,
                 },
@@ -135,6 +137,7 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                     "id": "balanced",
                     "asr": "asr",
                     "tts": "custom",
+                    "tts_clone": None,
                     "aligner": None,
                     "diarization": False,
                 },
@@ -142,6 +145,7 @@ def _catalog(*, mirror: bool = False, revision_suffix: str = "") -> tuple[
                     "id": "light",
                     "asr": "asr",
                     "tts": "custom",
+                    "tts_clone": None,
                     "aligner": None,
                     "diarization": False,
                 },
@@ -480,7 +484,7 @@ async def test_progress_callback_failure_does_not_retry_or_break_prepare(tmp_pat
 
     assert prepared_id.startswith("prepared_")
     assert callback_calls > 1
-    assert len(downloader.calls) == 12
+    assert len(downloader.calls) == 19
 
 
 @pytest.mark.anyio

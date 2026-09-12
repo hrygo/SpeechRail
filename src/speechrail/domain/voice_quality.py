@@ -66,6 +66,7 @@ class VoiceQualityFailureCode(StrEnum):
     OUTPUT_PEAK_EXCEEDED = "output_peak_exceeded"
     CLONE_SPEED_UNSUPPORTED = "clone_speed_unsupported"
     OUTPUT_INVALID = "output_invalid"
+    OUTPUT_NONDETERMINISTIC = "output_nondeterministic"
 
 
 VOICE_QUALITY_FAILURE_CODES: Final[tuple[str, ...]] = tuple(

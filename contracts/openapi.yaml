@@ -868,7 +868,7 @@ components:
           enum: [qwen3_asr, qwen3_tts]
         variant:
           type: string
-          enum: [asr, voice_design, custom_voice]
+          enum: [asr, voice_design, custom_voice, base]
         quantization:
           $ref: '#/components/schemas/Quantization'
         capabilities:
@@ -942,7 +942,7 @@ components:
           description: Whether the active TTS weights can synthesize this voice.
         variant:
           type: [string, 'null']
-          enum: [voice_design, custom_voice, null]
+          enum: [voice_design, custom_voice, base, null]
         capabilities:
           $ref: '#/components/schemas/VoiceCapabilities'
         mode:
@@ -1100,6 +1100,7 @@ components:
               - clone_speed_unsupported
               - output_invalid
               - output_peak_exceeded
+              - output_nondeterministic
     VoiceQualityRunRequest:
       type: object
       properties:

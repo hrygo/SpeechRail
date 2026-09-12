@@ -269,20 +269,22 @@ SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Emb
 |---|---|---|---|---|---|---|---|---|
 | 🟢 **`light`（Embedded 嵌入档）** | Qwen3-ASR 0.6B（`asr-0.6b-q8`，8-bit） | Qwen3-TTS 0.6B CustomVoice（`tts-0.6b-custom-q8`，8-bit） | ✗ 无 aligner / 无分人 | 8GB 基础款 Mac (Air / Mini) | **≈2.99 GB** (2986.6 MB) | **~4.4 GB** | **~4.1 GB** | **取决于运行时** (按配置卸载) |
 | 🟡 **`balanced`（Pro Workflow 工作流档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | Qwen3-TTS 0.6B CustomVoice（`tts-0.6b-custom-q8`，8-bit） | ✓ `aligner-q8` + Sortformer | 16GB / 24GB 主流 Mac (Pro / Max) | **≈5.96 GB** (5955.3 MB) | **~6.0 GB** | **~5.5 GB** | **取决于运行时** (按配置卸载) |
-| 🟣 **`quality`（Studio 工作室档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | Qwen3-TTS 1.7B VoiceDesign（`tts-1.7b-design-q8`，8-bit） | ✓ `aligner-bf16` + Sortformer | 32GB+ 旗舰款 Mac (Max / Ultra) | **≈7.63 GB** (7625.4 MB) | **~6.9 GB** | **~6.6 GB** | **取决于运行时** (按配置卸载) |
+| 🟣 **`quality`（Studio 工作室档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | 主 TTS：VoiceDesign 1.7B（`tts-1.7b-design-q8`）；按需克隆：Base 1.7B（`tts-1.7b-base-q8`），均为 8-bit | ✓ `aligner-bf16` + Sortformer | 32GB+ 旗舰款 Mac (Max / Ultra) | **≈10.73 GB** (≈10729.6 MB) | **需重新实测** | **需重新实测** | **取决于运行时** (按配置卸载) |
 
 *占位说明：`活跃最大占用` / `稳定占用` 两列沿用此前全 q8 档位的实测值（pre-v2），在新的按档位精度策略下仅具方向性。按档位精度的重新实测尚未完成，这些数值不是新档位的实测结果；`安装体积` 列为 v2 catalog 实测体积。*
 
-- **按档位精度策略**：三档统一使用 8-bit 权重——`light`（`asr-0.6b-q8` / `tts-0.6b-custom-q8`）、`balanced`（`asr-1.7b-q8` / `tts-0.6b-custom-q8`）、`quality`（`asr-1.7b-q8` / `tts-1.7b-design-q8`）——仅 `quality` 的 aligner 保持 bf16。4-bit 的 `asr-0.6b-q4` / `tts-0.6b-custom-q4` light 方案经评估后未采纳：验收门 E1 在公开真人语料上测得 0.6B 4-bit ASR 相对 8-bit 基线劣化 1.38pp，超过 0.5pp 阈值。三档对外 API 契约完全一致；4-bit 制品仍保留在 catalog 中，但已不再被任何档位使用。
+- **按档位精度策略**：三档统一使用 8-bit 权重——`light`（`asr-0.6b-q8` / `tts-0.6b-custom-q8`）、`balanced`（`asr-1.7b-q8` / `tts-0.6b-custom-q8`）、`quality`（`asr-1.7b-q8` / 主 `tts-1.7b-design-q8` / 克隆 capability `tts-1.7b-base-q8`）——仅 `quality` 的 aligner 保持 bf16。4-bit 的 `asr-0.6b-q4` / `tts-0.6b-custom-q4` light 方案经评估后未采纳：验收门 E1 在公开真人语料上测得 0.6B 4-bit ASR 相对 8-bit 基线劣化 1.38pp，超过 0.5pp 阈值。三档对外 API 契约完全一致；4-bit 制品仍保留在 catalog 中，但已不再被任何档位使用。
 - **权重共享关系**：`balanced` 与 `quality` 共享同一个 1.7B ASR 制品；`balanced` 与 `light` 共享同一个 0.6B CustomVoice 8-bit 制品（`tts-0.6b-custom-q8`）。
 - **可配置空闲卸载 (Idle Eviction)**：默认空闲超时为 **300 秒**，可通过 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 修改，设为 `0` 可禁用；卸载后的实测物理内存取决于运行时与档位。
-- **音色设计边界**：仅 `quality` 档使用 VoiceDesign（1.7B）合成，并支持通过自然语言设计自定义新音色；`balanced` / `light` 使用 CustomVoice（0.6B），其自定义音色声明为 `available=false`，切回 `quality` 自动恢复。
+- **Quality 音色创造边界**：`quality` 独享两类能力——自然语言创造音色由 **VoiceDesign 1.7B** 负责；参考音频克隆由 **Base 1.7B** 负责。`balanced` / `light` 使用 CustomVoice 0.6B，不声明这两类创建能力。
+- **Base 按需加载**：Base 作为 Quality 的 `tts_clone` 制品安装，但不在服务启动时预热。capability router 在一个逻辑 TTS 槽内互斥切换 VoiceDesign ↔ Base；切换前关闭另一 worker，避免有意让两套 1.7B TTS 权重同时常驻，代价是 capability switch 冷启动。
+- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。`voice_quality_v1` 报告契约继续保留，但 2026-09-12 审计已确认 synthesis 门禁存在假阳性缺口；在独立整改完成前，绿色报告不能视为跨文本 speaker identity 已证明。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md)。
 
 ### 2. 9 种跨档系统内置音色
 
 SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色角色（接口与角色 ID 跨档保持一致，原生兼容 OpenAI 官方别名如 `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu` 等）。
 
-但请注意：**同一角色在不同档位下的底层生成机制不同**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动，而 `quality` 档由 **VoiceDesign (1.7B)** 驱动。用户可根据实际业务需要，在“绝对声线稳定性”与“丰富情感表现力”之间做针对性选择：
+但请注意：**底层生成机制按档位和 capability 区分**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动；`quality` 的普通/提示词音色由 **VoiceDesign (1.7B)** 驱动，而 reference clone 使用按需加载的 **Base (1.7B)**。用户可根据实际业务需要，在“绝对声线稳定性”与“丰富情感表现力”之间做针对性选择：
 
 #### ⚖️ VoiceDesign 与 CustomVoice 核心差异与选型建议
 
@@ -377,7 +379,7 @@ flowchart TD
     subgraph SubprocessSandboxes["独立子进程沙箱 (物理进程强隔离)"]
         direction LR
         ASRWorker["Qwen3-ASR Worker\n(MLX / Metal 独立子进程)"]
-        TTSWorker["Qwen3-TTS Worker\n(VoiceDesign / CustomVoice MLX)"]
+        TTSWorker["Qwen3-TTS capability slot\n(Quality: VoiceDesign ↔ Base clone；其他: CustomVoice)"]
         DiarizationWorker["分人 Worker\n(FluidAudio / CoreML FP16)"]
     end
 
@@ -463,7 +465,7 @@ SpeechRail 的核心性能来自于 Apple MLX 框架对 **Apple Silicon 统一�
 | 🔌 **API 开发者** | [用户与客户端集成指南](docs/users/README.md) · [OpenAI 兼容契约详解](docs/users/api-contract.md) · [OpenAPI 规范](contracts/openapi.yaml) |
 | 🛠️ **系统运维** | [运维中心](docs/operations/README.md) · [受管运行时部署说明](docs/operations/runtime-deployment.md) · [分人验收报告](docs/operations/speaker-diarization-e2e-acceptance-2026-09-06.md) · [安全与可观测性](docs/operations/security-observability.md) |
 | 🧪 **代码贡献者** | [开发者中心](docs/developers/README.md) · [本地测试与验收套件](docs/developers/testing-acceptance.md) |
-| 📐 **架构评审** | [系统架构全景](docs/architecture/README.md) · [分人端到端设计](docs/architecture/speaker-diarization-e2e-design.md) · [克隆音色质量门禁与自量保障契约](docs/architecture/voice-clone-quality-gates-and-contract.md) · [当前边界与权衡](docs/architecture/current-boundaries.md) · [架构决策记录 (ADRs)](docs/decisions/README.md) |
+| 📐 **架构评审** | [系统架构全景](docs/architecture/README.md) · [Quality 音色创造、克隆与稳定化能力](docs/architecture/quality-voice-capabilities.md) · [音色克隆工程设计](docs/architecture/voice-cloning-design-and-handoff.md) · [克隆音色质量门禁与自量保障契约](docs/architecture/voice-clone-quality-gates-and-contract.md) · [当前边界与权衡](docs/architecture/current-boundaries.md) · [架构决策记录 (ADRs)](docs/decisions/README.md) |
 
 ---
 

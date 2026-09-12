@@ -77,7 +77,8 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_HOST` / `PORT` | 默认 `127.0.0.1:8201` |
 | `SPEECHRAIL_QWEN3_MODEL_DIR` | 仓库外完整 snapshot 的绝对路径 |
 | `SPEECHRAIL_QWEN3_PYTHON` | 专用 worker Python 可执行文件 |
-| `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的 TTS snapshot/runtime |
+| `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的默认 TTS snapshot/runtime |
+| `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` | Quality 可选 Base clone snapshot；managed profile 由 catalog/selection 自动注入，手工部署时需显式配置；未配置则不声明 `supports_clone` |
 | `SPEECHRAIL_TTS_VOICE_IDS` | 服务器登记的 TTS preset 列表 |
 | `SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；TTS worker 仅使用外部完整 snapshot |
 | `SPEECHRAIL_DEVICE` / `DTYPE` | `mps`（支持 `float16` 默认 / `int8` 优化）或 `cpu`（支持 `float32` / `int8`）；`int8` 仅作用于非预量化快照的 ASR Worker；TTS Worker 不做运行时量化，默认 `float16`（mps）/ `float32`（cpu），预量化 `-8bit` 快照自动解析为 `int8` |

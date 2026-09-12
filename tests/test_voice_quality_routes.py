@@ -142,6 +142,58 @@ class GenericFailureSynthesizer:
         return chunks()
 
 
+class SilentSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(
+                response_id="quality_probe",
+                chunk_index=0,
+                audio=b"\x00\x00" * int(0.5 * _SAMPLE_RATE),
+            )
+
+        return chunks()
+
+
+class ClippedOutputSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(
+                response_id="quality_probe",
+                chunk_index=0,
+                audio=(np.full(int(0.5 * _SAMPLE_RATE), 32767, dtype="<i2")).tobytes(),
+            )
+
+        return chunks()
+
+
+class NondeterministicSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+        amplitude = 0.25 if len(self.requests) % 2 else 0.30
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(
+                response_id="quality_probe",
+                chunk_index=0,
+                audio=_sine_pcm(0.5, amplitude=amplitude),
+            )
+
+        return chunks()
+
+
 class EmptySynthesizer:
     def __init__(self) -> None:
         self.requests: list[SpeechRequest] = []
@@ -170,6 +222,9 @@ def _make_client(
         qwen3_model_dir=tmp_path / preset.asr,
         qwen3_python=None,
         qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_clone_model_dir=(
+            tmp_path / preset.tts_clone if preset.tts_clone is not None else None
+        ),
         qwen3_tts_python=None,
     )
     if synthesizer is None:
@@ -496,11 +551,11 @@ def test_s5_quality_runs_ok_and_bounded(
     body = resp.json()
     assert body["status"] == "pass"
     assert body["policy_version"] == "voice_quality_v1"
-    assert body["synthesis"]["probe_count"] == 3
-    assert body["synthesis"]["successful_probe_count"] == 3
+    assert body["synthesis"]["probe_count"] == 18
+    assert body["synthesis"]["successful_probe_count"] == 18
     assert body["synthesis"]["deterministic"] is True
     assert body["failure_codes"] == []
-    assert len(synth.requests) == 3
+    assert len(synth.requests) == 18
 
 
 def test_s5_quality_runs_rejects_runs_out_of_range(
@@ -583,7 +638,7 @@ def test_quality_runs_classifies_clone_speed_unsupported(
     body = resp.json()
     assert body["status"] == "reject"
     assert "clone_speed_unsupported" in body["failure_codes"]
-    assert body["synthesis"]["successful_probe_count"] == 2
+    assert body["synthesis"]["successful_probe_count"] == 17
 
 
 def test_quality_runs_classifies_output_invalid(
@@ -602,7 +657,7 @@ def test_quality_runs_classifies_output_invalid(
     body = resp.json()
     assert body["status"] == "reject"
     assert "output_invalid" in body["failure_codes"]
-    assert body["synthesis"]["successful_probe_count"] == 2
+    assert body["synthesis"]["successful_probe_count"] == 17
 
 
 def test_quality_runs_classifies_probe_failed_and_counts_ok(
@@ -621,7 +676,7 @@ def test_quality_runs_classifies_probe_failed_and_counts_ok(
     body = resp.json()
     assert body["status"] == "reject"
     assert "probe_failed" in body["failure_codes"]
-    assert body["synthesis"]["successful_probe_count"] == 2
+    assert body["synthesis"]["successful_probe_count"] == 17
 
 
 def test_quality_runs_empty_output_is_rejected_not_counted(
@@ -639,7 +694,80 @@ def test_quality_runs_empty_output_is_rejected_not_counted(
     assert body["status"] == "reject"
     assert body["synthesis"]["successful_probe_count"] == 0
     assert "output_invalid" in body["failure_codes"]
-    assert len(synth.requests) == 3
+    assert len(synth.requests) == 18
+
+
+def test_quality_runs_rejects_silent_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, SilentSynthesizer())
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+    )
+    body = resp.json()
+    assert body["status"] == "reject"
+    assert body["synthesis"]["successful_probe_count"] == 0
+    assert "output_invalid" in body["failure_codes"]
+
+
+def test_quality_runs_rejects_clipped_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, ClippedOutputSynthesizer())
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+    )
+    body = resp.json()
+    assert body["status"] == "reject"
+    assert body["synthesis"]["successful_probe_count"] == 0
+    assert "output_peak_exceeded" in body["failure_codes"]
+
+
+def test_quality_runs_detects_repeated_output_nondeterminism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path, NondeterministicSynthesizer()
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+    )
+    body = resp.json()
+    assert body["status"] == "reject"
+    assert body["synthesis"]["successful_probe_count"] == 12
+    assert body["synthesis"]["deterministic"] is False
+    assert "output_nondeterministic" in body["failure_codes"]
+
+
+def test_quality_runs_runs_every_fixed_probe_category(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, synth, _voices_dir = _make_client(tmp_path)
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+    assert resp.status_code == 200
+    assert len(synth.requests) == 6
+    assert {request.text for request in synth.requests} == {
+        "请进行自我介绍",
+        "今天天气真好，我们开个会吧。",
+        "请先简要介绍你的工作经历和目前关注的项目，并告诉我你今天希望达成的目标，以及在执行过程中你会采用哪些优先级策略。",
+        "你认为人工智能能否真正提升我们的工作效率？为什么？",
+        "今天是2026年9月9日，温度是22.5℃，请你告诉我 3、6、9 的顺序。",
+        "我们先来——先说第一点……然后我们再讨论第二点。",
+    }
 
 
 def test_quality_runs_returns_503_when_tts_not_ready(tmp_path: Path) -> None:

@@ -39,7 +39,7 @@ graph TD
 | **音频输入与采集** | 内存流式解码、WAV Fast-Path 直读、16kHz PCM 归一化 | 麦克风硬件调用、系统录音权限请求、音频增益控制 |
 | **音频输出与播放** | 24kHz PCM16 / WAV / MP3 极速合成与流式分块 | 扬声器硬件播放、播放队列管理、本地音频文件存档 |
 | **语音识别 (ASR)** | 批量/流式转写、多语种识别、分段与时间戳对齐 | 会议转写持久化、实时会议笔记生成、敏感词过滤 |
-| **语音合成 (TTS)** | VoiceDesign / CustomVoice 合成、预设音色路由；quality 档的 voice design、preview 与 clone API（不保留原始参考音频） | 参考音频采集与同意、调用方侧文件选择、扬声器播放与业务化音色管理 |
+| **语音合成 (TTS)** | VoiceDesign / CustomVoice 合成、预设音色路由；quality 档的 VoiceDesign prompt creation、Base reference clone、preview 与 clone API，以及两种 TTS capability 的按需互斥换模 | 参考音频采集与同意、调用方侧文件选择、扬声器播放、业务化音色管理与专业播报策略 |
 | **讲话人分离 (Diarization)** | profile 就绪后通过 OpenAI `gpt-4o-transcribe-diarize` / `diarized_json` 提供 A–D 匿名标签；Realtime 仅在 `session.speechrail.diarization.enabled=true` 时发送 session-scoped 归属更新。固定正文由本地 Qwen3 ForcedAligner 对齐，CoreML 只提供活动证据 | 说话人实名映射库、声纹库管理、跨会议身份关联、用户身份识别与认证 |
 | **业务逻辑与编排** | Request ID 追踪、统一错误 Envelope、有界队列管理 | LLM 对话上下文、业务 Prompt 工程、多租户权限控制 |
 

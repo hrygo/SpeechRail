@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Quality TTS capability 新增锁定的 Qwen3-TTS Base 1.7B 8-bit `tts_clone` 制品；安装/切档、preflight 与 `/v1/models` 统一按 catalog 声明 reference-clone 能力。
+- 新增 `Qwen3TtsCapabilityRouter`：默认预热 VoiceDesign，reference clone 首次请求按需加载 Base，并在单一逻辑 TTS 槽内互斥换模，避免有意让两套 1.7B TTS 权重同时常驻。
+
+### Changed
+
+- reference-audio clone 从 VoiceDesign 私有 ICL 调用迁移到 Base 的公开 reference-generation 接口；VoiceDesign 仅承担 prompt voice design，不再作为 clone fallback。
+- README、公共 API 契约与架构文档同步新的 Quality 双 capability、Sona 两条音色创建链路、后续 VoiceDesign → canonical reference → Base 稳定化路线及当前质量门禁限制。
+
 ## [2.4.0] - 2026-09-11
 
 ### Added

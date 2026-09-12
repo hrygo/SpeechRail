@@ -1024,6 +1024,13 @@ def _b2_catalog() -> ModelCatalog:
                     _b2_tts_variant(b"d17"),
                 ),
                 _b2_artifact(
+                    "tts-17b-base-q8",
+                    "qwen3_tts",
+                    "base",
+                    8,
+                    _b2_tts_variant(b"b17"),
+                ),
+                _b2_artifact(
                     "tts-06b-custom-q8",
                     "qwen3_tts",
                     "custom_voice",
@@ -1061,6 +1068,7 @@ def _b2_catalog() -> ModelCatalog:
                     "id": "quality",
                     "asr": "asr-17b-q8",
                     "tts": "tts-17b-design-q8",
+                    "tts_clone": "tts-17b-base-q8",
                     "aligner": "aligner-bf16",
                     "diarization": True,
                 },
@@ -1278,6 +1286,8 @@ def test_managed_upgrade_provisions_tier_aligner_before_preflight(
 
     async def fake_prepare_models(preset_id: str, **kwargs: object) -> str:
         del preset_id, kwargs
+        assert selected.tts_clone is not None
+        (app_home / "models" / selected.tts_clone).mkdir(parents=True, exist_ok=True)
         return "prepared-quality"
 
     monkeypatch.setattr(install_macos, "prepare_models", fake_prepare_models)

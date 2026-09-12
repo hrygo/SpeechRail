@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     tts_model_id: str = "speechrail/qwen3-tts"
     tts_voice_ids: tuple[str, ...] = tuple(VOICE_PROFILES)
     qwen3_tts_model_dir: Path | None = None
+    qwen3_tts_clone_model_dir: Path | None = None
     qwen3_tts_python: Path | None = None
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)

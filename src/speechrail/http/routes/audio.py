@@ -1339,9 +1339,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown preset voice: {body.voice}",
                 param="voice",
             )
-        if tts_variant in {"voice_design", "custom_voice"}:
+        binding_variant = (
+            active.tts_clone.variant
+            if profile.mode == "clone" and active.tts_clone is not None
+            else tts_variant
+        )
+        if binding_variant in {"voice_design", "custom_voice", "base"}:
             try:
-                resolve_binding(tts_variant, preset_voice)
+                resolve_binding(binding_variant, preset_voice)
             except VoiceStoreUnavailableError:
                 return error_response(
                     503,

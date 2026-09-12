@@ -156,17 +156,20 @@ class OpenAIRealtimeSession:
         self._tts = services.tts_synthesizer
         active = active_model_catalog(self._settings)
         self._tts_variant = active.tts.variant if active.tts is not None else None
+        self._tts_clone_variant = (
+            active.tts_clone.variant if active.tts_clone is not None else None
+        )
         tts_available = services.tts_ready
+        clone_available = tts_available and self._tts_clone_variant == "base"
         self._tts_loudness_profile = (
-            "stable_loudness_v1"
-            if tts_available and self._tts_variant == "voice_design"
-            else None
+            "stable_loudness_v1" if clone_available else None
         )
         self._speech_capabilities: dict[str, object] = {
             "available": tts_available,
             "variant": self._tts_variant,
             "supports_speaker": tts_available and self._tts_variant == "custom_voice",
             "supports_instruction": tts_available and self._tts_variant == "voice_design",
+            "supports_clone": clone_available,
         }
         if self._tts_loudness_profile is not None:
             self._speech_capabilities["audio_loudness_profile"] = self._tts_loudness_profile
@@ -997,10 +1000,33 @@ class OpenAIRealtimeSession:
         self._pending_text = None
 
     def _require_voice_available(self, voice: str) -> None:
-        if self._tts_variant not in {"voice_design", "custom_voice"}:
+        from speechrail.domain.tts import get_voice_profile
+
+        # Injected/test synthesizers may not have an active catalog-backed TTS
+        # variant. Preserve the historical contract in that case: endpoint
+        # readiness is authoritative and model-specific binding is not enforced.
+        if self._tts_variant is None and self._tts_clone_variant is None:
             return
+
         try:
-            resolve_binding(self._tts_variant, voice)
+            profile = get_voice_profile(voice)
+        except VoiceStoreUnavailableError:
+            raise RealtimeAdapterError(
+                "voice_store_unavailable", "custom voice storage is unavailable"
+            ) from None
+        except ValueError:
+            raise RealtimeAdapterError(
+                "voice_not_found", f"unknown voice: {voice[:200]}"
+            ) from None
+
+        variant = self._tts_clone_variant if profile.mode == "clone" else self._tts_variant
+        if variant not in {"voice_design", "custom_voice", "base"}:
+            raise RealtimeAdapterError(
+                "voice_not_available",
+                f"voice {voice[:200]} is unavailable for the active TTS capabilities",
+            )
+        try:
+            resolve_binding(variant, voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"

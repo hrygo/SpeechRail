@@ -24,7 +24,7 @@ from pydantic import (
 )
 
 Family = Literal["qwen3_asr", "qwen3_tts", "qwen3_forced_aligner"]
-Variant = Literal["asr", "voice_design", "custom_voice", "aligner"]
+Variant = Literal["asr", "voice_design", "custom_voice", "base", "aligner"]
 PresetId = Literal["quality", "balanced", "light"]
 
 _SCHEMA_VERSION = 2
@@ -212,6 +212,7 @@ class ModelPreset(BaseModel):
     id: PresetId
     asr: StrictStr = Field(min_length=1)
     tts: StrictStr = Field(min_length=1)
+    tts_clone: StrictStr | None = None
     aligner: StrictStr | None
     diarization: StrictBool
 
@@ -375,6 +376,17 @@ class ModelCatalog(BaseModel):
             raise ValueError("quality and balanced presets must share the ASR artifact")
         if artifacts[quality.tts].variant != "voice_design":
             raise ValueError("quality preset must use a voice_design artifact")
+        if quality.tts_clone is None:
+            raise ValueError("quality preset must declare a base clone artifact")
+        clone_artifact = artifacts.get(quality.tts_clone)
+        if (
+            clone_artifact is None
+            or clone_artifact.family != "qwen3_tts"
+            or clone_artifact.variant != "base"
+        ):
+            raise ValueError("quality preset clone artifact must use qwen3_tts variant=base")
+        if balanced.tts_clone is not None or light.tts_clone is not None:
+            raise ValueError("balanced/light presets must not declare clone artifacts")
         if artifacts[balanced.tts].variant != "custom_voice":
             raise ValueError("balanced preset must use a custom_voice artifact")
         if artifacts[light.tts].variant != "custom_voice":

@@ -124,9 +124,12 @@ def _model_entry(
         )
         if artifact.family == "qwen3_tts":
             supports_voice_design = artifact.variant == "voice_design"
+            supports_clone = (
+                active.tts_clone is not None and active.tts_clone.variant == "base"
+            )
             entry["capabilities"] = {
                 "supports_preview": supports_voice_design,
-                "supports_clone": supports_voice_design,
+                "supports_clone": supports_clone,
                 "supports_instruction": supports_voice_design,
             }
     return entry
@@ -144,9 +147,14 @@ def _voice_entry(
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
-    if variant in {"voice_design", "custom_voice"}:
+    binding_variant = (
+        active.tts_clone.variant
+        if profile.mode == "clone" and active.tts_clone is not None
+        else variant
+    )
+    if binding_variant in {"voice_design", "custom_voice", "base"}:
         try:
-            binding = resolve_binding(variant, profile.id)
+            binding = resolve_binding(binding_variant, profile.id)
         except ValueError:
             available = False
         else:
@@ -168,7 +176,7 @@ def _voice_entry(
         "is_system": profile.is_system,
         "created_at": profile.created_at,
         "available": available,
-        "variant": variant,
+        "variant": binding_variant,
         "capabilities": {
             "supports_speaker": supports_speaker,
             "supports_instruction": supports_instruction,
@@ -294,38 +302,74 @@ def _classify_probe_failure(exc: BaseException) -> str:
 
 
 async def _synthesize_probes(
-    synthesizer: SpeechSynthesizer, voice_id: str, runs: int
-) -> tuple[bytes, int, list[str]]:
+    synthesizer: SpeechSynthesizer, voice_id: str, repetitions: int
+) -> tuple[bytes, int, int, list[str], bool]:
     pcm = bytearray()
     ok = 0
     failure_codes: list[str] = []
     probes = vq.VOICE_QUALITY_V1_ZH_PROBES
-    for index in range(runs):
-        synthesis = SpeechRequest(
-            text=probes[index % len(probes)]["text"],
-            voice=voice_id,
-            output_format="pcm16",
-            sample_rate=24_000,
-        )
-        probe_pcm = bytearray()
-        try:
-            async for chunk in synthesizer.synthesize(synthesis):
-                probe_pcm.extend(chunk.audio)
-        except Exception as exc:
-            failure_codes.append(_classify_probe_failure(exc))
-            continue
-        if not probe_pcm or len(probe_pcm) % 2 != 0:
-            failure_codes.append(_OUTPUT_INVALID_CODE)
-            continue
-        pcm.extend(probe_pcm)
-        ok += 1
-    return bytes(pcm), ok, failure_codes
+    digests_by_probe: dict[str, list[bytes]] = {probe["id"]: [] for probe in probes}
+
+    for probe in probes:
+        for _ in range(repetitions):
+            synthesis = SpeechRequest(
+                text=probe["text"],
+                voice=voice_id,
+                output_format="pcm16",
+                sample_rate=24_000,
+            )
+            probe_pcm = bytearray()
+            try:
+                async for chunk in synthesizer.synthesize(synthesis):
+                    probe_pcm.extend(chunk.audio)
+            except Exception as exc:
+                failure_codes.append(_classify_probe_failure(exc))
+                continue
+            if not probe_pcm or len(probe_pcm) % 2 != 0:
+                failure_codes.append(_OUTPUT_INVALID_CODE)
+                continue
+
+            try:
+                probe_metrics = compute_output_quality_metrics(
+                    bytes(probe_pcm),
+                    sample_rate=24_000,
+                    probe_count=1,
+                    successful_probe_count=1,
+                    deterministic=True,
+                )
+            except (ValueError, TypeError):
+                failure_codes.append(_OUTPUT_INVALID_CODE)
+                continue
+
+            if cast(float, probe_metrics["active_rms_dbfs"]) <= -45.0:
+                failure_codes.append(_OUTPUT_INVALID_CODE)
+                continue
+            if cast(float, probe_metrics["clipping_ratio"]) > 0.0:
+                failure_codes.append(vq.VoiceQualityFailureCode.OUTPUT_PEAK_EXCEEDED.value)
+                continue
+
+            payload = bytes(probe_pcm)
+            digests_by_probe[probe["id"]].append(hashlib.sha256(payload).digest())
+            pcm.extend(payload)
+            ok += 1
+
+    attempted = len(probes) * repetitions
+    deterministic = repetitions >= 2 and all(
+        len(digests) == repetitions and len(set(digests)) == 1
+        for digests in digests_by_probe.values()
+    )
+    if repetitions >= 2 and ok == attempted and not deterministic:
+        failure_codes.append(vq.VoiceQualityFailureCode.OUTPUT_NONDETERMINISTIC.value)
+
+    return bytes(pcm), attempted, ok, failure_codes, deterministic
 
 
-def _synthesis_report(pcm: bytes, runs: int, ok: int) -> vq.VoiceQualitySynthesis:
+def _synthesis_report(
+    pcm: bytes, attempted: int, ok: int, *, deterministic: bool
+) -> vq.VoiceQualitySynthesis:
     if not pcm or ok == 0:
         return vq.VoiceQualitySynthesis(
-            probe_count=runs,
+            probe_count=attempted,
             successful_probe_count=0,
             active_rms_dbfs=-240.0,
             peak_dbfs=-240.0,
@@ -336,9 +380,9 @@ def _synthesis_report(pcm: bytes, runs: int, ok: int) -> vq.VoiceQualitySynthesi
     metrics = compute_output_quality_metrics(
         pcm,
         sample_rate=24_000,
-        probe_count=runs,
+        probe_count=attempted,
         successful_probe_count=ok,
-        deterministic=True,
+        deterministic=deterministic,
     )
     return vq.VoiceQualitySynthesis(
         probe_count=cast(int, metrics["probe_count"]),
@@ -430,8 +474,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                     "capabilities": {
                         "supports_preview": active.tts is not None
                         and active.tts.variant == "voice_design",
-                        "supports_clone": active.tts is not None
-                        and active.tts.variant == "voice_design",
+                        "supports_clone": active.tts_clone is not None
+                        and active.tts_clone.variant == "base",
                         "supports_instruction": active.tts is not None
                         and active.tts.variant == "voice_design",
                     },
@@ -589,8 +633,8 @@ def create_system_router(services: AppServices) -> APIRouter:
         request_id: str = getattr(request.state, "request_id", "") or "req_clone"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        variant = active.tts.variant if active.tts is not None else None
-        if variant != "voice_design":
+        variant = active.tts_clone.variant if active.tts_clone is not None else None
+        if variant != "base":
             tier_name = active.profile or "custom"
             return error_response(
                 400,
@@ -598,7 +642,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_cloning_unsupported",
                 (
                     f"Active TTS tier ({tier_name}) variant '{variant}' "
-                    "does not support voice cloning; switch to quality profile"
+                    "does not provide the Base clone capability; switch to quality profile"
                 ),
             )
 
@@ -714,8 +758,8 @@ def create_system_router(services: AppServices) -> APIRouter:
         request_id: str = getattr(request.state, "request_id", "") or "req_validate"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        variant = active.tts.variant if active.tts is not None else None
-        if variant != "voice_design":
+        variant = active.tts_clone.variant if active.tts_clone is not None else None
+        if variant != "base":
             tier_name = active.profile or "custom"
             return error_response(
                 400,
@@ -723,7 +767,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_cloning_unsupported",
                 (
                     f"Active TTS tier ({tier_name}) variant '{variant}' "
-                    "does not support voice cloning; switch to quality profile"
+                    "does not provide the Base clone capability; switch to quality profile"
                 ),
             )
         if not name or not name.strip():
@@ -803,7 +847,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         registry = get_voice_registry()
         try:
             with registry.lease_profile(voice_id) as profile:
-                pcm, ok, probe_failure_codes = await _synthesize_probes(
+                pcm, attempted, ok, probe_failure_codes, deterministic = await _synthesize_probes(
                     synthesizer, profile.id, runs
                 )
         except VoiceStoreUnavailableError:
@@ -821,10 +865,12 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         output_invalid = False
         try:
-            synthesis = _synthesis_report(pcm, runs, ok)
+            synthesis = _synthesis_report(
+                pcm, attempted, ok, deterministic=deterministic
+            )
         except (ValueError, TypeError):
             synthesis = vq.VoiceQualitySynthesis(
-                probe_count=runs,
+                probe_count=attempted,
                 successful_probe_count=ok,
                 active_rms_dbfs=-240.0,
                 peak_dbfs=-240.0,
@@ -840,7 +886,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         status = (
             vq.VoiceQualityStatus.PASS.value
-            if ok == runs and not failure_codes
+            if ok == attempted and not failure_codes
             else vq.VoiceQualityStatus.REJECT.value
         )
         report = vq.VoiceQualityReport(
@@ -858,7 +904,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             vq.POLICY_VERSION,
             status,
             ok,
-            runs,
+            attempted,
             resolved.tts_model_id,
             variant_name,
             resolved.version,

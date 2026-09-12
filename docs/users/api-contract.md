@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.0.2"
-date: 2026-09-11
+version: "2.1.0"
+date: 2026-09-12
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -25,8 +25,9 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 
 客户端向 `GET /v1/models` 发起请求即可获取完整的模型清单及其 `resolves_to` 映射关系。
 TTS 模型条目还会返回 `capabilities.supports_preview`、`supports_clone` 与
-`supports_instruction`；`voice_design`（quality）为 `true`，`custom_voice`
-（balanced/light）为 `false`。这些字段描述当前权重能力，不能由客户端自行推断。
+`supports_instruction`。`quality` 的默认 TTS 是 `voice_design`，同时独立配置
+`base` clone capability，因此可同时声明 preview/instruction/clone；`balanced/light`
+为 `custom_voice` 且不配置 Base clone capability。客户端必须读取运行时能力字段，不能仅由默认 `variant` 推断 clone。
 
 ### 1.1 档位与能力可用性矩阵
 
@@ -39,16 +40,16 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 |---|---|---|---|
 | 批量文件转写 / Realtime / `segment`+`word` 时间戳 / translation | ✓ | ✓ | ✓ |
 | 匿名讲话人分离（`gpt-4o-transcribe-diarize` / `diarized_json`） | ✗ | ✓ | ✓ |
-| 自然语言音色设计 / 试听 / 克隆（`/v1/voices`、`/v1/voices/previews`、`/v1/voices/clone`） | ✗ | ✗ | ✓ |
+| 自然语言音色设计 / 试听（VoiceDesign） | ✗ | ✗ | ✓ |
+| 参考音频克隆（Base，`/v1/voices/clone`） | ✗ | ✗ | ✓ |
 
 > - **词级时间戳由 ASR 原生提供**：`timestamp_granularities=["segment", "word"]` 在三档均可用，
 >   与 aligner 无关。aligner 是分人专用制品，不是词级时间戳的依赖。
 > - **分人只在支持分人的档位声明**：`gpt-4o-transcribe-diarize` 与 `diarized_json` 仅在
 >   `balanced`、`quality` 可用；`light` 不供给 aligner/Sortformer，`/v1/models` 不列出该别名，
 >   文件分人与 Realtime 分人扩展（`session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
-> - **音色设计 / 试听 / 克隆仅 `quality`**：`balanced`、`light` 上 `supports_instruction`、
->   `supports_preview`、`supports_clone` 为 `false`，预览返回 `400 voice_preview_unsupported`，
->   克隆返回 `400 voice_cloning_unsupported`。
+> - **音色创造仅 `quality`**：prompt design / preview 由 VoiceDesign 承担；reference clone 由独立 Base capability 承担。`balanced`、`light` 上 `supports_instruction`、`supports_preview`、`supports_clone` 均为 `false`。
+> - **按需互斥换模**：Quality 启动时只预热默认 VoiceDesign；首次 clone 请求切换至 Base，后续普通 VoiceDesign 请求再切回。两个 1.7B TTS worker 不被运行时有意同时常驻。
 
 ---
 
@@ -164,7 +165,7 @@ Content-Type: application/json
 `uncle_fu`、`dylan`、`eric`、`ryan`、`aiden`、`ono_anna`、`sohee`。
 `default/warm/bright/calm` 与 13 个 OpenAI 标准 voice 名称仍可作为兼容 alias；别名解析与档位
 无关，客户端无需上送 `quality/balanced/light`。但能力的**可用性**随档位不同（分人仅支持分人的档位、
-VoiceDesign 预览/克隆仅 `quality`），见 §1.1。
+VoiceDesign 预览与 Base reference clone 仅 `quality`），见 §1.1。
 
 ---
 
@@ -295,7 +296,7 @@ Authorization: Bearer <TOKEN>
 
 ### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
 
-质量档（`quality` / `voice_design`）支持从参考音频 + 脚本文本克隆自定义音色。克隆走 `voice_design` 权重；`balanced` / `light` 档调用返回 `400 voice_cloning_unsupported`。三个接口共用同一套 `VoiceQualityReport` 结构，由 `voice_quality_v1` 策略门控。
+质量档支持从参考音频 + 脚本文本克隆自定义音色，但 clone 与默认 VoiceDesign 已解耦：reference clone 固定由按需加载的 Qwen3-TTS Base capability 通过公开 reference-generation 接口执行；VoiceDesign 不作为 clone fallback。`balanced` / `light` 调用返回 `400 voice_cloning_unsupported`。三个接口共用 `VoiceQualityReport` 结构。2026-09-12 审计已确认现有 synthesis quality-run 存在假阳性缺口，因此绿色 `status=pass` 暂不能作为跨文本 speaker identity 或纯净度已证明的充分证据。
 
 #### 5.7.1 克隆并注册音色 (`POST /v1/voices/clone`)
 
@@ -327,10 +328,10 @@ Authorization: Bearer <TOKEN>
 ```
 
 - `probe_set`：仅支持 `voice_quality_v1_zh`（默认值，可省略）；其他值返回 `422 validation_error`。
-- `runs`：整数，范围 `1..3`（默认 `3`）；越界返回 `422 validation_error`。
+- `runs`：整数，范围 `1..3`（默认 `3`），含义是“每个固定 probe 的重复次数”；6 个内置 probe 始终全部执行，因此默认 `probe_count=18`；越界返回 `422 validation_error`。
 - `include_audio`：布尔，默认 `false`。当前未实现内联音频试听，传入 `true` 直接返回 `422 include_audio_unsupported`。
-- 探针按 `voice_quality_v1_zh` 内置固定脚本逐条合成，首条为“请进行自我介绍”。
-- 全部探针合成成功返回 `status=pass`、`failure_codes=[]`；合成失败返回 `status=reject`，`failure_codes` 取合成侧码 `probe_failed`、`clone_speed_unsupported` 或 `output_invalid`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
+- 探针按 `voice_quality_v1_zh` 的 6 条内置固定脚本逐条合成，完整覆盖自我介绍、短句、长段落、问句、数字标点和停顿；每条重复 `runs` 次。
+- 所有 probe 输出必须同时通过格式、非静音、无满幅削波和重复确定性检查；失败返回 `status=reject`。合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`output_nondeterministic`。`runs>=2` 时会对同一 probe 的 PCM SHA-256 做重复比较；`runs=1` 不宣称已验证确定性。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
 - 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
 
 #### 5.7.4 `VoiceQualityReport` 结构与向后兼容
@@ -345,7 +346,7 @@ Authorization: Bearer <TOKEN>
 | `tested_at` | 测试时间（ISO 8601 UTC） |
 | `reference` | 参考音频信号指标（时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；`transcript_match` 始终为 `null`，因为实现未启用 ASR 文本匹配，从不计算该分数） |
 | `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`） |
-| `failure_codes` | 失败原因数组。参考侧（克隆参考音频门禁）：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧（质量探针输出）：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded` |
+| `failure_codes` | 失败原因数组。参考侧（克隆参考音频门禁）：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧（质量探针输出）：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic` |
 
 **向后兼容**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及历史遗留记录不携带 `quality` 字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过；服务端不会在响应中下发 `status=unevaluated`。
 

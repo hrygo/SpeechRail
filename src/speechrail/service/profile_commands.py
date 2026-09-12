@@ -60,6 +60,7 @@ class ProfileSummary:
     tts: str
     download_bytes: int
     aligner: str | None = None
+    tts_clone: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +78,8 @@ def list_profiles(catalog: ModelCatalog | None = None) -> tuple[ProfileSummary, 
     for preset_id in _ORDER:
         preset = selected_catalog.preset(preset_id)
         artifact_keys = [preset.asr, preset.tts]
+        if preset.tts_clone is not None:
+            artifact_keys.append(preset.tts_clone)
         if preset.aligner is not None:
             artifact_keys.append(preset.aligner)
         download_bytes = sum(
@@ -91,6 +94,7 @@ def list_profiles(catalog: ModelCatalog | None = None) -> tuple[ProfileSummary, 
                 tts=preset.tts,
                 download_bytes=download_bytes,
                 aligner=preset.aligner,
+                tts_clone=preset.tts_clone,
             )
         )
     return tuple(summaries)
@@ -108,7 +112,7 @@ def model_changes(
 ) -> frozenset[str]:
     return frozenset(
         name
-        for name in ("asr", "tts", "aligner")
+        for name in ("asr", "tts", "tts_clone", "aligner")
         if _model_value(old, name) != _model_value(new, name)
     )
 

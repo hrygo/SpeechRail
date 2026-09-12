@@ -105,6 +105,7 @@ def _make_test_client(
         qwen3_model_dir=tmp_path / preset.asr,
         qwen3_python=None,
         qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_clone_model_dir=(tmp_path / preset.tts_clone if preset.tts_clone else None),
         qwen3_tts_python=None,
     )
     synthesizer = CapturingSpeechSynthesizer()
@@ -379,15 +380,15 @@ def test_resolve_binding_voice_cloning(tmp_path: Path, monkeypatch: pytest.Monke
         duration_seconds=3.0,
     )
 
-    # 1. Quality tier (voice_design): supports cloning
-    binding_qd = resolve_binding("voice_design", "test_binding_clone")
+    # 1. Quality clone capability is provided by the Base model.
+    binding_qd = resolve_binding("base", "test_binding_clone")
     assert binding_qd.is_clone is True
     assert binding_qd.ref_audio_path is not None
     assert binding_qd.ref_text == "这是测试引导句。"
     assert binding_qd.capabilities.supports_clone is True
 
-    # 2. Balanced tier (custom_voice): does not support cloning
-    with pytest.raises(ValueError, match="requires voice_design variant"):
+    # 2. Balanced tier (custom_voice): does not support cloning.
+    with pytest.raises(ValueError, match="requires base clone capability"):
         resolve_binding("custom_voice", "test_binding_clone")
 
 
@@ -401,37 +402,37 @@ class FakeIclGenerationResult:
 
 
 class FakeIclMlxModel:
-    config = SimpleNamespace(tts_model_type="voice_design")
+    config = SimpleNamespace(tts_model_type="base")
 
     def __init__(self) -> None:
         self.icl_calls: list[dict[str, object]] = []
 
-    def _generate_icl(self, **kwargs: object):
+    def generate(self, **kwargs: object):
         self.icl_calls.append(kwargs)
         yield FakeIclGenerationResult()
 
 
 class AlternatingIclMlxModel:
-    config = SimpleNamespace(tts_model_type="voice_design")
+    config = SimpleNamespace(tts_model_type="base")
 
     def __init__(self) -> None:
         self.icl_calls: list[dict[str, object]] = []
 
-    def _generate_icl(self, **kwargs: object):
+    def generate(self, **kwargs: object):
         self.icl_calls.append(kwargs)
+        if "ref_audio" not in kwargs:
+            yield SimpleNamespace(
+                sample_rate=24_000,
+                audio=np.full(1_920, 0.20, dtype=np.float32),
+                is_final_chunk=False,
+            )
+            return
         for amplitude in (0.05, 0.40, 0.05, 0.40):
             yield SimpleNamespace(
                 sample_rate=24_000,
                 audio=np.full(1_920, amplitude, dtype=np.float32),
                 is_final_chunk=False,
             )
-
-    def generate(self, **kwargs: object):
-        yield SimpleNamespace(
-            sample_rate=24_000,
-            audio=np.full(1_920, 0.20, dtype=np.float32),
-            is_final_chunk=False,
-        )
 
 
 def _pcm_rms_dbfs(pcm: bytes) -> float:
@@ -518,7 +519,7 @@ def test_clone_synthesis_smooths_chunk_levels_without_touching_builtin(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("s" * 64),
         ),
@@ -546,10 +547,9 @@ def test_clone_synthesis_smooths_chunk_levels_without_touching_builtin(
         )
     )
     clone_stats = engine.consume_delivery_stats()
-    builtin_chunks = list(
-        engine.synthesize("内置音色。", voice="serena", speed=1.0, language="zh")
-    )
 
+    # Base is a clone-only capability.  Built-in synthesis remains owned by the
+    # primary VoiceDesign/CustomVoice worker and is tested independently below.
     clone_levels = [_pcm_rms_dbfs(chunk) for chunk in clone_chunks]
     raw_jump = 20.0 * math.log10(0.40 / 0.05)
     assert clone_stats == {
@@ -566,9 +566,6 @@ def test_clone_synthesis_smooths_chunk_levels_without_touching_builtin(
         abs(clone_levels[index] - clone_levels[index - 1])
         for index in range(1, len(clone_levels))
     ) < 8.0
-    assert max(abs(value) for value in struct.unpack("<1920h", builtin_chunks[0])) == round(
-        0.20 * 32767
-    )
     assert raw_jump > 8.0
 
 
@@ -601,7 +598,7 @@ def test_clone_controller_spans_sentences_and_resets_on_completion(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("t" * 64),
         ),
@@ -638,7 +635,7 @@ def test_clone_controller_resets_when_generation_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FailingIclMlxModel(FakeIclMlxModel):
-        def _generate_icl(self, **kwargs: object):
+        def generate(self, **kwargs: object):
             self.icl_calls.append(kwargs)
             yield FakeIclGenerationResult()
             raise RuntimeError("synthetic generation failure")
@@ -668,7 +665,7 @@ def test_clone_controller_resets_when_generation_raises(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("u" * 64),
         ),
@@ -748,7 +745,7 @@ def test_mlx_custom_voice_engine_forwards_supported_controls_and_rejects_seed(
         )
 
 
-def test_mlx_voice_design_engine_routes_icl_generation(
+def test_mlx_base_engine_routes_public_clone_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     model = FakeIclMlxModel()
@@ -760,7 +757,7 @@ def test_mlx_voice_design_engine_routes_icl_generation(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("c" * 64),
         ),
@@ -794,7 +791,7 @@ def test_mlx_voice_design_engine_routes_icl_generation(
     call = model.icl_calls[0]
     assert call["text"] == "测试克隆语音生成。"
     assert call["ref_text"] == "参考朗读文本"
-    assert call["language"] == "zh"
+    assert call["lang_code"] == "zh"
     assert call["stream"] is True
     assert call["temperature"] == pytest.approx(0.1)
     assert call["top_p"] == pytest.approx(0.95)
@@ -851,7 +848,7 @@ def test_mlx_voice_design_reference_loader_requests_volume_normalization(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("n" * 64),
         ),
@@ -890,7 +887,7 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("c" * 64),
         ),
@@ -959,7 +956,7 @@ def test_mlx_voice_design_engine_rejects_missing_audio_or_text(
         "inspect_model",
         lambda _: SnapshotIdentity(
             family="qwen3_tts",
-            variant="voice_design",
+            variant="base",
             quantization=QuantizationSpec(bits=8, group_size=64, format="mlx"),
             weight_fingerprint="shape:" + ("c" * 64),
         ),
@@ -1069,7 +1066,7 @@ def test_api_voices_clone_success_in_quality_tier(
     assert created["ref_text"] == "白日依山尽，黄河入海流。"
     assert created["duration_seconds"] == 4.0
     assert created["available"] is True
-    assert created["variant"] == "voice_design"
+    assert created["variant"] == "base"
     assert created["capabilities"]["supports_clone"] is True
 
     # Verify voice appears in /v1/voices
@@ -1176,7 +1173,7 @@ async def test_qwen3_tts_client_packs_clone_metadata_into_frame(
     repo_root.mkdir()
     model_dir = tmp_path / "models" / "tts"
     model_dir.mkdir(parents=True)
-    (model_dir / "config.json").write_text('{"tts_model_type": "voice_design"}')
+    (model_dir / "config.json").write_text('{"tts_model_type": "base"}')
 
     config = Qwen3TtsBackendConfig(
         repository_root=repo_root,
@@ -1187,7 +1184,7 @@ async def test_qwen3_tts_client_packs_clone_metadata_into_frame(
     )
     worker = Qwen3TtsWorker(config)
     worker._transport = FakeTransport()  # type: ignore[assignment]
-    worker.model_variant = "voice_design"
+    worker.model_variant = "base"
 
     request = SpeechRequest(
         text="合成这一句。",

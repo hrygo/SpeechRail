@@ -403,6 +403,14 @@ def run_preflight(
         checks.append(
             _runtime_check("tts_runtime", settings.qwen3_tts_python, "mlx_audio", runner)
         )
+        if settings.qwen3_tts_clone_model_dir is not None:
+            checks.append(
+                _snapshot_check(
+                    "tts_clone_snapshot",
+                    settings.qwen3_tts_clone_model_dir,
+                    ("config.json",),
+                )
+            )
     elif require_tts:
         checks.extend(
             [
