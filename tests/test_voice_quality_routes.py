@@ -104,7 +104,16 @@ class SpeedUnsupportedSynthesizer:
 
         async def chunks() -> AsyncIterator[AudioChunk]:
             if len(self.requests) == 1:
-                raise RuntimeError("clone speed unsupported")
+                # Real parent-side shape: the worker raises
+                # ValueError("clone_speed_unsupported") and the error-frame path
+                # re-raises it as a RuntimeError embedding the stderr tail.
+                raise RuntimeError(
+                    "worker_inference_error; worker stderr tail:\n"
+                    "Traceback (most recent call last):\n"
+                    '  File "qwen3_tts_worker.py", line 473, in _generate\n'
+                    '    raise ValueError("clone_speed_unsupported")\n'
+                    "ValueError: clone_speed_unsupported"
+                )
             yield AudioChunk(
                 response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5)
             )
@@ -881,6 +890,26 @@ def test_quality_runs_detects_repeated_output_nondeterminism(
     assert body["synthesis"]["successful_probe_count"] == 12
     assert body["synthesis"]["deterministic"] is False
     assert "output_nondeterministic" in body["failure_codes"]
+
+
+def test_quality_runs_single_run_never_claims_determinism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, synth, _voices_dir = _make_client(tmp_path)
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "pass"
+    assert body["synthesis"]["probe_count"] == 6
+    assert body["synthesis"]["successful_probe_count"] == 6
+    assert body["synthesis"]["deterministic"] is False
+    assert "output_nondeterministic" not in body["failure_codes"]
+    assert len(synth.requests) == 6
 
 
 def test_quality_runs_rejects_malformed_chunk_order(
