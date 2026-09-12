@@ -419,19 +419,20 @@ class Qwen3TtsCapabilityRouter:
         from speechrail.domain.tts import get_voice_registry
 
         profile = get_voice_registry().get_profile(request.voice)
+        clone_worker = self.clone
         if profile.mode == "clone":
-            if self.clone is None:
+            if clone_worker is None:
 
                 async def unavailable() -> AsyncIterator[AudioChunk]:
                     raise RuntimeError("voice_clone_base_model_unavailable")
                     yield  # pragma: no cover
 
                 return unavailable()
-            selected: Qwen3TtsWorker = self.clone
+            selected = clone_worker
             other = self.primary
         else:
             selected = self.primary
-            other = self.clone
+            other = clone_worker
 
         async def stream() -> AsyncIterator[AudioChunk]:
             # Hold the capability lock for the stream lifetime.  This makes a
