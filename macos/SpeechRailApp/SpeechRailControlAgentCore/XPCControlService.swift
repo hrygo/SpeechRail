@@ -34,7 +34,8 @@ private final class RequestHandler: NSObject, SpeechRailControlXPCProtocol, @unc
     }
 
     func send(_ requestData: Data, reply: @escaping (Data?, NSError?) -> Void) {
-        Task { [store] in
+        let replyBox = ReplyBox(reply)
+        Task { [store, replyBox] in
             let response: ControlResponse
             do {
                 let request = try ControlWireCodec.decode(ControlRequest.self, from: requestData)
@@ -47,10 +48,31 @@ private final class RequestHandler: NSObject, SpeechRailControlXPCProtocol, @unc
                 )
             }
             do {
-                reply(try ControlWireCodec.encode(response), nil)
+                replyBox.call(try ControlWireCodec.encode(response), nil)
             } catch {
-                reply(nil, NSError(domain: "SpeechRailControl", code: 1))
+                replyBox.call(nil, NSError(domain: "SpeechRailControl", code: 1))
             }
         }
+    }
+}
+
+private final class ReplyBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let reply: (Data?, NSError?) -> Void
+    private var didReply = false
+
+    init(_ reply: @escaping (Data?, NSError?) -> Void) {
+        self.reply = reply
+    }
+
+    func call(_ data: Data?, _ error: NSError?) {
+        lock.lock()
+        guard !didReply else {
+            lock.unlock()
+            return
+        }
+        didReply = true
+        lock.unlock()
+        reply(data, error)
     }
 }

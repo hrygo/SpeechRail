@@ -143,11 +143,18 @@ public final class ProcessManagedCommandRunner: ManagedCommandRunner, @unchecked
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments
+        process.standardInput = FileHandle.nullDevice
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw ManagedCommandError.launchFailed
+        }
 
         let stdoutCollector = PipeCollector()
         let stderrCollector = PipeCollector()
@@ -163,11 +170,6 @@ public final class ProcessManagedCommandRunner: ManagedCommandRunner, @unchecked
             group.leave()
         }
 
-        do {
-            try process.run()
-        } catch {
-            return ManagedCommandResult(exitCode: -1, response: nil, message: "launch failed")
-        }
         process.waitUntilExit()
         group.wait()
 
@@ -188,6 +190,7 @@ public final class ProcessManagedCommandRunner: ManagedCommandRunner, @unchecked
 }
 
 private final class PipeCollector: @unchecked Sendable {
+    private static let maximumBytes = 1024 * 1024
     private let lock = NSLock()
     private var storedData = Data()
 
@@ -198,7 +201,15 @@ private final class PipeCollector: @unchecked Sendable {
     }
 
     func collect(_ handle: FileHandle) {
-        let data = handle.readDataToEndOfFile()
+        var data = Data()
+        while true {
+            let chunk = handle.readData(ofLength: 64 * 1024)
+            guard !chunk.isEmpty else { break }
+            let remaining = Self.maximumBytes - data.count
+            if remaining > 0 {
+                data.append(chunk.prefix(remaining))
+            }
+        }
         lock.lock()
         storedData = data
         lock.unlock()

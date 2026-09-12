@@ -15,6 +15,11 @@
 	<true/>
 	<key>KeepAlive</key>
 	<false/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>SPEECHRAIL_ALLOW_UNSIGNED_XPC</key>
+		<string>1</string>
+	</dict>
 	<key>ProcessType</key>
 	<string>Interactive</string>
 </dict>

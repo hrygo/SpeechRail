@@ -4,6 +4,7 @@ import SpeechRailControlKit
 public struct ProfilePickerView: View {
     @Environment(AppModel.self) private var model
     @State private var selectedProfile: SpeechRailProfile = .balanced
+    @State private var isConfirmingProfileApply = false
 
     public init() {}
 
@@ -17,9 +18,19 @@ public struct ProfilePickerView: View {
                 }
                 .pickerStyle(.segmented)
                 Button("应用档位") {
-                    Task { await model.execute(.profileApply, profile: selectedProfile) }
+                    isConfirmingProfileApply = true
                 }
                 .disabled(model.isBusy)
+                .confirmationDialog(
+                    "确认切换模型档位？",
+                    isPresented: $isConfirmingProfileApply,
+                    titleVisibility: .visible
+                ) {
+                    Button("确认切换", role: .destructive) {
+                        Task { await model.execute(.profileApply, profile: selectedProfile) }
+                    }
+                    Button("取消", role: .cancel) {}
+                }
                 if let active = model.profile?.preset {
                     Text("当前：\(active.rawValue)")
                         .foregroundStyle(.secondary)

@@ -42,31 +42,75 @@ public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, 
         let encodedRequest = try ControlWireCodec.encode(request)
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<ControlResponse, Error>) in
+            let continuationBox = ContinuationBox(continuation)
             let proxy = connection.remoteObjectProxyWithErrorHandler { error in
-                continuation.resume(throwing: XPCControlTransportError.remote(error.localizedDescription))
+                continuationBox.resume(
+                    throwing: XPCControlTransportError.remote(error.localizedDescription)
+                )
             }
             guard let proxy = proxy as? SpeechRailControlXPCProtocol else {
-                continuation.resume(throwing: XPCControlTransportError.invalidProxy)
+                continuationBox.resume(throwing: XPCControlTransportError.invalidProxy)
                 return
             }
             proxy.send(encodedRequest) { responseData, error in
                 if let error {
-                    continuation.resume(
+                    continuationBox.resume(
                         throwing: XPCControlTransportError.remote(error.localizedDescription)
                     )
                     return
                 }
                 guard let responseData else {
-                    continuation.resume(throwing: XPCControlTransportError.invalidResponse)
+                    continuationBox.resume(throwing: XPCControlTransportError.invalidResponse)
                     return
                 }
                 do {
                     let response = try ControlWireCodec.decode(ControlResponse.self, from: responseData)
-                    continuation.resume(returning: response)
+                    guard response.schemaVersion == ControlConstants.schemaVersion,
+                          response.requestID == request.requestID,
+                          response.command == request.command
+                    else {
+                        continuationBox.resume(
+                            throwing: XPCControlTransportError.invalidResponse
+                        )
+                        return
+                    }
+                    continuationBox.resume(returning: response)
                 } catch {
-                    continuation.resume(throwing: XPCControlTransportError.invalidResponse)
+                    continuationBox.resume(throwing: XPCControlTransportError.invalidResponse)
                 }
             }
         }
+    }
+}
+
+private final class ContinuationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private let continuation: CheckedContinuation<ControlResponse, Error>
+    private var didResume = false
+
+    init(_ continuation: CheckedContinuation<ControlResponse, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning response: ControlResponse) {
+        lock.lock()
+        guard !didResume else {
+            lock.unlock()
+            return
+        }
+        didResume = true
+        lock.unlock()
+        continuation.resume(returning: response)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        guard !didResume else {
+            lock.unlock()
+            return
+        }
+        didResume = true
+        lock.unlock()
+        continuation.resume(throwing: error)
     }
 }

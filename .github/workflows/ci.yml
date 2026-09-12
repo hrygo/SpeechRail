@@ -67,3 +67,42 @@ jobs:
 
       - name: Run test suite with coverage gate (Pytest)
         run: uv run pytest --cov=src
+
+  macos-app:
+    name: macOS App Build & Tests
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify Apple toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Run Swift package tests
+        run: swift test --package-path macos/SpeechRailApp
+
+      - name: Build and test unsigned App
+        run: |
+          xcodebuild \
+            -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
+            -scheme SpeechRailApp \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test \
+            -testPlan SpeechRailApp
+
+      - name: Lint macOS bundle metadata
+        run: |
+          plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist
+          plutil -lint macos/SpeechRailApp/Entitlements/SpeechRailApp.entitlements
+
+      - name: Check patch whitespace
+        run: git diff --check

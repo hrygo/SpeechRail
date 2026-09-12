@@ -3,6 +3,7 @@ import SpeechRailControlKit
 
 public struct ControlMenuView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openSettings) private var openSettings
 
     public init() {}
 
@@ -22,7 +23,7 @@ public struct ControlMenuView: View {
             .disabled(model.isBusy)
             Divider()
             Button("打开设置") {
-                NSApp.activate(ignoringOtherApps: true)
+                openSettings()
             }
         }
         .padding(12)

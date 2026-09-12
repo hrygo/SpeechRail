@@ -70,7 +70,11 @@ public actor AgentOperationStore {
             let code: ControlErrorCode = result.exitCode == 0 ? .commandFailed : .serviceUnavailable
             return .failure(for: request, code: code, message: result.message ?? "managed command failed")
         } catch let error as ManagedCommandError {
-            return .failure(for: request, code: errorCode(for: error), message: message(for: error))
+            return .failure(
+                for: request,
+                code: Self.errorCode(for: error),
+                message: Self.message(for: error)
+            )
         } catch {
             return .failure(for: request, code: .commandFailed, message: "managed command failed")
         }
@@ -111,8 +115,8 @@ public actor AgentOperationStore {
                             requestID: request.requestID,
                             command: .profileApply,
                             status: .failed,
-                            errorCode: errorCode(for: error),
-                            message: message(for: error)
+                            errorCode: Self.errorCode(for: error),
+                            message: Self.message(for: error)
                         )
                     )
                 )
@@ -188,14 +192,14 @@ public actor AgentOperationStore {
         )
     }
 
-    private func errorCode(for error: ManagedCommandError) -> ControlErrorCode {
+    nonisolated private static func errorCode(for error: ManagedCommandError) -> ControlErrorCode {
         switch error {
         case .runtimeMissing: .managedRuntimeMissing
         case .launchFailed, .invalidOutput: .commandFailed
         }
     }
 
-    private func message(for error: ManagedCommandError) -> String {
+    nonisolated private static func message(for error: ManagedCommandError) -> String {
         switch error {
         case .runtimeMissing: "managed runtime is unavailable"
         case .launchFailed: "managed command could not be launched"

@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import SpeechRailControlKit
 
 @MainActor
 public final class ControlAgentRegistration {

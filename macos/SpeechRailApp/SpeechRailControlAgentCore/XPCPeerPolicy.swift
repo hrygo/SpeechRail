@@ -8,9 +8,16 @@ public struct XPCPeerPolicy: Sendable, Equatable {
     }
 
     public init(teamIdentifier: String, appIdentifier: String) {
-        let team = teamIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        let identifier = appIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !team.isEmpty, !identifier.isEmpty else {
+        let teamCharacters = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        )
+        let identifierCharacters = teamCharacters.union(CharacterSet(charactersIn: ".-"))
+        guard let team = Self.normalized(teamIdentifier, allowedCharacters: teamCharacters),
+              let identifier = Self.normalized(
+                  appIdentifier,
+                  allowedCharacters: identifierCharacters
+              )
+        else {
             self.requirement = ""
             return
         }
@@ -18,7 +25,34 @@ public struct XPCPeerPolicy: Sendable, Equatable {
             "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\" and identifier \"\(identifier)\""
     }
 
+    public init(developmentAppIdentifier: String) {
+        let allowedCharacters = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-"
+        )
+        guard let identifier = Self.normalized(
+            developmentAppIdentifier,
+            allowedCharacters: allowedCharacters
+        ) else {
+            self.requirement = ""
+            return
+        }
+        self.requirement = "identifier \"\(identifier)\""
+    }
+
     public var isConfigured: Bool {
         !requirement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func normalized(
+        _ rawValue: String,
+        allowedCharacters: CharacterSet
+    ) -> String? {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty,
+              value.unicodeScalars.allSatisfy({ allowedCharacters.contains($0) })
+        else {
+            return nil
+        }
+        return value
     }
 }

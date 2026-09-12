@@ -7,6 +7,8 @@ public struct SettingsView: View {
 
     public var body: some View {
         Form {
+            Text("SpeechRail")
+                .font(.title2)
             ServiceStatusView()
             ProfilePickerView()
         }

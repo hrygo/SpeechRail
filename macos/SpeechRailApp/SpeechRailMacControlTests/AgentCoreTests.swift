@@ -81,6 +81,26 @@ final class AgentCoreTests: XCTestCase {
         XCTAssertFalse(policy.isConfigured)
     }
 
+    func testDevelopmentPeerPolicyPinsOnlyTheLocalBundleIdentifier() {
+        let policy = XPCPeerPolicy(developmentAppIdentifier: "com.speechrail.desktop")
+        XCTAssertTrue(policy.isConfigured)
+        XCTAssertEqual(policy.requirement, "identifier \"com.speechrail.desktop\"")
+    }
+
+    func testPeerPolicyRejectsRequirementInjectionCharacters() {
+        XCTAssertFalse(
+            XPCPeerPolicy(
+                teamIdentifier: "TEAM\" or anchor apple generic",
+                appIdentifier: "com.speechrail.desktop"
+            ).isConfigured
+        )
+        XCTAssertFalse(
+            XPCPeerPolicy(
+                developmentAppIdentifier: "com.speechrail.desktop\" or anchor apple generic"
+            ).isConfigured
+        )
+    }
+
     func testPeerPolicyPinsTeamAndBundleIdentifier() {
         let policy = XPCPeerPolicy(
             teamIdentifier: "TEAM123",

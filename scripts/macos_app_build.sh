@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="$ROOT_DIR/macos/SpeechRailApp/SpeechRailApp.xcodeproj"
 CONFIGURATION="Debug"
 ACTION="build"
+EXPORT_OPTIONS=""
+EXPORT_PATH=""
 
 while (($# > 0)); do
   case "$1" in
@@ -16,6 +18,16 @@ while (($# > 0)); do
     --archive)
       ACTION="archive"
       shift
+      ;;
+    --export-options)
+      [[ $# -ge 2 ]] || { echo "--export-options requires a value" >&2; exit 2; }
+      EXPORT_OPTIONS="$2"
+      shift 2
+      ;;
+    --export-path)
+      [[ $# -ge 2 ]] || { echo "--export-path requires a value" >&2; exit 2; }
+      EXPORT_PATH="$2"
+      shift 2
       ;;
     *)
       echo "unknown argument: $1" >&2
@@ -36,6 +48,14 @@ if [[ "$ACTION" == "archive" ]]; then
     -destination 'generic/platform=macOS' \
     -archivePath "$ARCHIVE_PATH" \
     archive
+  if [[ -n "$EXPORT_OPTIONS" ]]; then
+    [[ -n "$EXPORT_PATH" ]] || { echo "--export-path is required with --export-options" >&2; exit 2; }
+    xcodebuild \
+      -exportArchive \
+      -archivePath "$ARCHIVE_PATH" \
+      -exportOptionsPlist "$EXPORT_OPTIONS" \
+      -exportPath "$EXPORT_PATH"
+  fi
 else
   xcodebuild \
     -project "$PROJECT" \

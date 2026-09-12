@@ -22,7 +22,7 @@ date: 2026-09-12
 - 仓库已有 `native/diarization` SwiftPM 包，`Package.swift` 使用 Swift tools 6.0、最低 macOS 14，并固定 FluidAudio revision；它是服务的 native worker，不是 GUI App target。
 - 当前受管服务由 `com.speechrail` 用户级 LaunchAgent 托管，实际 Python executable 位于 managed app home 的 `runtime/current/.venv/bin/python`；服务、profile apply/rollback 和事务 journal 已在 Python 侧有回归测试。
 - `create_launch_agent_manager`、`LaunchAgentServiceController` 和 `apply_prepared_profile` 是现有生命周期与 profile 切换的事实入口。App 不直接调用 `launchctl`，helper 也不重写这些规则。
-- 2026-09-12 本机实测为 `arm64`、macOS 26.6.2、Swift 6.3.3；当前 active developer directory 是 `/Library/Developer/CommandLineTools`，Xcode 尚未安装，`xcodebuild` 不可用。
+- 2026-09-12 本机实测为 `arm64`、macOS 26.6.2、Swift 6.3.3、Xcode 26.6；active developer directory 为 `/Applications/Xcode.app/Contents/Developer`，可用 macOS SDK 为 26.5。当前没有有效的 code-signing identity，因此本阶段按无 Apple Developer ID 的本地开发模式验收。
 - 项目现有边界要求默认 loopback、单一 SpeechRail 服务和单一 ASGI worker；模型、音频、私有配置和日志不进入仓库或 App bundle。
 
 ## 3. 方案比较与决策
@@ -80,7 +80,7 @@ helper 调用的 Python 入口始终是当前 managed runtime 的绝对路径，
 
 ## 5. 安全、权限与隐私
 
-- 首期使用站外直接分发，App 和 helper 开启 Hardened Runtime；只增加经实际功能证明必要的例外，不启用 JIT、unsigned executable memory、DYLD environment variables 或 library validation 例外。
+- 未来 Distribution 使用站外直接分发，App 和 helper 开启 Hardened Runtime；只增加经实际功能证明必要的例外，不启用 JIT、unsigned executable memory、DYLD environment variables 或 library validation 例外。当前无 Apple Developer ID 的 Debug/Release 本地 bundle 为支持 ad hoc 独立启动而关闭 Hardened Runtime；该本地配置不代表可分发产物。
 - 首期不启用 App Sandbox。这是为了让控制 helper 访问现有用户级 managed runtime、app home 和 LaunchAgent 兼容布局；该取舍只适用于 Developer ID 直发，不代表未来 App Store 方案。
 - App 不采集麦克风、不播放音频、不读取任意用户文件，因此不加入麦克风、文件、网络 server 或 Automation 权限，也不加入 `NSMicrophoneUsageDescription`。音频权限仍由未来真正负责录音的调用方申请。
 - `127.0.0.1:8201` 是唯一默认服务地址；App 不允许用户输入远程 URL，也不在请求路径触发下载。
@@ -104,19 +104,19 @@ macos/SpeechRailApp/
   SpeechRailApp/                 # GUI App target
   SpeechRailControlKit/         # XPC message types, state reducers, client protocol
   SpeechRailControlAgent/       # SMAppService LaunchAgent target
-  SpeechRailAppTests/            # Swift Testing unit tests
+  SpeechRailMacControlTests/     # XCTest unit-test sources for SpeechRailAppTests target
   SpeechRailAppUITests/          # XCTest UI tests
   Resources/LaunchAgents/        # control-agent plist
   Config/                        # Debug / Release / Distribution xcconfig
   Entitlements/                  # minimal direct-distribution entitlements
-  TestPlans/                     # deterministic local test plans
+  SpeechRailApp.xctestplan       # deterministic local test plan
 ```
 
 `SpeechRailApp` 不链接 `native/diarization` 或任何模型 SDK；该 package 继续独立构建并随服务 wheel/release 处理。
 
 ### 6.3 测试分层
 
-1. Swift Testing：覆盖 XPC 消息编码、code-signing requirement 配置、peer rejection、状态 reducer、profile enum、错误映射和 operation 状态机；所有外部进程和网络均 fake。
+1. XCTest unit tests：覆盖 XPC 消息编码、code-signing requirement 配置、peer rejection、状态 reducer、profile enum、错误映射和 operation 状态机；所有外部进程和网络均 fake。
 2. XCTest UI Tests：覆盖首次启动、helper 未注册、服务未就绪、启动/停止/重启、profile apply confirmation、失败回滚和后台服务被用户禁用的界面状态。使用 `--ui-test` 注入 deterministic fake transport，不能触碰真实 LaunchAgent。
 3. ControlAgent integration：使用独立 Mach service label、临时 app home、临时 port 和 fake managed Python runner；禁止写入生产 `~/Library/Application Support/SpeechRail`、生产 `com.speechrail` 或真实模型目录。
 4. Authorized local smoke：单独、显式执行签名 debug App 的 `SMAppService` register/unregister，以及真实 `com.speechrail` start/stop/profile 操作；每次操作前显示目标 label 和 app home，结束后核对 PID、端口、`/health`、`/readyz` 和 profile 状态。
@@ -124,8 +124,8 @@ macos/SpeechRailApp/
 
 ## 7. 签名、归档与分发门禁
 
-1. Debug：本地 Development signing，允许调试器附加；不把开发 entitlement 带入分发产物。
-2. Release：对 App、ControlAgent 及所有 nested code 分别签名，启用 Hardened Runtime 和 secure timestamp；不使用 `codesign --deep` 作为签名流程。
+1. Debug：无 Apple Developer ID 时使用 ad hoc 本地签名，关闭 Hardened Runtime，允许调试器附加；不把开发 entitlement 带入分发产物。
+2. Release：未来 Distribution 对 App、ControlAgent 及所有 nested code 分别签名，启用 Hardened Runtime 和 secure timestamp；不使用 `codesign --deep` 作为签名流程。当前本地 Release 与 Debug 同样采用 ad hoc、关闭 Hardened Runtime。
 3. Archive：使用 `xcodebuild archive` 生成 archive，再用 `-exportArchive` 的 Developer ID 方式导出。
 4. Verify：对 App、helper、nested code 逐项执行签名验证，并用 `spctl --assess` 检查 Gatekeeper 策略；核对 `SMAppService` plist 的 `BundleProgram` 和 bundle-relative 路径。
 5. Notarize：使用 `notarytool` 的 keychain profile 上传 zip/DMG；等待 notarization 成功后 staple ticket，再在干净目录验证打开和 helper 注册。

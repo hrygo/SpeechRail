@@ -1,29 +1,28 @@
 {
   "configurations" : [
     {
-      "id" : "default",
       "name" : "Default Configuration",
       "options" : {
-        "commandLineArgument" : [
-          "--ui-test"
-        ]
+        "testExecutionOrdering" : "lexical"
       }
     }
   ],
   "defaultOptions" : {
-    "testTimeoutsEnabled" : true
+    "codeCoverage" : false
   },
   "testTargets" : [
     {
       "target" : {
         "containerPath" : "container:SpeechRailApp.xcodeproj",
-        "identifier" : "SpeechRailAppTests"
+        "identifier" : "A20000000000000000000005",
+        "name" : "SpeechRailAppTests"
       }
     },
     {
       "target" : {
         "containerPath" : "container:SpeechRailApp.xcodeproj",
-        "identifier" : "SpeechRailAppUITests"
+        "identifier" : "A20000000000000000000006",
+        "name" : "SpeechRailAppUITests"
       }
     }
   ],
