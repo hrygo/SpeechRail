@@ -11,6 +11,7 @@ import struct
 import threading
 import wave
 from collections import OrderedDict
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -511,7 +512,7 @@ async def _evaluate_probe_intelligibility(
                 include_timestamps=False,
             )
             result = await services.admission.run(
-                lambda: transcriber.transcribe(request),
+                partial(transcriber.transcribe, request),
                 deadline=remaining,
             )
             scores.append(vq.transcript_match_score(probe["text"], result.text))
