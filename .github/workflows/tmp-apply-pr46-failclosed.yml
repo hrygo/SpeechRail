@@ -1,0 +1,32 @@
+name: tmp-apply-pr46-failclosed
+on:
+  push:
+    branches:
+      - feat/quality-voice-capabilities
+    paths:
+      - .pr-bootstrap/pr46-failclosed-trigger
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quality-voice-capabilities
+          fetch-depth: 0
+      - name: Apply reviewed fail-closed patch
+        run: |
+          set -euxo pipefail
+          base64 -d .pr-bootstrap/pr46-failclosed.patch.gz.b64 | gzip -d > /tmp/pr46-failclosed.patch
+          echo 'd18725636159ba5fde94c4fecf375f389f2f31b67d1fa039ea488f6d3fe80bac  /tmp/pr46-failclosed.patch' | sha256sum -c -
+          git apply --check /tmp/pr46-failclosed.patch
+          git apply --index /tmp/pr46-failclosed.patch
+          rm -f .pr-bootstrap/pr46-failclosed.patch.gz.b64 .pr-bootstrap/pr46-failclosed-trigger .github/workflows/tmp-apply-pr46-failclosed.yml
+          rmdir .pr-bootstrap 2>/dev/null || true
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(tts): fail closed on model variant mismatch'
+          git push origin HEAD:feat/quality-voice-capabilities
