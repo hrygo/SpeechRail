@@ -32,7 +32,7 @@ from speechrail.runtime.worker_protocol import (
     write_frame,
 )
 
-TTS_BACKEND_ID = "mlx-qwen3-tts-voice-design"
+TTS_BACKEND_ID = "mlx-qwen3-tts"
 _CLONE_LOUDNESS_CHUNK_MS = 200
 _CLONE_TEMPERATURE = 0.1
 _CLONE_TOP_P = 0.95

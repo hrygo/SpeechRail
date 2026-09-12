@@ -59,7 +59,7 @@ def test_mlx_voice_design_engine_routes_preset_and_streaming_parameters(
 
     chunks = list(engine.synthesize("你好", voice="serena", speed=1.25, language="zh"))
 
-    assert engine.identity.backend == "mlx-qwen3-tts-voice-design"
+    assert engine.identity.backend == "mlx-qwen3-tts"
     assert model.calls == [
         {
             "text": "你好。",
