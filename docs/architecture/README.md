@@ -36,7 +36,7 @@ graph TD
 11. **[单机语音基座优化交付审计](2026-09-08-single-machine-speech-foundation-delivery.md)**（`active`）：方案 ID 与 Issue / PR / 回归证据的映射，以及尚待真实模型验证的质量门。
 12. **[实时 VAD 最佳实践与当前模式策略](realtime-vad-2026-best-practices.md)**（`active`）：Silero/legacy 解析、SpeechAdmission、Sona 的 400/900ms 调用策略与帧量化边界。
 13. **[克隆音色质量门禁与自量保障契约](voice-clone-quality-gates-and-contract.md)**（`under_review`）：参考音频门禁、clone revalidate、固定 probe、VoiceQualityReport、低基数观测与 Sona 闭环边界。
-
+14. **[克隆音色输出可懂度与 ASR 复核设计](voice-quality-intelligibility-validation.md)**（`proposed`）：定义 TTS probe 完成并释放模型槽后再批量 ASR 的阶段化验收，避免 Base TTS 与 ASR 形成未治理重模型重叠，并为随机噪声、错读/漏读提供独立文本证据。
 
 ---
 
