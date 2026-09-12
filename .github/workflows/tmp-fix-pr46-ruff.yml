@@ -1,0 +1,49 @@
+name: tmp-fix-pr46-ruff
+on:
+  push:
+    branches:
+      - feat/quality-voice-capabilities
+    paths:
+      - .tmp-fix-pr46-ruff-trigger
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quality-voice-capabilities
+          fetch-depth: 0
+      - name: Format three inspect_model monkeypatches
+        run: |
+          set -euxo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          old = '    monkeypatch.setattr(services_module, "inspect_model", lambda _: SimpleNamespace(variant="voice_design"))\n'
+          new = (
+              '    monkeypatch.setattr(\n'
+              '        services_module,\n'
+              '        "inspect_model",\n'
+              '        lambda _: SimpleNamespace(variant="voice_design"),\n'
+              '    )\n'
+          )
+          for name in [
+              'tests/test_app_contract.py',
+              'tests/test_application_composition.py',
+              'tests/test_speech_api.py',
+          ]:
+              path = Path(name)
+              text = path.read_text()
+              if old not in text:
+                  raise SystemExit(f'expected Ruff target not found: {name}')
+              path.write_text(text.replace(old, new, 1))
+          PY
+          rm -f .tmp-fix-pr46-ruff-trigger .github/workflows/tmp-fix-pr46-ruff.yml
+          git diff --check
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'test: format model identity monkeypatches'
+          git push origin HEAD:feat/quality-voice-capabilities
