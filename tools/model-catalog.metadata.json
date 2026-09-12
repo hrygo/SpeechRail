@@ -684,12 +684,12 @@
         "format": "mlx",
         "group_size": 64
       },
-      "revision": "e7dd0585652209fa0d7783659aad4e8a324de11c",
+      "revision": "73ae2cb59832ed1eb13c249e378b854cfc643131",
       "sources": [
         {
-          "provider": "huggingface",
+          "provider": "modelscope",
           "repository": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
-          "revision": "e7dd0585652209fa0d7783659aad4e8a324de11c"
+          "revision": "73ae2cb59832ed1eb13c249e378b854cfc643131"
         }
       ],
       "variant": "base"

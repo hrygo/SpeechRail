@@ -67,6 +67,16 @@ def _clean_wav(duration: float = 4.0) -> bytes:
     return _wav_from_pcm(samples.tobytes())
 
 
+def _pcm_from_wav(wav: bytes) -> bytes:
+    with wave.open(io.BytesIO(wav), "rb") as wf:
+        return wf.readframes(wf.getnframes())
+
+
+def _padded_clean_wav() -> bytes:
+    padding = b"\x00\x00" * _SAMPLE_RATE
+    return _wav_from_pcm(padding + _pcm_from_wav(_clean_wav()) + padding)
+
+
 def _clip_wav(duration: float = 4.0) -> bytes:
     n = int(duration * _SAMPLE_RATE)
     t = np.arange(n, dtype=np.float32) / _SAMPLE_RATE
@@ -345,6 +355,33 @@ def test_s1_validate_clean_pass_and_no_profile_created(
 
     assert [p for p in registry.list_profiles() if not p.is_system] == []
     assert not voices_dir.exists() or list(voices_dir.iterdir()) == []
+
+
+def test_validate_matches_the_canonical_report_used_by_clone_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    wav = _padded_clean_wav()
+    _patch(registry, wav, monkeypatch)
+
+    validate = client.post(
+        "/v1/voices/clone/validate",
+        data=_clone_payload(name="预检音色"),
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+    )
+    clone = client.post(
+        "/v1/voices/clone",
+        data=_clone_payload(name="注册音色"),
+        files={"audio": ("sample.wav", wav, "audio/wav")},
+    )
+
+    assert validate.status_code == 200
+    assert clone.status_code == 201
+    validate_report = validate.json()
+    registered_report = clone.json()["quality"]
+    assert validate_report["status"] == registered_report["status"] == "pass"
+    assert validate_report["failure_codes"] == registered_report["failure_codes"]
+    assert validate_report["reference"] == registered_report["reference"]
 
 
 # ---------------------------------------------------------------------------

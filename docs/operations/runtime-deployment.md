@@ -43,7 +43,7 @@ worker 协议、调度与并发保持不变（ADR-0011；三档组成重排见 A
 |---|---|---|---|---|---|---|
 | `light`（Embedded） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ | ✓ | **≈2.99 GB** |
 | `balanced`（Pro Workflow） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ | ✓ | **≈5.96 GB** |
-| `quality`（Studio） | `asr-1.7b-q8`（8-bit） | `tts-1.7b-design-q8`（8-bit） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈7.63 GB** |
+| `quality`（Studio） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8` + on-demand clone `tts-1.7b-base-q8`（均 8-bit） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈10.73 GB** |
 
 - aligner 是**分人专用制品**，不进入 `PreparedModelSet` / `prepare_models`；它由安装器与 `profile apply` 经
   `diarization_assets.prepare_diarization_assets(app_home, preset_id=..., downloader=...)` 供给到

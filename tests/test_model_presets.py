@@ -182,6 +182,18 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
     assert by_id["quality"].diarization is True
 
 
+def test_quality_clone_source_is_pinned_to_modelscope() -> None:
+    catalog = load_catalog()
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    clone = artifacts[catalog.preset("quality").tts_clone or ""]
+    source = clone.sources[0]
+
+    assert clone.variant == "base"
+    assert clone.revision == "73ae2cb59832ed1eb13c249e378b854cfc643131"
+    assert source.provider == "modelscope"
+    assert source.revision == clone.revision
+
+
 def test_preset_relationships_keep_weight_changes_only() -> None:
     catalog = ModelCatalog.model_validate(_catalog_payload())
     by_id = {item.id: item for item in catalog.presets}

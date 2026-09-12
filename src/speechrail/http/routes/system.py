@@ -11,6 +11,7 @@ import struct
 import threading
 import wave
 from collections import OrderedDict
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -266,6 +267,28 @@ def _grade_clone_audio(wav_bytes: bytes) -> vq.VoiceQualityReport:
         transcript_match=None,
     )
     return vq.make_quality_report(reference, _empty_synthesis())
+
+
+@dataclass(frozen=True)
+class _CloneQualityEvaluation:
+    canonical_wav: bytes | None
+    canonical_duration: float
+    report: vq.VoiceQualityReport
+
+
+def _evaluate_clone_reference_audio(wav_bytes: bytes) -> _CloneQualityEvaluation:
+    """Grade the raw gate and, when allowed, the canonical persisted reference."""
+    raw_report = _grade_clone_audio(wav_bytes)
+    if raw_report.status == vq.VoiceQualityStatus.REJECT.value:
+        return _CloneQualityEvaluation(None, 0.0, raw_report)
+
+    canonical_wav, canonical_duration = canonicalize_clone_reference_audio(
+        wav_bytes, target_sample_rate=24_000
+    )
+    canonical_report = _grade_clone_audio(canonical_wav)
+    if canonical_report.status == vq.VoiceQualityStatus.REJECT.value:
+        return _CloneQualityEvaluation(None, 0.0, canonical_report)
+    return _CloneQualityEvaluation(canonical_wav, canonical_duration, canonical_report)
 
 
 def _quality_reject_response(
@@ -826,19 +849,15 @@ def create_system_router(services: AppServices) -> APIRouter:
                 code = "invalid_audio"
             return error_response(400, request_id, code, err_str)
 
-        report = _grade_clone_audio(wav_bytes)
-        if report.status == vq.VoiceQualityStatus.REJECT.value:
-            return _quality_reject_response(request_id, report)
         try:
-            canonical_wav, canonical_duration = canonicalize_clone_reference_audio(
-                wav_bytes, target_sample_rate=24_000
-            )
+            evaluation = _evaluate_clone_reference_audio(wav_bytes)
         except ValueError as exc:
             return error_response(400, request_id, "invalid_audio", str(exc))
-        # Grade the persisted canonical asset, not the raw upload (as in /v1/voices/designs).
-        report = _grade_clone_audio(canonical_wav)
-        if report.status == vq.VoiceQualityStatus.REJECT.value:
-            return _quality_reject_response(request_id, report)
+        if evaluation.canonical_wav is None:
+            return _quality_reject_response(request_id, evaluation.report)
+        canonical_wav = evaluation.canonical_wav
+        canonical_duration = evaluation.canonical_duration
+        report = evaluation.report
 
         vid_str = (
             voice_id.strip().lower()
@@ -940,8 +959,18 @@ def create_system_router(services: AppServices) -> APIRouter:
                 code = "invalid_audio"
             return error_response(400, request_id, code, err_str)
 
-        report = _grade_clone_audio(wav_bytes)
-        return JSONResponse(status_code=200, content=report.to_dict())
+        try:
+            evaluation = _evaluate_clone_reference_audio(wav_bytes)
+        except ValueError as exc:
+            err_str = str(exc)
+            if "too short" in err_str:
+                code = "audio_too_short"
+            elif "too long" in err_str:
+                code = "audio_too_long"
+            else:
+                code = "invalid_audio"
+            return error_response(400, request_id, code, err_str)
+        return JSONResponse(status_code=200, content=evaluation.report.to_dict())
 
     @router.post("/v1/voices/{voice_id}/quality-runs")
     async def run_voice_quality(voice_id: str, request: Request) -> JSONResponse:
