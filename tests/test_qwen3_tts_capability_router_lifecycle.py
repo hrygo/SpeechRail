@@ -109,7 +109,10 @@ async def test_router_serializes_capability_switches_for_concurrent_streams(
     primary = _Worker("voice_design")
     clone = _BlockingWorker("base", entered, release)
     router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    assert router.warm_capability is None
     await router.start()
+    assert router.warm_capability == "voice_design"
+    assert router.lifecycle_stats["warm_capability"] == "voice_design"
 
     clone_request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
     design_request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
@@ -126,6 +129,7 @@ async def test_router_serializes_capability_switches_for_concurrent_streams(
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_clone)
         await entered.wait()
+        assert router.warm_capability == "voice_clone"
         tg.start_soon(run_design)
         await anyio.lowlevel.checkpoint()
         assert clone.alive is True
@@ -136,6 +140,7 @@ async def test_router_serializes_capability_switches_for_concurrent_streams(
     assert results == ["clone", "design"]
     assert clone.alive is False
     assert primary.alive is True
+    assert router.warm_capability == "voice_design"
     assert primary.requests == [design_request]
 
 

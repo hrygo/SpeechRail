@@ -194,6 +194,25 @@ class NondeterministicSynthesizer:
         return chunks()
 
 
+
+
+class OutOfOrderSynthesizer:
+    def __init__(self) -> None:
+        self.requests: list[SpeechRequest] = []
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        self.requests.append(request)
+
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(
+                response_id="quality_probe",
+                chunk_index=1,
+                audio=_sine_pcm(0.5),
+            )
+
+        return chunks()
+
+
 class EmptySynthesizer:
     def __init__(self) -> None:
         self.requests: list[SpeechRequest] = []
@@ -746,6 +765,24 @@ def test_quality_runs_detects_repeated_output_nondeterminism(
     assert body["synthesis"]["successful_probe_count"] == 12
     assert body["synthesis"]["deterministic"] is False
     assert "output_nondeterministic" in body["failure_codes"]
+
+
+def test_quality_runs_rejects_malformed_chunk_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synth = OutOfOrderSynthesizer()
+    client, registry, _synth, _voices_dir = _make_client(tmp_path, synth)  # type: ignore[arg-type]
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "reject"
+    assert body["synthesis"]["successful_probe_count"] == 0
+    assert "output_invalid" in body["failure_codes"]
 
 
 def test_quality_runs_runs_every_fixed_probe_category(

@@ -284,14 +284,14 @@ SpeechRail exposes a unified API contract while internally adapting across Apple
 
 SpeechRail preconfigures 9 acoustically fine-tuned voice personas consistent across all profiles (compatible with OpenAI official aliases such as `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu`, etc.).
 
-Note: **The underlying generation mechanism differs by profile and capability**—`balanced` / `light` use **CustomVoice (0.6B)**; `quality` uses **VoiceDesign (1.7B)** for normal/prompt-designed speech and an on-demand **Base (1.7B)** model for reference clones. Users can choose between "absolute vocal consistency" and "expressive emotional range" based on their application needs:
+Note: **The underlying generation mechanism differs by profile and capability**—`balanced` / `light` use **CustomVoice (0.6B)**; `quality` uses **VoiceDesign (1.7B)** for normal/prompt-designed speech and an on-demand **Base (1.7B)** model for reference clones. Users can choose between a structurally fixed preset-voice path and a more expressive instruction-conditioned path based on application needs. Cross-text identity stability must be measured rather than assumed:
 
 #### ⚖️ VoiceDesign vs. CustomVoice: Core Differences & Selection Guide
 
 | Dimension | 🟡 / 🟢 `balanced` / `light` (CustomVoice) | 🟣 `quality` (VoiceDesign) | Recommendation & Use Cases |
 |---|---|---|---|
 | **Underlying Implementation** | Fixed Speaker Embedding weights (physical constants) | Driven by natural language instruction and acoustic prompt fitting | CustomVoice: structural embedding; VoiceDesign: algorithmic synthesis |
-| **Vocal Consistency (Identity)** | 🔒 **Extremely High (~100% identity consistency)**<br>Identical timbre across long texts and varying contexts | 🎨 **Good (100% deterministic reproducibility for identical input)**<br>Minor intonation/prosody variance across drastically different texts | Long audiobooks, news broadcasts, serious customer support: choose **CustomVoice**;<br>Natural prosody variation and emotion: choose **VoiceDesign** |
+| **Vocal Consistency (Identity)** | Structurally fixed preset-speaker path; expected to be steadier across text than open-ended design, but no universal percentage is claimed | Instruction-conditioned path; a fixed seed can improve same-input reproducibility, but it does not prove cross-text speaker-identity stability | Long-form/strict identity workloads should benchmark CustomVoice; expressive workloads can prefer **VoiceDesign** |
 | **Emotional Expressiveness** | Measured, stable, standardized, minimal pitch fluctuation | Expressive, vibrant, with natural breathing and dramatic range | Story narration, game NPCs, virtual companions: choose **VoiceDesign** |
 | **Custom Extensibility** | Limited to 9 predefined roles, no free creation | 🌟 **Create any custom voice persona using natural language prompts** | Choose **`quality`** when creating or exploring unique personas |
 | **RAM & Throughput** | Ultra-lightweight (~4.4–6.0 GB peak, pre-v2), fast inference | 1.7B high precision (~6.9 GB peak, pre-v2), higher compute demand | Recommended for 8GB/16GB Macs; 32GB+ flagship Macs enjoy quality tier |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -16,6 +17,11 @@ from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from speechrail.application.services import AppServices
+from speechrail.application.tts_delivery import (
+    TTSDeliveryError,
+    iter_until,
+    iter_validated_audio,
+)
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     asr_model_aliases,
@@ -36,6 +42,7 @@ from speechrail.domain.tts import (
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
+from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 _CLONE_PROMPTS_ASSET = (
     Path(__file__).resolve().parent.parent.parent
@@ -58,7 +65,12 @@ def _load_clone_prompts() -> list[dict[str, Any]]:
 _CACHED_CLONE_PROMPTS: list[dict[str, Any]] = _load_clone_prompts()
 _MAX_VOICE_SEED = 2**32 - 1
 _TTS_LIFECYCLE_FIELDS = frozenset(
-    {"cooperative_cancel_supported", "fallback_abort_count", "reload_count"}
+    {
+        "cooperative_cancel_supported",
+        "fallback_abort_count",
+        "reload_count",
+        "warm_capability",
+    }
 )
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,7 +99,9 @@ def _store_clone_idempotency_locked(
         _clone_idempotency.popitem(last=False)
 
 
-def _tts_lifecycle_diagnostics(services: AppServices) -> dict[str, int | bool] | None:
+def _tts_lifecycle_diagnostics(
+    services: AppServices,
+) -> dict[str, int | bool | str | None] | None:
     """Return safe TTS lifecycle counters when this backend exposes them."""
 
     stats = getattr(services.tts_synthesizer, "lifecycle_stats", None)
@@ -96,7 +110,8 @@ def _tts_lifecycle_diagnostics(services: AppServices) -> dict[str, int | bool] |
     return {
         name: value
         for name, value in stats.items()
-        if name in _TTS_LIFECYCLE_FIELDS and isinstance(value, (bool, int))
+        if name in _TTS_LIFECYCLE_FIELDS
+        and (value is None or isinstance(value, (bool, int, str)))
     }
 
 
@@ -296,13 +311,17 @@ _OUTPUT_INVALID_CODE = vq.VoiceQualityFailureCode.OUTPUT_INVALID.value
 def _classify_probe_failure(exc: BaseException) -> str:
     if isinstance(exc, RuntimeError) and "speed" in str(exc).lower():
         return _CLONE_SPEED_UNSUPPORTED_CODE
-    if isinstance(exc, (ValueError, TypeError)):
+    if isinstance(exc, (TTSDeliveryError, ValueError, TypeError)):
         return _OUTPUT_INVALID_CODE
     return vq.VoiceQualityFailureCode.PROBE_FAILED.value
 
 
 async def _synthesize_probes(
-    synthesizer: SpeechSynthesizer, voice_id: str, repetitions: int
+    synthesizer: SpeechSynthesizer,
+    voice_id: str,
+    repetitions: int,
+    *,
+    expires_at: float | None = None,
 ) -> tuple[bytes, int, int, list[str], bool]:
     pcm = bytearray()
     ok = 0
@@ -320,8 +339,14 @@ async def _synthesize_probes(
             )
             probe_pcm = bytearray()
             try:
-                async for chunk in synthesizer.synthesize(synthesis):
+                source = iter_validated_audio(synthesizer.synthesize(synthesis))
+                bounded = (
+                    iter_until(source, expires_at) if expires_at is not None else source
+                )
+                async for chunk in bounded:
                     probe_pcm.extend(chunk.audio)
+            except TimeoutError:
+                raise
             except Exception as exc:
                 failure_codes.append(_classify_probe_failure(exc))
                 continue
@@ -845,11 +870,40 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
 
         registry = get_voice_registry()
+        expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
         try:
-            with registry.lease_profile(voice_id) as profile:
-                pcm, attempted, ok, probe_failure_codes, deterministic = await _synthesize_probes(
-                    synthesizer, profile.id, runs
-                )
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS, expires_at=expires_at
+            ):
+                with registry.lease_profile(voice_id) as profile:
+                    pcm, attempted, ok, probe_failure_codes, deterministic = (
+                        await _synthesize_probes(
+                            synthesizer,
+                            profile.id,
+                            runs,
+                            expires_at=expires_at,
+                        )
+                    )
+        except GovernorQueueFullError:
+            return JSONResponse(
+                status_code=429,
+                content=error(
+                    message="Inference queue is full",
+                    error_type="server_error",
+                    code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except TimeoutError:
+            return error_response(
+                503,
+                request_id,
+                "backend_timeout",
+                "Voice quality run timed out",
+                retryable=True,
+            )
         except VoiceStoreUnavailableError:
             return error_response(
                 503,

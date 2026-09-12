@@ -53,3 +53,16 @@ ADR-0003 要求模型运行时隔离与离线准入，ADR-0011 要求单机共�
 - [v2.4.0 性能与质量基准](../archive/performance/2026-09-11-v2.4.0-performance-benchmark.md)
 - [ADR-0011：统一语音运行时与仅权重分档](0011-unified-runtime-model-tiers.md)、[ADR-0003：模型运行时隔离与离线准入](0003-runtime-isolation.md)
 - 代码：`src/speechrail/application/services.py`（`_heavy_overlap_policy`）、`src/speechrail/runtime/model_budget.py`（`budget_for_hardware` / `can_overlap_heavy_compute`）、`src/speechrail/runtime/resource_governor.py`（`allow_heavy_overlap` / `_can_admit`）、`src/speechrail/config/__init__.py`（`allow_heavy_overlap` 与 `*_resident_bytes`）
+
+## 2026-09-12 Amendment — Quality 双 TTS capability 的预算口径
+
+Quality 新增 Base clone artifact 后，**安装体积**会上升，但运行时重模型预算不能简单把
+VoiceDesign 与 Base 两套 1.7B TTS 同时相加。`Qwen3TtsCapabilityRouter` 把它们作为一个互斥
+TTS 槽：切换 capability 前关闭另一 worker，Base 首次 clone 请求才加载。因此
+`SPEECHRAIL_TTS_RESIDENT_BYTES` 应声明“当前可驻留的单个 TTS capability 的可信峰值上界”，并在
+VoiceDesign 与 Base 两条路径分别实测后取保守值。
+
+Quality quality-runs 也属于受治理的 `BATCH_TTS` 工作：固定 probe 生成必须经过
+`ResourceGovernor` 并受统一绝对 deadline 约束，不能因为它是验收接口就绕开 heavy-compute
+准入。后续 ASR intelligibility 复核仍必须在 TTS phase 结束并释放 TTS capability lock 后再进入
+ASR phase，避免形成未治理的 Base TTS ∥ ASR 隐式并行。

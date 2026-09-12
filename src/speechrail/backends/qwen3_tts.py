@@ -396,7 +396,22 @@ class Qwen3TtsCapabilityRouter:
         return self.primary.model_variant
 
     @property
-    def lifecycle_stats(self) -> dict[str, int | bool]:
+    def warm_capability(self) -> str | None:
+        """Return the currently resident TTS capability without loading a model."""
+        primary_ready = self.primary.ready
+        clone_ready = bool(self.clone is not None and self.clone.ready)
+        if primary_ready and clone_ready:
+            # This should be unreachable under the capability lock, but exposing
+            # it makes an invariant violation visible to health diagnostics.
+            return "conflict"
+        if clone_ready:
+            return "voice_clone"
+        if primary_ready:
+            return "voice_design" if self.primary.model_variant == "voice_design" else "tts"
+        return None
+
+    @property
+    def lifecycle_stats(self) -> dict[str, int | bool | str | None]:
         primary = self.primary.lifecycle_stats
         clone = self.clone.lifecycle_stats if self.clone is not None else None
         return {
@@ -408,6 +423,7 @@ class Qwen3TtsCapabilityRouter:
             + (int(clone["fallback_abort_count"]) if clone is not None else 0),
             "reload_count": int(primary["reload_count"])
             + (int(clone["reload_count"]) if clone is not None else 0),
+            "warm_capability": self.warm_capability,
         }
 
     async def start(self) -> None:

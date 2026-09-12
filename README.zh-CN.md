@@ -284,14 +284,14 @@ SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Emb
 
 SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色角色（接口与角色 ID 跨档保持一致，原生兼容 OpenAI 官方别名如 `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu` 等）。
 
-但请注意：**底层生成机制按档位和 capability 区分**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动；`quality` 的普通/提示词音色由 **VoiceDesign (1.7B)** 驱动，而 reference clone 使用按需加载的 **Base (1.7B)**。用户可根据实际业务需要，在“绝对声线稳定性”与“丰富情感表现力”之间做针对性选择：
+但请注意：**底层生成机制按档位和 capability 区分**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动；`quality` 的普通/提示词音色由 **VoiceDesign (1.7B)** 驱动，而 reference clone 使用按需加载的 **Base (1.7B)**。用户可根据实际业务需要，在“结构固定的预设音色路径”与“更开放的表达能力”之间选择；跨文本 speaker identity 必须通过实测证明，不能由模型类别直接推定：
 
 #### ⚖️ VoiceDesign 与 CustomVoice 核心差异与选型建议
 
 | 比较维度 | 🟡 / 🟢 `balanced` / `light` (CustomVoice) | 🟣 `quality` (VoiceDesign) | 选型与适用场景建议 |
 |---|---|---|---|
 | **底层实现** | 固化 Speaker Embedding 权重 (物理常量) | 自然语言 Instruction 与声学提示驱动拟合 | CustomVoice 结构固化；VoiceDesign 算法拟合 |
-| **声线稳定性 (Identity)** | 🔒 **极高 (近 100% 同一人一致性)**<br>跨不同长文本、不同语境音色完全恒定 | 🎨 **良好 (相同输入 100% 确定性复现)**<br>跨极端差异文本时偶有微小情绪/声调发散 | 长篇朗读、新闻播报、严肃客服选 **CustomVoice**；<br>允许或需要自然语调起伏选 **VoiceDesign** |
+| **声线稳定性 (Identity)** | 结构固定的预设 speaker 路径，理论上比开放式设计更容易保持跨文本一致，但不声明通用百分比 | Instruction 条件驱动；固定 seed 可改善同输入复现，但不能据此证明跨文本 speaker identity 稳定 | 长篇/严格身份场景应实测 CustomVoice；强调自然表达与情绪时可优先 VoiceDesign |
 | **情感张力与表现力** | 规范、平稳、标准，情绪起伏小 | 丰富、生动、富有自然呼吸感与戏剧表现力 | 故事旁白、游戏 NPC、虚拟陪伴智能体首选 **VoiceDesign** |
 | **开放自定义扩展** | 仅限 9 个固定角色，不支持自由创造 | 🌟 **支持自然语言 Prompt 任意创造新声线** | 需要探索或定制独一无二的新角色时必选 **`quality`** |
 | **硬件内存与吞吐** | 极轻量 (~4.4-6.0GB 峰值, pre-v2)，推理极速 | 1.7B 高精度 (~6.9GB 峰值, pre-v2)，算力开销略高 | 8GB/16GB Mac 推荐前者；32GB+ 旗舰 Mac 畅享后者 |
