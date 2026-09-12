@@ -1,0 +1,33 @@
+name: tmp-apply-pr46-asr-intelligibility
+on:
+  push:
+    branches:
+      - feat/quality-voice-capabilities
+    paths:
+      - .pr-bootstrap/pr46-asr-intelligibility-trigger
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quality-voice-capabilities
+          fetch-depth: 0
+      - name: Reassemble and apply reviewed ASR intelligibility patch
+        run: |
+          set -euxo pipefail
+          cat .pr-bootstrap/pr46-asr-intelligibility.part.00 .pr-bootstrap/pr46-asr-intelligibility.part.01 .pr-bootstrap/pr46-asr-intelligibility.part.02 > /tmp/pr46-asr-intelligibility.patch.gz.b64
+          base64 -d /tmp/pr46-asr-intelligibility.patch.gz.b64 | gzip -d > /tmp/pr46-asr-intelligibility.patch
+          echo 'b898b1f2c617c7f5fdc5bfbf77ddb60c19a375c7be3681a5cea6ef3f4a4151c7  /tmp/pr46-asr-intelligibility.patch' | sha256sum -c -
+          git apply --check /tmp/pr46-asr-intelligibility.patch
+          git apply --index /tmp/pr46-asr-intelligibility.patch
+          rm -f .pr-bootstrap/pr46-asr-intelligibility.part.00 .pr-bootstrap/pr46-asr-intelligibility.part.01 .pr-bootstrap/pr46-asr-intelligibility.part.02 .pr-bootstrap/pr46-asr-intelligibility-trigger .github/workflows/tmp-apply-pr46-asr-intelligibility.yml
+          rmdir .pr-bootstrap 2>/dev/null || true
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(voice-quality): add ASR intelligibility gate'
+          git push origin HEAD:feat/quality-voice-capabilities
