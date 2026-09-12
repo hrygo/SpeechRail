@@ -1,6 +1,6 @@
 # Superpowers 过程目录
 
-本目录保存近期活跃的设计规格与实施计划，状态为 `accepted` 或 `ready`，供实施参考。
+本目录保存近期活跃的设计规格与实施计划，状态为 `accepted`、`ready` 或候选 `draft`，供实施参考。
 
 ## 设计规格
 
@@ -11,6 +11,7 @@
 - [服务运维效率设计](specs/2026-09-07-service-operator-efficiency-design.md)
 - [讲话人分离整洁架构](specs/2026-09-08-diarization-clean-architecture-design.md)（`accepted`）
 - [讲话人分离 D1 选择证据](specs/2026-09-08-diarization-d1-selection-evidence.md)
+- [Clone frozen-gain 边界修复候选](specs/2026-09-12-clone-loudness-boundaries.md)（`draft`）
 
 ## 实施计划
 

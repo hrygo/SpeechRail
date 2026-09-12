@@ -35,7 +35,12 @@ Calibration uses complete 10 ms media-time frames, independently of process
 calls. A frame needs RMS above `silence_rms` and at least 20% above-gate samples
 (at least two samples); this rejects isolated spikes but is not a speech VAD.
 Accumulate `calibration_ms` of eligible frames (default 200 ms), then use the
-median frame power to select the bounded request gain. Until then emit unity
+median frame power to select the bounded request gain; calibration additionally
+requires at least three eligible frames, so a `calibration_ms` below one 10 ms
+analysis frame cannot lock a gain from a single frame. A signal whose frames
+never reach 20% occupancy (for example a low-duty high-energy pulse train) never
+becomes eligible: collection never starts, the deadline never arms, and the
+request stays at unity in the `waiting` state. Until calibrated, emit unity
 gain, still subject to sample-peak protection. Leading silence does not start
 the collection deadline. Once collection begins, insufficient evidence after
 `max(1 second, 5 * calibration_ms)` falls back to unity for the request. This
