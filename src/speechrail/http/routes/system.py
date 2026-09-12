@@ -43,6 +43,7 @@ from speechrail.domain.tts import (
     VoiceInUseError,
     VoiceProfile,
     VoiceStoreUnavailableError,
+    canonicalize_clone_reference_audio,
     get_voice_registry,
 )
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
@@ -817,6 +818,12 @@ def create_system_router(services: AppServices) -> APIRouter:
         report = _grade_clone_audio(wav_bytes)
         if report.status == vq.VoiceQualityStatus.REJECT.value:
             return _quality_reject_response(request_id, report)
+        try:
+            canonical_wav, canonical_duration = canonicalize_clone_reference_audio(
+                wav_bytes, target_sample_rate=24_000
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "invalid_audio", str(exc))
 
         vid_str = (
             voice_id.strip().lower()
@@ -828,9 +835,9 @@ def create_system_router(services: AppServices) -> APIRouter:
             return get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
-                audio_bytes=wav_bytes,
+                audio_bytes=canonical_wav,
                 voice_id=vid_str,
-                duration_seconds=duration,
+                duration_seconds=canonical_duration,
                 quality=report.to_dict(),
             )
 

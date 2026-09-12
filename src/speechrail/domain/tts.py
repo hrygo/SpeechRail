@@ -289,6 +289,111 @@ def tts_voice_class(voice: str) -> str:
     return "custom"
 
 
+_CANONICAL_REFERENCE_TARGET_DBFS = -20.0
+_CANONICAL_REFERENCE_MAX_GAIN_DB = 9.0
+_CANONICAL_REFERENCE_MAX_ATTENUATION_DB = 12.0
+_CANONICAL_REFERENCE_PEAK_CEILING = 0.95
+_CANONICAL_REFERENCE_PAD_SECONDS = 0.20
+_CANONICAL_REFERENCE_MIN_SECONDS = 2.0
+
+
+def canonicalize_clone_reference_audio(
+    wav_bytes: bytes,
+    *,
+    target_sample_rate: int = 24_000,
+) -> tuple[bytes, float]:
+    """Create one canonical clone reference without whole-recording RMS bias.
+
+    The input must already be decoded to mono PCM16 WAV and must have passed the
+    reference quality gate. Gain is derived only from speech-active 20 ms
+    windows, bounded conservatively, and capped by a fixed peak ceiling. Long
+    leading/trailing inactive regions are trimmed while retaining a short pad.
+    The returned WAV is the only reference persisted for Base cloning; the
+    vendor loader must therefore not normalize it again.
+    """
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            if (
+                wf.getnchannels() != 1
+                or wf.getsampwidth() != 2
+                or wf.getframerate() != target_sample_rate
+            ):
+                raise ValueError(
+                    "reference audio must be mono PCM16 at the target sample rate"
+                )
+            pcm = wf.readframes(wf.getnframes())
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("reference audio cannot be canonicalized") from exc
+
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        raise ValueError("reference audio contains no usable speech")
+
+    window_samples = max(1, round(target_sample_rate * 0.02))
+    active_threshold = 10 ** (-45.0 / 20.0)
+    active_windows: list[tuple[int, int]] = []
+    active_energy = 0.0
+    active_count = 0
+    for start in range(0, len(samples), window_samples):
+        end = min(len(samples), start + window_samples)
+        window = samples[start:end]
+        if not window:
+            continue
+        energy = sum((sample / 32_768.0) ** 2 for sample in window)
+        rms = math.sqrt(energy / len(window))
+        if rms > active_threshold:
+            active_windows.append((start, end))
+            active_energy += energy
+            active_count += len(window)
+    if not active_windows or active_count <= 0:
+        raise ValueError("reference audio contains no usable speech")
+
+    active_rms = math.sqrt(active_energy / active_count)
+    target_rms = 10 ** (_CANONICAL_REFERENCE_TARGET_DBFS / 20.0)
+    desired_gain = target_rms / max(active_rms, 1e-9)
+    min_gain = 10 ** (-_CANONICAL_REFERENCE_MAX_ATTENUATION_DB / 20.0)
+    max_gain = 10 ** (_CANONICAL_REFERENCE_MAX_GAIN_DB / 20.0)
+    gain = min(max(desired_gain, min_gain), max_gain)
+    peak = max(abs(sample) for sample in samples) / 32_768.0
+    if peak > 0.0:
+        gain = min(gain, _CANONICAL_REFERENCE_PEAK_CEILING / peak)
+
+    pad = round(target_sample_rate * _CANONICAL_REFERENCE_PAD_SECONDS)
+    start = max(0, active_windows[0][0] - pad)
+    end = min(len(samples), active_windows[-1][1] + pad)
+    minimum_samples = round(target_sample_rate * _CANONICAL_REFERENCE_MIN_SECONDS)
+    if end - start < minimum_samples and len(samples) >= minimum_samples:
+        missing = minimum_samples - (end - start)
+        extend_left = min(start, missing // 2)
+        start -= extend_left
+        missing -= extend_left
+        extend_right = min(len(samples) - end, missing)
+        end += extend_right
+        missing -= extend_right
+        if missing:
+            start = max(0, start - missing)
+
+    conditioned = array("h")
+    for sample in samples[start:end]:
+        value = int(round(sample * gain))
+        conditioned.append(max(-32_768, min(32_767, value)))
+    if sys.byteorder != "little":
+        conditioned.byteswap()
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(target_sample_rate)
+        wf.writeframes(conditioned.tobytes())
+    duration = len(conditioned) / float(target_sample_rate)
+    return output.getvalue(), duration
+
 def transcode_and_validate_clone_audio(
     audio_bytes: bytes,
     *,
@@ -1284,6 +1389,7 @@ __all__ = [
     "get_voice_registry",
     "normalize_tts_text",
     "resolve_voice",
+    "canonicalize_clone_reference_audio",
     "transcode_and_validate_clone_audio",
     "tts_voice_class",
 ]

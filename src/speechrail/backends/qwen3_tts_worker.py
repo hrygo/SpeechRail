@@ -579,7 +579,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             audio_array = loader(
                 str(resolved),
                 sample_rate=self._sample_rate,
-                volume_normalize=True,
+                volume_normalize=False,
             )
         except Exception as exc:
             raise RuntimeError(f"failed to decode reference audio: {exc}") from exc

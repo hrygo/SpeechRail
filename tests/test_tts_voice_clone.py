@@ -28,6 +28,7 @@ from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import (
     VoiceInUseError,
     VoiceRegistry,
+    canonicalize_clone_reference_audio,
     transcode_and_validate_clone_audio,
 )
 
@@ -282,6 +283,52 @@ def test_voice_registry_cross_process_mtime_reload(tmp_path: Path) -> None:
 
 
 # ===================== 2. Audio Transcoding & Validation =====================
+
+
+def test_canonicalize_clone_reference_uses_active_speech_for_gain() -> None:
+    sample_rate = 24_000
+    silence = np.zeros(sample_rate * 2, dtype=np.float32)
+    timeline = np.arange(sample_rate * 2, dtype=np.float32) / sample_rate
+    speech = 0.02 * np.sin(2 * np.pi * 220 * timeline)
+    samples = np.concatenate((silence, speech, silence))
+    pcm = np.asarray(np.round(samples * 32767), dtype="<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+    canonical, duration = canonicalize_clone_reference_audio(buf.getvalue())
+
+    with wave.open(io.BytesIO(canonical), "rb") as wf:
+        out = np.frombuffer(wf.readframes(wf.getnframes()), dtype="<i2").astype(np.float32)
+    assert 2.0 <= duration < 3.0
+    assert np.max(np.abs(out)) < 32767
+    active = out[np.abs(out) > 100]
+    assert active.size > 0
+    rms = float(np.sqrt(np.mean(np.square(active / 32768.0))))
+    assert rms > 0.04
+
+
+def test_canonicalize_clone_reference_caps_peak_after_gain() -> None:
+    sample_rate = 24_000
+    samples = np.zeros(sample_rate * 3, dtype=np.float32)
+    timeline = np.arange(sample_rate, dtype=np.float32) / sample_rate
+    samples[sample_rate : sample_rate * 2] = 0.9 * np.sin(2 * np.pi * 220 * timeline)
+    pcm = np.asarray(np.round(samples * 32767), dtype="<i2")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm.tobytes())
+
+    canonical, _ = canonicalize_clone_reference_audio(buf.getvalue())
+
+    with wave.open(io.BytesIO(canonical), "rb") as wf:
+        out = np.frombuffer(wf.readframes(wf.getnframes()), dtype="<i2")
+    assert int(np.max(np.abs(out.astype(np.int32)))) <= int(32768 * 0.95) + 1
 
 
 def test_transcode_and_validate_clone_audio_duration_bounds() -> None:
@@ -873,7 +920,7 @@ def test_mlx_voice_design_reference_loader_requests_volume_normalization(
         {
             "path": str(reference.resolve()),
             "sample_rate": 24_000,
-            "volume_normalize": True,
+            "volume_normalize": False,
         }
     ]
 
@@ -900,7 +947,7 @@ def test_mlx_voice_design_reference_cache_is_bounded_and_invalidates_source(
         path: str, *, sample_rate: int, volume_normalize: bool
     ) -> np.ndarray:
         assert sample_rate == 24_000
-        assert volume_normalize is True
+        assert volume_normalize is False
         loads.append(path)
         return np.ones(100, dtype=np.float32)
 
