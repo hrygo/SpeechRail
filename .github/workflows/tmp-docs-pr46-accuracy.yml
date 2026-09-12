@@ -18,51 +18,48 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          p=Path('README.md')
-          s=p.read_text()
-          old='''- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. Validation and quality-run endpoints retain the `voice_quality_v1` report contract, but the 2026-09-12 audit identified synthesis-gate false-positive gaps; a green report is not yet sufficient evidence of cross-text speaker identity. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md) and [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).'''
-          new='''- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. The synthesis gate now covers all six fixed probes, rejects silent/clipped output, and verifies fixed-seed repeated PCM determinism. A green report still does **not** prove transcript intelligibility, arbitrary-noise rejection, or cross-text speaker identity; those require staged ASR and independent speaker evidence. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md), [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md), and [Output Intelligibility / ASR Validation](docs/architecture/voice-quality-intelligibility-validation.md).'''
-          assert old in s
-          old2='''> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign`. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.'''
-          new2='''> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign` for normal/prompt-designed TTS and swaps to the on-demand `Base` capability for reference clones. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.'''
-          assert old2 in s
-          p.write_text(s.replace(old,new,1).replace(old2,new2,1))
+          def replace_if_present(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              s = p.read_text()
+              if old in s:
+                  p.write_text(s.replace(old, new, 1))
 
-          p=Path('README.zh-CN.md')
-          s=p.read_text()
-          old='''- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。`voice_quality_v1` 报告契约继续保留，但 2026-09-12 审计已确认 synthesis 门禁存在假阳性缺口；在独立整改完成前，绿色报告不能视为跨文本 speaker identity 已证明。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md)。'''
-          new='''- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前 synthesis 门禁已覆盖全部 6 类固定 probe，可拒绝静音/削波输出，并用固定 seed 下的重复 PCM 比较验证确定性；但绿色报告仍**不能**证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。'''
-          assert old in s
-          p.write_text(s.replace(old,new,1))
-
-          p=Path('docs/architecture/voice-clone-quality-gates-and-contract.md')
-          s=p.read_text()
-          replacements=[
-            (
-              '当前 `/v1/voices/{voice_id}/quality-runs` 存在已知假阳性：只要生成调用成功，就可能把静音、严重削波或不稳定输出报告为通过。修复前，绿色 synthesis 报告不能作为可靠质量证据。',
-              '当前 `/v1/voices/{voice_id}/quality-runs` 已修复已知的信号级假阳性：全 6 类固定 probe 均会执行，静音/无效 PCM 与削波会失败，固定 seed 下的重复输出会按 PCM digest 验证确定性。其边界仍然明确：尚未用 ASR 证明文本可懂度/错读，也未用独立声纹模型证明跨文本 speaker identity，因此绿色 synthesis 报告仍不是“完整音色质量证明”。',
-            ),
-            (
+          replace_if_present(
+              'README.md',
+              '- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. Validation and quality-run endpoints retain the `voice_quality_v1` report contract, but the 2026-09-12 audit identified synthesis-gate false-positive gaps; a green report is not yet sufficient evidence of cross-text speaker identity. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md) and [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).',
+              '- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. The synthesis gate now covers all six fixed probes, rejects silent/clipped output, and verifies fixed-seed repeated PCM determinism. A green report still does **not** prove transcript intelligibility, arbitrary-noise rejection, or cross-text speaker identity; those require staged ASR and independent speaker evidence. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md), [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md), and [Output Intelligibility / ASR Validation](docs/architecture/voice-quality-intelligibility-validation.md).',
+          )
+          replace_if_present(
+              'README.md',
+              '> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign`. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.',
+              '> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign` for normal/prompt-designed TTS and swaps to the on-demand `Base` capability for reference clones. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.',
+          )
+          replace_if_present(
+              'README.zh-CN.md',
+              '- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。`voice_quality_v1` 报告契约继续保留，但 2026-09-12 审计已确认 synthesis 门禁存在假阳性缺口；在独立整改完成前，绿色报告不能视为跨文本 speaker identity 已证明。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md)。',
+              '- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前 synthesis 门禁已覆盖全部 6 类固定 probe，可拒绝静音/削波输出，并用固定 seed 下的重复 PCM 比较验证确定性；但绿色报告仍**不能**证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。',
+          )
+          replace_if_present(
+              'docs/architecture/voice-clone-quality-gates-and-contract.md',
+              '> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。另一次本地回归审计发现当前 synthesis quality-run 的最终 pass 与 deterministic 判断仍存在假阳性风险；该报告契约保留，但在门禁修复前不能把 `pass` 当成 speaker identity/纯净度的充分证据。',
+              '> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。当前 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波与固定 seed 重复输出确定性纳入实际通过条件；但 `pass` 仍不能证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。',
+          )
+          replace_if_present(
+              'docs/architecture/voice-clone-quality-gates-and-contract.md',
               '> **审计阻断（2026-09-12）**：当前实现对生成成功的探针几乎都判定 `pass`，`deterministic` 也不是重复输出比较结果。本文其余质量阈值与指标设计是目标契约，不代表当前运行时已经满足。',
               '> **当前边界（2026-09-12）**：信号有效性、全 probe 覆盖和固定 seed 下的重复输出确定性已经进入运行时门禁；文本可懂度/错读检测、任意噪声拒绝与独立 speaker identity 仍是后续质量证据，详见 `voice-quality-intelligibility-validation.md`。本文涉及这些高级指标的阈值仍属于目标契约，不代表当前运行时已经全部满足。',
-            ),
-          ]
-          for old,new in replacements:
-              assert old in s, old
-              s=s.replace(old,new,1)
-          p.write_text(s)
+          )
+          replace_if_present(
+              'docs/users/api-contract.md',
+              '> **当前审计边界（2026-09-12）**：`quality-runs` 的 synthesis 通过条件仍存在已知假阳性；静音、削波或不同的重复输出都可能被报告为通过。当前绿色 synthesis 报告不能单独作为 clone 质量证明。',
+              '> **当前审计边界（2026-09-12）**：`quality-runs` 已将静音/无效输出、削波、全 6 类固定 probe 覆盖和固定 seed 重复确定性纳入实际通过条件；但文本可懂度/错读、任意噪声与跨文本 speaker identity 仍缺独立 ASR/声纹证据，因此绿色 synthesis 报告仍不是完整 clone 质量证明。',
+          )
 
           p=Path('docs/users/api-contract.md')
           s=p.read_text()
-          old='''> **当前审计边界（2026-09-12）**：`quality-runs` 的 synthesis 通过条件仍存在已知假阳性；静音、削波或不同的重复输出都可能被报告为通过。当前绿色 synthesis 报告不能单独作为 clone 质量证明。'''
-          new='''> **当前审计边界（2026-09-12）**：`quality-runs` 已将静音/无效输出、削波、全 6 类固定 probe 覆盖和固定 seed 重复确定性纳入实际通过条件；但文本可懂度/错读、任意噪声与跨文本 speaker identity 仍缺独立 ASR/声纹证据，因此绿色 synthesis 报告仍不是完整 clone 质量证明。'''
-          assert old in s
-          s=s.replace(old,new,1)
-          # Remove a duplicated failure-code row if the initial implementation left one behind.
           duplicate='| `output_nondeterministic` | 同一 probe 固定 seed 重复生成的 PCM digest 不一致 |\n| `output_nondeterministic` | 同一 probe 固定 seed 重复生成的 PCM digest 不一致 |\n'
           if duplicate in s:
-              s=s.replace(duplicate,'| `output_nondeterministic` | 同一 probe 固定 seed 重复生成的 PCM digest 不一致 |\n',1)
-          p.write_text(s)
+              p.write_text(s.replace(duplicate,'| `output_nondeterministic` | 同一 probe 固定 seed 重复生成的 PCM digest 不一致 |\n',1))
           PY
           rm -f .pr-bootstrap/DOC_ACCURACY .github/workflows/tmp-docs-pr46-accuracy.yml
           rmdir .pr-bootstrap 2>/dev/null || true
