@@ -20,11 +20,14 @@ class _PrimaryWorker:
     alive = False
     ready = False
     last_active = 0.0
-    lifecycle_stats = {
-        "cooperative_cancel_supported": False,
-        "fallback_abort_count": 0,
-        "reload_count": 0,
-    }
+
+    @property
+    def lifecycle_stats(self) -> dict[str, int | bool]:
+        return {
+            "cooperative_cancel_supported": False,
+            "fallback_abort_count": 0,
+            "reload_count": 0,
+        }
 
     async def start(self) -> None:
         self.alive = True
