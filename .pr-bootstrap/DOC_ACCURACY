@@ -1,1 +1,2 @@
 align documentation with implemented quality gates
+retry=idempotent
