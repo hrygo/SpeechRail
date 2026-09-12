@@ -16,14 +16,15 @@ jobs:
         with:
           ref: feat/quality-voice-capabilities
           fetch-depth: 0
-      - name: Apply reviewed reference canonicalization patch
+      - name: Reassemble and apply reviewed reference canonicalization patch
         run: |
           set -euxo pipefail
-          base64 -d .pr-bootstrap/pr46-reference-canonical.part.00 | gzip -d > /tmp/pr46-reference-canonical.patch
+          cat .pr-bootstrap/pr46-reference-canonical.part.00 .pr-bootstrap/pr46-reference-canonical.part.01 .pr-bootstrap/pr46-reference-canonical.part.02 > /tmp/pr46-reference-canonical.patch.gz.b64
+          base64 -d /tmp/pr46-reference-canonical.patch.gz.b64 | gzip -d > /tmp/pr46-reference-canonical.patch
           echo '6a2b656c5d0d853f66b2cec41cdf1f938a5e8de6ac498d7572632b3fdd13e8e7  /tmp/pr46-reference-canonical.patch' | sha256sum -c -
           git apply --check /tmp/pr46-reference-canonical.patch
           git apply --index /tmp/pr46-reference-canonical.patch
-          rm -f .pr-bootstrap/pr46-reference-canonical.part.00 .pr-bootstrap/pr46-reference-canonical-trigger .github/workflows/tmp-apply-pr46-reference-canonical.yml
+          rm -f .pr-bootstrap/pr46-reference-canonical.part.00 .pr-bootstrap/pr46-reference-canonical.part.01 .pr-bootstrap/pr46-reference-canonical.part.02 .pr-bootstrap/pr46-reference-canonical-trigger .github/workflows/tmp-apply-pr46-reference-canonical.yml
           rmdir .pr-bootstrap 2>/dev/null || true
           git add -A
           git config user.name 'github-actions[bot]'
