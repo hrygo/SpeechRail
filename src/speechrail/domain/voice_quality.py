@@ -28,12 +28,15 @@ from __future__ import annotations
 
 import math
 import struct
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final
 from uuid import uuid4
+
+from speechrail.domain.itn import apply_light_itn
 
 POLICY_VERSION: Final[str] = "voice_quality_v1"
 
@@ -43,6 +46,22 @@ _WINDOW_SECONDS: Final[float] = 0.02
 _NOISE_PERCENTILE: Final[float] = 0.10
 _EPSILON: Final[float] = 1e-12
 _PCM16_FULL_SCALE: Final[float] = 32768.0
+_TRANSCRIPT_DIGIT_TRANSLATION: Final[dict[int, str]] = str.maketrans(
+    {
+        "零": "0",
+        "一": "1",
+        "二": "2",
+        "两": "2",
+        "三": "3",
+        "四": "4",
+        "五": "5",
+        "六": "6",
+        "七": "7",
+        "八": "8",
+        "九": "9",
+    }
+)
+_TRANSCRIPT_SEMANTIC_SYMBOLS: Final[frozenset[str]] = frozenset({".", "%", "℃", "°"})
 
 
 class VoiceQualityStatus(StrEnum):
@@ -66,6 +85,8 @@ class VoiceQualityFailureCode(StrEnum):
     OUTPUT_PEAK_EXCEEDED = "output_peak_exceeded"
     CLONE_SPEED_UNSUPPORTED = "clone_speed_unsupported"
     OUTPUT_INVALID = "output_invalid"
+    OUTPUT_NONDETERMINISTIC = "output_nondeterministic"
+    TRANSCRIPTION_UNAVAILABLE = "transcription_unavailable"
 
 
 VOICE_QUALITY_FAILURE_CODES: Final[tuple[str, ...]] = tuple(
@@ -146,6 +167,8 @@ class VoiceQualitySynthesis:
     chunk_jump_p95_db: float
     clipping_ratio: float
     deterministic: bool
+    transcript_match: float | None = None
+    intelligibility_evaluated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +179,8 @@ class VoiceQualitySynthesis:
             "chunk_jump_p95_db": self.chunk_jump_p95_db,
             "clipping_ratio": self.clipping_ratio,
             "deterministic": self.deterministic,
+            "transcript_match": self.transcript_match,
+            "intelligibility_evaluated": self.intelligibility_evaluated,
         }
 
     @classmethod
@@ -170,6 +195,12 @@ class VoiceQualitySynthesis:
             chunk_jump_p95_db=float(data.get("chunk_jump_p95_db", 0.0)),
             clipping_ratio=float(data.get("clipping_ratio", 0.0)),
             deterministic=bool(data.get("deterministic", False)),
+            transcript_match=(
+                float(data["transcript_match"])
+                if data.get("transcript_match") is not None
+                else None
+            ),
+            intelligibility_evaluated=bool(data.get("intelligibility_evaluated", False)),
         )
 
 
@@ -478,6 +509,40 @@ def grade_reference_quality(
     return overall, list(dict.fromkeys(codes))
 
 
+def normalize_transcript_for_match(text: str) -> str:
+    """Normalize ASR/reference text for bounded character-level comparison."""
+    normalized = unicodedata.normalize("NFKC", apply_light_itn(text)).casefold()
+    normalized = normalized.translate(_TRANSCRIPT_DIGIT_TRANSLATION)
+    return "".join(
+        char
+        for char in normalized
+        if char.isalnum() or char in _TRANSCRIPT_SEMANTIC_SYMBOLS
+    )
+
+
+def transcript_match_score(expected: str, actual: str) -> float:
+    """Return normalized character similarity in ``[0, 1]`` using edit distance."""
+    reference = normalize_transcript_for_match(expected)
+    hypothesis = normalize_transcript_for_match(actual)
+    if not reference:
+        return 1.0 if not hypothesis else 0.0
+    if not hypothesis:
+        return 0.0
+
+    previous = list(range(len(hypothesis) + 1))
+    for row, ref_char in enumerate(reference, start=1):
+        current = [row]
+        for column, hyp_char in enumerate(hypothesis, start=1):
+            substitution = previous[column - 1] + (ref_char != hyp_char)
+            insertion = current[column - 1] + 1
+            deletion = previous[column] + 1
+            current.append(min(substitution, insertion, deletion))
+        previous = current
+
+    distance = previous[-1]
+    return max(0.0, 1.0 - distance / max(len(reference), len(hypothesis)))
+
+
 # ---------------------------------------------------------------------------
 # Report construction helpers
 # ---------------------------------------------------------------------------
@@ -570,6 +635,8 @@ __all__ = [
     "make_quality_report",
     "new_run_id",
     "noise_floor_dbfs",
+    "normalize_transcript_for_match",
     "now_iso8601_z",
     "speech_active_ratio",
+    "transcript_match_score",
 ]

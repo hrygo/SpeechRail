@@ -37,8 +37,8 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 - 请求路径不得下载模型、读取远程音频 URL 或静默访问网络。模型 snapshot、vendor Python、私有 `.env`、音频、日志、custom voice 数据和 benchmark 原始制品放在仓库外。
 - 日志、fixture 与报告不得记录 API key、`Authorization`、原始音频、Base64、完整 prompt、完整转写、embedding、实名 speaker 或绝对模型路径。
 - 一次只运行一个 SpeechRail 服务和一个 ASGI worker；不得复制模型进程来提高吞吐。batch ASR 与 streaming ASR 不作为同机并行产品场景，模式冲突稳定返回 `backend_busy`。
-- 唯一允许的重计算重叠是 ASR∥TTS。`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` 根据声明的 `*_RESIDENT_BYTES` 与 `max(4 GiB, 物理内存 // 2)` 预算判定；任一启用组件缺少非零峰值或总量超预算时必须 fail-closed 串行。TTS∥TTS 与 ASR∥ASR 仍受单 worker 约束，不复制进程。
-- 三档共享 API 形状、worker 协议和调度架构，但必须按活动档位如实发布能力：`light` 无 aligner/分人；`balanced` 使用 `aligner-q8` 并可分人；`quality` 使用 `aligner-bf16` 并可分人。当前活动 ASR/TTS 权重均为 8-bit；词级时间戳由 ASR 原生提供，不依赖 aligner。
+- 通用重计算重叠由 `SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` 根据声明的 `*_RESIDENT_BYTES` 与 `max(4 GiB, 物理内存 // 2)` 预算判定；任一启用组件缺少非零峰值或总量超预算时必须 fail-closed 串行。Quality 额外允许独立的 VoiceDesign∥Base TTS capability lane 并发，同一 lane 仍串行，Light/Balanced 与未知 lane 保持单 worker；ASR∥ASR 仍受共享 worker 约束，不复制进程。
+- 三档共享 API 形状、worker 协议和调度架构，但必须按活动档位如实发布能力：`light` 无 aligner/分人；`balanced` 使用 `aligner-q8` 并可分人；`quality` 使用 `aligner-bf16` 并可分人。当前活动 ASR/TTS 权重均为 8-bit；Quality 同时管理 VoiceDesign（`tts-1.7b-design-q8`）与 Base（`tts-1.7b-base-q8`）两个独立 TTS capability worker，允许双常驻、跨 lane 并发，并在配置的空闲冷却后 trim/close、下次请求惰性恢复；词级时间戳由 ASR 原生提供，不依赖 aligner。
 - 生产分人运行时为 FluidAudio CoreML FP16 worker，并只输出 session-scoped 匿名 label；不管理实名、声纹库、跨会话身份、持久化 PCM 或 embedding。`gpt-4o-transcribe-diarize` 只在分人档位且 profile ready 时声明。
 - 公共错误使用稳定 envelope 并包含 request ID；输入在 API 边界校验，vendor 输出在 adapter 边界校验。破坏性公共变更进入 `/v2` 并提供迁移说明，兼容 alias 必须有明确废弃计划。
 

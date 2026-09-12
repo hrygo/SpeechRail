@@ -90,10 +90,12 @@ class JobRunner:
         self._last_kind = job.kind
         work_class = WorkClass.BATCH_TTS if job.kind == "speech" else WorkClass.BATCH_ASR
         try:
+            resource_key = self._resource_key_for_job(job)
             result_ref = await self._governor.run(
                 lambda: self._processor.process(job),
                 work_class,
                 deadline=self._deadline_seconds,
+                resource_key=resource_key,
             )
             self._repository.complete(job.id, result_ref=result_ref)
         except JobProcessingError as exc:
@@ -119,6 +121,19 @@ class JobRunner:
                 error_message=_JOB_PROCESSOR_FAILED_MESSAGE,
             )
         return True
+
+    def _resource_key_for_job(self, job: JobRecord) -> str | None:
+        """Use an optional processor hint without weakening conservative admission."""
+        if job.kind != "speech":
+            return None
+        resolver = getattr(self._processor, "resource_key_for_job", None)
+        if not callable(resolver):
+            return None
+        try:
+            key = resolver(job)
+        except Exception:
+            return None
+        return key if isinstance(key, str) and key.strip() else None
 
     def _expire_completed_results(self) -> None:
         if self._result_ttl_seconds is None:

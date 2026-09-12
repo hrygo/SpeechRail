@@ -38,7 +38,9 @@ from speechrail.domain.voice_quality import (
     leading_trailing_silence_seconds,
     make_quality_report,
     noise_floor_dbfs,
+    normalize_transcript_for_match,
     speech_active_ratio,
+    transcript_match_score,
 )
 
 # ---------------------------------------------------------------------------
@@ -237,6 +239,22 @@ def test_failure_codes_are_deduplicated_preserving_order() -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_transcript_match_normalizes_itn_punctuation_and_case() -> None:
+    assert normalize_transcript_for_match("精度达到百分之九十九点九。") == "精度达到99.9%"
+    assert transcript_match_score("Hello，World!", "hello world") == pytest.approx(1.0)
+    assert transcript_match_score(
+        "精度达到百分之九十九点九。", "精度达到99.9%"
+    ) == pytest.approx(1.0)
+    assert transcript_match_score(
+        "请按 3、6、9 的顺序读。", "请按三六九的顺序读"
+    ) == pytest.approx(1.0)
+    assert transcript_match_score("温度是22.5℃", "温度是225℃") < 1.0
+
+
+def test_transcript_match_rejects_unrelated_text() -> None:
+    assert transcript_match_score("今天天气真好，我们开个会吧。", "完全错误的内容") < 0.5
+
+
 def test_report_to_dict_matches_openapi_shape_field_for_field() -> None:
     report = VoiceQualityReport(
         policy_version=POLICY_VERSION,
@@ -298,6 +316,8 @@ def test_report_to_dict_matches_openapi_shape_field_for_field() -> None:
         "chunk_jump_p95_db",
         "clipping_ratio",
         "deterministic",
+        "transcript_match",
+        "intelligibility_evaluated",
     }
     assert data["reference"]["transcript_match"] == 0.998
 

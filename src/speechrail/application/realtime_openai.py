@@ -34,6 +34,7 @@ from speechrail.application.diarization import (
     StatusChanged,
 )
 from speechrail.application.services import AppServices
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
@@ -156,17 +157,20 @@ class OpenAIRealtimeSession:
         self._tts = services.tts_synthesizer
         active = active_model_catalog(self._settings)
         self._tts_variant = active.tts.variant if active.tts is not None else None
+        self._tts_clone_variant = (
+            active.tts_clone.variant if active.tts_clone is not None else None
+        )
         tts_available = services.tts_ready
+        clone_available = tts_available and self._tts_clone_variant == "base"
         self._tts_loudness_profile = (
-            "stable_loudness_v1"
-            if tts_available and self._tts_variant == "voice_design"
-            else None
+            "stable_loudness_v1" if clone_available else None
         )
         self._speech_capabilities: dict[str, object] = {
             "available": tts_available,
             "variant": self._tts_variant,
             "supports_speaker": tts_available and self._tts_variant == "custom_voice",
             "supports_instruction": tts_available and self._tts_variant == "voice_design",
+            "supports_clone": clone_available,
         }
         if self._tts_loudness_profile is not None:
             self._speech_capabilities["audio_loudness_profile"] = self._tts_loudness_profile
@@ -997,10 +1001,33 @@ class OpenAIRealtimeSession:
         self._pending_text = None
 
     def _require_voice_available(self, voice: str) -> None:
-        if self._tts_variant not in {"voice_design", "custom_voice"}:
+        from speechrail.domain.tts import get_voice_profile
+
+        # Injected/test synthesizers may not have an active catalog-backed TTS
+        # variant. Preserve the historical contract in that case: endpoint
+        # readiness is authoritative and model-specific binding is not enforced.
+        if self._tts_variant is None and self._tts_clone_variant is None:
             return
+
         try:
-            resolve_binding(self._tts_variant, voice)
+            profile = get_voice_profile(voice)
+        except VoiceStoreUnavailableError:
+            raise RealtimeAdapterError(
+                "voice_store_unavailable", "custom voice storage is unavailable"
+            ) from None
+        except ValueError:
+            raise RealtimeAdapterError(
+                "voice_not_found", f"unknown voice: {voice[:200]}"
+            ) from None
+
+        variant = self._tts_clone_variant if profile.mode == "clone" else self._tts_variant
+        if variant not in {"voice_design", "custom_voice", "base"}:
+            raise RealtimeAdapterError(
+                "voice_not_available",
+                f"voice {voice[:200]} is unavailable for the active TTS capabilities",
+            )
+        try:
+            resolve_binding(variant, voice)
         except VoiceStoreUnavailableError:
             raise RealtimeAdapterError(
                 "voice_store_unavailable", "custom voice storage is unavailable"
@@ -1452,20 +1479,22 @@ class OpenAIRealtimeSession:
                 _ttfa_t0 = _time.monotonic()
                 _ttfa_recorded = False
                 _admission_started = _time.monotonic()
+                request = SpeechRequest(
+                    text=text,
+                    voice=voice,
+                    output_format="pcm16",
+                    sample_rate=24_000,
+                    speed=speed,
+                    language=language,
+                )
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     async with self._services.governor.reserve(
-                        WorkClass.REALTIME_TTS, deadline=self._settings.request_timeout_seconds
+                        WorkClass.REALTIME_TTS,
+                        deadline=self._settings.request_timeout_seconds,
+                        resource_key=tts_resource_key(self._tts, request.voice),
                     ):
                         self._services.metrics.record_realtime_phase(
                             "tts_admission", _time.monotonic() - _admission_started
-                        )
-                        request = SpeechRequest(
-                            text=text,
-                            voice=voice,
-                            output_format="pcm16",
-                            sample_rate=24_000,
-                            speed=speed,
-                            language=language,
                         )
                         async for chunk in iter_validated_audio(self._tts.synthesize(request)):
                             if not _ttfa_recorded:

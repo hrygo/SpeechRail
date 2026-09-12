@@ -31,7 +31,7 @@ _TERMINAL = {"COMMITTED", "ROLLED_BACK", "NOT_READY"}
 
 
 class SelectionRecord(BaseModel):
-    """持久化选择仅记录已准备的模型键和共同 runtime 身份。"""
+    """持久化选择记录已准备的模型键和共同 runtime 身份。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
     schema_version: StrictInt
@@ -39,6 +39,7 @@ class SelectionRecord(BaseModel):
     generation: StrictInt = Field(gt=0)
     asr: StrictStr
     tts: StrictStr
+    tts_clone: StrictStr | None = None
     runtime_lock_id: StrictStr
 
     @field_validator("schema_version")
@@ -48,9 +49,11 @@ class SelectionRecord(BaseModel):
             raise ValueError("unsupported selection schema")
         return value
 
-    @field_validator("asr", "tts", "runtime_lock_id")
+    @field_validator("asr", "tts", "tts_clone", "runtime_lock_id")
     @classmethod
-    def safe_key(cls, value: str) -> str:
+    def safe_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         if not _SAFE_KEY.fullmatch(value):
             raise ValueError("invalid model or runtime key")
         return value
@@ -59,7 +62,7 @@ class SelectionRecord(BaseModel):
 def _selection(value: object) -> dict[str, object] | None:
     if value is None:
         return None
-    return dict(SelectionRecord.model_validate(value).model_dump())
+    return dict(SelectionRecord.model_validate(value).model_dump(exclude_none=True))
 
 
 def allowed_transition(old: str, new: str) -> bool:

@@ -10,7 +10,7 @@ from speechrail.service.profile_store import ProfileStore
 from speechrail.service.profile_switch import ApplyResult, apply_prepared_profile
 
 
-def _prepared(preset: str) -> PreparedModelSet:
+def _prepared(preset: str, *, with_clone: bool = False) -> PreparedModelSet:
     asr_key = "asr-small" if preset == "light" else "asr-large"
     tts_key = "tts-design" if preset == "quality" else "tts-custom"
     asr = PreparedArtifact(
@@ -37,17 +37,34 @@ def _prepared(preset: str) -> PreparedModelSet:
         sources=(),
         files=(),
     )
+    clone = (
+        PreparedArtifact(
+            key="tts-base",
+            path=Path("/models/tts-base"),
+            model_id="fixture/tts-base",
+            revision="c" * 40,
+            family="qwen3_tts",
+            variant="base",
+            quantization={},
+            source={},
+            sources=(),
+            files=(),
+        )
+        if with_clone
+        else None
+    )
     return PreparedModelSet(
         prepared_id=f"prepared-{preset}",
         preset=preset,
         runtime_lock_id="runtime-v1",
         asr=asr,
         tts=tts,
+        tts_clone=clone,
     )
 
 
 def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]:
-    return {
+    selection: dict[str, object] = {
         "schema_version": 1,
         "preset": prepared.preset,
         "generation": generation,
@@ -55,6 +72,9 @@ def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]
         "tts": prepared.tts.key,
         "runtime_lock_id": prepared.runtime_lock_id,
     }
+    if prepared.tts_clone is not None:
+        selection["tts_clone"] = prepared.tts_clone.key
+    return selection
 
 
 class FakeService:
@@ -241,6 +261,36 @@ def test_same_complete_selection_is_idempotent(tmp_path: Path) -> None:
 
     assert result == ApplyResult(status="unchanged", operation_id=None, error_code=None)
     assert events == ["resolve:light"]
+
+
+def test_new_clone_capability_reapplies_an_existing_quality_selection(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    old = _prepared("quality")
+    candidate = _prepared("quality", with_clone=True)
+    store = ProfileStore(tmp_path)
+    store.initialize(_selection(old, 1))
+
+    result = apply_prepared_profile(
+        candidate.prepared_id,
+        app_home=tmp_path,
+        service=FakeService(events),
+        smoke=FakeSmoke(events),
+        store=store,
+        prepared_resolver=_id_resolver(candidate, events),
+        selection_resolver=_selection_resolver({"quality": old}, events),
+    )
+
+    assert result.status == "committed"
+    assert store.recover() == _selection(candidate, 2)
+    assert events == [
+        "resolve:quality",
+        "resolve_previous:quality",
+        "stop",
+        "start",
+        "smoke:quality",
+    ]
 
 
 def test_recovery_continues_when_second_stop_reports_failure(tmp_path: Path) -> None:

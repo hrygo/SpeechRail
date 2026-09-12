@@ -170,7 +170,16 @@ SDK、cURL、Sona、Open-WebUI、LiveKit/Pipecat 和 OpenClaw 示例见
 |---|---|---|---|
 | `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | 无 aligner、无分人；固定 CustomVoice 角色。 |
 | `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8`，可选匿名分人；固定 CustomVoice 角色。 |
-| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` | `aligner-bf16`，可选匿名分人、VoiceDesign 试听/设计和质量门控克隆。 |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`，可选匿名分人、VoiceDesign 试听/设计和质量门控 Base 克隆。两个 TTS capability worker 可双常驻，不同 lane 可并发；同一 lane 仍串行。 |
+
+Quality 将 VoiceDesign 与 Base 保持为两条独立的 TTS capability lane。切换音色
+工作流不需要在两者之间频繁加载和卸载；Quality capability group 仍会在配置的
+空闲冷却后 trim/close 两个 worker，并在下一次请求时惰性恢复。
+
+![三档模型与 Quality 双 TTS capability 关系图](docs/architecture/diagrams/three-tier-model-architecture.svg)
+
+上图是三档 profile 路由、模型共享、Quality 两条 TTS capability lane，以及
+共享资源与生命周期边界的统一总览。
 
 CLI 的 `setup` 会根据物理内存给出起始建议，但这不是硬件保证。使用 CLI 查看
 或切换受管 selection：
@@ -183,8 +192,8 @@ uv run speechrail profile rollback
 ```
 
 请先从 `/v1/voices` 选择音色，不要假设已注册的自定义音色在所有 profile 上都
-可用。质量档专属的音色接口包括 `POST /v1/voices/previews`、
-`POST /v1/voices` 和克隆接口，详见
+可用。质量档专属的音色接口包括 `POST /v1/voices/previews`、`POST /v1/voices`、
+`POST /v1/voices/designs` 和克隆接口，详见
 [`docs/users/api-contract.md`](docs/users/api-contract.md)。
 
 ## 安全与数据处理

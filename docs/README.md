@@ -2,7 +2,7 @@
 title: "SpeechRail 文档中心"
 status: active
 version: "2.0.6"
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # 📚 SpeechRail 文档中心
@@ -20,13 +20,14 @@ date: 2026-09-11
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
 
-## 当前实现基线（2026-09-11）
+## 当前实现基线（2026-09-13）
 
 - 当前受管质量档为 SpeechRail `2.3.2`，由本源码仓库构建 wheel 后经 `tools.install_macos.install_managed` 部署；`runtime/current` 只接受 release 切换，不作为源码编辑目标。
 - `/health` 当前应报告 `asr_ready=true`、`tts_ready=true`、`diarization_ready=true`；`realtime_vad` 为 `configured_engine=auto`、`resolved_engine=silero`、`speech_admission_enabled=true`、`ready=true`。
 - Realtime `server_vad` 是服务端 endpointing 能力。调用方可传递自己的窗口：Sona 标准字幕使用 `threshold=0.65/prefix=300ms/silence=400ms`，会议使用同 threshold/prefix、`silence=900ms`；这些不是 SpeechRail 公共 API 的全局默认值。
 - 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
 - clone ICL 路径已加入稳定采样、请求级响度冻结、峰值保护和参考音频信号校验；当前 active clone backend 对非 `1.0` speed 明确返回 `clone_speed_unsupported`。
+- Quality TTS 由 `voice_design` VoiceDesign worker 与 `voice_clone` Base worker 两条独立 capability lane 组成；两者允许双常驻，跨 lane 可并发，同一 lane 由 worker lock 串行，冷却后按 Quality group trim/close 并在下一次请求时惰性恢复。
 
 ---
 
@@ -67,8 +68,10 @@ flowchart TD
         subgraph ASR_Box ["Qwen3-ASR Worker (MLX / MPS)"]
             ASR["• 批量转写 & 时间戳对齐<br/>• 原生 MLX 流式转写<br/>• Server VAD & 打断"]
         end
-        subgraph TTS_Box ["Qwen3-TTS Worker (VoiceDesign)"]
-            TTS["• 24kHz 高保真语音合成<br/>• 流式逐句合成 & 音频平滑<br/>• 预设音色库 (warm, calm...)"]
+        subgraph TTS_Box ["Qwen3-TTS capability workers"]
+            direction TB
+            TTS_VD["VoiceDesign worker<br/>• voice_design lane<br/>• 1.7B Quality instruction synthesis"]
+            TTS_Base["Base worker<br/>• voice_clone lane<br/>• 1.7B Quality reference clone"]
         end
     end
 
@@ -78,9 +81,13 @@ flowchart TD
     Gov --> Diar
     Gov -. 活动与生命周期 .-> Life
     Life -. 尝试释放常驻权重 .-> ASR_Box
-    Life -. 尝试释放常驻权重 .-> TTS_Box
+    Life -. Quality group 冷却后释放常驻权重 .-> TTS_Box
     Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
+
+![三档模型与 Quality 双 TTS capability 关系图](architecture/diagrams/three-tier-model-architecture.svg)
+
+上图是当前三档模型组合、profile/capability 路由、Quality 双 TTS worker 以及共享资源边界的 canonical overview。
 
 ---
 

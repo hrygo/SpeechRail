@@ -1,124 +1,93 @@
 ---
 title: "VoiceDesign 能力优势与音色稳定性边界"
 status: active
-version: "1.1.0"
-date: 2026-09-06
+audience: "架构师、TTS 质量负责人、Sona Voice Studio 开发者"
+version: "2.1"
+date: 2026-09-13
 ---
 
 # VoiceDesign 能力优势与音色稳定性边界
 
-本文把 Qwen3-TTS 的官方能力说明、SpeechRail 当前实现和本机验收数据放在一起，明确 VoiceDesign 适合解决什么问题，以及目前不能作出什么承诺。
+## 1. 能力定位
 
-## 结论先行
+VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语言描述年龄感、音高、口音、情绪、韵律和角色气质，而不局限于固定 speaker。它非常适合 Sona 的“描述声音”入口。
 
-VoiceDesign 已核实的核心优势是**开放式创造**：调用方可以用自然语言描述音色、年龄感、音高、口音、情绪和韵律，生成预置 speaker 之外的新声线。它特别适合虚构角色、故事旁白、游戏人物和用户描述型音色。
+但 VoiceDesign 不再承担 SpeechRail 的 reference voice cloning。当前职责是：
 
-VoiceDesign 的描述能力不等于跨文本的 speaker identity 稳定性。已有质量验收表明，`quality` 对相同文本可以稳定复现；当前运行态为 `quality/1.8.0`，但现有跨文本 embedding 结果还不足以声明“九个角色始终是同一个人”。因此当前产品边界是：
+- `quality / VoiceDesign 1.7B`：提示词音色设计、Quality 默认 TTS；
+- `quality / Base 1.7B`：参考音频克隆，由独立 capability worker 承担；允许与 VoiceDesign 双常驻，Quality group 冷却后可一起回收并在下一次请求时惰性恢复；
+- `balanced/light / CustomVoice 0.6B`：九个固定 speaker；
+- Prompt voice 如果后续需要“跨任意文本始终像同一个人”，走 **VoiceDesign → canonical reference → Base stabilization**，而不是反复让 VoiceDesign 对每段目标文本重新拟合身份。
 
-- `quality` 用于需要开放式 VoiceDesign 的角色音色；
-- `balanced/light` 用固定的 0.6B CustomVoice speaker，优先保证已注册 speaker 的复用稳定性；
-- 如果同时要求“任意设计”和“跨文本始终同一个人”，采用官方的 VoiceDesign 生成锚点、再由 Base checkpoint 创建可复用 clone prompt 的路径；这不是当前 `quality` 运行时已经提供的稳定性保证。
+完整架构见 [Quality 档音色创造、克隆与稳定化能力架构](quality-voice-capabilities.md)。
 
-2026-09-06 已完成一次 9 角色的 `instruction × seed` 联合搜索和独立 holdout。搜索本身全部成功，但选中候选的联合 `separation margin p05=-0.2126`，低于预注册的 `0.10`；与当前 recipe 的同 holdout 对照还使 readback CER p95 从 `8.76%` 上升到 `20.97%`。因此本轮不写回生产角色配置，结论仍是“创造能力已验证，身份稳定性未达标”。
+## 2. 为什么要分离创造与复现
 
-## 1. 上游能力核实
+“设计一个有特点的声音”和“在不同内容上复现同一个 speaker”是两种不同的优化目标：
 
-以下结论来自 Qwen3-TTS 官方 README、官方推理接口和技术报告，而不是项目内部推断。
-
-| 能力 | 官方接口或模型说明 | 对项目的含义 |
+| 目标 | 最合适的主能力 | 主要评价 |
 |---|---|---|
-| 开放式音色创造 | `generate_voice_design(text, instruct)` 接收目标文本和自然语言 `instruct`；该路径不要求 `ref_audio`。 | 可以用文字组合描述型音色，不局限于预置 speaker。 |
-| 自然语言控制 | 官方说明覆盖 timbre、emotion、prosody 等维度，并明确 VoiceDesign 支持用户提供的描述。 | 可以表达“年龄感、音高、口音、情绪、节奏”等角色设定。 |
-| 固定音色复用 | 官方模型表将 CustomVoice 描述为 9 个 premium timbres；0.6B CustomVoice 的表项没有 instruction-control 标记。 | `balanced/light` 适合固定的九个 speaker，不应伪装成同等级的开放式 VoiceDesign。 |
-| 可复用克隆 | Base 路径提供 `create_voice_clone_prompt` 和 `generate_voice_clone`；官方还给出“Voice Design then Clone”流程，用 VoiceDesign 短参考音频创建可复用 clone prompt。 | 这是“创造 + 稳定身份”的官方组合方案，但会增加 Base 权重、参考音频和 prompt 管理成本。 |
+| 创造新声线 | VoiceDesign | 描述符合度、自然度、表现力 |
+| 复现参考 speaker | Base clone | speaker similarity、跨文本一致性、可懂度 |
+| 固定内置角色 | CustomVoice | 一致性、吞吐、资源占用 |
+| 创建后稳定复用 | VoiceDesign → Base | 创造符合度 + 跨文本 identity |
 
-技术报告证明了 VoiceDesign 的 description-to-voice 创造能力；它没有替 SpeechRail 的跨文本身份验收提供通过证据。两类能力必须分开测量。
+旧实现用 VoiceDesign 私有 ICL 方法承接 reference clone，会把“模型内部能够接受参考上下文”误解为“这是该模型最合适、最稳定的 speaker clone contract”。2026-09-12 起，这条路径不再是 SpeechRail 架构基线。
 
-## 2. 在 SpeechRail 中的落地
+## 3. Quality 的双模型能力与双常驻
 
-### 当前运行态
+Quality catalog 同时安装：
 
-2026-09-06 对本机服务做了核验：
+- `tts-1.7b-design-q8`：primary；
+- `tts-1.7b-base-q8`：`tts_clone` capability。
 
-- 服务版本：`1.8.0`，profile：`quality`；
-- TTS 模型：`tts-1.7b-design-q8`，variant：`voice_design`；
-- `/v1/voices` 返回九个 canonical role，均为可用的 VoiceDesign 角色并声明 `supports_instruction: true`；
-- `/health`、`/readyz` 为 ready，`tts_ready: true`；恢复后的真实 TTS 与 ASR smoke 均返回 200 和非空结果。
+运行时使用双 worker capability router。懒加载模式下 Base 首次 clone 才加载，但切回普通 VoiceDesign 请求不会关闭 Base；两个不同 capability lane 可以并发。`WorkerIdleEvictor` 在冷却后整体驱逐这组 TTS worker，下一次请求再按需恢复，避免连续请求在 VD/Base 之间反复换模。
 
-九个初始角色已经存在并可用于 `quality/1.8.0`：
+## 4. Prompt-created voice 当前边界
 
-| canonical role | 当前角色意图 |
-|---|---|
-| `serena` | 温暖柔和的年轻中文女声 |
-| `vivian` | 明亮清脆的年轻中文女声 |
-| `uncle_fu` | 成熟稳重、低沉醇厚的中文男声 |
-| `dylan` | 清晰自然、带北京口音的年轻中文男声 |
-| `eric` | 活泼明亮、带自然四川口音的年轻中文男声 |
-| `ryan` | 有活力和节奏感的英语男声 |
-| `aiden` | 阳光自然的美式英语年轻男声 |
-| `ono_anna` | 轻盈灵动、节奏明快的日语年轻女声 |
-| `sohee` | 温暖柔和、情感丰富的韩语女声 |
+本 PR 保持兼容：已有 prompt-created profile 仍直接由 VoiceDesign 合成，不自动修改 voice asset。
 
-角色的实际 profile、seed 和温度以当前代码为准，见 [`VoiceProfile` 与系统角色注册](../../src/speechrail/domain/tts.py)；模型绑定见 [`qwen3_voice_binding.py`](../../src/speechrail/backends/qwen3_voice_binding.py)。本文不复制完整 instruction，避免文档与运行时代码出现双份配置。
+当前已通过 `/v1/voices/designs` 提供显式生成参考注册：创建全新 Base-bound clone，保存来源 hash，原音色不变。下面的完整 VoiceRevision 与输出声纹验收仍是目标流程，不能将参考注册完成视为整体完成：
 
-## 3. 当前实测能证明什么
+```text
+instruction
+  → VoiceDesign 生成候选 canonical reference
+  → 质量门 + 人工试听（可选）
+  → Base 建立新 VoiceRevision
+  → 后续目标文本由 Base 复现
+```
 
-本节引用 [三档音色稳定性研究](../archive/archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md) 的已保存结果；原始音频、embedding 和 benchmark 制品仍在仓库外。
+该动作必须：
 
-| 指标 | `quality` VoiceDesign | `balanced` CustomVoice | `light` CustomVoice |
-|---|---:|---:|---:|
-| 相同文本跨重启复现 | `27/27` | `27/27` | `27/27` |
-| within-role cosine p05 / median | `0.4902 / 0.7853` | `0.6308 / 0.8278` | `0.6749 / 0.8273` |
-| between-role cosine p95 | `0.7122` | `0.4561` | `0.4553` |
-| separation margin p05 / median | `-0.0026 / 0.1116` | `0.2079 / 0.4215` | `0.3133 / 0.4489` |
-| nearest-centroid accuracy | `88.89%` | `100%` | `100%` |
+- 创建新 revision，而不是覆盖旧 profile；
+- 记录 canonical text/audio hash、preprocessing version、model revision；
+- 可回滚到 VoiceDesign-backed revision；
+- 用 holdout 文本验证 speaker identity，不能仅用同一文本重复 hash。
 
-相同文本的 `27/27` 说明当前确定性设置能复现相同输入的输出；它不能证明换一段文本后仍然是同一个人。当前 `quality` 的 nearest-centroid accuracy 为 `88.89%`，低于预注册目标 `≥98%`；`within-role p05` 和 `separation margin p05` 也尚未同时达到 `≥0.60` 和 `≥0.10` 的目标。
+## 5. 稳定性证据边界
 
-人工 ABX 尚未执行。`instruction × seed` 联合搜索已经执行，但独立 holdout 未通过 separation margin 和可懂度回归门槛。因此当前不能宣称 VoiceDesign 已达到 CustomVoice 的跨文本同一人稳定性。
+历史 VoiceDesign recipe 搜索、三档音色评测仍可作为“为什么需要稳定化”的证据，但不能反过来证明 Base 路径已经通过新验收。旧数据和过程归档保留在：
 
-2026-09-06 搜索与 holdout 的详细结果见 [VoiceDesign recipe 搜索验收](../archive/process/archive/2026-09-06-voicedesign-recipe-search.md)。
+- [三档音色稳定性研究](../archive/archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md)
+- [VoiceDesign recipe 搜索验收](../archive/process/archive/2026-09-06-voicedesign-recipe-search.md)
+- [VoiceDesign 音色稳定性 ROI 评估](../archive/process/archive/2026-09-05-voicedesign-stability-roi.md)
 
-## 4. 产品声明边界
-
-可以声明：
-
-- VoiceDesign 为自然语言描述提供了开放式音色创造能力；
-- SpeechRail 的 `quality` 档位承载这项创造能力，并已注册九个可复用的初始角色设定；
-- 当前相同输入的确定性复现已经通过现有测试范围。
-
-不能声明：
+当前不得宣称：
 
 - 任意 VoiceDesign instruction 都能跨文本保持同一 speaker identity；
-- 当前九个 VoiceDesign 角色已经达到 `balanced/light` 的身份稳定性；
-- 仅凭 embedding 或相同文本 hash 就完成了“同一个人”的人工听感验收。
+- 同文本确定性等于跨文本同一人；
+- Base capability 接入后无需真实参考音频 A/B 就已经解决全部漂移；
+- 声纹稳定自动意味着专业播报韵律。
 
-## 5. ROI 后续动作：第二项执行结果
+## 6. 与专业表达的关系
 
-这里的“按 ROI 执行初始九角色设置”**不是新增九个角色**。九个初始角色已经上线；第二项是对每个已有角色做一次离线配方筛选。本轮已经完成：
+Speaker identity 与 prosody 需要独立评价。用户自己的参考可能包含停顿、语速和表达习惯；高质量克隆不应强迫用户先成为专业播音员。
 
-1. 为同一个角色准备 3 个只强调身份特征的 instruction 变体；
-2. 为每个 instruction 试 16 个 seed；
-3. 因此每个角色有 `3 × 16 = 48` 个候选配方；
-4. 用 6 段校准文本、每段重复 2 次生成，共完成 `9 × 3 × 16 × 6 × 2 = 5184` 次生成，并计算跨文本稳定性；
-5. 对自动 selector 选出的 9 个候选，用 3 段未参与搜索的 holdout 文本、每段重复 3 次，共完成 `81` 条独立验证；
-6. holdout 未通过联合身份门槛，故**不写回**角色配置，线上仍使用当前九个 recipe。
+Quality 后续可引入“自然播报”模式，对 Base conditioning 方式或其他后端做身份/表达解耦实验。任何 VoxCPM2/voice-conversion 类候选都必须先经过 speaker leakage、自然度、首音延迟、RTF、内存和离线依赖验收，不能因为支持 instruction 就直接成为默认路径。
 
-搜索的详细 winner 只记录 `variant + seed` 和汇总指标，不在本文复制完整 instruction；原始 WAV、embedding 和 summary 保存在仓库外的 benchmark 目录。公开的 `WeSpeaker CNCeleb ResNet34-LM` 只作为 embedding 评测模型依据，本轮没有把公开原始音频复制进项目。
+## 7. 参考资料
 
-若需求只是“让最初九个角色在线可用”，这部分已经完成，不需要先做 5184 次实验。
-
-## 6. 验收门槛与回退
-
-继续优化 VoiceDesign 前，预注册门槛为：nearest-centroid accuracy `≥98%`、within-role cosine p05 `≥0.60`、separation margin p05 `≥0.10`，并由 3 人、每角色至少 3 组 ABX 得出“同一人”判断率 `≥80%`。本轮 holdout 为 `100% / 0.6037 / -0.2126`；自动门未全通过，因此没有执行 ABX，也不能用人工主观选择掩盖分离度失败。
-
-本轮 search winner 未写回；当前 nine-role seed/instruction 保持不变。按 ROI 决策，应停止继续盲调 VoiceDesign，固定角色改用 CustomVoice；若必须保留开放式创造，则评估官方的 VoiceDesign → Base clone 方案，并单独验收它的资源、参考音频管理和回退路径。
-
-## 7. 依据
-
-- [Qwen3-TTS 官方 README](https://github.com/QwenLM/Qwen3-TTS)：模型能力表、九个官方 speaker、VoiceDesign 接口和 Voice Design then Clone 流程。
-- [Qwen3-TTS 官方推理接口](https://github.com/QwenLM/Qwen3-TTS/blob/main/qwen_tts/inference/qwen3_tts_model.py)：`generate_voice_design`、`create_voice_clone_prompt` 和 `generate_voice_clone` 的参数与模型路径说明。
-- [Qwen3-TTS Technical Report](https://arxiv.org/abs/2601.15621)：description-based voice control 与 novel voice creation 的研究说明。
-- [Qwen3-TTS CustomVoice 模型卡](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice)：官方九个 speaker 和 CustomVoice 能力说明。
-- [VoiceDesign 音色稳定性 ROI 评估](../archive/process/archive/2026-09-05-voicedesign-stability-roi.md)：本项目的 ROI、预注册门槛和未完成项。
-- [三档音色稳定性研究](../archive/archive/2026-09-05-v1.7.0-full-three-tier-acceptance.md)：本项目三档实测数据和资源边界。
+- [Qwen3-TTS 官方仓库](https://github.com/QwenLM/Qwen3-TTS)
+- [Qwen3-TTS Base 模型](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base)
+- [SpeechRail Quality 音色能力架构](quality-voice-capabilities.md)
+- [SpeechRail 音色克隆架构设计与工程交接](voice-cloning-design-and-handoff.md)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -142,6 +143,8 @@ def test_enabled_tts_is_updated_to_selected_model(
     asr_dir.mkdir(parents=True)
     tts_dir = tmp_path / "models" / "tts-1.7b-design-q8"
     tts_dir.mkdir(parents=True)
+    clone_dir = tmp_path / "models" / "tts-1.7b-base-q8"
+    clone_dir.mkdir(parents=True)
     _aligner_dir(tmp_path, "aligner-bf16")
 
     original = _settings(
@@ -153,6 +156,7 @@ def test_enabled_tts_is_updated_to_selected_model(
     resolved = resolve_selection(original, selection, catalog_artifacts, tmp_path)
 
     assert resolved.qwen3_tts_model_dir == tts_dir.resolve()
+    assert resolved.qwen3_tts_clone_model_dir == clone_dir.resolve()
     assert resolved.qwen3_python == tmp_path / "vendor" / "current" / "bin" / "python"
     assert resolved.qwen3_tts_python == tmp_path / "vendor" / "current" / "bin" / "python"
     assert resolved.ffmpeg_path == (
@@ -380,7 +384,12 @@ def test_preflight_integrates_selection_successfully(
 
     tts_model = app_home / "models" / "tts-1.7b-design-q8"
     tts_model.mkdir(parents=True)
+    clone_model = app_home / "models" / "tts-1.7b-base-q8"
+    clone_model.mkdir(parents=True)
     (tts_model / "config.json").write_text("{}", encoding="utf-8")
+    (clone_model / "config.json").write_text(
+        json.dumps({"model_type": "qwen3_tts", "tts_model_type": "base"}), encoding="utf-8"
+    )
 
     aligner_dir = _aligner_dir(app_home, "aligner-bf16")
     (aligner_dir / "config.json").write_text("{}", encoding="utf-8")

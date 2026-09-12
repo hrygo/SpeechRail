@@ -3,7 +3,7 @@ title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
 version: "2.0.6"
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -68,6 +68,10 @@ response.stream_to_file("output.mp3")
 HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。两者都会给出 ASR、TTS、diarization 的可用状态，以及 realtime worker 状态和 VAD 的 `ready/code/message`；不包含模型绝对路径、音频或转写内容。
 
 `/readyz` 只表示 ASR 或 TTS 至少一个可用；成功响应也包含独立的 `realtime_vad` 诊断。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
+
+### Capability 路由提示
+
+客户端只调用公共 REST/WebSocket endpoint，不需要感知模型 worker 的加载、卸载或切换。选定的 profile 与请求 capability 会由服务端自动路由；`quality` 的 `voice_design` 与 `voice_clone` 使用独立 TTS worker，不同 lane 可以并发，同一 lane 的请求会按 worker lock 排队。空闲冷却导致 worker 回收时，服务会在下一次对应请求中惰性恢复，不改变客户端契约。
 
 ---
 

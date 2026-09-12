@@ -48,10 +48,15 @@ class _Waiter:
     ticket: int
     work_class: WorkClass
     enqueued_at: float
+    resource_key: str | None = None
 
     @property
     def is_realtime(self) -> bool:
         return self.work_class.is_realtime
+
+    @property
+    def is_tts(self) -> bool:
+        return self.work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
 
 
 class ResourceGovernor:
@@ -59,7 +64,10 @@ class ResourceGovernor:
 
     Batch work may use only the non-reserved capacity.  This intentionally
     leaves a real scheduling slot free instead of relying on cancellation or
-    preemption when a realtime client begins producing audio.
+    preemption when a realtime client begins producing audio. TTS reservations
+    may provide a capability key: requests sharing a key are serialized, while
+    independent keys can use separate physical workers concurrently. An
+    unkeyed TTS reservation remains a conservative wildcard lane.
     """
 
     def __init__(
@@ -82,6 +90,7 @@ class ResourceGovernor:
         self._active_batch = 0
         self._active_asr = 0
         self._active_tts = 0
+        self._active_tts_lanes: dict[str | None, int] = {}
         self._realtime_waiters: deque[_Waiter] = deque()
         self._batch_waiters: deque[_Waiter] = deque()
 
@@ -92,10 +101,13 @@ class ResourceGovernor:
         *,
         deadline: float | None = None,
         expires_at: float | None = None,
+        resource_key: str | None = None,
     ) -> T:
         """Run work after capacity admission, respecting an optional deadline."""
         expiry = self._resolve_expiry(deadline=deadline, expires_at=expires_at)
-        async with self.reserve(work_class, expires_at=expiry):
+        async with self.reserve(
+            work_class, expires_at=expiry, resource_key=resource_key
+        ):
             if expiry is None:
                 return await operation()
             remaining = expiry - self._clock()
@@ -111,21 +123,23 @@ class ResourceGovernor:
         *,
         deadline: float | None = None,
         expires_at: float | None = None,
+        resource_key: str | None = None,
     ) -> AsyncIterator[None]:
         """Hold one resource lane while an operation yields streamed output."""
+        normalized_key = self._normalize_resource_key(work_class, resource_key)
         expiry = self._resolve_expiry(deadline=deadline, expires_at=expires_at)
         if expiry is None:
-            await self._acquire(work_class)
+            await self._acquire(work_class, normalized_key)
         else:
             remaining = expiry - self._clock()
             if remaining <= 0:
                 raise TimeoutError
             async with asyncio.timeout(remaining):
-                await self._acquire(work_class)
+                await self._acquire(work_class, normalized_key)
         try:
             yield
         finally:
-            await self._release(work_class)
+            await self._release(work_class, normalized_key)
 
     def snapshot(self) -> GovernorSnapshot:
         """Return a point-in-time metric view suitable for readiness/metrics."""
@@ -140,7 +154,7 @@ class ResourceGovernor:
             policy_reason=self._policy_reason,
         )
 
-    async def _acquire(self, work_class: WorkClass) -> None:
+    async def _acquire(self, work_class: WorkClass, resource_key: str | None) -> None:
         async with self._condition:
             waiters = self._waiters_for(work_class)
             if len(waiters) >= self._limits.max_pending_per_class:
@@ -149,7 +163,10 @@ class ResourceGovernor:
                 raise GovernorQueueFullError(f"{work_class.value} admission queue is full")
             self._ticket += 1
             waiter = _Waiter(
-                ticket=self._ticket, work_class=work_class, enqueued_at=self._clock()
+                ticket=self._ticket,
+                work_class=work_class,
+                enqueued_at=self._clock(),
+                resource_key=resource_key,
             )
             waiters.append(waiter)
             try:
@@ -160,7 +177,7 @@ class ResourceGovernor:
                         continue
                     with suppress(TimeoutError):
                         await asyncio.wait_for(self._condition.wait(), timeout=timeout)
-                waiters.popleft()
+                waiters.remove(waiter)
                 if waiter.is_realtime:
                     self._active_realtime += 1
                 else:
@@ -169,6 +186,9 @@ class ResourceGovernor:
                     self._active_asr += 1
                 else:
                     self._active_tts += 1
+                    self._active_tts_lanes[waiter.resource_key] = (
+                        self._active_tts_lanes.get(waiter.resource_key, 0) + 1
+                    )
                 self._condition.notify_all()
             except BaseException:
                 if waiter in waiters:
@@ -176,7 +196,7 @@ class ResourceGovernor:
                 self._condition.notify_all()
                 raise
 
-    async def _release(self, work_class: WorkClass) -> None:
+    async def _release(self, work_class: WorkClass, resource_key: str | None) -> None:
         async with self._condition:
             if work_class.is_realtime:
                 self._active_realtime -= 1
@@ -186,18 +206,21 @@ class ResourceGovernor:
                 self._active_asr -= 1
             else:
                 self._active_tts -= 1
+                active_for_key = self._active_tts_lanes.get(resource_key, 0) - 1
+                if active_for_key > 0:
+                    self._active_tts_lanes[resource_key] = active_for_key
+                else:
+                    self._active_tts_lanes.pop(resource_key, None)
             self._condition.notify_all()
 
     def _can_admit(self, waiter: _Waiter) -> bool:
         if self._active_realtime + self._active_batch >= self._limits.total_capacity:
             return False
-        if (
-            waiter.work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
-            and self._active_tts > 0
-        ):
-            # The service owns one physical TTS worker.  Keep the request in
-            # the bounded governor queue instead of letting it wait on the
-            # backend's private lock outside an observable scheduling lane.
+        if self._is_tts(waiter.work_class) and self._tts_lane_busy(waiter.resource_key):
+            # Keep a same-capability request in the bounded governor queue
+            # instead of letting it wait on the backend's private worker lock.
+            # A keyed request may proceed beside a different keyed capability;
+            # an unkeyed request is a wildcard and therefore remains serial.
             return False
         if not self._allow_heavy_overlap:
             is_asr = waiter.work_class in (WorkClass.BATCH_ASR, WorkClass.REALTIME_ASR)
@@ -205,10 +228,10 @@ class ResourceGovernor:
                 return False
             if not is_asr and self._active_asr > 0:
                 return False
-        if waiter.is_realtime:
-            return self._realtime_waiters[0] == waiter
-        if self._batch_waiters[0] != waiter:
+        if not self._class_order_allows(waiter):
             return False
+        if waiter.is_realtime:
+            return True
         batch_capacity = self._limits.total_capacity - self._limits.realtime_reserved_capacity
         if self._active_batch < batch_capacity and not self._realtime_waiters:
             return True
@@ -217,6 +240,44 @@ class ResourceGovernor:
         # batch work entirely. FIFO within the batch class is preserved.
         aged = self._clock() - waiter.enqueued_at >= self._limits.batch_aging_seconds
         return aged and self._active_batch < self._limits.total_capacity
+
+    @staticmethod
+    def _is_tts(work_class: WorkClass) -> bool:
+        return work_class in (WorkClass.BATCH_TTS, WorkClass.REALTIME_TTS)
+
+    def _tts_lane_busy(self, resource_key: str | None) -> bool:
+        if self._active_tts == 0:
+            return False
+        if resource_key is None:
+            return True
+        return self._active_tts_lanes.get(None, 0) > 0 or (
+            self._active_tts_lanes.get(resource_key, 0) > 0
+        )
+
+    def _class_order_allows(self, waiter: _Waiter) -> bool:
+        """Preserve class FIFO except behind an occupied keyed TTS lane."""
+        waiters = self._waiters_for(waiter.work_class)
+        if waiters[0] == waiter:
+            return True
+        if not waiter.is_tts:
+            return False
+        for earlier in waiters:
+            if earlier == waiter:
+                return True
+            if not self._tts_lane_busy(earlier.resource_key):
+                return False
+        return False
+
+    def _normalize_resource_key(
+        self, work_class: WorkClass, resource_key: str | None
+    ) -> str | None:
+        if resource_key is None:
+            return None
+        if not self._is_tts(work_class):
+            raise ValueError("resource_key is only supported for TTS work")
+        if not isinstance(resource_key, str) or not resource_key.strip():
+            raise ValueError("resource_key must be a non-empty string")
+        return resource_key.strip()
 
     def _batch_aging_wait_timeout(self, waiter: _Waiter) -> float | None:
         if waiter.is_realtime or self._batch_waiters[0] != waiter:

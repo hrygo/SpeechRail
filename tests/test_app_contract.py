@@ -1,5 +1,6 @@
 from pathlib import Path
 from sys import executable
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -33,7 +34,7 @@ def test_health_reports_contract_shell_without_backend() -> None:
     assert response.json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
@@ -130,6 +131,7 @@ def test_managed_profile_publishes_active_model_identity(
         qwen3_model_dir=tmp_path / preset.asr,
         qwen3_python=None,
         qwen3_tts_model_dir=tmp_path / preset.tts,
+        qwen3_tts_clone_model_dir=(tmp_path / preset.tts_clone if preset.tts_clone else None),
         qwen3_tts_python=None,
     )
     client = TestClient(create_app(settings))
@@ -168,7 +170,7 @@ def test_managed_profile_publishes_active_model_identity(
         "quantization": tts.quantization.model_dump(mode="json"),
         "capabilities": {
             "supports_preview": tts.variant == "voice_design",
-            "supports_clone": tts.variant == "voice_design",
+            "supports_clone": preset.tts_clone is not None,
             "supports_instruction": tts.variant == "voice_design",
         },
     }
@@ -318,7 +320,7 @@ def test_tts_only_runtime_reports_independent_readiness() -> None:
     assert client.get("/health").json() == {
         "status": "ok",
         "service": "speechrail",
-        "version": "2.4.0",
+        "version": "2.5.0",
         "backend": "speechrail/qwen3-asr-1.7b",
         "profile": None,
         "asr_ready": False,
@@ -450,6 +452,8 @@ def test_startup_failure_closes_already_started_runtime_workers(
             raise AssertionError("transcribe is not expected in this lifecycle test")
 
     class FailingTtsWorker:
+        ready = False
+
         def __init__(self, config: object, *, on_delivery_event: object | None = None) -> None:
             del config
             del on_delivery_event
@@ -463,6 +467,11 @@ def test_startup_failure_closes_already_started_runtime_workers(
 
     monkeypatch.setattr(services_module, "Qwen3Worker", FakeAsrWorker)
     monkeypatch.setattr(services_module, "Qwen3TtsWorker", FailingTtsWorker)
+    monkeypatch.setattr(
+        services_module,
+        "inspect_model",
+        lambda _: SimpleNamespace(variant="voice_design"),
+    )
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
         qwen3_python=Path(executable),

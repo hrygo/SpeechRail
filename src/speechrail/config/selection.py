@@ -28,6 +28,7 @@ class ActiveModelCatalog:
     profile: str | None
     asr: ModelArtifact | None
     tts: ModelArtifact | None
+    tts_clone: ModelArtifact | None
     aligner: str | None
     diarization: bool
 
@@ -58,10 +59,22 @@ def active_model_catalog(
         else None
     )
     diarization = matched_preset.diarization if matched_preset is not None else False
+    configured_clone_key = (
+        settings.qwen3_tts_clone_model_dir.name
+        if settings.qwen3_tts_clone_model_dir is not None
+        else None
+    )
+    preset_clone_key = matched_preset.tts_clone if matched_preset is not None else None
+    tts_clone = (
+        artifacts.get(configured_clone_key)
+        if configured_clone_key is not None and configured_clone_key == preset_clone_key
+        else None
+    )
     return ActiveModelCatalog(
         profile=matched_preset.id if matched_preset is not None else None,
         asr=asr,
         tts=tts,
+        tts_clone=tts_clone,
         aligner=aligner,
         diarization=diarization,
     )
@@ -120,9 +133,10 @@ def resolve_selection(
     if tts_artifact.family != "qwen3_tts" or tts_artifact.variant not in {
         "voice_design",
         "custom_voice",
+        "base",
     }:
         raise ValueError(
-            "TTS artifact must use family=qwen3_tts and variant=voice_design or custom_voice"
+            "TTS artifact must use family=qwen3_tts and variant=voice_design, custom_voice, or base"
         )
 
     expected_preset = catalog.preset(record.preset)
@@ -132,6 +146,8 @@ def resolve_selection(
     models_dir = (resolved_app_home / "models").resolve()
     asr_dir = (models_dir / asr_key).resolve()
     tts_dir = (models_dir / tts_key).resolve()
+    clone_key = expected_preset.tts_clone
+    clone_dir = (models_dir / clone_key).resolve() if clone_key is not None else None
     vendor_current = resolved_app_home / "vendor" / "current"
     vendor_python = vendor_current / "bin" / "python"
     vendor_ffmpeg = vendor_current / "ffmpeg" / "bin" / "ffmpeg"
@@ -139,6 +155,8 @@ def resolve_selection(
     try:
         asr_dir.relative_to(models_dir)
         tts_dir.relative_to(models_dir)
+        if clone_dir is not None:
+            clone_dir.relative_to(models_dir)
     except ValueError as exc:
         raise ValueError("model path escapes models directory") from exc
 
@@ -156,10 +174,15 @@ def resolve_selection(
     )
 
     final_tts_dir: Path | None = None
+    final_clone_dir: Path | None = None
     if tts_configured:
         if not tts_dir.is_dir():
             raise ValueError(f"TTS model snapshot directory is missing: {tts_dir}")
         final_tts_dir = tts_dir
+        if clone_dir is not None:
+            if not clone_dir.is_dir():
+                raise ValueError(f"TTS clone model snapshot directory is missing: {clone_dir}")
+            final_clone_dir = clone_dir
 
     updates: dict[str, object] = {
         "qwen3_model_dir": asr_dir,
@@ -183,6 +206,7 @@ def resolve_selection(
 
     if tts_configured:
         updates["qwen3_tts_model_dir"] = final_tts_dir
+        updates["qwen3_tts_clone_model_dir"] = final_clone_dir
         updates["qwen3_tts_python"] = vendor_python
 
     return settings.model_copy(update=updates)

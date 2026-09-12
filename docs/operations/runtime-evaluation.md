@@ -2,7 +2,7 @@
 title: "SpeechRail 运行时评估：mlx-qwen3-asr 端到端、性能与清理"
 status: active
 version: "1.3.0"
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # SpeechRail 运行时评估
@@ -113,7 +113,7 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
 |---|---|---|---|---|
 | `light` | `asr-0.6b-q8` / `tts-0.6b-custom-q8` | — | ✗ | 8-bit ASR CER/WER 与 TTS 客观质量；4-bit 组合已评估并回退（E1 未过）|
 | `balanced` | `asr-1.7b-q8` / `tts-0.6b-custom-q8` | `aligner-q8` | ✓ | `aligner-q8` 的分人 DER/SACER 与资源包络 |
-| `quality` | `asr-1.7b-q8` / `tts-1.7b-design-q8` | `aligner-bf16` | ✓ | `aligner-bf16` 的分人 DER/SACER 与 Studio 资源包络 |
+| `quality` | `asr-1.7b-q8` / `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16` | ✓ | `aligner-bf16` 的分人 DER/SACER、VD/Base 双 worker 常驻峰值、跨 lane 并发与冷却恢复 |
 
 评估口径：
 
@@ -121,6 +121,8 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
   E1 未通过（公开真人语料 1.38pp > 0.5pp）后回退 `asr-0.6b-q8` + `tts-0.6b-custom-q8`，不再是 pending
   4-bit 档。§3 的 q8 数字仍是 release `1.1.0` 的历史实测，对当前 8-bit `light` 只能作为**方向性参考**，
   不能替代 catalog v2 下按档位重新实测的结论。
+- **Quality TTS 口径**：评估必须分别记录 `voice_design` / `voice_clone` 两个 worker 的常驻状态、各 lane
+  的 RTF/P95、跨 lane 并发结果以及 Quality group 冷却后的恢复延迟；不能用旧 VoiceDesign-only 数字代表双 worker 活跃态。
 - **aligner 变体**：`balanced`/`quality` 的 aligner 由 catalog 按档供给（`aligner-q8` / `aligner-bf16`），
   评估须报告该档实际供给的变体；`light` 无 aligner、无分人，不做分人评估。word-level timestamps 由 ASR
   原生提供，不依赖 aligner，因此不列入 aligner 评估。

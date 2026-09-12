@@ -221,7 +221,17 @@ are 8-bit; only the `quality` diarization aligner remains bf16.
 |---|---|---|---|
 | `light` | `asr-0.6b-q8` | `tts-0.6b-custom-q8` | No aligner and no diarization; fixed CustomVoice roles. |
 | `balanced` | `asr-1.7b-q8` | `tts-0.6b-custom-q8` | `aligner-q8` and optional anonymous diarization; fixed CustomVoice roles. |
-| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` | `aligner-bf16`, optional anonymous diarization, VoiceDesign preview/design, and quality-gated cloning. |
+| `quality` | `asr-1.7b-q8` | `tts-1.7b-design-q8` + `tts-1.7b-base-q8` | `aligner-bf16`, optional anonymous diarization, VoiceDesign preview/design, and quality-gated Base cloning. The two TTS capability workers may stay resident and different lanes may run concurrently; each lane remains serialized. |
+
+Quality keeps VoiceDesign and Base as independent TTS capability lanes. They do
+not need to be repeatedly loaded and unloaded when switching voice workflows;
+the Quality capability group can still trim/close both workers after the
+configured idle cooldown and restore them lazily for the next request.
+
+![Three-tier model and Quality dual-TTS capability relationship](docs/architecture/diagrams/three-tier-model-architecture.svg)
+
+The diagram is the canonical overview of profile routing, model sharing,
+Quality's two TTS capability lanes, and the shared resource/lifecycle boundary.
 
 Use the CLI to inspect or change a managed selection. `setup` provides a
 memory-based starting suggestion; it is not a hard hardware guarantee.
@@ -235,7 +245,7 @@ uv run speechrail profile rollback
 
 Select voices from `/v1/voices` rather than assuming that a registered custom
 voice is usable on every profile. The quality-only voice endpoints include
-`POST /v1/voices/previews`, `POST /v1/voices`, and the quality-gated clone
+`POST /v1/voices/previews`, `POST /v1/voices`, `POST /v1/voices/designs`, and the quality-gated clone
 endpoints documented in [`docs/users/api-contract.md`](docs/users/api-contract.md).
 
 ## Security and data handling

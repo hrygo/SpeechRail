@@ -444,7 +444,7 @@ def _family_variant(config: Mapping[str, object]) -> tuple[str, str]:
         return family, variant
     if family == "qwen3_tts":
         variant = config.get("tts_model_type", config.get("variant"))
-        if variant not in {"voice_design", "custom_voice"}:
+        if variant not in {"voice_design", "custom_voice", "base"}:
             raise ValueError("qwen3_tts has an unsupported variant")
         return family, variant
     raise ValueError("model config has an unsupported family")

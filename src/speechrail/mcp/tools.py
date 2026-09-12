@@ -185,7 +185,11 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
             "asr_state": _text(health.get("asr_state")),
             "tts_state": _text(health.get("tts_state")),
         },
-        "clone_supported": variant == "voice_design",
+        "clone_supported": (
+            _bool_flag(entry.get("capabilities", {}).get("supports_clone"))
+            if entry is not None and isinstance(entry.get("capabilities"), dict)
+            else False
+        ),
         "preview_supported": variant == "voice_design",
         "jobs": {
             "spool_ready": _bool_flag(health.get("job_spool_ready")),

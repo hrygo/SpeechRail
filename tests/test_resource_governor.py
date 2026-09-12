@@ -340,6 +340,150 @@ def test_tts_requests_share_one_admitted_worker_slot() -> None:
     asyncio.run(scenario())
 
 
+def test_distinct_tts_resource_keys_can_run_concurrently() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=2)
+        )
+        design_started = asyncio.Event()
+        clone_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def design() -> None:
+            design_started.set()
+            await release.wait()
+
+        async def clone() -> None:
+            clone_started.set()
+            await release.wait()
+
+        design_task = asyncio.create_task(
+            governor.run(
+                design,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+            )
+        )
+        await design_started.wait()
+        clone_task = asyncio.create_task(
+            governor.run(
+                clone,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_clone",
+            )
+        )
+        await asyncio.wait_for(clone_started.wait(), timeout=0.5)
+        assert governor.snapshot().active_tts == 2
+        assert governor.snapshot().pending_batch == 0
+
+        release.set()
+        await asyncio.gather(design_task, clone_task)
+        assert governor.snapshot().active_tts == 0
+
+    asyncio.run(scenario())
+
+
+def test_distinct_tts_lane_can_bypass_waiter_blocked_on_another_lane() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=3)
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        same_lane_started = asyncio.Event()
+        different_lane_started = asyncio.Event()
+        release_different = asyncio.Event()
+
+        async def first() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def same_lane() -> None:
+            same_lane_started.set()
+
+        async def different_lane() -> None:
+            different_lane_started.set()
+            await release_different.wait()
+
+        first_task = asyncio.create_task(
+            governor.run(
+                first,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+            )
+        )
+        await first_started.wait()
+        same_task = asyncio.create_task(
+            governor.run(
+                same_lane,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+            )
+        )
+        different_task = asyncio.create_task(
+            governor.run(
+                different_lane,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_clone",
+            )
+        )
+
+        await asyncio.wait_for(different_lane_started.wait(), timeout=0.5)
+        assert not same_lane_started.is_set()
+        assert governor.snapshot().active_tts == 2
+        assert governor.snapshot().pending_batch == 1
+
+        release_first.set()
+        await asyncio.wait_for(same_lane_started.wait(), timeout=0.5)
+        release_different.set()
+        await asyncio.gather(first_task, same_task, different_task)
+
+    asyncio.run(scenario())
+
+
+def test_same_tts_resource_key_remains_serialized() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=2)
+        )
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_started = asyncio.Event()
+
+        async def first() -> None:
+            first_started.set()
+            await release_first.wait()
+
+        async def second() -> None:
+            second_started.set()
+
+        first_task = asyncio.create_task(
+            governor.run(
+                first,
+                WorkClass.REALTIME_TTS,
+                resource_key="voice_clone",
+            )
+        )
+        await first_started.wait()
+        second_task = asyncio.create_task(
+            governor.run(
+                second,
+                WorkClass.REALTIME_TTS,
+                resource_key="voice_clone",
+            )
+        )
+        await asyncio.sleep(0)
+        assert governor.snapshot().active_tts == 1
+        assert governor.snapshot().pending_realtime == 1
+        assert not second_started.is_set()
+
+        release_first.set()
+        await asyncio.gather(first_task, second_task)
+        assert second_started.is_set()
+
+    asyncio.run(scenario())
+
+
 def test_settings_validate_resource_governor_reservation() -> None:
     with pytest.raises(ValueError, match="realtime_reserved_capacity"):
         Settings(runtime_total_capacity=2, realtime_reserved_capacity=2)

@@ -43,13 +43,14 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "2.4.0"
+    version: str = "2.5.0"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
     tts_model_id: str = "speechrail/qwen3-tts"
     tts_voice_ids: tuple[str, ...] = tuple(VOICE_PROFILES)
     qwen3_tts_model_dir: Path | None = None
+    qwen3_tts_clone_model_dir: Path | None = None
     qwen3_tts_python: Path | None = None
     tts_allow_model_downloads: bool = False
     tts_sample_rate: int = Field(default=24_000, ge=8_000, le=48_000)

@@ -56,6 +56,7 @@ def _selection(prepared: PreparedModelSet, generation: int) -> dict[str, object]
         "generation": generation,
         "asr": prepared.asr.key,
         "tts": prepared.tts.key,
+        "tts_clone": prepared.tts_clone.key if prepared.tts_clone is not None else None,
         "runtime_lock_id": prepared.runtime_lock_id,
     }
 
@@ -65,6 +66,8 @@ def _matches(selection: Mapping[str, object], prepared: PreparedModelSet) -> boo
         selection.get("preset") == prepared.preset
         and selection.get("asr") == prepared.asr.key
         and selection.get("tts") == prepared.tts.key
+        and selection.get("tts_clone")
+        == (prepared.tts_clone.key if prepared.tts_clone is not None else None)
         and selection.get("runtime_lock_id") == prepared.runtime_lock_id
     )
 
@@ -133,7 +136,7 @@ def apply_prepared_profile(
     prepared_resolver: PreparedIdResolver = _resolve_prepared_id,
     selection_resolver: SelectionResolver = _resolve_selection,
 ) -> ApplyResult:
-    """Apply one verified ASR/TTS pair while the single service is stopped."""
+    """Apply one verified ASR/TTS capability set while the single service is stopped."""
     resolved_home = app_home.resolve()
     prepared = prepared_resolver(prepared_id, resolved_home)
     profile_store = store or ProfileStore(resolved_home)

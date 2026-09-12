@@ -27,7 +27,7 @@ _CUSTOM_VOICE_SPEAKERS: Final[Mapping[str, str]] = MappingProxyType(
         "sohee": "Sohee",
     }
 )
-_SUPPORTED_VARIANTS: Final[frozenset[str]] = frozenset({"voice_design", "custom_voice"})
+_SUPPORTED_VARIANTS: Final[frozenset[str]] = frozenset({"voice_design", "custom_voice", "base"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,16 +69,24 @@ def resolve_binding(
         profile = get_voice_profile(preset_voice)
     elif profile.id != preset_voice:
         raise ValueError("voice profile does not match requested voice")
+    if variant == "base":
+        if profile.mode != "clone":
+            raise ValueError(f"voice {voice} is not a clone voice for base variant")
+        return VoiceBinding(
+            variant=variant,
+            voice=preset_voice,
+            speaker=None,
+            instruction=None,
+            is_clone=True,
+            ref_audio_path=profile.audio_path,
+            ref_text=profile.ref_text,
+        )
+
     if variant == "voice_design":
         if profile.mode == "clone":
-            return VoiceBinding(
-                variant=variant,
-                voice=preset_voice,
-                speaker=None,
-                instruction=None,
-                is_clone=True,
-                ref_audio_path=profile.audio_path,
-                ref_text=profile.ref_text,
+            raise ValueError(
+                f"voice {voice} requires base clone capability (quality tier); "
+                "voice_design is reserved for prompt-created voices"
             )
         return VoiceBinding(
             variant=variant,
@@ -90,7 +98,7 @@ def resolve_binding(
 
     if profile.mode == "clone":
         raise ValueError(
-            f"voice {voice} requires voice_design variant (quality tier); "
+            f"voice {voice} requires base clone capability (quality tier); "
             "custom_voice variant does not support voice cloning"
         )
 
