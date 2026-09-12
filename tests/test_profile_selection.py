@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -386,7 +387,9 @@ def test_preflight_integrates_selection_successfully(
     clone_model = app_home / "models" / "tts-1.7b-base-q8"
     clone_model.mkdir(parents=True)
     (tts_model / "config.json").write_text("{}", encoding="utf-8")
-    (clone_model / "config.json").write_text("{}", encoding="utf-8")
+    (clone_model / "config.json").write_text(
+        json.dumps({"model_type": "qwen3_tts", "tts_model_type": "base"}), encoding="utf-8"
+    )
 
     aligner_dir = _aligner_dir(app_home, "aligner-bf16")
     (aligner_dir / "config.json").write_text("{}", encoding="utf-8")

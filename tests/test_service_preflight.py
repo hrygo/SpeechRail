@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,18 @@ def _complete_snapshot(path: Path) -> None:
 def _complete_tts_snapshot(path: Path) -> None:
     path.mkdir(parents=True)
     (path / "config.json").write_text("{}", encoding="utf-8")
+
+
+def _complete_clone_snapshot(path: Path, variant: str) -> None:
+    path.mkdir(parents=True)
+    (path / "config.json").write_text(
+        json.dumps({"model_type": "qwen3_tts", "tts_model_type": variant}), encoding="utf-8"
+    )
+
+
+def _append_clone_dir(layout: ServiceLayout, clone_model: Path) -> None:
+    with layout.config_file.open("a", encoding="utf-8") as stream:
+        stream.write(f"SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR={clone_model}\n")
 
 
 def _successful_runner(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
@@ -373,3 +386,52 @@ def test_preflight_rejects_silero_vad_when_host_runtime_lacks_onnxruntime(
     assert result.ok is False
     vad_runtime = next(check for check in result.checks if check.name == "realtime_vad_runtime")
     assert vad_runtime.ok is False
+
+
+def test_preflight_accepts_base_variant_clone_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    tts_model = tmp_path / "tts-model"
+    clone_model = tmp_path / "tts-clone-model"
+    _complete_snapshot(asr_model)
+    _complete_tts_snapshot(tts_model)
+    _complete_clone_snapshot(clone_model, "base")
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(
+        layout, asr=(asr_model, Path(sys.executable)), tts=(tts_model, Path(sys.executable))
+    )
+    _append_clone_dir(layout, clone_model)
+
+    result = run_preflight(layout, require_tts=True, runner=_successful_runner)
+
+    assert result.ok is True
+    variant_check = next(check for check in result.checks if check.name == "tts_clone_variant")
+    assert variant_check.ok is True
+
+
+def test_preflight_rejects_non_base_variant_clone_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = ServiceLayout.for_app_home(tmp_path / "SpeechRail")
+    layout.ensure_directories()
+    asr_model = tmp_path / "asr-model"
+    tts_model = tmp_path / "tts-model"
+    clone_model = tmp_path / "tts-clone-model"
+    _complete_snapshot(asr_model)
+    _complete_tts_snapshot(tts_model)
+    _complete_clone_snapshot(clone_model, "voice_design")
+    monkeypatch.setattr("speechrail.service.preflight.shutil.which", lambda _: sys.executable)
+    _write_env(
+        layout, asr=(asr_model, Path(sys.executable)), tts=(tts_model, Path(sys.executable))
+    )
+    _append_clone_dir(layout, clone_model)
+
+    result = run_preflight(layout, require_tts=True, runner=_successful_runner)
+
+    assert result.ok is False
+    variant_check = next(check for check in result.checks if check.name == "tts_clone_variant")
+    assert variant_check.ok is False
+    assert "base TTS variant" in variant_check.message

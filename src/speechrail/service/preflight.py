@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -85,6 +86,31 @@ def _snapshot_check(
     ):
         return _check(name, False, "model snapshot weights are missing")
     return _check(name, True, "model snapshot is complete")
+
+
+def _tts_clone_variant_check(model_dir: Path | None) -> PreflightCheck:
+    """Confirm the clone snapshot declares the Base TTS variant.
+
+    Reads only ``config.json`` (same ``tts_model_type`` field the canonical
+    identity reader uses); weight/fingerprint verification stays with the
+    backend startup path.
+    """
+    name = "tts_clone_variant"
+    if model_dir is None:
+        return _check(name, False, "clone snapshot path is not configured")
+    config_path = model_dir / "config.json"
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return _check(name, False, "clone snapshot config.json is missing or invalid")
+    if not isinstance(config, dict):
+        return _check(name, False, "clone snapshot config.json must contain an object")
+    if config.get("model_type") != "qwen3_tts":
+        return _check(name, False, "clone snapshot is not a Qwen3-TTS model")
+    variant = config.get("tts_model_type", config.get("variant"))
+    if variant != "base":
+        return _check(name, False, "clone snapshot must be the base TTS variant")
+    return _check(name, True, "clone snapshot is the base TTS variant")
 
 
 def _file_check(name: str, model_path: Path | None, *, label: str) -> PreflightCheck:
@@ -411,6 +437,7 @@ def run_preflight(
                     ("config.json",),
                 )
             )
+            checks.append(_tts_clone_variant_check(settings.qwen3_tts_clone_model_dir))
     elif require_tts:
         checks.extend(
             [

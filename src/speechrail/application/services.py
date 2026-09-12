@@ -371,10 +371,16 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             *,
             warmup: bool,
             catalog_variant: str | None,
+            expected_variant: TtsModelVariant | None = None,
         ) -> Qwen3TtsWorker:
             raw_variant = catalog_variant or inspect_model(model_dir).variant
             if raw_variant not in {"voice_design", "custom_voice", "base"}:
                 raise RuntimeError("backend_identity_mismatch: unsupported TTS model variant")
+            if expected_variant is not None and raw_variant != expected_variant:
+                raise RuntimeError(
+                    f"backend_identity_mismatch: expected {expected_variant} TTS variant, "
+                    f"got {raw_variant}"
+                )
             variant = cast(TtsModelVariant, raw_variant)
             return Qwen3TtsWorker(
                 Qwen3TtsBackendConfig(
@@ -418,6 +424,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                     if active_tts_catalog.tts_clone is not None
                     else None
                 ),
+                expected_variant="base",
             )
             if settings.qwen3_tts_clone_model_dir is not None
             else None
