@@ -34,7 +34,7 @@ date: 2026-09-12
 - `diarization_ready` 只表示固定 CoreML bundle 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。它只在分人档位（`balanced`/`quality`）有意义：`light` 不供给 aligner 与 CoreML 路径，`/v1/models` 不出现 `gpt-4o-transcribe-diarize`。D1 仅记录 M5 Max、90 秒输入的 564 MB max RSS；DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。
 - `quality` 新增 Base clone artifact 会增加安装体积和 capability switch 冷启动；旧版 VoiceDesign-only RAM / latency 数据不能直接当作新架构 Base clone 的实测数据。需要在目标 Apple Silicon 上重新测量 VoiceDesign→Base、Base→VoiceDesign 的切换延迟、峰值 RSS 与首音时间。
-- 2026-09-12 本地审计发现现有 synthesis quality-run 的最终通过条件对静音、极端削波/噪声与 deterministic 证据仍不够严格；在独立质量门禁 PR 修复并重新验收前，不得把绿色 `voice_quality_v1` 报告解释成跨文本音色和纯净度已经证明。
+- 2026-09-12 本地审计发现现有 synthesis quality-run 的最终通过条件对静音、极端削波/噪声与 deterministic 证据仍不够严格；在这些门禁修复并重新验收前，不得把绿色 `voice_quality_v1` 报告解释成跨文本音色和纯净度已经证明。
 
 ## 已实测基准（本机，MPS/float16）
 

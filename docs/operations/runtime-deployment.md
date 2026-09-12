@@ -184,6 +184,12 @@ metadata 仍保留用于升级、回滚和审计的版本信息。
 > 必须先确保目标档位资产已存在（例如用一个能够供给的 runtime 先执行 `speechrail setup` /
 > `profile apply <tier>`），再切换新 release。
 
+> [!IMPORTANT]
+> **quality 档升级的 Base clone snapshot 前置条件**：`quality` preset 声明了 `tts_clone` artifact；
+> 若该 Base clone snapshot 缺失或未供给，`resolve_selection` 会在启动前 fail closed，服务不会以
+> `backend_not_ready` 降级形态启动。从仅 VoiceDesign 的旧 quality 部署升级时，操作者必须先供给
+> `tts_clone` 制品（managed profile apply 会执行该供给），再重启或切换 release。
+
 若 private `.env` 设置 `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH`，managed installer 会将该
 release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wheel 内
 `SpeechRailDiarizationWorker` 与 fixed-text aligner snapshot（aligner 校验由 `preset.aligner` 驱动，

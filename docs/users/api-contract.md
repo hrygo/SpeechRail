@@ -310,9 +310,10 @@ Authorization: Bearer <TOKEN>
 | `id` | string | 否 | 可选音色标识符，匹配 `^[a-zA-Z0-9_-]{1,64}$` |
 
 - **幂等**：可选 `Idempotency-Key` 请求头用于去重重试。缓存键为 `(Idempotency-Key, audio 的 SHA-256, ref_text)`；命中时直接 `201` 回放已注册的 `VoiceProfile`，不重复推理。缓存为进程内内存态，服务重启即失效，非持久化幂等。同一 key 下音频或 `ref_text` 变化即视为新请求，重新走质量分级，仍可能被 `voice_quality_reject` 拒绝。
-- **质量门控**：参考音频通过信号校验后按 `voice_quality_v1` 策略打分。
+- **质量门控**：参考音频通过信号校验后按 `voice_quality_v1` 策略打分；先对上传原始音频分级以尽早拒绝无效输入，再规范化为语音感知归一后的 canonical WAV 并对该 canonical 音频重新分级，持久化的参考资产与 `quality` 报告均描述 canonical 音频（与 `/v1/voices/designs` 同一契约）；canonical 重评结果为 `reject` 时同样返回 `400` 不落库。
   - `status=reject`：拒绝注册，返回 `400`，错误 envelope 为 `{"error": {"code": "voice_quality_reject", ...}, "quality_report": {...}}`（`quality_report` 与 `error` 同级）。客户端以响应体 `error.code` 作为可见的错误码信号；服务端内部通过 `X-SpeechRail-Error-Code` 响应头把错误码交给观测中间件消费，该头在到达客户端前已被中间件移除，不属于客户端可见契约。
   - `status=warn` 或 `pass`：正常注册，`201` 返回的 `VoiceProfile` 携带 `quality` 字段（即该报告，含 `status` 与 `run_id`）。
+- **历史音色**：本次架构切换（clone 固定走 Base capability）之前注册的 clone 音色，其已存储的 `voice_quality_v1` 报告描述的是旧合成路径，不代表当前 Base 路径表现；需通过 `/v1/voices/{voice_id}/quality-runs` 重新验证后方可继续作为质量依据。
 - 注册写入受控目录失败返回 `503 voice_store_unavailable`（可重试）；注册结构非法返回 `400 voice_creation_failed`。
 
 #### 5.7.2 仅校验不注册 (`POST /v1/voices/clone/validate`)

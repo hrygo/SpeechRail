@@ -291,7 +291,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/VoiceDesignRegistrationResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Invalid request; includes the stable code
+            voice_design_registration_unsupported when the active tier is not
+            the quality VoiceDesign/Base profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
@@ -1736,7 +1743,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorBody'
     ValidationError:
-      description: Multipart validation failed
+      description: Request validation failed
       content:
         application/json:
           schema:
