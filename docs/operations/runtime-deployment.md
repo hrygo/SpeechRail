@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # SpeechRail 运行时与部署
@@ -26,10 +26,14 @@ date: 2026-09-11
                                   └─ 外部 Base clone snapshot（Quality）
 ```
 
+![三档模型与 Quality 双 TTS capability 关系图](../architecture/diagrams/three-tier-model-architecture.svg)
+
 ASR worker 仅在同时设置 `SPEECHRAIL_QWEN3_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_PYTHON` 时
 创建并由 ASGI lifecycle 管理；TTS capability worker 仅在对应 TTS 路径同时设置时创建，Quality
-可创建 VoiceDesign 与 Base 两个 worker。是否在 startup 还是首次请求加载权重由
-`SPEECHRAIL_WORKER_LAZY_LOAD` 决定；加载后 capability 切换不会互相卸载。
+可创建 VoiceDesign 与 Base 两个独立 worker，并允许两者同时常驻。是否在 startup 还是首次请求加载权重由
+`SPEECHRAIL_WORKER_LAZY_LOAD` 决定；加载后 capability 路由不会互相卸载。不同 lane 可并发，同一 lane
+仍由对应 worker 串行；`SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 到期后，Quality 两个 worker 作为一个
+capability group trim/close，下一次请求再惰性恢复所需 worker。
 主进程与 worker 使用长度前缀 JSON 私有协议，ASR worker 接受 16 kHz / 单声道 / PCM16 音频，
 TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权重不在仓库内；请求路径
 不会下载模型。
@@ -66,7 +70,7 @@ worker 协议、调度与进程隔离保持不变；Quality 的 VD/Base 是新�
 | 默认 Apple Silicon | Qwen3-ASR-1.7B | `mps` / `float16` (默认) 或 `int8` (内存优化) | 启动时加载一份，拒绝 CPU fallback；本机已验证 |
 | 有意 CPU 部署 | Qwen3-ASR-1.7B | `cpu` / `float32` (默认) 或 `int8` | 启动时加载一份；性能基准待对应硬件验收 |
 | 未配置 runtime | 无 | 无 | 进程可启动；推理返回 `503 backend_not_ready` |
-| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8` | 独立加载一份；TTS 未就绪不阻塞 ASR；本机已验证；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
+| TTS runtime 成对配置 | Qwen3-TTS VoiceDesign + Quality Base clone capability | `mps` / `float16` 或 `cpu` / `float32`；预量化 `-8bit` 快照时解析为 `int8` | `light`/`balanced` 使用 CustomVoice；`quality` 可独立加载 VoiceDesign 与 Base 两个 worker；TTS 未就绪不阻塞 ASR；TTS 支持预量化 `-8bit` MLX 快照（`speech_tokenizer` codec 恒为 FP32、embedding/norm 为 BF16），不再要求运行时只能 float16/float32 |
 | diarization profile | 私有 Swift/CoreML Sortformer FP16 worker | 活跃会话时惰性启动；仅一条连续状态链路 | `/v1/audio/transcriptions` 的 `gpt-4o-transcribe-diarize` / `diarized_json`；Realtime 通过 `session.speechrail.diarization.enabled` opt-in；只保留有界匿名状态 |
 
 SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `sona` 组件。

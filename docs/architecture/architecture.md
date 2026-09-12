@@ -3,7 +3,7 @@ title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
 version: "1.17.0"
-date: 2026-09-12
+date: 2026-09-13
 ---
 
 # 🏛️ SpeechRail 系统总体架构
@@ -38,16 +38,20 @@ flowchart TD
     end
 
     ASR["一个共享 Qwen3-ASR MLX Worker<br/>batch 与 native streaming 复用物理模型<br/>模式冲突受限"]
-    TTS["TTS capability router<br/>quality: VoiceDesign + Base clone（双 worker / 可并发）<br/>balanced/light: CustomVoice 单 worker"]
+    TTS["TTS capability router<br/>quality: VoiceDesign + Base clone（双 worker / 可双常驻 / 跨 lane 可并发）<br/>balanced/light: CustomVoice 单 worker"]
 
     SDK -->|OpenAI-compatible HTTP / WS| Ingress
     MCP -->|REST；仅配置 API key 时带 Bearer| Ingress
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| ASR
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| TTS
     Life -. 尝试释放常驻权重 .-> ASR
-    Life -. 尝试释放常驻权重 .-> TTS
+    Life -. Quality group 冷却后释放常驻权重 .-> TTS
     Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
+
+![三档模型与 Quality 双 TTS capability 关系图](diagrams/three-tier-model-architecture.svg)
+
+该 SVG 是三档模型组合与 Quality 双 TTS worker 关系的 canonical overview；本页 Mermaid 继续用于说明主进程、IPC 与可选分人 worker 的边界。
 
 ### 运行时事实
 

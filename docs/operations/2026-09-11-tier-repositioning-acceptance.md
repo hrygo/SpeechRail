@@ -9,7 +9,7 @@ date: 2026-09-11
 
 # SpeechRail v2.3.2 三档重定位验收报告 (TIER-REPOS-E)
 
-> **2026-09-12 架构更新**：本报告保留 2.3.2 的历史实测，不重写当时结果。当前 Quality 架构已将 reference clone 从默认 `voice_design` 权重拆到独立、按需加载的 `base` capability；因此本报告中“`supports_clone=true (voice_design)`”及 Quality RAM/安装体积只代表 2026-09-11 基线，不能外推为新双 capability 架构的实测。
+> **2026-09-13 架构更新**：本报告保留 2.3.2 的历史实测，不重写当时结果。当前 Quality 架构已将 reference clone 从默认 `voice_design` 权重拆到独立的 `base` capability worker；该 worker 可与 VoiceDesign 双常驻、跨 lane 并发，并在 Quality group 冷却后回收。因此本报告中“`supports_clone=true (voice_design)`”及 Quality RAM/安装体积只代表 2026-09-11 基线，不能外推为新双 capability 架构的实测。
 
 本报告记录 2.3.0 引入、2.3.1 修复、2.3.2 收口的三档按用户定位重排（`light`/`balanced`/`quality`、aligner 按档位供给、分人能力按档位声明）后，Workstream E 验收门 E1–E6 在**本机 managed 服务**上的实测结果。
 

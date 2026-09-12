@@ -3,7 +3,7 @@ title: "Quality 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
 version: "1.2"
-date: 2026-09-12
+date: 2026-09-13
 ---
 
 # Quality 档音色创造、克隆与稳定化能力架构
@@ -120,7 +120,7 @@ flowchart LR
 5. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 VoiceDesign / Base / CustomVoice 身份由独立的 `model_variant` 表达；
 6. 父进程在 composition 阶段确定期望 `model_variant`（受管模型优先取 catalog；非受管本地快照才执行本地 identity inspection），并在 worker `ready` 握手中逐项比对；variant 缺失或不匹配必须 `backend_identity_mismatch` fail-closed，禁止回退成 VoiceDesign；
 7. `quality-runs` 作为批量 TTS 工作必须进入带 capability key 的 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界；
-8. `WorkerIdleEvictor` 把 router 视为一个能力组：warm standby 同时 trim 两个 worker，冷却到期后一起 close；驱逐期间 worker 自己的 lock 保证活动流完成后再释放；冷驱逐后下一请求按需重新加载所需 worker，不发生请求级互斥换模；
+8. `WorkerIdleEvictor` 把 router 视为一个能力组：warm standby 同时 trim 两个 worker，冷却到期后一起 close；驱逐期间 worker 自己的 lock 保证活动流完成后再释放；冷驱逐后下一请求惰性恢复所需 worker，不发生请求级互斥换模；
 9. 合成门通过后，先在同一请求 deadline 内释放两个 TTS worker，再进入受治理的 Batch ASR 回转录阶段；ASR 缺失或异常为 `unevaluated`，不得给出假通过。详见[输出可懂度 / ASR 复核](voice-quality-intelligibility-validation.md)。
 
 双常驻会增加 Quality 的活动内存占用，`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单个 TTS worker 的实测峰值声明，heavy-overlap 预算按 router 可能常驻的 worker 数量计入。冷却驱逐仍保留，用于释放整组权重；重新使用时只为当前请求恢复需要的 worker。

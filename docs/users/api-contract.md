@@ -3,7 +3,7 @@ title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
 version: "2.1.1"
-date: 2026-09-12
+date: 2026-09-13
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -19,7 +19,7 @@ SpeechRail 对外暴露 Canonical（规范）模型名与 OpenAI 标准别名（
 | 能力类别 | Canonical 模型 ID | 兼容别名 (Aliases) | 说明 |
 |---|---|---|---|
 | **语音识别 (ASR)** | `speechrail/qwen3-asr-1.7b` | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | 别名自动归一化路由至本地 Qwen3-ASR 运行时（支持 1.7B / 0.6B 权重目录） |
-| **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至当前档位的 VoiceDesign 或 CustomVoice 权重 |
+| **语音合成 (TTS)** | `speechrail/qwen3-tts` | `tts-1`, `tts-1-hd`, `gpt-4o-mini-tts` | 别名自动归一化路由至当前档位的 VoiceDesign、CustomVoice 或 Quality Base capability |
 
 > 💡 **模型规格自适应**：Canonical 模型 ID 标识服务后端能力契约，底层可通过 `SPEECHRAIL_QWEN3_MODEL_DIR` 自由加载 **Qwen3-ASR-1.7B** 或 **Qwen3-ASR-0.6B**（显存占用更低、适用于 8GB 内存设备），对外均遵循相同的 OpenAI 协议。
 
@@ -49,7 +49,7 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 >   `balanced`、`quality` 可用；`light` 不供给 aligner/Sortformer，`/v1/models` 不列出该别名，
 >   文件分人与 Realtime 分人扩展（`session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
 > - **音色创造仅 `quality`**：prompt design / preview 由 VoiceDesign 承担；reference clone 由独立 Base capability 承担。`balanced`、`light` 上 `supports_instruction`、`supports_preview`、`supports_clone` 均为 `false`。
-> - **双 capability lane**：Quality 的 VoiceDesign 与 Base clone 由两个独立 worker 提供；不同 capability 可同时常驻并发，同一 worker 内串行。开启懒加载时按首次请求加载，连续请求不会因 capability 切换反复换模；空闲冷却后仍会由生命周期组件驱逐。
+> - **双 capability lane**：Quality 的 VoiceDesign 与 Base clone 由两个独立 worker 提供；不同 capability 可同时常驻并发，同一 capability lane 内串行。开启懒加载时按首次请求加载，连续请求不会因 capability 切换反复换模；空闲冷却后仍会由生命周期组件按 Quality group 驱逐，下一次请求惰性恢复所需 worker。
 
 ---
 
@@ -74,7 +74,7 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 当前驻留。新增的 `tts_warm` 为 `true` 时表示 worker 已完成加载握手，可直接产生 PCM，
 为 `false` 时表示冷/未配置，注入的 backend 无法报告驻留状态时为 `null`。`tts_state` 提供
 `active`、`warm_standby`、`cold_evicted`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态
-不会单独把仍可按需加载的 `tts_ready=true` 改成 false。
+不会单独把仍可在请求时加载的 `tts_ready=true` 改成 false。
 
 ---
 
@@ -296,7 +296,7 @@ Authorization: Bearer <TOKEN>
 
 ### 5.7 音色克隆与质量门控 (`POST /v1/voices/clone`, `/clone/validate`, `/quality-runs`)
 
-质量档支持从参考音频 + 脚本文本克隆自定义音色，但 clone 与默认 VoiceDesign 已解耦：reference clone 固定由按需加载的 Qwen3-TTS Base capability 通过公开 reference-generation 接口执行；VoiceDesign 不作为 clone fallback。`balanced` / `light` 调用返回 `400 voice_cloning_unsupported`。三个接口共用 `VoiceQualityReport` 结构。2026-09-12 审计已确认现有 synthesis quality-run 存在假阳性缺口，因此绿色 `status=pass` 暂不能作为跨文本 speaker identity 或纯净度已证明的充分证据。
+质量档支持从参考音频 + 脚本文本克隆自定义音色，但 clone 与默认 VoiceDesign 已解耦：reference clone 固定由独立的 Qwen3-TTS Base capability 通过公开 reference-generation 接口执行；Base 可与 VoiceDesign 同时常驻，空闲冷却后可随 Quality group 一起回收并在下一次请求时惰性恢复。VoiceDesign 不作为 clone fallback。`balanced` / `light` 调用返回 `400 voice_cloning_unsupported`。三个接口共用 `VoiceQualityReport` 结构。2026-09-12 审计已确认现有 synthesis quality-run 存在假阳性缺口，因此绿色 `status=pass` 暂不能作为跨文本 speaker identity 或纯净度已证明的充分证据。
 
 #### 5.7.1 克隆并注册音色 (`POST /v1/voices/clone`)
 

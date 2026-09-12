@@ -3,7 +3,7 @@ title: "VoiceDesign 能力优势与音色稳定性边界"
 status: active
 audience: "架构师、TTS 质量负责人、Sona Voice Studio 开发者"
 version: "2.1"
-date: 2026-09-12
+date: 2026-09-13
 ---
 
 # VoiceDesign 能力优势与音色稳定性边界
@@ -15,7 +15,7 @@ VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语�
 但 VoiceDesign 不再承担 SpeechRail 的 reference voice cloning。当前职责是：
 
 - `quality / VoiceDesign 1.7B`：提示词音色设计、Quality 默认 TTS；
-- `quality / Base 1.7B`：参考音频克隆，按需加载；
+- `quality / Base 1.7B`：参考音频克隆，由独立 capability worker 承担；允许与 VoiceDesign 双常驻，Quality group 冷却后可一起回收并在下一次请求时惰性恢复；
 - `balanced/light / CustomVoice 0.6B`：九个固定 speaker；
 - Prompt voice 如果后续需要“跨任意文本始终像同一个人”，走 **VoiceDesign → canonical reference → Base stabilization**，而不是反复让 VoiceDesign 对每段目标文本重新拟合身份。
 

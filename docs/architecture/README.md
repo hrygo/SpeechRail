@@ -3,12 +3,18 @@ title: "SpeechRail 架构文档目录"
 status: active
 audience: "系统架构师、核心开发者、技术决策者"
 version: "2.0.6"
-date: 2026-09-12
+date: 2026-09-13
 ---
 
 # 🏛️ SpeechRail 架构文档
 
 本目录是面向系统架构评审、边界设计、协议设计与长期演进的正式技术参考。它详细规定了 SpeechRail 的系统分层、进程模型、状态机拓扑、资源调度机制及不可逆的架构决策 (ADR)。
+
+## 三档模型关系总览
+
+![三档模型与 Quality 双 TTS capability 关系图](diagrams/three-tier-model-architecture.svg)
+
+这张图是三档模型组合、共享入口、Quality `voice_design`/`voice_clone` 双 worker、跨 lane 并发与冷却回收边界的统一视觉入口。详细实现与约束见[总体架构与数据流](architecture.md)及 [Quality 音色创造、克隆与稳定化能力](quality-voice-capabilities.md)。
 
 ---
 

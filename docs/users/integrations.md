@@ -3,7 +3,7 @@ title: "SpeechRail 客户端与 SDK 接入指南"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
 version: "1.7.1"
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # 🔌 SpeechRail 客户端与 SDK 接入指南
@@ -39,6 +39,8 @@ Base URL、端点、请求/响应 schema 与错误 envelope；**差异只在能�
 - **音色设计 / 克隆仅 `quality`**：`balanced`、`light` 上预览返回 `400 voice_preview_unsupported`，
   克隆返回 `400 voice_cloning_unsupported`。
 - 权威能力矩阵与运行时字段见 [公共 API 契约手册 §1.1](api-contract.md#11-档位与能力可用性矩阵)。
+
+Quality 的 `voice_design` 与 `voice_clone` 由两个独立 TTS capability worker 处理。客户端无需管理 worker 的加载或卸载；不同 capability lane 可以并发，同一 lane 仍会按 worker lock 排队。空闲冷却会按 Quality group 回收常驻权重，下一次请求再惰性恢复所需 worker，这不改变 endpoint、模型别名或错误 envelope。
 
 ---
 

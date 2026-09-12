@@ -269,7 +269,7 @@ SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Emb
 |---|---|---|---|---|---|---|---|---|
 | 🟢 **`light`（Embedded 嵌入档）** | Qwen3-ASR 0.6B（`asr-0.6b-q8`，8-bit） | Qwen3-TTS 0.6B CustomVoice（`tts-0.6b-custom-q8`，8-bit） | ✗ 无 aligner / 无分人 | 8GB 基础款 Mac (Air / Mini) | **≈2.99 GB** (2986.6 MB) | **~4.4 GB** | **~4.1 GB** | **取决于运行时** (按配置卸载) |
 | 🟡 **`balanced`（Pro Workflow 工作流档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | Qwen3-TTS 0.6B CustomVoice（`tts-0.6b-custom-q8`，8-bit） | ✓ `aligner-q8` + Sortformer | 16GB / 24GB 主流 Mac (Pro / Max) | **≈5.96 GB** (5955.3 MB) | **~6.0 GB** | **~5.5 GB** | **取决于运行时** (按配置卸载) |
-| 🟣 **`quality`（Studio 工作室档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | 主 TTS：VoiceDesign 1.7B（`tts-1.7b-design-q8`）；按需克隆：Base 1.7B（`tts-1.7b-base-q8`），均为 8-bit | ✓ `aligner-bf16` + Sortformer | 32GB+ 旗舰款 Mac (Max / Ultra) | **≈10.73 GB** (≈10729.6 MB) | **需重新实测** | **需重新实测** | **取决于运行时** (按配置卸载) |
+| 🟣 **`quality`（Studio 工作室档）** | Qwen3-ASR 1.7B（`asr-1.7b-q8`，8-bit） | VoiceDesign 1.7B（`tts-1.7b-design-q8`）+ 独立 Base 克隆 capability（`tts-1.7b-base-q8`），均为 8-bit | ✓ `aligner-bf16` + Sortformer | 32GB+ 旗舰款 Mac (Max / Ultra) | **≈10.73 GB** (≈10729.6 MB) | **需重新实测** | **需重新实测** | **取决于运行时** (按配置卸载) |
 
 *占位说明：`活跃最大占用` / `稳定占用` 两列沿用此前全 q8 档位的实测值（pre-v2），在新的按档位精度策略下仅具方向性。按档位精度的重新实测尚未完成，这些数值不是新档位的实测结果；`安装体积` 列为 v2 catalog 实测体积。*
 
@@ -277,14 +277,18 @@ SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Emb
 - **权重共享关系**：`balanced` 与 `quality` 共享同一个 1.7B ASR 制品；`balanced` 与 `light` 共享同一个 0.6B CustomVoice 8-bit 制品（`tts-0.6b-custom-q8`）。
 - **可配置空闲卸载 (Idle Eviction)**：默认空闲超时为 **300 秒**，可通过 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 修改，设为 `0` 可禁用；卸载后的实测物理内存取决于运行时与档位。
 - **Quality 音色创造边界**：`quality` 独享两类能力——自然语言创造音色由 **VoiceDesign 1.7B** 负责；参考音频克隆由 **Base 1.7B** 负责。`balanced` / `light` 使用 CustomVoice 0.6B，不声明这两类创建能力。
-- **Base 按需加载**：Base 作为 Quality 的 `tts_clone` 制品安装，但不在服务启动时预热。capability router 在一个逻辑 TTS 槽内互斥切换 VoiceDesign ↔ Base；切换前关闭另一 worker，避免有意让两套 1.7B TTS 权重同时常驻，代价是 capability switch 冷启动。
-- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前合成门禁覆盖全部 6 类固定探针，检查静音/削波及重复 PCM，并在释放 TTS 模型槽后复用本地 Batch ASR 核对朗读内容；ASR 不可用时为 `unevaluated`，不能自动通过。通过此门禁仍不等于跨文本声纹稳定或任意噪声识别能力已获验证，仍需真实模型校准与独立声纹证据。已有 instruction 音色继续由 VoiceDesign 合成；新增显式 `POST /v1/voices/designs` 将生成参考经本地 ASR 核验后注册为**新的 Base 音色**，不覆盖已有音色，也不把注册成功当作 Base 合成或声纹验收通过。详见[生成式音色注册](docs/architecture/generated-voice-registration.md)。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。
+- **Quality 双 TTS capability worker**：Base 作为 Quality 的 `tts_clone` 制品安装，并由独立的 `voice_clone` worker 与 `voice_design` VoiceDesign worker 并行管理。VD 与 Base 允许双常驻，不需要在两者之间频繁加载/卸载；不同 capability lane 可以并发，同一 lane 仍由对应 worker 串行。Quality capability group 仍可在配置的空闲冷却后 trim/close，并在下一次请求时惰性恢复。
+- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前合成门禁覆盖全部 6 类固定探针，检查静音/削波及重复 PCM，并在释放 TTS lane lease 后复用本地 Batch ASR 核对朗读内容；ASR 不可用时为 `unevaluated`，不能自动通过。通过此门禁仍不等于跨文本声纹稳定或任意噪声识别能力已获验证，仍需真实模型校准与独立声纹证据。已有 instruction 音色继续由 VoiceDesign 合成；新增显式 `POST /v1/voices/designs` 将生成参考经本地 ASR 核验后注册为**新的 Base 音色**，不覆盖已有音色，也不把注册成功当作 Base 合成或声纹验收通过。详见[生成式音色注册](docs/architecture/generated-voice-registration.md)。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。
+
+![三档模型与 Quality 双 TTS capability 关系图](docs/architecture/diagrams/three-tier-model-architecture.svg)
+
+上图是三档 profile 路由、模型共享、Quality 两条 TTS capability lane，以及共享资源/生命周期边界的统一总览。
 
 ### 2. 9 种跨档系统内置音色
 
 SpeechRail 在全档位下统一预置了 9 种经过声学微调的优质音色角色（接口与角色 ID 跨档保持一致，原生兼容 OpenAI 官方别名如 `alloy` -> `serena`, `echo` -> `eric`, `fable` -> `uncle_fu` 等）。
 
-但请注意：**底层生成机制按档位和 capability 区分**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动；`quality` 的普通/提示词音色由 **VoiceDesign (1.7B)** 驱动，而 reference clone 使用按需加载的 **Base (1.7B)**。用户可根据实际业务需要，在“结构固定的预设音色路径”与“更开放的表达能力”之间选择；跨文本 speaker identity 必须通过实测证明，不能由模型类别直接推定：
+但请注意：**底层生成机制按档位和 capability 区分**——`balanced` / `light` 由 **CustomVoice (0.6B)** 驱动；`quality` 的普通/提示词音色由 **VoiceDesign (1.7B)** 驱动，而 reference clone 使用独立的 **Base (1.7B)** capability worker。用户可根据实际业务需要，在“结构固定的预设音色路径”与“更开放的表达能力”之间选择；跨文本 speaker identity 必须通过实测证明，不能由模型类别直接推定：
 
 #### ⚖️ VoiceDesign 与 CustomVoice 核心差异与选型建议
 

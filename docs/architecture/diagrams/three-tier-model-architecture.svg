@@ -1,0 +1,211 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1920"
+     height="1200"
+     viewBox="0 0 1920 1200"
+     role="img"
+     aria-labelledby="diagram-title diagram-desc">
+  <title id="diagram-title">SpeechRail 三档模型与 Quality 双 TTS capability 关系图</title>
+  <desc id="diagram-desc">客户端通过共享的 FastAPI OpenAI-compatible Gateway 和 profile capability router 进入三档运行时。Quality 同时管理 VoiceDesign 与 Base 两个独立 TTS worker，跨 capability lane 可以并发，同一 lane 串行，冷却后按 Quality group 回收并在下一次请求时惰性恢复。</desc>
+
+  <defs>
+    <style>
+      <![CDATA[
+        text {
+          font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+          fill: #132238;
+        }
+        .canvas { fill: #f7f9fc; }
+        .title { font-size: 34px; font-weight: 700; letter-spacing: -0.4px; }
+        .subtitle { font-size: 17px; font-weight: 400; fill: #58708f; }
+        .box-title { font-size: 20px; font-weight: 700; }
+        .box-copy { font-size: 16px; font-weight: 500; fill: #38516e; }
+        .box-copy-small { font-size: 14px; font-weight: 400; fill: #58708f; }
+        .profile-title { font-size: 25px; font-weight: 700; }
+        .profile-subtitle { font-size: 15px; font-weight: 500; }
+        .section-label { font-size: 14px; font-weight: 700; letter-spacing: 0.8px; fill: #58708f; }
+        .model-title { font-size: 16px; font-weight: 700; fill: #38516e; }
+        .model-key { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 18px; font-weight: 700; }
+        .model-key-small { font-family: "SFMono-Regular", Menlo, Consolas, monospace; font-size: 14px; font-weight: 700; }
+        .model-copy { font-size: 15px; font-weight: 500; fill: #58708f; }
+        .model-copy-small { font-size: 13px; font-weight: 500; fill: #58708f; }
+        .note { font-size: 15px; font-weight: 500; fill: #58708f; }
+        .callout { font-size: 16px; font-weight: 700; }
+        .footer-title { font-size: 16px; font-weight: 700; }
+        .footer-copy { font-size: 15px; font-weight: 500; fill: #38516e; }
+        .flow { fill: none; stroke: #2864b2; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+        .lifecycle { fill: none; stroke: #a56600; stroke-width: 2.5; stroke-dasharray: 10 8; stroke-linecap: round; stroke-linejoin: round; }
+        .shared-line { fill: none; stroke: #6e87a5; stroke-width: 2; stroke-dasharray: 6 7; stroke-linecap: round; }
+        .top-box { fill: #ffffff; stroke: #b9c8d9; stroke-width: 2; }
+        .shared-box { fill: #edf4fc; stroke: #7ea6d1; stroke-width: 2; }
+        .profile-card { fill: #ffffff; stroke-width: 2.5; }
+        .model-card { fill: #ffffff; stroke: #c5d2e0; stroke-width: 1.8; }
+        .quality-model-card { fill: #fbf9ff; stroke: #ab91df; stroke-width: 1.8; }
+        .aux-card { fill: #f7f9fc; stroke: #c5d2e0; stroke-width: 1.8; }
+        .lifecycle-box { fill: #fff8e8; stroke: #d19a35; stroke-width: 1.8; stroke-dasharray: 8 6; }
+        .light-fill { fill: #e7f6ec; }
+        .light-stroke { stroke: #3c9560; }
+        .light-text { fill: #24613b; }
+        .balanced-fill { fill: #fff5d9; }
+        .balanced-stroke { stroke: #c2851c; }
+        .balanced-text { fill: #7a5000; }
+        .quality-fill { fill: #efe8ff; }
+        .quality-stroke { stroke: #7652bf; }
+        .quality-text { fill: #4e318f; }
+        .blue-text { fill: #2864b2; }
+        .orange-text { fill: #8a5b08; }
+      ]]>
+    </style>
+    <marker id="flow-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#2864b2"/>
+    </marker>
+    <marker id="lifecycle-arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L12,6 L0,12 Z" fill="#a56600"/>
+    </marker>
+  </defs>
+
+  <rect class="canvas" x="0" y="0" width="1920" height="1200"/>
+
+  <text class="title" x="60" y="58">SpeechRail 三档模型与 Quality 双 TTS capability</text>
+  <text class="subtitle" x="60" y="88">共享 API 入口与资源边界 · profile 选择模型组合 · Quality 以两条 capability lane 支撑设计与克隆</text>
+
+  <!-- Shared request path -->
+  <rect class="top-box" x="60" y="130" width="300" height="120" rx="16"/>
+  <text class="box-title" x="85" y="169">Clients / Agents</text>
+  <text class="box-copy" x="85" y="198">OpenAI SDK · Sona · Open-WebUI</text>
+  <text class="box-copy-small" x="85" y="224">HTTP REST / WebSocket</text>
+
+  <rect class="top-box" x="450" y="130" width="400" height="120" rx="16"/>
+  <text class="box-title" x="475" y="169">FastAPI / OpenAI-compatible Gateway</text>
+  <text class="box-copy" x="475" y="198">same API contract · request ID · error envelope</text>
+  <text class="box-copy-small" x="475" y="224">session admission · server_vad · barge-in</text>
+
+  <rect class="top-box" x="930" y="130" width="360" height="120" rx="16"/>
+  <text class="box-title" x="955" y="169">Profile + capability Router</text>
+  <text class="box-copy" x="955" y="198">select one tier · route by capability</text>
+  <text class="box-copy-small" x="955" y="224">voice_design / voice_clone</text>
+
+  <rect class="shared-box" x="1370" y="130" width="490" height="120" rx="16"/>
+  <text class="box-title" x="1395" y="169">Shared host session layer</text>
+  <text class="box-copy" x="1395" y="198">server_vad / Silero VAD · admission · barge-in</text>
+  <text class="box-copy-small" x="1395" y="224">不是第三个 ASR/TTS worker</text>
+
+  <path class="flow" d="M360 190 H450" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M850 190 H930" marker-end="url(#flow-arrow)"/>
+  <path class="shared-line" d="M1290 190 H1370"/>
+
+  <path class="shared-line" d="M60 284 H1860"/>
+  <text class="note" x="60" y="308">三档是可选 preset 组合，不表示同一服务同时常驻三档；选定 profile 后由共享运行时加载对应模型制品。</text>
+
+  <!-- Router fan-out -->
+  <path class="flow" d="M1110 250 V292 H335 V330" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M1110 250 V330" marker-end="url(#flow-arrow)"/>
+  <path class="flow" d="M1110 250 V292 H1585 V330" marker-end="url(#flow-arrow)"/>
+
+  <!-- light profile -->
+  <rect class="profile-card light-stroke" x="45" y="330" width="580" height="690" rx="20"/>
+  <rect class="light-fill" x="45" y="330" width="580" height="72" rx="20"/>
+  <rect class="light-fill" x="45" y="382" width="580" height="20"/>
+  <text class="profile-title light-text" x="75" y="363">LIGHT · Embedded</text>
+  <text class="profile-subtitle light-text" x="75" y="387">8GB+ · three-tier 8-bit preset</text>
+
+  <rect class="model-card" x="75" y="425" width="520" height="100" rx="13"/>
+  <text class="model-title" x="100" y="454">ASR worker</text>
+  <text class="model-key" x="100" y="482">asr-0.6b-q8</text>
+  <text class="model-copy" x="100" y="508">Qwen3-ASR 0.6B · 8-bit</text>
+
+  <rect class="model-card" x="75" y="545" width="520" height="100" rx="13"/>
+  <text class="model-title" x="100" y="574">TTS capability worker</text>
+  <text class="model-key" x="100" y="602">tts-0.6b-custom-q8</text>
+  <text class="model-copy" x="100" y="628">Qwen3-TTS CustomVoice · 8-bit</text>
+
+  <rect class="aux-card" x="75" y="665" width="520" height="100" rx="13"/>
+  <text class="section-label" x="100" y="695">OPTIONAL COMPONENTS</text>
+  <text class="callout" x="100" y="725">无 aligner · 无 diarization</text>
+  <text class="model-copy" x="100" y="749">词级时间戳由 ASR 原生提供</text>
+
+  <path class="shared-line" d="M100 820 H570"/>
+  <text class="footer-title light-text" x="100" y="855">Light runtime boundary</text>
+  <text class="footer-copy" x="100" y="884">单 TTS lane · 可配置 idle eviction</text>
+  <text class="footer-copy" x="100" y="911">不声明 `gpt-4o-transcribe-diarize`</text>
+
+  <!-- balanced profile -->
+  <rect class="profile-card balanced-stroke" x="670" y="330" width="580" height="690" rx="20"/>
+  <rect class="balanced-fill" x="670" y="330" width="580" height="72" rx="20"/>
+  <rect class="balanced-fill" x="670" y="382" width="580" height="20"/>
+  <text class="profile-title balanced-text" x="700" y="363">BALANCED · Pro Workflow</text>
+  <text class="profile-subtitle balanced-text" x="700" y="387">16–24GB · three-tier 8-bit preset</text>
+
+  <rect class="model-card" x="700" y="425" width="520" height="100" rx="13"/>
+  <text class="model-title" x="725" y="454">ASR worker</text>
+  <text class="model-key" x="725" y="482">asr-1.7b-q8</text>
+  <text class="model-copy" x="725" y="508">Qwen3-ASR 1.7B · 8-bit</text>
+
+  <rect class="model-card" x="700" y="545" width="520" height="100" rx="13"/>
+  <text class="model-title" x="725" y="574">TTS capability worker</text>
+  <text class="model-key" x="725" y="602">tts-0.6b-custom-q8</text>
+  <text class="model-copy" x="725" y="628">Qwen3-TTS CustomVoice · 8-bit</text>
+
+  <rect class="aux-card" x="700" y="665" width="520" height="120" rx="13"/>
+  <text class="section-label" x="725" y="695">DIARIZATION PATH</text>
+  <text class="model-key-small" x="725" y="725">aligner-q8</text>
+  <text class="model-copy" x="850" y="725">+ CoreML Sortformer</text>
+  <text class="model-copy" x="725" y="754">仅分人路径使用 · 输出 session-scoped 匿名 label</text>
+
+  <path class="shared-line" d="M725 820 H1195"/>
+  <text class="footer-title balanced-text" x="725" y="855">Balanced runtime boundary</text>
+  <text class="footer-copy" x="725" y="884">单 TTS lane · diarization ready</text>
+  <text class="footer-copy" x="725" y="911">aligner 不参与普通词级时间戳</text>
+
+  <!-- quality profile -->
+  <rect class="profile-card quality-stroke" x="1295" y="330" width="580" height="690" rx="20"/>
+  <rect class="quality-fill" x="1295" y="330" width="580" height="72" rx="20"/>
+  <rect class="quality-fill" x="1295" y="382" width="580" height="20"/>
+  <text class="profile-title quality-text" x="1325" y="363">QUALITY · Studio</text>
+  <text class="profile-subtitle quality-text" x="1325" y="387">32GB+ · 8-bit ASR/TTS · aligner bf16</text>
+
+  <rect class="model-card" x="1325" y="415" width="520" height="88" rx="13"/>
+  <text class="model-title" x="1350" y="444">ASR worker</text>
+  <text class="model-key" x="1350" y="472">asr-1.7b-q8</text>
+  <text class="model-copy" x="1585" y="472">Qwen3-ASR 1.7B · 8-bit</text>
+
+  <rect class="quality-model-card" x="1325" y="520" width="520" height="250" rx="13"/>
+  <text class="section-label quality-text" x="1350" y="548">TTS CAPABILITY WORKERS · 双常驻允许</text>
+
+  <rect class="quality-model-card quality-stroke" x="1345" y="565" width="230" height="145" rx="12"/>
+  <text class="model-title quality-text" x="1365" y="592">VoiceDesign</text>
+  <text class="model-key-small" x="1365" y="620">tts-1.7b-design-q8</text>
+  <text class="model-copy-small" x="1365" y="646">lane: voice_design</text>
+  <text class="model-copy-small" x="1365" y="673">普通 / instruction</text>
+  <text class="model-copy-small" x="1365" y="696">自然语言设计音色</text>
+
+  <rect class="quality-model-card quality-stroke" x="1595" y="565" width="230" height="145" rx="12"/>
+  <text class="model-title quality-text" x="1615" y="592">Base</text>
+  <text class="model-key-small" x="1615" y="620">tts-1.7b-base-q8</text>
+  <text class="model-copy-small" x="1615" y="646">lane: voice_clone</text>
+  <text class="model-copy-small" x="1615" y="673">reference-audio clone</text>
+  <text class="model-copy-small" x="1615" y="696">不可用时显式失败</text>
+
+  <path class="shared-line" d="M1575 638 H1595"/>
+  <text class="callout quality-text" x="1350" y="742">跨 lane 可并发 · 同 lane worker lock 串行</text>
+
+  <rect class="aux-card" x="1325" y="790" width="520" height="90" rx="13"/>
+  <text class="section-label" x="1350" y="819">DIARIZATION PATH</text>
+  <text class="model-key-small" x="1350" y="848">aligner-bf16</text>
+  <text class="model-copy" x="1510" y="848">+ CoreML Sortformer · 仅分人路径</text>
+
+  <rect class="lifecycle-box" x="1325" y="900" width="520" height="88" rx="13"/>
+  <text class="section-label orange-text" x="1350" y="927">QUALITY GROUP LIFECYCLE</text>
+  <text class="model-copy" x="1350" y="953">VD + Base resident → cooldown → trim/close group</text>
+  <text class="model-copy" x="1350" y="976">next request → lazy restore selected worker</text>
+
+  <!-- Shared scheduling and artifact relationship -->
+  <rect class="shared-box" x="45" y="1045" width="1830" height="115" rx="18"/>
+  <text class="footer-title blue-text" x="75" y="1080">Resource Governor · shared runtime boundary</text>
+  <text class="footer-copy" x="75" y="1110">ASR∥TTS：物理内存预算允许才重叠 · Quality TTS∥TTS 仅开放 VD/Base 跨 lane 并发</text>
+  <text class="footer-copy" x="75" y="1137">不复制 ASR worker / 不复制服务进程 · 同一 lane 与 ASR∥ASR 仍受单 worker 约束</text>
+
+  <path class="shared-line" d="M1000 1065 V1140"/>
+  <text class="footer-title blue-text" x="1040" y="1080">Catalog artifact sharing</text>
+  <text class="footer-copy" x="1040" y="1110">balanced ↔ quality：asr-1.7b-q8</text>
+  <text class="footer-copy" x="1040" y="1137">light ↔ balanced：tts-0.6b-custom-q8</text>
+</svg>
