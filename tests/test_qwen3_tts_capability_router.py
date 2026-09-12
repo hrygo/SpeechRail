@@ -60,7 +60,7 @@ class _Worker:
 
 
 @pytest.mark.anyio
-async def test_router_keeps_base_lazy_and_swaps_one_tts_model_slot(
+async def test_router_keeps_quality_tts_workers_resident_and_routes_by_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"designed": "instruction", "cloned": "clone"})
@@ -71,23 +71,28 @@ async def test_router_keeps_base_lazy_and_swaps_one_tts_model_slot(
 
     await router.start()
     assert primary.alive is True
-    assert clone.alive is False
-    assert clone.started == 0
+    assert clone.alive is True
+    assert primary.started == 1
+    assert clone.started == 1
+    assert router.warm_capability == "both"
+    assert router.warm_capabilities == ("voice_design", "voice_clone")
+    assert router.resource_key_for_voice("designed") == "voice_design"
+    assert router.resource_key_for_voice("cloned") == "voice_clone"
 
     clone_request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
     assert [chunk async for chunk in router.synthesize(clone_request)]
-    assert primary.alive is False
-    assert primary.closed == 1
+    assert primary.alive is True
+    assert primary.closed == 0
     assert clone.alive is True
     assert clone.started == 1
     assert clone.requests == [clone_request]
 
     design_request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
     assert [chunk async for chunk in router.synthesize(design_request)]
-    assert clone.alive is False
-    assert clone.closed == 1
+    assert clone.alive is True
+    assert clone.closed == 0
     assert primary.alive is True
-    assert primary.started == 2
+    assert primary.started == 1
     assert primary.requests == [design_request]
 
 
@@ -125,6 +130,7 @@ async def test_router_lifecycle_aggregates_both_workers() -> None:
         "fallback_abort_count": 5,
         "reload_count": 5,
         "warm_capability": None,
+        "warm_capabilities": [],
     }
     await router.trim_memory()
     assert (primary.trimmed, clone.trimmed) == (1, 1)

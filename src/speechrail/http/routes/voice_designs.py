@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from speechrail.application.services import AppServices
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
     PcmOutputCounter,
     TTSDeliveryError,
@@ -171,7 +172,11 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 language=body.language,
                 sample_rate=_SAMPLE_RATE,
             )
-            async with services.governor.reserve(WorkClass.BATCH_TTS, expires_at=expires_at):
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                resource_key=tts_resource_key(synthesizer, synthesis.voice),
+            ):
                 raw_wav = await _generate_reference(synthesizer, synthesis, expires_at=expires_at)
             raw_report = _grade_clone_audio(raw_wav)
             if raw_report.status == "reject":

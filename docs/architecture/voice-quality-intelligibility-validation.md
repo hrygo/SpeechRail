@@ -18,7 +18,7 @@ date: 2026-09-12
 
 ## 2. 关键约束：不得无治理地并行 Base TTS 与 ASR
 
-Quality reference clone 由 Qwen3-TTS Base 承担。Base 与 VoiceDesign 已通过 capability router 使用单个互斥的大模型槽。
+Quality reference clone 由 Qwen3-TTS Base 承担。Base 与 VoiceDesign 由 capability router 分别持有在两个独立 worker 中；它们可以在各自 lane 并发，但 TTS 与 ASR 仍必须遵守 governor 和阶段边界。
 
 质量复测如果在每个 TTS probe 刚生成完就立即调用 ASR，会产生两个问题：
 
@@ -42,10 +42,10 @@ Phase A: TTS probe generation
   -> per-probe PCM digest
   -> bounded temporary PCM set
 
-Phase B: release/switch TTS capability
-  -> complete active Base stream
-  -> release capability lock
-  -> close/evict Base when policy requires
+Phase B: release TTS workers before ASR
+  -> complete active VoiceDesign/Base streams
+  -> release both TTS lanes
+  -> close/evict the router group when policy requires
   -> honor Resource Governor
 
 Phase C: ASR validation
@@ -83,14 +83,14 @@ ASR 输出不得用原始字符串完全相等作为唯一判据。中文 probe 
 
 ASR 复核必须满足：
 
-1. 不在 TTS capability lock 内启动 ASR；
+1. 不在 TTS worker 生命周期锁或未释放的 TTS reservation 内启动 ASR；
 2. 不自行创建绕过 `AppServices` 的额外 ASR worker；
 3. 使用现有 `batch_transcriber`/`transcribe` 依赖；
 4. 接受现有 admission/governor 的拒绝与超时；
 5. 临时 PCM 有明确上限，验收完成后释放，不写磁盘；
 6. ASR 不可用时报告“未评估”，不得把“未评估”伪装成通过。
-7. 超长输出、异常、取消或消费者提前结束时，显式关闭整条生成器链；子 worker 的 abort/reap 与参考租约释放完成后，才能放开 TTS capability lock。不能依赖垃圾回收代替关闭。
-8. eviction 获取模型槽和释放 worker 的等待必须共享原请求的绝对 deadline，不能在 TTS 与 ASR 两阶段之间形成无界等待。
+7. 超长输出、异常、取消或消费者提前结束时，显式关闭整条生成器链；对应子 worker 的 abort/reap 与参考租约释放完成后，才能放开对应 TTS lane。不能依赖垃圾回收代替关闭。
+8. eviction 获取 router 生命周期锁和释放 worker 的等待必须共享原请求的绝对 deadline，不能在 TTS 与 ASR 两阶段之间形成无界等待。
 9. 验证器异常仅记录稳定错误码和 request ID；禁止输出 vendor 异常正文或 traceback，防止转写、参考内容和本地路径进入日志。
 
 ## 6. 当前实现与阈值边界

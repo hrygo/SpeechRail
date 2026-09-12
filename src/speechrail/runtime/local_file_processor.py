@@ -18,13 +18,14 @@ from typing import BinaryIO
 
 from fastapi import UploadFile
 
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.domain.ports import (
     BatchTranscriber,
     SpeechRequest,
     SpeechSynthesizer,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import DEFAULT_VOICE_ID
+from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError
 from speechrail.runtime.job_runner import JobProcessingError
 from speechrail.runtime.jobs import JobRecord
 
@@ -98,6 +99,22 @@ class LocalFileJobProcessor:
         self._max_audio_seconds = max_audio_seconds
         self._tts_sample_rate = tts_sample_rate
         self._ffmpeg_path = ffmpeg_path
+
+    def resource_key_for_job(self, job: JobRecord) -> str | None:
+        """Return the TTS worker lane for a durable speech job when it is known."""
+        if job.kind != "speech":
+            return None
+        params = job.request.get("params")
+        if not isinstance(params, dict):
+            return None
+        voice = _optional_str(params.get("voice")) or DEFAULT_VOICE_ID
+        try:
+            return tts_resource_key(self._tts_synthesizer, voice)
+        except (RuntimeError, ValueError, VoiceStoreUnavailableError):
+            # The processor will perform the authoritative voice validation
+            # during synthesis; an uncertain scheduling hint must fall back to
+            # the governor's conservative wildcard lane.
+            return None
 
     async def process(self, job: JobRecord) -> str:
         input_path = self._resolve_input_path(job.request.get("input_ref"))

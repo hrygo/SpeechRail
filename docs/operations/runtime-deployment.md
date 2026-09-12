@@ -21,13 +21,15 @@ date: 2026-09-11
                            │      └─ 外部 Qwen3-ASR snapshot
                            ├─ 可选 Swift/CoreML diarization worker（惰性启动）
                            │      └─ 外部 FluidAudio Sortformer FP16 `.mlmodelc`
-                           └─ Qwen3 TTS worker（专用 Python，可选）
-                                  └─ 外部 VoiceDesign snapshot
+                           └─ Qwen3 TTS capability workers（专用 Python，可选）
+                                  ├─ 外部 VoiceDesign snapshot
+                                  └─ 外部 Base clone snapshot（Quality）
 ```
 
 ASR worker 仅在同时设置 `SPEECHRAIL_QWEN3_MODEL_DIR` 与 `SPEECHRAIL_QWEN3_PYTHON` 时
-创建并由 ASGI lifecycle 管理；TTS worker 仅在对应两条 TTS 路径同时设置时创建。是否在
-startup 还是首次请求加载权重由 `SPEECHRAIL_WORKER_LAZY_LOAD` 决定。
+创建并由 ASGI lifecycle 管理；TTS capability worker 仅在对应 TTS 路径同时设置时创建，Quality
+可创建 VoiceDesign 与 Base 两个 worker。是否在 startup 还是首次请求加载权重由
+`SPEECHRAIL_WORKER_LAZY_LOAD` 决定；加载后 capability 切换不会互相卸载。
 主进程与 worker 使用长度前缀 JSON 私有协议，ASR worker 接受 16 kHz / 单声道 / PCM16 音频，
 TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权重不在仓库内；请求路径
 不会下载模型。
@@ -37,13 +39,14 @@ TTS worker 输出 24 kHz / 单声道 / PCM16。模型目录和 diarization 权�
 `catalog schema_version=2` 用顶层 `precision_policy` 取代旧的“全档 8-bit”规则，并按用户定位重排三档。
 其中 `light` 的 4-bit 候选在验收门 E1 未通过（公开真人语料劣化 1.38pp > 0.5pp）后已回退到 8-bit，
 现行精度策略为三档均 8-bit、仅 `quality` aligner 为 bf16。档位仍然只选择权重与量化，公共 API 形状、
-worker 协议、调度与并发保持不变（ADR-0011；三档组成重排见 ADR-0015）。
+worker 协议、调度与进程隔离保持不变；Quality 的 VD/Base 是新增的两条 capability lane（ADR-0011；
+三档组成重排见 ADR-0015）。
 
 | profile | ASR | TTS | Aligner（分人专用） | Diarization | VAD | 安装体积 |
 |---|---|---|---|---|---|---|
 | `light`（Embedded） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ | ✓ | **≈2.99 GB** |
 | `balanced`（Pro Workflow） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ | ✓ | **≈5.96 GB** |
-| `quality`（Studio） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8` + on-demand clone `tts-1.7b-base-q8`（均 8-bit） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈10.73 GB** |
+| `quality`（Studio） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8` + clone `tts-1.7b-base-q8`（两个 8-bit worker，可双常驻/并发） | `aligner-bf16`（bf16） | ✓ | ✓ | **≈10.73 GB** |
 
 - aligner 是**分人专用制品**，不进入 `PreparedModelSet` / `prepare_models`；它由安装器与 `profile apply` 经
   `diarization_assets.prepare_diarization_assets(app_home, preset_id=..., downloader=...)` 供给到
@@ -78,7 +81,7 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_QWEN3_MODEL_DIR` | 仓库外完整 snapshot 的绝对路径 |
 | `SPEECHRAIL_QWEN3_PYTHON` | 专用 worker Python 可执行文件 |
 | `SPEECHRAIL_QWEN3_TTS_MODEL_DIR` / `SPEECHRAIL_QWEN3_TTS_PYTHON` | 可选、成对配置的默认 TTS snapshot/runtime |
-| `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` | Quality 可选 Base clone snapshot；managed profile 由 catalog/selection 自动注入，手工部署时需显式配置；未配置则不声明 `supports_clone` |
+| `SPEECHRAIL_QWEN3_TTS_CLONE_MODEL_DIR` | Quality 独立 Base clone worker 的 snapshot；managed profile 由 catalog/selection 自动注入，手工部署时需显式配置；未配置则不声明 `supports_clone` |
 | `SPEECHRAIL_TTS_VOICE_IDS` | 服务器登记的 TTS preset 列表 |
 | `SPEECHRAIL_TTS_ALLOW_MODEL_DOWNLOADS` | 必须为 `false`；TTS worker 仅使用外部完整 snapshot |
 | `SPEECHRAIL_DEVICE` / `DTYPE` | `mps`（支持 `float16` 默认 / `int8` 优化）或 `cpu`（支持 `float32` / `int8`）；`int8` 仅作用于非预量化快照的 ASR Worker；TTS Worker 不做运行时量化，默认 `float16`（mps）/ `float32`（cpu），预量化 `-8bit` 快照自动解析为 `int8` |
@@ -90,7 +93,7 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_DIARIZATION_COREML_MODEL_PATH` | 分人档位（`balanced`/`quality`）由 `profile apply` 供给到 `app_home/diarization/` 的 `SortformerNvidiaLow_v2.1.mlmodelc` bundle 绝对路径；`light` 不设置 |
 | `SPEECHRAIL_DIARIZATION_WORKER_PATH` | 可选覆盖；未设置时使用 macOS wheel 内置的 `SpeechRailDiarizationWorker` |
 | `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` | 分人档位由 `profile apply` 写入 `app_home/diarization/<aligner-key>` 的 tier 专用 aligner snapshot；私有 ASR worker 仅对固定正文调用它，不再次识别音频；`light` 不设置 |
-| `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；物理内存回收取决于运行时 |
+| `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；Quality 的 VD/Base 作为一个 TTS 能力组一起驱逐；物理内存回收取决于运行时 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
 
 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS` 必须为 `false`。`allowed_origins` 与
@@ -199,7 +202,8 @@ release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wh
 ## 端口与进程策略
 
 默认端口 `8201` 供 SpeechRail 使用。一次只启动一个
-SpeechRail 进程；每个已配置 profile 只启动一个对应 worker。多 ASGI worker 或重复服务实例
+SpeechRail 进程；每个已配置 profile 按 capability 启动对应 worker，Quality 最多两个 TTS worker。
+多 ASGI worker 或重复服务实例
 会产生多份模型载入和不可控内存压力。
 
 需要常驻运行时使用 macOS `LaunchAgent`，而不是将 MPS 服务作为系统级 `LaunchDaemon`。

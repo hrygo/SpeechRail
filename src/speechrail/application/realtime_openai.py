@@ -34,6 +34,7 @@ from speechrail.application.diarization import (
     StatusChanged,
 )
 from speechrail.application.services import AppServices
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
@@ -1478,20 +1479,22 @@ class OpenAIRealtimeSession:
                 _ttfa_t0 = _time.monotonic()
                 _ttfa_recorded = False
                 _admission_started = _time.monotonic()
+                request = SpeechRequest(
+                    text=text,
+                    voice=voice,
+                    output_format="pcm16",
+                    sample_rate=24_000,
+                    speed=speed,
+                    language=language,
+                )
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     async with self._services.governor.reserve(
-                        WorkClass.REALTIME_TTS, deadline=self._settings.request_timeout_seconds
+                        WorkClass.REALTIME_TTS,
+                        deadline=self._settings.request_timeout_seconds,
+                        resource_key=tts_resource_key(self._tts, request.voice),
                     ):
                         self._services.metrics.record_realtime_phase(
                             "tts_admission", _time.monotonic() - _admission_started
-                        )
-                        request = SpeechRequest(
-                            text=text,
-                            voice=voice,
-                            output_format="pcm16",
-                            sample_rate=24_000,
-                            speed=speed,
-                            language=language,
                         )
                         async for chunk in iter_validated_audio(self._tts.synthesize(request)):
                             if not _ttfa_recorded:

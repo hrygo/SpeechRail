@@ -15,7 +15,7 @@ SpeechRail 将 `quality` 定义为唯一具有**音色创造（voice design）**
 - **提示词设计音色**：Qwen3-TTS VoiceDesign 1.7B，职责是根据自然语言描述创造声线；
 - **参考音频克隆**：Qwen3-TTS Base 1.7B，职责是根据参考音频 + 准确参考文本复现 speaker identity；
 - **常规内置音色**：`quality` 继续由 VoiceDesign 提供，`balanced/light` 继续由 CustomVoice 0.6B 提供；
-- **Base 按需加载**：Base 作为 `quality.tts_clone` capability artifact 安装，但不在服务启动时常驻；clone 请求到来时切换到 Base，下一次普通 VoiceDesign 请求再切回；两个大 TTS 模型不应被运行时有意同时常驻。
+- **双 capability worker**：Base 作为 `quality.tts_clone` capability artifact 安装，并与 VoiceDesign 使用独立 worker。两者可以同时常驻、分别处理请求；懒加载只决定首次加载时机，不会在 capability 切换时卸载另一模型。
 
 该设计修正了旧实现把参考克隆请求送入 VoiceDesign 私有 `_generate_icl()` 的职责混用。clone 现在只允许由 `base` variant 经 MLX-Audio **公开 `generate(...)` 接口**执行。
 
@@ -93,24 +93,37 @@ light:
 
 Base artifact 使用不可变模型 revision 和逐文件 SHA-256，遵循与其他 managed artifacts 相同的离线、校验、原子发布和 fail-closed 规则。
 
-## 4. 运行时模型槽：按 capability 互斥换模
+## 4. 运行时模型槽：双 capability 并行与冷却驱逐
 
-Quality 不采用“VoiceDesign + Base 永久双常驻”。`Qwen3TtsCapabilityRouter` 维护一个逻辑 TTS 槽：
+Quality 的 `Qwen3TtsCapabilityRouter` 维护两个独立的 capability worker，而不是在请求之间交换一个模型槽：
 
-1. 服务启动仅 warm primary VoiceDesign；
-2. clone 请求获取 capability lock；
-3. 若 primary 仍 resident，先安全关闭 primary；
-4. Base worker 首次请求时惰性启动并完成 clone；
-5. Base 可继续保留到下一次 capability 切换/idle eviction；
-6. 普通 TTS 请求到来时先关闭 Base，再按需恢复 primary；
-7. `/health` 的 `tts_lifecycle.warm_capability` 只报告当前实际 warm 的 `voice_design` / `voice_clone` / `tts`，不得为了探测状态触发模型加载；
-8. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 VoiceDesign / Base / CustomVoice 身份由独立的 `model_variant` 表达；
-9. 父进程在 composition 阶段确定期望 `model_variant`（受管模型优先取 catalog；非受管本地快照才执行本地 identity inspection），并在 worker `ready` 握手中逐项比对；variant 缺失或不匹配必须 `backend_identity_mismatch` fail-closed，禁止回退成 VoiceDesign；
-10. `quality-runs` 作为批量 TTS 工作必须进入 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界；
-11. capability lock 覆盖完整流式请求，包括提前终止时关闭子生成器、abort/reap 和释放参考租约；重复 `start()` 保留已 warm 的 capability，不再旁路加载 primary；
-12. 合成门通过后，先在同一请求 deadline 内释放 TTS 模型槽，再进入受治理的 Batch ASR 回转录阶段；ASR 缺失或异常为 `unevaluated`，不得给出假通过。详见[输出可懂度 / ASR 复核](voice-quality-intelligibility-validation.md)。
+```mermaid
+flowchart LR
+    Request[SpeechRequest] --> Router[Qwen3TtsCapabilityRouter]
+    Router -->|voice_design lane| VD[VoiceDesign 1.7B worker]
+    Router -->|voice_clone lane| Base[Base 1.7B worker]
+    VD -. 同一 worker .-> VDLock[worker lock 串行]
+    Base -. 同一 worker .-> BaseLock[worker lock 串行]
+    VD <-->|不同 lane| Base
+    Router --> Evict[WorkerIdleEvictor
+    warm standby / cooldown cold eviction]
+    Evict -->|组级 trim/close| VD
+    Evict -->|组级 trim/close| Base
+```
 
-这样增加的是**安装体积与换模冷启动成本**，而不是强制把两个 1.7B TTS 权重同时计入常驻内存。TTS∥TTS 仍然不是当前产品并发模型。
+运行规则：
+
+1. 非懒加载模式下服务启动按顺序 warm primary VoiceDesign 与 Base；懒加载模式下先按请求加载所需 worker，另一 worker 在首次使用时加载；
+2. 请求根据 VoiceProfile 进入 `voice_design` 或 `voice_clone` lane；不同 lane 可以并发，同一 lane 由对应 worker 的私有 lock 串行；
+3. capability 切换只改变路由，不关闭另一 worker，因此连续的“设计音色 → 使用已有 clone”不会反复加载/卸载模型；
+4. `/health` 的 `tts_lifecycle.warm_capability` 在双 warm 时报告 `both`，并以 `warm_capabilities` 给出 `voice_design` / `voice_clone` 明细；探测不得触发模型加载；
+5. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 VoiceDesign / Base / CustomVoice 身份由独立的 `model_variant` 表达；
+6. 父进程在 composition 阶段确定期望 `model_variant`（受管模型优先取 catalog；非受管本地快照才执行本地 identity inspection），并在 worker `ready` 握手中逐项比对；variant 缺失或不匹配必须 `backend_identity_mismatch` fail-closed，禁止回退成 VoiceDesign；
+7. `quality-runs` 作为批量 TTS 工作必须进入带 capability key 的 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界；
+8. `WorkerIdleEvictor` 把 router 视为一个能力组：warm standby 同时 trim 两个 worker，冷却到期后一起 close；驱逐期间 worker 自己的 lock 保证活动流完成后再释放；冷驱逐后下一请求按需重新加载所需 worker，不发生请求级互斥换模；
+9. 合成门通过后，先在同一请求 deadline 内释放两个 TTS worker，再进入受治理的 Batch ASR 回转录阶段；ASR 缺失或异常为 `unevaluated`，不得给出假通过。详见[输出可懂度 / ASR 复核](voice-quality-intelligibility-validation.md)。
+
+双常驻会增加 Quality 的活动内存占用，`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单个 TTS worker 的实测峰值声明，heavy-overlap 预算按 router 可能常驻的 worker 数量计入。冷却驱逐仍保留，用于释放整组权重；重新使用时只为当前请求恢复需要的 worker。
 
 ## 5. VoiceProfile / VoiceRevision 收敛方向
 
@@ -193,7 +206,7 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 - Quality preset 增加 `tts_clone`；
 - Base 成为唯一 reference clone variant；
 - clone 改走 vendor public `generate`；
-- capability router 实现 Base lazy load 与互斥换模；
+- capability router 实现 VoiceDesign/Base 双 worker、分 lane 并发与组级 idle eviction；
 - managed install / profile / preflight / model capability 全链同步；
 - README、架构与当前边界更新；
 - 保持 Balanced/Light 与现有公共请求形状不变。

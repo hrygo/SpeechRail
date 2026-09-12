@@ -20,6 +20,7 @@ from speechrail.application.audio_stream import decode_upload
 from speechrail.application.deadline import await_until
 from speechrail.application.diarization import diarize_transcript
 from speechrail.application.services import AppServices
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
     PcmOutputCounter,
     TTSDeliveryError,
@@ -1199,7 +1200,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
         expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
         try:
             async with services.governor.reserve(
-                WorkClass.BATCH_TTS, expires_at=expires_at
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                resource_key=tts_resource_key(synthesizer, synthesis.voice),
             ):
                 async for chunk in iter_until(
                     iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
@@ -1424,7 +1427,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
             # reserved realtime TTS lane; the reserve is held while the stream
             # is consumed and released as soon as the generator closes.
             async with services.governor.reserve(
-                WorkClass.BATCH_TTS, expires_at=expires_at
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                resource_key=tts_resource_key(synthesizer, synthesis.voice),
             ):
                 async for chunk in iter_until(
                     iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at

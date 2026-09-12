@@ -91,19 +91,28 @@ def component_ready(component: object | None) -> bool:
     return True if state is None else bool(state)
 
 
+def _resident_tts_worker_count(component: object | None) -> int:
+    """Return the conservative number of TTS workers that may be resident."""
+    count = getattr(component, "resident_worker_count", 1)
+    return count if type(count) is int and count >= 1 else 1
+
+
 def _heavy_overlap_policy(
     settings: Settings,
     *,
     asr_enabled: bool,
     tts_enabled: bool,
     diarization_enabled: bool,
+    tts_worker_count: int = 1,
 ) -> tuple[bool, str]:
     """Decide whether heavy ASR/TTS compute may overlap.
 
-    Declared `*_resident_bytes` settings feed a shared hardware budget. An
-    enabled component with 0 declared bytes is still unknown and fail-closes
-    under `auto`. `allow_heavy_overlap` may force the decision: "true" always
-    allows overlap and "false" always serializes, both recorded in the reason.
+    Declared `*_resident_bytes` settings feed a shared hardware budget. TTS
+    bytes are declared per worker and multiplied by the maximum number of
+    workers the configured capability may keep resident. An enabled component
+    with 0 declared bytes is still unknown and fail-closes under `auto`.
+    `allow_heavy_overlap` may force the decision: "true" always allows overlap
+    and "false" always serializes, both recorded in the reason.
     """
     if settings.allow_heavy_overlap == "false":
         return False, "heavy overlap disabled by configuration"
@@ -113,9 +122,13 @@ def _heavy_overlap_policy(
             return 0
         return declared if declared > 0 else None
 
+    if tts_worker_count < 1:
+        raise ValueError("tts_worker_count must be positive")
+    tts_declared_bytes = settings.tts_resident_bytes * tts_worker_count
+
     footprint = ComponentFootprint(
         asr_bytes=_bytes(asr_enabled, settings.asr_resident_bytes),
-        tts_bytes=_bytes(tts_enabled, settings.tts_resident_bytes),
+        tts_bytes=_bytes(tts_enabled, tts_declared_bytes),
         diarization_bytes=_bytes(diarization_enabled, settings.diarization_resident_bytes),
         service_bytes=_SERVICE_OVERHEAD_BYTES,
         device=settings.device,
@@ -418,7 +431,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         clone_tts_worker = (
             make_tts_worker(
                 settings.qwen3_tts_clone_model_dir,
-                warmup=False,
+                warmup=settings.tts_warmup_on_start,
                 catalog_variant=(
                     active_tts_catalog.tts_clone.variant
                     if active_tts_catalog.tts_clone is not None
@@ -495,6 +508,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         ),
         tts_enabled=tts_synthesizer is not None,
         diarization_enabled=diarization_engine is not None,
+        tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
     )
     governor = ResourceGovernor(
         settings.governor_limits,

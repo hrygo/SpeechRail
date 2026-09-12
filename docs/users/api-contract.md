@@ -49,7 +49,7 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 >   `balanced`、`quality` 可用；`light` 不供给 aligner/Sortformer，`/v1/models` 不列出该别名，
 >   文件分人与 Realtime 分人扩展（`session.speechrail.diarization.enabled=true`）在 `light` 上均不可用。
 > - **音色创造仅 `quality`**：prompt design / preview 由 VoiceDesign 承担；reference clone 由独立 Base capability 承担。`balanced`、`light` 上 `supports_instruction`、`supports_preview`、`supports_clone` 均为 `false`。
-> - **按需互斥换模**：Quality 启动时只预热默认 VoiceDesign；首次 clone 请求切换至 Base，后续普通 VoiceDesign 请求再切回。两个 1.7B TTS worker 不被运行时有意同时常驻。
+> - **双 capability lane**：Quality 的 VoiceDesign 与 Base clone 由两个独立 worker 提供；不同 capability 可同时常驻并发，同一 worker 内串行。开启懒加载时按首次请求加载，连续请求不会因 capability 切换反复换模；空闲冷却后仍会由生命周期组件驱逐。
 
 ---
 

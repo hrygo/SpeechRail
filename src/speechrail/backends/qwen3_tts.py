@@ -355,12 +355,13 @@ class Qwen3TtsWorker:
             await self._transport.abort()
 
 class Qwen3TtsCapabilityRouter:
-    """Route TTS capabilities through one mutually-exclusive model slot.
+    """Route TTS capabilities through independent, lifecycle-owned workers.
 
     Normal synthesis uses the preset's primary VoiceDesign/CustomVoice worker.
-    Registered clone voices use the Quality-only Base worker.  The router keeps
-    Base lazy and swaps workers on capability changes so both large TTS models
-    are never intentionally resident at the same time.
+    Registered clone voices use the Quality-only Base worker.  Each worker owns
+    its request lock, so VoiceDesign and Base can remain resident and synthesize
+    concurrently without allowing two requests onto the same worker.  The
+    router only serializes lifecycle operations such as startup and eviction.
     """
 
     def __init__(
@@ -372,6 +373,11 @@ class Qwen3TtsCapabilityRouter:
         self.primary = primary
         self.clone = clone
         self._capability_lock = asyncio.Lock()
+
+    @property
+    def resident_worker_count(self) -> int:
+        """Return the maximum number of TTS workers this router may keep warm."""
+        return 1 + (1 if self.clone is not None else 0)
 
     @property
     def alive(self) -> bool:
@@ -393,22 +399,27 @@ class Qwen3TtsCapabilityRouter:
         return self.primary.model_variant
 
     @property
-    def warm_capability(self) -> str | None:
-        """Return the currently resident TTS capability without loading a model."""
-        primary_ready = self.primary.ready
-        clone_ready = bool(self.clone is not None and self.clone.ready)
-        if primary_ready and clone_ready:
-            # This should be unreachable under the capability lock, but exposing
-            # it makes an invariant violation visible to health diagnostics.
-            return "conflict"
-        if clone_ready:
-            return "voice_clone"
-        if primary_ready:
-            return "voice_design" if self.primary.model_variant == "voice_design" else "tts"
-        return None
+    def warm_capabilities(self) -> tuple[str, ...]:
+        """Return resident capabilities without loading either model."""
+        capabilities: list[str] = []
+        if self.primary.ready:
+            capabilities.append(
+                "voice_design" if self.primary.model_variant == "voice_design" else "tts"
+            )
+        if self.clone is not None and self.clone.ready:
+            capabilities.append("voice_clone")
+        return tuple(capabilities)
 
     @property
-    def lifecycle_stats(self) -> dict[str, int | bool | str | None]:
+    def warm_capability(self) -> str | None:
+        """Return a compact resident-capability summary for health diagnostics."""
+        capabilities = self.warm_capabilities
+        if len(capabilities) > 1:
+            return "both"
+        return capabilities[0] if capabilities else None
+
+    @property
+    def lifecycle_stats(self) -> dict[str, object]:
         primary = self.primary.lifecycle_stats
         clone = self.clone.lifecycle_stats if self.clone is not None else None
         return {
@@ -421,17 +432,36 @@ class Qwen3TtsCapabilityRouter:
             "reload_count": int(primary["reload_count"])
             + (int(clone["reload_count"]) if clone is not None else 0),
             "warm_capability": self.warm_capability,
+            "warm_capabilities": list(self.warm_capabilities),
         }
 
     async def start(self) -> None:
-        # Start is idempotent for either warm capability, including a concurrent
-        # clone request. Never start primary outside the mutually-exclusive slot.
+        """Start every configured capability, leaving already-warm workers intact."""
         async with self._capability_lock:
-            if self.ready:
+            workers = (self.primary,) + ((self.clone,) if self.clone is not None else ())
+            if all(worker.ready for worker in workers):
                 return
-            if self.clone is not None and self.clone.alive:
-                await self.clone.close()
-            await self.primary.start()
+            try:
+                for worker in workers:
+                    if not worker.ready:
+                        await worker.start()
+            except BaseException:
+                # Do not leave a partially initialized Quality router with one
+                # model warm and the other unavailable.
+                for worker in reversed(workers):
+                    with contextlib.suppress(BaseException):
+                        if worker.alive or worker.ready:
+                            await worker.close()
+                raise
+
+    def resource_key_for_voice(self, voice: str) -> str:
+        """Map a validated public voice to the worker lane that serves it."""
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(voice)
+        if profile.mode == "clone":
+            return "voice_clone" if self.clone is not None else "tts"
+        return "voice_design" if self.clone is not None else "tts"
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         from speechrail.domain.tts import get_voice_registry
@@ -439,7 +469,6 @@ class Qwen3TtsCapabilityRouter:
         profile = get_voice_registry().get_profile(request.voice)
         clone_worker = self.clone
         selected: Qwen3TtsWorker
-        other: Qwen3TtsWorker | None
         if profile.mode == "clone":
             if clone_worker is None:
 
@@ -449,39 +478,17 @@ class Qwen3TtsCapabilityRouter:
 
                 return unavailable()
             selected = clone_worker
-            other = self.primary
         else:
             selected = self.primary
-            other = clone_worker
-
-        async def stream() -> AsyncIterator[AudioChunk]:
-            # Hold the capability lock for the stream lifetime.  This makes a
-            # model swap atomic with respect to another synthesis request and
-            # prevents primary/Base workers from becoming resident together.
-            async with self._capability_lock:
-                if other is not None and other.alive:
-                    await other.close()
-                source = selected.synthesize(request)
-                try:
-                    async for chunk in source:
-                        yield chunk
-                finally:
-                    # Closing the outer generator does not automatically close
-                    # an async-for child. Finish abort/reap and reference leases
-                    # before another request can acquire the model slot.
-                    close = getattr(source, "aclose", None)
-                    if close is not None:
-                        await close()
-
-        return stream()
+        return selected.synthesize(request)
 
     async def evict_warm_capability(self) -> None:
-        """Release the current TTS model slot before a heavyweight validation phase."""
+        """Release all TTS workers before a heavyweight validation phase or idle eviction."""
         async with self._capability_lock:
-            if self.clone is not None and self.clone.alive:
-                await self.clone.close()
-            if self.primary.alive:
-                await self.primary.close()
+            workers = (self.clone, self.primary) if self.clone is not None else (self.primary,)
+            for worker in workers:
+                if worker.alive or worker.ready:
+                    await worker.close()
 
     async def trim_memory(self) -> None:
         await self.primary.trim_memory()
@@ -489,13 +496,14 @@ class Qwen3TtsCapabilityRouter:
             await self.clone.trim_memory()
 
     async def close(self) -> None:
-        primary_error: BaseException | None = None
-        try:
-            await self.primary.close()
-        except BaseException as exc:
-            primary_error = exc
-        finally:
-            if self.clone is not None:
-                await self.clone.close()
-        if primary_error is not None:
-            raise primary_error
+        async with self._capability_lock:
+            workers = (self.primary,) + ((self.clone,) if self.clone is not None else ())
+            first_error: BaseException | None = None
+            for worker in workers:
+                try:
+                    await worker.close()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error

@@ -34,14 +34,14 @@ VoiceDesign 的优势是**开放式音色创造**：调用方可以用自然语�
 
 旧实现用 VoiceDesign 私有 ICL 方法承接 reference clone，会把“模型内部能够接受参考上下文”误解为“这是该模型最合适、最稳定的 speaker clone contract”。2026-09-12 起，这条路径不再是 SpeechRail 架构基线。
 
-## 3. Quality 的双模型能力不是双常驻
+## 3. Quality 的双模型能力与双常驻
 
 Quality catalog 同时安装：
 
 - `tts-1.7b-design-q8`：primary；
 - `tts-1.7b-base-q8`：`tts_clone` capability。
 
-运行时使用互斥 capability router。Base 首次 clone 才加载；切回普通 VoiceDesign 请求时关闭 Base 后恢复 primary。这样把成本放在安装体积和 capability switch 冷启动，而不是永久双模型常驻。
+运行时使用双 worker capability router。懒加载模式下 Base 首次 clone 才加载，但切回普通 VoiceDesign 请求不会关闭 Base；两个不同 capability lane 可以并发。`WorkerIdleEvictor` 在冷却后整体驱逐这组 TTS worker，下一次请求再按需恢复，避免连续请求在 VD/Base 之间反复换模。
 
 ## 4. Prompt-created voice 当前边界
 

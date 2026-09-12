@@ -29,8 +29,8 @@ graph TD
 4. **[🚀 ASR/TTS 深度优化规范 (asr-tts-best-practices-and-optimization-spec.md)](asr-tts-best-practices-and-optimization-spec.md)**：Apple Silicon 统一内存优化、流式 VAD、音频平滑算法与长会话显存控制。
 5. **[🛡️ 当前边界与剩余风险 (current-boundaries.md)](current-boundaries.md)**：明确当前已实测能力与发布前必须遵守的安全与容量红线。
 6. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：追溯重大技术选型的历史背景、权衡与替代方案。
-7. **[🎙️ Quality 音色创造、克隆与稳定化能力 (quality-voice-capabilities.md)](quality-voice-capabilities.md)**：Quality 独享 VoiceDesign + Base 双 capability、按需互斥换模、Sona 两条创建链路、VoiceRevision 收敛与分阶段质量路线。
-8. **[🎙️ 音色克隆架构设计与工程交接 (voice-cloning-design-and-handoff.md)](voice-cloning-design-and-handoff.md)**：reference clone 固定由 Base 承担，定义 API、worker、IPC、按需换模和 Sona 工程边界。
+7. **[🎙️ Quality 音色创造、克隆与稳定化能力 (quality-voice-capabilities.md)](quality-voice-capabilities.md)**：Quality 独享 VoiceDesign + Base 双 capability、双 worker 分 lane 并发、冷却驱逐、Sona 两条创建链路、VoiceRevision 收敛与分阶段质量路线。
+8. **[🎙️ 音色克隆架构设计与工程交接 (voice-cloning-design-and-handoff.md)](voice-cloning-design-and-handoff.md)**：reference clone 固定由 Base 承担，定义 API、worker、IPC、双 capability lane 与 Sona 工程边界。
 9. **[讲话人分离整洁架构](../superpowers/specs/2026-09-08-diarization-clean-architecture-design.md)**（`accepted`）：文件接口遵循 OpenAI 原生 `diarized_json`；Realtime 使用单一 namespaced opt-in。运行时固定为 FluidAudio CoreML FP16 私有 worker，无 NeMo/CAM++ 回退；质量门以[能力与质量验收](../operations/capability-quality-acceptance.md)为准。旧 [SPK-E2E-1](speaker-diarization-e2e-design.md) 仅保留历史背景。
 10. **[🎙️ SpeechRail MCP Proxy 工具与契约 (speechrail-mcp-proxy.md)](speechrail-mcp-proxy.md)**（`active`）：外置 `speechrail-mcp` 进程把 ASR/TTS/diarization 暴露为 MCP 工具，无状态 + 零配置 key，供 agent 精准调用本地语音能力。
 11. **[单机语音基座优化交付审计](2026-09-08-single-machine-speech-foundation-delivery.md)**（`active`）：方案 ID 与 Issue / PR / 回归证据的映射，以及尚待真实模型验证的质量门。

@@ -99,7 +99,7 @@ class _FailOnceWorker(_Worker):
 
 
 @pytest.mark.anyio
-async def test_router_serializes_capability_switches_for_concurrent_streams(
+async def test_router_allows_voice_design_and_clone_streams_concurrently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _Registry({"designed": "instruction", "cloned": "clone"})
@@ -111,8 +111,9 @@ async def test_router_serializes_capability_switches_for_concurrent_streams(
     router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
     assert router.warm_capability is None
     await router.start()
-    assert router.warm_capability == "voice_design"
-    assert router.lifecycle_stats["warm_capability"] == "voice_design"
+    assert router.warm_capability == "both"
+    assert router.warm_capabilities == ("voice_design", "voice_clone")
+    assert router.lifecycle_stats["warm_capability"] == "both"
 
     clone_request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
     design_request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
@@ -129,18 +130,18 @@ async def test_router_serializes_capability_switches_for_concurrent_streams(
     async with anyio.create_task_group() as tg:
         tg.start_soon(run_clone)
         await entered.wait()
-        assert router.warm_capability == "voice_clone"
+        assert router.warm_capability == "both"
         tg.start_soon(run_design)
         await anyio.lowlevel.checkpoint()
         assert clone.alive is True
-        assert primary.alive is False
-        assert primary.requests == []
+        assert primary.alive is True
+        assert primary.requests == [design_request]
         release.set()
 
-    assert results == ["clone", "design"]
-    assert clone.alive is False
+    assert set(results) == {"clone", "design"}
+    assert clone.alive is True
     assert primary.alive is True
-    assert router.warm_capability == "voice_design"
+    assert router.warm_capability == "both"
     assert primary.requests == [design_request]
 
 
@@ -162,7 +163,7 @@ async def test_router_releases_capability_lock_after_worker_failure(
     design_request = SpeechRequest(text="design", voice="designed", output_format="pcm16")
     chunks = [chunk async for chunk in router.synthesize(design_request)]
     assert chunks
-    assert clone.alive is False
+    assert clone.alive is True
     assert primary.alive is True
     assert primary.requests == [design_request]
 
@@ -180,7 +181,7 @@ async def test_router_can_evict_current_capability_without_loading_another(
 
     request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
     assert [chunk async for chunk in router.synthesize(request)]
-    assert router.warm_capability == "voice_clone"
+    assert router.warm_capability == "both"
 
     await router.evict_warm_capability()
 
@@ -234,6 +235,7 @@ async def test_start_preserves_already_warm_clone_capability(
     request = SpeechRequest(text="test", voice="cloned")
     assert [chunk async for chunk in router.synthesize(request)]
     await router.start()
-    assert router.warm_capability == "voice_clone"
-    assert primary.started == 0
+    assert router.warm_capability == "both"
+    assert primary.started == 1
+    assert clone.started == 1
     assert clone.alive

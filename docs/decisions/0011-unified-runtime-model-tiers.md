@@ -76,7 +76,7 @@ ADR-0011 原始三档决策保留其历史语义，但 `quality` 的 TTS 组成�
 
 - `quality.tts` 仍为 Qwen3-TTS VoiceDesign 1.7B 8-bit，负责普通/提示词音色设计；
 - `quality.tts_clone` 增加 Qwen3-TTS Base 1.7B 8-bit，仅负责 reference-audio clone；
-- 两个 1.7B TTS worker 共用一个逻辑 capability slot，运行时互斥驻留，Base 按需加载；
+- 两个 1.7B TTS worker 由 capability router 独立管理；Quality 的 `voice_design` / `voice_clone` lane 可双常驻、可并发，同一 worker 仍串行，lazy 模式只延迟首次加载；
 - `balanced` / `light` 不声明 `voice_design` / `voice_clone` 创建能力，继续使用 CustomVoice；
 - reference clone 不允许 fallback 回 VoiceDesign。Base 不可用时必须显式失败。
 

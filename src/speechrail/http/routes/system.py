@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 
 from speechrail.application.deadline import await_until
 from speechrail.application.services import AppServices
+from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
     TTSDeliveryError,
     iter_until,
@@ -81,6 +82,7 @@ _TTS_LIFECYCLE_FIELDS = frozenset(
         "fallback_abort_count",
         "reload_count",
         "warm_capability",
+        "warm_capabilities",
     }
 )
 _LOGGER = logging.getLogger(__name__)
@@ -112,7 +114,7 @@ def _store_clone_idempotency_locked(
 
 def _tts_lifecycle_diagnostics(
     services: AppServices,
-) -> dict[str, int | bool | str | None] | None:
+) -> dict[str, object] | None:
     """Return safe TTS lifecycle counters when this backend exposes them."""
 
     stats = getattr(services.tts_synthesizer, "lifecycle_stats", None)
@@ -122,7 +124,14 @@ def _tts_lifecycle_diagnostics(
         name: value
         for name, value in stats.items()
         if name in _TTS_LIFECYCLE_FIELDS
-        and (value is None or isinstance(value, (bool, int, str)))
+        and (
+            value is None
+            or isinstance(value, (bool, int, str))
+            or (
+                isinstance(value, list)
+                and all(isinstance(item, str) for item in value)
+            )
+        )
     }
 
 
@@ -1021,7 +1030,9 @@ def create_system_router(services: AppServices) -> APIRouter:
         expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
         try:
             async with services.governor.reserve(
-                WorkClass.BATCH_TTS, expires_at=expires_at
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                resource_key=tts_resource_key(synthesizer, voice_id),
             ):
                 with registry.lease_profile(voice_id) as profile:
                     (

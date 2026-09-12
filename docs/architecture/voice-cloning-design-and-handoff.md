@@ -27,7 +27,7 @@ Reference clone 与 VoiceDesign 已正式分离：
 |---|---|---|---|---|
 | `light` | CustomVoice 0.6B q8 | — | ✗ | ✗ |
 | `balanced` | CustomVoice 0.6B q8 | — | ✗ | ✗ |
-| `quality` | VoiceDesign 1.7B q8 | **Base 1.7B q8（按需）** | ✓ | ✓ |
+| `quality` | VoiceDesign 1.7B q8 | **Base 1.7B q8（独立 worker，可与 VoiceDesign 并发）** | ✓ | ✓ |
 
 `/v1/models` 只有在 Base capability 实际解析成功时才声明 `supports_clone=true`。`/v1/voices` 对 clone profile 返回其真实 binding variant `base`，而不是把它伪装成 `voice_design`。
 
@@ -49,8 +49,8 @@ sequenceDiagram
     S->>API: POST /v1/audio/speech (voice=clone_id)
     API->>VR: resolve clone profile
     API->>R: SpeechRequest
-    R->>R: capability lock; close primary if resident
-    R->>B: lazy start Base on first clone
+    R->>R: route to voice_clone lane; keep VoiceDesign resident
+    R->>B: start Base on first clone when lazy loading is enabled
     B->>VR: lease immutable reference revision
     B->>B: public generate(ref_audio, ref_text, target text)
     B-->>API: 24 kHz PCM16 chunks
@@ -85,17 +85,16 @@ sequenceDiagram
 
 Base worker 内部解码 reference，并调用 vendor public `generate`；不再调用 `_generate_icl` 私有方法。
 
-## 6. 按需换模与资源边界
+## 6. 双 worker 与资源边界
 
-Quality 安装 VoiceDesign 与 Base 两套 TTS 权重，但运行时通过 `Qwen3TtsCapabilityRouter` 使用单一逻辑 TTS 槽：
+Quality 安装 VoiceDesign 与 Base 两套 TTS 权重，并通过 `Qwen3TtsCapabilityRouter` 维护两个独立 worker：
 
-- startup warm VoiceDesign；
-- clone 首次请求关闭 VoiceDesign 后启动 Base；
-- 下一次普通 TTS 关闭 Base 后恢复 VoiceDesign；
-- capability lock 覆盖一次完整流式合成，避免切换中交叉；
-- Base 也受既有 idle eviction / close 生命周期管理。
+- eager lifecycle 按顺序 warm 两个 worker；lazy lifecycle 先加载当前请求所需 worker，后续另一 capability 首次使用时再加载；
+- `voice_design` 与 `voice_clone` 是不同 governor resource lane，可以并发；同一 lane 仍由 worker lock 串行；
+- capability 切换不关闭另一 worker，避免“设计音色 → clone”请求反复冷启动；
+- router 受既有 `WorkerIdleEvictor` 管理，warm standby trim 两个 worker，冷却到期后整体 close；冷驱逐后按请求懒加载，不改变路由关系。
 
-因此不能把“新增 Base artifact”直接等同于“常驻 RAM 永久增加一整个 Base 模型”。需要单独实测换模冷启动与峰值瞬态，不能沿用旧 VoiceDesign-only RAM 数据作新结论。
+因此 Quality 活跃态的 RAM 必须按 VoiceDesign + Base 两个 worker 的实测峰值验收；不能沿用旧 VoiceDesign-only 数据。`SPEECHRAIL_TTS_RESIDENT_BYTES` 按单 worker 声明，heavy-overlap 预算在 composition 阶段按可能常驻的 worker 数量相加。
 
 ## 7. Reference 音频质量
 
@@ -141,6 +140,6 @@ Sona 不应知道具体模型目录，只消费 SpeechRail capability。创建�
 - managed install / profile selection / preflight tests；
 - VoiceBinding variant tests；
 - Base public clone generation tests；
-- capability router lazy-load + mutually-exclusive swap tests；
+- capability router lazy-load/eager-start、双 lane 并发、同 lane 串行与组级 eviction tests；
 - clone HTTP API + TTS IPC tests；
 - Ubuntu/macOS Python 3.12 CI 全绿。
