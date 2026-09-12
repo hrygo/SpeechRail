@@ -35,6 +35,7 @@
 		A50000000000000000000025 /* SpeechRailApp.app in UI Test Host */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* SpeechRailApp.app */; };
 		A50000000000000000000027 /* SpeechRailControlKit.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000001 /* SpeechRailControlKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy,); }; };
 		A50000000000000000000028 /* SpeechRailControlAgentCore.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = F10000000000000000000002 /* SpeechRailControlAgentCore.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy,); }; };
+		A50000000000000000000029 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A40000000000000000000027 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -118,6 +119,7 @@
 		A40000000000000000000023 /* com.speechrail.desktop.control.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = com.speechrail.desktop.control.plist; sourceTree = "<group>"; };
 		A40000000000000000000024 /* SpeechRailApp.xctestplan */ = {isa = PBXFileReference; lastKnownFileType = text.xctestplan; path = SpeechRailApp.xctestplan; sourceTree = "<group>"; };
 		A40000000000000000000025 /* SpeechRailMacControl-Package.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Package.swift; sourceTree = "<group>"; };
+		A40000000000000000000027 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -131,7 +133,7 @@
 
 /* Begin PBXGroup section */
 		A30000000000000000000001 = {isa = PBXGroup; children = (A30000000000000000000002, A30000000000000000000003, A30000000000000000000004, A30000000000000000000005, A30000000000000000000006, A30000000000000000000007, A30000000000000000000008, A30000000000000000000009, A30000000000000000000010, A40000000000000000000024 /* SpeechRailApp.xctestplan */, A40000000000000000000025 /* Package.swift */, A30000000000000000000011 /* Products */,); sourceTree = "<group>"; };
-		A30000000000000000000002 /* SpeechRailApp */ = {isa = PBXGroup; children = (A40000000000000000000001, A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005, A40000000000000000000006, A40000000000000000000007, A40000000000000000000008,); path = SpeechRailApp; sourceTree = "<group>"; };
+		A30000000000000000000002 /* SpeechRailApp */ = {isa = PBXGroup; children = (A40000000000000000000001, A40000000000000000000002, A40000000000000000000003, A40000000000000000000004, A40000000000000000000005, A40000000000000000000006, A40000000000000000000007, A40000000000000000000008, A40000000000000000000027 /* Assets.xcassets */,); path = SpeechRailApp; sourceTree = "<group>"; };
 		A30000000000000000000003 /* SpeechRailControlKit */ = {isa = PBXGroup; children = (A40000000000000000000009, A40000000000000000000010, A40000000000000000000026,); path = SpeechRailControlKit; sourceTree = "<group>"; };
 		A30000000000000000000004 /* SpeechRailControlAgentCore */ = {isa = PBXGroup; children = (A40000000000000000000011, A40000000000000000000012, A40000000000000000000013, A40000000000000000000014,); path = SpeechRailControlAgentCore; sourceTree = "<group>"; };
 		A30000000000000000000005 /* SpeechRailControlAgent */ = {isa = PBXGroup; children = (A40000000000000000000015,); path = SpeechRailControlAgent; sourceTree = "<group>"; };
@@ -181,7 +183,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A70000000000000000000010 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000010 /* App Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A50000000000000000000029 /* Assets.xcassets in Resources */,); runOnlyForDeploymentPostprocessing = 0; };
 		A70000000000000000000014 /* Unit Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		A70000000000000000000016 /* UI Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */

@@ -1,6 +1,10 @@
 # SpeechRail 🎙️
 
 <p align="center">
+  <img src="docs/assets/logo.png" alt="SpeechRail Logo" width="128" height="128" />
+</p>
+
+<p align="center">
   <strong>面向 Apple Silicon macOS 的本地优先共享 ASR / TTS 基础设施</strong><br>
   <em>一个本地服务 · OpenAI 兼容 HTTP 与 WebSocket · 有界 Worker 运行时</em>
 </p>

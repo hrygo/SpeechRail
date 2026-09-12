@@ -1,6 +1,10 @@
 # SpeechRail 🎙️
 
 <p align="center">
+  <img src="docs/assets/logo.png" alt="SpeechRail Logo" width="128" height="128" />
+</p>
+
+<p align="center">
   <strong>Local speech infrastructure for Apple Silicon macOS</strong><br>
   <em>Shared ASR, TTS, and Realtime endpoints for desktop agents and local apps</em>
 </p>
