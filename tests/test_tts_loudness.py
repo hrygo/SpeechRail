@@ -86,6 +86,10 @@ def test_controller_can_freeze_clone_gain_after_request_calibration() -> None:
     low = _constant_pcm16(0.05, 4_800)
     high = _constant_pcm16(0.40, 1_920)
 
+    # Frozen mode emits unity gain while gathering credible media-time frames,
+    # then ramps to the fixed target. Compare settled levels, not calibration.
+    controller.process(low)
+    controller.process(low)
     first = controller.process(low)
     first_gain_db = controller._current_gain_db
     second = controller.process(high)
