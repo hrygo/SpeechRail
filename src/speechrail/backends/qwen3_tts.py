@@ -420,6 +420,8 @@ class Qwen3TtsCapabilityRouter:
 
         profile = get_voice_registry().get_profile(request.voice)
         clone_worker = self.clone
+        selected: Qwen3TtsWorker
+        other: Qwen3TtsWorker | None
         if profile.mode == "clone":
             if clone_worker is None:
 
