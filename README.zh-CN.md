@@ -1,4 +1,4 @@
-# SpeechRail 🎙️
+# SpeechRail
 
 <p align="center">
   <img src="docs/assets/logo.png" alt="SpeechRail Logo" width="128" height="128" />
