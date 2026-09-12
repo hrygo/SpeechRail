@@ -265,7 +265,11 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     """A pre-quantized TTS snapshot drives backend config dtype to int8."""
     captured: dict[str, str] = {}
     real_worker = services_module.Qwen3TtsWorker
-    monkeypatch.setattr(services_module, "inspect_model", lambda _: SimpleNamespace(variant="voice_design"))
+    monkeypatch.setattr(
+        services_module,
+        "inspect_model",
+        lambda _: SimpleNamespace(variant="voice_design"),
+    )
 
     def spy_worker(config: object, *, on_delivery_event: object | None = None) -> object:
         captured["dtype"] = getattr(config, "dtype", "")

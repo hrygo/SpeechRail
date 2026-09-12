@@ -465,7 +465,11 @@ def test_startup_failure_closes_already_started_runtime_workers(
 
     monkeypatch.setattr(services_module, "Qwen3Worker", FakeAsrWorker)
     monkeypatch.setattr(services_module, "Qwen3TtsWorker", FailingTtsWorker)
-    monkeypatch.setattr(services_module, "inspect_model", lambda _: SimpleNamespace(variant="voice_design"))
+    monkeypatch.setattr(
+        services_module,
+        "inspect_model",
+        lambda _: SimpleNamespace(variant="voice_design"),
+    )
     settings = Settings(
         qwen3_model_dir=asr_snapshot,
         qwen3_python=Path(executable),
