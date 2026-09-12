@@ -13,24 +13,16 @@ public enum XPCControlTransportError: Error, Equatable, Sendable {
 }
 
 public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, @unchecked Sendable {
-    private let connection: NSXPCConnection
+    private let machServiceName: String
+    private let codeSigningRequirement: String?
 
     public init(
         machServiceName: String = ControlConstants.agentMachServiceName,
         codeSigningRequirement: String? = nil
     ) {
-        let connection = NSXPCConnection(machServiceName: machServiceName, options: [])
-        if let codeSigningRequirement {
-            connection.setCodeSigningRequirement(codeSigningRequirement)
-        }
-        connection.remoteObjectInterface = NSXPCInterface(with: SpeechRailControlXPCProtocol.self)
-        connection.resume()
-        self.connection = connection
+        self.machServiceName = machServiceName
+        self.codeSigningRequirement = codeSigningRequirement
         super.init()
-    }
-
-    deinit {
-        connection.invalidate()
     }
 
     public func send(_ request: ControlRequest) async throws -> ControlResponse {
@@ -40,6 +32,13 @@ public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, 
             throw error
         }
         let encodedRequest = try ControlWireCodec.encode(request)
+        let connection = NSXPCConnection(machServiceName: machServiceName, options: [])
+        if let codeSigningRequirement {
+            connection.setCodeSigningRequirement(codeSigningRequirement)
+        }
+        connection.remoteObjectInterface = NSXPCInterface(with: SpeechRailControlXPCProtocol.self)
+        connection.resume()
+        defer { connection.invalidate() }
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<ControlResponse, Error>) in
             let continuationBox = ContinuationBox(continuation)
