@@ -511,7 +511,7 @@ async def _evaluate_probe_intelligibility(
                 include_timestamps=False,
             )
             result = await services.admission.run(
-                lambda request=request: transcriber.transcribe(request),
+                lambda: transcriber.transcribe(request),
                 deadline=remaining,
             )
             scores.append(vq.transcript_match_score(probe["text"], result.text))
