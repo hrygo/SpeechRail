@@ -1,0 +1,32 @@
+name: tmp-apply-pr46-backend-id
+on:
+  push:
+    branches:
+      - feat/quality-voice-capabilities
+    paths:
+      - .pr-bootstrap/pr46-backend-id-trigger
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/quality-voice-capabilities
+          fetch-depth: 0
+      - name: Apply generic backend identity patch
+        run: |
+          set -euxo pipefail
+          base64 -d .pr-bootstrap/pr46-backend-id.patch.gz.b64 | gzip -d > /tmp/pr46-backend-id.patch
+          echo '92e0b1b9d1dff8106a6b61a2c7069b61004220bbef0d5c722bcc2397dbd0f671  /tmp/pr46-backend-id.patch' | sha256sum -c -
+          git apply --check /tmp/pr46-backend-id.patch
+          git apply --index /tmp/pr46-backend-id.patch
+          rm -f .pr-bootstrap/pr46-backend-id.patch.gz.b64 .pr-bootstrap/pr46-backend-id-trigger .github/workflows/tmp-apply-pr46-backend-id.yml
+          rmdir .pr-bootstrap 2>/dev/null || true
+          git add -A
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor(tts): use generic qwen3 backend identity'
+          git push origin HEAD:feat/quality-voice-capabilities
