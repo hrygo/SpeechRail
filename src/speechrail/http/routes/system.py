@@ -835,6 +835,10 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         except ValueError as exc:
             return error_response(400, request_id, "invalid_audio", str(exc))
+        # Grade the persisted canonical asset, not the raw upload (as in /v1/voices/designs).
+        report = _grade_clone_audio(canonical_wav)
+        if report.status == vq.VoiceQualityStatus.REJECT.value:
+            return _quality_reject_response(request_id, report)
 
         vid_str = (
             voice_id.strip().lower()
