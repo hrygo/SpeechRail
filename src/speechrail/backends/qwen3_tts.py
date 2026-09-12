@@ -461,6 +461,14 @@ class Qwen3TtsCapabilityRouter:
 
         return stream()
 
+    async def evict_warm_capability(self) -> None:
+        """Release the current TTS model slot before a heavyweight validation phase."""
+        async with self._capability_lock:
+            if self.clone is not None and self.clone.alive:
+                await self.clone.close()
+            if self.primary.alive:
+                await self.primary.close()
+
     async def trim_memory(self) -> None:
         await self.primary.trim_memory()
         if self.clone is not None:

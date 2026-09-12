@@ -47,7 +47,7 @@ tracking_issues:
 - 哪些指标可以公开给 Sona，哪些信息必须留在服务端内存或受控日志；
 - clone 创建成功是否等价于“可以作为默认助手音色”。
 
-> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。当前 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波与固定 seed 重复输出确定性纳入实际通过条件；但 `pass` 仍不能证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。
+> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。当前 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波、固定 seed 重复输出确定性，以及分阶段 ASR 回转录可懂度纳入通过条件；跨文本 speaker identity 仍需要独立声纹证据。ASR 阈值目前是待目标机校准的工程初值。
 
 本方案的关键决策：
 
@@ -191,7 +191,7 @@ clone route 必须始终重新执行输入门禁，即使客户端刚刚成功�
 - `runs` 表示每个固定 probe 的重复次数，限制在 `1..3`；默认 3；固定 probe 集始终完整执行，因此默认总合成次数为 `6 × 3 = 18`；
 - 只返回 quality summary，试听音频仍走既有 preview/REST/Realtime 响应，不落盘；
 - 质量运行必须记录模型/变体/策略版本和服务版本，但不记录 voice 自由值、文本和路径；
-- 失败时区分 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic` 和服务不可用。
+- 失败时区分 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch` 与 `transcription_unavailable`。ASR 不可用时结果必须是 `unevaluated`，不能返回假 `pass`。
 
 固定中文 probe 至少覆盖：短句、长段落、问句、数字和标点、多个停顿，以及“请进行自我介绍”这一跨清空/重启验收句。
 

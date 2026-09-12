@@ -1,6 +1,6 @@
 ---
 title: "克隆音色输出可懂度与 ASR 复核设计"
-status: proposed
+status: active
 audience: "SpeechRail/Sona 维护者、质量工程与架构评审者"
 version: "1.0"
 date: 2026-09-12
@@ -14,7 +14,7 @@ date: 2026-09-12
 
 因此 Quality 音色验收需要增加独立于 TTS 的文本/可懂度证据。首选复用 SpeechRail 已有 ASR，而不是继续堆叠幅度阈值。
 
-本文只定义下一阶段架构与资源边界；在完成 Apple Silicon 资源验证前，不把 ASR 复核声明为当前已上线能力。
+本文同时记录当前实现与仍需目标机校准的边界。`quality-runs` 已在信号门通过后，顺序调用现有 Batch ASR 对 6 类固定 probe 的首个有效样本做回转录；真实 Apple Silicon 的时延、内存与阈值仍需校准。
 
 ## 2. 关键约束：不得无治理地并行 Base TTS 与 ASR
 
@@ -90,18 +90,19 @@ ASR 复核必须满足：
 5. 临时 PCM 有明确上限，验收完成后释放，不写磁盘；
 6. ASR 不可用时报告“未评估”，不得把“未评估”伪装成通过。
 
-## 6. 为什么不在当前 PR 中直接上线
+## 6. 当前实现与阈值边界
 
-当前 PR 首先修复模型职责与可证实的质量门缺陷：
+当前 `quality-runs` 已实现：
 
-- reference clone -> Base；
-- VoiceDesign 保留为 prompt voice creation；
-- 6 类固定 probe 全覆盖；
-- 静音/削波拒绝；
-- 固定种子下的重复 PCM 确定性验证；
-- Quality 双模型按需互斥生命周期。
+- Phase A 在 `BATCH_TTS` governor reservation 内完成固定 probe 合成、信号门和重复 digest；
+- 只保留每类 probe 的首个有效 PCM 作为回转录样本；
+- Phase A 结束并释放 TTS reservation 后，若 capability router 支持显式 eviction，则先释放当前 warm TTS 模型；
+- Phase C 独立进入 `BATCH_ASR` reservation，并复用现有 `batch_transcriber` 与 `AdmissionQueue`；
+- 24 kHz mono PCM16 使用有界线性重采样转换到 16 kHz，再按已知 probe 文本计算 Unicode/ITN 归一化后的字符编辑相似度；
+- 六类 probe 取最小 `transcript_match`，当前 provisional 门为：`>=0.92 pass`、`0.80..0.92 warn`、`<0.80 reject`；
+- ASR 未配置或验证器异常时报告 `unevaluated` / `transcription_unavailable`，绝不冒充 pass；队列饱和与 deadline 超时保持运行时 429/503 语义。
 
-ASR 输出复核需要额外完成 24 kHz -> 16 kHz 重采样口径、heavy-overlap/内存验证以及真实 Apple Silicon 性能测试。先写清边界再实现，避免为了“拒绝噪声”引入未经治理的新重模型重叠。
+上述 0.92/0.80 是工程初始值，不是已校准的人类感知阈值。真实 Apple Silicon 语料验收必须覆盖数字、日期、单位、长短句和噪声反例，再决定是否调整。
 
 ## 7. 验收标准
 

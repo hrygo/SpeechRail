@@ -165,3 +165,25 @@ async def test_router_releases_capability_lock_after_worker_failure(
     assert clone.alive is False
     assert primary.alive is True
     assert primary.requests == [design_request]
+
+
+@pytest.mark.anyio
+async def test_router_can_evict_current_capability_without_loading_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _Registry({"designed": "instruction", "cloned": "clone"})
+    monkeypatch.setattr("speechrail.domain.tts.get_voice_registry", lambda: registry)
+    primary = _Worker("voice_design")
+    clone = _Worker("base")
+    router = Qwen3TtsCapabilityRouter(primary, clone=clone)  # type: ignore[arg-type]
+    await router.start()
+
+    request = SpeechRequest(text="clone", voice="cloned", output_format="pcm16")
+    assert [chunk async for chunk in router.synthesize(request)]
+    assert router.warm_capability == "voice_clone"
+
+    await router.evict_warm_capability()
+
+    assert router.warm_capability is None
+    assert primary.alive is False
+    assert clone.alive is False

@@ -21,9 +21,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
+from speechrail.domain import voice_quality as vq
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
-from speechrail.domain.ports import AudioChunk, SpeechRequest
+from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.ports import (
+    AudioChunk,
+    BatchTranscriber,
+    SpeechRequest,
+    TranscriptionRequest,
+)
 from speechrail.domain.tts import VoiceRegistry
 
 _SAMPLE_RATE = 24_000
@@ -228,9 +235,37 @@ class EmptySynthesizer:
         return chunks()
 
 
+class ProbeEchoTranscriber:
+    def __init__(self) -> None:
+        self.requests: list[TranscriptionRequest] = []
+        self._text_by_id = {probe["id"]: probe["text"] for probe in vq.VOICE_QUALITY_V1_ZH_PROBES}
+
+    async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+        self.requests.append(request)
+        probe_id = request.request_id.rsplit(":", 1)[-1]
+        return TranscriptResult(
+            request_id=request.request_id,
+            model_id="quality-asr",
+            text=self._text_by_id[probe_id],
+            language="zh",
+            duration_ms=len(request.audio) * 1000 // 32_000,
+        )
+
+
+class MismatchTranscriber(ProbeEchoTranscriber):
+    async def transcribe(self, request: TranscriptionRequest) -> TranscriptResult:
+        result = await super().transcribe(request)
+        return result.model_copy(update={"text": "完全错误的内容"})
+
+
+_DEFAULT_TRANSCRIBER = object()
+
+
 def _make_client(
     tmp_path: Path,
     synthesizer: SineSynthesizer | None = None,
+    *,
+    batch_transcriber: BatchTranscriber | None | object = _DEFAULT_TRANSCRIBER,
 ) -> tuple[TestClient, VoiceRegistry, SineSynthesizer, Path]:
     preset = load_catalog().preset("quality")
     storage_path = tmp_path / "custom_voices.json"
@@ -248,7 +283,16 @@ def _make_client(
     )
     if synthesizer is None:
         synthesizer = SineSynthesizer()
-    app = create_app(settings, tts_synthesizer=synthesizer)
+    resolved_transcriber = (
+        ProbeEchoTranscriber()
+        if batch_transcriber is _DEFAULT_TRANSCRIBER
+        else batch_transcriber
+    )
+    app = create_app(
+        settings,
+        tts_synthesizer=synthesizer,
+        batch_transcriber=resolved_transcriber,  # type: ignore[arg-type]
+    )
     return TestClient(app), registry, synthesizer, voices_dir
 
 
@@ -573,8 +617,80 @@ def test_s5_quality_runs_ok_and_bounded(
     assert body["synthesis"]["probe_count"] == 18
     assert body["synthesis"]["successful_probe_count"] == 18
     assert body["synthesis"]["deterministic"] is True
+    assert body["synthesis"]["intelligibility_evaluated"] is True
+    assert body["synthesis"]["transcript_match"] == pytest.approx(1.0)
     assert body["failure_codes"] == []
     assert len(synth.requests) == 18
+
+
+
+
+def test_quality_runs_asr_phase_uses_one_16khz_sample_per_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcriber = ProbeEchoTranscriber()
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        batch_transcriber=transcriber,
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 3},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "pass"
+    assert len(transcriber.requests) == len(vq.VOICE_QUALITY_V1_ZH_PROBES)
+    assert all(request.language == "zh" for request in transcriber.requests)
+    assert all(request.prompt == "" for request in transcriber.requests)
+    # 0.5 s generated PCM: 24 kHz -> 16 kHz = 8000 PCM16 samples = 16000 bytes.
+    assert all(len(request.audio) == 16_000 for request in transcriber.requests)
+
+
+def test_quality_runs_rejects_transcript_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        batch_transcriber=MismatchTranscriber(),
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "reject"
+    assert body["synthesis"]["intelligibility_evaluated"] is True
+    assert body["synthesis"]["transcript_match"] < 0.8
+    assert "transcript_mismatch" in body["failure_codes"]
+
+
+def test_quality_runs_is_unevaluated_without_asr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        batch_transcriber=None,
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    resp = client.post(
+        "/v1/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 2},
+    )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "unevaluated"
+    assert body["synthesis"]["intelligibility_evaluated"] is False
+    assert body["synthesis"]["transcript_match"] is None
+    assert body["failure_codes"] == ["transcription_unavailable"]
 
 
 def test_s5_quality_runs_rejects_runs_out_of_range(

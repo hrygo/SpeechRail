@@ -331,7 +331,10 @@ Authorization: Bearer <TOKEN>
 - `runs`：整数，范围 `1..3`（默认 `3`），含义是“每个固定 probe 的重复次数”；6 个内置 probe 始终全部执行，因此默认 `probe_count=18`；越界返回 `422 validation_error`。
 - `include_audio`：布尔，默认 `false`。当前未实现内联音频试听，传入 `true` 直接返回 `422 include_audio_unsupported`。
 - 探针按 `voice_quality_v1_zh` 的 6 条内置固定脚本逐条合成，完整覆盖自我介绍、短句、长段落、问句、数字标点和停顿；每条重复 `runs` 次。
-- 所有 probe 输出必须同时通过格式、非静音、无满幅削波和重复确定性检查；失败返回 `status=reject`。合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`output_nondeterministic`。`runs>=2` 时会对同一 probe 的 PCM SHA-256 做重复比较；`runs=1` 不宣称已验证确定性。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
+- 所有 probe 输出必须同时通过格式、非静音、无满幅削波和重复确定性检查；`runs>=2` 时会对同一 probe 的 PCM SHA-256 做重复比较，`runs=1` 不宣称已验证确定性。
+- 信号门全部通过后，服务释放 TTS phase，只取 6 类 probe 各自首个有效 PCM，以现有 Batch ASR 顺序回转录并计算归一化字符相似度；该 ASR phase 独立进入 `BATCH_ASR` governor/admission，避免把 Base TTS 与 ASR 变成未经治理的并行重计算。
+- `synthesis.transcript_match` 为 6 类 probe 的最小匹配分，当前工程初始门为 `>=0.92 pass`、`0.80..0.92 warn`、`<0.80 reject`；该阈值仍需真实 Apple Silicon 语料校准。ASR 不可用时返回 `status=unevaluated` + `transcription_unavailable`，绝不伪装为通过。
+- 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
 - 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
 
 #### 5.7.4 `VoiceQualityReport` 结构与向后兼容
@@ -341,14 +344,14 @@ Authorization: Bearer <TOKEN>
 | 字段 | 说明 |
 |---|---|
 | `policy_version` | 门控策略版本，当前固定 `voice_quality_v1` |
-| `status` | `pass` / `warn` / `reject`。服务端响应对象永远不会下发 `status=unevaluated`；该值仅存在于 schema 枚举中，客户端在 `quality` 字段缺失时自行按“未评估”展示 |
+| `status` | `pass` / `warn` / `reject` / `unevaluated`。当输出信号有效但独立 ASR 可懂度证据不可获得时，`quality-runs` 会显式下发 `unevaluated`，客户端不得把它当作 pass |
 | `run_id` | 本次质量运行的唯一标识 |
 | `tested_at` | 测试时间（ISO 8601 UTC） |
 | `reference` | 参考音频信号指标（时长、采样率、声道、语音活动比、底噪、SNR、削波比、首尾静音；`transcript_match` 始终为 `null`，因为实现未启用 ASR 文本匹配，从不计算该分数） |
-| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`） |
-| `failure_codes` | 失败原因数组。参考侧（克隆参考音频门禁）：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧（质量探针输出）：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic` |
+| `synthesis` | 合成输出指标（`probe_count`、`successful_probe_count`、`active_rms_dbfs`、`peak_dbfs`、`chunk_jump_p95_db`、`clipping_ratio`、`deterministic`、`transcript_match`、`intelligibility_evaluated`） |
+| `failure_codes` | 失败/未评估原因数组。参考侧：`audio_too_short`、`low_snr`、`high_noise_floor`、`clipping`、`transcript_mismatch`；合成侧：`probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable` |
 
-**向后兼容**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及历史遗留记录不携带 `quality` 字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过；服务端不会在响应中下发 `status=unevaluated`。
+**向后兼容**：`VoiceProfile.quality` 仅在克隆音色（或已评估音色）上出现；系统预置音色、`POST /v1/voices` 创建的音色及历史遗留记录不携带 `quality` 字段。消费端应将缺失的 `quality` 字段视为“未评估”（等同 `unevaluated`），不要假定通过。新版 `quality-runs` 也会在独立 ASR 证据不可获得时显式返回 `status=unevaluated`。
 
 ---
 

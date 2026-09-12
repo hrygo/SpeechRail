@@ -1040,6 +1040,8 @@ components:
         - chunk_jump_p95_db
         - clipping_ratio
         - deterministic
+        - transcript_match
+        - intelligibility_evaluated
       properties:
         probe_count:
           type: integer
@@ -1059,6 +1061,14 @@ components:
           maximum: 1
         deterministic:
           type: boolean
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: Minimum normalized ASR transcript match across the fixed probe set; null when not evaluated.
+        intelligibility_evaluated:
+          type: boolean
+          description: Whether independent ASR intelligibility evidence was successfully collected.
     VoiceQualityReport:
       type: object
       required:
@@ -1101,6 +1111,7 @@ components:
               - output_invalid
               - output_peak_exceeded
               - output_nondeterministic
+              - transcription_unavailable
     VoiceQualityRunRequest:
       type: object
       properties:
