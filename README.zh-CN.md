@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml"><img src="https://github.com/hrygo/SpeechRail/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI 状态" /></a>
   <a href="https://github.com/hrygo/SpeechRail/releases"><img src="https://img.shields.io/github/v/release/hrygo/SpeechRail?label=release" alt="Release" /></a>
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon-000000.svg?logo=apple&logoColor=white" alt="Apple Silicon" />
   <img src="https://img.shields.io/badge/Python-3.12-3776AB.svg?logo=python&logoColor=white" alt="Python 3.12" />
@@ -19,6 +20,14 @@
 
 <p align="center">
   <a href="README.md">English</a> · <strong>简体中文</strong>
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#当前能力">当前能力</a> ·
+  <a href="#开发与验证">开发与验证</a> ·
+  <a href="docs/README.md">文档导航</a> ·
+  <a href="https://github.com/hrygo/SpeechRail/discussions">讨论区</a>
 </p>
 
 SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语音应用的
