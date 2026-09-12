@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-09-13
+
 ### Added
 
 - 新增 Quality-only `POST /v1/voices/designs`：VoiceDesign 生成有界参考，经规范化和无提示 ASR 核验后，create-only 注册新 Base 音色；记录模型/seed/hash 来源，明确输出验收仍为 `unevaluated`，不迁移或覆盖旧音色。
