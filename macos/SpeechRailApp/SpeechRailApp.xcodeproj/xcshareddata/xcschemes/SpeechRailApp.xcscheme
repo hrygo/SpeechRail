@@ -15,7 +15,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A20000000000000000000001"
-               BuildableName = "SpeechRailApp.app"
+               BuildableName = "SpeechRail.app"
                BlueprintName = "SpeechRailApp"
                ReferencedContainer = "container:SpeechRailApp.xcodeproj">
             </BuildableReference>
@@ -85,7 +85,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A20000000000000000000001"
-            BuildableName = "SpeechRailApp.app"
+            BuildableName = "SpeechRail.app"
             BlueprintName = "SpeechRailApp"
             ReferencedContainer = "container:SpeechRailApp.xcodeproj">
          </BuildableReference>
@@ -100,7 +100,7 @@
       <BuildableReference
          BuildableIdentifier = "primary"
          BlueprintIdentifier = "A20000000000000000000001"
-         BuildableName = "SpeechRailApp.app"
+         BuildableName = "SpeechRail.app"
          BlueprintName = "SpeechRailApp"
          ReferencedContainer = "container:SpeechRailApp.xcodeproj">
       </BuildableReference>

@@ -40,7 +40,7 @@ DERIVED_DATA="$ROOT_DIR/build/macos-derived-data"
 mkdir -p "$DERIVED_DATA"
 
 if [[ "$ACTION" == "archive" ]]; then
-  ARCHIVE_PATH="$ROOT_DIR/build/SpeechRailApp.xcarchive"
+  ARCHIVE_PATH="$ROOT_DIR/build/SpeechRail.xcarchive"
   xcodebuild \
     -project "$PROJECT" \
     -scheme SpeechRailApp \

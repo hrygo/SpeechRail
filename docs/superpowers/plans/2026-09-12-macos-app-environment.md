@@ -4,7 +4,7 @@
 
 **Goal:** 为 SpeechRail 建立可签名、可测试、可直接分发的 macOS App 开发环境，并完成首版控制面骨架：App 可查看服务状态、启动/停止/重启服务、查看并切换 `light`/`balanced`/`quality` profile，同时不复制 SpeechRail runtime、worker 或模型。
 
-**Architecture:** `SpeechRailApp` 是 SwiftUI 控制面；签名的 `SpeechRailControlAgent` 由 `SMAppService` 管理并通过受签名验证的 XPC 暴露有限命令；Agent 使用绝对路径调用现有 managed Python CLI；`com.speechrail` 仍是唯一的 ASR/TTS 服务 LaunchAgent 和生命周期所有者。UI 与服务端通过 loopback HTTP 读取公开状态，所有改变本机服务状态的操作经过 XPC Agent 串行执行。
+**Architecture:** `SpeechRail` 是 SwiftUI 控制面；签名的 `SpeechRailControlAgent` 由 `SMAppService` 管理并通过受签名验证的 XPC 暴露有限命令；Agent 使用绝对路径调用现有 managed Python CLI；`com.speechrail` 仍是唯一的 ASR/TTS 服务 LaunchAgent 和生命周期所有者。UI 与服务端通过 loopback HTTP 读取公开状态，所有改变本机服务状态的操作经过 XPC Agent 串行执行。
 
 **Tech Stack:** Xcode 26.6 stable, Swift 6.3, SwiftUI, Observation, `NSXPCConnection`/`NSXPCListener`, `SMAppService`, Hardened Runtime, Developer ID Application signing, notarization, Python 3.12, `uv`, existing SpeechRail service CLI, Swift Testing/XCTest.
 
@@ -64,7 +64,7 @@ security find-identity -p codesigning -v
 - `macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist`
 - `macos/SpeechRailApp/SpeechRailApp.xctestplan`
 
-- [x] 用 Xcode 原生工程创建 `SpeechRailApp`，并加入 `SpeechRailControlKit` framework、`SpeechRailControlAgent` executable、unit test target 和 UI test target。
+- [x] 用 Xcode 原生工程创建 `SpeechRail` App，并加入 `SpeechRailControlKit` framework、`SpeechRailControlAgent` executable、unit test target 和 UI test target；Xcode target 保留 `SpeechRailApp` 技术名。
 - [x] 使用 `com.speechrail.desktop` 作为 App bundle identifier，使用 `com.speechrail.desktop.control` 作为 Agent Mach service/LaunchAgent label；所有标识符集中在配置文件或构建设置中，代码不散落硬编码。
 - [x] 所有 target 设置 `MACOSX_DEPLOYMENT_TARGET = 14.0`、Apple Silicon `arm64`、Swift 6 language mode、严格并发检查；Debug/Release/Distribution 三套配置显式分离。
 - [x] Distribution target 开启 Hardened Runtime；无 Apple Developer ID 的 Debug/Release 保持关闭以支持本地 bundle 运行。App Sandbox 保持关闭并在配置注释中说明这是 direct Developer ID distribution 的边界决定，不为 App Store 伪造兼容性。
@@ -239,9 +239,9 @@ xcodebuild test -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
 **Verification:**
 
 ```bash
-codesign --verify --strict --verbose=2 build/Release/SpeechRailApp.app
-codesign --display --requirements :- build/Release/SpeechRailApp.app/Contents/Resources/SpeechRailControlAgent
-plutil -lint build/Release/SpeechRailApp.app/Contents/Library/LaunchAgents/com.speechrail.desktop.control.plist
+codesign --verify --strict --verbose=2 build/Release/SpeechRail.app
+codesign --display --requirements :- build/Release/SpeechRail.app/Contents/Resources/SpeechRailControlAgent
+plutil -lint build/Release/SpeechRail.app/Contents/Library/LaunchAgents/com.speechrail.desktop.control.plist
 ```
 
 ---
@@ -326,7 +326,7 @@ scripts/macos_app_build.sh --configuration Debug
 
 ```bash
 scripts/macos_app_archive.sh --configuration Distribution
-scripts/macos_app_verify_distribution.sh path/to/SpeechRailApp.app
+scripts/macos_app_verify_distribution.sh path/to/SpeechRail.app
 ```
 
 ---

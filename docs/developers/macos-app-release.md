@@ -42,7 +42,7 @@ export SPEECHRAIL_TEAM_ID="<your-team-id>"
 scripts/macos_app_archive.sh \
   --export-options "/path/outside/repository/ExportOptions.plist" \
   --export-path "build/macos-export"
-scripts/macos_app_verify_distribution.sh "build/macos-export/SpeechRailApp.app"
+scripts/macos_app_verify_distribution.sh "build/macos-export/SpeechRail.app"
 ```
 
 `macos_app_verify_distribution.sh` 会逐项验证 App、嵌套 framework、Agent executable 以及 LaunchAgent plist，不使用 `codesign --deep` 掩盖嵌套代码签名问题。验证项包括：

@@ -3,7 +3,7 @@ set -euo pipefail
 
 APP_PATH="${1:-}"
 if [[ -z "$APP_PATH" || "$APP_PATH" == -* ]]; then
-  echo "usage: scripts/macos_app_verify_distribution.sh path/to/SpeechRailApp.app" >&2
+  echo "usage: scripts/macos_app_verify_distribution.sh path/to/SpeechRail.app" >&2
   exit 2
 fi
 if [[ ! -d "$APP_PATH" ]]; then

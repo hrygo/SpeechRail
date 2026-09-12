@@ -44,7 +44,7 @@ App 通过 `SMAppService` 注册一个随 App 分发的用户级 `SpeechRailCont
 ## 4. 目标架构
 
 ```text
-SpeechRailApp
+SpeechRail
   ├─ SwiftUI settings window + MenuBarExtra
   ├─ URLSession → http://127.0.0.1:8201
   │                /health /readyz /v1/models /v1/voices /metrics
@@ -112,7 +112,7 @@ macos/SpeechRailApp/
   SpeechRailApp.xctestplan       # deterministic local test plan
 ```
 
-`SpeechRailApp` 不链接 `native/diarization` 或任何模型 SDK；该 package 继续独立构建并随服务 wheel/release 处理。
+`SpeechRail` 不链接 `native/diarization` 或任何模型 SDK；该 package 继续独立构建并随服务 wheel/release 处理。
 
 ### 6.3 测试分层
 

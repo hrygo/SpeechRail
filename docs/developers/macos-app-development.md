@@ -16,7 +16,7 @@ date: 2026-09-12
 
 ## 边界
 
-`SpeechRailApp` 是控制面，不是 ASR/TTS runtime。它不采集麦克风、不播放音频、不加载模型，也不直接执行 `launchctl`。`SpeechRailControlAgent` 由 `SMAppService` 管理，通过受签名约束的 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
+`SpeechRail` 是控制面，不是 ASR/TTS runtime。它不采集麦克风、不播放音频、不加载模型，也不直接执行 `launchctl`。`SpeechRailControlAgent` 由 `SMAppService` 管理，通过受签名约束的 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
 
 App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志、原始音频、完整转写和 API key 均留在 App bundle 之外。
 
