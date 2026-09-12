@@ -41,11 +41,13 @@ tracking_issues:
 
 当前 SpeechRail 已具备 clone reference audio 的格式/时长/削波/有效语音检查、请求级稳定采样、clone-only streaming loudness controller 和 24 kHz mono PCM16 输出契约。现有验收证明了“输出稳定性”边界，但还没有把以下问题收敛成一个可消费的质量契约：
 
-- 参考录音是否足够干净，适合让 ICL 学习音色；
+- 参考录音是否足够干净，适合让 Base clone 条件提取 speaker identity；
 - clone 生成是否在多种中文 probe 上稳定；
 - 用户在 Sona 清空会话、重启管道后听到的噪声是否来自 SpeechRail；
 - 哪些指标可以公开给 Sona，哪些信息必须留在服务端内存或受控日志；
 - clone 创建成功是否等价于“可以作为默认助手音色”。
+
+> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。当前 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波、固定 seed 重复输出确定性，以及分阶段 ASR 回转录可懂度纳入通过条件；跨文本 speaker identity 仍需要独立声纹证据。ASR 阈值目前是待目标机校准的工程初值。
 
 本方案的关键决策：
 
@@ -60,7 +62,7 @@ tracking_issues:
 已存在的实现/契约入口：
 
 - `src/speechrail/domain/tts.py`：`VoiceProfile`、clone 音频转码与信号校验；
-- `src/speechrail/backends/qwen3_tts_worker.py`：ICL reference load、稳定 seed、跨 chunk loudness controller；
+- `src/speechrail/backends/qwen3_tts_worker.py`：Base public clone generation、reference load、稳定 seed、跨 chunk loudness controller；
 - `src/speechrail/backends/qwen3_tts.py`：clone delivery 统计和 worker 生命周期；
 - `src/speechrail/http/routes/system.py`：`/v1/voices/clone` 与音色目录；
 - `src/speechrail/http/routes/audio.py`：REST TTS 的 clone speed/instruction 能力边界；
@@ -186,10 +188,10 @@ clone route 必须始终重新执行输入门禁，即使客户端刚刚成功�
 约束：
 
 - probe 文本由服务端固定版本管理，客户端不能自由修改为任意文本后宣称通过；
-- `runs` 限制在 `1..3`；默认 3；
+- `runs` 表示每个固定 probe 的重复次数，限制在 `1..3`；默认 3；固定 probe 集始终完整执行，因此默认总合成次数为 `6 × 3 = 18`；
 - 只返回 quality summary，试听音频仍走既有 preview/REST/Realtime 响应，不落盘；
 - 质量运行必须记录模型/变体/策略版本和服务版本，但不记录 voice 自由值、文本和路径；
-- 失败时区分 `probe_failed`、`clone_speed_unsupported`、`output_invalid` 和服务不可用。
+- 失败时区分 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch` 与 `transcription_unavailable`。ASR 不可用时结果必须是 `unevaluated`，不能返回假 `pass`。
 
 固定中文 probe 至少覆盖：短句、长段落、问句、数字和标点、多个停顿，以及“请进行自我介绍”这一跨清空/重启验收句。
 
@@ -200,7 +202,7 @@ SpeechRail 继续是输出 PCM 的权威方，Sona 不做第二次完整归一�
 - `active_rms_dbfs`：只在有效语音窗口统计；
 - `peak_dbfs`、`clipping_ratio`：验证 PCM16 不回绕、不越过 ceiling；
 - `chunk_jump_p95_db`：相邻有效 chunk RMS 跳变 P95；
-- `successful_probe_count`、`deterministic`：固定 seed、同输入重复运行；
+- `successful_probe_count`：所有固定 probe × 重复次数中的有效输出数；`deterministic`：同一固定 probe 在重复运行中的 PCM SHA-256 是否完全一致（`runs=1` 时为 `false`，不宣称已验证确定性）；
 - `format`：24 kHz、mono、PCM16、chunk 顺序、response 生命周期；
 - `ttfa_ms`、总时长和取消结果：用于回归，不作为音色相似度分数。
 

@@ -28,6 +28,7 @@ from speechrail.http.routes.audio import create_audio_router
 from speechrail.http.routes.jobs import create_jobs_router
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 from speechrail.http.routes.system import create_system_router
+from speechrail.http.routes.voice_designs import create_voice_design_router
 from speechrail.observability.logging import access
 from speechrail.runtime.job_runner import JobProcessor
 from speechrail.runtime.jobs import JobRepository
@@ -188,6 +189,7 @@ def create_app(
     install_error_handlers(app)
     app.include_router(create_system_router(services))
     app.include_router(create_audio_router(services))
+    app.include_router(create_voice_design_router(services))
     app.include_router(create_jobs_router(services))
     app.include_router(create_openai_realtime_router(services))
     return app

@@ -80,6 +80,7 @@ def _catalog_payload() -> dict[str, object]:
         _artifact(key="tts-custom-q4", family="qwen3_tts", variant="custom_voice", bits=4),
         _artifact(key="tts-custom-q8", family="qwen3_tts", variant="custom_voice", bits=8),
         _artifact(key="tts-design-q8", family="qwen3_tts", variant="voice_design", bits=8),
+        _artifact(key="tts-base-q8", family="qwen3_tts", variant="base", bits=8),
         _artifact(key="aligner-q8", family="qwen3_forced_aligner", variant="aligner", bits=8),
         _artifact(
             key="aligner-bf16",
@@ -98,6 +99,7 @@ def _catalog_payload() -> dict[str, object]:
                 "id": "quality",
                 "asr": "asr-q8",
                 "tts": "tts-design-q8",
+                "tts_clone": "tts-base-q8",
                 "aligner": "aligner-bf16",
                 "diarization": True,
             },
@@ -105,6 +107,7 @@ def _catalog_payload() -> dict[str, object]:
                 "id": "balanced",
                 "asr": "asr-q8",
                 "tts": "tts-custom-q8",
+                "tts_clone": None,
                 "aligner": "aligner-q8",
                 "diarization": True,
             },
@@ -112,6 +115,7 @@ def _catalog_payload() -> dict[str, object]:
                 "id": "light",
                 "asr": "asr-q8",
                 "tts": "tts-custom-q8",
+                "tts_clone": None,
                 "aligner": None,
                 "diarization": False,
             },
@@ -145,7 +149,7 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
     artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
 
     assert catalog.schema_version == 2
-    assert len(catalog.artifacts) == 8
+    assert len(catalog.artifacts) == 9
     assert {item.id for item in catalog.presets} == {"quality", "balanced", "light"}
     assert catalog.preset("quality") == preset("quality")
 
@@ -172,8 +176,22 @@ def test_load_catalog_matches_tier_precision_policy() -> None:
     assert by_id["balanced"].diarization is True
     assert by_id["quality"].asr == "asr-1.7b-q8"
     assert by_id["quality"].tts == "tts-1.7b-design-q8"
+    assert by_id["quality"].tts_clone == "tts-1.7b-base-q8"
+    assert artifacts[by_id["quality"].tts_clone].variant == "base"
     assert by_id["quality"].aligner == "aligner-bf16"
     assert by_id["quality"].diarization is True
+
+
+def test_quality_clone_source_is_pinned_to_modelscope() -> None:
+    catalog = load_catalog()
+    artifacts = {artifact.key: artifact for artifact in catalog.artifacts}
+    clone = artifacts[catalog.preset("quality").tts_clone or ""]
+    source = clone.sources[0]
+
+    assert clone.variant == "base"
+    assert clone.revision == "73ae2cb59832ed1eb13c249e378b854cfc643131"
+    assert source.provider == "modelscope"
+    assert source.revision == clone.revision
 
 
 def test_preset_relationships_keep_weight_changes_only() -> None:

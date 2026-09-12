@@ -59,17 +59,19 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 ## Clone TTS 响度能力
 
-当前 `voice_design` Realtime worker 若启用 clone 响度控制，会在
-`session.created.session.speech_capabilities.audio_loudness_profile` 声明
-`stable_loudness_v1`；Sona 等客户端据此只保留 peak safety，未声明能力的旧服务走有界
-compatibility guard。SpeechRail 的 clone PCM normalization 使用请求级状态，并以私有的
-200 ms 缓冲合并稀疏模型 chunk；200 ms 是内部处理边界，不是客户端可依赖的公共 Realtime
-delta 大小承诺。
+当前 Quality Realtime 在独立 Base clone capability 实际配置时，通过
+`session.created.session.speech_capabilities.supports_clone=true` 声明可用性，并同时声明
+`audio_loudness_profile=stable_loudness_v1`。默认 TTS `variant` 仍可为 `voice_design`；客户端不能再由
+默认 variant 推断 clone。clone voice 请求由 capability router 按需切换到 Base。SpeechRail 的 clone PCM
+normalization 使用请求级状态，并以私有 200 ms 缓冲合并稀疏模型 chunk；200 ms 是内部处理边界，
+不是客户端可依赖的公共 Realtime delta 大小承诺。
 
 当前代码级 review 修复与脱敏证据见
 [2026-09-08 clone TTS 响度验收记录](../archive/performance/2026-09-08-clone-tts-loudness-acceptance.md)。
-真实 managed runtime 的 clone 重复生成复测已完成：同一请求连续 3 次输出 hash 一致，输出
-24kHz mono PCM16，active RMS 约 `-21.03 dBFS`，peak 约 `-3.81 dBFS`，未发现 chunk 边界点击型突变证据。物理扬声器主观试听和 cancel/interruption 覆盖仍须单独记录；本节不把静态测试或 `readyz=200` 当作完整声音质量通过。
+下述真实 managed runtime clone 数据来自旧 VoiceDesign-only 基线：同一请求连续 3 次输出 hash 一致，输出
+24kHz mono PCM16，active RMS 约 `-21.03 dBFS`，peak 约 `-3.81 dBFS`。它不能外推为新的 Base clone
+capability 实测。新架构仍需在目标 Apple Silicon 上重做跨文本 speaker identity、切换冷启动、峰值 RSS、
+物理试听及 cancel/interruption 验收；本节不把静态测试或 `readyz=200` 当作完整声音质量通过。
 
 ## 外部语料与 benchmark
 

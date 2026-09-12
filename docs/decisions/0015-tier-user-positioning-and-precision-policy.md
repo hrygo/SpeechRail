@@ -19,7 +19,10 @@ date: 2026-09-11
   （`asr-0.6b-q8` 1010.8 MB + `tts-0.6b-custom-q8` 1973.6 MB + VAD 2.3 MB）。
 - **现行按档位精度策略**：三档均为 8-bit，仅 `quality` 的 aligner 为 `"bf16"`。
   `balanced` = `asr-1.7b-q8` + `tts-0.6b-custom-q8` + `aligner-q8`；
-  `quality` = `asr-1.7b-q8` + `tts-1.7b-design-q8` + `aligner-bf16`。
+  `quality` = `asr-1.7b-q8` + `tts-1.7b-design-q8` + `tts-1.7b-base-q8` + `aligner-bf16`。
+- **现行 Quality TTS 运行语义**：`tts-1.7b-design-q8` 是 `voice_design` lane，
+  `tts-1.7b-base-q8` 是 `voice_clone` lane；两个独立 worker 可双常驻、跨 lane 并发，
+  同一 lane 串行，空闲冷却后按 Quality capability group 回收并惰性恢复。
 - **q4 制品保留但不再使用**：`asr-0.6b-q4` 与 `tts-0.6b-custom-q4` 仍在 catalog 中，
   可继续加载，但不被任何档位引用。
 - **门控影响**：E2（TTS q4 vs q8）不再对 light 构成门控；light 已回到 8-bit 组合。
@@ -45,6 +48,8 @@ ADR-0011 把三档设计成"同一能力按内存缩小/放大"：三档都取 `
      `tts-0.6b-custom-q8`、aligner `aligner-q8`，分人开启，≈5.96GB。
    - 🟣 `quality` — Studio（32GB+）：ASR `asr-1.7b-q8`、TTS `tts-1.7b-design-q8`、
      aligner `aligner-bf16`，分人开启，≈7.63GB。
+     **〔此处记录的是原始默认 VoiceDesign 路径；Quality 的独立 Base clone capability
+     由 2026-09-12 后续 amendment 补充，现行组成见「修订」节。〕**
 2. 解除"全档 8-bit"铁律，改由每档 `precision_policy` 声明精度
    （`model_catalog.ModelCatalog.precision_policy`，`TierPrecision`：light 为 4-bit，
    balanced/quality 为 8-bit，quality aligner 为 `"bf16"`）。4-bit 是显式档位决策，

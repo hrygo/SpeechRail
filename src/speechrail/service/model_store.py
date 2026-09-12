@@ -107,13 +107,18 @@ class PreparedArtifact:
 
 @dataclass(frozen=True, slots=True)
 class PreparedModelSet:
-    """An immutable, verified ASR/TTS pair prepared under one runtime lock."""
+    """Immutable verified models prepared under one runtime lock.
+
+    ``tts_clone`` is an optional capability artifact.  Quality uses a Base
+    checkpoint there while its primary ``tts`` remains VoiceDesign.
+    """
 
     prepared_id: str
     preset: str
     runtime_lock_id: str
     asr: PreparedArtifact
     tts: PreparedArtifact
+    tts_clone: PreparedArtifact | None = None
 
     @property
     def asr_model_dir(self) -> Path:
@@ -122,8 +127,13 @@ class PreparedModelSet:
 
     @property
     def tts_model_dir(self) -> Path:
-        """Return the verified TTS model directory."""
+        """Return the verified primary TTS model directory."""
         return self.tts.path
+
+    @property
+    def tts_clone_model_dir(self) -> Path | None:
+        """Return the verified clone-capability model directory when present."""
+        return self.tts_clone.path if self.tts_clone is not None else None
 
     @property
     def identity(self) -> Mapping[str, object]:
@@ -135,6 +145,7 @@ class PreparedModelSet:
                 "runtime_lock_id": self.runtime_lock_id,
                 "asr": self.asr.identity,
                 "tts": self.tts.identity,
+                "tts_clone": self.tts_clone.identity if self.tts_clone is not None else None,
             }
         )
 
@@ -537,13 +548,18 @@ def _resolver_registry_path(app_home: Path) -> Path:
 
 def _resolver_artifacts(
     catalog: ModelCatalog, preset_id: str
-) -> tuple[ModelArtifact, ModelArtifact]:
-    """Return the catalog's exact ASR/TTS pair for one preset."""
+) -> tuple[ModelArtifact, ...]:
+    """Return every catalog artifact required by one preset."""
     try:
         selected_preset = catalog.preset(preset_id)
         artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
         asr = artifacts_by_key[selected_preset.asr]
         tts = artifacts_by_key[selected_preset.tts]
+        clone = (
+            artifacts_by_key[selected_preset.tts_clone]
+            if selected_preset.tts_clone is not None
+            else None
+        )
     except (KeyError, TypeError) as exc:
         raise ModelStoreError("prepared model identity is invalid") from exc
 
@@ -555,7 +571,16 @@ def _resolver_artifacts(
         or tts.variant not in {"voice_design", "custom_voice"}
     ):
         raise ModelStoreError("prepared model identity is invalid")
-    return asr, tts
+    artifacts: tuple[ModelArtifact, ...] = (asr, tts)
+    if clone is not None:
+        if (
+            clone.key in {asr.key, tts.key}
+            or clone.family != "qwen3_tts"
+            or clone.variant != "base"
+        ):
+            raise ModelStoreError("prepared clone model identity is invalid")
+        artifacts += (clone,)
+    return artifacts
 
 
 def _strict_prepared_path(
@@ -648,7 +673,7 @@ def _resolve_prepared_candidate(
     app_home: Path,
     catalog: ModelCatalog,
     runtime_lock: RuntimeLock,
-) -> tuple[str, tuple[PreparedArtifact, PreparedArtifact]]:
+) -> tuple[str, tuple[PreparedArtifact, ...]]:
     """Strictly validate one registry entry and return immutable artifacts."""
     prepared = registry.get("prepared")
     if not isinstance(prepared, dict):
@@ -671,8 +696,7 @@ def _resolve_prepared_candidate(
         raise ModelStoreError("prepared model identity is invalid")
     candidate_artifacts = candidate.get("artifacts")
     if not isinstance(candidate_artifacts, dict) or set(candidate_artifacts) != {
-        artifacts[0].key,
-        artifacts[1].key,
+        artifact.key for artifact in artifacts
     }:
         raise ModelStoreError("prepared model identity is invalid")
 
@@ -692,9 +716,9 @@ def _resolve_prepared_candidate(
         raise ModelStoreError("prepared model snapshot is not verified")
     return (
         preset_id,
-        (
-            _prepared_artifact_public(artifacts[0], entries[0], paths[0]),
-            _prepared_artifact_public(artifacts[1], entries[1], paths[1]),
+        tuple(
+            _prepared_artifact_public(artifact, entry, path)
+            for artifact, entry, path in zip(artifacts, entries, paths, strict=True)
         ),
     )
 
@@ -731,6 +755,7 @@ def resolve_prepared_models(
         runtime_lock_id=resolved_runtime_lock.id,
         asr=artifacts[0],
         tts=artifacts[1],
+        tts_clone=artifacts[2] if len(artifacts) > 2 else None,
     )
 
 
@@ -1089,7 +1114,10 @@ async def prepare_models(
         raise ModelStoreError(f"unknown preset: {preset_id}") from exc
     artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
     try:
-        artifacts = (artifacts_by_key[selected_preset.asr], artifacts_by_key[selected_preset.tts])
+        artifact_keys = [selected_preset.asr, selected_preset.tts]
+        if selected_preset.tts_clone is not None:
+            artifact_keys.append(selected_preset.tts_clone)
+        artifacts = tuple(artifacts_by_key[key] for key in artifact_keys)
     except KeyError as exc:
         raise ModelStoreError(f"preset {preset_id} references an unknown artifact") from exc
 

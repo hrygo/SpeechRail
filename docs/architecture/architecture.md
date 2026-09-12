@@ -2,8 +2,8 @@
 title: "SpeechRail 系统总体架构"
 status: active
 audience: "系统架构师、核心开发者"
-version: "1.16.0"
-date: 2026-09-11
+version: "1.17.0"
+date: 2026-09-13
 ---
 
 # 🏛️ SpeechRail 系统总体架构
@@ -38,24 +38,28 @@ flowchart TD
     end
 
     ASR["一个共享 Qwen3-ASR MLX Worker<br/>batch 与 native streaming 复用物理模型<br/>模式冲突受限"]
-    TTS["一个 Qwen3-TTS MLX Worker<br/>quality: VoiceDesign；balanced/light: CustomVoice"]
+    TTS["TTS capability router<br/>quality: VoiceDesign + Base clone（双 worker / 可双常驻 / 跨 lane 可并发）<br/>balanced/light: CustomVoice 单 worker"]
 
     SDK -->|OpenAI-compatible HTTP / WS| Ingress
     MCP -->|REST；仅配置 API key 时带 Bearer| Ingress
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| ASR
     App <==>|"长度前缀 JSON metadata + 原始二进制 payload IPC"| TTS
     Life -. 尝试释放常驻权重 .-> ASR
-    Life -. 尝试释放常驻权重 .-> TTS
+    Life -. Quality group 冷却后释放常驻权重 .-> TTS
     Life -. 丢弃常驻引用 / 生命周期 .-> Diar
 ```
 
+![三档模型与 Quality 双 TTS capability 关系图](diagrams/three-tier-model-architecture.svg)
+
+该 SVG 是三档模型组合与 Quality 双 TTS worker 关系的 canonical overview；本页 Mermaid 继续用于说明主进程、IPC 与可选分人 worker 的边界。
+
 ### 运行时事实
 
-- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsWorker`、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
+- `build_app_services` 组合 `Qwen3SharedWorker`、`Qwen3TtsCapabilityRouter`（内部拥有 primary `Qwen3TtsWorker` 与可选 clone worker）、可选 `CoreMLSortformerEngine`、`AdmissionQueue`、`ResourceGovernor` 与生命周期组件。Quality 的 primary 是 VoiceDesign，clone capability 是 Base；两者是独立 worker，能力切换只改变路由，不关闭另一 worker。懒加载开启时先按请求加载所需 capability，后续可同时驻留；非懒加载时 router 顺序启动两者。分人模型只由惰性启动的私有 Swift worker 持有，FastAPI 主进程不加载 NeMo 或 CAM++。
 - 分人生产制品固定为 FluidAudio CoreML FP16 `v3/fp16/SortformerNvidiaLow_v2.1.mlmodelc`，使用 `computeUnits=.all` 直接加载已编译 bundle；没有 provider 自动选择、精度降级或 NeMo 回退。运行时选择证据见 D1 报告，质量、尾部和长期资源门仍须单独验收。
 - ASR 的 batch 与 native streaming facade 共享一个物理 owner；它们不是同机同时工作的产品场景，冲突稳定返回 `backend_busy`。
 - `ResourceGovernor` 为 realtime 留出容量，并让 batch 按 FIFO/aging 准入；它不取消或抢占已经进入推理的 batch 工作。
-- ASR∥TTS 重计算重叠是可配置策略（ADR-0016），由声明常驻字节与物理内存预算判定：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）在任一启用组件未声明非零峰、或声明的总量超过 `budget_for_hardware = max(4 GiB, host_memory // 2)` 时 fail-closed 串行，否则放行 ASR 与 TTS 并行；`true`/`false` 是运维与实验强制开关。重叠轴严格限定为 ASR∥TTS：TTS∥TTS 仍受单一 TTS worker 约束，ASR∥ASR（batch 与 native streaming）仍返回 `backend_busy`，且不复制任何 worker 进程。
+- ASR∥TTS 重计算重叠是可配置策略（ADR-0016），由声明常驻字节与物理内存预算判定：`SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto`（默认）在任一启用组件未声明非零峰、或声明的总量超过 `budget_for_hardware = max(4 GiB, host_memory // 2)` 时 fail-closed 串行，否则放行 ASR 与 TTS 并行；`true`/`false` 是运维与实验强制开关。Quality 另外允许 VoiceDesign∥Base 两条不同 capability lane 并发，`ResourceGovernor` 对同一 lane 串行；`balanced/light` 与未声明 lane 的 TTS 仍为单 worker 串行。ASR∥ASR（batch 与 native streaming）仍返回 `backend_busy`，且不复制任何 worker 进程。
 - Worker IPC 使用长度前缀、JSON metadata 和可选 raw binary payload。它避免在主进程与 worker 间对 PCM 使用 Base64，但编码、拼接和读取仍会复制字节，不能称为 zero-copy。
 - 分人 worker 在活跃会话结束时由 supervisor 定向取消并回收；IPC 是长度前缀 JSON header 加 PCM16 binary payload。不存在活跃分人会话时，普通 ASR/TTS 不创建或租用该 worker。
 
@@ -67,12 +71,13 @@ flowchart TD
 |---|---|---|---|---|---|
 | 🟢 `light` | Embedded（8GB 基础机） | `asr-0.6b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | —（无） | ✗ |
 | 🟡 `balanced` | Pro Workflow（16–24GB） | `asr-1.7b-q8`（8-bit） | `tts-0.6b-custom-q8`（8-bit） | `aligner-q8`（8-bit） | ✓ |
-| 🟣 `quality` | Studio（32GB+） | `asr-1.7b-q8`（8-bit） | `tts-1.7b-design-q8`（8-bit） | `aligner-bf16`（bf16） | ✓ |
+| 🟣 `quality` | Studio（32GB+） | `asr-1.7b-q8`（8-bit） | primary `tts-1.7b-design-q8` + clone `tts-1.7b-base-q8`（两个 8-bit worker，可双常驻/并发） | `aligner-bf16`（bf16） | ✓ |
 
 - **按档位精度策略**：三档均 8-bit 权重，`quality` 的 aligner 保持 bf16；曾评估的 4-bit `light`（`asr-0.6b-q4` / `tts-0.6b-custom-q4`）因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳，制品保留在 catalog 但不再被任何档位使用。
 - **aligner 是分人专用制品**：aligner 是 catalog 一等制品，但**不进入 `PreparedModelSet` / `prepare_models`**，而由 `diarization_assets.prepare_diarization_assets` 按档位供给到 `app_home/diarization/<aligner-key>`，因此无 `prepared_id` / registry 迁移。词级时间戳来自 ASR 原生输出，不依赖 aligner。
 - **选择与供给**：`config.selection.resolve_selection` 按档位覆盖 `qwen3_aligner_model_dir`，在 `light` 清空它并同时清空 `diarization_coreml_model_path`；aligner 快照缺失时 fail closed（清晰报错，不半启动）。`profile apply <tier>` 在切换时供给该档分人制品并写入/移除 CoreML 与 aligner 环境键。
-- **契约与声明**：三档的公共 API 契约形状、worker 协议、调度与进程隔离保持一致；**对外声明的能力随档位不同**——`gpt-4o-transcribe-diarize` 仅在分人就绪（`balanced`/`quality`）时出现在 `/v1/models`，`light` 不声明。
+- **TTS capability**：`tts` 是档位默认合成 artifact；可选 `tts_clone` 是独立 capability。只有 `quality` 配置 Base clone artifact。`Qwen3TtsCapabilityRouter` 为 Quality 维护两个独立 worker，分别映射 `voice_design` 与 `voice_clone` lane；不同 lane 可并发，同一 worker 仍由 worker lock 串行。`WorkerIdleEvictor` 以 router 为能力组，在冷却后一起驱逐并按请求懒加载。
+- **契约与声明**：三档的公共 API 契约形状、worker 协议、调度与进程隔离保持一致；**对外声明的能力随档位不同**——`gpt-4o-transcribe-diarize` 仅在分人就绪（`balanced`/`quality`）时出现在 `/v1/models`；`supports_clone` 只有实际 Base capability 可用时才为 true。
 
 ## 2. 输入、调度与持久化边界
 

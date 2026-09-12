@@ -30,6 +30,7 @@ from speechrail.runtime.worker_process import (
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 DeliveryEventRecorder = Callable[[str, int], None]
+TtsModelVariant = Literal["voice_design", "custom_voice", "base"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class Qwen3TtsBackendConfig:
     repository_root: Path
     python_executable: Path
     model_dir: Path
+    model_variant: TtsModelVariant
     device: Literal["mps", "cpu"]
     dtype: Literal["float16", "float32", "int8"] = "float16"
     sample_rate: int = 24_000
@@ -147,13 +149,7 @@ class Qwen3TtsWorker:
         self._reload_count = 0
         self._on_delivery_event = on_delivery_event
         self.last_active: float = time.monotonic()
-        self.model_variant: str | None = None
-        try:
-            from speechrail.backends.model_identity import inspect_model
-
-            self.model_variant = inspect_model(config.model_dir).variant
-        except Exception:
-            self.model_variant = "voice_design"
+        self.model_variant: str = config.model_variant
 
     @property
     def alive(self) -> bool:
@@ -208,6 +204,7 @@ class Qwen3TtsWorker:
                 or ready.get("device") != self.config.device
                 or ready.get("dtype") != self.config.dtype
                 or ready.get("sample_rate") != self.config.sample_rate
+                or ready.get("model_variant") != self.config.model_variant
             ):
                 raise RuntimeError("backend_identity_mismatch")
             self._started = True
@@ -251,7 +248,7 @@ class Qwen3TtsWorker:
                     if request.seed is not None:
                         frame_payload["seed"] = request.seed
                     binding = resolve_binding(
-                        self.model_variant or "voice_design",
+                        self.model_variant,
                         request.voice,
                         profile=profile,
                     )
@@ -356,3 +353,157 @@ class Qwen3TtsWorker:
             self._started = False
             self._epoch += 1
             await self._transport.abort()
+
+class Qwen3TtsCapabilityRouter:
+    """Route TTS capabilities through independent, lifecycle-owned workers.
+
+    Normal synthesis uses the preset's primary VoiceDesign/CustomVoice worker.
+    Registered clone voices use the Quality-only Base worker.  Each worker owns
+    its request lock, so VoiceDesign and Base can remain resident and synthesize
+    concurrently without allowing two requests onto the same worker.  The
+    router only serializes lifecycle operations such as startup and eviction.
+    """
+
+    def __init__(
+        self,
+        primary: Qwen3TtsWorker,
+        *,
+        clone: Qwen3TtsWorker | None = None,
+    ) -> None:
+        self.primary = primary
+        self.clone = clone
+        self._capability_lock = asyncio.Lock()
+
+    @property
+    def resident_worker_count(self) -> int:
+        """Return the maximum number of TTS workers this router may keep warm."""
+        return 1 + (1 if self.clone is not None else 0)
+
+    @property
+    def alive(self) -> bool:
+        return self.primary.alive or bool(self.clone is not None and self.clone.alive)
+
+    @property
+    def ready(self) -> bool:
+        return self.primary.ready or bool(self.clone is not None and self.clone.ready)
+
+    @property
+    def last_active(self) -> float:
+        values = [self.primary.last_active]
+        if self.clone is not None:
+            values.append(self.clone.last_active)
+        return max(values)
+
+    @property
+    def model_variant(self) -> str | None:
+        return self.primary.model_variant
+
+    @property
+    def warm_capabilities(self) -> tuple[str, ...]:
+        """Return resident capabilities without loading either model."""
+        capabilities: list[str] = []
+        if self.primary.ready:
+            capabilities.append(
+                "voice_design" if self.primary.model_variant == "voice_design" else "tts"
+            )
+        if self.clone is not None and self.clone.ready:
+            capabilities.append("voice_clone")
+        return tuple(capabilities)
+
+    @property
+    def warm_capability(self) -> str | None:
+        """Return a compact resident-capability summary for health diagnostics."""
+        capabilities = self.warm_capabilities
+        if len(capabilities) > 1:
+            return "both"
+        return capabilities[0] if capabilities else None
+
+    @property
+    def lifecycle_stats(self) -> dict[str, object]:
+        primary = self.primary.lifecycle_stats
+        clone = self.clone.lifecycle_stats if self.clone is not None else None
+        return {
+            "cooperative_cancel_supported": bool(
+                primary["cooperative_cancel_supported"]
+                and (clone is None or clone["cooperative_cancel_supported"])
+            ),
+            "fallback_abort_count": int(primary["fallback_abort_count"])
+            + (int(clone["fallback_abort_count"]) if clone is not None else 0),
+            "reload_count": int(primary["reload_count"])
+            + (int(clone["reload_count"]) if clone is not None else 0),
+            "warm_capability": self.warm_capability,
+            "warm_capabilities": list(self.warm_capabilities),
+        }
+
+    async def start(self) -> None:
+        """Start every configured capability, leaving already-warm workers intact."""
+        async with self._capability_lock:
+            workers = (self.primary,) + ((self.clone,) if self.clone is not None else ())
+            if all(worker.ready for worker in workers):
+                return
+            try:
+                for worker in workers:
+                    if not worker.ready:
+                        await worker.start()
+            except BaseException:
+                # Do not leave a partially initialized Quality router with one
+                # model warm and the other unavailable.
+                for worker in reversed(workers):
+                    with contextlib.suppress(BaseException):
+                        if worker.alive or worker.ready:
+                            await worker.close()
+                raise
+
+    def resource_key_for_voice(self, voice: str) -> str:
+        """Map a validated public voice to the worker lane that serves it."""
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(voice)
+        if profile.mode == "clone":
+            return "voice_clone" if self.clone is not None else "tts"
+        return "voice_design" if self.clone is not None else "tts"
+
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(request.voice)
+        clone_worker = self.clone
+        selected: Qwen3TtsWorker
+        if profile.mode == "clone":
+            if clone_worker is None:
+
+                async def unavailable() -> AsyncIterator[AudioChunk]:
+                    raise RuntimeError("voice_clone_base_model_unavailable")
+                    yield  # pragma: no cover
+
+                return unavailable()
+            selected = clone_worker
+        else:
+            selected = self.primary
+        return selected.synthesize(request)
+
+    async def evict_warm_capability(self) -> None:
+        """Release all TTS workers before a heavyweight validation phase or idle eviction."""
+        async with self._capability_lock:
+            workers = (self.clone, self.primary) if self.clone is not None else (self.primary,)
+            for worker in workers:
+                if worker.alive or worker.ready:
+                    await worker.close()
+
+    async def trim_memory(self) -> None:
+        await self.primary.trim_memory()
+        if self.clone is not None:
+            await self.clone.trim_memory()
+
+    async def close(self) -> None:
+        async with self._capability_lock:
+            workers = (self.primary,) + ((self.clone,) if self.clone is not None else ())
+            first_error: BaseException | None = None
+            for worker in workers:
+                try:
+                    await worker.close()
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error

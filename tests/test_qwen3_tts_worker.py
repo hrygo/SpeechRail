@@ -133,7 +133,7 @@ def test_serve_reports_tts_model_identity_and_preserves_four_bit_value(
     assert ready == {
         "version": PROTOCOL_VERSION,
         "type": "ready",
-        "backend": "mlx-qwen3-tts-voice-design",
+        "backend": "mlx-qwen3-tts",
         "device": "mps",
         "dtype": "int8",
         "sample_rate": 24_000,
@@ -235,7 +235,7 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
     assert ready == {
         "version": PROTOCOL_VERSION,
         "type": "ready",
-        "backend": "mlx-qwen3-tts-voice-design",
+        "backend": "mlx-qwen3-tts",
         "device": "mps",
         "dtype": "float16",
         "sample_rate": 24_000,

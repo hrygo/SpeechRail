@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from sys import executable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -264,6 +265,11 @@ def test_build_app_services_tts_dtype_resolves_from_snapshot(
     """A pre-quantized TTS snapshot drives backend config dtype to int8."""
     captured: dict[str, str] = {}
     real_worker = services_module.Qwen3TtsWorker
+    monkeypatch.setattr(
+        services_module,
+        "inspect_model",
+        lambda _: SimpleNamespace(variant="voice_design"),
+    )
 
     def spy_worker(config: object, *, on_delivery_event: object | None = None) -> object:
         captured["dtype"] = getattr(config, "dtype", "")
@@ -450,6 +456,31 @@ def test_composition_allows_overlap_when_declared_footprints_fit_budget(
     snapshot = services.governor.snapshot()
     assert snapshot.allow_heavy_overlap is True
     assert "within budget" in snapshot.policy_reason.lower()
+
+
+def test_composition_counts_both_quality_tts_workers_in_overlap_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(services_module, "detect_system_memory_bytes", lambda: 8 * 1024**3)
+
+    class DualResidentTTS:
+        resident_worker_count = 2
+
+    settings = Settings(
+        _env_file=None,
+        qwen3_model_dir=None,
+        qwen3_python=None,
+        asr_resident_bytes=1 * 1024**3,
+        tts_resident_bytes=int(1.5 * 1024**3),
+    )
+    services = build_app_services(
+        settings,
+        AppOverrides(batch_transcriber=object(), tts_synthesizer=DualResidentTTS()),
+    )
+
+    snapshot = services.governor.snapshot()
+    assert snapshot.allow_heavy_overlap is False
+    assert "exceeds" in snapshot.policy_reason.lower()
 
 
 def test_composition_serializes_when_declared_footprints_exceed_budget(

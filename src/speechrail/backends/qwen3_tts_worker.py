@@ -32,7 +32,7 @@ from speechrail.runtime.worker_protocol import (
     write_frame,
 )
 
-TTS_BACKEND_ID = "mlx-qwen3-tts-voice-design"
+TTS_BACKEND_ID = "mlx-qwen3-tts"
 _CLONE_LOUDNESS_CHUNK_MS = 200
 _CLONE_TEMPERATURE = 0.1
 _CLONE_TOP_P = 0.95
@@ -228,7 +228,7 @@ def _identity_matches_tts(
     variant = getattr(identity, "model_variant", None)
     if family is not None and family != "qwen3_tts":
         return False
-    if variant is not None and variant not in {"voice_design", "custom_voice"}:
+    if variant is not None and variant not in {"voice_design", "custom_voice", "base"}:
         return False
     expected_dtype = "int8" if bits is not None or snapshot_is_quantized(model_dir) else (
         "float16" if device == "mps" else "float32"
@@ -301,6 +301,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         if expected.family != "qwen3_tts" or expected.variant not in (
             "voice_design",
             "custom_voice",
+            "base",
         ):
             raise RuntimeError("backend_identity_mismatch: unsupported TTS snapshot identity")
         try:
@@ -465,8 +466,8 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         ref_text: str | None = None,
     ) -> Iterator[bytes]:
         if ref_audio is not None or ref_text is not None:
-            # The vendor ICL generator accepts neither speaking-rate controls
-            # nor VoiceDesign sampling controls.  Reject them at the adapter
+            # The Base reference-clone contract accepts neither SpeechRail speaking-rate
+            # controls nor VoiceDesign instructions. Reject them at the adapter
             # boundary so a successful response never hides an ignored option.
             if speed != 1.0:
                 raise ValueError("clone_speed_unsupported")
@@ -481,23 +482,23 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             if self._audio_loader_fn is None:
                 raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
             audio_array = self._load_reference_audio(ref_audio)
-            if not hasattr(self._model, "_generate_icl"):
-                raise RuntimeError(
-                    "model does not support clone generation (_generate_icl missing)"
-                )
+            variant = self.identity.model_variant or "voice_design"
+            if variant != "base":
+                raise RuntimeError("voice_clone_requires_base_model")
 
             _seed_clone_generation(voice=voice, text=text, ref_text=ref_text)
 
-            for result in self._model._generate_icl(
+            for result in self._model.generate(
                 text=text,
                 ref_audio=audio_array,
                 ref_text=ref_text,
-                language=language,
+                lang_code=language,
+                max_tokens=generation_token_budget(text),
                 stream=True,
                 streaming_interval=self._chunk_ms / 1000,
                 temperature=_CLONE_TEMPERATURE,
                 top_p=_CLONE_TOP_P,
-                repetition_penalty=max(self._repetition_penalty, 1.3),
+                repetition_penalty=max(self._repetition_penalty, 1.5),
             ):
                 pcm = self._to_pcm(result)
                 if pcm:
@@ -578,7 +579,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             audio_array = loader(
                 str(resolved),
                 sample_rate=self._sample_rate,
-                volume_normalize=True,
+                volume_normalize=False,
             )
         except Exception as exc:
             raise RuntimeError(f"failed to decode reference audio: {exc}") from exc

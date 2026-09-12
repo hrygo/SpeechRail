@@ -3,7 +3,7 @@ title: "SpeechRail 产品白皮书与全景概述"
 status: active
 audience: "产品经理、业务架构师、技术决策者"
 version: "1.6.0"
-date: 2026-09-11
+date: 2026-09-13
 ---
 
 # 🌟 SpeechRail 产品全景白皮书
@@ -52,7 +52,7 @@ mindmap
 ### ⚡ 2. Apple Silicon 硬件级性能 (Apple Silicon Accelerated)
 - **统一内存深度优化**：ASR 与 TTS 原生适配 MLX 与 MPS，并按档位执行精度策略——🟢 `light`、🟡 `balanced`、🟣 `quality` 三档均使用 8-bit 权重（`quality` 的 aligner 保持 bf16）。曾评估的 4-bit `light` 方案因验收门 E1 在公开真人语料上测得 0.6B ASR 相对 8-bit 基线劣化 1.38pp（>0.5pp 阈值）而未采纳。
 - **全链路极速吞吐**：WAV 容器 Fast-Path 直读避免转码开销；端到端流式转写首字延迟低至百毫秒级。
-- **整句高质量合成**：24 kHz 高保真自然语音生成，支持多语种与丰富预设音色；🟣 `quality` 由 VoiceDesign（1.7B）驱动并支持以自然语言创建新音色，🟡/🟢 由 CustomVoice（0.6B）提供固定预设音色。
+- **整句高质量合成**：24 kHz 高保真自然语音生成，支持多语种与丰富预设音色；🟣 `quality` 由 VoiceDesign（1.7B）驱动并支持以自然语言创建新音色，同时由独立 Base（1.7B）capability worker 承担参考音频克隆；🟡/🟢 由 CustomVoice（0.6B）提供固定预设音色。
 
 ### 🔌 3. 标准兼容与无缝接入 (Zero-Migration Cost)
 - **Drop-in 替换**：全面兼容 OpenAI `/v1/audio/transcriptions`、`/v1/audio/speech` 及 `/v1/realtime`。
@@ -91,6 +91,10 @@ SpeechRail 以三个**用户差异化档位**交付同一套 API 契约；档位
 | 🟡 `balanced`（Pro Workflow） | 会议、播客、访谈 | 16–24GB 主流机（Pro / Max） | 8-bit | ✓ Sortformer + `aligner-q8` |
 | 🟣 `quality`（Studio） | 创作者、R&D | 32GB+ 旗舰机（Max / Ultra） | 8-bit（aligner bf16） | ✓ Sortformer + `aligner-bf16` |
 
+`quality` 的 VoiceDesign 与 Base 是两条独立 TTS capability lane：允许双常驻，面向不同 lane 的请求可以并发，同一 lane 仍串行。空闲冷却可以将两者作为一个 Quality group trim/close，下一次请求再惰性恢复所需 worker。
+
+![三档模型与 Quality 双 TTS capability 关系图](../architecture/diagrams/three-tier-model-architecture.svg)
+
 ### 画像一：🟢 `light`（Embedded）— 桌面智能体与语音输入用户 (Desktop Agents)
 - **典型应用**：QwenPaw、Hermes Agent、本地听写工具。
 - **核心诉求**：随时按下快捷键说话，极速返回精准转写文本；绝不上传麦克风录音至云端。
@@ -104,7 +108,7 @@ SpeechRail 以三个**用户差异化档位**交付同一套 API 契约；档位
 ### 画像三：🟣 `quality`（Studio）— 内容创作者与自动化配音系统 (Content Creators)
 - **典型应用**：播客生成器、小说朗读器、短视频配音脚本。
 - **核心诉求**：多情感、多角色、高保真自然声音输出，支持长文案与流式断句播放。
-- **SpeechRail 解法**：通过 `/v1/audio/speech` 输出 24 kHz 广播级音频，提供 `warm`、`calm`、`bright` 等预设音色。
+- **SpeechRail 解法**：通过 `/v1/audio/speech` 输出 24 kHz 广播级音频，提供 `warm`、`calm`、`bright` 等预设音色；Quality 的自然语言设计与参考音频克隆分别路由到 VoiceDesign/Base 两个 capability worker，不触发两套模型的频繁来回切换。
 
 ---
 

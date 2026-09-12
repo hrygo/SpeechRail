@@ -70,6 +70,7 @@ def _worker(
             repository_root=tmp_path,
             python_executable=Path(executable),
             model_dir=snapshot,
+            model_variant="voice_design",
             device="mps",
             dtype="float16",
             sample_rate=24_000,
@@ -102,6 +103,7 @@ def test_tts_worker_config_requires_external_snapshot_and_builds_private_command
         repository_root=tmp_path,
         python_executable=Path(executable),
         model_dir=snapshot,
+        model_variant="voice_design",
         device="mps",
         dtype="float16",
         sample_rate=24_000,
@@ -141,6 +143,7 @@ def test_tts_worker_config_rejects_snapshot_inside_repository(tmp_path: Path) ->
             repository_root=tmp_path,
             python_executable=Path(executable),
             model_dir=snapshot,
+            model_variant="voice_design",
             device="mps",
             dtype="float16",
             sample_rate=24_000,
@@ -242,6 +245,7 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
             repository_root=tmp_path,
             python_executable=Path(executable),
             model_dir=snapshot,
+            model_variant="voice_design",
             device="mps",
             dtype="float16",
             sample_rate=24_000,
@@ -256,6 +260,7 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
                 "device": "mps",
                 "dtype": "float16",
                 "sample_rate": 24_000,
+                "model_variant": "voice_design",
             }
         ]
     )
@@ -283,6 +288,7 @@ def test_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
             repository_root=tmp_path,
             python_executable=Path(executable),
             model_dir=snapshot,
+            model_variant="voice_design",
             device="mps",
             dtype="float16",
             sample_rate=24_000,
@@ -316,6 +322,7 @@ def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
             repository_root=tmp_path,
             python_executable=Path(executable),
             model_dir=snapshot,
+            model_variant="voice_design",
             device="mps",
             dtype="float16",
             sample_rate=24_000,
@@ -330,6 +337,43 @@ def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
                 "device": "cpu",
                 "dtype": "float32",
                 "sample_rate": 24_000,
+                "model_variant": "voice_design",
+            }
+        ]
+    )
+    worker._transport = fake  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="backend_identity_mismatch"):
+        asyncio.run(worker.start())
+
+    assert fake.abort_count == 1
+
+
+def test_ready_identity_rejects_model_variant_mismatch(tmp_path: Path) -> None:
+    snapshot = tmp_path.parent / "external-qwen3-tts-variant-mismatch"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    worker = Qwen3TtsWorker(
+        Qwen3TtsBackendConfig(
+            repository_root=tmp_path,
+            python_executable=Path(executable),
+            model_dir=snapshot,
+            model_variant="base",
+            device="mps",
+            dtype="float16",
+            sample_rate=24_000,
+        )
+    )
+    fake = _FakeTransport(
+        [
+            {
+                "type": "ready",
+                "model_loaded": True,
+                "backend": TTS_BACKEND_ID,
+                "device": "mps",
+                "dtype": "float16",
+                "sample_rate": 24_000,
+                "model_variant": "voice_design",
             }
         ]
     )
@@ -358,6 +402,7 @@ def test_ready_identity_rejects_dtype_mismatch_even_when_device_matches(
             repository_root=tmp_path,
             python_executable=Path(executable),
             model_dir=snapshot,
+            model_variant="voice_design",
             device="mps",
             dtype="float16",
             sample_rate=24_000,
@@ -372,6 +417,7 @@ def test_ready_identity_rejects_dtype_mismatch_even_when_device_matches(
                 "device": "mps",
                 "dtype": "float32",
                 "sample_rate": 24_000,
+                "model_variant": "voice_design",
             }
         ]
     )
@@ -525,6 +571,7 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
                 "device": "mps",
                 "dtype": "float16",
                 "sample_rate": 24_000,
+                "model_variant": "voice_design",
             }
         )
         fake.push(_chunk_frame("pending", 0, b"\x00\x00"))

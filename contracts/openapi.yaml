@@ -260,6 +260,61 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '503':
           $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/voices/designs:
+    post:
+      operationId: registerDesignedReferenceVoice
+      tags: [speech]
+      summary: Generate and validate a reference for a new Base-bound voice
+      description: |
+        Quality-only explicit registration. VoiceDesign generates a 2-30 second
+        reference, followed by canonicalization and local Batch ASR validation.
+        The expected text is never supplied as an ASR prompt. Publication is
+        create-only: existing voice IDs and aliases cannot be overwritten.
+        Existing /v1/voices prompt metadata registration is unchanged.
+        Only language=zh is currently accepted. This request does not execute
+        Base synthesis; the returned synthesis_validation remains unevaluated.
+        Use normal TTS and quality-runs to validate the newly registered voice.
+      security:
+        - BearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceDesignRegistrationRequest'
+      responses:
+        '201':
+          description: New Base-bound voice; reference accepted, Base output not yet evaluated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceDesignRegistrationResponse'
+        '400':
+          description: >-
+            Invalid request; includes the stable code
+            voice_design_registration_unsupported when the active tier is not
+            the quality VoiceDesign/Base profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Target ID already exists; no voice was overwritten
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '502':
+          $ref: '#/components/responses/BackendDeliveryInvalid'
+        '503':
+          $ref: '#/components/responses/BackendNotReady'
   /v1/voices/clone/prompts:
     get:
       operationId: listClonePrompts
@@ -868,7 +923,7 @@ components:
           enum: [qwen3_asr, qwen3_tts]
         variant:
           type: string
-          enum: [asr, voice_design, custom_voice]
+          enum: [asr, voice_design, custom_voice, base]
         quantization:
           $ref: '#/components/schemas/Quantization'
         capabilities:
@@ -942,7 +997,7 @@ components:
           description: Whether the active TTS weights can synthesize this voice.
         variant:
           type: [string, 'null']
-          enum: [voice_design, custom_voice, null]
+          enum: [voice_design, custom_voice, base, null]
         capabilities:
           $ref: '#/components/schemas/VoiceCapabilities'
         mode:
@@ -955,6 +1010,82 @@ components:
           type: number
         quality:
           $ref: '#/components/schemas/VoiceQualityReport'
+        creation:
+          $ref: '#/components/schemas/VoiceCreation'
+    VoiceDesignRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [id, name, instruction, reference_text]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9_-]{1,64}$'
+          description: New target ID; system IDs, aliases and occupied IDs are rejected.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        reference_text:
+          type: string
+          minLength: 20
+          maxLength: 240
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          default: 42
+        language:
+          type: string
+          const: zh
+          default: zh
+    VoiceDesignRegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [voice, synthesis_validation]
+      properties:
+        voice:
+          $ref: '#/components/schemas/VoiceProfile'
+        synthesis_validation:
+          type: string
+          const: unevaluated
+          description: Reference registration does not execute Base output or speaker-identity validation.
+    VoiceCreation:
+      type: object
+      additionalProperties: false
+      required: [origin, method, model_artifact, model_revision, seed, instruction_sha256, reference_text_sha256, reference_audio_sha256, preprocessing_version]
+      properties:
+        origin:
+          type: string
+          const: generated
+        method:
+          type: string
+          const: voice_design_reference_v1
+        model_artifact:
+          type: string
+          pattern: '^[a-z0-9._-]{1,128}$'
+        model_revision:
+          type: string
+          pattern: '^[0-9a-f]{40}$'
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        instruction_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        reference_text_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        reference_audio_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        preprocessing_version:
+          type: string
+          const: energy_v1
     VoiceCapabilities:
       type: object
       required: [supports_speaker, supports_instruction]
@@ -1040,6 +1171,8 @@ components:
         - chunk_jump_p95_db
         - clipping_ratio
         - deterministic
+        - transcript_match
+        - intelligibility_evaluated
       properties:
         probe_count:
           type: integer
@@ -1059,6 +1192,14 @@ components:
           maximum: 1
         deterministic:
           type: boolean
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: Minimum normalized ASR transcript match across the fixed probe set; null when not evaluated.
+        intelligibility_evaluated:
+          type: boolean
+          description: Whether independent ASR intelligibility evidence was successfully collected.
     VoiceQualityReport:
       type: object
       required:
@@ -1100,6 +1241,8 @@ components:
               - clone_speed_unsupported
               - output_invalid
               - output_peak_exceeded
+              - output_nondeterministic
+              - transcription_unavailable
     VoiceQualityRunRequest:
       type: object
       properties:
@@ -1600,7 +1743,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorBody'
     ValidationError:
-      description: Multipart validation failed
+      description: Request validation failed
       content:
         application/json:
           schema:

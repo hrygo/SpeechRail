@@ -36,7 +36,10 @@ _SOURCE_FIELDS: Final[frozenset[str]] = frozenset({"provider", "repository", "re
 _SOURCE_ALLOWED_FIELDS: Final[frozenset[str]] = _SOURCE_FIELDS | frozenset({"files"})
 _FILE_FIELDS: Final[frozenset[str]] = frozenset({"path", "size", "sha256"})
 _QUANTIZATION_FIELDS: Final[frozenset[str]] = frozenset({"bits", "group_size", "format"})
-_PRESET_FIELDS: Final[frozenset[str]] = frozenset({"id", "asr", "tts", "aligner", "diarization"})
+_PRESET_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
+    {"id", "asr", "tts", "aligner", "diarization"}
+)
+_PRESET_ALLOWED_FIELDS: Final[frozenset[str]] = _PRESET_REQUIRED_FIELDS | frozenset({"tts_clone"})
 
 
 def _mapping(value: object, *, context: str) -> Mapping[str, object]:
@@ -286,7 +289,12 @@ def _normalise_artifact(value: object, *, index: int) -> dict[str, object]:
 def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> dict[str, object]:
     context = f"preset {index}"
     data = _mapping(value, context=context)
-    _check_fields(data, _PRESET_FIELDS, context=context)
+    missing = sorted(_PRESET_REQUIRED_FIELDS.difference(data))
+    if missing:
+        raise ValueError(f"{context} is missing required field(s): {', '.join(missing)}")
+    unexpected = sorted(set(data).difference(_PRESET_ALLOWED_FIELDS))
+    if unexpected:
+        raise ValueError(f"{context} has unsupported field(s): {', '.join(unexpected)}")
     preset_id = _required_string(data, "id", context=context)
     if preset_id not in _PRESET_IDS:
         raise ValueError(f"{context}.id must be one of quality, balanced, light")
@@ -296,6 +304,12 @@ def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> 
         raise ValueError(f"{context}.asr references unknown artifact: {asr}")
     if tts not in artifact_keys:
         raise ValueError(f"{context}.tts references unknown artifact: {tts}")
+    tts_clone = data.get("tts_clone")
+    if tts_clone is not None:
+        if not isinstance(tts_clone, str) or not tts_clone:
+            raise ValueError(f"{context}.tts_clone must be null or a non-empty string")
+        if tts_clone not in artifact_keys:
+            raise ValueError(f"{context}.tts_clone references unknown artifact: {tts_clone}")
     aligner = data["aligner"]
     if aligner is not None:
         if not isinstance(aligner, str) or not aligner:
@@ -309,6 +323,7 @@ def _normalise_preset(value: object, *, index: int, artifact_keys: set[str]) -> 
         "id": preset_id,
         "asr": asr,
         "tts": tts,
+        "tts_clone": tts_clone,
         "aligner": aligner,
         "diarization": diarization,
     }

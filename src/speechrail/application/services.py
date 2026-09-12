@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from speechrail.application.diarization.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
+from speechrail.backends.model_identity import inspect_model
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -22,8 +24,14 @@ from speechrail.backends.qwen3_streaming import (
     Qwen3StreamingBackendConfig,
     Qwen3StreamingWorker,
 )
-from speechrail.backends.qwen3_tts import Qwen3TtsBackendConfig, Qwen3TtsWorker
+from speechrail.backends.qwen3_tts import (
+    Qwen3TtsBackendConfig,
+    Qwen3TtsCapabilityRouter,
+    Qwen3TtsWorker,
+    TtsModelVariant,
+)
 from speechrail.config import Settings
+from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationReadiness
 from speechrail.domain.diarization.ports import AlignTextPort
@@ -83,19 +91,28 @@ def component_ready(component: object | None) -> bool:
     return True if state is None else bool(state)
 
 
+def _resident_tts_worker_count(component: object | None) -> int:
+    """Return the conservative number of TTS workers that may be resident."""
+    count = getattr(component, "resident_worker_count", 1)
+    return count if type(count) is int and count >= 1 else 1
+
+
 def _heavy_overlap_policy(
     settings: Settings,
     *,
     asr_enabled: bool,
     tts_enabled: bool,
     diarization_enabled: bool,
+    tts_worker_count: int = 1,
 ) -> tuple[bool, str]:
     """Decide whether heavy ASR/TTS compute may overlap.
 
-    Declared `*_resident_bytes` settings feed a shared hardware budget. An
-    enabled component with 0 declared bytes is still unknown and fail-closes
-    under `auto`. `allow_heavy_overlap` may force the decision: "true" always
-    allows overlap and "false" always serializes, both recorded in the reason.
+    Declared `*_resident_bytes` settings feed a shared hardware budget. TTS
+    bytes are declared per worker and multiplied by the maximum number of
+    workers the configured capability may keep resident. An enabled component
+    with 0 declared bytes is still unknown and fail-closes under `auto`.
+    `allow_heavy_overlap` may force the decision: "true" always allows overlap
+    and "false" always serializes, both recorded in the reason.
     """
     if settings.allow_heavy_overlap == "false":
         return False, "heavy overlap disabled by configuration"
@@ -105,9 +122,13 @@ def _heavy_overlap_policy(
             return 0
         return declared if declared > 0 else None
 
+    if tts_worker_count < 1:
+        raise ValueError("tts_worker_count must be positive")
+    tts_declared_bytes = settings.tts_resident_bytes * tts_worker_count
+
     footprint = ComponentFootprint(
         asr_bytes=_bytes(asr_enabled, settings.asr_resident_bytes),
-        tts_bytes=_bytes(tts_enabled, settings.tts_resident_bytes),
+        tts_bytes=_bytes(tts_enabled, tts_declared_bytes),
         diarization_bytes=_bytes(diarization_enabled, settings.diarization_resident_bytes),
         service_bytes=_SERVICE_OVERHEAD_BYTES,
         device=settings.device,
@@ -346,36 +367,84 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         transcribe = asr_worker.transcribe
         batch_transcriber = Qwen3BatchTranscriber(worker=asr_worker, model_id=settings.model_id)
 
-    tts_worker: Qwen3TtsWorker | None = None
+    tts_worker: Qwen3TtsWorker | Qwen3TtsCapabilityRouter | None = None
     tts_synthesizer = overrides.tts_synthesizer
     if (
         tts_synthesizer is None
         and settings.qwen3_tts_model_dir is not None
         and settings.qwen3_tts_python is not None
     ):
-        tts_worker = Qwen3TtsWorker(
-            Qwen3TtsBackendConfig(
-                repository_root=_package_root(),
-                python_executable=settings.qwen3_tts_python,
-                model_dir=settings.qwen3_tts_model_dir,
-                device=settings.device,
-                dtype=resolve_backend_dtype(
-                    settings.qwen3_tts_model_dir,
-                    "float16" if settings.device == "mps" else "float32",
+        tts_python = settings.qwen3_tts_python
+        assert tts_python is not None
+
+        active_tts_catalog = active_model_catalog(settings)
+
+        def make_tts_worker(
+            model_dir: Path,
+            *,
+            warmup: bool,
+            catalog_variant: str | None,
+            expected_variant: TtsModelVariant | None = None,
+        ) -> Qwen3TtsWorker:
+            raw_variant = catalog_variant or inspect_model(model_dir).variant
+            if raw_variant not in {"voice_design", "custom_voice", "base"}:
+                raise RuntimeError("backend_identity_mismatch: unsupported TTS model variant")
+            if expected_variant is not None and raw_variant != expected_variant:
+                raise RuntimeError(
+                    f"backend_identity_mismatch: expected {expected_variant} TTS variant, "
+                    f"got {raw_variant}"
+                )
+            variant = cast(TtsModelVariant, raw_variant)
+            return Qwen3TtsWorker(
+                Qwen3TtsBackendConfig(
+                    repository_root=_package_root(),
+                    python_executable=tts_python,
+                    model_dir=model_dir,
+                    model_variant=variant,
+                    device=settings.device,
+                    dtype=resolve_backend_dtype(
+                        model_dir,
+                        "float16" if settings.device == "mps" else "float32",
+                    ),
+                    sample_rate=settings.tts_sample_rate,
+                    timeout_seconds=settings.request_timeout_seconds,
+                    chunk_ms=settings.tts_chunk_ms,
+                    repetition_penalty=settings.tts_repetition_penalty,
+                    temperature=settings.tts_temperature,
+                    top_p=settings.tts_top_p,
+                    warmup_on_start=warmup,
+                    cache_limit_mb=settings.mlx_cache_limit_mb,
+                    memory_limit_mb=settings.mlx_memory_limit_mb,
                 ),
-                sample_rate=settings.tts_sample_rate,
-                timeout_seconds=settings.request_timeout_seconds,
-                chunk_ms=settings.tts_chunk_ms,
-                repetition_penalty=settings.tts_repetition_penalty,
-                temperature=settings.tts_temperature,
-                top_p=settings.tts_top_p,
-                warmup_on_start=settings.tts_warmup_on_start,
-                cache_limit_mb=settings.mlx_cache_limit_mb,
-                memory_limit_mb=settings.mlx_memory_limit_mb,
+                on_delivery_event=lambda event, amount: metrics.record_tts_delivery_event(
+                    event, amount=amount
+                ),
+            )
+
+        primary_tts_worker = make_tts_worker(
+            settings.qwen3_tts_model_dir,
+            warmup=settings.tts_warmup_on_start,
+            catalog_variant=(
+                active_tts_catalog.tts.variant if active_tts_catalog.tts is not None else None
             ),
-            on_delivery_event=lambda event, amount: metrics.record_tts_delivery_event(
-                event, amount=amount
-            ),
+        )
+        clone_tts_worker = (
+            make_tts_worker(
+                settings.qwen3_tts_clone_model_dir,
+                warmup=settings.tts_warmup_on_start,
+                catalog_variant=(
+                    active_tts_catalog.tts_clone.variant
+                    if active_tts_catalog.tts_clone is not None
+                    else None
+                ),
+                expected_variant="base",
+            )
+            if settings.qwen3_tts_clone_model_dir is not None
+            else None
+        )
+        tts_worker = Qwen3TtsCapabilityRouter(
+            primary_tts_worker,
+            clone=clone_tts_worker,
         )
         tts_synthesizer = tts_worker
 
@@ -439,6 +508,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         ),
         tts_enabled=tts_synthesizer is not None,
         diarization_enabled=diarization_engine is not None,
+        tts_worker_count=_resident_tts_worker_count(tts_synthesizer),
     )
     governor = ResourceGovernor(
         settings.governor_limits,

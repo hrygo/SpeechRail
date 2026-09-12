@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import logging
+import struct
 import threading
 import wave
 from collections import OrderedDict
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
+from speechrail.application.deadline import await_until
 from speechrail.application.services import AppServices
+from speechrail.application.tts_admission import tts_resource_key
+from speechrail.application.tts_delivery import (
+    TTSDeliveryError,
+    iter_until,
+    iter_validated_audio,
+)
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     asr_model_aliases,
@@ -25,17 +36,25 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
 from speechrail.domain import voice_quality as vq
-from speechrail.domain.ports import SpeechRequest, SpeechSynthesizer
+from speechrail.domain.ports import (
+    BatchTranscriber,
+    SpeechRequest,
+    SpeechSynthesizer,
+    TranscriptionRequest,
+)
 from speechrail.domain.tts import (
     VOICE_ALIASES,
     VoiceInUseError,
     VoiceProfile,
     VoiceStoreUnavailableError,
+    canonicalize_clone_reference_audio,
     get_voice_registry,
 )
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
+from speechrail.runtime.admission import QueueFullError
+from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
 
 _CLONE_PROMPTS_ASSET = (
     Path(__file__).resolve().parent.parent.parent
@@ -58,7 +77,13 @@ def _load_clone_prompts() -> list[dict[str, Any]]:
 _CACHED_CLONE_PROMPTS: list[dict[str, Any]] = _load_clone_prompts()
 _MAX_VOICE_SEED = 2**32 - 1
 _TTS_LIFECYCLE_FIELDS = frozenset(
-    {"cooperative_cancel_supported", "fallback_abort_count", "reload_count"}
+    {
+        "cooperative_cancel_supported",
+        "fallback_abort_count",
+        "reload_count",
+        "warm_capability",
+        "warm_capabilities",
+    }
 )
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,7 +112,9 @@ def _store_clone_idempotency_locked(
         _clone_idempotency.popitem(last=False)
 
 
-def _tts_lifecycle_diagnostics(services: AppServices) -> dict[str, int | bool] | None:
+def _tts_lifecycle_diagnostics(
+    services: AppServices,
+) -> dict[str, object] | None:
     """Return safe TTS lifecycle counters when this backend exposes them."""
 
     stats = getattr(services.tts_synthesizer, "lifecycle_stats", None)
@@ -96,7 +123,15 @@ def _tts_lifecycle_diagnostics(services: AppServices) -> dict[str, int | bool] |
     return {
         name: value
         for name, value in stats.items()
-        if name in _TTS_LIFECYCLE_FIELDS and isinstance(value, (bool, int))
+        if name in _TTS_LIFECYCLE_FIELDS
+        and (
+            value is None
+            or isinstance(value, (bool, int, str))
+            or (
+                isinstance(value, list)
+                and all(isinstance(item, str) for item in value)
+            )
+        )
     }
 
 
@@ -124,9 +159,12 @@ def _model_entry(
         )
         if artifact.family == "qwen3_tts":
             supports_voice_design = artifact.variant == "voice_design"
+            supports_clone = (
+                active.tts_clone is not None and active.tts_clone.variant == "base"
+            )
             entry["capabilities"] = {
                 "supports_preview": supports_voice_design,
-                "supports_clone": supports_voice_design,
+                "supports_clone": supports_clone,
                 "supports_instruction": supports_voice_design,
             }
     return entry
@@ -144,9 +182,14 @@ def _voice_entry(
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
-    if variant in {"voice_design", "custom_voice"}:
+    binding_variant = (
+        active.tts_clone.variant
+        if profile.mode == "clone" and active.tts_clone is not None
+        else variant
+    )
+    if binding_variant in {"voice_design", "custom_voice", "base"}:
         try:
-            binding = resolve_binding(variant, profile.id)
+            binding = resolve_binding(binding_variant, profile.id)
         except ValueError:
             available = False
         else:
@@ -168,7 +211,7 @@ def _voice_entry(
         "is_system": profile.is_system,
         "created_at": profile.created_at,
         "available": available,
-        "variant": variant,
+        "variant": binding_variant,
         "capabilities": {
             "supports_speaker": supports_speaker,
             "supports_instruction": supports_instruction,
@@ -182,6 +225,8 @@ def _voice_entry(
         entry["duration_seconds"] = profile.duration_seconds
     if profile.quality is not None:
         entry["quality"] = profile.quality
+    if profile.creation is not None:
+        entry["creation"] = profile.creation.model_dump(mode="json")
     return entry
 
 
@@ -231,6 +276,28 @@ def _grade_clone_audio(wav_bytes: bytes) -> vq.VoiceQualityReport:
         transcript_match=None,
     )
     return vq.make_quality_report(reference, _empty_synthesis())
+
+
+@dataclass(frozen=True)
+class _CloneQualityEvaluation:
+    canonical_wav: bytes | None
+    canonical_duration: float
+    report: vq.VoiceQualityReport
+
+
+def _evaluate_clone_reference_audio(wav_bytes: bytes) -> _CloneQualityEvaluation:
+    """Grade the raw gate and, when allowed, the canonical persisted reference."""
+    raw_report = _grade_clone_audio(wav_bytes)
+    if raw_report.status == vq.VoiceQualityStatus.REJECT.value:
+        return _CloneQualityEvaluation(None, 0.0, raw_report)
+
+    canonical_wav, canonical_duration = canonicalize_clone_reference_audio(
+        wav_bytes, target_sample_rate=24_000
+    )
+    canonical_report = _grade_clone_audio(canonical_wav)
+    if canonical_report.status == vq.VoiceQualityStatus.REJECT.value:
+        return _CloneQualityEvaluation(None, 0.0, canonical_report)
+    return _CloneQualityEvaluation(canonical_wav, canonical_duration, canonical_report)
 
 
 def _quality_reject_response(
@@ -283,62 +350,138 @@ def _transcode_clone_audio(audio_content: bytes, ffmpeg_cmd: str) -> tuple[bytes
 
 _CLONE_SPEED_UNSUPPORTED_CODE = vq.VoiceQualityFailureCode.CLONE_SPEED_UNSUPPORTED.value
 _OUTPUT_INVALID_CODE = vq.VoiceQualityFailureCode.OUTPUT_INVALID.value
+_TRANSCRIPTION_UNAVAILABLE_CODE = (
+    vq.VoiceQualityFailureCode.TRANSCRIPTION_UNAVAILABLE.value
+)
+_TRANSCRIPT_PASS_SCORE = 0.92
+_TRANSCRIPT_WARN_SCORE = 0.80
+_MAX_QUALITY_PROBE_PCM_BYTES = 30 * 24_000 * 2
 
 
 def _classify_probe_failure(exc: BaseException) -> str:
     if isinstance(exc, RuntimeError) and "speed" in str(exc).lower():
         return _CLONE_SPEED_UNSUPPORTED_CODE
-    if isinstance(exc, (ValueError, TypeError)):
+    if isinstance(exc, (TTSDeliveryError, ValueError, TypeError)):
         return _OUTPUT_INVALID_CODE
     return vq.VoiceQualityFailureCode.PROBE_FAILED.value
 
 
 async def _synthesize_probes(
-    synthesizer: SpeechSynthesizer, voice_id: str, runs: int
-) -> tuple[bytes, int, list[str]]:
+    synthesizer: SpeechSynthesizer,
+    voice_id: str,
+    repetitions: int,
+    *,
+    expires_at: float | None = None,
+) -> tuple[bytes, int, int, list[str], bool, dict[str, bytes]]:
     pcm = bytearray()
     ok = 0
     failure_codes: list[str] = []
     probes = vq.VOICE_QUALITY_V1_ZH_PROBES
-    for index in range(runs):
-        synthesis = SpeechRequest(
-            text=probes[index % len(probes)]["text"],
-            voice=voice_id,
-            output_format="pcm16",
-            sample_rate=24_000,
-        )
-        probe_pcm = bytearray()
-        try:
-            async for chunk in synthesizer.synthesize(synthesis):
-                probe_pcm.extend(chunk.audio)
-        except Exception as exc:
-            failure_codes.append(_classify_probe_failure(exc))
-            continue
-        if not probe_pcm or len(probe_pcm) % 2 != 0:
-            failure_codes.append(_OUTPUT_INVALID_CODE)
-            continue
-        pcm.extend(probe_pcm)
-        ok += 1
-    return bytes(pcm), ok, failure_codes
+    digests_by_probe: dict[str, list[bytes]] = {probe["id"]: [] for probe in probes}
+    representative_pcm: dict[str, bytes] = {}
+
+    for probe in probes:
+        for _ in range(repetitions):
+            synthesis = SpeechRequest(
+                text=probe["text"],
+                voice=voice_id,
+                output_format="pcm16",
+                sample_rate=24_000,
+            )
+            probe_pcm = bytearray()
+            try:
+                source = iter_validated_audio(synthesizer.synthesize(synthesis))
+                bounded = (
+                    iter_until(source, expires_at) if expires_at is not None else source
+                )
+                try:
+                    async for chunk in bounded:
+                        if len(probe_pcm) + len(chunk.audio) > _MAX_QUALITY_PROBE_PCM_BYTES:
+                            raise ValueError("quality probe audio exceeds 30 seconds")
+                        probe_pcm.extend(chunk.audio)
+                finally:
+                    close = getattr(bounded, "aclose", None)
+                    if close is not None:
+                        await close()
+            except TimeoutError:
+                raise
+            except Exception as exc:
+                failure_codes.append(_classify_probe_failure(exc))
+                continue
+            if not probe_pcm or len(probe_pcm) % 2 != 0:
+                failure_codes.append(_OUTPUT_INVALID_CODE)
+                continue
+
+            try:
+                probe_metrics = compute_output_quality_metrics(
+                    bytes(probe_pcm),
+                    sample_rate=24_000,
+                    probe_count=1,
+                    successful_probe_count=1,
+                    deterministic=True,
+                )
+            except (ValueError, TypeError):
+                failure_codes.append(_OUTPUT_INVALID_CODE)
+                continue
+
+            if cast(float, probe_metrics["active_rms_dbfs"]) <= -45.0:
+                failure_codes.append(_OUTPUT_INVALID_CODE)
+                continue
+            if cast(float, probe_metrics["clipping_ratio"]) > 0.0:
+                failure_codes.append(vq.VoiceQualityFailureCode.OUTPUT_PEAK_EXCEEDED.value)
+                continue
+
+            payload = bytes(probe_pcm)
+            digests_by_probe[probe["id"]].append(hashlib.sha256(payload).digest())
+            representative_pcm.setdefault(probe["id"], payload)
+            pcm.extend(payload)
+            ok += 1
+
+    attempted = len(probes) * repetitions
+    deterministic = repetitions >= 2 and all(
+        len(digests) == repetitions and len(set(digests)) == 1
+        for digests in digests_by_probe.values()
+    )
+    if repetitions >= 2 and ok == attempted and not deterministic:
+        failure_codes.append(vq.VoiceQualityFailureCode.OUTPUT_NONDETERMINISTIC.value)
+
+    return (
+        bytes(pcm),
+        attempted,
+        ok,
+        failure_codes,
+        deterministic,
+        representative_pcm,
+    )
 
 
-def _synthesis_report(pcm: bytes, runs: int, ok: int) -> vq.VoiceQualitySynthesis:
+def _synthesis_report(
+    pcm: bytes,
+    attempted: int,
+    ok: int,
+    *,
+    deterministic: bool,
+    transcript_match: float | None = None,
+    intelligibility_evaluated: bool = False,
+) -> vq.VoiceQualitySynthesis:
     if not pcm or ok == 0:
         return vq.VoiceQualitySynthesis(
-            probe_count=runs,
+            probe_count=attempted,
             successful_probe_count=0,
             active_rms_dbfs=-240.0,
             peak_dbfs=-240.0,
             chunk_jump_p95_db=0.0,
             clipping_ratio=0.0,
             deterministic=False,
+            transcript_match=transcript_match,
+            intelligibility_evaluated=intelligibility_evaluated,
         )
     metrics = compute_output_quality_metrics(
         pcm,
         sample_rate=24_000,
-        probe_count=runs,
+        probe_count=attempted,
         successful_probe_count=ok,
-        deterministic=True,
+        deterministic=deterministic,
     )
     return vq.VoiceQualitySynthesis(
         probe_count=cast(int, metrics["probe_count"]),
@@ -348,7 +491,74 @@ def _synthesis_report(pcm: bytes, runs: int, ok: int) -> vq.VoiceQualitySynthesi
         chunk_jump_p95_db=cast(float, metrics["chunk_jump_p95_db"]),
         clipping_ratio=cast(float, metrics["clipping_ratio"]),
         deterministic=cast(bool, metrics["deterministic"]),
+        transcript_match=transcript_match,
+        intelligibility_evaluated=intelligibility_evaluated,
     )
+
+
+def _resample_quality_pcm_24k_to_16k(pcm: bytes) -> bytes:
+    """Linearly resample mono PCM16 from the TTS 24 kHz rate to ASR 16 kHz."""
+    if not pcm or len(pcm) % 2 != 0:
+        raise ValueError("invalid PCM16 payload")
+    count = len(pcm) // 2
+    samples = struct.unpack(f"<{count}h", pcm)
+    output_count = count * 2 // 3
+    if output_count <= 0:
+        raise ValueError("PCM16 payload is too short")
+    output = bytearray(output_count * 2)
+    for index in range(output_count):
+        source_numerator = index * 3
+        left = source_numerator // 2
+        half_step = source_numerator % 2
+        if left >= count - 1:
+            value = samples[-1]
+        elif half_step:
+            value = round((samples[left] + samples[left + 1]) / 2.0)
+        else:
+            value = samples[left]
+        struct.pack_into("<h", output, index * 2, max(-32768, min(32767, value)))
+    return bytes(output)
+
+
+async def _evict_quality_tts_if_supported(
+    synthesizer: SpeechSynthesizer, *, expires_at: float,
+) -> None:
+    evict = getattr(synthesizer, "evict_warm_capability", None)
+    if callable(evict):
+        await await_until(evict(), expires_at)
+
+
+async def _evaluate_probe_intelligibility(
+    services: AppServices,
+    transcriber: BatchTranscriber,
+    representative_pcm: dict[str, bytes],
+    *,
+    request_id: str,
+    expires_at: float,
+) -> float:
+    """Transcribe one valid sample per fixed probe after the TTS phase completes."""
+    scores: list[float] = []
+    async with services.governor.reserve(WorkClass.BATCH_ASR, expires_at=expires_at):
+        for probe in vq.VOICE_QUALITY_V1_ZH_PROBES:
+            pcm = representative_pcm.get(probe["id"])
+            if pcm is None:
+                raise ValueError("missing representative quality probe audio")
+            remaining = expires_at - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise TimeoutError
+            request = TranscriptionRequest(
+                request_id=f"{request_id}:intelligibility:{probe['id']}",
+                audio=_resample_quality_pcm_24k_to_16k(pcm),
+                language="zh",
+                prompt="",
+                include_timestamps=False,
+            )
+            result = await services.admission.run(
+                partial(transcriber.transcribe, request),
+                deadline=remaining,
+            )
+            scores.append(vq.transcript_match_score(probe["text"], result.text))
+    return min(scores) if scores else 0.0
 
 
 def create_system_router(services: AppServices) -> APIRouter:
@@ -430,8 +640,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                     "capabilities": {
                         "supports_preview": active.tts is not None
                         and active.tts.variant == "voice_design",
-                        "supports_clone": active.tts is not None
-                        and active.tts.variant == "voice_design",
+                        "supports_clone": active.tts_clone is not None
+                        and active.tts_clone.variant == "base",
                         "supports_instruction": active.tts is not None
                         and active.tts.variant == "voice_design",
                     },
@@ -589,8 +799,8 @@ def create_system_router(services: AppServices) -> APIRouter:
         request_id: str = getattr(request.state, "request_id", "") or "req_clone"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        variant = active.tts.variant if active.tts is not None else None
-        if variant != "voice_design":
+        variant = active.tts_clone.variant if active.tts_clone is not None else None
+        if variant != "base":
             tier_name = active.profile or "custom"
             return error_response(
                 400,
@@ -598,7 +808,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_cloning_unsupported",
                 (
                     f"Active TTS tier ({tier_name}) variant '{variant}' "
-                    "does not support voice cloning; switch to quality profile"
+                    "does not provide the Base clone capability; switch to quality profile"
                 ),
             )
 
@@ -635,7 +845,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
-            wav_bytes, duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
+            wav_bytes, _duration = _transcode_clone_audio(audio_content, ffmpeg_cmd)
         except RuntimeError as exc:
             return error_response(500, request_id, "dependency_missing", str(exc))
         except ValueError as exc:
@@ -648,9 +858,15 @@ def create_system_router(services: AppServices) -> APIRouter:
                 code = "invalid_audio"
             return error_response(400, request_id, code, err_str)
 
-        report = _grade_clone_audio(wav_bytes)
-        if report.status == vq.VoiceQualityStatus.REJECT.value:
-            return _quality_reject_response(request_id, report)
+        try:
+            evaluation = _evaluate_clone_reference_audio(wav_bytes)
+        except ValueError as exc:
+            return error_response(400, request_id, "invalid_audio", str(exc))
+        if evaluation.canonical_wav is None:
+            return _quality_reject_response(request_id, evaluation.report)
+        canonical_wav = evaluation.canonical_wav
+        canonical_duration = evaluation.canonical_duration
+        report = evaluation.report
 
         vid_str = (
             voice_id.strip().lower()
@@ -662,9 +878,9 @@ def create_system_router(services: AppServices) -> APIRouter:
             return get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
-                audio_bytes=wav_bytes,
+                audio_bytes=canonical_wav,
                 voice_id=vid_str,
-                duration_seconds=duration,
+                duration_seconds=canonical_duration,
                 quality=report.to_dict(),
             )
 
@@ -714,8 +930,8 @@ def create_system_router(services: AppServices) -> APIRouter:
         request_id: str = getattr(request.state, "request_id", "") or "req_validate"
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        variant = active.tts.variant if active.tts is not None else None
-        if variant != "voice_design":
+        variant = active.tts_clone.variant if active.tts_clone is not None else None
+        if variant != "base":
             tier_name = active.profile or "custom"
             return error_response(
                 400,
@@ -723,7 +939,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "voice_cloning_unsupported",
                 (
                     f"Active TTS tier ({tier_name}) variant '{variant}' "
-                    "does not support voice cloning; switch to quality profile"
+                    "does not provide the Base clone capability; switch to quality profile"
                 ),
             )
         if not name or not name.strip():
@@ -752,8 +968,18 @@ def create_system_router(services: AppServices) -> APIRouter:
                 code = "invalid_audio"
             return error_response(400, request_id, code, err_str)
 
-        report = _grade_clone_audio(wav_bytes)
-        return JSONResponse(status_code=200, content=report.to_dict())
+        try:
+            evaluation = _evaluate_clone_reference_audio(wav_bytes)
+        except ValueError as exc:
+            err_str = str(exc)
+            if "too short" in err_str:
+                code = "audio_too_short"
+            elif "too long" in err_str:
+                code = "audio_too_long"
+            else:
+                code = "invalid_audio"
+            return error_response(400, request_id, code, err_str)
+        return JSONResponse(status_code=200, content=evaluation.report.to_dict())
 
     @router.post("/v1/voices/{voice_id}/quality-runs")
     async def run_voice_quality(voice_id: str, request: Request) -> JSONResponse:
@@ -801,11 +1027,47 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
 
         registry = get_voice_registry()
+        expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
         try:
-            with registry.lease_profile(voice_id) as profile:
-                pcm, ok, probe_failure_codes = await _synthesize_probes(
-                    synthesizer, profile.id, runs
-                )
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                resource_key=tts_resource_key(synthesizer, voice_id),
+            ):
+                with registry.lease_profile(voice_id) as profile:
+                    (
+                        pcm,
+                        attempted,
+                        ok,
+                        probe_failure_codes,
+                        deterministic,
+                        representative_pcm,
+                    ) = await _synthesize_probes(
+                        synthesizer,
+                        profile.id,
+                        runs,
+                        expires_at=expires_at,
+                    )
+        except GovernorQueueFullError:
+            return JSONResponse(
+                status_code=429,
+                content=error(
+                    message="Inference queue is full",
+                    error_type="server_error",
+                    code="queue_full",
+                    request_id=request_id,
+                    retryable=True,
+                ),
+                headers={"Retry-After": "1"},
+            )
+        except TimeoutError:
+            return error_response(
+                503,
+                request_id,
+                "backend_timeout",
+                "Voice quality run timed out",
+                retryable=True,
+            )
         except VoiceStoreUnavailableError:
             return error_response(
                 503,
@@ -819,18 +1081,77 @@ def create_system_router(services: AppServices) -> APIRouter:
                 404, request_id, "voice_not_found", f"Voice {voice_id} not found"
             )
 
+        transcript_match: float | None = None
+        intelligibility_evaluated = False
+        intelligibility_unavailable = False
+        if ok == attempted and not probe_failure_codes:
+            transcriber = services.batch_transcriber
+            if transcriber is None or not services.asr_ready:
+                intelligibility_unavailable = True
+            else:
+                try:
+                    await _evict_quality_tts_if_supported(
+                        synthesizer, expires_at=expires_at,
+                    )
+                    transcript_match = await _evaluate_probe_intelligibility(
+                        services,
+                        transcriber,
+                        representative_pcm,
+                        request_id=request_id,
+                        expires_at=expires_at,
+                    )
+                    intelligibility_evaluated = True
+                except (GovernorQueueFullError, QueueFullError):
+                    return JSONResponse(
+                        status_code=429,
+                        content=error(
+                            message="Inference queue is full",
+                            error_type="server_error",
+                            code="queue_full",
+                            request_id=request_id,
+                            retryable=True,
+                        ),
+                        headers={"Retry-After": "1"},
+                    )
+                except TimeoutError:
+                    return error_response(
+                        503,
+                        request_id,
+                        "backend_timeout",
+                        "Voice intelligibility validation timed out",
+                        retryable=True,
+                    )
+                except Exception:
+                    # Vendor exception messages/tracebacks may contain audio,
+                    # reference text, or local paths. Log only a stable code.
+                    _LOGGER.warning(
+                        "voice intelligibility validation unavailable: "
+                        "code=transcription_unavailable request_id=%s",
+                        request_id,
+                    )
+                    intelligibility_unavailable = True
+
         output_invalid = False
         try:
-            synthesis = _synthesis_report(pcm, runs, ok)
+            synthesis = _synthesis_report(
+                pcm,
+                attempted,
+                ok,
+                deterministic=deterministic,
+                transcript_match=transcript_match,
+                intelligibility_evaluated=intelligibility_evaluated,
+            )
         except (ValueError, TypeError):
             synthesis = vq.VoiceQualitySynthesis(
-                probe_count=runs,
+                probe_count=attempted,
                 successful_probe_count=ok,
                 active_rms_dbfs=-240.0,
                 peak_dbfs=-240.0,
                 chunk_jump_p95_db=0.0,
                 clipping_ratio=0.0,
                 deterministic=False,
+                transcript_match=transcript_match,
+                intelligibility_evaluated=intelligibility_evaluated,
             )
             output_invalid = True
 
@@ -838,11 +1159,24 @@ def create_system_router(services: AppServices) -> APIRouter:
         if output_invalid and _OUTPUT_INVALID_CODE not in failure_codes:
             failure_codes.append(_OUTPUT_INVALID_CODE)
 
-        status = (
-            vq.VoiceQualityStatus.PASS.value
-            if ok == runs and not failure_codes
-            else vq.VoiceQualityStatus.REJECT.value
-        )
+        if intelligibility_unavailable:
+            failure_codes.append(_TRANSCRIPTION_UNAVAILABLE_CODE)
+
+        if ok != attempted or output_invalid or any(
+            code != _TRANSCRIPTION_UNAVAILABLE_CODE for code in failure_codes
+        ):
+            status = vq.VoiceQualityStatus.REJECT.value
+        elif not intelligibility_evaluated or transcript_match is None:
+            status = vq.VoiceQualityStatus.UNEVALUATED.value
+        elif transcript_match < _TRANSCRIPT_WARN_SCORE:
+            status = vq.VoiceQualityStatus.REJECT.value
+            failure_codes.append(vq.VoiceQualityFailureCode.TRANSCRIPT_MISMATCH.value)
+        elif transcript_match < _TRANSCRIPT_PASS_SCORE:
+            status = vq.VoiceQualityStatus.WARN.value
+            failure_codes.append(vq.VoiceQualityFailureCode.TRANSCRIPT_MISMATCH.value)
+        else:
+            status = vq.VoiceQualityStatus.PASS.value
+        failure_codes = list(dict.fromkeys(failure_codes))
         report = vq.VoiceQualityReport(
             policy_version=vq.POLICY_VERSION,
             status=status,
@@ -858,7 +1192,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             vq.POLICY_VERSION,
             status,
             ok,
-            runs,
+            attempted,
             resolved.tts_model_id,
             variant_name,
             resolved.version,

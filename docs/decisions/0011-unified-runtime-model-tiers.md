@@ -68,3 +68,19 @@ M1 Air 8GB 的 ASR/TTS 通用服务，且不同用户不应手工修改模型路
 - [详细实施计划](../archive/process/archive/2026-09-05-three-tier-implementation-plan.md)
 - [ADR-0003：运行时隔离](0003-runtime-isolation.md)
 - [现有公共契约](../../contracts/openapi.yaml)
+
+## 2026-09-12 Amendment — Quality voice-creation capabilities
+
+ADR-0011 原始三档决策保留其历史语义，但 `quality` 的 TTS 组成自 2026-09-12 起需按
+**capability** 解释，而不是“一个 TTS artifact 覆盖所有音色任务”：
+
+- `quality.tts` 仍为 Qwen3-TTS VoiceDesign 1.7B 8-bit，负责普通/提示词音色设计；
+- `quality.tts_clone` 增加 Qwen3-TTS Base 1.7B 8-bit，仅负责 reference-audio clone；
+- 两个 1.7B TTS worker 由 capability router 独立管理；Quality 的 `voice_design` / `voice_clone` lane 可双常驻，不同 lane 可并发，同一 lane 仍由对应 worker lock 串行，lazy 模式只延迟所需 capability 的首次加载；
+- `WorkerIdleEvictor` 将两个 Quality TTS worker 视为一个 capability group：空闲冷却后可一起 trim/close，下一次请求只惰性恢复所需 worker；双常驻是允许的运行态，空闲回收是独立的生命周期策略；
+- `balanced` / `light` 不声明 `voice_design` / `voice_clone` 创建能力，继续使用 CustomVoice；
+- reference clone 不允许 fallback 回 VoiceDesign。Base 不可用时必须显式失败。
+
+因此本 ADR §2 中 “quality = ASR + VoiceDesign” 现在表示默认 TTS 主路径，不再表示 Quality
+只有一个 TTS capability。规范性细节见
+[`docs/architecture/quality-voice-capabilities.md`](../architecture/quality-voice-capabilities.md)。

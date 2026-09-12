@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -25,6 +26,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from speechrail.domain.voice_creation import VoiceCreation
+
 logger = logging.getLogger(__name__)
 
 VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
@@ -47,6 +50,7 @@ class VoiceProfile:
     audio_path: str | None = None
     duration_seconds: float = 0.0
     quality: dict[str, Any] | None = None
+    creation: VoiceCreation | None = None
 
     @property
     def description(self) -> str:
@@ -73,6 +77,8 @@ class VoiceProfile:
             data["duration_seconds"] = self.duration_seconds
         if self.quality is not None:
             data["quality"] = self.quality
+        if self.creation is not None:
+            data["creation"] = self.creation.model_dump(mode="json")
         return data
 
 
@@ -289,6 +295,111 @@ def tts_voice_class(voice: str) -> str:
     return "custom"
 
 
+_CANONICAL_REFERENCE_TARGET_DBFS = -20.0
+_CANONICAL_REFERENCE_MAX_GAIN_DB = 9.0
+_CANONICAL_REFERENCE_MAX_ATTENUATION_DB = 12.0
+_CANONICAL_REFERENCE_PEAK_CEILING = 0.95
+_CANONICAL_REFERENCE_PAD_SECONDS = 0.20
+_CANONICAL_REFERENCE_MIN_SECONDS = 2.0
+
+
+def canonicalize_clone_reference_audio(
+    wav_bytes: bytes,
+    *,
+    target_sample_rate: int = 24_000,
+) -> tuple[bytes, float]:
+    """Create one canonical clone reference without whole-recording RMS bias.
+
+    The input must already be decoded to mono PCM16 WAV and must have passed the
+    reference quality gate. Gain is derived only from speech-active 20 ms
+    windows, bounded conservatively, and capped by a fixed peak ceiling. Long
+    leading/trailing inactive regions are trimmed while retaining a short pad.
+    The returned WAV is the only reference persisted for Base cloning; the
+    vendor loader must therefore not normalize it again.
+    """
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            if (
+                wf.getnchannels() != 1
+                or wf.getsampwidth() != 2
+                or wf.getframerate() != target_sample_rate
+            ):
+                raise ValueError(
+                    "reference audio must be mono PCM16 at the target sample rate"
+                )
+            pcm = wf.readframes(wf.getnframes())
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("reference audio cannot be canonicalized") from exc
+
+    samples = array("h")
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
+    if sys.byteorder != "little":
+        samples.byteswap()
+    if not samples:
+        raise ValueError("reference audio contains no usable speech")
+
+    window_samples = max(1, round(target_sample_rate * 0.02))
+    active_threshold = 10 ** (-45.0 / 20.0)
+    active_windows: list[tuple[int, int]] = []
+    active_energy = 0.0
+    active_count = 0
+    for start in range(0, len(samples), window_samples):
+        end = min(len(samples), start + window_samples)
+        window = samples[start:end]
+        if not window:
+            continue
+        energy = sum((sample / 32_768.0) ** 2 for sample in window)
+        rms = math.sqrt(energy / len(window))
+        if rms > active_threshold:
+            active_windows.append((start, end))
+            active_energy += energy
+            active_count += len(window)
+    if not active_windows or active_count <= 0:
+        raise ValueError("reference audio contains no usable speech")
+
+    active_rms = math.sqrt(active_energy / active_count)
+    target_rms = 10 ** (_CANONICAL_REFERENCE_TARGET_DBFS / 20.0)
+    desired_gain = target_rms / max(active_rms, 1e-9)
+    min_gain = 10 ** (-_CANONICAL_REFERENCE_MAX_ATTENUATION_DB / 20.0)
+    max_gain = 10 ** (_CANONICAL_REFERENCE_MAX_GAIN_DB / 20.0)
+    gain = min(max(desired_gain, min_gain), max_gain)
+    peak = max(abs(sample) for sample in samples) / 32_768.0
+    if peak > 0.0:
+        gain = min(gain, _CANONICAL_REFERENCE_PEAK_CEILING / peak)
+
+    pad = round(target_sample_rate * _CANONICAL_REFERENCE_PAD_SECONDS)
+    start = max(0, active_windows[0][0] - pad)
+    end = min(len(samples), active_windows[-1][1] + pad)
+    minimum_samples = round(target_sample_rate * _CANONICAL_REFERENCE_MIN_SECONDS)
+    if end - start < minimum_samples and len(samples) >= minimum_samples:
+        missing = minimum_samples - (end - start)
+        extend_left = min(start, missing // 2)
+        start -= extend_left
+        missing -= extend_left
+        extend_right = min(len(samples) - end, missing)
+        end += extend_right
+        missing -= extend_right
+        if missing:
+            start = max(0, start - missing)
+
+    conditioned = array("h")
+    for sample in samples[start:end]:
+        value = round(sample * gain)
+        conditioned.append(max(-32_768, min(32_767, value)))
+    if sys.byteorder != "little":
+        conditioned.byteswap()
+
+    output = io.BytesIO()
+    with wave.open(output, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(target_sample_rate)
+        wf.writeframes(conditioned.tobytes())
+    duration = len(conditioned) / float(target_sample_rate)
+    return output.getvalue(), duration
+
 def transcode_and_validate_clone_audio(
     audio_bytes: bytes,
     *,
@@ -440,6 +551,12 @@ class VoiceStoreUnavailableError(RuntimeError):
     """The persistent custom voice registry cannot be trusted or updated."""
 
     code = "voice_store_unavailable"
+
+
+class VoiceAlreadyExistsError(ValueError):
+    """A create-only registration must not replace an existing voice."""
+
+    code = "voice_already_exists"
 
 
 class VoiceInUseError(RuntimeError):
@@ -618,6 +735,10 @@ class VoiceRegistry:
             if not isinstance(quality_raw, dict):
                 raise ValueError("custom voice quality must be an object")
             quality = quality_raw
+        creation_raw = item.get("creation")
+        creation = None if creation_raw is None else VoiceCreation.model_validate(creation_raw)
+        if creation is not None and raw_mode != "clone":
+            raise ValueError("generated reference provenance requires clone mode")
         return VoiceProfile(
             id=vid,
             name=name,
@@ -632,6 +753,7 @@ class VoiceRegistry:
             audio_path=audio_path,
             duration_seconds=float(duration_seconds),
             quality=quality,
+            creation=creation,
         )
 
     def _controlled_audio_path(
@@ -881,6 +1003,8 @@ class VoiceRegistry:
         voice_id: str | None = None,
         duration_seconds: float,
         quality: dict[str, Any] | None = None,
+        creation: VoiceCreation | None = None,
+        create_only: bool = False,
     ) -> VoiceProfile:
         if not name.strip():
             raise ValueError("voice name must not be empty")
@@ -903,9 +1027,21 @@ class VoiceRegistry:
             raise ValueError("duration_seconds must be a non-negative number")
         if quality is not None and not isinstance(quality, dict):
             raise ValueError("quality must be an object")
+        if creation is not None and not isinstance(creation, VoiceCreation):
+            raise ValueError("creation must be validated voice provenance")
+        if creation is not None and (
+            creation.reference_audio_sha256 != hashlib.sha256(audio_bytes).hexdigest()
+            or creation.reference_text_sha256
+            != hashlib.sha256(ref_text.strip().encode()).hexdigest()
+        ):
+            raise ValueError("reference does not match voice provenance")
 
         with self._lock:
             self._ensure_available_locked(reload=True)
+            # This check shares the metadata commit lock; the HTTP preflight
+            # alone cannot protect against concurrent registration of the ID.
+            if create_only and vid in self._custom_voices:
+                raise VoiceAlreadyExistsError("target voice already exists")
             self._prepare_store_dirs_locked()
             target_file = (self._voices_dir / f"{vid}.{uuid.uuid4().hex}.wav").resolve()
             self._controlled_audio_path(str(target_file), vid, require_exists=False)
@@ -925,6 +1061,7 @@ class VoiceRegistry:
                 audio_path=str(target_file),
                 duration_seconds=round(float(duration_seconds), 2),
                 quality=quality,
+                creation=creation,
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
@@ -1278,6 +1415,7 @@ __all__ = [
     "VoiceRegistry",
     "apply_crossfade",
     "bounded_sentences",
+    "canonicalize_clone_reference_audio",
     "create_breath_pause",
     "generation_token_budget",
     "get_voice_profile",
