@@ -30,6 +30,7 @@ from speechrail.runtime.worker_process import (
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
 
 DeliveryEventRecorder = Callable[[str, int], None]
+TtsModelVariant = Literal["voice_design", "custom_voice", "base"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +38,7 @@ class Qwen3TtsBackendConfig:
     repository_root: Path
     python_executable: Path
     model_dir: Path
+    model_variant: TtsModelVariant
     device: Literal["mps", "cpu"]
     dtype: Literal["float16", "float32", "int8"] = "float16"
     sample_rate: int = 24_000
@@ -147,13 +149,7 @@ class Qwen3TtsWorker:
         self._reload_count = 0
         self._on_delivery_event = on_delivery_event
         self.last_active: float = time.monotonic()
-        self.model_variant: str | None = None
-        try:
-            from speechrail.backends.model_identity import inspect_model
-
-            self.model_variant = inspect_model(config.model_dir).variant
-        except Exception:
-            self.model_variant = "voice_design"
+        self.model_variant: str = config.model_variant
 
     @property
     def alive(self) -> bool:
@@ -208,6 +204,7 @@ class Qwen3TtsWorker:
                 or ready.get("device") != self.config.device
                 or ready.get("dtype") != self.config.dtype
                 or ready.get("sample_rate") != self.config.sample_rate
+                or ready.get("model_variant") != self.config.model_variant
             ):
                 raise RuntimeError("backend_identity_mismatch")
             self._started = True
@@ -251,7 +248,7 @@ class Qwen3TtsWorker:
                     if request.seed is not None:
                         frame_payload["seed"] = request.seed
                     binding = resolve_binding(
-                        self.model_variant or "voice_design",
+                        self.model_variant,
                         request.voice,
                         profile=profile,
                     )

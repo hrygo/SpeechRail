@@ -124,6 +124,7 @@ async def test_router_lifecycle_aggregates_both_workers() -> None:
         "cooperative_cancel_supported": False,
         "fallback_abort_count": 5,
         "reload_count": 5,
+        "warm_capability": None,
     }
     await router.trim_memory()
     assert (primary.trimmed, clone.trimmed) == (1, 1)

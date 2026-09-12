@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 from sys import executable
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -499,6 +500,7 @@ def test_configured_tts_paths_create_and_lifecycle_manage_private_worker(
             return chunks()
 
     monkeypatch.setattr(services_module, "Qwen3TtsWorker", FakeConfiguredWorker)
+    monkeypatch.setattr(services_module, "inspect_model", lambda _: SimpleNamespace(variant="voice_design"))
     settings = Settings(
         qwen3_model_dir=None,
         qwen3_python=None,

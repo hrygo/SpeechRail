@@ -1147,6 +1147,7 @@ async def test_qwen3_tts_client_packs_clone_metadata_into_frame(
                     "device": "mps",
                     "dtype": "float16",
                     "sample_rate": 24_000,
+                    "model_variant": "base",
                 }
             # Synthesis audio chunk response followed by completed
             if len(sent_frames) == 2:
@@ -1179,6 +1180,7 @@ async def test_qwen3_tts_client_packs_clone_metadata_into_frame(
         repository_root=repo_root,
         python_executable=Path("/usr/bin/python3"),
         model_dir=model_dir,
+        model_variant="base",
         device="mps",
         sample_rate=24_000,
     )

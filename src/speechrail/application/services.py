@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from speechrail.application.diarization.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
+from speechrail.backends.model_identity import inspect_model
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -26,8 +28,10 @@ from speechrail.backends.qwen3_tts import (
     Qwen3TtsBackendConfig,
     Qwen3TtsCapabilityRouter,
     Qwen3TtsWorker,
+    TtsModelVariant,
 )
 from speechrail.config import Settings
+from speechrail.config.selection import active_model_catalog
 from speechrail.domain.contracts import TranscriptResult
 from speechrail.domain.diarization import DiarizationReadiness
 from speechrail.domain.diarization.ports import AlignTextPort
@@ -360,12 +364,24 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         tts_python = settings.qwen3_tts_python
         assert tts_python is not None
 
-        def make_tts_worker(model_dir: Path, *, warmup: bool) -> Qwen3TtsWorker:
+        active_tts_catalog = active_model_catalog(settings)
+
+        def make_tts_worker(
+            model_dir: Path,
+            *,
+            warmup: bool,
+            catalog_variant: str | None,
+        ) -> Qwen3TtsWorker:
+            raw_variant = catalog_variant or inspect_model(model_dir).variant
+            if raw_variant not in {"voice_design", "custom_voice", "base"}:
+                raise RuntimeError("backend_identity_mismatch: unsupported TTS model variant")
+            variant = cast(TtsModelVariant, raw_variant)
             return Qwen3TtsWorker(
                 Qwen3TtsBackendConfig(
                     repository_root=_package_root(),
                     python_executable=tts_python,
                     model_dir=model_dir,
+                    model_variant=variant,
                     device=settings.device,
                     dtype=resolve_backend_dtype(
                         model_dir,
@@ -389,9 +405,20 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         primary_tts_worker = make_tts_worker(
             settings.qwen3_tts_model_dir,
             warmup=settings.tts_warmup_on_start,
+            catalog_variant=(
+                active_tts_catalog.tts.variant if active_tts_catalog.tts is not None else None
+            ),
         )
         clone_tts_worker = (
-            make_tts_worker(settings.qwen3_tts_clone_model_dir, warmup=False)
+            make_tts_worker(
+                settings.qwen3_tts_clone_model_dir,
+                warmup=False,
+                catalog_variant=(
+                    active_tts_catalog.tts_clone.variant
+                    if active_tts_catalog.tts_clone is not None
+                    else None
+                ),
+            )
             if settings.qwen3_tts_clone_model_dir is not None
             else None
         )

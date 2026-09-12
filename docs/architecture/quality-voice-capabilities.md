@@ -104,8 +104,10 @@ Quality 不采用“VoiceDesign + Base 永久双常驻”。`Qwen3TtsCapabilityR
 5. Base 可继续保留到下一次 capability 切换/idle eviction；
 6. 普通 TTS 请求到来时先关闭 Base，再按需恢复 primary；
 7. `/health` 的 `tts_lifecycle.warm_capability` 只报告当前实际 warm 的 `voice_design` / `voice_clone` / `tts`，不得为了探测状态触发模型加载；
-8. `quality-runs` 作为批量 TTS 工作必须进入 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界。
-7. capability lock 覆盖完整流式请求，避免换模过程和另一条 TTS 流交叉。
+8. worker `backend` 只标识通用 `mlx-qwen3-tts` 运行时；具体 VoiceDesign / Base / CustomVoice 身份由独立的 `model_variant` 表达；
+9. 父进程在 composition 阶段确定期望 `model_variant`（受管模型优先取 catalog；非受管本地快照才执行本地 identity inspection），并在 worker `ready` 握手中逐项比对；variant 缺失或不匹配必须 `backend_identity_mismatch` fail-closed，禁止回退成 VoiceDesign；
+10. `quality-runs` 作为批量 TTS 工作必须进入 `ResourceGovernor`，并使用统一绝对 deadline 与公共 `AudioChunk` 流校验，不能绕过正常运行时资源边界；
+11. capability lock 覆盖完整流式请求，避免换模过程和另一条 TTS 流交叉。
 
 这样增加的是**安装体积与换模冷启动成本**，而不是强制把两个 1.7B TTS 权重同时计入常驻内存。TTS∥TTS 仍然不是当前产品并发模型。
 
