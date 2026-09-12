@@ -47,7 +47,7 @@ tracking_issues:
 - 哪些指标可以公开给 Sona，哪些信息必须留在服务端内存或受控日志；
 - clone 创建成功是否等价于“可以作为默认助手音色”。
 
-> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。另一次本地回归审计发现当前 synthesis quality-run 的最终 pass 与 deterministic 判断仍存在假阳性风险；该报告契约保留，但在门禁修复前不能把 `pass` 当成 speaker identity/纯净度的充分证据。
+> 2026-09-12 更新：reference clone 已从 VoiceDesign 私有 ICL 路径迁移到 Quality-only Base public generation。当前 synthesis quality-run 已覆盖全部 6 类固定 probe，并把静音/无效 PCM、削波与固定 seed 重复输出确定性纳入实际通过条件；但 `pass` 仍不能证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。
 
 本方案的关键决策：
 

@@ -278,7 +278,7 @@ SpeechRail exposes a unified API contract while internally adapting across Apple
 - **Configurable Idle Eviction**: The default idle timeout is **300 seconds**. It can be changed with `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` or disabled with `0`; measured post-eviction footprint remains runtime- and profile-dependent.
 - **Quality Voice-Creation Boundary**: `quality` owns two distinct capabilities. Natural-language voice creation uses **VoiceDesign 1.7B**; reference-audio cloning uses **Base 1.7B**. `balanced`/`light` use CustomVoice 0.6B and do not advertise either creation capability.
 - **On-Demand Base Clone Model**: Base is installed as the Quality `tts_clone` artifact but is not warmed at startup. A capability router swaps VoiceDesign ↔ Base under a single TTS slot, closing the other worker before loading the requested capability. This avoids intentionally keeping both 1.7B TTS models resident at once, at the cost of model-switch cold-start latency.
-- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. Validation and quality-run endpoints retain the `voice_quality_v1` report contract, but the 2026-09-12 audit identified synthesis-gate false-positive gaps; a green report is not yet sufficient evidence of cross-text speaker identity. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md) and [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md).
+- **Quality-Gated Voice Cloning**: On `quality`, `POST /v1/voices/clone` binds reference audio + exact reference text to the Base public clone path. The synthesis gate now covers all six fixed probes, rejects silent/clipped output, and verifies fixed-seed repeated PCM determinism. A green report still does **not** prove transcript intelligibility, arbitrary-noise rejection, or cross-text speaker identity; those require staged ASR and independent speaker evidence. See [Quality Voice Capabilities](docs/architecture/quality-voice-capabilities.md), [Voice-Clone Quality Gates & Contract](docs/architecture/voice-clone-quality-gates-and-contract.md), and [Output Intelligibility / ASR Validation](docs/architecture/voice-quality-intelligibility-validation.md).
 
 ### 2. 9 Cross-Profile Built-in Voices
 
@@ -345,7 +345,7 @@ For meeting minutes, multi-party interviews, and duplex discussions, SpeechRail 
 | **Realtime ASR commit p50** | **238.2 ms** | **348.6 ms** | **373.6 ms** | 16kHz PCM16, current nested profile, three consecutive sessions; terminal success 3/3 |
 | **Realtime TTS first delta p50** | **25.0 ms** | **26.1 ms** | **38.4 ms** | `response.output_audio.delta`, three consecutive sessions |
 
-> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign`. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.
+> `balanced` and `light` use `CustomVoice`; `quality` uses `VoiceDesign` for normal/prompt-designed TTS and swaps to the on-demand `Base` capability for reference clones. Shared-worker conflicts intentionally return `backend_busy` rather than being counted as concurrent batch throughput.
 
 ---
 

@@ -278,7 +278,7 @@ SpeechRail 对外暴露统一 API 契约，内部按**用户场景**分为 **Emb
 - **可配置空闲卸载 (Idle Eviction)**：默认空闲超时为 **300 秒**，可通过 `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` 修改，设为 `0` 可禁用；卸载后的实测物理内存取决于运行时与档位。
 - **Quality 音色创造边界**：`quality` 独享两类能力——自然语言创造音色由 **VoiceDesign 1.7B** 负责；参考音频克隆由 **Base 1.7B** 负责。`balanced` / `light` 使用 CustomVoice 0.6B，不声明这两类创建能力。
 - **Base 按需加载**：Base 作为 Quality 的 `tts_clone` 制品安装，但不在服务启动时预热。capability router 在一个逻辑 TTS 槽内互斥切换 VoiceDesign ↔ Base；切换前关闭另一 worker，避免有意让两套 1.7B TTS 权重同时常驻，代价是 capability switch 冷启动。
-- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。`voice_quality_v1` 报告契约继续保留，但 2026-09-12 审计已确认 synthesis 门禁存在假阳性缺口；在独立整改完成前，绿色报告不能视为跨文本 speaker identity 已证明。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md)。
+- **质量门控音色克隆**：`POST /v1/voices/clone` 将参考音频 + 准确参考文本绑定到 Base public clone 路径。当前 synthesis 门禁已覆盖全部 6 类固定 probe，可拒绝静音/削波输出，并用固定 seed 下的重复 PCM 比较验证确定性；但绿色报告仍**不能**证明文本可懂度、任意噪声拒绝或跨文本 speaker identity，这些需要分阶段 ASR 与独立声纹证据。详见 [Quality 音色能力架构](docs/architecture/quality-voice-capabilities.md) 与 [输出可懂度 / ASR 复核设计](docs/architecture/voice-quality-intelligibility-validation.md)。
 
 ### 2. 9 种跨档系统内置音色
 
