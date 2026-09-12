@@ -77,3 +77,16 @@ async def test_non_clone_request_still_uses_primary_without_base_worker(
 
     chunks = [chunk async for chunk in router.synthesize(request)]
     assert [chunk.response_id for chunk in chunks] == ["primary"]
+
+
+@pytest.mark.anyio
+async def test_close_is_safe_without_optional_clone_worker() -> None:
+    primary = _PrimaryWorker()
+    router = Qwen3TtsCapabilityRouter(primary)  # type: ignore[arg-type]
+    await router.start()
+    assert primary.alive is True
+
+    await router.close()
+
+    assert primary.alive is False
+    assert primary.ready is False
