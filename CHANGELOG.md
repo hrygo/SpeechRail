@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-09-13
+
+### Fixed
+
+- 同步 Realtime 分人扩展的 v1 JSON Schema、fixtures 与回归测试至运行时已发布的 `speechrail.diarization.updated` / `.done` / `.finish` 事件，修复契约校验和客户端结束屏障仍引用已退役名称的问题。
+
 ## [2.5.1] - 2026-09-13
 
 ### Fixed
