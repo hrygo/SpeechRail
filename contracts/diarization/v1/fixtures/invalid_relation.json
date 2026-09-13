@@ -1,5 +1,5 @@
 {
-  "type": "speechrail.diarization.update",
+  "type": "speechrail.diarization.updated",
   "group_generation": "generation_example",
   "stable_through_sample": 52800,
   "updates": [],

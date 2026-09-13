@@ -23,6 +23,10 @@ from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
 from speechrail.application.services import AppOverrides, build_app_services
+from speechrail.compatibility.openai_realtime import (
+    diarization_done_event,
+    diarization_update_event,
+)
 from speechrail.config import Settings
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.diarization import (
@@ -41,9 +45,9 @@ EXTENSION = "speechrail.diarization.v1"
 
 _SCHEMA_BY_TYPE = {
     "conversation.item.input_audio_transcription.completed": "completed.schema.json",
-    "speechrail.diarization.update": "update.schema.json",
+    "speechrail.diarization.updated": "update.schema.json",
     "speechrail.diarization.status": "status.schema.json",
-    "speechrail.diarization.finalized": "finalized.schema.json",
+    "speechrail.diarization.done": "finalized.schema.json",
 }
 
 
@@ -59,6 +63,52 @@ def _load(name: str) -> dict[str, Any]:
 def _schema(name: str) -> dict[str, Any]:
     with (CONTRACT_DIR / name).open(encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def test_runtime_diarization_events_match_v1_schemas() -> None:
+    events = (
+        (
+            "update.schema.json",
+            diarization_update_event(
+                group_generation=None,
+                stable_through_sample=10,
+                updates=[
+                    {
+                        "segment_uid": "segment-1",
+                        "revision": 1,
+                        "status": "unknown",
+                        "speaker": None,
+                        "coverage_ratio": 0.0,
+                        "overlap_ratio": 0.0,
+                        "candidates": [],
+                    }
+                ],
+                speaker_links=[],
+            ),
+        ),
+        (
+            "finalized.schema.json",
+            diarization_done_event(
+                finalization_id="finish-1",
+                through_sample=10,
+                stable_through_sample=10,
+                status="complete",
+                reason=None,
+                last_update_sequence=1,
+            ),
+        ),
+    )
+    for schema_name, event in events:
+        errors = list(Draft202012Validator(_schema(schema_name)).iter_errors(event))
+        assert not errors, f"{schema_name}: {[error.message for error in errors]}"
+
+
+def test_finish_request_matches_v1_schema() -> None:
+    event = {"type": "speechrail.diarization.finish", "event_id": "finish-1"}
+    errors = list(
+        Draft202012Validator(_schema("finalize-request.schema.json")).iter_errors(event)
+    )
+    assert not errors, [error.message for error in errors]
 
 
 def _fixture_units_are_semantically_valid(event: dict[str, Any]) -> bool:
@@ -128,7 +178,7 @@ def test_valid_extension_fixtures_pass_schema_and_semantics() -> None:
         assert not errors, f"{path.name}: {[e.message for e in errors]}"
         if fixture["type"] == "conversation.item.input_audio_transcription.completed":
             assert _fixture_units_are_semantically_valid(fixture), path.name
-        elif fixture["type"] == "speechrail.diarization.update":
+        elif fixture["type"] == "speechrail.diarization.updated":
             assert _update_is_semantically_valid(fixture), path.name
 
 

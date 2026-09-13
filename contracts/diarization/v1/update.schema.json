@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://speechrail.local/contracts/diarization/v1/update.schema.json",
-  "title": "SpeechRail diarization attribution update event (SPK-E2E-1, version 1)",
-  "description": "speechrail.diarization.update: revises speaker attribution for units already delivered by an extension-mode completed event. revision counts per segment_uid from 1; repeated revisions must repeat identical content (semantic rule).",
+  "title": "SpeechRail diarization attribution updated event (SPK-E2E-1, version 1)",
+  "description": "speechrail.diarization.updated: revises speaker attribution for units already delivered by an extension-mode completed event. revision counts per segment_uid from 1; repeated revisions must repeat identical content (semantic rule).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -14,7 +14,7 @@
     "speaker_links"
   ],
   "properties": {
-    "type": {"const": "speechrail.diarization.update"},
+    "type": {"const": "speechrail.diarization.updated"},
     "event_version": {"const": 1},
     "group_generation": {"type": ["string", "null"], "minLength": 1},
     "stable_through_sample": {"type": "integer", "minimum": 0},
