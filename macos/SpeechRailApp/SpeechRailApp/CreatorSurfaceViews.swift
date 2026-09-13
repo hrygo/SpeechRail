@@ -258,10 +258,10 @@ public struct VoiceDesignView: View {
         "磁性胸腔", "治愈温暖", "播音质感", "微醺叙事", "少年清冽", "知性温婉", "沙哑沉郁"
     ]
     private let candidateSpecs = [
-        CandidateSpec(slot: "A", seed: 101, title: "候选 A", detail: "同一描述 · seed 101"),
-        CandidateSpec(slot: "B", seed: 202, title: "候选 B", detail: "同一描述 · seed 202"),
-        CandidateSpec(slot: "C", seed: 303, title: "候选 C", detail: "同一描述 · seed 303"),
-        CandidateSpec(slot: "D", seed: 404, title: "候选 D", detail: "同一描述 · seed 404")
+        CandidateSpec(slot: "A", seed: 101, title: "候选 A", detail: "同一试听文案 · seed 101"),
+        CandidateSpec(slot: "B", seed: 202, title: "候选 B", detail: "同一试听文案 · seed 202"),
+        CandidateSpec(slot: "C", seed: 303, title: "候选 C", detail: "同一试听文案 · seed 303"),
+        CandidateSpec(slot: "D", seed: 404, title: "候选 D", detail: "同一试听文案 · seed 404")
     ]
 
     public init() {}
@@ -343,13 +343,18 @@ public struct VoiceDesignView: View {
                             .frame(width: 220)
                     }
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("参考文案 · \(referenceText.count)/240")
+                        Text("试听与注册参考文案 · \(referenceText.count)/240")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        TextField("保存时用于生成质量参考", text: $referenceText)
+                        TextField("用于候选试听与保存注册", text: $referenceText)
                             .textFieldStyle(.roundedBorder)
                     }
                 }
+
+                Text("候选音频只用于本次试听；注册时服务会按描述、参考文案和 seed 创建可复用音色，不会把候选音频本身当作音色资产保存。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
 
                 HStack {
                     Spacer()
@@ -550,6 +555,11 @@ public struct VoiceDesignView: View {
             errorMessage = "请先填写音色描述"
             return
         }
+        let previewText = referenceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (20...240).contains(previewText.count) else {
+            errorMessage = "试听与注册参考文案需要 20–240 个字符"
+            return
+        }
         guard voiceDesignAvailable else {
             errorMessage = "当前尚未确认 VoiceDesign 能力，请先完成服务状态和音色能力检查。"
             return
@@ -568,7 +578,10 @@ public struct VoiceDesignView: View {
             )
         }
         isGenerating = true
-        generationRequest = VoiceGenerationRequest(instruction: instruction)
+        generationRequest = VoiceGenerationRequest(
+            instruction: instruction,
+            previewText: previewText
+        )
     }
 
     @MainActor
@@ -578,7 +591,7 @@ public struct VoiceDesignView: View {
             guard !Task.isCancelled else { return }
             updateCandidate(slot: spec.slot, status: .loading)
             guard let data = await model.previewDesignedVoice(
-                text: "这是一段用于比较音色质感的试听文案。",
+                text: request.previewText,
                 instruction: request.instruction,
                 speed: 1.0,
                 seed: spec.seed
@@ -662,7 +675,7 @@ public struct VoiceDesignView: View {
             savingSlot = nil
             if let voice {
                 savedSlots.insert(candidate.slot)
-                successMessage = "“\(voice.name)” 已由服务端注册，可在音色库中复用。"
+                successMessage = "“\(voice.name)” 已按候选 \(candidate.slot) 的 seed 注册，可在音色库中复用。"
             }
         }
     }
@@ -671,6 +684,7 @@ public struct VoiceDesignView: View {
 private struct VoiceGenerationRequest: Equatable {
     let id = UUID()
     let instruction: String
+    let previewText: String
 }
 
 private struct CandidateSpec {
@@ -762,14 +776,14 @@ private struct CandidateRackRow: View {
 
             Button(action: onSave) {
                 Label(
-                    isSaving ? "保存中" : (isSaved ? "已保存" : "保存"),
+                    isSaving ? "注册中" : (isSaved ? "已注册" : "注册此候选"),
                     systemImage: isSaved ? "checkmark" : "square.and.arrow.down"
                 )
                     .font(SpeechRailDesignTokens.Typography.caption)
             }
             .speechRailButton(.secondary)
             .disabled(isSaved || isSaving || !hasAudio)
-            .accessibilityLabel("保存 \(candidate.title) 至音色库")
+            .accessibilityLabel("按 \(candidate.title) 注册至音色库")
         }
         .padding(SpeechRailDesignTokens.Spacing.sm)
         .background(

@@ -112,8 +112,8 @@
 - [x] 保存通过 `registerVoiceDesign()` → `POST /v1/voices/designs`，成功后刷新 `/v1/voices`。
 - [x] 修复能力门禁：生成按钮现在同时依赖健康快照、当前 profile、`ttsReady`、service ready 和服务实际 `voice_design + supports_instruction` capability；未知状态 fail-closed。代码已完成，待人工/自动化验收。
 - [x] 对齐模型页和创作页的能力事实源：模型页现在显示目标档位的 VoiceDesign 能力，并将“当前服务 · 档位 · ASR/TTS”与“目标档位未应用”分开表达；仍待人工核对页面文案与服务快照。
-- [ ] 明确“保存候选”的语义：当前保存是按 seed/instruction/reference text 重新注册，不是把已经试听的音频文件持久化；文案和确认框必须如实表达，或改为服务端保存 exact candidate。
-- [ ] preview 使用的输入文本、用户填写的 reference text、注册时 reference text 的关系必须在 UI 中解释清楚，避免用户以为候选音频就是最终音色资产。
+- [x] 明确“保存候选”的语义：页面现在明确说明试听音频不持久化，按钮和成功消息改为“注册此候选”，注册按 seed/instruction/reference text 重新创建服务端音色；待人工验收。
+- [x] preview 使用的输入文本、用户填写的 reference text、注册时 reference text 的关系已统一：同一段 20–240 字参考文案用于候选试听和注册，并在页面解释；待真实请求验收。
 - [ ] 检查四个候选请求的顺序、取消、部分失败和重试；某个候选失败不能让其他已成功候选丢失或被误标为成功。
 
 ### Token / UX 审查
@@ -322,4 +322,5 @@
 - 2026-09-13：只读核对 profile、catalog、model status、`/health`、`/readyz`、`/v1/models`、`/v1/voices` 和 JSON `/metrics`；未下载/加载/卸载模型，未改服务运行态。
 - 2026-09-13 23:01：完成音色创作能力门禁的 fail-closed 修复；进入页面先刷新 health 和 voices，Debug 编译通过。自动化测试与真实 VoiceDesign 请求按用户要求未执行。
 - 2026-09-13 23:07：模型页补充目标档位 VoiceDesign 能力事实，并明确当前服务档位/运行制品与目标档位的区别；Debug 编译通过。
+- 2026-09-13 23:09：音色创作页统一试听/注册参考文案，补齐候选非持久化说明与注册状态文案；Debug 编译通过。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。
