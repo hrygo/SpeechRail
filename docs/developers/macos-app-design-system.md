@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.3.0"
+version: "0.4.0"
 date: 2026-09-13
 ---
 
@@ -28,7 +28,7 @@ ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否�
 
 | 能力 | SpeechRailApp macOS 26+ | 独立服务/协议边界 | 设计决策 |
 |---|---|---|---|
-| Liquid Glass | 直接使用 `glassEffect`、`GlassEffectContainer`、`glassEffectID` 和必要的 tint | 不参与 GUI 渲染 | App 不写 Material fallback，不自绘假玻璃 |
+| Liquid Glass | 直接使用系统 `glassEffect` 能力承载窗口/导航层和关键控制 | 不参与 GUI 渲染 | 玻璃只表达导航或交互层；内容与 Inspector 不铺玻璃 |
 | 浮动工具栏与分组 | 直接使用系统 toolbar、`ToolbarSpacer`、scroll edge effect | 不参与 GUI 渲染 | 重要命令仍进入菜单栏，不能只放在 toolbar |
 | 导航 | `NavigationSplitView` 使用 macOS 26 sidebar 行为 | 不参与 GUI 导航 | 不另造一套平行导航；窗口变窄时使用系统折叠 |
 | 菜单栏入口 | `MenuBarExtra` 展示健康状态和高频动作 | 不参与 GUI 渲染 | 菜单栏是快速入口，不承载完整监控看板 |
@@ -37,8 +37,8 @@ ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否�
 
 App target 的 `MACOSX_DEPLOYMENT_TARGET` 必须为 `26.0`，只要是 App 页面或 App 专属
 设计组件，就直接依赖 macOS 26 API。不得为了让 App target 继续编译到 macOS 14 而加入
-条件分支、Material 替代面板或删除 Liquid Glass 行为；服务侧独立 target 的最低版本不
-改变 App 的 UI 实现。
+条件分支、兼容视觉 fallback 或删除 macOS 26 行为；服务侧独立 target 的最低版本不改变
+App 的 UI 实现。内容层使用标准 macOS 内容表面是信息层级决策，不是为了兼容旧系统而降级。
 
 ### 2.2 SpeechRail 的产品层级
 
@@ -62,18 +62,19 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 分类 | Swift 名称 | 约束 |
 |---|---|---|
-| 间距 | `Spacing` | 只使用 `xxs/xs/sm/md/lg/xl/xxl`，页面默认节奏为 8/12/16/24 |
+| 间距 | `Spacing` | 使用 `micro/xs/sm/md/lg/xl`，页面默认节奏为 4/8/12/16/24/32 |
 | 圆角 | `Corner` | 控件、面板、窗口分别使用固定层级；内层控件不超过外层容器的圆角层级 |
 | 布局 | `Layout` | sidebar、内容最大宽度、窗口最小尺寸集中管理，支持 resize/full screen |
 | 控件 | `Control` | 使用系统 `controlSize`，自定义容器只引用统一的触达尺寸和图标尺寸 |
 | 字体 | `Typography` | 优先语义字体，不在页面内硬编码字号；用户字体偏好由系统接管 |
 | 颜色 | `Palette` | 使用 `Color.primary`、`Color.secondary`、系统 accent 和语义色，自动适配明暗与高对比 |
-| 表面 | `SpeechRailSurfaceLevel` | 统一走 macOS 26 Liquid Glass，不提供 App UI Material fallback |
+| 表面 | `SpeechRailSurfaceLevel`、`speechRailContentSurface()` | `window/navigation` 使用系统玻璃；`control` 使用系统 material 加细描边；`panel/inspector` 使用自适应内容表面，不铺玻璃 |
 | 动效 | `Motion` | 所有自定义 transition 可关闭或降级；状态变化必须有文字/结构反馈 |
 
 ### 3.2 统一使用规则
 
-- 页面背景、导航背景、面板和弹窗按层级使用 `speechRailSurface(_:)`，不在各页面重复实现玻璃或阴影。
+- 页面背景和导航由系统窗口/侧边栏承载；关键控制使用 `speechRailSurface(.control)`，内容区和 Inspector 使用 `speechRailContentSurface()`，不在各页面重复实现玻璃或阴影。
+- 玻璃的使用范围必须可解释：侧边栏、工具栏和需要与内容分离的关键控制可以使用系统玻璃；状态、模型制品、指标和诊断内容不得因装饰需要铺玻璃。
 - 主操作每个上下文最多一个，使用系统 `Button` 与 `buttonStyle`；危险动作使用确认对话框并明确影响范围。
 - 监控数字使用 tabular figures；错误不能只用颜色表达，同时显示文字、图标或状态标签。
 - 图标使用 SF Symbols，并与文字共同构成按钮 label；图标按钮必须有 accessibility label。
@@ -83,14 +84,25 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 ## 4. 验收清单
 
 - [x] App target 的最低系统版本为 macOS 26.0，并使用系统 Liquid Glass 结构能力（2026-09-13 Debug build 已验证）。
-- [x] App 未通过自绘背景阻断 scroll edge effect，也未以 Material 替代 Liquid Glass（detail 根背景已移除，玻璃组使用 `GlassEffectContainer`）。
-- [ ] 所有 App 页面只从 `SpeechRailDesignTokens` 读取产品 token。
+- [x] App 未通过自绘根背景阻断 scroll edge effect；玻璃只用于窗口/导航层，内容和 Inspector 使用统一内容表面（2026-09-13 代码审查已验证）。
+- [x] 所有 App 页面主要产品间距、尺寸、颜色和字体从 `SpeechRailDesignTokens` 读取；零间距仅用于 Divider/列表拼接等结构性布局。
 - [ ] Light、Dark、Increase Contrast、Dynamic Type 和 Reduce Motion 均有 UI 验证；当前只完成代码/构建检查，尚未完成桌面人工矩阵。
 - [ ] VoiceOver 可按“导航 → 页面说明 → 主操作 → 状态详情”的顺序访问；图表、档位和 DisclosureGroup 语义已接入，尚未完成桌面 VoiceOver 实测。
-- [ ] 页面高频动作可从 toolbar、菜单栏或键盘路径到达，不依赖 hover。
-- [ ] 音色创作、模型下载、profile 应用、服务启停和回退的边界在 UI 文案中清楚可见。
+- [x] 页面高频动作已提供 toolbar、菜单栏或键盘路径，不依赖 hover；2026-09-13 UI tests 验证控制台、设置和主要页面入口。
+- [x] 音色创作、模型下载、profile 应用、服务启停的边界在 UI 文案和确认动作中可见；模型下载与档位应用使用独立按钮和确认框。
 
-## 5. 变更流程
+## 5. 当前实现与验证矩阵
+
+| 范围 | 实际结果 | 验证时间 |
+|---|---|---|
+| App Debug 构建 | `BUILD SUCCEEDED`，目标为 `arm64-apple-macos26.0` | 2026-09-13 13:59 |
+| Swift 单元测试 | 32 tests，0 failures | 2026-09-13 14:04 |
+| UI 测试 | 7 tests，0 failures；覆盖导航、服务状态、模型确认/恢复/能力不匹配、监控空状态、设置 | 2026-09-13 14:04 |
+| 设置单场景复核 | 1 test，0 failures | 2026-09-13 14:03 |
+| 桌面视觉矩阵 | 尚未完成；仍需人工检查最小窗口、深色、高对比度、Reduce Motion | — |
+| VoiceOver 实测 | 尚未完成 | — |
+
+## 6. 变更流程
 
 新增组件先判断是否能由标准 SwiftUI 控件表达；确需定制时先补充 token 和可访问语义，
 再实现组件。token 变更必须同时更新本文件、对应 Swift 定义、组件测试和 macOS App

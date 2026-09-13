@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail macOS 26 任务型主窗口与服务 Inspector 重构"
-status: draft
+status: active
 audience: "SpeechRail macOS App 产品、设计、开发与测试人员"
 version: "0.1.0"
 date: 2026-09-13

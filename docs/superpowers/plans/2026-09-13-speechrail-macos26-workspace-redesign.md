@@ -75,7 +75,7 @@
 - Produces shared views `PageIntroView(route:)`, `StatusBanner`, `ServiceStatusBadge`, `SectionHeading`, `MetricStrip` and `OperationBar`.
 - Keeps `AppRoute.rawValue` stable so `AppNavigationState` and menu-bar commands remain compatible.
 
-- [ ] **Step 1: Update UI assertions to the approved navigation language.**
+- [x] **Step 1: Update UI assertions to the approved navigation language.**
 
 Change UI assertions from `本机服务总览`/`模型管理`/`预检与诊断` to `服务状态`/`模型`/`诊断`, and add:
 
@@ -99,7 +99,7 @@ XCTAssertTrue(app.buttons["诊断"].exists)
 - Consumes `modelCatalog`, `modelStatus`, `operation`, `modelAvailability`, `prepareModels`, `execute(.profileApply:)` and `cancelCurrentOperation()`.
 - Produces profile selection, artifact selection, user-safe operation states and a developer Inspector.
 
-- [ ] **Step 1: Update the confirmation test to the new route and retain explicit action checks.**
+- [x] **Step 1: Update the confirmation test to the new route and retain explicit action checks.**
 
 Keep the test’s confirmation assertion but navigate through `app.buttons["模型"]`. Add a check for separate labels:
 
@@ -110,7 +110,7 @@ XCTAssertTrue(app.buttons["应用档位"].exists)
 
 Expected: the route label fails before the shell refactor and the new action label fails before this task.
 
-- [ ] **Step 2: Implement the three-region profile workspace.**
+- [x] **Step 2: Implement the three-region profile workspace.**
 
 Use a profile `List(selection:)` on the left, selected profile content in the center, and `.inspector(isPresented:)` on the right.
 The selected profile content must show:
@@ -124,7 +124,7 @@ The selected profile content must show:
 
 Replace profile glass cards with native list rows. Artifact rows are selectable and show verification state, not nested glass panels.
 
-- [ ] **Step 3: Implement `OperationBar` for every model operation state.**
+- [x] **Step 3: Implement `OperationBar` for every model operation state.**
 
 Map states as follows:
 
@@ -138,13 +138,13 @@ cancelled         → 已取消
 
 Keep `ProgressView`, file/bytes text and cancellation gating. Never claim resume when the Agent marked the operation interrupted.
 
-- [ ] **Step 4: Add the artifact Inspector and unsupported/empty states.**
+- [x] **Step 4: Add the artifact Inspector and unsupported/empty states.**
 
 The Inspector shows `modelID`, provider/repository, revision, quantization, file count/size and integrity counts for the selected artifact.
 If `modelAvailability == .unsupported`, show the version mismatch `StatusBanner` and `打开诊断`; do not render stale artifact rows as current.
 If catalog is empty, use a native empty state with a single next action.
 
-- [ ] **Step 5: Run model UI tests and commit.**
+- [x] **Step 5: Run model UI tests and commit.**
 
 Run:
 
@@ -174,23 +174,23 @@ git commit -m "refactor: turn model management into a profile workspace"
 - Consumes existing `RuntimeMetricsSample`, `RuntimeMonitoringChartDescriptor`, `preflightChecks`, and `refreshPreflight()` APIs.
 - Preserves `AXChartDescriptor`, stable metric semantics and failure-safe monitoring behavior.
 
-- [ ] **Step 1: Add failing UI assertions for the new monitoring and diagnostics hierarchy.**
+- [x] **Step 1: Add failing UI assertions for the new monitoring and diagnostics hierarchy.**
 
 Update monitoring test to assert `运行监控` plus `等待监控样本`, and add diagnostics assertions for `检查项` and a selected check detail.
 Expected: the new `检查项` assertion fails before the page refactor.
 
-- [ ] **Step 2: Replace metric tiles with one metric strip and one primary trend area.**
+- [x] **Step 2: Replace metric tiles with one metric strip and one primary trend area.**
 
 Render active requests, pending requests, processed requests and queue rejections in one `MetricStrip` with separators and tabular digits.
 Render the Chart in a single content surface with a heading, timestamp and empty state. Keep the existing 5-second sampling and accessibility descriptor.
 Move latency, workers, RTF and resource detail into the Inspector; do not expose them as default card grid content.
 
-- [ ] **Step 3: Replace diagnostics card stack with list + selected detail.**
+- [x] **Step 3: Replace diagnostics card stack with list + selected detail.**
 
 Use `List(selection:)` for checks, with text plus status shape. The detail pane explains the selected check’s result, impact and recovery action.
 Keep `重新运行` as the page action and retain the read-only promise. Show developer fields only in Inspector/DisclosureGroup.
 
-- [ ] **Step 4: Run focused monitoring and native accessibility tests.**
+- [x] **Step 4: Run focused monitoring and native accessibility tests.**
 
 Run:
 
@@ -201,7 +201,7 @@ xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRa
 
 Expected: empty monitoring state, chart descriptor and chart sample threshold pass.
 
-- [ ] **Step 5: Commit monitoring and diagnostics.**
+- [x] **Step 5: Commit monitoring and diagnostics.**
 
 ```bash
 git add macos/SpeechRailApp/SpeechRailApp/RuntimeMonitoringView.swift macos/SpeechRailApp/SpeechRailApp/PreflightDiagnosticsView.swift macos/SpeechRailApp/SpeechRailApp/RuntimeMonitoringAccessibility.swift macos/SpeechRailApp/SpeechRailAppUITests/SpeechRailAppUITests.swift
@@ -225,7 +225,7 @@ git commit -m "refactor: simplify monitoring and diagnostics hierarchy"
 - Keeps public `CreatorSurfaceView`, `DubbingDeskView`, `VoiceDesignView`, `VoiceLibraryView` and `WorksView` names.
 - Keeps the VoiceDesign description editor and future candidate/preview/save path.
 
-- [ ] **Step 1: Add a UI assertion for the retained VoiceDesign purpose and editor.**
+- [x] **Step 1: Add a UI assertion for the retained VoiceDesign purpose and editor.**
 
 Use the existing navigation test and assert:
 
@@ -235,21 +235,21 @@ XCTAssertTrue(app.staticTexts["从一句话开始"].waitForExistence(timeout: 2)
 XCTAssertTrue(app.staticTexts["先描述你想要的声音，再试听候选并保存。"].exists)
 ```
 
-- [ ] **Step 2: Remove the creator footer and duplicate route header.**
+- [x] **Step 2: Remove the creator footer and duplicate route header.**
 
 Keep the toolbar title and render a compact purpose line. Do not show service port/status footer on creator pages.
 
-- [ ] **Step 3: Implement creator workspaces.**
+- [x] **Step 3: Implement creator workspaces.**
 
 For VoiceDesign, keep the editor in the main content region and place candidate/preview/save controls in an Inspector-shaped region.
 For Dubbing, keep text editing in the main region and voice/parameter controls in the Inspector. Keep disabled actions honest until the service capability exists.
 Use list/table empty states for the library and works pages, with one next action and no decorative empty card.
 
-- [ ] **Step 4: Align compiled previews and legacy surfaces with the same tokens.**
+- [x] **Step 4: Align compiled previews and legacy surfaces with the same tokens.**
 
 Update `ServiceRoutePreviewView`, `ServiceStatusView` and `ProfilePickerView` so they no longer introduce a footer or old nested glass panel if they are opened by future routes/tests.
 
-- [ ] **Step 5: Run the VoiceDesign UI test and commit.**
+- [x] **Step 5: Run the VoiceDesign UI test and commit.**
 
 ```bash
 xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRailApp -testPlan SpeechRailApp -destination 'platform=macOS' -only-testing:SpeechRailAppUITests/SpeechRailAppUITests/testControlCenterSeparatesCreatorAndServiceNavigation test
@@ -265,13 +265,13 @@ git commit -m "refactor: preserve voice design workspace hierarchy"
 - Modify: `docs/developers/macos-app-design-system.md`
 - Inspect only: existing unrelated dirty files listed in Global Constraints
 
-- [ ] **Step 1: Update the active design-system document.**
+- [x] **Step 1: Update the active design-system document.**
 
 Document the final token values, semantic surfaces, route labels, page prototypes, Inspector policy,
 model capability mismatch copy, ordinary/developer information split and the actual verification matrix.
 Mark only checks demonstrated by fresh commands as complete; leave desktop visual, VoiceOver and Reduce Motion checks explicitly marked with their real result.
 
-- [ ] **Step 2: Run the full native and Python verification gate.**
+- [x] **Step 2: Run the full native and Python verification gate.**
 
 Run:
 
@@ -315,13 +315,13 @@ manual visual/accessibility checks not performed, preserved unrelated changes, a
 
 ## Self-review checklist
 
-- [ ] Every section of `docs/superpowers/specs/2026-09-13-speechrail-macos26-workspace-redesign-design.md` maps to at least one task above.
-- [ ] `rg -n "TODO|TBD|FIXME|待定|占位" docs/superpowers/plans/2026-09-13-speechrail-macos26-workspace-redesign.md` returns no matches.
-- [ ] Token names and page/component names remain consistent across tasks.
-- [ ] The plan never authorizes direct model loading, arbitrary downloads, direct `launchctl`, or changes to the unrelated dirty worktree.
-- [ ] The plan distinguishes build/unit evidence from desktop visual and VoiceOver evidence.
+- [x] Every section of `docs/superpowers/specs/2026-09-13-speechrail-macos26-workspace-redesign-design.md` maps to at least one task above.
+- [x] `rg -n "TODO|TBD|FIXME|待定|占位" docs/superpowers/plans/2026-09-13-speechrail-macos26-workspace-redesign.md` returns no matches.
+- [x] Token names and page/component names remain consistent across tasks.
+- [x] The plan never authorizes direct model loading, arbitrary downloads, direct `launchctl`, or changes to the unrelated dirty worktree.
+- [x] The plan distinguishes build/unit evidence from desktop visual and VoiceOver evidence.
 
-- [ ] **Step 2: Run the focused UI test to verify it fails against the old labels.**
+- [x] **Step 2: Run the focused UI test to verify it fails against the old labels.**
 
 Run:
 
@@ -331,7 +331,7 @@ xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRa
 
 Expected: FAIL because the current UI still exposes `本机服务总览` and `模型管理`.
 
-- [ ] **Step 3: Replace the token constants with the approved semantic values.**
+- [x] **Step 3: Replace the token constants with the approved semantic values.**
 
 Implement the following public values in `SpeechRailDesignTokens.swift`:
 
@@ -358,7 +358,7 @@ Map `Palette.railSignal` to the system accent, `Palette.voiceAccent` to the Voic
 and use adaptive system colors for canvas, content, primary text, secondary text, healthy, attention and critical states.
 Remove `SpeechRailSurfaceLevel.panel` as the default content treatment; retain explicit navigation/control surface modifiers only.
 
-- [ ] **Step 4: Add shared semantic components and compile the App target.**
+- [x] **Step 4: Add shared semantic components and compile the App target.**
 
 Implement the shared views without `.glassEffect` on content rows:
 
@@ -384,13 +384,13 @@ scripts/macos_app_build.sh --configuration Debug
 
 Expected: BUILD SUCCEEDED and no old token compile errors.
 
-- [ ] **Step 5: Refactor the navigation shell and remove the fixed footer from rendered surfaces.**
+- [x] **Step 5: Refactor the navigation shell and remove the fixed footer from rendered surfaces.**
 
 Use native `Label` rows with `.tag(route)`, keep sidebar search, use `ServiceStatusBadge(compact: true)` in the service section header,
 and let the toolbar own the route title. Remove the route title duplication from page bodies and stop rendering
 `ServiceStatusFooterView` from all active pages. Keep toolbar refresh as a command that calls `model.refresh()`.
 
-- [ ] **Step 6: Run the focused UI test and commit the shell.**
+- [x] **Step 6: Run the focused UI test and commit the shell.**
 
 Run the same focused UI test from Step 2. Expected: PASS for navigation labels. Then:
 
@@ -414,7 +414,7 @@ git commit -m "refactor: establish macos 26 workspace shell"
 - Consumes `AppModel.service`, `health`, `profile`, `controlAgentStatus` and the existing `ControlCommand` API.
 - Produces a status conclusion, capability list, next-step action and developer Inspector without changing service ownership.
 
-- [ ] **Step 1: Add a failing UI assertion for conclusion-first service status.**
+- [x] **Step 1: Add a failing UI assertion for conclusion-first service status.**
 
 Add assertions that the overview contains the approved purpose and a next-step label:
 
@@ -426,7 +426,7 @@ XCTAssertTrue(app.buttons["运行预检"].exists)
 
 Expected: FAIL because the current overview has repeated `服务状态` cards and no `运行预检` action.
 
-- [ ] **Step 2: Replace the overview stack with a conclusion banner and scanable capability rows.**
+- [x] **Step 2: Replace the overview stack with a conclusion banner and scanable capability rows.**
 
 Render one `StatusBanner` at the top with:
 
@@ -440,12 +440,12 @@ SpeechRail 已准备好接收本机语音请求。
 Render ASR/TTS/实时语音/分人识别 as `VStack` rows with `Divider`, not four `CapabilityTile` glass cards.
 Place `运行预检` as the next-step action. Put start/stop/restart in a toolbar `Menu` and retain confirmation dialogs.
 
-- [ ] **Step 3: Make control-agent state inline and actionable.**
+- [x] **Step 3: Make control-agent state inline and actionable.**
 
 Remove the independent `speechRailSurface(.panel)` wrapper from `ControlAgentStatusView`; show title, impact and one recovery action as an inline status row or Inspector section. Preserve `register`, `openLoginItems`, `installAgent` and `unavailable` semantics.
 Update `ControlMenuView` to use the same `ServiceStatusBadge` and the same `ControlCommand` action closures.
 
-- [ ] **Step 4: Add the developer Inspector and verify UI behavior.**
+- [x] **Step 4: Add the developer Inspector and verify UI behavior.**
 
 Add `.inspector(isPresented:)` to the overview with service/version/backend/port and control-agent details. Default it closed unless
 `speechrail.showDeveloperDetails` is enabled. Run:
@@ -457,7 +457,7 @@ xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRa
 
 Expected: BUILD SUCCEEDED and the updated status page assertions pass.
 
-- [ ] **Step 5: Commit the service status surface.**
+- [x] **Step 5: Commit the service status surface.**
 
 ```bash
 git add macos/SpeechRailApp/SpeechRailApp/ServiceOverviewView.swift macos/SpeechRailApp/SpeechRailApp/ControlAgentStatusView.swift macos/SpeechRailApp/SpeechRailApp/ControlMenuView.swift macos/SpeechRailApp/SpeechRailAppUITests/SpeechRailAppUITests.swift
@@ -482,7 +482,7 @@ git commit -m "refactor: make service status conclusion-first"
 - Produces `AppModel.ModelAvailabilityState` values `.unknown`, `.available`, `.unsupported`, `.notReady` and `.failed`.
 - Keeps ControlKit schema version `1`; no mandatory wire field is introduced.
 
-- [ ] **Step 1: Add a failing runner test for the measured runtime error.**
+- [x] **Step 1: Add a failing runner test for the measured runtime error.**
 
 Add a shell fixture whose stderr contains:
 
@@ -498,14 +498,14 @@ xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRa
 
 Expected: FAIL because the current runner returns `.commandFailed`/generic failure.
 
-- [ ] **Step 2: Classify only the model capability rejection.**
+- [x] **Step 2: Classify only the model capability rejection.**
 
 Extend `ManagedCommandError` with `.unsupported`. Add a redacted diagnostic classifier that returns true only when the command is one of
 `.modelCatalog`, `.modelStatus`, `.modelPrepare` and stderr contains the known command-rejection forms (`invalid choice` plus `model`, or `no such command` plus `model`).
 Map it to `ControlErrorCode.unsupported` and the stable message `managed runtime does not support model control commands`.
 Leave all other stderr redaction and failure codes unchanged.
 
-- [ ] **Step 3: Add `ModelAvailabilityState` and fail closed in `AppModel.refreshModels()`.**
+- [x] **Step 3: Add `ModelAvailabilityState` and fail closed in `AppModel.refreshModels()`.**
 
 Implement:
 
@@ -522,7 +522,7 @@ public enum ModelAvailabilityState: Equatable, Sendable {
 When catalog/status returns `.unsupported`, set `.unsupported`, clear stale catalog/status data, and set user copy to
 `模型管理暂不可用：服务组件版本不匹配`. Do not retry or trigger download/profile changes. Set `.available` only after both catalog and status are read successfully.
 
-- [ ] **Step 4: Add the UI-test unsupported fixture and verify red/green behavior.**
+- [x] **Step 4: Add the UI-test unsupported fixture and verify red/green behavior.**
 
 Add `--ui-test-model-unsupported` handling in `SpeechRailApp` and make the fixture return `.unsupported` for model catalog/status.
 Add a UI test that opens `模型` and asserts:
@@ -534,7 +534,7 @@ XCTAssertTrue(app.buttons["打开诊断"].exists)
 
 Run the focused unit and UI tests. Expected: both PASS after implementation.
 
-- [ ] **Step 5: Commit the capability boundary.**
+- [x] **Step 5: Commit the capability boundary.**
 
 ```bash
 git add macos/SpeechRailApp/SpeechRailControlAgentCore/AgentCommandRunner.swift macos/SpeechRailApp/SpeechRailControlAgentCore/AgentOperationStore.swift macos/SpeechRailApp/SpeechRailApp/AppModel.swift macos/SpeechRailApp/SpeechRailApp/App.swift macos/SpeechRailApp/SpeechRailMacControlTests/AgentCoreTests.swift macos/SpeechRailApp/SpeechRailAppUITests/SpeechRailAppUITests.swift
