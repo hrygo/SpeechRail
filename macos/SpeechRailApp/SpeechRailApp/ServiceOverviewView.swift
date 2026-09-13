@@ -125,7 +125,7 @@ public struct ServiceOverviewView: View {
                 Button("停止服务") { pendingAction = .stop }
                 Button("重启服务") { pendingAction = .restart }
             }
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
             if let message = model.message {
                 Text(message)
                     .font(SpeechRailDesignTokens.Typography.secondary)

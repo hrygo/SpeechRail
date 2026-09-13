@@ -113,7 +113,7 @@ private final class ProgressRecorder: @unchecked Sendable {
 final class AgentCoreTests: XCTestCase {
     func testOperationJournalPersistsRedactedMetadataAndUpdatedAt() throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speechrail-journal-(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("speechrail-journal-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let journal = OperationJournal(
             fileURL: root.appendingPathComponent("control/active-operation.json")
@@ -140,8 +140,14 @@ final class AgentCoreTests: XCTestCase {
         let loaded = try XCTUnwrap(journal.load())
         let unrelated = root.appendingPathComponent("unrelated.txt")
         try Data("keep".utf8).write(to: unrelated)
+        let controlDirectory = root.appendingPathComponent("control", isDirectory: true)
+        let controlMode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: controlDirectory.path)[.posixPermissions]
+                as? NSNumber
+        ).intValue & 0o777
 
         XCTAssertTrue(raw.contains("updated_at"))
+        XCTAssertEqual(controlMode, 0o700)
         XCTAssertFalse(raw.contains("/Users/private/models"))
         XCTAssertFalse(raw.contains("super-secret"))
         XCTAssertEqual(loaded.updatedAt, updatedAt)
@@ -156,7 +162,7 @@ final class AgentCoreTests: XCTestCase {
 
     func testAgentStartupMarksActiveJournalAsInterruptedAndExposesItInModelStatus() async throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speechrail-recovery-(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("speechrail-recovery-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let journal = OperationJournal(appHome: root)
         let operation = OperationSnapshot(
@@ -228,7 +234,7 @@ final class AgentCoreTests: XCTestCase {
 
     func testTerminalOperationClearsActiveJournal() async throws {
         let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speechrail-terminal-(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("speechrail-terminal-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let journal = OperationJournal(appHome: root)
         let store = AgentOperationStore(runner: ModelStatusRunner(), journal: journal)

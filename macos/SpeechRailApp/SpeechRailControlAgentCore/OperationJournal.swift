@@ -47,9 +47,13 @@ public struct OperationJournal: Sendable {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: NSNumber(value: 0o700)]
         )
+        try fileManager.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o700)],
+            ofItemAtPath: directoryURL.path
+        )
 
         let temporaryURL = directoryURL.appendingPathComponent(
-            ".(fileURL.lastPathComponent).(UUID().uuidString).tmp",
+            ".\(fileURL.lastPathComponent).\(UUID().uuidString).tmp",
             isDirectory: false
         )
         defer { try? fileManager.removeItem(at: temporaryURL) }

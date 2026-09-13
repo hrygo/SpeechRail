@@ -15,6 +15,7 @@ public struct ModelManagementView: View {
                 SurfaceHeaderView(route: .models)
                 explanationPanel
                 GlassEffectContainer(spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    ControlAgentStatusView()
                     diskSummary
                     profilePicker
                     artifactStatusPanel
@@ -52,6 +53,7 @@ public struct ModelManagementView: View {
             }
         }
         .task {
+            model.refreshControlAgentStatus()
             await model.refreshModels()
             if let active = model.operation?.profile ?? model.profile?.preset {
                 selectedProfile = active
@@ -101,7 +103,7 @@ public struct ModelManagementView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
             }
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailSurface(.panel)

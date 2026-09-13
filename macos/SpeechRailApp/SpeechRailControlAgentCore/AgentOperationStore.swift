@@ -16,24 +16,28 @@ public actor AgentOperationStore {
         self.journal = journal
         if let journal {
             do {
-                if let entry = try journal.load(), entry.operation.command == .modelPrepare {
-                    switch entry.operation.state {
-                    case .accepted, .running:
-                        let interrupted = OperationSnapshot(
-                            operationID: entry.operation.operationID,
-                            command: entry.operation.command,
-                            profile: entry.operation.profile,
-                            state: .interrupted,
-                            phase: entry.operation.phase ?? "interrupted",
-                            progress: entry.operation.progress,
-                            errorCode: entry.operation.errorCode,
-                            message: "previous model preparation was interrupted; retry is required"
-                        )
-                        operations[interrupted.operationID] = interrupted
-                        try journal.save(interrupted)
-                    case .interrupted:
-                        operations[entry.operation.operationID] = entry.operation
-                    case .committed, .failed, .cancelled:
+                if let entry = try journal.load() {
+                    if entry.operation.command == .modelPrepare {
+                        switch entry.operation.state {
+                        case .accepted, .running:
+                            let interrupted = OperationSnapshot(
+                                operationID: entry.operation.operationID,
+                                command: entry.operation.command,
+                                profile: entry.operation.profile,
+                                state: .interrupted,
+                                phase: entry.operation.phase ?? "interrupted",
+                                progress: entry.operation.progress,
+                                errorCode: entry.operation.errorCode,
+                                message: "previous model preparation was interrupted; retry is required"
+                            )
+                            operations[interrupted.operationID] = interrupted
+                            try journal.save(interrupted)
+                        case .interrupted:
+                            operations[entry.operation.operationID] = entry.operation
+                        case .committed, .failed, .cancelled:
+                            try journal.clear()
+                        }
+                    } else {
                         try journal.clear()
                     }
                 }
