@@ -19,7 +19,7 @@
 
 ## 当前证据基线（只读）
 
-审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:37。
+审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:51。
 
 - 当前 managed profile 为 `quality`，generation 为 `102`。
 - 当前 `/health`、`/readyz` 为 ready；ASR、TTS、diarization、realtime VAD 均报告 ready。ASR/TTS/streaming 为 `cold_evicted`，含义是可按需加载，不是模型缺失。
@@ -240,7 +240,7 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 
 - [ ] 只读状态下观察至少两个刷新周期，核对更新时间、样本数和 worker 状态与 `/health`/`/metrics` 一致。
 - [ ] 模拟 metrics 暂时失败和服务恢复，确认旧数据保留、stale 明确、恢复后新快照替换。
-- [ ] 在 server contract 增加 memory/RTF 后补端到端数据对账；在此之前不得宣称“监控看板完整”。
+- [x] 在 server contract 中固化 memory/RTF 的字段与计算口径：`physical_memory_bytes`、预算、完整采样的 `physical_footprint_bytes`，以及 `speechrail_asr_rtf` / `speechrail_tts_rtf`；缺失 RTF 序列显示“未提供”，不改名 streaming latency。安装后的 live endpoint 对账仍待验收，未据源码构建宣称运行态完整。
 
 ## 7. 模型 `models`
 
@@ -362,4 +362,5 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - 2026-09-14 00:31：HTTP 错误 code fallback、voice ID 边界、创作候选并发注册门禁和 VoiceDesign/VoiceLibrary 列表 surface 完成收口；Debug 编译通过。
 - 2026-09-14 00:33：服务动作在控制通道不可用时统一 fail-closed；模型刷新/应用按钮、菜单状态和创作页状态均不再依据 stale service snapshot 放行；Debug 编译通过。
 - 2026-09-14 00:37：候选行移除嵌套 field 卡片，VoiceDesign/配音台补齐共享 developer inspector；模型 `ready == nil` 时显示“就绪状态未读取”而不依据 worker 状态过度推断；运行中 operation snapshot 在内存/XPC 出口统一脱敏；静态检查通过，自动化测试仍按用户要求暂停。
-- 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。
+- 2026-09-14 00:51：OpenAPI 与用户 API 契约补充 ASR/TTS RTF、资源快照和缺失值语义；监控脱敏摘要补齐同一采样中的请求、延迟、RTF 和实时会话字段；Debug 构建通过，未安装新实例，live endpoint 对账、真实模型操作和自动化测试仍按用户要求暂停。
+- 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试；作品重命名/删除/复用仍需先确定可恢复回收策略，当前不擅自扩展用户数据删除能力。

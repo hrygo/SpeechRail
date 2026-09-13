@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.1.1"
-date: 2026-09-13
+version: "2.1.2"
+date: 2026-09-14
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -154,6 +154,12 @@ Content-Type: application/json
 `seed` 仅属于质量档 VoiceDesign preview 的确定性采样参数；系统 VoiceDesign 音色使用其
 固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
 组合返回稳定错误，不以“已接受”暗示参数生效。
+
+`/metrics` 的结构化 JSON 视图中，`histograms` 的 `speechrail_asr_rtf` 定义为 ASR 推理时长 /
+已处理音频时长，`speechrail_tts_rtf` 定义为 TTS 推理时长 / 已生成音频时长。只有分母为正且
+存在有效观测时才会出现对应序列；缺失序列表示“未提供”，不是 0，也不能把实时流延迟改名为
+RTF。资源快照中的 `physical_memory_bytes`、`memory_budget_bytes` 与完整采样时的
+`physical_footprint_bytes` 也保持各自语义，模型磁盘大小不替代内存占用。
 
 `/metrics` 的 TTS 交付计数只使用固定事件标签：`planner_chunk`、参考缓存命中/未命中/淘汰、
 `abort_fallback` 与 `reload`。它们用于比较同一 runtime 与 profile 下的实现路径，不含文本、

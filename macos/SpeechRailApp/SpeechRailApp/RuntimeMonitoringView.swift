@@ -563,6 +563,18 @@ public struct RuntimeMonitoringView: View {
         sample_count: \(model.monitoringSamples.count)/60
         freshness: \(freshnessTitle)
 
+        metrics:
+        - active_requests: \(latestSample.map { String($0.activeRequests) } ?? "未提供")
+        - pending_requests: \(latestSample.map { String($0.pendingRequests) } ?? "未提供")
+        - request_rate: \(latestSample?.requestRatePerSecond.map(formatRate) ?? "未提供")
+        - queue_rejections: \(latestSample?.queueRejections.map(formatCount) ?? "未提供")
+        - asr_latency: \(latestSample?.asrLatencySeconds.map(formatSeconds) ?? "未提供")
+        - tts_latency: \(latestSample?.ttsLatencySeconds.map(formatSeconds) ?? "未提供")
+        - asr_rtf: \(latestSample?.asrRTF.map(formatRTF) ?? "未提供")
+        - tts_rtf: \(latestSample?.ttsRTF.map(formatRTF) ?? "未提供")
+        - tts_ttfa: \(latestSample?.ttsTTFASeconds.map(formatSeconds) ?? "未提供")
+        - active_realtime_sessions: \(latestSample?.activeRealtimeSessions.map(String.init) ?? "未提供")
+
         workers:
         \(workerLines.isEmpty ? "- 未提供" : workerLines)
 
