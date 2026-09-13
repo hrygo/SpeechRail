@@ -33,7 +33,8 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
             range: firstTimestamp ... max(lastTimestamp, firstTimestamp + 1),
             gridlinePositions: [],
             valueDescriptionProvider: { value in
-                "时间戳 \(Int(value))"
+                Date(timeIntervalSince1970: value)
+                    .formatted(.dateTime.hour().minute().second())
             }
         )
         let maximumRequests = max(
