@@ -87,6 +87,7 @@ public final class AppModel {
     public private(set) var isCreatingSpeech = false
     public private(set) var isCreatingVoicePreview = false
     public private(set) var isRegisteringVoice = false
+    public private(set) var isDeletingVoice = false
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
     public private(set) var worksMessage: String?
@@ -232,6 +233,32 @@ public final class AppModel {
         } catch {
             creatorMessage = Self.creatorErrorMessage(for: error)
             return nil
+        }
+    }
+
+    public func deleteVoice(_ voice: CreatorVoice) async -> Bool {
+        guard !voice.isSystem else {
+            creatorMessage = "系统音色受保护，不能删除"
+            return false
+        }
+        guard !isDeletingVoice else { return false }
+
+        isDeletingVoice = true
+        creatorMessage = nil
+        defer { isDeletingVoice = false }
+        do {
+            try await creatorClient.deleteVoice(id: voice.id)
+            if playingVoiceID == voice.id {
+                stopAudio()
+            }
+            await refreshCreatorVoices()
+            creatorMessage = nil
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            creatorMessage = Self.creatorErrorMessage(for: error)
+            return false
         }
     }
 

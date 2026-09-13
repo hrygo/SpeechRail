@@ -134,10 +134,10 @@
 
 - [x] 列表来自 `GET /v1/voices`；系统音色和自定义音色分组真实反映响应。
 - [x] 试听调用 `POST /v1/audio/speech` 并使用 `AudioPlaybackController`，不是空闭包或静音假反馈。
-- [ ] 接入服务端已有的 voice delete 能力（若产品确认允许删除），并实现确认、进行中、成功、失败、误删恢复/刷新；没有 delete 契约时先补契约，不在 App 内伪造删除。
+- [x] 已接入服务端已有的 voice delete 能力：仅自定义音色显示删除，先确认，再调用 `DELETE /v1/voices/{voice_id}`，支持进行中、成功、服务端失败和刷新；系统音色保持保护。
 - [ ] 核实 voice response 是否包含 tags、created time、model source、关联作品所需字段；字段不存在时不要在 UI 生成假值，应补 API 或明确“未提供”。
 - [ ] 设计音色详情 inspector：普通用户看用途/试听/使用入口，开发者看安全的 model source、variant、availability 和关联关系。
-- [ ] 对服务端名称、description、instruction 等不可信文本设置行数、截断和详情展开边界；当前 live metadata 已证明超长内容会出现。
+- [x] 对服务端 description 设置两行截断；列表同时展示 type、variant 和可用时的创建日期，超长 live metadata 不再撑开列表布局。instruction/detail inspector 边界仍待补。
 
 ### Token / UX 审查
 
@@ -324,4 +324,5 @@
 - 2026-09-13 23:07：模型页补充目标档位 VoiceDesign 能力事实，并明确当前服务档位/运行制品与目标档位的区别；Debug 编译通过。
 - 2026-09-13 23:09：音色创作页统一试听/注册参考文案，补齐候选非持久化说明与注册状态文案；Debug 编译通过。
 - 2026-09-13 23:11：配音台明确“生成并保存”语义，作品页补充本地 WAV 导出、导出失败反馈和独立作品存储错误状态；Debug 编译通过。
+- 2026-09-13 23:13：音色库接入自定义音色删除确认与真实 DELETE 请求，补齐删除状态/错误反馈及 description 截断；Debug 编译通过，未执行真实删除。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。

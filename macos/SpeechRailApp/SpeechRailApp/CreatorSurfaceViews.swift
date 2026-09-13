@@ -862,6 +862,9 @@ public struct VoiceLibraryView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
     @State private var sampleText = "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。"
+    @State private var pendingDeleteVoice: CreatorVoice?
+    @State private var isConfirmingDeletion = false
+    @State private var deletionMessage: String?
 
     public init() {}
 
@@ -894,12 +897,20 @@ public struct VoiceLibraryView: View {
             if let message = model.creatorMessage {
                 StatusBanner(
                     tone: .critical,
-                    title: "音色库暂不可用",
+                    title: "音色操作未完成",
                     message: message,
                     actionTitle: "重新加载"
                 ) {
                     Task { await model.refreshCreatorVoices() }
                 }
+            }
+
+            if let deletionMessage {
+                StatusBanner(
+                    tone: .healthy,
+                    title: "音色已删除",
+                    message: deletionMessage
+                )
             }
 
             if model.isRefreshingCreatorVoices && model.creatorVoices.isEmpty {
@@ -938,6 +949,29 @@ public struct VoiceLibraryView: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailField()
+        .confirmationDialog(
+            "确认删除音色？",
+            isPresented: $isConfirmingDeletion,
+            titleVisibility: .visible
+        ) {
+            if let voice = pendingDeleteVoice {
+                Button("删除“\(voice.name)”", role: .destructive) {
+                    let voiceToDelete = voice
+                    pendingDeleteVoice = nil
+                    Task {
+                        if await model.deleteVoice(voiceToDelete) {
+                            deletionMessage = "“\(voiceToDelete.name)” 已从当前服务音色库移除。"
+                        }
+                    }
+                }
+                .disabled(model.isDeletingVoice)
+            }
+            Button("取消", role: .cancel) {
+                pendingDeleteVoice = nil
+            }
+        } message: {
+            Text("仅删除当前服务中的自定义音色；系统音色不会受影响。正在使用中的音色可能无法删除。")
+        }
         .task {
             await model.refreshCreatorVoices()
         }
@@ -963,6 +997,7 @@ public struct VoiceLibraryView: View {
         let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
         let type = voice.isSystem ? "系统音色" : "自定义音色"
         let description = voice.description.isEmpty ? "服务端已注册，当前档位\(voice.available ? "可用" : "不可用")。" : voice.description
+        let metadata = voiceMetadata(for: voice, type: type)
         return HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: AppRoute.voiceLibrary.systemImage)
                 .font(.title2)
@@ -978,9 +1013,14 @@ public struct VoiceLibraryView: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
+                Text(metadata)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Text(description)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                 if !voice.available {
                     Text("当前档位不可用")
                         .font(SpeechRailDesignTokens.Typography.caption)
@@ -1005,8 +1045,36 @@ public struct VoiceLibraryView: View {
             .speechRailButton(.secondary)
             .disabled(!voice.available || model.isCreatingSpeech)
             .accessibilityLabel("\(voice.name)\(isPlaying ? "停止试听" : "试听")")
+
+            if !voice.isSystem {
+                Button(role: .destructive) {
+                    deletionMessage = nil
+                    pendingDeleteVoice = voice
+                    isConfirmingDeletion = true
+                } label: {
+                    Label("删除", systemImage: "trash")
+                }
+                .speechRailButton(.quiet)
+                .tint(SpeechRailDesignTokens.Color.critical)
+                .disabled(model.isDeletingVoice)
+                .accessibilityLabel("删除自定义音色：\(voice.name)")
+            }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+    }
+
+    private func voiceMetadata(for voice: CreatorVoice, type: String) -> String {
+        var values = [type]
+        if let variant = voice.variant, !variant.isEmpty {
+            values.append(variant.replacingOccurrences(of: "_", with: " "))
+        }
+        if voice.createdAt > 0 {
+            values.append(
+                Date(timeIntervalSince1970: voice.createdAt)
+                    .formatted(date: .abbreviated, time: .omitted)
+            )
+        }
+        return values.joined(separator: " · ")
     }
 
     private var systemVoices: [CreatorVoice] {

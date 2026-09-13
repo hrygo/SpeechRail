@@ -129,6 +129,18 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return response.voice
     }
 
+    public func deleteVoice(id: String) async throws {
+        guard !id.isEmpty, !id.contains("/") else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        let request = try makeRequest(
+            path: "/v1/voices/\(id)",
+            method: "DELETE",
+            accept: "application/json"
+        )
+        _ = try await execute(request)
+    }
+
     private func get<Value: Decodable>(path: String) async throws -> Value {
         let request = try makeRequest(path: path, method: "GET", accept: "application/json")
         let (data, _) = try await execute(request)
