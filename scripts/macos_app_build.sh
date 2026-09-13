@@ -36,9 +36,6 @@ while (($# > 0)); do
   esac
 done
 
-DERIVED_DATA="$ROOT_DIR/build/macos-derived-data"
-mkdir -p "$DERIVED_DATA"
-
 if [[ "$ACTION" == "archive" ]]; then
   ARCHIVE_PATH="$ROOT_DIR/build/SpeechRail.xcarchive"
   xcodebuild \
@@ -57,6 +54,18 @@ if [[ "$ACTION" == "archive" ]]; then
       -exportPath "$EXPORT_PATH"
   fi
 else
+  DERIVED_DATA="$(mktemp -d "${TMPDIR:-/tmp}/speechrail-macos-build.XXXXXX")"
+  LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
+
+  cleanup_build_artifacts() {
+    "$LSREGISTER" -u \
+      "$DERIVED_DATA/Build/Products/$CONFIGURATION/SpeechRail.app" \
+      >/dev/null 2>&1 || true
+    /bin/rm -rf "$DERIVED_DATA"
+  }
+
+  trap cleanup_build_artifacts EXIT
+
   xcodebuild \
     -project "$PROJECT" \
     -scheme SpeechRailApp \

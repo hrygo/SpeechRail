@@ -7,7 +7,14 @@ final class SpeechRailAppUITests: XCTestCase {
         app.launchArguments = ["--ui-test"]
         app.launch()
         app.activate()
-        app.typeKey(",", modifierFlags: .command)
+
+        // Open Settings through the status-item menu, not synthetic keyboard input.
+        let statusItem = app.menuBars.statusItems.firstMatch
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        let settingsMenuItem = statusItem.menus.firstMatch.menuItems["打开设置"]
+        XCTAssertTrue(settingsMenuItem.waitForExistence(timeout: 2))
+        settingsMenuItem.click()
 
         XCTAssertTrue(app.staticTexts["SpeechRail"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["服务状态"].waitForExistence(timeout: 5))
