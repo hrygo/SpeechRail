@@ -42,11 +42,16 @@ public struct PageIntroView: View {
     }
 
     public var body: some View {
-        Text(route.purpose)
-            .font(SpeechRailDesignTokens.Typography.body)
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel(route.purpose)
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Capsule()
+                .fill(SpeechRailDesignTokens.Color.rail)
+                .frame(width: 3, height: 14)
+            Text(route.purpose)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(route.purpose)
     }
 }
 

@@ -547,8 +547,14 @@ private struct ProfileChoiceRow: View {
                 isSelected
                     ? SpeechRailDesignTokens.Surface.selectedFill
                     : Color.clear,
-                in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
+                in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
             )
+            .overlay {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+                        .stroke(SpeechRailDesignTokens.Color.rail.opacity(0.35), lineWidth: 1)
+                }
+            }
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(profile.rawValue)

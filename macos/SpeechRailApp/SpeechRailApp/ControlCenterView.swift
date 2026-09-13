@@ -112,7 +112,13 @@ public struct ControlCenterView: View {
                 if let profile = model.profile?.preset {
                     Text(profile.rawValue)
                         .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.titanium)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            SpeechRailDesignTokens.Color.titanium.opacity(0.12),
+                            in: Capsule()
+                        )
                 }
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
@@ -200,8 +206,18 @@ public struct ControlCenterView: View {
         } label: {
             Label {
                 Text(route.title)
+                    .foregroundStyle(
+                        selection == route
+                            ? SpeechRailDesignTokens.Color.ink
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
             } icon: {
                 Image(systemName: route.systemImage)
+                    .foregroundStyle(
+                        selection == route
+                            ? SpeechRailDesignTokens.Color.rail
+                            : SpeechRailDesignTokens.Color.titanium
+                    )
             }
         }
         .buttonStyle(.plain)

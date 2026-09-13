@@ -59,14 +59,17 @@ struct SpeechRailApp: App {
             ControlCenterView()
                 .environment(model)
                 .environment(navigation)
+                .tint(SpeechRailDesignTokens.Color.rail)
         }
         MenuBarExtra("SpeechRail", systemImage: "waveform") {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)
+                .tint(SpeechRailDesignTokens.Color.rail)
         }
         Settings {
             SettingsView()
+                .tint(SpeechRailDesignTokens.Color.rail)
         }
     }
 }

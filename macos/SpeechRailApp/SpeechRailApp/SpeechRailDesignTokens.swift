@@ -309,12 +309,25 @@ public struct SpeechRailFieldModifier: ViewModifier {
             )
             .overlay {
                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .stroke(SpeechRailDesignTokens.Surface.hairlineStroke, lineWidth: 0.5)
+                    .strokeBorder(
+                        LinearGradient(
+                            stops: [
+                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.specularChamfer : Color.white.opacity(0.4), location: 0),
+                                .init(color: SpeechRailDesignTokens.Surface.cardStroke, location: 0.15),
+                                .init(color: SpeechRailDesignTokens.Surface.hairlineStroke, location: 1.0)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.5
+                    )
             }
     }
 }
 
 public struct SpeechRailContentSurfaceModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
     public init() {}
 
     public func body(content: Content) -> some View {
@@ -323,9 +336,28 @@ public struct SpeechRailContentSurfaceModifier: ViewModifier {
                 SpeechRailDesignTokens.Color.field,
                 in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
             )
+            .shadow(
+                color: colorScheme == .dark
+                    ? SpeechRailDesignTokens.Surface.ambientShadow
+                    : Color.black.opacity(0.04),
+                radius: 4,
+                x: 0,
+                y: 1.5
+            )
             .overlay {
                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .stroke(SpeechRailDesignTokens.Surface.hairlineStroke, lineWidth: 0.5)
+                    .strokeBorder(
+                        LinearGradient(
+                            stops: [
+                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.specularChamfer : Color.white.opacity(0.5), location: 0),
+                                .init(color: SpeechRailDesignTokens.Surface.cardStroke, location: 0.15),
+                                .init(color: SpeechRailDesignTokens.Surface.hairlineStroke, location: 1.0)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        ),
+                        lineWidth: 0.75
+                    )
             }
     }
 }
