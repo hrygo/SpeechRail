@@ -13,6 +13,7 @@ public struct ServiceOverviewView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 SurfaceHeaderView(route: .overview)
                 readinessCard
+                ControlAgentStatusView()
                 capabilityGrid
                 serviceControls
                 technicalDetails

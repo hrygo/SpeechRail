@@ -17,6 +17,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["运行监控"].exists)
         XCTAssertTrue(app.buttons["模型管理"].exists)
         XCTAssertTrue(app.staticTexts["服务状态"].exists)
+        XCTAssertTrue(app.staticTexts["本地控制通道已就绪"].exists)
 
         app.buttons["音色创作"].click()
         XCTAssertTrue(app.staticTexts["音色创作"].waitForExistence(timeout: 2))
@@ -59,6 +60,16 @@ final class SpeechRailAppUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["等待监控样本"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["运行监控"].exists)
+    }
+
+    func testModelRecoveryRestoresInterruptedOperationAndRetryAction() {
+        let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-model-recovery"])
+        openControlCenter(in: app)
+        app.buttons["模型管理"].tap()
+
+        XCTAssertTrue(app.staticTexts["上次准备被中断"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["重新下载并校验"].exists)
+        XCTAssertFalse(app.buttons["停止下载"].exists)
     }
 
     func testSettingsContainAppPreferencesOnly() {

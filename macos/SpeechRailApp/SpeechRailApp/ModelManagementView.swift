@@ -51,11 +51,14 @@ public struct ModelManagementView: View {
         }
         .task {
             await model.refreshModels()
-            if let active = model.profile?.preset {
+            if let active = model.operation?.profile ?? model.profile?.preset {
                 selectedProfile = active
             }
         }
         .onChange(of: model.profile?.preset) { _, value in
+            if let value { selectedProfile = value }
+        }
+        .onChange(of: model.operation?.profile) { _, value in
             if let value { selectedProfile = value }
         }
     }
@@ -174,11 +177,21 @@ public struct ModelManagementView: View {
         Group {
             if let operation = model.operation,
                operation.command == .modelPrepare,
-               operation.state == .accepted || operation.state == .running
+               operation.state == .accepted || operation.state == .running || operation.state == .interrupted
             {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Label("正在准备模型", systemImage: "arrow.down.circle")
+                    Label(
+                        operation.state == .interrupted ? "上次准备被中断" : "正在准备模型",
+                        systemImage: operation.state == .interrupted
+                            ? "exclamationmark.triangle"
+                            : "arrow.down.circle"
+                    )
                         .font(SpeechRailDesignTokens.Typography.panelTitle)
+                    if operation.state == .interrupted {
+                        Text("控制 Agent 曾在准备过程中重启，当前文件状态需要重新校验。请重新下载并校验，不会伪造续传。")
+                            .font(SpeechRailDesignTokens.Typography.secondary)
+                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    }
                     Text(operation.phase ?? "等待开始")
                         .font(SpeechRailDesignTokens.Typography.secondary)
                     if let progress = operation.progress {
@@ -199,8 +212,14 @@ public struct ModelManagementView: View {
                                 .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                         }
                     }
-                    Button("停止下载") {
-                        Task { await model.cancelCurrentOperation() }
+                    if operation.state == .interrupted {
+                        Button("重新下载并校验") {
+                            pendingAction = .download
+                        }
+                    } else {
+                        Button("停止下载") {
+                            Task { await model.cancelCurrentOperation() }
+                        }
                     }
                 }
                 .padding(SpeechRailDesignTokens.Spacing.lg)

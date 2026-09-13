@@ -17,6 +17,7 @@ public final class AppModel {
     public private(set) var monitoringSamples: [RuntimeMetricsSample] = []
     public private(set) var message: String?
     public private(set) var isBusy = false
+    public private(set) var controlAgentStatus: ControlAgentStatusSnapshot
 
     private let transport: any SpeechRailControlTransport
     private let apiClient: any ServiceDiagnosticsClient
@@ -30,9 +31,12 @@ public final class AppModel {
         self.transport = transport
         self.apiClient = apiClient
         self.registration = registration
+        self.controlAgentStatus = registration?.statusSnapshot
+            ?? ControlAgentStatusSnapshot(kind: .local)
     }
 
     public func refresh() async {
+        refreshControlAgentStatus()
         do {
             let snapshot = try await apiClient.fetchHealthSnapshot()
             health = snapshot
@@ -64,10 +68,40 @@ public final class AppModel {
             let status = try await transport.send(ControlRequest(command: .modelStatus))
             if let modelStatus = status.modelStatus {
                 self.modelStatus = modelStatus
+                if let activeOperation = modelStatus.activeOperation {
+                    operation = activeOperation
+                } else if operation?.command == .modelPrepare {
+                    operation = nil
+                }
+            }
+            if let warning = status.message, !warning.isEmpty {
+                message = warning
             }
         } catch {
             message = Self.controlErrorMessage(for: error, fallback: "模型状态暂时不可用")
         }
+    }
+
+    public func refreshControlAgentStatus() {
+        controlAgentStatus = registration?.statusSnapshot
+            ?? ControlAgentStatusSnapshot(kind: .local)
+    }
+
+    public func enableControlAgent() {
+        guard let registration else { return }
+        refreshControlAgentStatus()
+        guard controlAgentStatus.kind == .notRegistered else { return }
+        do {
+            try registration.register()
+            refreshControlAgentStatus()
+            message = controlAgentStatus.title
+        } catch {
+            message = "无法启用控制 Agent：\(Self.controlAgentErrorMessage(for: error))"
+        }
+    }
+
+    public func openControlAgentSettings() {
+        registration?.openLoginItemsSettings()
     }
 
     public func refreshMonitoring() async {
@@ -109,6 +143,7 @@ public final class AppModel {
     }
 
     public func cancelCurrentOperation() async {
+        guard canExecuteMutation(for: .operationCancel) else { return }
         guard let operationID = operation?.operationID else { return }
         do {
             let response = try await transport.send(
@@ -128,12 +163,15 @@ public final class AppModel {
         profile selectedProfile: SpeechRailProfile? = nil
     ) async {
         guard !isBusy else { return }
+        guard canExecuteMutation(for: command) else { return }
         isBusy = true
         message = nil
         defer { isBusy = false }
 
         do {
-            try registration?.ensureRegisteredForCurrentBundle()
+            if command.isMutation {
+                try registration?.ensureRegisteredForCurrentBundle()
+            }
             let response = try await transport.send(
                 ControlRequest(
                     command: command,
@@ -169,9 +207,9 @@ public final class AppModel {
                 )
                 operation = response.operation
                 if let state = response.operation?.state,
-                   state == .committed || state == .failed || state == .cancelled
+                   state == .committed || state == .failed || state == .cancelled || state == .interrupted
                 {
-                    if state == .failed || state == .cancelled {
+                    if state == .failed || state == .cancelled || state == .interrupted {
                         message = response.operation?.message ?? response.message ?? "操作失败"
                     }
                     return
@@ -185,14 +223,37 @@ public final class AppModel {
     }
 
     private static func controlErrorMessage(for error: Error, fallback: String) -> String {
+        if let error = error as? ControlAgentRegistrationError {
+            return controlAgentErrorMessage(for: error)
+        }
         guard let error = error as? XPCControlTransportError else { return fallback }
         switch error {
         case .timeout:
             return "控制 Agent 响应超时，请重新打开 SpeechRail"
         case let .remote(detail) where !detail.isEmpty:
             return "控制 Agent 不可用：\(detail)"
-        default:
-            return fallback
+            default:
+                return fallback
         }
+    }
+
+    private static func controlAgentErrorMessage(for error: Error) -> String {
+        guard let error = error as? ControlAgentRegistrationError else {
+            return "系统授权状态不可用"
+        }
+        switch error {
+        case let .notEnabled(kind):
+            return ControlAgentStatusSnapshot(kind: kind).detail
+        }
+    }
+
+    private func canExecuteMutation(for command: ControlCommand) -> Bool {
+        guard command.isMutation else { return true }
+        refreshControlAgentStatus()
+        guard controlAgentStatus.allowsMutation else {
+            message = "\(controlAgentStatus.title)：\(controlAgentStatus.detail)"
+            return false
+        }
+        return true
     }
 }

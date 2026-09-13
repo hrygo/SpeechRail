@@ -16,6 +16,9 @@ struct SpeechRailApp: App {
                 ),
                 modelPrepareFails: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-model-failure"
+                ),
+                modelRecovery: ProcessInfo.processInfo.arguments.contains(
+                    "--ui-test-model-recovery"
                 )
             )
             : usesBundledXPCService
@@ -31,15 +34,6 @@ struct SpeechRailApp: App {
             )
             : ServiceAPIClient()
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
-        if usesBundledXPCService {
-            // A previous ad-hoc build may have left a failed SMAppService job
-            // behind. Local XPC service mode owns control for this build.
-            try? ControlAgentRegistration().unregister()
-        }
-        if let registration {
-            // Refresh SMAppService only when the embedded helper changed.
-            try? registration.ensureRegisteredForCurrentBundle()
-        }
         _model = State(
             initialValue: AppModel(
                 transport: transport,
@@ -182,15 +176,18 @@ private actor UITestOperationState {
 private struct UITestControlTransport: SpeechRailControlTransport {
     private let profileApplyFails: Bool
     private let modelPrepareFails: Bool
+    private let modelRecovery: Bool
     private let operationState: UITestOperationState
 
     init(
         profileApplyFails: Bool = false,
         modelPrepareFails: Bool = false,
+        modelRecovery: Bool = false,
         operationState: UITestOperationState = UITestOperationState()
     ) {
         self.profileApplyFails = profileApplyFails
         self.modelPrepareFails = modelPrepareFails
+        self.modelRecovery = modelRecovery
         self.operationState = operationState
     }
 
@@ -256,7 +253,23 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                             totalFileCount: 1
                         )
                     ],
-                    disk: ModelDiskSnapshot(modelBytes: 0, freeBytes: 0)
+                    disk: ModelDiskSnapshot(modelBytes: 0, freeBytes: 0),
+                    activeOperation: modelRecovery
+                        ? OperationSnapshot(
+                            operationID: "ui-test-recovered-model",
+                            command: .modelPrepare,
+                            profile: .quality,
+                            state: .interrupted,
+                            phase: "download",
+                            progress: OperationProgressSnapshot(
+                                artifactKey: "fake-asr",
+                                file: "fixture.bin",
+                                completedBytes: 64,
+                                expectedBytes: 128
+                            ),
+                            message: "previous model preparation was interrupted; retry is required"
+                        )
+                        : nil
                 )
             )
         case .preflight:

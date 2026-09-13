@@ -12,6 +12,7 @@ public struct PreflightDiagnosticsView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 SurfaceHeaderView(route: .diagnostics)
                 explanationPanel
+                ControlAgentStatusView()
                 resultPanel
                 recoveryPanel
                 ServiceStatusFooterView()
@@ -22,7 +23,10 @@ public struct PreflightDiagnosticsView: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
-        .task { await model.refreshPreflight() }
+        .task {
+            model.refreshControlAgentStatus()
+            await model.refreshPreflight()
+        }
     }
 
     private var explanationPanel: some View {
