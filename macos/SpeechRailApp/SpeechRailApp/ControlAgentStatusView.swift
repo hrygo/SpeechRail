@@ -44,11 +44,13 @@ struct ControlAgentStatusView: View {
             Button("启用控制 Agent") {
                 model.enableControlAgent()
             }
+            .speechRailButton(.secondary)
             .accessibilityIdentifier("enable-control-agent")
         case .openLoginItems:
             Button("打开登录项设置") {
                 model.openControlAgentSettings()
             }
+            .speechRailButton(.secondary)
             .accessibilityIdentifier("open-login-items")
         case .installAgent:
             Text("请重新安装包含控制 Agent 的 SpeechRail 应用包。")

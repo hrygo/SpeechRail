@@ -679,7 +679,7 @@ public struct ServiceOperationStatusView: View {
                         .controlSize(.small)
                         .tint(SpeechRailDesignTokens.Color.rail)
                 }
-                Text(operation.message ?? defaultMessage)
+                Text(SpeechRailOperationMessagePresentation.text(operation.message ?? defaultMessage))
                     .font(SpeechRailDesignTokens.Typography.secondary)
                     .foregroundStyle(tone.color)
                     .lineLimit(2)
@@ -693,7 +693,9 @@ public struct ServiceOperationStatusView: View {
         .padding(SpeechRailDesignTokens.Spacing.md)
         .speechRailField()
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(operationTitle)，\(operation.message ?? defaultMessage)")
+        .accessibilityLabel(
+            "\(operationTitle)，\(SpeechRailOperationMessagePresentation.text(operation.message ?? defaultMessage))"
+        )
     }
 
     private var commandTitle: String {

@@ -151,7 +151,7 @@ public struct ControlMenuView: View {
         if model.controlPlaneMessage != nil {
             return "服务状态已读取，但控制通道不可用"
         }
-        if model.service.ready == true {
+        if model.health?.ready == true {
             if !model.controlAgentStatus.allowsMutation {
                 return "本机服务已就绪，但控制受限"
             }

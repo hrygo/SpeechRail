@@ -395,7 +395,7 @@ public struct PreflightDiagnosticsView: View {
         if normalized.contains("tts") {
             return "确认语音合成能力的配置、制品和运行状态满足启动条件。"
         }
-        return "确认 \(name) 满足 SpeechRail 服务运行的前置条件。"
+        return "确认 \(checkTitle(for: name)) 满足 SpeechRail 服务运行的前置条件。"
     }
 
     private func resultMessage(for check: PreflightCheckSnapshot) -> String {

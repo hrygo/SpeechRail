@@ -489,10 +489,14 @@ public struct VoiceDesignView: View {
                     }
                     .padding(SpeechRailDesignTokens.Spacing.lg)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .speechRailField()
+                    .speechRailContentSurface()
                 } else {
-                    VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        ForEach(candidates) { candidate in
+                    VStack(spacing: 0) {
+                        ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                            if index > 0 {
+                                Divider()
+                                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                            }
                             CandidateRackRow(
                                 candidate: candidate,
                                 isPlaying: playingSlot == candidate.slot && model.isAudioPlaying,
@@ -504,6 +508,7 @@ public struct VoiceDesignView: View {
                             )
                         }
                     }
+                    .speechRailContentSurface()
                 }
             }
         }
@@ -648,7 +653,7 @@ public struct VoiceDesignView: View {
         guard health.profile == .quality else {
             return .requiresQuality
         }
-        guard health.status == "ok", health.ttsReady == true, model.service.ready == true else {
+        guard health.status == "ok", health.ttsReady == true, model.health?.ready == true else {
             return .serviceUnavailable
         }
 
@@ -1086,7 +1091,7 @@ public struct VoiceLibraryView: View {
                 ProgressView("正在读取服务端音色…")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(SpeechRailDesignTokens.Spacing.lg)
-                    .speechRailField()
+                    .speechRailContentSurface()
             } else if model.creatorVoices.isEmpty {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Label("当前没有可用音色", systemImage: AppRoute.voiceLibrary.systemImage)
@@ -1106,7 +1111,7 @@ public struct VoiceLibraryView: View {
                     }
                 }
                 .padding(SpeechRailDesignTokens.Spacing.lg)
-                .speechRailField()
+                .speechRailContentSurface()
             } else {
                 voiceListSurface
             }

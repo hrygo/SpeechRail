@@ -737,8 +737,12 @@ public final class AppModel {
                 )
             )
             operation = response.operation
-            if response.status == .failed {
-                let failureMessage = response.message ?? "操作失败"
+            if response.status == .failed
+                || response.status == .cancelled
+                || response.status == .rolledBack
+            {
+                let fallbackMessage = response.status == .cancelled ? "操作已取消" : "操作未完成"
+                let failureMessage = response.message ?? fallbackMessage
                 message = failureMessage
                 if serviceMutation != nil {
                     serviceOperation = ServiceOperationStatus(
