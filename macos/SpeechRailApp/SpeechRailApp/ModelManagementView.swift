@@ -181,12 +181,17 @@ public struct ModelManagementView: View {
                 }
             }
             Divider()
-            Text("当前服务档位")
+            Text("当前运行档位")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            Text(model.profile?.preset.map { profileTitle(for: $0) } ?? "未读取")
+            Text(currentServiceProfile.map { profileTitle(for: $0) } ?? "未读取")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            if let configuredProfile = configuredProfile {
+                Text("配置档位：\(profileTitle(for: configuredProfile))")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailField()
@@ -203,6 +208,7 @@ public struct ModelManagementView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
 
+            profileContext
             profileFacts
             Divider()
             artifactSection
@@ -231,6 +237,43 @@ public struct ModelManagementView: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailField()
+    }
+
+    private var profileContext: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+            profileContextValue(
+                title: "目标档位",
+                value: profileTitle(for: selectedProfile),
+                tone: .neutral
+            )
+            Divider()
+                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
+            profileContextValue(
+                title: "当前服务",
+                value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取",
+                tone: currentServiceProfile == selectedProfile ? .healthy : .attention
+            )
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("模型档位上下文")
+        .accessibilityValue(profileContextAccessibilityValue)
+    }
+
+    private func profileContextValue(
+        title: String,
+        value: String,
+        tone: StatusTone
+    ) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Text(value)
+                .font(SpeechRailDesignTokens.Typography.label)
+                .foregroundStyle(tone.color)
+                .lineLimit(1)
+        }
     }
 
     private var profileFacts: some View {
@@ -293,6 +336,7 @@ public struct ModelManagementView: View {
                                     artifact: artifact,
                                     status: status(for: artifact),
                                     usage: usage(for: artifact),
+                                    targetProfile: selectedProfile,
                                     selected: selectedArtifactKey == artifact.key
                                 )
                             }
@@ -356,6 +400,7 @@ public struct ModelManagementView: View {
                 title: "下一步",
                 detail: "下载只准备本机资产；应用档位才会改变服务配置。两项动作都会先确认影响。"
             )
+            modelReadinessSummary
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Button {
                     pendingAction = .download
@@ -398,6 +443,30 @@ public struct ModelManagementView: View {
         }
     }
 
+    private var modelReadinessSummary: some View {
+        let presentation = modelReadinessPresentation
+        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: presentation.systemImage)
+                .font(SpeechRailDesignTokens.Typography.statusIcon)
+                .foregroundStyle(presentation.tone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(presentation.title)
+                    .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(presentation.detail)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(presentation.title)
+        .accessibilityValue(presentation.detail)
+    }
+
     @ViewBuilder
     private var modelInspector: some View {
         DeveloperInspector {
@@ -409,12 +478,24 @@ public struct ModelManagementView: View {
                 LabeledContent("revision", value: artifact.revision)
                 LabeledContent("量化", value: quantizationText(for: artifact))
                 LabeledContent("文件", value: "\(artifact.fileCount) 个 · \(formatBytes(artifact.sizeBytes))")
+                LabeledContent(
+                    "适用档位",
+                    value: artifact.requiredBy.map { profileTitle(for: $0) }.joined(separator: "、")
+                )
                 if let status = status(for: artifact) {
                     Divider()
                     LabeledContent("存在状态", value: statusText(for: status))
                     LabeledContent("完整性", value: integrityText(for: status))
                 }
                 LabeledContent("VoiceDesign 能力", value: voiceDesignCapability(for: selectedProfile))
+                LabeledContent(
+                    "当前服务档位",
+                    value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
+                )
+                LabeledContent(
+                    "配置档位",
+                    value: configuredProfile.map { profileTitle(for: $0) } ?? "未读取"
+                )
                 LabeledContent("使用状态", value: usage(for: artifact).text)
                 if let operation = model.operation, let message = operation.message {
                     Divider()
@@ -447,6 +528,33 @@ public struct ModelManagementView: View {
     private var selectedArtifact: ModelArtifactSnapshot? {
         guard let key = selectedArtifactKey else { return nil }
         return visibleArtifacts.first(where: { $0.key == key })
+    }
+
+    /// `/health` is the source of truth for the profile the running service is
+    /// actually using. The XPC profile snapshot remains useful as the desired
+    /// configuration, but must not be presented as a running-state fact.
+    private var currentServiceProfile: SpeechRailProfile? {
+        model.health?.profile
+    }
+
+    private var configuredProfile: SpeechRailProfile? {
+        model.profile?.preset
+    }
+
+    private var profileContextAccessibilityValue: String {
+        let target = "目标档位：\(profileTitle(for: selectedProfile))"
+        let current = currentServiceProfile.map { "当前服务：\(profileTitle(for: $0))" }
+            ?? "当前服务：运行态未读取"
+        let consistency: String
+        switch (configuredProfile, currentServiceProfile) {
+        case let (.some(configured), .some(current)) where configured == current:
+            consistency = "配置与运行一致"
+        case (.some, .some):
+            consistency = "配置与运行不一致"
+        default:
+            consistency = "配置与运行一致性未确认"
+        }
+        return [target, current, consistency].joined(separator: "，")
     }
 
     private var visibleArtifacts: [ModelArtifactSnapshot] {
@@ -512,6 +620,75 @@ public struct ModelManagementView: View {
         missingDiarizationKeys.isEmpty
     }
 
+    private var modelReadinessPresentation: ModelReadinessPresentation {
+        guard summary(for: selectedProfile) != nil else {
+            return ModelReadinessPresentation(
+                systemImage: "questionmark.circle",
+                tone: .neutral,
+                title: "目标档位映射未读取",
+                detail: "暂时无法判断模型需求；请刷新模型状态。"
+            )
+        }
+        guard !visibleArtifacts.isEmpty else {
+            return ModelReadinessPresentation(
+                systemImage: "shippingbox",
+                tone: .attention,
+                title: "目标档位没有可用制品",
+                detail: "请检查受管 runtime 的模型目录，或打开诊断查看原因。"
+            )
+        }
+        if let operation = activeModelOperation,
+           operation.state == .accepted || operation.state == .running
+        {
+            let title = operation.command == .profileApply ? "正在应用目标档位" : "正在准备目标档位模型"
+            return ModelReadinessPresentation(
+                systemImage: operation.command == .profileApply
+                    ? "arrow.triangle.2.circlepath"
+                    : "arrow.down.circle",
+                tone: .attention,
+                title: title,
+                detail: "以 OperationBar 的阶段和进度为准，完成后会重新读取服务状态。"
+            )
+        }
+        guard profileArtifactsVerified else {
+            let detail = missingDiarizationKeys.isEmpty
+                ? "当前档位制品尚未全部通过文件与 SHA-256 校验。"
+                : "还需要校验：\(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))。"
+            return ModelReadinessPresentation(
+                systemImage: "arrow.down.circle",
+                tone: .attention,
+                title: "需要下载并校验",
+                detail: detail
+            )
+        }
+
+        if currentServiceProfile == selectedProfile,
+           configuredProfile == selectedProfile
+        {
+            return ModelReadinessPresentation(
+                systemImage: "checkmark.seal.fill",
+                tone: .healthy,
+                title: "制品已验证，当前服务正在使用此档位",
+                detail: "配置档位与运行档位一致；worker 是否常驻由运行态生命周期决定。"
+            )
+        }
+        if currentServiceProfile == selectedProfile {
+            return ModelReadinessPresentation(
+                systemImage: "checkmark.circle",
+                tone: .healthy,
+                title: "制品已验证，运行时正在使用此档位",
+                detail: "配置档位尚未完整读取，应用状态仍以新的 profile/health 回读为准。"
+            )
+        }
+        let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
+        return ModelReadinessPresentation(
+            systemImage: "checkmark.circle",
+            tone: .attention,
+            title: "制品已验证，可应用此档位",
+            detail: "当前服务为 \(current)；点击“应用此档位”后才会切换服务配置。"
+        )
+    }
+
     private var missingDiarizationKeys: [String] {
         requiredDiarizationKeys.filter { !isVerified(status(forKey: $0)) }
     }
@@ -548,34 +725,28 @@ public struct ModelManagementView: View {
     }
 
     private func usage(forKey key: String) -> ModelArtifactUsagePresentation {
-        guard let activeProfile = model.profile?.preset else {
-            return ModelArtifactUsagePresentation(
-                text: "当前服务档位未读取",
-                tone: .neutral
-            )
-        }
-        guard let activeSummary = summary(for: activeProfile) else {
-            return ModelArtifactUsagePresentation(
-                text: "当前档位模型映射未读取",
-                tone: .neutral
-            )
-        }
         guard let health = model.health else {
             return ModelArtifactUsagePresentation(
                 text: "运行状态未读取",
                 tone: .neutral
             )
         }
-        guard let healthProfile = health.profile else {
+        guard let runtimeProfile = health.profile else {
             return ModelArtifactUsagePresentation(
                 text: "运行档位未读取",
                 tone: .neutral
             )
         }
-        guard healthProfile == activeProfile else {
+        if let configuredProfile, configuredProfile != runtimeProfile {
             return ModelArtifactUsagePresentation(
-                text: "配置档位与运行时不一致",
+                text: "配置档位与运行时不一致 · 当前服务未确认使用",
                 tone: .critical
+            )
+        }
+        guard let activeSummary = summary(for: runtimeProfile) else {
+            return ModelArtifactUsagePresentation(
+                text: "当前服务档位模型映射未读取",
+                tone: .neutral
             )
         }
         guard let artifactStatus = status(forKey: key) else {
@@ -593,21 +764,21 @@ public struct ModelManagementView: View {
 
         if key == activeSummary.asr {
             return runtimeUsage(
-                label: "当前服务 · " + profileTitle(for: activeProfile) + " · ASR",
+                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · ASR",
                 ready: health.asrReady,
                 state: health.asrState
             )
         }
         if key == activeSummary.tts {
             return runtimeUsage(
-                label: "当前服务 · " + profileTitle(for: activeProfile) + " · TTS",
+                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · TTS",
                 ready: health.ttsReady,
                 state: health.ttsState
             )
         }
         if key == activeSummary.ttsClone {
             return runtimeUsage(
-                label: "当前服务 · " + profileTitle(for: activeProfile) + " · 克隆 TTS 备用",
+                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · 克隆 TTS 备用",
                 ready: health.ttsReady,
                 state: health.ttsState
             )
@@ -726,8 +897,13 @@ public struct ModelManagementView: View {
         case .download:
             downloadConfirmationTitle
         case .apply:
-            "确认应用 \(profileTitle(for: selectedProfile))？这会停止当前服务、切换档位、重新启动并执行健康检查。"
+            applyConfirmationTitle
         }
+    }
+
+    private var applyConfirmationTitle: String {
+        let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
+        return "确认应用 \(profileTitle(for: selectedProfile))？当前服务为 \(current)。这会更新服务配置、重新启动相关 worker，并回读健康状态；不会重新下载已验证制品。"
     }
 
     private var downloadConfirmationTitle: String {
@@ -776,20 +952,7 @@ public struct ModelManagementView: View {
     }
 
     private func statusText(for status: ModelArtifactStatusSnapshot) -> String {
-        return switch status.state {
-        case .verified:
-            status.integrity == .verified
-                ? "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
-                : "文件存在，但完整性校验未通过"
-        case .notDownloaded:
-            "未下载"
-        case .downloading:
-            "下载中"
-        case .invalid:
-            "校验不匹配，需要重新准备"
-        case .unknown:
-            "状态未知"
-        }
+        ModelArtifactStatusPresentation(status: status).summary
     }
 
     private func integrityText(for status: ModelArtifactStatusSnapshot) -> String {
@@ -893,28 +1056,89 @@ private struct ModelArtifactUsagePresentation {
     let tone: StatusTone
 }
 
+private struct ModelArtifactStatusPresentation {
+    let systemImage: String
+    let color: Color
+    let title: String
+    let detail: String
+
+    init(status: ModelArtifactStatusSnapshot?) {
+        guard let status else {
+            systemImage = "questionmark.circle"
+            color = SpeechRailDesignTokens.Color.inkSecondary
+            title = "未读取"
+            detail = "尚未读取本机文件状态"
+            return
+        }
+
+        switch status.state {
+        case .verified where status.integrity == .verified:
+            systemImage = "checkmark.seal.fill"
+            color = SpeechRailDesignTokens.Color.ready
+            title = "已验证"
+            detail = "\(status.verifiedFileCount)/\(status.totalFileCount) 个文件 · SHA-256 已匹配"
+        case .verified:
+            systemImage = "xmark.octagon.fill"
+            color = SpeechRailDesignTokens.Color.critical
+            title = "完整性失败"
+            detail = "文件存在 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件 · SHA-256 不匹配"
+        case .notDownloaded:
+            systemImage = "arrow.down.circle"
+            color = SpeechRailDesignTokens.Color.attention
+            title = "未下载"
+            detail = "未检测到已校验文件 · 需要下载并校验"
+        case .downloading:
+            systemImage = "arrow.down.circle.fill"
+            color = SpeechRailDesignTokens.Color.rail
+            title = "下载中"
+            detail = "已校验 \(status.verifiedFileCount)/\(status.totalFileCount) 个文件 · 等待操作完成"
+        case .invalid:
+            systemImage = "exclamationmark.octagon.fill"
+            color = SpeechRailDesignTokens.Color.critical
+            title = "校验失败"
+            detail = "文件存在但与锁定 revision 不一致 · 需要重新准备"
+        case .unknown:
+            systemImage = "questionmark.circle"
+            color = SpeechRailDesignTokens.Color.inkSecondary
+            title = "状态未知"
+            detail = "无法确认本机文件状态 · 请刷新或打开诊断"
+        }
+    }
+
+    var summary: String {
+        "\(title) · \(detail)"
+    }
+}
+
+private struct ModelReadinessPresentation {
+    let systemImage: String
+    let tone: StatusTone
+    let title: String
+    let detail: String
+}
+
 private struct ArtifactChoiceRow: View {
     let artifact: ModelArtifactSnapshot
     let status: ModelArtifactStatusSnapshot?
     let usage: ModelArtifactUsagePresentation
+    let targetProfile: SpeechRailProfile
     let selected: Bool
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: isVerified ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(
-                    isVerified
-                        ? SpeechRailDesignTokens.Color.ready
-                        : SpeechRailDesignTokens.Color.attention
-                )
+            Image(systemName: statusPresentation.systemImage)
+                .foregroundStyle(statusPresentation.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(artifact.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("存在：\(existenceText)")
+                Text("目标：\(SpeechRailProfilePresentation.title(targetProfile)) · 必需")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text("存在：\(statusPresentation.summary)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(statusPresentation.color)
                 Text("使用：\(usage.text)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(usage.tone.color)
@@ -933,30 +1157,14 @@ private struct ArtifactChoiceRow: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.key)
-        .accessibilityValue("存在：\(existenceText)，使用：\(usage.text)")
+        .accessibilityValue(
+            "目标：\(SpeechRailProfilePresentation.title(targetProfile))，存在：\(statusPresentation.summary)，使用：\(usage.text)"
+        )
         .accessibilityHint("在开发者详情中查看模型来源和校验信息")
     }
 
-    private var isVerified: Bool {
-        status?.state == .verified && status?.integrity == .verified
-    }
-
-    private var existenceText: String {
-        guard let status else { return "未读取状态" }
-        return switch status.state {
-        case .verified:
-            status.integrity == .verified
-                ? "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
-                : "文件存在，但完整性校验未通过"
-        case .notDownloaded:
-            "未下载"
-        case .downloading:
-            "下载中"
-        case .invalid:
-            "校验不匹配，需要重新准备"
-        case .unknown:
-            "状态未知"
-        }
+    private var statusPresentation: ModelArtifactStatusPresentation {
+        ModelArtifactStatusPresentation(status: status)
     }
 }
 
@@ -967,20 +1175,16 @@ private struct DiarizationStatusRow: View {
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: isVerified ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(
-                    isVerified
-                        ? SpeechRailDesignTokens.Color.ready
-                        : SpeechRailDesignTokens.Color.attention
-                )
+            Image(systemName: statusPresentation.systemImage)
+                .foregroundStyle(statusPresentation.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(key)")
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("存在：\(existenceText)")
+                Text("存在：\(statusPresentation.summary)")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .foregroundStyle(statusPresentation.color)
                 Text("使用：\(usage.text)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(usage.tone.color)
@@ -989,29 +1193,12 @@ private struct DiarizationStatusRow: View {
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(key)，存在：\(existenceText)，使用：\(usage.text)")
+        .accessibilityLabel(key)
+        .accessibilityValue("存在：\(statusPresentation.summary)，使用：\(usage.text)")
     }
 
-    private var isVerified: Bool {
-        status?.state == .verified && status?.integrity == .verified
-    }
-
-    private var existenceText: String {
-        guard let status else { return "未读取状态" }
-        return switch status.state {
-        case .verified:
-            status.integrity == .verified
-                ? "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
-                : "文件存在，但完整性校验未通过"
-        case .notDownloaded:
-            "未下载"
-        case .downloading:
-            "下载中"
-        case .invalid:
-            "校验不匹配，需要重新准备"
-        case .unknown:
-            "状态未知"
-        }
+    private var statusPresentation: ModelArtifactStatusPresentation {
+        ModelArtifactStatusPresentation(status: status)
     }
 }
 
@@ -1020,20 +1207,16 @@ private struct UnmanagedArtifactRow: View {
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: isVerified ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(
-                    isVerified
-                        ? SpeechRailDesignTokens.Color.ready
-                        : SpeechRailDesignTokens.Color.attention
-                )
+            Image(systemName: statusPresentation.systemImage)
+                .foregroundStyle(statusPresentation.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(status.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("存在：\(existenceText)")
+                Text("存在：\(statusPresentation.summary)")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .foregroundStyle(statusPresentation.color)
                 Text("使用：当前 catalog 未登记")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -1043,27 +1226,10 @@ private struct UnmanagedArtifactRow: View {
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(status.key)
-        .accessibilityValue("存在：\(existenceText)，使用：当前 catalog 未登记")
+        .accessibilityValue("存在：\(statusPresentation.summary)，使用：当前 catalog 未登记")
     }
 
-    private var isVerified: Bool {
-        status.state == .verified && status.integrity == .verified
-    }
-
-    private var existenceText: String {
-        switch status.state {
-        case .verified:
-            status.integrity == .verified
-                ? "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
-                : "文件存在，但完整性校验未通过"
-        case .notDownloaded:
-            "未下载"
-        case .downloading:
-            "下载中"
-        case .invalid:
-            "校验不匹配，需要重新准备"
-        case .unknown:
-            "状态未知"
-        }
+    private var statusPresentation: ModelArtifactStatusPresentation {
+        ModelArtifactStatusPresentation(status: status)
     }
 }

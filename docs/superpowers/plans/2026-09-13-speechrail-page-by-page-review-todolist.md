@@ -226,17 +226,17 @@
 - [x] catalog/status 通过 XPC 读取；generic artifact 与 dedicated diarization lane 已区分，dedicated lane 是分人相关制品的权威状态。
 - [x] 下载准备和档位应用分别调用 `model.prepare` 与 `profile.apply`；两者都有 confirmation，未自动下载、加载、卸载或切换。
 - [x] 页面将“存在/完整性”和“当前使用/worker 生命周期”分开表达；`verified` 与 `cold_evicted` 不会被混成缺失。
-- [ ] 强化目标档位与当前服务档位的文案。当用户查看 Balanced/Light 而服务仍为 Quality，`asr-1.7b-q8` 等共享制品必须同时显示“目标需要”和“当前服务是否使用”，不能只写“当前 ASR”。
-- [ ] 所有 artifact 显示统一的存在状态、文件计数、完整性、使用状态、来源、量化和档位；`not_checked`、`unknown`、`invalid` 的下一步必须不同。
-- [ ] OperationBar 补齐阶段、已完成/总大小、速度、ETA、校验、失败、取消中、取消完成和清理结果；只展示后端真实提供的数据。
-- [ ] 下载完成后的“可应用”与“已应用”必须分开；应用成功要回读 profile/health，不能以 prepare 完成冒充服务已切换。
-- [ ] 对 catalog 未登记旧制品保留隔离展示，避免普通用户把它当作当前可用模型；开发者可查看原因和处理建议。
+- [x] 强化目标档位与当前服务档位的文案。当用户查看 Balanced/Light 而服务仍为 Quality，`asr-1.7b-q8` 等共享制品同时显示“目标需要”和“当前服务是否使用”；运行档位以 `/health.profile` 为准，XPC profile 作为配置事实单独呈现。
+- [x] 所有受管 artifact 使用统一的存在状态、文件计数、完整性、使用状态、来源、量化和适用档位表达；`not_downloaded`、`unknown`、`invalid` 的图标、颜色、文案和下一步不同。
+- [x] OperationBar 展示后端真实提供的阶段、制品/文件和已完成/总字节；速度、ETA、缺失字节进度及清理结果若当前协议未提供，明确标注“协议未提供”，不做估算。
+- [x] 下载完成后的“可应用”与“已应用”分开；应用动作完成后由 `AppModel.execute(.profileApply)` 回读 profile/health，页面不以 prepare 完成冒充服务已切换。
+- [x] 对 catalog 未登记旧制品保留隔离展示，避免普通用户把它当作当前可用模型；开发者可查看其存在状态和“当前 catalog 未登记”原因。
 
 ### Token / UX 审查
 
-- [ ] 先用档位选择器表达决策，再用制品表表达证据，最后用 OperationBar 表达动作；不把每个 artifact 做成独立大卡片。
-- [ ] profile ready、downloaded、verified、in use、cold evicted、not checked 使用同一状态语义和 icon/文本组合。
-- [ ] 下载、应用、取消、刷新使用标准按钮样式和明确 confirmation；静态完整性字段不可显示 pointing hand。
+- [x] 先用档位选择器表达决策，再用制品列表表达证据，最后用 OperationBar 表达动作；制品仍是可扫描列表行，不再做成独立大卡片。
+- [x] profile ready、downloaded、verified、in use、cold evicted、not checked 使用同一“存在 / 使用”状态语义与 icon/文本组合；`cold_evicted` 继续表示可按需加载，不改写为缺失。
+- [x] 下载、应用、取消、刷新使用标准按钮样式和明确 confirmation；静态完整性字段没有 pointing cursor，只有可选择制品和实际按钮注册交互光标。
 
 ### 待验收
 
@@ -295,9 +295,9 @@
 | 服务健康 | `GET /health` | 已接，需持续核对 stale/操作期间状态 | 服务状态、运行监控、全局 badge |
 | 运行指标 | `GET /metrics` + `Accept: application/json` | 源码已接 active/pending、worker、health、资源/准入和 ASR/TTS RTF；安装后需 live 对账 | 运行监控 |
 | 模型目录 | XPC `model.catalog` | 已接 | 模型、诊断 |
-| 模型完整性 | XPC `model.status` | 已接，需强化目标/当前文案 | 模型、诊断 |
-| 模型下载/校验 | XPC `model.prepare` | 已接，需补速度/ETA/清理语义 | 模型 |
-| 档位应用 | XPC `profile.apply` | 已接，需回读 profile/health 证明生效 | 模型、服务状态 |
+| 模型完整性 | XPC `model.status` | 已接；目标/当前/配置档位与状态语义已分离，待人工对账 | 模型、诊断 |
+| 模型下载/校验 | XPC `model.prepare` | 已接；阶段、字节、取消和缺失协议字段边界已明确 | 模型 |
+| 档位应用 | XPC `profile.apply` | 已接；完成后回读 profile/health 证明生效，待人工对账 | 模型、服务状态 |
 | 音色列表 | `GET /v1/voices` | 已接，需边界保护和管理闭环 | 配音台、音色库 |
 | 配音生成 | `POST /v1/audio/speech` | 已接；按钮保存语义需修正 | 配音台、作品 |
 | 音色 preview | `POST /v1/voices/previews` | 已接；门禁和候选语义需修正 | 音色创作 |
@@ -327,4 +327,5 @@
 - 2026-09-13 23:13：音色库接入自定义音色删除确认与真实 DELETE 请求，补齐删除状态/错误反馈及 description 截断；Debug 编译通过，未执行真实删除。
 - 2026-09-13 23:20：诊断与服务状态页补齐独立预检状态源、更新时间、脱敏报告复制、LaunchAgent/XPC/health inspector；服务操作完成后重新读取预检，开发者详情不再展示 raw backend message；Debug 编译通过，未执行自动化测试。
 - 2026-09-13 23:32：运行监控源码补齐 `/metrics` 的资源/准入快照和 TTS RTF（ASR RTF 复用既有真实来源），Swift 解码、看板 summary/inspector、stale 状态和脱敏复制报告同步接线；Debug 编译与 Python 目标模块静态编译通过，未执行自动化测试，未安装新服务实例，因此 live 字段对账留待用户验收。
+- 2026-09-13 23:54：模型页完成目标档位 / 当前服务运行档位 / 配置档位分层；制品状态统一为存在、完整性、文件计数、使用状态的语义呈现；OperationBar 展示真实阶段、制品、文件、字节进度，并明确速度/ETA/清理结果等未由协议提供的字段；Debug 编译通过，未执行自动化测试、模型下载或档位应用。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。

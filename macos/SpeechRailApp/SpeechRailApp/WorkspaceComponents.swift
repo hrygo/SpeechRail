@@ -861,6 +861,30 @@ public struct OperationBar: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
+                    if let progress = operation.progress {
+                        if let artifactKey = progress.artifactKey ?? progress.file {
+                            Text("当前制品：\(artifactKey)")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .lineLimit(1)
+                        }
+                        if let file = progress.file, progress.artifactKey != nil {
+                            Text("当前文件：\(file)")
+                                .font(SpeechRailDesignTokens.Typography.technical)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                .lineLimit(1)
+                        }
+                        if progress.completedBytes == nil || progress.expectedBytes == nil {
+                            Text("字节进度：未提供")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                    }
+                    if operation.command == .modelPrepare {
+                        Text("速度与预计时间：协议未提供")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
                     if let message = operation.message, !message.isEmpty {
                         Text(SpeechRailOperationMessagePresentation.text(message))
                             .font(SpeechRailDesignTokens.Typography.secondary)
