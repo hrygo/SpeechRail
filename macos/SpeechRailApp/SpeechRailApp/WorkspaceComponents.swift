@@ -302,6 +302,9 @@ enum SpeechRailOperationMessagePresentation {
         if normalized.hasPrefix("model preparation was cancelled") {
             return "模型准备已取消。"
         }
+        if normalized.hasPrefix("stopping model preparation") {
+            return "正在停止模型准备…"
+        }
         if normalized.hasPrefix("model preparation") {
             return "模型准备未完成，请重新下载并校验。"
         }
@@ -397,13 +400,16 @@ public struct WorkspaceActionsMenu<Content: View>: View {
         Menu {
             content
         } label: {
-            Label("更多操作", systemImage: "ellipsis")
+            Label("操作", systemImage: "ellipsis.circle")
                 .labelStyle(.titleAndIcon)
-                .frame(minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget)
+                .font(SpeechRailDesignTokens.Typography.label)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .frame(minHeight: SpeechRailDesignTokens.Toolbar.controlHeight)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         }
         .menuStyle(.borderlessButton)
         .controlSize(.regular)
-        .accessibilityLabel("更多操作")
+        .accessibilityLabel("操作")
         .accessibilityIdentifier("workspace-actions")
         .help(helpText)
     }
@@ -470,15 +476,20 @@ public struct ServiceStatusBadge: View {
 
     public var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Image(systemName: systemImage)
-                .font(.system(size: SpeechRailDesignTokens.Icon.toolbarSize, weight: .semibold))
-                .foregroundStyle(statusColor)
+            Circle()
+                .fill(statusColor)
+                .frame(
+                    width: SpeechRailDesignTokens.Control.statusIndicatorDiameter,
+                    height: SpeechRailDesignTokens.Control.statusIndicatorDiameter
+                )
+                .accessibilityHidden(true)
             if !compact {
                 Text(statusText)
                     .font(SpeechRailDesignTokens.Typography.workspaceContext)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
         }
+        .frame(minHeight: SpeechRailDesignTokens.Toolbar.controlHeight)
         .fixedSize(horizontal: true, vertical: false)
         .help("服务状态：\(statusText)")
         .accessibilityElement(children: .combine)
@@ -490,21 +501,186 @@ public struct ServiceStatusBadge: View {
     }
 
     private var statusText: String {
+        if model.serviceOperation?.phase.isActive == true {
+            return "处理中"
+        }
         if model.service.ready == true { return "已就绪" }
         if isUnavailable { return "不可用" }
         return "未就绪"
     }
 
-    private var systemImage: String {
-        if model.service.ready == true { return "checkmark.circle.fill" }
-        if isUnavailable { return "xmark.circle.fill" }
-        return "exclamationmark.triangle.fill"
-    }
-
     private var statusColor: Color {
+        if model.serviceOperation?.phase.isActive == true {
+            return SpeechRailDesignTokens.Color.attention
+        }
         if model.service.ready == true { return SpeechRailDesignTokens.Color.ready }
         if isUnavailable { return SpeechRailDesignTokens.Color.critical }
         return SpeechRailDesignTokens.Color.attention
+    }
+}
+
+public struct ServiceOperationStatusView: View {
+    public let operation: ServiceOperationStatus
+    public let actionTitle: String?
+    public let action: (() -> Void)?
+
+    public init(
+        operation: ServiceOperationStatus,
+        actionTitle: String? = nil,
+        action: (() -> Void)? = nil
+    ) {
+        self.operation = operation
+        self.actionTitle = actionTitle
+        self.action = action
+    }
+
+    public var body: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: operationIcon)
+                .font(.title3)
+                .foregroundStyle(tone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(operationTitle)
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                if operation.phase.isActive {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(SpeechRailDesignTokens.Color.rail)
+                }
+                Text(operation.message ?? defaultMessage)
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(tone.color)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .speechRailButton(.secondary)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .speechRailField()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(operationTitle)，\(operation.message ?? defaultMessage)")
+    }
+
+    private var commandTitle: String {
+        switch operation.command {
+        case .start:
+            "启动服务"
+        case .stop:
+            "停止服务"
+        case .restart:
+            "重启服务"
+        default:
+            "服务操作"
+        }
+    }
+
+    private var operationTitle: String {
+        switch operation.phase {
+        case .starting:
+            "正在启动服务"
+        case .stopping:
+            "正在停止服务"
+        case .restarting:
+            "正在重启服务"
+        case .healthChecking:
+            "健康检查中"
+        case .completed:
+            "\(commandTitle)已完成"
+        case .failed:
+            "\(commandTitle)未完成"
+        }
+    }
+
+    private var defaultMessage: String {
+        switch operation.phase {
+        case .starting:
+            "正在请求受管服务启动…"
+        case .stopping:
+            "正在请求受管服务停止…"
+        case .restarting:
+            "正在请求受管服务重启…"
+        case .healthChecking:
+            "正在读取服务与能力状态…"
+        case .completed:
+            "服务命令已完成。"
+        case .failed:
+            "服务命令未完成，请重新读取或打开诊断。"
+        }
+    }
+
+    private var operationIcon: String {
+        switch operation.phase {
+        case .starting:
+            "play.circle"
+        case .stopping:
+            "stop.circle"
+        case .restarting, .healthChecking:
+            "arrow.clockwise.circle"
+        case .completed:
+            "checkmark.circle"
+        case .failed:
+            "xmark.circle"
+        }
+    }
+
+    private var tone: StatusTone {
+        switch operation.phase {
+        case .starting, .stopping, .restarting, .healthChecking:
+            .attention
+        case .completed:
+            .healthy
+        case .failed:
+            .critical
+        }
+    }
+}
+
+public struct ServiceOperationCompactStatus: View {
+    public let operation: ServiceOperationStatus
+
+    public init(operation: ServiceOperationStatus) {
+        self.operation = operation
+    }
+
+    public var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            if operation.phase.isActive {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Image(systemName: operation.phase == .failed ? "xmark.circle.fill" : "checkmark.circle.fill")
+                    .accessibilityHidden(true)
+            }
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .lineLimit(1)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+        }
+        .foregroundStyle(operation.phase == .failed ? SpeechRailDesignTokens.Color.critical : SpeechRailDesignTokens.Color.inkSecondary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+    }
+
+    private var title: String {
+        let command = switch operation.command {
+        case .start: "启动服务"
+        case .stop: "停止服务"
+        case .restart: "重启服务"
+        default: "服务操作"
+        }
+        return switch operation.phase {
+        case .starting: "正在启动服务…"
+        case .stopping: "正在停止服务…"
+        case .restarting: "正在重启服务…"
+        case .healthChecking: "健康检查中…"
+        case .completed: "\(command)已完成"
+        case .failed: "\(command)未完成"
+        }
     }
 }
 
@@ -751,6 +927,8 @@ public struct OperationBar: View {
             "失败"
         case "cancelled", "canceled":
             "已取消"
+        case "cancelling", "canceling":
+            "正在停止"
         case "interrupted":
             "已中断"
         default:

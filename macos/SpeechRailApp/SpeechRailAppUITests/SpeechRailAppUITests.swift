@@ -14,8 +14,22 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["本地控制通道已就绪"].exists)
 
         app.buttons["音色创作"].click()
-        XCTAssertTrue(app.staticTexts["音色创作"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.staticTexts["从一句话开始"].exists)
+        let workspaceTitle = app.descendants(matching: .any)["workspace-title"]
+        XCTAssertTrue(workspaceTitle.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            workspaceTitle.label.contains("音色创作"),
+            "workspace-title label was: \(workspaceTitle.label)"
+        )
+        XCTAssertTrue(app.menuButtons["操作"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["刷新状态"].exists)
+
+        app.buttons["模型"].click()
+        let modelsTitle = app.descendants(matching: .any)["workspace-title"]
+        XCTAssertTrue(modelsTitle.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            modelsTitle.label.contains("模型管理"),
+            "workspace-title label was: \(modelsTitle.label)"
+        )
     }
 
     func testControlSurfaceShowsServiceAndProfiles() {
@@ -33,6 +47,17 @@ final class SpeechRailAppUITests: XCTestCase {
 
         app.buttons["模型"].tap()
         XCTAssertTrue(app.staticTexts["模型"].waitForExistence(timeout: 2))
+    }
+
+    func testDiagnosticsUsesCompactSummaryAndSelectedDetail() {
+        let app = launchSpeechRail()
+        openControlCenter(in: app)
+        app.buttons["诊断"].tap()
+
+        XCTAssertTrue(app.otherElements["diagnostics-summary"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["diagnostics-check-list"].exists)
+        XCTAssertTrue(app.otherElements["diagnostics-check-detail"].exists)
+        XCTAssertTrue(app.buttons["重新运行诊断"].exists)
     }
 
     func testModelDownloadRequiresExplicitConfirmation() {
@@ -123,9 +148,12 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["起初，没有人在意这一场灾难。这不过是一场山火，一次旱灾，一个物种的灭绝，一座城市的消失。直到这场灾难和每个人息息相关。"].exists)
 
         let window = app.windows["SpeechRail 管理控制台"]
-        let auditButton = window.buttons["脱敏技术详情"].firstMatch
-        XCTAssertTrue(auditButton.waitForExistence(timeout: 5))
-        auditButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        let actionMenu = window.menuButtons["操作"].firstMatch
+        XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
+        actionMenu.click()
+        let auditItem = app.menuItems["显示技术审计"].firstMatch
+        XCTAssertTrue(auditItem.waitForExistence(timeout: 3))
+        auditItem.click()
         XCTAssertTrue(app.staticTexts["开发者审计 (隐私脱敏)"].waitForExistence(timeout: 3))
         XCTAssertTrue(app.staticTexts["请求 ID"].exists)
         XCTAssertTrue(app.staticTexts["req_7f2b918a"].exists)

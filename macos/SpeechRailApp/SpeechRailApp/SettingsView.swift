@@ -12,7 +12,7 @@ public struct SettingsView: View {
                 Toggle("默认展开技术详情", isOn: $showDeveloperDetails)
                 Text("面向开发者的接口状态、阶段和标识信息仍只在管理控制台中展开。")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Section("关于 SpeechRail") {
                 LabeledContent("产品定位", value: "本机 Apple Silicon 语音服务控制面")

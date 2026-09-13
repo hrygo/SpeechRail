@@ -224,6 +224,13 @@ public actor AgentOperationStore {
         progress: OperationProgressSnapshot
     ) {
         guard let current = operations[operationID] else { return }
+        // Progress is delivered through an unstructured callback task. The
+        // runner may therefore finish (or be cancelled) before that task is
+        // scheduled. Terminal snapshots are authoritative and must never be
+        // reopened by a late progress event.
+        guard current.state == .accepted || current.state == .running,
+              current.phase?.lowercased() != "cancelling"
+        else { return }
         let updated = OperationSnapshot(
             operationID: current.operationID,
             command: current.command,
@@ -244,24 +251,27 @@ public actor AgentOperationStore {
         result: ManagedCommandResult
     ) {
         let response = result.response
-        if operations[operationID]?.state == .cancelled {
-            return
-        }
+        let cancellationRequested = operations[operationID]?.phase?.lowercased() == "cancelling"
         let succeeded = result.exitCode == 0 && response?.status != .failed
-        let message = succeeded
-            ? nil
-            : (response?.message ?? result.message ?? "managed command failed")
-        let phase = succeeded
-            ? "committed"
-            : (response?.operation?.phase ?? response?.status.rawValue ?? "failed")
+        let finalState: OperationState = cancellationRequested
+            ? .cancelled
+            : (succeeded ? .committed : .failed)
+        let message = cancellationRequested
+            ? "model preparation was cancelled"
+            : (succeeded ? nil : (response?.message ?? result.message ?? "managed command failed"))
+        let phase = cancellationRequested
+            ? "cancelled"
+            : (succeeded
+                ? "committed"
+                : (response?.operation?.phase ?? response?.status.rawValue ?? "failed"))
         let snapshot = OperationSnapshot(
             operationID: operationID,
             command: command,
             profile: operations[operationID]?.profile,
-            state: succeeded ? .committed : .failed,
+            state: finalState,
             phase: phase,
             progress: response?.operation?.progress ?? operations[operationID]?.progress,
-            errorCode: succeeded ? nil : (response?.errorCode ?? .commandFailed),
+            errorCode: cancellationRequested ? .cancelled : (succeeded ? nil : (response?.errorCode ?? .commandFailed)),
             message: message
         )
         operations[operationID] = snapshot
@@ -313,6 +323,15 @@ public actor AgentOperationStore {
                 operation: operation
             )
         }
+        if operation.phase?.lowercased() == "cancelling" {
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .running,
+                message: "stopping model preparation",
+                operation: operation
+            )
+        }
         guard let cancellable = runner as? any CancellableManagedCommandRunner,
               cancellable.cancelCurrentCommand()
         else {
@@ -322,25 +341,23 @@ public actor AgentOperationStore {
                 message: "model operation cannot be cancelled"
             )
         }
-        let cancelled = OperationSnapshot(
+        let cancelling = OperationSnapshot(
             operationID: operation.operationID,
             command: operation.command,
             profile: operation.profile,
-            state: .cancelled,
-            phase: "cancelled",
+            state: .running,
+            phase: "cancelling",
             progress: operation.progress,
-            message: "model preparation was cancelled"
+            message: "stopping model preparation"
         )
-        operations[operationID] = cancelled
-        persist(cancelled)
-        clearJournalIfTerminal(cancelled)
-        activeMutation = nil
+        operations[operationID] = cancelling
+        persist(cancelling)
         return ControlResponse(
             requestID: request.requestID,
             command: request.command,
-            status: .cancelled,
-            message: "model preparation was cancelled",
-            operation: cancelled
+            status: .running,
+            message: "stopping model preparation",
+            operation: cancelling
         )
     }
 

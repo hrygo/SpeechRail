@@ -13,7 +13,7 @@ public struct ServiceRoutePreviewView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 PageIntroView(route: route)
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    Label("服务状态", systemImage: "server.rack")
+                    Label("服务状态", systemImage: AppRoute.overview.systemImage)
                         .font(SpeechRailDesignTokens.Typography.sectionTitle)
                     Text("这里是统一的服务页面承载区。运行监控、模型管理和预检诊断会在同一处解释本机服务正在做什么；页面不会伪造没有读取到的运行数据。")
                         .font(SpeechRailDesignTokens.Typography.body)

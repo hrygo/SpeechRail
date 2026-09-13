@@ -110,6 +110,38 @@ private final class ProgressRecorder: @unchecked Sendable {
     }
 }
 
+private actor LateProgressRunner: ProgressAwareManagedCommandRunner {
+    private var progressHandler: ManagedCommandProgressHandler?
+
+    func run(_ command: ManagedCommand) async throws -> ManagedCommandResult {
+        try await run(command, progress: { _ in })
+    }
+
+    func run(
+        _ command: ManagedCommand,
+        progress: @escaping ManagedCommandProgressHandler
+    ) async throws -> ManagedCommandResult {
+        progressHandler = progress
+        return ManagedCommandResult(
+            exitCode: 0,
+            response: ControlResponse(
+                requestID: UUID(),
+                command: command.controlCommand,
+                status: .committed
+            )
+        )
+    }
+
+    func emitLateProgress() {
+        progressHandler?(OperationProgressSnapshot(
+            phase: "download",
+            artifactKey: "late-artifact",
+            completedBytes: 1,
+            expectedBytes: 2
+        ))
+    }
+}
+
 final class AgentCoreTests: XCTestCase {
     func testOperationJournalPersistsRedactedMetadataAndUpdatedAt() throws {
         let root = FileManager.default.temporaryDirectory
@@ -301,6 +333,39 @@ final class AgentCoreTests: XCTestCase {
         XCTAssertEqual(rejected.errorCode, .operationInProgress)
 
         await runner.complete()
+    }
+
+    func testLateProgressCannotReopenCommittedOperation() async throws {
+        let runner = LateProgressRunner()
+        let store = AgentOperationStore(runner: runner)
+        let request = ControlRequest(
+            command: .modelPrepare,
+            profile: .quality,
+            confirmation: true
+        )
+
+        let accepted = await store.handle(request)
+        let operationID = try XCTUnwrap(accepted.operation?.operationID)
+        var terminal: ControlResponse?
+        for _ in 0..<20 {
+            let response = await store.handle(
+                ControlRequest(command: .operationStatus, operationID: operationID)
+            )
+            terminal = response
+            if response.status == .committed { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(terminal?.operation?.state, .committed)
+
+        await runner.emitLateProgress()
+        try await Task.sleep(for: .milliseconds(20))
+
+        let afterLateProgress = await store.handle(
+            ControlRequest(command: .operationStatus, operationID: operationID)
+        )
+        XCTAssertEqual(afterLateProgress.operation?.state, .committed)
+        XCTAssertEqual(afterLateProgress.operation?.phase, "committed")
     }
 
     func testProfileApplyFailurePreservesMessageInOperationStatus() async throws {

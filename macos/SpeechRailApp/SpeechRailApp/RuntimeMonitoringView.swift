@@ -12,8 +12,18 @@ public struct RuntimeMonitoringView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 PageIntroView(route: .monitoring)
+                monitoringSummary
                 metricSummary
-                chartPanel
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    capabilityPanel
+                        .frame(
+                            minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
+                            maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                            alignment: .topLeading
+                        )
+                    chartPanel
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
@@ -22,22 +32,26 @@ public struct RuntimeMonitoringView: View {
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
-            ToolbarItem {
-                Button {
-                    showInspector.toggle()
-                } label: {
-                    Label("开发者详情", systemImage: "info.circle")
+            ToolbarItem(placement: .primaryAction) {
+                WorkspaceActionsMenu(helpText: "读取最新运行样本，或查看 worker 与 metrics 技术详情") {
+                    Button {
+                        Task { await model.refreshMonitoring() }
+                    } label: {
+                        Label("刷新监控", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.isRefreshingMonitoring)
+                    Divider()
+                    Button {
+                        showInspector.toggle()
+                    } label: {
+                        Label(
+                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
+                            systemImage: "info.circle"
+                        )
+                    }
                 }
-                .help("查看 worker、延迟样本和 metrics 读取状态")
             }
-            ToolbarItem {
-                Button {
-                    Task { await model.refreshMonitoring() }
-                } label: {
-                    Label("刷新监控", systemImage: "arrow.clockwise")
-                }
-                .help("立即读取一次本机服务 metrics")
-            }
+            .sharedBackgroundVisibility(.hidden)
         }
         .inspector(isPresented: $showInspector) {
             monitoringInspector
@@ -68,7 +82,7 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var metricSummary: some View {
-        MetricStrip(metrics: [
+        MetricGrid(metrics: [
             MetricValue(
                 id: "active-requests",
                 title: "活跃请求",
@@ -82,18 +96,132 @@ public struct RuntimeMonitoringView: View {
                 detail: "等待调度"
             ),
             MetricValue(
+                id: "asr-latency",
+                title: "ASR 平均",
+                value: latestSample.flatMap { $0.asrLatencySeconds }.map(formatSeconds) ?? "—",
+                detail: "推理直方图"
+            ),
+            MetricValue(
+                id: "tts-latency",
+                title: "TTS 平均",
+                value: latestSample.flatMap { $0.ttsLatencySeconds }.map(formatSeconds) ?? "—",
+                detail: "推理直方图"
+            ),
+            MetricValue(
+                id: "tts-ttfa",
+                title: "TTS 首帧",
+                value: latestSample.flatMap { $0.ttsTTFASeconds }.map(formatSeconds) ?? "—",
+                detail: "首个音频延迟"
+            ),
+            MetricValue(
+                id: "realtime-sessions",
+                title: "实时会话",
+                value: latestSample.flatMap { $0.activeRealtimeSessions }.map(String.init) ?? "—",
+                detail: "当前 WebSocket"
+            ),
+            MetricValue(
                 id: "request-count",
                 title: "已处理请求",
                 value: latestSample.flatMap { $0.requestCount }.map(formatCount) ?? "—",
-                detail: "进程内累计"
+                detail: latestSample.map { "累计 · \(rateDetail($0.requestRatePerSecond))" } ?? "等待两个样本"
             ),
             MetricValue(
                 id: "queue-rejections",
                 title: "队列拒绝",
                 value: latestSample.flatMap { $0.queueRejections }.map(formatCount) ?? "—",
-                detail: "容量已满时拒绝"
+                detail: latestSample.map { "累计 · \(rateDetail($0.queueRejectionRatePerSecond))" } ?? "等待两个样本"
             ),
         ])
+    }
+
+    private var monitoringSummary: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+            Image(systemName: monitoringTone.systemImage)
+                .font(.title2)
+                .foregroundStyle(monitoringTone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(monitoringTitle)
+                    .font(SpeechRailDesignTokens.Typography.diagnosticsSummary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(monitoringMessage)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                Text(serviceIdentity)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(latestSample.map { "最近样本 · \(relativeTime($0.capturedAt))" } ?? "等待样本")
+                    .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(lastHealthRefreshText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(lastMetricsRefreshText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.lg)
+        .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight)
+        .speechRailField()
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(monitoringTitle)
+        .accessibilityValue(
+            [monitoringMessage, serviceIdentity, lastHealthRefreshText, lastMetricsRefreshText]
+                .joined(separator: "，")
+        )
+    }
+
+    private var capabilityPanel: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "能力状态",
+                detail: "来自最近一次 health 读取。"
+            )
+            VStack(spacing: 0) {
+                MonitoringCapabilityRow(
+                    title: "语音转文字",
+                    detail: model.health?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    ready: model.health?.asrReady
+                )
+                Divider()
+                MonitoringCapabilityRow(
+                    title: "文字转语音",
+                    detail: model.health?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    ready: model.health?.ttsReady
+                )
+                Divider()
+                MonitoringCapabilityRow(
+                    title: "实时语音",
+                    detail: model.health?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    ready: model.health?.realtimeVAD?.ready
+                )
+                Divider()
+                MonitoringCapabilityRow(
+                    title: "分人识别",
+                    detail: model.health?.diarization.map(SpeechRailDiarizationPresentation.text)
+                        ?? "按当前档位启用",
+                    ready: model.health?.diarizationReady
+                )
+                if let workers = model.metrics?.workers, !workers.isEmpty {
+                    Divider()
+                    SectionHeading(
+                        title: "运行组件",
+                        detail: "来自最近一次 metrics 读取的生命周期状态。"
+                    )
+                    ForEach(workers.keys.sorted(), id: \.self) { key in
+                        workerRow(key: key, state: workers[key] ?? "unknown")
+                    }
+                }
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.md)
+        .speechRailField()
     }
 
     private var chartPanel: some View {
@@ -111,7 +239,7 @@ public struct RuntimeMonitoringView: View {
             if !RuntimeMonitoringChartDescriptor.isSufficient(chartPoints) {
                 ContentUnavailableView(
                     "等待监控样本",
-                    systemImage: "chart.xyaxis.line",
+                systemImage: AppRoute.monitoring.systemImage,
                     description: Text("打开此页面后读取本机服务 metrics，至少需要两个样本才绘制趋势。")
                 )
                 .frame(
@@ -140,10 +268,10 @@ public struct RuntimeMonitoringView: View {
                     RuntimeMonitoringChartDescriptor(points: chartPoints)
                 )
             }
-            if let message = model.message, !message.isEmpty {
-                Text(message)
+            if let message = model.monitoringMessage, !message.isEmpty {
+                Text(monitoringMessage)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .foregroundStyle(monitoringTone.color)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
@@ -158,13 +286,19 @@ public struct RuntimeMonitoringView: View {
                 detail: "这些字段面向排障和容量判断，不代表服务质量或模型质量结论。"
             )
             LabeledContent("服务状态", value: model.service.serviceState)
+            LabeledContent("最近成功读取 health", value: model.lastHealthRefresh.map(relativeTime) ?? "未读取")
+            LabeledContent("最近成功读取 metrics", value: model.lastMetricsRefresh.map(relativeTime) ?? "未读取")
             LabeledContent("最近采样", value: latestSample.map { relativeTime($0.capturedAt) } ?? "未读取")
             if let sample = latestSample {
                 Divider()
                 detailRow("ASR 延迟", sample.asrLatencySeconds.map(formatSeconds) ?? "样本不足")
                 detailRow("TTS 延迟", sample.ttsLatencySeconds.map(formatSeconds) ?? "样本不足")
+                detailRow("TTS 首帧", sample.ttsTTFASeconds.map(formatSeconds) ?? "样本不足")
+                detailRow("实时会话", sample.activeRealtimeSessions.map(String.init) ?? "样本不足")
                 detailRow("活跃请求", String(sample.activeRequests))
                 detailRow("排队请求", String(sample.pendingRequests))
+                detailRow("请求窗口速率", sample.requestRatePerSecond.map(formatRate) ?? "样本不足")
+                detailRow("拒绝窗口速率", sample.queueRejectionRatePerSecond.map(formatRate) ?? "样本不足")
             }
             if !(model.metrics?.workers.isEmpty ?? true) {
                 Divider()
@@ -201,7 +335,201 @@ public struct RuntimeMonitoringView: View {
         String(format: "%.3f s", value)
     }
 
+    private func formatRate(_ value: Double) -> String {
+        String(format: "%.2f /s", value)
+    }
+
+    private func rateDetail(_ value: Double?) -> String {
+        value.map { "窗口 \(formatRate($0))" } ?? "等待两个样本"
+    }
+
     private func relativeTime(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
+    }
+
+    private var serviceIdentity: String {
+        let profile = model.health?.profile.map { SpeechRailProfilePresentation.title($0) }
+            ?? model.profile?.preset.map { SpeechRailProfilePresentation.title($0) }
+            ?? "档位未读取"
+        let version = model.health?.version ?? "版本未读取"
+        return profile + " · " + version
+    }
+
+    private var lastHealthRefreshText: String {
+        model.lastHealthRefresh.map { "health 最近成功 · \(relativeTime($0))" } ?? "health 尚无成功读取"
+    }
+
+    private var lastMetricsRefreshText: String {
+        model.lastMetricsRefresh.map { "metrics 最近成功 · \(relativeTime($0))" } ?? "metrics 尚无成功读取"
+    }
+
+    private func workerRow(key: String, state: String) -> some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: workerTone(for: state).systemImage)
+                .foregroundStyle(workerTone(for: state).color)
+                .imageScale(.small)
+                .accessibilityHidden(true)
+            Text(workerTitle(for: key))
+                .font(SpeechRailDesignTokens.Typography.label)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            Text(workerStateText(for: state))
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(workerTone(for: state).color)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(workerTitle(for: key))
+        .accessibilityValue(workerStateText(for: state))
+    }
+
+    private func workerTitle(for key: String) -> String {
+        switch key.lowercased() {
+        case "asr":
+            "ASR 语音识别"
+        case "tts":
+            "TTS 语音合成"
+        case "diarization":
+            "分人识别"
+        case "realtime_vad":
+            "实时语音检测"
+        default:
+            key
+        }
+    }
+
+    private func workerStateText(for state: String) -> String {
+        SpeechRailRuntimeStatePresentation.text(state)
+    }
+
+    private func workerTone(for state: String) -> StatusTone {
+        switch state.lowercased() {
+        case "active", "warm_standby":
+            .healthy
+        case "cold_evicted", "inactive", "unconfigured":
+            .attention
+        case "failed":
+            .critical
+        case "starting", "stopping":
+            .attention
+        default:
+            .neutral
+        }
+    }
+
+    private var monitoringTone: StatusTone {
+        if model.isRefreshingMonitoring {
+            return .attention
+        }
+        if model.service.serviceState == "unavailable"
+            || model.healthMessage != nil
+            || model.metricsMessage != nil
+            || model.monitoringMessage != nil
+        {
+            return .critical
+        }
+        if model.health?.ready == false || model.health == nil || model.metrics == nil {
+            return .attention
+        }
+        return .healthy
+    }
+
+    private var monitoringTitle: String {
+        return switch monitoringTone {
+        case .healthy:
+            "运行稳定"
+        case .attention:
+            "正在读取运行状态"
+        case .critical:
+            "无法读取服务状态"
+        case .neutral:
+            "等待运行状态"
+        }
+    }
+
+    private var monitoringMessage: String {
+        if model.isRefreshingMonitoring {
+            return "正在读取本机服务 health 和 metrics。"
+        }
+        if let message = model.healthMessage {
+            return "\(message) \(lastHealthRefreshText)。"
+        }
+        if let message = model.metricsMessage {
+            return "\(message) \(lastMetricsRefreshText)。"
+        }
+        return switch monitoringTone {
+        case .healthy:
+            "已读取本机服务 health 和 metrics，当前数据可用于判断负载。"
+        case .attention:
+            "服务可能正在启动，或当前能力还没有准备完成。"
+        case .critical:
+            model.monitoringMessage ?? "控制中心暂时无法连接到 SpeechRail。"
+        case .neutral:
+            "打开此页面后会自动读取本机运行状态。"
+        }
+    }
+}
+
+private struct MonitoringCapabilityRow: View {
+    let title: String
+    let detail: String
+    let ready: Bool?
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: iconName)
+                .foregroundStyle(statusColor)
+                .imageScale(.small)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(detail)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Text(statusText)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(statusColor)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityValue("\(statusText)，\(detail)")
+    }
+
+    private var iconName: String {
+        switch ready {
+        case .some(true):
+            "checkmark.circle.fill"
+        case .some(false):
+            "xmark.circle.fill"
+        case .none:
+            "questionmark.circle"
+        }
+    }
+
+    private var statusText: String {
+        switch ready {
+        case .some(true):
+            "正常"
+        case .some(false):
+            "未就绪"
+        case .none:
+            "未读取"
+        }
+    }
+
+    private var statusColor: Color {
+        switch ready {
+        case .some(true):
+            SpeechRailDesignTokens.Color.ready
+        case .some(false):
+            SpeechRailDesignTokens.Color.critical
+        case .none:
+            SpeechRailDesignTokens.Color.inkSecondary
+        }
     }
 }

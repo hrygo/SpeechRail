@@ -9,6 +9,10 @@ public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
     public let queueRejections: Double?
     public let asrLatencySeconds: Double?
     public let ttsLatencySeconds: Double?
+    public let ttsTTFASeconds: Double?
+    public let activeRealtimeSessions: Int?
+    public let requestRatePerSecond: Double?
+    public let queueRejectionRatePerSecond: Double?
 
     public var id: Date { capturedAt }
 
@@ -19,7 +23,11 @@ public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
         requestCount: Double?,
         queueRejections: Double?,
         asrLatencySeconds: Double?,
-        ttsLatencySeconds: Double?
+        ttsLatencySeconds: Double?,
+        ttsTTFASeconds: Double? = nil,
+        activeRealtimeSessions: Int? = nil,
+        requestRatePerSecond: Double? = nil,
+        queueRejectionRatePerSecond: Double? = nil
     ) {
         self.capturedAt = capturedAt
         self.activeRequests = activeRequests
@@ -28,26 +36,33 @@ public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
         self.queueRejections = queueRejections
         self.asrLatencySeconds = asrLatencySeconds
         self.ttsLatencySeconds = ttsLatencySeconds
+        self.ttsTTFASeconds = ttsTTFASeconds
+        self.activeRealtimeSessions = activeRealtimeSessions
+        self.requestRatePerSecond = requestRatePerSecond
+        self.queueRejectionRatePerSecond = queueRejectionRatePerSecond
     }
 }
 
 public enum RuntimeMetricsSampler {
     public static func makeSample(
         from metrics: RuntimeMetricsSnapshot,
-        capturedAt: Date = Date()
+        capturedAt: Date = Date(),
+        previous: RuntimeMetricsSample? = nil
     ) -> RuntimeMetricsSample {
-        RuntimeMetricsSample(
+        let requestCount = sumValues(
+            metrics.counters,
+            prefix: "speechrail_http_requests_total"
+        )
+        let queueRejections = sumValues(
+            metrics.counters,
+            prefix: "speechrail_governor_queue_rejections_total"
+        )
+        return RuntimeMetricsSample(
             capturedAt: capturedAt,
             activeRequests: metrics.activeRequests.realtime + metrics.activeRequests.batch,
             pendingRequests: metrics.pendingRequests.realtime + metrics.pendingRequests.batch,
-            requestCount: sumValues(
-                metrics.counters,
-                prefix: "speechrail_http_requests_total"
-            ),
-            queueRejections: sumValues(
-                metrics.counters,
-                prefix: "speechrail_governor_queue_rejections_total"
-            ),
+            requestCount: requestCount,
+            queueRejections: queueRejections,
             asrLatencySeconds: histogramAverage(
                 metrics,
                 name: "speechrail_asr_inference_duration_seconds"
@@ -55,6 +70,26 @@ public enum RuntimeMetricsSampler {
             ttsLatencySeconds: histogramAverage(
                 metrics,
                 name: "speechrail_tts_inference_duration_seconds"
+            ),
+            ttsTTFASeconds: histogramAverage(
+                metrics,
+                name: "speechrail_tts_ttfa_seconds"
+            ),
+            activeRealtimeSessions: sumValues(
+                metrics.gauges,
+                prefix: "speechrail_realtime_active_sessions"
+            ).map { max(0, Int($0.rounded())) },
+            requestRatePerSecond: counterRate(
+                current: requestCount,
+                previous: previous?.requestCount,
+                capturedAt: capturedAt,
+                previousCapturedAt: previous?.capturedAt
+            ),
+            queueRejectionRatePerSecond: counterRate(
+                current: queueRejections,
+                previous: previous?.queueRejections,
+                capturedAt: capturedAt,
+                previousCapturedAt: previous?.capturedAt
             )
         )
     }
@@ -78,5 +113,21 @@ public enum RuntimeMetricsSampler {
         guard count > 0 else { return nil }
         let sum = samples.reduce(0.0) { $0 + $1.sum }
         return sum / Double(count)
+    }
+
+    private static func counterRate(
+        current: Double?,
+        previous: Double?,
+        capturedAt: Date,
+        previousCapturedAt: Date?
+    ) -> Double? {
+        guard let current,
+              let previous,
+              let previousCapturedAt,
+              current >= previous
+        else { return nil }
+        let elapsed = capturedAt.timeIntervalSince(previousCapturedAt)
+        guard elapsed > 0 else { return nil }
+        return (current - previous) / elapsed
     }
 }

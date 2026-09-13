@@ -13,9 +13,7 @@ public struct WorkspaceTitleLockup: View {
     public var body: some View {
         ViewThatFits(in: .horizontal) {
             titleVariant(includeIcon: true, includeContext: true)
-                .fixedSize(horizontal: true, vertical: false)
             titleVariant(includeIcon: true, includeContext: false)
-                .fixedSize(horizontal: true, vertical: false)
             minimalTitleVariant
         }
         .frame(
@@ -52,24 +50,21 @@ public struct WorkspaceTitleLockup: View {
             }
             Text(route.workspaceTitle)
                 .font(SpeechRailDesignTokens.Typography.toolbarTitle)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .lineLimit(1)
-                .truncationMode(.tail)
+                .fixedSize(horizontal: true, vertical: false)
             if includeContext {
-                Text("·")
-                    .font(SpeechRailDesignTokens.Typography.workspaceContext)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Rectangle()
+                    .fill(SpeechRailDesignTokens.Color.inkSecondary.opacity(0.45))
+                    .frame(width: 1, height: 14)
                     .accessibilityHidden(true)
                 Text(route.contextTitle)
                     .font(SpeechRailDesignTokens.Typography.workspaceContext)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .accessibilityHidden(true)
             }
         }
-        .lineLimit(1)
-        .fixedSize(horizontal: false, vertical: true)
+        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var accessibilityValue: String {
@@ -125,11 +120,6 @@ public struct RouteIconView: View {
         Image(systemName: route.systemImage)
             .font(.system(size: iconSize, weight: .medium))
             .symbolRenderingMode(.hierarchical)
-            .foregroundStyle(
-                selected
-                    ? SpeechRailDesignTokens.Navigation.selectedForeground
-                    : SpeechRailDesignTokens.Color.inkSecondary
-            )
             .frame(
                 width: iconFrame,
                 height: iconFrame

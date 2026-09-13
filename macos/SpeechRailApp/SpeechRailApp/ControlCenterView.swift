@@ -59,11 +59,18 @@ public struct ControlCenterView: View {
                         ToolbarItem(placement: .principal) {
                             WorkspaceTitleLockup(route: selection ?? .overview, service: model.service)
                         }
-                        ToolbarItem(placement: .automatic) {
+                        .sharedBackgroundVisibility(.hidden)
+                        ToolbarItem(placement: .primaryAction) {
                             ServiceStatusBadge()
                         }
+                        .sharedBackgroundVisibility(.hidden)
                         ToolbarSpacer(.flexible)
                     }
+                    .toolbarBackground(
+                        SpeechRailDesignTokens.Color.canvas,
+                        for: .windowToolbar
+                    )
+                    .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
             }
             .navigationSplitViewStyle(.balanced)
             .frame(
@@ -110,11 +117,6 @@ public struct ControlCenterView: View {
             Label {
                 Text(route.title)
                     .font(SpeechRailDesignTokens.Typography.label)
-                    .foregroundStyle(
-                        isSelected
-                            ? SpeechRailDesignTokens.Navigation.selectedForeground
-                            : SpeechRailDesignTokens.Color.inkSecondary
-                    )
                     .lineLimit(1)
                     .truncationMode(.tail)
             } icon: {
@@ -126,17 +128,6 @@ public struct ControlCenterView: View {
                 alignment: .leading
             )
         }
-        .listRowBackground(
-            RoundedRectangle(
-                cornerRadius: SpeechRailDesignTokens.Corner.row,
-                style: .continuous
-            )
-            .fill(
-                isSelected
-                    ? SpeechRailDesignTokens.Navigation.selectedFill
-                    : Color.clear
-            )
-        )
         .listRowInsets(
             EdgeInsets(
                 top: SpeechRailDesignTokens.Spacing.micro,

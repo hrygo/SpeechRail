@@ -97,9 +97,12 @@ public enum SpeechRailDesignTokens {
     /// Toolbar dimensions are kept separate from page content so the window chrome can
     /// protect its own geometry when a route or context title becomes long.
     public enum Toolbar {
-        public static let titleMaximumWidth: CGFloat = 360
-        public static let titleCompactMaximumWidth: CGFloat = 260
-        public static let titleHeight: CGFloat = 30
+        /// macOS 26 unified compact toolbar baseline. The visual control is compact;
+        /// the system still owns the larger accessibility hit region.
+        public static let controlHeight: CGFloat = 32
+        public static let titleMaximumWidth: CGFloat = 280
+        public static let titleCompactMaximumWidth: CGFloat = 220
+        public static let titleHeight: CGFloat = 32
         public static let itemSpacing: CGFloat = 8
     }
 

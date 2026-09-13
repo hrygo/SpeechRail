@@ -13,7 +13,7 @@ public struct ControlMenuView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: "waveform")
+                Image(systemName: AppRoute.dubbing.systemImage)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                 Text("SpeechRail")
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
@@ -27,6 +27,9 @@ public struct ControlMenuView: View {
                 Text(SpeechRailRuntimeStatePresentation.text(model.service.serviceState))
                     .font(SpeechRailDesignTokens.Typography.technical)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            if let operation = model.serviceOperation {
+                ServiceOperationCompactStatus(operation: operation)
             }
 
             Divider()
@@ -42,7 +45,7 @@ public struct ControlMenuView: View {
                 navigation.request(.voiceDesign)
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             } label: {
-                Label("开始音色创作", systemImage: "wand.and.stars")
+                Label("开始音色创作", systemImage: AppRoute.voiceDesign.systemImage)
             }
             .keyboardShortcut("N", modifiers: [.command])
 
@@ -121,6 +124,9 @@ public struct ControlMenuView: View {
     }
 
     private var statusSummary: String {
+        if model.serviceOperation?.phase.isActive == true {
+            return "服务操作进行中，请等待结果"
+        }
         if model.service.ready == true {
             return "本机服务已就绪"
         }

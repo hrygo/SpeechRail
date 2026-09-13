@@ -384,6 +384,18 @@ public struct ModelStatusSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+public extension ModelStatusSnapshot {
+    /// Resolve one artifact's canonical status across the two inspection lanes.
+    ///
+    /// Aligner and CoreML diarization assets are inspected under the dedicated
+    /// diarization root, so that lane is authoritative when the same key also
+    /// appears in the generic model registry inspection.
+    func status(for key: String) -> ModelArtifactStatusSnapshot? {
+        diarization.first(where: { $0.key == key })
+            ?? artifacts.first(where: { $0.key == key })
+    }
+}
+
 public struct OperationProgressSnapshot: Codable, Equatable, Sendable {
     public let phase: String?
     public let artifactKey: String?

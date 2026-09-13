@@ -29,18 +29,26 @@ struct SpeechRailApp: App {
                     bundledServiceName: ControlConstants.localXPCServiceName
                 )
                 : NSXPCControlTransport()
-        let diagnosticsClient: any ServiceDiagnosticsClient = isUITest
-            ? UITestServiceDiagnosticsClient(
+        let diagnosticsClient: any ServiceDiagnosticsClient
+        let creatorClient: (any SpeechRailCreatorClient)?
+        if isUITest {
+            diagnosticsClient = UITestServiceDiagnosticsClient(
                 metricsUnavailable: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-metrics-unavailable"
                 )
             )
-            : ServiceAPIClient()
+            creatorClient = nil
+        } else {
+            let liveServiceClient = ServiceAPIClient()
+            diagnosticsClient = liveServiceClient
+            creatorClient = liveServiceClient
+        }
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
         _model = State(
             initialValue: AppModel(
                 transport: transport,
                 apiClient: diagnosticsClient,
+                creatorClient: creatorClient,
                 registration: registration
             )
         )
@@ -61,7 +69,8 @@ struct SpeechRailApp: App {
                 .environment(navigation)
                 .tint(SpeechRailDesignTokens.Color.rail)
         }
-        MenuBarExtra("SpeechRail", systemImage: "waveform") {
+        .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        MenuBarExtra("SpeechRail", systemImage: AppRoute.dubbing.systemImage) {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)

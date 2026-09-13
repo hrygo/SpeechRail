@@ -24,10 +24,10 @@ public struct ModelManagementView: View {
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "读取模型目录与校验状态，或查看选中制品的技术详情") {
                     Button {
-                        Task { await model.refreshModels() }
+                        Task { await model.refreshModelsAndHealth() }
                     } label: {
                         Label("刷新模型状态", systemImage: "arrow.clockwise")
                     }
@@ -43,6 +43,7 @@ public struct ModelManagementView: View {
                     }
                 }
             }
+            .sharedBackgroundVisibility(.hidden)
         }
         .inspector(isPresented: $showInspector) {
             modelInspector
@@ -75,7 +76,7 @@ public struct ModelManagementView: View {
         }
         .task {
             model.refreshControlAgentStatus()
-            await model.refreshModels()
+            await model.refreshModelsAndHealth()
             if let active = model.operation?.profile ?? model.profile?.preset {
                 selectedProfile = active
             }
@@ -205,6 +206,10 @@ public struct ModelManagementView: View {
             profileFacts
             Divider()
             artifactSection
+            if !unmanagedArtifactStatuses.isEmpty {
+                Divider()
+                unmanagedArtifactSection
+            }
             if !independentDiarizationKeys.isEmpty {
                 Divider()
                 diarizationSection
@@ -260,14 +265,14 @@ public struct ModelManagementView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
                 title: "模型制品",
-                detail: "下载动作会逐文件校验大小和 SHA-256；选择制品后可在 Inspector 查看技术细节。"
+                detail: "存在状态看文件与 SHA-256；使用状态看当前服务档位和 worker 生命周期。已释放表示可按需加载，不等于缺失。"
             )
             if model.modelCatalog != nil {
                 let artifacts = visibleArtifacts
                 if artifacts.isEmpty {
                     ContentUnavailableView(
-                        "当前档位没有已登记制品",
-                        systemImage: "cube",
+                    "当前档位没有已登记制品",
+                        systemImage: AppRoute.models.systemImage,
                         description: Text("请运行预检或检查受管 runtime 的模型目录。")
                     )
                     .frame(
@@ -283,6 +288,7 @@ public struct ModelManagementView: View {
                                 ArtifactChoiceRow(
                                     artifact: artifact,
                                     status: status(for: artifact),
+                                    usage: usage(for: artifact),
                                     selected: selectedArtifactKey == artifact.key
                                 )
                             }
@@ -297,7 +303,7 @@ public struct ModelManagementView: View {
             } else {
                 ContentUnavailableView(
                     "模型目录暂时不可用",
-                    systemImage: "cube",
+                    systemImage: AppRoute.models.systemImage,
                     description: Text("管理控制台会通过本机控制 Agent 读取锁定目录。")
                 )
                 .frame(
@@ -316,7 +322,25 @@ public struct ModelManagementView: View {
             )
             VStack(spacing: 0) {
                 ForEach(independentDiarizationKeys, id: \.self) { key in
-                    DiarizationStatusRow(key: key, status: status(forKey: key))
+                    DiarizationStatusRow(
+                        key: key,
+                        status: status(forKey: key),
+                        usage: usage(forKey: key)
+                    )
+                }
+            }
+        }
+    }
+
+    private var unmanagedArtifactSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "已检测但未纳入当前目录",
+                detail: "这些本机制品仍存在，但当前锁定 catalog 未登记；不会被受管档位选择或运行时映射。"
+            )
+            VStack(spacing: 0) {
+                ForEach(unmanagedArtifactStatuses, id: \.key) { status in
+                    UnmanagedArtifactRow(status: status)
                 }
             }
         }
@@ -352,8 +376,8 @@ public struct ModelManagementView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
-            if !profileDiarizationVerified {
-                Text("此档位还需要 FluidAudio CoreML 分人资产通过校验。")
+            if !missingDiarizationKeys.isEmpty {
+                Text("此档位还需要 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))通过校验。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
             } else if !visibleArtifacts.isEmpty && !profileArtifactsVerified {
@@ -383,9 +407,10 @@ public struct ModelManagementView: View {
                 LabeledContent("文件", value: "\(artifact.fileCount) 个 · \(formatBytes(artifact.sizeBytes))")
                 if let status = status(for: artifact) {
                     Divider()
-                    LabeledContent("状态", value: statusText(for: status))
+                    LabeledContent("存在状态", value: statusText(for: status))
                     LabeledContent("完整性", value: integrityText(for: status))
                 }
+                LabeledContent("使用状态", value: usage(for: artifact).text)
                 if let operation = model.operation, let message = operation.message {
                     Divider()
                     LabeledContent("最近操作", value: operation.command.rawValue)
@@ -423,6 +448,13 @@ public struct ModelManagementView: View {
         model.modelCatalog?.artifacts.filter {
             $0.requiredBy.contains(selectedProfile)
         } ?? []
+    }
+
+    private var unmanagedArtifactStatuses: [ModelArtifactStatusSnapshot] {
+        let catalogKeys = Set(model.modelCatalog?.artifacts.map(\.key) ?? [])
+        return (model.modelStatus?.artifacts ?? [])
+            .filter { !catalogKeys.contains($0.key) }
+            .sorted { $0.key < $1.key }
     }
 
     private var activeModelOperation: OperationSnapshot? {
@@ -472,9 +504,15 @@ public struct ModelManagementView: View {
     }
 
     private var profileDiarizationVerified: Bool {
-        requiredDiarizationKeys.allSatisfy { key in
-            isVerified(status(forKey: key))
-        }
+        missingDiarizationKeys.isEmpty
+    }
+
+    private var missingDiarizationKeys: [String] {
+        requiredDiarizationKeys.filter { !isVerified(status(forKey: $0)) }
+    }
+
+    private func assetTitle(for key: String) -> String {
+        key == "diarization-coreml" ? "FluidAudio CoreML 分人资产" : key
     }
 
     private func summary(for profile: SpeechRailProfile) -> ProfileSummary? {
@@ -486,8 +524,136 @@ public struct ModelManagementView: View {
     }
 
     private func status(forKey key: String) -> ModelArtifactStatusSnapshot? {
-        model.modelStatus?.artifacts.first(where: { $0.key == key })
-            ?? model.modelStatus?.diarization.first(where: { $0.key == key })
+        model.modelStatus?.status(for: key)
+    }
+
+    private func usage(for artifact: ModelArtifactSnapshot) -> ModelArtifactUsagePresentation {
+        usage(forKey: artifact.key)
+    }
+
+    private func usage(forKey key: String) -> ModelArtifactUsagePresentation {
+        guard let activeProfile = model.profile?.preset else {
+            return ModelArtifactUsagePresentation(
+                text: "当前服务档位未读取",
+                tone: .neutral
+            )
+        }
+        guard let activeSummary = summary(for: activeProfile) else {
+            return ModelArtifactUsagePresentation(
+                text: "当前档位模型映射未读取",
+                tone: .neutral
+            )
+        }
+        guard let health = model.health else {
+            return ModelArtifactUsagePresentation(
+                text: "运行状态未读取",
+                tone: .neutral
+            )
+        }
+        guard let healthProfile = health.profile else {
+            return ModelArtifactUsagePresentation(
+                text: "运行档位未读取",
+                tone: .neutral
+            )
+        }
+        guard healthProfile == activeProfile else {
+            return ModelArtifactUsagePresentation(
+                text: "配置档位与运行时不一致",
+                tone: .critical
+            )
+        }
+        guard let artifactStatus = status(forKey: key) else {
+            return ModelArtifactUsagePresentation(
+                text: "配置引用 · 存在状态未读取",
+                tone: .critical
+            )
+        }
+        guard isVerified(artifactStatus) else {
+            return ModelArtifactUsagePresentation(
+                text: "配置引用 · 制品未验证",
+                tone: .attention
+            )
+        }
+
+        if key == activeSummary.asr {
+            return runtimeUsage(
+                label: "当前 ASR",
+                ready: health.asrReady,
+                state: health.asrState
+            )
+        }
+        if key == activeSummary.tts {
+            return runtimeUsage(
+                label: "当前 TTS",
+                ready: health.ttsReady,
+                state: health.ttsState
+            )
+        }
+        if key == activeSummary.ttsClone {
+            return runtimeUsage(
+                label: "当前克隆 TTS 备用",
+                ready: health.ttsReady,
+                state: health.ttsState
+            )
+        }
+        if activeSummary.diarization,
+           key == activeSummary.aligner || key == "diarization-coreml" {
+            let ready = health.diarization?.ready ?? health.diarizationReady
+            guard let ready else {
+                return ModelArtifactUsagePresentation(
+                    text: "当前分人链路 · 状态未读取",
+                    tone: .neutral
+                )
+            }
+            return ModelArtifactUsagePresentation(
+                text: ready ? "当前分人链路 · 已就绪" : "当前分人链路 · 未就绪",
+                tone: ready ? .healthy : .critical
+            )
+        }
+        return ModelArtifactUsagePresentation(
+            text: "当前档位未使用",
+            tone: .neutral
+        )
+    }
+
+    private func runtimeUsage(
+        label: String,
+        ready: Bool?,
+        state: String?
+    ) -> ModelArtifactUsagePresentation {
+        guard ready != false else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 服务未就绪",
+                tone: .critical
+            )
+        }
+        guard let state else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 生命周期未读取",
+                tone: .neutral
+            )
+        }
+        let normalized = state.lowercased()
+        let text: String
+        let tone: StatusTone
+        switch normalized {
+        case "active":
+            text = "\(label) · 运行中"
+            tone = .healthy
+        case "warm_standby":
+            text = "\(label) · 温待机"
+            tone = .healthy
+        case "cold_evicted":
+            text = "\(label) · 空闲已释放（请求时加载）"
+            tone = .attention
+        case "inactive", "stopped":
+            text = "\(label) · 未运行"
+            tone = .attention
+        default:
+            text = "\(label) · \(SpeechRailRuntimeStatePresentation.text(state))"
+            tone = .neutral
+        }
+        return ModelArtifactUsagePresentation(text: text, tone: tone)
     }
 
     private func isVerified(_ status: ModelArtifactStatusSnapshot?) -> Bool {
@@ -497,6 +663,9 @@ public struct ModelManagementView: View {
     private func operationActionTitle(for operation: OperationSnapshot) -> String? {
         switch operation.command {
         case .modelPrepare:
+            if operation.phase?.lowercased() == "cancelling" {
+                return nil
+            }
             return operation.state == .accepted || operation.state == .running
                 ? "停止下载"
                 : "重新下载并校验"
@@ -549,13 +718,14 @@ public struct ModelManagementView: View {
         let profile = profileTitle(for: selectedProfile)
         let size = summary(for: selectedProfile).map { formatBytes($0.downloadBytes) }
         let free = model.modelStatus.map { formatBytes($0.disk.freeBytes) }
+        let boundary = "只下载并校验，不会重启服务、切换档位、删除模型，也不会上传音频或作品。"
         switch (size, free) {
         case let (.some(size), .some(free)):
-            return "确认下载并校验 \(profile) 模型？预计占用 \(size)，当前可用空间 \(free)。"
+            return "确认下载并校验 \(profile) 模型？预计占用 \(size)，当前可用空间 \(free)。\(boundary)"
         case let (.some(size), .none):
-            return "确认下载并校验 \(profile) 模型？预计占用 \(size)。"
+            return "确认下载并校验 \(profile) 模型？预计占用 \(size)。\(boundary)"
         default:
-            return "确认下载并校验 \(profile) 模型？"
+            return "确认下载并校验 \(profile) 模型？\(boundary)"
         }
     }
 
@@ -699,9 +869,15 @@ private struct ProfileChoiceRow: View {
     }
 }
 
+private struct ModelArtifactUsagePresentation {
+    let text: String
+    let tone: StatusTone
+}
+
 private struct ArtifactChoiceRow: View {
     let artifact: ModelArtifactSnapshot
     let status: ModelArtifactStatusSnapshot?
+    let usage: ModelArtifactUsagePresentation
     let selected: Bool
 
     var body: some View {
@@ -714,15 +890,18 @@ private struct ArtifactChoiceRow: View {
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
+                Text(artifact.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(statusText)
+                Text("存在：\(existenceText)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text("使用：\(usage.text)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(usage.tone.color)
             }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Text(artifact.key)
+            Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
@@ -734,8 +913,8 @@ private struct ArtifactChoiceRow: View {
             in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(artifact.variant)
-        .accessibilityValue(statusText)
+        .accessibilityLabel(artifact.key)
+        .accessibilityValue("存在：\(existenceText)，使用：\(usage.text)")
         .accessibilityHint("在开发者详情中查看模型来源和校验信息")
     }
 
@@ -743,7 +922,7 @@ private struct ArtifactChoiceRow: View {
         status?.state == .verified && status?.integrity == .verified
     }
 
-    private var statusText: String {
+    private var existenceText: String {
         guard let status else { return "未读取状态" }
         return switch status.state {
         case .verified:
@@ -765,6 +944,7 @@ private struct ArtifactChoiceRow: View {
 private struct DiarizationStatusRow: View {
     let key: String
     let status: ModelArtifactStatusSnapshot?
+    let usage: ModelArtifactUsagePresentation
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -779,7 +959,63 @@ private struct DiarizationStatusRow: View {
                 Text(key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(key)")
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(statusText)
+                Text("存在：\(existenceText)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text("使用：\(usage.text)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(usage.tone.color)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(key)，存在：\(existenceText)，使用：\(usage.text)")
+    }
+
+    private var isVerified: Bool {
+        status?.state == .verified && status?.integrity == .verified
+    }
+
+    private var existenceText: String {
+        guard let status else { return "未读取状态" }
+        return switch status.state {
+        case .verified:
+            status.integrity == .verified
+                ? "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
+                : "文件存在，但完整性校验未通过"
+        case .notDownloaded:
+            "未下载"
+        case .downloading:
+            "下载中"
+        case .invalid:
+            "校验不匹配，需要重新准备"
+        case .unknown:
+            "状态未知"
+        }
+    }
+}
+
+private struct UnmanagedArtifactRow: View {
+    let status: ModelArtifactStatusSnapshot
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: isVerified ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundStyle(
+                    isVerified
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.attention
+                )
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(status.key)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text("存在：\(existenceText)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text("使用：当前 catalog 未登记")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
@@ -787,16 +1023,16 @@ private struct DiarizationStatusRow: View {
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(key)，\(statusText)")
+        .accessibilityLabel(status.key)
+        .accessibilityValue("存在：\(existenceText)，使用：当前 catalog 未登记")
     }
 
     private var isVerified: Bool {
-        status?.state == .verified && status?.integrity == .verified
+        status.state == .verified && status.integrity == .verified
     }
 
-    private var statusText: String {
-        guard let status else { return "未读取状态" }
-        return switch status.state {
+    private var existenceText: String {
+        switch status.state {
         case .verified:
             status.integrity == .verified
                 ? "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"

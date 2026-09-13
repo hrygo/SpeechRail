@@ -30,7 +30,7 @@ public struct PreflightDiagnosticsView: View {
         .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .toolbar {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "查看预检上下文与脱敏技术详情") {
                     Button {
                         showInspector.toggle()
@@ -42,6 +42,7 @@ public struct PreflightDiagnosticsView: View {
                     }
                 }
             }
+            .sharedBackgroundVisibility(.hidden)
         }
         .inspector(isPresented: $showInspector) {
             DeveloperInspector {
@@ -111,7 +112,7 @@ public struct PreflightDiagnosticsView: View {
             if model.preflightChecks.isEmpty {
                 ContentUnavailableView(
                     "还没有检查项",
-                    systemImage: "stethoscope",
+                    systemImage: AppRoute.diagnostics.systemImage,
                     description: Text("运行诊断后，结果会出现在这里。")
                 )
                 .frame(
@@ -120,13 +121,7 @@ public struct PreflightDiagnosticsView: View {
                 )
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    LazyVGrid(
-                        columns: [
-                            GridItem(.flexible(minimum: 0), spacing: SpeechRailDesignTokens.Spacing.xs),
-                            GridItem(.flexible(minimum: 0), spacing: SpeechRailDesignTokens.Spacing.xs),
-                        ],
-                        spacing: SpeechRailDesignTokens.Spacing.xs
-                    ) {
+                    LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         ForEach(model.preflightChecks, id: \.name) { check in
                             Button {
                                 selectedCheckName = check.name
@@ -210,13 +205,13 @@ public struct PreflightDiagnosticsView: View {
                         Button {
                             navigation.request(.models)
                         } label: {
-                            Label("打开模型管理", systemImage: "cube")
+                            Label("打开模型管理", systemImage: AppRoute.models.systemImage)
                         }
                         .speechRailButton(.secondary)
                         Button {
                             navigation.request(.overview)
                         } label: {
-                            Label("查看服务状态", systemImage: "server.rack")
+                            Label("查看服务状态", systemImage: AppRoute.overview.systemImage)
                         }
                         .speechRailButton(.secondary)
                     }

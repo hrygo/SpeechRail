@@ -100,6 +100,31 @@ final class ControlKitTests: XCTestCase {
         XCTAssertEqual(decoded.modelCatalog?.profiles, [])
     }
 
+    func testModelStatusPrefersDedicatedDiarizationInspectionForOverlappingArtifact() {
+        let generic = ModelArtifactStatusSnapshot(
+            key: "aligner-bf16",
+            state: .notDownloaded,
+            integrity: .notChecked,
+            verifiedFileCount: 0,
+            totalFileCount: 10
+        )
+        let dedicated = ModelArtifactStatusSnapshot(
+            key: "aligner-bf16",
+            state: .verified,
+            integrity: .verified,
+            verifiedFileCount: 10,
+            totalFileCount: 10
+        )
+        let snapshot = ModelStatusSnapshot(
+            artifacts: [generic],
+            diarization: [dedicated],
+            disk: ModelDiskSnapshot(modelBytes: 0, freeBytes: 1)
+        )
+
+        XCTAssertEqual(snapshot.status(for: "aligner-bf16"), dedicated)
+        XCTAssertEqual(snapshot.status(for: "unknown"), nil)
+    }
+
     func testRecoveryFieldsRoundTripWithoutChangingSchemaVersion() throws {
         let operation = OperationSnapshot(
             operationID: "model_recovery_123",
@@ -182,6 +207,47 @@ final class ControlKitTests: XCTestCase {
                 RuntimeMonitoringChartPoint(capturedAt: Date().addingTimeInterval(5), activeRequests: 2),
             ])
         )
+    }
+
+    func testRuntimeMetricsSamplerIncludesPublishedSignalsAndAdjacentRates() {
+        let firstDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = RuntimeMetricsSnapshot(
+            counters: [
+                "speechrail_http_requests_total": 10,
+                "speechrail_governor_queue_rejections_total": 1,
+            ],
+            gauges: ["speechrail_realtime_active_sessions": 2],
+            histograms: [
+                "speechrail_tts_ttfa_seconds": [
+                    "": RuntimeHistogramSummary(count: 2, sum: 0.6, average: 0.3),
+                ],
+            ]
+        )
+        let firstSample = RuntimeMetricsSampler.makeSample(
+            from: first,
+            capturedAt: firstDate
+        )
+
+        XCTAssertEqual(firstSample.ttsTTFASeconds, 0.3)
+        XCTAssertEqual(firstSample.activeRealtimeSessions, 2)
+        XCTAssertNil(firstSample.requestRatePerSecond)
+
+        let second = RuntimeMetricsSnapshot(
+            counters: [
+                "speechrail_http_requests_total": 20,
+                "speechrail_governor_queue_rejections_total": 3,
+            ],
+            gauges: ["speechrail_realtime_active_sessions": 4]
+        )
+        let secondSample = RuntimeMetricsSampler.makeSample(
+            from: second,
+            capturedAt: firstDate.addingTimeInterval(5),
+            previous: firstSample
+        )
+
+        XCTAssertEqual(secondSample.activeRealtimeSessions, 4)
+        XCTAssertEqual(secondSample.requestRatePerSecond, 2.0)
+        XCTAssertEqual(secondSample.queueRejectionRatePerSecond, 0.4)
     }
 
     func testProfileSummaryAcceptsLegacyPayloadWithoutDiarization() throws {

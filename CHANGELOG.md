@@ -2,14 +2,28 @@
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-09-13
+
+### Added
+
+- 新增 macOS 26 SpeechRail 管理控制台工作区，分离创作入口与服务入口，保留配音台、音色创作、音色库和我的作品，并补充运行监控、诊断与模型管理视图。
+- 新增模型下载、完整性校验、准备中断恢复和版本不匹配引导；所有模型准备操作都需要显式确认，运行时仍保持模型制品仓库外管理。
+- 新增 Signal Loom 视觉语言和统一设计 token，覆盖窗口层级、颜色、排版、间距、状态信号、图表与品牌图标高光。
+
+### Changed
+
+- macOS 控制面统一采用以结论为先、状态可解释、普通用户与开发者分层的工作区结构；开发者 Inspector 只展示脱敏运行元数据。
+
 ### Fixed
 
 - 修复 `/v1/audio/speech` 运行时 OpenAPI 将二进制音频响应误报为 `application/json` 的问题；请求校验错误在仅有一个字段失败时现在会安全返回对应 `param`，不暴露原始输入。
 - MCP REST 错误转为工具错误时保留安全的 `param` 字段，并修正工具契约附录中已实现工具数量与破坏性标注的陈旧描述。
+- 修复 macOS Developer Inspector 在 macOS 26 `Form` 语义合并后无法逐项访问的问题，保留其内部辅助功能子元素。
 
 ### Documentation
 
 - 更新 MCP 集成指南：区分 Codex 本机 `stdio` 安装与 ChatGPT Web 通过远程 HTTPS MCP endpoint / Secure MCP Tunnel 的连接方式，并补充 ChatGPT 的本地文件与音频产物边界。
+- 归档原始 macOS 设计包，并补充管理控制台、服务模块、运行监控、模型下载和 macOS 26 设计系统文档。
 
 ## [2.5.2] - 2026-09-13
 

@@ -76,22 +76,26 @@ public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, 
                 execute: timeoutWorkItem
             )
             let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+                timeoutWorkItem.cancel()
                 continuationBox.resume(
                     throwing: XPCControlTransportError.remote(error.localizedDescription)
                 )
             }
             guard let proxy = proxy as? SpeechRailControlXPCProtocol else {
+                timeoutWorkItem.cancel()
                 continuationBox.resume(throwing: XPCControlTransportError.invalidProxy)
                 return
             }
             proxy.send(encodedRequest) { responseData, error in
                 if let error {
+                    timeoutWorkItem.cancel()
                     continuationBox.resume(
                         throwing: XPCControlTransportError.remote(error.localizedDescription)
                     )
                     return
                 }
                 guard let responseData else {
+                    timeoutWorkItem.cancel()
                     continuationBox.resume(throwing: XPCControlTransportError.invalidResponse)
                     return
                 }
@@ -101,13 +105,16 @@ public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, 
                           response.requestID == request.requestID,
                           response.command == request.command
                     else {
+                        timeoutWorkItem.cancel()
                         continuationBox.resume(
                             throwing: XPCControlTransportError.invalidResponse
                         )
                         return
                     }
+                    timeoutWorkItem.cancel()
                     continuationBox.resume(returning: response)
                 } catch {
+                    timeoutWorkItem.cancel()
                     continuationBox.resume(throwing: XPCControlTransportError.invalidResponse)
                 }
             }

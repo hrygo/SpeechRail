@@ -84,11 +84,11 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     public var systemImage: String {
         switch self {
         case .dubbing:
-            "waveform"
+            "waveform.and.mic"
         case .voiceDesign:
-            "wand.and.stars"
+            "waveform.badge.plus"
         case .voiceLibrary:
-            "person.wave.2"
+            "music.note.list"
         case .works:
             "square.stack.3d.up"
         case .overview:
@@ -96,7 +96,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .monitoring:
             "chart.xyaxis.line"
         case .models:
-            "cube"
+            "shippingbox"
         case .diagnostics:
             "stethoscope"
         }

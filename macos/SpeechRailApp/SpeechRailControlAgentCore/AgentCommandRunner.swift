@@ -223,12 +223,17 @@ public final class ProcessManagedCommandRunner: CancellableManagedCommandRunner,
 
         let stdoutCollector = PipeCollector()
         let stderrCollector = PipeCollector()
+        let outputValidation = OutputValidationState()
         let group = DispatchGroup()
         group.enter()
         DispatchQueue.global(qos: .utility).async {
             stdoutCollector.collect(stdoutPipe.fileHandleForReading) { line in
-                if let snapshot = CLIOutputDecoder.decodeProgress(line, command: command) {
-                    progress(snapshot)
+                do {
+                    if let snapshot = try CLIOutputDecoder.decodeProgress(line, command: command) {
+                        progress(snapshot)
+                    }
+                } catch {
+                    outputValidation.markInvalid()
                 }
             }
             group.leave()
@@ -241,6 +246,10 @@ public final class ProcessManagedCommandRunner: CancellableManagedCommandRunner,
 
         process.waitUntilExit()
         group.wait()
+
+        if outputValidation.isInvalid {
+            throw ManagedCommandError.invalidOutput
+        }
 
         let exitCode = process.terminationStatus
         let stdout = stdoutCollector.data
@@ -310,6 +319,23 @@ private final class PipeCollector: @unchecked Sendable {
         }
         lock.lock()
         storedData = data
+        lock.unlock()
+    }
+}
+
+private final class OutputValidationState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var invalid = false
+
+    var isInvalid: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return invalid
+    }
+
+    func markInvalid() {
+        lock.lock()
+        invalid = true
         lock.unlock()
     }
 }
@@ -415,7 +441,9 @@ private struct CLIEnvelope: Decodable {
 }
 
 private struct CLIProgressEnvelope: Decodable {
-    let event: String?
+    let schemaVersion: Int
+    let command: String
+    let event: String
     let phase: String?
     let artifact: String?
     let artifactKey: String?
@@ -425,6 +453,8 @@ private struct CLIProgressEnvelope: Decodable {
     let expectedBytes: Int64?
 
     enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case command
         case event
         case phase
         case artifact
@@ -512,12 +542,38 @@ private enum CLIOutputDecoder {
     static func decodeProgress(
         _ data: Data,
         command: ManagedCommand
-    ) -> OperationProgressSnapshot? {
-        guard command.controlCommand == .modelPrepare,
-              let envelope = try? ControlWireCodec.decode(CLIProgressEnvelope.self, from: data),
-              envelope.event == "progress"
-        else {
+    ) throws -> OperationProgressSnapshot? {
+        guard command.controlCommand == .modelPrepare else {
             return nil
+        }
+        guard let envelope = try? ControlWireCodec.decode(CLIProgressEnvelope.self, from: data) else {
+            return nil
+        }
+        guard envelope.schemaVersion == ControlConstants.schemaVersion,
+              envelope.command == expectedCommand(for: command.controlCommand)
+        else {
+            throw ManagedCommandError.invalidOutput
+        }
+        guard envelope.event == "progress" else {
+            guard envelope.event == "result" else {
+                throw ManagedCommandError.invalidOutput
+            }
+            return nil
+        }
+        if let bytes = envelope.bytes, bytes < 0 {
+            throw ManagedCommandError.invalidOutput
+        }
+        if let completedBytes = envelope.completedBytes, completedBytes < 0 {
+            throw ManagedCommandError.invalidOutput
+        }
+        if let expectedBytes = envelope.expectedBytes, expectedBytes < 0 {
+            throw ManagedCommandError.invalidOutput
+        }
+        if let completedBytes = envelope.completedBytes,
+           let expectedBytes = envelope.expectedBytes,
+           completedBytes > expectedBytes
+        {
+            throw ManagedCommandError.invalidOutput
         }
         return OperationProgressSnapshot(
             phase: envelope.phase,
@@ -538,8 +594,16 @@ private enum CLIOutputDecoder {
         }
         let envelope = try ControlWireCodec.decode(CLIEnvelope.self, from: envelopeData)
         guard envelope.schemaVersion == ControlConstants.schemaVersion,
+              envelope.command == expectedCommand(for: command),
               let responseStatus = ControlResponseStatus(rawValue: envelope.status)
         else {
+            throw ManagedCommandError.invalidOutput
+        }
+        if command == .modelPrepare {
+            guard envelope.event == "result" else {
+                throw ManagedCommandError.invalidOutput
+            }
+        } else if let event = envelope.event, event != "result" {
             throw ManagedCommandError.invalidOutput
         }
 
@@ -680,6 +744,39 @@ private enum CLIOutputDecoder {
         case .committed, .completed, .unchanged: .committed
         case .cancelled: .cancelled
         case .ok, .rolledBack, .failed: .failed
+        }
+    }
+
+    private static func expectedCommand(for command: ControlCommand) -> String {
+        switch command {
+        case .status:
+            "service.status"
+        case .start:
+            "service.start"
+        case .stop:
+            "service.stop"
+        case .restart:
+            "service.restart"
+        case .preflight:
+            "service.preflight"
+        case .profileList:
+            "profile.list"
+        case .profileStatus:
+            "profile.status"
+        case .profileApply:
+            "profile.apply"
+        case .profileRollback:
+            "profile.rollback"
+        case .modelCatalog:
+            "model.catalog"
+        case .modelStatus:
+            "model.status"
+        case .modelPrepare:
+            "model.prepare"
+        case .operationStatus:
+            "operation.status"
+        case .operationCancel:
+            "operation.cancel"
         }
     }
 }

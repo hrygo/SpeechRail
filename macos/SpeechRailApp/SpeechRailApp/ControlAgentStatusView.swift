@@ -14,18 +14,18 @@ struct ControlAgentStatusView: View {
                 ? "checkmark.shield.fill"
                 : "exclamationmark.shield.fill")
                 .foregroundStyle(model.controlAgentStatus.allowsMutation
-                    ? SpeechRailDesignTokens.Palette.healthy
-                    : SpeechRailDesignTokens.Palette.attention)
+                    ? SpeechRailDesignTokens.Color.ready
+                    : SpeechRailDesignTokens.Color.attention)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(model.controlAgentStatus.title)
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
                 Text(model.controlAgentStatus.detail)
                     .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Text("影响：\(model.controlAgentStatus.impact)")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 if !compact {
                     action
                 }
@@ -53,7 +53,7 @@ struct ControlAgentStatusView: View {
         case .installAgent:
             Text("请重新安装包含控制 Agent 的 SpeechRail 应用包。")
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.warning)
+                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
         case .none, .unavailable:
             EmptyView()
         }

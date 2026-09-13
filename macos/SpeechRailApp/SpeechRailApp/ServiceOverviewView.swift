@@ -15,7 +15,7 @@ public struct ServiceOverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 PageIntroView(route: .overview)
-                statusBanner
+                statusArea
                 ControlAgentStatusView()
                 serviceBody
             }
@@ -26,7 +26,7 @@ public struct ServiceOverviewView: View {
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
-            ToolbarItem {
+            ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "刷新状态、查看技术详情，或启动、停止和重启本机 SpeechRail 服务") {
                     Button {
                         Task { await model.refresh() }
@@ -47,6 +47,7 @@ public struct ServiceOverviewView: View {
                     serviceActions
                 }
             }
+            .sharedBackgroundVisibility(.hidden)
         }
         .inspector(isPresented: $showInspector) {
             DeveloperInspector {
@@ -85,6 +86,21 @@ public struct ServiceOverviewView: View {
         }
     }
 
+    @ViewBuilder
+    private var statusArea: some View {
+        if let operation = model.serviceOperation {
+            ServiceOperationStatusView(
+                operation: operation,
+                actionTitle: operation.phase == .failed ? "重新读取" : nil
+            ) {
+                Task { await model.refresh() }
+            }
+        }
+        if model.serviceOperation?.phase.isActive != true {
+            statusBanner
+        }
+    }
+
     private var statusBanner: some View {
         let isReady = model.service.ready == true && model.healthMessage == nil
         let isUnavailable = model.service.serviceState == "unavailable" || model.healthMessage != nil
@@ -108,7 +124,10 @@ public struct ServiceOverviewView: View {
             title: isReady ? "服务可用" : (isUnavailable ? "服务不可用" : "服务尚未就绪"),
             message: statusMessage,
             actionTitle: actionTitle,
-            actionDisabled: model.isBusy || model.hasActiveMutation || model.isRefreshingService
+            actionDisabled: model.isBusy
+                || model.hasActiveMutation
+                || model.isRefreshingService
+                || model.serviceOperation?.phase.isActive == true
         ) {
             if model.healthMessage != nil {
                 Task { await model.refresh() }
@@ -166,14 +185,14 @@ public struct ServiceOverviewView: View {
                     Button {
                         Task { await model.refreshPreflight() }
                     } label: {
-                        Label("运行预检", systemImage: "stethoscope")
+                        Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
                     }
                     .speechRailButton(.secondary)
                     .disabled(model.isBusy || model.isRefreshingPreflight)
                     Button {
                         navigation.request(.models)
                     } label: {
-                        Label("打开模型管理", systemImage: "cube")
+                        Label("打开模型管理", systemImage: AppRoute.models.systemImage)
                     }
                     .speechRailButton(.secondary)
                     if let message = model.message, !message.isEmpty {
