@@ -289,7 +289,7 @@ plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.c
 Expected: native build/tests and all existing project gates pass. If macOS UI automation is blocked by the desktop menu traversal environment,
 record the exact failing test and separate that environmental result from compile/unit-test results.
 
-- [ ] **Step 3: Inspect the final diff and installed App without touching the managed service.**
+- [x] **Step 3: Inspect the final diff and installed App without touching the managed service.**
 
 Confirm:
 
@@ -302,7 +302,7 @@ git diff --check
 Verify the App bundle still has `MACOSX_DEPLOYMENT_TARGET=26.0`, one embedded local XPC service and no model/audio artifacts.
 Do not stop/restart/replace `com.speechrail` or download models as part of UI verification.
 
-- [ ] **Step 4: Commit documentation and report evidence.**
+- [x] **Step 4: Commit documentation and report evidence.**
 
 ```bash
 git add docs/developers/macos-app-design-system.md

@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.4.0"
+version: "0.4.1"
 date: 2026-09-13
 ---
 
@@ -99,6 +99,8 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | Swift 单元测试 | 32 tests，0 failures | 2026-09-13 14:04 |
 | UI 测试 | 7 tests，0 failures；覆盖导航、服务状态、模型确认/恢复/能力不匹配、监控空状态、设置 | 2026-09-13 14:04 |
 | 设置单场景复核 | 1 test，0 failures | 2026-09-13 14:03 |
+| Release App 安装 | `2.5.2 (1)`、`arm64`、`LSMinimumSystemVersion=26.0`，签名与嵌入 XPC 通过；已安装到 `~/Applications/SpeechRail.app` | 2026-09-13 14:15 |
+| 安装后服务隔离 | `/health`、`/readyz` 通过；仍为唯一 8201 listener（PID 25912），quality profile；未重启服务 | 2026-09-13 14:16 |
 | 桌面视觉矩阵 | 尚未完成；仍需人工检查最小窗口、深色、高对比度、Reduce Motion | — |
 | VoiceOver 实测 | 尚未完成 | — |
 
