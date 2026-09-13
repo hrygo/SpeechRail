@@ -24,6 +24,20 @@ token；新页面不得自行定义颜色、间距、圆角和字体层级。
 
 App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志、原始音频、完整转写和 API key 均留在 App bundle 之外。
 
+`ServiceAPIClient` 通过 `ServiceDiagnosticsClient` 抽象读取 `/health` 和带
+`Accept: application/json` 的 `/metrics`；UI 测试用 fake client 返回 typed snapshot，不能
+因为测试参数而访问 loopback。`model.status` 另外返回分人 CoreML/aligner 状态，避免只看
+`models/` 快照就误判 diarization 已就绪。
+
+## 当前控制面 surface
+
+`WindowGroup(id: "control-center")` 承载同一个 `AppModel` 下的两类一级 surface：
+
+- 创作：配音台、音色创作、音色库、我的作品。音色创作框架保留 VoiceDesign 的描述、候选、试听和保存主线；尚未接入真实能力时，按钮保持禁用并解释依赖，不伪造音频结果。
+- 服务：本机服务总览、运行监控、模型管理、预检与诊断。总览解释健康状态和能力，监控读取 `/metrics`，模型管理通过 XPC Agent 调用锁定目录的 `model catalog/status/prepare`，预检显示可操作的失败原因。
+
+模型页明确区分“下载并校验”和“应用此档位”：前者执行逐文件大小/SHA-256 校验和原子发布，可显示 JSONL 进度并取消；后者才改变当前 profile。App 不直接访问模型源、不把本地路径或 hash 返回给页面，也不把模型下载放进请求路径。
+
 ## 发布与运行态关系
 
 - `com.speechrail` 是实际服务 owner，必须由服务发布/安装流程负责登录常驻；`SpeechRail.app` 只是按需打开的控制面，不是登录启动项。
@@ -45,6 +59,9 @@ App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志
 - UI/integration tests 使用 fake transport、临时 app home、端口和 helper label；测试结束必须注销临时 LaunchAgent 并清理临时目录。
 - 真实 `SMAppService` register/unregister 只在签名 Distribution 验收中执行；本机 Debug/Release 走内嵌 XPC service。真实 `com.speechrail` smoke 仍只在单独、明确授权的本机验收中执行。
 - profile apply 仍由 Python transaction journal、preflight、public smoke 和 rollback 决定成功与否；App 不自行推断模型能力。
+- `model prepare` 是独立的可取消 mutation；Agent 仅转发已确认的档位、进度和终态，取消后不会把部分 staging 目录当作可用模型。
+- 模型 progress 的 `phase` 使用 `download`、`verifying`、`publishing` 等受控值；文件名、字节数可以显示给用户，但不携带 URL、绝对路径或凭据。
+- 运行监控只保留最近 60 个内存样本，页面关闭不改变服务；无 metrics 时显示“等待监控样本”，不显示虚构的 0 值或容量。
 
 ## 控制操作错误契约
 

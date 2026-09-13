@@ -69,6 +69,17 @@ HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。�
 
 `/readyz` 只表示 ASR 或 TTS 至少一个可用；成功响应也包含独立的 `realtime_vad` 诊断。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
 
+## macOS App 控制面
+
+SpeechRail macOS App 面向本机用户提供两类入口：
+
+- **创作**：配音台、音色创作、音色库和我的作品。音色创作保留 VoiceDesign 的描述、试听和保存主线。
+- **服务**：本机服务总览、运行监控、模型管理、预检与诊断。普通用户先看“现在能不能用”和“下一步做什么”；开发者可展开技术详情核对档位、worker、metrics、revision 和校验文件数。
+
+在“模型管理”中，选择 `quality`、`balanced` 或 `light` 后可以单独执行“下载并校验”。该操作只使用 SpeechRail 锁定的模型目录，逐文件校验大小和 SHA-256，并原子发布到本机；它不会自动应用 profile、启动/重启服务、删除已有模型，也不会上传音频或作品。确认“应用此档位”才会触发 profile 切换和现有服务验收。
+
+“运行监控”是服务运行指标看板，不是语音质量评分；它展示活跃/排队请求、worker 状态和延迟样本。服务未运行或指标暂时不可读时，页面会保留“不可用/等待样本”的事实，不把缺失数据显示成正常的 0。
+
 ### Capability 路由提示
 
 客户端只调用公共 REST/WebSocket endpoint，不需要感知模型 worker 的加载、卸载或切换。选定的 profile 与请求 capability 会由服务端自动路由；`quality` 的 `voice_design` 与 `voice_clone` 使用独立 TTS worker，不同 lane 可以并发，同一 lane 的请求会按 worker lock 排队。空闲冷却导致 worker 回收时，服务会在下一次对应请求中惰性恢复，不改变客户端契约。

@@ -4,6 +4,7 @@ import SpeechRailControlKit
 @main
 struct SpeechRailApp: App {
     @State private var model: AppModel
+    @State private var navigation: AppNavigationState
 
     init() {
         let isUITest = ProcessInfo.processInfo.arguments.contains("--ui-test")
@@ -12,6 +13,9 @@ struct SpeechRailApp: App {
             ? UITestControlTransport(
                 profileApplyFails: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-profile-failure"
+                ),
+                modelPrepareFails: ProcessInfo.processInfo.arguments.contains(
+                    "--ui-test-model-failure"
                 )
             )
             : usesBundledXPCService
@@ -19,6 +23,13 @@ struct SpeechRailApp: App {
                     bundledServiceName: ControlConstants.localXPCServiceName
                 )
                 : NSXPCControlTransport()
+        let diagnosticsClient: any ServiceDiagnosticsClient = isUITest
+            ? UITestServiceDiagnosticsClient(
+                metricsUnavailable: ProcessInfo.processInfo.arguments.contains(
+                    "--ui-test-metrics-unavailable"
+                )
+            )
+            : ServiceAPIClient()
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
         if usesBundledXPCService {
             // A previous ad-hoc build may have left a failed SMAppService job
@@ -32,10 +43,11 @@ struct SpeechRailApp: App {
         _model = State(
             initialValue: AppModel(
                 transport: transport,
-                apiClient: ServiceAPIClient(),
+                apiClient: diagnosticsClient,
                 registration: registration
             )
         )
+        _navigation = State(initialValue: AppNavigationState())
     }
 
     private static var hasBundledLocalXPCService: Bool {
@@ -46,22 +58,140 @@ struct SpeechRailApp: App {
     }
 
     var body: some Scene {
+        WindowGroup("SpeechRail 管理控制台", id: AppNavigationState.controlCenterWindowID) {
+            ControlCenterView()
+                .environment(model)
+                .environment(navigation)
+        }
         MenuBarExtra("SpeechRail", systemImage: "waveform") {
             ControlMenuView()
                 .environment(model)
+                .environment(navigation)
         }
         Settings {
             SettingsView()
-                .environment(model)
         }
+    }
+}
+
+private struct UITestServiceDiagnosticsClient: ServiceDiagnosticsClient {
+    let metricsUnavailable: Bool
+
+    var port: Int? { 8201 }
+
+    func fetchHealthSnapshot() async throws -> HealthSnapshot {
+        HealthSnapshot(
+            status: "ok",
+            service: "speechrail",
+            version: "fixture",
+            backend: "fake-asr",
+            profile: .quality,
+            asrReady: true,
+            ttsReady: true,
+            ttsWarm: true,
+            diarizationReady: true,
+            diarization: DiarizationStatusSnapshot(
+                configured: true,
+                ready: true,
+                message: "fixture ready",
+                profile: "quality"
+            ),
+            asrState: "active",
+            ttsState: "active",
+            streamingState: "active",
+            realtimeVAD: RealtimeVADStatusSnapshot(
+                configuredEngine: "auto",
+                resolvedEngine: "fixture",
+                speechAdmissionEnabled: true,
+                ready: true,
+                message: "fixture ready"
+            ),
+            ready: true,
+            jobSpoolReady: false
+        )
+    }
+
+    func fetchMetrics() async throws -> RuntimeMetricsSnapshot {
+        if metricsUnavailable {
+            throw ServiceAPIClientError.requestFailed
+        }
+        return RuntimeMetricsSnapshot(
+            activeRequests: RuntimeRequestCounts(realtime: 1, batch: 0),
+            pendingRequests: RuntimeRequestCounts(realtime: 0, batch: 1),
+            workers: ["asr": "active", "tts": "warm_standby"],
+            health: ["asr": true, "tts": true],
+            counters: ["speechrail_http_requests_total": 12],
+            histograms: [
+                "speechrail_asr_inference_duration_seconds": [
+                    "all": RuntimeHistogramSummary(count: 4, sum: 1.2, average: 0.3),
+                ],
+                "speechrail_tts_inference_duration_seconds": [
+                    "all": RuntimeHistogramSummary(count: 2, sum: 0.8, average: 0.4),
+                ],
+            ]
+        )
+    }
+}
+
+private actor UITestOperationState {
+    private var modelStatusPolls = 0
+
+    func nextModelStatus(
+        request: ControlRequest,
+        fails: Bool
+    ) -> ControlResponse {
+        modelStatusPolls += 1
+        let isTerminal = fails || modelStatusPolls >= 2
+        let state: OperationState = if isTerminal {
+            fails ? .failed : .committed
+        } else {
+            .running
+        }
+        let status: ControlResponseStatus = if isTerminal {
+            fails ? .failed : .committed
+        } else {
+            .running
+        }
+        let errorCode: ControlErrorCode? = fails ? .integrityMismatch : nil
+        let message = fails ? "model preparation failed" : nil
+        let progress = OperationProgressSnapshot(
+            artifactKey: "fake-asr",
+            file: "fixture.bin",
+            completedBytes: isTerminal ? 128 : 64,
+            expectedBytes: 128
+        )
+        return ControlResponse(
+            requestID: request.requestID,
+            command: .operationStatus,
+            status: status,
+            errorCode: errorCode,
+            message: message,
+            operation: OperationSnapshot(
+                operationID: request.operationID ?? "ui-test-model-prepare",
+                command: .modelPrepare,
+                state: state,
+                phase: isTerminal ? (fails ? "failed" : "committed") : "download",
+                progress: progress,
+                errorCode: errorCode,
+                message: message
+            )
+        )
     }
 }
 
 private struct UITestControlTransport: SpeechRailControlTransport {
     private let profileApplyFails: Bool
+    private let modelPrepareFails: Bool
+    private let operationState: UITestOperationState
 
-    init(profileApplyFails: Bool = false) {
+    init(
+        profileApplyFails: Bool = false,
+        modelPrepareFails: Bool = false,
+        operationState: UITestOperationState = UITestOperationState()
+    ) {
         self.profileApplyFails = profileApplyFails
+        self.modelPrepareFails = modelPrepareFails
+        self.operationState = operationState
     }
 
     func send(_ request: ControlRequest) async throws -> ControlResponse {
@@ -81,6 +211,79 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                 command: request.command,
                 status: .ok,
                 profile: ProfileSnapshot(preset: .quality, generation: 1, asr: "fake-asr", tts: "fake-tts")
+            )
+        case .modelCatalog:
+            let artifact = ModelArtifactSnapshot(
+                key: "fake-asr",
+                modelID: "fixture/fake-asr",
+                family: "qwen3_asr",
+                variant: "asr",
+                revision: String(repeating: "a", count: 40),
+                provider: "fixture",
+                repository: "fixture/fake-asr",
+                quantization: ModelQuantizationSnapshot(bits: 8, groupSize: 64, format: "fixture"),
+                sizeBytes: 0,
+                fileCount: 1,
+                requiredBy: [.quality, .balanced, .light]
+            )
+            let profiles = SpeechRailProfile.allCases.map {
+                ProfileSummary(
+                    id: $0,
+                    asr: "fake-asr",
+                    tts: "fake-tts",
+                    diarization: $0 != .light,
+                    downloadBytes: 0
+                )
+            }
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .ok,
+                modelCatalog: ModelCatalogSnapshot(artifacts: [artifact], profiles: profiles)
+            )
+        case .modelStatus:
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .ok,
+                modelStatus: ModelStatusSnapshot(
+                    artifacts: [
+                        ModelArtifactStatusSnapshot(
+                            key: "fake-asr",
+                            state: .verified,
+                            integrity: .verified,
+                            verifiedFileCount: 1,
+                            totalFileCount: 1
+                        )
+                    ],
+                    disk: ModelDiskSnapshot(modelBytes: 0, freeBytes: 0)
+                )
+            )
+        case .preflight:
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .ok,
+                checks: [
+                    PreflightCheckSnapshot(name: "fake runtime", ok: true, message: "fixture ready")
+                ]
+            )
+        case .modelPrepare:
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: .accepted,
+                operation: OperationSnapshot(
+                    operationID: "ui-test-model-prepare",
+                    command: .modelPrepare,
+                    state: .accepted,
+                    phase: "accepted"
+                )
+            )
+        case .operationStatus where request.operationID == "ui-test-model-prepare":
+            return await operationState.nextModelStatus(
+                request: request,
+                fails: modelPrepareFails
             )
         case .profileApply where profileApplyFails:
             return ControlResponse(

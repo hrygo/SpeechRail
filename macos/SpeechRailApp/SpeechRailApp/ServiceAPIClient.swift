@@ -7,18 +7,11 @@ public enum ServiceAPIClientError: Error, Sendable {
     case requestFailed
 }
 
-private struct HealthPayload: Decodable, Sendable {
-    let status: String?
-    let profile: SpeechRailProfile?
-    let asrReady: Bool?
-    let ttsReady: Bool?
+public protocol ServiceDiagnosticsClient: Sendable {
+    var port: Int? { get }
 
-    enum CodingKeys: String, CodingKey {
-        case status
-        case profile
-        case asrReady = "asr_ready"
-        case ttsReady = "tts_ready"
-    }
+    func fetchHealthSnapshot() async throws -> HealthSnapshot
+    func fetchMetrics() async throws -> RuntimeMetricsSnapshot
 }
 
 public final class ServiceAPIClient: @unchecked Sendable {
@@ -30,18 +23,32 @@ public final class ServiceAPIClient: @unchecked Sendable {
         self.session = session
     }
 
+    public init(baseURL: URL, session: URLSession = .shared) {
+        self.baseURL = baseURL
+        self.session = session
+    }
+
+    public var port: Int? { baseURL.port }
+
+    public func fetchHealthSnapshot() async throws -> HealthSnapshot {
+        try await get(path: "/health")
+    }
+
     public func fetchHealth() async throws -> ServiceSnapshot {
-        let payload: HealthPayload = try await get(path: "/health")
-        let ready: Bool?
-        if let asrReady = payload.asrReady, let ttsReady = payload.ttsReady {
-            ready = asrReady && ttsReady
-        } else {
-            ready = nil
+        let payload = try await fetchHealthSnapshot()
+        let ready = payload.ready ?? payload.asrReady.map { asrReady in
+            guard let ttsReady = payload.ttsReady else { return asrReady }
+            return asrReady && ttsReady
         }
         return ServiceSnapshot(
             serviceState: payload.status ?? "unknown",
-            ready: ready
+            ready: ready,
+            port: baseURL.port
         )
+    }
+
+    public func fetchMetrics() async throws -> RuntimeMetricsSnapshot {
+        try await get(path: "/metrics")
     }
 
     private func get<Value: Decodable>(path: String) async throws -> Value {
@@ -49,7 +56,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
             throw ServiceAPIClientError.invalidURL
         }
         do {
-            let (data, response) = try await session.data(from: url)
+            var request = URLRequest(url: url)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse,
                   (200..<300).contains(httpResponse.statusCode)
             else {
@@ -63,3 +72,5 @@ public final class ServiceAPIClient: @unchecked Sendable {
         }
     }
 }
+
+extension ServiceAPIClient: ServiceDiagnosticsClient {}

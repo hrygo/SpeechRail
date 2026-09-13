@@ -26,6 +26,8 @@ public enum SpeechRailDesignTokens {
         public static let contentMaximumWidth: CGFloat = 1_200
         public static let windowMinimumWidth: CGFloat = 980
         public static let windowMinimumHeight: CGFloat = 680
+        public static let creatorComposerMinimumHeight: CGFloat = 180
+        public static let emptyStateMinimumHeight: CGFloat = 240
     }
 
     public enum Control {

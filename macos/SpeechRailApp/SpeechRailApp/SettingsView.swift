@@ -1,19 +1,33 @@
+import Foundation
 import SwiftUI
 
 public struct SettingsView: View {
-    @Environment(AppModel.self) private var model
+    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
 
     public init() {}
 
     public var body: some View {
         Form {
-            Text("SpeechRail")
-                .font(.title2)
-            ServiceStatusView()
-            ProfilePickerView()
+            Section("常规") {
+                Toggle("默认展开技术详情", isOn: $showDeveloperDetails)
+                Text("面向开发者的接口状态、阶段和标识信息仍只在管理控制台中展开。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+            }
+            Section("关于 SpeechRail") {
+                LabeledContent("产品定位", value: "本机 Apple Silicon 语音服务控制面")
+                LabeledContent("最低系统", value: "macOS 26.0")
+                LabeledContent("版本", value: Bundle.main.shortVersionString)
+            }
         }
-        .padding(20)
-        .frame(minWidth: 480, minHeight: 360)
-        .task { await model.refresh() }
+        .formStyle(.grouped)
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .frame(minWidth: 560, minHeight: 360)
+    }
+}
+
+private extension Bundle {
+    var shortVersionString: String {
+        object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版本"
     }
 }
