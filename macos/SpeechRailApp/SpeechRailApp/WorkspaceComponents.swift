@@ -333,6 +333,7 @@ public struct DeveloperInspector<Content: View>: View {
         Form {
             Section("开发者详情") {
                 content
+                    .accessibilityElement(children: .contain)
             }
         }
         .formStyle(.grouped)
