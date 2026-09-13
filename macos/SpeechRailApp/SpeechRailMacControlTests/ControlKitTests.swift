@@ -148,6 +148,42 @@ final class ControlKitTests: XCTestCase {
         XCTAssertNil(decoded.activeOperation)
     }
 
+    func testRuntimeMonitoringChartDescriptorDescribesTimeAndActiveRequests() {
+        let points = [
+            RuntimeMonitoringChartPoint(
+                capturedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                activeRequests: 1
+            ),
+            RuntimeMonitoringChartPoint(
+                capturedAt: Date(timeIntervalSince1970: 1_700_000_005),
+                activeRequests: 3
+            ),
+        ]
+
+        let chart = RuntimeMonitoringChartDescriptor(points: points).makeChartDescriptor()
+
+        XCTAssertEqual(chart.title, "最近运行监控趋势")
+        XCTAssertTrue(chart.summary?.contains("活跃请求") == true)
+        XCTAssertEqual(chart.xAxis.title, "时间")
+        XCTAssertEqual(chart.yAxis?.title, "活跃请求")
+        XCTAssertEqual(chart.series.count, 1)
+        XCTAssertEqual(chart.series.first?.dataPoints.count, 2)
+    }
+
+    func testRuntimeMonitoringChartDescriptorRequiresTwoSamples() {
+        XCTAssertFalse(
+            RuntimeMonitoringChartDescriptor.isSufficient(
+                [RuntimeMonitoringChartPoint(capturedAt: Date(), activeRequests: 1)]
+            )
+        )
+        XCTAssertTrue(
+            RuntimeMonitoringChartDescriptor.isSufficient([
+                RuntimeMonitoringChartPoint(capturedAt: Date(), activeRequests: 1),
+                RuntimeMonitoringChartPoint(capturedAt: Date().addingTimeInterval(5), activeRequests: 2),
+            ])
+        )
+    }
+
     func testProfileSummaryAcceptsLegacyPayloadWithoutDiarization() throws {
         let data = Data(
             #"{"id":"balanced","asr":"asr","tts":"tts","aligner":null,"download_bytes":10}"#

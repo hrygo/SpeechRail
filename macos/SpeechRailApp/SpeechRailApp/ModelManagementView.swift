@@ -347,6 +347,8 @@ private struct ProfileChoiceRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(profile.rawValue)
+        .accessibilityLabel(profileTitle)
+        .accessibilityValue(accessibilityValue)
     }
 
     private var profileTitle: String {
@@ -363,6 +365,14 @@ private struct ProfileChoiceRow: View {
         case .balanced: "8-bit 运行与分人能力的平衡选择"
         case .light: "更小的 ASR 组合，适合快速启动"
         }
+    }
+
+    private var accessibilityValue: String {
+        var details = [profilePurpose, isSelected ? "已选择" : "未选择"]
+        if let summary {
+            details.append("准备大小 \(formatBytes(summary.downloadBytes))")
+        }
+        return details.joined(separator: "，")
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -402,8 +412,10 @@ private struct ArtifactStatusRow: View {
                 Spacer()
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(artifact.variant)，\(statusText)")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(artifact.variant)
+        .accessibilityValue(statusText)
+        .accessibilityHint("展开查看模型 ID、来源、revision 和文件信息")
     }
 
     private var statusText: String {

@@ -36,6 +36,15 @@ public struct RuntimeMonitoringView: View {
         model.monitoringSamples.last
     }
 
+    private var chartPoints: [RuntimeMonitoringChartPoint] {
+        model.monitoringSamples.map {
+            RuntimeMonitoringChartPoint(
+                capturedAt: $0.capturedAt,
+                activeRequests: $0.activeRequests
+            )
+        }
+    }
+
     private var metricSummary: some View {
         LazyVGrid(
             columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
@@ -69,7 +78,7 @@ public struct RuntimeMonitoringView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             Text("资源脉冲")
                 .font(SpeechRailDesignTokens.Typography.panelTitle)
-            if model.monitoringSamples.count < 2 {
+            if !RuntimeMonitoringChartDescriptor.isSufficient(chartPoints) {
                 ContentUnavailableView(
                     "等待监控样本",
                     systemImage: "chart.xyaxis.line",
@@ -93,6 +102,10 @@ public struct RuntimeMonitoringView: View {
                 .frame(height: 240)
                 .chartYAxisLabel("请求数")
                 .accessibilityLabel("最近运行监控趋势")
+                .accessibilityIdentifier("runtime-chart")
+                .accessibilityChartDescriptor(
+                    RuntimeMonitoringChartDescriptor(points: chartPoints)
+                )
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
