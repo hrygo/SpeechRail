@@ -46,13 +46,13 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .works:
             "我的作品"
         case .overview:
-            "本机服务总览"
+            "服务状态"
         case .monitoring:
             "运行监控"
         case .models:
-            "模型管理"
+            "模型"
         case .diagnostics:
-            "预检与诊断"
+            "诊断"
         }
     }
 

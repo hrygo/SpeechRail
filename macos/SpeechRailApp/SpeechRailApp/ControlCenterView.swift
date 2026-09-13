@@ -12,16 +12,24 @@ public struct ControlCenterView: View {
         NavigationSplitView {
             List(selection: $selection) {
                 if !visibleCreatorRoutes.isEmpty {
-                    Section(AppRouteGroup.creator.title) {
+                    Section {
                         ForEach(visibleCreatorRoutes) { route in
                             navigationRow(for: route)
                         }
+                    } header: {
+                        Text(AppRouteGroup.creator.title)
                     }
                 }
                 if !visibleServiceRoutes.isEmpty {
-                    Section(AppRouteGroup.service.title) {
+                    Section {
                         ForEach(visibleServiceRoutes) { route in
                             navigationRow(for: route)
+                        }
+                    } header: {
+                        HStack {
+                            Text(AppRouteGroup.service.title)
+                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                            ServiceStatusBadge(compact: true)
                         }
                     }
                 }
@@ -94,16 +102,11 @@ public struct ControlCenterView: View {
 
     @ViewBuilder
     private func navigationRow(for route: AppRoute) -> some View {
-        Button {
-            selection = route
-        } label: {
-            Label {
-                Text(route.title)
-            } icon: {
-                Image(systemName: route.systemImage)
-            }
+        Label {
+            Text(route.title)
+        } icon: {
+            Image(systemName: route.systemImage)
         }
-        .buttonStyle(.plain)
         .tag(route)
         .accessibilityIdentifier(route.id)
         .help(route.purpose)

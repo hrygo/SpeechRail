@@ -12,10 +12,10 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(controlCenterMenuItem.waitForExistence(timeout: 2))
         controlCenterMenuItem.click()
 
-        XCTAssertTrue(app.staticTexts["本机服务总览"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["服务状态"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["音色创作"].exists)
         XCTAssertTrue(app.buttons["运行监控"].exists)
-        XCTAssertTrue(app.buttons["模型管理"].exists)
+        XCTAssertTrue(app.buttons["模型"].exists)
         XCTAssertTrue(app.staticTexts["服务状态"].exists)
         XCTAssertTrue(app.staticTexts["本地控制通道已就绪"].exists)
 
@@ -30,18 +30,18 @@ final class SpeechRailAppUITests: XCTestCase {
 
         XCTAssertTrue(app.staticTexts["创作"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["服务"].exists)
-        XCTAssertTrue(app.buttons["本机服务总览"].exists)
-        XCTAssertTrue(app.buttons["模型管理"].exists)
+        XCTAssertTrue(app.buttons["服务状态"].exists)
+        XCTAssertTrue(app.buttons["模型"].exists)
         XCTAssertTrue(app.staticTexts["服务状态"].exists)
 
-        app.buttons["模型管理"].tap()
-        XCTAssertTrue(app.staticTexts["模型管理"].waitForExistence(timeout: 2))
+        app.buttons["模型"].tap()
+        XCTAssertTrue(app.staticTexts["模型"].waitForExistence(timeout: 2))
     }
 
     func testModelDownloadRequiresExplicitConfirmation() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
-        app.buttons["模型管理"].tap()
+        app.buttons["模型"].tap()
 
         let downloadButton = app.buttons["下载并校验"]
         XCTAssertTrue(downloadButton.waitForExistence(timeout: 5))
@@ -65,7 +65,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testModelRecoveryRestoresInterruptedOperationAndRetryAction() {
         let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-model-recovery"])
         openControlCenter(in: app)
-        app.buttons["模型管理"].tap()
+        app.buttons["模型"].tap()
 
         XCTAssertTrue(app.staticTexts["上次准备被中断"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新下载并校验"].exists)
