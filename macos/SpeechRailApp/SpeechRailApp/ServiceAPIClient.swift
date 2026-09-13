@@ -38,15 +38,26 @@ public protocol ServiceDiagnosticsClient: Sendable {
 public final class ServiceAPIClient: @unchecked Sendable {
     private let baseURL: URL
     private let session: URLSession
+    private let apiKey: String?
 
-    public init(port: Int = 8201, session: URLSession = .shared) {
+    public init(
+        port: Int = 8201,
+        session: URLSession = .shared,
+        apiKey: String? = nil
+    ) {
         self.baseURL = URL(string: "http://127.0.0.1:\(port)")!
         self.session = session
+        self.apiKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
     }
 
-    public init(baseURL: URL, session: URLSession = .shared) {
+    public init(
+        baseURL: URL,
+        session: URLSession = .shared,
+        apiKey: String? = nil
+    ) {
         self.baseURL = baseURL
         self.session = session
+        self.apiKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
     }
 
     public var port: Int? { baseURL.port }
@@ -134,6 +145,32 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return response.voice
     }
 
+    public func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?
+    ) async throws -> CreatorVoice {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        var request = try makeRequest(
+            path: "/v1/voices/\(id)",
+            method: "PATCH",
+            accept: "application/json"
+        )
+        request.httpBody = try JSONEncoder().encode(
+            UpdateVoiceRequestBody(name: name, instruction: instruction, seed: seed)
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, _) = try await execute(request)
+        do {
+            return try JSONDecoder().decode(CreatorVoice.self, from: data)
+        } catch {
+            throw ServiceAPIClientError.invalidResponse
+        }
+    }
+
     public func deleteVoice(id: String) async throws {
         guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
             throw ServiceAPIClientError.invalidURL
@@ -206,6 +243,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue(accept, forHTTPHeaderField: "Accept")
+        if let apiKey {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         return request
     }
 
@@ -241,6 +281,84 @@ public final class ServiceAPIClient: @unchecked Sendable {
 }
 
 extension ServiceAPIClient: ServiceDiagnosticsClient, SpeechRailCreatorClient {}
+
+private enum SpeechRailAPICredentialProvider {
+    private static let apiKeyName = "SPEECHRAIL_API_KEY"
+    private static let appHomeName = "SPEECHRAIL_APP_HOME"
+
+    static func resolve(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> String? {
+        if let value = validated(environment[apiKeyName]) {
+            return value
+        }
+        let appHome = managedAppHome(environment: environment)
+        return readEnvFile(
+            at: appHome
+                .appendingPathComponent("config", isDirectory: true)
+                .appendingPathComponent(".env")
+        )
+    }
+
+    private static func managedAppHome(environment: [String: String]) -> URL {
+        if let configured = environment[appHomeName]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !configured.isEmpty {
+            let expanded = (configured as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded).standardizedFileURL
+        }
+        return FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("SpeechRail", isDirectory: true)
+    }
+
+    private static func readEnvFile(at url: URL) -> String? {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else {
+            return nil
+        }
+        for rawLine in contents.split(
+            omittingEmptySubsequences: false,
+            whereSeparator: \.isNewline
+        ) {
+            var line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            if line.hasPrefix("export ") {
+                line = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
+            }
+            guard let separator = line.firstIndex(of: "=") else { continue }
+            let name = String(line[..<separator]).trimmingCharacters(in: .whitespaces)
+            guard name == apiKeyName else { continue }
+            return parseValue(String(line[line.index(after: separator)...]))
+        }
+        return nil
+    }
+
+    private static func parseValue(_ value: String) -> String? {
+        var parsed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let first = parsed.first, first == "'" || first == "\"" {
+            let start = parsed.index(after: parsed.startIndex)
+            if let closing = parsed[start...].firstIndex(of: first) {
+                let suffix = parsed[parsed.index(after: closing)...]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if suffix.isEmpty || suffix.hasPrefix("#") {
+                    parsed = String(parsed[start..<closing])
+                }
+            }
+        } else if let comment = parsed.range(of: " #") {
+            parsed = String(parsed[..<comment.lowerBound]).trimmingCharacters(in: .whitespaces)
+        }
+        return validated(parsed)
+    }
+
+    private static func validated(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("\r"), !trimmed.contains("\n") else {
+            return nil
+        }
+        return trimmed
+    }
+}
 
 private struct CreatorVoiceListResponse: Decodable {
     let object: String
@@ -304,6 +422,25 @@ private struct VoiceDesignRegistrationRequestBody: Encodable {
         case referenceText = "reference_text"
         case seed
         case language
+    }
+}
+
+private struct UpdateVoiceRequestBody: Encodable {
+    let name: String?
+    let instruction: String?
+    let seed: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case instruction
+        case seed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(instruction, forKey: .instruction)
+        try container.encodeIfPresent(seed, forKey: .seed)
     }
 }
 

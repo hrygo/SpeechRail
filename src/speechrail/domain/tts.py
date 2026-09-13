@@ -20,7 +20,7 @@ import wave
 from array import array
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
@@ -559,6 +559,12 @@ class VoiceAlreadyExistsError(ValueError):
     code = "voice_already_exists"
 
 
+class VoiceUpdateUnsupportedError(ValueError):
+    """The requested metadata is immutable for this voice kind."""
+
+    code = "voice_update_unsupported"
+
+
 class VoiceInUseError(RuntimeError):
     """A custom voice still has an active immutable audio reader lease."""
 
@@ -1069,6 +1075,67 @@ class VoiceRegistry:
             if previous is not None:
                 self._retire_audio_locked(previous.audio_path, vid)
             return profile
+
+    def update_custom_profile(
+        self,
+        voice_id: str,
+        *,
+        name: str | None = None,
+        instruction: str | None = None,
+        seed: int | None = None,
+    ) -> VoiceProfile:
+        """Atomically update mutable metadata without replacing voice assets."""
+
+        if not isinstance(voice_id, str):
+            raise ValueError("invalid voice ID format")
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
+            raise VoiceUpdateUnsupportedError(f"system voice cannot be updated: {vid}")
+        if name is None and instruction is None and seed is None:
+            raise ValueError("at least one voice field must be provided")
+
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            profile = self._custom_voices.get(vid)
+            if profile is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            if profile.mode == "clone" and (instruction is not None or seed is not None):
+                raise VoiceUpdateUnsupportedError(
+                    "clone voice instruction and seed are immutable"
+                )
+
+            next_name = profile.name
+            if name is not None:
+                if not isinstance(name, str) or not name.strip():
+                    raise ValueError("voice name must not be empty")
+                next_name = name.strip()
+
+            next_instruction = profile.instruction
+            if instruction is not None:
+                if not isinstance(instruction, str) or not instruction.strip():
+                    raise ValueError("voice instruction must not be empty")
+                if len(instruction.strip()) > 10_000:
+                    raise ValueError("voice instruction exceeds the 10000 character limit")
+                next_instruction = instruction.strip()
+
+            next_seed = profile.seed
+            if seed is not None:
+                if type(seed) is not int or not 0 <= seed <= 2**32 - 1:
+                    raise ValueError("voice seed must be between 0 and 4294967295")
+                next_seed = seed
+
+            updated = replace(
+                profile,
+                name=next_name,
+                instruction=next_instruction,
+                seed=next_seed,
+            )
+            candidate = dict(self._custom_voices)
+            candidate[vid] = updated
+            self._commit_candidate(candidate)
+            return updated
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()

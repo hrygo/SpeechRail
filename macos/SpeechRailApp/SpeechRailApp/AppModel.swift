@@ -105,6 +105,7 @@ public final class AppModel {
     public private(set) var isCreatingSpeech = false
     public private(set) var isCreatingVoicePreview = false
     public private(set) var isRegisteringVoice = false
+    public private(set) var isUpdatingVoice = false
     public private(set) var isDeletingVoice = false
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
@@ -270,6 +271,66 @@ public final class AppModel {
             if playingVoiceID == voice.id {
                 stopAudio()
             }
+            await refreshCreatorVoices()
+            creatorMessage = nil
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            creatorMessage = Self.creatorErrorMessage(for: error)
+            return false
+        }
+    }
+
+    public func updateVoice(
+        _ voice: CreatorVoice,
+        name: String?,
+        instruction: String?,
+        seed: Int?
+    ) async -> Bool {
+        guard !voice.isSystem else {
+            creatorMessage = "系统音色受保护，不能修改"
+            return false
+        }
+        guard !isUpdatingVoice else { return false }
+        guard name != nil || instruction != nil || seed != nil else {
+            creatorMessage = "没有可保存的音色修改"
+            return false
+        }
+
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedInstruction = instruction?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmedName, trimmedName.isEmpty {
+            creatorMessage = "音色名称不能为空"
+            return false
+        }
+        if let trimmedInstruction, trimmedInstruction.isEmpty {
+            creatorMessage = "音色描述不能为空"
+            return false
+        }
+        if let trimmedInstruction, trimmedInstruction.count > 10_000 {
+            creatorMessage = "音色描述不能超过 10000 个字符"
+            return false
+        }
+        if voice.mode == "clone", trimmedInstruction != nil || seed != nil {
+            creatorMessage = "参考音色的来源和采样参数不可修改"
+            return false
+        }
+        if let seed, seed < 0 || seed > Int(UInt32.max) {
+            creatorMessage = "采样种子必须在 0–4294967295 之间"
+            return false
+        }
+
+        isUpdatingVoice = true
+        creatorMessage = nil
+        defer { isUpdatingVoice = false }
+        do {
+            _ = try await creatorClient.updateVoice(
+                id: voice.id,
+                name: trimmedName,
+                instruction: trimmedInstruction,
+                seed: seed
+            )
             await refreshCreatorVoices()
             creatorMessage = nil
             return true
@@ -869,10 +930,16 @@ public final class AppModel {
         switch error {
         case let .server(code, _, _):
             switch code {
+            case "invalid_api_key":
+                return "本机服务凭据不可用，请检查服务配置后重试"
             case "backend_not_ready":
                 return "语音服务尚未就绪，请先检查服务状态"
             case "voice_store_unavailable":
                 return "音色库暂时不可用，请稍后重试"
+            case "voice_update_unsupported":
+                return "该音色的来源或系统属性不可修改"
+            case "voice_update_failed":
+                return "音色修改未保存，请检查输入后重试"
             case "voice_not_found", "voice_not_available":
                 return "所选音色当前不可用，请重新选择"
             case "voice_preview_unsupported":

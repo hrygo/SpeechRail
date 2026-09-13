@@ -156,6 +156,7 @@ public struct ControlCenterView: View {
         )
         .listRowSeparator(.hidden)
         .frame(minHeight: SpeechRailDesignTokens.Control.sidebarRowHeight)
+        .contentShape(Rectangle())
         .accessibilityIdentifier(route.id)
         .help(route.purpose)
         .accessibilityValue(
@@ -195,6 +196,7 @@ public struct ControlCenterView: View {
         .speechRailInteractiveButtonStyle()
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .speechRailPointerCursor()
         .help("打开服务状态")
         .accessibilityLabel("服务状态")
         .accessibilityValue(sidebarStatusText)

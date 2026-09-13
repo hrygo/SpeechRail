@@ -267,6 +267,7 @@ public struct DubbingDeskView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             Slider(value: $speechSpeed, in: 0.5...2.0, step: 0.1)
                 .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
+                .speechRailPointerCursor()
                 .accessibilityLabel("语速")
             Text(String(format: "%.1fx", speechSpeed))
                 .font(SpeechRailDesignTokens.Typography.caption)
@@ -1124,6 +1125,7 @@ public struct VoiceLibraryView: View {
     @State private var pendingDeleteVoice: CreatorVoice?
     @State private var isConfirmingDeletion = false
     @State private var deletionMessage: String?
+    @State private var editingVoice: CreatorVoice?
 
     public init() {}
 
@@ -1135,6 +1137,12 @@ public struct VoiceLibraryView: View {
                     detail: "列表来自当前 SpeechRail 服务；系统音色与自定义音色分别管理。"
                 )
                 Spacer()
+                Button {
+                    navigation.request(.voiceDesign)
+                } label: {
+                    Label("新建音色", systemImage: "plus")
+                }
+                .speechRailButton(.primary)
                 Button {
                     showInspector.toggle()
                 } label: {
@@ -1251,6 +1259,9 @@ public struct VoiceLibraryView: View {
         }
         .inspector(isPresented: $showInspector) {
             voiceInspector
+        }
+        .sheet(item: $editingVoice) { voice in
+            VoiceEditorSheet(voice: voice)
         }
         .task {
             showInspector = showDeveloperDetails
@@ -1428,6 +1439,13 @@ public struct VoiceLibraryView: View {
                     }
                     .speechRailButton(.secondary)
                     .disabled(!voice.available || model.isCreatingSpeech || sampleText.isEmpty)
+                    if !voice.isSystem {
+                        Button("编辑音色") {
+                            editingVoice = voice
+                        }
+                        .speechRailButton(.secondary)
+                        .disabled(model.isUpdatingVoice)
+                    }
                 }
                 Divider()
                 Text("开发者详情")
@@ -1499,6 +1517,173 @@ public struct VoiceLibraryView: View {
 
     private var customVoices: [CreatorVoice] {
         model.creatorVoices.filter { !$0.isSystem }
+    }
+}
+
+private struct VoiceEditorSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+
+    let voice: CreatorVoice
+    @State private var name: String
+    @State private var instruction: String
+    @State private var seedText: String
+    @State private var errorMessage: String?
+    @State private var isSaving = false
+
+    init(voice: CreatorVoice) {
+        self.voice = voice
+        _name = State(initialValue: voice.name)
+        _instruction = State(initialValue: voice.instruction)
+        _seedText = State(initialValue: String(voice.seed ?? 42))
+    }
+
+    private var isClone: Bool {
+        voice.mode == "clone"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            SectionHeading(
+                title: "编辑音色",
+                detail: isClone
+                    ? "可修改显示名称；参考音频、来源和质量记录保持不变。"
+                    : "修改后会写入当前 SpeechRail 服务，并同步到所有使用该音色的入口。"
+            )
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("名称")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                TextField("音色名称", text: $name)
+                    .textFieldStyle(.plain)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                    .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
+                    .speechRailField()
+                    .accessibilityLabel("音色名称")
+            }
+
+            if isClone {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Label("参考来源不可编辑", systemImage: "lock.fill")
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Text("这是由 VoiceDesign 生成的参考音色。修改名称不会替换参考音频或来源证明。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+                .padding(SpeechRailDesignTokens.Spacing.md)
+                .speechRailContentSurface()
+            } else {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("音色描述")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    TextEditor(text: $instruction)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 120)
+                        .padding(SpeechRailDesignTokens.Spacing.xs)
+                        .speechRailField()
+                        .accessibilityLabel("自然语言音色描述")
+                    Text("\(instruction.count)/10000")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("采样种子")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    TextField("0–4294967295", text: $seedText)
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                        .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
+                        .speechRailField()
+                        .accessibilityLabel("采样种子")
+                }
+            }
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
+            }
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Spacer()
+                Button("取消") {
+                    dismiss()
+                }
+                .speechRailButton(.secondary)
+                Button("保存") {
+                    save()
+                }
+                .speechRailButton(.primary)
+                .disabled(isSaving || model.isUpdatingVoice)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.xl)
+        .frame(minWidth: 520, minHeight: isClone ? 320 : 470)
+    }
+
+    private func save() {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            errorMessage = "音色名称不能为空"
+            return
+        }
+
+        let nameUpdate = trimmedName == voice.name ? nil : trimmedName
+        var instructionUpdate: String?
+        var seedUpdate: Int?
+        if isClone {
+            instructionUpdate = nil
+            seedUpdate = nil
+        } else {
+            let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedInstruction.isEmpty else {
+                errorMessage = "音色描述不能为空"
+                return
+            }
+            guard trimmedInstruction.count <= 10_000 else {
+                errorMessage = "音色描述不能超过 10000 个字符"
+                return
+            }
+            guard let parsedSeed = Int(seedText.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  (0...Int(UInt32.max)).contains(parsedSeed)
+            else {
+                errorMessage = "采样种子必须在 0–4294967295 之间"
+                return
+            }
+            instructionUpdate = trimmedInstruction == voice.instruction ? nil : trimmedInstruction
+            seedUpdate = parsedSeed == voice.seed ? nil : parsedSeed
+        }
+
+        guard nameUpdate != nil || instructionUpdate != nil || seedUpdate != nil else {
+            errorMessage = "没有可保存的音色修改"
+            return
+        }
+
+        isSaving = true
+        errorMessage = nil
+        Task { @MainActor in
+            let success = await model.updateVoice(
+                voice,
+                name: nameUpdate,
+                instruction: instructionUpdate,
+                seed: seedUpdate
+            )
+            isSaving = false
+            if success {
+                dismiss()
+            } else {
+                errorMessage = model.creatorMessage ?? "音色修改未保存，请重试"
+            }
+        }
     }
 }
 
@@ -1735,6 +1920,7 @@ public struct WorksView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                 }
+                .speechRailPointerCursor()
                 .accessibilityLabel("作品文稿，\(work.scriptText.count) 字")
             }
 

@@ -479,6 +479,72 @@ paths:
         '503':
           $ref: '#/components/responses/BackendNotReady'
   /v1/voices/{voice_id}:
+    get:
+      operationId: getVoice
+      tags: [speech]
+      summary: Get one TTS voice profile
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Voice profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceProfile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice not found
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+    patch:
+      operationId: updateVoice
+      tags: [speech]
+      summary: Update mutable metadata for a custom voice
+      description: >-
+        Updates name for any custom voice. Natural-language instruction and
+        seed are mutable only for instruction-mode voices; clone reference
+        audio, provenance, ref_text, and voice ID remain immutable.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVoiceRequest'
+      responses:
+        '200':
+          description: Updated voice profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceProfile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: System voices or immutable clone fields cannot be updated
+        '404':
+          description: Voice not found
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
     delete:
       operationId: deleteVoice
       tags: [speech]
@@ -1422,6 +1488,24 @@ components:
           minimum: 0
           maximum: 4294967295
           description: Optional deterministic sampling seed for a reusable voice recipe.
+    UpdateVoiceRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          description: New display name for the custom voice.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: New natural-language instruction for an instruction-mode voice.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: New deterministic sampling seed for an instruction-mode voice.
     VoiceList:
       type: object
       required: [object, data]

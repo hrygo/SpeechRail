@@ -47,6 +47,7 @@ from speechrail.domain.tts import (
     VoiceInUseError,
     VoiceProfile,
     VoiceStoreUnavailableError,
+    VoiceUpdateUnsupportedError,
     canonicalize_clone_reference_audio,
     get_voice_registry,
 )
@@ -691,6 +692,145 @@ def create_system_router(services: AppServices) -> APIRouter:
                 for profile in profiles
             ],
         }
+
+    @router.get("/v1/voices/{voice_id}")
+    async def voice_detail(voice_id: str, request: Request) -> JSONResponse:
+        """Return one system or custom voice profile."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        try:
+            profile = get_voice_registry().get_profile(voice_id)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except ValueError:
+            return error_response(
+                404,
+                request_id,
+                "voice_not_found",
+                "Voice not found",
+            )
+        return JSONResponse(
+            status_code=200,
+            content=_voice_entry(
+                profile,
+                active,
+                services.tts_ready,
+                enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
+            ),
+        )
+
+    @router.patch("/v1/voices/{voice_id}")
+    async def update_voice(voice_id: str, request: Request) -> JSONResponse:
+        """Atomically update mutable metadata for a custom voice."""
+        request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(
+                400,
+                request_id,
+                "invalid_json",
+                "Invalid JSON payload",
+            )
+        if not isinstance(body, dict):
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "JSON object expected",
+            )
+        allowed = {"name", "instruction", "seed"}
+        if set(body) - allowed or not any(
+            key in body and body[key] is not None for key in allowed
+        ):
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "At least one mutable voice field is required",
+            )
+        name = body.get("name")
+        instruction = body.get("instruction")
+        seed = body.get("seed")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            return error_response(
+                400,
+                request_id,
+                "invalid_name",
+                "Voice name must not be empty",
+            )
+        if instruction is not None and (
+            not isinstance(instruction, str) or not instruction.strip()
+        ):
+            return error_response(
+                400,
+                request_id,
+                "invalid_instruction",
+                "Voice instruction must not be empty",
+            )
+        if instruction is not None and len(instruction.strip()) > 10_000:
+            return error_response(
+                400,
+                request_id,
+                "invalid_instruction",
+                "Voice instruction exceeds the 10000 character limit",
+            )
+        if seed is not None and (
+            type(seed) is not int or seed < 0 or seed > _MAX_VOICE_SEED
+        ):
+            return error_response(
+                400,
+                request_id,
+                "invalid_seed",
+                f"Voice seed must be an integer between 0 and {_MAX_VOICE_SEED}",
+            )
+        try:
+            profile = get_voice_registry().update_custom_profile(
+                voice_id,
+                name=name,
+                instruction=instruction,
+                seed=seed,
+            )
+        except VoiceUpdateUnsupportedError as exc:
+            return error_response(
+                403,
+                request_id,
+                "voice_update_unsupported",
+                str(exc),
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "voice_not_found",
+                f"Voice {voice_id} not found",
+            )
+        except ValueError as exc:
+            return error_response(
+                400,
+                request_id,
+                "voice_update_failed",
+                str(exc),
+            )
+        return JSONResponse(
+            status_code=200,
+            content=_voice_entry(profile, active, services.tts_ready),
+        )
 
     @router.post("/v1/voices")
     async def create_voice(request: Request) -> JSONResponse:

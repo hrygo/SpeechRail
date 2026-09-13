@@ -273,6 +273,73 @@ def test_custom_voice_lifecycle_create_list_and_delete() -> None:
     assert "test_zhixing_voice" not in after_ids
 
 
+def test_custom_voice_detail_and_metadata_update_round_trip() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+    voice_id = "test_voice_update_round_trip"
+    try:
+        created = client.post(
+            "/v1/voices",
+            json={
+                "name": "原始名称",
+                "instruction": "自然清晰的中文女声。",
+                "id": voice_id,
+                "seed": 123,
+            },
+        )
+        assert created.status_code == 201
+
+        detail = client.get(f"/v1/voices/{voice_id}")
+        assert detail.status_code == 200
+        assert detail.json()["id"] == voice_id
+
+        updated = client.patch(
+            f"/v1/voices/{voice_id}",
+            json={
+                "name": "更新后的名称",
+                "instruction": "沉稳、温暖、语速略慢的中文女声。",
+                "seed": 2026,
+            },
+        )
+        assert updated.status_code == 200
+        assert updated.json()["name"] == "更新后的名称"
+        assert updated.json()["instruction"] == "沉稳、温暖、语速略慢的中文女声。"
+        assert updated.json()["seed"] == 2026
+
+        listed = {
+            voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]
+        }
+        assert listed[voice_id]["name"] == "更新后的名称"
+        assert listed[voice_id]["seed"] == 2026
+    finally:
+        client.delete(f"/v1/voices/{voice_id}")
+
+
+def test_voice_detail_and_update_reject_unknown_or_empty_patch() -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=CapturingSpeechSynthesizer(),
+        )
+    )
+
+    missing = client.get("/v1/voices/does_not_exist")
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "voice_not_found"
+
+    empty = client.patch("/v1/voices/serena", json={})
+    assert empty.status_code == 400
+    assert empty.json()["error"]["code"] == "invalid_payload"
+
+    protected = client.patch("/v1/voices/serena", json={"name": "不应修改"})
+    assert protected.status_code == 403
+    assert protected.json()["error"]["code"] == "voice_update_unsupported"
+
+
 def test_custom_voice_accepts_and_returns_explicit_seed() -> None:
     client = TestClient(
         create_app(

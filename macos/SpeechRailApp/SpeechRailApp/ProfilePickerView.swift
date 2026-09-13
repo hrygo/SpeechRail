@@ -20,6 +20,7 @@ public struct ProfilePickerView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .speechRailPointerCursor()
                 Button("应用档位") {
                     isConfirmingProfileApply = true
                 }

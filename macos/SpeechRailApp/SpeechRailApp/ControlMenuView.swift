@@ -40,6 +40,7 @@ public struct ControlMenuView: View {
                 Label("打开管理控制台", systemImage: "rectangle.3.group")
             }
             .keyboardShortcut("0", modifiers: [.command, .option])
+            .speechRailPointerCursor()
 
             Button {
                 navigation.request(.models)
@@ -47,6 +48,7 @@ public struct ControlMenuView: View {
             } label: {
                 Label("管理模型", systemImage: AppRoute.models.systemImage)
             }
+            .speechRailPointerCursor()
 
             Button {
                 navigation.request(.voiceDesign)
@@ -55,6 +57,7 @@ public struct ControlMenuView: View {
                 Label("开始音色创作", systemImage: AppRoute.voiceDesign.systemImage)
             }
             .keyboardShortcut("N", modifiers: [.command])
+            .speechRailPointerCursor()
 
             Divider()
 
@@ -63,6 +66,7 @@ public struct ControlMenuView: View {
             } label: {
                 Label("启动服务", systemImage: "play.circle")
             }
+            .speechRailPointerCursor()
             .disabled(
                 model.isBusy
                     || model.hasActiveMutation
@@ -74,6 +78,7 @@ public struct ControlMenuView: View {
             } label: {
                 Label("停止服务", systemImage: "stop.circle")
             }
+            .speechRailPointerCursor()
             .disabled(
                 model.isBusy
                     || model.hasActiveMutation
@@ -85,6 +90,7 @@ public struct ControlMenuView: View {
             } label: {
                 Label("重启服务", systemImage: "arrow.clockwise.circle")
             }
+            .speechRailPointerCursor()
             .disabled(
                 model.isBusy
                     || model.hasActiveMutation
@@ -97,6 +103,7 @@ public struct ControlMenuView: View {
             Button("打开设置") {
                 openSettings()
             }
+            .speechRailPointerCursor()
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
         .frame(minWidth: SpeechRailDesignTokens.Layout.controlMenuMinimumWidth, alignment: .leading)

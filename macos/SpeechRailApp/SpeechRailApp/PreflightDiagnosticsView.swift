@@ -235,6 +235,7 @@ public struct PreflightDiagnosticsView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 }
+                .speechRailPointerCursor()
             } else {
                 ContentUnavailableView(
                     "选择一项检查",

@@ -130,6 +130,12 @@ public protocol SpeechRailCreatorClient: Sendable {
         referenceText: String,
         seed: Int
     ) async throws -> CreatorVoice
+    func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?
+    ) async throws -> CreatorVoice
     func deleteVoice(id: String) async throws
 }
 
@@ -157,6 +163,15 @@ struct UnavailableCreatorClient: SpeechRailCreatorClient {
         instruction: String,
         referenceText: String,
         seed: Int
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?
     ) async throws -> CreatorVoice {
         throw ServiceAPIClientError.requestFailed
     }

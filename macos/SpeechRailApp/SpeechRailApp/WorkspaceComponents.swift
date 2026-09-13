@@ -9,8 +9,8 @@ public enum SpeechRailButtonLevel: Sendable {
     case destructive
 }
 
-/// Applies the native macOS button hierarchy without replacing the system's
-/// pointer, press, focus, or accessibility behavior.
+/// Applies the native macOS button hierarchy while keeping SpeechRail's
+/// pointer, press, focus, and accessibility behavior consistent.
 public struct SpeechRailButtonAppearance: ViewModifier {
     private let level: SpeechRailButtonLevel
 
@@ -101,8 +101,9 @@ private struct SpeechRailInteractiveButtonBody: View {
             .onHover { hovering in
                 isHovered = isEnabled && hovering
             }
-            .background {
+            .overlay {
                 SpeechRailCursorRegion(isEnabled: isEnabled)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
             }
             .animation(
@@ -200,8 +201,9 @@ public struct SpeechRailPointerCursorModifier: ViewModifier {
 
     public func body(content: Content) -> some View {
         content
-            .background {
+            .overlay {
                 SpeechRailCursorRegion(isEnabled: isEnabled)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .allowsHitTesting(false)
             }
     }
@@ -1111,14 +1113,52 @@ public struct DeveloperInspector<Content: View>: View {
     }
 
     public var body: some View {
-        Form {
-            Section("开发者详情") {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                Text("开发者详情")
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 content
+                    .labeledContentStyle(SpeechRailInspectorLabeledContentStyle())
                     .accessibilityElement(children: .contain)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(SpeechRailDesignTokens.Spacing.md)
         }
-        .formStyle(.grouped)
-        .frame(minWidth: SpeechRailDesignTokens.Layout.inspectorMinimumWidth)
+        .scrollIndicators(.automatic)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.inspectorMinimumWidth,
+            idealWidth: SpeechRailDesignTokens.Layout.inspectorIdealWidth,
+            maxWidth: SpeechRailDesignTokens.Layout.inspectorMaximumWidth,
+            maxHeight: .infinity,
+            alignment: .topLeading
+        )
+        .inspectorColumnWidth(
+            min: SpeechRailDesignTokens.Layout.inspectorMinimumWidth,
+            ideal: SpeechRailDesignTokens.Layout.inspectorIdealWidth,
+            max: SpeechRailDesignTokens.Layout.inspectorMaximumWidth
+        )
         .background(SpeechRailDesignTokens.Surface.inspectorFill)
+    }
+}
+
+private struct SpeechRailInspectorLabeledContentStyle: LabeledContentStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            configuration.label
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+            configuration.content
+                .font(SpeechRailDesignTokens.Typography.technical)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: 180, alignment: .trailing)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

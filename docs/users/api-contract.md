@@ -62,7 +62,9 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 | `GET` | `/metrics` | 运行指标导出 | 默认 Prometheus 文本；`Accept: application/json` 返回结构化视图 |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
 | `GET` | `/v1/voices` | 注册与自定义的 TTS 音色列表 | 返回系统预置与自建音色全属性及可用性 |
+| `GET` | `/v1/voices/{voice_id}` | 读取单个音色详情 | 返回与目录一致的完整 VoiceProfile |
 | `POST` | `/v1/voices` | 自然语言创建自定义音色 (Voice Design) | 接收名称与人设描述，固化专属 Seed 并持久化 |
+| `PATCH` | `/v1/voices/{voice_id}` | 更新自定义音色 metadata | instruction 音色可改名称、描述、Seed；clone 音色只可改名 |
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
@@ -260,6 +262,28 @@ Authorization: Bearer <TOKEN>
 
 **持久化机制**：创建成功的音色会使用请求提供的 Seed，或由服务自动分配固定 Seed，并持久化保存在用户目录 `~/.speechrail/custom_voices.json` 中，服务重启后依然存在。克隆音频使用受控目录内的不可变文件名（`<voice_id>.<uuid>.wav`）；历史的 `<voice_id>.wav` 引用仍可读取。损坏、不可读或结构非法的 registry 会保留原文件并进入 fail-closed 状态，列表、写入和自定义音色解析返回 `503 voice_store_unavailable`，系统预置音色仍可使用。切换到 `balanced/light` 后条目保留但返回 `available=false`，合成请求返回 `400 voice_not_available`；切回 `quality` 后恢复。
 
+### 5.3.1 读取与更新单个音色 (`GET/PATCH /v1/voices/{voice_id}`)
+读取单个音色返回与目录条目相同的完整安全 metadata：
+```http
+GET /v1/voices/custom_1788583825_59b3
+Authorization: Bearer <TOKEN>
+```
+
+自定义音色可以原子更新 metadata。instruction 音色支持更新名称、instruction 和 seed；由 VoiceDesign/clone 生成的 reference 音色只支持更新名称，参考音频、`ref_text`、来源证明和 ID 不可替换：
+```http
+PATCH /v1/voices/custom_1788583825_59b3
+Content-Type: application/json
+Authorization: Bearer <TOKEN>
+
+{
+  "name": "更新后的知性姐姐",
+  "instruction": "更温暖、语速略慢的中文女声。",
+  "seed": 2026
+}
+```
+
+更新成功返回完整的 `VoiceProfile`。系统预置音色、标准 alias 和不存在的音色不可修改；更新失败时旧 registry 记录保持不变。
+
 ### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
 ```http
 DELETE /v1/voices/custom_1788583825_59b3
@@ -419,6 +443,8 @@ Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 
 | **422** | `audio_decode_failed` | `false` | 上传文件损坏或非标准音频容器，检查文件有效性 |
 | **429** | `queue_full` | `true` | 当前并发超出 Governor 配额，按 `Retry-After` 重试 |
 | **409** | `voice_in_use` | `true` | 自定义音色仍有活动 TTS 读者，等待当前合成完成后重试删除 |
+| **403** | `voice_update_unsupported` | `false` | 系统音色或 clone 音色的不可变来源字段不能修改 |
+| **400** | `voice_update_failed` | `false` | 音色更新字段不符合校验规则，修正名称、instruction 或 seed 后重试 |
 | **503** | `backend_not_ready` | `true` | 对应模型 Worker 尚未启动或预检未通过，等待就绪 |
 | **503** | `backend_timeout` | `true` | 队列准入、worker 生成或音频交付超出总 deadline，减小音频分块 |
 | **503** | `voice_store_unavailable` | `true` | 自定义音色 registry 或音频存储不可读/不可写，先保留原文件并按手册修复 |

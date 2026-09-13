@@ -22,6 +22,7 @@ import pytest
 from speechrail.domain.tts import (
     VoiceProfile,
     VoiceRegistry,
+    VoiceUpdateUnsupportedError,
     transcode_and_validate_clone_audio,
 )
 from speechrail.domain.voice_quality import (
@@ -562,3 +563,49 @@ def test_create_cloned_profile_quality_defaults_to_none(tmp_path: Path) -> None:
         duration_seconds=3.0,
     )
     assert profile.quality is None
+
+
+def test_voice_registry_updates_instruction_profile_and_persists_it(tmp_path: Path) -> None:
+    storage_path = tmp_path / "registry.json"
+    voices_dir = tmp_path / "voices"
+    registry = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    registry.create_custom_profile(
+        name="原始名称",
+        instruction="自然清晰",
+        voice_id="update_instruction",
+        seed=123,
+    )
+
+    updated = registry.update_custom_profile(
+        "update_instruction",
+        name="更新名称",
+        instruction="沉稳温暖",
+        seed=2026,
+    )
+
+    assert updated.name == "更新名称"
+    assert updated.instruction == "沉稳温暖"
+    assert updated.seed == 2026
+    reloaded = VoiceRegistry(storage_path=storage_path, voices_dir=voices_dir)
+    assert reloaded.get_profile("update_instruction") == updated
+
+
+def test_voice_registry_only_allows_name_update_for_clone_profile(tmp_path: Path) -> None:
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "registry.json",
+        voices_dir=tmp_path / "voices",
+    )
+    clone = registry.create_cloned_profile(
+        name="参考音色",
+        ref_text="你好，世界。",
+        audio_bytes=_wav_bytes(3.0),
+        voice_id="update_clone",
+        duration_seconds=3.0,
+    )
+
+    renamed = registry.update_custom_profile("update_clone", name="新的参考音色")
+
+    assert renamed.name == "新的参考音色"
+    assert renamed.ref_text == clone.ref_text
+    with pytest.raises(VoiceUpdateUnsupportedError):
+        registry.update_custom_profile("update_clone", instruction="不应替换来源")

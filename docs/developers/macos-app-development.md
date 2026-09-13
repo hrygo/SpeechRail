@@ -22,7 +22,8 @@ token；新页面不得自行定义颜色、间距、圆角和字体层级。
 
 `SpeechRail` 是控制面，不是 ASR/TTS runtime。它不采集麦克风、不播放音频、不加载模型，也不直接执行 `launchctl`。Distribution 的 `SpeechRailControlAgent` 由 `SMAppService` 管理；本机 Debug/Release 则使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动同一控制代码，通过 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
 
-App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志、原始音频、完整转写和 API key 均留在 App bundle 之外。
+App 只连接 loopback；健康/目录读取保持公开状态语义，创作 REST 请求通过进程环境或受管
+`Application Support/SpeechRail/config/.env` 发现 Bearer key。模型目录、`.env`、日志、原始音频、完整转写和 API key 均留在 App bundle 之外，key 只在请求内存中使用。
 
 `ServiceAPIClient` 通过 `ServiceDiagnosticsClient` 抽象读取 `/health` 和带
 `Accept: application/json` 的 `/metrics`；UI 测试用 fake client 返回 typed snapshot，不能
@@ -33,7 +34,7 @@ App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志
 
 `WindowGroup(id: "control-center")` 承载同一个 `AppModel` 下的两类一级 surface：
 
-- 创作：配音台、音色创作、音色库、我的作品。音色创作框架保留 VoiceDesign 的描述、候选、试听和保存主线；尚未接入真实能力时，按钮保持禁用并解释依赖，不伪造音频结果。
+- 创作：配音台、音色创作、音色库、我的作品。音色创作保留 VoiceDesign 的描述、候选、试听和保存主线；配音与试听通过统一的本机 Bearer 凭据接入服务，音色库提供服务端列表、详情、更新和删除，失败时保留用户输入并解释稳定错误。
 - 服务：本机服务总览、运行监控、模型管理、预检与诊断。总览解释健康状态和能力，监控读取 `/metrics`，模型管理通过 XPC Agent 调用锁定目录的 `model catalog/status/prepare`，预检显示可操作的失败原因。
 
 模型页明确区分“下载并校验”和“应用此档位”：前者执行逐文件大小/SHA-256 校验和原子发布，可显示 JSONL 进度并取消；后者才改变当前 profile。App 不直接访问模型源、不把本地路径或 hash 返回给页面，也不把模型下载放进请求路径。

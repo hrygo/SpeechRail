@@ -73,6 +73,9 @@ public enum SpeechRailDesignTokens {
         public static let diagnosticsBodyMinimumHeight: CGFloat = 360
         public static let monitoringCapabilityMinimumWidth: CGFloat = 280
         public static let monitoringCapabilityIdealWidth: CGFloat = 320
+        public static let monitoringCapabilityRowHeight: CGFloat = 58
+        public static let monitoringWorkerRowHeight: CGFloat = 42
+        public static let monitoringStatusColumnWidth: CGFloat = 64
         public static let metricMinimumWidth: CGFloat = 112
         public static let metricColumnCount: Int = 4
     }

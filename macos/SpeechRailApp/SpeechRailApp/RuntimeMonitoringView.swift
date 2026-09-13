@@ -32,6 +32,7 @@ public struct RuntimeMonitoringView: View {
                 chartPanel
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             }
+            resourcePanel
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -175,11 +176,13 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var capabilityPanel: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        VStack(alignment: .leading, spacing: 0) {
             SectionHeading(
                 title: "能力状态",
                 detail: "来自最近一次 health 读取。"
             )
+            .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+
             VStack(spacing: 0) {
                 MonitoringCapabilityRow(
                     title: "语音转文字",
@@ -205,22 +208,49 @@ public struct RuntimeMonitoringView: View {
                         ?? "按当前档位启用",
                     ready: model.health?.diarizationReady
                 )
-                if let workers = model.metrics?.workers, !workers.isEmpty {
-                    Divider()
-                    SectionHeading(
-                        title: "运行组件",
-                        detail: "来自最近一次 metrics 读取的生命周期状态。"
-                    )
-                    ForEach(workers.keys.sorted(), id: \.self) { key in
-                        workerRow(key: key, state: workers[key] ?? "unknown")
-                    }
-                }
             }
-            Divider()
-            resourceSection
+
+            sectionDivider
+            runtimeComponentsSection
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
         .speechRailContentSurface()
+    }
+
+    private var resourcePanel: some View {
+        resourceSection
+            .padding(SpeechRailDesignTokens.Spacing.md)
+            .speechRailContentSurface()
+    }
+
+    private var sectionDivider: some View {
+        Divider()
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+    }
+
+    private var runtimeComponentsSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "运行组件",
+                detail: "来自最近一次 metrics 读取的生命周期状态。"
+            )
+            if let workers = model.metrics?.workers, !workers.isEmpty {
+                let workerKeys = workers.keys.sorted()
+                VStack(spacing: 0) {
+                    ForEach(Array(workerKeys.enumerated()), id: \.element) { index, key in
+                        workerRow(key: key, state: workers[key] ?? "unknown")
+                        if index < workerKeys.count - 1 {
+                            Divider()
+                        }
+                    }
+                }
+            } else {
+                Label("暂无 worker 生命周期数据", systemImage: "hourglass")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(minHeight: SpeechRailDesignTokens.Layout.monitoringWorkerRowHeight)
+            }
+        }
     }
 
     private var resourceSection: some View {
@@ -318,6 +348,8 @@ public struct RuntimeMonitoringView: View {
                 .monospacedDigit()
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(minWidth: 84, maxWidth: 110, alignment: .trailing)
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
         .accessibilityElement(children: .combine)
@@ -597,19 +629,28 @@ public struct RuntimeMonitoringView: View {
     }
 
     private func workerRow(key: String, state: String) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: workerTone(for: state).systemImage)
                 .foregroundStyle(workerTone(for: state).color)
                 .imageScale(.small)
                 .accessibilityHidden(true)
+                .frame(width: SpeechRailDesignTokens.Icon.navigationFrame, alignment: .leading)
             Text(workerTitle(for: key))
                 .font(SpeechRailDesignTokens.Typography.label)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             Text(workerStateText(for: state))
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(workerTone(for: state).color)
+                .lineLimit(1)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
+                    alignment: .trailing
+                )
         }
+        .frame(minHeight: SpeechRailDesignTokens.Layout.monitoringWorkerRowHeight)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(workerTitle(for: key))
         .accessibilityValue(workerStateText(for: state))
@@ -707,26 +748,34 @@ private struct MonitoringCapabilityRow: View {
     let ready: Bool?
 
     var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: iconName)
                 .foregroundStyle(statusColor)
-                .imageScale(.small)
+                .imageScale(.medium)
                 .accessibilityHidden(true)
+                .frame(width: SpeechRailDesignTokens.Icon.navigationFrame, alignment: .leading)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.label)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
                 Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             Text(statusText)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(statusColor)
+                .lineLimit(1)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
+                    alignment: .trailing
+                )
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .frame(minHeight: SpeechRailDesignTokens.Layout.monitoringCapabilityRowHeight)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue("\(statusText)，\(detail)")
