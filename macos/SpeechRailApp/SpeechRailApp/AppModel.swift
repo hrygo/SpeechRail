@@ -2,6 +2,14 @@ import Foundation
 import Observation
 import SpeechRailControlKit
 
+public enum ModelAvailabilityState: Equatable, Sendable {
+    case unknown
+    case available
+    case unsupported
+    case notReady
+    case failed
+}
+
 @MainActor
 @Observable
 public final class AppModel {
@@ -13,6 +21,7 @@ public final class AppModel {
     public private(set) var metrics: RuntimeMetricsSnapshot?
     public private(set) var modelCatalog: ModelCatalogSnapshot?
     public private(set) var modelStatus: ModelStatusSnapshot?
+    public private(set) var modelAvailability: ModelAvailabilityState = .unknown
     public private(set) var preflightChecks: [PreflightCheckSnapshot] = []
     public private(set) var monitoringSamples: [RuntimeMetricsSample] = []
     public private(set) var message: String?
@@ -62,22 +71,47 @@ public final class AppModel {
     public func refreshModels() async {
         do {
             let catalog = try await transport.send(ControlRequest(command: .modelCatalog))
-            if let modelCatalog = catalog.modelCatalog {
-                self.modelCatalog = modelCatalog
+            guard !handleModelResponseFailure(catalog) else {
+                return
+            }
+            guard let catalogSnapshot = catalog.modelCatalog else {
+                markModelUnavailable(
+                    state: .failed,
+                    message: "模型目录暂时不可用"
+                )
+                return
             }
             let status = try await transport.send(ControlRequest(command: .modelStatus))
-            if let modelStatus = status.modelStatus {
-                self.modelStatus = modelStatus
-                if let activeOperation = modelStatus.activeOperation {
-                    operation = activeOperation
-                } else if operation?.command == .modelPrepare {
-                    operation = nil
-                }
+            guard !handleModelResponseFailure(status) else {
+                return
+            }
+            guard let statusSnapshot = status.modelStatus else {
+                markModelUnavailable(
+                    state: .notReady,
+                    message: "模型状态暂时不可用"
+                )
+                return
+            }
+            modelCatalog = catalogSnapshot
+            modelStatus = statusSnapshot
+            modelAvailability = .available
+            if let activeOperation = statusSnapshot.activeOperation {
+                operation = activeOperation
+            } else if operation?.command == .modelPrepare {
+                operation = nil
             }
             if let warning = status.message, !warning.isEmpty {
                 message = warning
+            } else {
+                message = nil
             }
         } catch {
+            modelCatalog = nil
+            modelStatus = nil
+            if operation?.command == .modelPrepare {
+                operation = nil
+            }
+            modelAvailability = .failed
             message = Self.controlErrorMessage(for: error, fallback: "模型状态暂时不可用")
         }
     }
@@ -245,6 +279,37 @@ public final class AppModel {
         case let .notEnabled(kind):
             return ControlAgentStatusSnapshot(kind: kind).detail
         }
+    }
+
+    @discardableResult
+    private func handleModelResponseFailure(_ response: ControlResponse) -> Bool {
+        guard response.status == .failed else { return false }
+        let state: ModelAvailabilityState = switch response.errorCode {
+        case .unsupported:
+            .unsupported
+        case .managedRuntimeMissing, .serviceUnavailable, .transportUnavailable, .modelUnavailable:
+            .notReady
+        default:
+            .failed
+        }
+        let fallback = state == .unsupported
+            ? "模型管理暂不可用：服务组件版本不匹配"
+            : "模型状态暂时不可用"
+        markModelUnavailable(state: state, message: response.message ?? fallback)
+        return true
+    }
+
+    private func markModelUnavailable(
+        state: ModelAvailabilityState,
+        message: String
+    ) {
+        modelCatalog = nil
+        modelStatus = nil
+        if operation?.command == .modelPrepare {
+            operation = nil
+        }
+        modelAvailability = state
+        self.message = message
     }
 
     private func canExecuteMutation(for command: ControlCommand) -> Bool {

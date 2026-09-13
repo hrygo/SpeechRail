@@ -396,6 +396,37 @@ final class AgentCoreTests: XCTestCase {
         XCTAssertFalse(message.contains("super-secret"))
     }
 
+    func testProcessRunnerClassifiesMissingModelCommandAsUnsupported() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-unsupported-model-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root
+            .appendingPathComponent("runtime/current/.venv/bin", isDirectory: true)
+            .appendingPathComponent("python")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(
+            "#!/bin/sh\nprintf '%s\\n' \"speechrail: error: argument command: invalid choice: 'model'\" >&2\nexit 2\n".utf8
+        ).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o755)],
+            ofItemAtPath: executable.path
+        )
+
+        do {
+            _ = try await ProcessManagedCommandRunner(
+                locator: ManagedRuntimeLocator(appHome: root)
+            ).run(.modelCatalog)
+            XCTFail("missing model command should be classified as unsupported")
+        } catch let error as ManagedCommandError {
+            XCTAssertEqual(error, .unsupported)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
     func testProcessRunnerForwardsModelPreparationProgress() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("speechrail-runner-\(UUID().uuidString)", isDirectory: true)

@@ -19,6 +19,9 @@ struct SpeechRailApp: App {
                 ),
                 modelRecovery: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-model-recovery"
+                ),
+                modelUnsupported: ProcessInfo.processInfo.arguments.contains(
+                    "--ui-test-model-unsupported"
                 )
             )
             : usesBundledXPCService
@@ -177,17 +180,20 @@ private struct UITestControlTransport: SpeechRailControlTransport {
     private let profileApplyFails: Bool
     private let modelPrepareFails: Bool
     private let modelRecovery: Bool
+    private let modelUnsupported: Bool
     private let operationState: UITestOperationState
 
     init(
         profileApplyFails: Bool = false,
         modelPrepareFails: Bool = false,
         modelRecovery: Bool = false,
+        modelUnsupported: Bool = false,
         operationState: UITestOperationState = UITestOperationState()
     ) {
         self.profileApplyFails = profileApplyFails
         self.modelPrepareFails = modelPrepareFails
         self.modelRecovery = modelRecovery
+        self.modelUnsupported = modelUnsupported
         self.operationState = operationState
     }
 
@@ -210,6 +216,15 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                 profile: ProfileSnapshot(preset: .quality, generation: 1, asr: "fake-asr", tts: "fake-tts")
             )
         case .modelCatalog:
+            if modelUnsupported {
+                return ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .failed,
+                    errorCode: .unsupported,
+                    message: "模型管理暂不可用：服务组件版本不匹配"
+                )
+            }
             let artifact = ModelArtifactSnapshot(
                 key: "fake-asr",
                 modelID: "fixture/fake-asr",
@@ -239,6 +254,15 @@ private struct UITestControlTransport: SpeechRailControlTransport {
                 modelCatalog: ModelCatalogSnapshot(artifacts: [artifact], profiles: profiles)
             )
         case .modelStatus:
+            if modelUnsupported {
+                return ControlResponse(
+                    requestID: request.requestID,
+                    command: request.command,
+                    status: .failed,
+                    errorCode: .unsupported,
+                    message: "模型管理暂不可用：服务组件版本不匹配"
+                )
+            }
             return ControlResponse(
                 requestID: request.requestID,
                 command: request.command,

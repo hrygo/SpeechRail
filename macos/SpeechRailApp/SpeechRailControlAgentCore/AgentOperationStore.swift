@@ -348,6 +348,7 @@ public actor AgentOperationStore {
         switch error {
         case .runtimeMissing: .managedRuntimeMissing
         case .launchFailed, .invalidOutput: .commandFailed
+        case .unsupported: .unsupported
         }
     }
 
@@ -356,6 +357,7 @@ public actor AgentOperationStore {
         case .runtimeMissing: "managed runtime is unavailable"
         case .launchFailed: "managed command could not be launched"
         case .invalidOutput: "managed command returned invalid output"
+        case .unsupported: "managed runtime does not support model control commands"
         }
     }
 

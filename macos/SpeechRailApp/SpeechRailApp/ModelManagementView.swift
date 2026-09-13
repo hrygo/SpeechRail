@@ -1,27 +1,21 @@
-import Foundation
 import SpeechRailControlKit
 import SwiftUI
 
 public struct ModelManagementView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppNavigationState.self) private var navigation
     @State private var selectedProfile: SpeechRailProfile = .balanced
+    @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
+    @State private var showInspector = false
 
     public init() {}
 
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                SurfaceHeaderView(route: .models)
-                explanationPanel
-                GlassEffectContainer(spacing: SpeechRailDesignTokens.Spacing.lg) {
-                    ControlAgentStatusView()
-                    diskSummary
-                    profilePicker
-                    artifactStatusPanel
-                    operationPanel
-                }
-                ServiceStatusFooterView()
+                PageIntroView(route: .models)
+                mainContent
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
@@ -29,13 +23,37 @@ public struct ModelManagementView: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    showInspector.toggle()
+                } label: {
+                    Label("开发者详情", systemImage: "info.circle")
+                }
+                .help("查看模型 ID、revision、量化和校验明细")
+            }
+            ToolbarItem {
+                Button {
+                    Task { await model.refreshModels() }
+                } label: {
+                    Label("刷新模型状态", systemImage: "arrow.clockwise")
+                }
+                .help("重新读取模型目录和本机校验状态")
+            }
+        }
+        .inspector(isPresented: $showInspector) {
+            modelInspector
+        }
         .confirmationDialog(
             confirmationTitle,
             isPresented: isConfirmingAction,
             titleVisibility: .visible
         ) {
             if let pendingAction {
-                Button(actionTitle(for: pendingAction), role: pendingAction == .apply ? .destructive : nil) {
+                Button(
+                    actionTitle(for: pendingAction),
+                    role: pendingAction == .apply ? .destructive : nil
+                ) {
                     let action = pendingAction
                     self.pendingAction = nil
                     Task {
@@ -67,101 +85,195 @@ public struct ModelManagementView: View {
         }
     }
 
-    private var explanationPanel: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Label("模型下载是准备动作", systemImage: "arrow.down.circle")
+    @ViewBuilder
+    private var mainContent: some View {
+        switch model.modelAvailability {
+        case .unknown:
+            ProgressView("正在读取模型目录…")
+                .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
+                .speechRailContentSurface()
+        case .available:
+            modelWorkspace
+        case .unsupported:
+            unavailableBanner(
+                title: "模型管理暂不可用",
+                message: model.message ?? "模型管理暂不可用：服务组件版本不匹配",
+                tone: .critical,
+                actionTitle: "打开诊断"
+            ) {
+                navigation.request(.diagnostics)
+            }
+        case .notReady:
+            unavailableBanner(
+                title: "模型状态尚未就绪",
+                message: model.message ?? "请先确认本机服务和控制 Agent 已就绪。",
+                tone: .attention,
+                actionTitle: "打开诊断"
+            ) {
+                navigation.request(.diagnostics)
+            }
+        case .failed:
+            unavailableBanner(
+                title: "模型状态读取失败",
+                message: model.message ?? "重新读取模型目录，或打开诊断查看阻塞原因。",
+                tone: .critical,
+                actionTitle: "重新读取"
+            ) {
+                Task { await model.refreshModels() }
+            }
+        }
+    }
+
+    private func unavailableBanner(
+        title: String,
+        message: String,
+        tone: StatusTone,
+        actionTitle: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        StatusBanner(
+            tone: tone,
+            title: title,
+            message: message,
+            actionTitle: actionTitle,
+            action: action
+        )
+    }
+
+    private var modelWorkspace: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            profileList
+                .frame(width: SpeechRailDesignTokens.Layout.sidebarIdealWidth)
+            selectedProfilePanel
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var profileList: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            SectionHeading(
+                title: "运行档位",
+                detail: "先选择目标，再分别准备模型或应用服务配置。"
+            )
+            VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
+                    ProfileChoiceRow(
+                        profile: profile,
+                        summary: summary(for: profile),
+                        isSelected: selectedProfile == profile
+                    ) {
+                        selectedProfile = profile
+                    }
+                }
+            }
+            Divider()
+            Text("当前服务档位")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+            Text(model.profile?.preset?.rawValue ?? "未读取")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
-            Text("SpeechRail 只从仓库锁定的目录下载模型，逐文件校验大小和 SHA-256，再原子发布。下载完成不会自动切换当前运行档位。")
-                .font(SpeechRailDesignTokens.Typography.body)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-            Text("普通用户：选择档位并下载。开发者：展开制品状态，确认 revision、量化和校验进度。")
-                .font(SpeechRailDesignTokens.Typography.secondary)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 
-    private var profilePicker: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("选择要准备的档位")
-                .font(SpeechRailDesignTokens.Typography.panelTitle)
-            ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
-                ProfileChoiceRow(
-                    profile: profile,
-                    summary: model.modelCatalog?.profiles.first(where: { $0.id == profile }),
-                    isSelected: selectedProfile == profile
-                ) {
-                    selectedProfile = profile
-                }
-            }
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Button("下载并校验") { pendingAction = .download }
-                    .buttonStyle(.glassProminent)
-                Button("应用此档位") { pendingAction = .apply }
-                Text("应用会改变正在使用的服务配置")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-            }
-            .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
-        }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
-    }
-
-    private var diskSummary: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("本机空间")
-                .font(SpeechRailDesignTokens.Typography.panelTitle)
-            if let disk = model.modelStatus?.disk {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xl) {
-                    diskValue("模型已占用", disk.modelBytes)
-                    diskValue("当前可用", disk.freeBytes)
-                    Spacer(minLength: 0)
-                }
-            } else {
-                Text("暂时无法读取磁盘状态")
+    private var selectedProfilePanel: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(profileTitle(for: selectedProfile))
+                    .font(SpeechRailDesignTokens.Typography.windowTitle)
+                Text(profilePurpose(for: selectedProfile))
                     .font(SpeechRailDesignTokens.Typography.secondary)
                     .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
             }
+
+            profileFacts
+            Divider()
+            artifactSection
+            if !diarizationStatuses.isEmpty {
+                Divider()
+                diarizationSection
+            }
+            if let operation = activeModelOperation {
+                Divider()
+                OperationBar(
+                    operation: operation,
+                    actionTitle: operation.state == .interrupted ? "重新下载并校验" : "停止下载"
+                ) {
+                    if operation.state == .interrupted {
+                        pendingAction = .download
+                    } else {
+                        Task { await model.cancelCurrentOperation() }
+                    }
+                }
+            }
+            Divider()
+            actionSection
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 
-    private func diskValue(_ title: String, _ bytes: Int64) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xxs) {
+    private var profileFacts: some View {
+        HStack(spacing: 0) {
+            fact("准备大小", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
+            Divider()
+                .frame(height: 42)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            fact("识别", value: summary(for: selectedProfile)?.asr ?? "未读取")
+            Divider()
+                .frame(height: 42)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            fact("合成", value: summary(for: selectedProfile)?.tts ?? "未读取")
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+        }
+    }
+
+    private func fact(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             Text(title)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-            Text(formatBytes(bytes))
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text(value)
+                .font(SpeechRailDesignTokens.Typography.technical)
+                .lineLimit(1)
         }
+        .frame(minWidth: 100, alignment: .leading)
     }
 
-    private var artifactStatusPanel: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("制品状态")
-                .font(SpeechRailDesignTokens.Typography.panelTitle)
+    private var artifactSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "模型制品",
+                detail: "下载动作会逐文件校验大小和 SHA-256；选择制品后可在 Inspector 查看技术细节。"
+            )
             if let catalog = model.modelCatalog {
-                ForEach(
-                    catalog.artifacts.filter { $0.requiredBy.contains(selectedProfile) },
-                    id: \.key
-                ) { artifact in
-                    ArtifactStatusRow(
-                        artifact: artifact,
-                        status: model.modelStatus?.artifacts.first(where: { $0.key == artifact.key })
+                let artifacts = catalog.artifacts.filter { $0.requiredBy.contains(selectedProfile) }
+                if artifacts.isEmpty {
+                    ContentUnavailableView(
+                        "当前档位没有已登记制品",
+                        systemImage: "shippingbox",
+                        description: Text("请运行预检或检查受管 runtime 的模型目录。")
                     )
-                }
-                if let diarization = model.modelStatus?.diarization, !diarization.isEmpty {
-                    Divider()
-                    Text("分人资产")
-                        .font(SpeechRailDesignTokens.Typography.panelTitle)
-                    Text("Quality / Balanced 档位共用 CoreML 资产，并按档位使用对应 aligner。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-                    ForEach(diarization, id: \.key) { item in
-                        DiarizationStatusRow(status: item)
+                    .frame(maxWidth: .infinity, minHeight: 130)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(artifacts.enumerated()), id: \.element.key) { index, artifact in
+                            Button {
+                                selectedArtifactKey = artifact.key
+                            } label: {
+                                ArtifactChoiceRow(
+                                    artifact: artifact,
+                                    status: status(for: artifact),
+                                    selected: selectedArtifactKey == artifact.key
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("artifact-\(artifact.key)")
+                            if index < artifacts.count - 1 {
+                                Divider()
+                            }
+                        }
                     }
                 }
             } else {
@@ -173,65 +285,128 @@ public struct ModelManagementView: View {
                 .frame(maxWidth: .infinity, minHeight: 180)
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
     }
 
-    private var operationPanel: some View {
-        Group {
-            if let operation = model.operation,
-               operation.command == .modelPrepare,
-               operation.state == .accepted || operation.state == .running || operation.state == .interrupted
-            {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Label(
-                        operation.state == .interrupted ? "上次准备被中断" : "正在准备模型",
-                        systemImage: operation.state == .interrupted
-                            ? "exclamationmark.triangle"
-                            : "arrow.down.circle"
-                    )
-                        .font(SpeechRailDesignTokens.Typography.panelTitle)
-                    if operation.state == .interrupted {
-                        Text("控制 Agent 曾在准备过程中重启，当前文件状态需要重新校验。请重新下载并校验，不会伪造续传。")
-                            .font(SpeechRailDesignTokens.Typography.secondary)
-                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-                    }
-                    Text(operation.phase ?? "等待开始")
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                    if let progress = operation.progress {
-                        Text(progress.file ?? progress.artifactKey ?? "校验中")
-                            .font(SpeechRailDesignTokens.Typography.technical)
-                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-                        if let completedBytes = progress.completedBytes,
-                           let expectedBytes = progress.expectedBytes,
-                           expectedBytes > 0
-                        {
-                            ProgressView(
-                                value: Double(completedBytes),
-                                total: Double(expectedBytes)
-                            )
-                            .controlSize(.small)
-                            Text("\(formatBytes(completedBytes)) / \(formatBytes(expectedBytes))")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-                        }
-                    }
-                    if operation.state == .interrupted {
-                        Button("重新下载并校验") {
-                            pendingAction = .download
-                        }
-                        .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
-                    } else {
-                        Button("停止下载") {
-                            Task { await model.cancelCurrentOperation() }
-                        }
-                        .disabled(!model.controlAgentStatus.allowsMutation)
-                    }
+    private var diarizationSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "分人资产",
+                detail: "Balanced / Quality 共用 FluidAudio CoreML 资产，并按档位使用对应 aligner。"
+            )
+            VStack(spacing: 0) {
+                ForEach(diarizationStatuses, id: \.key) { item in
+                    DiarizationStatusRow(status: item)
                 }
-                .padding(SpeechRailDesignTokens.Spacing.lg)
-                .speechRailSurface(.panel)
             }
         }
+    }
+
+    private var actionSection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "下一步",
+                detail: "下载只准备本机资产；应用档位才会改变服务配置。两项动作都会先确认影响。"
+            )
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button("下载并校验") {
+                    pendingAction = .download
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canPrepareModels)
+                .accessibilityHint("准备并校验所选档位的本机模型文件")
+
+                Button("应用此档位") {
+                    pendingAction = .apply
+                }
+                .buttonStyle(.bordered)
+                .disabled(!canApplyProfile)
+                .accessibilityHint("将所选档位写入服务配置并重启相关 worker")
+            }
+            if let disk = model.modelStatus?.disk {
+                Text("本机模型占用 \(formatBytes(disk.modelBytes)) · 可用空间 \(formatBytes(disk.freeBytes))")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+            }
+            if let message = model.message, !message.isEmpty, model.modelAvailability == .available {
+                Text(message)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var modelInspector: some View {
+        DeveloperInspector {
+            if let artifact = selectedArtifact {
+                SectionHeading(title: artifact.variant.replacingOccurrences(of: "_", with: " "))
+                LabeledContent("模型 ID", value: artifact.modelID)
+                LabeledContent("family", value: artifact.family)
+                LabeledContent("来源", value: "\(artifact.provider) · \(artifact.repository)")
+                LabeledContent("revision", value: artifact.revision)
+                LabeledContent("量化", value: quantizationText(for: artifact))
+                LabeledContent("文件", value: "\(artifact.fileCount) 个 · \(formatBytes(artifact.sizeBytes))")
+                if let status = status(for: artifact) {
+                    Divider()
+                    LabeledContent("状态", value: statusText(for: status))
+                    LabeledContent("完整性", value: integrityText(for: status))
+                }
+            } else {
+                SectionHeading(
+                    title: "模型运行信息",
+                    detail: "选择制品查看锁定来源、revision 和本机校验结果。"
+                )
+                LabeledContent("当前档位", value: selectedProfile.rawValue)
+                LabeledContent("服务档位", value: model.profile?.preset?.rawValue ?? "未读取")
+                LabeledContent("目录状态", value: model.modelAvailability == .available ? "已读取" : "未读取")
+                if let disk = model.modelStatus?.disk {
+                    LabeledContent("模型占用", value: formatBytes(disk.modelBytes))
+                    LabeledContent("可用空间", value: formatBytes(disk.freeBytes))
+                }
+                Text("开发者详情不会改变下载或应用行为。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+            }
+        }
+    }
+
+    private var selectedArtifact: ModelArtifactSnapshot? {
+        guard let key = selectedArtifactKey else { return nil }
+        return model.modelCatalog?.artifacts.first(where: { $0.key == key })
+    }
+
+    private var activeModelOperation: OperationSnapshot? {
+        guard let operation = model.operation, operation.command == .modelPrepare else { return nil }
+        switch operation.state {
+        case .accepted, .running, .interrupted:
+            return operation
+        case .committed, .failed, .cancelled:
+            return nil
+        }
+    }
+
+    private var diarizationStatuses: [ModelArtifactStatusSnapshot] {
+        model.modelStatus?.diarization ?? []
+    }
+
+    private var canPrepareModels: Bool {
+        model.modelAvailability == .available
+            && !model.isBusy
+            && model.controlAgentStatus.allowsMutation
+    }
+
+    private var canApplyProfile: Bool {
+        canPrepareModels
+    }
+
+    private func summary(for profile: SpeechRailProfile) -> ProfileSummary? {
+        model.modelCatalog?.profiles.first(where: { $0.id == profile })
+    }
+
+    private func status(for artifact: ModelArtifactSnapshot) -> ModelArtifactStatusSnapshot? {
+        model.modelStatus?.artifacts.first(where: { $0.key == artifact.key })
+            ?? model.modelStatus?.diarization.first(where: { $0.key == artifact.key })
     }
 
     private var isConfirmingAction: Binding<Bool> {
@@ -244,55 +419,54 @@ public struct ModelManagementView: View {
     }
 
     private var confirmationTitle: String {
-        switch pendingAction {
+        guard let pendingAction else { return "确认操作" }
+        return switch pendingAction {
         case .download:
             "确认下载并校验 \(selectedProfile.rawValue) 档位模型？"
         case .apply:
             "确认应用 \(selectedProfile.rawValue) 档位？"
-        case nil:
-            "确认操作"
         }
     }
 
     private func actionTitle(for action: ModelAction) -> String {
-        switch action {
-        case .download: "下载并校验"
-        case .apply: "应用此档位"
+        return switch action {
+        case .download:
+            "下载并校验"
+        case .apply:
+            "应用此档位"
         }
     }
 
-    private func formatBytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GiB", Double(bytes) / 1_073_741_824)
-    }
-}
-
-private struct DiarizationStatusRow: View {
-    let status: ModelArtifactStatusSnapshot
-
-    var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: status.state == .verified ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(
-                    status.state == .verified
-                        ? SpeechRailDesignTokens.Palette.success
-                        : SpeechRailDesignTokens.Palette.warning
-                )
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xxs) {
-                Text(status.key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(status.key)")
-                    .font(SpeechRailDesignTokens.Typography.panelTitle)
-                Text(statusText)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-            }
-            Spacer(minLength: 0)
+    private func profileTitle(for profile: SpeechRailProfile) -> String {
+        return switch profile {
+        case .quality:
+            "Quality · 创作优先"
+        case .balanced:
+            "Balanced · 分人和日常"
+        case .light:
+            "Light · 轻量快速"
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(status.key)，\(statusText)")
     }
 
-    private var statusText: String {
-        switch status.state {
+    private func profilePurpose(for profile: SpeechRailProfile) -> String {
+        return switch profile {
+        case .quality:
+            "VoiceDesign 与高质量对齐，适合音色创作"
+        case .balanced:
+            "8-bit 运行与分人能力的平衡选择"
+        case .light:
+            "更小的 ASR 组合，适合快速启动"
+        }
+    }
+
+    private func quantizationText(for artifact: ModelArtifactSnapshot) -> String {
+        let bits = artifact.quantization.bits.map { "\($0)-bit" } ?? "未声明位宽"
+        let group = artifact.quantization.groupSize.map { " · group \($0)" } ?? ""
+        return "\(bits) · \(artifact.quantization.format)\(group)"
+    }
+
+    private func statusText(for status: ModelArtifactStatusSnapshot) -> String {
+        return switch status.state {
         case .verified:
             "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
         case .notDownloaded:
@@ -304,6 +478,21 @@ private struct DiarizationStatusRow: View {
         case .unknown:
             "状态未知"
         }
+    }
+
+    private func integrityText(for status: ModelArtifactStatusSnapshot) -> String {
+        return switch status.integrity {
+        case .verified:
+            "SHA-256 已匹配"
+        case .mismatch:
+            "SHA-256 不匹配"
+        case .notChecked:
+            "尚未校验"
+        }
+    }
+
+    private func formatBytes(_ bytes: Int64) -> String {
+        String(format: "%.1f GiB", Double(bytes) / 1_073_741_824)
     }
 }
 
@@ -320,63 +509,63 @@ private struct ProfileChoiceRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(
                         isSelected
-                            ? SpeechRailDesignTokens.Palette.tint
+                            ? SpeechRailDesignTokens.Palette.railSignal
                             : SpeechRailDesignTokens.Palette.secondaryText
                     )
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xxs) {
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Text(profileTitle)
-                        .font(SpeechRailDesignTokens.Typography.panelTitle)
+                        .font(SpeechRailDesignTokens.Typography.body)
                     Text(profilePurpose)
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                        .lineLimit(2)
                 }
-                Spacer()
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 if let summary {
                     Text(formatBytes(summary.downloadBytes))
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                 }
             }
-            .padding(SpeechRailDesignTokens.Spacing.md)
+            .padding(SpeechRailDesignTokens.Spacing.sm)
             .background(
                 isSelected
-                    ? SpeechRailDesignTokens.Palette.tint.opacity(0.12)
-                    : SpeechRailDesignTokens.Palette.canvas.opacity(0.01),
-                in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.control)
+                    ? SpeechRailDesignTokens.Surface.selectedFill
+                    : Color.clear,
+                in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
             )
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(profile.rawValue)
         .accessibilityLabel(profileTitle)
-        .accessibilityValue(accessibilityValue)
+        .accessibilityValue(isSelected ? "已选择" : "未选择")
     }
 
     private var profileTitle: String {
-        switch profile {
-        case .quality: "Quality · 创作优先"
-        case .balanced: "Balanced · 分人和日常"
-        case .light: "Light · 轻量快速"
+        return switch profile {
+        case .quality:
+            "Quality · 创作优先"
+        case .balanced:
+            "Balanced · 分人和日常"
+        case .light:
+            "Light · 轻量快速"
         }
     }
 
     private var profilePurpose: String {
-        switch profile {
-        case .quality: "VoiceDesign 与高质量对齐，适合音色创作"
-        case .balanced: "8-bit 运行与分人能力的平衡选择"
-        case .light: "更小的 ASR 组合，适合快速启动"
+        return switch profile {
+        case .quality:
+            "VoiceDesign 与高质量对齐，适合音色创作"
+        case .balanced:
+            "8-bit 运行与分人能力的平衡选择"
+        case .light:
+            "更小的 ASR 组合，适合快速启动"
         }
-    }
-
-    private var accessibilityValue: String {
-        var details = [profilePurpose, isSelected ? "已选择" : "未选择"]
-        if let summary {
-            details.append("准备大小 \(formatBytes(summary.downloadBytes))")
-        }
-        return details.joined(separator: "，")
     }
 
     private func formatBytes(_ bytes: Int64) -> String {
@@ -384,42 +573,43 @@ private struct ProfileChoiceRow: View {
     }
 }
 
-private struct ArtifactStatusRow: View {
+private struct ArtifactChoiceRow: View {
     let artifact: ModelArtifactSnapshot
     let status: ModelArtifactStatusSnapshot?
+    let selected: Bool
 
     var body: some View {
-        DisclosureGroup {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                LabeledContent("模型 ID", value: artifact.modelID)
-                LabeledContent("来源", value: "\(artifact.provider) · \(artifact.repository)")
-                LabeledContent("revision", value: artifact.revision)
-                LabeledContent("文件", value: "\(artifact.fileCount) 个 · \(formatBytes(artifact.sizeBytes))")
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: status?.state == .verified ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundStyle(
+                    status?.state == .verified
+                        ? SpeechRailDesignTokens.Palette.healthy
+                        : SpeechRailDesignTokens.Palette.attention
+                )
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
+                    .font(SpeechRailDesignTokens.Typography.body)
+                Text(statusText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
             }
-            .font(SpeechRailDesignTokens.Typography.technical)
-            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-        } label: {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Image(systemName: status?.state == .verified ? "checkmark.circle.fill" : "circle.dashed")
-                    .foregroundStyle(
-                        status?.state == .verified
-                            ? SpeechRailDesignTokens.Palette.success
-                            : SpeechRailDesignTokens.Palette.warning
-                    )
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xxs) {
-                    Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
-                        .font(SpeechRailDesignTokens.Typography.panelTitle)
-                    Text(statusText)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-                }
-                Spacer()
-            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            Text(artifact.key)
+                .font(SpeechRailDesignTokens.Typography.technical)
+                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                .lineLimit(1)
         }
-        .accessibilityElement(children: .contain)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .background(
+            selected ? SpeechRailDesignTokens.Surface.selectedFill : Color.clear,
+            in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
+        )
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.variant)
         .accessibilityValue(statusText)
-        .accessibilityHint("展开查看模型 ID、来源、revision 和文件信息")
+        .accessibilityHint("在开发者详情中查看模型来源和校验信息")
     }
 
     private var statusText: String {
@@ -437,8 +627,46 @@ private struct ArtifactStatusRow: View {
             "状态未知"
         }
     }
+}
 
-    private func formatBytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GiB", Double(bytes) / 1_073_741_824)
+private struct DiarizationStatusRow: View {
+    let status: ModelArtifactStatusSnapshot
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: status.state == .verified ? "checkmark.circle.fill" : "circle.dashed")
+                .foregroundStyle(
+                    status.state == .verified
+                        ? SpeechRailDesignTokens.Palette.healthy
+                        : SpeechRailDesignTokens.Palette.attention
+                )
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(status.key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(status.key)")
+                    .font(SpeechRailDesignTokens.Typography.body)
+                Text(statusText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(status.key)，\(statusText)")
+    }
+
+    private var statusText: String {
+        return switch status.state {
+        case .verified:
+            "已验证 · \(status.verifiedFileCount)/\(status.totalFileCount) 个文件"
+        case .notDownloaded:
+            "未下载"
+        case .downloading:
+            "下载中"
+        case .invalid:
+            "校验不匹配，需要重新准备"
+        case .unknown:
+            "状态未知"
+        }
     }
 }

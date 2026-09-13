@@ -47,7 +47,9 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(
             app.staticTexts["确认下载并校验 quality 档位模型？"].waitForExistence(timeout: 2)
         )
-        app.buttons["取消"].tap()
+        let dialog = app.windows["SpeechRail 管理控制台"].sheets.firstMatch
+        XCTAssertTrue(dialog.buttons["取消"].waitForExistence(timeout: 2))
+        dialog.buttons["取消"].tap()
     }
 
     func testMonitoringExplainsMissingMetrics() {
@@ -67,6 +69,19 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["上次准备被中断"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新下载并校验"].exists)
         XCTAssertFalse(app.buttons["停止下载"].exists)
+    }
+
+    func testModelUnsupportedStateExplainsVersionMismatch() {
+        let app = launchSpeechRail(
+            arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-model-unsupported"]
+        )
+        openControlCenter(in: app)
+        app.buttons["模型"].tap()
+
+        XCTAssertTrue(
+            app.staticTexts["模型管理暂不可用：服务组件版本不匹配"].waitForExistence(timeout: 5)
+        )
+        XCTAssertTrue(app.buttons["打开诊断"].exists)
     }
 
     func testSettingsContainAppPreferencesOnly() {

@@ -109,6 +109,7 @@ public enum ManagedCommandError: Error, Equatable, Sendable {
     case runtimeMissing
     case launchFailed
     case invalidOutput
+    case unsupported
 }
 
 public struct ManagedCommandResult: Sendable {
@@ -243,6 +244,14 @@ public final class ProcessManagedCommandRunner: CancellableManagedCommandRunner,
 
         let exitCode = process.terminationStatus
         let stdout = stdoutCollector.data
+        if exitCode != 0,
+           ManagedCommandDiagnostics.isUnsupportedModelCommand(
+               stderrCollector.data,
+               command: command
+           )
+        {
+            throw ManagedCommandError.unsupported
+        }
         let response: ControlResponse?
         do {
             response = try CLIOutputDecoder.decode(stdout, command: command.controlCommand)
@@ -308,6 +317,20 @@ private final class PipeCollector: @unchecked Sendable {
 private enum ManagedCommandDiagnostics {
     private static let secretPattern = #"(?i)\b(api[_-]?key|authorization|token|secret|password)\b\s*[:=]\s*\S+"#
     private static let pathPattern = #"(?<![:\w])/[^\s"']+"#
+
+    static func isUnsupportedModelCommand(_ data: Data, command: ManagedCommand) -> Bool {
+        guard command.controlCommand == .modelCatalog
+                || command.controlCommand == .modelStatus
+                || command.controlCommand == .modelPrepare,
+              let output = String(data: data, encoding: .utf8)
+        else {
+            return false
+        }
+        let normalized = output.lowercased()
+        return (normalized.contains("invalid choice") && normalized.contains("model"))
+            || (normalized.contains("no such command") && normalized.contains("model"))
+            || normalized.contains("unrecognized arguments: model")
+    }
 
     static func failureMessage(from data: Data) -> String {
         guard let output = String(data: data, encoding: .utf8) else {
