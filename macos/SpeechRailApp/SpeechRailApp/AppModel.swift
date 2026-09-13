@@ -89,6 +89,7 @@ public final class AppModel {
     public private(set) var isRegisteringVoice = false
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
+    public private(set) var worksMessage: String?
 
     public var hasActiveMutation: Bool {
         guard let state = operation?.state else { return false }
@@ -329,9 +330,14 @@ public final class AppModel {
     public func refreshWorks() {
         do {
             works = try workStore.list()
+            worksMessage = nil
         } catch {
-            creatorMessage = "作品历史暂时不可用"
+            worksMessage = "作品历史暂时不可用"
         }
+    }
+
+    public func loadWorkAudio(_ work: CreativeWork) throws -> Data {
+        try workStore.loadAudio(for: work)
     }
 
     public func synthesizeAndSave(

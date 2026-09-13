@@ -1,6 +1,7 @@
 import Foundation
 import SpeechRailControlKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct CreatorSurfaceView: View {
     @Environment(AppModel.self) private var model
@@ -67,9 +68,11 @@ public struct CreatorSurfaceView: View {
 
 public struct DubbingDeskView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppNavigationState.self) private var navigation
     @State private var dubbingText = "在星际航行的漫长岁月里，人类学会了倾听寂静。每当脉冲信号穿越猎户座悬臂，控制台都会闪烁起熟悉的琥珀色微光。"
     @State private var selectedVoiceID = ""
     @State private var speechSpeed: Double = 1.0
+    @State private var successMessage: String?
 
     public init() {}
 
@@ -106,7 +109,7 @@ public struct DubbingDeskView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                 SectionHeading(
                     title: "声学参数配置",
-                    detail: "从当前服务公开的可用音色中选择，并在本机生成 WAV 作品。"
+                    detail: "从当前服务公开的可用音色中选择；生成后自动保存 WAV 作品并播放。"
                 )
                 HStack(spacing: SpeechRailDesignTokens.Spacing.lg) {
                     Picker("音色预设", selection: $selectedVoiceID) {
@@ -140,12 +143,15 @@ public struct DubbingDeskView: View {
                         if model.isAudioPlaying {
                             model.stopAudio()
                         } else if let voice = selectedVoice {
+                            successMessage = nil
                             Task {
-                                _ = await model.synthesizeAndSave(
+                                if let work = await model.synthesizeAndSave(
                                     text: dubbingText,
                                     voice: voice,
                                     speed: speechSpeed
-                                )
+                                ) {
+                                    successMessage = "“\(work.title)” 已保存到“我的作品”，并已开始播放。"
+                                }
                             }
                         }
                     } label: {
@@ -153,7 +159,7 @@ public struct DubbingDeskView: View {
                             Label("生成中", systemImage: "hourglass")
                         } else {
                             Label(
-                                model.isAudioPlaying ? "停止试听" : "生成并试听",
+                                model.isAudioPlaying ? "停止试听" : "生成并保存",
                                 systemImage: model.isAudioPlaying ? "stop.fill" : "play.fill"
                             )
                         }
@@ -178,6 +184,17 @@ public struct DubbingDeskView: View {
                         Task { await model.refreshCreatorVoices() }
                     }
                 )
+            }
+
+            if let successMessage {
+                StatusBanner(
+                    tone: .healthy,
+                    title: "作品已生成并保存",
+                    message: successMessage,
+                    actionTitle: "查看我的作品"
+                ) {
+                    navigation.request(.works)
+                }
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
@@ -1008,6 +1025,10 @@ public struct WorksView: View {
     @Environment(AppNavigationState.self) private var navigation
     @State private var selectedWorkID: String?
     @State private var showInspector = false
+    @State private var exportDocument = WAVFileDocument(data: Data())
+    @State private var exportFileName = "SpeechRail-作品"
+    @State private var isExporting = false
+    @State private var exportMessage: String?
 
     public init() {}
 
@@ -1018,7 +1039,28 @@ public struct WorksView: View {
                 detail: "作品音频和文稿只保存在本机；开发者信息只展示必要的技术摘要。"
             )
 
-            if model.works.isEmpty {
+            if let message = model.worksMessage {
+                StatusBanner(
+                    tone: .critical,
+                    title: "作品历史暂时不可用",
+                    message: message,
+                    actionTitle: "重新加载"
+                ) {
+                    model.refreshWorks()
+                }
+            }
+
+            if let exportMessage {
+                StatusBanner(
+                    tone: exportMessage.hasPrefix("导出失败") ? .critical : .healthy,
+                    title: exportMessage.hasPrefix("导出失败") ? "导出未完成" : "作品已导出",
+                    message: exportMessage,
+                    actionTitle: nil,
+                    action: nil
+                )
+            }
+
+            if model.works.isEmpty, model.worksMessage == nil {
                 VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                     Image(systemName: AppRoute.works.systemImage)
                         .font(.system(size: 30, weight: .medium))
@@ -1035,7 +1077,7 @@ public struct WorksView: View {
                     .speechRailButton(.primary)
                 }
                 .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
-            } else {
+            } else if !model.works.isEmpty {
                 VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                     ForEach(model.works) { work in
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -1101,7 +1143,16 @@ public struct WorksView: View {
         .speechRailField()
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "查看当前作品的技术摘要") {
+                        WorkspaceActionsMenu(helpText: "查看当前作品的技术摘要") {
+                    Button {
+                        if let work = selectedWork {
+                            prepareExport(for: work)
+                        }
+                    } label: {
+                        Label("导出选中作品", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(selectedWork == nil)
+                    Divider()
                     Button {
                         showInspector.toggle()
                     } label: {
@@ -1135,6 +1186,19 @@ public struct WorksView: View {
                 }
             }
         }
+        .fileExporter(
+            isPresented: $isExporting,
+            document: exportDocument,
+            contentType: .wav,
+            defaultFilename: exportFileName
+        ) { result in
+            switch result {
+            case .success:
+                exportMessage = "已将“\(exportFileName).wav”导出到你选择的位置。"
+            case .failure:
+                exportMessage = "导出失败：未能写入目标位置，请重试。"
+            }
+        }
         .task {
             model.refreshWorks()
             if selectedWorkID == nil {
@@ -1150,5 +1214,49 @@ public struct WorksView: View {
         guard let duration = work.durationSeconds else { return "未读取" }
         let totalSeconds = max(0, Int(duration.rounded()))
         return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
+    }
+
+    private var selectedWork: CreativeWork? {
+        guard let selectedWorkID else { return nil }
+        return model.works.first(where: { $0.id == selectedWorkID })
+    }
+
+    private func prepareExport(for work: CreativeWork) {
+        do {
+            exportDocument = WAVFileDocument(data: try model.loadWorkAudio(work))
+            exportFileName = exportBaseName(for: work)
+            exportMessage = nil
+            isExporting = true
+        } catch {
+            exportMessage = "导出失败：作品音频暂时不可用，请重新生成或重试。"
+        }
+    }
+
+    private func exportBaseName(for work: CreativeWork) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")
+        let cleaned = work.title
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "SpeechRail-作品" : String(cleaned.prefix(80))
+    }
+}
+
+private struct WAVFileDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.wav] }
+    static var writableContentTypes: [UTType] { [.wav] }
+
+    let data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
     }
 }
