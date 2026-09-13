@@ -4,10 +4,25 @@ import SpeechRailControlKit
 public struct WorkspaceTitleLockup: View {
     public let route: AppRoute
     public let service: ServiceSnapshot?
+    public let health: HealthSnapshot?
+    public let healthMessage: String?
+    public let operation: ServiceOperationStatus?
+    public let controlPlaneMessage: String?
 
-    public init(route: AppRoute, service: ServiceSnapshot? = nil) {
+    public init(
+        route: AppRoute,
+        service: ServiceSnapshot? = nil,
+        health: HealthSnapshot? = nil,
+        healthMessage: String? = nil,
+        operation: ServiceOperationStatus? = nil,
+        controlPlaneMessage: String? = nil
+    ) {
         self.route = route
         self.service = service
+        self.health = health
+        self.healthMessage = healthMessage
+        self.operation = operation
+        self.controlPlaneMessage = controlPlaneMessage
     }
 
     public var body: some View {
@@ -46,7 +61,12 @@ public struct WorkspaceTitleLockup: View {
     }
 
     private func serviceStatusText(_ service: ServiceSnapshot) -> String {
-        if service.ready == true { return "服务已就绪" }
+        if operation?.phase.isActive == true { return "服务操作进行中" }
+        if healthMessage != nil { return "健康状态不可用" }
+        if controlPlaneMessage != nil { return "控制通道不可用" }
+        if health?.ready == true || (health == nil && service.ready == true) {
+            return "服务已就绪"
+        }
         if service.serviceState == "unavailable" { return "服务不可用" }
         return "服务未就绪"
     }
@@ -56,14 +76,36 @@ public struct WorkspaceTitleLockup: View {
 public struct WorkspaceTitleView: View {
     private let route: AppRoute
     private let service: ServiceSnapshot?
+    private let health: HealthSnapshot?
+    private let healthMessage: String?
+    private let operation: ServiceOperationStatus?
+    private let controlPlaneMessage: String?
 
-    public init(route: AppRoute, service: ServiceSnapshot? = nil) {
+    public init(
+        route: AppRoute,
+        service: ServiceSnapshot? = nil,
+        health: HealthSnapshot? = nil,
+        healthMessage: String? = nil,
+        operation: ServiceOperationStatus? = nil,
+        controlPlaneMessage: String? = nil
+    ) {
         self.route = route
         self.service = service
+        self.health = health
+        self.healthMessage = healthMessage
+        self.operation = operation
+        self.controlPlaneMessage = controlPlaneMessage
     }
 
     public var body: some View {
-        WorkspaceTitleLockup(route: route, service: service)
+        WorkspaceTitleLockup(
+            route: route,
+            service: service,
+            health: health,
+            healthMessage: healthMessage,
+            operation: operation,
+            controlPlaneMessage: controlPlaneMessage
+        )
     }
 }
 

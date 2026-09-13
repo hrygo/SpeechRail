@@ -63,7 +63,14 @@ public struct ControlCenterView: View {
                     .background(SpeechRailDesignTokens.Color.canvas)
                     .toolbar {
                         ToolbarItem(placement: .principal) {
-                            WorkspaceTitleLockup(route: selection ?? .overview, service: model.service)
+                            WorkspaceTitleLockup(
+                                route: selection ?? .overview,
+                                service: model.service,
+                                health: model.health,
+                                healthMessage: model.healthMessage,
+                                operation: model.serviceOperation,
+                                controlPlaneMessage: model.controlPlaneMessage
+                            )
                         }
                         .sharedBackgroundVisibility(.hidden)
                         ToolbarItem(placement: .primaryAction) {
@@ -197,7 +204,13 @@ public struct ControlCenterView: View {
         if model.serviceOperation?.phase.isActive == true {
             return "服务操作进行中"
         }
-        if model.service.ready == true {
+        if model.healthMessage != nil {
+            return "健康状态不可用"
+        }
+        if model.controlPlaneMessage != nil {
+            return "控制通道不可用"
+        }
+        if model.health?.ready == true {
             return "服务已就绪"
         }
         if model.service.serviceState == "unavailable" {
@@ -210,7 +223,13 @@ public struct ControlCenterView: View {
         if model.serviceOperation?.phase.isActive == true {
             return .attention
         }
-        if model.service.ready == true {
+        if model.healthMessage != nil {
+            return .critical
+        }
+        if model.controlPlaneMessage != nil {
+            return .attention
+        }
+        if model.health?.ready == true {
             return .healthy
         }
         if model.service.serviceState == "unavailable" {

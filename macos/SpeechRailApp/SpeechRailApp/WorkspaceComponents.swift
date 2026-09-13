@@ -619,12 +619,17 @@ public struct ServiceStatusBadge: View {
         model.service.serviceState == "unavailable" || model.healthMessage != nil
     }
 
+    private var isControlRestricted: Bool {
+        model.controlPlaneMessage != nil
+    }
+
     private var statusText: String {
         if model.serviceOperation?.phase.isActive == true {
             return "处理中"
         }
         if isUnavailable { return "不可用" }
-        if model.service.ready == true { return "已就绪" }
+        if isControlRestricted { return "控制受限" }
+        if model.health?.ready == true { return "已就绪" }
         return "未就绪"
     }
 
@@ -632,8 +637,9 @@ public struct ServiceStatusBadge: View {
         if model.serviceOperation?.phase.isActive == true {
             return SpeechRailDesignTokens.Color.attention
         }
-        if model.service.ready == true { return SpeechRailDesignTokens.Color.ready }
         if isUnavailable { return SpeechRailDesignTokens.Color.critical }
+        if isControlRestricted { return SpeechRailDesignTokens.Color.attention }
+        if model.health?.ready == true { return SpeechRailDesignTokens.Color.ready }
         return SpeechRailDesignTokens.Color.attention
     }
 }
