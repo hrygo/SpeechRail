@@ -248,7 +248,7 @@ public struct ServiceOverviewView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailField()
+        .speechRailContentSurface()
     }
 
     private var preflightSummary: some View {

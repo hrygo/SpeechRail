@@ -158,7 +158,7 @@ public struct PreflightDiagnosticsView: View {
             alignment: .topLeading
         )
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailField()
+        .speechRailContentSurface()
         .accessibilityIdentifier("diagnostics-check-list")
     }
 
@@ -260,7 +260,7 @@ public struct PreflightDiagnosticsView: View {
             alignment: .topLeading
         )
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailField()
+        .speechRailContentSurface()
         .accessibilityIdentifier("diagnostics-check-detail")
     }
 
@@ -772,7 +772,7 @@ private struct DiagnosticsSummaryView: View {
             maxHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight,
             alignment: .leading
         )
-        .speechRailField()
+        .speechRailContentSurface()
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("diagnostics-summary")
         .accessibilityValue(

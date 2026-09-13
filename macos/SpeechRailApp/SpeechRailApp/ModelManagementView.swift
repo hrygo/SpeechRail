@@ -94,7 +94,7 @@ public struct ModelManagementView: View {
         case .unknown:
             ProgressView("正在读取模型目录…")
                 .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
-                .speechRailField()
+                .speechRailContentSurface()
         case .available:
             modelWorkspace
         case .unsupported:
@@ -186,7 +186,7 @@ public struct ModelManagementView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailField()
+        .speechRailContentSurface()
     }
 
     private var selectedProfilePanel: some View {
@@ -228,7 +228,7 @@ public struct ModelManagementView: View {
             actionSection
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailField()
+        .speechRailContentSurface()
     }
 
     private var profileContext: some View {

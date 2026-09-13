@@ -165,7 +165,7 @@ public struct RuntimeMonitoringView: View {
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.lg)
         .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight)
-        .speechRailField()
+        .speechRailContentSurface()
         .accessibilityElement(children: .combine)
         .accessibilityLabel(monitoringTitle)
         .accessibilityValue(
@@ -220,7 +220,7 @@ public struct RuntimeMonitoringView: View {
             resourceSection
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailField()
+        .speechRailContentSurface()
     }
 
     private var resourceSection: some View {
@@ -380,7 +380,7 @@ public struct RuntimeMonitoringView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailField()
+        .speechRailContentSurface()
     }
 
     @ViewBuilder
