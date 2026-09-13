@@ -19,7 +19,7 @@
 
 ## 当前证据基线（只读）
 
-审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:52。
+审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:53。
 
 - 当前 managed profile 为 `quality`，generation 为 `102`。
 - 当前 `/health`、`/readyz` 为 ready；ASR、TTS、diarization、realtime VAD 均报告 ready。ASR/TTS/streaming 为 `cold_evicted`，含义是可按需加载，不是模型缺失。
@@ -365,4 +365,5 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - 2026-09-14 00:37：候选行移除嵌套 field 卡片，VoiceDesign/配音台补齐共享 developer inspector；模型 `ready == nil` 时显示“就绪状态未读取”而不依据 worker 状态过度推断；运行中 operation snapshot 在内存/XPC 出口统一脱敏；静态检查通过，自动化测试仍按用户要求暂停。
 - 2026-09-14 00:51：OpenAPI 与用户 API 契约补充 ASR/TTS RTF、资源快照和缺失值语义；监控脱敏摘要补齐同一采样中的请求、延迟、RTF 和实时会话字段；Debug 构建通过，未安装新实例，live endpoint 对账、真实模型操作和自动化测试仍按用户要求暂停。
 - 2026-09-14 00:52：同一改动在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 Release 构建通过；确认 Release 不启用 UI-test fake 分支。自动化测试、安装和服务运行态操作仍未执行。
+- 2026-09-14 00:53：最终静态门通过：`git diff --check`、OpenAPI YAML 解析、页面 token/legacy-style 扫描均无新增问题；工作树保持干净。自动化测试、安装、真实模型操作和故障注入继续保留为用户验收门槛。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试；作品重命名/删除/复用仍需先确定可恢复回收策略，当前不擅自扩展用户数据删除能力。
