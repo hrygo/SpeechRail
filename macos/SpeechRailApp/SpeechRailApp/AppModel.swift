@@ -728,7 +728,7 @@ public final class AppModel {
             if let operationID = response.operation?.operationID {
                 await waitForOperation(operationID)
             }
-            if let serviceMutation {
+            if serviceMutation != nil {
                 serviceOperation = ServiceOperationStatus(
                     command: command,
                     phase: .healthChecking,
@@ -739,7 +739,7 @@ public final class AppModel {
             if serviceMutation != nil {
                 await refreshPreflight()
             }
-            if let serviceMutation {
+            if serviceMutation != nil {
                 let message = healthMessage == nil
                     ? "服务命令已完成，状态已刷新。"
                     : "服务命令已完成，但健康检查暂时不可用，请重新读取。"

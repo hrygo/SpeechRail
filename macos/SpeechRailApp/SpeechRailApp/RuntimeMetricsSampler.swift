@@ -9,10 +9,13 @@ public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
     public let queueRejections: Double?
     public let asrLatencySeconds: Double?
     public let ttsLatencySeconds: Double?
+    public let asrRTF: Double?
+    public let ttsRTF: Double?
     public let ttsTTFASeconds: Double?
     public let activeRealtimeSessions: Int?
     public let requestRatePerSecond: Double?
     public let queueRejectionRatePerSecond: Double?
+    public let resources: RuntimeResourceSnapshot?
 
     public var id: Date { capturedAt }
 
@@ -24,10 +27,13 @@ public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
         queueRejections: Double?,
         asrLatencySeconds: Double?,
         ttsLatencySeconds: Double?,
+        asrRTF: Double? = nil,
+        ttsRTF: Double? = nil,
         ttsTTFASeconds: Double? = nil,
         activeRealtimeSessions: Int? = nil,
         requestRatePerSecond: Double? = nil,
-        queueRejectionRatePerSecond: Double? = nil
+        queueRejectionRatePerSecond: Double? = nil,
+        resources: RuntimeResourceSnapshot? = nil
     ) {
         self.capturedAt = capturedAt
         self.activeRequests = activeRequests
@@ -36,10 +42,13 @@ public struct RuntimeMetricsSample: Identifiable, Equatable, Sendable {
         self.queueRejections = queueRejections
         self.asrLatencySeconds = asrLatencySeconds
         self.ttsLatencySeconds = ttsLatencySeconds
+        self.asrRTF = asrRTF
+        self.ttsRTF = ttsRTF
         self.ttsTTFASeconds = ttsTTFASeconds
         self.activeRealtimeSessions = activeRealtimeSessions
         self.requestRatePerSecond = requestRatePerSecond
         self.queueRejectionRatePerSecond = queueRejectionRatePerSecond
+        self.resources = resources
     }
 }
 
@@ -71,6 +80,8 @@ public enum RuntimeMetricsSampler {
                 metrics,
                 name: "speechrail_tts_inference_duration_seconds"
             ),
+            asrRTF: histogramAverage(metrics, name: "speechrail_asr_rtf"),
+            ttsRTF: histogramAverage(metrics, name: "speechrail_tts_rtf"),
             ttsTTFASeconds: histogramAverage(
                 metrics,
                 name: "speechrail_tts_ttfa_seconds"
@@ -90,7 +101,8 @@ public enum RuntimeMetricsSampler {
                 previous: previous?.queueRejections,
                 capturedAt: capturedAt,
                 previousCapturedAt: previous?.capturedAt
-            )
+            ),
+            resources: metrics.resources
         )
     }
 

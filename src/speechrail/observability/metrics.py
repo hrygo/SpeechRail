@@ -137,6 +137,10 @@ class Metrics:
             "TTS synthesis duration in seconds",
         )
         self._describe(
+            "speechrail_tts_rtf",
+            "TTS Real-Time Factor (inference duration / generated audio duration)",
+        )
+        self._describe(
             "speechrail_tts_ttfa_seconds",
             "Streaming TTS Time-To-First-Audio latency in seconds",
         )
@@ -324,6 +328,13 @@ class Metrics:
             TTS_DURATION_BUCKETS,
             voice_class=voice_class,
         )
+        if audio_duration_sec > 0:
+            self.observe(
+                "speechrail_tts_rtf",
+                inference_duration_sec / audio_duration_sec,
+                RTF_BUCKETS,
+                voice_class=voice_class,
+            )
 
     def record_ttfa(self, ttfa_sec: float) -> None:
         self.observe("speechrail_tts_ttfa_seconds", ttfa_sec, TTFA_BUCKETS)
@@ -483,6 +494,7 @@ class Metrics:
         governor_snapshot: Any | None = None,
         worker_states: Mapping[str, str] | None = None,
         readiness: Mapping[str, bool] | None = None,
+        resources: Mapping[str, Any] | None = None,
     ) -> str:
         """Render standard OpenMetrics / Prometheus 0.0.4 text format."""
         with self._lock:
@@ -529,6 +541,8 @@ class Metrics:
                     lines.append(f"{name}_sum{_format_labels(key)} {hist.sum_val:.6g}")
                     lines.append(f"{name}_count{_format_labels(key)} {hist.count}")
 
+            _append_resource_prometheus(lines, resources)
+
         return "\n".join(lines) + "\n"
 
     def render_json(
@@ -537,6 +551,7 @@ class Metrics:
         governor_snapshot: Any | None = None,
         worker_states: Mapping[str, str] | None = None,
         readiness: Mapping[str, bool] | None = None,
+        resources: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Render a structured JSON view for APIs and debugging."""
         with self._lock:
@@ -599,4 +614,69 @@ class Metrics:
             "counters": counters,
             "gauges": gauges,
             "histograms": histograms,
+            "resources": dict(resources or {}),
         }
+
+
+def _append_resource_prometheus(
+    lines: list[str], resources: Mapping[str, Any] | None
+) -> None:
+    """Append fixed-name resource gauges without exposing free-form labels."""
+
+    if not resources:
+        return
+
+    values: tuple[tuple[str, str, float | int | None], ...] = (
+        (
+            "speechrail_resource_physical_memory_bytes",
+            "Detected host physical memory in bytes",
+            resources.get("physical_memory_bytes"),
+        ),
+        (
+            "speechrail_resource_memory_budget_bytes",
+            "Configured heavy-compute memory budget in bytes",
+            resources.get("memory_budget_bytes"),
+        ),
+        (
+            "speechrail_resource_declared_footprint_bytes",
+            "Declared enabled-component footprint in bytes",
+            resources.get("declared_footprint_bytes"),
+        ),
+        (
+            "speechrail_resource_physical_footprint_bytes",
+            "Observed service-owned macOS physical footprint in bytes",
+            resources.get("physical_footprint_bytes"),
+        ),
+        (
+            "speechrail_resource_footprint_process_count",
+            "Number of service-owned processes considered for footprint",
+            resources.get("physical_footprint_process_count"),
+        ),
+        (
+            "speechrail_resource_declaration_complete",
+            "Whether enabled component footprint declarations are complete",
+            _bool_metric_value(resources.get("declaration_complete")),
+        ),
+        (
+            "speechrail_resource_footprint_complete",
+            "Whether all service-owned processes were sampled for footprint",
+            _bool_metric_value(resources.get("physical_footprint_complete")),
+        ),
+        (
+            "speechrail_resource_heavy_overlap_allowed",
+            "Whether the resource governor allows heavy compute overlap",
+            _bool_metric_value(resources.get("heavy_overlap_allowed")),
+        ),
+    )
+    for name, help_text, value in values:
+        if value is None or isinstance(value, bool):
+            continue
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} gauge")
+        lines.append(f"{name} {value:g}")
+
+
+def _bool_metric_value(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return None

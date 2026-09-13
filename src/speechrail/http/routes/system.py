@@ -1246,6 +1246,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         """Expose Prometheus / JSON metrics via the unified Metrics engine."""
         gov_snap = services.governor.snapshot()
         worker_states = services.lifecycle.worker_states()
+        resource_status = services.runtime_resource_status(gov_snap)
         readiness = {
             "asr": services.asr_ready,
             "tts": services.tts_ready,
@@ -1260,6 +1261,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     governor_snapshot=gov_snap,
                     worker_states=worker_states,
                     readiness=readiness,
+                    resources=resource_status,
                 )
             )
 
@@ -1268,6 +1270,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 governor_snapshot=gov_snap,
                 worker_states=worker_states,
                 readiness=readiness,
+                resources=resource_status,
             ),
             media_type="text/plain; version=0.0.4; charset=utf-8",
         )

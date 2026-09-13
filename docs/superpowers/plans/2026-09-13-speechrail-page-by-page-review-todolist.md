@@ -25,7 +25,7 @@
 - 当前 `/health`、`/readyz` 为 ready；ASR、TTS、diarization、realtime VAD 均报告 ready。ASR/TTS/streaming 为 `cold_evicted`，含义是可按需加载，不是模型缺失。
 - 当前活动制品已核对：`asr-1.7b-q8`、`tts-1.7b-design-q8`、`tts-1.7b-base-q8`、`aligner-bf16`、`diarization-coreml` 均为 verified；Balanced/Light 所需资源存在但未应用。
 - `GET /metrics` 在客户端要求 `Accept: application/json` 时实测 200 JSON；不带该请求头返回 Prometheus 文本，符合 `contracts/openapi.yaml` 的内容协商约定。因此不能把默认 `curl` 得到的文本误判成 Swift 接线故障。
-- 当前 metrics JSON 有请求数、队列数、延迟、TTFA、worker 状态和健康 gauges，但没有可直接展示的 resident memory、物理内存预算、RTF 或重叠冲突字段；这是真实数据面缺口，不允许 UI 伪造。
+- 审查开始时 metrics JSON 只有请求数、队列数、延迟、TTFA、worker 状态和健康 gauges；本轮源码已在同一 `/metrics` JSON/Prometheus 入口补充资源快照、准入策略和 ASR/TTS RTF。当前本机运行中的旧实例尚未替换，因此新字段仍需安装后做 live 对账，不能把源码构建当作运行态证明。
 - `GET /v1/voices` 实测包含系统音色和自定义音色；其中存在超长描述 metadata，证明音色列表必须对服务端文本做边界保护。
 - 未执行模型下载、模型加载/卸载、服务重启、真实创作请求和自动化测试。当前验证只覆盖源码、契约、编译、AX 手工检查和只读本机接口。
 
@@ -38,7 +38,7 @@
 | 音色库 | 已接真实列表和试听 | 缺少管理闭环；长 metadata 有布局风险 | P1 |
 | 我的作品 | 已接 Application Support 索引、音频读取和播放 | 存储错误不会在当前页显式呈现；缺少导出/管理 | P1 |
 | 服务状态 | 已接 health、profile、preflight、Control Agent 操作 | 关键结果可见性和开发者审计信息仍不完整 | P1 |
-| 运行监控 | 已接 health + JSON metrics，5 秒刷新并保留最后有效快照 | 现有数据不足以兑现 memory/RTF/budget 设计；图表信息层级偏弱 | P1 |
+| 运行监控 | 已接 health + JSON metrics，5 秒刷新并保留最后有效快照；源码已补资源/准入/ASR-TTS RTF | 新数据契约待安装后的 live 对账；手工失败恢复和全局 token 矩阵待验收 | P1 |
 | 模型 | 已接 catalog/status、下载准备和 profile apply；模型存在/使用已分开表达 | 目标档位与当前档位还需更强区分；下载进度缺速度/ETA | P1 |
 | 诊断 | 已接 XPC preflight、选中检查项和恢复动作 | 缺复制报告/结构化修复闭环；需完成一屏和辅助功能验收 | P1 |
 | 全局 chrome、菜单、设置 | 标题、菜单、设置均有真实入口 | 侧栏全局状态 footer、标题/操作语义、指针/点击反馈和 token 仍需统一验收 | P1/P2 |
@@ -201,17 +201,17 @@
 - [x] 页面进入后通过 `AppModel.refreshMonitoring()` 读取 `/health` 和 `/metrics`，任务存活期间按 5 秒刷新。
 - [x] metrics 失败时保留最后一份有效快照并显示错误/新鲜度边界，避免用零覆盖真实数据。
 - [x] 当前页面展示的 request、queue、ASR/TTS latency、TTFA、realtime session、worker state 均可追溯到当前 JSON metrics/health 字段。
-- [ ] 补齐或重新定义 memory：服务端需提供 resident bytes、physical memory、budget、overlap decision 等安全低基数指标；在契约完成前 UI 必须显示“未提供”，不能用模型大小或磁盘空间替代内存占用。
-- [ ] 补齐 RTF 的真实来源和定义（ASR/TTS/streaming 分开）；没有 RTF 数据时不要把 latency label 改成 RTF。
-- [ ] 增加 stale badge、last updated、样本数和 metrics 请求错误的显式状态；读到旧快照时必须让用户知道。
-- [ ] 增加 worker tree、档位、准入预算、冲突/拒绝原因和可复制诊断报告；普通用户默认看结论，开发者展开细节。
-- [ ] 核实图表时间窗、采样上限、空数据、服务刚启动和 counter reset；counter 下降时不要画出负速率。
+- [x] 补齐或重新定义 memory：现有 `/metrics` 增加 physical memory、budget、配置声明、完整采样时的服务 process-tree physical footprint、overlap decision；无法完整采样时返回不可用并由 UI 显示“未提供”，不把模型大小或磁盘空间替代内存占用。
+- [x] 补齐 RTF 的真实来源和定义：ASR 使用 `record_asr` 的推理时长/音频时长，TTS 使用 `record_tts` 的推理时长/生成音频时长；streaming 没有同等定义时继续显示“未提供”，不把 latency 改名为 RTF。
+- [x] 增加 stale badge、last updated、样本数和 metrics 请求错误的显式状态；读到旧快照时保留可信值并标记数据已过期。
+- [x] 增加 worker 状态、服务 process count、档位/服务身份、准入预算、策略原因、队列拒绝和可复制脱敏监控报告；普通用户默认看结论，开发者展开 inspector。
+- [x] 核实图表时间窗、采样上限、空数据、服务刚启动和 counter reset；最近 60 个样本以内，counter 下降或时间间隔无效时不计算窗口速率。
 
 ### Token / UX 审查
 
-- [ ] 以一条主趋势 + 紧凑 metrics strip + inspector 为骨架，主图只回答一个问题；不要把所有指标做成同等重量的卡片。
-- [ ] 统一数值字体、单位、精度、趋势色和 unavailable/stale 状态；数值不能因窗口宽度换行或抖动。
-- [ ] 图例、时间范围、刷新状态和错误操作使用系统控件和 tokenized toolbar，不再堆叠无名 icon。
+- [x] 以一条主趋势 + 紧凑 metrics strip + inspector 为骨架，主图只回答活跃请求趋势，不把所有指标做成同等重量的卡片。
+- [x] 统一数值字体、单位、精度、趋势色和 unavailable/stale 状态；缺失值显示“—/未提供”，不以零代替。
+- [x] 刷新、复制摘要、开发者详情使用有文字语义的 toolbar menu 项，不再堆叠无名 icon；图表仍保持空数据说明。
 
 ### 待验收
 
@@ -293,7 +293,7 @@
 | 功能点 | 真实入口 | 当前结论 | 责任页面 |
 | --- | --- | --- | --- |
 | 服务健康 | `GET /health` | 已接，需持续核对 stale/操作期间状态 | 服务状态、运行监控、全局 badge |
-| 运行指标 | `GET /metrics` + `Accept: application/json` | 已接当前字段；memory/RTF/budget 缺口 | 运行监控 |
+| 运行指标 | `GET /metrics` + `Accept: application/json` | 源码已接 active/pending、worker、health、资源/准入和 ASR/TTS RTF；安装后需 live 对账 | 运行监控 |
 | 模型目录 | XPC `model.catalog` | 已接 | 模型、诊断 |
 | 模型完整性 | XPC `model.status` | 已接，需强化目标/当前文案 | 模型、诊断 |
 | 模型下载/校验 | XPC `model.prepare` | 已接，需补速度/ETA/清理语义 | 模型 |
@@ -311,7 +311,7 @@
 - [ ] P0 项全部关闭，尤其是音色创作 capability gate 和所有“存在/当前使用/目标档位”歧义。
 - [ ] P1 主流程全部有真实来源、进行中、成功、失败、恢复和可见结果。
 - [ ] 每个页面只使用统一 token；完成一次静态 literal/token lint 和一次人工视觉审阅。
-- [ ] 运行监控只宣称服务端实际提供的指标；memory、RTF、budget 在契约和实测都成立后再进入完成结论。
+- [ ] 运行监控只宣称服务端实际提供的指标；本轮契约和源码已成立，仍需安装后的 live endpoint 对账才可关闭本门槛。
 - [ ] 完成 Light/Dark/Increase Contrast/Dynamic Type/Reduce Motion/最小窗口/键盘/VoiceOver 手工矩阵。
 - [ ] 用户解除“暂停自动化测试”后，更新过期 UI tests，运行 App build、XCTest/XCUITest、Python contract gate，并把结果写入本文。
 - [ ] 发布或安装前再次执行旧 App 退出/移入废纸篓、安装新版本、启动验证；测试应用验收完成后清理测试实例和临时运行态，但不删除用户模型和作品。
@@ -326,4 +326,5 @@
 - 2026-09-13 23:11：配音台明确“生成并保存”语义，作品页补充本地 WAV 导出、导出失败反馈和独立作品存储错误状态；Debug 编译通过。
 - 2026-09-13 23:13：音色库接入自定义音色删除确认与真实 DELETE 请求，补齐删除状态/错误反馈及 description 截断；Debug 编译通过，未执行真实删除。
 - 2026-09-13 23:20：诊断与服务状态页补齐独立预检状态源、更新时间、脱敏报告复制、LaunchAgent/XPC/health inspector；服务操作完成后重新读取预检，开发者详情不再展示 raw backend message；Debug 编译通过，未执行自动化测试。
+- 2026-09-13 23:32：运行监控源码补齐 `/metrics` 的资源/准入快照和 TTS RTF（ASR RTF 复用既有真实来源），Swift 解码、看板 summary/inspector、stale 状态和脱敏复制报告同步接线；Debug 编译与 Python 目标模块静态编译通过，未执行自动化测试，未安装新服务实例，因此 live 字段对账留待用户验收。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。

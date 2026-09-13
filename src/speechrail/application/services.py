@@ -56,6 +56,7 @@ from speechrail.runtime.model_budget import (
     detect_system_memory_bytes,
 )
 from speechrail.runtime.resource_governor import ResourceGovernor
+from speechrail.runtime.resource_observability import service_physical_footprint
 from speechrail.runtime.worker_lease import EvictableWorker, WorkerIdleEvictor
 
 Transcribe = Callable[[bytes, str | None, str, bool], Awaitable[TranscriptResult]]
@@ -198,6 +199,78 @@ class AppServices:
         if isinstance(ready, bool):
             return ready
         return None
+
+    def runtime_resource_status(
+        self,
+        governor_snapshot: object | None = None,
+    ) -> dict[str, object]:
+        """Return safe, low-cardinality resource facts for the metrics endpoint.
+
+        The configured component values are estimates used by the admission
+        policy, not a substitute for the observed macOS physical footprint.
+        The latter is sampled independently and is omitted when the service's
+        process tree cannot be measured completely.
+        """
+
+        snapshot = governor_snapshot or self.governor.snapshot()
+        settings = self.settings
+        tts_worker_count = _resident_tts_worker_count(self.tts_synthesizer)
+        asr_enabled = (
+            self.transcribe is not None
+            or self.batch_transcriber is not None
+            or self.realtime_asr_factory is not None
+        )
+        tts_enabled = self.tts_synthesizer is not None
+        diarization_enabled = self.diarization_engine is not None
+
+        def declared_bytes(enabled: bool, value: int) -> int | None:
+            if not enabled:
+                return 0
+            return value if value > 0 else None
+
+        component_bytes: dict[str, int | None] = {
+            "service": _SERVICE_OVERHEAD_BYTES,
+            "asr": declared_bytes(asr_enabled, settings.asr_resident_bytes),
+            "tts": declared_bytes(
+                tts_enabled,
+                settings.tts_resident_bytes * tts_worker_count,
+            ),
+            "diarization": declared_bytes(
+                diarization_enabled,
+                settings.diarization_resident_bytes,
+            ),
+        }
+        declared_footprint = (
+            sum(value for value in component_bytes.values() if value is not None)
+            if all(value is not None for value in component_bytes.values())
+            else None
+        )
+
+        try:
+            physical_memory = detect_system_memory_bytes()
+            memory_budget = budget_for_hardware(physical_memory)
+        except (RuntimeError, ValueError):
+            physical_memory = None
+            memory_budget = None
+
+        footprint, footprint_source, footprint_complete, process_count = (
+            service_physical_footprint()
+        )
+        return {
+            "physical_memory_bytes": physical_memory,
+            "memory_budget_bytes": memory_budget,
+            "declared_footprint_bytes": declared_footprint,
+            "declared_component_bytes": component_bytes,
+            "declaration_complete": declared_footprint is not None,
+            "physical_footprint_bytes": footprint,
+            "physical_footprint_source": footprint_source,
+            "physical_footprint_complete": footprint_complete,
+            "physical_footprint_process_count": process_count,
+            "heavy_overlap_allowed": bool(getattr(snapshot, "allow_heavy_overlap", False)),
+            "heavy_overlap_reason": str(
+                getattr(snapshot, "policy_reason", "未提供")
+            ),
+        }
 
     @property
     def realtime_vad_status(self) -> dict[str, object]:

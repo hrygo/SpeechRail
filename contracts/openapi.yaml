@@ -103,7 +103,8 @@ paths:
       description: |
         Returns metrics in Prometheus text exposition format (default) or a
         structured JSON view when the request Accept header prefers
-        `application/json`. Labels are strictly limited to the low-cardinality
+        `application/json`. The JSON view also includes optional runtime
+        resource observations and scheduling policy facts. Labels are strictly limited to the low-cardinality
         set (`endpoint`, `status`, `class`, `component`, `voice_class`, `state`,
         `event`, `reason`, `method`); request IDs and transcript content are
         never recorded.
@@ -117,8 +118,7 @@ paths:
                 type: string
             application/json:
               schema:
-                type: object
-                additionalProperties: true
+                $ref: '#/components/schemas/RuntimeMetrics'
         '400':
           $ref: '#/components/responses/BadRequest'
   /v1/models:
@@ -885,6 +885,108 @@ components:
           enum: [vad_runtime_missing, vad_model_missing, vad_not_ready, null]
           description: Stable VAD diagnostic code; null when the selected path is ready.
         message:
+          type: string
+    RuntimeMetrics:
+      type: object
+      required: [active_requests, pending_requests, workers, health, counters, gauges, histograms, resources]
+      properties:
+        active_requests:
+          $ref: '#/components/schemas/RuntimeRequestCounts'
+        pending_requests:
+          $ref: '#/components/schemas/RuntimeRequestCounts'
+        workers:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [active, warm_standby, cold_evicted, inactive, unconfigured, starting, stopping, failed]
+        health:
+          type: object
+          additionalProperties:
+            type: boolean
+        counters:
+          type: object
+          additionalProperties:
+            type: number
+        gauges:
+          type: object
+          additionalProperties:
+            type: number
+        histograms:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/RuntimeHistogramSummary'
+        resources:
+          $ref: '#/components/schemas/RuntimeResourceSnapshot'
+    RuntimeRequestCounts:
+      type: object
+      required: [realtime, batch]
+      properties:
+        realtime:
+          type: integer
+          minimum: 0
+        batch:
+          type: integer
+          minimum: 0
+    RuntimeHistogramSummary:
+      type: object
+      required: [count, sum, avg]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        sum:
+          type: number
+        avg:
+          type: number
+    RuntimeResourceSnapshot:
+      type: object
+      required:
+        - physical_memory_bytes
+        - memory_budget_bytes
+        - declared_footprint_bytes
+        - declared_component_bytes
+        - declaration_complete
+        - physical_footprint_bytes
+        - physical_footprint_source
+        - physical_footprint_complete
+        - physical_footprint_process_count
+        - heavy_overlap_allowed
+        - heavy_overlap_reason
+      properties:
+        physical_memory_bytes:
+          type: [integer, 'null']
+          minimum: 0
+        memory_budget_bytes:
+          type: [integer, 'null']
+          minimum: 0
+        declared_footprint_bytes:
+          type: [integer, 'null']
+          minimum: 0
+          description: Sum of configured enabled-component footprint declarations; not an observed memory measurement.
+        declared_component_bytes:
+          type: object
+          additionalProperties:
+            type: [integer, 'null']
+            minimum: 0
+        declaration_complete:
+          type: boolean
+        physical_footprint_bytes:
+          type: [integer, 'null']
+          minimum: 0
+          description: Aggregate macOS phys_footprint for the service process tree when sampling is complete.
+        physical_footprint_source:
+          type: string
+          enum: [macos_footprint, macos_footprint_incomplete, unavailable]
+        physical_footprint_complete:
+          type: boolean
+        physical_footprint_process_count:
+          type: integer
+          minimum: 0
+        heavy_overlap_allowed:
+          type: boolean
+        heavy_overlap_reason:
           type: string
     Model:
       type: object

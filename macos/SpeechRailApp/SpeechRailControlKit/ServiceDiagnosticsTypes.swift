@@ -158,6 +158,84 @@ public struct RuntimeHistogramSummary: Codable, Equatable, Sendable {
     }
 }
 
+public struct RuntimeResourceSnapshot: Codable, Equatable, Sendable {
+    public let physicalMemoryBytes: Int64?
+    public let memoryBudgetBytes: Int64?
+    public let declaredFootprintBytes: Int64?
+    public let declaredComponentBytes: [String: Int64?]
+    public let declarationComplete: Bool?
+    public let physicalFootprintBytes: Int64?
+    public let physicalFootprintSource: String?
+    public let physicalFootprintComplete: Bool?
+    public let physicalFootprintProcessCount: Int?
+    public let heavyOverlapAllowed: Bool?
+    public let heavyOverlapReason: String?
+
+    public init(
+        physicalMemoryBytes: Int64? = nil,
+        memoryBudgetBytes: Int64? = nil,
+        declaredFootprintBytes: Int64? = nil,
+        declaredComponentBytes: [String: Int64?] = [:],
+        declarationComplete: Bool? = nil,
+        physicalFootprintBytes: Int64? = nil,
+        physicalFootprintSource: String? = nil,
+        physicalFootprintComplete: Bool? = nil,
+        physicalFootprintProcessCount: Int? = nil,
+        heavyOverlapAllowed: Bool? = nil,
+        heavyOverlapReason: String? = nil
+    ) {
+        self.physicalMemoryBytes = physicalMemoryBytes
+        self.memoryBudgetBytes = memoryBudgetBytes
+        self.declaredFootprintBytes = declaredFootprintBytes
+        self.declaredComponentBytes = declaredComponentBytes
+        self.declarationComplete = declarationComplete
+        self.physicalFootprintBytes = physicalFootprintBytes
+        self.physicalFootprintSource = physicalFootprintSource
+        self.physicalFootprintComplete = physicalFootprintComplete
+        self.physicalFootprintProcessCount = physicalFootprintProcessCount
+        self.heavyOverlapAllowed = heavyOverlapAllowed
+        self.heavyOverlapReason = heavyOverlapReason
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case physicalMemoryBytes = "physical_memory_bytes"
+        case memoryBudgetBytes = "memory_budget_bytes"
+        case declaredFootprintBytes = "declared_footprint_bytes"
+        case declaredComponentBytes = "declared_component_bytes"
+        case declarationComplete = "declaration_complete"
+        case physicalFootprintBytes = "physical_footprint_bytes"
+        case physicalFootprintSource = "physical_footprint_source"
+        case physicalFootprintComplete = "physical_footprint_complete"
+        case physicalFootprintProcessCount = "physical_footprint_process_count"
+        case heavyOverlapAllowed = "heavy_overlap_allowed"
+        case heavyOverlapReason = "heavy_overlap_reason"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        physicalMemoryBytes = try container.decodeIfPresent(Int64.self, forKey: .physicalMemoryBytes)
+        memoryBudgetBytes = try container.decodeIfPresent(Int64.self, forKey: .memoryBudgetBytes)
+        declaredFootprintBytes = try container.decodeIfPresent(Int64.self, forKey: .declaredFootprintBytes)
+        declaredComponentBytes = try container.decodeIfPresent(
+            [String: Int64?].self,
+            forKey: .declaredComponentBytes
+        ) ?? [:]
+        declarationComplete = try container.decodeIfPresent(Bool.self, forKey: .declarationComplete)
+        physicalFootprintBytes = try container.decodeIfPresent(Int64.self, forKey: .physicalFootprintBytes)
+        physicalFootprintSource = try container.decodeIfPresent(String.self, forKey: .physicalFootprintSource)
+        physicalFootprintComplete = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .physicalFootprintComplete
+        )
+        physicalFootprintProcessCount = try container.decodeIfPresent(
+            Int.self,
+            forKey: .physicalFootprintProcessCount
+        )
+        heavyOverlapAllowed = try container.decodeIfPresent(Bool.self, forKey: .heavyOverlapAllowed)
+        heavyOverlapReason = try container.decodeIfPresent(String.self, forKey: .heavyOverlapReason)
+    }
+}
+
 public struct RuntimeMetricsSnapshot: Codable, Equatable, Sendable {
     public let activeRequests: RuntimeRequestCounts
     public let pendingRequests: RuntimeRequestCounts
@@ -166,6 +244,7 @@ public struct RuntimeMetricsSnapshot: Codable, Equatable, Sendable {
     public let counters: [String: Double]
     public let gauges: [String: Double]
     public let histograms: [String: [String: RuntimeHistogramSummary]]
+    public let resources: RuntimeResourceSnapshot?
     public let capturedAt: Date
 
     public init(
@@ -176,6 +255,7 @@ public struct RuntimeMetricsSnapshot: Codable, Equatable, Sendable {
         counters: [String: Double] = [:],
         gauges: [String: Double] = [:],
         histograms: [String: [String: RuntimeHistogramSummary]] = [:],
+        resources: RuntimeResourceSnapshot? = nil,
         capturedAt: Date = Date()
     ) {
         self.activeRequests = activeRequests
@@ -185,6 +265,7 @@ public struct RuntimeMetricsSnapshot: Codable, Equatable, Sendable {
         self.counters = counters
         self.gauges = gauges
         self.histograms = histograms
+        self.resources = resources
         self.capturedAt = capturedAt
     }
 
@@ -196,6 +277,7 @@ public struct RuntimeMetricsSnapshot: Codable, Equatable, Sendable {
         case counters
         case gauges
         case histograms
+        case resources
         case capturedAt = "captured_at"
     }
 
@@ -213,6 +295,7 @@ public struct RuntimeMetricsSnapshot: Codable, Equatable, Sendable {
             [String: [String: RuntimeHistogramSummary]].self,
             forKey: .histograms
         ) ?? [:]
+        resources = try container.decodeIfPresent(RuntimeResourceSnapshot.self, forKey: .resources)
         capturedAt = try container.decodeIfPresent(Date.self, forKey: .capturedAt) ?? Date()
     }
 }

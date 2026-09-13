@@ -156,7 +156,9 @@ UI 不显示伪造的百分比，只显示阶段、已准备/待准备的制品�
 - `/health`：服务身份、档位、ready、ASR/TTS/Streaming/diarization/VAD lifecycle 和
   job spool 状态；
 - `/metrics` with `Accept: application/json`：active/pending 请求、Worker 状态、健康 gauge、
-  counter 和 histogram；
+  counter 和 histogram，并以可选 `resources` 快照提供 physical memory、服务预算、声明占用、
+  完整采样时的 process-tree physical footprint、重计算重叠策略和策略原因；ASR/TTS RTF
+  继续以 `speechrail_asr_rtf`/`speechrail_tts_rtf` histogram 提供；
 - XPC `operationStatus`：服务控制、档位切换和模型准备的当前阶段与失败信息。
 
 不新增服务端 API，不让 App 读取日志或模型目录。App 只在内存中保留最近 60 个采样点，
@@ -188,7 +190,9 @@ UI 不显示伪造的百分比，只显示阶段、已准备/待准备的制品�
 - 请求负载：realtime/batch active 与 pending；队列拒绝累计值；
 - Worker 生命周期：`active`、`warm_standby`、`cold_evicted`、`inactive`、`unconfigured`；
 - 低基数性能摘要：HTTP 请求累计、ASR/TTS inference histogram avg、TTS TTFA avg、
-  realtime active sessions；
+  ASR/TTS RTF、realtime active sessions；
+- 资源与准入摘要：物理内存、服务预算、配置声明（明确标注为估算）、完整采样时的服务
+  physical footprint、Worker 生命周期、重叠策略和队列拒绝；采样不完整时不得展示部分总量；
 - 最近采样曲线：使用相邻 metrics counter 差值计算窗口速率，采样不足时不绘制速率。
 
 任何一个 endpoint 暂时不可用都要在对应区域显示“暂时无法读取”和最近成功读取时间，
@@ -213,7 +217,7 @@ AppModel 增加以下可观察状态，保留已有 `service`、`profiles`、`pr
 - `ModelCatalogSnapshot`/每个制品的安全状态；
 - `preflightChecks`；
 - `lastHealthRefresh`、`lastMetricsRefresh`、刷新错误状态；
-- 最近 60 个内存采样点。
+- 最近 60 个运行指标采样点；每个采样点可携带资源快照，但不持久化原始内存明细。
 
 AppModel 负责刷新调度、状态合并和安全的派生摘要；View 不直接持有 URLSession、Process、
 文件句柄或 XPC 连接。
@@ -223,8 +227,9 @@ AppModel 负责刷新调度、状态合并和安全的派生摘要；View 不直
 ServiceAPIClient 增加 health 详细字段和 metrics JSON 解码，使用 `decodeIfPresent` 兼容
 旧版本服务。未知字段忽略；已知字段类型不符时明确返回客户端错误。
 
-metrics 解码器只保留约定的顶层对象、低基数 gauge/counter/histogram；不把原始 Prometheus
-文本或任意 label 内容传入 View。
+metrics 解码器只保留约定的顶层对象、低基数 gauge/counter/histogram 和可选 `resources`；
+不把原始 Prometheus 文本或任意 label 内容传入 View。缺失的资源字段使用 `decodeIfPresent`
+进入“未提供”状态，不用模型大小、磁盘空间或零值推断内存占用。
 
 ### 7.3 ControlKit 与 managed CLI
 

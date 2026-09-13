@@ -117,6 +117,8 @@ def test_metrics_endpoint_json_format() -> None:
     assert data["health"]["asr"] is False
     assert "counters" in data
     assert "histograms" in data
+    assert "resources" in data
+    assert "physical_memory_bytes" in data["resources"]
 
 
 def test_metrics_engine_counter_gauge_histogram() -> None:
@@ -154,6 +156,21 @@ def test_metrics_record_asr_records_rtf() -> None:
     assert "speechrail_asr_processed_audio_seconds_total" in text
     assert "speechrail_asr_inference_duration_seconds" in text
     assert "speechrail_asr_rtf" in text
+
+
+def test_metrics_record_tts_records_rtf() -> None:
+    """Verify TTS RTF is derived from measured inference and audio durations."""
+    m = Metrics()
+    m.record_tts(
+        voice_class="system",
+        char_count=10,
+        audio_duration_sec=2.0,
+        inference_duration_sec=1.0,
+    )
+    text = m.render_prometheus()
+
+    assert 'speechrail_tts_rtf_bucket{le="0.5",voice_class="system"} 1' in text
+    assert 'speechrail_tts_rtf_count{voice_class="system"} 1' in text
 
 
 def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
