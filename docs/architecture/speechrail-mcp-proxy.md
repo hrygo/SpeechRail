@@ -2,16 +2,19 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.2.1"
-date: 2026-09-11
+version: "1.2.2"
+date: 2026-09-13
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
 
-# 🎙️ SpeechRail MCP Proxy 工具与契约 (v1.2.0)
+# 🎙️ SpeechRail MCP Proxy 工具与契约 (v1.2.2)
 
 > **状态声明**：本文档描述**已实现**的外置 `speechrail-mcp` 进程（合并于 `feat/speechrail-mcp`，
 > PR #15，2026-09-07）。当前行为以 `src/speechrail/mcp/` 代码与实测为准；REST 契约仍以
 > `contracts/openapi.yaml` 为唯一事实来源。本文档记录 MCP 工具清单与设计取舍。
+>
+> **v1.2.2 变更**（2026-09-13）：
+> - 修正附录 B 对工具数量、`delete_voice` 实现状态和破坏性工具标注的陈旧描述；当前工具集为 9 个，`delete_voice` / `cancel_job` 均已实现并标记为 destructive。
 >
 > **v1.2.1 变更**（2026-09-11）：
 > - **streamable-http 绑定可配置**：默认从 MCP SDK 默认 `127.0.0.1:8000` 改为 `127.0.0.1:8202`
@@ -527,8 +530,9 @@ SDK 选择协议 era 的判据是**连接上的第一条消息**：若首条消�
 | `transcribe` | ✅ | 核心能力；音频引用不落日志 |
 | `synthesize` | ✅ | 核心能力 |
 | `preview_voice` | ⚠️ 视 token/配额 | quality 档较贵，建议 agent 内加节流 |
-| `create_job`/`get_job`/`cancel_job` | ✅ | 长任务句柄 |
-| `delete_voice`（克隆删除） | ❌ 默认禁 | 破坏性，应由本地人（而非 agent）操作；**未实现，预留** |
+| `create_job`/`get_job` | ✅ | 长任务句柄 |
+| `cancel_job` | ⚠️ 默认禁 | 破坏性操作，当前已实现；建议由本地人确认后执行 |
+| `delete_voice` | ⚠️ 默认禁 | 破坏性操作，当前已实现；建议由本地人确认后执行 |
 
-> 配置建议：`SPEECHRAIL_MCP_ALLOW_PREVIEW=0/1`、`SPEECHRAIL_MCP_ALLOW_DELETE_VOICE=0` 等。
-> 注：`delete_voice` 尚未进入工具集，仅作为克隆删除能力的授权预留；当前 7 工具均无破坏性操作。
+> 配置化授权仍是后续运维增强项；当前代码通过 MCP `ToolAnnotations` 标记 destructive，未实现上述环境变量 ACL。
+> 注：当前工具集共 9 个；`delete_voice` 与 `cancel_job` 已进入工具集并标记为 destructive。

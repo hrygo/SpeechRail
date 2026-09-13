@@ -93,6 +93,8 @@ class SpeechRailError(RuntimeError):
         """Render a compact, hint-carrying message for an MCP tool error."""
         retry = "retryable" if self.retryable else "not retryable"
         parts = f"SpeechRail error {self.code} ({retry}): {self.message}"
+        if self.param:
+            parts = f"{parts} [param={self.param}]"
         if self.request_id:
             parts = f"{parts} [request_id={self.request_id}]"
         if self.hint:

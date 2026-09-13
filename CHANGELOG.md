@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 修复 `/v1/audio/speech` 运行时 OpenAPI 将二进制音频响应误报为 `application/json` 的问题；请求校验错误在仅有一个字段失败时现在会安全返回对应 `param`，不暴露原始输入。
+- MCP REST 错误转为工具错误时保留安全的 `param` 字段，并修正工具契约附录中已实现工具数量与破坏性标注的陈旧描述。
+
+### Documentation
+
+- 更新 MCP 集成指南：区分 Codex 本机 `stdio` 安装与 ChatGPT Web 通过远程 HTTPS MCP endpoint / Secure MCP Tunnel 的连接方式，并补充 ChatGPT 的本地文件与音频产物边界。
+
 ## [2.5.2] - 2026-09-13
 
 ### Fixed

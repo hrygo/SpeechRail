@@ -91,7 +91,7 @@ public struct ModelManagementView: View {
         case .unknown:
             ProgressView("正在读取模型目录…")
                 .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
-                .speechRailContentSurface()
+                .speechRailField()
         case .available:
             modelWorkspace
         case .unsupported:
@@ -169,12 +169,13 @@ public struct ModelManagementView: View {
             Divider()
             Text("当前服务档位")
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             Text(model.profile?.preset?.rawValue ?? "未读取")
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailField()
     }
 
     private var selectedProfilePanel: some View {
@@ -182,9 +183,10 @@ public struct ModelManagementView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(profileTitle(for: selectedProfile))
                     .font(SpeechRailDesignTokens.Typography.windowTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Text(profilePurpose(for: selectedProfile))
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
 
             profileFacts
@@ -211,7 +213,7 @@ public struct ModelManagementView: View {
             actionSection
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailField()
     }
 
     private var profileFacts: some View {
@@ -233,9 +235,10 @@ public struct ModelManagementView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             Text(title)
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             Text(value)
                 .font(SpeechRailDesignTokens.Typography.technical)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
         }
         .frame(minWidth: SpeechRailDesignTokens.Layout.modelFactMinimumWidth, alignment: .leading)
@@ -331,12 +334,12 @@ public struct ModelManagementView: View {
             if let disk = model.modelStatus?.disk {
                 Text("本机模型占用 \(formatBytes(disk.modelBytes)) · 可用空间 \(formatBytes(disk.freeBytes))")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             if let message = model.message, !message.isEmpty, model.modelAvailability == .available {
                 Text(message)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                     .lineLimit(2)
             }
         }
@@ -372,7 +375,7 @@ public struct ModelManagementView: View {
                 }
                 Text("开发者详情不会改变下载或应用行为。")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
         }
     }
@@ -430,7 +433,7 @@ public struct ModelManagementView: View {
         case .download:
             "确认下载并校验 \(selectedProfile.rawValue) 档位模型？"
         case .apply:
-            "确认应用 \(selectedProfile.rawValue) 档位？"
+            "确认应用 \(selectedProfile.rawValue) 档位？将无缝热重载相关 ASR/TTS 服务。"
         }
     }
 
@@ -519,23 +522,24 @@ private struct ProfileChoiceRow: View {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(
                         isSelected
-                            ? SpeechRailDesignTokens.Palette.railSignal
-                            : SpeechRailDesignTokens.Palette.secondaryText
+                            ? SpeechRailDesignTokens.Color.rail
+                            : SpeechRailDesignTokens.Color.inkSecondary
                     )
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Text(profileTitle)
                         .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     Text(profilePurpose)
                         .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .lineLimit(2)
                 }
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 if let summary {
                     Text(formatBytes(summary.downloadBytes))
                         .font(SpeechRailDesignTokens.Typography.technical)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
             .padding(SpeechRailDesignTokens.Spacing.sm)
@@ -589,21 +593,22 @@ private struct ArtifactChoiceRow: View {
             Image(systemName: status?.state == .verified ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(
                     status?.state == .verified
-                        ? SpeechRailDesignTokens.Palette.healthy
-                        : SpeechRailDesignTokens.Palette.attention
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.attention
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
                     .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Text(statusText)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
             Text(artifact.key)
                 .font(SpeechRailDesignTokens.Typography.technical)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
@@ -643,16 +648,17 @@ private struct DiarizationStatusRow: View {
             Image(systemName: status.state == .verified ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(
                     status.state == .verified
-                        ? SpeechRailDesignTokens.Palette.healthy
-                        : SpeechRailDesignTokens.Palette.attention
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.attention
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(status.key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(status.key)")
                     .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Text(statusText)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Spacer(minLength: 0)
         }

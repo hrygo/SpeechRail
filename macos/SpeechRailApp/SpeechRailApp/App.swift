@@ -55,7 +55,7 @@ struct SpeechRailApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("SpeechRail 管理控制台", id: AppNavigationState.controlCenterWindowID) {
+        Window("SpeechRail 管理控制台", id: AppNavigationState.controlCenterWindowID) {
             ControlCenterView()
                 .environment(model)
                 .environment(navigation)

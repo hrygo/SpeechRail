@@ -148,14 +148,14 @@ public struct ServiceOverviewView: View {
                     if let message = model.message, !message.isEmpty {
                         Text(message)
                             .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                             .lineLimit(2)
                     }
                 }
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailField()
     }
 
     private func capabilityRow(title: String, detail: String, ready: Bool?) -> some View {
@@ -163,16 +163,17 @@ public struct ServiceOverviewView: View {
             Image(systemName: ready == true ? "checkmark.circle.fill" : "circle.dashed")
                 .foregroundStyle(
                     ready == true
-                        ? SpeechRailDesignTokens.Palette.healthy
-                        : SpeechRailDesignTokens.Palette.secondaryText
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.inkSecondary
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
             }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
@@ -180,8 +181,8 @@ public struct ServiceOverviewView: View {
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(
                     ready == true
-                        ? SpeechRailDesignTokens.Palette.healthy
-                        : SpeechRailDesignTokens.Palette.secondaryText
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.inkSecondary
                 )
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)

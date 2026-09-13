@@ -246,6 +246,7 @@ def test_voice_error_gets_describe_hint(
         assert exc.retryable is False
         assert exc.error_type == "invalid_request_error"
         assert exc.param == "voice"
+        assert "param=voice" in exc.to_message()
         assert "describe()" in (exc.hint or "")
     else:
         raise AssertionError("expected SpeechRailError")

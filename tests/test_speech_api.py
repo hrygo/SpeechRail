@@ -250,6 +250,32 @@ def test_voice_preview_is_rejected_by_custom_voice_tiers(tmp_path: Path) -> None
     assert response.json()["error"]["code"] == "voice_preview_unsupported"
 
 
+def test_quality_speech_accepts_instructions_and_passes_them_to_backend(
+    tmp_path: Path,
+) -> None:
+    client, synthesizer, _custom_voices = _preview_client(tmp_path)
+    instruction = "成年男性中文声线，低沉、近距离、克制而清晰。"
+    text = "你可以称我为愚者。"
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": text,
+            "voice": "uncle_fu",
+            "response_format": "wav",
+            "speed": 0.94,
+            "language": "zh",
+            "instructions": instruction,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
+    assert synthesizer.requests[0].text == text
+    assert synthesizer.requests[0].instruction == instruction
+
+
 def test_speech_endpoint_caps_input_at_openai_limit() -> None:
     client = _speech_client()
 
@@ -275,6 +301,28 @@ def test_speech_endpoint_caps_input_at_openai_limit() -> None:
     assert ok.status_code == 200
     assert too_long.status_code == 422
     assert too_long.json()["error"]["code"] == "validation_error"
+    assert too_long.json()["error"]["param"] == "input"
+
+
+@pytest.mark.parametrize("length", [133, 136, 162])
+def test_speech_endpoint_accepts_unicode_input_below_public_limit(length: int) -> None:
+    text = ("这是一段用于验证中文语音合成边界的长文本。" * 20)[:length]
+    assert len(text) == length
+
+    response = _speech_client().post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": text,
+            "voice": "uncle_fu",
+            "response_format": "wav",
+            "speed": 0.94,
+            "language": "zh",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/wav")
 
 
 class InvalidDeliverySynthesizer:

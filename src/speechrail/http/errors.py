@@ -58,6 +58,22 @@ def error_response(
     )
 
 
+def _single_validation_param(exc: RequestValidationError) -> str | None:
+    """Return one safe top-level field name without exposing submitted values."""
+
+    fields: set[str] = set()
+    for issue in exc.errors():
+        location = issue.get("loc")
+        if not isinstance(location, (tuple, list)) or len(location) < 2:
+            continue
+        if location[0] not in {"body", "path", "query", "header", "cookie"}:
+            continue
+        field = location[1]
+        if isinstance(field, str) and field:
+            fields.add(field)
+    return next(iter(fields)) if len(fields) == 1 else None
+
+
 class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -77,10 +93,10 @@ def install_error_handlers(app: FastAPI) -> None:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        del exc
         return error_response(
             422,
             getattr(request.state, "request_id", f"req_{uuid4().hex}"),
             "validation_error",
             "Request validation failed",
+            param=_single_validation_param(exc),
         )

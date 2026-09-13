@@ -95,6 +95,44 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["服务状态"].exists)
     }
 
+    func testVoiceDesignAcousticChipsAndCandidateRack() {
+        let app = launchSpeechRail()
+        openControlCenter(in: app)
+        app.buttons["音色创作"].click()
+
+        XCTAssertTrue(app.staticTexts["从一句话开始"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["声学特征胶囊 (点击插入)"].exists)
+        XCTAssertTrue(app.buttons["插入声学特征：磁性胸腔"].exists)
+        app.buttons["插入声学特征：磁性胸腔"].click()
+
+        XCTAssertTrue(app.staticTexts["候选试听机架 (A/B/C/D 候选池)"].exists)
+        XCTAssertTrue(app.staticTexts["A"].exists)
+        XCTAssertTrue(app.staticTexts["B"].exists)
+        XCTAssertTrue(app.buttons["A 槽位试听：播放"].exists)
+        app.buttons["A 槽位试听：播放"].click()
+        XCTAssertTrue(app.buttons["A 槽位试听：暂停"].waitForExistence(timeout: 2))
+    }
+
+    func testWorksViewExposesFullPromptAndPrivacyDecoupledInspector() {
+        let app = launchSpeechRail()
+        openControlCenter(in: app)
+        app.buttons["我的作品"].click()
+
+        XCTAssertTrue(app.staticTexts["创作历史与文稿回溯"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["《流浪地球》旁白选段"].exists)
+        XCTAssertTrue(app.staticTexts["起初，没有人在意这一场灾难。这不过是一场山火，一次旱灾，一个物种的灭绝，一座城市的消失。直到这场灾难和每个人息息相关。"].exists)
+
+        let window = app.windows["SpeechRail 管理控制台"]
+        let auditButton = window.buttons["脱敏技术详情"].firstMatch
+        XCTAssertTrue(auditButton.waitForExistence(timeout: 5))
+        auditButton.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
+        XCTAssertTrue(app.staticTexts["开发者审计 (隐私脱敏)"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.staticTexts["请求 ID"].exists)
+        XCTAssertTrue(app.staticTexts["req_7f2b918a"].exists)
+        XCTAssertTrue(app.staticTexts["分人标识"].exists)
+        XCTAssertTrue(app.staticTexts["speaker_0"].exists)
+    }
+
     private func launchSpeechRail(arguments: [String] = ["--ui-test", "--ui-test-open-control-center"]) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = arguments

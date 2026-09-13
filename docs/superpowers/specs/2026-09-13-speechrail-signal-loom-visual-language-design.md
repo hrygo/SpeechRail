@@ -1,472 +1,654 @@
 ---
-title: "SpeechRail Signal Loom 视觉语言与 App-wide Token 设计"
-status: review
-audience: "SpeechRail macOS App 产品、设计、开发与测试人员"
-version: "0.1.0"
+title: "SpeechRail Signal Loom 视觉语言与 App-wide Token 设计规范"
+status: "review"
+audience: "SpeechRail macOS App 产品、设计、前端与核心开发人员"
+version: "0.2.0"
 date: 2026-09-13
+supersedes: "docs/architecture/speechrail-macos26-workspace-redesign-design.md"
 ---
 
-# SpeechRail Signal Loom 视觉语言与 App-wide Token 设计
+# 🎙️ SpeechRail Signal Loom 视觉语言与 App-wide Token 设计规范 (v0.2.0)
 
-## 1. 决策摘要
+> **设计定位与事实基线**：
+> 本规范定义 SpeechRail macOS 原生应用（`SpeechRailApp`，面向 macOS 26.0+ Apple Silicon）的统一设计系统与视觉工程标准。它彻底终结“通用圆角卡片堆叠”、“悬浮标题竞争”、“无语义状态色块”以及“运维界面挤占创作主线”的历史设计债务，确立以 **Signal Loom「信号织网」** 为核心的顶尖工业级设计范式。
+>
+> **评审状态说明**：
+> 当前版本为经过产品、设计与工程多方审阅校准后的 `review` 评审稿，所有设计决策严格与 Python 服务端资源治理、FluidAudio CoreML 匿名分人、macOS 桌面人机界面指南（HIG）以及真实服务能力边界对齐。在工程团队依据本规范编写实施计划并验收通过后，方作为代码落地之基准。
 
-采用 **Signal Loom「信号织网」** 作为 SpeechRail macOS App 的全局视觉语言。
+---
 
-它把 SpeechRail 看成一条将本机语音信号接入、转换、观察和创作的清晰路径：
+## 1. 核心设计哲学：Signal Loom 的三大支柱
 
-```text
-输入 / 创作  →  模型能力  →  服务运行  →  结果 / 诊断
-```
-
-视觉上以“信号线、层级、留白和可追踪状态”建立秩序，以一处受控的暖色音色语义保留创作
-温度。它同时服务两类用户：普通用户先看到“现在是什么状态、能做什么、下一步是什么”，
-开发者再通过 Inspector 或开发者详情获得版本、worker、metrics 和错误码。
-
-本规范先于实现生效。当前状态为 `review`：视觉方向已经确认，以下 token、组件规则和页面
-映射需要作为下一轮实现的审阅基线；在用户确认本规范后，才编写实施计划并修改 SwiftUI。
-
-## 2. 为什么要重做
-
-此前问题不是诊断页单页问题，而是全局语言问题：
-
-- 所有内容都被包装成同等重量的圆角卡片，页面缺少主次和阅读路径；
-- 标题、页面说明、状态和操作彼此竞争，出现悬浮标题、重复标题或脱离上下文的按钮；
-- 工具栏存在重复刷新/信息动作，侧边栏出现只有颜色没有语义的孤立绿色点；
-- Inspector 默认承载重复内容、固定占位并发生截断，不能体现“选中对象的上下文细节”；
-- 颜色、间距、圆角和表面 token 偏向实现方便，而不是围绕 SpeechRail 的产品语义；
-- Liquid Glass 被当成装饰性容器，而不是 macOS 26 的导航和交互层能力。
-
-因此本次不是换一组颜色，也不是把旧卡片重新配色，而是重建以下关系：
+SpeechRail 不是一个冷冰冰的模型包装器，而是一座架设在 Apple Silicon 上的**本地声音中枢**。它向上支撑创意者的音色雕琢与配音心流，向下掌控多模型并发调度、FluidAudio CoreML 匿名分人（Session-scoped 说话人分段，不持久化声纹库）与实时流式传输。
 
 ```text
-语义 → 信息层级 → 页面结构 → 组件 → token → SwiftUI 实现
+┌────────────────────────────────────────────────────────────────────────┐
+│                        SIGNAL LOOM 设计哲学体系                         │
+├───────────────────┬────────────────────────────┬───────────────────────┤
+│   SIGNAL (信号)   │        LOOM (织网)         │     STUDIO (工坊)     │
+│   系统真理与遥测   │      时序编排与结构秩序      │     声学温度与触感    │
+├───────────────────┼────────────────────────────┼───────────────────────┤
+│ • 状态结论优先    │ • 经纬分明的信息轨道        │ • 陶土暖色 (Terracotta)│
+│ • 杜绝孤立红绿点  │ • 字段化 (Field) 取代卡片   │ • 声学胶囊与波形触感   │
+│ • 严谨的时延与指标 │ • 连续对齐的行进节奏        │ • 沉浸式 A/B 试听机架  │
+└───────────────────┴────────────────────────────┴───────────────────────┘
 ```
 
-## 3. 设计目标与非目标
+### 1.1 四大设计原则 (The 4 Design Principles)
 
-### 3.1 目标
+1. **真实高于装饰 (Truth Before Ornament)**
+   - 杜绝装饰性动效与伪造的进度条；
+   - 状态必须包含「图标 + 结论标签 + 影响说明 + 明确下一步」四要素，严禁孤立颜色圆点；
+   - macOS 26 Liquid Glass 材质严格限制于导航与工具栏层，正文内容区保持纯净极简的哑光字段（Fields）。
+2. **声学物理触感 (Acoustic Tactility)**
+   - 声音是有形且可感知的；
+   - 创作流提供波形预览、声学特征标签（Acoustic Chips）以及符合 macOS 桌面习惯的交互反馈；
+   - 音色创作专属陶土暖色（`Color.voice`），在冷峻的系统蓝调中点亮创作心流。
+3. **渐进启示与统一真理 (Progressive Disclosure & Unified Truth)**
+   - **Level 1（普通用户/创作者层）**：首屏 3 秒内识别“当前状态、能做什么、如何开始”，零技术术语门槛，不常驻暴露原生端口和内部模型 revision；
+   - **Level 2（工程师/排障层）**：通过可折叠 Inspector 获得脱敏端口、Worker 租约、RTF 时延、内存高水位；
+   - 两层必须基于同一套状态事实源，严禁出现结论打架。
+4. **macOS 26 原生人体工学 (Native Desktop Ergonomics)**
+   - 完全依托 macOS 26 标准窗口拓扑、SF Pro / SF Mono 系统排版、Dynamic Type 与全键盘快捷链路；
+   - 遵循 macOS 桌面级指针交互尺寸（Compact 28pt / Regular 34pt / Prominent 40pt），不生搬硬套移动端触控 44pt 规则。
 
-1. 每一页在首屏回答“这是什么、现在怎样、下一步做什么”。
-2. 让创作、管理、监控、模型下载和诊断共享一套能解释的视觉语法。
-3. 保留并强化音色创作 / VoiceDesign，不让运维能力吞掉产品主线。
-4. 模型下载、校验、应用、取消、恢复和失败状态清晰可区分。
-5. 普通用户不必理解端口、profile、worker 和 revision 才能完成任务。
-6. 开发者能在选中对象后取得脱敏且足够排障的技术上下文。
-7. 直接使用 macOS 26 的系统导航、toolbar、Inspector、字体、材料和可访问能力；App 层不为
-   macOS 14 增加兼容视觉分支。
+---
 
-### 3.2 非目标
+## 2. 空间拓扑与双轨工作台架构 (Dual-Track Workspace)
 
-- 不改变 Python 服务的单 worker、资源治理、模型 manifest 或公共音频协议；
-- 不让 App 直接加载模型、处理音频、执行 `launchctl` 或成为服务 owner；
-- 不自动下载、加载、卸载、应用模型或切换 profile；涉及运行状态和磁盘占用的动作必须确认；
-- 不把模型、音频、日志、私有配置或 secrets 放入仓库；
-- 不为追求视觉统一而删除系统标准控件、菜单栏命令、键盘路径或 VoiceOver 语义。
+为兼顾“创作者心流”与“工程师掌控”，侧边栏采用清晰的**双轨语义分组（Dual-Track Navigation）**，杜绝页面定位混乱。
 
-## 4. 设计语言：Signal Loom
-
-### 4.1 三个关键词
-
-| 关键词 | 在 SpeechRail 中的含义 | 视觉表达 |
-|---|---|---|
-| `Signal` 信号 | 服务是否可用、操作处于哪一阶段、结果是否可信 | 明确状态、信号线、图标与文字组合 |
-| `Loom` 织网 | ASR、TTS、实时、分人和模型能力由同一服务编排 | 列表、轨道、对齐的列和连续的分组节奏 |
-| `Studio` 工作室 | 音色创作是产品能力，不是运维页的附属按钮 | 一处受控的 `Voice` 暖色、编辑空间和试听 Inspector |
-
-### 4.2 视觉性格
-
-- **冷静但不冷漠**：服务和诊断使用深墨色、青绿色和靛蓝，创作使用陶土色点亮情绪；
-- **精确但不机械**：技术信息使用等宽数字和紧凑行，用户说明使用正常比例字体；
-- **有层次但不堆叠**：使用窗口、导航、画布、字段和 Inspector 的层级，不把每个区块做成卡片；
-- **可信但不喧哗**：状态先结论后细节，颜色只加强语义，不承担唯一信息职责。
-
-### 4.3 视觉重心
-
-每个上下文只允许一个视觉重心：
-
-- 服务状态：当前结论和唯一主要恢复动作；
-- 运行监控：健康结论和一条主要趋势；
-- 模型：选中的档位及其准备/应用状态；
-- 诊断：选中的检查项及其下一步；
-- 音色创作：描述编辑器与试听结果；
-- 配音台：文本编辑器与生成动作。
-
-任何“卡片、彩色背景、粗体标题、按钮、图表”只要无法解释为当前视觉重心，就不应提升为
-一级表面。
-
-## 5. Token 体系
-
-### 5.1 命名原则
-
-SwiftUI 的唯一实现来源仍为：
-
-`macos/SpeechRailApp/SpeechRailApp/SpeechRailDesignTokens.swift`
-
-新 token 使用“角色/语义”命名，不使用 `blueCard`、`successGreen`、`defaultPanel` 等视觉或
-页面命名。命名空间按以下层次组织：
+### 2.1 整体空间视区规划
 
 ```text
-SpeechRailDesignTokens
-├── Color       // 语义颜色与自适应映射
-├── Surface     // 层级和材质策略
-├── Spacing     // 空间节奏
-├── Corner      // 形状层级
-├── Typography  // 内容角色
-├── Layout      // 窗口与列约束
-├── Control     // 触达、图标和控件尺寸
-└── Motion      // 状态变化与 Reduce Motion
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│  Window Toolbar: [Sidebar Toggle] [Title & Status Pill]  ──  [Track Actions] [Inspector]│
+├──────────────────┬──────────────────────────────────────────────┬──────────────────────┤
+│ SIDEBAR (240pt)  │ MAIN CANVAS (1,240pt max)                    │ INSPECTOR (320pt)    │
+│                  │                                              │                      │
+│ ▾ STUDIO (创作)  │ ┌──────────────────────────────────────────┐ │ ▾ 选中对象详情       │
+│   🎙️ 配音台      │ │ 页面定位说明与主任务区                   │ │   ID / 规格参数    │
+│   🎨 音色创作    │ └──────────────────────────────────────────┘ │   声学参数 / 属性    │
+│   🗂️ 音色库      │ ┌──────────────────────────────────────────┐ │                      │
+│   📦 我的作品    │ │ StatusConclusion (状态结论，仅按需出现)  │ │ ▾ 试听 / 快捷操作  │
+│                  │ └──────────────────────────────────────────┘ │   [▶ 试听] [复制]    │
+│ ▾ ENGINE (核心)  │ ┌──────────────────────────────────────────┐ │                      │
+│   ⚡ 服务中枢    │ │ Field 容器 (列表 / 编辑器 / 指标趋势)    │ │ ▾ 开发者技术证据   │
+│   🧠 模型档位    │ └──────────────────────────────────────────┘ │   Worker/Latency     │
+│   📈 运行监控    │                                              │                      │
+│   🩺 系统诊断    │                                              │                      │
+├──────────────────┴──────────────────────────────────────────────┴──────────────────────┤
+│ Sidebar Footer: [✓ 服务已就绪 · Quality] (无孤立红绿点、不暴露原生端口)       v2.5.2     │
+└────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-旧的 `Palette.success`、`Palette.warning`、`Corner.panel` 等兼容别名只允许在迁移期存在，
-页面迁移完成后删除；不得继续新增引用。
+### 2.2 双轨职责与心智模型
 
-### 5.2 语义颜色
-
-下表是设计参考值，不代表页面直接使用固定 hex。实现必须提供 Light、Dark、Increase
-Contrast 的自适应映射，系统 `Color.primary`、`Color.secondary`、系统 accent 和标准语义色
-优先于自绘颜色。
-
-#### 核心色板
-
-| Token | Light 参考值 | Dark 参考值 | 角色 |
+| 轨道 | 涵盖页面 | 交互心智与视觉特征 | 默认 Inspector 行为 |
 |---|---|---|---|
-| `Color.ink` | `#17212B` | `#F2F5F6` | 产品墨色；仅用于品牌标记或高强调文本 |
-| `Color.canvas` | `#F5F7F7` | `#171B1E` | detail 根内容画布 |
-| `Color.field` | `#FFFFFF` | `#20262B` | 编辑器、列表组、图表所在的信息字段 |
-| `Color.rail` | `#6073F2` | `#91A0FF` | 当前选中、主要动作、服务信号 |
-| `Color.voice` | `#C97859` | `#E39A78` | 音色创作 / VoiceDesign 专属强调 |
-| `Color.ready` | `#3A9C83` | `#65C5A8` | 已就绪、已通过、可继续 |
-| `Color.attention` | `#B1812C` | `#E0B65A` | 需要处理、准备中、资源不足 |
-| `Color.critical` | `#C94E52` | `#F28A8C` | 失败、不可用、危险操作 |
-| `Color.info` | `#4C86B8` | `#83B9E8` | 信息、能力说明、开发者提示 |
+| **Studio 创作工坊** | 配音台、音色创作、音色库、我的作品 | 强调白噪音降低、专注文本与声音雕琢。引入 `Accent.voice`（陶土暖色），主区大留白（`Spacing.hero`） | 承载音色参数微调、A/B 试听候选机架、波形控制器 |
+| **Engine 核心引擎** | 服务中枢、模型档位、运行监控、系统诊断 | 强调精确、可靠、低延迟与高透明度。主打冷墨色、信号蓝与系统状态色，等宽数字排版 | 承载模型 Manifest 校验、Worker 进程租约、脱敏排障日志 |
 
-#### 语义映射
+---
 
-| Token | 用途 | 禁止用法 |
-|---|---|---|
-| `Foreground.primary` | 用户正文、标题、主要值 | 不用作大面积色块 |
-| `Foreground.secondary` | 辅助说明、时间、范围 | 不承载关键结论 |
-| `Foreground.technical` | 端口、版本、revision、错误码 | 不用于普通用户标题 |
-| `Signal.ready` | `已就绪`、`通过`、可执行 | 不只画一个绿点 |
-| `Signal.attention` | `需要处理`、`准备中`、`未安装` | 不暗示失败 |
-| `Signal.critical` | `不可用`、`失败`、危险动作 | 必须同时有文字与图标 |
-| `Signal.info` | 能力、来源、解释 | 不与健康状态混用 |
-| `Accent.rail` | 服务/导航/主要动作 | 不用于音色创作结果 |
-| `Accent.voice` | 音色描述、候选、试听、保存 | 不用于服务健康或错误 |
+## 3. 全局 Design Token 体系 (App-wide Tokens)
 
-### 5.3 表面层级
+Token 唯一工程落地源：`macos/SpeechRailApp/SpeechRailApp/SpeechRailDesignTokens.swift`。
+所有命名均基于**语义与功能角色**，严禁使用页面名或视觉别名（如 `blueCard`、`successGreen`）。
+**API 统一命名约定**：文档中提及的 `Color.*` 在 Swift 中完全对应于 `SpeechRailDesignTokens.Color.*`，保持 1:1 纯正对应。
 
-表面不是“每个区块一个卡片”，而是内容所处的空间层级：
+### 3.1 语义色彩体系 (Color & Signal Tokens)
 
-| 层级 | 语义 token | macOS 26 实现策略 | 允许内容 |
-|---|---|---|---|
-| 0 | `Surface.window` | 系统窗口背景 | 全局窗口承载 |
-| 1 | `Surface.navigation` | 系统 sidebar / toolbar glass | 导航、页面命令、窗口级控制 |
-| 2 | `Surface.canvas` | 自适应内容背景 | 页面主体、滚动内容 |
-| 3 | `Surface.field` | 标准内容表面，必要时细描边 | 编辑器、列表组、图表、资源区 |
-| 4 | `Surface.inspector` | 可折叠的上下文侧栏，内容表面 | 当前选中对象的细节 |
-| 5 | `Surface.control` | 系统控件或薄材质 | 主要动作、筛选、紧凑操作 |
-
-规则：
-
-1. `navigation` 可以使用系统 Liquid Glass；`canvas`、`field`、`inspector` 不铺玻璃。
-2. `field` 必须有内容语义：没有表格、编辑器、图表或资源列表时，不应凭空创建。
-3. 同一页面最多一个 `Surface.control` 视觉重心，次要按钮使用标准 macOS 控件层。
-4. 默认不使用自定义阴影；层级由留白、描边、选择态和系统材料完成。
-5. `Surface.inspector` 只显示当前选中对象或用户主动请求的开发者详情，不重复页面结论。
-
-### 5.4 空间节奏
-
-| Token | 值 | 用途 |
-|---|---:|---|
-| `Spacing.hairline` | 1 | Divider / 结构线 |
-| `Spacing.micro` | 4 | 图标与文字、状态图标内部 |
-| `Spacing.xs` | 8 | 行内组、紧凑控件 |
-| `Spacing.sm` | 12 | 列表行、标签组、字段内间距 |
-| `Spacing.md` | 16 | 区块内部、表单字段 |
-| `Spacing.lg` | 24 | 主区块之间 |
-| `Spacing.xl` | 32 | 页面边距、主列分隔 |
-| `Spacing.hero` | 44 | 仅用于创作编辑器或空状态的呼吸空间 |
-
-页面默认节奏为 `4/8/12/16/24/32`。`44` 不是新的通用间距，只有编辑器主区或空状态经过
-设计评审才可使用。禁止在页面中随意出现 `20`、`28`、`36`、`40` 等一次性数值。
-
-### 5.5 形状与边界
-
-| Token | 值 | 用途 |
-|---|---:|---|
-| `Corner.control` | 6 | 标准控件外的轻量容器 |
-| `Corner.row` | 10 | 选中行、列表行组 |
-| `Corner.field` | 14 | 编辑器、图表、资源字段 |
-| `Corner.module` | 18 | 必须独立存在的主模块 |
-| `Corner.window` | 22 | App 自有窗口边界（不覆盖系统窗口圆角） |
-| `Corner.pill` | 999 | 标签、紧凑状态胶囊；不用于大按钮 |
-
-边界规则：
-
-- 内层圆角不得大于外层圆角；
-- 同一垂直层级不能同时出现三种以上圆角；
-- 模块没有实际独立语义时，改用 Divider、列表分组和留白；
-- 线条默认使用 `hairline`，禁止用粗边框制造“卡片感”。
-
-### 5.6 排版角色
-
-使用系统 SF Pro，技术数据使用 SF Mono；字号由 Dynamic Type / 用户字体偏好接管，不在页面
-内直接写字号。
-
-| Token | 角色 | 默认字重 | 用途 |
-|---|---|---|---|
-| `Typography.display` | 编辑器/空状态主句 | semibold | 只用于创作主入口或没有数据时的明确邀请 |
-| `Typography.pageTitle` | 页面标题 | semibold | 由 toolbar 承载，每页只出现一次 |
-| `Typography.section` | 区块标题 | semibold | 能力、制品、最近事件等主要区块 |
-| `Typography.body` | 用户说明 | regular | 页面定位、影响范围、下一步 |
-| `Typography.label` | 行标题、按钮文本 | medium | 可扫描的控件和列表语义 |
-| `Typography.caption` | 时间、辅助提示 | regular | 不承载唯一结论 |
-| `Typography.metric` | 指标数值 | semibold / tabular | 活跃请求、延迟、容量 |
-| `Typography.technical` | 开发者字段 | monospaced | 版本、revision、端口、错误码 |
-
-规则：
-
-- 页面标题不在正文重复；
-- 用字重和间距建立层级，不用每个模块换一种字号；
-- 技术字段必须有用户可理解的标签，不直接把 raw key 当主标题；
-- 指标使用 tabular figures，避免刷新时数字跳动破坏扫描。
-
-### 5.7 控件与布局
-
-| Token | 值 | 规则 |
-|---|---:|---|
-| `Control.minimumHitTarget` | 44 | 指针、键盘和辅助功能最低触达尺寸 |
-| `Control.icon` | 16 | 行内 SF Symbol |
-| `Control.toolbarIcon` | 18 | toolbar 命令 |
-| `Control.compact` | 28 | 紧凑辅助控件，不牺牲 hit target |
-| `Control.regular` | 34 | 标准表单/按钮视觉高度 |
-| `Control.prominent` | 40 | 页面唯一主要动作 |
-| `Layout.sidebarIdealWidth` | 240 | 顶层导航 |
-| `Layout.inspectorIdealWidth` | 304 | 上下文细节 |
-| `Layout.contentMaximumWidth` | 1,240 | 大窗口下的内容节制 |
-| `Layout.windowMinimumWidth` | 1,120 | 保证主任务可读 |
-| `Layout.windowMinimumHeight` | 720 | 保证定位、状态和动作同时可见 |
-
-窗口、sidebar 和 Inspector 必须可调整；固定宽度只用于默认值和最小可读约束，不能锁死
-用户的工作区。
-
-### 5.8 状态与信号语法
-
-状态采用四部分组合：
+所有颜色必须完美自适应 Light Mode、Dark Mode 以及 Increase Contrast（提高对比度模式）。
+- **默认对比度标度**：符合 WCAG AA 级无障碍标准（正文文本 4.5:1，UI 组件与边界 3:1）；
+- **系统高对比度偏好**：在开启 macOS「提高对比度（Increase Contrast）」偏好时，关键文字与交互边界全面提升至 WCAG AAA（7:1）。
 
 ```text
-[SF Symbol / 形状]  [结论标签]  [一句解释]  [下一步动作]
+       INK (墨底)             RAIL (信号蓝)            VOICE (陶土暖色)
+┌──────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│ Light: #111822       │ │ Light: #4E61E6       │ │ Light: #C26743       │
+│ Dark:  #F0F4F8       │ │ Dark:  #8796FF       │ │ Dark:  #E88F6D       │
+│ 角色: 品牌主干与高强文本│ │ 角色: 导航聚焦与系统主动作│ │ 角色: 音色创作专属强调 │
+└──────────────────────┘ └──────────────────────┘ └──────────────────────┘
 ```
 
-例如：
+#### 核心调色板规格表
 
-```text
-✓ 已就绪    SpeechRail 可以接收本机语音请求。    查看能力
-! 需要处理  模型尚未准备，当前服务仍可提供基础能力。  准备模型
-× 不可用    控制 Agent 未连接，服务动作暂不可执行。  运行诊断
-```
-
-禁止：
-
-- 只有颜色或孤立绿点表达健康；
-- 只显示“正常”而不说明对象和更新时间；
-- 用红色 raw error 代替影响范围和恢复动作；
-- 同一页面同时出现两个互相竞争的全局健康结论。
-
-### 5.9 动效
-
-| Token | 默认 | Reduce Motion |
-|---|---:|---:|
-| `Motion.stateTransition` | 180 ms | 0 ms |
-| `Motion.selection` | 140 ms | 0 ms |
-| `Motion.progress` | 系统控件动画 | 静态进度与文字时间戳 |
-
-动效只表达状态变化的连续性，不表达状态本身。下载、预检和监控刷新必须同时显示文字、
-进度/时间或结果；Reduce Motion 时保留全部信息。
-
-## 6. 组件语法
-
-### 6.1 `PageScaffold`
-
-每页固定结构：
-
-```text
-系统 toolbar：页面标题 + 页面命令 + Inspector 控制
-正文：一句页面定位
-正文：StatusConclusion（可选，但不能重复 toolbar 状态）
-正文：一个主任务区
-正文：必要的列表/图表/编辑器
-Inspector：按选中项或用户请求出现
-```
-
-`PageScaffold` 不自动生成卡片、底部服务栏或重复标题。它只提供对齐、滚动、toolbar 和
-Inspector 容器。
-
-### 6.2 `StatusConclusion`
-
-用于服务、模型、诊断和长任务状态。必须有结论、对象、更新时间/阶段和下一步。主要动作
-最多一个；停止、重启、应用档位等影响运行状态的动作必须进入确认流程。
-
-### 6.3 `SignalRow`
-
-用于能力、模型制品、检查项和事件：
-
-```text
-[状态图标] [主标题]                    [结论/值]
-             [一句用途或影响说明]       [Disclosure / action]
-```
-
-行内不放大面积彩色背景；选中只使用轻量 `rail` selection fill 和明显的 keyboard focus。
-
-### 6.4 `OperationBar`
-
-用于模型下载、校验、应用、取消、重试和可恢复操作。它是页面内联的操作轨道，不是一个新
-的“进度卡片”。必须区分：
-
-```text
-未开始 → 已接受 → 准备中 → 校验中 → 可应用 → 已应用
-                         ↘ 失败 / 已取消 / 被中断
-```
-
-下载完成不等于档位已应用；应用前必须再次说明影响范围并确认。
-
-### 6.5 `DeveloperInspector`
-
-Inspector 只显示当前选中对象相关的信息。默认字段以标签/值形式展示，技术值使用
-`Typography.technical`，支持复制但不暴露 secret、完整日志、绝对路径、原始音频、完整转写、
-embedding 或实名 speaker。
-
-### 6.6 `MetricStrip` 与 `TrendFigure`
-
-监控首屏最多一个趋势图和一行紧凑指标，不再把每个指标做成同等权重的 MetricTile。图表
-必须有文字标题、时间范围、样本状态和 accessibility chart descriptor；数据不足时显示原因
-和下一步，而不是画一条误导性的平线。
-
-### 6.7 创作组件
-
-保留音色创作框架，并与服务页共享布局和状态语法：
-
-- `VoiceDescriptionEditor`：主编辑字段，`Accent.voice` 只在此语义域出现；
-- `VoiceCandidateInspector`：候选、试听、保存和生成状态；
-- `DubbingComposer`：文本、音色、参数和生成操作；
-- `CreatorEmptyState`：说明“能创作什么”和下一步，不展示运维卡片堆叠。
-
-## 7. 页面映射
-
-| 页面 | 用户定位 | 主视觉重心 | 默认 Inspector | 不应出现 |
+| Token (Swift: `SpeechRailDesignTokens.Color.*`) | Light (Hex) | Dark (Hex) | High Contrast (Light / Dark) | 语义角色与禁止用法 |
 |---|---|---|---|---|
-| 配音台 | 用已有音色把文本变成语音 | 文本编辑器 + 生成 | 音色、参数、结果 | 服务 footer、端口字段 |
-| 音色创作 | 描述并试听新音色 | 描述编辑器 + 候选 | 候选试听、保存状态 | 运维指标抢主位 |
-| 音色库 | 管理可复用音色 | list/table | 音色元数据和试听 | 空白卡片网格 |
-| 我的作品 | 找到并复用已生成结果 | 作品列表 | 文件/生成信息 | 技术日志首屏展开 |
-| 服务状态 | 判断现在能不能用 | 单一健康结论 + 能力行 | 服务版本/worker | 四个健康卡片 |
-| 模型 | 准备和应用模型档位 | 选中档位 + OperationBar | manifest、revision、校验 | 下载等于已应用的暗示 |
-| 运行监控 | 判断是否需要处理 | 健康结论 + 一条趋势 | worker、延迟、资源预算 | 四个大 MetricTile |
-| 诊断 | 找到原因并采取恢复动作 | 检查项列表 + 选中解释 | 脱敏错误码/组件版本 | 固定重复 Inspector |
+| `Color.ink` | `#111822` | `#F0F4F8` | `#000000` / `#FFFFFF` | 品牌墨色；用于高强调文本，禁止做大面积实色背景 |
+| `Color.canvas` | `#F6F8F9` | `#13171A` | `#FFFFFF` / `#000000` | 窗口根底色与主滚动区域 |
+| `Color.field` | `#FFFFFF` | `#1C2227` | `#FFFFFF` / `#161B1E` | 内容承载表面（编辑器、表格、列表组、图表底面） |
+| `Color.rail` | `#23687D` | `#4FA4BA` | `#144959` / `#7FD3E6` | **Logo 声轨信号色**；提取自官方 App 图标冷青铁轨钢光（Sonic Rail Cyan），用于系统信号、当前聚焦选中、主要动作 |
+| `Color.titanium` | `#4D5358` | `#CCD1D0` | `#24282B` / `#FAFAFA` | **航天冷钛金属色**；提取自 Logo 'S' Crest 微雕质感与频谱微光 |
+| `Color.voice` | `#C26743` | `#E88F6D` | `#9E4928` / `#FFAE90` | **音色创作专属色**；用于 VoiceDesign 候选、试听条、声学标签 |
+| `Color.ready` | `#26856C` | `#52BFA1` | `#175C4A` / `#6FE0C0` | **已就绪 / 正常**；必须配合 ✓ 图标与文字使用 |
+| `Color.attention`| `#9E6E1C` | `#D9AB43` | `#78510E` / `#F0C45C` | **准备中 / 资源告警 / 待确认**；禁止暗示系统已崩溃 |
+| `Color.critical` | `#BA3539` | `#E87074` | `#8E1E22` / `#FF9296` | **不可用 / 失败 / 破坏性操作**；必须配合 ✕ 图标与确定性文案 |
+| `Color.info` | `#39729E` | `#6EA9D6` | `#254E6D` / `#8DC0EA` | **中立信息 / 能力说明 / 技术详情** |
 
-## 8. 普通用户与开发者的渐进式信息
+#### 前景与文本角色映射
 
-### 8.1 普通用户默认层
+| Token | 系统级绑定 | 典型场景 |
+|---|---|---|
+| `Foreground.primary` | `Color.primary` | 标题、主要数值、选中文本 |
+| `Foreground.secondary`| `Color.secondary` | 描述段落、表单说明、次级时间戳 |
+| `Foreground.tertiary` | `Color.secondary.opacity(0.7)` | 占位符、边框辅助、极弱分隔 |
+| `Foreground.technical`| `Font.system(.caption2, design: .monospaced)` | 端口号、SHA256 摘要、Worker 租约 ID、音频参数（由字体层实现等宽） |
 
-默认可见且可读的内容：
+---
 
-- 结论：`已就绪`、`准备中`、`需要处理`、`不可用`；
-- 用途：当前页面解决什么问题；
-- 影响：是否占用磁盘、是否影响所有客户端、是否改变当前档位；
-- 下一步：一个主要动作和一个可选的了解更多入口。
+### 3.2 表面与材质物理体系 (Surface & Elevation)
 
-### 8.2 开发者层
+macOS 26 倡导沉浸式材质分层。**绝对禁止“全屏卡片套卡片”或“多层漫反射黑阴影”**。层级全部依托**材质透过率、精密描边（Hairline Strokes）与自然间距**呈现。
 
-通过选中项、Inspector 或“显示开发者详情”进入：
+```text
+[Level 0: Window Background] ── 纯色/环境底色
+  └─ [Level 1: System Liquid Glass] ── 仅用于 Sidebar 与 Toolbar (支持壁纸色相渗透)
+       └─ [Level 2: Canvas 主画布] ── 纯净平铺底色
+            └─ [Level 3: Field 字段表面] ── 0.5px 精密描边，承载核心信息
+                 └─ [Level 4: Control 交互控件] ── 悬浮/聚焦态轻量材质
+```
 
-- service/version/backend/port；
-- profile、artifact、revision、量化、文件数和校验摘要；
-- operation ID、phase、状态、字节进度；
-- worker、ASR/TTS latency、RTF、队列和资源预算；
-- 稳定错误分类、能力探测结果和恢复建议。
+| 层级 | 语义 Token | macOS 26 材质策略 | 边框与阴影规范 |
+|---|---|---|---|
+| **Level 0** | `Surface.window` | 系统基础窗口背板 | 无边框，无阴影 |
+| **Level 1** | `Surface.navigation` | `.glassEffect(.regular)` | 系统内建 Liquid Glass，自适应暗区色相渗透 |
+| **Level 2** | `Surface.canvas` | `Color.canvas` 哑光纯色 | 纯净底面，禁止叠加任何阴影 |
+| **Level 3** | `Surface.field` | `Color.field` | 边框：`Color.primary.opacity(0.07)` 0.5px 极细线；<br>Dark 模式辅以顶部 `0.5px` 的 `white.opacity(0.05)` 内高光；**零模糊投影** |
+| **Level 4** | `Surface.inspector` | `.thinMaterial` 或纯色底面 | 左边缘配备 `1px` 细分界线，独立纵向滚动 |
+| **Level 5** | `Surface.control` | `.regularMaterial` 或状态色微填充 | 聚焦态激活 `2px` `Color.rail.opacity(0.4)` Focus Ring |
 
-技术层必须与用户层保持同一结论，不得出现“普通用户说已就绪、Inspector 却显示未知”这类
-语义冲突。若能力不匹配，用户层显示可理解的影响，开发者层补充证据。
+---
 
-## 9. 交互与 macOS 26 规则
+### 3.3 空间节奏与布局常量 (Spacing & Layout)
 
-1. `NavigationSplitView` 承载创作/服务两组导航；不另造平行导航栏。
-2. 页面标题由 system toolbar 承载；正文不再重复一个同名大标题或浮动圆形标题。
-3. toolbar 动作按语义分组；全局刷新、页面刷新和对象刷新只能保留一个当前有效入口。
-4. 高频命令必须同时进入菜单栏/Commands，隐藏 toolbar 后能力仍然可达。
-5. sidebar 的服务状态使用“图标 + 文字/accessible value”；不放只有颜色的状态点。
-6. Inspector 默认跟随选中对象，可隐藏、可调整；没有选中对象时不渲染重复占位内容。
-7. 重要操作使用系统确认框或明确 inline confirmation：下载/校验、应用档位、停止、重启、
-   删除或覆盖都要写明影响范围。
-8. 图表、列表、DisclosureGroup、按钮和状态都提供可访问 label/value；颜色、动效和声音不
-   得是唯一状态来源。
-9. Light、Dark、Increase Contrast、Dynamic Type、Reduce Motion、键盘和 VoiceOver 都属于
-   设计验收矩阵，不以“默认浅色截图好看”作为完成标准。
+基于 **4-pt / 8-pt 物理网格** 演进，杜绝任何任意手写数值（如 `17`、`23`、`38`）。
 
-## 10. 迁移规则
+```text
+4pt(micro) ── 8pt(xs) ── 12pt(sm) ── 16pt(md) ── 24pt(lg) ── 32pt(xl) ── 48pt(hero)
+```
 
-### 10.1 必须删除或替换
+| Token | 数值 (pt) | 唯一用途 |
+|---|---:|---|
+| `Spacing.hairline` | 1 | 极细分割线、表头下划线 |
+| `Spacing.micro` | 4 | 图标与相邻文字间隙、胶囊内边距 |
+| `Spacing.xs` | 8 | 表单输入框内组件间隙、同组按钮间距 |
+| `Spacing.sm` | 12 | 列表行垂直间距、紧凑字段组内边距 |
+| `Spacing.md` | 16 | 标准字段内边距、常规卡片内嵌间隙 |
+| `Spacing.lg` | 24 | 大模块间纵向间隔、段落组间距 |
+| `Spacing.xl` | 32 | 页面外框边距（Page Margin）、主双列水平间距 |
+| `Spacing.hero` | 48 | 仅用于配音台/音色创作编辑器的呼吸空间、空状态大视距 |
 
-- 删除页面级重复标题、重复 `ServiceStatusFooterView` 和孤立健康点；
-- 替换“标题 + 说明 + 状态 + 操作 + 技术详情 + footer”的通用卡片堆叠；
-- 统一重复的 refresh / info / developer detail 命令；
-- 将默认 Inspector 改为选中项上下文，而不是固定的全局详情栏；
-- 将 `Palette` 的视觉命名替换为 `Color` / `Signal` / `Accent` 语义命名；
-- 删除没有内容语义的 `.panel`、`.elevated` 包装和多层自定义阴影。
+#### 布局与桌面端尺寸约束
 
-### 10.2 迁移顺序
+- `Control.compact`: `28 pt`（紧凑辅助按钮、段落操作）
+- `Control.regular`: `34 pt`（标准表单输入、常规按钮）
+- `Control.prominent`: `40 pt`（页面主操作 Primary CTA）
+- `Layout.windowMinimumWidth`: `1,120 pt`（低于此尺寸收起 Inspector，防止内容挤压）
+- `Layout.windowMinimumHeight`: `720 pt`（确保首屏至少完整展示定位、状态与主任务）
+- `Layout.sidebarIdealWidth`: `240 pt`（可调整范围：`200 pt` ~ `280 pt`）
+- `Layout.inspectorIdealWidth`: `320 pt`（可调整范围：`280 pt` ~ `400 pt`）
+- `Layout.contentMaximumWidth`: `1,240 pt`（大屏超宽显示器下限制文本行宽，保持最佳视线跨度）
 
-1. 先替换 token 定义和表面层级，保留旧 alias 仅用于编译过渡；
-2. 重构 `ControlCenterView` 与 `PageScaffold`，统一 toolbar、导航和 Inspector；
-3. 迁移服务状态、诊断、监控和模型页，先完成状态/操作语义；
-4. 迁移配音台、音色创作、音色库和作品，保留 VoiceDesign 主流程；
-5. 删除旧 alias 和未使用组件，补充 UI/可访问性回归测试；
-6. 更新 active design system 文档和视觉验收记录。
+---
 
-迁移期间不得同时维护两套“当前 token”文档；未迁移页面必须明确标记，不得把临时兼容 alias
-当作新的设计 API。
+### 3.4 形状与圆角嵌套定律 (Corner Radii)
 
-## 11. 验收标准
+圆角必须遵循**同心同率定律**：`Corner.outer = Corner.inner + Padding`。禁止外小内大或尖锐突变。
 
-### 11.1 视觉与结构
+```text
+┌─────────────────────────────────────────────────────────┐ ── Corner.field (14pt)
+│  Padding: 12pt (sm)                                     │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │ 内部可交互行组 / 控件                               │  │ ── Corner.row (8pt)
+│  └───────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
+```
 
-- 首屏五秒内能说清页面用途、当前状态和下一步；
-- 页面不存在无语义的卡片堆叠、重复标题、重复服务 footer 或漂浮孤立按钮；
-- 只有一个主要视觉重心；主要动作、次要动作和技术详情层级可见；
-- Light/Dark/Increase Contrast 下颜色仍满足对比度，状态不依赖颜色；
-- 选中行、焦点环、Inspector 和列表列对齐，不出现截断的固定三栏。
+| Token | 半径 (pt) | 应用实体 |
+|---|---:|---|
+| `Corner.control` | 6 | 小型按钮、输入框、下拉选单、微型开关 |
+| `Corner.row` | 8 | 列表选中高亮条、内部单元格、次级分组行 |
+| `Corner.field` | 14 | 承载表面（Fields）、图表容器、主文本编辑器 |
+| `Corner.module` | 18 | 独立浮动窗口、主对话框、大面板外廓 |
+| `Corner.pill` | 999 | 状态胶囊、声学标签（Chips）、音频时长标 |
 
-### 11.2 产品能力
+---
 
-- 模型下载、文件校验、档位应用、取消、恢复、失败和版本不匹配均有独立可理解的状态；
-- 下载完成不自动暗示已应用；应用档位有影响范围确认；
-- 音色创作仍能进入描述、候选、试听和保存；
-- 服务未就绪时，创作页仍解释原因并提供恢复入口，不显示伪造的生成成功状态。
+### 3.5 排版与字体层次 (Typography Scale)
 
-### 11.3 工程与可访问性
+全面启用系统 Dynamic Type 机制。正文采用 **SF Pro**，数值与度量采用 **SF Pro Rounded**（具备 Tabular 属性），工程数据采用 **SF Mono**。
 
-- 所有页面样式来自 `SpeechRailDesignTokens.swift`，无新增页面级颜色/间距/圆角常量；
-- App 继续以 macOS 26.0 为 deployment target，不添加 macOS 14 UI fallback；
-- UI tests 覆盖导航、主要状态、确认/取消/恢复和 Inspector 显隐；
-- VoiceOver 顺序为“导航 → 页面定位 → 结论 → 主要动作 → 列表/编辑器 → Inspector”；
-- 完成 build、Swift 单测、UI 测试、Python gate、契约 lint、`git diff --check` 和人工视觉矩阵。
+| 角色 Token | 字体规格 | 默认特征 | 用途与约束 |
+|---|---|---|---|
+| `Typography.display` | `Font.system(.title, design: .default, weight: .bold)` | 极具冲击力 | 仅用于空状态邀请语、作品标题 |
+| `Typography.pageTitle`| 由系统 Toolbar 统一托管（`title2`，semibold） | 统一原生 | **严禁在内容区重复手写大标题** |
+| `Typography.section` | `Font.system(.headline, design: .default, weight: .semibold)` | 明确层级 | 模块与字段组标题（如“声学属性”、“推理时延”） |
+| `Typography.body` | `Font.system(.body, design: .default, weight: .regular)` | 舒适阅读 | 页面定位段落、核心操作提示 |
+| `Typography.label` | `Font.system(.callout, design: .default, weight: .medium)` | 高扫描性 | 控件文案、表头标签、列表主标题 |
+| `Typography.caption` | `Font.system(.caption, design: .default, weight: .regular)` | 辅助弱化 | 绝对时间戳、只读辅助备注 |
+| `Typography.metric` | `Font.system(.title3, design: .rounded, weight: .semibold).monospacedDigit()` | 无跳动刷新 | RTF 倍率、时延数值（如 `184ms`）、显存占用 |
+| `Typography.technical`| `Font.system(.caption2, design: .monospaced, weight: .regular)` | 严谨等宽 | 端口、SHA256、Worker PID、错误代码 |
 
-## 12. 回退与风险
+---
 
-- token、共享组件和页面迁移按独立逻辑 commit 交付，可回退而不影响 Python runtime、模型或
-  本机服务；
-- 旧服务 Agent 不支持模型控制时，仍显示能力不匹配，不执行危险重放；
-- macOS 26 的系统材质和窗口行为可能随 beta/point release 微调，产品 token 只定义语义和
-  层级，不复制系统玻璃实现；
-- 本轮暂不改变服务契约，若模型操作能力需要新增字段，另行走 API/interface design 与契约
-  评审，不把 UI 需要直接变成隐式后端变更。
+### 3.6 触觉与声音交互建议 (待实测验证项)
 
-## 13. 审阅问题
+> **工程边界说明**：
+> 下列触觉与音效为 macOS 桌面端人机交互的原生设计建议，属于体验增强项，**不作为当前公共服务契约的强保证**。具体在 App 运行时结合系统 API 实测表现逐步落地：
 
-请审阅以下三件事后再进入实施计划：
+- **触控板微触感（建议）**：音色生成/导出完成可尝试触发轻量弹性回馈；模型切换应用触发明确确认顿挫感；阻断性操作触发双击阻尼感；
+- **系统提示音（建议）**：长任务耗时完成后调用系统微和弦（如 `NSSound` 原生提示音），静默后台任务不打扰前台心流。
 
-1. 是否确认 `Signal Loom` 作为 App-wide 基线，并接受“服务冷静、创作陶土色”的双语义色策略；
-2. 是否确认 `Surface.field` 取代大多数通用卡片，Inspector 只跟随选中项或用户主动打开；
-3. 是否确认上述页面映射和模型下载的状态/确认语法覆盖管理控制台、运行监控、模型和音色创作。
+---
 
+## 4. 核心组件交互与工业制图 (Component Specifications)
+
+### 4.1 页面标准骨架 (`PageScaffold`)
+
+所有 8 个页面必须统一采用 `PageScaffold`，严格统一外框秩序：
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ Toolbar: [Sidebar Toggle]  页面标题 (Title)      [操作群] [Inspector开闭]│
+├────────────────────────────────────────────────────────────────────────┤
+│ Page Content (Padding: 32pt)                                           │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ 1. 页面定位条 (Page Subtitle / Orientation): 简练一句话说明核心价值 │ │
+│ └────────────────────────────────────────────────────────────────────┘ │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ 2. StatusConclusion (可选): 仅当状态发生跃迁或存在阻断时常驻置顶   │ │
+│ └────────────────────────────────────────────────────────────────────┘ │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ 3. 主任务工作区 (Primary Action Field): 编辑器 / 矩阵 / 核心配置   │ │
+│ └────────────────────────────────────────────────────────────────────┘ │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ 4. 次级详情字段 (Secondary Fields): 数据趋势 / 历史列表             │ │
+│ └────────────────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Toolbar 状态锚定铁律**：`Title & Status Pill` 必须是原生 window toolbar 内挂载的状态信息（如 `.windowToolbar` / `.principal` 或 leading 导航项），**严禁在画布内容正文重新渲染脱离窗口顶栏的居中悬浮大标题**。
+
+---
+
+### 4.2 状态结论面板 (`StatusConclusion`)
+
+状态组件必须在 2 秒内解答“发生了什么、影响有多大、我该做什么”。
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ [✓/!/✕ 图标]  【状态大标签：已就绪 / 需处理】   [最后同步: 14:38:02]   │
+│               说明文本：SpeechRail 本机引擎正常运行，全部能力准备就绪。  │
+│               影响范围：本地端口监听中；所有集成 Agent 均可调用。        │
+│                                                                        │
+│               [主要恢复动作: 立即应用]    [次要动作: 查看能力清单]      │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+- **语义语法**：`[Icon] + [Headline] + [Explanation] + [Scope] + [Single Primary CTA]`；
+- **防冲突与非重复原则**：
+  - **Sidebar Footer 是唯一的紧凑全局常驻入口**；
+  - 正文 `StatusConclusion` 绝不无脑复制全局健康信息。它**仅在**以下场景条件激活：① 「服务中枢」主视区，② 页面任务遇到阻断（如缺少模型、离线），③ 长任务执行跃迁中。在正常的创作页面（如配音台、我的作品），首屏完全留给创作任务，不显示重复的状态横幅。
+
+---
+
+### 4.3 异步操作与模型生命周期轨道 (`OperationBar`)
+
+模型下载（通常 2GB ~ 8GB）、权重校验与环境准备涉及长时耗时。必须依托真实的 Python 后端状态，以**确定性进度轨道**呈现：
+
+```text
+未开始 ──► 已接受 ──► 下载中 (MB/s & ETA) ──► 校验中 (SHA256) ──► 就绪待应用 ──► 切换中 ──► 已激活
+                           │                                                 │
+                           └──► 失败 / 空间不足 / 被中断                     └──► 切换失败 / 回退
+```
+
+#### 组件物理结构
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ 🧠 Quality 档位 (Qwen3-TTS 1.7B + Align-bf16)       [下载中 42%]       │
+│                                                                        │
+│ ▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱   1.2 GB / 2.8 GB (18.4 MB/s)  │
+│ 预计剩余时间: 1 分 14 秒 · 校验方式: SHA256                            │
+│                                                                        │
+│ [取消并清理下载]                                             [后台静默] │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+- **关键准则**：下载完成**绝不等于**已应用。下载完成后状态转换为 `[就绪待应用]`。切换档位涉及后台 Worker 进程管理与资源重载，应用前必须展示明确的影响范围确认，并支持平稳回退。
+
+---
+
+### 4.4 音色创作器与声学胶囊机架 (`VoiceDesignStudio` & `AcousticRack`)
+
+面向 Qwen3 VoiceDesign 打造的专业级创作面板：
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│ 🎨 声音特征描述 (Voice Description)                       [Accent.voice]│
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ 成年男性中文声线，低沉、近距离、克制而清晰，略带胸腔共鸣。         │ │
+│ └────────────────────────────────────────────────────────────────────┘ │
+│ 常用声学特征胶囊 (Acoustic Chips):                                     │
+│ [＋ 磁性胸腔]  [＋ 近场收音]  [＋ 纪录片解说]  [＋ 青年男声]  [＋ 治愈系] │
+│                                                                        │
+│ 试听参考文案: 「你可以称我为愚者，亦或是时间的记录人。」              │
+│                                                                        │
+│                                   [生成音色候选 (⌘ Return)  ── 陶土色] │
+├────────────────────────────────────────────────────────────────────────┤
+│ 候选试听机架 (Candidate A/B/C/D Shelf):                                │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ [▶ 播放] 候选 A (4.2s)   |||i|li|i|li|i|l|i (波形预览)   [保存到音色库]│
+│ │ [▶ 播放] 候选 B (4.1s)   ||li|i|li|li|i|l|i (波形预览)   [保存到音色库]│
+│ └────────────────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### 4.5 开发者与上下文审阅侧栏 (`DeveloperInspector`)
+
+- 选中主画布任意项目（模型行、音色卡、诊断项、历史日志）时，Inspector 立即流式推入对应上下文；
+- **数据与脱敏边界双轨隔离**：
+  - **业务作品层（我的作品）**：展示完整的输入文本回溯，属于创作者自有的创作资产，保障可读与复用；
+  - **技术审计层（Developer Inspector）**：严守脱敏铁律，仅展示 Request ID、推理时延、Token 计数、脱敏 Worker PID 和匿名化分人标签（`speaker_0`），**严禁**暴露用户完整 Prompt、Base64 音频、绝对文件路径或实名身份；
+- **一键调试**：所有技术标识（Job ID, Revision, Hash）自带小巧复制图标与键盘 `⌘C` 响应。
+
+---
+
+## 5. 八大核心页面空间映射与交互蓝图 (Screen-by-Screen Blueprint)
+
+### 5.1 配音台 (Dubbing Studio)
+- **用户心智**：快速选择音色，输入或导入文本，高保真生成目标语音并导出。
+- **视觉重心**：主文本排版编辑器，字号 16pt，具备行号与标点停顿标记提示。
+- **Inspector**：当前所选音色的参数（语速 `0.5x~2.0x`、音频格式 `WAV/MP3/FLAC`、采样率）。
+- **杜绝要素**：严禁在首屏放置复杂的服务器端口、模型下载卡片等运维杂音。
+
+### 5.2 音色创作 (Voice Design Studio)
+- **用户心智**：通过自然语言与声学胶囊塑造独一无二的全新声音。
+- **视觉重心**：陶土色系强化的 Prompt 描述框与即时候选播放列表。
+- **Inspector**：候选音色基础参数概览、参考文本快速试听。
+- **杜绝要素**：严禁使用技术栈异常报错堆栈覆盖创作区。
+
+### 5.3 音色库 (Voice Catalog)
+- **用户心智**：沉淀、分类、标记和管理系统音色与自定义克隆音色。
+- **视觉重心**：清晰的双列/表格列表，每行包含：音色试听按钮、音色名称、声学标签、创建时间。
+- **Inspector**：音色详情、基模型来源（Base / Design）、关联配音作品数、删除音色（破坏性保护确认）。
+
+### 5.4 我的作品 (Audio Archive)
+- **用户心智**：回溯、复用与导出过往生成的音频资产。
+- **视觉重心**：时间轴排序的音频资产清单，内嵌轻量波形试听条与导出按钮（Share/Export）。
+- **Inspector**：完整输入文本回溯、生成耗时与 RTF 记录、文件磁盘大小与采样参数。
+
+### 5.5 服务中枢 (Service Core)
+- **用户心智**：一眼确认本地服务是否健康，当前激活了什么档位，如何优雅启停。
+- **视觉重心**：`StatusConclusion` 置顶大面板（例如：“● Quality 档位运行中 · 延迟 184ms”）。
+- **次级字段**：能力矩阵表（ASR 原生词级时间戳、VoiceDesign 并发、FluidAudio 匿名分人就绪）。
+- **Inspector**：LaunchAgent 托管信息、端口绑定状态（127.0.0.1 闭环保护）、活跃客户端连接数。
+
+### 5.6 模型档位 (Model Profiles)
+- **用户心智**：在 Light（低内存）、Balanced（均衡）与 Quality（全能力）三档间自由调度，并监控磁盘下载。
+- **视觉重心**：三档横向比对字段，当前激活档位具备 `Color.rail` 精致边框高亮。
+- **次级字段**：模型文件资产列表与 `OperationBar` 下载校验进度。
+- **Inspector**：各组件量化精度（Q8 / BF16 / FP16）、CoreML 编译状态、模型磁盘目录安全引用。
+
+### 5.7 运行监控 (Telemetry & Metrics)
+- **用户心智**：了解系统负载、内存驻留是否超预算、语音合成是否发生拥堵。
+- **视觉重心**：单条趋势图（实时并发与 RTF 时延），配备 Tabular 紧凑指标条（活动请求数、内存占用、平均首包时延）。
+- **Inspector**：Worker 进程树明细、内存上限预算图解（物理内存 / 2）、模式冲突熔断计数。
+
+### 5.8 系统诊断 (Diagnostic Triage)
+- **用户心智**：遇到异常时迅速定位根因，一键执行恢复或复制排障报告。
+- **视觉重心**：递进式检查项清单（Launchd 权限、端口占用、模型完整性、CoreML 加速可用性）。
+- **Inspector**：选中断言失败项的官方排障指引与一键修复动作（如“清理冲突端口”）。
+
+---
+
+## 6. Swift 工程落地契约 (`SpeechRailDesignTokens.swift`)
+
+为确保设计规范以零折损直接落地到 SwiftUI 代码中，工程层必须提供以下标准 API 架构：
+
+```swift
+import AppKit
+import SwiftUI
+
+// MARK: - SpeechRail Signal Loom Design Tokens (v0.2.0 Baseline)
+
+public enum SpeechRailDesignTokens {
+
+    // MARK: 1. Spacing (4-pt / 8-pt Grid)
+    public enum Spacing {
+        public static let hairline: CGFloat = 1
+        public static let micro: CGFloat    = 4
+        public static let xs: CGFloat       = 8
+        public static let sm: CGFloat       = 12
+        public static let md: CGFloat       = 16
+        public static let lg: CGFloat       = 24
+        public static let xl: CGFloat       = 32
+        public static let hero: CGFloat     = 48
+    }
+
+    // MARK: 2. Corner Radii
+    public enum Corner {
+        public static let control: CGFloat  = 6
+        public static let row: CGFloat      = 8
+        public static let field: CGFloat    = 14
+        public static let module: CGFloat   = 18
+        public static let pill: CGFloat     = 999
+    }
+
+    // MARK: 3. Semantic Colors (Unified Public API: SpeechRailDesignTokens.Color.*)
+    public enum Color {
+        public static let ink = SwiftUI.Color("Ink", bundle: .main)
+        public static let canvas = SwiftUI.Color("Canvas", bundle: .main)
+        public static let field = SwiftUI.Color("Field", bundle: .main)
+
+        // Dynamic Adaptive Accents
+        public static let rail = SwiftUI.Color("RailSignal", bundle: .main)
+        public static let voice = SwiftUI.Color("VoiceAccent", bundle: .main)
+
+        // Signal States
+        public static let ready = SwiftUI.Color("SignalReady", bundle: .main)
+        public static let attention = SwiftUI.Color("SignalAttention", bundle: .main)
+        public static let critical = SwiftUI.Color("SignalCritical", bundle: .main)
+        public static let info = SwiftUI.Color("SignalInfo", bundle: .main)
+    }
+
+    // MARK: 4. Surface & Stroke Tokens
+    public enum Surface {
+        public static let hairlineStroke = SwiftUI.Color.primary.opacity(0.07)
+        public static let selectedFill = Color.rail.opacity(0.10)
+        public static let voiceSelectedFill = Color.voice.opacity(0.12)
+        public static let focusRing = Color.rail.opacity(0.40)
+    }
+
+    // MARK: 5. Typography Scale
+    public enum Typography {
+        public static let display = Font.system(.title, design: .default, weight: .bold)
+        public static let section = Font.system(.headline, design: .default, weight: .semibold)
+        public static let body = Font.system(.body, design: .default, weight: .regular)
+        public static let label = Font.system(.callout, design: .default, weight: .medium)
+        public static let caption = Font.system(.caption, design: .default, weight: .regular)
+        public static let metric = Font.system(.title3, design: .rounded, weight: .semibold).monospacedDigit()
+        public static let technical = Font.system(.caption2, design: .monospaced, weight: .regular)
+    }
+
+    // MARK: 6. Layout Constants
+    public enum Layout {
+        public static let windowMinimumWidth: CGFloat   = 1_120
+        public static let windowMinimumHeight: CGFloat  = 720
+        public static let contentMaximumWidth: CGFloat  = 1_240
+        public static let sidebarIdealWidth: CGFloat    = 240
+        public static let inspectorIdealWidth: CGFloat  = 320
+    }
+
+    // MARK: 7. Motion
+    public enum Motion {
+        public static let springTransition = Animation.spring(response: 0.28, dampingFraction: 0.82)
+        public static let selectionFeedback = Animation.easeOut(duration: 0.14)
+    }
+}
+
+// MARK: - Standard Field Container ViewModifier
+
+public struct SpeechRailFieldModifier: ViewModifier {
+    @Environment(\.colorScheme) private var colorScheme
+
+    public func body(content: Content) -> some View {
+        content
+            .background(SpeechRailDesignTokens.Color.field)
+            .clipShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field))
+            .overlay {
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field)
+                    .stroke(SpeechRailDesignTokens.Surface.hairlineStroke, lineWidth: 0.5)
+            }
+    }
+}
+
+public extension View {
+    func speechRailField() -> some View {
+        modifier(SpeechRailFieldModifier())
+    }
+}
+```
+
+---
+
+## 7. 渐进式实施与验收标准 (Handoff & Acceptance)
+
+### 7.1 阶段性交付路线图
+
+```text
+阶段 1: Token & 基础层 (Tokens & Primitives)
+  ├── 落地 Color Asset Catalog (Dark/Light/High-Contrast 9 组 Color Sets 补齐)
+  ├── 落地 SpeechRailDesignTokens.swift 全量定义并保持向前兼容别名
+  └── 统一 PageScaffold 容器与窗口最小约束
+
+阶段 2: 核心引擎页面重构 (Engine Surfaces)
+  ├── 重塑「服务中枢」：落地单一置顶 StatusConclusion，移除浮动绿点与卡片堆叠
+  ├── 重塑「模型档位」：实现 OperationBar 真实状态生命周期轨道
+  └── 重塑「运行监控」与「系统诊断」：接入单趋势折线与按需推入 Inspector
+
+阶段 3: 创作工坊页面重构 (Studio Surfaces)
+  ├── 落地「音色创作」：陶土色系注入，声学胶囊机架与 A/B 候选试听机架
+  └── 统一「配音台」、「音色库」与「我的作品」列表与 Field 容器
+
+阶段 4: 契约终验与清理 (Final Sweep)
+  ├── 清除所有过时别名（如 Palette.panel, Palette.tint 等）
+  ├── VoiceOver 无障碍巡检与键盘全链路测试
+  └── 执行代码门禁：Swift Build、Pytest、OpenAPI Lint 与回归测试
+```
+
+### 7.2 严苛验收指标 (Acceptance Criteria)
+
+1. **信息层级扫描性**：首屏 3 秒内，任何新用户均能准确回答出“服务状态、激活档位、主任务区”三要素；
+2. **零卡片堆叠**：全 App 内容区不再存在两层以上的白底嵌套矩形与生硬的深色漫反射投影；
+3. **桌面端触达合规**：所有控件符合 macOS 原生人机交互标准，主操作、辅助按钮尺寸与焦点环清晰分层；
+4. **色彩与对比度合规**：默认满足 WCAG AA 标度；在系统开启「提高对比度」模式下，文本对比度达到 WCAG AAA（7:1）；
+5. **单视觉重心**：单屏内仅有一处突出 Primary CTA，次级操作一律退入标准 Control 层；
+6. **工程门禁**：`SpeechRailApp` 编译 0 Warning，相关测试 100% 通过。
+
+---
+
+## 8. 实施前锁定的五个关键工程约束 (Engineering Lock-in Agreements)
+
+本节明确记录经产品、设计与工程团队共同签署确认的 5 大工程落地边界，在后续实施计划与代码开发中**严格遵循，不得随意漂移**：
+
+1. **Toolbar 状态原生挂载，严禁居中悬浮标题**
+   - 页面标题与 Status Pill 必须使用系统原生 `.toolbar` 挂载于窗口工具栏（如 `.windowToolbar` / `.principal` 或 leading 导航项），彻底杜绝在主画布内重新绘制居中脱节的卡片式大标题。
+2. **全局状态单一入口原则，杜绝信息冗余复制**
+   - 侧边栏底部 `[✓ 服务已就绪 · Quality]` 是全 App 唯一的常驻全局服务状态指示；
+   - 正文中的 `StatusConclusion` 绝不机械复制全局健康信息。它仅在服务专属主页（Service Overview）、任务受阻（如模型缺失）或长任务跃迁期间条件出现。在正常的创作流中，首屏空间 100% 留给任务区。
+3. **公共 API 命名统一收敛为 `SpeechRailDesignTokens.Color.*`**
+   - 文档中的 `Color.ink`、`Color.field` 与 Swift 实现完全统合，直接采用 `SpeechRailDesignTokens.Color.ink`，消除文档与代码之间的命名认知摩擦。
+4. **Asset Catalog 前置就绪铁律 (Color Sets)**
+   - 鉴于当前 `Assets.xcassets` 仅有 AppIcon，实施阶段 1 必须在 `SpeechRailApp/Assets.xcassets` 中补齐全套 9 个包含 Any/Light/Dark/High-Contrast 外观的 Color Sets，并在 Swift 层提供安全的系统色兜底，避免运行时颜色丢失。
+5. **真实能力条件渲染与数据隐私边界双轨隔离**
+   - **真实服务能力门禁**：波形预览、回退操作、端口修复和 CoreML 预热编译等高级控件必须基于 Python 后端实际能力条件展示，未就绪时优雅降级为静态标签，杜绝假进度与未支持操作；
+   - **业务资产与技术审计双轨隔离**：「我的作品」中展示创作者自有的完整输入文本；而「开发者 Inspector」严格遵循脱敏协议，仅展示匿名化元数据（Request ID、时延、Token 统计、会话级匿名分人标签 `speaker_0`），严禁日志侧泄露用户输入、Base64 音频或绝对敏感路径。
+
+---
+
+## 9. 验收测试标准与断言清单 (Acceptance Criteria & Test Matrix)
+
+为确保工程落地、设计走查与 QA 测试具备可量化、可验证的闭环标准，制定以下 8 组可测试断言清单（Acceptance Criteria）：
+
+### AC-01: Token 体系完整性与 Asset Catalog 契约
+- **Given**：在 macOS 26.0+ 环境下使用 Xcode 编译并启动 `SpeechRailApp`；
+- **When**：各页面视图直接引用 `SpeechRailDesignTokens.Color.*`（包含 `ink`, `canvas`, `field`, `rail`, `voice`, `ready`, `attention`, `critical`, `info`）；
+- **Then**：
+  1. `SpeechRailApp/Assets.xcassets` 中包含上述 9 组命名 Color Sets，且全部补齐 Any / Light / Dark / High Contrast 4 种外观变体；
+  2. 动态切换系统深色/浅色模式时，界面背景与字段边缘自然自适应，无生硬闪烁或取色丢失（Fall-through to black/clear）；
+  3. 兼容层保留的旧别名（如 `@available(*, deprecated) Palette.panel`）仍能通过编译，不破坏现有过渡代码。
+- **验证手段**：Xcode Build 0 错误 + `SpeechRailDesignTokensTests` 单元测试。
+
+### AC-02: 原生 Toolbar 挂载与零悬浮大标题
+- **Given**：用户在侧边栏任意切换 8 个视图页面；
+- **When**：主内容画布（Main Canvas）完成布局与首帧渲染；
+- **Then**：
+  1. 页面标题与状态胶囊（Status Pill）严格位于系统原生 `.toolbar` 内部（`.windowToolbar` / `.principal` 或 leading 导航项）；
+  2. 主画布正文区**绝对不存在**脱节的居中悬浮大标题、伪卡片外框或重复的主标题文本；
+  3. 画布首行仅允许存在紧凑的「页面定位说明（Page Subtitle）」，字号为 `Typography.body`，描述简洁明确（不超过 40 字）。
+- **验证手段**：Accessibility Inspector 检查窗口 AX 结构树，断言无重复 `AXHeading`。
+
+### AC-03: 双轨工作台导航与侧边栏唯一全局状态入口
+- **Given**：打开 `SpeechRailApp` 主窗口；
+- **When**：观察侧边栏（Sidebar）；
+- **Then**：
+  1. 侧边栏结构清晰呈现为两大独立语义分组：`STUDIO (创作工坊)`（配音台、音色创作、音色库、我的作品）与 `ENGINE (核心引擎)`（服务中枢、模型档位、运行监控、系统诊断）；
+  2. 侧边栏底部常驻全 App **唯一的紧凑全局服务状态摘要**（如 `[✓ 服务已就绪 · Quality]`），严禁出现无语义的孤立颜色圆点，严禁暴露 `127.0.0.1:8201` 等内部端口；
+  3. 点击侧边栏底部状态，可平滑呼出或跳转至「服务中枢」视图；
+  4. 正文主视区的 `StatusConclusion` 在正常的创作者工作流（配音台、我的作品、音色库）中**保持隐藏**，杜绝与侧边栏/工具栏状态发生双重复制。
+- **验证手段**：UI 自动化测试 + 页面视觉走查。
+
+### AC-04: 模型生命周期与 OperationBar 确定性轨道
+- **Given**：用户在「模型档位」页面对未安装的 Profile（如 Quality 档位）点击下载；
+- **When**：模型长任务处于各个执行阶段（未开始、下载中、校验中、就绪待应用、切换中、已激活、失败/取消）；
+- **Then**：
+  1. 下载中阶段必须实时显示已下载字节、总字节、瞬时速度（MB/s）与预计剩余时间（ETA）；
+  2. 下载与校验完成后，状态明确跃迁为 `[就绪待应用]`，**绝对不得**自动激活或误导用户认为已在生效；
+  3. 用户点击「应用档位」时，弹出二次确定框，明确告知将无缝热重载 TTS/ASR 服务并显示预计耗时；
+  4. 用户主动点击「取消并清理」或发生校验错误时，状态转为 `失败 / 已取消`，并提供垃圾制品清理与一键重试能力；
+  5. 界面中不存在“暂停下载”、“优先下载”等未经 Python 后端支持的虚构功能。
+- **验证手段**：Mock Agent 状态机测试 + 模拟网络错误与校验失败。
+
+### AC-05: Studio 音色创作与声学机架交互
+- **Given**：创作者进入「音色创作」视图；
+- **When**：输入声音 Prompt 描述并生成候选音色；
+- **Then**：
+  1. 描述编辑器获取聚焦时激活专属陶土暖色高亮（`Color.voice`）；
+  2. 提供开箱即用的声学特征胶囊（Acoustic Chips，如 `[＋ 磁性胸腔]`、`[＋ 治愈系]`），点击可将标签无缝插入描述；
+  3. 生成完成后，候选列表以 A/B/C/D 试听机架排列，每项支持：播放/暂停控制、音频波形预览、时长显示以及「保存到音色库」动作；
+  4. 若生成发生异常，展示用户可理解的失败原因与恢复入口，严禁底层原始 Python Traceback 遮蔽创作主视区。
+- **验证手段**：UI 交互测试 + 候选播放器状态流转测试。
+
+### AC-06: 业务创作资产与开发者 Inspector 隐私脱敏隔离
+- **Given**：在「我的作品」选中历史生成项，或在监控/诊断页选中审计对象；
+- **When**：展开右侧上下文 Inspector；
+- **Then**：
+  1. **业务资产侧（我的作品）**：主视图展示创作者完整的输入文本内容（供回溯复用），保障正常业务可读性；
+  2. **开发者审计侧（Developer Inspector）**：严守脱敏协议，仅展示 Request ID、时延（ms）、Token 统计、脱敏 Worker PID 以及会话级匿名分人标签（`speaker_0`）；
+  3. **脱敏红线**：Developer Inspector 与排障日志中**严禁**输出用户完整 Prompt、Base64 音频明文、绝对模型路径或实名身份。
+- **验证手段**：Inspector 数据源绑定单元测试 + 脱敏正则断言。
+
+### AC-07: macOS 桌面人机工学与无障碍/对比度合规
+- **Given**：在 macOS 系统偏好中切换不同辅助功能与显示设置；
+- **When**：遍历 App 各交互表面；
+- **Then**：
+  1. 常用控件尺寸符合 macOS 桌面交互标准：Compact 28pt、Regular 34pt、Prominent 40pt，键盘焦点环（Focus Ring）清晰可辨；
+  2. 默认模式下文本/组件对比度符合 WCAG AA（正文 $\ge 4.5:1$，组件 $\ge 3:1$）；在系统「提高对比度」模式下，关键文字提升至 WCAG AAA（$\ge 7:1$）；
+  3. VoiceOver 轮转器（Rotor）按标准语义顺序导航：`窗口导航 → 页面定位 → 状态结论 (若有) → 主任务区 → 列表/编辑器 → Inspector`；
+  4. 所有状态图标具备 `accessibilityLabel`，所有图表具备 `accessibilityChartDescriptor`，无孤立无名元素。
+- **验证手段**：Accessibility Inspector 审查 + 系统 High Contrast / VoiceOver 走查。
+
+### AC-08: 工程构建门禁与测试套件完全通过
+- **Given**：完成全部 Signal Loom 代码与资源改动；
+- **When**：在仓库根目录执行工程构建与自动化门禁脚本；
+- **Then**：
+  1. `./scripts/macos_app_build.sh --configuration Debug` 构建成功，零编译错误，零新增 Warning；
+  2. Xcode 单元测试 `SpeechRailAppTests` 100% 通过；
+  3. `SpeechRailAppUITests` 彻底消除多窗口并发定位冲突，全套 UI 用例全部亮绿灯；
+  4. 全局质量门禁 `uv run --extra dev pytest`、`ruff check`、`mypy src`、`npx @redocly/cli lint contracts/openapi.yaml` 及 `git diff --check` 全部通过。
+- **验证手段**：本地构建脚本与质量门禁命令全量执行。

@@ -106,7 +106,7 @@ public struct RuntimeMonitoringView: View {
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
                 Text(latestSample == nil ? "等待首个样本" : "自动刷新 · 5 秒")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             if !RuntimeMonitoringChartDescriptor.isSufficient(chartPoints) {
                 ContentUnavailableView(
@@ -124,13 +124,13 @@ public struct RuntimeMonitoringView: View {
                         x: .value("时间", sample.capturedAt),
                         y: .value("活跃请求", sample.activeRequests)
                     )
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.railSignal)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                     .interpolationMethod(.catmullRom)
                     PointMark(
                         x: .value("时间", sample.capturedAt),
                         y: .value("活跃请求", sample.activeRequests)
                     )
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.railSignal)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                 }
                 .frame(height: SpeechRailDesignTokens.Layout.monitoringChartHeight)
                 .chartYAxisLabel("请求数")
@@ -143,11 +143,11 @@ public struct RuntimeMonitoringView: View {
             if let message = model.message, !message.isEmpty {
                 Text(message)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.attention)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.attention)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailField()
     }
 
     @ViewBuilder
@@ -189,7 +189,7 @@ public struct RuntimeMonitoringView: View {
         LabeledContent(title) {
             Text(value)
                 .font(SpeechRailDesignTokens.Typography.technical)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
     }
 

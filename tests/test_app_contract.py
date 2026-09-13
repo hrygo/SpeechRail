@@ -246,6 +246,25 @@ def test_request_id_is_returned_without_caching() -> None:
     assert response.headers["Cache-Control"] == "no-store"
 
 
+def test_runtime_openapi_describes_binary_speech_responses() -> None:
+    response = _client().app.openapi()["paths"]["/v1/audio/speech"]["post"]["responses"]["200"]
+
+    expected_media_types = {
+        "audio/mpeg",
+        "audio/opus",
+        "audio/aac",
+        "audio/flac",
+        "audio/wav",
+        "audio/x-pcm",
+    }
+    assert response["description"] == "Synthesized audio stream"
+    assert set(response["content"]) == expected_media_types
+    assert all(
+        media["schema"] == {"type": "string", "format": "binary"}
+        for media in response["content"].values()
+    )
+
+
 def test_private_realtime_v2_endpoint_is_removed() -> None:
     response = _client().get("/v2/realtime")
 

@@ -56,7 +56,7 @@ public struct PreflightDiagnosticsView: View {
                     LabeledContent("结果", value: selectedCheck.ok ? "通过" : "失败")
                     Text(selectedCheck.message)
                         .font(SpeechRailDesignTokens.Typography.technical)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .textSelection(.enabled)
                 }
             }
@@ -145,7 +145,7 @@ public struct PreflightDiagnosticsView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailField()
     }
 
     private var detailPanel: some View {
@@ -156,25 +156,26 @@ public struct PreflightDiagnosticsView: View {
                         .font(.title2)
                         .foregroundStyle(
                             selectedCheck.ok
-                                ? SpeechRailDesignTokens.Palette.healthy
-                                : SpeechRailDesignTokens.Palette.critical
+                                ? SpeechRailDesignTokens.Color.ready
+                                : SpeechRailDesignTokens.Color.critical
                         )
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                         Text(selectedCheck.name)
                             .font(SpeechRailDesignTokens.Typography.windowTitle)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         Text(selectedCheck.ok ? "通过" : "失败")
-                            .font(SpeechRailDesignTokens.Typography.secondary)
+                            .font(SpeechRailDesignTokens.Typography.body)
                             .foregroundStyle(
                                 selectedCheck.ok
-                                    ? SpeechRailDesignTokens.Palette.healthy
-                                    : SpeechRailDesignTokens.Palette.critical
+                                    ? SpeechRailDesignTokens.Color.ready
+                                    : SpeechRailDesignTokens.Color.critical
                             )
                     }
                 }
                 Text(selectedCheck.message)
                     .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .textSelection(.enabled)
                 Divider()
                 SectionHeading(
@@ -213,11 +214,11 @@ public struct PreflightDiagnosticsView: View {
             if let message = model.message, !message.isEmpty {
                 Text(message)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailField()
     }
 
     private var selectedCheck: PreflightCheckSnapshot? {
@@ -240,16 +241,17 @@ private struct PreflightCheckRow: View {
             Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundStyle(
                     check.ok
-                        ? SpeechRailDesignTokens.Palette.healthy
-                        : SpeechRailDesignTokens.Palette.critical
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.critical
                 )
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(check.name)
                     .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 Text(check.ok ? "通过" : "失败")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             Spacer(minLength: 0)
         }

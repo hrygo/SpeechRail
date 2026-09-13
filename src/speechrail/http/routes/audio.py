@@ -456,6 +456,17 @@ _TTS_CONTAINER_ENCODERS: dict[str, tuple[str, tuple[str, ...]]] = {
     "aac": ("audio/aac", ("-c:a", "aac", "-f", "adts")),
     "flac": ("audio/flac", ("-c:a", "flac", "-f", "flac")),
 }
+_TTS_OPENAPI_RESPONSE = {
+    "description": "Synthesized audio stream",
+    "content": {
+        "audio/mpeg": {"schema": {"type": "string", "format": "binary"}},
+        "audio/opus": {"schema": {"type": "string", "format": "binary"}},
+        "audio/aac": {"schema": {"type": "string", "format": "binary"}},
+        "audio/flac": {"schema": {"type": "string", "format": "binary"}},
+        "audio/wav": {"schema": {"type": "string", "format": "binary"}},
+        "audio/x-pcm": {"schema": {"type": "string", "format": "binary"}},
+    },
+}
 
 
 async def _stream_encode_container(
@@ -1305,7 +1316,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         return Response(content=content, media_type=media_type)
 
-    @router.post("/v1/audio/speech")
+    @router.post(
+        "/v1/audio/speech",
+        response_class=Response,
+        responses={200: _TTS_OPENAPI_RESPONSE},
+    )
     async def speech(request: Request, body: _SpeechHTTPBody) -> Response:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:

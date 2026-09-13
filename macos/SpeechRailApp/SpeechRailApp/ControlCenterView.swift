@@ -3,13 +3,21 @@ import SwiftUI
 public struct ControlCenterView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.dismiss) private var dismiss
     @State private var selection: AppRoute? = .overview
     @State private var searchText = ""
 
     public init() {}
 
     public var body: some View {
-        NavigationSplitView {
+        if isUITestWithoutControlCenter {
+            Color.clear
+                .frame(width: 0, height: 0)
+                .onAppear {
+                    dismiss()
+                }
+        } else {
+            NavigationSplitView {
             List(selection: $selection) {
                 if !visibleCreatorRoutes.isEmpty {
                     Section {
@@ -26,11 +34,7 @@ public struct ControlCenterView: View {
                             navigationRow(for: route)
                         }
                     } header: {
-                        HStack {
-                            Text(AppRouteGroup.service.title)
-                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                            ServiceStatusBadge(compact: true)
-                        }
+                        Text(AppRouteGroup.service.title)
                     }
                 }
                 if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
@@ -45,14 +49,22 @@ public struct ControlCenterView: View {
                 ideal: SpeechRailDesignTokens.Layout.sidebarIdealWidth,
                 max: SpeechRailDesignTokens.Layout.sidebarMaximumWidth
             )
+            .safeAreaInset(edge: .bottom) {
+                sidebarFooter
+            }
             .backgroundExtensionEffect()
         } detail: {
             detailView(for: selection ?? .overview)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .toolbar {
                     ToolbarItem(placement: .principal) {
-                        Text(selection?.title ?? AppRoute.overview.title)
-                            .font(SpeechRailDesignTokens.Typography.panelTitle)
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text(selection?.title ?? AppRoute.overview.title)
+                                .font(SpeechRailDesignTokens.Typography.panelTitle)
+                            if selection?.group == .service {
+                                statusPill
+                            }
+                        }
                     }
                     ToolbarSpacer(.flexible)
                     ToolbarItem(placement: .primaryAction) {
@@ -81,6 +93,87 @@ public struct ControlCenterView: View {
                 selection = route
             }
         }
+        }
+    }
+
+    private var sidebarFooter: some View {
+        Button {
+            selection = .overview
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: globalStatusIcon)
+                    .foregroundStyle(globalStatusColor)
+                    .imageScale(.small)
+                Text(globalStatusText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.primaryText)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if let profile = model.profile?.preset {
+                    Text(profile.rawValue)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+            .background(
+                SpeechRailDesignTokens.Color.field.opacity(0.85),
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row)
+                    .stroke(SpeechRailDesignTokens.Surface.hairlineStroke, lineWidth: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .help("点击打开服务状态概览")
+        .accessibilityLabel("全局服务状态：\(globalStatusText)")
+    }
+
+    private var statusPill: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Image(systemName: globalStatusIcon)
+                .imageScale(.small)
+            Text(globalStatusText)
+                .font(SpeechRailDesignTokens.Typography.caption)
+        }
+        .foregroundStyle(globalStatusColor)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, 2)
+        .background(globalStatusColor.opacity(0.12), in: Capsule())
+    }
+
+    private var globalStatusIcon: String {
+        if model.service.ready == true {
+            return "checkmark.circle.fill"
+        }
+        if model.service.serviceState == "unavailable" {
+            return "xmark.circle.fill"
+        }
+        return "exclamationmark.triangle.fill"
+    }
+
+    private var globalStatusColor: SwiftUI.Color {
+        if model.service.ready == true {
+            return SpeechRailDesignTokens.Color.ready
+        }
+        if model.service.serviceState == "unavailable" {
+            return SpeechRailDesignTokens.Color.critical
+        }
+        return SpeechRailDesignTokens.Color.attention
+    }
+
+    private var globalStatusText: String {
+        if model.service.ready == true {
+            return "服务已就绪"
+        }
+        if model.service.serviceState == "unavailable" {
+            return "服务不可用"
+        }
+        return "服务未就绪"
     }
 
     private var visibleCreatorRoutes: [AppRoute] {
@@ -137,5 +230,10 @@ public struct ControlCenterView: View {
                 EmptyView()
             }
         }
+    }
+
+    private var isUITestWithoutControlCenter: Bool {
+        let args = ProcessInfo.processInfo.arguments
+        return args.contains("--ui-test") && !args.contains("--ui-test-open-control-center")
     }
 }
