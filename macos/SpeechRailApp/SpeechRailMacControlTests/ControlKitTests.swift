@@ -100,6 +100,54 @@ final class ControlKitTests: XCTestCase {
         XCTAssertEqual(decoded.modelCatalog?.profiles, [])
     }
 
+    func testRecoveryFieldsRoundTripWithoutChangingSchemaVersion() throws {
+        let operation = OperationSnapshot(
+            operationID: "model_recovery_123",
+            command: .modelPrepare,
+            profile: .quality,
+            state: .interrupted,
+            phase: "download",
+            progress: OperationProgressSnapshot(
+                artifactKey: "fake-asr",
+                file: "weights.bin",
+                completedBytes: 64,
+                expectedBytes: 128
+            ),
+            message: "previous preparation was interrupted"
+        )
+        let modelStatus = ModelStatusSnapshot(
+            artifacts: [],
+            disk: ModelDiskSnapshot(modelBytes: 64, freeBytes: 1024),
+            activeOperation: operation
+        )
+
+        let response = ControlResponse(
+            requestID: UUID(),
+            command: .modelStatus,
+            status: .ok,
+            modelStatus: modelStatus
+        )
+        let decoded = try ControlWireCodec.decode(
+            ControlResponse.self,
+            from: ControlWireCodec.encode(response)
+        )
+
+        XCTAssertEqual(decoded.schemaVersion, ControlConstants.schemaVersion)
+        XCTAssertEqual(decoded.modelStatus?.activeOperation, operation)
+        XCTAssertEqual(decoded.modelStatus?.activeOperation?.profile, .quality)
+        XCTAssertEqual(decoded.modelStatus?.activeOperation?.state, .interrupted)
+    }
+
+    func testLegacyModelStatusWithoutActiveOperationDecodesAsNoRecovery() throws {
+        let data = Data(
+            #"{"artifacts":[],"diarization":[],"disk":{"model_bytes":0,"free_bytes":1024}}"#.utf8
+        )
+
+        let decoded = try ControlWireCodec.decode(ModelStatusSnapshot.self, from: data)
+
+        XCTAssertNil(decoded.activeOperation)
+    }
+
     func testProfileSummaryAcceptsLegacyPayloadWithoutDiarization() throws {
         let data = Data(
             #"{"id":"balanced","asr":"asr","tts":"tts","aligner":null,"download_bytes":10}"#

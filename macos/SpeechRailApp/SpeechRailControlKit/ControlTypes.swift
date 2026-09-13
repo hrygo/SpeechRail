@@ -67,6 +67,7 @@ public enum ControlResponseStatus: String, Codable, Sendable {
 public enum OperationState: String, Codable, Sendable {
     case accepted
     case running
+    case interrupted
     case committed
     case failed
     case cancelled
@@ -228,6 +229,7 @@ public struct PreflightCheckSnapshot: Codable, Equatable, Sendable {
 public struct OperationSnapshot: Codable, Equatable, Sendable {
     public let operationID: String
     public let command: ControlCommand
+    public let profile: SpeechRailProfile?
     public let state: OperationState
     public let phase: String?
     public let progress: OperationProgressSnapshot?
@@ -237,6 +239,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
     public init(
         operationID: String,
         command: ControlCommand,
+        profile: SpeechRailProfile? = nil,
         state: OperationState,
         phase: String? = nil,
         progress: OperationProgressSnapshot? = nil,
@@ -245,6 +248,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
     ) {
         self.operationID = operationID
         self.command = command
+        self.profile = profile
         self.state = state
         self.phase = phase
         self.progress = progress

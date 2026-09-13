@@ -230,6 +230,7 @@ public actor AgentOperationStore {
         let status: ControlResponseStatus = switch operation.state {
         case .accepted: .accepted
         case .running: .running
+        case .interrupted: .failed
         case .committed: .committed
         case .failed: .failed
         case .cancelled: .cancelled

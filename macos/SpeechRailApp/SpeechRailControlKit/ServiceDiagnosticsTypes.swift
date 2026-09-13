@@ -362,21 +362,25 @@ public struct ModelStatusSnapshot: Codable, Equatable, Sendable {
     public let artifacts: [ModelArtifactStatusSnapshot]
     public let diarization: [ModelArtifactStatusSnapshot]
     public let disk: ModelDiskSnapshot
+    public let activeOperation: OperationSnapshot?
 
     public init(
         artifacts: [ModelArtifactStatusSnapshot],
         diarization: [ModelArtifactStatusSnapshot] = [],
-        disk: ModelDiskSnapshot
+        disk: ModelDiskSnapshot,
+        activeOperation: OperationSnapshot? = nil
     ) {
         self.artifacts = artifacts
         self.diarization = diarization
         self.disk = disk
+        self.activeOperation = activeOperation
     }
 
     enum CodingKeys: String, CodingKey {
         case artifacts
         case diarization
         case disk
+        case activeOperation = "active_operation"
     }
 }
 
