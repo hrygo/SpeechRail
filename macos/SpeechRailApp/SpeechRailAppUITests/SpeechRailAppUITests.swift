@@ -4,13 +4,7 @@ import XCTest
 final class SpeechRailAppUITests: XCTestCase {
     func testControlCenterSeparatesCreatorAndServiceNavigation() {
         let app = launchSpeechRail()
-
-        let statusItem = app.menuBars.statusItems.firstMatch
-        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
-        statusItem.click()
-        let controlCenterMenuItem = statusItem.menus.firstMatch.menuItems["打开管理控制台"]
-        XCTAssertTrue(controlCenterMenuItem.waitForExistence(timeout: 2))
-        controlCenterMenuItem.click()
+        openControlCenter(in: app)
 
         XCTAssertTrue(app.staticTexts["服务状态"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["音色创作"].exists)
@@ -33,6 +27,9 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["服务状态"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
         XCTAssertTrue(app.staticTexts["服务状态"].exists)
+        XCTAssertTrue(app.staticTexts["确认本机语音服务能否使用"].exists)
+        XCTAssertTrue(app.staticTexts["能力"].exists)
+        XCTAssertTrue(app.buttons["运行预检"].exists)
 
         app.buttons["模型"].tap()
         XCTAssertTrue(app.staticTexts["模型"].waitForExistence(timeout: 2))
@@ -54,7 +51,7 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     func testMonitoringExplainsMissingMetrics() {
-        let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-metrics-unavailable"])
+        let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-metrics-unavailable"])
         openControlCenter(in: app)
         app.buttons["运行监控"].tap()
 
@@ -63,7 +60,7 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     func testModelRecoveryRestoresInterruptedOperationAndRetryAction() {
-        let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-model-recovery"])
+        let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-model-recovery"])
         openControlCenter(in: app)
         app.buttons["模型"].tap()
 
@@ -73,7 +70,7 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     func testSettingsContainAppPreferencesOnly() {
-        let app = launchSpeechRail()
+        let app = launchSpeechRail(arguments: ["--ui-test"])
         let statusItem = app.menuBars.statusItems.firstMatch
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
@@ -86,7 +83,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["服务状态"].exists)
     }
 
-    private func launchSpeechRail(arguments: [String] = ["--ui-test"]) -> XCUIApplication {
+    private func launchSpeechRail(arguments: [String] = ["--ui-test", "--ui-test-open-control-center"]) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = arguments
         app.launch()
@@ -98,8 +95,6 @@ final class SpeechRailAppUITests: XCTestCase {
         let statusItem = app.menuBars.statusItems.firstMatch
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
-        let controlCenterMenuItem = statusItem.menus.firstMatch.menuItems["打开管理控制台"]
-        XCTAssertTrue(controlCenterMenuItem.waitForExistence(timeout: 2))
-        controlCenterMenuItem.click()
+        XCTAssertTrue(app.windows["SpeechRail 管理控制台"].waitForExistence(timeout: 5))
     }
 }

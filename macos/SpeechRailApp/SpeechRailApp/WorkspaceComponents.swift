@@ -46,7 +46,7 @@ public struct PageIntroView: View {
             .font(SpeechRailDesignTokens.Typography.secondary)
             .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel("(route.title)，(route.purpose)")
+            .accessibilityLabel(route.purpose)
     }
 }
 
@@ -115,7 +115,7 @@ public struct StatusBanner: View {
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailContentSurface()
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("(title)，(message)")
+        .accessibilityLabel("\(title)，\(message)")
     }
 }
 
@@ -232,7 +232,7 @@ public struct OperationBar: View {
                     {
                         ProgressView(value: Double(completed), total: Double(expected))
                             .controlSize(.small)
-                        Text("(ByteCountFormatter.string(fromByteCount: completed, countStyle: .file)) / (ByteCountFormatter.string(fromByteCount: expected, countStyle: .file))")
+                        Text("\(ByteCountFormatter.string(fromByteCount: completed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: expected, countStyle: .file))")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                     }

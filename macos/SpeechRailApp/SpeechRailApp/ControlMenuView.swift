@@ -12,9 +12,15 @@ public struct ControlMenuView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xxs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "waveform")
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.railSignal)
                 Text("SpeechRail")
-                    .font(SpeechRailDesignTokens.Typography.panelTitle)
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                ServiceStatusBadge()
+            }
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(statusSummary)
                     .font(SpeechRailDesignTokens.Typography.secondary)
                     .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
@@ -79,7 +85,12 @@ public struct ControlMenuView: View {
                 pendingServiceAction = nil
             }
         }
-        .task { await model.refresh() }
+        .task {
+            await model.refresh()
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-open-control-center") {
+                openWindow(id: AppNavigationState.controlCenterWindowID)
+            }
+        }
     }
 
     private var statusSummary: String {

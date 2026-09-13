@@ -102,11 +102,16 @@ public struct ControlCenterView: View {
 
     @ViewBuilder
     private func navigationRow(for route: AppRoute) -> some View {
-        Label {
-            Text(route.title)
-        } icon: {
-            Image(systemName: route.systemImage)
+        Button {
+            selection = route
+        } label: {
+            Label {
+                Text(route.title)
+            } icon: {
+                Image(systemName: route.systemImage)
+            }
         }
+        .buttonStyle(.plain)
         .tag(route)
         .accessibilityIdentifier(route.id)
         .help(route.purpose)

@@ -9,31 +9,30 @@ struct ControlAgentStatusView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Label {
-                Text(model.controlAgentStatus.title)
-                    .font(SpeechRailDesignTokens.Typography.panelTitle)
-            } icon: {
-                Image(systemName: model.controlAgentStatus.allowsMutation
-                    ? "checkmark.shield.fill"
-                    : "exclamationmark.shield.fill")
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: model.controlAgentStatus.allowsMutation
+                ? "checkmark.shield.fill"
+                : "exclamationmark.shield.fill")
                 .foregroundStyle(model.controlAgentStatus.allowsMutation
-                    ? SpeechRailDesignTokens.Palette.success
-                    : SpeechRailDesignTokens.Palette.warning)
+                    ? SpeechRailDesignTokens.Palette.healthy
+                    : SpeechRailDesignTokens.Palette.attention)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(model.controlAgentStatus.title)
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                Text(model.controlAgentStatus.detail)
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                Text("影响：\(model.controlAgentStatus.impact)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                if !compact {
+                    action
+                }
             }
-            Text(model.controlAgentStatus.detail)
-                .font(SpeechRailDesignTokens.Typography.secondary)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-            Text("影响：\(model.controlAgentStatus.impact)")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-
-            if !compact {
-                action
-            }
+            Spacer(minLength: 0)
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("control-agent-status")
     }
