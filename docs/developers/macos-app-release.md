@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.3.0"
+version: "0.4.0"
 date: 2026-09-13
 ---
 
@@ -11,7 +11,7 @@ date: 2026-09-13
 
 当前开发机按无 Apple Developer ID 模式运行：Debug/Release 使用 ad hoc 本地签名构建并关闭 Hardened Runtime，测试脚本默认保留该本地签名，以便 Xcode UI test runner 正常加载 `Testing.framework` 运行库；不会生成可分发的 archive，不会上传 notarization，也不会修改钥匙串或用户的登录项。只有显式设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=0` 才会请求 unsigned test bundle；Distribution 配置才启用 Hardened Runtime。
 
-本地安装的 Debug/Release App 使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动控制 helper，不注册 `SMAppService`。App 启动时会尽力清理早期 ad hoc 版本留下的失败 `SMAppService` 记录。只有 Distribution 包在具备 Team ID 和签名时，才使用 `SMAppService` LaunchAgent；这一步不代表 ad hoc 包具备 Developer ID 分发资格。
+本地安装的 Debug/Release App 使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动控制 helper，不注册 `SMAppService`，也不会修改 Distribution 的登录项记录。只有 Distribution 包在具备 Team ID 和签名时，才使用 `SMAppService` LaunchAgent；App 先呈现系统授权状态，只有用户明确点击启用时才注册，这一步不代表 ad hoc 包具备 Developer ID 分发资格。
 
 这不等同于可交付给其他 Mac 的发布包。站外直接分发仍保留 Developer ID Application + notarization 路径，待用户准备 Apple Developer 账号、证书和 notarization credential 后再启用。
 

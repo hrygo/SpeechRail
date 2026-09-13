@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.4.0"
+version: "0.5.0"
 date: 2026-09-13
 ---
 
@@ -43,7 +43,7 @@ App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志
 - `com.speechrail` 是实际服务 owner，必须由服务发布/安装流程负责登录常驻；`SpeechRail.app` 只是按需打开的控制面，不是登录启动项。
 - `com.speechrail.desktop.control` 是 Distribution 中由 App 通过 `SMAppService` 管理的独立 XPC helper；它不拥有 8201、不加载模型、不创建第二个服务实例。
 - `com.speechrail.desktop.local-control` 是 Debug/Release 内嵌的 XPC service，仅在 App 需要控制操作时由系统按需启动；它不注册登录项、不依赖 Developer ID，也不拥有 8201。两种模式都复用同一个 `SpeechRailControlAgentCore` 和 XPC 协议。
-- 签名 Distribution App 启动和控制操作前会以嵌入 helper 的 SHA-256 指纹维护 `SMAppService` 注册状态；首次安装、替换 bundle 或 helper 发生变化时，只对原本已启用的 item 做一次注销/重新注册，刷新 macOS 的 launch constraint，不覆盖用户在系统设置中的禁用/待批准状态。本机 Debug/Release 不走这条注册路径。
+- 签名 Distribution App 只读取 `SMAppService` 的 status snapshot：`enabled` 允许 mutation，`notRegistered` 由用户明确点击启用后调用 `register()`，`requiresApproval` 只打开 Login Items，`notFound` 和未知状态 fail closed。本机 Debug/Release 只使用内嵌 XPC，不触碰 Distribution 的登录项记录；App 启动不会隐式 `unregister()` 或吞掉注册错误。
 - `service-only`、`app-only` 和 `combined` release 允许独立回滚。联合发布必须先验收 service wheel，再验收 App 的 `status`/`preflight` 控制链路；发布、安装、清理和回滚统一见 [macOS App 分发与签名](macos-app-release.md) 与 [版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)。
 
 ## 本地开发
@@ -61,6 +61,7 @@ App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志
 - profile apply 仍由 Python transaction journal、preflight、public smoke 和 rollback 决定成功与否；App 不自行推断模型能力。
 - `model prepare` 是独立的可取消 mutation；Agent 仅转发已确认的档位、进度和终态，取消后不会把部分 staging 目录当作可用模型。
 - 模型 progress 的 `phase` 使用 `download`、`verifying`、`publishing` 等受控值；文件名、字节数可以显示给用户，但不携带 URL、绝对路径或凭据。
+- `model prepare` 的 active operation 会在 managed app home 的受控 journal 中保存脱敏元数据；App/Agent 重启后只恢复 active/interrupted 的解释状态，不承诺续传。`model.status` 的 manifest 校验仍是模型可用性的最终事实来源，终态 operation 会清理 active journal。
 - 运行监控只保留最近 60 个内存样本，页面关闭不改变服务；无 metrics 时显示“等待监控样本”，不显示虚构的 0 值或容量。
 
 ## 控制操作错误契约
@@ -76,8 +77,9 @@ App 默认只读 loopback 的公开状态端点；模型目录、`.env`、日志
 ## 常见恢复
 
 - Distribution Agent 显示为 disabled 或 requires approval：打开 System Settings 的 Login Items & Extensions，检查 `SpeechRailControlAgent` 的用户批准状态，然后回到 App 重试。
-- 本机 Debug/Release 不应依赖 Login Items 中的 control helper。若旧 ad hoc 版本留下了失败的 `SMAppService` 记录，当前本地模式启动时会尽力注销旧记录，再使用内嵌 XPC service；不要手工复制 plist 或直接启动第二个 Agent。
-- 替换签名 Distribution App 后，App 会检测 helper 指纹并刷新 `SMAppService` 注册；仍失败时看 App 展示的 phase/error code。
+- 本机 Debug/Release 不依赖 Login Items 中的 control helper，也不会清理或注销用户已有的 Distribution 注册；如果本地 XPC 不可用，运行预检并重新构建受控 bundle，不手工复制 plist 或直接启动第二个 Agent。
+- 替换签名 Distribution App 后，先看 App 展示的 `enabled`/`requiresApproval`/`notFound` 状态；只有用户明确启用时才注册，不通过隐式注销/重注册修复授权。
+- 如果模型准备在 Agent 重启后显示“上次准备被中断”，重新执行“下载并校验”；不要把 journal 的进度当作可续传证明，也不要直接把 staging 文件当作 verified 模型。
 - managed runtime 缺失：先运行 `speechrail service preflight --app-home "$SPEECHRAIL_APP_HOME"`，不要让 App 下载模型或创建第二个 runtime。
 - 服务不 ready：检查现有 `com.speechrail` 状态、端口和 `/health`/`/readyz`；App 退出不会自动停止服务。
 

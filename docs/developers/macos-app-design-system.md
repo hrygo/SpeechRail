@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.2.0"
+version: "0.3.0"
 date: 2026-09-13
 ---
 
@@ -82,11 +82,11 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 ## 4. 验收清单
 
-- [ ] App target 的最低系统版本为 macOS 26.0，并使用系统 Liquid Glass 结构能力。
-- [ ] App 未通过自绘背景阻断 scroll edge effect，也未以 Material 替代 Liquid Glass。
+- [x] App target 的最低系统版本为 macOS 26.0，并使用系统 Liquid Glass 结构能力（2026-09-13 Debug build 已验证）。
+- [x] App 未通过自绘背景阻断 scroll edge effect，也未以 Material 替代 Liquid Glass（detail 根背景已移除，玻璃组使用 `GlassEffectContainer`）。
 - [ ] 所有 App 页面只从 `SpeechRailDesignTokens` 读取产品 token。
-- [ ] Light、Dark、Increase Contrast、Dynamic Type 和 Reduce Motion 均有 UI 验证。
-- [ ] VoiceOver 可按“导航 → 页面说明 → 主操作 → 状态详情”的顺序访问。
+- [ ] Light、Dark、Increase Contrast、Dynamic Type 和 Reduce Motion 均有 UI 验证；当前只完成代码/构建检查，尚未完成桌面人工矩阵。
+- [ ] VoiceOver 可按“导航 → 页面说明 → 主操作 → 状态详情”的顺序访问；图表、档位和 DisclosureGroup 语义已接入，尚未完成桌面 VoiceOver 实测。
 - [ ] 页面高频动作可从 toolbar、菜单栏或键盘路径到达，不依赖 hover。
 - [ ] 音色创作、模型下载、profile 应用、服务启停和回退的边界在 UI 文案中清楚可见。
 
