@@ -66,6 +66,33 @@ private struct ModelStatusRunner: ManagedCommandRunner {
     }
 }
 
+private actor BlockingModelPreparationRunner: ManagedCommandRunner {
+    private var continuation: CheckedContinuation<ManagedCommandResult, Never>?
+
+    func run(_ command: ManagedCommand) async throws -> ManagedCommandResult {
+        if case .modelPrepare = command {
+            return await withCheckedContinuation { continuation in
+                self.continuation = continuation
+            }
+        }
+        return try await ModelStatusRunner().run(command)
+    }
+
+    func complete() {
+        continuation?.resume(
+            returning: ManagedCommandResult(
+                exitCode: 0,
+                response: ControlResponse(
+                    requestID: UUID(),
+                    command: .modelPrepare,
+                    status: .committed
+                )
+            )
+        )
+        continuation = nil
+    }
+}
+
 private final class ProgressRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var snapshots: [OperationProgressSnapshot] = []
@@ -166,6 +193,37 @@ final class AgentCoreTests: XCTestCase {
             serviceStatus.errorCode,
             nil
         )
+    }
+
+    func testModelStatusPrefersNewPreparationOverAnInterruptedRecord() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-retry-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = OperationJournal(appHome: root)
+        try journal.save(
+            OperationSnapshot(
+                operationID: "control_old_123",
+                command: .modelPrepare,
+                profile: .quality,
+                state: .interrupted,
+                phase: "download"
+            )
+        )
+        let runner = BlockingModelPreparationRunner()
+        let store = AgentOperationStore(runner: runner, journal: journal)
+        let request = ControlRequest(
+            command: .modelPrepare,
+            profile: .light,
+            confirmation: true
+        )
+
+        let accepted = await store.handle(request)
+        let status = await store.handle(ControlRequest(command: .modelStatus))
+
+        XCTAssertEqual(status.modelStatus?.activeOperation?.operationID, accepted.operation?.operationID)
+        XCTAssertEqual(status.modelStatus?.activeOperation?.profile, .light)
+
+        await runner.complete()
     }
 
     func testTerminalOperationClearsActiveJournal() async throws {

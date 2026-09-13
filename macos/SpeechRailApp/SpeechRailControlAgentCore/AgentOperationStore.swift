@@ -16,7 +16,7 @@ public actor AgentOperationStore {
         self.journal = journal
         if let journal {
             do {
-                if let entry = try journal.load() {
+                if let entry = try journal.load(), entry.operation.command == .modelPrepare {
                     switch entry.operation.state {
                     case .accepted, .running:
                         let interrupted = OperationSnapshot(
@@ -379,12 +379,7 @@ public actor AgentOperationStore {
     }
 
     private func modelStatusResponse(from response: ControlResponse) -> ControlResponse {
-        let activeOperation = operations.values
-            .filter {
-                $0.command == .modelPrepare
-                    && ($0.state == .accepted || $0.state == .running || $0.state == .interrupted)
-            }
-            .first
+        let activeOperation = activeModelOperation
         let modelStatus = response.modelStatus.map {
             ModelStatusSnapshot(
                 artifacts: $0.artifacts,
@@ -408,6 +403,19 @@ public actor AgentOperationStore {
             operation: response.operation,
             schemaVersion: response.schemaVersion
         )
+    }
+
+    private var activeModelOperation: OperationSnapshot? {
+        if let activeMutation,
+           let operation = operations[activeMutation],
+           operation.command == .modelPrepare,
+           operation.state == .accepted || operation.state == .running
+        {
+            return operation
+        }
+        return operations.values.first {
+            $0.command == .modelPrepare && $0.state == .interrupted
+        }
     }
 
     nonisolated private static func profile(for command: ManagedCommand) -> SpeechRailProfile? {
