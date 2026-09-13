@@ -2,15 +2,17 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.6.5"
-date: 2026-09-09
+version: "1.7.0"
+date: 2026-09-13
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
 
 > 本 Runbook 规定了在 macOS 本机环境下部署、启动、维护、排障与回滚 SpeechRail 的标准化操作流程。
 
-服务发布、安装、停启、切档和基准共同遵守 [本机 operator contract](../../.agents/skills/speechrail-local-deploy/references/operator-contract.md)。本机允许完全停服和数分钟启动真空；生命周期 controller 在短等待无响应时只对已核验的精确 PID/进程组强杀。
+服务发布、安装、停启、切档和基准共同遵守 [本机 operator contract](../../.agents/skills/speechrail-local-deploy/references/operator-contract.md)。版本发布的 canonical 流程见 [SpeechRail 版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)；App 的构建、签名、安装、清理和回滚见 [macOS App 分发与签名](../developers/macos-app-release.md)。本机允许完全停服和数分钟启动真空；生命周期 controller 在短等待无响应时只对已核验的精确 PID/进程组强杀。
+
+服务与 App 是两个发布单元：`com.speechrail` LaunchAgent 负责登录常驻和 8201 服务，`SpeechRail.app` 按需打开，只通过 `com.speechrail.desktop.control` helper 控制现有服务。App 退出或升级不得影响服务；联合发布必须先服务、后 App。
 
 ---
 
@@ -136,11 +138,11 @@ sequenceDiagram
 
     SRE->>Old: 1. 安全停服 (service stop)
     SRE->>New: 2. 安装新 Wheel 至隔离 Release 目录
-    SRE->>New: 3. 执行 Pre-flight 静态与 Smoke 验证
+    SRE->>New: 3. 执行 Pre-flight 静态验证
     alt 验证通过
-        SRE->>Agent: 4. 原子切换 runtime/current 指针
-        SRE->>Agent: 5. 重新生成 Plist 并 service start
-        SRE->>New: 6. 验证 /health, /readyz 为 200
+        SRE->>Agent: 4. 原子切换 runtime/current 与 plist
+        SRE->>Agent: 5. controller-backed service start
+        SRE->>New: 6. 验证 /health、/readyz、models/voices 与 smoke
     else 验证失败 (触发回滚)
         SRE->>Old: 回滚至旧版本 runtime/current 指针
         SRE->>Agent: 重新启用旧版本 LaunchAgent
@@ -148,17 +150,22 @@ sequenceDiagram
     end
 ```
 
-### 标准发布升级步骤（managed）：
+### 标准服务发布升级步骤（managed）：
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 
-# 1. 安全停用当前旧服务
+# 1. 先完成运行态快照和外部 realtime 客户端隔离
+speechrail service status --app-home "$APP_HOME"
+speechrail profile status --app-home "$APP_HOME"
+speechrail service preflight --app-home "$APP_HOME"
+
+# 2. 安全停用当前旧服务，并确认 8201 lock 已释放
 uv run speechrail service stop --app-home "$APP_HOME"
 
-# 2. 构建新版本 Wheel
+# 3. 构建新版本 Wheel
 uv build --no-sources --wheel
 
-# 3. 通过唯一 managed installer 准备 active profile、preflight 并启用
+# 4. 通过唯一 managed installer 准备 active profile、preflight、plist 和 runtime/current
 uv run python - <<PY
 import os
 from pathlib import Path
@@ -175,15 +182,26 @@ with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)
         app_home=app_home,
         preset_id=preset,
         downloader=ModelScopeDownloader(client=client),
-        enable=True,
+        enable=False,
     )
 PY
 
-# 4. 验证新版本端点与真实 TTS→ASR smoke
-curl http://127.0.0.1:8201/health
-curl http://127.0.0.1:8201/readyz
+# 5. 由 lifecycle controller 启动，并验证端点与真实 TTS→ASR smoke
+uv run speechrail service start --app-home "$APP_HOME"
+curl --fail http://127.0.0.1:8201/health
+curl --fail http://127.0.0.1:8201/readyz
+curl --fail http://127.0.0.1:8201/v1/models
+curl --fail http://127.0.0.1:8201/v1/voices
 ```
 
 安装入口只有 managed installer。它会在 staging 和切换前复用 per-port lock；服务未完全停下时不会替换
-runtime/current。启用或 post-enable smoke 失败时会停止候选、清理首次安装的 selection 并恢复旧指针。
+runtime/current。`enable=False` 只安装候选 plist 和切换已验证的 runtime，不启动服务；随后必须由
+controller-backed `service start` 启动。启动或 smoke 失败时停止候选、清理首次安装的 selection 并恢复旧指针。
 发布完成后仍须核对 `/health`、`/readyz`、models/voices、PID/listener 和真实 TTS→ASR 结果。
+
+### App 发布与联合发布
+
+- App-only 或 Distribution 归档不执行服务停启；按 [macOS App 分发与签名](../developers/macos-app-release.md) 构建、测试、逐项签名、公证、安装和清理。
+- App 安装前服务必须已经 ready；App 只通过 `SMAppService` 管理 `com.speechrail.desktop.control`，不直接调用 `launchctl`，不加载模型，不创建第二个 worker。
+- 联合发布固定顺序为：服务 wheel gate → managed preflight/原子切换 → 服务 health/ready/smoke → App archive/verify/notarize → 唯一安装路径与 XPC `status`/`preflight` smoke → 退出 App 后再次确认服务仍 healthy。
+- App/XPC 失败只回滚 App；服务失败按本 Runbook 的服务回滚处理。两套回退点、版本/build、签名/公证和 SHA-256 分开记录。

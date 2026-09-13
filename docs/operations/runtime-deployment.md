@@ -8,7 +8,7 @@ date: 2026-09-13
 
 本页说明当前实际运行组成；日常操作以[运维 Runbook](operations-runbook.md) 为准。
 
-停启、安装和 profile 切换的唯一安全边界见 [本机 operator contract](../../.agents/skills/speechrail-local-deploy/references/operator-contract.md)；本页只描述运行时拓扑和制品布局。
+停启、安装和 profile 切换的唯一安全边界见 [本机 operator contract](../../.agents/skills/speechrail-local-deploy/references/operator-contract.md)；本页只描述运行时拓扑和制品布局。macOS App 的独立构建、签名、安装、清理和回滚见 [App 分发 SOP](../developers/macos-app-release.md)。
 
 ## 运行拓扑
 
@@ -135,8 +135,8 @@ SpeechRail 的任何修复、协议变更或 worker 变更都必须先落在本�
 
 1. 在 SpeechRail 源码根目录完成测试、类型、lint、契约与 `git diff --check`。
 2. 使用 `uv build --no-sources --wheel` 构建当前源码 wheel。
-3. 使用 `tools.install_macos.install_managed` 安装候选 release；installer 负责 preflight、LaunchAgent 切换、公共 smoke 和失败回退。
-4. 通过 `/health`、`/readyz`、`/v1/models` 和目标 Realtime smoke 验证后，才把 `runtime/current` 指向新 release。
+3. 按 operator contract 安全停旧服务并确认 lock 释放；再用 `tools.install_macos.install_managed` 做候选 release preflight、LaunchAgent plist 安装和原子 `runtime/current` 切换。
+4. 使用 lifecycle controller 启动新 runtime，通过 `/health`、`/readyz`、`/v1/models` 和目标 Realtime smoke 验证；任何失败都恢复旧 current/runtime。
 
 源码构建与安装沿用下方唯一的 managed installer 示例，避免维护两份可能漂移的命令。
 
@@ -145,6 +145,7 @@ SpeechRail 的任何修复、协议变更或 worker 变更都必须先落在本�
 在发布目录中构建并通过唯一 managed installer 安装：
 
 ```bash
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 uv build --no-sources --wheel
 uv run python - <<PY
 import os
@@ -162,13 +163,15 @@ with httpx.Client(timeout=httpx.Timeout(connect=30, read=300, write=30, pool=30)
         app_home=app_home,
         preset_id=preset,
         downloader=ModelScopeDownloader(client=client),
-        enable=True,
+        enable=False,
     )
 PY
+
+speechrail service start --app-home "$APP_HOME"
 ```
 
-managed installer 会准备新 release、执行 preflight、更新 LaunchAgent 并按事务完成启动与公共 smoke；
-启用或 smoke 失败会停止候选并恢复旧 runtime/current。完整安装要求 ASR/TTS 两组 runtime 和 snapshot
+managed installer 会准备新 release、执行 preflight、更新 LaunchAgent 并原子切换 `runtime/current`；
+`enable=False` 时只安装候选 plist，不启动服务；随后必须用 controller-backed `speechrail service start` 启动并做公共 smoke。启动或 smoke 失败会停止候选并恢复旧 runtime/current。完整安装要求 ASR/TTS 两组 runtime 和 snapshot
 均通过检查；私有 `.env` 可作为 managed 初始化配置输入，但不会被覆盖或写入 wheel。
 
 验证已安装 wheel，而不是源码工作树：
@@ -179,8 +182,8 @@ python3 scripts/verify_release.py \
   --app-home "$HOME/Library/Application Support/SpeechRail"
 ```
 
-升级先安装到新的 release runtime，完成 preflight 和真实 ASR/TTS smoke 后才切换
-`runtime/current` 并重启；失败时恢复旧 `current`。README 不固定发布版本，包文件名和 package
+升级先在候选 release 上完成 preflight，再由 installer 原子切换
+`runtime/current`，随后启动并完成真实 ASR/TTS smoke；失败时恢复旧 `current`。README 不固定发布版本，包文件名和 package
 metadata 仍保留用于升级、回滚和审计的版本信息。
 
 > [!IMPORTANT]

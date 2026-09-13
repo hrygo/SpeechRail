@@ -2,8 +2,8 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.0.4"
-date: 2026-09-09
+version: "2.1.0"
+date: 2026-09-13
 ---
 
 # 🛠️ SpeechRail 开发者文档
@@ -18,13 +18,16 @@ date: 2026-09-09
 graph TD
     A[🚀 1. 开发上手与工作流<br/>development-guide.md] --> B[🧪 2. 测试金字塔与验收门禁<br/>testing-acceptance.md]
     B --> C[📡 3. 公共 API 契约设计<br/>../users/api-contract.md]
-    C --> D[📜 4. 架构决策记录<br/>../decisions/README.md]
+    C --> D[🖥️ 4. macOS App 开发/发布<br/>macos-app-development.md / macos-app-release.md]
+    D --> E[📜 5. 架构决策记录<br/>../decisions/README.md]
 ```
 
 1. **[🚀 开发者上手指南 (development-guide.md)](development-guide.md)**：开发环境搭建、5分钟本地启动、目录代码规范与 Worker 扩展流程。
 2. **[🧪 测试与质量验收规范 (testing-acceptance.md)](testing-acceptance.md)**：确定性测试、Fake Backend 模式、真实模型 Smoke 与质量门禁。
 3. **[📡 公共 API 契约手册](../users/api-contract.md)**：REST 端点定义、WebSocket 协议与 OpenAI 兼容层实现标准。
-4. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：关键技术选型与设计原则约束。
+4. **[🖥️ macOS App 开发与测试](macos-app-development.md)**：SwiftUI 控制面、XPC helper、测试隔离与服务边界。
+5. **[📦 macOS App 分发与签名](macos-app-release.md)**：Distribution archive、签名/公证、安装清理、控制链路验收与独立回滚。
+6. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：关键技术选型与设计原则约束。
 
 ---
 

@@ -12,6 +12,13 @@
   `profile`/`setup` 命令时，CLI 会自动转交给 `runtime/current/.venv/bin/python`；若 managed
   runtime 不存在，不得用源码依赖结果代替安装态判断。
 
+## App 控制面边界
+
+- `SpeechRail.app` 是按需打开的 SwiftUI 控制面，不是语音服务的启动器，也不是登录启动项。真正需要随用户登录常驻的是唯一的 `com.speechrail` user `LaunchAgent`；它直接拥有 8201 端口和服务生命周期。
+- `com.speechrail.desktop.control` 是 App 随包携带、由 `SMAppService` 管理的可选 control-agent。它只接收固定 XPC 命令并委托当前 managed runtime 的 Python CLI，不加载模型、不创建第二个 ASGI worker、不替换 `com.speechrail`。
+- App 退出、control-agent 注销或 App bundle 升级都不得停止、删除或覆盖服务的 `runtime/current`、selection、模型、私有配置和 `com.speechrail` plist。服务发布与 App 发布可以独立回滚；联合发布必须先验收服务，再验收 App 控制链路。
+- App 发布只保留一个实际安装 bundle（默认 `~/Applications/SpeechRail.app`）。测试/归档副本放在构建或临时目录，验收后注销并清理；不要把上一版本的 `.app` 作为可执行副本长期留在 Applications 或 DerivedData 中，以免 Finder/LaunchServices 显示重复项目。
+
 ## 唯一生命周期流程
 
 1. 记录 active profile、generation、runtime target、PID/listener 和健康状态。
@@ -44,4 +51,4 @@
 
 ## 完成证据
 
-最终结果至少包含：版本/commit、wheel digest、runtime target、profile/generation、唯一 listener、health/ready、models/voices、真实 ASR/TTS smoke、benchmark report、回退目标和未验证项。不得包含 API key、Authorization、音频、完整转写、日志全文或私人绝对路径。
+最终结果至少包含：版本/commit、wheel digest、runtime target、profile/generation、唯一 listener、health/ready、models/voices、真实 ASR/TTS smoke、benchmark report、回退目标和未验证项。若范围包含 App，额外记录 App bundle version/build、bundle identifier、签名/公证状态、control-agent label、App 控制链路 smoke 和清理后的唯一安装路径。不得包含 API key、Authorization、音频、完整转写、日志全文或私人绝对路径。
