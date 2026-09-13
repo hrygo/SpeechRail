@@ -45,6 +45,7 @@ public enum SpeechRailDesignTokens {
         public static let windowMinimumHeight: CGFloat = 720
         public static let creatorComposerMinimumHeight: CGFloat = 180
         public static let creatorVoicePickerWidth: CGFloat = 180
+        public static let creatorVoiceNameWidth: CGFloat = 220
         public static let creatorVoiceControlWidth: CGFloat = 240
         public static let creatorSpeedSliderWidth: CGFloat = 120
         public static let creatorSlotBadgeSize: CGFloat = 32
@@ -83,15 +84,17 @@ public enum SpeechRailDesignTokens {
         public static let toolbarIconSize: CGFloat = 18
         public static let iconButtonSize: CGFloat = 28
         public static let statusIndicatorDiameter: CGFloat = 7
+        public static let statusIconSize: CGFloat = 17
         public static let sidebarRowHeight: CGFloat = 44
         public static let sidebarIconFrame: CGFloat = 20
         public static let sidebarIconSize: CGFloat = 15
         public static let workspaceTitleHeight: CGFloat = 30
         public static let purposeIndicatorWidth: CGFloat = 3
         public static let purposeIndicatorHeight: CGFloat = 14
+        public static let focusStrokeWidth: CGFloat = 2
         public static let waveformBarSpacing: CGFloat = 3
         public static let waveformBarWidth: CGFloat = 3
-        public static let waveformBarRadius: CGFloat = 1.5
+        public static let waveformBarRadius: CGFloat = 2
     }
 
     /// Toolbar dimensions are kept separate from page content so the window chrome can
@@ -120,6 +123,17 @@ public enum SpeechRailDesignTokens {
         public static let navigationFrame: CGFloat = 20
         public static let toolbarSize: CGFloat = 16
         public static let toolbarFrame: CGFloat = 24
+    }
+
+    public enum Stroke {
+        public static let hairline: CGFloat = 0.5
+        public static let standard: CGFloat = 0.75
+        public static let strong: CGFloat = 1
+    }
+
+    public enum Shadow {
+        public static let elevatedRadius: CGFloat = 12
+        public static let elevatedYOffset: CGFloat = 4
     }
 
     /// All non-native interactive surfaces use this matrix. Native Button/Menu/
@@ -151,6 +165,9 @@ public enum SpeechRailDesignTokens {
         public static let workspaceContext: Font = .system(.caption, design: .default, weight: .medium)
         public static let diagnosticsSummary: Font = .system(.title3, design: .default, weight: .semibold)
         public static let diagnosticsDetail: Font = .system(.callout, design: .default, weight: .medium)
+        public static let statusIcon: Font = .system(size: Control.statusIconSize, weight: .semibold)
+        public static let statusGlyph: Font = .system(.title2, design: .default, weight: .semibold)
+        public static let emptyStateGlyph: Font = .system(size: 30, weight: .medium)
 
         // Source-compatibility aliases for compiled legacy surfaces.
         public static let pageTitle = windowTitle
@@ -171,6 +188,20 @@ public enum SpeechRailDesignTokens {
             darkHex: 0x8C9AA9,
             hcLightHex: 0x222222,
             hcDarkHex: 0xE0E0E0
+        )
+        public static let inkTertiary = dynamicColor(
+            named: "InkTertiary",
+            lightHex: 0x77818E,
+            darkHex: 0x73808C,
+            hcLightHex: 0x333333,
+            hcDarkHex: 0xD6D6D6
+        )
+        public static let onRail = dynamicColor(
+            named: "OnRail",
+            lightHex: 0xFFFFFF,
+            darkHex: 0x07151A,
+            hcLightHex: 0xFFFFFF,
+            hcDarkHex: 0x07151A
         )
         public static let canvas = dynamicColor(
             named: "Canvas",
@@ -237,6 +268,7 @@ public enum SpeechRailDesignTokens {
             hcLightHex: 0x254E6D,
             hcDarkHex: 0x8DC0EA
         )
+        public static let waveformInactive = Color.inkSecondary.opacity(0.35)
     }
 
     public enum Palette {
@@ -262,20 +294,26 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Surface {
-        public static let hairlineStroke = Color.inkSecondary.opacity(0.18)
+        public static let hairlineStroke = Color.inkSecondary.opacity(0.16)
         public static let contentStroke = hairlineStroke
-        public static let selectedFill = Color.rail.opacity(0.10)
+        public static let selectedFill = Color.rail.opacity(0.14)
+        public static let selectedFillStrong = Color.rail.opacity(0.18)
         public static let voiceSelectedFill = Color.voice.opacity(0.12)
         public static let voiceBadgeFill = Color.voice.opacity(0.15)
-        public static let focusRing = Color.rail.opacity(0.40)
-        public static let controlFill = Color.field.opacity(0.72)
-        public static let inspectorFill = Color.field.opacity(0.92)
-        public static let fieldHighlight = SwiftUI.Color.white.opacity(0.46)
-        public static let fieldHighlightDark = SwiftUI.Color.white.opacity(0.06)
+        public static let focusRing = Color.rail.opacity(0.72)
+        public static let controlFill = Color.field.opacity(0.88)
+        public static let navigationFill = Color.canvas.opacity(0.98)
+        public static let panelFill = Color.field.opacity(0.96)
+        public static let inspectorFill = Color.field.opacity(0.98)
+        public static let fieldHighlight = SwiftUI.Color.white.opacity(0.34)
+        public static let fieldHighlightDark = SwiftUI.Color.white.opacity(0.04)
         public static let statusChipFillOpacity: Double = 0.12
-        public static let surfaceRaised = Color.field.opacity(0.96)
-        public static let border = Color.inkSecondary.opacity(0.18)
-        public static let borderStrong = Color.inkSecondary.opacity(0.32)
+        public static let surfaceRaised = panelFill
+        public static let border = Color.inkSecondary.opacity(0.16)
+        public static let borderStrong = Color.inkSecondary.opacity(0.28)
+        public static let divider = Color.inkSecondary.opacity(0.14)
+        public static let disabledFill = Color.inkSecondary.opacity(0.08)
+        public static let elevatedShadow = SwiftUI.Color.black.opacity(0.12)
         public static let interactionHover = Color.rail.opacity(Interaction.hoverFillOpacity)
         public static let interactionPressed = Color.rail.opacity(Interaction.pressedFillOpacity)
 
@@ -292,9 +330,11 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Navigation {
-        public static let selectedFill = Color.rail.opacity(0.12)
-        public static let focusRing = Color.rail.opacity(0.65)
-        public static let selectedForeground = Color.ink
+        public static let selectedFill = Surface.selectedFillStrong
+        public static let focusRing = Color.rail.opacity(0.72)
+        public static let selectedForeground = Color.onRail
+        public static let unselectedForeground = Color.ink
+        public static let secondaryForeground = Color.inkSecondary
     }
 
     public enum Motion {
@@ -368,74 +408,106 @@ public struct SpeechRailSurfaceModifier: ViewModifier {
     @ViewBuilder
     public func body(content: Content) -> some View {
         switch level {
-        case .window, .navigation:
-            content.glassEffect(.regular, in: .rect(cornerRadius: level.cornerRadius, style: .continuous))
+        case .window:
+            content
+                .background(SpeechRailDesignTokens.Color.canvas)
+        case .navigation:
+            content
+                .background(SpeechRailDesignTokens.Surface.navigationFill)
         case .control:
             content
-                .background(.thinMaterial, in: .rect(cornerRadius: level.cornerRadius, style: .continuous))
+                .background(
+                    SpeechRailDesignTokens.Surface.controlFill,
+                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
+                )
                 .overlay {
                     RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                        .stroke(SpeechRailDesignTokens.Surface.contentStroke, lineWidth: 0.5)
+                        .stroke(
+                            SpeechRailDesignTokens.Surface.border,
+                            lineWidth: SpeechRailDesignTokens.Stroke.standard
+                        )
                 }
-        case .inspector, .panel, .elevated:
+        case .inspector:
             content
+                .background(
+                    SpeechRailDesignTokens.Surface.inspectorFill,
+                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
+                        .stroke(
+                            SpeechRailDesignTokens.Surface.border,
+                            lineWidth: SpeechRailDesignTokens.Stroke.standard
+                        )
+                }
+        case .panel:
+            content
+                .background(
+                    SpeechRailDesignTokens.Surface.panelFill,
+                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
+                        .stroke(
+                            SpeechRailDesignTokens.Surface.border,
+                            lineWidth: SpeechRailDesignTokens.Stroke.standard
+                        )
+                }
+        case .elevated:
+            content
+                .background(
+                    SpeechRailDesignTokens.Surface.surfaceRaised,
+                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
+                        .stroke(
+                            SpeechRailDesignTokens.Surface.borderStrong,
+                            lineWidth: SpeechRailDesignTokens.Stroke.standard
+                        )
+                }
+                .shadow(
+                    color: SpeechRailDesignTokens.Surface.elevatedShadow,
+                    radius: SpeechRailDesignTokens.Shadow.elevatedRadius,
+                    y: SpeechRailDesignTokens.Shadow.elevatedYOffset
+                )
         }
     }
 }
 
 public struct SpeechRailFieldModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-
     public init() {}
 
     public func body(content: Content) -> some View {
         content
             .background(
-                SpeechRailDesignTokens.Color.field,
+                SpeechRailDesignTokens.Surface.controlFill,
                 in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.fieldHighlightDark : SpeechRailDesignTokens.Surface.fieldHighlight, location: 0),
-                                .init(color: SpeechRailDesignTokens.Surface.cardStroke, location: 0.15),
-                                .init(color: SpeechRailDesignTokens.Surface.hairlineStroke, location: 1.0)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.5
+                        SpeechRailDesignTokens.Surface.border,
+                        lineWidth: SpeechRailDesignTokens.Stroke.standard
                     )
             }
     }
 }
 
 public struct SpeechRailContentSurfaceModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-
     public init() {}
 
     public func body(content: Content) -> some View {
         content
             .background(
-                SpeechRailDesignTokens.Color.field,
+                SpeechRailDesignTokens.Surface.panelFill,
                 in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
             )
             .overlay {
                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
                     .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.fieldHighlightDark : SpeechRailDesignTokens.Surface.fieldHighlight, location: 0),
-                                .init(color: SpeechRailDesignTokens.Surface.cardStroke, location: 0.15),
-                                .init(color: SpeechRailDesignTokens.Surface.hairlineStroke, location: 1.0)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.75
+                        SpeechRailDesignTokens.Surface.borderStrong,
+                        lineWidth: SpeechRailDesignTokens.Stroke.standard
                     )
             }
     }

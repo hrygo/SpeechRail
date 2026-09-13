@@ -42,6 +42,7 @@ public struct SpeechRailButtonAppearance: ViewModifier {
         }
         .controlSize(.regular)
         .frame(minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget)
+        .speechRailPointerCursor()
     }
 }
 
@@ -134,7 +135,10 @@ private struct SpeechRailInteractiveButtonBody: View {
                     cornerRadius: SpeechRailDesignTokens.Corner.row,
                     style: .continuous
                 )
-                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 0.5)
+                .stroke(
+                    SpeechRailDesignTokens.Surface.border,
+                    lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                )
             }
         }
     }
@@ -180,6 +184,26 @@ public extension View {
 
     func speechRailInteractiveButtonStyle() -> some View {
         buttonStyle(SpeechRailInteractiveButtonStyle())
+    }
+
+    /// Shows a pointing hand only for an enabled, genuinely interactive surface.
+    /// Static labels and containers never opt into this cursor.
+    func speechRailPointerCursor() -> some View {
+        modifier(SpeechRailPointerCursorModifier())
+    }
+}
+
+public struct SpeechRailPointerCursorModifier: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+
+    public init() {}
+
+    public func body(content: Content) -> some View {
+        content
+            .background {
+                SpeechRailCursorRegion(isEnabled: isEnabled)
+                    .allowsHitTesting(false)
+            }
     }
 }
 
@@ -400,7 +424,7 @@ public struct WorkspaceActionsMenu<Content: View>: View {
         Menu {
             content
         } label: {
-            Label("操作", systemImage: "ellipsis.circle")
+            Label("更多操作", systemImage: "ellipsis")
                 .labelStyle(.titleAndIcon)
                 .font(SpeechRailDesignTokens.Typography.label)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -409,9 +433,10 @@ public struct WorkspaceActionsMenu<Content: View>: View {
         }
         .menuStyle(.borderlessButton)
         .controlSize(.regular)
-        .accessibilityLabel("操作")
+        .accessibilityLabel("更多操作")
         .accessibilityIdentifier("workspace-actions")
         .help(helpText)
+        .speechRailPointerCursor()
     }
 }
 
@@ -442,7 +467,7 @@ public struct StatusBanner: View {
     public var body: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: tone.systemImage)
-                .font(.title3)
+                .font(SpeechRailDesignTokens.Typography.statusIcon)
                 .foregroundStyle(tone.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -486,7 +511,7 @@ public struct ServiceStatusBadge: View {
             if !compact {
                 Text(statusText)
                     .font(SpeechRailDesignTokens.Typography.workspaceContext)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .foregroundStyle(statusColor)
             }
         }
         .frame(minHeight: SpeechRailDesignTokens.Toolbar.controlHeight)
@@ -537,7 +562,7 @@ public struct ServiceOperationStatusView: View {
     public var body: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
             Image(systemName: operationIcon)
-                .font(.title3)
+                .font(SpeechRailDesignTokens.Typography.statusIcon)
                 .foregroundStyle(tone.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -698,6 +723,36 @@ public struct MetricValue: Identifiable, Sendable {
     }
 }
 
+private struct MetricValueView: View {
+    let metric: MetricValue
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(metric.title)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+            Text(metric.value)
+                .font(SpeechRailDesignTokens.Typography.metricValue)
+                .monospacedDigit()
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+            Text(metric.detail)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+        }
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.metricMinimumWidth,
+            maxWidth: .infinity,
+            alignment: .leading
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(metric.title)
+        .accessibilityValue("\(metric.value)，\(metric.detail)")
+    }
+}
+
 public struct MetricStrip: View {
     public let metrics: [MetricValue]
 
@@ -713,20 +768,7 @@ public struct MetricStrip: View {
                         .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 }
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Text(metric.title)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    Text(metric.value)
-                        .font(SpeechRailDesignTokens.Typography.metricValue)
-                        .monospacedDigit()
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text(metric.detail)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                MetricValueView(metric: metric)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
@@ -760,23 +802,7 @@ public struct MetricGrid: View {
             spacing: SpeechRailDesignTokens.Spacing.md
         ) {
             ForEach(metrics) { metric in
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Text(metric.title)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(1)
-                    Text(metric.value)
-                        .font(SpeechRailDesignTokens.Typography.metricValue)
-                        .monospacedDigit()
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        .lineLimit(1)
-                    Text(metric.detail)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(1)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .combine)
+                MetricValueView(metric: metric)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
@@ -804,7 +830,7 @@ public struct OperationBar: View {
         if let operation {
             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Image(systemName: operationIcon(for: operation))
-                    .font(.title3)
+                    .font(SpeechRailDesignTokens.Typography.statusIcon)
                     .foregroundStyle(operationTone(for: operation.state).color)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {

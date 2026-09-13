@@ -11,60 +11,31 @@ public struct WorkspaceTitleLockup: View {
     }
 
     public var body: some View {
-        ViewThatFits(in: .horizontal) {
-            titleVariant(includeIcon: true, includeContext: true)
-            titleVariant(includeIcon: true, includeContext: false)
-            minimalTitleVariant
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            RouteIconView(
+                route: route,
+                selected: false,
+                presentation: .toolbar
+            )
+            Text(route.workspaceTitle)
+                .font(SpeechRailDesignTokens.Typography.toolbarTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .minimumScaleFactor(0.82)
+                .layoutPriority(1)
         }
         .frame(
             maxWidth: SpeechRailDesignTokens.Toolbar.titleMaximumWidth,
             minHeight: SpeechRailDesignTokens.Toolbar.titleHeight,
             alignment: .center
         )
-        .clipped()
+        .contentShape(Rectangle())
         .id(route.id)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(route.workspaceTitle)
         .accessibilityIdentifier("workspace-title")
         .accessibilityValue(accessibilityValue)
-    }
-
-    private var minimalTitleVariant: some View {
-        Text(route.workspaceTitle)
-            .font(SpeechRailDesignTokens.Typography.toolbarTitle)
-            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .center)
-    }
-
-    @ViewBuilder
-    private func titleVariant(includeIcon: Bool, includeContext: Bool) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Toolbar.itemSpacing) {
-            if includeIcon {
-                RouteIconView(
-                    route: route,
-                    selected: false,
-                    presentation: .toolbar
-                )
-            }
-            Text(route.workspaceTitle)
-                .font(SpeechRailDesignTokens.Typography.toolbarTitle)
-                .fixedSize(horizontal: true, vertical: false)
-            if includeContext {
-                Rectangle()
-                    .fill(SpeechRailDesignTokens.Color.inkSecondary.opacity(0.45))
-                    .frame(width: 1, height: 14)
-                    .accessibilityHidden(true)
-                Text(route.contextTitle)
-                    .font(SpeechRailDesignTokens.Typography.workspaceContext)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .accessibilityHidden(true)
-            }
-        }
-        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var accessibilityValue: String {
@@ -118,8 +89,9 @@ public struct RouteIconView: View {
 
     public var body: some View {
         Image(systemName: route.systemImage)
-            .font(.system(size: iconSize, weight: .medium))
-            .symbolRenderingMode(.hierarchical)
+            .font(.system(size: iconSize, weight: .semibold))
+            .symbolRenderingMode(.monochrome)
+            .foregroundStyle(selected ? SpeechRailDesignTokens.Navigation.selectedForeground : foregroundColor)
             .frame(
                 width: iconFrame,
                 height: iconFrame
@@ -142,6 +114,15 @@ public struct RouteIconView: View {
             SpeechRailDesignTokens.Icon.navigationFrame
         case .toolbar:
             SpeechRailDesignTokens.Icon.toolbarFrame
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch presentation {
+        case .navigation:
+            SpeechRailDesignTokens.Navigation.secondaryForeground
+        case .toolbar:
+            SpeechRailDesignTokens.Color.inkSecondary
         }
     }
 }

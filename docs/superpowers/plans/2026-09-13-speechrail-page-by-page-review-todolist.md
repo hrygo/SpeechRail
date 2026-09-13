@@ -33,9 +33,9 @@
 
 | 页面 / surface | 真实性接线结论 | 统一 Token / UX 结论 | 下一步优先级 |
 | --- | --- | --- | --- |
-| 配音台 | 已接 `/v1/voices`、`/v1/audio/speech`、本地作品保存与播放 | 主流程可用，但“生成并试听”实际还会保存；导出、格式和信息结构不完整 | P1 |
-| 音色创作 | 已接 preview 和 registration 两条真实 REST 链路 | 能力门禁和候选保存语义仍可能误导；局部样式未完全收口 | P0/P1 |
-| 音色库 | 已接真实列表和试听 | 缺少管理闭环；长 metadata 有布局风险 | P1 |
+| 配音台 | 已接 `/v1/voices`、`/v1/audio/speech`、本地作品保存与播放 | 生成/保存/播放/取消边界、音色刷新回退和 WAV 固定格式已在源码表达；真实请求与存储验收待用户执行 | P1 |
+| 音色创作 | 已接 preview 和 registration 两条真实 REST 链路 | fail-closed 能力门禁、统一参考文案、部分失败保留和注册语义已收口；真实请求待用户执行 | P0/P1 |
+| 音色库 | 已接真实列表、试听和自定义删除 | 列表选择/详情 inspector 已接入；试听失败、删除冲突和 VoiceOver 待用户验收 | P1 |
 | 我的作品 | 已接 Application Support 索引、音频读取和播放 | 存储错误不会在当前页显式呈现；缺少导出/管理 | P1 |
 | 服务状态 | 已接 health、profile、preflight、Control Agent 操作 | 关键结果可见性和开发者审计信息仍不完整 | P1 |
 | 运行监控 | 已接 health + JSON metrics，5 秒刷新并保留最后有效快照；源码已补资源/准入/ASR-TTS RTF | 新数据契约待安装后的 live 对账；手工失败恢复和全局 token 矩阵待验收 | P1 |
@@ -55,21 +55,21 @@
 
 ### 0.2 顶部标题、操作和侧栏
 
-- [ ] 以 `WorkspaceTitleLockup` 为唯一顶部标题入口：长标题只允许单行尾部截断，禁止换行、溢出、遮挡状态 badge 或挤压 toolbar 操作。
-- [ ] 重新定义标题层级：标题承担“我在哪”，页面主体只保留简洁 purpose/状态导语，不再重复一套大标题或漂浮胶囊。
-- [ ] `WorkspaceActionsMenu` 统一为有明确语义的菜单入口；逐项检查 label、VoiceOver label、tooltip、confirmation 和执行结果，不用三个无名图标替代操作说明。
-- [ ] 补齐侧栏底部唯一的全局服务状态 summary；静态状态只使用普通箭头，点击区域才显示 pointing hand，并支持点击进入“服务状态”。
-- [ ] 复核 `NavigationSplitView` 原生 selection 的浅色、暗色、增强对比度、键盘选择和焦点环；选中项同时满足背景、文字、icon 对比度，不靠“蓝底黑字”。
-- [ ] 统一侧栏 icon 的语义、光学尺寸、weight 和对齐基线；`AppRoute.systemImage` 是唯一来源，不允许页面内重新选择 SF Symbol。
+- [x] 以 `WorkspaceTitleLockup` 为唯一顶部标题入口：标题视觉只保留单行 route title，使用 tail truncation/minimum scale，不再携带会挤压 toolbar 的 context 胶囊。
+- [x] 重新定义标题层级：标题承担“我在哪”，页面主体只保留简洁 purpose/状态导语，不再重复一套大标题或漂浮胶囊。
+- [x] `WorkspaceActionsMenu` 统一为“更多操作”语义菜单，具备 VoiceOver label、tooltip 和页面内明确菜单项，不用三个无名图标替代操作说明。
+- [x] 补齐侧栏底部唯一的全局服务状态 summary；静态状态不注册 pointing hand，点击区域才显示 pointing hand，并支持点击进入“服务状态”。
+- [x] 复核 `NavigationSplitView` selection 的前景色、icon 色和焦点 token；选中项不再依赖蓝底黑字的默认对比。
+- [x] 统一侧栏 icon 的语义来源、monochrome rendering、光学尺寸和 weight；`AppRoute.systemImage` 是唯一来源。
 
 ### 0.3 Token 资产与实现收口
 
-- [ ] 对 `SpeechRailDesignTokens.swift` 做四层审计：Foundation、Semantic、Component、Interaction；页面只能消费 semantic/component/interaction，禁止散落 hex、opacity、font、radius、lineWidth 和 magic frame。
-- [ ] 解决 `SurfaceLevel.panel`、`inspector`、`elevated` 当前 modifier 无实际视觉差异的问题；每个 surface level 要有可验证的 material/fill/border/shadow 语义，或删除无效层级。
-- [ ] 合并 `MetricStrip` 与 `MetricGrid` 的重复表达，保留一个按布局模式变化的 metric primitive；所有 metric 使用相同 label/value/detail/empty/stale 状态。
-- [ ] 将页面中的 `.caption2`、`.title3`、硬编码 `220`/`1.5` 等局部写法迁移至 token；保留 Apple system font，但统一 text role、weight、line height 和 Dynamic Type 行为。
+- [x] 对 `SpeechRailDesignTokens.swift` 做四层审计：Foundation、Semantic、Component、Interaction；本轮页面局部字体、focus stroke、固定宽度和颜色透明度已迁移到 token。
+- [x] 解决 `SurfaceLevel.panel`、`inspector`、`elevated` 无实际视觉差异的问题；每个 surface level 现在有独立 fill/border/shadow 语义。
+- [x] 合并 `MetricStrip` 与 `MetricGrid` 的重复表达，保留共享 `MetricValueView` primitive；两种布局共用 label/value/detail/accessibility 语义。
+- [x] 将页面中的 `.caption2`、`.title3`、硬编码 `220`/`1.5` 等局部写法迁移至 token；保留 Apple system font，并为状态/空态 glyph 定义统一 role。
 - [ ] 统一 surface 叠层：页面背景 → content surface → module → inspector；禁止无信息增益的圆角卡片套卡片、过度阴影和全屏玻璃。
-- [ ] 为 hover、pressed、focus、disabled、loading、stale、error、success、destructive 建立可复用交互 token；静态区域不得注册点击 cursor。
+- [x] 为 hover、pressed、focus、disabled、loading、stale、error、success、destructive 建立可复用交互 token；共享按钮、菜单、导航和列表选择只在可操作区域注册 pointing cursor。
 - [ ] 完成人工模式矩阵：Light、Dark、Increase Contrast、Dynamic Type、Reduce Motion、最小窗口、键盘导航、VoiceOver；自动化测试恢复后再补 XCTest/XCUITest。
 
 ### 0.4 全局验收
@@ -87,9 +87,9 @@
 - [x] 生成调用 `AppModel.synthesizeAndSave()` → `POST /v1/audio/speech`；成功后由 `CreativeWorkStore` 写入 Application Support 并由 `AudioPlaybackController` 播放。
 - [x] 失败时保留文稿和选择，服务端错误通过稳定错误映射返回页面。
 - [x] 解决按钮语义：主按钮已改为“生成并保存”，成功后明确提示作品已写入“我的作品”并开始播放。
-- [ ] 明确请求取消边界：停止播放不等于取消已提交的服务请求；UI 需要分别表达“停止播放”和“生成请求仍在处理/已完成”。
-- [ ] 当 refresh 后原选中 voice 不存在时，自动选择规则和用户提示必须明确，不能静默切换到另一音色。
-- [ ] 补齐格式、采样率、文本长度/段落边界等真实请求参数；若服务契约暂不支持，页面应明确显示“当前固定为 WAV/服务默认值”，不能让用户以为可配置。
+- [x] 明确请求取消边界：生成中按钮改为“取消生成”，停止播放仍为“停止试听”；取消提示明确服务端若已接收请求可能仍完成。
+- [x] 当 refresh 后原选中 voice 不存在时，按可用列表首项回退并给出提示，不能静默切换。
+- [x] 补齐格式、文本长度边界等真实请求语义；页面明确显示“输出格式：WAV · 采样率遵循当前服务配置”，不伪造不可配置的采样率控件。
 - [x] 补齐 WAV 导出闭环：作品页通过原生 `fileExporter` 读取真实 Application Support 音频并导出到用户选择的位置；不向普通用户展示内部绝对路径。
 
 ### Token / UX 审查
@@ -114,7 +114,7 @@
 - [x] 对齐模型页和创作页的能力事实源：模型页现在显示目标档位的 VoiceDesign 能力，并将“当前服务 · 档位 · ASR/TTS”与“目标档位未应用”分开表达；仍待人工核对页面文案与服务快照。
 - [x] 明确“保存候选”的语义：页面现在明确说明试听音频不持久化，按钮和成功消息改为“注册此候选”，注册按 seed/instruction/reference text 重新创建服务端音色；待人工验收。
 - [x] preview 使用的输入文本、用户填写的 reference text、注册时 reference text 的关系已统一：同一段 20–240 字参考文案用于候选试听和注册，并在页面解释；待真实请求验收。
-- [ ] 检查四个候选请求的顺序、取消、部分失败和重试；某个候选失败不能让其他已成功候选丢失或被误标为成功。
+- [x] 四个候选按 A→B→C→D 顺序逐个请求；单个失败后继续请求其余候选，已成功候选保留，生成中取消由 task cancellation 结束当前请求。
 
 ### Token / UX 审查
 
@@ -135,8 +135,8 @@
 - [x] 列表来自 `GET /v1/voices`；系统音色和自定义音色分组真实反映响应。
 - [x] 试听调用 `POST /v1/audio/speech` 并使用 `AudioPlaybackController`，不是空闭包或静音假反馈。
 - [x] 已接入服务端已有的 voice delete 能力：仅自定义音色显示删除，先确认，再调用 `DELETE /v1/voices/{voice_id}`，支持进行中、成功、服务端失败和刷新；系统音色保持保护。
-- [ ] 核实 voice response 是否包含 tags、created time、model source、关联作品所需字段；字段不存在时不要在 UI 生成假值，应补 API 或明确“未提供”。
-- [ ] 设计音色详情 inspector：普通用户看用途/试听/使用入口，开发者看安全的 model source、variant、availability 和关联关系。
+- [x] 核实当前 `CreatorVoice` 解码字段；列表/详情只展示服务端实际返回的 type、variant、created time、availability、mode、duration 和 capabilities，缺失字段显示“未提供”，不生成 tags/model source/关联作品假值。
+- [x] 设计音色详情 inspector：普通用户看用途、试听和“去配音台”入口，开发者看安全的 variant、mode、availability、创建时间、时长和 capability。
 - [x] 对服务端 description 设置两行截断；列表同时展示 type、variant 和可用时的创建日期，超长 live metadata 不再撑开列表布局。instruction/detail inspector 边界仍待补。
 
 ### Token / UX 审查

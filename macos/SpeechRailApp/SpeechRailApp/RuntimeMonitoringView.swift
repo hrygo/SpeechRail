@@ -141,7 +141,7 @@ public struct RuntimeMonitoringView: View {
     private var monitoringSummary: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: monitoringTone.systemImage)
-                .font(.title2)
+                .font(SpeechRailDesignTokens.Typography.statusGlyph)
                 .foregroundStyle(monitoringTone.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {

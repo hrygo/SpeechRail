@@ -855,7 +855,10 @@ private struct ProfileChoiceRow: View {
             .overlay {
                 if isSelected {
                     RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
-                        .stroke(SpeechRailDesignTokens.Navigation.focusRing, lineWidth: 1)
+                        .stroke(
+                            SpeechRailDesignTokens.Navigation.focusRing,
+                            lineWidth: SpeechRailDesignTokens.Stroke.strong
+                        )
                 }
             }
         }

@@ -18,39 +18,45 @@ public struct ControlCenterView: View {
                 }
         } else {
             NavigationSplitView {
-                List(selection: $selection) {
-                    if !visibleCreatorRoutes.isEmpty {
-                        Section {
-                            ForEach(visibleCreatorRoutes) { route in
-                                navigationRow(for: route)
+                VStack(spacing: 0) {
+                    List(selection: $selection) {
+                        if !visibleCreatorRoutes.isEmpty {
+                            Section {
+                                ForEach(visibleCreatorRoutes) { route in
+                                    navigationRow(for: route)
+                                }
+                            } header: {
+                                Text(AppRouteGroup.creator.title)
                             }
-                        } header: {
-                            Text(AppRouteGroup.creator.title)
+                        }
+                        if !visibleServiceRoutes.isEmpty {
+                            Section {
+                                ForEach(visibleServiceRoutes) { route in
+                                    navigationRow(for: route)
+                                }
+                            } header: {
+                                Text(AppRouteGroup.service.title)
+                            }
+                        }
+                        if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
+                            ContentUnavailableView.search(text: searchText)
+                                .listRowBackground(Color.clear)
                         }
                     }
-                    if !visibleServiceRoutes.isEmpty {
-                        Section {
-                            ForEach(visibleServiceRoutes) { route in
-                                navigationRow(for: route)
-                            }
-                        } header: {
-                            Text(AppRouteGroup.service.title)
-                        }
-                    }
-                    if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
-                        ContentUnavailableView.search(text: searchText)
-                            .listRowBackground(Color.clear)
-                    }
+                    .listStyle(.sidebar)
+                    .tint(SpeechRailDesignTokens.Color.rail)
+                    .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
+                    .backgroundExtensionEffect()
+
+                    Divider()
+                    sidebarServiceStatus
                 }
-                .listStyle(.sidebar)
-                .tint(SpeechRailDesignTokens.Color.rail)
-                .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
                 .navigationSplitViewColumnWidth(
                     min: SpeechRailDesignTokens.Layout.sidebarMinimumWidth,
                     ideal: SpeechRailDesignTokens.Layout.sidebarIdealWidth,
                     max: SpeechRailDesignTokens.Layout.sidebarMaximumWidth
                 )
-                .backgroundExtensionEffect()
+                .background(SpeechRailDesignTokens.Surface.navigationFill)
             } detail: {
                 detailView(for: selection ?? .overview)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -115,8 +121,13 @@ public struct ControlCenterView: View {
         let isSelected = selection == route
         NavigationLink(value: route) {
             Label {
-                Text(route.title)
+            Text(route.title)
                     .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(
+                        isSelected
+                            ? SpeechRailDesignTokens.Navigation.selectedForeground
+                            : SpeechRailDesignTokens.Navigation.unselectedForeground
+                    )
                     .lineLimit(1)
                     .truncationMode(.tail)
             } icon: {
@@ -143,6 +154,69 @@ public struct ControlCenterView: View {
         .accessibilityValue(
             isSelected ? "已选中。\(route.purpose)" : route.purpose
         )
+        .speechRailPointerCursor()
+    }
+
+    private var sidebarServiceStatus: some View {
+        Button {
+            withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
+                selection = .overview
+            }
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: sidebarStatusTone.systemImage)
+                    .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(sidebarStatusTone.color)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("服务状态")
+                        .font(SpeechRailDesignTokens.Typography.label)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Text(sidebarStatusText)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(sidebarStatusTone.color)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                Image(systemName: "chevron.right")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .accessibilityHidden(true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .speechRailInteractiveButtonStyle()
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .help("打开服务状态")
+        .accessibilityLabel("服务状态")
+        .accessibilityValue(sidebarStatusText)
+    }
+
+    private var sidebarStatusText: String {
+        if model.serviceOperation?.phase.isActive == true {
+            return "服务操作进行中"
+        }
+        if model.service.ready == true {
+            return "服务已就绪"
+        }
+        if model.service.serviceState == "unavailable" {
+            return "服务不可用"
+        }
+        return "服务未就绪"
+    }
+
+    private var sidebarStatusTone: StatusTone {
+        if model.serviceOperation?.phase.isActive == true {
+            return .attention
+        }
+        if model.service.ready == true {
+            return .healthy
+        }
+        if model.service.serviceState == "unavailable" {
+            return .critical
+        }
+        return .neutral
     }
 
     @ViewBuilder

@@ -174,7 +174,7 @@ public struct PreflightDiagnosticsView: View {
             if let selectedCheck {
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Image(systemName: selectedCheck.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .font(.title3)
+                        .font(SpeechRailDesignTokens.Typography.statusIcon)
                         .foregroundStyle(
                             selectedCheck.ok
                                 ? SpeechRailDesignTokens.Color.ready
@@ -604,7 +604,7 @@ private struct DiagnosticsSummaryView: View {
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
             Image(systemName: tone.systemImage)
-                .font(.title2)
+                .font(SpeechRailDesignTokens.Typography.statusGlyph)
                 .foregroundStyle(tone.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -694,7 +694,10 @@ private struct PreflightCheckRow: View {
         .overlay {
             if selected {
                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
-                    .stroke(SpeechRailDesignTokens.Navigation.focusRing, lineWidth: 1)
+                    .stroke(
+                        SpeechRailDesignTokens.Navigation.focusRing,
+                        lineWidth: SpeechRailDesignTokens.Stroke.strong
+                    )
             }
         }
         .accessibilityElement(children: .combine)
