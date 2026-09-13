@@ -244,6 +244,10 @@ public struct ModelManagementView: View {
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             fact("合成", value: summary(for: selectedProfile)?.tts ?? "未读取")
+            Divider()
+                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            fact("VoiceDesign", value: voiceDesignCapability(for: selectedProfile))
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
     }
@@ -410,6 +414,7 @@ public struct ModelManagementView: View {
                     LabeledContent("存在状态", value: statusText(for: status))
                     LabeledContent("完整性", value: integrityText(for: status))
                 }
+                LabeledContent("VoiceDesign 能力", value: voiceDesignCapability(for: selectedProfile))
                 LabeledContent("使用状态", value: usage(for: artifact).text)
                 if let operation = model.operation, let message = operation.message {
                     Divider()
@@ -519,6 +524,17 @@ public struct ModelManagementView: View {
         model.modelCatalog?.profiles.first(where: { $0.id == profile })
     }
 
+    private func voiceDesignCapability(for profile: SpeechRailProfile) -> String {
+        guard let profileSummary = summary(for: profile),
+              let artifact = model.modelCatalog?.artifacts.first(where: {
+                  $0.key == profileSummary.tts
+              })
+        else {
+            return "未读取"
+        }
+        return artifact.variant == "voice_design" ? "支持候选预览" : "不支持候选预览"
+    }
+
     private func status(for artifact: ModelArtifactSnapshot) -> ModelArtifactStatusSnapshot? {
         status(forKey: artifact.key)
     }
@@ -577,21 +593,21 @@ public struct ModelManagementView: View {
 
         if key == activeSummary.asr {
             return runtimeUsage(
-                label: "当前 ASR",
+                label: "当前服务 · " + profileTitle(for: activeProfile) + " · ASR",
                 ready: health.asrReady,
                 state: health.asrState
             )
         }
         if key == activeSummary.tts {
             return runtimeUsage(
-                label: "当前 TTS",
+                label: "当前服务 · " + profileTitle(for: activeProfile) + " · TTS",
                 ready: health.ttsReady,
                 state: health.ttsState
             )
         }
         if key == activeSummary.ttsClone {
             return runtimeUsage(
-                label: "当前克隆 TTS 备用",
+                label: "当前服务 · " + profileTitle(for: activeProfile) + " · 克隆 TTS 备用",
                 ready: health.ttsReady,
                 state: health.ttsState
             )
@@ -611,7 +627,7 @@ public struct ModelManagementView: View {
             )
         }
         return ModelArtifactUsagePresentation(
-            text: "当前档位未使用",
+            text: "目标档位未应用；当前服务未使用",
             tone: .neutral
         )
     }
