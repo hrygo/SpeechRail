@@ -19,7 +19,8 @@ final class ControlKitTests: XCTestCase {
                 operationID: "control_123",
                 command: .profileApply,
                 state: .accepted,
-                phase: "accepted"
+                phase: "accepted",
+                message: "profile switch accepted"
             )
         )
 
@@ -35,6 +36,7 @@ final class ControlKitTests: XCTestCase {
         XCTAssertEqual(decodedRequest, request)
         XCTAssertEqual(decodedResponse, response)
         XCTAssertEqual(decodedRequest.schemaVersion, 1)
+        XCTAssertEqual(decodedResponse.operation?.message, "profile switch accepted")
     }
 
     func testEveryProfileIsRepresentedByTheStableEnum() {
@@ -62,10 +64,33 @@ final class ControlKitTests: XCTestCase {
         XCTAssertEqual(
             arguments,
             [
-                "profile", "apply", "quality", "--yes", "--app-home",
+                "-m", "speechrail", "profile", "apply", "quality", "--yes", "--app-home",
                 "/tmp/SpeechRail Test Home", "--json",
             ]
         )
         XCTAssertFalse(arguments.joined(separator: " ").contains("sh -c"))
+    }
+
+    func testUnavailableXPCServiceTimesOutInsteadOfHanging() async {
+        let transport = NSXPCControlTransport(
+            machServiceName: "com.speechrail.test.unavailable.\(UUID().uuidString)",
+            requestTimeout: 0.1
+        )
+        let startedAt = Date()
+
+        do {
+            _ = try await transport.send(ControlRequest(command: .profileStatus))
+            XCTFail("unavailable XPC service should time out")
+        } catch let error as XPCControlTransportError {
+            switch error {
+            case .remote, .timeout:
+                break
+            default:
+                XCTFail("unavailable XPC service returned an unrelated error: \(error)")
+            }
+            XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
     }
 }

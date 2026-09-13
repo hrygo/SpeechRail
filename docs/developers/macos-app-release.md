@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.2.0"
+version: "0.3.0"
 date: 2026-09-13
 ---
 
@@ -11,6 +11,8 @@ date: 2026-09-13
 
 当前开发机按无 Apple Developer ID 模式运行：Debug/Release 使用 ad hoc 本地签名构建并关闭 Hardened Runtime，测试脚本默认保留该本地签名，以便 Xcode UI test runner 正常加载 `Testing.framework` 运行库；不会生成可分发的 archive，不会上传 notarization，也不会修改钥匙串或用户的登录项。只有显式设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=0` 才会请求 unsigned test bundle；Distribution 配置才启用 Hardened Runtime。
 
+本地安装的 Debug/Release App 使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动控制 helper，不注册 `SMAppService`。App 启动时会尽力清理早期 ad hoc 版本留下的失败 `SMAppService` 记录。只有 Distribution 包在具备 Team ID 和签名时，才使用 `SMAppService` LaunchAgent；这一步不代表 ad hoc 包具备 Developer ID 分发资格。
+
 这不等同于可交付给其他 Mac 的发布包。站外直接分发仍保留 Developer ID Application + notarization 路径，待用户准备 Apple Developer 账号、证书和 notarization credential 后再启用。
 
 ## 发布边界与制品
@@ -18,7 +20,8 @@ date: 2026-09-13
 | 制品 | 内容 | 实际 owner | 登录启动 | 不能做什么 |
 |---|---|---|---|---|
 | `SpeechRail.app` | SwiftUI 菜单栏/设置控制面 | 用户按需打开 | **否** | 不采集/播放音频，不加载模型，不启动服务 |
-| `com.speechrail.desktop.control` | App bundle 内的 `SpeechRailControlAgent` + `SMAppService` plist | XPC 控制 helper | 可由 `SMAppService` 单独注册 | 不拥有 8201，不创建第二个 ASGI/worker，不替换服务 runtime |
+| `com.speechrail.desktop.control` | Distribution App bundle 内的 `SpeechRailControlAgent` + `SMAppService` plist | XPC 控制 helper | 仅签名 Distribution 由 `SMAppService` 注册 | 不拥有 8201，不创建第二个 ASGI/worker，不替换服务 runtime |
+| `com.speechrail.desktop.local-control` | Debug/Release App bundle 内的 `XPCServices/*.xpc` | 按需 XPC 控制 helper | 由 `NSXPCConnection(serviceName:)` 按需启动 | 不注册登录项，不拥有 8201，不创建第二个 ASGI/worker |
 | `com.speechrail` | Python managed service LaunchAgent | SpeechRail 服务 | **是** | 不依赖 App 是否打开 |
 
 `SpeechRail.app` 退出、更新或注销 control-agent 都不得停止、删除或覆盖 `com.speechrail`、`runtime/current`、selection、模型、私有 `.env` 或日志。服务发布与 App 发布可以独立回滚；联合发布时先完成服务 wheel 的 preflight/运行态验收，再验收 App 控制链路。
@@ -114,7 +117,7 @@ shasum -a 256 "/path/outside/repository/SpeechRail-<version>.zip"
 
 1. 联合发布先完成服务的 `/health`、`/readyz`、`/v1/models`、`/v1/voices` 和目标 smoke；App 不能替代服务验收。
 2. 退出旧 `SpeechRail.app`，将最终 ZIP 解出到临时目录，确认 bundle identity/version 后，只安装一个 bundle 到用户路径 `~/Applications/SpeechRail.app`；若使用其他路径，必须在 evidence 中明确记录。上一版本保留为 ZIP/归档制品，不作为第二个长期可执行 `.app`。
-3. 打开同一路径的 App，确认显示名、bundle identifier、version/build 和 control-agent 状态；用 UI 执行一次 `status`/`preflight` 只读控制，必要的 mutation 必须有单独授权。App 通过 `SMAppService` 管理 `com.speechrail.desktop.control`，不手工复制 plist、不直接调用 `launchctl`。
+3. 打开同一路径的 App，确认显示名、bundle identifier、version/build 和 control-agent 状态；用 UI 执行一次 `status`/`preflight` 只读控制，必要的 mutation 必须有单独授权。Debug/Release 应验证内嵌 `com.speechrail.desktop.local-control.xpc`；签名 Distribution 才通过 `SMAppService` 管理 `com.speechrail.desktop.control`。两种模式都不手工复制 plist、不直接调用 `launchctl`。
 4. 关闭 App 后再次检查 `com.speechrail`、唯一 8201 listener、`/health` 和 `/readyz`；App/Agent 退出不能停止服务。
 5. 清理本次精确 staging、DerivedData、`build/macos-derived-data`、未交付 archive/export 和旧测试 bundle；保留最终 ZIP、哈希、签名/公证结果及脱敏 evidence。不要删除服务 app home、`runtime/releases`、模型、selection、私有配置或日志，也不要全局重置 LaunchServices。
 

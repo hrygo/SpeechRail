@@ -17,7 +17,12 @@ if !teamIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
 } else {
     peerPolicy = XPCPeerPolicy(requirement: "")
 }
-let listener = NSXPCListener(machServiceName: ControlConstants.agentMachServiceName)
+let listener: NSXPCListener
+if ProcessInfo.processInfo.environment["SPEECHRAIL_XPC_SERVICE"] == "1" {
+    listener = .service()
+} else {
+    listener = NSXPCListener(machServiceName: ControlConstants.agentMachServiceName)
+}
 let service = XPCControlService(store: store, peerPolicy: peerPolicy)
 listener.delegate = service
 listener.resume()

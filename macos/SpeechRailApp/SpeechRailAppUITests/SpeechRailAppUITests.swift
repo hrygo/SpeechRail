@@ -28,4 +28,27 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(confirmation.buttons["确认切换"].waitForExistence(timeout: 2))
         confirmation.buttons["取消"].tap()
     }
+
+    func testProfileApplyFailureShowsActionableMessage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-test", "--ui-test-profile-failure"]
+        app.launch()
+        app.activate()
+
+        let statusItem = app.menuBars.statusItems.firstMatch
+        XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
+        statusItem.click()
+        let settingsMenuItem = statusItem.menus.firstMatch.menuItems["打开设置"]
+        XCTAssertTrue(settingsMenuItem.waitForExistence(timeout: 2))
+        settingsMenuItem.click()
+
+        let applyButton = app.buttons["应用档位"]
+        XCTAssertTrue(applyButton.waitForExistence(timeout: 5))
+        applyButton.tap()
+        let confirmation = app.sheets.firstMatch
+        XCTAssertTrue(confirmation.buttons["确认切换"].waitForExistence(timeout: 2))
+        confirmation.buttons["确认切换"].tap()
+
+        XCTAssertTrue(app.staticTexts["profile preparation failed"].waitForExistence(timeout: 5))
+    }
 }

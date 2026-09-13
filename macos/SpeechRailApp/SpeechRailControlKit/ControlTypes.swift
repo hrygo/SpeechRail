@@ -4,6 +4,7 @@ public enum ControlConstants {
     public static let schemaVersion = 1
     public static let appBundleIdentifier = "com.speechrail.desktop"
     public static let agentMachServiceName = "com.speechrail.desktop.control"
+    public static let localXPCServiceName = "com.speechrail.desktop.local-control"
     public static let agentPlistName = "com.speechrail.desktop.control.plist"
 }
 
@@ -189,19 +190,22 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
     public let state: OperationState
     public let phase: String?
     public let errorCode: ControlErrorCode?
+    public let message: String?
 
     public init(
         operationID: String,
         command: ControlCommand,
         state: OperationState,
         phase: String? = nil,
-        errorCode: ControlErrorCode? = nil
+        errorCode: ControlErrorCode? = nil,
+        message: String? = nil
     ) {
         self.operationID = operationID
         self.command = command
         self.state = state
         self.phase = phase
         self.errorCode = errorCode
+        self.message = message
     }
 }
 

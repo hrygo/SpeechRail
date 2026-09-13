@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>SpeechRailControlAgent</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.speechrail.desktop.local-control</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>SpeechRailControlAgent</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>XPCService</key>
+	<dict>
+		<key>EnvironmentVariables</key>
+		<dict>
+			<key>SPEECHRAIL_ALLOW_UNSIGNED_XPC</key>
+			<string>1</string>
+			<key>SPEECHRAIL_XPC_SERVICE</key>
+			<string>1</string>
+		</dict>
+		<key>JoinExistingSession</key>
+		<true/>
+		<key>RunLoopType</key>
+		<string>NSRunLoop</string>
+	</dict>
+</dict>
+</plist>

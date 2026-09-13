@@ -240,11 +240,19 @@ def _print_apply_result(
     result: object, *, machine_output: bool = False, command: str = "profile.apply"
 ) -> int:
     status = getattr(result, "status", "not_ready")
+    default_messages: dict[str, str] = {
+        "unchanged": "profile is already active",
+        "committed": "profile applied and public API smoke passed",
+        "rolled_back": "profile smoke failed; the previous profile was restored",
+        "not_ready": "profile switch failed and the service is not ready",
+    }
+    message = getattr(result, "message", None) or default_messages.get(status)
     if machine_output:
         _print_machine(
             {
                 "command": command,
                 "error_code": getattr(result, "error_code", None),
+                "message": message,
                 "operation_id": getattr(result, "operation_id", None),
                 "status": status,
             }

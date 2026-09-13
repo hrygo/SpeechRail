@@ -8,20 +8,39 @@ public enum XPCControlTransportError: Error, Equatable, Sendable {
     case invalidProxy
     case connectionInterrupted
     case connectionInvalidated
+    case timeout
     case remote(String)
     case invalidResponse
 }
 
 public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, @unchecked Sendable {
-    private let machServiceName: String
+    private enum Endpoint: @unchecked Sendable {
+        case machService(String)
+        case bundledService(String)
+    }
+
+    private let endpoint: Endpoint
     private let codeSigningRequirement: String?
+    private let requestTimeout: TimeInterval
 
     public init(
         machServiceName: String = ControlConstants.agentMachServiceName,
-        codeSigningRequirement: String? = nil
+        codeSigningRequirement: String? = nil,
+        requestTimeout: TimeInterval = 10
     ) {
-        self.machServiceName = machServiceName
+        endpoint = .machService(machServiceName)
         self.codeSigningRequirement = codeSigningRequirement
+        self.requestTimeout = max(requestTimeout, 0.1)
+        super.init()
+    }
+
+    public init(
+        bundledServiceName: String,
+        requestTimeout: TimeInterval = 10
+    ) {
+        endpoint = .bundledService(bundledServiceName)
+        codeSigningRequirement = nil
+        self.requestTimeout = max(requestTimeout, 0.1)
         super.init()
     }
 
@@ -32,7 +51,13 @@ public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, 
             throw error
         }
         let encodedRequest = try ControlWireCodec.encode(request)
-        let connection = NSXPCConnection(machServiceName: machServiceName, options: [])
+        let connection: NSXPCConnection
+        switch endpoint {
+        case let .machService(name):
+            connection = NSXPCConnection(machServiceName: name, options: [])
+        case let .bundledService(name):
+            connection = NSXPCConnection(serviceName: name)
+        }
         if let codeSigningRequirement {
             connection.setCodeSigningRequirement(codeSigningRequirement)
         }
@@ -42,6 +67,14 @@ public final class NSXPCControlTransport: NSObject, SpeechRailControlTransport, 
         return try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<ControlResponse, Error>) in
             let continuationBox = ContinuationBox(continuation)
+            let timeoutWorkItem = DispatchWorkItem {
+                connection.invalidate()
+                continuationBox.resume(throwing: XPCControlTransportError.timeout)
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + requestTimeout,
+                execute: timeoutWorkItem
+            )
             let proxy = connection.remoteObjectProxyWithErrorHandler { error in
                 continuationBox.resume(
                     throwing: XPCControlTransportError.remote(error.localizedDescription)

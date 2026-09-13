@@ -13,9 +13,14 @@ fi
 
 AGENT_PATH="$APP_PATH/Contents/Resources/SpeechRailControlAgent"
 AGENT_PLIST="$APP_PATH/Contents/Library/LaunchAgents/com.speechrail.desktop.control.plist"
+LOCAL_XPC_PATH="$APP_PATH/Contents/XPCServices/com.speechrail.desktop.local-control.xpc"
 FRAMEWORK_ROOT="$APP_PATH/Contents/Frameworks"
 if [[ ! -f "$AGENT_PATH" || ! -f "$AGENT_PLIST" ]]; then
   echo "app bundle is missing the control agent or LaunchAgent plist" >&2
+  exit 1
+fi
+if [[ -e "$LOCAL_XPC_PATH" ]]; then
+  echo "Distribution bundle must not contain the local unsigned XPC service" >&2
   exit 1
 fi
 for framework in SpeechRailControlKit.framework SpeechRailControlAgentCore.framework; do

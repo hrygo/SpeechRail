@@ -148,12 +148,19 @@ public actor AgentOperationStore {
     private func finish(operationID: String, result: ManagedCommandResult) {
         let response = result.response
         let succeeded = result.exitCode == 0 && response?.status != .failed
+        let message = succeeded
+            ? nil
+            : (response?.message ?? result.message ?? "managed command failed")
+        let phase = succeeded
+            ? "committed"
+            : (response?.operation?.phase ?? response?.status.rawValue ?? "failed")
         let snapshot = OperationSnapshot(
             operationID: operationID,
             command: .profileApply,
             state: succeeded ? .committed : .failed,
-            phase: succeeded ? "committed" : "failed",
-            errorCode: succeeded ? nil : (response?.errorCode ?? .commandFailed)
+            phase: phase,
+            errorCode: succeeded ? nil : (response?.errorCode ?? .commandFailed),
+            message: message
         )
         operations[operationID] = snapshot
         if activeMutation == operationID {
@@ -177,6 +184,7 @@ public actor AgentOperationStore {
             command: request.command,
             status: status,
             errorCode: operation.errorCode,
+            message: operation.message,
             operation: operation
         )
     }

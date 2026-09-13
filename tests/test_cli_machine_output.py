@@ -117,10 +117,42 @@ def test_profile_apply_json_has_no_human_prefix(
     assert json.loads(lines[0]) == {
         "command": "profile.apply",
         "error_code": None,
+        "message": "profile applied and public API smoke passed",
         "operation_id": "op_test",
         "schema_version": 1,
         "status": "committed",
     }
+
+
+def test_profile_apply_json_preserves_a_safe_failure_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from speechrail.service import profile_commands
+    from speechrail.service.profile_switch import ApplyResult
+
+    monkeypatch.setattr(profile_commands, "list_profiles", _profile_summaries)
+    monkeypatch.setattr(cli, "_confirm", lambda assume_yes: assume_yes)
+    monkeypatch.setattr(
+        profile_commands,
+        "apply_profile",
+        lambda preset, app_home: ApplyResult(
+            status="rolled_back",
+            operation_id="op_test",
+            error_code="profile_switch_failed",
+            message="profile smoke failed; the previous profile was restored",
+        ),
+    )
+
+    assert (
+        cli.main(
+            ["profile", "apply", "light", "--app-home", str(tmp_path), "--yes", "--json"]
+        )
+        == 1
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_code"] == "profile_switch_failed"
+    assert payload["message"] == "profile smoke failed; the previous profile was restored"
 
 
 class _JsonFakeManager:

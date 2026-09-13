@@ -202,6 +202,6 @@ controller-backed `service start` 启动。启动或 smoke 失败时停止候选
 ### App 发布与联合发布
 
 - App-only 或 Distribution 归档不执行服务停启；按 [macOS App 分发与签名](../developers/macos-app-release.md) 构建、测试、逐项签名、公证、安装和清理。
-- App 安装前服务必须已经 ready；App 只通过 `SMAppService` 管理 `com.speechrail.desktop.control`，不直接调用 `launchctl`，不加载模型，不创建第二个 worker。
+- App 安装前服务必须已经 ready；签名 Distribution App 通过 `SMAppService` 管理 `com.speechrail.desktop.control`，本机 Debug/Release 使用内嵌 `com.speechrail.desktop.local-control.xpc` 按需控制；两者都不直接调用 `launchctl`，不加载模型，不创建第二个 worker。
 - 联合发布固定顺序为：服务 wheel gate → managed preflight/原子切换 → 服务 health/ready/smoke → App archive/verify/notarize → 唯一安装路径与 XPC `status`/`preflight` smoke → 退出 App 后再次确认服务仍 healthy。
 - App/XPC 失败只回滚 App；服务失败按本 Runbook 的服务回滚处理。两套回退点、版本/build、签名/公证和 SHA-256 分开记录。

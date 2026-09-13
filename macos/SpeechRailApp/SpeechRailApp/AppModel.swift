@@ -38,7 +38,7 @@ public final class AppModel {
             let status = try await transport.send(ControlRequest(command: .profileStatus))
             profile = status.profile
         } catch {
-            message = "控制 Agent 尚未连接"
+            message = Self.controlErrorMessage(for: error, fallback: "控制 Agent 尚未连接")
         }
     }
 
@@ -52,9 +52,7 @@ public final class AppModel {
         defer { isBusy = false }
 
         do {
-            if let registration, registration.status != .enabled {
-                try registration.register()
-            }
+            try registration?.ensureRegisteredForCurrentBundle()
             let response = try await transport.send(
                 ControlRequest(
                     command: command,
@@ -72,7 +70,7 @@ public final class AppModel {
             }
             await refresh()
         } catch {
-            message = "控制 Agent 不可用"
+            message = Self.controlErrorMessage(for: error, fallback: "控制 Agent 不可用")
         }
     }
 
@@ -88,13 +86,28 @@ public final class AppModel {
                 if let state = response.operation?.state,
                    state == .committed || state == .failed || state == .cancelled
                 {
+                    if state == .failed || state == .cancelled {
+                        message = response.operation?.message ?? response.message ?? "操作失败"
+                    }
                     return
                 }
             } catch {
-                message = "无法读取操作状态"
+                message = Self.controlErrorMessage(for: error, fallback: "无法读取操作状态")
                 return
             }
         }
         message = "操作仍在后台运行"
+    }
+
+    private static func controlErrorMessage(for error: Error, fallback: String) -> String {
+        guard let error = error as? XPCControlTransportError else { return fallback }
+        switch error {
+        case .timeout:
+            return "控制 Agent 响应超时，请重新打开 SpeechRail"
+        case let .remote(detail) where !detail.isEmpty:
+            return "控制 Agent 不可用：\(detail)"
+        default:
+            return fallback
+        }
     }
 }

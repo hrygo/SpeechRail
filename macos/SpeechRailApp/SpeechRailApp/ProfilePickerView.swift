@@ -13,7 +13,8 @@ public struct ProfilePickerView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Picker("档位", selection: $selectedProfile) {
                     ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
-                        Text(profile.rawValue).tag(profile)
+                        Text(profile.rawValue)
+                            .tag(profile)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -38,9 +39,31 @@ public struct ProfilePickerView: View {
                 if let operation = model.operation {
                     Text("操作：\(operation.state.rawValue)")
                         .foregroundStyle(.secondary)
+                    if let phase = operation.phase {
+                        Text("阶段：\(phase)")
+                            .foregroundStyle(.secondary)
+                    }
+                    if let errorCode = operation.errorCode {
+                        Text("错误码：\(errorCode.rawValue)")
+                            .foregroundStyle(.secondary)
+                    }
+                    if let message = operation.message {
+                        Text(message)
+                            .foregroundStyle(.red)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .task(id: model.profile?.preset) {
+                if let active = model.profile?.preset {
+                    selectedProfile = active
+                }
+            }
+            .onChange(of: model.operation?.state) { _, state in
+                if state == .failed || state == .cancelled {
+                    selectedProfile = model.profile?.preset ?? .balanced
+                }
+            }
         }
     }
 }

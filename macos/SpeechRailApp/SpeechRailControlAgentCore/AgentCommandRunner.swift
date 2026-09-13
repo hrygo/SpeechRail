@@ -35,19 +35,24 @@ public enum ManagedCommand: Equatable, Sendable {
 
     public func arguments(appHome: URL) -> [String] {
         let home = appHome.standardizedFileURL.path
+        let commandPrefix = ["-m", "speechrail"]
         switch self {
         case let .service(command):
-            return ["service", command.rawValue, "--app-home", home, "--json"]
+            return commandPrefix + [
+                "service", command.rawValue, "--app-home", home, "--json",
+            ]
         case .profileList:
-            return ["profile", "list", "--app-home", home, "--json"]
+            return commandPrefix + ["profile", "list", "--app-home", home, "--json"]
         case .profileStatus:
-            return ["profile", "status", "--app-home", home, "--json"]
+            return commandPrefix + ["profile", "status", "--app-home", home, "--json"]
         case let .profileApply(profile):
-            return [
+            return commandPrefix + [
                 "profile", "apply", profile.rawValue, "--yes", "--app-home", home, "--json",
             ]
         case .profileRollback:
-            return ["profile", "rollback", "--yes", "--app-home", home, "--json"]
+            return commandPrefix + [
+                "profile", "rollback", "--yes", "--app-home", home, "--json",
+            ]
         }
     }
 }
@@ -184,7 +189,14 @@ public final class ProcessManagedCommandRunner: ManagedCommandRunner, @unchecked
             }
             response = nil
         }
-        let message = exitCode == 0 ? nil : "managed command failed"
+        let message: String?
+        if let responseMessage = response?.message, !responseMessage.isEmpty {
+            message = responseMessage
+        } else if exitCode == 0 {
+            message = nil
+        } else {
+            message = ManagedCommandDiagnostics.failureMessage(from: stderrCollector.data)
+        }
         return ManagedCommandResult(exitCode: exitCode, response: response, message: message)
     }
 }
@@ -213,6 +225,50 @@ private final class PipeCollector: @unchecked Sendable {
         lock.lock()
         storedData = data
         lock.unlock()
+    }
+}
+
+private enum ManagedCommandDiagnostics {
+    private static let secretPattern = #"(?i)\b(api[_-]?key|authorization|token|secret|password)\b\s*[:=]\s*\S+"#
+    private static let pathPattern = #"(?<![:\w])/[^\s"']+"#
+
+    static func failureMessage(from data: Data) -> String {
+        guard let output = String(data: data, encoding: .utf8) else {
+            return "managed command failed"
+        }
+        let detail = output
+            .split(whereSeparator: { $0.isNewline })
+            .reversed()
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+        guard let detail else {
+            return "managed command failed"
+        }
+
+        let redactedSecrets = replacingMatches(
+            in: detail,
+            pattern: secretPattern,
+            template: "$1=[redacted]"
+        )
+        let redactedPaths = replacingMatches(
+            in: redactedSecrets,
+            pattern: pathPattern,
+            template: "[path]"
+        )
+        return "managed command failed: \(String(redactedPaths.prefix(200)))"
+    }
+
+    private static func replacingMatches(in value: String, pattern: String, template: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return value
+        }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return regex.stringByReplacingMatches(
+            in: value,
+            options: [],
+            range: range,
+            withTemplate: template
+        )
     }
 }
 
@@ -325,7 +381,9 @@ private enum CLIOutputDecoder {
                     operationID: $0,
                     command: command,
                     state: operationState(for: responseStatus),
-                    errorCode: errorCode
+                    phase: envelope.status,
+                    errorCode: errorCode,
+                    message: envelope.message
                 )
             }
         )

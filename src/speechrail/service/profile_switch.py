@@ -37,6 +37,7 @@ class ApplyResult:
     status: Literal["unchanged", "committed", "rolled_back", "not_ready"]
     operation_id: str | None
     error_code: str | None
+    message: str | None = None
 
 
 def _resolve_prepared_id(prepared_id: str, app_home: Path) -> PreparedModelSet:
@@ -114,6 +115,7 @@ def _rollback(
             status="rolled_back",
             operation_id=operation_id,
             error_code="profile_switch_failed",
+            message="profile smoke failed; the previous profile was restored",
         )
     except BaseException as exc:
         _mark_not_ready(store, operation_id)
@@ -123,6 +125,7 @@ def _rollback(
             status="not_ready",
             operation_id=operation_id,
             error_code="profile_rollback_failed",
+            message="profile switch failed and the service is not ready",
         )
 
 
