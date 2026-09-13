@@ -3,11 +3,45 @@ import SpeechRailControlKit
 
 public actor AgentOperationStore {
     private let runner: any ManagedCommandRunner
+    private let journal: OperationJournal?
     private var activeMutation: String?
     private var operations: [String: OperationSnapshot] = [:]
+    private var journalWarning: String?
 
-    public init(runner: any ManagedCommandRunner) {
+    public init(
+        runner: any ManagedCommandRunner,
+        journal: OperationJournal? = nil
+    ) {
         self.runner = runner
+        self.journal = journal
+        if let journal {
+            do {
+                if let entry = try journal.load() {
+                    switch entry.operation.state {
+                    case .accepted, .running:
+                        let interrupted = OperationSnapshot(
+                            operationID: entry.operation.operationID,
+                            command: entry.operation.command,
+                            profile: entry.operation.profile,
+                            state: .interrupted,
+                            phase: entry.operation.phase ?? "interrupted",
+                            progress: entry.operation.progress,
+                            errorCode: entry.operation.errorCode,
+                            message: "previous model preparation was interrupted; retry is required"
+                        )
+                        operations[interrupted.operationID] = interrupted
+                        try journal.save(interrupted)
+                    case .interrupted:
+                        operations[entry.operation.operationID] = entry.operation
+                    case .committed, .failed, .cancelled:
+                        try journal.clear()
+                    }
+                }
+            } catch {
+                journalWarning = "previous model preparation state could not be recovered"
+                try? journal.clear()
+            }
+        }
     }
 
     public func handle(_ request: ControlRequest) async -> ControlResponse {
@@ -77,7 +111,10 @@ public actor AgentOperationStore {
         do {
             let result = try await runner.run(command)
             if let response = result.response {
-                return response.rebound(to: request)
+                let rebound = response.rebound(to: request)
+                return request.command == .modelStatus
+                    ? modelStatusResponse(from: rebound)
+                    : rebound
             }
             let code: ControlErrorCode = result.exitCode == 0 ? .commandFailed : .serviceUnavailable
             return .failure(for: request, code: code, message: result.message ?? "managed command failed")
@@ -108,11 +145,13 @@ public actor AgentOperationStore {
         let accepted = OperationSnapshot(
             operationID: operationID,
             command: request.command,
+            profile: Self.profile(for: command),
             state: .accepted,
             phase: "accepted"
         )
         operations[operationID] = accepted
         activeMutation = operationID
+        persist(accepted)
         let runner = self.runner
         let store = self
         Task {
@@ -181,15 +220,18 @@ public actor AgentOperationStore {
         progress: OperationProgressSnapshot
     ) {
         guard let current = operations[operationID] else { return }
-        operations[operationID] = OperationSnapshot(
+        let updated = OperationSnapshot(
             operationID: current.operationID,
             command: current.command,
+            profile: current.profile,
             state: .running,
             phase: progress.phase ?? current.phase ?? "download",
             progress: progress,
             errorCode: current.errorCode,
             message: current.message
         )
+        operations[operationID] = updated
+        persist(updated)
     }
 
     private func finish(
@@ -211,6 +253,7 @@ public actor AgentOperationStore {
         let snapshot = OperationSnapshot(
             operationID: operationID,
             command: command,
+            profile: operations[operationID]?.profile,
             state: succeeded ? .committed : .failed,
             phase: phase,
             progress: response?.operation?.progress ?? operations[operationID]?.progress,
@@ -218,6 +261,8 @@ public actor AgentOperationStore {
             message: message
         )
         operations[operationID] = snapshot
+        persist(snapshot)
+        clearJournalIfTerminal(snapshot)
         if activeMutation == operationID {
             activeMutation = nil
         }
@@ -276,12 +321,15 @@ public actor AgentOperationStore {
         let cancelled = OperationSnapshot(
             operationID: operation.operationID,
             command: operation.command,
+            profile: operation.profile,
             state: .cancelled,
             phase: "cancelled",
             progress: operation.progress,
             message: "model preparation was cancelled"
         )
         operations[operationID] = cancelled
+        persist(cancelled)
+        clearJournalIfTerminal(cancelled)
         activeMutation = nil
         return ControlResponse(
             requestID: request.requestID,
@@ -304,6 +352,68 @@ public actor AgentOperationStore {
         case .runtimeMissing: "managed runtime is unavailable"
         case .launchFailed: "managed command could not be launched"
         case .invalidOutput: "managed command returned invalid output"
+        }
+    }
+
+    private func persist(_ operation: OperationSnapshot) {
+        guard operation.command == .modelPrepare, let journal else { return }
+        do {
+            try journal.save(operation)
+            journalWarning = nil
+        } catch {
+            journalWarning = "model operation recovery state could not be saved"
+        }
+    }
+
+    private func clearJournalIfTerminal(_ operation: OperationSnapshot) {
+        guard operation.command == .modelPrepare,
+              operation.state == .committed || operation.state == .failed || operation.state == .cancelled,
+              let journal
+        else { return }
+        do {
+            try journal.clear()
+            journalWarning = nil
+        } catch {
+            journalWarning = "model operation recovery state could not be cleared"
+        }
+    }
+
+    private func modelStatusResponse(from response: ControlResponse) -> ControlResponse {
+        let activeOperation = operations.values
+            .filter {
+                $0.command == .modelPrepare
+                    && ($0.state == .accepted || $0.state == .running || $0.state == .interrupted)
+            }
+            .first
+        let modelStatus = response.modelStatus.map {
+            ModelStatusSnapshot(
+                artifacts: $0.artifacts,
+                diarization: $0.diarization,
+                disk: $0.disk,
+                activeOperation: activeOperation
+            )
+        }
+        return ControlResponse(
+            requestID: response.requestID,
+            command: response.command,
+            status: response.status,
+            errorCode: response.errorCode,
+            message: response.message ?? journalWarning,
+            service: response.service,
+            profiles: response.profiles,
+            profile: response.profile,
+            checks: response.checks,
+            modelCatalog: response.modelCatalog,
+            modelStatus: modelStatus,
+            operation: response.operation,
+            schemaVersion: response.schemaVersion
+        )
+    }
+
+    nonisolated private static func profile(for command: ManagedCommand) -> SpeechRailProfile? {
+        switch command {
+        case let .profileApply(profile), let .modelPrepare(profile): profile
+        default: nil
         }
     }
 }

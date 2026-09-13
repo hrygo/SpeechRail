@@ -3,7 +3,9 @@ import SpeechRailControlAgentCore
 import SpeechRailControlKit
 
 let runner = ProcessManagedCommandRunner()
-let store = AgentOperationStore(runner: runner)
+let runtimeLocator = ManagedRuntimeLocator.default
+let journal = OperationJournal(appHome: runtimeLocator.appHome)
+let store = AgentOperationStore(runner: runner, journal: journal)
 let teamIdentifier = ProcessInfo.processInfo.environment["SPEECHRAIL_DEVELOPMENT_TEAM"] ?? ""
 let peerPolicy: XPCPeerPolicy
 if !teamIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

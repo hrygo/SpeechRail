@@ -49,6 +49,23 @@ private struct FailureEnvelopeRunner: ManagedCommandRunner {
     }
 }
 
+private struct ModelStatusRunner: ManagedCommandRunner {
+    func run(_ command: ManagedCommand) async throws -> ManagedCommandResult {
+        ManagedCommandResult(
+            exitCode: 0,
+            response: ControlResponse(
+                requestID: UUID(),
+                command: command.controlCommand,
+                status: .ok,
+                modelStatus: ModelStatusSnapshot(
+                    artifacts: [],
+                    disk: ModelDiskSnapshot(modelBytes: 0, freeBytes: 1024)
+                )
+            )
+        )
+    }
+}
+
 private final class ProgressRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var snapshots: [OperationProgressSnapshot] = []
@@ -67,6 +84,119 @@ private final class ProgressRecorder: @unchecked Sendable {
 }
 
 final class AgentCoreTests: XCTestCase {
+    func testOperationJournalPersistsRedactedMetadataAndUpdatedAt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-journal-(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = OperationJournal(
+            fileURL: root.appendingPathComponent("control/active-operation.json")
+        )
+        let operation = OperationSnapshot(
+            operationID: "control_safe_123",
+            command: .modelPrepare,
+            profile: .balanced,
+            state: .running,
+            phase: "download",
+            progress: OperationProgressSnapshot(
+                artifactKey: "fake-asr",
+                file: "/Users/private/models/weights.bin",
+                completedBytes: 32,
+                expectedBytes: 64
+            ),
+            message: "failed at /Users/private/models token=super-secret"
+        )
+        let updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+        try journal.save(operation, updatedAt: updatedAt)
+
+        let raw = try String(contentsOf: journal.fileURL, encoding: .utf8)
+        let loaded = try XCTUnwrap(journal.load())
+        let unrelated = root.appendingPathComponent("unrelated.txt")
+        try Data("keep".utf8).write(to: unrelated)
+
+        XCTAssertTrue(raw.contains("updated_at"))
+        XCTAssertFalse(raw.contains("/Users/private/models"))
+        XCTAssertFalse(raw.contains("super-secret"))
+        XCTAssertEqual(loaded.updatedAt, updatedAt)
+        XCTAssertFalse(loaded.operation.progress?.file?.contains("/") ?? false)
+        XCTAssertFalse(loaded.operation.message?.contains("super-secret") ?? false)
+
+        try journal.clear()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journal.fileURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
+    func testAgentStartupMarksActiveJournalAsInterruptedAndExposesItInModelStatus() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-recovery-(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = OperationJournal(appHome: root)
+        let operation = OperationSnapshot(
+            operationID: "control_recover_123",
+            command: .modelPrepare,
+            profile: .quality,
+            state: .running,
+            phase: "download",
+            progress: OperationProgressSnapshot(
+                artifactKey: "fake-asr",
+                completedBytes: 16,
+                expectedBytes: 64
+            )
+        )
+        try journal.save(operation)
+
+        let store = AgentOperationStore(runner: ModelStatusRunner(), journal: journal)
+        let status = await store.handle(ControlRequest(command: .modelStatus))
+        let recovered = try XCTUnwrap(status.modelStatus?.activeOperation)
+
+        XCTAssertEqual(recovered.operationID, operation.operationID)
+        XCTAssertEqual(recovered.profile, .quality)
+        XCTAssertEqual(recovered.state, .interrupted)
+        XCTAssertEqual(recovered.progress?.completedBytes, 16)
+        let operationStatus = await store.handle(
+            ControlRequest(command: .operationStatus, operationID: operation.operationID)
+        )
+        XCTAssertEqual(
+            operationStatus.operation?.state,
+            .interrupted
+        )
+        let serviceStatus = await store.handle(ControlRequest(command: .status))
+        XCTAssertEqual(
+            serviceStatus.errorCode,
+            nil
+        )
+    }
+
+    func testTerminalOperationClearsActiveJournal() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-terminal-(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = OperationJournal(appHome: root)
+        let store = AgentOperationStore(runner: ModelStatusRunner(), journal: journal)
+        let request = ControlRequest(
+            command: .modelPrepare,
+            profile: .light,
+            confirmation: true
+        )
+
+        let accepted = await store.handle(request)
+        let operationID = try XCTUnwrap(accepted.operation?.operationID)
+
+        for _ in 0..<20 {
+            if !FileManager.default.fileExists(atPath: journal.fileURL.path) {
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journal.fileURL.path))
+        let operation = await store.handle(
+            ControlRequest(command: .operationStatus, operationID: operationID)
+        ).operation
+        XCTAssertEqual(operation?.state, .committed)
+    }
+
     func testManagedRuntimeLocatorUsesOnlyTheCurrentVenvPython() {
         let locator = ManagedRuntimeLocator(
             appHome: URL(fileURLWithPath: "/tmp/SpeechRail Test Home", isDirectory: true)
