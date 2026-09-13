@@ -20,8 +20,10 @@ extension ServiceAPIClientError: LocalizedError {
             "无法连接本机 SpeechRail 服务"
         case .requestTimedOut:
             "本机 SpeechRail 服务响应超时"
-        case let .server(_, message, _):
-            message
+        case .server:
+            // Server detail can contain backend paths or implementation text.
+            // Feature surfaces map stable error codes to user-facing copy.
+            "SpeechRail 服务请求失败"
         }
     }
 }

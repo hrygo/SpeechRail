@@ -493,7 +493,10 @@ public struct ModelManagementView: View {
                     Divider()
                     LabeledContent("最近操作", value: operation.command.rawValue)
                     LabeledContent("操作状态", value: operation.state.rawValue)
-                    LabeledContent("原始消息", value: message)
+                    LabeledContent(
+                        "操作结果",
+                        value: SpeechRailOperationMessagePresentation.text(message)
+                    )
                 }
             } else {
                 SectionHeading(

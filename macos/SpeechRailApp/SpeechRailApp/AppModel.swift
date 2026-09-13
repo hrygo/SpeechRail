@@ -817,10 +817,10 @@ public final class AppModel {
         switch error {
         case .timeout:
             return "控制 Agent 响应超时，请重新打开 SpeechRail"
-        case let .remote(detail) where !detail.isEmpty:
-            return "控制 Agent 不可用：\(detail)"
-            default:
-                return fallback
+        case .remote:
+            return "控制 Agent 不可用，请重新打开 SpeechRail 或运行诊断"
+        default:
+            return fallback
         }
     }
 

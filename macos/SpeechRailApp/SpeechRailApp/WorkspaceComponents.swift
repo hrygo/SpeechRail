@@ -315,10 +315,15 @@ enum SpeechRailDiarizationPresentation {
 enum SpeechRailOperationMessagePresentation {
     static func text(_ rawMessage: String) -> String {
         let normalized = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if rawMessage.unicodeScalars.contains(where: { scalar in
-            scalar.value >= 0x4E00 && scalar.value <= 0x9FFF
-        }) {
+        switch normalized {
+        case "正在停止模型准备…", "模型准备已取消", "已有操作正在进行，请等待当前操作完成。":
             return rawMessage
+        case "命令已完成，正在读取最新服务状态…", "服务命令已完成，状态已刷新。":
+            return rawMessage
+        case "服务命令已完成，但健康检查暂时不可用，请重新读取。":
+            return rawMessage
+        default:
+            break
         }
         if normalized.hasPrefix("profile") {
             return "档位应用未完成，请重试或打开系统诊断。"

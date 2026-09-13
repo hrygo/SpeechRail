@@ -101,7 +101,7 @@ public struct ServiceOverviewView: View {
     private var statusBanner: some View {
         let operationFailed = model.serviceOperation?.phase == .failed
         let isProfileMismatch = profileMismatch
-        let serviceReady = model.service.ready == true
+        let serviceReady = displayedHealth?.ready == true
             && model.healthMessage == nil
             && !operationFailed
             && !isProfileMismatch
@@ -417,7 +417,8 @@ public struct ServiceOverviewView: View {
 
     private var statusMessage: String {
         if let operation = model.serviceOperation, operation.phase == .failed {
-            let detail = operation.message ?? "服务命令未完成"
+            let detail = operation.message.map(SpeechRailOperationMessagePresentation.text)
+                ?? "服务命令未完成"
             return "\(detail)。没有把旧的健康快照当作成功结果，请重新读取或打开诊断。"
         }
         if profileMismatch,
@@ -430,10 +431,10 @@ public struct ServiceOverviewView: View {
             let lastRead = model.lastHealthRefresh.map { "最近成功读取于 \(relativeTime($0))" } ?? "尚无成功读取"
             return "\(healthMessage)。\(lastRead)。"
         }
-        if let controlPlaneMessage = model.controlPlaneMessage {
-            return "SpeechRail 健康状态已单独读取，但控制通道不可用：\(controlPlaneMessage)。只读健康信息仍可查看，请打开诊断。"
+        if model.controlPlaneMessage != nil {
+            return "SpeechRail 健康状态已单独读取，但控制通道不可用。只读健康信息仍可查看，请打开诊断。"
         }
-        if model.service.ready == true {
+        if displayedHealth?.ready == true {
             let profile = displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "运行档位未读取"
             if !model.controlAgentStatus.allowsMutation {
                 return "SpeechRail 已准备好接收本机语音请求。当前运行档位：\(profile)。但控制 Agent 受限，服务操作和档位变更暂不可用；只读诊断仍可使用。"
