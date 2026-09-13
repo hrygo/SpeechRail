@@ -19,7 +19,7 @@
 
 ## 当前证据基线（只读）
 
-审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:51。
+审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:52。
 
 - 当前 managed profile 为 `quality`，generation 为 `102`。
 - 当前 `/health`、`/readyz` 为 ready；ASR、TTS、diarization、realtime VAD 均报告 ready。ASR/TTS/streaming 为 `cold_evicted`，含义是可按需加载，不是模型缺失。
@@ -321,18 +321,19 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 | 模型完整性 | XPC `model.status` | 已接；目标/当前/配置档位与状态语义已分离，待人工对账 | 模型、诊断 |
 | 模型下载/校验 | XPC `model.prepare` | 已接；阶段、字节、取消和缺失协议字段边界已明确 | 模型 |
 | 档位应用 | XPC `profile.apply` | 已接；完成后回读 profile/health 证明生效，待人工对账 | 模型、服务状态 |
-| 音色列表 | `GET /v1/voices` | 已接，需边界保护和管理闭环 | 配音台、音色库 |
+| 音色列表 | `GET /v1/voices` | 已接；服务端文本边界保护与自定义音色管理闭环已实现，待 live 验收 | 配音台、音色库 |
 | 配音生成 | `POST /v1/audio/speech` | 已接；生成、保存、播放失败状态已拆分表达 | 配音台、作品 |
-| 音色 preview | `POST /v1/voices/previews` | 已接；门禁和候选语义需修正 | 音色创作 |
-| 音色注册 | `POST /v1/voices/designs` | 已接；需说明按 seed 重注册 | 音色创作、音色库 |
+| 音色 preview | `POST /v1/voices/previews` | 已接；fail-closed 能力门禁、候选保留和试听语义已实现，待 live 验收 | 音色创作 |
+| 音色注册 | `POST /v1/voices/designs` | 已接；按 seed 重注册、服务端刷新与失败反馈已明确，待 live 验收 | 音色创作、音色库 |
 | 作品索引 | `CreativeWorkStore` | 已接；错误不可静默 | 我的作品 |
 | 音频播放 | `AudioPlaybackController` | 已接；配音、候选、音色试听和作品播放均有统一进行中/停止反馈 | 配音台、音色创作、音色库、作品 |
-| 预检 | XPC `preflight` | 已接；需复制报告和错误修复映射 | 诊断、服务状态 |
+| 预检 | XPC `preflight` | 已接；脱敏报告、错误修复映射和重新运行入口已实现，待故障注入验收 | 诊断、服务状态 |
 
 ## 11. 完成门槛
 
-- [ ] P0 项全部关闭，尤其是音色创作 capability gate 和所有“存在/当前使用/目标档位”歧义。
-- [ ] P1 主流程全部有真实来源、进行中、成功、失败、恢复和可见结果。
+- [x] P0 静态审查项全部关闭：音色创作 capability gate fail-closed，模型“存在/当前使用/目标档位”在来源和文案上已分离；运行态矩阵仍待验收。
+- [x] P1 静态接线项全部具备真实来源、进行中、成功、失败、恢复和可见结果；真实服务/存储/故障注入仍待验收。
+- [ ] P0/P1 运行态验收全部关闭：真实创作、模型准备/应用、服务操作、失败恢复和跨页状态仍需在用户允许的验收窗口执行。
 - [x] 每个页面只使用统一 token；静态 literal/token lint 已完成。
 - [ ] 完成人工视觉审阅；需在用户解除测试暂停后逐页核对截图和交互反馈。
 - [ ] 运行监控只宣称服务端实际提供的指标；本轮契约和源码已成立，仍需安装后的 live endpoint 对账才可关闭本门槛。
@@ -363,4 +364,5 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - 2026-09-14 00:33：服务动作在控制通道不可用时统一 fail-closed；模型刷新/应用按钮、菜单状态和创作页状态均不再依据 stale service snapshot 放行；Debug 编译通过。
 - 2026-09-14 00:37：候选行移除嵌套 field 卡片，VoiceDesign/配音台补齐共享 developer inspector；模型 `ready == nil` 时显示“就绪状态未读取”而不依据 worker 状态过度推断；运行中 operation snapshot 在内存/XPC 出口统一脱敏；静态检查通过，自动化测试仍按用户要求暂停。
 - 2026-09-14 00:51：OpenAPI 与用户 API 契约补充 ASR/TTS RTF、资源快照和缺失值语义；监控脱敏摘要补齐同一采样中的请求、延迟、RTF 和实时会话字段；Debug 构建通过，未安装新实例，live endpoint 对账、真实模型操作和自动化测试仍按用户要求暂停。
+- 2026-09-14 00:52：同一改动在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 Release 构建通过；确认 Release 不启用 UI-test fake 分支。自动化测试、安装和服务运行态操作仍未执行。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试；作品重命名/删除/复用仍需先确定可恢复回收策略，当前不擅自扩展用户数据删除能力。
