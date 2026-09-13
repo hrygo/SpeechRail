@@ -58,6 +58,12 @@ public struct ServiceOperationStatus: Equatable, Sendable {
     }
 }
 
+private enum OperationWaitResult {
+    case committed
+    case failed
+    case stillRunning
+}
+
 @MainActor
 @Observable
 public final class AppModel {
@@ -744,7 +750,33 @@ public final class AppModel {
                 return
             }
             if let operationID = response.operation?.operationID {
-                await waitForOperation(operationID)
+                switch await waitForOperation(operationID) {
+                case .committed:
+                    break
+                case .failed:
+                    if let serviceMutation {
+                        serviceOperation = ServiceOperationStatus(
+                            command: command,
+                            phase: .failed,
+                            message: SpeechRailOperationMessagePresentation.text(
+                                message ?? "操作未完成"
+                            )
+                        )
+                    }
+                    if command == .modelPrepare {
+                        await refreshModels()
+                    }
+                    return
+                case .stillRunning:
+                    if let serviceMutation {
+                        serviceOperation = ServiceOperationStatus(
+                            command: command,
+                            phase: serviceMutation,
+                            message: "操作仍在后台运行，请稍后重新读取。"
+                        )
+                    }
+                    return
+                }
             }
             if serviceMutation != nil {
                 serviceOperation = ServiceOperationStatus(
@@ -783,10 +815,10 @@ public final class AppModel {
         }
     }
 
-    private func waitForOperation(_ operationID: String) async {
+    private func waitForOperation(_ operationID: String) async -> OperationWaitResult {
         let maxPolls = operation?.command == .modelPrepare ? 43_200 : 120
         for _ in 0..<maxPolls {
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { return .failed }
             do {
                 try await Task.sleep(for: .milliseconds(500))
                 let response = try await transport.send(
@@ -798,15 +830,17 @@ public final class AppModel {
                 {
                     if state == .failed || state == .cancelled || state == .interrupted {
                         message = response.operation?.message ?? response.message ?? "操作失败"
+                        return .failed
                     }
-                    return
+                    return .committed
                 }
             } catch {
                 message = Self.controlErrorMessage(for: error, fallback: "无法读取操作状态")
-                return
+                return .failed
             }
         }
         message = "操作仍在后台运行"
+        return .stillRunning
     }
 
     private static func controlErrorMessage(for error: Error, fallback: String) -> String {
