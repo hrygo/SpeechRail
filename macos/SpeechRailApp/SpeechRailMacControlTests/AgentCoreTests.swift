@@ -93,6 +93,44 @@ private actor BlockingModelPreparationRunner: ManagedCommandRunner {
     }
 }
 
+private actor ProgressBlockingRunner: ProgressAwareManagedCommandRunner {
+    private var continuation: CheckedContinuation<ManagedCommandResult, Never>?
+
+    func run(_ command: ManagedCommand) async throws -> ManagedCommandResult {
+        try await run(command, progress: { _ in })
+    }
+
+    func run(
+        _ command: ManagedCommand,
+        progress: @escaping ManagedCommandProgressHandler
+    ) async throws -> ManagedCommandResult {
+        progress(OperationProgressSnapshot(
+            phase: "download",
+            artifactKey: "quality-asr",
+            file: "/Users/private/models/weights.bin",
+            completedBytes: 32,
+            expectedBytes: 64
+        ))
+        return await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func complete() {
+        continuation?.resume(
+            returning: ManagedCommandResult(
+                exitCode: 0,
+                response: ControlResponse(
+                    requestID: UUID(),
+                    command: .modelPrepare,
+                    status: .committed
+                )
+            )
+        )
+        continuation = nil
+    }
+}
+
 private final class ProgressRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var snapshots: [OperationProgressSnapshot] = []
@@ -190,6 +228,27 @@ final class AgentCoreTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: journal.fileURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: unrelated.path))
+    }
+
+    func testRunningOperationRedactsProgressBeforeReturningItToConsumers() async throws {
+        let runner = ProgressBlockingRunner()
+        let store = AgentOperationStore(runner: runner)
+        let accepted = await store.handle(
+            ControlRequest(command: .modelPrepare, profile: .quality, confirmation: true)
+        )
+        let operationID = try XCTUnwrap(accepted.operation?.operationID)
+
+        var progress: OperationProgressSnapshot?
+        for _ in 0..<20 {
+            progress = await store.handle(
+                ControlRequest(command: .operationStatus, operationID: operationID)
+            ).operation?.progress
+            if progress != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertEqual(progress?.file, "weights.bin")
+        await runner.complete()
     }
 
     func testAgentStartupMarksActiveJournalAsInterruptedAndExposesItInModelStatus() async throws {

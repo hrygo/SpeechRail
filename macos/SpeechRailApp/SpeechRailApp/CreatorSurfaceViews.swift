@@ -6,7 +6,9 @@ import UniformTypeIdentifiers
 public struct CreatorSurfaceView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     public let route: AppRoute
+    @State private var showCreatorInspector = false
 
     public init(route: AppRoute) {
         self.route = route
@@ -32,10 +34,31 @@ public struct CreatorSurfaceView: View {
                         } label: {
                             Label("查看服务状态", systemImage: AppRoute.overview.systemImage)
                         }
+                        if supportsCreatorInspector {
+                            Divider()
+                            Button {
+                                showCreatorInspector.toggle()
+                            } label: {
+                                Label(
+                                    showCreatorInspector ? "隐藏开发者详情" : "显示开发者详情",
+                                    systemImage: "info.circle"
+                                )
+                            }
+                        }
                     }
                 }
                 .sharedBackgroundVisibility(.hidden)
             }
+        }
+        .onAppear {
+            syncCreatorInspectorPreference()
+        }
+        .onChange(of: route) { _, _ in
+            syncCreatorInspectorPreference()
+        }
+        .onChange(of: showCreatorInspector) { _, value in
+            guard supportsCreatorInspector else { return }
+            showDeveloperDetails = value
         }
     }
 
@@ -43,9 +66,9 @@ public struct CreatorSurfaceView: View {
     private var creatorContent: some View {
         switch route {
         case .dubbing:
-            DubbingDeskView()
+            DubbingDeskView(showInspector: $showCreatorInspector)
         case .voiceDesign:
-            VoiceDesignView()
+            VoiceDesignView(showInspector: $showCreatorInspector)
         case .voiceLibrary:
             VoiceLibraryView()
         case .works:
@@ -54,6 +77,14 @@ public struct CreatorSurfaceView: View {
             EmptyView()
         }
     }
+
+    private var supportsCreatorInspector: Bool {
+        route == .dubbing || route == .voiceDesign
+    }
+
+    private func syncCreatorInspectorPreference() {
+        showCreatorInspector = supportsCreatorInspector && showDeveloperDetails
+    }
 }
 
 // MARK: - 配音台 (Dubbing Desk)
@@ -61,6 +92,7 @@ public struct CreatorSurfaceView: View {
 public struct DubbingDeskView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Binding private var showInspector: Bool
     @State private var dubbingText = "在星际航行的漫长岁月里，人类学会了倾听寂静。每当脉冲信号穿越猎户座悬臂，控制台都会闪烁起熟悉的琥珀色微光。"
     @State private var selectedVoiceID = ""
     @State private var speechSpeed: Double = 1.0
@@ -68,7 +100,9 @@ public struct DubbingDeskView: View {
     @State private var selectionNotice: String?
     @State private var synthesisTask: Task<Void, Never>?
 
-    public init() {}
+    public init(showInspector: Binding<Bool> = .constant(false)) {
+        self._showInspector = showInspector
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
@@ -172,6 +206,32 @@ public struct DubbingDeskView: View {
             synthesisTask = nil
             model.stopAudio()
         }
+        .inspector(isPresented: $showInspector) {
+            dubbingInspector
+        }
+    }
+
+    private var dubbingInspector: some View {
+        DeveloperInspector {
+            SectionHeading(
+                title: "配音技术摘要",
+                detail: "面向开发者的安全运行信息；不展示原始文稿、凭据或本地绝对路径。"
+            )
+            LabeledContent("文稿长度", value: "\(dubbingText.count) 字")
+            LabeledContent("音色", value: selectedVoice?.name ?? "未选择")
+            LabeledContent("音色状态", value: selectedVoice.map { $0.available ? "当前可用" : "当前不可用" } ?? "未读取")
+            LabeledContent("语速", value: String(format: "%.1fx", speechSpeed))
+            LabeledContent("输出格式", value: "WAV")
+            LabeledContent("采样率", value: "服务配置未提供")
+            LabeledContent("生成状态", value: model.isCreatingSpeech ? "生成中" : "空闲")
+            LabeledContent("播放状态", value: model.isAudioPlaying ? "正在播放" : "未播放")
+            if let workPlaybackMessage = model.workPlaybackMessage {
+                Divider()
+                Text(workPlaybackMessage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
+            }
+        }
     }
 
     private var availableVoices: [CreatorVoice] {
@@ -212,7 +272,10 @@ public struct DubbingDeskView: View {
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .monospacedDigit()
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .frame(minWidth: 32, alignment: .trailing)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Layout.creatorSpeedValueWidth,
+                    alignment: .trailing
+                )
         }
     }
 
@@ -317,6 +380,7 @@ public struct DubbingDeskView: View {
 public struct VoiceDesignView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Binding private var showInspector: Bool
     @State private var description = "温暖、清晰、亲近，像一位深夜电台耐心的播客主持人。"
     @State private var voiceName = "夜航主持"
     @State private var referenceText = "欢迎来到 SpeechRail，这是用于试听和保存音色的参考文案。"
@@ -360,7 +424,9 @@ public struct VoiceDesignView: View {
         CandidateSpec(slot: "D", seed: 404, title: "候选 D", detail: "同一试听文案 · seed 404")
     ]
 
-    public init() {}
+    public init(showInspector: Binding<Bool> = .constant(false)) {
+        self._showInspector = showInspector
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
@@ -379,12 +445,12 @@ public struct VoiceDesignView: View {
                     .padding(SpeechRailDesignTokens.Spacing.xs)
                     .speechRailField()
                     .overlay(
-                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control)
+                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field)
                             .stroke(
                                 isEditorFocused
                                     ? SpeechRailDesignTokens.Color.voice
                                     : Color.clear,
-                                lineWidth: SpeechRailDesignTokens.Control.focusStrokeWidth
+                                lineWidth: SpeechRailDesignTokens.Interaction.focusLineWidth
                             )
                     )
                     .accessibilityLabel("音色描述输入")
@@ -524,6 +590,49 @@ public struct VoiceDesignView: View {
         .onDisappear {
             generationRequest = nil
             model.stopAudio()
+        }
+        .inspector(isPresented: $showInspector) {
+            voiceDesignInspector
+        }
+    }
+
+    private var voiceDesignInspector: some View {
+        let readyCount = candidates.filter { candidate in
+            if case .ready = candidate.status { return true }
+            return false
+        }.count
+        let failedCount = candidates.filter { candidate in
+            if case .failed = candidate.status { return true }
+            return false
+        }.count
+        return DeveloperInspector {
+            SectionHeading(
+                title: "VoiceDesign 技术摘要",
+                detail: "候选音频只用于本次试听；不展示原始描述、参考文案或本地绝对路径。"
+            )
+            LabeledContent("能力门禁", value: voiceDesignAvailabilityText)
+            LabeledContent("音色描述", value: "\(description.count) 字")
+            LabeledContent("参考文案", value: "\(referenceText.count) 字")
+            LabeledContent("候选状态", value: "\(readyCount) 个可试听 · \(failedCount) 个失败")
+            LabeledContent("预览请求", value: model.isCreatingVoicePreview ? "进行中" : "空闲")
+            LabeledContent("注册状态", value: model.isRegisteringVoice ? "进行中" : "空闲")
+            LabeledContent("播放状态", value: playingSlot.map { "候选 \($0) 正在播放" } ?? "未播放")
+            LabeledContent("候选音频持久化", value: "否")
+        }
+    }
+
+    private var voiceDesignAvailabilityText: String {
+        switch voiceDesignAvailability {
+        case .checking:
+            "正在核对"
+        case .available:
+            "已确认可用"
+        case .requiresQuality:
+            "需要 Quality 档位"
+        case .serviceUnavailable:
+            "TTS 服务未就绪"
+        case .unsupported:
+            "服务端未提供"
         }
     }
 
@@ -931,10 +1040,6 @@ private struct CandidateRackRow: View {
             .accessibilityLabel("按 \(candidate.title) 注册至音色库")
         }
         .padding(SpeechRailDesignTokens.Spacing.sm)
-        .background(
-            SpeechRailDesignTokens.Color.field,
-            in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
-        )
         .accessibilityElement(children: .contain)
     }
 

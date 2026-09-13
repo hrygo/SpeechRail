@@ -49,6 +49,7 @@ public enum SpeechRailDesignTokens {
         public static let creatorVoiceNameWidth: CGFloat = 220
         public static let creatorVoiceControlWidth: CGFloat = 240
         public static let creatorSpeedSliderWidth: CGFloat = 120
+        public static let creatorSpeedValueWidth: CGFloat = 32
         public static let creatorSlotBadgeSize: CGFloat = 32
         public static let creatorWaveformWidth: CGFloat = 72
         public static let creatorWaveformHeight: CGFloat = 20
@@ -93,7 +94,6 @@ public enum SpeechRailDesignTokens {
         public static let workspaceTitleHeight: CGFloat = 30
         public static let purposeIndicatorWidth: CGFloat = 3
         public static let purposeIndicatorHeight: CGFloat = 14
-        public static let focusStrokeWidth: CGFloat = 2
         public static let waveformBarSpacing: CGFloat = 3
         public static let waveformBarWidth: CGFloat = 3
         public static let waveformBarRadius: CGFloat = 2

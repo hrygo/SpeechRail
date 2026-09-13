@@ -153,9 +153,10 @@ public actor AgentOperationStore {
             state: .accepted,
             phase: "accepted"
         )
-        operations[operationID] = accepted
+        let safeAccepted = OperationJournal.sanitized(accepted)
+        operations[operationID] = safeAccepted
         activeMutation = operationID
-        persist(accepted)
+        persist(safeAccepted)
         let runner = self.runner
         let store = self
         Task {
@@ -241,8 +242,9 @@ public actor AgentOperationStore {
             errorCode: current.errorCode,
             message: current.message
         )
-        operations[operationID] = updated
-        persist(updated)
+        let safeUpdated = OperationJournal.sanitized(updated)
+        operations[operationID] = safeUpdated
+        persist(safeUpdated)
     }
 
     private func finish(
@@ -274,9 +276,10 @@ public actor AgentOperationStore {
             errorCode: cancellationRequested ? .cancelled : (succeeded ? nil : (response?.errorCode ?? .commandFailed)),
             message: message
         )
-        operations[operationID] = snapshot
-        persist(snapshot)
-        clearJournalIfTerminal(snapshot)
+        let safeSnapshot = OperationJournal.sanitized(snapshot)
+        operations[operationID] = safeSnapshot
+        persist(safeSnapshot)
+        clearJournalIfTerminal(safeSnapshot)
         if activeMutation == operationID {
             activeMutation = nil
         }
@@ -350,14 +353,15 @@ public actor AgentOperationStore {
             progress: operation.progress,
             message: "stopping model preparation"
         )
-        operations[operationID] = cancelling
-        persist(cancelling)
+        let safeCancelling = OperationJournal.sanitized(cancelling)
+        operations[operationID] = safeCancelling
+        persist(safeCancelling)
         return ControlResponse(
             requestID: request.requestID,
             command: request.command,
             status: .running,
             message: "stopping model preparation",
-            operation: cancelling
+            operation: safeCancelling
         )
     }
 

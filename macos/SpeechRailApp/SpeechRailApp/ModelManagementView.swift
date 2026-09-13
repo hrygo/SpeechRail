@@ -811,7 +811,13 @@ public struct ModelManagementView: View {
         ready: Bool?,
         state: String?
     ) -> ModelArtifactUsagePresentation {
-        guard ready != false else {
+        guard let ready else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 就绪状态未读取",
+                tone: .neutral
+            )
+        }
+        guard ready else {
             return ModelArtifactUsagePresentation(
                 text: "\(label) · 服务未就绪",
                 tone: .critical

@@ -91,7 +91,7 @@ public struct OperationJournal: Sendable {
         try FileManager.default.removeItem(at: fileURL)
     }
 
-    private static func sanitized(_ operation: OperationSnapshot) -> OperationSnapshot {
+    static func sanitized(_ operation: OperationSnapshot) -> OperationSnapshot {
         let progress = operation.progress.map {
             OperationProgressSnapshot(
                 phase: sanitizedText($0.phase),
