@@ -220,6 +220,40 @@ public struct VoiceDesignView: View {
     @State private var isGenerating = false
     @State private var generationRequest: VoiceGenerationRequest?
 
+    private enum VoiceDesignAvailability: Equatable {
+        case checking
+        case available
+        case requiresQuality
+        case serviceUnavailable
+        case unsupported
+
+        var isAvailable: Bool {
+            self == .available
+        }
+
+        var label: String {
+            switch self {
+            case .checking:
+                "正在核对服务能力"
+            case .available:
+                "VoiceDesign 可用"
+            case .requiresQuality:
+                "需要 Quality"
+            case .serviceUnavailable:
+                "服务未就绪"
+            case .unsupported:
+                "VoiceDesign 不可用"
+            }
+        }
+    }
+
+    private struct AvailabilityBanner {
+        let title: String
+        let message: String
+        let actionTitle: String
+        let route: AppRoute
+    }
+
     private let acousticChips = [
         "磁性胸腔", "治愈温暖", "播音质感", "微醺叙事", "少年清冽", "知性温婉", "沙哑沉郁"
     ]
@@ -243,7 +277,13 @@ public struct VoiceDesignView: View {
                     Spacer()
                     Text(qualityAvailabilityLabel)
                         .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(voiceDesignAvailable ? SpeechRailDesignTokens.Color.voice : SpeechRailDesignTokens.Color.attention)
+                        .foregroundStyle(
+                            voiceDesignAvailable
+                                ? SpeechRailDesignTokens.Color.voice
+                                : voiceDesignAvailability == .checking
+                                    ? SpeechRailDesignTokens.Color.inkSecondary
+                                    : SpeechRailDesignTokens.Color.attention
+                        )
                 }
 
                 TextEditor(text: $description)
@@ -344,10 +384,17 @@ public struct VoiceDesignView: View {
                     tone: .critical,
                     title: "音色生成未就绪",
                     message: error,
-                    actionTitle: "重新尝试"
+                    actionTitle: model.creatorVoicesLoadState == .failed ? "重新读取能力" : "重新尝试"
                 ) {
-                    errorMessage = nil
-                    startGeneration()
+                    if model.creatorVoicesLoadState == .failed {
+                        Task {
+                            await model.refresh()
+                            await model.refreshCreatorVoices()
+                        }
+                    } else {
+                        errorMessage = nil
+                        startGeneration()
+                    }
                 }
             }
 
@@ -362,14 +409,14 @@ public struct VoiceDesignView: View {
                 }
             }
 
-            if !voiceDesignAvailable {
+            if let banner = voiceDesignAvailabilityBanner {
                 StatusBanner(
                     tone: .attention,
-                    title: "音色创作需要 Quality 档位",
-                    message: "当前档位不会加载 VoiceDesign 能力。切换档位不会自动发生，请在模型页确认后再操作。",
-                    actionTitle: "打开模型页"
+                    title: banner.title,
+                    message: banner.message,
+                    actionTitle: banner.actionTitle
                 ) {
-                    navigation.request(.models)
+                    navigation.request(banner.route)
                 }
             }
 
@@ -415,6 +462,10 @@ public struct VoiceDesignView: View {
             guard let generationRequest else { return }
             await generateCandidates(for: generationRequest)
         }
+        .task {
+            await model.refresh()
+            await model.refreshCreatorVoices()
+        }
         .onDisappear {
             generationRequest = nil
             model.stopAudio()
@@ -433,19 +484,74 @@ public struct VoiceDesignView: View {
     }
 
     private var voiceDesignAvailable: Bool {
-        guard let profile = model.health?.profile else { return true }
-        return profile == .quality
+        voiceDesignAvailability.isAvailable
     }
 
     private var qualityAvailabilityLabel: String {
-        guard let profile = model.health?.profile else { return "等待服务档位" }
-        return profile == .quality ? "Quality 可用" : "需要 Quality"
+        voiceDesignAvailability.label
+    }
+
+    private var voiceDesignAvailability: VoiceDesignAvailability {
+        guard !model.isRefreshingService, !model.isRefreshingCreatorVoices else {
+            return .checking
+        }
+        guard let health = model.health else {
+            return .checking
+        }
+        guard model.creatorVoicesLoadState == .loaded else {
+            return .checking
+        }
+        guard health.profile == .quality else {
+            return .requiresQuality
+        }
+        guard health.status == "ok", health.ttsReady == true, model.service.ready == true else {
+            return .serviceUnavailable
+        }
+
+        let supportsVoiceDesign = model.creatorVoices.contains { voice in
+            voice.available
+                && voice.variant == "voice_design"
+                && voice.capabilities.supportsInstruction
+        }
+        return supportsVoiceDesign ? .available : .unsupported
+    }
+
+    private var voiceDesignAvailabilityBanner: AvailabilityBanner? {
+        switch voiceDesignAvailability {
+        case .checking, .available:
+            nil
+        case .requiresQuality:
+            AvailabilityBanner(
+                title: "音色创作需要 Quality 档位",
+                message: "当前档位不会加载 VoiceDesign 能力。切换档位不会自动发生，请在模型页确认后再操作。",
+                actionTitle: "打开模型页",
+                route: .models
+            )
+        case .serviceUnavailable:
+            AvailabilityBanner(
+                title: "服务尚未就绪",
+                message: "当前没有确认 TTS 服务可用。请先查看服务状态，修复后再生成候选音色。",
+                actionTitle: "查看服务状态",
+                route: .overview
+            )
+        case .unsupported:
+            AvailabilityBanner(
+                title: "当前 TTS 不支持 VoiceDesign",
+                message: "服务未公开可用的 VoiceDesign preview 能力。请在模型页核对 Quality 制品和当前档位。",
+                actionTitle: "打开模型页",
+                route: .models
+            )
+        }
     }
 
     private func startGeneration() {
         let instruction = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !instruction.isEmpty else {
             errorMessage = "请先填写音色描述"
+            return
+        }
+        guard voiceDesignAvailable else {
+            errorMessage = "当前尚未确认 VoiceDesign 能力，请先完成服务状态和音色能力检查。"
             return
         }
         errorMessage = nil

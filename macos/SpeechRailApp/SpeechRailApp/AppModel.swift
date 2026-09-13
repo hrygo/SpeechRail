@@ -10,6 +10,13 @@ public enum ModelAvailabilityState: Equatable, Sendable {
     case failed
 }
 
+public enum CreatorVoicesLoadState: Equatable, Sendable {
+    case unknown
+    case loading
+    case loaded
+    case failed
+}
+
 public enum ServiceOperationPhase: Equatable, Sendable {
     case starting
     case stopping
@@ -73,6 +80,7 @@ public final class AppModel {
     public private(set) var serviceOperation: ServiceOperationStatus?
     public private(set) var isAudioPlaying = false
     public private(set) var creatorVoices: [CreatorVoice] = []
+    public private(set) var creatorVoicesLoadState: CreatorVoicesLoadState = .unknown
     public private(set) var works: [CreativeWork] = []
     public private(set) var creatorMessage: String?
     public private(set) var isRefreshingCreatorVoices = false
@@ -299,6 +307,7 @@ public final class AppModel {
     public func refreshCreatorVoices() async {
         guard !isRefreshingCreatorVoices else { return }
         isRefreshingCreatorVoices = true
+        creatorVoicesLoadState = .loading
         defer { isRefreshingCreatorVoices = false }
         do {
             creatorVoices = try await creatorClient.fetchVoices()
@@ -306,10 +315,13 @@ public final class AppModel {
                     if lhs.isSystem != rhs.isSystem { return lhs.isSystem }
                     return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
                 }
+            creatorVoicesLoadState = .loaded
             creatorMessage = nil
         } catch is CancellationError {
+            creatorVoicesLoadState = .unknown
             return
         } catch {
+            creatorVoicesLoadState = .failed
             creatorMessage = Self.creatorErrorMessage(for: error)
         }
     }

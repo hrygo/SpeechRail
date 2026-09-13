@@ -110,7 +110,7 @@
 
 - [x] 候选请求通过 `createVoicePreview()` → `POST /v1/voices/previews`，候选使用稳定 seed 区分，试听使用真实音频数据。
 - [x] 保存通过 `registerVoiceDesign()` → `POST /v1/voices/designs`，成功后刷新 `/v1/voices`。
-- [ ] 修复能力门禁：当前主要依据 `health.profile == quality`，且 health 未知时存在放行风险；生成按钮必须同时依赖健康快照、当前 profile、`ttsReady` 和服务实际 voice-design capability，未知状态应为禁用或“检查服务”。
+- [x] 修复能力门禁：生成按钮现在同时依赖健康快照、当前 profile、`ttsReady`、service ready 和服务实际 `voice_design + supports_instruction` capability；未知状态 fail-closed。代码已完成，待人工/自动化验收。
 - [ ] 对齐模型页和创作页的能力事实源：不得出现模型页显示当前 TTS 不支持 voice design、创作页却允许生成的矛盾。
 - [ ] 明确“保存候选”的语义：当前保存是按 seed/instruction/reference text 重新注册，不是把已经试听的音频文件持久化；文案和确认框必须如实表达，或改为服务端保存 exact candidate。
 - [ ] preview 使用的输入文本、用户填写的 reference text、注册时 reference text 的关系必须在 UI 中解释清楚，避免用户以为候选音频就是最终音色资产。
@@ -320,4 +320,5 @@
 
 - 2026-09-13：源码审查确认 `ServiceAPIClient` 为 `/metrics` 设置 `Accept: application/json`；服务端按 Accept 内容协商，未发现此前容易误报的“Prometheus 文本无法 JSON 解码”问题。
 - 2026-09-13：只读核对 profile、catalog、model status、`/health`、`/readyz`、`/v1/models`、`/v1/voices` 和 JSON `/metrics`；未下载/加载/卸载模型，未改服务运行态。
+- 2026-09-13 23:01：完成音色创作能力门禁的 fail-closed 修复；进入页面先刷新 health 和 voices，Debug 编译通过。自动化测试与真实 VoiceDesign 请求按用户要求未执行。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。
