@@ -10,6 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-13-speechrail-app-management-observability-design.md`
 
+## Execution status (2026-09-13, Asia/Shanghai)
+
+核心实现已落地并拆成两个主提交：`c174581`（模型目录、状态、准备、JSONL 进度、取消、ControlKit/Agent 协议）和 `ecd70a2`（macOS 26-only 控制中心、服务总览、运行监控、模型管理、预检诊断、音色创作保留、fake UI 场景和文档）；随后以 `47eab12` 收紧趋势图的最小采样门槛。原始设计包及图稿已在更早提交中归档到 `docs/design/archive/2026-09-12-macos-app-design-package/`。
+
+已验证：Python 全量测试 `1761 passed, 1 skipped`，ruff、mypy、OpenAPI lint、plist lint、App build、App unit tests 和 UI `build-for-testing` 通过。真正启动 XCUITest 尚未完成：当前 Mac 锁屏，且此前启动还遇到 Xcode LLDB debugger-version store 错误；不能把构建通过表述为 UI 运行通过。
+
+实现偏差是有意的：模型 `prepare` 保持独立，不接入 `profile_commands.py` 的 apply 事务；“下载并校验”不会切换 active profile，profile apply 仍走既有切换/回退链路。`ServicePayloadTests.swift` 未单独创建，diagnostics/sampler 的编译与行为由现有 App/ControlKit 构建、fake UI 场景和 Python/协议测试覆盖。解除锁屏后应优先执行 `scripts/macos_app_test.sh`，再做真实模型下载验收；真实模型、音频、日志和 runtime 仍不进入仓库。
+
 ## Global Constraints
 
 - Python 固定为 `>=3.12,<3.13`，运行目标为 macOS Apple Silicon；服务模块的 SwiftUI 页面只在 `SpeechRailApp` GUI target 中实现，该 target 使用 macOS 26.0，不为 macOS 14 编写 UI fallback。
