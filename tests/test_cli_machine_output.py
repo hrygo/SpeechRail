@@ -216,3 +216,70 @@ def test_machine_error_is_json_and_does_not_leak_exception_details(
     assert payload["status"] == "failed"
     assert payload["error_code"] == "managed_runtime_missing"
     assert "/private/secret/path" not in json.dumps(payload)
+
+
+def test_model_catalog_json_is_path_free(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cli.main(["model", "catalog", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "model.catalog"
+    assert payload["status"] == "ok"
+    assert {item["id"] for item in payload["profiles"]} == {
+        "quality",
+        "balanced",
+        "light",
+    }
+    assert all("path" not in item and "url" not in item for item in payload["artifacts"])
+
+
+def test_model_status_json_distinguishes_missing_without_paths(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(["model", "status", "--app-home", str(tmp_path), "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "model.status"
+    assert all(item["state"] == "not_downloaded" for item in payload["artifacts"])
+    assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_model_prepare_json_requires_confirmation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert (
+        cli.main(
+            [
+                "model",
+                "prepare",
+                "light",
+                "--app-home",
+                str(tmp_path),
+                "--json",
+            ]
+        )
+        == 1
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["command"] == "model.prepare"
+    assert payload["event"] == "result"
+    assert payload["error_code"] == "confirmation_required"
+    assert payload["status"] == "cancelled"
+
+
+def test_model_errors_use_stable_machine_error_codes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from speechrail.service import model_commands
+
+    monkeypatch.setattr(
+        model_commands,
+        "model_status_payload",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("insufficient disk space for missing model staging")
+        ),
+    )
+
+    assert cli.main(["model", "status", "--app-home", str(tmp_path), "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_code"] == "insufficient_disk_space"

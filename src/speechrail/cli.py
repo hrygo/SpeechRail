@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -115,6 +117,22 @@ def _parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="emit one machine-readable JSON envelope"
     )
 
+    model = subcommands.add_parser("model", help="inspect or prepare locked model artifacts")
+    model_commands = model.add_subparsers(dest="model_command", required=True)
+    for command in ("catalog", "status"):
+        command_parser = model_commands.add_parser(command)
+        command_parser.add_argument("--app-home", type=Path, help="use this installed app home")
+        command_parser.add_argument(
+            "--json", action="store_true", help="emit one machine-readable JSON envelope"
+        )
+    prepare = model_commands.add_parser("prepare")
+    prepare.add_argument("preset", choices=("quality", "balanced", "light"))
+    prepare.add_argument("--app-home", type=Path, help="use this installed app home")
+    prepare.add_argument("--yes", action="store_true", help="prepare without an interactive prompt")
+    prepare.add_argument(
+        "--json", action="store_true", help="emit JSONL progress and one result envelope"
+    )
+
     service = subcommands.add_parser("service", help="manage the macOS user LaunchAgent")
     service_commands = service.add_subparsers(dest="service_command", required=True)
     for command in (
@@ -204,11 +222,27 @@ def _machine_command(args: argparse.Namespace) -> str:
         return f"service.{args.service_command}"
     if args.command == "profile":
         return f"profile.{args.profile_command}"
+    if args.command == "model":
+        return f"model.{args.model_command}"
     return str(args.command)
 
 
 def _machine_error_code(exc: BaseException) -> str:
     message = str(exc).lower()
+    if "insufficient disk space" in message or "disk space" in message:
+        return "insufficient_disk_space"
+    if (
+        "integrity" in message
+        or "hash" in message
+        or "verify" in message
+        or "manifest" in message
+        or "mismatch" in message
+    ):
+        return "integrity_mismatch"
+    if "download" in message or "model source" in message:
+        return "download_failed"
+    if "model" in message and ("unavailable" in message or "missing" in message):
+        return "model_unavailable"
     if "managed runtime" in message:
         return "managed_runtime_missing"
     if "backend_busy" in message:
@@ -393,6 +427,144 @@ def _run_profile(args: argparse.Namespace) -> int:
             command="profile.rollback",
         )
     raise ServiceError("unknown profile command")
+
+
+def _run_model(args: argparse.Namespace) -> int:
+    from speechrail.config.model_catalog import load_catalog, load_runtime_lock
+    from speechrail.service import model_commands
+
+    app_home = (args.app_home or _default_app_home()).resolve()
+    machine_output = bool(getattr(args, "json", False))
+    if args.model_command == "catalog":
+        payload = model_commands.model_catalog_payload(catalog=load_catalog())
+        if machine_output:
+            print(json.dumps(payload, sort_keys=True))
+            return 0
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ServiceError("model catalog returned invalid artifacts")
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            print(
+                f"{artifact['key']}: {artifact['variant']} / {artifact['quantization']['format']} "
+                f"({_format_bytes(int(artifact['size_bytes']))})"
+            )
+        return 0
+    if args.model_command == "status":
+        payload = model_commands.model_status_payload(app_home, catalog=load_catalog())
+        if machine_output:
+            print(json.dumps(payload, sort_keys=True))
+            return 0
+        disk = payload.get("disk")
+        if not isinstance(disk, dict):
+            raise ServiceError("model status returned invalid disk information")
+        print(
+            f"Models: {_format_bytes(int(disk['model_bytes']))} on disk, "
+            f"{_format_bytes(int(disk['free_bytes']))} free"
+        )
+        artifacts = payload.get("artifacts")
+        if not isinstance(artifacts, list):
+            raise ServiceError("model status returned invalid artifacts")
+        for artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            print(
+                f"{artifact['key']}: {artifact['state']} "
+                f"({artifact['verified_file_count']}/{artifact['total_file_count']} files)"
+            )
+        return 0
+    if args.model_command == "prepare":
+        if not _confirm(args.yes):
+            if machine_output:
+                _print_machine(
+                    {
+                        "command": "model.prepare",
+                        "event": "result",
+                        "error_code": "confirmation_required",
+                        "message": "model preparation requires confirmation",
+                        "status": "cancelled",
+                    }
+                )
+            else:
+                print("Cancelled.")
+            return 1
+
+        managed_python = _managed_runtime_for_mutation(app_home)
+        if managed_python is not None:
+            command_args: tuple[str, ...] = ("model", "prepare", args.preset, "--yes")
+            if machine_output:
+                command_args += ("--json",)
+            return _delegate_managed_command(
+                command_args,
+                app_home,
+                managed_python=managed_python,
+            )
+
+        import httpx
+
+        from speechrail.service.modelscope import ModelScopeDownloader
+
+        def progress(event: dict[str, object]) -> None:
+            if machine_output:
+                _print_machine({"event": "progress", "command": "model.prepare", **event})
+            else:
+                phase = event.get("phase", "preparing")
+                artifact = event.get("artifact")
+                suffix = f" ({artifact})" if isinstance(artifact, str) else ""
+                print(f"{phase}{suffix}")
+
+        timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+        cancel_event = asyncio.Event()
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+
+        def request_cancel(_signum: int, _frame: object) -> None:
+            cancel_event.set()
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, request_cancel)
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                prepared_id = asyncio.run(
+                    model_commands.prepare_profile_models(
+                        args.preset,
+                        app_home,
+                        progress=progress,
+                        downloader=ModelScopeDownloader(client=client),
+                        catalog=load_catalog(),
+                        runtime_lock=load_runtime_lock(),
+                        cancel_event=cancel_event,
+                    )
+                )
+        except KeyboardInterrupt:
+            if machine_output:
+                _print_machine(
+                    {
+                        "event": "result",
+                        "command": "model.prepare",
+                        "error_code": "cancelled",
+                        "message": "model preparation was cancelled",
+                        "status": "cancelled",
+                    }
+                )
+            else:
+                print("Cancelled.")
+            return 130
+        finally:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        if machine_output:
+            _print_machine(
+                {
+                    "event": "result",
+                    "command": "model.prepare",
+                    "prepared_id": prepared_id,
+                    "status": "committed",
+                }
+            )
+        else:
+            print(f"Model preparation committed: {prepared_id}")
+        return 0
+    raise ServiceError("unknown model command")
 
 
 def _run_setup(args: argparse.Namespace) -> int:
@@ -775,6 +947,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if service_result is None else service_result
         if args.command == "profile":
             return _run_profile(args)
+        if args.command == "model":
+            return _run_model(args)
         if args.command == "setup":
             return _run_setup(args)
         raise ServiceError("unknown command")

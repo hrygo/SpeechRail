@@ -25,7 +25,15 @@ public actor AgentOperationStore {
         case .operationCancel:
             return cancelOperation(for: request)
         case .profileApply:
-            return await acceptProfileApply(request)
+            guard let profile = request.profile else {
+                return .failure(for: request, code: .invalidRequest, message: "profile is required")
+            }
+            return await acceptMutation(request, command: .profileApply(profile))
+        case .modelPrepare:
+            guard let profile = request.profile else {
+                return .failure(for: request, code: .invalidRequest, message: "profile is required")
+            }
+            return await acceptMutation(request, command: .modelPrepare(profile))
         case .status:
             return await execute(request, command: .service(.status))
         case .start:
@@ -42,6 +50,10 @@ public actor AgentOperationStore {
             return await execute(request, command: .profileStatus)
         case .profileRollback:
             return await execute(request, command: .profileRollback)
+        case .modelCatalog:
+            return await execute(request, command: .modelCatalog)
+        case .modelStatus:
+            return await execute(request, command: .modelStatus)
         }
     }
 
@@ -80,10 +92,10 @@ public actor AgentOperationStore {
         }
     }
 
-    private func acceptProfileApply(_ request: ControlRequest) async -> ControlResponse {
-        guard let profile = request.profile else {
-            return .failure(for: request, code: .invalidRequest, message: "profile is required")
-        }
+    private func acceptMutation(
+        _ request: ControlRequest,
+        command: ManagedCommand
+    ) async -> ControlResponse {
         guard activeMutation == nil else {
             return .failure(
                 for: request,
@@ -95,25 +107,43 @@ public actor AgentOperationStore {
         let operationID = "control_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let accepted = OperationSnapshot(
             operationID: operationID,
-            command: .profileApply,
+            command: request.command,
             state: .accepted,
             phase: "accepted"
         )
         operations[operationID] = accepted
         activeMutation = operationID
         let runner = self.runner
-        Task { [weak self] in
+        let store = self
+        Task {
             do {
-                let result = try await runner.run(.profileApply(profile))
-                await self?.finish(operationID: operationID, result: result)
-            } catch let error as ManagedCommandError {
-                await self?.finish(
+                let result: ManagedCommandResult
+                if let progressRunner = runner as? any ProgressAwareManagedCommandRunner {
+                    result = try await progressRunner.run(command) { progress in
+                        Task {
+                            await store.updateProgress(
+                                operationID: operationID,
+                                progress: progress
+                            )
+                        }
+                    }
+                } else {
+                    result = try await runner.run(command)
+                }
+                await store.finish(
                     operationID: operationID,
+                    command: request.command,
+                    result: result
+                )
+            } catch let error as ManagedCommandError {
+                await store.finish(
+                    operationID: operationID,
+                    command: request.command,
                     result: ManagedCommandResult(
                         exitCode: -1,
                         response: ControlResponse(
                             requestID: request.requestID,
-                            command: .profileApply,
+                            command: request.command,
                             status: .failed,
                             errorCode: Self.errorCode(for: error),
                             message: Self.message(for: error)
@@ -121,13 +151,14 @@ public actor AgentOperationStore {
                     )
                 )
             } catch {
-                await self?.finish(
+                await store.finish(
                     operationID: operationID,
+                    command: request.command,
                     result: ManagedCommandResult(
                         exitCode: -1,
                         response: ControlResponse(
                             requestID: request.requestID,
-                            command: .profileApply,
+                            command: request.command,
                             status: .failed,
                             errorCode: .commandFailed,
                             message: "managed command failed"
@@ -145,8 +176,31 @@ public actor AgentOperationStore {
         )
     }
 
-    private func finish(operationID: String, result: ManagedCommandResult) {
+    private func updateProgress(
+        operationID: String,
+        progress: OperationProgressSnapshot
+    ) {
+        guard let current = operations[operationID] else { return }
+        operations[operationID] = OperationSnapshot(
+            operationID: current.operationID,
+            command: current.command,
+            state: .running,
+            phase: progress.phase ?? current.phase ?? "download",
+            progress: progress,
+            errorCode: current.errorCode,
+            message: current.message
+        )
+    }
+
+    private func finish(
+        operationID: String,
+        command: ControlCommand,
+        result: ManagedCommandResult
+    ) {
         let response = result.response
+        if operations[operationID]?.state == .cancelled {
+            return
+        }
         let succeeded = result.exitCode == 0 && response?.status != .failed
         let message = succeeded
             ? nil
@@ -156,9 +210,10 @@ public actor AgentOperationStore {
             : (response?.operation?.phase ?? response?.status.rawValue ?? "failed")
         let snapshot = OperationSnapshot(
             operationID: operationID,
-            command: .profileApply,
+            command: command,
             state: succeeded ? .committed : .failed,
             phase: phase,
+            progress: response?.operation?.progress ?? operations[operationID]?.progress,
             errorCode: succeeded ? nil : (response?.errorCode ?? .commandFailed),
             message: message
         )
@@ -190,13 +245,49 @@ public actor AgentOperationStore {
     }
 
     private func cancelOperation(for request: ControlRequest) -> ControlResponse {
-        guard let operationID = request.operationID, operations[operationID] != nil else {
+        guard let operationID = request.operationID, let operation = operations[operationID] else {
             return .failure(for: request, code: .invalidRequest, message: "operation is not available")
         }
-        return .failure(
-            for: request,
-            code: .unsupported,
-            message: "profile operations cannot be cancelled after submission"
+        guard operation.command == .modelPrepare else {
+            return .failure(
+                for: request,
+                code: .unsupported,
+                message: "profile operations cannot be cancelled after submission"
+            )
+        }
+        guard operation.state == .accepted || operation.state == .running else {
+            return ControlResponse(
+                requestID: request.requestID,
+                command: request.command,
+                status: operation.state == .cancelled ? .cancelled : .completed,
+                operation: operation
+            )
+        }
+        guard let cancellable = runner as? any CancellableManagedCommandRunner,
+              cancellable.cancelCurrentCommand()
+        else {
+            return .failure(
+                for: request,
+                code: .unsupported,
+                message: "model operation cannot be cancelled"
+            )
+        }
+        let cancelled = OperationSnapshot(
+            operationID: operation.operationID,
+            command: operation.command,
+            state: .cancelled,
+            phase: "cancelled",
+            progress: operation.progress,
+            message: "model preparation was cancelled"
+        )
+        operations[operationID] = cancelled
+        activeMutation = nil
+        return ControlResponse(
+            requestID: request.requestID,
+            command: request.command,
+            status: .cancelled,
+            message: "model preparation was cancelled",
+            operation: cancelled
         )
     }
 

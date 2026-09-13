@@ -6,8 +6,10 @@ public struct ServiceStatusView: View {
     public init() {}
 
     public var body: some View {
-        GroupBox("服务状态") {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Text("服务状态")
+                .font(SpeechRailDesignTokens.Typography.panelTitle)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 LabeledContent("状态", value: model.service.serviceState)
                 if let ready = model.service.ready {
                     LabeledContent("就绪", value: ready ? "是" : "否")
@@ -20,10 +22,13 @@ public struct ServiceStatusView: View {
                 .disabled(model.isBusy)
                 if let message = model.message {
                     Text(message)
-                        .foregroundStyle(.red)
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .speechRailSurface(.panel)
     }
 }

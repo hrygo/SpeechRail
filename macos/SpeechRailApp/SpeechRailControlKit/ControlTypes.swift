@@ -24,23 +24,29 @@ public enum ControlCommand: String, Codable, CaseIterable, Sendable {
     case profileStatus
     case profileApply
     case profileRollback
+    case modelCatalog
+    case modelStatus
+    case modelPrepare
     case operationStatus
     case operationCancel
 
     public var requiresConfirmation: Bool {
         switch self {
-        case .start, .stop, .restart, .profileApply, .profileRollback:
+        case .start, .stop, .restart, .profileApply, .profileRollback, .modelPrepare:
             true
-        case .status, .preflight, .profileList, .profileStatus, .operationStatus, .operationCancel:
+        case .status, .preflight, .profileList, .profileStatus, .modelCatalog, .modelStatus,
+             .operationStatus, .operationCancel:
             false
         }
     }
 
     public var isMutation: Bool {
         switch self {
-        case .start, .stop, .restart, .profileApply, .profileRollback, .operationCancel:
+        case .start, .stop, .restart, .profileApply, .profileRollback, .modelPrepare,
+             .operationCancel:
             true
-        case .status, .preflight, .profileList, .profileStatus, .operationStatus:
+        case .status, .preflight, .profileList, .profileStatus, .modelCatalog, .modelStatus,
+             .operationStatus:
             false
         }
     }
@@ -76,6 +82,11 @@ public enum ControlErrorCode: String, Codable, Sendable {
     case commandFailed = "command_failed"
     case serviceUnavailable = "service_unavailable"
     case transportUnavailable = "transport_unavailable"
+    case modelUnavailable = "model_unavailable"
+    case downloadFailed = "download_failed"
+    case integrityMismatch = "integrity_mismatch"
+    case insufficientDiskSpace = "insufficient_disk_space"
+    case cancelled
     case unsupported
 }
 
@@ -113,6 +124,9 @@ public struct ControlRequest: Codable, Equatable, Sendable {
         if command == .profileApply && profile == nil {
             throw ControlProtocolError.profileRequired
         }
+        if command == .modelPrepare && profile == nil {
+            throw ControlProtocolError.profileRequired
+        }
         if (command == .operationStatus || command == .operationCancel) && operationID == nil {
             throw ControlProtocolError.operationRequired
         }
@@ -136,6 +150,8 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
     public let asr: String
     public let tts: String
     public let aligner: String?
+    public let ttsClone: String?
+    public let diarization: Bool
     public let downloadBytes: Int64
 
     public init(
@@ -143,13 +159,38 @@ public struct ProfileSummary: Codable, Equatable, Sendable {
         asr: String,
         tts: String,
         aligner: String? = nil,
+        ttsClone: String? = nil,
+        diarization: Bool = false,
         downloadBytes: Int64
     ) {
         self.id = id
         self.asr = asr
         self.tts = tts
         self.aligner = aligner
+        self.ttsClone = ttsClone
+        self.diarization = diarization
         self.downloadBytes = downloadBytes
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(SpeechRailProfile.self, forKey: .id)
+        asr = try container.decode(String.self, forKey: .asr)
+        tts = try container.decode(String.self, forKey: .tts)
+        aligner = try container.decodeIfPresent(String.self, forKey: .aligner)
+        ttsClone = try container.decodeIfPresent(String.self, forKey: .ttsClone)
+        diarization = try container.decodeIfPresent(Bool.self, forKey: .diarization) ?? false
+        downloadBytes = try container.decode(Int64.self, forKey: .downloadBytes)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case asr
+        case tts
+        case aligner
+        case ttsClone = "tts_clone"
+        case diarization
+        case downloadBytes = "download_bytes"
     }
 }
 
@@ -189,6 +230,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
     public let command: ControlCommand
     public let state: OperationState
     public let phase: String?
+    public let progress: OperationProgressSnapshot?
     public let errorCode: ControlErrorCode?
     public let message: String?
 
@@ -197,6 +239,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
         command: ControlCommand,
         state: OperationState,
         phase: String? = nil,
+        progress: OperationProgressSnapshot? = nil,
         errorCode: ControlErrorCode? = nil,
         message: String? = nil
     ) {
@@ -204,6 +247,7 @@ public struct OperationSnapshot: Codable, Equatable, Sendable {
         self.command = command
         self.state = state
         self.phase = phase
+        self.progress = progress
         self.errorCode = errorCode
         self.message = message
     }
@@ -220,6 +264,8 @@ public struct ControlResponse: Codable, Equatable, Sendable {
     public let profiles: [ProfileSummary]?
     public let profile: ProfileSnapshot?
     public let checks: [PreflightCheckSnapshot]?
+    public let modelCatalog: ModelCatalogSnapshot?
+    public let modelStatus: ModelStatusSnapshot?
     public let operation: OperationSnapshot?
 
     public init(
@@ -232,6 +278,8 @@ public struct ControlResponse: Codable, Equatable, Sendable {
         profiles: [ProfileSummary]? = nil,
         profile: ProfileSnapshot? = nil,
         checks: [PreflightCheckSnapshot]? = nil,
+        modelCatalog: ModelCatalogSnapshot? = nil,
+        modelStatus: ModelStatusSnapshot? = nil,
         operation: OperationSnapshot? = nil,
         schemaVersion: Int = ControlConstants.schemaVersion
     ) {
@@ -245,6 +293,8 @@ public struct ControlResponse: Codable, Equatable, Sendable {
         self.profiles = profiles
         self.profile = profile
         self.checks = checks
+        self.modelCatalog = modelCatalog
+        self.modelStatus = modelStatus
         self.operation = operation
     }
 
@@ -273,6 +323,8 @@ public struct ControlResponse: Codable, Equatable, Sendable {
             profiles: profiles,
             profile: profile,
             checks: checks,
+            modelCatalog: modelCatalog,
+            modelStatus: modelStatus,
             operation: operation,
             schemaVersion: schemaVersion
         )

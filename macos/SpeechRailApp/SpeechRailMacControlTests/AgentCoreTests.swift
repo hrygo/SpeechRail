@@ -49,6 +49,23 @@ private struct FailureEnvelopeRunner: ManagedCommandRunner {
     }
 }
 
+private final class ProgressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var snapshots: [OperationProgressSnapshot] = []
+
+    func append(_ snapshot: OperationProgressSnapshot) {
+        lock.lock()
+        snapshots.append(snapshot)
+        lock.unlock()
+    }
+
+    var first: OperationProgressSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshots.first
+    }
+}
+
 final class AgentCoreTests: XCTestCase {
     func testManagedRuntimeLocatorUsesOnlyTheCurrentVenvPython() {
         let locator = ManagedRuntimeLocator(
@@ -183,6 +200,43 @@ final class AgentCoreTests: XCTestCase {
         XCTAssertTrue(message.contains("api_key=[redacted]"))
         XCTAssertFalse(message.contains("/Users/hrygo/private/models"))
         XCTAssertFalse(message.contains("super-secret"))
+    }
+
+    func testProcessRunnerForwardsModelPreparationProgress() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("speechrail-runner-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root
+            .appendingPathComponent("runtime/current/.venv/bin", isDirectory: true)
+            .appendingPathComponent("python")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data(
+            """
+            #!/bin/sh
+            printf '%s\\n' '{"schema_version":1,"event":"progress","command":"model.prepare","phase":"download","artifact":"fake-asr","file":"fixture.bin","bytes":64,"expected_bytes":128}'
+            printf '%s\\n' '{"schema_version":1,"event":"result","command":"model.prepare","status":"committed","prepared_id":"prepared_fixture"}'
+            """.utf8
+        ).write(to: executable)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: 0o755)],
+            ofItemAtPath: executable.path
+        )
+
+        let recorder = ProgressRecorder()
+        let result = try await ProcessManagedCommandRunner(
+            locator: ManagedRuntimeLocator(appHome: root)
+        ).run(.modelPrepare(.quality)) { snapshot in
+            recorder.append(snapshot)
+        }
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.response?.status, .committed)
+        XCTAssertEqual(recorder.first?.phase, "download")
+        XCTAssertEqual(recorder.first?.completedBytes, 64)
+        XCTAssertEqual(recorder.first?.expectedBytes, 128)
     }
 
     func testPeerPolicyFailsClosedForMissingTeamIdentifier() {

@@ -9,8 +9,10 @@ public struct ProfilePickerView: View {
     public init() {}
 
     public var body: some View {
-        GroupBox("模型档位") {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            Text("模型档位")
+                .font(SpeechRailDesignTokens.Typography.panelTitle)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Picker("档位", selection: $selectedProfile) {
                     ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
                         Text(profile.rawValue)
@@ -34,22 +36,27 @@ public struct ProfilePickerView: View {
                 }
                 if let active = model.profile?.preset {
                     Text("当前：\(active.rawValue)")
-                        .foregroundStyle(.secondary)
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                 }
                 if let operation = model.operation {
                     Text("操作：\(operation.state.rawValue)")
-                        .foregroundStyle(.secondary)
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                     if let phase = operation.phase {
                         Text("阶段：\(phase)")
-                            .foregroundStyle(.secondary)
+                            .font(SpeechRailDesignTokens.Typography.secondary)
+                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                     }
                     if let errorCode = operation.errorCode {
                         Text("错误码：\(errorCode.rawValue)")
-                            .foregroundStyle(.secondary)
+                            .font(SpeechRailDesignTokens.Typography.technical)
+                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                     }
                     if let message = operation.message {
                         Text(message)
-                            .foregroundStyle(.red)
+                            .font(SpeechRailDesignTokens.Typography.secondary)
+                            .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
                     }
                 }
             }
@@ -65,5 +72,7 @@ public struct ProfilePickerView: View {
                 }
             }
         }
+        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .speechRailSurface(.panel)
     }
 }

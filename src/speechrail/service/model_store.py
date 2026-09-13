@@ -15,7 +15,7 @@ from collections.abc import AsyncIterable, Awaitable, Callable, Iterable, Mappin
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from uuid import uuid4
 
 from speechrail.config.model_catalog import (
@@ -36,6 +36,8 @@ DownloadStream = bytes | AsyncIterable[bytes] | Iterable[bytes]
 DownloadResult = DownloadStream | Awaitable[DownloadStream]
 ProgressCallback = Callable[[dict[str, object]], None]
 DiskUsage = Callable[[Path], object]
+ModelIntegrity = Literal["verified", "mismatch", "not_checked"]
+ModelState = Literal["not_downloaded", "verified", "invalid"]
 
 
 class Downloader(Protocol):
@@ -47,6 +49,17 @@ class Downloader(Protocol):
 
 class ModelStoreError(ValueError):
     """Raised when a model preparation cannot produce a fully verified snapshot."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedArtifactStatus:
+    """Path-free integrity state for one catalog artifact."""
+
+    key: str
+    state: ModelState
+    integrity: ModelIntegrity
+    verified_file_count: int
+    total_file_count: int
 
 
 class _DownloadStreamCloseError(ModelStoreError):
@@ -458,6 +471,130 @@ def _verify_snapshot(directory: Path, artifact: ModelArtifact) -> bool:
         except (OSError, ValueError, ModelStoreError):
             return False
     return True
+
+
+def _artifact_integrity(
+    directory: Path, artifact: ModelArtifact
+) -> tuple[ModelIntegrity, int]:
+    """Inspect a snapshot without exposing its local path."""
+    if directory.is_symlink() or not directory.is_dir():
+        return "not_checked", 0
+    try:
+        resolved_directory = directory.resolve()
+    except (OSError, RuntimeError):
+        return "mismatch", 0
+
+    actual: set[str] = set()
+    verified = 0
+    try:
+        for current, directories, files in os.walk(resolved_directory, followlinks=False):
+            current_path = Path(current)
+            if any((current_path / name).is_symlink() for name in directories):
+                return "mismatch", verified
+            for name in files:
+                path = current_path / name
+                if path.is_symlink() or not path.is_file():
+                    return "mismatch", verified
+                actual.add(path.relative_to(resolved_directory).as_posix())
+
+        expected = {item.path for item in artifact.files}
+        integrity: ModelIntegrity = "mismatch" if actual != expected else "verified"
+        for item in artifact.files:
+            path = safe_artifact_path(resolved_directory, item.path)
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size != item.size
+                or _snapshot_file_hash(path) != item.sha256
+            ):
+                integrity = "mismatch"
+            else:
+                verified += 1
+        return integrity, verified
+    except (OSError, ValueError, RuntimeError, ModelStoreError):
+        return "mismatch", verified
+
+
+def inspect_prepared_artifacts(
+    app_home: Path,
+    *,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+) -> tuple[PreparedArtifactStatus, ...]:
+    """Return registry- and manifest-backed model states without local paths."""
+    del runtime_lock  # Reserved for callers that already resolved the runtime lock.
+    resolved_app_home = _resolve_app_home(app_home)
+    selected_catalog = load_catalog() if catalog is None else catalog
+    if not isinstance(selected_catalog, ModelCatalog):
+        raise ModelStoreError("catalog must be a ModelCatalog")
+
+    registry_path = _registry_path(resolved_app_home)
+    registry_error = False
+    try:
+        registry = _read_registry(registry_path)
+    except ModelStoreError:
+        registry = _empty_registry()
+        registry_error = True
+
+    prepared = registry.get("prepared")
+    prepared_entries = prepared.values() if isinstance(prepared, dict) else ()
+    models_root = resolved_app_home / "models"
+    models_root_is_symlink = models_root.is_symlink()
+    statuses: list[PreparedArtifactStatus] = []
+    for artifact in selected_catalog.artifacts:
+        entry: dict[str, object] | None = None
+        evidence = False
+        matching_entry = False
+        if not registry_error:
+            for candidate in prepared_entries:
+                if not isinstance(candidate, dict):
+                    continue
+                artifacts = candidate.get("artifacts")
+                if not isinstance(artifacts, dict):
+                    continue
+                candidate_entry = artifacts.get(artifact.key)
+                if not isinstance(candidate_entry, dict):
+                    continue
+                evidence = True
+                if entry is None:
+                    entry = candidate_entry
+                if _entry_matches_artifact(candidate_entry, artifact):
+                    entry = candidate_entry
+                    matching_entry = True
+                    break
+
+        destination = models_root / artifact.key
+        if destination.exists() or destination.is_symlink():
+            evidence = True
+        inspected_path = destination
+        if not inspected_path.exists() and entry is not None:
+            candidate_path = _entry_path(entry, resolved_app_home)
+            if candidate_path is not None:
+                inspected_path = candidate_path
+
+        integrity: ModelIntegrity
+        if models_root_is_symlink:
+            integrity, verified_count = "mismatch", 0
+        else:
+            integrity, verified_count = _artifact_integrity(inspected_path, artifact)
+        if not evidence and integrity == "not_checked":
+            state: ModelState = "not_downloaded"
+        elif matching_entry and integrity == "verified":
+            state = "verified"
+        else:
+            state = "invalid"
+            if integrity == "not_checked":
+                integrity = "mismatch"
+        statuses.append(
+            PreparedArtifactStatus(
+                key=artifact.key,
+                state=state,
+                integrity=integrity,
+                verified_file_count=verified_count,
+                total_file_count=len(artifact.files),
+            )
+        )
+    return tuple(statuses)
 
 
 def _cache_path(
@@ -998,6 +1135,14 @@ async def _download_artifact(
                         progress=progress,
                         cancel_event=cancel_event,
                     )
+                _emit(
+                    progress,
+                    {
+                        "phase": "verifying",
+                        "prepared_id": prepared_id,
+                        "artifact": artifact.key,
+                    },
+                )
                 if not _verify_snapshot(stage_directory, artifact):
                     raise ModelStoreError("staged snapshot does not match manifest")
                 return source
@@ -1180,6 +1325,10 @@ async def prepare_models(
             selected_sources[artifact.key] = source
 
         _check_cancel(cancel_event)
+        _emit(
+            progress,
+            {"phase": "publishing", "prepared_id": prepared_id, "preset": preset_id},
+        )
         next_registry = copy.deepcopy(registry)
         next_prepared = next_registry.get("prepared")
         if not isinstance(next_prepared, dict):
@@ -1244,9 +1393,13 @@ async def prepare_models(
 
 __all__ = [
     "Downloader",
+    "ModelIntegrity",
+    "ModelState",
     "ModelStoreError",
     "PreparedArtifact",
+    "PreparedArtifactStatus",
     "PreparedModelSet",
+    "inspect_prepared_artifacts",
     "prepare_models",
     "resolve_prepared_models",
     "resolve_prepared_selection",

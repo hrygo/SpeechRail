@@ -55,6 +55,61 @@ final class ControlKitTests: XCTestCase {
         XCTAssertThrowsError(try ControlRequest(command: .operationStatus).validate()) { error in
             XCTAssertEqual(error as? ControlProtocolError, .operationRequired)
         }
+        XCTAssertThrowsError(try ControlRequest(command: .modelPrepare).validate()) { error in
+            XCTAssertEqual(error as? ControlProtocolError, .confirmationRequired)
+        }
+        XCTAssertThrowsError(
+            try ControlRequest(command: .modelPrepare, confirmation: true).validate()
+        ) { error in
+            XCTAssertEqual(error as? ControlProtocolError, .profileRequired)
+        }
+    }
+
+    func testModelPrepareRequestRoundTripsProgressAndCatalog() throws {
+        let request = ControlRequest(
+            command: .modelPrepare,
+            profile: .quality,
+            confirmation: true
+        )
+        let response = ControlResponse(
+            requestID: request.requestID,
+            command: .modelPrepare,
+            status: .running,
+            modelCatalog: ModelCatalogSnapshot(artifacts: [], profiles: []),
+            operation: OperationSnapshot(
+                operationID: "model_123",
+                command: .modelPrepare,
+                state: .running,
+                phase: "download",
+                progress: OperationProgressSnapshot(
+                    artifactKey: "tts-1.7b-base-q8",
+                    file: "model.safetensors",
+                    completedBytes: 10,
+                    expectedBytes: 20
+                )
+            )
+        )
+
+        let decoded = try ControlWireCodec.decode(
+            ControlResponse.self,
+            from: ControlWireCodec.encode(response)
+        )
+
+        XCTAssertEqual(decoded.command, .modelPrepare)
+        XCTAssertEqual(decoded.operation?.progress?.completedBytes, 10)
+        XCTAssertEqual(decoded.modelCatalog?.profiles, [])
+    }
+
+    func testProfileSummaryAcceptsLegacyPayloadWithoutDiarization() throws {
+        let data = Data(
+            #"{"id":"balanced","asr":"asr","tts":"tts","aligner":null,"download_bytes":10}"#
+                .utf8
+        )
+
+        let decoded = try ControlWireCodec.decode(ProfileSummary.self, from: data)
+
+        XCTAssertEqual(decoded.id, .balanced)
+        XCTAssertFalse(decoded.diarization)
     }
 
     func testProfileApplyArgumentsAreFixedAndPreserveHomeAsOneArgument() {
@@ -69,6 +124,20 @@ final class ControlKitTests: XCTestCase {
             ]
         )
         XCTAssertFalse(arguments.joined(separator: " ").contains("sh -c"))
+    }
+
+    func testModelPrepareArgumentsUseTheLockedCommandAndRequireNoShell() {
+        let home = URL(fileURLWithPath: "/tmp/SpeechRail Test Home", isDirectory: true)
+        let arguments = ManagedCommand.modelPrepare(.quality).arguments(appHome: home)
+
+        XCTAssertEqual(
+            arguments,
+            [
+                "-m", "speechrail", "model", "prepare", "quality", "--yes", "--app-home",
+                "/tmp/SpeechRail Test Home", "--json",
+            ]
+        )
+        XCTAssertFalse(arguments.contains("--url"))
     }
 
     func testUnavailableXPCServiceTimesOutInsteadOfHanging() async {

@@ -22,6 +22,7 @@ from speechrail.service import model_store
 from speechrail.service.model_store import (
     ModelStoreError,
     PreparedModelSet,
+    inspect_prepared_artifacts,
     prepare_models,
     resolve_prepared_models,
     resolve_prepared_selection,
@@ -349,6 +350,26 @@ async def test_prepare_streams_locked_files_and_publishes_atomic_registry(tmp_pa
     assert registry["prepared"][prepared_id]["runtime_lock_id"] == "fixture-lock"
     assert not (tmp_path / "models" / ".staging").exists()
     assert any(event.get("phase") == "verified" for event in progress)
+
+
+@pytest.mark.anyio
+async def test_inspector_distinguishes_verified_invalid_and_missing_artifacts(
+    tmp_path: Path,
+) -> None:
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="quality")
+    (tmp_path / "models" / "design" / "config.json").write_bytes(b"corrupt")
+
+    statuses = inspect_prepared_artifacts(tmp_path, catalog=catalog, runtime_lock=lock)
+    by_key = {item.key: item for item in statuses}
+
+    assert by_key["asr"].state == "verified"
+    assert by_key["asr"].integrity == "verified"
+    assert by_key["design"].state == "invalid"
+    assert by_key["design"].integrity == "mismatch"
+    assert by_key["custom"].state == "not_downloaded"
+    assert by_key["custom"].integrity == "not_checked"
 
 
 @pytest.mark.anyio
