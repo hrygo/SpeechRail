@@ -19,7 +19,7 @@
 
 ## 当前证据基线（只读）
 
-审查时间：2026-09-13（Asia/Shanghai）。
+审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:37。
 
 - 当前 managed profile 为 `quality`，generation 为 `102`。
 - 当前 `/health`、`/readyz` 为 ready；ASR、TTS、diarization、realtime VAD 均报告 ready。ASR/TTS/streaming 为 `cold_evicted`，含义是可按需加载，不是模型缺失。
@@ -37,21 +37,42 @@
 | 音色创作 | 已接 preview 和 registration 两条真实 REST 链路 | fail-closed 能力门禁、统一参考文案、部分失败保留、注册语义和候选状态已收口；真实请求待用户执行 | P0/P1 |
 | 音色库 | 已接真实列表、试听和自定义删除 | 单一列表 surface + inspector；可用/不可用、试听失败、删除冲突有明确语义；VoiceOver 待用户验收 | P1 |
 | 我的作品 | 已接 Application Support 索引、音频读取、播放和 WAV 导出 | 改为紧凑列表 + 选中展开文稿 + inspector；索引错误、播放失败、导出结果均显式呈现；重命名/删除/复用仍待数据模型与回收策略 | P1 |
-| 服务状态 | 已接 health、profile、preflight、Control Agent 操作 | 关键结果可见性和开发者审计信息仍不完整 | P1 |
-| 运行监控 | 已接 health + JSON metrics，5 秒刷新并保留最后有效快照；源码已补资源/准入/ASR-TTS RTF | 新数据契约待安装后的 live 对账；手工失败恢复和全局 token 矩阵待验收 | P1 |
-| 模型 | 已接 catalog/status、下载准备和 profile apply；模型存在/使用已分开表达 | 目标档位与当前档位还需更强区分；下载进度缺速度/ETA | P1 |
-| 诊断 | 已接 XPC preflight、选中检查项和恢复动作 | 缺复制报告/结构化修复闭环；需完成一屏和辅助功能验收 | P1 |
-| 全局 chrome、菜单、设置 | 标题、菜单、设置均有真实入口 | 侧栏全局状态 footer、标题/操作语义、指针/点击反馈和 token 仍需统一验收 | P1/P2 |
+| 服务状态 | 已接 health、profile、preflight、Control Agent 操作 | 关键结果、恢复入口和开发者审计信息已统一；真实操作验收待用户执行 | P1 |
+| 运行监控 | 已接 health + JSON metrics，5 秒刷新并保留最后有效快照；源码已补资源/准入/ASR-TTS RTF | 数据契约、stale 语义和摘要复制已统一；安装后的 live 对账及手工失败恢复待验收 | P1 |
+| 模型 | 已接 catalog/status、下载准备和 profile apply；模型存在/使用已分开表达 | 目标/当前/配置档位和“可按需加载”已分层；真实下载/应用待用户触发 | P1 |
+| 诊断 | 已接 XPC preflight、选中检查项、解释、恢复动作和脱敏报告复制 | 一屏结论 + 检查清单 + 解释工作面已统一；辅助功能验收待用户执行 | P1 |
+| 全局 chrome、菜单、设置 | 标题、菜单、设置均有真实入口 | 标题/操作/侧栏/指针/点击反馈及 token 已统一；手工模式矩阵待用户执行 | P1/P2 |
 
 ## 0. 全局基线与 Token 审查
 
 ### 0.1 真实性与状态来源
 
 - [x] 建立 `AppModel → client → endpoint/XPC → typed snapshot → View` 的来源链；关键入口见 `AppModel.swift`、`ServiceAPIClient.swift`、`AgentCommandRunner.swift`、`XPCControlService.swift`。
-- [ ] 为每个用户可操作控件补齐“触发的命令/请求、进行中状态、成功结果、失败结果、取消边界、重试动作”审查表；不能只以按钮存在证明已接线。
-- [ ] 对所有跨页共享状态规定唯一事实源：服务健康来自 `/health`，运行指标来自 `/metrics` JSON，模型存在/完整性来自 XPC catalog/status，profile 应用状态来自 operation snapshot，作品来自 `CreativeWorkStore`。
-- [ ] 清理或标注所有仅用于 UI test 的 fake transport 和 fixture，确保 Release 路径不会误用 fake；人工验收时记录真实路径和 fake 路径的差异。
-- [ ] 为每个错误保留稳定用户文案和开发者安全详情；禁止直接展示 raw path、Authorization、原始 prompt、完整音频或服务端私密 metadata。
+- [x] 为每个用户可操作控件补齐“触发的命令/请求、进行中状态、成功结果、失败结果、取消边界、重试动作”审查表；不能只以按钮存在证明已接线。
+- [x] 对所有跨页共享状态规定唯一事实源：服务健康来自 `/health`，运行指标来自 `/metrics` JSON，模型存在/完整性来自 XPC catalog/status，profile 应用状态来自 operation snapshot，作品来自 `CreativeWorkStore`。
+- [x] 清理或标注所有仅用于 UI test 的 fake transport 和 fixture，确保 Release 路径不会误用 fake；人工验收时记录真实路径和 fake 路径的差异。
+- [x] 为每个错误保留稳定用户文案和开发者安全详情；禁止直接展示 raw path、Authorization、原始 prompt、完整音频或服务端私密 metadata。
+
+#### 0.1.1 触发—状态—结果审查表
+
+| 页面 / 控件 | 触发与唯一来源 | 进行中 / 成功可见结果 | 失败、取消与重试边界 |
+| --- | --- | --- | --- |
+| 侧栏导航 | `NavigationLink` → `AppNavigationState` 本地选择 | 选中项、标题和 detail 同步切换 | 无远端失败；键盘/VoiceOver 待人工核对 |
+| 全局刷新 | `AppModel.refresh()` → `GET /health` + XPC `profile.list/status` | `isRefreshingService`；更新 health/profile 与全局 badge | health/XPC 分离显示；重新读取可重试，不保留旧 ready 结论 |
+| 预检 | `refreshPreflight()` → XPC `preflight` | 预检状态、检查项和完成时间来自 typed snapshot | 失败映射到模型/服务/诊断；重新运行可重试 |
+| 启动 / 停止 / 重启 | 确认框 → `AppModel.execute()` → XPC command + operation status | operation banner；终态以新的 health/profile 回读为准 | command failure 显示恢复入口；不取消已提交服务命令 |
+| 模型刷新 | `refreshModels()` → XPC `model.catalog/status` + health | catalog/status 与当前 worker 使用状态分层刷新 | XPC 失败显示未读取；可刷新重试 |
+| 模型准备 | 确认框 → XPC `model.prepare` + operation polling | `OperationBar` 显示阶段、制品、文件和真实字节进度 | 失败/中断可重新准备；取消只停止客户端轮询/受管取消边界，不伪造清理结果 |
+| 档位应用 | 确认框 → XPC `profile.apply` + operation polling | 完成后重新读 profile/health；明确目标档位与当前档位 | 失败保留当前运行档位；打开诊断/重试，不把 prepare 完成冒充 apply |
+| 诊断恢复 / 复制 | XPC `preflight`、导航恢复动作、脱敏报告到 pasteboard | 选中检查项解释影响和下一步；复制动作给出结果反馈 | 未知项进入安全报告；不复制 raw path、凭据或 backend 原文 |
+| 运行监控刷新 / 复制 | `refreshMonitoring()` → `/health` + JSON `/metrics` | 5 秒轮询、样本数、更新时间、stale、图表和复制摘要 | metrics 失败保留最后有效样本并标 stale；恢复后替换 |
+| 配音生成 | `/v1/voices` → `POST /v1/audio/speech` → `CreativeWorkStore` → playback | 生成中/播放中/已保存状态和“我的作品”结果可见 | 请求/保存/播放分别报错；文本与选择保留，可重试或停止试听 |
+| 音色创作 | `/v1/voices/previews`；注册 `/v1/voices/designs` | A–D 候选逐个显示生成/试听/注册状态 | capability 未知 fail-closed；单候选失败不清空其他候选，可重试 |
+| 音色库试听 / 删除 | `/v1/voices`、`POST /v1/audio/speech`、自定义 `DELETE` | 列表与 inspector 来自真实 voice snapshot；试听/删除状态可见 | 系统音色不可删；删除需确认，冲突/失败保留目标并可刷新 |
+| 我的作品播放 / 导出 | `CreativeWorkStore` + `AudioPlaybackController` + native file exporter | 选中、展开文稿、播放和导出结果可见 | 索引/音频/播放/导出分别报错；不泄漏本地绝对路径 |
+| Settings | `@AppStorage("speechrail.showDeveloperDetails")` | 偏好立即持久化，影响控制台 inspector 默认展开 | 当前无服务副作用；恢复默认和辅助功能待人工核对 |
+
+UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release 的 `isUITest` 固定为 false，并始终选择 live XPC/REST client。真实链路与 fake 链路的人工差异仍需在恢复自动化后补测。运行中的 `OperationSnapshot` 也统一经 `OperationJournal.sanitized` 后才进入 XPC/UI，避免进度文件路径或 raw message 越过隐私边界。
 
 ### 0.2 顶部标题、操作和侧栏
 
@@ -68,8 +89,10 @@
 - [x] 解决 `SurfaceLevel.panel`、`inspector`、`elevated` 无实际视觉差异的问题；每个 surface level 现在有独立 fill/border/shadow 语义。
 - [x] 合并 `MetricStrip` 与 `MetricGrid` 的重复表达，保留共享 `MetricValueView` primitive；两种布局共用 label/value/detail/accessibility 语义。
 - [x] 将页面中的 `.caption2`、`.title3`、硬编码 `220`/`1.5` 等局部写法迁移至 token；保留 Apple system font，并为状态/空态 glyph 定义统一 role。
-- [ ] 统一 surface 叠层：页面背景 → content surface → module → inspector；禁止无信息增益的圆角卡片套卡片、过度阴影和全屏玻璃。
+- [x] 统一 surface 叠层：页面背景 → content surface → module → inspector；禁止无信息增益的圆角卡片套卡片、过度阴影和全屏玻璃。
 - [x] 为 hover、pressed、focus、disabled、loading、stale、error、success、destructive 建立可复用交互 token；共享按钮、菜单、导航和列表选择只在可操作区域注册 pointing cursor。
+- [x] 完成静态 literal/token lint：业务页面不再使用 rounded border、material 玻璃、局部 caption/title 字体、裸色状态色或未命名布局尺寸；保留项均位于 token/系统窗口测试路径。
+- [x] 核对路由图与编译目标：`ServiceStatusView.swift`、`ProfilePickerView.swift`、`ServiceRoutePreviewView.swift` 当前无调用点，仅作为旧源码兼容保留，不属于 Release 可达页面；交付页面统一从 `AppRoute` 进入。
 - [ ] 完成人工模式矩阵：Light、Dark、Increase Contrast、Dynamic Type、Reduce Motion、最小窗口、键盘导航、VoiceOver；自动化测试恢复后再补 XCTest/XCUITest。
 
 ### 0.4 全局验收
@@ -97,7 +120,7 @@
 - [x] 以共享工作区外层（当前由 `CreatorSurfaceView` 承担）+ 单一 `PageIntro` + 编辑区/参数区/结果区重排，减少 field/card 嵌套；编辑器保持主工作面，不被状态卡片抢层级。
 - [x] 文稿编辑器、voice picker、speed control、primary action 使用统一 field/control token；参数区使用 `ViewThatFits` 适配窄窗口，长文案输入不再依赖系统 rounded border。
 - [x] 生成中、播放中、生成失败、作品保存失败、空音色列表分别使用明确的状态样式；播放按钮的 icon、label、pressed/playing 状态一致。
-- [x] 开发者 inspector 只显示安全 metadata（format、duration、character count；sample rate/request latency 明确标注协议未提供），不显示 raw prompt 或本地绝对路径。
+- [x] 开发者 inspector 只显示安全 metadata（format、duration、character count；sample rate/request latency 明确标注协议未提供），不显示 raw prompt 或本地绝对路径；本轮补齐配音台与音色创作 inspector，并由父级“更多操作”统一入口控制。
 
 ### 待验收
 
@@ -277,14 +300,14 @@
 ### Settings
 
 - [x] “默认展开技术详情”通过 `@AppStorage("speechrail.showDeveloperDetails")` 持久化；关于信息显示定位和 macOS 26 最低系统。
-- [ ] Settings 只保留真正的 App 偏好，不复制服务操作、模型下载或运行监控；若新增偏好必须声明影响范围和恢复默认动作。
+- [x] Settings 只保留真正的 App 偏好，不复制服务操作、模型下载或运行监控；若新增偏好必须声明影响范围和恢复默认动作。
 - [ ] 统一 Form、section、label、secondary text 的 token 和 Dynamic Type；核对 Light/Dark/Increase Contrast/VoiceOver。
 
 ### 跨页状态
 
 - [ ] page switch 不应丢失正在进行的 operation、播放状态或错误上下文；退出页面时只停止不应继续的播放器，不取消服务端已提交操作。
-- [ ] 所有页面使用同一 service badge、operation bar、empty state、error state、developer inspector，不再各自定义一套近似组件。
-- [ ] 顶部标题始终只出现一次；页面主体不得重新绘制“配音台/运行监控/模型”等重复标题胶囊。
+- [x] 所有页面按需使用同一 service badge、operation bar、empty state、error state、developer inspector；配音台与音色创作补齐缺失的 developer inspector，页面不再各自定义近似组件。
+- [x] 顶部标题始终只出现一次；页面主体不得重新绘制“配音台/运行监控/模型”等重复标题胶囊。
 
 ## 10. 功能真实性追踪表
 
@@ -310,7 +333,8 @@
 
 - [ ] P0 项全部关闭，尤其是音色创作 capability gate 和所有“存在/当前使用/目标档位”歧义。
 - [ ] P1 主流程全部有真实来源、进行中、成功、失败、恢复和可见结果。
-- [ ] 每个页面只使用统一 token；完成一次静态 literal/token lint 和一次人工视觉审阅。
+- [x] 每个页面只使用统一 token；静态 literal/token lint 已完成。
+- [ ] 完成人工视觉审阅；需在用户解除测试暂停后逐页核对截图和交互反馈。
 - [ ] 运行监控只宣称服务端实际提供的指标；本轮契约和源码已成立，仍需安装后的 live endpoint 对账才可关闭本门槛。
 - [ ] 完成 Light/Dark/Increase Contrast/Dynamic Type/Reduce Motion/最小窗口/键盘/VoiceOver 手工矩阵。
 - [ ] 用户解除“暂停自动化测试”后，更新过期 UI tests，运行 App build、XCTest/XCUITest、Python contract gate，并把结果写入本文。
@@ -331,4 +355,11 @@
 - 2026-09-14 00:02：服务状态页按 health failure / control plane / profile mismatch / operation failure 分流恢复路径；菜单新增模型管理入口，并修复全局 ServiceStatusBadge 在 health 失败时沿用旧“已就绪”的问题；Debug 编译通过，未执行自动化测试或服务操作。
 - 2026-09-14 00:05：诊断页接入同一 XPC 模型快照作为模型证据；预检失败按模型/服务/开发者处理映射恢复入口，详情先展示影响与建议动作，复制报告补充 runtime/config profile、health failure 和 control plane 安全状态；Debug 编译通过，未执行自动化测试或故障注入。
 - 2026-09-14 00:15：创作工作区完成一轮 token/UX 与真实性收口：配音台自适应参数布局、真实生成/播放失败反馈；音色创作 tokenized 输入、快捷特征横向滚动、候选状态语义和能力修复入口；音色库改为单一列表 surface；作品改为列表 + DisclosureGroup + inspector，并拆分作品播放错误状态；Debug 编译通过，未执行自动化测试或真实创作请求。
+- 2026-09-14 00:22：全局状态与隐私复核：侧栏、顶部标题、服务 badge 和服务状态页统一以最新 `/health` 判定 ready；控制 Agent、服务端错误和 operation message 不再直接展示 raw detail；模型 inspector 使用安全操作结果；Debug 编译通过。
+- 2026-09-14 00:24：UI-test fake 路径限定为 Debug + 显式 `--ui-test`，Release 固定使用 live XPC/REST；Debug 编译通过，未运行 UI tests。
+- 2026-09-14 00:26：页面级 surface 分层收口，服务状态、运行监控、模型和诊断外层工作面统一为 content surface，控件/操作条保留 field 语义；Debug 编译通过。
+- 2026-09-14 00:27：修复 `profile.apply`/模型 operation 失败后被服务状态页标为成功的终态分流；只有 operation `committed` 才进入健康回读并显示完成；失败、中断、取消和仍在后台运行均保留非成功状态；Debug 编译通过。
+- 2026-09-14 00:31：HTTP 错误 code fallback、voice ID 边界、创作候选并发注册门禁和 VoiceDesign/VoiceLibrary 列表 surface 完成收口；Debug 编译通过。
+- 2026-09-14 00:33：服务动作在控制通道不可用时统一 fail-closed；模型刷新/应用按钮、菜单状态和创作页状态均不再依据 stale service snapshot 放行；Debug 编译通过。
+- 2026-09-14 00:37：候选行移除嵌套 field 卡片，VoiceDesign/配音台补齐共享 developer inspector；模型 `ready == nil` 时显示“就绪状态未读取”而不依据 worker 状态过度推断；运行中 operation snapshot 在内存/XPC 出口统一脱敏；静态检查通过，自动化测试仍按用户要求暂停。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。
