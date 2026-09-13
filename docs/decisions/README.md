@@ -18,5 +18,6 @@
 | [0014](0014-source-built-managed-runtime.md) | 所有运行时变更必须从源码构建并经 managed release 部署 | Accepted |
 | [0015](0015-tier-user-positioning-and-precision-policy.md) | 三档按用户定位重排与按档位精度策略 | Accepted |
 | [0016](0016-configurable-heavy-compute-overlap.md) | 可配置的 ASR∥TTS 重计算重叠（声明字节 + 物理内存预算） | Accepted |
+| [0017](0017-macos26-app-best-practices-remediation.md) | macOS 26 App 最佳实践整改与可恢复控制面 | Accepted |
 
 ADR 记录为什么这样设计；旧决策不删除，后续改变用新 ADR supersede。
