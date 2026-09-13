@@ -178,9 +178,9 @@
 
 - [x] 服务健康和能力矩阵来自 `/health`；profile 和 Control Agent 状态来自 XPC。
 - [x] 预检通过 XPC 执行 `preflight`；启动、停止、重启有 confirmation 和异步 operation 状态。
-- [ ] 预检成功后在当前页给出明确结果和下一步；不能只依靠按钮禁用或跨页查看诊断。
-- [ ] inspector 补齐 LaunchAgent label、port、control agent、listener/connection summary 等安全审计信息；不要把绝对路径和敏感配置直接给普通用户。
-- [ ] 操作期间隐藏或降级旧的“已就绪”结论，改为“正在重启/健康检查中”；终态必须以新的 health/profile 读回为准。
+- [x] 预检成功后在当前页给出明确结果和下一步；不能只依靠按钮禁用或跨页查看诊断。
+- [x] inspector 补齐 LaunchAgent label、port、control agent、listener/connection summary 等安全审计信息；不要把绝对路径和敏感配置直接给普通用户。
+- [x] 操作期间隐藏或降级旧的“已就绪”结论，改为“正在重启/健康检查中”；终态必须以新的 health/profile 读回为准。
 - [ ] 服务启动失败、Control Agent 不可用、health 超时和 profile 不一致分别给出恢复路径，不共用一个模糊的“失败”。
 
 ### Token / UX 审查
@@ -249,9 +249,9 @@
 
 - [x] 预检请求经 XPC 到受管制的 CLI；清单、选中检查项、结果和 developer details 均来自 typed preflight snapshot。
 - [x] 已有“重跑预检/打开模型/查看服务”恢复入口，未直接让 App 执行 `launchctl` 或模型命令。
-- [ ] 增加“复制诊断报告”安全动作：只复制 schema、状态、错误 code、时间、request ID/operation ID 等安全字段，过滤绝对路径、凭据、音频和 raw metadata。
+- [x] 增加“复制诊断报告”安全动作：只复制 schema、状态、错误 code、时间、request ID/operation ID 等安全字段，过滤绝对路径、凭据、音频和 raw metadata。（当前预检协议未提供 error code/operation ID，报告明确标注不可用，不伪造。）
 - [ ] 对每个失败 code 建立修复映射：可自动重跑、需要打开模型、需要服务操作、需要用户授权、只能联系开发者；不要让所有失败都落到同一个按钮。
-- [ ] 预检成功、部分失败、运行中、未知和旧快照分别可见；切换检查项不应丢失全局结论。
+- [x] 预检成功、部分失败、运行中、未知和旧快照分别可见；切换检查项不应丢失全局结论。
 - [ ] 模型存在/使用事实与模型页采用同一 XPC snapshot 语义，不在诊断页重新猜测模型状态。
 
 ### Token / UX 审查
@@ -325,4 +325,5 @@
 - 2026-09-13 23:09：音色创作页统一试听/注册参考文案，补齐候选非持久化说明与注册状态文案；Debug 编译通过。
 - 2026-09-13 23:11：配音台明确“生成并保存”语义，作品页补充本地 WAV 导出、导出失败反馈和独立作品存储错误状态；Debug 编译通过。
 - 2026-09-13 23:13：音色库接入自定义音色删除确认与真实 DELETE 请求，补齐删除状态/错误反馈及 description 截断；Debug 编译通过，未执行真实删除。
+- 2026-09-13 23:20：诊断与服务状态页补齐独立预检状态源、更新时间、脱敏报告复制、LaunchAgent/XPC/health inspector；服务操作完成后重新读取预检，开发者详情不再展示 raw backend message；Debug 编译通过，未执行自动化测试。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。

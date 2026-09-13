@@ -55,7 +55,12 @@ public struct ServiceOverviewView: View {
                 LabeledContent("版本", value: model.health?.version ?? "未读取")
                 LabeledContent("后端", value: model.health?.backend ?? "未读取")
                 LabeledContent("端口", value: model.service.port.map(String.init) ?? "未读取")
+                LabeledContent("LaunchAgent", value: ControlConstants.agentPlistName)
+                LabeledContent("XPC 通道", value: ControlConstants.agentMachServiceName)
+                LabeledContent("健康连接", value: healthConnectionSummary)
                 Divider()
+                LabeledContent("当前档位", value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取")
+                LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? "未读取")
                 LabeledContent("控制 Agent", value: model.controlAgentStatus.title)
                 LabeledContent("影响", value: model.controlAgentStatus.impact)
             }
@@ -82,6 +87,7 @@ public struct ServiceOverviewView: View {
         .task {
             model.refreshControlAgentStatus()
             await model.refresh()
+            await model.refreshPreflight()
             showInspector = showDeveloperDetails
         }
     }
@@ -195,17 +201,81 @@ public struct ServiceOverviewView: View {
                         Label("打开模型管理", systemImage: AppRoute.models.systemImage)
                     }
                     .speechRailButton(.secondary)
-                    if let message = model.message, !message.isEmpty {
-                        Text(SpeechRailOperationMessagePresentation.text(message))
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.critical)
-                            .lineLimit(2)
-                    }
                 }
+                preflightSummary
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailField()
+    }
+
+    private var preflightSummary: some View {
+        let failedCount = model.preflightChecks.filter { !$0.ok }.count
+        let isOperating = model.serviceOperation?.phase.isActive == true
+        let tone: StatusTone
+        if isOperating || model.isRefreshingPreflight {
+            tone = .attention
+        } else if model.preflightMessage != nil {
+            tone = .critical
+        } else if model.preflightChecks.isEmpty {
+            tone = .neutral
+        } else {
+            tone = failedCount == 0 ? .healthy : .critical
+        }
+
+        let title: String
+        if isOperating {
+            title = "等待服务操作完成"
+        } else if model.isRefreshingPreflight {
+            title = "正在读取预检"
+        } else if model.preflightMessage != nil {
+            title = "预检读取失败"
+        } else if model.preflightChecks.isEmpty {
+            title = "尚未运行预检"
+        } else if failedCount == 0 {
+            title = "预检通过"
+        } else {
+            title = "预检需要处理"
+        }
+
+        let detail: String
+        if isOperating {
+            detail = "服务操作期间不沿用旧结论，终态会重新读取服务与预检状态。"
+        } else if model.isRefreshingPreflight {
+            detail = "正在核对运行环境、配置和模型制品。"
+        } else if let message = model.preflightMessage, !message.isEmpty {
+            detail = SpeechRailOperationMessagePresentation.text(message)
+        } else if model.preflightChecks.isEmpty {
+            detail = "运行预检后，这里会给出是否可以继续使用的结论。"
+        } else if failedCount == 0 {
+            detail = "环境与配置满足当前控制面的检查条件。"
+        } else {
+            detail = "有 \(failedCount) 项前置条件需要处理，打开诊断查看修复路径。"
+        }
+
+        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: tone.systemImage)
+                .foregroundStyle(tone.color)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(detail)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            Button("查看诊断") {
+                navigation.request(.diagnostics)
+            }
+            .speechRailButton(.quiet)
+            .disabled(isOperating || model.isRefreshingPreflight)
+        }
+        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("预检，\(title)，\(detail)")
     }
 
     private func capabilityRow(title: String, detail: String, ready: Bool?) -> some View {
@@ -323,6 +393,12 @@ public struct ServiceOverviewView: View {
 
     private func relativeTime(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
+    }
+
+    private var healthConnectionSummary: String {
+        if model.healthMessage != nil { return "health 读取失败" }
+        if model.health != nil { return "health 已响应" }
+        return "未读取"
     }
 
     private var isConfirmingAction: Binding<Bool> {

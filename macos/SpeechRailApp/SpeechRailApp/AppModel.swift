@@ -64,6 +64,9 @@ public final class AppModel {
     public private(set) var modelStatus: ModelStatusSnapshot?
     public private(set) var modelAvailability: ModelAvailabilityState = .unknown
     public private(set) var preflightChecks: [PreflightCheckSnapshot] = []
+    public private(set) var preflightMessage: String?
+    public private(set) var lastPreflightRefresh: Date?
+    public private(set) var preflightRequestID: UUID?
     public private(set) var monitoringSamples: [RuntimeMetricsSample] = []
     public private(set) var message: String?
     public private(set) var monitoringMessage: String? = nil
@@ -636,19 +639,22 @@ public final class AppModel {
         isRefreshingPreflight = true
         defer { isRefreshingPreflight = false }
         refreshControlAgentStatus()
-        message = nil
+        preflightMessage = nil
+        preflightRequestID = nil
         do {
             let response = try await transport.send(ControlRequest(command: .preflight))
+            preflightRequestID = response.requestID
+            lastPreflightRefresh = Date()
             if let checks = response.checks {
                 preflightChecks = checks
             } else if response.status != .failed {
                 preflightChecks = []
             }
             if response.status == .failed {
-                message = response.message ?? "预检未通过"
+                preflightMessage = response.message ?? "预检未通过"
             }
         } catch {
-            message = Self.controlErrorMessage(for: error, fallback: "预检暂时不可用")
+            preflightMessage = Self.controlErrorMessage(for: error, fallback: "预检暂时不可用")
         }
     }
 
@@ -730,6 +736,9 @@ public final class AppModel {
                 )
             }
             await refresh()
+            if serviceMutation != nil {
+                await refreshPreflight()
+            }
             if let serviceMutation {
                 let message = healthMessage == nil
                     ? "服务命令已完成，状态已刷新。"

@@ -1,3 +1,4 @@
+import AppKit
 import SpeechRailControlKit
 import SwiftUI
 
@@ -7,6 +8,7 @@ public struct PreflightDiagnosticsView: View {
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     @State private var selectedCheckName: String?
     @State private var showInspector = false
+    @State private var reportMessage: String?
 
     public init() {}
 
@@ -17,8 +19,16 @@ public struct PreflightDiagnosticsView: View {
                 checks: model.preflightChecks,
                 isBusy: model.isBusy || model.isRefreshingPreflight,
                 isRefreshing: model.isRefreshingPreflight,
+                errorMessage: model.preflightMessage,
+                lastUpdated: model.lastPreflightRefresh,
                 action: { Task { await model.refreshPreflight() } }
             )
+            if let reportMessage {
+                Label(reportMessage, systemImage: "checkmark.circle.fill")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ready)
+                    .transition(.opacity)
+            }
             diagnosticWorkspace
         }
         .frame(
@@ -32,6 +42,13 @@ public struct PreflightDiagnosticsView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "查看预检上下文与脱敏技术详情") {
+                    Button {
+                        copyDiagnosticReport()
+                    } label: {
+                        Label("复制脱敏诊断报告", systemImage: "doc.on.clipboard")
+                    }
+                    .disabled(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
+                    Divider()
                     Button {
                         showInspector.toggle()
                     } label: {
@@ -55,8 +72,9 @@ public struct PreflightDiagnosticsView: View {
                 LabeledContent("检查数量", value: String(model.preflightChecks.count))
                 if let selectedCheck {
                     Divider()
-                    LabeledContent("选中检查", value: selectedCheck.name)
-                    LabeledContent("结果", value: selectedCheck.ok ? "通过" : "失败")
+                        LabeledContent("选中检查", value: selectedCheck.name)
+                        LabeledContent("结果", value: selectedCheck.ok ? "通过" : "失败")
+                        LabeledContent("安全技术结果", value: safeTechnicalResult(for: selectedCheck))
                 }
             }
         }
@@ -220,7 +238,7 @@ public struct PreflightDiagnosticsView: View {
                 DisclosureGroup("开发者详情") {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         LabeledContent("检查标识", value: selectedCheck.name)
-                        LabeledContent("原始结果", value: selectedCheck.message)
+                        LabeledContent("安全技术结果", value: safeTechnicalResult(for: selectedCheck))
                         LabeledContent("结果", value: selectedCheck.ok ? "通过" : "失败")
                         LabeledContent("当前档位", value: model.profile?.preset?.rawValue ?? "未配置")
                         LabeledContent("服务状态", value: model.service.serviceState)
@@ -241,7 +259,7 @@ public struct PreflightDiagnosticsView: View {
                 )
             }
 
-            if let message = model.message, !message.isEmpty {
+            if let message = model.preflightMessage, !message.isEmpty {
                 Text(SpeechRailOperationMessagePresentation.text(message))
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.critical)
@@ -414,9 +432,54 @@ public struct PreflightDiagnosticsView: View {
             "音色克隆制品已确认是 Base TTS 版本。"
         default:
             check.ok
-                ? "检查已通过。"
-                : "检查未通过，请展开开发者详情查看原始结果。"
+                ? "检查已通过；服务端未提供额外安全详情。"
+                : "检查未通过；技术原文已隐藏，请依据检查标识处理。"
         }
+    }
+
+    private func safeTechnicalResult(for check: PreflightCheckSnapshot) -> String {
+        resultMessage(for: check)
+    }
+
+    private func copyDiagnosticReport() {
+        let formatter = ISO8601DateFormatter()
+        let generatedAt = formatter.string(from: Date())
+        let lastUpdated = model.lastPreflightRefresh.map(formatter.string(from:)) ?? "未提供"
+        let profile = model.profile?.preset?.rawValue ?? "未配置"
+        let ready = model.health?.ready.map { $0 ? "true" : "false" } ?? "未读取"
+        let checks = model.preflightChecks.map { check in
+            let status = check.ok ? "passed" : "failed"
+            return "- \(safeIdentifier(check.name)): \(status); \(safeTechnicalResult(for: check))"
+        }.joined(separator: "\n")
+        let report = """
+        SpeechRail 脱敏诊断报告
+        schema_version: \(ControlConstants.schemaVersion)
+        generated_at: \(generatedAt)
+        preflight_updated_at: \(lastUpdated)
+        preflight_request_id: \(model.preflightRequestID?.uuidString ?? "未提供")
+        profile: \(profile)
+        service_state: \(safeIdentifier(model.service.serviceState))
+        health_ready: \(ready)
+        checks: \(model.preflightChecks.filter(\.ok).count)/\(model.preflightChecks.count) passed
+
+        \(checks)
+        """
+        _ = NSPasteboard.general.clearContents()
+        if NSPasteboard.general.setString(report, forType: .string) {
+            withAnimation(.easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+                reportMessage = "已复制脱敏诊断报告"
+            }
+        } else {
+            reportMessage = "复制失败，请稍后重试"
+        }
+    }
+
+    private func safeIdentifier(_ value: String) -> String {
+        String(value.map { character in
+            let isAllowed = character.isASCII
+                && (character.isLetter || character.isNumber || "._-".contains(character))
+            return isAllowed ? character : "_"
+        })
     }
 
     private func checkTitle(for name: String) -> String {
@@ -498,6 +561,8 @@ private struct DiagnosticsSummaryView: View {
     let checks: [PreflightCheckSnapshot]
     let isBusy: Bool
     let isRefreshing: Bool
+    let errorMessage: String?
+    let lastUpdated: Date?
     let action: () -> Void
 
     private var passedCount: Int { checks.filter(\.ok).count }
@@ -505,18 +570,24 @@ private struct DiagnosticsSummaryView: View {
 
     private var tone: StatusTone {
         if isRefreshing { return .attention }
+        if let errorMessage, !errorMessage.isEmpty { return .critical }
         if checks.isEmpty { return .attention }
         return failedCount == 0 ? .healthy : .critical
     }
 
     private var title: String {
         if isRefreshing { return "正在运行诊断" }
+        if checks.isEmpty, errorMessage != nil { return "预检读取失败" }
         if checks.isEmpty { return "尚未运行诊断" }
         return failedCount == 0 ? "预检通过" : "需要处理的检查"
     }
 
     private var message: String {
         if isRefreshing { return "正在读取本机环境、配置和模型准备状态。" }
+        if let errorMessage, !errorMessage.isEmpty {
+            let prefix = checks.isEmpty ? "无法读取预检结果" : "保留上次结果；本次读取失败"
+            return "\(prefix)：\(SpeechRailOperationMessagePresentation.text(errorMessage))"
+        }
         if checks.isEmpty { return "运行一次诊断，控制台会说明阻塞原因和下一步动作。" }
         if failedCount == 0 { return "当前受管 runtime、配置和模型目录满足控制面检查条件。" }
         return "有 \(failedCount) 项前置条件需要处理，先从右侧详情开始。"
@@ -524,6 +595,10 @@ private struct DiagnosticsSummaryView: View {
 
     private var countText: String {
         checks.isEmpty ? "尚未检查" : "\(passedCount)/\(checks.count) 项通过"
+    }
+
+    private var updatedText: String? {
+        lastUpdated.map { "更新于 \($0.formatted(date: .omitted, time: .shortened))" }
     }
 
     var body: some View {
@@ -541,10 +616,18 @@ private struct DiagnosticsSummaryView: View {
                         .font(SpeechRailDesignTokens.Typography.metricValue)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
-                Text(message)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Text(message)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                    if let updatedText {
+                        Text(updatedText)
+                            .font(SpeechRailDesignTokens.Typography.technical)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .lineLimit(1)
+                    }
+                }
             }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
             Button("重新运行诊断", action: action)
