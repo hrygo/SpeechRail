@@ -181,13 +181,13 @@
 - [x] 预检成功后在当前页给出明确结果和下一步；不能只依靠按钮禁用或跨页查看诊断。
 - [x] inspector 补齐 LaunchAgent label、port、control agent、listener/connection summary 等安全审计信息；不要把绝对路径和敏感配置直接给普通用户。
 - [x] 操作期间隐藏或降级旧的“已就绪”结论，改为“正在重启/健康检查中”；终态必须以新的 health/profile 读回为准。
-- [ ] 服务启动失败、Control Agent 不可用、health 超时和 profile 不一致分别给出恢复路径，不共用一个模糊的“失败”。
+- [x] 服务启动失败、Control Agent 不可用、health 超时和 profile 不一致分别给出标题、原因和恢复路径；运行操作期间只显示 operation 状态，终态只保留一个服务结论。
 
 ### Token / UX 审查
 
-- [ ] 页面首屏只保留一个服务结论、一个主恢复动作和一组能力事实；减少重复 status banner 与操作胶囊。
-- [ ] capability matrix 使用统一的 ready/unavailable/unknown token；不能只用绿色/红色。
-- [ ] 服务操作按钮与顶部 action menu 的 label、confirmation 文案和 pressed/loading 状态一致。
+- [x] 页面首屏只保留一个服务结论、一个主恢复动作和一组能力事实；终态不再叠加旧 operation banner。
+- [x] capability matrix 使用统一的 ready/unavailable/unknown icon、文字和语义颜色；health 读取失败时不继续展示旧快照为当前能力。
+- [x] 服务操作按钮与顶部 action menu 使用相同 label、confirmation 文案和 AppModel 异步 operation 状态来源。
 
 ### 待验收
 
@@ -270,8 +270,8 @@
 ### MenuBarExtra
 
 - [x] 状态 badge、打开控制中心、音色创作快捷入口、服务 start/stop/restart 和 Settings 入口均有真实 action；服务 mutations 有 confirmation。
-- [ ] 菜单与控制中心使用同一服务状态事实和操作状态，不允许菜单显示旧的“已就绪”。
-- [ ] 评估是否加入“模型”快捷入口；若不加入，在信息架构文档中明确模型操作只从控制中心进入，避免用户找不到模型下载。
+- [x] 菜单与控制中心使用同一 AppModel 服务健康、health failure、控制通道和 operation 状态；health 失败时不显示旧的“已就绪”。
+- [x] 增加“管理模型”快捷入口，明确模型下载只准备并校验本机资产，档位切换仍在控制中心模型页完成。
 - [ ] 检查 menu item 的 label、keyboard navigation、disabled 状态和操作后菜单关闭/反馈行为。
 
 ### Settings
@@ -328,4 +328,5 @@
 - 2026-09-13 23:20：诊断与服务状态页补齐独立预检状态源、更新时间、脱敏报告复制、LaunchAgent/XPC/health inspector；服务操作完成后重新读取预检，开发者详情不再展示 raw backend message；Debug 编译通过，未执行自动化测试。
 - 2026-09-13 23:32：运行监控源码补齐 `/metrics` 的资源/准入快照和 TTS RTF（ASR RTF 复用既有真实来源），Swift 解码、看板 summary/inspector、stale 状态和脱敏复制报告同步接线；Debug 编译与 Python 目标模块静态编译通过，未执行自动化测试，未安装新服务实例，因此 live 字段对账留待用户验收。
 - 2026-09-13 23:54：模型页完成目标档位 / 当前服务运行档位 / 配置档位分层；制品状态统一为存在、完整性、文件计数、使用状态的语义呈现；OperationBar 展示真实阶段、制品、文件、字节进度，并明确速度/ETA/清理结果等未由协议提供的字段；Debug 编译通过，未执行自动化测试、模型下载或档位应用。
+- 2026-09-14 00:02：服务状态页按 health failure / control plane / profile mismatch / operation failure 分流恢复路径；菜单新增模型管理入口，并修复全局 ServiceStatusBadge 在 health 失败时沿用旧“已就绪”的问题；Debug 编译通过，未执行自动化测试或服务操作。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。

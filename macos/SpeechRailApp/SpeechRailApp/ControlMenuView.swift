@@ -42,6 +42,13 @@ public struct ControlMenuView: View {
             .keyboardShortcut("0", modifiers: [.command, .option])
 
             Button {
+                navigation.request(.models)
+                openWindow(id: AppNavigationState.controlCenterWindowID)
+            } label: {
+                Label("管理模型", systemImage: AppRoute.models.systemImage)
+            }
+
+            Button {
                 navigation.request(.voiceDesign)
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             } label: {
@@ -60,7 +67,7 @@ public struct ControlMenuView: View {
                 model.isBusy
                     || model.hasActiveMutation
                     || model.isRefreshingService
-                    || !model.controlAgentStatus.allowsMutation
+                    || !canMutate
             )
             Button {
                 pendingServiceAction = .stop
@@ -71,7 +78,7 @@ public struct ControlMenuView: View {
                 model.isBusy
                     || model.hasActiveMutation
                     || model.isRefreshingService
-                    || !model.controlAgentStatus.allowsMutation
+                    || !canMutate
             )
             Button {
                 pendingServiceAction = .restart
@@ -82,7 +89,7 @@ public struct ControlMenuView: View {
                 model.isBusy
                     || model.hasActiveMutation
                     || model.isRefreshingService
-                    || !model.controlAgentStatus.allowsMutation
+                    || !canMutate
             )
 
             Divider()
@@ -127,13 +134,35 @@ public struct ControlMenuView: View {
         if model.serviceOperation?.phase.isActive == true {
             return "服务操作进行中，请等待结果"
         }
+        if model.healthMessage != nil {
+            switch model.healthFailure {
+            case .some(.timeout):
+                return "健康检查超时，请重新读取"
+            case .some(.connection):
+                return "服务未连接，请打开管理控制台"
+            case .some(.invalidResponse), .some(.server):
+                return "健康状态异常，请打开管理控制台"
+            default:
+                return "服务状态暂不可用，请打开管理控制台"
+            }
+        }
+        if model.controlPlaneMessage != nil {
+            return "服务状态已读取，但控制通道不可用"
+        }
         if model.service.ready == true {
+            if !model.controlAgentStatus.allowsMutation {
+                return "本机服务已就绪，但控制受限"
+            }
             return "本机服务已就绪"
         }
         if model.service.serviceState == "unavailable" {
             return "服务不可用，请打开控制台诊断"
         }
         return "服务尚未就绪"
+    }
+
+    private var canMutate: Bool {
+        model.controlAgentStatus.allowsMutation && model.controlPlaneMessage == nil
     }
 
     private var isConfirmingServiceAction: Binding<Bool> {

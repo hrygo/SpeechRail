@@ -522,15 +522,15 @@ public struct ServiceStatusBadge: View {
     }
 
     private var isUnavailable: Bool {
-        model.service.serviceState == "unavailable"
+        model.service.serviceState == "unavailable" || model.healthMessage != nil
     }
 
     private var statusText: String {
         if model.serviceOperation?.phase.isActive == true {
             return "处理中"
         }
-        if model.service.ready == true { return "已就绪" }
         if isUnavailable { return "不可用" }
+        if model.service.ready == true { return "已就绪" }
         return "未就绪"
     }
 

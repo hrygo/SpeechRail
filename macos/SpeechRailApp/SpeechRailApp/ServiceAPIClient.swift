@@ -5,6 +5,7 @@ public enum ServiceAPIClientError: Error, Equatable, Sendable {
     case invalidURL
     case invalidResponse
     case requestFailed
+    case requestTimedOut
     case server(code: String, message: String, retryable: Bool)
 }
 
@@ -17,6 +18,8 @@ extension ServiceAPIClientError: LocalizedError {
             "服务返回了无法识别的结果"
         case .requestFailed:
             "无法连接本机 SpeechRail 服务"
+        case .requestTimedOut:
+            "本机 SpeechRail 服务响应超时"
         case let .server(_, message, _):
             message
         }
@@ -218,6 +221,8 @@ public final class ServiceAPIClient: @unchecked Sendable {
             throw error
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as URLError where error.code == .timedOut {
+            throw ServiceAPIClientError.requestTimedOut
         } catch {
             throw ServiceAPIClientError.requestFailed
         }

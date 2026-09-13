@@ -58,8 +58,13 @@ public struct ServiceOverviewView: View {
                 LabeledContent("LaunchAgent", value: ControlConstants.agentPlistName)
                 LabeledContent("XPC 通道", value: ControlConstants.agentMachServiceName)
                 LabeledContent("健康连接", value: healthConnectionSummary)
+                LabeledContent(
+                    "控制通道",
+                    value: model.controlPlaneMessage == nil ? "已响应" : "不可用"
+                )
                 Divider()
-                LabeledContent("当前档位", value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取")
+                LabeledContent("运行档位", value: displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取")
+                LabeledContent("配置档位", value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取")
                 LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? "未读取")
                 LabeledContent("控制 Agent", value: model.controlAgentStatus.title)
                 LabeledContent("影响", value: model.controlAgentStatus.impact)
@@ -94,40 +99,78 @@ public struct ServiceOverviewView: View {
 
     @ViewBuilder
     private var statusArea: some View {
-        if let operation = model.serviceOperation {
-            ServiceOperationStatusView(
-                operation: operation,
-                actionTitle: operation.phase == .failed ? "重新读取" : nil
-            ) {
-                Task { await model.refresh() }
-            }
-        }
-        if model.serviceOperation?.phase.isActive != true {
+        if let operation = model.serviceOperation, operation.phase.isActive {
+            ServiceOperationStatusView(operation: operation)
+        } else {
             statusBanner
         }
     }
 
     private var statusBanner: some View {
-        let isReady = model.service.ready == true && model.healthMessage == nil
-        let isUnavailable = model.service.serviceState == "unavailable" || model.healthMessage != nil
+        let operationFailed = model.serviceOperation?.phase == .failed
+        let isProfileMismatch = profileMismatch
+        let serviceReady = model.service.ready == true
+            && model.healthMessage == nil
+            && !operationFailed
+            && !isProfileMismatch
         let canMutate = model.controlAgentStatus.allowsMutation
-        let tone: StatusTone = if isReady {
+            && model.controlPlaneMessage == nil
+        let isReady = serviceReady && canMutate
+        let isUnavailable = model.service.serviceState == "unavailable"
+            || model.healthMessage != nil
+            || operationFailed
+        let healthFailureIsCritical: Bool
+        switch model.healthFailure {
+        case .some(.connection), .some(.invalidResponse), .some(.server):
+            healthFailureIsCritical = true
+        default:
+            healthFailureIsCritical = false
+        }
+        let tone: StatusTone = if isReady && canMutate {
             .healthy
-        } else if isUnavailable {
+        } else if isUnavailable && (operationFailed || healthFailureIsCritical) {
             .critical
         } else {
             .attention
         }
-        let actionTitle: String = if model.healthMessage != nil {
-            "重新读取"
-        } else if canMutate {
-            isReady ? "重启服务" : "启动服务"
+        let title: String
+        if operationFailed {
+            title = "服务操作未完成"
+        } else if serviceReady && !canMutate {
+            title = "服务可用，但控制受限"
+        } else if isProfileMismatch {
+            title = "服务档位未生效"
+        } else if model.healthFailure == .timeout {
+            title = "健康检查超时"
+        } else if model.healthFailure == .connection {
+            title = "服务未连接"
+        } else if model.healthFailure == .invalidResponse {
+            title = "健康响应无效"
+        } else if model.healthFailure != nil {
+            title = "服务报告异常"
+        } else if isReady {
+            title = "服务可用"
+        } else if isUnavailable {
+            title = "服务不可用"
         } else {
+            title = "服务尚未就绪"
+        }
+        let actionTitle: String = if !canMutate {
             "打开诊断"
+        } else if operationFailed {
+            "重新读取"
+        } else if isProfileMismatch {
+            "打开模型管理"
+        } else if model.healthFailure == .connection {
+            "启动服务"
+        } else if model.healthFailure != nil || model.healthMessage != nil {
+            "重新读取"
+        } else {
+            isReady ? "重启服务" : "启动服务"
         }
         return StatusBanner(
             tone: tone,
-            title: isReady ? "服务可用" : (isUnavailable ? "服务不可用" : "服务尚未就绪"),
+            title: title,
             message: statusMessage,
             actionTitle: actionTitle,
             actionDisabled: model.isBusy
@@ -135,12 +178,18 @@ public struct ServiceOverviewView: View {
                 || model.isRefreshingService
                 || model.serviceOperation?.phase.isActive == true
         ) {
-            if model.healthMessage != nil {
-                Task { await model.refresh() }
-            } else if canMutate {
-                pendingAction = isReady ? .restart : .start
-            } else {
+            if !canMutate {
                 navigation.request(.diagnostics)
+            } else if operationFailed {
+                Task { await model.refresh() }
+            } else if isProfileMismatch {
+                navigation.request(.models)
+            } else if model.healthFailure == .connection {
+                pendingAction = .start
+            } else if model.healthFailure != nil || model.healthMessage != nil {
+                Task { await model.refresh() }
+            } else {
+                pendingAction = isReady ? .restart : .start
             }
         }
     }
@@ -155,27 +204,28 @@ public struct ServiceOverviewView: View {
                 VStack(spacing: 0) {
                     capabilityRow(
                         title: "语音识别",
-                        detail: model.health?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                        ready: model.health?.asrReady
+                        detail: displayedHealth?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                        ready: displayedHealth?.asrReady
                     )
                     Divider()
                     capabilityRow(
                         title: "语音合成",
-                        detail: model.health?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                        ready: model.health?.ttsReady
+                        detail: displayedHealth?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                        ready: displayedHealth?.ttsReady
                     )
                     Divider()
                     capabilityRow(
                         title: "实时语音",
-                        detail: model.health?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                        ready: model.health?.realtimeVAD?.ready
+                        detail: displayedHealth?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                        ready: displayedHealth?.realtimeVAD?.ready
                     )
                     Divider()
                     capabilityRow(
                         title: "分人识别",
-                        detail: model.health?.diarization.map { SpeechRailDiarizationPresentation.text($0) }
-                            ?? "按当前档位启用",
-                        ready: model.health?.diarizationReady
+                        detail: displayedHealth?.diarization.map { SpeechRailDiarizationPresentation.text($0) }
+                            ?? displayedHealth?.diarizationReady.map { $0 ? "已就绪" : "未就绪" }
+                            ?? "未读取",
+                        ready: displayedHealth?.diarizationReady
                     )
                 }
             }
@@ -374,16 +424,32 @@ public struct ServiceOverviewView: View {
     }
 
     private var statusMessage: String {
+        if let operation = model.serviceOperation, operation.phase == .failed {
+            let detail = operation.message ?? "服务命令未完成"
+            return "\(detail)。没有把旧的健康快照当作成功结果，请重新读取或打开诊断。"
+        }
+        if profileMismatch,
+           let configured = model.profile?.preset,
+           let runtime = displayedHealth?.profile
+        {
+            return "服务正在运行 \(SpeechRailProfilePresentation.title(runtime))，但配置档位为 \(SpeechRailProfilePresentation.title(configured))。请打开模型管理重新应用目标档位。"
+        }
         if let healthMessage = model.healthMessage {
             let lastRead = model.lastHealthRefresh.map { "最近成功读取于 \(relativeTime($0))" } ?? "尚无成功读取"
             return "\(healthMessage)。\(lastRead)。"
         }
+        if let controlPlaneMessage = model.controlPlaneMessage {
+            return "SpeechRail 健康状态已单独读取，但控制通道不可用：\(controlPlaneMessage)。只读健康信息仍可查看，请打开诊断。"
+        }
         if model.service.ready == true {
-            let profile = model.profile?.preset.map { SpeechRailProfilePresentation.title($0) } ?? "未读取"
-            return "SpeechRail 已准备好接收本机语音请求。当前档位：\(profile)。"
+            let profile = displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "运行档位未读取"
+            if !model.controlAgentStatus.allowsMutation {
+                return "SpeechRail 已准备好接收本机语音请求。当前运行档位：\(profile)。但控制 Agent 受限，服务操作和档位变更暂不可用；只读诊断仍可使用。"
+            }
+            return "SpeechRail 已准备好接收本机语音请求。当前运行档位：\(profile)。"
         }
         if model.service.serviceState == "unavailable" {
-            return "控制中心暂时无法读取 SpeechRail，通常意味着服务尚未启动或正在重新启动。"
+            return "本机服务尚未响应健康检查；如果刚执行过启动或重启，请等待操作完成后重新读取。"
         }
         if !model.controlAgentStatus.allowsMutation {
             return "\(model.controlAgentStatus.detail) 只读诊断仍可使用。"
@@ -396,9 +462,32 @@ public struct ServiceOverviewView: View {
     }
 
     private var healthConnectionSummary: String {
-        if model.healthMessage != nil { return "health 读取失败" }
-        if model.health != nil { return "health 已响应" }
+        if let healthFailure = model.healthFailure {
+            switch healthFailure {
+            case .connection:
+                return "health 无法连接"
+            case .timeout:
+                return "health 响应超时"
+            case .invalidResponse:
+                return "health 响应无效"
+            case .server:
+                return "health 返回服务错误"
+            }
+        }
+        if displayedHealth != nil { return "health 已响应" }
         return "未读取"
+    }
+
+    private var displayedHealth: HealthSnapshot? {
+        guard model.healthFailure == nil else { return nil }
+        return model.health
+    }
+
+    private var profileMismatch: Bool {
+        guard let configured = model.profile?.preset,
+              let runtime = displayedHealth?.profile
+        else { return false }
+        return configured != runtime
     }
 
     private var isConfirmingAction: Binding<Bool> {

@@ -534,7 +534,8 @@ public struct ModelManagementView: View {
     /// actually using. The XPC profile snapshot remains useful as the desired
     /// configuration, but must not be presented as a running-state fact.
     private var currentServiceProfile: SpeechRailProfile? {
-        model.health?.profile
+        guard model.healthFailure == nil else { return nil }
+        return model.health?.profile
     }
 
     private var configuredProfile: SpeechRailProfile? {
@@ -725,6 +726,12 @@ public struct ModelManagementView: View {
     }
 
     private func usage(forKey key: String) -> ModelArtifactUsagePresentation {
+        guard model.healthFailure == nil else {
+            return ModelArtifactUsagePresentation(
+                text: "运行状态读取失败 · 当前使用未确认",
+                tone: .critical
+            )
+        }
         guard let health = model.health else {
             return ModelArtifactUsagePresentation(
                 text: "运行状态未读取",

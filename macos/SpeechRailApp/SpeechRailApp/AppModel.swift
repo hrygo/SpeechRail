@@ -10,6 +10,13 @@ public enum ModelAvailabilityState: Equatable, Sendable {
     case failed
 }
 
+public enum ServiceHealthFailureKind: Equatable, Sendable {
+    case connection
+    case timeout
+    case invalidResponse
+    case server(code: String)
+}
+
 public enum CreatorVoicesLoadState: Equatable, Sendable {
     case unknown
     case loading
@@ -71,6 +78,8 @@ public final class AppModel {
     public private(set) var message: String?
     public private(set) var monitoringMessage: String? = nil
     public private(set) var healthMessage: String? = nil
+    public private(set) var healthFailure: ServiceHealthFailureKind? = nil
+    public private(set) var controlPlaneMessage: String? = nil
     public private(set) var metricsMessage: String? = nil
     public private(set) var lastHealthRefresh: Date?
     public private(set) var lastMetricsRefresh: Date?
@@ -453,6 +462,7 @@ public final class AppModel {
             guard refreshGeneration == healthRefreshGeneration else { return }
             health = snapshot
             healthMessage = nil
+            healthFailure = nil
             lastHealthRefresh = Date()
             service = ServiceSnapshot(
                 serviceState: snapshot.status ?? "unknown",
@@ -463,9 +473,11 @@ public final class AppModel {
             return
         } catch {
             guard refreshGeneration == healthRefreshGeneration else { return }
-            healthMessage = Self.controlErrorMessage(for: error, fallback: "运行状态暂时不可用")
+            healthFailure = Self.healthFailureKind(for: error)
+            healthMessage = Self.healthFailureMessage(for: error)
             service = ServiceSnapshot(serviceState: "unavailable", port: apiClient.port)
         }
+        controlPlaneMessage = nil
         do {
             let list = try await transport.send(ControlRequest(command: .profileList))
             guard refreshGeneration == healthRefreshGeneration else { return }
@@ -478,7 +490,8 @@ public final class AppModel {
             return
         } catch {
             guard refreshGeneration == healthRefreshGeneration else { return }
-            message = Self.controlErrorMessage(for: error, fallback: "控制 Agent 尚未连接")
+            controlPlaneMessage = Self.controlErrorMessage(for: error, fallback: "控制 Agent 尚未连接")
+            message = controlPlaneMessage
         }
     }
 
@@ -585,6 +598,7 @@ public final class AppModel {
             guard healthGeneration == healthRefreshGeneration else { return }
             health = snapshot
             healthMessage = nil
+            healthFailure = nil
             lastHealthRefresh = Date()
             service = ServiceSnapshot(
                 serviceState: snapshot.status ?? "unknown",
@@ -595,7 +609,8 @@ public final class AppModel {
             return
         } catch {
             guard healthGeneration == healthRefreshGeneration else { return }
-            healthMessage = Self.controlErrorMessage(for: error, fallback: "运行状态暂时不可用")
+            healthFailure = Self.healthFailureKind(for: error)
+            healthMessage = Self.healthFailureMessage(for: error)
             service = ServiceSnapshot(serviceState: "unavailable", port: apiClient.port)
             monitoringMessage = healthMessage
             return
@@ -834,8 +849,49 @@ public final class AppModel {
             default:
                 return "创作服务暂时不可用"
             }
-        case .invalidURL, .invalidResponse, .requestFailed:
+        case .invalidURL, .invalidResponse, .requestFailed, .requestTimedOut:
             return "无法连接本机 SpeechRail 创作服务"
+        }
+    }
+
+    private static func healthFailureKind(for error: Error) -> ServiceHealthFailureKind {
+        guard let error = error as? ServiceAPIClientError else {
+            return .connection
+        }
+        switch error {
+        case .requestTimedOut:
+            return .timeout
+        case .invalidResponse:
+            return .invalidResponse
+        case let .server(code, _, _):
+            return .server(code: code)
+        case .invalidURL, .requestFailed:
+            return .connection
+        }
+    }
+
+    private static func healthFailureMessage(for error: Error) -> String {
+        guard let error = error as? ServiceAPIClientError else {
+            return "无法连接本机 SpeechRail 服务，请先启动服务或运行预检。"
+        }
+        switch error {
+        case .invalidURL:
+            return "服务地址无效，请打开诊断检查本机配置。"
+        case .requestFailed:
+            return "无法连接本机 SpeechRail 服务，请先启动服务或运行预检。"
+        case .requestTimedOut:
+            return "服务健康检查超时，可能正在启动或负载较高，请稍后重新读取。"
+        case .invalidResponse:
+            return "服务返回无法识别的健康状态，请运行预检检查版本和运行时。"
+        case let .server(code, _, _):
+            switch code {
+            case "backend_not_ready":
+                return "服务已连接，但语音运行时尚未就绪，请运行预检查看阻塞项。"
+            case "service_unavailable":
+                return "服务已连接，但当前运行时不可用，请打开诊断查看恢复路径。"
+            default:
+                return "服务健康检查未通过，请打开诊断查看恢复路径。"
+            }
         }
     }
 
