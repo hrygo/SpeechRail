@@ -220,10 +220,12 @@ public struct ModelManagementView: View {
                         Button("重新下载并校验") {
                             pendingAction = .download
                         }
+                        .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
                     } else {
                         Button("停止下载") {
                             Task { await model.cancelCurrentOperation() }
                         }
+                        .disabled(!model.controlAgentStatus.allowsMutation)
                     }
                 }
                 .padding(SpeechRailDesignTokens.Spacing.lg)
