@@ -704,6 +704,7 @@ public struct VoiceDesignView: View {
         }
         errorMessage = nil
         successMessage = nil
+        savedSlots.removeAll()
         playingSlot = nil
         model.stopAudio()
         candidates = candidateSpecs.map {

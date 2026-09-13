@@ -135,7 +135,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
     }
 
     public func deleteVoice(id: String) async throws {
-        guard !id.isEmpty, !id.contains("/") else {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
             throw ServiceAPIClientError.invalidURL
         }
         let request = try makeRequest(
@@ -233,7 +233,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
     private func serverError(from data: Data, statusCode: Int) -> ServiceAPIClientError {
         let payload = try? JSONDecoder().decode(ServiceAPIErrorEnvelope.self, from: data)
         return .server(
-            code: payload?.error.code ?? "http_\\(statusCode)",
+            code: payload?.error.code ?? "http_\(statusCode)",
             message: payload?.error.message ?? "SpeechRail 服务请求失败",
             retryable: payload?.error.retryable ?? (statusCode >= 500)
         )
