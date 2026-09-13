@@ -33,10 +33,10 @@
 
 | 页面 / surface | 真实性接线结论 | 统一 Token / UX 结论 | 下一步优先级 |
 | --- | --- | --- | --- |
-| 配音台 | 已接 `/v1/voices`、`/v1/audio/speech`、本地作品保存与播放 | 生成/保存/播放/取消边界、音色刷新回退和 WAV 固定格式已在源码表达；真实请求与存储验收待用户执行 | P1 |
-| 音色创作 | 已接 preview 和 registration 两条真实 REST 链路 | fail-closed 能力门禁、统一参考文案、部分失败保留和注册语义已收口；真实请求待用户执行 | P0/P1 |
-| 音色库 | 已接真实列表、试听和自定义删除 | 列表选择/详情 inspector 已接入；试听失败、删除冲突和 VoiceOver 待用户验收 | P1 |
-| 我的作品 | 已接 Application Support 索引、音频读取和播放 | 存储错误不会在当前页显式呈现；缺少导出/管理 | P1 |
+| 配音台 | 已接 `/v1/voices`、`/v1/audio/speech`、本地作品保存与播放 | 编辑区、参数区、结果区已按单一工作面重排；生成/保存/播放/取消与播放失败状态均有真实反馈；真实请求与存储验收待用户执行 | P1 |
+| 音色创作 | 已接 preview 和 registration 两条真实 REST 链路 | fail-closed 能力门禁、统一参考文案、部分失败保留、注册语义和候选状态已收口；真实请求待用户执行 | P0/P1 |
+| 音色库 | 已接真实列表、试听和自定义删除 | 单一列表 surface + inspector；可用/不可用、试听失败、删除冲突有明确语义；VoiceOver 待用户验收 | P1 |
+| 我的作品 | 已接 Application Support 索引、音频读取、播放和 WAV 导出 | 改为紧凑列表 + 选中展开文稿 + inspector；索引错误、播放失败、导出结果均显式呈现；重命名/删除/复用仍待数据模型与回收策略 | P1 |
 | 服务状态 | 已接 health、profile、preflight、Control Agent 操作 | 关键结果可见性和开发者审计信息仍不完整 | P1 |
 | 运行监控 | 已接 health + JSON metrics，5 秒刷新并保留最后有效快照；源码已补资源/准入/ASR-TTS RTF | 新数据契约待安装后的 live 对账；手工失败恢复和全局 token 矩阵待验收 | P1 |
 | 模型 | 已接 catalog/status、下载准备和 profile apply；模型存在/使用已分开表达 | 目标档位与当前档位还需更强区分；下载进度缺速度/ETA | P1 |
@@ -94,10 +94,10 @@
 
 ### Token / UX 审查
 
-- [ ] 用 `PageScaffold` + 单一 `PageIntro` + 编辑区/参数区/结果区重排，减少 field/card 嵌套；编辑器是主工作面，不被状态卡片抢层级。
-- [ ] 文稿编辑器、voice picker、speed control、primary action 使用统一 field/control token；检查长文案、Dynamic Type 和最小窗口。
-- [ ] 生成中、播放中、生成失败、作品保存失败、空音色列表分别使用明确的状态样式；播放按钮需要 icon、label、pressed/playing 状态一致。
-- [ ] 开发者 inspector 只显示安全 metadata（model、format、sample rate、request ID/latency 若契约提供），不显示 raw prompt 或本地绝对路径。
+- [x] 以共享工作区外层（当前由 `CreatorSurfaceView` 承担）+ 单一 `PageIntro` + 编辑区/参数区/结果区重排，减少 field/card 嵌套；编辑器保持主工作面，不被状态卡片抢层级。
+- [x] 文稿编辑器、voice picker、speed control、primary action 使用统一 field/control token；参数区使用 `ViewThatFits` 适配窄窗口，长文案输入不再依赖系统 rounded border。
+- [x] 生成中、播放中、生成失败、作品保存失败、空音色列表分别使用明确的状态样式；播放按钮的 icon、label、pressed/playing 状态一致。
+- [x] 开发者 inspector 只显示安全 metadata（format、duration、character count；sample rate/request latency 明确标注协议未提供），不显示 raw prompt 或本地绝对路径。
 
 ### 待验收
 
@@ -118,10 +118,10 @@
 
 ### Token / UX 审查
 
-- [ ] Prompt、reference text、声学 chips、速度、候选 rack 使用明确的主次层级；chips 是快捷输入，不要伪装成可独立配置的复杂表单。
-- [ ] 删除页面内硬编码 text field 样式、宽度和 line width，统一使用 tokenized field/capsule/selection primitive。
-- [ ] 候选行统一显示 A/B/C/D、状态、时长、播放/停止和保存结果；按钮在 loading、playing、saved、failed 状态下不能只换 icon。
-- [ ] 服务不满足条件时，在 primary action 旁解释“为什么不能用”和“去哪里修复”（模型/服务/诊断），而不是只显示灰色按钮。
+- [x] Prompt、reference text、声学 chips、速度、候选 rack 使用明确的主次层级；chips 仅作为横向快捷输入，不伪装成独立配置表单。
+- [x] 删除页面内硬编码 text field 样式；输入、快捷特征、选择态和候选行统一使用 tokenized field/capsule/selection primitive，窄窗口使用自适应布局。
+- [x] 候选行统一显示 A/B/C/D、状态、时长、播放/停止和保存结果；loading、playing、saved、failed 均有文字语义，不只换 icon。
+- [x] 服务不满足条件时，在 primary action 同一视觉区解释原因，并提供模型页/服务状态页的真实修复入口，而不是只显示灰色按钮。
 
 ### 待验收
 
@@ -141,9 +141,9 @@
 
 ### Token / UX 审查
 
-- [ ] 从“堆叠卡片”改为可扫描的双栏或 table/list：列表负责选择和试听，详情负责解释和操作；当前音色的选择态、播放态、不可用态要互斥且可读。
-- [ ] 系统音色、自定义音色、不可用音色分别使用语义 token；颜色不是唯一状态依据，必须有文字/icon/AX value。
-- [ ] 搜索、筛选、标签若未接真实数据暂不显示；不提供看似能用但不改变列表的空壳控件。
+- [x] 从“堆叠卡片”改为单一可扫描列表 surface + inspector：列表负责选择和试听，详情负责解释和操作；选择态、播放态、不可用态互斥且可读。
+- [x] 系统音色、自定义音色、不可用音色分别使用语义 token；颜色之外同时提供文字、icon 和 AX value。
+- [x] 搜索、筛选、标签当前没有真实数据源，因此不显示空壳控件。
 
 ### 待验收
 
@@ -159,13 +159,13 @@
 - [x] 修复错误可见性：`refreshWorks()` 使用独立的 `worksMessage`，作品索引损坏、读取失败不会静默变成空列表，并提供重新加载。
 - [x] 增加真实 WAV 导出和失败提示；导出失败只显示可恢复的用户文案，不泄漏内部路径。
 - [ ] 增加重命名、删除、再次编辑/复用前先确认数据模型和回收策略；涉及删除必须可定位目标且优先可恢复。
-- [ ] 核实作品详情所需的 duration、file size、sample params、request ID、latency 是否有安全来源；缺少来源就标注 unavailable。
+- [x] 核实作品详情所需的 duration、file size、sample params、request ID、latency 是否有安全来源；当前只展示有来源的 duration/format/character count/file name，其余明确标注未提供。
 
 ### Token / UX 审查
 
-- [ ] 使用时间线/列表 + inspector 的信息结构，避免每个作品都是相同大卡片；当前选中作品要有清晰 focus/selection 和可见播放反馈。
-- [ ] 用户文稿可显示完整内容，但需要折叠/展开和可读边界；开发者详情仅显示安全技术 metadata，不显示 raw service path 或 Authorization。
-- [ ] 空、加载、损坏、播放失败、正在播放、已导出状态全部复用统一状态 token。
+- [x] 使用紧凑列表 + inspector 的信息结构，避免每个作品都是相同大卡片；当前选中作品有清晰 selection，播放中有文字/icon 反馈。
+- [x] 用户文稿通过 DisclosureGroup 折叠/展开并保留文本选择；开发者详情仅显示安全技术 metadata，不显示 raw service path 或 Authorization。
+- [x] 空、损坏/读取失败、播放失败、正在播放、已导出状态复用统一状态 token；加载态仍由本地索引同步读取，不伪造进度。
 
 ### 待验收
 
@@ -299,11 +299,11 @@
 | 模型下载/校验 | XPC `model.prepare` | 已接；阶段、字节、取消和缺失协议字段边界已明确 | 模型 |
 | 档位应用 | XPC `profile.apply` | 已接；完成后回读 profile/health 证明生效，待人工对账 | 模型、服务状态 |
 | 音色列表 | `GET /v1/voices` | 已接，需边界保护和管理闭环 | 配音台、音色库 |
-| 配音生成 | `POST /v1/audio/speech` | 已接；按钮保存语义需修正 | 配音台、作品 |
+| 配音生成 | `POST /v1/audio/speech` | 已接；生成、保存、播放失败状态已拆分表达 | 配音台、作品 |
 | 音色 preview | `POST /v1/voices/previews` | 已接；门禁和候选语义需修正 | 音色创作 |
 | 音色注册 | `POST /v1/voices/designs` | 已接；需说明按 seed 重注册 | 音色创作、音色库 |
 | 作品索引 | `CreativeWorkStore` | 已接；错误不可静默 | 我的作品 |
-| 音频播放 | `AudioPlaybackController` | 已接；需统一播放反馈 | 配音台、音色创作、音色库、作品 |
+| 音频播放 | `AudioPlaybackController` | 已接；配音、候选、音色试听和作品播放均有统一进行中/停止反馈 | 配音台、音色创作、音色库、作品 |
 | 预检 | XPC `preflight` | 已接；需复制报告和错误修复映射 | 诊断、服务状态 |
 
 ## 11. 完成门槛
@@ -330,4 +330,5 @@
 - 2026-09-13 23:54：模型页完成目标档位 / 当前服务运行档位 / 配置档位分层；制品状态统一为存在、完整性、文件计数、使用状态的语义呈现；OperationBar 展示真实阶段、制品、文件、字节进度，并明确速度/ETA/清理结果等未由协议提供的字段；Debug 编译通过，未执行自动化测试、模型下载或档位应用。
 - 2026-09-14 00:02：服务状态页按 health failure / control plane / profile mismatch / operation failure 分流恢复路径；菜单新增模型管理入口，并修复全局 ServiceStatusBadge 在 health 失败时沿用旧“已就绪”的问题；Debug 编译通过，未执行自动化测试或服务操作。
 - 2026-09-14 00:05：诊断页接入同一 XPC 模型快照作为模型证据；预检失败按模型/服务/开发者处理映射恢复入口，详情先展示影响与建议动作，复制报告补充 runtime/config profile、health failure 和 control plane 安全状态；Debug 编译通过，未执行自动化测试或故障注入。
+- 2026-09-14 00:15：创作工作区完成一轮 token/UX 与真实性收口：配音台自适应参数布局、真实生成/播放失败反馈；音色创作 tokenized 输入、快捷特征横向滚动、候选状态语义和能力修复入口；音色库改为单一列表 surface；作品改为列表 + DisclosureGroup + inspector，并拆分作品播放错误状态；Debug 编译通过，未执行自动化测试或真实创作请求。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试。
