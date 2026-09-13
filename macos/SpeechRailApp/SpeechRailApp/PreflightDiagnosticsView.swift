@@ -67,7 +67,8 @@ public struct PreflightDiagnosticsView: View {
                     title: "预检上下文",
                     detail: "预检只读取环境、制品和配置，不会下载模型或改变服务。"
                 )
-                LabeledContent("当前档位", value: model.profile?.preset?.rawValue ?? "未配置")
+                LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
+                LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
                 LabeledContent("服务状态", value: model.service.serviceState)
                 LabeledContent("检查数量", value: String(model.preflightChecks.count))
                 if let selectedCheck {
@@ -81,6 +82,7 @@ public struct PreflightDiagnosticsView: View {
         .task {
             showInspector = showDeveloperDetails
             model.refreshControlAgentStatus()
+            await model.refreshModelsAndHealth()
             await model.refreshPreflight()
             selectFirstCheckIfNeeded()
         }
@@ -198,6 +200,11 @@ public struct PreflightDiagnosticsView: View {
                 detailFact("检测结果", resultMessage(for: selectedCheck))
                 detailFact("这项检查确认", explanation(for: selectedCheck.name))
                 detailFact("对当前服务的影响", impact(for: selectedCheck))
+                detailFact("建议动作", recoveryPath(for: selectedCheck).detail)
+
+                if isModelRelatedCheck(selectedCheck) {
+                    modelEvidence
+                }
 
                 Divider()
 
@@ -220,18 +227,7 @@ public struct PreflightDiagnosticsView: View {
                         }
                         .speechRailButton(.primary)
                         .disabled(model.isBusy || model.isRefreshingPreflight)
-                        Button {
-                            navigation.request(.models)
-                        } label: {
-                            Label("打开模型管理", systemImage: AppRoute.models.systemImage)
-                        }
-                        .speechRailButton(.secondary)
-                        Button {
-                            navigation.request(.overview)
-                        } label: {
-                            Label("查看服务状态", systemImage: AppRoute.overview.systemImage)
-                        }
-                        .speechRailButton(.secondary)
+                        recoveryAction(for: selectedCheck)
                     }
                 }
 
@@ -240,7 +236,8 @@ public struct PreflightDiagnosticsView: View {
                         LabeledContent("检查标识", value: selectedCheck.name)
                         LabeledContent("安全技术结果", value: safeTechnicalResult(for: selectedCheck))
                         LabeledContent("结果", value: selectedCheck.ok ? "通过" : "失败")
-                        LabeledContent("当前档位", value: model.profile?.preset?.rawValue ?? "未配置")
+                        LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
+                        LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
                         LabeledContent("服务状态", value: model.service.serviceState)
                     }
                     .font(SpeechRailDesignTokens.Typography.technical)
@@ -286,6 +283,102 @@ public struct PreflightDiagnosticsView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    @ViewBuilder
+    private func recoveryAction(for check: PreflightCheckSnapshot) -> some View {
+        switch recoveryPath(for: check).route {
+        case .models:
+            Button {
+                navigation.request(.models)
+            } label: {
+                Label("打开模型管理", systemImage: AppRoute.models.systemImage)
+            }
+            .speechRailButton(.secondary)
+        case .overview:
+            Button {
+                navigation.request(.overview)
+            } label: {
+                Label("查看服务状态", systemImage: AppRoute.overview.systemImage)
+            }
+            .speechRailButton(.secondary)
+        case .developer:
+            Button {
+                copyDiagnosticReport()
+            } label: {
+                Label("复制脱敏报告", systemImage: "doc.on.clipboard")
+            }
+            .speechRailButton(.secondary)
+        }
+    }
+
+    private var modelEvidence: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Divider()
+            SectionHeading(
+                title: "模型证据",
+                detail: "以下与模型页使用同一组 XPC model.catalog / model.status 快照；使用状态再结合当前 health 和 worker 生命周期判断。"
+            )
+            if let catalog = model.modelCatalog, let status = model.modelStatus {
+                let statuses = status.artifacts + status.diarization
+                let verifiedCount = statuses.filter {
+                    $0.state == .verified && $0.integrity == .verified
+                }.count
+                detailFact("受管制品", "\(catalog.artifacts.count) 个目录项")
+                detailFact("完整性", "\(verifiedCount)/\(statuses.count) 个制品已通过校验")
+                detailFact(
+                    "当前服务",
+                    displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "运行态未读取"
+                )
+            } else {
+                Text("模型 XPC 快照尚未读取，不能在诊断页推断模型存在或使用状态。")
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+        }
+        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+    }
+
+    private var displayedHealth: HealthSnapshot? {
+        guard model.healthFailure == nil else { return nil }
+        return model.health
+    }
+
+    private func isModelRelatedCheck(_ check: PreflightCheckSnapshot) -> Bool {
+        let normalized = check.name.lowercased()
+        return normalized.contains("model")
+            || normalized.contains("snapshot")
+            || normalized.contains("asr")
+            || normalized.contains("tts")
+            || normalized.contains("diarization")
+            || normalized.contains("aligner")
+            || normalized.contains("vad")
+    }
+
+    private func recoveryPath(for check: PreflightCheckSnapshot) -> DiagnosticRecoveryPath {
+        let normalized = check.name.lowercased()
+        if isModelRelatedCheck(check) {
+            return DiagnosticRecoveryPath(
+                route: .models,
+                detail: "打开模型管理核对目标档位的目录、文件完整性和当前服务使用状态；仅在制品通过校验后应用档位。"
+            )
+        }
+        if normalized.contains("config")
+            || normalized.contains("permission")
+            || normalized.contains("runtime")
+            || normalized.contains("ffmpeg")
+            || normalized.contains("app_home")
+            || normalized.contains("settings")
+        {
+            return DiagnosticRecoveryPath(
+                route: .overview,
+                detail: "先打开服务状态确认控制通道和受管 runtime，再重新运行预检；该页面不自动改写配置或权限。"
+            )
+        }
+        return DiagnosticRecoveryPath(
+            route: .developer,
+            detail: "没有安全的自动修复动作；复制脱敏报告交给开发者，报告不包含凭据、原始音频或本地绝对路径。"
+        )
     }
 
     private func explanation(for name: String) -> String {
@@ -445,8 +538,9 @@ public struct PreflightDiagnosticsView: View {
         let formatter = ISO8601DateFormatter()
         let generatedAt = formatter.string(from: Date())
         let lastUpdated = model.lastPreflightRefresh.map(formatter.string(from:)) ?? "未提供"
-        let profile = model.profile?.preset?.rawValue ?? "未配置"
-        let ready = model.health?.ready.map { $0 ? "true" : "false" } ?? "未读取"
+        let runtimeProfile = displayedHealth?.profile?.rawValue ?? "未读取"
+        let configuredProfile = model.profile?.preset?.rawValue ?? "未配置"
+        let ready = displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取"
         let checks = model.preflightChecks.map { check in
             let status = check.ok ? "passed" : "failed"
             return "- \(safeIdentifier(check.name)): \(status); \(safeTechnicalResult(for: check))"
@@ -457,9 +551,12 @@ public struct PreflightDiagnosticsView: View {
         generated_at: \(generatedAt)
         preflight_updated_at: \(lastUpdated)
         preflight_request_id: \(model.preflightRequestID?.uuidString ?? "未提供")
-        profile: \(profile)
+        runtime_profile: \(runtimeProfile)
+        configured_profile: \(configuredProfile)
         service_state: \(safeIdentifier(model.service.serviceState))
         health_ready: \(ready)
+        health_failure: \(healthFailureSummary)
+        control_plane: \(model.controlPlaneMessage == nil ? "available" : "unavailable")
         checks: \(model.preflightChecks.filter(\.ok).count)/\(model.preflightChecks.count) passed
 
         \(checks)
@@ -480,6 +577,20 @@ public struct PreflightDiagnosticsView: View {
                 && (character.isLetter || character.isNumber || "._-".contains(character))
             return isAllowed ? character : "_"
         })
+    }
+
+    private var healthFailureSummary: String {
+        guard let failure = model.healthFailure else { return "none" }
+        switch failure {
+        case .connection:
+            return "connection"
+        case .timeout:
+            return "timeout"
+        case .invalidResponse:
+            return "invalid_response"
+        case let .server(code):
+            return "server_\(safeIdentifier(code))"
+        }
     }
 
     private func checkTitle(for name: String) -> String {
@@ -543,7 +654,24 @@ public struct PreflightDiagnosticsView: View {
         if check.ok {
             return "这项前置条件已满足，不会阻塞当前服务。"
         }
-        return "这项前置条件未满足，相关语音能力可能无法启动或使用。"
+        let normalized = check.name.lowercased()
+        if normalized.contains("snapshot")
+            || normalized.contains("model")
+            || normalized.contains("asr")
+            || normalized.contains("tts")
+            || normalized.contains("diarization")
+            || normalized.contains("aligner")
+            || normalized.contains("vad")
+        {
+            return "相关模型或语音能力无法被证明可用；继续启动可能导致对应请求返回未就绪。"
+        }
+        if normalized.contains("runtime") || normalized.contains("ffmpeg") {
+            return "受管运行时或音频编解码链路不完整，服务可能无法启动或无法交付音频。"
+        }
+        if normalized.contains("config") || normalized.contains("permission") || normalized.contains("settings") {
+            return "服务无法安全读取配置；当前运行档位和能力结论不能视为可信。"
+        }
+        return "这项前置条件未满足，相关服务能力可能无法启动或使用。"
     }
 
     private var selectedCheck: PreflightCheckSnapshot? {
@@ -555,6 +683,17 @@ public struct PreflightDiagnosticsView: View {
         guard selectedCheck == nil else { return }
         selectedCheckName = model.preflightChecks.first?.name
     }
+}
+
+private struct DiagnosticRecoveryPath {
+    enum Route {
+        case models
+        case overview
+        case developer
+    }
+
+    let route: Route
+    let detail: String
 }
 
 private struct DiagnosticsSummaryView: View {
