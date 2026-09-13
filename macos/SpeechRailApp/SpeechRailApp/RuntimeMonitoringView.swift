@@ -67,11 +67,11 @@ public struct RuntimeMonitoringView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             Text("资源脉冲")
                 .font(SpeechRailDesignTokens.Typography.panelTitle)
-            if model.monitoringSamples.isEmpty {
+            if model.monitoringSamples.count < 2 {
                 ContentUnavailableView(
                     "等待监控样本",
                     systemImage: "chart.xyaxis.line",
-                    description: Text("打开此页面后每 5 秒读取一次本机服务 metrics。")
+                    description: Text("打开此页面后每 5 秒读取一次本机服务 metrics，至少需要两个样本才绘制趋势。")
                 )
                 .frame(maxWidth: .infinity, minHeight: 220)
             } else {
