@@ -11,10 +11,12 @@ public struct PreflightDiagnosticsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 SurfaceHeaderView(route: .diagnostics)
-                explanationPanel
-                ControlAgentStatusView()
-                resultPanel
-                recoveryPanel
+                GlassEffectContainer(spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    explanationPanel
+                    ControlAgentStatusView()
+                    resultPanel
+                    recoveryPanel
+                }
                 ServiceStatusFooterView()
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)

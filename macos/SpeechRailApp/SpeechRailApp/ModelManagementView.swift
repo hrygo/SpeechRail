@@ -14,10 +14,12 @@ public struct ModelManagementView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 SurfaceHeaderView(route: .models)
                 explanationPanel
-                diskSummary
-                profilePicker
-                artifactStatusPanel
-                operationPanel
+                GlassEffectContainer(spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    diskSummary
+                    profilePicker
+                    artifactStatusPanel
+                    operationPanel
+                }
                 ServiceStatusFooterView()
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)

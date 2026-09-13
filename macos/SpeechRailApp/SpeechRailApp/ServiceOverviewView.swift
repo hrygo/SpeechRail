@@ -12,11 +12,13 @@ public struct ServiceOverviewView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 SurfaceHeaderView(route: .overview)
-                readinessCard
-                ControlAgentStatusView()
-                capabilityGrid
-                serviceControls
-                technicalDetails
+                GlassEffectContainer(spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    readinessCard
+                    ControlAgentStatusView()
+                    capabilityGrid
+                    serviceControls
+                    technicalDetails
+                }
                 ServiceStatusFooterView()
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)

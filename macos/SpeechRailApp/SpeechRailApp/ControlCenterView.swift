@@ -41,7 +41,6 @@ public struct ControlCenterView: View {
         } detail: {
             detailView(for: selection ?? .overview)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .background(SpeechRailDesignTokens.Palette.groupedCanvas)
                 .toolbar {
                     ToolbarItem(placement: .principal) {
                         Text(selection?.title ?? AppRoute.overview.title)

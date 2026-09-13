@@ -11,9 +11,11 @@ public struct RuntimeMonitoringView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 SurfaceHeaderView(route: .monitoring)
-                metricSummary
-                chartPanel
-                runtimeDetails
+                GlassEffectContainer(spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    metricSummary
+                    chartPanel
+                    runtimeDetails
+                }
                 ServiceStatusFooterView()
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
