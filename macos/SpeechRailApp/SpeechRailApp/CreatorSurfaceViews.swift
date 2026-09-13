@@ -13,17 +13,9 @@ public struct CreatorSurfaceView: View {
     }
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                PageIntroView(route: route)
-                creatorContent
-            }
-            .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+        PageScaffold(route: route) {
+            creatorContent
         }
-        .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
             if route != .works {
                 ToolbarItem(placement: .primaryAction) {

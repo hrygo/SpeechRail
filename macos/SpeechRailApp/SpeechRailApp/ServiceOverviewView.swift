@@ -12,19 +12,11 @@ public struct ServiceOverviewView: View {
     public init() {}
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                PageIntroView(route: .overview)
-                statusArea
-                ControlAgentStatusView()
-                serviceBody
-            }
-            .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+        PageScaffold(route: .overview) {
+            statusArea
+            ControlAgentStatusView()
+            serviceBody
         }
-        .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "刷新状态、查看技术详情，或启动、停止和重启本机 SpeechRail 服务") {

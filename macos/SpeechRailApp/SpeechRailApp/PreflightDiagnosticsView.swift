@@ -13,8 +13,7 @@ public struct PreflightDiagnosticsView: View {
     public init() {}
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            PageIntroView(route: .diagnostics)
+        PageScaffold(route: .diagnostics, scrollable: false) {
             DiagnosticsSummaryView(
                 checks: model.preflightChecks,
                 isBusy: model.isBusy || model.isRefreshingPreflight,
@@ -31,14 +30,6 @@ public struct PreflightDiagnosticsView: View {
             }
             diagnosticWorkspace
         }
-        .frame(
-            maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth,
-            maxHeight: .infinity,
-            alignment: .topLeading
-        )
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.lg)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "查看预检上下文与脱敏技术详情") {

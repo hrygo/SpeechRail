@@ -379,6 +379,52 @@ public struct PageIntroView: View {
     }
 }
 
+/// The shared page geometry for every workspace surface.
+///
+/// The scaffold owns the single purpose line and the content margins so a
+/// page cannot accidentally grow a second title or a route-specific chrome.
+/// Full-height workspaces such as diagnostics can opt out of the outer scroll
+/// container while keeping the same geometry and intro treatment.
+public struct PageScaffold<Content: View>: View {
+    public let route: AppRoute
+    public let scrollable: Bool
+    private let content: Content
+
+    public init(
+        route: AppRoute,
+        scrollable: Bool = true,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.route = route
+        self.scrollable = scrollable
+        self.content = content()
+    }
+
+    @ViewBuilder
+    public var body: some View {
+        if scrollable {
+            ScrollView {
+                pageContent
+            }
+            .scrollEdgeEffectStyle(.automatic, for: .top)
+        } else {
+            pageContent
+                .frame(maxHeight: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private var pageContent: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            PageIntroView(route: route)
+            content
+        }
+        .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
 public struct SectionHeading: View {
     public let title: String
     public let detail: String?

@@ -13,34 +13,26 @@ public struct RuntimeMonitoringView: View {
     public init() {}
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                PageIntroView(route: .monitoring)
-                monitoringSummary
-                if let reportMessage {
-                    Label(reportMessage, systemImage: "checkmark.circle.fill")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                        .transition(.opacity)
-                }
-                metricStrip
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                    capabilityPanel
-                        .frame(
-                            minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
-                            maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
-                            alignment: .topLeading
-                        )
-                    chartPanel
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
+        PageScaffold(route: .monitoring) {
+            monitoringSummary
+            if let reportMessage {
+                Label(reportMessage, systemImage: "checkmark.circle.fill")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ready)
+                    .transition(.opacity)
             }
-            .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            metricStrip
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
+                capabilityPanel
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
+                        maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                        alignment: .topLeading
+                    )
+                chartPanel
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
         }
-        .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "读取最新运行样本，或查看 worker 与 metrics 技术详情") {

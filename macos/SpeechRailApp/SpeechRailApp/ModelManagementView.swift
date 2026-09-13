@@ -12,17 +12,9 @@ public struct ModelManagementView: View {
     public init() {}
 
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                PageIntroView(route: .models)
-                mainContent
-            }
-            .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+        PageScaffold(route: .models) {
+            mainContent
         }
-        .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 WorkspaceActionsMenu(helpText: "读取模型目录与校验状态，或查看选中制品的技术详情") {
