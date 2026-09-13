@@ -29,6 +29,10 @@
 
 其中明确区分：模型下载/校验、profile 应用、服务运行状态、推理就绪状态和质量验证，不把原型中的概念状态直接当成后端事实。
 
+macOS 26-only 的 App 设计研究、Liquid Glass 分层、统一颜色/间距/字体/可访问性 token 见：
+
+[`macos-app-design-system.md`](../developers/macos-app-design-system.md)
+
 ## 实施计划
 
 - [整体 App 框架实施计划](../superpowers/plans/2026-09-13-speechrail-app-framework-plan.md)

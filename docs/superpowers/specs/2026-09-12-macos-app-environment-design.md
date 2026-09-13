@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 开发测试环境与控制面设计"
 status: active
 audience: "核心开发者、macOS App 开发者、发布维护者"
-version: "0.1.0"
-date: 2026-09-12
+version: "0.2.0"
+date: 2026-09-13
 ---
 
 # SpeechRail macOS App 开发测试环境与控制面设计
@@ -24,6 +24,7 @@ date: 2026-09-12
 - `create_launch_agent_manager`、`LaunchAgentServiceController` 和 `apply_prepared_profile` 是现有生命周期与 profile 切换的事实入口。App 不直接调用 `launchctl`，helper 也不重写这些规则。
 - 2026-09-12 本机实测为 `arm64`、macOS 26.6.2、Swift 6.3.3、Xcode 26.6；active developer directory 为 `/Applications/Xcode.app/Contents/Developer`，可用 macOS SDK 为 26.5。当前没有有效的 code-signing identity，因此本阶段按无 Apple Developer ID 的本地开发模式验收。
 - 项目现有边界要求默认 loopback、单一 SpeechRail 服务和单一 ASGI worker；模型、音频、私有配置和日志不进入仓库或 App bundle。
+- 后续产品决策：`SpeechRailApp` GUI target 以 macOS 26.0 为最低版本，直接使用 macOS 26 SwiftUI 设计能力；ControlKit、ControlAgent 与服务侧 SwiftPM worker 是独立边界，不得为了它们的最低版本给 App UI 增加兼容 fallback。
 
 ## 3. 方案比较与决策
 
@@ -60,17 +61,17 @@ SpeechRail
 - 使用 SwiftUI `MenuBarExtra` 提供常驻状态、启动/停止、重启、profile 入口和打开设置窗口的入口；复杂状态放在普通设置窗口中。
 - 使用 Observation 管理 UI state；服务状态、profile 状态和控制 operation 都是可观察模型，View 不直接持有进程或文件句柄。
 - 使用 `URLSession` 查询现有安全诊断端点。App 只接收脱敏能力状态，不读取 `.env`、model path、原始日志、音频或转写文本。
-- App 只提供 `arm64` 首期制品，最低 macOS 14.0，与 SpeechRail Apple Silicon 运行时定位一致。
+- App 只提供 `arm64` 首期制品，最低 macOS 26.0；服务侧 SwiftPM worker 和 ControlKit/Agent 可以继续按自身职责维持独立最低版本。
 
 ### 4.2 ControlAgent
 
 - 作为 App bundle 内的 signed executable，放在 `Contents/Resources`；LaunchAgent plist 放在 `Contents/Library/LaunchAgents`，使用 `BundleProgram`，由 `SMAppService.agent(plistName:)` 注册。
 - 以当前登录用户运行，不使用 root，不安装 `LaunchDaemon`。
-- 通过 Mach service 接收 XPC 请求；首期以 macOS 14 可用的 `NSXPCConnection` 承载版本化 Codable `Data` envelope，操作集合固定为：`status`、`start`、`stop`、`restart`、`preflight`、`profileList`、`profileStatus`、`profileApply`、`profileRollback`、`operationStatus`、`operationCancel`。macOS 26 的新 Swift `XPCSession` peer API 不作为最低系统版本的必要依赖。
+- 通过 Mach service 接收 XPC 请求；版本化 Codable `Data` envelope 继续作为 App 与受控 helper 的稳定协议边界，操作集合固定为：`status`、`start`、`stop`、`restart`、`preflight`、`profileList`、`profileStatus`、`profileApply`、`profileRollback`、`operationStatus`、`operationCancel`。GUI App 的 macOS 26-only 决策不要求把服务协议与 UI API 耦合。
 - helper 串行执行会改变运行态或配置的操作；同一时间只允许一个 mutation。profile apply 作为异步 operation，返回 opaque `operation_id` 和脱敏阶段状态，不把完整子进程输出传给 UI。
 - helper 只接受固定的 profile enum 和布尔确认，不接受任意 executable、shell 字符串、模型路径、日志路径或任意 `app_home`。首期 app home 固定为用户的 `~/Library/Application Support/SpeechRail`；现有自定义路径用户先继续使用 CLI。
 - helper 使用 `Process` 直接传递 argv，禁止 `shell`、`system()`、字符串拼接命令和隐式网络下载。实际 profile 供给仍由用户明确触发的既有 Python 命令完成。
-- App 与 helper 使用同一 Developer Team 签名；helper 通过 `NSXPCConnection.setCodeSigningRequirement` 对 XPC peer 做 code-signing / team identity 校验，拒绝未授权调用方。该 API 在 macOS 13 已可用，满足最低 macOS 14；`XPCPeerRequirement` 仅作为 macOS 26 可选实现，不写入最低版本路径。
+- App 与 helper 使用同一 Developer Team 签名；helper 通过 `NSXPCConnection.setCodeSigningRequirement` 对 XPC peer 做 code-signing / team identity 校验，拒绝未授权调用方。GUI App 已以 macOS 26 为最低版本；XPC envelope 仍保持与独立 ControlKit/Agent 边界解耦，不为 UI 引入低版本 fallback。
 
 ### 4.3 Python 兼容边界
 
@@ -133,7 +134,7 @@ macos/SpeechRailApp/
 
 ## 8. 实施顺序
 
-1. 安装并验证 Xcode 26.6，确认 macOS 14 SDK、Swift compiler、`xcodebuild`、`xcrun`、codesigning 和 host macOS test destination 可用。
+1. 安装并验证 Xcode 26.6，确认 macOS 26 SDK、Swift compiler、`xcodebuild`、`xcrun`、codesigning 和 host macOS test destination 可用。
 2. 建立 Xcode project、shared scheme、targets、xcconfig、最小 Hardened Runtime 配置、helper plist 和 test plan。
 3. 建立 `SpeechRailControlKit` 的协议与 fake transport，先用 Swift Testing 锁定状态和错误行为。
 4. 建立 ControlAgent 的 `NSXPCListener`、固定命令 runner 和 `SMAppService` register/status/unregister 流程；先只接 fake runner。
@@ -144,7 +145,7 @@ macos/SpeechRailApp/
 
 ## 9. 验收标准
 
-- 本机 `xcodebuild -version`、`swift --version`、macOS 14 SDK 查询和 `xcodebuild test` 均成功。
+- 本机 `xcodebuild -version`、`swift --version`、macOS 26 SDK 查询和 `xcodebuild test` 均成功；App target 的构建设置明确为 `MACOSX_DEPLOYMENT_TARGET = 26.0`。
 - App、ControlAgent、unit test、UI test 四类 target 能在共享 scheme 下编译；Xcode project 不依赖仓库外的绝对源码路径。
 - UI 启停请求只能经 XPC helper 到达既有 Python lifecycle；App 源码中不存在 `launchctl`、任意 shell 或模型路径读取。
 - profile apply 的成功/失败状态与 Python journal 一致；失败不会留下第二个服务实例，且 UI 能展示 rollback / `NOT_READY`。

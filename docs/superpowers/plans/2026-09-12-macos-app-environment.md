@@ -31,7 +31,7 @@
 - [x] 确认当前机器为 Apple Silicon、macOS 26.x，记录 Swift、`uv`、Python、`xcode-select` 和 SDK 现状。
 - [x] 确认 Apple 官方 Xcode 26.6 stable 已安装；不安装 Xcode 27 RC，不引入第三方项目生成器作为构建前置依赖。
 - [x] 将 active developer directory 切换到 `/Applications/Xcode.app/Contents/Developer`，接受许可并确认 `xcodebuild -version`、`xcodebuild -showsdks`、`swift --version` 可用。
-- [x] 确认 `xcodebuild -runFirstLaunch` 已完成；确认可用 macOS SDK 至少为 26.5，并保留 macOS 14 deployment target 的编译能力。
+- [x] 确认 `xcodebuild -runFirstLaunch` 已完成；确认可用 macOS SDK 至少为 26.5，`SpeechRailApp` GUI target 直接以 macOS 26 为最低系统版本。
 - [x] 检查本机是否存在 Developer ID signing identity；当前有效 signing identity 为 0，未配置 notarization credential；不输出证书名称、账号或 token。
 
 **Verification:**
@@ -66,7 +66,7 @@ security find-identity -p codesigning -v
 
 - [x] 用 Xcode 原生工程创建 `SpeechRail` App，并加入 `SpeechRailControlKit` framework、`SpeechRailControlAgent` executable、unit test target 和 UI test target；Xcode target 保留 `SpeechRailApp` 技术名。
 - [x] 使用 `com.speechrail.desktop` 作为 App bundle identifier，使用 `com.speechrail.desktop.control` 作为 Agent Mach service/LaunchAgent label；所有标识符集中在配置文件或构建设置中，代码不散落硬编码。
-- [x] 所有 target 设置 `MACOSX_DEPLOYMENT_TARGET = 14.0`、Apple Silicon `arm64`、Swift 6 language mode、严格并发检查；Debug/Release/Distribution 三套配置显式分离。
+- [x] `SpeechRailApp` 与 UI test target 设置 `MACOSX_DEPLOYMENT_TARGET = 26.0`、Apple Silicon `arm64`、Swift 6 language mode、严格并发检查；ControlKit、ControlAgent 和服务侧 worker 继续由各自 target/Package 的最低版本控制，Debug/Release/Distribution 三套配置显式分离。
 - [x] Distribution target 开启 Hardened Runtime；无 Apple Developer ID 的 Debug/Release 保持关闭以支持本地 bundle 运行。App Sandbox 保持关闭并在配置注释中说明这是 direct Developer ID distribution 的边界决定，不为 App Store 伪造兼容性。
 - [x] 不添加 microphone entitlement、`NSMicrophoneUsageDescription`、JIT、unsigned executable、DYLD/library validation 等例外；只有后续实测确有需要时才单独评审例外。
 - [x] 将 Agent executable 复制到 App `Contents/Resources/SpeechRailControlAgent`，将 `com.speechrail.desktop.control.plist` 复制到 `Contents/Library/LaunchAgents/`；plist 使用 `BundleProgram`，不使用旧式 `Program`。
@@ -229,7 +229,7 @@ xcodebuild test -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
 - `macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist`
 
 - [ ] 先用 fake/in-process transport 写客户端和 Agent handler 测试，验证 request ID、错误映射、单次响应、operation polling 和断开重连。
-- [x] 在 macOS 14 可用范围内采用 `NSXPCConnection`/`NSXPCListener` 承载严格类型 `Data` envelope，并在连接两端使用 `setCodeSigningRequirement`；macOS 26 的 `XPCPeerRequirement` 不作为最低版本依赖。
+- [x] ControlKit/ControlAgent 边界采用 `NSXPCConnection`/`NSXPCListener` 承载严格类型 `Data` envelope，并在连接两端使用 `setCodeSigningRequirement`；GUI App 已是 macOS 26-only，不为 UI 引入低版本 fallback。
 - [x] Agent listener 在有 Team ID 时设置 same-team/signing-identifier peer requirement；无 Team ID 的本地模式仅允许固定 bundle identifier，生产路径缺少 Team ID 时 fail closed。
 - [x] App 侧用 `SMAppService.agent(plistName:)` 注册、查询 `status`、注销 helper；注册/注销错误由 AppModel 统一显示控制面不可用提示。
 - [x] App 首次控制操作前确保 helper 已注册；重复注册交给 `SMAppService` 幂等处理。注销 helper 不停止现有 `com.speechrail` 服务，不删除 app home 或模型。

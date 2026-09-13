@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Python 固定为 `>=3.12,<3.13`，运行目标为 macOS Apple Silicon，原生控制面 deployment target 为 macOS 14.0。
+- Python 固定为 `>=3.12,<3.13`，运行目标为 macOS Apple Silicon；服务模块的 SwiftUI 页面只在 `SpeechRailApp` GUI target 中实现，该 target 使用 macOS 26.0，不为 macOS 14 编写 UI fallback。
 - 默认只绑定 loopback；不新增远程管理入口，不把 API key 放入 URL 或 UI 文案。
 - App 不直接访问模型源、模型目录、日志或音频；模型下载只由 control agent 委托 managed Python CLI 执行。
 - 下载目标只能来自仓库内锁定的 model catalog、revision、文件大小和 SHA-256；不接受任意 URL、repository、revision、路径或 shell 参数。

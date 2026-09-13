@@ -26,8 +26,9 @@ graph TD
 2. **[🧪 测试与质量验收规范 (testing-acceptance.md)](testing-acceptance.md)**：确定性测试、Fake Backend 模式、真实模型 Smoke 与质量门禁。
 3. **[📡 公共 API 契约手册](../users/api-contract.md)**：REST 端点定义、WebSocket 协议与 OpenAI 兼容层实现标准。
 4. **[🖥️ macOS App 开发与测试](macos-app-development.md)**：SwiftUI 控制面、XPC helper、测试隔离与服务边界。
-5. **[📦 macOS App 分发与签名](macos-app-release.md)**：Distribution archive、签名/公证、安装清理、控制链路验收与独立回滚。
-6. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：关键技术选型与设计原则约束。
+5. **[🎛️ macOS App 设计系统与 Token](macos-app-design-system.md)**：macOS 26 设计研究、Liquid Glass 分层、颜色/间距/字体/可访问性 token。
+6. **[📦 macOS App 分发与签名](macos-app-release.md)**：Distribution archive、签名/公证、安装清理、控制链路验收与独立回滚。
+7. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：关键技术选型与设计原则约束。
 
 ---
 

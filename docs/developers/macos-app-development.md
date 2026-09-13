@@ -1,15 +1,19 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.3.0"
+version: "0.4.0"
 date: 2026-09-13
 ---
 
 # SpeechRail macOS App 开发与测试
 
+界面开发必须先遵循 [macOS App 设计系统与 Token](macos-app-design-system.md)。该文档规定
+macOS 26-only 的特性优先级、服务侧独立 target 的边界，以及 SwiftUI 页面可使用的统一
+token；新页面不得自行定义颜色、间距、圆角和字体层级。
+
 ## 工具链
 
-- Xcode 26.6 stable，Swift 6.3，macOS deployment target 14.0，首期只构建 `arm64`。
+- Xcode 26.6 stable，Swift 6.3，`SpeechRailApp` GUI target 使用 macOS deployment target 26.0，首期只构建 `arm64`；ControlKit、ControlAgent 和服务侧 worker 可按独立职责保留更低最低版本。
 - Python 仍固定为 `>=3.12,<3.13`，使用仓库现有 `uv` 环境。
 - 运行 App 前，首次安装 Xcode 的管理员需要在本机接受 Apple 许可；不要把管理员密码写入脚本或仓库。
 - 当前本机不依赖 Apple Developer ID；Debug/Release 可用 ad hoc 本地签名且关闭 Hardened Runtime。无 Team ID 时，Debug/Release 使用 App bundle 内的 XPC service，避免把 ad hoc helper 交给 macOS 的 `SMAppService` Launch Constraint；Distribution 才启用 Hardened Runtime 并使用签名的 `SMAppService`。

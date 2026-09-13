@@ -6,13 +6,13 @@
 
 **Architecture:** App scene 层负责 `WindowGroup(id: "control-center")`、`MenuBarExtra` 和独立 `Settings` 的职责分离；控制中心使用 `NavigationSplitView`，把“创作”和“服务”作为两个一级分组。创作页面先提供保留原设计语义的可用框架，服务路由在本计划中建立可导航的功能定位与状态承载层，真实 health、metrics、模型和 operation 数据由服务模块计划接入。
 
-**Tech Stack:** Swift 6、SwiftUI、Observation、macOS 14.0 SDK、XCTest/XCUITest、现有 `SpeechRailControlKit`、现有 `AppModel` 与 Xcode project。
+**Tech Stack:** Swift 6、SwiftUI、Observation、macOS 26 SDK、XCTest/XCUITest、现有 `SpeechRailControlKit`、现有 `AppModel` 与 Xcode project。
 
 **Spec:** `docs/superpowers/specs/2026-09-13-speechrail-app-management-observability-design.md`
 
 ## Global Constraints
 
-- 原生控制面 deployment target 为 macOS 14.0，运行目标为单人 Apple Silicon Mac。
+- `SpeechRailApp` GUI target 的 deployment target 为 macOS 26.0；ControlKit、ControlAgent 和服务侧 worker 维持独立 target 的最低版本，不能反向约束 App UI 特性。
 - SpeechRail App 是控制面，不采集麦克风、不播放音频、不加载模型、不直接执行 `launchctl`；运行态动作继续经受约束的 XPC control agent 委托现有 managed Python CLI。
 - 使用独立管理控制中心、保留音色创作一级区域和独立 `Settings`；`Settings` 只承载应用偏好，不承载运行监控或模型下载。
 - 控制中心使用 `NavigationSplitView`；一级导航固定包含“配音台”“音色创作”“音色库”“我的作品”“总览”“运行监控”“模型管理”“预检与诊断”。
