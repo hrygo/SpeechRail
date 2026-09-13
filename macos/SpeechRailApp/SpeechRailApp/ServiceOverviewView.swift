@@ -389,6 +389,7 @@ public struct ServiceOverviewView: View {
                         || model.hasActiveMutation
                         || model.isRefreshingService
                         || !model.controlAgentStatus.allowsMutation
+                        || model.controlPlaneMessage != nil
                 )
             Button {
                 pendingAction = .stop
@@ -400,6 +401,7 @@ public struct ServiceOverviewView: View {
                         || model.hasActiveMutation
                         || model.isRefreshingService
                         || !model.controlAgentStatus.allowsMutation
+                        || model.controlPlaneMessage != nil
                 )
             Button {
                 pendingAction = .restart
@@ -411,6 +413,7 @@ public struct ServiceOverviewView: View {
                         || model.hasActiveMutation
                         || model.isRefreshingService
                         || !model.controlAgentStatus.allowsMutation
+                        || model.controlPlaneMessage != nil
                 )
         }
     }

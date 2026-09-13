@@ -599,6 +599,7 @@ public struct ModelManagementView: View {
             && summary(for: selectedProfile) != nil
             && !visibleArtifacts.isEmpty
             && model.controlAgentStatus.allowsMutation
+            && model.controlPlaneMessage == nil
     }
 
     private var canApplyProfile: Bool {

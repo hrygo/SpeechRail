@@ -498,6 +498,7 @@ public struct VoiceDesignView: View {
                                 isPlaying: playingSlot == candidate.slot && model.isAudioPlaying,
                                 isSaved: savedSlots.contains(candidate.slot),
                                 isSaving: savingSlot == candidate.slot,
+                                isRegistering: model.isRegisteringVoice,
                                 onPlayToggle: { play(candidate) },
                                 onSave: { save(candidate) }
                             )
@@ -788,6 +789,7 @@ public struct VoiceDesignView: View {
     }
 
     private func save(_ candidate: VoiceCandidate) {
+        guard savingSlot == nil, !model.isRegisteringVoice else { return }
         guard candidate.audioData != nil else { return }
         let name = voiceName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
@@ -848,6 +850,7 @@ private struct CandidateRackRow: View {
     let isPlaying: Bool
     let isSaved: Bool
     let isSaving: Bool
+    let isRegistering: Bool
     let onPlayToggle: () -> Void
     let onSave: () -> Void
 
@@ -919,7 +922,7 @@ private struct CandidateRackRow: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
             }
             .speechRailButton(.secondary)
-            .disabled(isSaved || isSaving || !hasAudio)
+            .disabled(isSaved || isSaving || isRegistering || !hasAudio)
             .accessibilityLabel("按 \(candidate.title) 注册至音色库")
         }
         .padding(SpeechRailDesignTokens.Spacing.sm)

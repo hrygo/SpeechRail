@@ -1000,6 +1000,10 @@ public final class AppModel {
             message = "\(controlAgentStatus.title)：\(controlAgentStatus.detail)"
             return false
         }
+        guard controlPlaneMessage == nil else {
+            message = "控制 Agent 不可用，请重新读取或运行诊断"
+            return false
+        }
         return true
     }
 
