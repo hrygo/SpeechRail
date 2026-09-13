@@ -2,14 +2,14 @@
 
 本目录保存 SpeechRail macOS App 的原始设计资料与本项目的补充设计。
 
-## 原始设计包
+## 原始设计包（归档）
 
-完整附件已归档到 [`SpeechRail-macOS-App-Design-Package/`](./SpeechRail-macOS-App-Design-Package/)，包括：
+完整附件已归档到 [`archive/2026-09-12-macos-app-design-package/`](./archive/2026-09-12-macos-app-design-package/)，仅供设计追溯，不作为当前实现规范，包括：
 
-- [`PRODUCT-DESIGN.md`](./SpeechRail-macOS-App-Design-Package/PRODUCT-DESIGN.md)：产品定位、信息架构、交互原则与视觉语言。
-- [`PROTOTYPE-INVENTORY.md`](./SpeechRail-macOS-App-Design-Package/PROTOTYPE-INVENTORY.md)：10 张原型图的索引与说明。
-- [`DELIVERY-NOTES.md`](./SpeechRail-macOS-App-Design-Package/DELIVERY-NOTES.md)：设计包交付边界与后续建议。
-- [`README.md`](./SpeechRail-macOS-App-Design-Package/README.md)：设计包总览。
+- [`PRODUCT-DESIGN.md`](./archive/2026-09-12-macos-app-design-package/PRODUCT-DESIGN.md)：产品定位、信息架构、交互原则与视觉语言。
+- [`PROTOTYPE-INVENTORY.md`](./archive/2026-09-12-macos-app-design-package/PROTOTYPE-INVENTORY.md)：10 张原型图的索引与说明。
+- [`DELIVERY-NOTES.md`](./archive/2026-09-12-macos-app-design-package/DELIVERY-NOTES.md)：设计包交付边界与后续建议。
+- [`README.md`](./archive/2026-09-12-macos-app-design-package/README.md)：设计包总览。
 - `images/`：全部 10 张原型图。
 
 附件中的内容作为设计参考吸收；当前代码、测试和公共契约仍是实现事实来源。原始设计包明确未覆盖的设置、模型管理页面，已在本次需求的补充规格中结合现有后端能力设计。
