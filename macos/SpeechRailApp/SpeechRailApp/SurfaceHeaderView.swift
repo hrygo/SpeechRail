@@ -12,13 +12,3 @@ public struct SurfaceHeaderView: View {
         PageIntroView(route: route)
     }
 }
-
-@available(*, deprecated, message: "Use ServiceStatusBadge in the toolbar or page status banner")
-public struct ServiceStatusFooterView: View {
-    public init() {}
-
-    public var body: some View {
-        ServiceStatusBadge()
-            .accessibilityHint("服务状态已移动到页面顶部和工具栏")
-    }
-}

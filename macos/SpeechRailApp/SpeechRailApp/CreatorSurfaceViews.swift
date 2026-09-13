@@ -10,9 +10,8 @@ public struct CreatorSurfaceView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                SurfaceHeaderView(route: route)
+                PageIntroView(route: route)
                 creatorContent
-                ServiceStatusFooterView()
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
@@ -20,6 +19,11 @@ public struct CreatorSurfaceView: View {
             .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
+        .toolbar {
+            ToolbarItem {
+                ServiceStatusBadge()
+            }
+        }
     }
 
     @ViewBuilder
@@ -48,23 +52,23 @@ public struct DubbingDeskView: View {
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
             TextEditor(text: .constant("在这里粘贴需要配音的文本。选择音色后，可以在服务就绪时生成预览。"))
                 .font(SpeechRailDesignTokens.Typography.body)
-                .frame(minHeight: 180)
+                .frame(minHeight: SpeechRailDesignTokens.Layout.creatorComposerMinimumHeight)
                 .padding(SpeechRailDesignTokens.Spacing.xs)
-                .speechRailSurface(.panel)
+                .speechRailSurface(.control)
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Picker("音色", selection: .constant("晨光")) {
                     Text("晨光").tag("晨光")
                     Text("松风").tag("松风")
                 }
-                .frame(width: 180)
+                .frame(width: SpeechRailDesignTokens.Layout.creatorVoicePickerWidth)
                 Button("生成预览") {}
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(.borderedProminent)
                     .disabled(true)
                     .help("服务模块接入后可生成音频预览")
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 }
 
@@ -86,13 +90,13 @@ public struct VoiceDesignView: View {
                 Spacer()
                 Text("保留的产品主线")
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.tint)
+                    .foregroundStyle(SpeechRailDesignTokens.Palette.voiceAccent)
             }
             TextEditor(text: $description)
                 .font(SpeechRailDesignTokens.Typography.body)
                 .frame(minHeight: SpeechRailDesignTokens.Layout.creatorComposerMinimumHeight)
                 .padding(SpeechRailDesignTokens.Spacing.xs)
-                .speechRailSurface(.elevated)
+                .speechRailSurface(.control)
                 .accessibilityLabel("音色描述")
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Text("建议：温暖 · 清晰 · 自然语速")
@@ -100,13 +104,14 @@ public struct VoiceDesignView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                 Spacer()
                 Button("生成候选音色") {}
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(.borderedProminent)
+                    .tint(SpeechRailDesignTokens.Palette.voiceAccent)
                     .disabled(true)
                     .help("服务模块接入后生成候选音色")
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 }
 
@@ -123,13 +128,13 @@ public struct VoiceLibraryView: View {
                 Text("完成一次音色创作并保存后，音色会出现在这里。")
             } actions: {
                 Button("打开音色创作") {}
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(.borderedProminent)
                     .disabled(true)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.xl)
         .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 }
 
@@ -146,12 +151,12 @@ public struct WorksView: View {
                 Text("在配音台生成并保存结果后，可以在这里继续查看。")
             } actions: {
                 Button("打开配音台") {}
-                    .buttonStyle(.glassProminent)
+                    .buttonStyle(.borderedProminent)
                     .disabled(true)
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.xl)
         .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 }

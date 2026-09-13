@@ -218,11 +218,11 @@ public struct ModelManagementView: View {
         HStack(spacing: 0) {
             fact("准备大小", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
             Divider()
-                .frame(height: 42)
+                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             fact("识别", value: summary(for: selectedProfile)?.asr ?? "未读取")
             Divider()
-                .frame(height: 42)
+                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             fact("合成", value: summary(for: selectedProfile)?.tts ?? "未读取")
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
@@ -238,7 +238,7 @@ public struct ModelManagementView: View {
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .lineLimit(1)
         }
-        .frame(minWidth: 100, alignment: .leading)
+        .frame(minWidth: SpeechRailDesignTokens.Layout.modelFactMinimumWidth, alignment: .leading)
     }
 
     private var artifactSection: some View {
@@ -255,7 +255,10 @@ public struct ModelManagementView: View {
                         systemImage: "shippingbox",
                         description: Text("请运行预检或检查受管 runtime 的模型目录。")
                     )
-                    .frame(maxWidth: .infinity, minHeight: 130)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.Layout.modelArtifactEmptyStateMinimumHeight
+                    )
                 } else {
                     VStack(spacing: 0) {
                         ForEach(Array(artifacts.enumerated()), id: \.element.key) { index, artifact in
@@ -282,7 +285,10 @@ public struct ModelManagementView: View {
                     systemImage: "shippingbox",
                     description: Text("管理控制台会通过本机控制 Agent 读取锁定目录。")
                 )
-                .frame(maxWidth: .infinity, minHeight: 180)
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: SpeechRailDesignTokens.Layout.modelEmptyStateMinimumHeight
+                )
             }
         }
     }

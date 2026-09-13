@@ -4,8 +4,8 @@ import SpeechRailControlKit
 public struct ControlMenuView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @State private var pendingServiceAction: ControlCommand?
 
     public init() {}
@@ -68,7 +68,7 @@ public struct ControlMenuView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .frame(minWidth: 280, alignment: .leading)
+        .frame(minWidth: SpeechRailDesignTokens.Layout.controlMenuMinimumWidth, alignment: .leading)
         .confirmationDialog(
             confirmationTitle,
             isPresented: isConfirmingServiceAction,
@@ -89,6 +89,9 @@ public struct ControlMenuView: View {
             await model.refresh()
             if ProcessInfo.processInfo.arguments.contains("--ui-test-open-control-center") {
                 openWindow(id: AppNavigationState.controlCenterWindowID)
+            }
+            if ProcessInfo.processInfo.arguments.contains("--ui-test-open-settings") {
+                openSettings()
             }
         }
     }

@@ -36,7 +36,19 @@ public enum SpeechRailDesignTokens {
         public static let windowMinimumWidth: CGFloat = 1_120
         public static let windowMinimumHeight: CGFloat = 720
         public static let creatorComposerMinimumHeight: CGFloat = 180
+        public static let creatorVoicePickerWidth: CGFloat = 180
         public static let emptyStateMinimumHeight: CGFloat = 240
+        public static let modelEmptyStateMinimumHeight: CGFloat = 180
+        public static let modelArtifactEmptyStateMinimumHeight: CGFloat = 130
+        public static let modelFactMinimumWidth: CGFloat = 100
+        public static let diagnosticsEmptyListMinimumHeight: CGFloat = 180
+        public static let diagnosticsEmptyDetailMinimumHeight: CGFloat = 300
+        public static let monitoringEmptyMinimumHeight: CGFloat = 220
+        public static let monitoringChartHeight: CGFloat = 240
+        public static let compactDividerHeight: CGFloat = 42
+        public static let controlMenuMinimumWidth: CGFloat = 280
+        public static let settingsWindowMinimumWidth: CGFloat = 560
+        public static let settingsWindowMinimumHeight: CGFloat = 360
     }
 
     public enum Control {
@@ -44,6 +56,7 @@ public enum SpeechRailDesignTokens {
         public static let iconSize: CGFloat = 16
         public static let toolbarIconSize: CGFloat = 18
         public static let iconButtonSize: CGFloat = 28
+        public static let statusIndicatorDiameter: CGFloat = 7
 
         // Kept for surfaces that still use an explicit control size.
         public static let compactHeight: CGFloat = 28
@@ -58,6 +71,7 @@ public enum SpeechRailDesignTokens {
         public static let secondary: Font = .subheadline
         public static let caption: Font = .caption
         public static let technical: Font = .system(.caption2, design: .monospaced)
+        public static let metricValue: Font = .system(.title2, design: .rounded, weight: .semibold)
 
         // Source-compatibility aliases for compiled legacy surfaces.
         public static let pageTitle = windowTitle

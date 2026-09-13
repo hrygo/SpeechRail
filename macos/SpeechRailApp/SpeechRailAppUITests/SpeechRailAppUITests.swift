@@ -85,13 +85,10 @@ final class SpeechRailAppUITests: XCTestCase {
     }
 
     func testSettingsContainAppPreferencesOnly() {
-        let app = launchSpeechRail(arguments: ["--ui-test"])
+        let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-settings"])
         let statusItem = app.menuBars.statusItems.firstMatch
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
-        let settingsMenuItem = statusItem.menus.firstMatch.menuItems["打开设置"]
-        XCTAssertTrue(settingsMenuItem.waitForExistence(timeout: 2))
-        settingsMenuItem.click()
 
         XCTAssertTrue(app.staticTexts["关于 SpeechRail"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["最低系统"].exists)

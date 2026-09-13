@@ -73,6 +73,6 @@ public struct ProfilePickerView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 }

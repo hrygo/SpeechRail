@@ -11,7 +11,7 @@ public struct ServiceRoutePreviewView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                SurfaceHeaderView(route: route)
+                PageIntroView(route: route)
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
                     Label("服务状态", systemImage: "point.3.connected.trianglepath.dotted")
                         .font(SpeechRailDesignTokens.Typography.sectionTitle)
@@ -28,8 +28,7 @@ public struct ServiceRoutePreviewView: View {
                     }
                 }
                 .padding(SpeechRailDesignTokens.Spacing.lg)
-                .speechRailSurface(.panel)
-                ServiceStatusFooterView()
+                .speechRailContentSurface()
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)

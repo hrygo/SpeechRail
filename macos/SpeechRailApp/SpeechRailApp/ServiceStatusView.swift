@@ -29,6 +29,6 @@ public struct ServiceStatusView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailSurface(.panel)
+        .speechRailContentSurface()
     }
 }

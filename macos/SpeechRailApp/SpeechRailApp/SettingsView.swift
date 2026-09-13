@@ -22,7 +22,10 @@ public struct SettingsView: View {
         }
         .formStyle(.grouped)
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(minWidth: 560, minHeight: 360)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.settingsWindowMinimumWidth,
+            minHeight: SpeechRailDesignTokens.Layout.settingsWindowMinimumHeight
+        )
     }
 }
 

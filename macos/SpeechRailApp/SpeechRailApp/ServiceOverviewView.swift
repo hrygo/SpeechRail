@@ -15,6 +15,7 @@ public struct ServiceOverviewView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
                 PageIntroView(route: .overview)
                 statusBanner
+                ControlAgentStatusView()
                 serviceBody
             }
             .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)

@@ -114,8 +114,7 @@ public struct StatusBanner: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailContentSurface()
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title)，\(message)")
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -133,7 +132,10 @@ public struct ServiceStatusBadge: View {
                 .fill(model.service.ready == true
                     ? SpeechRailDesignTokens.Palette.healthy
                     : SpeechRailDesignTokens.Palette.attention)
-                .frame(width: 7, height: 7)
+                .frame(
+                    width: SpeechRailDesignTokens.Control.statusIndicatorDiameter,
+                    height: SpeechRailDesignTokens.Control.statusIndicatorDiameter
+                )
                 .accessibilityHidden(true)
             if !compact {
                 Text(model.service.ready == true ? "已就绪" : "未就绪")
@@ -172,7 +174,7 @@ public struct MetricStrip: View {
             ForEach(Array(metrics.enumerated()), id: \.element.id) { index, metric in
                 if index > 0 {
                     Divider()
-                        .frame(height: 42)
+                        .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 }
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
@@ -180,7 +182,7 @@ public struct MetricStrip: View {
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
                     Text(metric.value)
-                        .font(.system(.title2, design: .rounded, weight: .semibold))
+                        .font(SpeechRailDesignTokens.Typography.metricValue)
                         .monospacedDigit()
                     Text(metric.detail)
                         .font(SpeechRailDesignTokens.Typography.caption)
@@ -249,7 +251,7 @@ public struct OperationBar: View {
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
             .speechRailContentSurface()
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .contain)
             .accessibilityLabel(operationAccessibilityLabel(for: operation))
         }
     }
