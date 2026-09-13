@@ -103,6 +103,7 @@ public final class AppModel {
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
     public private(set) var worksMessage: String?
+    public private(set) var workPlaybackMessage: String?
 
     public var hasActiveMutation: Bool {
         guard let state = operation?.state else { return false }
@@ -370,6 +371,7 @@ public final class AppModel {
         do {
             works = try workStore.list()
             worksMessage = nil
+            workPlaybackMessage = nil
         } catch {
             worksMessage = "作品历史暂时不可用"
         }
@@ -417,12 +419,13 @@ public final class AppModel {
             )
             try workStore.save(work, audioData: data)
             works = try workStore.list()
+            workPlaybackMessage = nil
             do {
                 try audioPlaybackController.play(data: data)
                 isAudioPlaying = audioPlaybackController.isPlaying
                 playingWorkID = work.id
             } catch {
-                creatorMessage = "作品已保存，但音频无法播放"
+                workPlaybackMessage = "作品已保存，但本次音频无法播放；可以在“我的作品”中重新试听。"
             }
             return work
         } catch is CancellationError {
@@ -443,9 +446,9 @@ public final class AppModel {
             try audioPlaybackController.play(data: data)
             isAudioPlaying = audioPlaybackController.isPlaying
             playingWorkID = work.id
-            creatorMessage = nil
+            workPlaybackMessage = nil
         } catch {
-            creatorMessage = "作品音频暂时不可用"
+            workPlaybackMessage = "作品音频暂时不可用，请重新生成或确认本机作品文件仍在。"
         }
     }
 

@@ -491,6 +491,54 @@ public struct StatusBanner: View {
     }
 }
 
+/// A lightweight state row for context that belongs next to the action it
+/// explains. Unlike `StatusBanner`, it does not create another card surface;
+/// use it for capability, loading, playback, and selection context.
+public struct SpeechRailStatusLine: View {
+    public let tone: StatusTone
+    public let title: String
+    public let message: String
+    public let systemImage: String?
+
+    public init(
+        tone: StatusTone,
+        title: String,
+        message: String,
+        systemImage: String? = nil
+    ) {
+        self.tone = tone
+        self.title = title
+        self.message = message
+        self.systemImage = systemImage
+    }
+
+    public var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Rectangle()
+                .fill(tone.color)
+                .frame(width: SpeechRailDesignTokens.Control.purposeIndicatorWidth)
+                .accessibilityHidden(true)
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(tone.color)
+                    .accessibilityHidden(true)
+            }
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.label)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Text(message)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title)，\(message)")
+    }
+}
+
 public struct ServiceStatusBadge: View {
     @Environment(AppModel.self) private var model
     public let compact: Bool

@@ -44,6 +44,7 @@ public enum SpeechRailDesignTokens {
         public static let windowMinimumWidth: CGFloat = 1_120
         public static let windowMinimumHeight: CGFloat = 720
         public static let creatorComposerMinimumHeight: CGFloat = 180
+        public static let creatorReferenceMinimumHeight: CGFloat = 72
         public static let creatorVoicePickerWidth: CGFloat = 180
         public static let creatorVoiceNameWidth: CGFloat = 220
         public static let creatorVoiceControlWidth: CGFloat = 240
@@ -51,6 +52,7 @@ public enum SpeechRailDesignTokens {
         public static let creatorSlotBadgeSize: CGFloat = 32
         public static let creatorWaveformWidth: CGFloat = 72
         public static let creatorWaveformHeight: CGFloat = 20
+        public static let creatorListRowMinimumHeight: CGFloat = 72
         public static let emptyStateMinimumHeight: CGFloat = 240
         public static let modelEmptyStateMinimumHeight: CGFloat = 180
         public static let modelArtifactEmptyStateMinimumHeight: CGFloat = 130
