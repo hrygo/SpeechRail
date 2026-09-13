@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.4.1"
+version: "0.5.0"
 date: 2026-09-13
 ---
 
@@ -71,11 +71,37 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 表面 | `SpeechRailSurfaceLevel`、`speechRailContentSurface()` | `window/navigation` 使用系统玻璃；`control` 使用系统 material 加细描边；`panel/inspector` 使用自适应内容表面，不铺玻璃 |
 | 动效 | `Motion` | 所有自定义 transition 可关闭或降级；状态变化必须有文字/结构反馈 |
 
-### 3.2 统一使用规则
+导航选中前景、页面定位标记和状态 chip 也属于统一 token：分别使用
+`Navigation.selectedForeground`、`Control.purposeIndicatorWidth/Height` 和
+`Surface.statusChipFillOpacity`，页面不得重新定义同义颜色、透明度或尺寸。
+
+### 3.2 全局交互语言
+
+Token 进一步按四层组织：Foundation（最小尺度）、Semantic（产品语义）、Component（组件尺寸和层级）
+以及 Interaction（`rest`/`hover`/`pressed`/`focused`/`selected`/`disabled`/`loading`）。页面只消费
+Semantic、Component 和 Interaction token；Foundation 只在共享组件内部使用。工具栏标题使用
+`Toolbar.titleMaximumWidth`、`Toolbar.titleCompactMaximumWidth` 和 `Toolbar.titleHeight`，交互命中区、
+按压缩放、hover/pressed 填充和 focus 描边统一使用 `Interaction`。
+
+`WorkspaceTitleLockup` 是唯一的 toolbar principal 标题组件。它不绘制标题胶囊，使用 `ViewThatFits` 依次
+尝试“icon + workspace + context”“icon + workspace”“workspace”三种单行变体；context 先于 workspace
+隐藏或截断，标题永远不换行。服务状态是独立的、不可点击的辅助状态，不挤进中心标题。
+
+标准 `Button`、`Menu` 和 `NavigationLink` 保留 macOS 系统箭头、hover、按压、焦点和辅助功能行为。
+只有自定义可点击行/卡片使用 `SpeechRailInteractiveButtonStyle` 和 `NSCursor.pointingHand` cursor rect；
+静态内容不添加 `contentShape`、hover、cursor 或可聚焦语义。自定义可点击表面必须同时具备 hover、pressed、
+focus 和 disabled 反馈，减少动效时去除缩放但保留状态变化。图标按钮必须有可见语义或 accessibility label/help，
+有效命中区至少为 `44 × 44pt`。
+
+导航 icon 由 `AppRoute.systemImage` 集中管理，统一使用 SF Symbols 的光学尺寸、weight 和层级渲染；
+选中态用低噪声 accent fill + 高对比前景表达，不把深色文字压在亮色选中背景上。
+
+### 3.3 统一使用规则
 
 - 页面背景和导航由系统窗口/侧边栏承载；关键控制使用 `speechRailSurface(.control)`，内容区和 Inspector 使用 `speechRailContentSurface()`，不在各页面重复实现玻璃或阴影。
 - 玻璃的使用范围必须可解释：侧边栏、工具栏和需要与内容分离的关键控制可以使用系统玻璃；状态、模型制品、指标和诊断内容不得因装饰需要铺玻璃。
-- 主操作每个上下文最多一个，使用系统 `Button` 与 `buttonStyle`；危险动作使用确认对话框并明确影响范围。
+- 主操作每个上下文最多一个，使用系统 `Button` 与 `speechRailButton(.primary)`；辅助动作使用 secondary/quiet，
+  危险动作使用确认对话框、真实 destructive role 并明确影响范围。
 - 监控数字使用 tabular figures；错误不能只用颜色表达，同时显示文字、图标或状态标签。
 - 图标使用 SF Symbols，并与文字共同构成按钮 label；图标按钮必须有 accessibility label。
 - 每个页面的 `ScrollView`、列表和卡片在最小窗口、全屏、深色模式、增加对比度和 Reduce Motion 下验证。
@@ -90,19 +116,24 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 - [ ] VoiceOver 可按“导航 → 页面说明 → 主操作 → 状态详情”的顺序访问；图表、档位和 DisclosureGroup 语义已接入，尚未完成桌面 VoiceOver 实测。
 - [x] 页面高频动作已提供 toolbar、菜单栏或键盘路径，不依赖 hover；2026-09-13 UI tests 验证控制台、设置和主要页面入口。
 - [x] 音色创作、模型下载、profile 应用、服务启停的边界在 UI 文案和确认动作中可见；模型下载与档位应用使用独立按钮和确认框。
+- [x] 全局标题使用单行 `WorkspaceTitleLockup`，动作菜单统一为“更多操作”，导航 route icon 集中管理；2026-09-13 Debug build 已验证。
+- [x] custom clickable rows/cards 使用共享按压、hover、focus、disabled 与 cursor 规则，静态表面不再伪装成可操作区域；2026-09-13 代码审查已验证。
 
 ## 5. 当前实现与验证矩阵
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
-| App Debug 构建 | `BUILD SUCCEEDED`，目标为 `arm64-apple-macos26.0` | 2026-09-13 13:59 |
-| Swift 单元测试 | 32 tests，0 failures | 2026-09-13 14:04 |
-| UI 测试 | 7 tests，0 failures；覆盖导航、服务状态、模型确认/恢复/能力不匹配、监控空状态、设置 | 2026-09-13 14:04 |
-| 设置单场景复核 | 1 test，0 failures | 2026-09-13 14:03 |
+| App Debug 构建 | `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`；未运行测试 | 2026-09-13 19:34 |
+| Swift 单元测试 | 本轮按用户指令暂停；此前历史记录不作为本轮证据 | — |
+| UI 测试 | 本轮按用户指令暂停；此前历史记录不作为本轮证据 | — |
+| 设置单场景复核 | 本轮未执行 | — |
 | Release App 安装 | `2.5.2 (1)`、`arm64`、`LSMinimumSystemVersion=26.0`，签名与嵌入 XPC 通过；已安装到 `~/Applications/SpeechRail.app` | 2026-09-13 14:15 |
 | 安装后服务隔离 | `/health`、`/readyz` 通过；仍为唯一 8201 listener（PID 25912），quality profile；未重启服务 | 2026-09-13 14:16 |
 | 桌面视觉矩阵 | 尚未完成；仍需人工检查最小窗口、深色、高对比度、Reduce Motion | — |
 | VoiceOver 实测 | 尚未完成 | — |
+
+> 2026-09-13 状态说明：本轮已完成一次 macOS 26 Debug 编译，严格未运行自动化测试和安装流程。
+> Light/Dark、高对比度、Reduce Motion、键盘和 VoiceOver 仍需用户解除测试暂停后进行桌面验收。
 
 ## 6. 变更流程
 

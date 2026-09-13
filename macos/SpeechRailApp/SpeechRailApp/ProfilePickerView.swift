@@ -11,11 +11,11 @@ public struct ProfilePickerView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             Text("模型档位")
-                .font(SpeechRailDesignTokens.Typography.panelTitle)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Picker("档位", selection: $selectedProfile) {
                     ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
-                        Text(profile.rawValue)
+                        Text(SpeechRailProfilePresentation.title(profile))
                             .tag(profile)
                     }
                 }
@@ -23,40 +23,45 @@ public struct ProfilePickerView: View {
                 Button("应用档位") {
                     isConfirmingProfileApply = true
                 }
-                .disabled(model.isBusy)
+                .speechRailButton(.primary)
+                .disabled(
+                    model.isBusy
+                        || model.hasActiveMutation
+                        || !model.controlAgentStatus.allowsMutation
+                )
                 .confirmationDialog(
-                    "确认切换模型档位？",
+                    "确认应用\(SpeechRailProfilePresentation.title(selectedProfile))？这会停止当前服务、切换档位并重新执行健康检查。",
                     isPresented: $isConfirmingProfileApply,
                     titleVisibility: .visible
                 ) {
-                    Button("确认切换", role: .destructive) {
+                    Button("应用档位", role: .destructive) {
                         Task { await model.execute(.profileApply, profile: selectedProfile) }
                     }
                     Button("取消", role: .cancel) {}
                 }
                 if let active = model.profile?.preset {
-                    Text("当前：\(active.rawValue)")
+                    Text("当前：\(SpeechRailProfilePresentation.title(active))")
                         .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
                 if let operation = model.operation {
-                    Text("操作：\(operation.state.rawValue)")
+                    Text("操作：\(operationStateText(operation.state))")
                         .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     if let phase = operation.phase {
-                        Text("阶段：\(phase)")
+                        Text("阶段：\(phaseText(phase))")
                             .font(SpeechRailDesignTokens.Typography.secondary)
-                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                     if let errorCode = operation.errorCode {
                         Text("错误码：\(errorCode.rawValue)")
                             .font(SpeechRailDesignTokens.Typography.technical)
-                            .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                     if let message = operation.message {
-                        Text(message)
+                        Text(SpeechRailOperationMessagePresentation.text(message))
                             .font(SpeechRailDesignTokens.Typography.secondary)
-                            .foregroundStyle(SpeechRailDesignTokens.Palette.critical)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                     }
                 }
             }
@@ -74,5 +79,51 @@ public struct ProfilePickerView: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailContentSurface()
+    }
+
+    private func operationStateText(_ state: OperationState) -> String {
+        switch state {
+        case .accepted:
+            "已接收"
+        case .running:
+            "进行中"
+        case .interrupted:
+            "已中断"
+        case .committed:
+            "已完成"
+        case .failed:
+            "失败"
+        case .cancelled:
+            "已取消"
+        }
+    }
+
+    private func phaseText(_ phase: String) -> String {
+        switch phase.lowercased() {
+        case "accepted":
+            "已接收"
+        case "prepare", "preparing":
+            "准备中"
+        case "download", "downloading":
+            "下载中"
+        case "verify", "verifying":
+            "校验中"
+        case "apply", "applying":
+            "应用中"
+        case "reload", "reloading":
+            "重载中"
+        case "smoke", "smoke_test":
+            "健康检查中"
+        case "committed", "completed":
+            "已完成"
+        case "failed":
+            "失败"
+        case "cancelled", "canceled":
+            "已取消"
+        case "interrupted":
+            "已中断"
+        default:
+            "处理中"
+        }
     }
 }

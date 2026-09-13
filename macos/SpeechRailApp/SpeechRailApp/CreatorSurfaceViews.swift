@@ -2,6 +2,8 @@ import SpeechRailControlKit
 import SwiftUI
 
 public struct CreatorSurfaceView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(AppNavigationState.self) private var navigation
     public let route: AppRoute
 
     public init(route: AppRoute) {
@@ -21,8 +23,23 @@ public struct CreatorSurfaceView: View {
         }
         .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
-            ToolbarItem {
-                ServiceStatusBadge()
+            if route != .works {
+                ToolbarItem {
+                    WorkspaceActionsMenu(helpText: "刷新服务状态，或打开服务状态页") {
+                        Button {
+                            Task { await model.refresh() }
+                        } label: {
+                            Label("刷新服务状态", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(model.isRefreshingService)
+                        Divider()
+                        Button {
+                            navigation.request(.overview)
+                        } label: {
+                            Label("查看服务状态", systemImage: "server.rack")
+                        }
+                    }
+                }
             }
         }
     }
@@ -77,7 +94,7 @@ public struct DubbingDeskView: View {
                         dubbingText = ""
                     }
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .buttonStyle(.plain)
+                    .speechRailButton(.quiet)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
             }
@@ -96,14 +113,14 @@ public struct DubbingDeskView: View {
                         Text("清泉 (灵动少女)").tag("清泉 (灵动少女)")
                         Text("星原 (科技播报)").tag("星原 (科技播报)")
                     }
-                    .frame(width: SpeechRailDesignTokens.Layout.creatorVoicePickerWidth + 60)
+                    .frame(width: SpeechRailDesignTokens.Layout.creatorVoiceControlWidth)
 
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("语速")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         Slider(value: $speechSpeed, in: 0.5...2.0, step: 0.1)
-                            .frame(width: 120)
+                            .frame(width: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
                         Text(String(format: "%.1fx", speechSpeed))
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .monospacedDigit()
@@ -117,7 +134,7 @@ public struct DubbingDeskView: View {
                     } label: {
                         Label(isPlaying ? "停止试听" : "生成并试听", systemImage: isPlaying ? "stop.fill" : "play.fill")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .speechRailButton(.primary)
                     .tint(SpeechRailDesignTokens.Color.rail)
                 }
             }
@@ -199,14 +216,14 @@ public struct VoiceDesignView: View {
                                 }
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                                .padding(.vertical, 4)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                                 .background(
-                                    SpeechRailDesignTokens.Color.voice.opacity(0.12),
+                                    SpeechRailDesignTokens.Surface.voiceSelectedFill,
                                     in: .capsule
                                 )
                                 .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                             }
-                            .buttonStyle(.plain)
+                            .speechRailInteractiveButtonStyle()
                             .accessibilityLabel("插入声学特征：\(chip)")
                         }
                     }
@@ -217,7 +234,7 @@ public struct VoiceDesignView: View {
                     Button("生成候选音色") {
                         generateCandidates()
                     }
-                    .buttonStyle(.borderedProminent)
+                    .speechRailButton(.primary)
                     .tint(SpeechRailDesignTokens.Color.voice)
                     .accessibilityLabel("根据当前描述生成 4 组候选音色")
                 }
@@ -313,9 +330,12 @@ private struct CandidateRackRow: View {
             Text(candidate.slot)
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                 .foregroundStyle(SpeechRailDesignTokens.Color.voice)
-                .frame(width: 32, height: 32)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.creatorSlotBadgeSize,
+                    height: SpeechRailDesignTokens.Layout.creatorSlotBadgeSize
+                )
                 .background(
-                    SpeechRailDesignTokens.Color.voice.opacity(0.15),
+                    SpeechRailDesignTokens.Surface.voiceBadgeFill,
                     in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.control)
                 )
 
@@ -333,7 +353,10 @@ private struct CandidateRackRow: View {
 
             // 静态/动态声波可视化
             AcousticWaveformBar(active: isPlaying)
-                .frame(width: 72, height: 20)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.creatorWaveformWidth,
+                    height: SpeechRailDesignTokens.Layout.creatorWaveformHeight
+                )
                 .accessibilityHidden(true)
 
             // 时长
@@ -348,7 +371,7 @@ private struct CandidateRackRow: View {
                     .font(.title3)
                     .foregroundStyle(SpeechRailDesignTokens.Color.voice)
             }
-            .buttonStyle(.plain)
+            .speechRailInteractiveButtonStyle()
             .accessibilityLabel("\(candidate.slot) 槽位试听：\(isPlaying ? "暂停" : "播放")")
 
             // 保存按钮
@@ -356,7 +379,7 @@ private struct CandidateRackRow: View {
                 Label(isSaved ? "已保存" : "保存", systemImage: isSaved ? "checkmark" : "square.and.arrow.down")
                     .font(SpeechRailDesignTokens.Typography.caption)
             }
-            .buttonStyle(.bordered)
+            .speechRailButton(.secondary)
             .disabled(isSaved)
             .accessibilityLabel("保存 \(candidate.title) 至音色库")
         }
@@ -373,11 +396,14 @@ private struct AcousticWaveformBar: View {
     let active: Bool
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: SpeechRailDesignTokens.Control.waveformBarSpacing) {
             ForEach(0..<9, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1.5)
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Control.waveformBarRadius)
                     .fill(active ? SpeechRailDesignTokens.Color.voice : SpeechRailDesignTokens.Color.inkSecondary.opacity(0.35))
-                    .frame(width: 3, height: barHeight(for: index))
+                    .frame(
+                        width: SpeechRailDesignTokens.Control.waveformBarWidth,
+                        height: barHeight(for: index)
+                    )
             }
         }
     }
@@ -451,7 +477,7 @@ public struct VoiceLibraryView: View {
             Spacer()
 
             Button("试听") {}
-                .buttonStyle(.bordered)
+                .speechRailButton(.secondary)
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
     }
@@ -504,15 +530,22 @@ public struct WorksView: View {
             VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                 ForEach(mockWorks) { work in
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        HStack {
-                            Text(work.title)
-                                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            Spacer()
-                            Text("\(work.voiceName) · \(work.duration)")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Button {
+                            selectedWorkID = work.id
+                        } label: {
+                            HStack {
+                                Text(work.title)
+                                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                Spacer()
+                                Text("\(work.voiceName) · \(work.duration)")
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            }
                         }
+                        .speechRailInteractiveButtonStyle()
+                        .accessibilityLabel("选择作品：\(work.title)")
+                        .accessibilityValue(selectedWorkID == work.id ? "已选择" : "未选择")
 
                         // 业务资产侧：完整展示创作者输入文本 (AC-06 规范保障)
                         Text(work.promptText)
@@ -533,7 +566,7 @@ public struct WorksView: View {
                                 selectedWorkID = work.id
                                 showInspector.toggle()
                             }
-                            .buttonStyle(.bordered)
+                            .speechRailButton(.secondary)
                             .font(SpeechRailDesignTokens.Typography.caption)
                             Spacer()
                         }
@@ -541,13 +574,10 @@ public struct WorksView: View {
                     .padding(SpeechRailDesignTokens.Spacing.sm)
                     .background(
                         selectedWorkID == work.id
-                            ? SpeechRailDesignTokens.Color.rail.opacity(0.06)
+                            ? SpeechRailDesignTokens.Surface.selectedFill
                             : Color.clear,
                         in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
                     )
-                    .onTapGesture {
-                        selectedWorkID = work.id
-                    }
                 }
             }
         }
@@ -555,12 +585,16 @@ public struct WorksView: View {
         .speechRailField()
         .toolbar {
             ToolbarItem {
-                Button {
-                    showInspector.toggle()
-                } label: {
-                    Label("脱敏技术详情", systemImage: "info.circle")
+                WorkspaceActionsMenu(helpText: "查看当前作品的脱敏技术审计") {
+                    Button {
+                        showInspector.toggle()
+                    } label: {
+                        Label(
+                            showInspector ? "隐藏技术审计" : "显示技术审计",
+                            systemImage: "info.circle"
+                        )
+                    }
                 }
-                .help("查看脱敏的运行元数据 (AC-06)")
             }
         }
         .inspector(isPresented: $showInspector) {

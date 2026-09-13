@@ -45,6 +45,11 @@ public enum SpeechRailDesignTokens {
         public static let windowMinimumHeight: CGFloat = 720
         public static let creatorComposerMinimumHeight: CGFloat = 180
         public static let creatorVoicePickerWidth: CGFloat = 180
+        public static let creatorVoiceControlWidth: CGFloat = 240
+        public static let creatorSpeedSliderWidth: CGFloat = 120
+        public static let creatorSlotBadgeSize: CGFloat = 32
+        public static let creatorWaveformWidth: CGFloat = 72
+        public static let creatorWaveformHeight: CGFloat = 20
         public static let emptyStateMinimumHeight: CGFloat = 240
         public static let modelEmptyStateMinimumHeight: CGFloat = 180
         public static let modelArtifactEmptyStateMinimumHeight: CGFloat = 130
@@ -57,6 +62,15 @@ public enum SpeechRailDesignTokens {
         public static let controlMenuMinimumWidth: CGFloat = 280
         public static let settingsWindowMinimumWidth: CGFloat = 560
         public static let settingsWindowMinimumHeight: CGFloat = 360
+        public static let diagnosticsSummaryHeight: CGFloat = 84
+        public static let diagnosticsListWidth: CGFloat = 320
+        public static let diagnosticsDetailMinimumWidth: CGFloat = 460
+        public static let diagnosticsRowHeight: CGFloat = 44
+        public static let diagnosticsBodyMinimumHeight: CGFloat = 360
+        public static let monitoringCapabilityMinimumWidth: CGFloat = 280
+        public static let monitoringCapabilityIdealWidth: CGFloat = 320
+        public static let metricMinimumWidth: CGFloat = 112
+        public static let metricColumnCount: Int = 4
     }
 
     public enum Control {
@@ -69,6 +83,51 @@ public enum SpeechRailDesignTokens {
         public static let toolbarIconSize: CGFloat = 18
         public static let iconButtonSize: CGFloat = 28
         public static let statusIndicatorDiameter: CGFloat = 7
+        public static let sidebarRowHeight: CGFloat = 44
+        public static let sidebarIconFrame: CGFloat = 20
+        public static let sidebarIconSize: CGFloat = 15
+        public static let workspaceTitleHeight: CGFloat = 30
+        public static let purposeIndicatorWidth: CGFloat = 3
+        public static let purposeIndicatorHeight: CGFloat = 14
+        public static let waveformBarSpacing: CGFloat = 3
+        public static let waveformBarWidth: CGFloat = 3
+        public static let waveformBarRadius: CGFloat = 1.5
+    }
+
+    /// Toolbar dimensions are kept separate from page content so the window chrome can
+    /// protect its own geometry when a route or context title becomes long.
+    public enum Toolbar {
+        public static let titleMaximumWidth: CGFloat = 360
+        public static let titleCompactMaximumWidth: CGFloat = 260
+        public static let titleHeight: CGFloat = 30
+        public static let itemSpacing: CGFloat = 8
+    }
+
+    /// Component-level button dimensions. The visual glyph may be smaller than the
+    /// hit target; the hit target is never smaller than the macOS control baseline.
+    public enum Button {
+        public static let standardHeight: CGFloat = 34
+        public static let prominentHeight: CGFloat = 40
+        public static let iconHitTarget: CGFloat = 44
+        public static let cornerRadius: CGFloat = Corner.control
+    }
+
+    public enum Icon {
+        public static let navigationSize: CGFloat = 15
+        public static let navigationFrame: CGFloat = 20
+        public static let toolbarSize: CGFloat = 16
+        public static let toolbarFrame: CGFloat = 24
+    }
+
+    /// All non-native interactive surfaces use this matrix. Native Button/Menu/
+    /// NavigationLink controls retain the system's own equivalent states.
+    public enum Interaction {
+        public static let minimumHitTarget: CGFloat = 44
+        public static let pressedScale: CGFloat = 0.985
+        public static let hoverFillOpacity: Double = 0.07
+        public static let pressedFillOpacity: Double = 0.12
+        public static let disabledOpacity: Double = 0.45
+        public static let focusLineWidth: CGFloat = 2
     }
 
     public enum Typography {
@@ -83,6 +142,12 @@ public enum SpeechRailDesignTokens {
         public static let technical: Font = .system(.caption2, design: .monospaced)
         public static let metricValue: Font = .system(.title3, design: .rounded, weight: .semibold).monospacedDigit()
         public static let metric = metricValue
+        public static let statusTitle: Font = .system(.title3, design: .default, weight: .semibold)
+        public static let workspaceTitle: Font = .system(.headline, design: .default, weight: .semibold)
+        public static let toolbarTitle: Font = .system(.headline, design: .default, weight: .semibold)
+        public static let workspaceContext: Font = .system(.caption, design: .default, weight: .medium)
+        public static let diagnosticsSummary: Font = .system(.title3, design: .default, weight: .semibold)
+        public static let diagnosticsDetail: Font = .system(.callout, design: .default, weight: .medium)
 
         // Source-compatibility aliases for compiled legacy surfaces.
         public static let pageTitle = windowTitle
@@ -194,13 +259,22 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Surface {
-        public static let hairlineStroke = SwiftUI.Color.primary.opacity(0.07)
+        public static let hairlineStroke = Color.inkSecondary.opacity(0.18)
         public static let contentStroke = hairlineStroke
         public static let selectedFill = Color.rail.opacity(0.10)
         public static let voiceSelectedFill = Color.voice.opacity(0.12)
+        public static let voiceBadgeFill = Color.voice.opacity(0.15)
         public static let focusRing = Color.rail.opacity(0.40)
         public static let controlFill = Color.field.opacity(0.72)
         public static let inspectorFill = Color.field.opacity(0.92)
+        public static let fieldHighlight = SwiftUI.Color.white.opacity(0.46)
+        public static let fieldHighlightDark = SwiftUI.Color.white.opacity(0.06)
+        public static let statusChipFillOpacity: Double = 0.12
+        public static let surfaceRaised = Color.field.opacity(0.96)
+        public static let border = Color.inkSecondary.opacity(0.18)
+        public static let borderStrong = Color.inkSecondary.opacity(0.32)
+        public static let interactionHover = Color.rail.opacity(Interaction.hoverFillOpacity)
+        public static let interactionPressed = Color.rail.opacity(Interaction.pressedFillOpacity)
 
         // MARK: - Logo 物理微雕与光学反光 Token (Crafted from App Icon)
 
@@ -214,11 +288,21 @@ public enum SpeechRailDesignTokens {
         public static let railGlow = Color.rail.opacity(0.15)
     }
 
+    public enum Navigation {
+        public static let selectedFill = Color.rail.opacity(0.12)
+        public static let focusRing = Color.rail.opacity(0.65)
+        public static let selectedForeground = Color.ink
+    }
+
     public enum Motion {
         public static let standardDuration: Double = 0.2
         public static let reducedDuration: Double = 0
+        public static let hoverDuration: Double = 0.14
+        public static let pressDuration: Double = 0.12
         public static let springTransition = Animation.spring(response: 0.28, dampingFraction: 0.82)
         public static let selectionFeedback = Animation.easeOut(duration: 0.14)
+        public static let hoverFeedback = Animation.easeOut(duration: hoverDuration)
+        public static let pressFeedback = Animation.easeOut(duration: pressDuration)
     }
 }
 
@@ -312,7 +396,7 @@ public struct SpeechRailFieldModifier: ViewModifier {
                     .strokeBorder(
                         LinearGradient(
                             stops: [
-                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.specularChamfer : Color.white.opacity(0.4), location: 0),
+                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.fieldHighlightDark : SpeechRailDesignTokens.Surface.fieldHighlight, location: 0),
                                 .init(color: SpeechRailDesignTokens.Surface.cardStroke, location: 0.15),
                                 .init(color: SpeechRailDesignTokens.Surface.hairlineStroke, location: 1.0)
                             ],
@@ -336,20 +420,12 @@ public struct SpeechRailContentSurfaceModifier: ViewModifier {
                 SpeechRailDesignTokens.Color.field,
                 in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
             )
-            .shadow(
-                color: colorScheme == .dark
-                    ? SpeechRailDesignTokens.Surface.ambientShadow
-                    : Color.black.opacity(0.04),
-                radius: 4,
-                x: 0,
-                y: 1.5
-            )
             .overlay {
                 RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
                     .strokeBorder(
                         LinearGradient(
                             stops: [
-                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.specularChamfer : Color.white.opacity(0.5), location: 0),
+                                .init(color: colorScheme == .dark ? SpeechRailDesignTokens.Surface.fieldHighlightDark : SpeechRailDesignTokens.Surface.fieldHighlight, location: 0),
                                 .init(color: SpeechRailDesignTokens.Surface.cardStroke, location: 0.15),
                                 .init(color: SpeechRailDesignTokens.Surface.hairlineStroke, location: 1.0)
                             ],

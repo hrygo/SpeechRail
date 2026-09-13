@@ -56,22 +56,47 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         }
     }
 
+    public var contextTitle: String {
+        group.title
+    }
+
+    public var workspaceTitle: String {
+        switch self {
+        case .dubbing:
+            "配音台"
+        case .voiceDesign:
+            "音色创作"
+        case .voiceLibrary:
+            "音色库"
+        case .works:
+            "我的作品"
+        case .overview:
+            "服务状态"
+        case .monitoring:
+            "运行监控"
+        case .models:
+            "模型管理"
+        case .diagnostics:
+            "系统诊断"
+        }
+    }
+
     public var systemImage: String {
         switch self {
         case .dubbing:
-            "text.bubble"
+            "waveform"
         case .voiceDesign:
-            "waveform.badge.magic"
+            "wand.and.stars"
         case .voiceLibrary:
-            "books.vertical"
+            "person.wave.2"
         case .works:
-            "folder"
+            "square.stack.3d.up"
         case .overview:
-            "rectangle.3.group"
+            "server.rack"
         case .monitoring:
             "chart.xyaxis.line"
         case .models:
-            "shippingbox"
+            "cube"
         case .diagnostics:
             "stethoscope"
         }

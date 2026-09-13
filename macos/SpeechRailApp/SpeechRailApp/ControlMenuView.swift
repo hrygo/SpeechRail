@@ -14,7 +14,7 @@ public struct ControlMenuView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: "waveform")
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.railSignal)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                 Text("SpeechRail")
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
@@ -23,10 +23,10 @@ public struct ControlMenuView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(statusSummary)
                     .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
-                Text(model.service.serviceState)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(SpeechRailRuntimeStatePresentation.text(model.service.serviceState))
                     .font(SpeechRailDesignTokens.Typography.technical)
-                    .foregroundStyle(SpeechRailDesignTokens.Palette.secondaryText)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
 
             Divider()
@@ -42,24 +42,45 @@ public struct ControlMenuView: View {
                 navigation.request(.voiceDesign)
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             } label: {
-                Label("开始音色创作", systemImage: "waveform")
+                Label("开始音色创作", systemImage: "wand.and.stars")
             }
             .keyboardShortcut("N", modifiers: [.command])
 
             Divider()
 
-            Button("启动服务") {
+            Button {
                 pendingServiceAction = .start
+            } label: {
+                Label("启动服务", systemImage: "play.circle")
             }
-            .disabled(model.isBusy)
-            Button("停止服务") {
+            .disabled(
+                model.isBusy
+                    || model.hasActiveMutation
+                    || model.isRefreshingService
+                    || !model.controlAgentStatus.allowsMutation
+            )
+            Button {
                 pendingServiceAction = .stop
+            } label: {
+                Label("停止服务", systemImage: "stop.circle")
             }
-            .disabled(model.isBusy)
-            Button("重启服务") {
+            .disabled(
+                model.isBusy
+                    || model.hasActiveMutation
+                    || model.isRefreshingService
+                    || !model.controlAgentStatus.allowsMutation
+            )
+            Button {
                 pendingServiceAction = .restart
+            } label: {
+                Label("重启服务", systemImage: "arrow.clockwise.circle")
             }
-            .disabled(model.isBusy)
+            .disabled(
+                model.isBusy
+                    || model.hasActiveMutation
+                    || model.isRefreshingService
+                    || !model.controlAgentStatus.allowsMutation
+            )
 
             Divider()
 
@@ -75,7 +96,10 @@ public struct ControlMenuView: View {
             titleVisibility: .visible
         ) {
             if let pendingServiceAction {
-                Button(confirmationButtonTitle(for: pendingServiceAction), role: .destructive) {
+                Button(
+                    confirmationButtonTitle(for: pendingServiceAction),
+                    role: isDestructive(pendingServiceAction) ? .destructive : nil
+                ) {
                     let command = pendingServiceAction
                     self.pendingServiceAction = nil
                     Task { await model.execute(command) }
@@ -142,5 +166,9 @@ public struct ControlMenuView: View {
         default:
             "确认"
         }
+    }
+
+    private func isDestructive(_ command: ControlCommand) -> Bool {
+        command == .stop || command == .restart
     }
 }

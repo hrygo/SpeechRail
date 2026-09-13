@@ -1,3 +1,4 @@
+import Foundation
 import SpeechRailControlKit
 import SwiftUI
 
@@ -26,15 +27,25 @@ public struct ServiceOverviewView: View {
         .scrollEdgeEffectStyle(.automatic, for: .top)
         .toolbar {
             ToolbarItem {
-                Button {
-                    showInspector.toggle()
-                } label: {
-                    Label("开发者详情", systemImage: "info.circle")
+                WorkspaceActionsMenu(helpText: "刷新状态、查看技术详情，或启动、停止和重启本机 SpeechRail 服务") {
+                    Button {
+                        Task { await model.refresh() }
+                    } label: {
+                        Label("刷新服务状态", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(model.isRefreshingService)
+                    Divider()
+                    Button {
+                        showInspector.toggle()
+                    } label: {
+                        Label(
+                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
+                            systemImage: "info.circle"
+                        )
+                    }
+                    Divider()
+                    serviceActions
                 }
-                .help("显示当前服务和控制 Agent 的技术详情")
-            }
-            ToolbarItem {
-                serviceActions
             }
         }
         .inspector(isPresented: $showInspector) {
@@ -54,7 +65,10 @@ public struct ServiceOverviewView: View {
             titleVisibility: .visible
         ) {
             if let pendingAction {
-                Button(actionTitle(for: pendingAction), role: .destructive) {
+                Button(
+                    actionTitle(for: pendingAction),
+                    role: isDestructive(pendingAction) ? .destructive : nil
+                ) {
                     let command = pendingAction
                     self.pendingAction = nil
                     Task { await model.execute(command) }
@@ -72,21 +86,33 @@ public struct ServiceOverviewView: View {
     }
 
     private var statusBanner: some View {
-        let isReady = model.service.ready == true
+        let isReady = model.service.ready == true && model.healthMessage == nil
+        let isUnavailable = model.service.serviceState == "unavailable" || model.healthMessage != nil
         let canMutate = model.controlAgentStatus.allowsMutation
-        let tone: StatusTone = isReady ? .healthy : .attention
-        let actionTitle: String = if canMutate {
+        let tone: StatusTone = if isReady {
+            .healthy
+        } else if isUnavailable {
+            .critical
+        } else {
+            .attention
+        }
+        let actionTitle: String = if model.healthMessage != nil {
+            "重新读取"
+        } else if canMutate {
             isReady ? "重启服务" : "启动服务"
         } else {
             "打开诊断"
         }
         return StatusBanner(
             tone: tone,
-            title: isReady ? "服务可用" : "服务尚未就绪",
+            title: isReady ? "服务可用" : (isUnavailable ? "服务不可用" : "服务尚未就绪"),
             message: statusMessage,
-            actionTitle: actionTitle
+            actionTitle: actionTitle,
+            actionDisabled: model.isBusy || model.hasActiveMutation || model.isRefreshingService
         ) {
-            if canMutate {
+            if model.healthMessage != nil {
+                Task { await model.refresh() }
+            } else if canMutate {
                 pendingAction = isReady ? .restart : .start
             } else {
                 navigation.request(.diagnostics)
@@ -104,25 +130,26 @@ public struct ServiceOverviewView: View {
                 VStack(spacing: 0) {
                     capabilityRow(
                         title: "语音识别",
-                        detail: model.health?.asrState ?? "未读取",
+                        detail: model.health?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
                         ready: model.health?.asrReady
                     )
                     Divider()
                     capabilityRow(
                         title: "语音合成",
-                        detail: model.health?.ttsState ?? "未读取",
+                        detail: model.health?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
                         ready: model.health?.ttsReady
                     )
                     Divider()
                     capabilityRow(
                         title: "实时语音",
-                        detail: model.health?.streamingState ?? "未读取",
+                        detail: model.health?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
                         ready: model.health?.realtimeVAD?.ready
                     )
                     Divider()
                     capabilityRow(
                         title: "分人识别",
-                        detail: model.health?.diarization?.message ?? "按当前档位启用",
+                        detail: model.health?.diarization.map { SpeechRailDiarizationPresentation.text($0) }
+                            ?? "按当前档位启用",
                         ready: model.health?.diarizationReady
                     )
                 }
@@ -136,17 +163,21 @@ public struct ServiceOverviewView: View {
                     detail: "预检只读取环境和配置，不会下载模型或改变当前服务。"
                 )
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Button("运行预检") {
+                    Button {
                         Task { await model.refreshPreflight() }
+                    } label: {
+                        Label("运行预检", systemImage: "stethoscope")
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(model.isBusy)
-                    Button("打开模型") {
+                    .speechRailButton(.secondary)
+                    .disabled(model.isBusy || model.isRefreshingPreflight)
+                    Button {
                         navigation.request(.models)
+                    } label: {
+                        Label("打开模型管理", systemImage: "cube")
                     }
-                    .buttonStyle(.bordered)
+                    .speechRailButton(.secondary)
                     if let message = model.message, !message.isEmpty {
-                        Text(message)
+                        Text(SpeechRailOperationMessagePresentation.text(message))
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                             .lineLimit(2)
@@ -160,12 +191,8 @@ public struct ServiceOverviewView: View {
 
     private func capabilityRow(title: String, detail: String, ready: Bool?) -> some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: ready == true ? "checkmark.circle.fill" : "circle.dashed")
-                .foregroundStyle(
-                    ready == true
-                        ? SpeechRailDesignTokens.Color.ready
-                        : SpeechRailDesignTokens.Color.inkSecondary
-                )
+            Image(systemName: capabilityIcon(ready))
+                .foregroundStyle(capabilityColor(ready))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(title)
@@ -177,41 +204,106 @@ public struct ServiceOverviewView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Text(ready == true ? "已就绪" : "未就绪")
+            Text(capabilityStatus(ready))
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(
-                    ready == true
-                        ? SpeechRailDesignTokens.Color.ready
-                        : SpeechRailDesignTokens.Color.inkSecondary
-                )
+                .foregroundStyle(capabilityColor(ready))
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title)，\(ready == true ? "已就绪" : "未就绪")，\(detail)")
+        .accessibilityLabel("\(title)，\(capabilityStatus(ready))，\(detail)")
+    }
+
+    private func capabilityStatus(_ ready: Bool?) -> String {
+        switch ready {
+        case .some(true):
+            "已就绪"
+        case .some(false):
+            "未就绪"
+        case .none:
+            "未读取"
+        }
+    }
+
+    private func capabilityColor(_ ready: Bool?) -> SwiftUI.Color {
+        switch ready {
+        case .some(true):
+            SpeechRailDesignTokens.Color.ready
+        case .some(false):
+            SpeechRailDesignTokens.Color.critical
+        case .none:
+            SpeechRailDesignTokens.Color.inkSecondary
+        }
+    }
+
+    private func capabilityIcon(_ ready: Bool?) -> String {
+        switch ready {
+        case .some(true):
+            "checkmark.circle.fill"
+        case .some(false):
+            "xmark.circle.fill"
+        case .none:
+            "questionmark.circle"
+        }
     }
 
     private var serviceActions: some View {
-        Menu {
-            Button("启动服务") { pendingAction = .start }
-                .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
-            Button("停止服务") { pendingAction = .stop }
-                .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
-            Button("重启服务") { pendingAction = .restart }
-                .disabled(model.isBusy || !model.controlAgentStatus.allowsMutation)
-        } label: {
-            Label("服务操作", systemImage: "ellipsis.circle")
+        Group {
+            Button {
+                pendingAction = .start
+            } label: {
+                Label("启动服务", systemImage: "play.circle")
+            }
+                .disabled(
+                    model.isBusy
+                        || model.hasActiveMutation
+                        || model.isRefreshingService
+                        || !model.controlAgentStatus.allowsMutation
+                )
+            Button {
+                pendingAction = .stop
+            } label: {
+                Label("停止服务", systemImage: "stop.circle")
+            }
+                .disabled(
+                    model.isBusy
+                        || model.hasActiveMutation
+                        || model.isRefreshingService
+                        || !model.controlAgentStatus.allowsMutation
+                )
+            Button {
+                pendingAction = .restart
+            } label: {
+                Label("重启服务", systemImage: "arrow.clockwise.circle")
+            }
+                .disabled(
+                    model.isBusy
+                        || model.hasActiveMutation
+                        || model.isRefreshingService
+                        || !model.controlAgentStatus.allowsMutation
+                )
         }
-        .help("启动、停止或重启本机 SpeechRail 服务")
     }
 
     private var statusMessage: String {
+        if let healthMessage = model.healthMessage {
+            let lastRead = model.lastHealthRefresh.map { "最近成功读取于 \(relativeTime($0))" } ?? "尚无成功读取"
+            return "\(healthMessage)。\(lastRead)。"
+        }
         if model.service.ready == true {
-            return "SpeechRail 已准备好接收本机语音请求。当前档位：\(model.profile?.preset?.rawValue ?? "未读取")。"
+            let profile = model.profile?.preset.map { SpeechRailProfilePresentation.title($0) } ?? "未读取"
+            return "SpeechRail 已准备好接收本机语音请求。当前档位：\(profile)。"
+        }
+        if model.service.serviceState == "unavailable" {
+            return "控制中心暂时无法读取 SpeechRail，通常意味着服务尚未启动或正在重新启动。"
         }
         if !model.controlAgentStatus.allowsMutation {
             return "\(model.controlAgentStatus.detail) 只读诊断仍可使用。"
         }
         return "先启动服务或运行预检，控制台会说明阻塞原因。"
+    }
+
+    private func relativeTime(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .standard)
     }
 
     private var isConfirmingAction: Binding<Bool> {
@@ -248,5 +340,9 @@ public struct ServiceOverviewView: View {
         default:
             "确认"
         }
+    }
+
+    private func isDestructive(_ command: ControlCommand) -> Bool {
+        command == .stop || command == .restart
     }
 }
