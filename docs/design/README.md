@@ -28,3 +28,8 @@
 [`docs/superpowers/specs/2026-09-13-speechrail-app-management-observability-design.md`](../superpowers/specs/2026-09-13-speechrail-app-management-observability-design.md)
 
 其中明确区分：模型下载/校验、profile 应用、服务运行状态、推理就绪状态和质量验证，不把原型中的概念状态直接当成后端事实。
+
+## 实施计划
+
+- [整体 App 框架实施计划](../superpowers/plans/2026-09-13-speechrail-app-framework-plan.md)
+- [服务模块实施计划](../superpowers/plans/2026-09-13-speechrail-service-module-plan.md)

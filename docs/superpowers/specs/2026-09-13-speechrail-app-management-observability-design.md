@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail macOS App 创作工作台与管理控制面"
-status: proposed
+status: approved
 audience: "普通用户、音色创作者、SpeechRail macOS App 开发者与本机运行维护者"
 version: "0.2.0"
 date: 2026-09-13
