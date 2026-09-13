@@ -121,12 +121,14 @@ public struct ControlMenuView: View {
         }
         .task {
             await model.refresh()
+#if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--ui-test-open-control-center") {
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-open-settings") {
                 openSettings()
             }
+#endif
         }
     }
 

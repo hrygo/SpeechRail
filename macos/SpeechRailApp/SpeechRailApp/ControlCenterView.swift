@@ -260,7 +260,11 @@ public struct ControlCenterView: View {
     }
 
     private var isUITestWithoutControlCenter: Bool {
+#if DEBUG
         let args = ProcessInfo.processInfo.arguments
         return args.contains("--ui-test") && !args.contains("--ui-test-open-control-center")
+#else
+        return false
+#endif
     }
 }

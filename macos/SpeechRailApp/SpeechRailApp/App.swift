@@ -7,7 +7,14 @@ struct SpeechRailApp: App {
     @State private var navigation: AppNavigationState
 
     init() {
-        let isUITest = ProcessInfo.processInfo.arguments.contains("--ui-test")
+        let isUITest: Bool
+#if DEBUG
+        isUITest = ProcessInfo.processInfo.arguments.contains("--ui-test")
+#else
+        // Release builds must always use the live XPC/REST path, even if an
+        // old UI-test launch argument is accidentally carried over.
+        isUITest = false
+#endif
         let usesBundledXPCService = !isUITest && Self.hasBundledLocalXPCService
         let transport: any SpeechRailControlTransport = isUITest
             ? UITestControlTransport(
