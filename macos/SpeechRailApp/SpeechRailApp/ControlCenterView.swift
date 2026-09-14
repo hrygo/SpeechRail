@@ -7,6 +7,7 @@ public struct ControlCenterView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selection: AppRoute? = .overview
     @State private var searchText = ""
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     public init() {}
 
@@ -18,7 +19,7 @@ public struct ControlCenterView: View {
                     dismiss()
                 }
         } else {
-            NavigationSplitView {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
                 VStack(spacing: 0) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -35,6 +36,7 @@ public struct ControlCenterView: View {
                         }
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                         .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+                        .frame(minWidth: SpeechRailDesignTokens.Layout.sidebarMinimumWidth - SpeechRailDesignTokens.Spacing.sm * 2)
                     }
                     .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
 
@@ -43,9 +45,9 @@ public struct ControlCenterView: View {
                     sidebarServiceStatus
                 }
                 .navigationSplitViewColumnWidth(
-                    min: SpeechRailDesignTokens.Layout.sidebarWidth,
-                    ideal: SpeechRailDesignTokens.Layout.sidebarWidth,
-                    max: SpeechRailDesignTokens.Layout.sidebarWidth
+                    min: SpeechRailDesignTokens.Layout.sidebarMinimumWidth,
+                    ideal: SpeechRailDesignTokens.Layout.sidebarIdealWidth,
+                    max: SpeechRailDesignTokens.Layout.sidebarMaximumWidth
                 )
                 .background(SpeechRailDesignTokens.Chassis.obsidian)
             } detail: {

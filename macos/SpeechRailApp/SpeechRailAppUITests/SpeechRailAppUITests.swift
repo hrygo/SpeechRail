@@ -6,11 +6,10 @@ final class SpeechRailAppUITests: XCTestCase {
         let app = launchSpeechRail()
         openControlCenter(in: app)
 
-        XCTAssertTrue(app.staticTexts["服务状态"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["服务状态"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["音色创作"].exists)
         XCTAssertTrue(app.buttons["运行监控"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
-        XCTAssertTrue(app.staticTexts["服务状态"].exists)
         XCTAssertTrue(app.staticTexts["本地控制通道已就绪"].exists)
 
         app.buttons["音色创作"].click()
@@ -43,7 +42,6 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["服务"].exists)
         XCTAssertTrue(app.buttons["服务状态"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
-        XCTAssertTrue(app.staticTexts["服务状态"].exists)
         XCTAssertTrue(app.staticTexts["确认本机语音服务能否使用"].exists)
         XCTAssertTrue(app.staticTexts["能力"].exists)
         XCTAssertTrue(app.buttons["运行预检"].exists)

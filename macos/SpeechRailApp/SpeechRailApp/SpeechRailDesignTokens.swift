@@ -35,13 +35,12 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Layout {
-        /// Navigation and inspector columns are intentionally locked. A changing
-        /// column width makes the workspace feel unstable and moves the menu while
-        /// long technical values are being rendered.
+        /// Navigation and inspector columns are calibrated for console stability.
         public static let sidebarWidth: CGFloat = 240
-        public static let sidebarMinimumWidth: CGFloat = sidebarWidth
-        public static let sidebarIdealWidth: CGFloat = sidebarWidth
-        public static let sidebarMaximumWidth: CGFloat = sidebarWidth
+        public static let sidebarMinimumWidth: CGFloat = 220
+        public static let sidebarIdealWidth: CGFloat = 240
+        public static let sidebarMaximumWidth: CGFloat = 280
+        public static let modelProfileListWidth: CGFloat = 280
         public static let inspectorWidth: CGFloat = 360
         public static let inspectorMinimumWidth: CGFloat = inspectorWidth
         public static let inspectorIdealWidth: CGFloat = inspectorWidth
