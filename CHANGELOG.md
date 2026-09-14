@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-09-14
+
+### Changed
+
+- 依赖更新：`onnxruntime` 提升至 1.30.0，并同步 github-actions 组（`astral-sh/setup-uv` 10.1.0、`actions/download-artifact` 8.0.1）。
+
+### Fixed
+
+- 修复 macOS 控制台在 Release 配置下编译失败：`ControlCenterWindowActivator` 仅在 `#if DEBUG` 下声明却被无条件引用，导致 tag 触发的 unsigned DMG 构建以 exit 65 中断并阻塞 GitHub Release；现将引用与声明同门控，Debug 行为不变。
+
 ## [2.6.1] - 2026-09-14
 
 ### Added
