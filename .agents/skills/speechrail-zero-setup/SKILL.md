@@ -64,6 +64,8 @@ uv run --python 3.12 python \
 
 不要把真实 API key 放进命令参数或 shell 历史，不在仓库内生成测试音频，也不输出完整转写。手工复查仍使用统一探针；只记录 HTTP 状态、request ID、非空音频/转写校验和脱敏错误。
 
+上述 smoke 属于本次显式 `--yes` 确认的安装事务，`--yes` 本身就是该事务的授权。除安装事务内的探针外，不运行 UI 自动化、benchmark 或额外验收命令；额外验收需要当前用户明确授权，否则列入未验证项。
+
 每次安装都会在 `runtime/releases` 新增一个 release 目录，installer 不自动清理旧版本；重复首装或升级会让
 app home 持续增长。因此「预留至少 25 GB」是单次全新安装的增量需求，不是 app home 的长期上限。保留、清理
 与陈旧进程边界读 [speechrail-local-deploy](../speechrail-local-deploy/SKILL.md)。
