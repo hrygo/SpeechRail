@@ -2,9 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
+  merge_group:
+  workflow_call:
+    inputs:
+      package-runner:
+        description: "Runner used for the release wheel package job"
+        required: false
+        type: string
+        default: ubuntu-latest
 
 permissions:
   contents: read
@@ -13,11 +22,68 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  UV_VERSION: "0.12.13"
+
 jobs:
-  test:
-    name: Lint, Type Check & Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
-    runs-on: ${{ matrix.os }}
+  quality:
+    name: Quality Gates
+    runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install locked project dependencies
+        run: uv sync --locked --extra dev --extra mcp
+
+      - name: Code style check (Ruff)
+        run: uv run ruff check src tests scripts hatch_build.py
+
+      - name: Static type check (Mypy)
+        run: uv run mypy src
+
+      - name: Check release version consistency
+        run: uv run python scripts/check_version_consistency.py
+
+      - name: Lint OpenAPI contract
+        run: npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
+
+      - name: Run explicit diarization contract regression tests
+        run: uv run pytest --no-cov tests/test_diarization_contracts.py tests/test_diarization_extensions.py
+
+      - name: Check patch whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" && -n "$PR_BASE_SHA" ]]; then
+            git diff --check "$PR_BASE_SHA...HEAD"
+          elif [[ -n "$EVENT_BEFORE" && "$EVENT_BEFORE" != "0000000000000000000000000000000000000000" ]]; then
+            git diff --check "$EVENT_BEFORE" HEAD
+          else
+            git diff --check HEAD^ HEAD
+          fi
+
+  test:
+    name: Test (${{ matrix.os }} / Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -46,32 +112,26 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Install project dependencies
-        run: uv sync --extra dev --extra mcp
+      - name: Install locked project dependencies
+        run: uv sync --locked --extra dev --extra mcp
 
       - name: Build wheel package
         run: uv build --no-sources --wheel
-
-      - name: Code style check (Ruff)
-        run: uv run ruff check src tests tools hatch_build.py
-
-      - name: Static type check (Mypy)
-        run: uv run mypy src
 
       - name: Run test suite with coverage gate (Pytest)
         run: uv run pytest --cov=src
 
   macos-app:
     name: macOS App Build & Tests
-    runs-on: macos-15
-    timeout-minutes: 15
+    runs-on: macos-26
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -79,10 +139,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Verify Apple toolchain
+      - name: Verify Apple toolchain and arm64 runner
         run: |
+          test "$(uname -m)" = "arm64"
           xcodebuild -version
-          xcodebuild -showsdks
+          xcodebuild -showsdks | grep -F 'macOS 26'
 
       - name: Run Swift package tests
         run: swift test --package-path macos/SpeechRailApp
@@ -96,6 +157,7 @@ jobs:
             -destination 'platform=macOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            ARCHS=arm64 \
             test \
             -testPlan SpeechRailApp
 
@@ -104,5 +166,57 @@ jobs:
           plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist
           plutil -lint macos/SpeechRailApp/Entitlements/SpeechRailApp.entitlements
 
-      - name: Check patch whitespace
-        run: git diff --check
+  package:
+    name: Package wheel artifact
+    runs-on: ${{ inputs.package-runner || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    needs: [quality, test]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install locked project dependencies
+        run: uv sync --locked --extra dev --extra mcp
+
+      - name: Build and verify release wheel
+        run: |
+          uv build --no-sources --wheel
+          version="$(uv run python -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')"
+          shopt -s nullglob
+          wheel_candidates=(dist/speechrail-${version}-*.whl)
+          test "${#wheel_candidates[@]}" -eq 1
+          wheel="${wheel_candidates[0]}"
+          test -f "$wheel"
+          unzip -t "$wheel"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            unzip -l "$wheel" | grep -F 'speechrail/_native/SpeechRailDiarizationWorker'
+          fi
+          uv run pytest --no-cov tests/test_wheel_contents.py -q
+          uv run python scripts/check_version_consistency.py
+
+      - name: Prepare wheel artifact and checksum
+        run: |
+          mkdir -p release-artifact
+          cp dist/*.whl release-artifact/
+          (cd release-artifact && sha256sum ./*.whl > wheel.SHA256)
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: speechrail-wheel
+          path: release-artifact/
+          if-no-files-found: error
+          retention-days: 7

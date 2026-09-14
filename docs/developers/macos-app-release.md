@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.4.0"
-date: 2026-09-13
+version: "0.5.0"
+date: 2026-09-14
 ---
 
 # SpeechRail macOS App 分发与签名
@@ -42,6 +42,23 @@ scripts/macos_app_test.sh
 ```
 
 本地测试不需要 Developer ID。测试使用 `--ui-test` fake transport，不注册生产 helper、不启动 `com.speechrail`、不下载模型。测试脚本使用一次性临时 DerivedData，结束时注销本次构建 App/runner 的 LaunchServices 注册并清理测试产物；不会把测试 App 留在用户目录或仓库中。Distribution archive/export 仍只在显式指定的输出路径保留。
+
+## GitHub Actions unsigned DMG
+
+匹配 `pyproject.toml` 版本的 `vX.Y.Z` tag 会触发 Release workflow。workflow 在 `macos-26` arm64 runner 上用 `Release` 配置构建 App，并显式设置 `CODE_SIGNING_ALLOWED=NO`、`CODE_SIGNING_REQUIRED=NO` 和 `ARCHS=arm64`；随后由 `scripts/macos_app_create_dmg.sh` 生成压缩 DMG。DMG 只包含 `SpeechRail.app` 和指向 `/Applications` 的符号链接，并随 wheel 与 `SHA256SUMS` 上传到 GitHub Release。
+
+该 DMG 是 unsigned、未 notarize 的早期分发制品，不代表 Developer ID 发布验收。首次从互联网下载后打开时，macOS 可能显示无法验证开发者或无法检查恶意软件的提示；确认制品来源和 checksum 后，按系统设置“隐私与安全性”中的“仍要打开”流程放行。受企业策略管理的 Mac 可能不允许此覆盖。正式面向不熟悉终端用户的分发仍必须走下面的 Developer ID + notarization 路径。
+
+本地只打包一个已经生成的 App 时可以执行：
+
+```bash
+scripts/macos_app_create_dmg.sh \
+  --app-path "/path/to/SpeechRail.app" \
+  --version "2.6.0" \
+  --output-path "/path/outside/repository/SpeechRail-2.6.0-macOS-arm64.dmg"
+```
+
+脚本会核对 App bundle identifier、`CFBundleShortVersionString`、`CFBundleVersion` 和 DMG 内容，并拒绝覆盖已有输出文件。它不签名、不修改钥匙串、不注册 LaunchAgent，也不改变服务 runtime。
 
 归档前先确认版本字段已经进入实际构建设置：
 

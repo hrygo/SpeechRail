@@ -12,13 +12,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  UV_VERSION: "0.12.13"
+
 jobs:
-  build-and-release:
-    name: Build Wheel & Create Release
-    runs-on: macos-15
-    timeout-minutes: 10
-    permissions:
-      contents: write
+  verify-tag:
+    name: Verify tag and project version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -29,38 +30,145 @@ jobs:
       - name: Set up uv
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
-          version: "latest"
+          version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      - name: Install build dependencies
-        run: uv sync --extra dev
+      - name: Verify release tag
+        run: uv run --no-project --python 3.12 python scripts/verify_release_tag.py --tag "$GITHUB_REF_NAME"
 
-      - name: Build wheel package
-        run: uv build --no-sources --wheel
+  ci:
+    name: Run reusable CI gates
+    needs: verify-tag
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+    with:
+      package-runner: macos-26
 
-      - name: Verify build artifacts
+  build-app:
+    name: Build unsigned macOS DMG
+    needs: verify-tag
+    runs-on: macos-26
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify Apple toolchain and arm64 runner
         run: |
-          ls -lh dist/
-          unzip -l dist/*.whl
+          test "$(uname -m)" = "arm64"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -F 'macOS 26'
+
+      - name: Build unsigned Release App
+        env:
+          APP_BUILD_DIRECTORY: ${{ runner.temp }}/speechrail-app-derived-data
+        run: |
+          xcodebuild \
+            -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
+            -scheme SpeechRailApp \
+            -configuration Release \
+            -sdk macosx \
+            -derivedDataPath "$APP_BUILD_DIRECTORY" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            ARCHS=arm64 \
+            build
+
+          app_path="$APP_BUILD_DIRECTORY/Build/Products/Release/SpeechRail.app"
+          test -d "$app_path"
+          test -x "$app_path/Contents/MacOS/SpeechRail"
+          file "$app_path/Contents/MacOS/SpeechRail" | grep -F 'arm64'
+
+      - name: Create and verify unsigned DMG
+        env:
+          APP_PATH: ${{ runner.temp }}/speechrail-app-derived-data/Build/Products/Release/SpeechRail.app
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Keep the asset name derived from the verified tag, never from a free-form input.
+          dmg_path="$RUNNER_TEMP/SpeechRail-${version}-macOS-arm64.dmg"
+          scripts/macos_app_create_dmg.sh \
+            --app-path "$APP_PATH" \
+            --version "$version" \
+            --output-path "$dmg_path"
+          mkdir -p "$RUNNER_TEMP/release-artifact"
+          cp "$dmg_path" "$RUNNER_TEMP/release-artifact/"
+          (cd "$RUNNER_TEMP/release-artifact" && shasum -a 256 "$(basename "$dmg_path")" > dmg.SHA256)
+
+      - name: Upload unsigned DMG artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: speechrail-macos-dmg
+          path: ${{ runner.temp }}/release-artifact/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release assets
+    needs: [verify-tag, ci, build-app]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download wheel artifact from this run
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: speechrail-wheel
+          path: release-assets/wheel
+
+      - name: Download macOS DMG artifact from this run
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: speechrail-macos-dmg
+          path: release-assets/dmg
+
+      - name: Verify artifacts and create release checksum
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          shopt -s nullglob
+          wheel_candidates=(release-assets/wheel/speechrail-${version}-*.whl)
+          dmg_candidates=(release-assets/dmg/SpeechRail-${version}-macOS-arm64.dmg)
+          test "${#wheel_candidates[@]}" -eq 1
+          test "${#dmg_candidates[@]}" -eq 1
+          wheel="${wheel_candidates[0]}"
+          dmg="${dmg_candidates[0]}"
+          test -f "$wheel"
+          test -f "$dmg"
+          (cd release-assets/wheel && sha256sum -c wheel.SHA256)
+          (cd release-assets/dmg && shasum -a 256 -c dmg.SHA256)
+          mkdir -p release-assets/final
+          cp "$wheel" "$dmg" release-assets/final/
+          (cd release-assets/final && sha256sum ./*.whl ./*.dmg > SHA256SUMS)
+          (cd release-assets/final && sha256sum -c SHA256SUMS)
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          repo="${GITHUB_REPOSITORY}"
+          release_notes='The macOS DMG is an unsigned arm64 build. On first launch, macOS may require opening it from Privacy & Security > Open Anyway.'
+          assets=(release-assets/final/*.whl release-assets/final/*.dmg release-assets/final/SHA256SUMS)
 
-          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-            gh release upload "$tag" --repo "$repo" --clobber dist/*.whl
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" --repo "$REPOSITORY" --clobber "${assets[@]}"
           else
-            gh release create "$tag" \
-              --repo "$repo" \
-              --title "SpeechRail $tag" \
+            gh release create "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --title "SpeechRail $RELEASE_TAG" \
               --generate-notes \
+              --notes "$release_notes" \
               --verify-tag \
-              dist/*.whl
+              "${assets[@]}"
           fi
