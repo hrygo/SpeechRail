@@ -205,7 +205,6 @@ public struct ControlCenterView: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .listRowInsets(
             EdgeInsets(
                 top: SpeechRailDesignTokens.Spacing.micro,
