@@ -80,11 +80,13 @@ public struct ControlCenterView: View {
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
             )
             .background {
+#if DEBUG
                 if isUITestSession {
                     ControlCenterWindowActivator()
                         .frame(width: 1, height: 1)
                         .allowsHitTesting(false)
                 }
+#endif
             }
             .task { await model.refresh() }
             .onAppear {
