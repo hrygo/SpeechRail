@@ -1,6 +1,9 @@
 import Foundation
 import SpeechRailControlAgentCore
 import SpeechRailControlKit
+#if SWIFT_PACKAGE
+import SpeechRailAppSupport
+#endif
 import XCTest
 
 final class ControlKitTests: XCTestCase {

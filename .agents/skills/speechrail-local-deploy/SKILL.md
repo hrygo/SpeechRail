@@ -63,6 +63,9 @@ CLI 从源码 checkout 执行带 `--app-home` 的 service/profile/setup 状态�
 先阅读 [operator contract](references/operator-contract.md)；需要实际 stop/start 时再阅读
 [lifecycle controller](references/lifecycle.md)。所有替换、启停和回滚都必须：
 
+共享 contract 固定生命周期上限：默认最多等待 `2 秒`；只有重新核对身份后才允许对精确进程组发送
+`SIGKILL`，强杀后最多再等待 `10 秒` 确认 lock 释放。
+
 1. 检查外部 `/v1/realtime` 客户端：只把 `ESTABLISHED` 连接视为活动，并确认 realtime session
    与 batch/realtime active requests 为零；不能自动关闭 Sona、浏览器或其他客户端。
 2. 通过 controller 执行 `bootout`/stop，而不是直接把 `launchctl` 返回当作退出证明。

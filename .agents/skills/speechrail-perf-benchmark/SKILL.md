@@ -32,8 +32,11 @@ description: >-
   不自动关闭 Sona、浏览器或其他客户端。
 - API key 按 shared resolver 读取：显式 `SPEECHRAIL_API_KEY` 优先，其次是 managed
   `config/.env`；不得 `source` 配置，也不得把 key 写入命令、结果或日志。
+- 身份和指标读取只走 `只读受保护路由`；不会用未鉴权的公开端点替代 `/metrics` 的安全读取。
 - 内存以 Apple Silicon 的 `phys_footprint` 计量：每个完整采样 tick 汇总目标 PID+start-time；
   缺样、PID 重用、sampler 异常或停止超时会关闭对应 gate。懒加载 worker 必须在预热后重新发现。
+- benchmark 使用 managed `runtime/current/.venv/bin/python`；生命周期遵守共享 contract 的 `2 秒`
+  停止等待、身份复核后的 `SIGKILL` 和强杀后最多 `10 秒` 的 lock 释放等待。
 - `SPEECHRAIL_ALLOW_HEAVY_OVERLAP=auto` 是默认测量口径，不再执行 overlap OFF 对照；重叠轴是
   ASR∥TTS，不是 ASR∥ASR。多路 ASR 被单 worker 拒绝时记录为 `429 backend_busy`，不当作并发收益。
 

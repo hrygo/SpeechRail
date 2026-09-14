@@ -1,4 +1,7 @@
 import XCTest
+#if SWIFT_PACKAGE
+import SpeechRailAppSupport
+#endif
 
 @MainActor
 private final class RecordingRegistrationClient: ControlAgentRegistrationClient {

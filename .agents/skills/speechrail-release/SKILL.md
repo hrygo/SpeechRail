@@ -9,7 +9,7 @@ description: >-
 
 本 skill 处理明确授权的 service-only、app-only 或 combined release。它把版本材料、构建门禁、
 安装边界和回滚点串起来；生命周期细节统一由
-[speechrail-local-deploy](../speechrail-local-deploy/SKILL.md) 的 operator contract 管理。
+[operator contract](../speechrail-local-deploy/references/operator-contract.md) 管理。
 
 ## 入口分级
 
@@ -114,6 +114,9 @@ scope 包含服务时，先读 local-deploy 的
    `runtime/current`/selection，不删除旧 release、模型、配置或日志。
 4. 用新 managed runtime 通过 controller start；等待真实 ready，核对 profile/model/voice identity 和
    必要公共 smoke。任何 PID、身份、lock 或 listener 不一致都 fail closed，不循环 restart。
+
+生命周期遵守共享 operator contract：默认最多等待 `2 秒`；仅在重新核对身份后允许对精确进程组发送
+`SIGKILL`，并在强杀后最多等待 `10 秒` 确认 lock 释放。
 
 wheel 替换和 profile 切换分开执行；不要直接使用底层 `launchctl`、`pkill`、`killall` 或手工 plist。
 
