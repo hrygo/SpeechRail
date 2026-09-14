@@ -19,7 +19,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # A fixed prefix, not ${{ github.workflow }}: in a reusable-workflow call that
+  # expression resolves to the CALLER's name, so this file would otherwise
+  # declare the same group as the caller and cancel it (which skipped the
+  # tag-triggered Release publish in v2.6.2). "ci-<ref>" stays unique to CI.
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
