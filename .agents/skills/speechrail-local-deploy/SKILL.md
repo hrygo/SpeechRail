@@ -32,6 +32,9 @@ description: >-
 - `SpeechRail.app` 是按需控制面，不拥有 8201、不加载模型、不替代 `com.speechrail`；App
   或 control-agent 的退出、升级和回滚不能改动服务 runtime、selection、模型或配置。
 - 不使用 `pkill`、`killall`、模糊名称匹配、手工 plist 修改或连续 restart 重试。
+- `runtime/releases` 只增不减：每次安装/替换新增一个 release 目录，installer 没有自动保留策略。保留
+  基线是 `runtime/current` 指向的 release、回退目标和最近 1–2 个版本；清理更旧的 release 属运行态动作，
+  必须有当前用户明确授权。
 
 ## 操作前快照
 
@@ -85,6 +88,19 @@ profile/generation；切换失败停止后续动作，只允许一次明确回�
 取证；不要先删除模型、配置或 release。按现象读取 [troubleshooting](references/troubleshooting.md)，
 其中包含 `server_already_running`、`worker_load_error`、旧 profile、`/readyz 503`、plist 和
 日志取证的最小路径。
+
+## 旧 release 与陈旧进程
+
+- `runtime/releases` 不自动清理；累积到几十上百 GB 属于已知现象，不是故障。每次安装或替换都会新增一个
+  release 目录，磁盘随发布次数单调增长。
+- 清理前必须核对没有活进程从待删目录执行：用 `ps -axo pid,command` 和 `ps -axo pid,comm` 匹配 release
+  的绝对路径，并确认待删目录不是 `runtime/current` 或其指向的目录。被引用的目录必须保留，否则会打断
+  运行中的服务或 `speechrail-mcp`。
+- 旧版本残留进程很常见：例如长期运行的 `speechrail-mcp` 仍在使用旧 release 的 `.venv`，同一个 release
+  目录可能同时被服务父进程、worker 和 MCP 进程引用。发现这类进程时先按 PID、owner、command 和
+  executable 取证，不要假设它已经退出。
+- 终止陈旧进程与删除 release 目录都属运行态动作，需要当前用户明确授权，并按 operator contract 只对重新
+  核对过身份的精确进程组处理，不使用模糊名称匹配。
 
 ## 完成证据
 
