@@ -141,11 +141,7 @@ public struct ControlCenterView: View {
     @ViewBuilder
     private func navigationRow(for route: AppRoute) -> some View {
         let isSelected = selection == route
-        Button {
-            withAnimation(SpeechRailDesignTokens.Motion.springTransition) {
-                selection = route
-            }
-        } label: {
+        NavigationLink(value: route) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 RouteIconView(route: route, selected: isSelected)
                     .frame(width: SpeechRailDesignTokens.Icon.navigationFrame)
