@@ -12,6 +12,6 @@ def test_supported_macos_app_installs_onnxruntime_for_server_vad() -> None:
     dependencies = project["dependencies"]
 
     assert (
-        "onnxruntime==1.29.0; sys_platform == 'darwin' and platform_machine == 'arm64'"
+        "onnxruntime==1.30.0; sys_platform == 'darwin' and platform_machine == 'arm64'"
         in dependencies
     )

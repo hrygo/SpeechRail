@@ -25,7 +25,7 @@ dependencies = [
     "python-multipart>=0.0.20",
     "httpx>=0.28",
     "websockets>=14",
-    "onnxruntime==1.29.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "onnxruntime==1.30.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [project.urls]
