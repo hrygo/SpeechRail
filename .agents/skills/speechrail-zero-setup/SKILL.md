@@ -64,6 +64,10 @@ uv run --python 3.12 python \
 
 不要把真实 API key 放进命令参数或 shell 历史，不在仓库内生成测试音频，也不输出完整转写。手工复查仍使用统一探针；只记录 HTTP 状态、request ID、非空音频/转写校验和脱敏错误。
 
+每次安装都会在 `runtime/releases` 新增一个 release 目录，installer 不自动清理旧版本；重复首装或升级会让
+app home 持续增长。因此「预留至少 25 GB」是单次全新安装的增量需求，不是 app home 的长期上限。保留、清理
+与陈旧进程边界读 [speechrail-local-deploy](../speechrail-local-deploy/SKILL.md)。
+
 ## 已有实例
 
 若检测到已运行的 SpeechRail，首装脚本不得在运行态替换。已有明确服务维护授权时使用 `speechrail service stop`；否则报告当前 PID、listener、profile 和阻塞原因。升级现有 wheel 使用 `speechrail-release`，日常启停或切档使用 `speechrail-local-deploy`。
