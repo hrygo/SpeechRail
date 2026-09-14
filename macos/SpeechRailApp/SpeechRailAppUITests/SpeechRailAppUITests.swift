@@ -198,6 +198,10 @@ final class SpeechRailAppUITests: XCTestCase {
         statusItem.click()
         let controlCenter = app.windows["SpeechRail 管理控制台"]
         XCTAssertTrue(controlCenter.waitForExistence(timeout: 5))
+        // Opening the window from MenuBarExtra can leave its popover as the
+        // active event target, which makes controls in the new window appear
+        // present but not hittable to XCUITest.
+        app.typeKey(.escape, modifierFlags: [])
         // MenuBarExtra can leave the newly opened window behind its popover on
         // macOS runners. Activate the app after the window exists so the
         // following controls are tested through their normal hit targets.
