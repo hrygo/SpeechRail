@@ -151,7 +151,7 @@ public struct ModelManagementView: View {
     private var modelWorkspace: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
             profileList
-                .frame(width: SpeechRailDesignTokens.Layout.sidebarWidth)
+                .frame(width: SpeechRailDesignTokens.Layout.modelProfileListWidth)
             selectedProfilePanel
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -1069,31 +1069,38 @@ private struct ProfileChoiceRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(
-                        isSelected
-                            ? SpeechRailDesignTokens.Color.rail
-                            : SpeechRailDesignTokens.Color.inkSecondary
-                    )
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(
+                            isSelected
+                                ? SpeechRailDesignTokens.Color.rail
+                                : SpeechRailDesignTokens.Color.inkSecondary
+                        )
+                        .accessibilityHidden(true)
+
                     Text(profileTitle)
                         .font(SpeechRailDesignTokens.Typography.body)
+                        .fontWeight(.medium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text(profilePurpose)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(2)
-                }
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                if let summary {
-                    Text(formatBytes(summary.downloadBytes))
-                        .font(SpeechRailDesignTokens.Typography.technical)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .lineLimit(1)
-                        .truncationMode(.tail)
+
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                    if let summary {
+                        Text(formatBytes(summary.downloadBytes))
+                            .font(SpeechRailDesignTokens.Typography.technical)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .lineLimit(1)
+                    }
                 }
+
+                Text(profilePurpose)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 20)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(SpeechRailDesignTokens.List.rowContentPadding)
@@ -1251,8 +1258,7 @@ private struct ArtifactChoiceRow: View {
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(width: SpeechRailDesignTokens.Layout.modelVariantWidth, alignment: .trailing)
+                .layoutPriority(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
