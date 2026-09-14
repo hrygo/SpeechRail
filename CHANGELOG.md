@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-09-14
+
+### Added
+
+- 新增音色读取与更新接口 `GET /v1/voices/{voice_id}` 和 `PATCH /v1/voices/{voice_id}`，并在 OpenAPI 中登记 `VoiceProfile` 与 `UpdateVoiceRequest`。
+- 新增 macOS 自定义音色库管理控制面：音色创建、预览注册反馈与库内生命周期操作均已接入受约束的控制链路。
+- `/metrics` JSON 视图新增真实 runtime 资源观测与调度策略事实（`RuntimeMetrics`、`RuntimeRequestCounts`、`RuntimeHistogramSummary`、`RuntimeResourceSnapshot`），并明确 RTF 序列仅在分母为正时发出。
+- 新增 tag 触发的 GitHub Actions 发布流程：在 arm64 runner 上构建 unsigned macOS DMG，并随 wheel 与 `SHA256SUMS` 发布到 GitHub Release。
+
+### Changed
+
+- macOS 控制台统一窗口 chrome、侧栏与设计 token，对齐品牌 logo 视觉语言。
+- 模型管理视图区分“目标档位”与“活动中档位”、“存在”与“使用”，并让不可用控制动作按能力门禁禁用。
+- 创作工作区与诊断视图改为结论优先、状态可解释的布局；服务状态、诊断恢复与运行监控闭环。
+
+### Fixed
+
+- 侧栏改用原生 macOS 导航语义，修复控制中心窗口激活与侧栏路由不可点击的问题。
+- 菜单栏 popover 在打开控制中心窗口前先关闭，避免 UI 断言与导航被遮挡。
+- voice design capability 在缺失时 fail-closed，控制面消息统一脱敏。
+- 恢复 SwiftPM 与 operator docs 的 CI 门禁回归。
+- 模型与分人制品完整性校验引入持久化 sha256 缓存（按 `size` + `mtime_ns` 命中），避免每次 inspect 重复读取大文件；缓存落在 app home `state/` 下并以 0600 原子写入。
+
 ## [2.6.0] - 2026-09-13
 
 ### Added
