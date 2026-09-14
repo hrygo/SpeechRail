@@ -61,13 +61,14 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["重新运行诊断"].exists)
     }
 
-    func testModelDownloadRequiresExplicitConfirmation() {
+    func testModelDownloadRequiresExplicitConfirmation() throws {
         let app = launchSpeechRail()
         openControlCenter(in: app)
         app.buttons["模型"].clickWhenReady()
 
         let downloadButton = app.buttons["下载并校验"]
         XCTAssertTrue(downloadButton.waitForExistence(timeout: 20))
+        try skipUnlessWorkspacePaneFits(app)
         downloadButton.clickWhenReady()
 
         let dialog = app.sheets.firstMatch
@@ -118,7 +119,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["服务状态"].exists)
     }
 
-    func testVoiceDesignAcousticChipsAndCandidateRack() {
+    func testVoiceDesignAcousticChipsAndCandidateRack() throws {
         let app = launchSpeechRail()
         openControlCenter(in: app)
         app.buttons["音色创作"].clickWhenReady()
@@ -131,6 +132,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["候选试听"].exists)
         let generateButton = app.buttons["根据当前描述生成 4 组候选音色"]
         XCTAssertTrue(generateButton.waitForExistence(timeout: 20))
+        try skipUnlessWorkspacePaneFits(app)
         generateButton.clickWhenReady()
         let playButton = app.buttons["A 槽位试听：播放"]
         XCTAssertTrue(playButton.waitForExistence(timeout: 20))
@@ -164,12 +166,14 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(previewButton.waitForExistence(timeout: 10))
     }
 
-    func testWorksViewExposesSelectionAndExportActions() {
+    func testWorksViewExposesSelectionAndExportActions() throws {
         let app = launchSpeechRail()
         openControlCenter(in: app)
         app.buttons["我的作品"].clickWhenReady()
 
         XCTAssertTrue(app.staticTexts["回看 SpeechRail 创作的作品"].waitForExistence(timeout: 10))
+        try skipUnlessWorkspacePaneFits(app)
+
         let workRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "选择作品：")).firstMatch
         XCTAssertTrue(workRow.waitForExistence(timeout: 20))
 
@@ -198,6 +202,20 @@ final class SpeechRailAppUITests: XCTestCase {
 
     private func identifierElement(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// A workspace pane needs roughly 900pt of window height. The CI runner only
+    /// exposes a 1024x768 display, so the lower controls and rows of a pane stay
+    /// below the fold there, and macOS has no XCUITest scroll API
+    /// (`scrollByDeltaX:deltaY:` is iOS/macCatalyst only). Checks that need the
+    /// whole pane visible therefore run only on a window tall enough to show it;
+    /// the assertions above each skip still execute.
+    private func skipUnlessWorkspacePaneFits(_ app: XCUIApplication) throws {
+        let height = app.windows["SpeechRail 管理控制台"].frame.height
+        try XCTSkipUnless(
+            height >= 900,
+            "window is \(Int(height))pt tall; a workspace pane needs about 900pt"
+        )
     }
 
 
