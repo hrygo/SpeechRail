@@ -196,9 +196,17 @@ final class SpeechRailAppUITests: XCTestCase {
         let statusItem = app.menuBars.statusItems.firstMatch
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
-        let openControlCenter = app.buttons["打开管理控制台"]
-        XCTAssertTrue(openControlCenter.waitForExistence(timeout: 5))
-        openControlCenter.click()
+        let openControlCenterMenuItem = app.menuItems["打开管理控制台"]
+        if openControlCenterMenuItem.waitForExistence(timeout: 5) {
+            openControlCenterMenuItem.click()
+        } else {
+            // Keep compatibility with the popover presentation used by some
+            // macOS runner images, where SwiftUI exposes the same action as a
+            // button instead of a menu item.
+            let openControlCenterButton = app.buttons["打开管理控制台"]
+            XCTAssertTrue(openControlCenterButton.waitForExistence(timeout: 5))
+            openControlCenterButton.click()
+        }
         let controlCenter = app.windows["SpeechRail 管理控制台"]
         XCTAssertTrue(controlCenter.waitForExistence(timeout: 5))
         // MenuBarExtra can leave the newly opened window behind its popover on
