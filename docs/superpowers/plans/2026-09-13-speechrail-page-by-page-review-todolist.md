@@ -19,7 +19,7 @@
 
 ## 当前证据基线（只读）
 
-审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查截至 00:53。
+审查时间：2026-09-14（Asia/Shanghai）；本轮最新静态审查与 Release 编译截至 11:03。
 
 - 当前 managed profile 为 `quality`，generation 为 `102`。
 - 当前 `/health`、`/readyz` 为 ready；ASR、TTS、diarization、realtime VAD 均报告 ready。ASR/TTS/streaming 为 `cold_evicted`，含义是可按需加载，不是模型缺失。
@@ -28,6 +28,16 @@
 - 审查开始时 metrics JSON 只有请求数、队列数、延迟、TTFA、worker 状态和健康 gauges；本轮源码已在同一 `/metrics` JSON/Prometheus 入口补充资源快照、准入策略和 ASR/TTS RTF。当前本机运行中的旧实例尚未替换，因此新字段仍需安装后做 live 对账，不能把源码构建当作运行态证明。
 - `GET /v1/voices` 实测包含系统音色和自定义音色；其中存在超长描述 metadata，证明音色列表必须对服务端文本做边界保护。
 - 未执行模型下载、模型加载/卸载、服务重启、真实创作请求和自动化测试。当前验证只覆盖源码、契约、编译、AX 手工检查和只读本机接口。
+
+- 交互热区补强：`SpeechRailInteractiveButtonStyle` 增加 `fillsAvailableWidth` 语义；导航、列表选择行和 `DisclosureGroup` 明确使用整列布局，声学标签与试听图标按钮保持紧凑尺寸。Debug / Release 编译在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下均 `BUILD SUCCEEDED`；自动化测试、安装和运行态操作仍按用户要求暂停。
+- 运行监控真相链路补强：health 最近一次读取失败时，能力状态、运行档位、版本和复制摘要不再展示内存中的旧快照；metrics 仍独立保留最近有效样本并标识新鲜度。音色创建、更新、删除成功后若服务端列表刷新失败，界面明确保留“操作已完成但列表刷新失败”的可恢复反馈。
+- 运行监控独立读取修复：health 失败不再提前终止同一次刷新，继续读取独立的 JSON metrics；成功的 metrics 不会覆盖健康失败语义，health 与 metrics 同时失败时合并为可读的双重错误提示。
+- 音色库窄窗口收口：头部“新建音色 / 显示详情 / 刷新”操作使用 `ViewThatFits`，空间不足时按统一间距纵向排列，避免按钮标签被压缩或挤压主工作区；Debug / Release canonical build 均通过，自动化测试和安装仍按用户要求暂停。
+- 指针实现去重：侧栏服务状态按钮移除重复的外层指针注册，统一由共享交互 ButtonStyle 管理 enabled/disabled 光标区域，避免重叠 cursor rect 造成反馈不稳定；Debug / Release canonical build 均通过。
+- 本轮复核：确认两处 `DisclosureGroup` 均使用共享全宽命中区；未发现裸 `onTapGesture` / `gesture(` 或重复 pointing cursor 组合。监控状态条件去重后，Debug / Release canonical build 均通过。
+- Token 收口：顶部标题最小缩放比例与音色描述列表预览长度改由 `SpeechRailDesignTokens.Toolbar` / `List` 提供，页面不再持有这两个视觉边界裸常量。
+- 最新验证：Release canonical build 在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下通过；本轮未执行自动化测试、安装或运行态操作。
+- 本轮接线收口：音色库选中音色新增服务端 `GET /v1/voices/{id}` 详情读取，详情失败保留列表事实并提供重新读取；模型、预检和远端操作轮询对本地取消分支做了独立处理，不把“客户端停止等待”误报成远端已回滚。Debug / Release canonical build 均通过；本轮未执行自动化测试、安装或运行态操作。
 
 ## 总览
 
@@ -135,7 +145,7 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - [x] 保存通过 `registerVoiceDesign()` → `POST /v1/voices/designs`，成功后刷新 `/v1/voices`。
 - [x] 修复能力门禁：生成按钮现在同时依赖健康快照、当前 profile、`ttsReady`、service ready 和服务实际 `voice_design + supports_instruction` capability；未知状态 fail-closed。代码已完成，待人工/自动化验收。
 - [x] 对齐模型页和创作页的能力事实源：模型页现在显示目标档位的 VoiceDesign 能力，并将“当前服务 · 档位 · ASR/TTS”与“目标档位未应用”分开表达；仍待人工核对页面文案与服务快照。
-- [x] 明确“保存候选”的语义：页面现在明确说明试听音频不持久化，按钮和成功消息改为“注册此候选”，注册按 seed/instruction/reference text 重新创建服务端音色；待人工验收。
+- [x] 明确“保存候选”的语义：页面现在明确说明试听音频不持久化，按钮和成功消息表达“按候选注册”，注册按 seed/instruction/reference text 重新生成并创建服务端音色；待人工验收。
 - [x] preview 使用的输入文本、用户填写的 reference text、注册时 reference text 的关系已统一：同一段 20–240 字参考文案用于候选试听和注册，并在页面解释；待真实请求验收。
 - [x] 四个候选按 A→B→C→D 顺序逐个请求；单个失败后继续请求其余候选，已成功候选保留，生成中取消由 task cancellation 结束当前请求。
 
@@ -149,7 +159,7 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 ### 待验收
 
 - [ ] 在 quality + TTS ready、quality + TTS unavailable、非-quality profile、health unknown 四种状态下核对按钮和文案。
-- [ ] 生成四候选、播放两个候选、保存一个候选，核对服务端 voice 列表出现对应真实音色，重启页面后仍能试听。
+- [ ] 生成四候选、播放两个候选、按一个候选的参数注册，核对服务端 voice 列表出现对应真实音色，重启页面后仍能试听。
 
 ## 3. 音色库 `voiceLibrary`
 
@@ -160,7 +170,7 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - [x] 已接入服务端已有的 voice delete 能力：仅自定义音色显示删除，先确认，再调用 `DELETE /v1/voices/{voice_id}`，支持进行中、成功、服务端失败和刷新；系统音色保持保护。
 - [x] 核实当前 `CreatorVoice` 解码字段；列表/详情只展示服务端实际返回的 type、variant、created time、availability、mode、duration 和 capabilities，缺失字段显示“未提供”，不生成 tags/model source/关联作品假值。
 - [x] 设计音色详情 inspector：普通用户看用途、试听和“去配音台”入口，开发者看安全的 variant、mode、availability、创建时间、时长和 capability。
-- [x] 对服务端 description 设置两行截断；列表同时展示 type、variant 和可用时的创建日期，超长 live metadata 不再撑开列表布局。instruction/detail inspector 边界仍待补。
+- [x] 对服务端 description 设置两行截断；列表同时展示 type、variant 和可用时的创建日期，超长 live metadata 不再撑开列表布局；开发者详情为服务端描述设置固定行数，并以长度元数据表达 `instruction/ref_text`，不展示原文且不撑开 inspector。
 
 ### Token / UX 审查
 
@@ -305,7 +315,7 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 
 ### 跨页状态
 
-- [ ] page switch 不应丢失正在进行的 operation、播放状态或错误上下文；退出页面时只停止不应继续的播放器，不取消服务端已提交操作。
+- [x] page switch 不应丢失正在进行的 operation、生成/注册任务或错误上下文；服务、配音和音色创作的长任务与结果由 AppModel 持有，页面退出只停止本地播放器，不取消已提交服务操作。页面专属播放器按 macOS 预期在离开页面时停止，重新进入仍能看到任务、候选/作品结果和失败恢复入口。
 - [x] 所有页面按需使用同一 service badge、operation bar、empty state、error state、developer inspector；配音台与音色创作补齐缺失的 developer inspector，页面不再各自定义近似组件。
 - [x] 顶部标题始终只出现一次；页面主体不得重新绘制“配音台/运行监控/模型”等重复标题胶囊。
 
@@ -352,6 +362,7 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - 2026-09-13 23:13：音色库接入自定义音色删除确认与真实 DELETE 请求，补齐删除状态/错误反馈及 description 截断；Debug 编译通过，未执行真实删除。
 - 2026-09-13 23:20：诊断与服务状态页补齐独立预检状态源、更新时间、脱敏报告复制、LaunchAgent/XPC/health inspector；服务操作完成后重新读取预检，开发者详情不再展示 raw backend message；Debug 编译通过，未执行自动化测试。
 - 2026-09-13 23:32：运行监控源码补齐 `/metrics` 的资源/准入快照和 TTS RTF（ASR RTF 复用既有真实来源），Swift 解码、看板 summary/inspector、stale 状态和脱敏复制报告同步接线；Debug 编译与 Python 目标模块静态编译通过，未执行自动化测试，未安装新服务实例，因此 live 字段对账留待用户验收。
+- 2026-09-14 10:18：修复监控刷新在 health 失败时提前返回的问题；同一次刷新仍独立读取 metrics，成功指标不会覆盖健康失败语义，双失败会合并展示可读错误。`git diff --check`、无裸手势/重复指针静态检查通过，Debug / Release 编译通过；自动化测试、安装和运行态操作仍暂停。
 - 2026-09-13 23:54：模型页完成目标档位 / 当前服务运行档位 / 配置档位分层；制品状态统一为存在、完整性、文件计数、使用状态的语义呈现；OperationBar 展示真实阶段、制品、文件、字节进度，并明确速度/ETA/清理结果等未由协议提供的字段；Debug 编译通过，未执行自动化测试、模型下载或档位应用。
 - 2026-09-14 00:02：服务状态页按 health failure / control plane / profile mismatch / operation failure 分流恢复路径；菜单新增模型管理入口，并修复全局 ServiceStatusBadge 在 health 失败时沿用旧“已就绪”的问题；Debug 编译通过，未执行自动化测试或服务操作。
 - 2026-09-14 00:05：诊断页接入同一 XPC 模型快照作为模型证据；预检失败按模型/服务/开发者处理映射恢复入口，详情先展示影响与建议动作，复制报告补充 runtime/config profile、health failure 和 control plane 安全状态；Debug 编译通过，未执行自动化测试或故障注入。
@@ -366,4 +377,80 @@ UI-test fake 仅在 `DEBUG` 编译且显式带 `--ui-test` 时可选；Release �
 - 2026-09-14 00:51：OpenAPI 与用户 API 契约补充 ASR/TTS RTF、资源快照和缺失值语义；监控脱敏摘要补齐同一采样中的请求、延迟、RTF 和实时会话字段；Debug 构建通过，未安装新实例，live endpoint 对账、真实模型操作和自动化测试仍按用户要求暂停。
 - 2026-09-14 00:52：同一改动在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 Release 构建通过；确认 Release 不启用 UI-test fake 分支。自动化测试、安装和服务运行态操作仍未执行。
 - 2026-09-14 00:53：最终静态门通过：`git diff --check`、OpenAPI YAML 解析、页面 token/legacy-style 扫描均无新增问题；工作树保持干净。自动化测试、安装、真实模型操作和故障注入继续保留为用户验收门槛。
+- 2026-09-14 05:28：全局交互命中区复审：标准按钮、侧栏导航、菜单行、自定义列表行以及两个 `DisclosureGroup` 标签均具备完整布局边界命中区；自定义按钮改为矩形命中形状，视觉圆角保留，避免透明内边距和圆角死角点不到。macOS 26.5 SDK / arm64 Debug build 通过；自动化测试、安装和真实运行态操作仍按用户要求暂停。
+- 2026-09-14 05:37：修正 Debug/Release 条件编译路径：Debug 显式启用 `DEBUG` 以保留 UI-test fake transport，Release 排除 fake 分支并保留 bundled XPC live transport；AppModel 编译警告收口。`scripts/macos_app_build.sh --configuration Debug` 与 `Release` 均在 macOS 26.5 SDK / arm64 下通过；自动化测试、安装和真实运行态操作仍按用户要求暂停。
+- 2026-09-14 05:40：菜单栏 popover 的 7 个动作将整行命中区下沉到原生 `Button` label 内部，覆盖文字、图标与行内留白，并保留 disabled 与 pointing-hand 语义；Debug 构建通过，未执行自动化测试或安装。
+- 2026-09-14 05:42：顶部静态 `WorkspaceTitleLockup` 移除多余 `contentShape`，与“只有可操作区域注册命中区”的全局规则一致；设计文档同步为当前单行 icon + title 实现。未执行自动化测试或安装。
+- 2026-09-14 05:44：交互覆盖矩阵补齐 Settings 页 `Toggle` 的 pointing-hand；文本输入/文本选择区继续排除在动作光标之外。未执行自动化测试或安装。
+- 2026-09-14 05:46：侧栏 `NavigationLink` 的矩形命中形状下沉到完整 label 内容内部，和菜单项、`DisclosureGroup`、自定义列表行的命中区规则统一；Debug 构建通过，未执行自动化测试或安装。
+- 2026-09-14 05:48：音色库选择行将上下留白纳入选择按钮的 label 命中区，保持试听/删除按钮独立；Debug / Release 编译均通过，未执行自动化测试或安装。
+- 2026-09-14 05:50：复核模型、监控、诊断和音色 inspector 的服务端字符串边界：列表/指标/worker 使用单行截断或固定列，技术详情使用固定宽度滚动与行数上限，操作错误统一经过安全文案映射；未发现新的布局撑开路径。
+- 2026-09-14 05:53：token 扫描收口音色编辑器 `120pt` 输入高度、焦点描边内缩和声学 chip 紧凑间距，页面不再直接持有这三处产品尺寸；未执行自动化测试或安装。
+- 2026-09-14 05:58：跨页状态修复：配音生成任务句柄与最近完成作品移入 `AppModel`，配音台退出时只停止播放器，不再取消已提交生成；重新进入页面仍可观察进行中状态并取消，完成结果可恢复显示。未执行自动化测试或安装。
+- 2026-09-14 06:04：跨页状态继续收口：音色创作候选生成与候选注册任务、候选音频快照及取消/成功状态移入 `AppModel`；离开页面不再取消候选任务，已完成候选保留，未完成候选明确标记“已停止”。配音与音色创作草稿改为场景级本地状态，侧栏服务状态按钮的完整 label 命中区同步固定；音色开发者详情增加 description 行数与 `instruction/ref_text` 长度边界。Debug / Release canonical build 均通过，未执行自动化测试或安装。
+- 2026-09-14 06:07：只读复核运行中的服务：`/health`、`/readyz` 均为 ready，服务版本 `2.6.0`、活动档位 `quality`；`/v1/models` 返回活动 ASR/TTS 与兼容 alias，`/v1/voices` 返回系统/自定义音色并再次包含超长 metadata 样本。未执行模型操作、音频请求、服务变更或安装；该实例尚未替换为本工作树构建产物。
+- 2026-09-14 10:35：补齐音色库单音色详情 GET 接线与失败保留/重读反馈；模型刷新、预检刷新和 operation polling 增加本地取消安全边界。准确静态扫描确认无裸 `onTapGesture` / `gesture(`、无重复 pointing cursor 组合；`git diff --check` 通过，Debug / Release canonical build 已通过。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 10:48：修复音色目录刷新与单音色详情读取的竞态：目录快照开始读取时使旧详情响应失效，并收敛详情读取中的状态，避免旧详情覆盖新列表或永久显示加载中。修复后 Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；`git diff --check`、裸手势扫描和重复 pointing cursor 扫描通过。自动化测试、安装、运行态和真实音频/模型操作仍按用户要求暂停。
+- 2026-09-14 10:54：收口配音台空/刷新中音色选择器：无可用音色或列表刷新期间禁用 `Picker`，同时将选中音色写入 AX value，避免不可操作控件显示手形或无法说明当前选择。修复后 Debug / Release canonical build 均 `BUILD SUCCEEDED`；自动化测试、安装、运行态和真实音频/模型操作仍按用户要求暂停。
+- 2026-09-14 11:03：修复 `URLSession` 将取消报告为 `URLError.cancelled` 时的错误映射；配音、音色试听和 VoiceDesign preview 现在保持取消语义，不再误报“无法连接服务”。修复后 Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；自动化测试、安装、运行态和真实音频/模型操作仍按用户要求暂停。
+- 2026-09-14 06:10：页面级“更多操作”菜单的刷新、复制、详情和服务状态入口统一将整行命中区下沉到 `Button` label，覆盖图标、文字与行内留白；静态文字不注册 pointing cursor，disabled 状态继续由原生菜单处理。未执行自动化测试、安装或服务变更。
+- 2026-09-14 06:12：补齐服务状态页菜单中的启动、停止和重启动作的整行命中区；`scripts/macos_app_build.sh --configuration Debug` 与 `Release` 均在 macOS 26.5 SDK / arm64 下通过，`git diff --check` 通过。自动化测试、安装和服务运行态操作仍按用户要求暂停。
+- 2026-09-14 06:17：Settings 保持原生 grouped `Form` 语义，补齐统一 canvas、次级文案行数/自适应布局、44pt Toggle 命中区与 pointing cursor；Debug / Release canonical build 均通过。Light/Dark、Increase Contrast、Dynamic Type、VoiceOver 的人工核验仍待用户解除测试暂停。
+- 2026-09-14 06:21：音色库试听状态接线：AppModel 暴露当前 `previewingVoiceID`，音色库与详情面板在真实请求期间显示“试听中”进度；新配音/试听开始前停止旧播放器，完成或失败后清理目标状态并保留错误反馈。Debug / Release canonical build 均通过，未执行自动化测试、安装或真实音频请求。
+- 2026-09-14 06:24：完成本轮全局交互收口：按钮、菜单行、侧栏导航、列表选择行、`DisclosureGroup` 标签和 Settings `Toggle` 的整块布局均纳入可点击命中区，并统一 hover/focus/按下反馈与 pointing-hand；静态标题和正文继续保持不可操作光标。当前改动下 Debug / Release canonical build 均在 macOS 26.5 SDK / arm64 通过，`git diff --check` 通过；自动化测试、安装、服务变更和真实音频请求仍按用户要求暂停。
+- 2026-09-14 06:27：程序化复核所有 SwiftUI 交互入口：未发现遗漏的 `onTapGesture`/裸手势；`Button`、`NavigationLink`、`DisclosureGroup`、`Picker`、`Slider`、`Toggle` 和菜单动作均使用原生或共享交互样式，独立试听/删除动作未被列表选择命中区吞并；开发者详情面板仍统一固定宽度并垂直滚动。自动化测试、安装和运行态验收继续暂停。
+- 2026-09-14 06:29：完成音频与音色功能的源码/契约对账：配音与 VoiceDesign preview 均发送 `wav` 请求并校验非空 `audio/wav` 响应；注册、更新、删除字段和状态与服务端路由及 OpenAPI 相符；`com.speechrail.plist.example` 通过 `plutil -lint`，`git diff --check` 通过。未执行真实音频请求或服务变更。
+- 2026-09-14 06:30：静态核对发现现有 `SpeechRailAppUITests` 仍保留旧版标题、菜单和创作页文案断言，且 UI-test transport 未覆盖真实配音/试听反馈；已明确列入暂停解除后的测试更新项。当前不修改或运行自动化测试，避免绕过用户的测试暂停要求。
+- 2026-09-14 06:32：复核模型页真实性分层：运行档位只来自 `/health`，配置档位只来自 XPC `profile.status`，制品存在/完整性只来自 `model.catalog` 与 `model.status`；health 读取失败时模型使用状态明确降级为“未确认”，未发现可安全修复的错配。
+- 2026-09-14 06:34：维护 UI-test 契约：断言同步到当前“更多操作”、单行 workspace title、模型中断文案、诊断摘要和作品空状态；Debug-only `UITestCreatorClient` 增加离线音色列表、VoiceDesign preview/配音合法 WAV 和注册/更新/删除返回，使创作链路不再是空壳。Debug / Release canonical build 均通过；未运行 XCTest/XCUITest。
+- 2026-09-14 06:35：重新编译包含 UI-test 支持 transport 的 App：Debug / Release 均在 macOS 26.5 SDK / arm64 下 `BUILD SUCCEEDED`，`git diff --check` 通过。UI-test 源码尚未执行，真实服务、音频和模型运行态未改变。
+- 2026-09-14 06:37：将 Debug-only `UITestCreatorClient` 的音色列表改为 actor-backed 离线 store；注册、更新、删除后重新读取会反映状态，配音/VoiceDesign preview 继续返回本地合法 WAV。Debug / Release canonical build 均通过，未执行 XCTest/XCUITest。
+- 2026-09-14 06:39：为取得完整收尾证据重新执行 Release canonical build，在 macOS 26.5 SDK / arm64 下 `BUILD SUCCEEDED`；`git diff --check` 通过。未执行 XCTest/XCUITest、安装、服务变更、真实音频请求或模型操作，工作区改动保持未提交供后续审阅。
+- 2026-09-14 06:44：进一步加固开发者详情面板：Inspector 外列宽与内内容宽度均固定为 360pt / 328pt，长技术字段只能在固定列内换行或垂直滚动，不再依赖父布局提议宽度；Debug / Release canonical build 均在 macOS 26.5 SDK / arm64 下通过。自动化测试、安装和运行态验收继续暂停。
+- 2026-09-14 06:49：按服务端 `POST /v1/voices/designs` 实现核对并修正文案：候选试听音频仅供本次会话，注册动作会按同一 instruction/reference text/seed 由服务端重新生成、校验并持久化参考音频；按钮改为“按候选注册”，开发者详情拆分两种音频的持久化语义。`List`、`Control`、`Button` 的 44pt 触达基线统一引用 `Interaction.minimumHitTarget`；Debug / Release canonical build 均通过，未执行自动化测试或真实请求。
+- 2026-09-14 06:55：按“整个按钮和标签可点击”再次收口：侧栏 `NavigationLink` 的外层行也固定为整行矩形命中区；诊断页与作品页的 `DisclosureGroup` 外层固定为整行宽度，和内部共享 label 命中区一致，确保文字、图标与行内留白都能触发展开/导航。修复一次由新增本地计算属性导致的 Swift 编译错误后，Debug / Release canonical build 均在 macOS 26.5 SDK / arm64 下通过；`git diff --check` 通过。自动化测试、安装、服务变更和真实音频/模型请求仍按用户要求暂停。
+- 2026-09-14 06:57：修复诊断顶部结论卡的动态内容风险：移除 84pt 硬性最大高度，仅保留最小高度，动态字体或较长状态文案可以自然增高而不被裁切；同时再次核对整行交互矩阵，无裸手势命中区。Debug / Release canonical build 均在 macOS 26.5 SDK / arm64 下通过；自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:07：修正侧栏选中态前景 token：不再用固定的 `onRail` 颜色覆盖系统选中背景，改用 AppKit 动态 `alternateSelectedControlTextColor`，在明暗、高对比和系统 accent 下保持可读。Debug / Release canonical build 均在 macOS 26.5 SDK / arm64 下通过，`git diff --check` 通过；未执行自动化测试、安装或运行态操作。
+- 2026-09-14 07:12：诊断结论区用户影响说明从单行截断改为最多两行并允许自然增高，新增 `Diagnostics.summaryMessageMaximumLines` token；动态字体和较长错误文案不会被固定最大高度裁切。未执行自动化测试、安装或运行态操作。
+- 2026-09-14 07:12：完成上述诊断摘要修复后的 Debug / Release canonical build，均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；`git diff --check` 与裸手势扫描通过。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:22：音色库试听请求改由 `AppModel` 持有并可取消；页面离开会取消未完成请求，响应返回前增加 cancellation check，避免离开页面后误启动播放；列表与开发者详情的试听按钮在请求进行中均扩展为整块“取消试听”操作。新增 UI-test 契约与 Debug-only 慢请求 fixture，但未执行 XCTest/XCUITest。Debug / Release canonical build 均通过，`git diff --check` 通过。
+- 2026-09-14 07:22：复核当前改动后修正 Debug fixture 的显式返回并重新完成 Debug / Release canonical build；两种配置均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:26：顶部中心 workspace title 改为固定 token 槽位（`280 × 32pt`），保持单行、尾部截断与紧缩；路由切换不再改变标题宽度或挤压右侧操作，并在槽位边界增加绘制裁切，避免长本地化标题视觉溢出。Debug / Release canonical build 均通过，`git diff --check` 与裸手势扫描通过。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:31：逐页复核 `DeveloperInspector` 的固定几何时发现内层 `328pt` 内容在 padding 前被 `maxWidth: .infinity` 再次放大，可能造成水平溢出；移除该放大层后严格保持 `328pt 内容 + 32pt 内边距 = 360pt`，所有模型/监控/诊断/创作/音色/作品详情共用此边界。Debug / Release 构建随后重新验证，自动化测试与安装仍暂停。
+- 2026-09-14 07:36：共享按钮、菜单行、Disclosure 标签和顶部操作菜单统一补齐最小 `44 × 44pt` 触达基线；命中区继续使用矩形，覆盖透明内边距，短标签与图标型控件不再可能低于最小宽度。修正一次 SwiftUI `.frame` 参数顺序后，Debug / Release canonical build 均在 macOS 26.5 SDK、arm64 下 `BUILD SUCCEEDED`，`git diff --check` 通过。自动化测试和安装仍按要求暂停。
+- 2026-09-14 07:41：原生 `DisclosureGroup` 的两个开发者详情区统一切换为 `SpeechRailDisclosureGroupStyle`；箭头、整行矩形命中区、按压/焦点反馈与展开状态集中到共享 primitive，并为展开内容使用统一左侧 inset。自动化测试和安装仍按要求暂停。
+- 2026-09-14 07:44：完成共享 Disclosure primitive 后重新执行 Release canonical build，在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；`git diff --check` 通过，裸手势扫描无结果。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:49：删除未再使用的 `speechRailDisclosureLabel()` 备用路径，避免与 `SpeechRailDisclosureGroupStyle` 形成两套命中区规则；全仓引用扫描无残留，Debug / Release canonical build 均 `BUILD SUCCEEDED`，`git diff --check` 通过。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:52：共享 Disclosure primitive 读取 macOS Reduce Motion 环境，系统启用“减少动态效果”时不再播放展开动画；Debug / Release canonical build 均 `BUILD SUCCEEDED`。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:56：将矩形 `contentShape` 明确固化在 Disclosure label 行自身，而不只依赖 ButtonStyle 的间接布局，避免后续样式调整使整行命中区退化为文字宽度；Debug / Release canonical build 均 `BUILD SUCCEEDED`。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 08:02：VoiceDesign 能力状态与修复入口改用 `ViewThatFits`：宽窗口横排、窄窗口纵排，避免长状态文案挤压操作按钮或产生溢出；Debug / Release canonical build 均 `BUILD SUCCEEDED`。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 08:08：共享 `StatusBanner` 改为 `ViewThatFits` 自适应布局：宽窗口保留摘要与动作横排，窄窗口自动纵排，服务/模型/诊断/创作共用同一防溢出规则；Debug / Release canonical build 均 `BUILD SUCCEEDED`。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 08:15：服务操作进度组件同步改为 `ViewThatFits` 宽排/窄排，长操作文案或动态字体不会挤压重试动作；服务状态、模型操作和诊断恢复共用同一防溢出规则，Debug / Release canonical build 均 `BUILD SUCCEEDED`。自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 07:59：运行监控摘要、诊断结论和服务状态页预检摘要统一采用 `ViewThatFits` 宽排/窄排；长状态文案、样本信息和恢复按钮在窄窗口或大字体下不再互相挤压，摘要外层仍保持统一 token 与可访问性语义。Debug / Release canonical build 均 `BUILD SUCCEEDED`，`git diff --check` 与裸手势扫描通过；自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 08:03：修复配音与音色试听取消竞态：取消时不再提前清空任务句柄或伪造终态，等待真实异步请求收敛；配音响应返回后增加 cancellation check，取消不会继续保存作品，旧请求也不会与下一次操作交叉。Debug / Release canonical build 均 `BUILD SUCCEEDED`；自动化测试、安装和真实音频请求仍按用户要求暂停。
+- 2026-09-14 08:06：音色库自定义音色列表行新增直达“编辑”按钮，普通用户无需先打开开发者详情即可完成更新；系统音色仍不可编辑，详情 inspector 的技术入口保留。音色库的创建、读取、更新、删除入口与真实 REST 接线保持一致；Debug / Release canonical build 均 `BUILD SUCCEEDED`，未执行自动化测试或安装。
+- 2026-09-14 08:08：补齐音色 CRUD 与试听错误码的用户恢复文案，覆盖 `voice_in_use`、删除/创建/更新失败、输入校验、档位不支持等稳定服务端结果；修复后 Debug / Release canonical build 均 `BUILD SUCCEEDED`。自动化测试、安装和真实音频请求仍按用户要求暂停。
+- 2026-09-14 08:14：补齐创作链路对 `model_not_found`、`dependency_missing`、音频时长/格式错误、连接失败和超时的用户恢复文案，并移除重复 Swift `switch` 分支；Debug / Release canonical build 均 `BUILD SUCCEEDED`，未执行自动化测试、安装或运行态操作。
+- 2026-09-14 08:18：修正 VoiceDesign 顶部多余单子节点布局，并将运行监控“资源脉冲”标题与刷新状态改为 `ViewThatFits` 宽排/窄排，窄窗口和动态字体下不再互相挤压；Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`。`git diff --check` 通过，页面源码无裸 `onTapGesture`/`gesture(`；自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 08:58：模型下载/档位操作的 `OperationBar` 纳入共享 `ViewThatFits` 宽排/窄排，长制品名、动态字体和窄窗口下动作按钮不会再与操作详情争抢横向空间；Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`。`git diff --check`、裸手势扫描和页面 legacy-style 扫描通过；自动化测试、安装和运行态操作仍按用户要求暂停。
+- 2026-09-14 09:15：全量静态复核整行交互热区后，`SpeechRailInteractiveButtonStyle(fillsAvailableWidth: true)` 已覆盖开发者详情、侧栏状态、诊断检查项、模型制品/档位、音色库和作品选择行；紧凑声学标签与试听图标按钮保持内容尺寸。运行监控 health 失败时不再展示旧缓存快照；音色创建/更新/删除成功后的列表刷新失败会保留可恢复提示。Debug / Release canonical build 均 `BUILD SUCCEEDED`，`git diff --check` 和裸手势扫描通过；自动化测试、安装和运行态验收仍暂停。
+- 2026-09-14 09:18：继续审计 health 失败后的跨页事实源：服务状态 inspector 的服务/版本/后端信息、Control Center 全局标题状态以及 VoiceDesign 能力门禁均改为只消费最近一次成功 health 读取；health 失败时能力门禁 fail-closed，并显示服务不可用语义。Debug / Release canonical build 均 `BUILD SUCCEEDED`；自动化测试、安装和运行态验收仍暂停。
+- 2026-09-14 09:24：修复本轮编译回归发现的 `ControlCenterView` 缺少 `SpeechRailControlKit` 类型导入；同时同步 VoiceDesign 播放完成后的本地候选状态清理和新增音频错误文案。修复后 Debug / Release canonical build 均 `BUILD SUCCEEDED`；自动化测试、安装和运行态验收仍暂停。
+- 2026-09-14 09:27：继续收口读取失败语义：XPC profile 读取失败时清空旧配置快照；音色列表和作品索引读取失败时清空旧展示快照并保留可恢复错误，避免用户继续操作未经确认的旧对象。Debug / Release canonical build 均 `BUILD SUCCEEDED`；自动化测试、安装和运行态验收仍暂停。
+- 2026-09-14 09:30：修正服务操作菜单的状态冲突：命令完成但 health 读取失败时，不再在菜单中显示绿色“操作已完成”摘要，最终服务状态统一由 health 结论负责；Debug / Release canonical build 均 `BUILD SUCCEEDED`。
+- 2026-09-14 09:32：继续全局状态优先级收口：服务操作失败会优先于 ready 状态出现在标题、侧栏与菜单中，避免“服务已就绪”遮蔽“操作未完成”。Debug / Release canonical build 均 `BUILD SUCCEEDED`；静态差异检查通过。
+- 2026-09-14 09:38：音色库头部操作补齐窄窗口自适应：三项操作宽度足够时保持单行，空间不足时纵向排列；按钮标签、命中区和交互反馈继续由共享 token 提供，不改变固定侧栏与开发者详情宽度。Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；自动化测试、安装和运行态验收仍暂停。
+- 2026-09-14 09:46：清理侧栏服务状态按钮的重复指针区域注册，保留共享 ButtonStyle 作为唯一光标来源；Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；`git diff --check` 通过，自动化测试、安装和运行态验收仍暂停。
+- 2026-09-14 09:51：按“整个按钮和标签可点击”完成静态交互矩阵复核：共享标准按钮、菜单行、侧栏导航、开发者详情 Disclosure 标签、模型/诊断/音色库/作品列表选择行均由完整布局边界承载命中区；未发现裸手势或仅文字注册命中区的页面入口。紧凑声学标签与试听/编辑/删除等独立动作保持各自边界，避免嵌套操作互相吞并；自动化测试、安装和运行态验收仍按用户要求暂停。
+- 2026-09-14 09:57：修正配音完成反馈的终态语义：作品成功保存但播放器已自然结束时不再误报播放失败；作品列表二次读取失败时保留“已保存”事实并单独提示列表刷新问题。Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；自动化测试、安装和真实音频/服务运行态验收仍暂停。
+- 2026-09-14 09:59：补强 VoiceDesign 取消竞态与本机存储错误分流：取消后的迟到预览响应不再写回候选；音频生成成功但作品库保存失败时显示本机存储恢复建议，而不是泛化为服务错误。修复后 Debug / Release canonical build 均 `BUILD SUCCEEDED`；自动化测试、安装和真实音频/服务运行态验收仍暂停。
+- 2026-09-14 10:04：再次落实“整个按钮和标签可点击”：共享自定义按钮样式同时扩展外层 Button 与内部 label 的全宽矩形命中区；开发者详情等 Disclosure 标题增加稳定的 trailing hit area 与同范围反馈，透明留白也归属同一个交互目标。未执行自动化测试、安装或运行态操作。
+- 2026-09-14 11:00：收口创作接线边界：`URLSession` 的 `URLError.cancelled` 归一为 `CancellationError`，取消预览/合成不会误报连接失败；`AVAudioPlayer` 异步播放失败会回写到对应的配音或作品错误状态；音色目录刷新会使迟到的单音色详情响应失效，避免新列表被旧详情覆盖；音色选择器在读取中或无可用音色时禁用并提供准确的辅助功能状态。Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；`git diff --check`、裸手势扫描和重复指针注册扫描通过。
+- 2026-09-14 11:05：补齐全局交互契约遗漏：顶部统一“更多操作” `Menu` 的矩形触发区现在显式使用 enabled-only pointing hand，与原生菜单的 hover/pressed 反馈保持一致；Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`。
+- 2026-09-14 11:06：复核指针注册后移除 `WorkspaceActionsMenu` 的重复 modifier，仅保留一个全局 cursor 来源；`git diff --check` 和裸手势扫描通过，Release canonical build 再次 `BUILD SUCCEEDED`。
+- 2026-09-14 11:10：同步交互契约与实现：所有 enabled 操作/选择控件的 pointing-hand 规则、静态区域普通箭头规则和固定单行标题槽位已写回设计系统、全局交互规格与实施计划；移除标题内部 `layoutPriority`，避免中心标题参与 toolbar 争抢。修改后 Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`。
+- 2026-09-14 11:11：完成文档与源码一致性复核：`WorkspaceActionsMenu`、Picker、Slider、Toggle、NavigationLink、DisclosureGroup、按钮及声学特征标签均有明确的 enabled/disabled 指针边界；标题只保留固定宽度单行 lockup；无新增裸手势或页面级 cursor 实现。自动化测试与桌面视觉矩阵仍按用户要求暂停。
+- 2026-09-14 11:13：模型事实链路补强：模型页“已检测但未纳入当前目录”现在合并 generic 与 dedicated diarization 状态，并以 dedicated lane 覆盖同 key，避免 CoreML/aligner 资产因状态通道不同而漏显示或重复；Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`。
+- 2026-09-14 11:22：继续收口“整个按钮和标签可点击”：共享 `DisclosureGroup` 的 label 使用透明全宽布局提议，开发者详情的箭头、文字与尾部留白统一属于同一矩形命中区；模型页新增 `tts_lifecycle` 解码，并仅以 `warm_capability` / `warm_capabilities` 展示 Quality clone TTS 的真实常驻状态，缺少证据时明确标为未公开，不再复用通用 TTS worker 状态。Debug / Release canonical build 均在 macOS 26.5 SDK、arm64、macOS 26.0 deployment target 下 `BUILD SUCCEEDED`；自动化测试、安装、服务变更和真实模型/音频请求仍按用户要求暂停。
+- 2026-09-14 11:24：运行监控开发者详情补充同一份 `tts_lifecycle` 常驻能力证据；Quality 的 `voice_design` / `voice_clone` lane 不再只在模型页可见，空数组明确显示按请求加载，缺少字段显示未公开。未执行自动化测试、安装、服务变更或真实模型/音频请求。
 - 待补：解除自动化暂停后的人工全矩阵、真实创作链路、模型下载/应用链路、诊断故障注入和更新后的自动化测试；作品重命名/删除/复用仍需先确定可恢复回收策略，当前不擅自扩展用户数据删除能力。

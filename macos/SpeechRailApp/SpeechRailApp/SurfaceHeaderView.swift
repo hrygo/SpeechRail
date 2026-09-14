@@ -37,15 +37,17 @@ public struct WorkspaceTitleLockup: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .minimumScaleFactor(0.82)
-                .layoutPriority(1)
+                .minimumScaleFactor(SpeechRailDesignTokens.Toolbar.titleMinimumScaleFactor)
+                .allowsTightening(true)
         }
         .frame(
-            maxWidth: SpeechRailDesignTokens.Toolbar.titleMaximumWidth,
-            minHeight: SpeechRailDesignTokens.Toolbar.titleHeight,
+            width: SpeechRailDesignTokens.Toolbar.titleMaximumWidth,
+            height: SpeechRailDesignTokens.Toolbar.titleHeight,
             alignment: .center
         )
-        .contentShape(Rectangle())
+        // Keep unusually long localized titles inside the fixed toolbar slot;
+        // the text already uses a single line and tail truncation above.
+        .clipped()
         .id(route.id)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(route.workspaceTitle)
@@ -62,6 +64,7 @@ public struct WorkspaceTitleLockup: View {
 
     private func serviceStatusText(_ service: ServiceSnapshot) -> String {
         if operation?.phase.isActive == true { return "服务操作进行中" }
+        if operation?.phase == .failed { return "服务操作未完成" }
         if healthMessage != nil { return "健康状态不可用" }
         if controlPlaneMessage != nil { return "控制通道不可用" }
         if health?.ready == true || (health == nil && service.ready == true) {

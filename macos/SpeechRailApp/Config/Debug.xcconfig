@@ -2,6 +2,7 @@ PRODUCT_BUNDLE_IDENTIFIER = com.speechrail.desktop
 MACOSX_DEPLOYMENT_TARGET = 26.0
 SWIFT_VERSION = 6.0
 SWIFT_STRICT_CONCURRENCY = complete
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG
 ARCHS = arm64
 ONLY_ACTIVE_ARCH = YES
 // Local development has no Team ID; Distribution re-enables Hardened Runtime.

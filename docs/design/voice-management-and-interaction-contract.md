@@ -6,14 +6,22 @@
 
 ## 背景与已确认事实
 
-本次问题不是单一页面的视觉缺陷，而是控制面、REST 客户端和音色持久化层没有共享同一套交互与能力边界：
+本次问题不是单一页面的视觉缺陷，而是控制面、REST 客户端和音色持久化层没有共享同一套交互与能力边界。
 
-- 2026-09-14 实测本机服务 `/health` 为 ready，`GET /v1/voices` 返回成功；App 发出的 `/v1/audio/speech` 与 `/v1/voices/previews` 请求在服务日志中返回 `401 Unauthorized`。
-- `ServiceAPIClient` 发送 JSON 和音频请求时没有携带 `Authorization`，而服务端在配置 API key 时要求 `Bearer`。
-- 服务端已有音色列表、自然语言创建、VoiceDesign 注册和删除能力，但没有单音色读取与更新接口；`VoiceRegistry` 也没有更新方法。
-- App 的 pointing-hand 实现只在部分自定义控件上生效，左侧导航以及 Picker、Slider、DisclosureGroup 等原生交互控件没有统一覆盖。
+以下是 2026-09-14 修复前的基线记录，不代表当前源码状态：
 
-以上是当前代码和本机运行日志的事实；不把“配置存在”或“服务 ready”推断成模型推理已经成功。
+- 当时本机服务 `/health` 为 ready，`GET /v1/voices` 返回成功；旧 App 发出的 `/v1/audio/speech` 与 `/v1/voices/previews` 请求在服务日志中返回 `401 Unauthorized`。
+- 当时 `ServiceAPIClient` 未携带 `Authorization`，服务端在配置 API key 时要求 `Bearer`。
+- 当时服务端和 `VoiceRegistry` 尚未提供单音色读取与更新闭环。
+- 当时 pointing-hand 只覆盖部分自定义控件，左侧导航以及 Picker、Slider、DisclosureGroup 等原生交互控件未统一覆盖。
+
+当前源码已完成对应修复：
+
+- `ServiceAPIClient` 统一从受管凭据来源发现 key，并为请求添加 `Bearer`；音频响应校验 `audio/wav` 和非空 body。
+- 服务端、OpenAPI、Swift client、`AppModel` 和音色库已对齐 `GET/PATCH/DELETE` 语义；更新失败保留旧记录。
+- 按钮、菜单行、侧栏导航、列表选择行、音色特征标签和 `DisclosureGroup` 均使用共享整块命中区与反馈规则。
+
+以上结论区分了修复前基线、当前源码和运行态验证；不把“配置存在”或“服务 ready”推断成模型推理已经成功。
 
 ## 产品目标
 
@@ -23,7 +31,7 @@
 
 ## 全局交互契约
 
-- `Button`、`NavigationLink`、`Menu`、`Picker`、`Slider`、`DisclosureGroup` 和可点击列表行等操作/选择控件使用 pointing hand。
+- `Button`、`NavigationLink`、`Menu`、`Picker`、`Slider`、`Toggle`、`DisclosureGroup` 和可点击列表行等操作/选择控件使用 pointing hand。
 - `TextField`、`TextEditor`、代码/日志文本选择区保留 macOS 标准 I-beam 或文本选择行为；它们是编辑区域，不是动作按钮。
 - 指针区域必须覆盖控件的真实 hit target，不能依赖一个零尺寸或不参与布局的背景视图。
 - enabled 控件提供 hover、pressed、keyboard focus 反馈；disabled 控件不显示 pointing hand，也不伪装成可用。
@@ -81,7 +89,7 @@ PATCH 请求只接受下列字段，至少提供一个：
 ## App 音色库 UX
 
 - 列表顶部提供“新建音色”，进入既有 VoiceDesign 创作流程；创建成功后返回音色库并刷新服务端列表。
-- 详情 inspector 对自定义音色提供“编辑音色”入口；保存前显示字段校验，保存后刷新列表并保留当前选择。
+- 每个自定义音色列表行直接提供“编辑”入口；详情 inspector 同时提供“编辑音色”入口。保存前显示字段校验，保存后刷新列表并保留当前选择。
 - clone 音色的编辑表单允许改名，并明确标注“参考音频与来源不可编辑”；instruction 音色可编辑名称、描述和 seed。
 - 试听、保存、编辑、删除均使用真实 REST 请求；成功后更新本地状态，失败后保留用户输入并展示稳定错误。
 - 删除继续使用确认对话框；删除成功后清除选中项和详情，不能只修改 App 内存列表。

@@ -2,6 +2,12 @@
 
 这是本机服务发布、安装、停启、切档和基准共同遵守的终态契约。具体命令可以因入口不同而变化，但安全边界和验收条件不能分叉。
 
+## 平台基线（按交付物区分）
+
+- **服务**：Apple Silicon `arm64`、macOS `14.0+`、Python `>=3.12,<3.13`。这是 Python/wheel、managed runtime 和用户级 `com.speechrail` LaunchAgent 的运行基线，不是 App UI 的编译基线。
+- **App**：`SpeechRailApp` GUI target 为 Apple Silicon `arm64`、`MACOSX_DEPLOYMENT_TARGET=26.0`。App 页面可直接使用 macOS 26 API，不为 macOS 14 保留 UI fallback；App 的最低版本不反向约束服务。
+- `ControlKit`、`ControlAgent` 和服务侧 SwiftPM worker 各自按 target/package 的最低版本管理；不能从服务 14.0+ 或 App 26.0 推断它们的最低版本。
+
 ## 运行边界
 
 - 单机、单用户、单实例：一个 `com.speechrail` LaunchAgent、一个 ASGI 父进程、一个 loopback listener。

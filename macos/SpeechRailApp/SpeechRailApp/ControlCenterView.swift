@@ -1,4 +1,5 @@
 import SwiftUI
+import SpeechRailControlKit
 
 public struct ControlCenterView: View {
     @Environment(AppModel.self) private var model
@@ -19,62 +20,48 @@ public struct ControlCenterView: View {
         } else {
             NavigationSplitView {
                 VStack(spacing: 0) {
-                    List(selection: $selection) {
-                        if !visibleCreatorRoutes.isEmpty {
-                            Section {
-                                ForEach(visibleCreatorRoutes) { route in
-                                    navigationRow(for: route)
-                                }
-                            } header: {
-                                Text(AppRouteGroup.creator.title)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                            if !visibleCreatorRoutes.isEmpty {
+                                sidebarSection(title: AppRouteGroup.creator.title, routes: visibleCreatorRoutes)
+                            }
+                            if !visibleServiceRoutes.isEmpty {
+                                sidebarSection(title: AppRouteGroup.service.title, routes: visibleServiceRoutes)
+                            }
+                            if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
+                                ContentUnavailableView.search(text: searchText)
+                                    .padding(.top, SpeechRailDesignTokens.Spacing.xl)
                             }
                         }
-                        if !visibleServiceRoutes.isEmpty {
-                            Section {
-                                ForEach(visibleServiceRoutes) { route in
-                                    navigationRow(for: route)
-                                }
-                            } header: {
-                                Text(AppRouteGroup.service.title)
-                            }
-                        }
-                        if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
-                            ContentUnavailableView.search(text: searchText)
-                                .listRowBackground(Color.clear)
-                        }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                     }
-                    .listStyle(.sidebar)
-                    .tint(SpeechRailDesignTokens.Color.rail)
                     .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
-                    .backgroundExtensionEffect()
 
                     Divider()
+                        .overlay(SpeechRailDesignTokens.Chassis.milledBevel)
                     sidebarServiceStatus
                 }
                 .navigationSplitViewColumnWidth(
-                    min: SpeechRailDesignTokens.Layout.sidebarMinimumWidth,
-                    ideal: SpeechRailDesignTokens.Layout.sidebarIdealWidth,
-                    max: SpeechRailDesignTokens.Layout.sidebarMaximumWidth
+                    min: SpeechRailDesignTokens.Layout.sidebarWidth,
+                    ideal: SpeechRailDesignTokens.Layout.sidebarWidth,
+                    max: SpeechRailDesignTokens.Layout.sidebarWidth
                 )
-                .background(SpeechRailDesignTokens.Surface.navigationFill)
+                .background(SpeechRailDesignTokens.Chassis.obsidian)
             } detail: {
                 detailView(for: selection ?? .overview)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .background(SpeechRailDesignTokens.Color.canvas)
+                    .background(SpeechRailDesignTokens.Chassis.obsidian)
                     .toolbar {
                         ToolbarItem(placement: .principal) {
                             WorkspaceTitleLockup(
                                 route: selection ?? .overview,
                                 service: model.service,
-                                health: model.health,
+                                health: displayedHealth,
                                 healthMessage: model.healthMessage,
                                 operation: model.serviceOperation,
                                 controlPlaneMessage: model.controlPlaneMessage
                             )
-                        }
-                        .sharedBackgroundVisibility(.hidden)
-                        ToolbarItem(placement: .primaryAction) {
-                            ServiceStatusBadge()
                         }
                         .sharedBackgroundVisibility(.hidden)
                         ToolbarSpacer(.flexible)
@@ -108,6 +95,11 @@ public struct ControlCenterView: View {
         matching(AppRoute.creatorRoutes)
     }
 
+    private var displayedHealth: HealthSnapshot? {
+        guard model.healthFailure == nil else { return nil }
+        return model.health
+    }
+
     private var visibleServiceRoutes: [AppRoute] {
         matching(AppRoute.serviceRoutes)
     }
@@ -124,39 +116,94 @@ public struct ControlCenterView: View {
     }
 
     @ViewBuilder
+    private func sidebarSection(title: String, routes: [AppRoute]) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .fontWeight(.medium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.tight)
+
+            ForEach(routes, id: \.self) { route in
+                navigationRow(for: route)
+            }
+        }
+    }
+
+    @ViewBuilder
     private func navigationRow(for route: AppRoute) -> some View {
         let isSelected = selection == route
-        NavigationLink(value: route) {
-            Label {
-            Text(route.title)
-                    .font(SpeechRailDesignTokens.Typography.label)
+        Button {
+            withAnimation(SpeechRailDesignTokens.Motion.springTransition) {
+                selection = route
+            }
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                RouteIconView(route: route, selected: isSelected)
+                    .frame(width: SpeechRailDesignTokens.Icon.navigationFrame)
                     .foregroundStyle(
                         isSelected
-                            ? SpeechRailDesignTokens.Navigation.selectedForeground
+                            ? SpeechRailDesignTokens.SteelRail.railheadGleam
+                            : SpeechRailDesignTokens.Color.inkSecondary
+                    )
+
+                Text(route.title)
+                    .font(isSelected ? SpeechRailDesignTokens.Typography.sectionTitle : SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(
+                        isSelected
+                            ? SpeechRailDesignTokens.Color.ink
                             : SpeechRailDesignTokens.Navigation.unselectedForeground
                     )
                     .lineLimit(1)
                     .truncationMode(.tail)
-            } icon: {
-                RouteIconView(route: route, selected: isSelected)
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                if isSelected {
+                    // Physical Rail Indicator Bead (嵌入钢轨内的声轨冷青指示滑标)
+                    HStack(spacing: 0) {
+                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.pill, style: .continuous)
+                            .fill(SpeechRailDesignTokens.SteelRail.railheadGleam)
+                            .frame(width: 3, height: 16)
+                            .shadow(color: SpeechRailDesignTokens.SteelRail.trackGlow, radius: 3)
+                    }
+                    .accessibilityHidden(true)
+                }
             }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             .frame(
                 maxWidth: .infinity,
-                minHeight: SpeechRailDesignTokens.Control.sidebarRowHeight,
+                minHeight: SpeechRailDesignTokens.List.rowHeight,
                 alignment: .leading
             )
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                stops: [
+                                    .init(color: SpeechRailDesignTokens.SteelRail.trackCyan.opacity(0.30), location: 0.0),
+                                    .init(color: SpeechRailDesignTokens.SteelRail.trackCyan.opacity(0.12), location: 1.0)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+                                .strokeBorder(
+                                    SpeechRailDesignTokens.SteelRail.railheadGleam.opacity(0.40),
+                                    lineWidth: 0.75
+                                )
+                        }
+                }
+            }
+            .contentShape(Rectangle())
         }
-        .listRowInsets(
-            EdgeInsets(
-                top: SpeechRailDesignTokens.Spacing.micro,
-                leading: SpeechRailDesignTokens.Spacing.xs,
-                bottom: SpeechRailDesignTokens.Spacing.micro,
-                trailing: SpeechRailDesignTokens.Spacing.xs
-            )
-        )
-        .listRowSeparator(.hidden)
-        .frame(minHeight: SpeechRailDesignTokens.Control.sidebarRowHeight)
-        .contentShape(Rectangle())
+        .buttonStyle(.plain)
         .accessibilityIdentifier(route.id)
         .help(route.purpose)
         .accessibilityValue(
@@ -167,15 +214,23 @@ public struct ControlCenterView: View {
 
     private var sidebarServiceStatus: some View {
         Button {
-            withAnimation(SpeechRailDesignTokens.Motion.selectionFeedback) {
+            withAnimation(SpeechRailDesignTokens.Motion.springTransition) {
                 selection = .overview
             }
         } label: {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: sidebarStatusTone.systemImage)
-                    .font(SpeechRailDesignTokens.Typography.label)
-                    .foregroundStyle(sidebarStatusTone.color)
-                    .accessibilityHidden(true)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                // Micro-LED Jewel with Phosphor Diffusion (机架镶嵌式状态透光珠)
+                ZStack {
+                    Circle()
+                        .fill(sidebarStatusTone.color.opacity(0.20))
+                        .frame(width: 14, height: 14)
+                    Circle()
+                        .fill(sidebarStatusTone.color)
+                        .frame(width: 6, height: 6)
+                        .shadow(color: sidebarStatusTone.color.opacity(0.8), radius: 2)
+                }
+                .accessibilityHidden(true)
+
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Text("服务状态")
                         .font(SpeechRailDesignTokens.Typography.label)
@@ -190,13 +245,12 @@ public struct ControlCenterView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .accessibilityHidden(true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
+                .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         }
-        .speechRailInteractiveButtonStyle()
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
-        .speechRailPointerCursor()
+        .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
         .help("打开服务状态")
         .accessibilityLabel("服务状态")
         .accessibilityValue(sidebarStatusText)
@@ -206,13 +260,16 @@ public struct ControlCenterView: View {
         if model.serviceOperation?.phase.isActive == true {
             return "服务操作进行中"
         }
+        if model.serviceOperation?.phase == .failed {
+            return "服务操作未完成"
+        }
         if model.healthMessage != nil {
             return "健康状态不可用"
         }
         if model.controlPlaneMessage != nil {
             return "控制通道不可用"
         }
-        if model.health?.ready == true {
+        if displayedHealth?.ready == true {
             return "服务已就绪"
         }
         if model.service.serviceState == "unavailable" {
@@ -225,13 +282,16 @@ public struct ControlCenterView: View {
         if model.serviceOperation?.phase.isActive == true {
             return .attention
         }
+        if model.serviceOperation?.phase == .failed {
+            return .critical
+        }
         if model.healthMessage != nil {
             return .critical
         }
         if model.controlPlaneMessage != nil {
             return .attention
         }
-        if model.health?.ready == true {
+        if displayedHealth?.ready == true {
             return .healthy
         }
         if model.service.serviceState == "unavailable" {
@@ -242,22 +302,23 @@ public struct ControlCenterView: View {
 
     @ViewBuilder
     private func detailView(for route: AppRoute) -> some View {
-        switch route.group {
-        case .creator:
-            CreatorSurfaceView(route: route)
-        case .service:
-            switch route {
-            case .overview:
-                ServiceOverviewView()
-            case .monitoring:
-                RuntimeMonitoringView()
-            case .models:
-                ModelManagementView()
-            case .diagnostics:
-                PreflightDiagnosticsView()
-            case .dubbing, .voiceDesign, .voiceLibrary, .works:
-                EmptyView()
-            }
+        switch route {
+        case .dubbing:
+            DubbingDeskView()
+        case .voiceDesign:
+            VoiceDesignView()
+        case .voiceLibrary:
+            VoiceLibraryView()
+        case .works:
+            WorksView()
+        case .overview:
+            ServiceOverviewView()
+        case .monitoring:
+            RuntimeMonitoringView()
+        case .models:
+            ModelManagementView()
+        case .diagnostics:
+            PreflightDiagnosticsView()
         }
     }
 

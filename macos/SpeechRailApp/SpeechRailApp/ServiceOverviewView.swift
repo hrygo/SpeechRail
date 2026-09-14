@@ -24,6 +24,7 @@ public struct ServiceOverviewView: View {
                         Task { await model.refresh() }
                     } label: {
                         Label("刷新服务状态", systemImage: "arrow.clockwise")
+                            .speechRailMenuRow()
                     }
                     .disabled(model.isRefreshingService)
                     Divider()
@@ -34,6 +35,7 @@ public struct ServiceOverviewView: View {
                             showInspector ? "隐藏开发者详情" : "显示开发者详情",
                             systemImage: "info.circle"
                         )
+                        .speechRailMenuRow()
                     }
                     Divider()
                     serviceActions
@@ -43,9 +45,9 @@ public struct ServiceOverviewView: View {
         }
         .inspector(isPresented: $showInspector) {
             DeveloperInspector {
-                LabeledContent("服务", value: model.health?.service ?? "未读取")
-                LabeledContent("版本", value: model.health?.version ?? "未读取")
-                LabeledContent("后端", value: model.health?.backend ?? "未读取")
+                LabeledContent("服务", value: displayedHealth?.service ?? "未读取")
+                LabeledContent("版本", value: displayedHealth?.version ?? "未读取")
+                LabeledContent("后端", value: displayedHealth?.backend ?? "未读取")
                 LabeledContent("端口", value: model.service.port.map(String.init) ?? "未读取")
                 LabeledContent("LaunchAgent", value: ControlConstants.agentPlistName)
                 LabeledContent("XPC 通道", value: ControlConstants.agentMachServiceName)
@@ -295,29 +297,74 @@ public struct ServiceOverviewView: View {
             detail = "有 \(failedCount) 项前置条件需要处理，打开诊断查看修复路径。"
         }
 
-        return HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: tone.systemImage)
-                .foregroundStyle(tone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(title)
-                    .font(SpeechRailDesignTokens.Typography.label)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(detail)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Button("查看诊断") {
-                navigation.request(.diagnostics)
-            }
-            .speechRailButton(.quiet)
-            .disabled(isOperating || model.isRefreshingPreflight)
+        return ViewThatFits(in: .horizontal) {
+            preflightSummaryHorizontal(tone: tone, title: title, detail: detail, isOperating: isOperating)
+            preflightSummaryVertical(tone: tone, title: title, detail: detail, isOperating: isOperating)
         }
         .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("预检，\(title)，\(detail)")
+    }
+
+    private func preflightSummaryHorizontal(
+        tone: StatusTone,
+        title: String,
+        detail: String,
+        isOperating: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            preflightSummaryIcon(tone)
+            preflightSummaryCopy(title: title, detail: detail)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            preflightSummaryAction(isOperating: isOperating)
+        }
+    }
+
+    private func preflightSummaryVertical(
+        tone: StatusTone,
+        title: String,
+        detail: String,
+        isOperating: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                preflightSummaryIcon(tone)
+                preflightSummaryCopy(title: title, detail: detail)
+            }
+            preflightSummaryAction(isOperating: isOperating)
+        }
+    }
+
+    private func preflightSummaryIcon(_ tone: StatusTone) -> some View {
+        Image(systemName: tone.systemImage)
+            .foregroundStyle(tone.color)
+            .accessibilityHidden(true)
+    }
+
+    private func preflightSummaryCopy(title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.label)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(detail)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func preflightSummaryAction(isOperating: Bool) -> some View {
+        Button("查看诊断") {
+            navigation.request(.diagnostics)
+        }
+        .speechRailButton(.quiet)
+        .disabled(isOperating || model.isRefreshingPreflight)
     }
 
     private func capabilityRow(title: String, detail: String, ready: Bool?) -> some View {
@@ -329,17 +376,24 @@ public struct ServiceOverviewView: View {
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
             Text(capabilityStatus(ready))
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(capabilityColor(ready))
+                .lineLimit(1)
+                .frame(width: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth, alignment: .trailing)
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title)，\(capabilityStatus(ready))，\(detail)")
     }
@@ -383,6 +437,7 @@ public struct ServiceOverviewView: View {
                 pendingAction = .start
             } label: {
                 Label("启动服务", systemImage: "play.circle")
+                    .speechRailMenuRow()
             }
                 .disabled(
                     model.isBusy
@@ -395,6 +450,7 @@ public struct ServiceOverviewView: View {
                 pendingAction = .stop
             } label: {
                 Label("停止服务", systemImage: "stop.circle")
+                    .speechRailMenuRow()
             }
                 .disabled(
                     model.isBusy
@@ -407,6 +463,7 @@ public struct ServiceOverviewView: View {
                 pendingAction = .restart
             } label: {
                 Label("重启服务", systemImage: "arrow.clockwise.circle")
+                    .speechRailMenuRow()
             }
                 .disabled(
                     model.isBusy

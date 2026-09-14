@@ -22,6 +22,7 @@ public struct ModelManagementView: View {
                         Task { await model.refreshModelsAndHealth() }
                     } label: {
                         Label("刷新模型状态", systemImage: "arrow.clockwise")
+                            .speechRailMenuRow()
                     }
                     .disabled(model.isRefreshingModels)
                     Divider()
@@ -32,6 +33,7 @@ public struct ModelManagementView: View {
                             showInspector ? "隐藏开发者详情" : "显示开发者详情",
                             systemImage: "info.circle"
                         )
+                        .speechRailMenuRow()
                     }
                 }
             }
@@ -149,7 +151,7 @@ public struct ModelManagementView: View {
     private var modelWorkspace: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
             profileList
-                .frame(width: SpeechRailDesignTokens.Layout.sidebarIdealWidth)
+                .frame(width: SpeechRailDesignTokens.Layout.sidebarWidth)
             selectedProfilePanel
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
@@ -161,7 +163,7 @@ public struct ModelManagementView: View {
                 title: "运行档位",
                 detail: "先选择目标，再分别准备模型或应用服务配置。"
             )
-            VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            VStack(spacing: SpeechRailDesignTokens.List.rowSpacing) {
                 ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
                     ProfileChoiceRow(
                         profile: profile,
@@ -185,7 +187,8 @@ public struct ModelManagementView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .padding(.horizontal, SpeechRailDesignTokens.List.contentHorizontalPadding)
+        .padding(.vertical, SpeechRailDesignTokens.List.contentVerticalPadding)
         .speechRailContentSurface()
     }
 
@@ -332,7 +335,7 @@ public struct ModelManagementView: View {
                                     selected: selectedArtifactKey == artifact.key
                                 )
                             }
-                            .speechRailInteractiveButtonStyle()
+                            .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
                             .accessibilityIdentifier("artifact-\(artifact.key)")
                             if index < artifacts.count - 1 {
                                 Divider()
@@ -416,15 +419,21 @@ public struct ModelManagementView: View {
                 Text("本机模型占用 \(formatBytes(disk.modelBytes)) · 可用空间 \(formatBytes(disk.freeBytes))")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
             }
             if !missingDiarizationKeys.isEmpty {
                 Text("此档位还需要 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))通过校验。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
             } else if !visibleArtifacts.isEmpty && !profileArtifactsVerified {
                 Text("应用档位前，请先完成当前档位制品的下载与校验。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
             }
             if let message = model.message, !message.isEmpty, model.modelAvailability == .available {
                 Text(SpeechRailOperationMessagePresentation.text(message))
@@ -446,11 +455,16 @@ public struct ModelManagementView: View {
                 Text(presentation.title)
                     .font(SpeechRailDesignTokens.Typography.label)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(presentation.detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(2)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
@@ -503,10 +517,14 @@ public struct ModelManagementView: View {
                     title: "模型运行信息",
                     detail: "选择制品查看锁定来源、revision 和本机校验结果。"
                 )
-                LabeledContent("当前档位", value: profileTitle(for: selectedProfile))
+                LabeledContent("目标档位", value: profileTitle(for: selectedProfile))
                 LabeledContent(
-                    "服务档位",
-                    value: model.profile?.preset.map { profileTitle(for: $0) } ?? "未读取"
+                    "当前服务档位",
+                    value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
+                )
+                LabeledContent(
+                    "配置档位",
+                    value: configuredProfile.map { profileTitle(for: $0) } ?? "未读取"
                 )
                 LabeledContent("目录状态", value: model.modelAvailability == .available ? "已读取" : "未读取")
                 if let disk = model.modelStatus?.disk {
@@ -561,7 +579,17 @@ public struct ModelManagementView: View {
 
     private var unmanagedArtifactStatuses: [ModelArtifactStatusSnapshot] {
         let catalogKeys = Set(model.modelCatalog?.artifacts.map(\.key) ?? [])
-        return (model.modelStatus?.artifacts ?? [])
+        var statusesByKey: [String: ModelArtifactStatusSnapshot] = [:]
+        for status in model.modelStatus?.artifacts ?? [] {
+            statusesByKey[status.key] = status
+        }
+        // The dedicated diarization lane is authoritative for its own keys.
+        // Merge it here as well so detected CoreML/aligner assets cannot
+        // disappear merely because they are not part of the generic lane.
+        for status in model.modelStatus?.diarization ?? [] {
+            statusesByKey[status.key] = status
+        }
+        return statusesByKey.values
             .filter { !catalogKeys.contains($0.key) }
             .sorted { $0.key < $1.key }
     }
@@ -780,10 +808,9 @@ public struct ModelManagementView: View {
             )
         }
         if key == activeSummary.ttsClone {
-            return runtimeUsage(
-                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · 克隆 TTS 备用",
-                ready: health.ttsReady,
-                state: health.ttsState
+            return cloneRuntimeUsage(
+                label: "当前服务 · " + profileTitle(for: runtimeProfile) + " · 克隆 TTS",
+                health: health
             )
         }
         if activeSummary.diarization,
@@ -803,6 +830,55 @@ public struct ModelManagementView: View {
         return ModelArtifactUsagePresentation(
             text: "目标档位未应用；当前服务未使用",
             tone: .neutral
+        )
+    }
+
+    private func cloneRuntimeUsage(
+        label: String,
+        health: HealthSnapshot
+    ) -> ModelArtifactUsagePresentation {
+        guard let ttsReady = health.ttsReady else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · TTS 就绪状态未读取",
+                tone: .neutral
+            )
+        }
+        guard ttsReady else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 服务 TTS 未就绪",
+                tone: .critical
+            )
+        }
+
+        guard let lifecycle = health.ttsLifecycle else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 已验证；独立常驻状态未公开",
+                tone: .neutral
+            )
+        }
+
+        let hasWarmStateSignal = lifecycle.warmCapability != nil
+            || lifecycle.warmCapabilities != nil
+        guard hasWarmStateSignal else {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 已验证；独立常驻状态未公开",
+                tone: .neutral
+            )
+        }
+
+        let warmCapabilities = lifecycle.warmCapabilities ?? []
+        let isWarm = warmCapabilities.contains("voice_clone")
+            || lifecycle.warmCapability == "voice_clone"
+            || lifecycle.warmCapability == "both"
+        if isWarm {
+            return ModelArtifactUsagePresentation(
+                text: "\(label) · 当前常驻",
+                tone: .healthy
+            )
+        }
+        return ModelArtifactUsagePresentation(
+            text: "\(label) · 已验证，按请求加载",
+            tone: .attention
         )
     }
 
@@ -1015,18 +1091,27 @@ private struct ProfileChoiceRow: View {
                     Text(formatBytes(summary.downloadBytes))
                         .font(SpeechRailDesignTokens.Typography.technical)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
-            .padding(SpeechRailDesignTokens.Spacing.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(SpeechRailDesignTokens.List.rowContentPadding)
             .background(
                 isSelected
                     ? SpeechRailDesignTokens.Surface.selectedFill
                     : Color.clear,
-                in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+                in: .rect(
+                    cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
+                    style: .continuous
+                )
             )
             .overlay {
                 if isSelected {
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+                    RoundedRectangle(
+                        cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
+                        style: .continuous
+                    )
                         .stroke(
                             SpeechRailDesignTokens.Navigation.focusRing,
                             lineWidth: SpeechRailDesignTokens.Stroke.strong
@@ -1034,7 +1119,7 @@ private struct ProfileChoiceRow: View {
                 }
             }
         }
-        .speechRailInteractiveButtonStyle()
+        .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
         .accessibilityIdentifier(profile.rawValue)
         .accessibilityLabel(profileTitle)
         .accessibilityValue(isSelected ? "已选择" : "未选择")
@@ -1142,27 +1227,39 @@ private struct ArtifactChoiceRow: View {
                 Text(artifact.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Text("目标：\(SpeechRailProfilePresentation.title(targetProfile)) · 必需")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text("存在：\(statusPresentation.summary)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(statusPresentation.color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                 Text("使用：\(usage.text)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(usage.tone.color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
             Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: SpeechRailDesignTokens.Layout.modelVariantWidth, alignment: .trailing)
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
+        .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
         .background(
             selected ? SpeechRailDesignTokens.Surface.selectedFill : Color.clear,
-            in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row)
+            in: .rect(cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius)
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.key)
@@ -1191,16 +1288,24 @@ private struct DiarizationStatusRow: View {
                 Text(key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(key)")
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Text("存在：\(statusPresentation.summary)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(statusPresentation.color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                 Text("使用：\(usage.text)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(usage.tone.color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(key)
         .accessibilityValue("存在：\(statusPresentation.summary)，使用：\(usage.text)")
@@ -1223,16 +1328,23 @@ private struct UnmanagedArtifactRow: View {
                 Text(status.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
                 Text("存在：\(statusPresentation.summary)")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(statusPresentation.color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                 Text("使用：当前 catalog 未登记")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: 0)
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(status.key)
         .accessibilityValue("存在：\(statusPresentation.summary)，使用：当前 catalog 未登记")

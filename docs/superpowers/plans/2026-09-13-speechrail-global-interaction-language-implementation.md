@@ -16,7 +16,7 @@
 - 不修改 REST、Realtime、XPC、worker、模型目录或服务生命周期契约。
 - 保留服务状态、运行监控、模型下载、诊断、配音台、音色创作、音色库和作品的真实动作，不以静态占位替换接线。
 - 页面不得新增裸颜色、裸圆角、裸间距、局部 hover/cursor 数值或重复的标题/按钮状态实现。
-- 标准 `Button`、`Menu`、`NavigationLink` 保留 macOS 系统指针、按压和焦点行为；只有自定义可点击行/卡片使用 `pointingHand`。
+- 标准 `Button`、`Menu`、`NavigationLink`、`Picker`、`Slider` 和 `Toggle` 保留 macOS 系统按压、焦点和辅助功能行为；所有 enabled 操作/选择实例在真实命中区统一使用 `pointingHand`，只有静态内容保持普通箭头。
 - 每个交互对象的有效命中区至少为 `44 × 44pt`；状态不能只依赖颜色。
 - 用户此前暂停了自动化测试；执行本计划不运行 XCTest、XCUITest、Python 测试或安装流程，只做静态审查、编译和人工检查。
 - 保留工作区现有未提交改动；每次提交只包含当前任务明确修改的文件。
@@ -63,12 +63,12 @@
 - Produces `SpeechRailButtonLevel` with `.primary`, `.secondary`, `.quiet`, `.destructive`。
 - Produces `SpeechRailButtonAppearance` (`ViewModifier`) for native `Button`/`Menu` label sizing and tint hierarchy。
 - Produces `SpeechRailInteractiveButtonStyle` (`ButtonStyle`) for custom rows/cards, with `hover`、`pressed`、`focus`、`disabled` state。
-- Produces `SpeechRailCursorRegion` (`NSViewRepresentable`) only for custom pointing-hand surfaces。
+- Produces `SpeechRailCursorRegion` (`NSViewRepresentable`) as a layout-backed pointing-hand surface for enabled action/selection controls；文本编辑区和静态内容不挂载。
 - Keeps `WorkspaceActionsMenu` initializer source-compatible while changing its visible label to “更多操作”。
 
 - [ ] **Step 1: Add the native button appearance modifier**
 
-实现 `speechRailButton(_ level: SpeechRailButtonLevel)`：`.primary` 使用系统 `.borderedProminent` 和 `Color.rail`，`.secondary` 使用系统 `.bordered`，`.quiet` 使用系统 `.borderless`/`.plain` 的低干扰语义，`.destructive` 使用 `Color.critical`。统一应用 `controlSize` 和 `minimumHitTarget`，不实现自己的标准控件光标。
+实现 `speechRailButton(_ level: SpeechRailButtonLevel)`：`.primary` 使用系统 `.borderedProminent` 和 `Color.rail`，`.secondary` 使用系统 `.bordered`，`.quiet` 使用系统 `.borderless`/`.plain` 的低干扰语义，`.destructive` 使用 `Color.critical`。统一应用 `controlSize`、`minimumHitTarget` 和 enabled-only pointing hand；不替换系统的按压与焦点反馈。
 
 - [ ] **Step 2: Add the custom interactive style**
 
@@ -76,7 +76,7 @@
 
 - [ ] **Step 3: Add cursor rect bridge**
 
-实现 `SpeechRailCursorRegion` 的 `NSView` 子类，在 `resetCursorRects()` 中对自身 bounds 添加 `NSCursor.pointingHand`；将它作为 custom button style 的不可命中 overlay。静态 surface 不挂载该 bridge，标准 Button/Menu/NavigationLink 不挂载该 bridge。
+实现 `SpeechRailCursorRegion` 的 `NSView` 子类，在 `resetCursorRects()` 中对自身 bounds 添加 `NSCursor.pointingHand`；将它作为 enabled 控件的不可命中 overlay。静态 surface、TextField/TextEditor 和 disabled 控件不挂载有效 cursor rect。
 
 - [ ] **Step 4: Migrate shared components**
 
@@ -94,7 +94,7 @@
 
 - [ ] **Step 1: Implement title variants**
 
-使用 `ViewThatFits(in: .horizontal)` 依次提供“icon + workspace + context”“icon + workspace”“workspace”三种单行变体；工作区标题使用 `lineLimit(1)`、尾部截断和 `Toolbar.titleMaximumWidth`，context 在紧凑变体中隐藏；不把 service status chip 放进中心标题。
+使用固定的“icon + workspace”单行结构；工作区标题使用 `lineLimit(1)`、尾部截断、适度缩放和 `Toolbar.titleMaximumWidth`，不使用 `layoutPriority` 抢占左右 toolbar item；context 与 service status 只进入辅助功能语义，不放进中心标题。
 
 - [ ] **Step 2: Normalize title accessibility**
 
@@ -102,7 +102,7 @@
 
 - [ ] **Step 3: Rewire the shell toolbar**
 
-在 `ControlCenterView` 的 `.principal` 使用 `WorkspaceTitleLockup`，移除任何会让标题无限扩张的 `layoutPriority`；把服务状态放入独立辅助 item，toolbar 右侧只保留清晰的文字动作组和系统默认反馈。
+在 `ControlCenterView` 的 `.principal` 使用 `WorkspaceTitleLockup`，由固定标题槽位保护中心几何；把服务状态放入辅助功能语义，toolbar 右侧只保留清晰的文字动作组和系统默认反馈。
 
 - [ ] **Step 4: Verify title geometry statically**
 
@@ -121,7 +121,7 @@
 
 - [ ] **Step 2: Rebuild selected navigation row**
 
-保留原生 `NavigationLink`，统一使用 44pt row、tokenized inset、低噪声 accent fill、Ink 前景和共享 focus ring；selected、hover、keyboard focus 分开表达；标准 NavigationLink 保留系统箭头，不挂 pointing-hand cursor。
+保留原生 `NavigationLink`，统一使用 44pt row、tokenized inset、低噪声 accent fill、Ink 前景和共享 focus ring；selected、hover、keyboard focus 分开表达；enabled 导航行显示 pointing hand，disabled/静态区域不显示。
 
 - [ ] **Step 3: Align icon rendering**
 

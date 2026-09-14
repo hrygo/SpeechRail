@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import SpeechRailControlKit
 
@@ -16,8 +17,10 @@ struct SpeechRailApp: App {
         isUITest = false
 #endif
         let usesBundledXPCService = !isUITest && Self.hasBundledLocalXPCService
-        let transport: any SpeechRailControlTransport = isUITest
-            ? UITestControlTransport(
+        let transport: any SpeechRailControlTransport
+#if DEBUG
+        if isUITest {
+            transport = UITestControlTransport(
                 profileApplyFails: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-profile-failure"
                 ),
@@ -31,25 +34,42 @@ struct SpeechRailApp: App {
                     "--ui-test-model-unsupported"
                 )
             )
-            : usesBundledXPCService
-                ? NSXPCControlTransport(
-                    bundledServiceName: ControlConstants.localXPCServiceName
-                )
-                : NSXPCControlTransport()
+        } else if usesBundledXPCService {
+            transport = NSXPCControlTransport(
+                bundledServiceName: ControlConstants.localXPCServiceName
+            )
+        } else {
+            transport = NSXPCControlTransport()
+        }
+#else
+        if usesBundledXPCService {
+            transport = NSXPCControlTransport(
+                bundledServiceName: ControlConstants.localXPCServiceName
+            )
+        } else {
+            transport = NSXPCControlTransport()
+        }
+#endif
         let diagnosticsClient: any ServiceDiagnosticsClient
         let creatorClient: (any SpeechRailCreatorClient)?
+#if DEBUG
         if isUITest {
             diagnosticsClient = UITestServiceDiagnosticsClient(
                 metricsUnavailable: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-metrics-unavailable"
                 )
             )
-            creatorClient = nil
+            creatorClient = UITestCreatorClient()
         } else {
             let liveServiceClient = ServiceAPIClient()
             diagnosticsClient = liveServiceClient
             creatorClient = liveServiceClient
         }
+#else
+        let liveServiceClient = ServiceAPIClient()
+        diagnosticsClient = liveServiceClient
+        creatorClient = liveServiceClient
+#endif
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
         _model = State(
             initialValue: AppModel(
@@ -74,22 +94,23 @@ struct SpeechRailApp: App {
             ControlCenterView()
                 .environment(model)
                 .environment(navigation)
-                .tint(SpeechRailDesignTokens.Color.rail)
+                .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         MenuBarExtra("SpeechRail", systemImage: AppRoute.dubbing.systemImage) {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)
-                .tint(SpeechRailDesignTokens.Color.rail)
+                .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
         Settings {
             SettingsView()
-                .tint(SpeechRailDesignTokens.Color.rail)
+                .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
     }
 }
 
+#if DEBUG
 private struct UITestServiceDiagnosticsClient: ServiceDiagnosticsClient {
     let metricsUnavailable: Bool
 
@@ -114,6 +135,10 @@ private struct UITestServiceDiagnosticsClient: ServiceDiagnosticsClient {
             ),
             asrState: "active",
             ttsState: "active",
+            ttsLifecycle: TTSCapabilityLifecycleSnapshot(
+                warmCapability: "both",
+                warmCapabilities: ["voice_design", "voice_clone"]
+            ),
             streamingState: "active",
             realtimeVAD: RealtimeVADStatusSnapshot(
                 configuredEngine: "auto",
@@ -146,6 +171,206 @@ private struct UITestServiceDiagnosticsClient: ServiceDiagnosticsClient {
                 ],
             ]
         )
+    }
+}
+
+/// Deterministic creator transport for UI tests. It exercises the same AppModel
+/// state transitions as the live REST client while keeping tests offline and
+/// free of user audio or model assets.
+private struct UITestCreatorClient: SpeechRailCreatorClient {
+    private let store: UITestVoiceStore
+
+    init(store: UITestVoiceStore = UITestVoiceStore()) {
+        self.store = store
+    }
+
+    func fetchVoices() async throws -> [CreatorVoice] {
+        await store.list()
+    }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
+        guard let voice = await store.get(id: id) else {
+            throw ServiceAPIClientError.server(
+                code: "voice_not_found",
+                message: "voice not found",
+                retryable: false
+            )
+        }
+        return voice
+    }
+
+    func createSpeech(text: String, voiceID: String, speed: Double) async throws -> Data {
+        if ProcessInfo.processInfo.arguments.contains("--ui-test-slow-voice-preview") {
+            try await Task.sleep(for: .seconds(5))
+        }
+        return UITestAudioFactory.silentWAV
+    }
+
+    func createVoicePreview(
+        text: String,
+        instruction: String,
+        speed: Double,
+        seed: Int?
+    ) async throws -> Data {
+        UITestAudioFactory.silentWAV
+    }
+
+    func registerVoiceDesign(
+        id: String,
+        name: String,
+        instruction: String,
+        referenceText: String,
+        seed: Int
+    ) async throws -> CreatorVoice {
+        let voice = CreatorVoice(
+            id: id,
+            name: name,
+            description: instruction,
+            instruction: instruction,
+            seed: seed,
+            isSystem: false,
+            createdAt: 0,
+            available: true,
+            variant: "custom_voice",
+            mode: "clone",
+            refText: referenceText,
+            durationSeconds: 3
+        )
+        return await store.insert(voice)
+    }
+
+    func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?
+    ) async throws -> CreatorVoice {
+        guard let voice = await store.update(
+            id: id,
+            name: name,
+            instruction: instruction,
+            seed: seed
+        ) else {
+            throw ServiceAPIClientError.requestFailed
+        }
+        return voice
+    }
+
+    func deleteVoice(id: String) async throws {
+        await store.delete(id: id)
+    }
+}
+
+private actor UITestVoiceStore {
+    private var voices: [CreatorVoice] = [
+        CreatorVoice(
+            id: "fixture_voice_design",
+            name: "夜航主持",
+            description: "用于 UI 验收的 VoiceDesign 系统音色",
+            instruction: "温暖、清晰、亲近",
+            seed: 101,
+            isDefault: true,
+            isSystem: true,
+            createdAt: 0,
+            available: true,
+            variant: "voice_design",
+            capabilities: CreatorVoiceCapabilities(supportsInstruction: true),
+            mode: "instruction"
+        ),
+        CreatorVoice(
+            id: "fixture_custom_voice",
+            name: "测试自定义音色",
+            description: "用于 UI 验收的自定义音色",
+            instruction: "自然、稳定",
+            seed: 202,
+            isSystem: false,
+            createdAt: 0,
+            available: true,
+            variant: "custom_voice",
+            mode: "instruction"
+        ),
+    ]
+
+    func list() -> [CreatorVoice] {
+        voices
+    }
+
+    func get(id: String) -> CreatorVoice? {
+        voices.first { $0.id == id }
+    }
+
+    func insert(_ voice: CreatorVoice) -> CreatorVoice {
+        voices.append(voice)
+        return voice
+    }
+
+    func update(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?
+    ) -> CreatorVoice? {
+        guard let index = voices.firstIndex(where: { $0.id == id }) else {
+            return nil
+        }
+        let current = voices[index]
+        let updated = CreatorVoice(
+            id: current.id,
+            name: name ?? current.name,
+            description: current.description,
+            instruction: instruction ?? current.instruction,
+            seed: seed ?? current.seed,
+            aliases: current.aliases,
+            isDefault: current.isDefault,
+            isSystem: current.isSystem,
+            createdAt: current.createdAt,
+            available: current.available,
+            variant: current.variant,
+            capabilities: current.capabilities,
+            mode: current.mode,
+            refText: current.refText,
+            durationSeconds: current.durationSeconds
+        )
+        voices[index] = updated
+        return updated
+    }
+
+    func delete(id: String) {
+        voices.removeAll { $0.id == id }
+    }
+}
+
+private enum UITestAudioFactory {
+    static let silentWAV: Data = {
+        let sampleRate: UInt32 = 16_000
+        let frameCount: UInt32 = sampleRate * 3
+        let dataSize = frameCount * 2
+        var data = Data()
+        data.append(contentsOf: Array("RIFF".utf8))
+        appendUInt32(36 + dataSize, to: &data)
+        data.append(contentsOf: Array("WAVE".utf8))
+        data.append(contentsOf: Array("fmt ".utf8))
+        appendUInt32(16, to: &data)
+        appendUInt16(1, to: &data)
+        appendUInt16(1, to: &data)
+        appendUInt32(sampleRate, to: &data)
+        appendUInt32(sampleRate * 2, to: &data)
+        appendUInt16(2, to: &data)
+        appendUInt16(16, to: &data)
+        data.append(contentsOf: Array("data".utf8))
+        appendUInt32(dataSize, to: &data)
+        data.append(Data(repeating: 0, count: Int(dataSize)))
+        return data
+    }()
+
+    private static func appendUInt16(_ value: UInt16, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+        var littleEndian = value.littleEndian
+        withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
     }
 }
 
@@ -374,3 +599,4 @@ private struct UITestControlTransport: SpeechRailControlTransport {
         }
     }
 }
+#endif

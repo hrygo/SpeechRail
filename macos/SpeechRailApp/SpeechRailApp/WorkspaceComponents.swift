@@ -41,7 +41,11 @@ public struct SpeechRailButtonAppearance: ViewModifier {
             }
         }
         .controlSize(.regular)
-        .frame(minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget)
+        .frame(
+            minWidth: SpeechRailDesignTokens.Interaction.minimumHitTarget,
+            minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget
+        )
+        .contentShape(Rectangle())
         .speechRailPointerCursor()
     }
 }
@@ -49,10 +53,109 @@ public struct SpeechRailButtonAppearance: ViewModifier {
 /// A shared style for custom rows/cards that are buttons but intentionally do
 /// not look like standard toolbar or form buttons.
 public struct SpeechRailInteractiveButtonStyle: ButtonStyle {
-    public init() {}
+    private let fillsAvailableWidth: Bool
+
+    public init(fillsAvailableWidth: Bool = false) {
+        self.fillsAvailableWidth = fillsAvailableWidth
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
-        SpeechRailInteractiveButtonBody(configuration: configuration)
+        SpeechRailInteractiveButtonBody(
+            configuration: configuration,
+            fillsAvailableWidth: fillsAvailableWidth
+        )
+    }
+}
+
+/// A full-width disclosure primitive for technical detail sections.
+///
+/// `DisclosureGroup` still owns the expansion binding and content lifecycle,
+/// while this style makes the complete row one native Button hit target. This
+/// prevents a long detail panel from falling back to the label's intrinsic
+/// width and keeps the arrow, focus, pressed, and accessibility states together.
+@MainActor
+public struct SpeechRailDisclosureGroupStyle: DisclosureGroupStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    public init() {}
+
+    @ViewBuilder
+    public func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+            Button {
+                withAnimation(
+                    reduceMotion ? nil : SpeechRailDesignTokens.Motion.selectionFeedback
+                ) {
+                    configuration.isExpanded.toggle()
+                }
+            } label: {
+                ZStack(alignment: .leading) {
+                    // A clear fill gives the label a concrete full-width layout
+                    // proposal. The row remains visually transparent until the
+                    // shared ButtonStyle supplies hover/pressed feedback.
+                    Color.clear
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Image(
+                            systemName: configuration.isExpanded
+                                ? "chevron.down"
+                                : "chevron.right"
+                        )
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .accessibilityHidden(true)
+
+                        configuration.label
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Interaction.minimumHitTarget,
+                    maxWidth: .infinity,
+                    minHeight: SpeechRailDesignTokens.List.rowHeight,
+                    alignment: .leading
+                )
+                .contentShape(Rectangle())
+            }
+            .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
+            // Keep the Button's outer hit region aligned with the full-width
+            // label. The style owns feedback; this frame owns the command
+            // boundary so transparent trailing space is still actionable.
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .accessibilityValue(configuration.isExpanded ? "已展开" : "已收起")
+
+            if configuration.isExpanded {
+                configuration.content
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, SpeechRailDesignTokens.List.disclosureContentInset)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// A compact, full-width action row for the menu-bar popover. The native
+/// Button style still owns its pressed appearance; this modifier owns only the
+/// shared geometry and cursor affordance.
+public struct SpeechRailMenuRowModifier: ViewModifier {
+    public init() {}
+
+    public func body(content: Content) -> some View {
+        content
+            .frame(
+                minWidth: SpeechRailDesignTokens.Interaction.minimumHitTarget,
+                maxWidth: .infinity,
+                minHeight: SpeechRailDesignTokens.Menu.rowHeight,
+                alignment: .leading
+            )
+            .contentShape(Rectangle())
+            .speechRailPointerCursor()
+    }
+}
+
+public extension View {
+    func speechRailMenuRow() -> some View {
+        modifier(SpeechRailMenuRowModifier())
     }
 }
 
@@ -63,11 +166,13 @@ private struct SpeechRailInteractiveButtonBody: View {
     @State private var isHovered = false
 
     let configuration: SpeechRailInteractiveButtonStyle.Configuration
+    let fillsAvailableWidth: Bool
 
     var body: some View {
-        configuration.label
+        labelContent
             .frame(
                 minWidth: SpeechRailDesignTokens.Interaction.minimumHitTarget,
+                maxWidth: fillsAvailableWidth ? .infinity : nil,
                 minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget,
                 alignment: .leading
             )
@@ -83,15 +188,12 @@ private struct SpeechRailInteractiveButtonBody: View {
                         SpeechRailDesignTokens.Navigation.focusRing,
                         lineWidth: SpeechRailDesignTokens.Interaction.focusLineWidth
                     )
-                    .padding(1)
+                    .padding(SpeechRailDesignTokens.Interaction.focusRingInset)
                 }
             }
-            .contentShape(
-                RoundedRectangle(
-                    cornerRadius: SpeechRailDesignTokens.Corner.row,
-                    style: .continuous
-                )
-            )
+            // The visual treatment stays rounded, but the complete button
+            // bounds—including transparent padding—remain one hit target.
+            .contentShape(Rectangle())
             .scaleEffect(
                 configuration.isPressed && isEnabled && !reduceMotion
                     ? SpeechRailDesignTokens.Interaction.pressedScale
@@ -114,6 +216,16 @@ private struct SpeechRailInteractiveButtonBody: View {
                 reduceMotion ? nil : SpeechRailDesignTokens.Motion.pressFeedback,
                 value: configuration.isPressed
             )
+    }
+
+    @ViewBuilder
+    private var labelContent: some View {
+        if fillsAvailableWidth {
+            configuration.label
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            configuration.label
+        }
     }
 
     private var backgroundShape: some View {
@@ -183,8 +295,19 @@ public extension View {
         modifier(SpeechRailButtonAppearance(level: level))
     }
 
-    func speechRailInteractiveButtonStyle() -> some View {
-        buttonStyle(SpeechRailInteractiveButtonStyle())
+    func speechRailInteractiveButtonStyle(fillsAvailableWidth: Bool = false) -> some View {
+        buttonStyle(
+            SpeechRailInteractiveButtonStyle(fillsAvailableWidth: fillsAvailableWidth)
+        )
+        // A custom ButtonStyle controls the visual body, but SwiftUI may keep
+        // the Button's outer layout at the label's intrinsic width. Expand the
+        // semantic command surface here as well, so the complete row/tag—not
+        // only its text or icon—has one consistent hit target.
+        .frame(
+            maxWidth: fillsAvailableWidth ? .infinity : nil,
+            alignment: .leading
+        )
+        .contentShape(Rectangle())
     }
 
     /// Shows a pointing hand only for an enabled, genuinely interactive surface.
@@ -371,14 +494,19 @@ public struct PageIntroView: View {
     public var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
-                .fill(SpeechRailDesignTokens.Color.rail)
+                .fill(SpeechRailDesignTokens.SteelRail.railheadGleam)
                 .frame(
                     width: SpeechRailDesignTokens.Control.purposeIndicatorWidth,
                     height: SpeechRailDesignTokens.Control.purposeIndicatorHeight
                 )
+                .shadow(color: SpeechRailDesignTokens.SteelRail.trackGlow, radius: 2)
             Text(route.purpose)
                 .font(SpeechRailDesignTokens.Typography.body)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)
@@ -413,7 +541,6 @@ public struct PageScaffold<Content: View>: View {
             ScrollView {
                 pageContent
             }
-            .scrollEdgeEffectStyle(.automatic, for: .top)
         } else {
             pageContent
                 .frame(maxHeight: .infinity, alignment: .topLeading)
@@ -446,10 +573,16 @@ public struct SectionHeading: View {
             Text(title)
                 .font(SpeechRailDesignTokens.Typography.sectionTitle)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
             if let detail, !detail.isEmpty {
                 Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .accessibilityElement(children: .contain)
@@ -481,8 +614,12 @@ public struct WorkspaceActionsMenu<Content: View>: View {
                 .labelStyle(.titleAndIcon)
                 .font(SpeechRailDesignTokens.Typography.label)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .frame(minHeight: SpeechRailDesignTokens.Toolbar.controlHeight)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Interaction.minimumHitTarget,
+                    minHeight: SpeechRailDesignTokens.Menu.triggerHeight
+                )
+                .padding(.horizontal, SpeechRailDesignTokens.Menu.triggerHorizontalPadding)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .controlSize(.regular)
@@ -518,29 +655,65 @@ public struct StatusBanner: View {
     }
 
     public var body: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Image(systemName: tone.systemImage)
-                .font(SpeechRailDesignTokens.Typography.statusIcon)
-                .foregroundStyle(tone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(title)
-                    .font(SpeechRailDesignTokens.Typography.statusTitle)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(message)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            if let actionTitle, let action {
-                Button(actionTitle, action: action)
-                    .speechRailButton(.primary)
-                    .disabled(actionDisabled)
-            }
+        ViewThatFits(in: .horizontal) {
+            horizontalLayout
+            verticalLayout
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
         .speechRailField()
         .accessibilityElement(children: .contain)
+    }
+
+    private var horizontalLayout: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+            bannerIcon
+            bannerCopy
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            bannerAction
+        }
+    }
+
+    private var verticalLayout: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                bannerIcon
+                bannerCopy
+            }
+            bannerAction
+        }
+    }
+
+    private var bannerIcon: some View {
+        Image(systemName: tone.systemImage)
+            .font(SpeechRailDesignTokens.Typography.statusIcon)
+            .foregroundStyle(tone.color)
+            .accessibilityHidden(true)
+    }
+
+    private var bannerCopy: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.statusTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(message)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(3)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var bannerAction: some View {
+        if let actionTitle, let action {
+            Button(actionTitle, action: action)
+                .speechRailButton(.primary)
+                .disabled(actionDisabled)
+        }
     }
 }
 
@@ -566,7 +739,7 @@ public struct SpeechRailStatusLine: View {
     }
 
     public var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.xs) {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
             Rectangle()
                 .fill(tone.color)
                 .frame(width: SpeechRailDesignTokens.Control.purposeIndicatorWidth)
@@ -577,77 +750,25 @@ public struct SpeechRailStatusLine: View {
                     .foregroundStyle(tone.color)
                     .accessibilityHidden(true)
             }
-            Text(title)
-                .font(SpeechRailDesignTokens.Typography.label)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            Text(message)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(2)
-            Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.label)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(message)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title)，\(message)")
-    }
-}
-
-public struct ServiceStatusBadge: View {
-    @Environment(AppModel.self) private var model
-    public let compact: Bool
-
-    public init(compact: Bool = false) {
-        self.compact = compact
-    }
-
-    public var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Circle()
-                .fill(statusColor)
-                .frame(
-                    width: SpeechRailDesignTokens.Control.statusIndicatorDiameter,
-                    height: SpeechRailDesignTokens.Control.statusIndicatorDiameter
-                )
-                .accessibilityHidden(true)
-            if !compact {
-                Text(statusText)
-                    .font(SpeechRailDesignTokens.Typography.workspaceContext)
-                    .foregroundStyle(statusColor)
-            }
-        }
-        .frame(minHeight: SpeechRailDesignTokens.Toolbar.controlHeight)
-        .fixedSize(horizontal: true, vertical: false)
-        .help("服务状态：\(statusText)")
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("服务\(statusText)")
-    }
-
-    private var isUnavailable: Bool {
-        model.service.serviceState == "unavailable" || model.healthMessage != nil
-    }
-
-    private var isControlRestricted: Bool {
-        model.controlPlaneMessage != nil
-    }
-
-    private var statusText: String {
-        if model.serviceOperation?.phase.isActive == true {
-            return "处理中"
-        }
-        if isUnavailable { return "不可用" }
-        if isControlRestricted { return "控制受限" }
-        if model.health?.ready == true { return "已就绪" }
-        return "未就绪"
-    }
-
-    private var statusColor: Color {
-        if model.serviceOperation?.phase.isActive == true {
-            return SpeechRailDesignTokens.Color.attention
-        }
-        if isUnavailable { return SpeechRailDesignTokens.Color.critical }
-        if isControlRestricted { return SpeechRailDesignTokens.Color.attention }
-        if model.health?.ready == true { return SpeechRailDesignTokens.Color.ready }
-        return SpeechRailDesignTokens.Color.attention
     }
 }
 
@@ -667,37 +788,73 @@ public struct ServiceOperationStatusView: View {
     }
 
     public var body: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: operationIcon)
-                .font(SpeechRailDesignTokens.Typography.statusIcon)
-                .foregroundStyle(tone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(operationTitle)
-                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                if operation.phase.isActive {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(SpeechRailDesignTokens.Color.rail)
-                }
-                Text(SpeechRailOperationMessagePresentation.text(operation.message ?? defaultMessage))
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(tone.color)
-                    .lineLimit(2)
-            }
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            if let actionTitle, let action {
-                Button(actionTitle, action: action)
-                    .speechRailButton(.secondary)
-            }
+        ViewThatFits(in: .horizontal) {
+            horizontalLayout
+            verticalLayout
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .speechRailField()
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
             "\(operationTitle)，\(SpeechRailOperationMessagePresentation.text(operation.message ?? defaultMessage))"
         )
+    }
+
+    private var horizontalLayout: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            operationIconView
+            operationCopy
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            operationAction
+        }
+    }
+
+    private var verticalLayout: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                operationIconView
+                operationCopy
+            }
+            operationAction
+        }
+    }
+
+    private var operationIconView: some View {
+        Image(systemName: operationIcon)
+            .font(SpeechRailDesignTokens.Typography.statusIcon)
+            .foregroundStyle(tone.color)
+            .accessibilityHidden(true)
+    }
+
+    private var operationCopy: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(operationTitle)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if operation.phase.isActive {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(SpeechRailDesignTokens.Color.rail)
+            }
+            Text(SpeechRailOperationMessagePresentation.text(operation.message ?? defaultMessage))
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(tone.color)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var operationAction: some View {
+        if let actionTitle, let action {
+            Button(actionTitle, action: action)
+                .speechRailButton(.secondary)
+        }
     }
 
     private var commandTitle: String {
@@ -793,6 +950,8 @@ public struct ServiceOperationCompactStatus: View {
             Text(title)
                 .font(SpeechRailDesignTokens.Typography.secondary)
                 .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
         }
         .foregroundStyle(operation.phase == .failed ? SpeechRailDesignTokens.Color.critical : SpeechRailDesignTokens.Color.inkSecondary)
@@ -846,10 +1005,12 @@ private struct MetricValueView: View {
                 .monospacedDigit()
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
+                .truncationMode(.tail)
             Text(metric.detail)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(1)
+                .truncationMode(.tail)
         }
         .frame(
             minWidth: SpeechRailDesignTokens.Layout.metricMinimumWidth,
@@ -870,18 +1031,22 @@ public struct MetricStrip: View {
     }
 
     public var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(metrics.enumerated()), id: \.element.id) { index, metric in
-                if index > 0 {
-                    Divider()
-                        .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 0) {
+                ForEach(Array(metrics.enumerated()), id: \.element.id) { index, metric in
+                    if index > 0 {
+                        Divider()
+                            .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    }
+                    MetricValueView(metric: metric)
                 }
-                MetricValueView(metric: metric)
             }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+            .speechRailConsoleChassis()
+
+            MetricGrid(metrics: metrics)
         }
-        .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailField()
         .accessibilityElement(children: .contain)
     }
 }
@@ -915,7 +1080,7 @@ public struct MetricGrid: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailField()
+        .speechRailConsoleChassis()
         .accessibilityElement(children: .contain)
     }
 }
@@ -937,80 +1102,122 @@ public struct OperationBar: View {
 
     public var body: some View {
         if let operation {
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Image(systemName: operationIcon(for: operation))
-                    .font(SpeechRailDesignTokens.Typography.statusIcon)
-                    .foregroundStyle(operationTone(for: operation.state).color)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text(operationTitle(for: operation))
-                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        if let phase = operation.phase {
-                            Text("· \(operationPhaseText(phase))")
-                                .font(SpeechRailDesignTokens.Typography.secondary)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        }
-                    }
-                    if let progress = operation.progress,
-                       let completed = progress.completedBytes,
-                       let expected = progress.expectedBytes,
-                       expected > 0
-                    {
-                        let percent = min(1.0, max(0.0, Double(completed) / Double(expected)))
-                        ProgressView(value: percent)
-                            .controlSize(.small)
-                            .tint(SpeechRailDesignTokens.Color.rail)
-                        HStack {
-                            Text("\(ByteCountFormatter.string(fromByteCount: completed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: expected, countStyle: .file))")
-                            Spacer()
-                            Text(String(format: "%.1f%%", percent * 100))
-                        }
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    }
-                    if let progress = operation.progress {
-                        if let artifactKey = progress.artifactKey ?? progress.file {
-                            Text("当前制品：\(artifactKey)")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .lineLimit(1)
-                        }
-                        if let file = progress.file, progress.artifactKey != nil {
-                            Text("当前文件：\(file)")
-                                .font(SpeechRailDesignTokens.Typography.technical)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                .lineLimit(1)
-                        }
-                        if progress.completedBytes == nil || progress.expectedBytes == nil {
-                            Text("字节进度：未提供")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        }
-                    }
-                    if operation.command == .modelPrepare {
-                        Text("速度与预计时间：协议未提供")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    }
-                    if let message = operation.message, !message.isEmpty {
-                        Text(SpeechRailOperationMessagePresentation.text(message))
-                            .font(SpeechRailDesignTokens.Typography.secondary)
-                            .foregroundStyle(operationTone(for: operation.state).color)
-                            .lineLimit(2)
-                    }
-                }
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                if let actionTitle, let action {
-                    Button(actionTitle, action: action)
-                        .speechRailButton(.secondary)
-                }
+            ViewThatFits(in: .horizontal) {
+                horizontalLayout(for: operation)
+                verticalLayout(for: operation)
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
             .speechRailField()
             .accessibilityElement(children: .contain)
             .accessibilityLabel(operationAccessibilityLabel(for: operation))
+        }
+    }
+
+    private func horizontalLayout(for operation: OperationSnapshot) -> some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            operationSummary(for: operation)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            operationAction
+        }
+    }
+
+    private func verticalLayout(for operation: OperationSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            operationSummary(for: operation)
+            operationAction
+        }
+    }
+
+    private func operationSummary(for operation: OperationSnapshot) -> some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Image(systemName: operationIcon(for: operation))
+                .font(SpeechRailDesignTokens.Typography.statusIcon)
+                .foregroundStyle(operationTone(for: operation.state).color)
+                .accessibilityHidden(true)
+            operationDetails(for: operation)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func operationDetails(for operation: OperationSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text(operationTitle(for: operation))
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let phase = operation.phase {
+                    Text("· \(operationPhaseText(phase))")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            if let progress = operation.progress,
+               let completed = progress.completedBytes,
+               let expected = progress.expectedBytes,
+               expected > 0
+            {
+                let percent = min(1.0, max(0.0, Double(completed) / Double(expected)))
+                ProgressView(value: percent)
+                    .controlSize(.small)
+                    .tint(SpeechRailDesignTokens.Color.rail)
+                HStack {
+                    Text("\(ByteCountFormatter.string(fromByteCount: completed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: expected, countStyle: .file))")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text(String(format: "%.1f%%", percent * 100))
+                }
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            if let progress = operation.progress {
+                if let artifactKey = progress.artifactKey ?? progress.file {
+                    Text("当前制品：\(artifactKey)")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if let file = progress.file, progress.artifactKey != nil {
+                    Text("当前文件：\(file)")
+                        .font(SpeechRailDesignTokens.Typography.technical)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                if progress.completedBytes == nil || progress.expectedBytes == nil {
+                    Text("字节进度：未提供")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+            if operation.command == .modelPrepare {
+                Text("速度与预计时间：协议未提供")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            if let message = operation.message, !message.isEmpty {
+                Text(SpeechRailOperationMessagePresentation.text(message))
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(operationTone(for: operation.state).color)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var operationAction: some View {
+        if let actionTitle, let action {
+            Button(actionTitle, action: action)
+                .speechRailButton(.secondary)
         }
     }
 
@@ -1114,29 +1321,40 @@ public struct DeveloperInspector<Content: View>: View {
 
     public var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.sectionSpacing) {
                 Text("开发者详情")
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                content
-                    .labeledContentStyle(SpeechRailInspectorLabeledContentStyle())
-                    .accessibilityElement(children: .contain)
+                    .lineLimit(SpeechRailDesignTokens.Inspector.titleMaximumLines)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.rowSpacing) {
+                    content
+                        .labeledContentStyle(SpeechRailInspectorLabeledContentStyle())
+                        .accessibilityElement(children: .contain)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(SpeechRailDesignTokens.Spacing.md)
+            .frame(
+                width: SpeechRailDesignTokens.Inspector.contentWidth,
+                alignment: .leading
+            )
+            .padding(SpeechRailDesignTokens.Inspector.contentPadding)
+            .fixedSize(horizontal: false, vertical: true)
         }
         .scrollIndicators(.automatic)
+        .scrollBounceBehavior(.basedOnSize)
         .frame(
-            minWidth: SpeechRailDesignTokens.Layout.inspectorMinimumWidth,
-            idealWidth: SpeechRailDesignTokens.Layout.inspectorIdealWidth,
-            maxWidth: SpeechRailDesignTokens.Layout.inspectorMaximumWidth,
-            maxHeight: .infinity,
+            minWidth: SpeechRailDesignTokens.Inspector.width,
+            idealWidth: SpeechRailDesignTokens.Inspector.width,
+            maxWidth: SpeechRailDesignTokens.Inspector.width,
             alignment: .topLeading
         )
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+        .clipped()
         .inspectorColumnWidth(
-            min: SpeechRailDesignTokens.Layout.inspectorMinimumWidth,
-            ideal: SpeechRailDesignTokens.Layout.inspectorIdealWidth,
-            max: SpeechRailDesignTokens.Layout.inspectorMaximumWidth
+            min: SpeechRailDesignTokens.Inspector.width,
+            ideal: SpeechRailDesignTokens.Inspector.width,
+            max: SpeechRailDesignTokens.Inspector.width
         )
         .background(SpeechRailDesignTokens.Surface.inspectorFill)
     }
@@ -1144,21 +1362,22 @@ public struct DeveloperInspector<Content: View>: View {
 
 private struct SpeechRailInspectorLabeledContentStyle: LabeledContentStyle {
     func makeBody(configuration: Configuration) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.labelValueSpacing) {
             configuration.label
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                .lineLimit(SpeechRailDesignTokens.Inspector.titleMaximumLines)
+                .frame(maxWidth: .infinity, alignment: .leading)
             configuration.content
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .lineLimit(2)
+                .lineLimit(SpeechRailDesignTokens.Inspector.valueMaximumLines)
                 .truncationMode(.middle)
-                .multilineTextAlignment(.trailing)
-                .frame(maxWidth: 180, alignment: .trailing)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, SpeechRailDesignTokens.Inspector.rowVerticalPadding)
     }
 }

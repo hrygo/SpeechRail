@@ -1,17 +1,21 @@
 ---
 name: speechrail-zero-setup
 description: >-
-  在全新 Apple Silicon Mac 上安装 SpeechRail 的首装 SOP。仅在用户明确要求完成 SpeechRail
-  从零安装、下载模型并注册本机服务时使用；普通 Python 版本排障、日常升级或远程部署不触发。
+  在全新 Apple Silicon Mac 上完成 SpeechRail 服务首装、模型准备和用户级 LaunchAgent 注册。
+  仅在用户明确要求从零安装时触发；日常运维、版本发布、App 安装或远程部署不触发。
 ---
 
 # SpeechRail 空白 Mac 首装
 
 本流程会安装本机依赖、下载模型、写入用户 app home 并注册用户级 LaunchAgent。诊断默认只读；任何安装入口都必须显式 `--yes`。共享运行边界见 [本机 operator contract](../speechrail-local-deploy/references/operator-contract.md)。
 
+已有实例的启停、切档、回滚和故障排查读 [speechrail-local-deploy](../speechrail-local-deploy/SKILL.md)；
+wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-release/SKILL.md)。
+
 ## 前置条件
 
-- Apple Silicon `arm64`，macOS 14+，Python `>=3.12,<3.13`；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+- 服务首装基线：Apple Silicon `arm64`、macOS `14.0+`、Python `>=3.12,<3.13`；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+- App 控制面基线（仅在同时安装 `SpeechRail.app` 时适用）：`SpeechRailApp` GUI target 为 Apple Silicon `arm64`，最低系统为 macOS `26.0`；App target 不反向约束服务。
 - 预留至少 25 GB 磁盘空间，并可访问项目锁定的下载源。
 - profile 推荐以代码中的 `recommend_profile()` 为内存兜底建议；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。
 - 安装前确认脚本解析到包含 `pyproject.toml` 的项目根目录；不得从未知目录继续执行。

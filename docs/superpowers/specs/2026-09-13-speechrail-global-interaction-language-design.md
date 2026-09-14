@@ -2,8 +2,8 @@
 title: "SpeechRail macOS 26 全局交互语言与设计 Token 重构"
 status: proposed
 audience: "SpeechRail macOS App 产品、设计、开发与验收人员"
-version: "0.1.0"
-date: 2026-09-13
+version: "0.2.0"
+date: 2026-09-14
 ---
 
 # SpeechRail macOS 26 全局交互语言与设计 Token 重构
@@ -15,8 +15,9 @@ date: 2026-09-13
 Design Token 与组件边界，统一所有页面的标题、工具栏、侧栏、按钮、图标、可操作状态和反馈。
 
 采用已确认的方案 A：Native-first global interaction language。标准 macOS 控件保留系统的
-指针、按压、焦点和辅助功能行为；只有自定义的可点击行/卡片才增加明确的交互表面与
-`pointingHand` 语义。视觉语言以 SpeechRail logo 的信号/波形气质为品牌底层，但不再依赖
+按压、焦点和辅助功能行为；所有 enabled 的操作/选择控件在其真实命中区统一提供
+`pointingHand` 语义，静态内容仍保持普通箭头。自定义的可点击行/卡片还必须增加明确的
+交互表面反馈。视觉语言以 SpeechRail logo 的信号/波形气质为品牌底层，但不再依赖
 随意的胶囊、阴影或颜色堆叠表达层级。
 
 本规格只约束 macOS App 的呈现层与交互层，不改变服务协议、模型运行时、XPC 契约或数据模型。
@@ -52,17 +53,17 @@ Design Token 与组件边界，统一所有页面的标题、工具栏、侧栏�
 
 - [Buttons](https://developer.apple.com/design/human-interface-guidelines/buttons)：使用清晰的按钮样式和角色，避免工具栏拥挤；自定义按钮必须有按压态，交互区域满足 macOS 的可用尺寸要求。
 - [Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars)：工具栏承载当前标题、导航和少量高价值动作，动作需要有清晰语义。
-- [Pointing devices](https://developer.apple.com/design/human-interface-guidelines/pointing-devices)：优先系统提供的指针和交互效果，避免无差别给所有区域强制手型指针。
+- [Pointing devices](https://developer.apple.com/design/human-interface-guidelines/pointing-devices)：只在真实可操作命中区提供手型指针，静态文本、状态和空白区域保持普通箭头，避免无差别覆盖整页。
 - [Focus and selection](https://developer.apple.com/design/human-interface-guidelines/focus-and-selection)：选中和键盘焦点是不同状态，二者都必须可识别。
 - [Offering help](https://developer.apple.com/design/human-interface-guidelines/offering-help)：图标按钮提供 tooltip/help 和 VoiceOver label，但不以 tooltip 替代可理解的界面文案。
-- [NSCursor](https://developer.apple.com/documentation/appkit/nscursor)：标准按钮保留系统箭头/控件指针；自定义可点击表面只在其确实代表链接或直接操作时使用 pointing hand。
+- [NSCursor](https://developer.apple.com/documentation/appkit/nscursor)：交互指针必须绑定到真实布局边界；SpeechRail 对所有 enabled 操作/选择控件统一提供 pointing hand，disabled 和静态区域不注册 cursor rect。
 
 具体约束：
 
 - App 只面向 macOS 26，不增加 macOS 14 兼容分支，不为兼容牺牲 macOS 26 特性。
 - 使用原生 `Button`、`Menu`、`NavigationLink`、`ToolbarItem`、`NavigationSplitView` 作为行为基座。
 - Liquid Glass/Material 只用于需要层次的窗口、导航、工具栏和弹出层；内容卡片默认使用结构化填充和边界，不把所有内容包成浮起胶囊。
-- 标准控件不覆盖原生 hover、按压、焦点和光标行为；自定义行为通过共享组件实现，禁止页面自行复制状态逻辑。
+- 标准控件不覆盖原生 hover、按压和焦点行为；共享 cursor modifier 只补充统一的可操作性提示，自定义行为通过共享组件实现，禁止页面自行复制状态逻辑。
 
 ## 4. Token 语言
 
@@ -120,14 +121,11 @@ Light/Dark 使用动态颜色提供者，Increase Contrast 提升文字、边界
 新组件替代现有页面各自拼装的 `WorkspaceTitleView` 视觉逻辑，仍挂载于标准 toolbar principal。
 
 - 不绘制胶囊背景、独立大阴影或装饰性外框；它与工具栏材质自然融合。
-- 采用 `ViewThatFits` 的三级内容优先级：
-  1. 完整：导航 icon + 工作区标题 + context；
-  2. 紧凑：导航 icon + 工作区标题；
-  3. 最小：工作区标题。
-- 工作区标题永远单行；优先保证工作区标题可读，context 在空间不足时先隐藏，最后才对标题做尾部截断。
+- 采用固定的“导航 icon + 工作区标题”单一结构，避免标题变体切换时改变 toolbar 中心几何并挤压右侧操作。
+- 工作区标题永远单行；使用 tokenized 固定槽位、尾部截断、适度缩放和 tightening，context 在视觉上不进入标题槽位。
 - 服务状态不挤入中心标题。它作为独立的、带文字的状态组件放在工具栏的辅助区域；空间不足时只保留
   状态 icon + accessibility label，不能把状态 chip 强行塞进标题。
-- 标题有明确的最大宽度 token，不能通过 `layoutPriority` 无限抢占左右 toolbar item 的空间。
+- 标题有明确的固定宽度 token，不使用 `layoutPriority` 抢占左右 toolbar item 的空间；context 与服务状态只作为辅助功能语义提供。
 - 长名称、中文、英文、混合字符和 VoiceOver label 都需要单行和截断语义验证。
 
 ### 5.2 Toolbar 与动作入口
@@ -138,7 +136,7 @@ Light/Dark 使用动态颜色提供者，Increase Contrast 提升文字、边界
   进入语义明确的 `Menu`，菜单项用动词开头，并按主次和破坏性排序。
 - 图标按钮必须有 `.help(...)`、accessibility label 和 44pt 命中区；如果图标不能让普通用户理解，
   使用文字按钮或文字+图标，而不是增加 tooltip 依赖。
-- 标准 `Button`/`Menu` 保留系统箭头和按压反馈，不用全局 pointing hand 伪装成网页链接。
+- 标准 `Button`/`Menu` 保留系统按压、焦点和辅助功能反馈；enabled 实例使用真实控件边界显示 pointing hand，不把静态内容或整页伪装成网页链接。
 
 ### 5.3 Navigation 与菜单 icon
 
@@ -170,13 +168,13 @@ Light/Dark 使用动态颜色提供者，Increase Contrast 提升文字、边界
 
 | 对象 | 光标 | hover | pressed | focus |
 | --- | --- | --- | --- | --- |
-| 原生 Button/Menu/NavigationLink | 系统默认 | 系统默认 | 系统默认 | 系统默认/共享 focus ring |
+| 原生 Button/Menu/NavigationLink | enabled 命中区 pointing hand；disabled 系统默认 | 系统默认 | 系统默认 | 系统默认/共享 focus ring |
 | 自定义可点击行/卡片 | `pointingHand` | 轻微表面高亮或边界增强 | 轻微缩放/填充变化，约 `0.985` | 明确的 `FocusRing` |
 | 静态文本/卡片/指标 | 系统 arrow | 无 | 无 | 不可聚焦 |
 | disabled 控件 | 系统默认 disabled 行为 | 无交互高亮 | 无 | 保留可解释的辅助功能状态 |
 | loading 控件 | 保留可取消时的语义，否则 disabled | 不暗示可重复点击 | 显示进度而非重复触发 | label 说明进行中 |
 
-- 标准控件不覆盖 AppKit 的系统指针；只在 custom surface 建立 cursor rect 时使用 pointing hand。
+- cursor rect 只覆盖真实的 enabled 控件边界；标准控件和 custom surface 都可通过共享 modifier 提供 pointing hand，静态区域不注册 cursor rect。
 - hover 不能是唯一可用线索；文字、icon、命中区域和 accessibility 语义必须本身清楚。
 - 按压反馈应即时且克制，避免弹跳、强烈缩放和与操作无关的动画。
 - `Motion.standardDuration`、`pressedScale` 和 `selectionFeedback` 统一从 `Interaction`/`Motion` token

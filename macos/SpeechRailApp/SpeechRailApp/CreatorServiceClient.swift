@@ -1,5 +1,12 @@
 import Foundation
 
+enum SpeechRailCreatorLimits {
+    static let speechTextMaximumLength = 4_096
+    static let voiceInstructionMaximumLength = 10_000
+    static let referenceTextMinimumLength = 20
+    static let referenceTextMaximumLength = 240
+}
+
 public struct CreatorVoiceCapabilities: Codable, Equatable, Sendable {
     public let supportsSpeaker: Bool
     public let supportsInstruction: Bool
@@ -116,6 +123,7 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
 
 public protocol SpeechRailCreatorClient: Sendable {
     func fetchVoices() async throws -> [CreatorVoice]
+    func fetchVoice(id: String) async throws -> CreatorVoice
     func createSpeech(text: String, voiceID: String, speed: Double) async throws -> Data
     func createVoicePreview(
         text: String,
@@ -141,6 +149,10 @@ public protocol SpeechRailCreatorClient: Sendable {
 
 struct UnavailableCreatorClient: SpeechRailCreatorClient {
     func fetchVoices() async throws -> [CreatorVoice] {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    func fetchVoice(id: String) async throws -> CreatorVoice {
         throw ServiceAPIClientError.requestFailed
     }
 

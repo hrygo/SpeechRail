@@ -81,6 +81,7 @@ SF Symbols，统一光学尺寸、渲染模式和状态颜色；不再混用过�
 4. 系统选中态、键盘焦点、VoiceOver label/value 和动态字号必须共同表达状态。
 5. 窗口在 `1120 × 720` 最小尺寸下仍保持标题、结论、主要动作和诊断主体可用。
 6. 不为 macOS 14 保留 UI 兼容分支；App 继续以 macOS 26 为唯一视觉和交互目标。
+7. 开发者详情折叠区使用统一的 `SpeechRailDisclosureGroupStyle`，整行均可展开，箭头和展开状态保持一致。
 
 ## 4. 全局顶部标题系统
 
@@ -96,11 +97,13 @@ SF Symbols，统一光学尺寸、渲染模式和状态颜色；不再混用过�
 标题组件必须满足：
 
 - 以页面标题为第一视觉锚点，不再只渲染一个孤立的小文本；
+- 使用固定的 `Toolbar.titleMaximumWidth × Toolbar.titleHeight` 标题槽位，路由切换时保持中心位置稳定；
 - icon 仅作为导航定位和品牌信号，不与状态 icon 争夺权重；
 - 服务页可显示“已就绪 / 未就绪 / 需要处理”状态 chip，创作页不显示运维状态 chip；
 - 状态 chip 使用文字、图形和自适应颜色；
 - 标题具有稳定的 `workspace-title` accessibility identifier，label 是当前页面的完整标题；
 - 页面切换时标题与 detail 同步更新，不依赖旧 toolbar 节点复用；
+- 标题保持单行，过长时尾部截断并允许最小缩放，不得换行或挤压右侧操作；
 - 不在正文再复制一个相同的大标题。
 
 ### 4.2 页面标题语义
@@ -152,7 +155,7 @@ SF Symbols，统一光学尺寸、渲染模式和状态颜色；不再混用过�
 
 ### 5.2 结论区
 
-结论区高度控制在 `diagnosticsSummaryHeight` 内，包含：
+结论区以 `diagnosticsSummaryHeight` 作为默认最小高度，用户影响说明最多显示两行，内容在动态字体、长状态文案或错误恢复提示出现时可以自然增高，包含：
 
 - 状态 icon 与文字结论，例如“预检通过”“需要处理”“检查失败”；
 - 通过数量、失败数量和最近检查时间等紧凑摘要；
@@ -257,7 +260,7 @@ token。现有页面仍可使用经过审查的兼容 alias，但新代码不得
 
 | Token | 值 | 用途 |
 |---|---:|---|
-| `Layout.diagnosticsSummaryHeight` | 84 | 顶部结论区 |
+| `Layout.diagnosticsSummaryHeight` | 84 | 顶部结论区默认最小高度（不得作为硬性最大高度） |
 | `Layout.diagnosticsListWidth` | 320 | 双列检查清单区 |
 | `Layout.diagnosticsDetailMinimumWidth` | 460 | 详情区最低可读宽度 |
 | `Layout.diagnosticsRowHeight` | 44 | 检查项行高 |
@@ -325,4 +328,3 @@ UI 测试应优先使用稳定 accessibility identifier 和 `label CONTAINS` 语
 - 不在旧版本 App 尚未卸载前安装新版 App；
 - 本设计通过 UI、代码门和 App 测试后，才恢复发布流程；服务运行时替换仍需等待现有 realtime
   session 清零，不能为发布擅自中断 Sona。
-

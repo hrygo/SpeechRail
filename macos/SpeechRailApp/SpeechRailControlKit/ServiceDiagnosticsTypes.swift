@@ -56,6 +56,30 @@ public struct RealtimeVADStatusSnapshot: Codable, Equatable, Sendable {
     }
 }
 
+/// Runtime-only TTS lane evidence exposed by ``GET /health``.
+///
+/// The aggregate ``tts_ready``/``tts_state`` fields describe the TTS router,
+/// not each capability worker.  Keeping the lane-level warm evidence separate
+/// prevents the model page from presenting the primary VoiceDesign worker's
+/// state as proof that the Quality clone worker is resident.
+public struct TTSCapabilityLifecycleSnapshot: Codable, Equatable, Sendable {
+    public let warmCapability: String?
+    public let warmCapabilities: [String]?
+
+    public init(
+        warmCapability: String? = nil,
+        warmCapabilities: [String]? = nil
+    ) {
+        self.warmCapability = warmCapability
+        self.warmCapabilities = warmCapabilities
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case warmCapability = "warm_capability"
+        case warmCapabilities = "warm_capabilities"
+    }
+}
+
 public struct HealthSnapshot: Codable, Equatable, Sendable {
     public let status: String?
     public let service: String?
@@ -69,6 +93,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
     public let diarization: DiarizationStatusSnapshot?
     public let asrState: String?
     public let ttsState: String?
+    public let ttsLifecycle: TTSCapabilityLifecycleSnapshot?
     public let streamingState: String?
     public let realtimeVAD: RealtimeVADStatusSnapshot?
     public let ready: Bool?
@@ -87,6 +112,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         diarization: DiarizationStatusSnapshot? = nil,
         asrState: String? = nil,
         ttsState: String? = nil,
+        ttsLifecycle: TTSCapabilityLifecycleSnapshot? = nil,
         streamingState: String? = nil,
         realtimeVAD: RealtimeVADStatusSnapshot? = nil,
         ready: Bool? = nil,
@@ -104,6 +130,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         self.diarization = diarization
         self.asrState = asrState
         self.ttsState = ttsState
+        self.ttsLifecycle = ttsLifecycle
         self.streamingState = streamingState
         self.realtimeVAD = realtimeVAD
         self.ready = ready
@@ -123,6 +150,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         case diarization
         case asrState = "asr_state"
         case ttsState = "tts_state"
+        case ttsLifecycle = "tts_lifecycle"
         case streamingState = "streaming_state"
         case realtimeVAD = "realtime_vad"
         case ready

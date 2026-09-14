@@ -22,15 +22,28 @@ public struct RuntimeMonitoringView: View {
                     .transition(.opacity)
             }
             metricStrip
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                capabilityPanel
-                    .frame(
-                        minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
-                        maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
-                        alignment: .topLeading
-                    )
-                chartPanel
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    capabilityPanel
+                        .frame(
+                            minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
+                            maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
+                            alignment: .topLeading
+                        )
+                    chartPanel
+                        .frame(
+                            minWidth: SpeechRailDesignTokens.Layout.monitoringChartMinimumWidth,
+                            maxWidth: .infinity,
+                            alignment: .topLeading
+                        )
+                }
+
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    capabilityPanel
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    chartPanel
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
             }
             resourcePanel
         }
@@ -41,14 +54,16 @@ public struct RuntimeMonitoringView: View {
                         Task { await model.refreshMonitoring() }
                     } label: {
                         Label("刷新监控", systemImage: "arrow.clockwise")
+                            .speechRailMenuRow()
                     }
                     .disabled(model.isRefreshingMonitoring)
                     Button {
                         copyMonitoringReport()
                     } label: {
                         Label("复制监控摘要", systemImage: "doc.on.clipboard")
+                            .speechRailMenuRow()
                     }
-                    .disabled(model.health == nil && model.metrics == nil)
+                    .disabled(displayedHealth == nil && model.metrics == nil)
                     Divider()
                     Button {
                         showInspector.toggle()
@@ -57,6 +72,7 @@ public struct RuntimeMonitoringView: View {
                             showInspector ? "隐藏开发者详情" : "显示开发者详情",
                             systemImage: "info.circle"
                         )
+                        .speechRailMenuRow()
                     }
                 }
             }
@@ -79,6 +95,13 @@ public struct RuntimeMonitoringView: View {
 
     private var latestSample: RuntimeMetricsSample? {
         model.monitoringSamples.last
+    }
+
+    /// A cached health snapshot is useful for comparison, but it must not be
+    /// presented as current runtime truth after the latest health read fails.
+    private var displayedHealth: HealthSnapshot? {
+        guard model.healthFailure == nil else { return nil }
+        return model.health
     }
 
     private var chartPoints: [RuntimeMonitoringChartPoint] {
@@ -132,37 +155,9 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var monitoringSummary: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-            Image(systemName: monitoringTone.systemImage)
-                .font(SpeechRailDesignTokens.Typography.statusGlyph)
-                .foregroundStyle(monitoringTone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(monitoringTitle)
-                    .font(SpeechRailDesignTokens.Typography.diagnosticsSummary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(monitoringMessage)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-                Text(serviceIdentity)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Label(freshnessTitle, systemImage: freshnessTone.systemImage)
-                    .font(SpeechRailDesignTokens.Typography.label)
-                    .foregroundStyle(freshnessTone.color)
-                Text("\(model.monitoringSamples.count)/60 个样本")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Text(latestSample.map { "最近样本 · \(relativeTime($0.capturedAt))" } ?? "等待样本")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-            }
+        ViewThatFits(in: .horizontal) {
+            monitoringSummaryHorizontal
+            monitoringSummaryVertical
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.lg)
         .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight)
@@ -173,6 +168,70 @@ public struct RuntimeMonitoringView: View {
             [monitoringMessage, serviceIdentity, freshnessTitle, lastMetricsRefreshText]
                 .joined(separator: "，")
         )
+    }
+
+    private var monitoringSummaryHorizontal: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+            monitoringSummaryIcon
+            monitoringSummaryCopy
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            monitoringFreshness(alignment: .trailing)
+        }
+    }
+
+    private var monitoringSummaryVertical: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                monitoringSummaryIcon
+                monitoringSummaryCopy
+            }
+            monitoringFreshness(alignment: .leading)
+        }
+    }
+
+    private var monitoringSummaryIcon: some View {
+        Image(systemName: monitoringTone.systemImage)
+            .font(SpeechRailDesignTokens.Typography.statusGlyph)
+            .foregroundStyle(monitoringTone.color)
+            .accessibilityHidden(true)
+    }
+
+    private var monitoringSummaryCopy: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text(monitoringTitle)
+                .font(SpeechRailDesignTokens.Typography.diagnosticsSummary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Text(monitoringMessage)
+                .font(SpeechRailDesignTokens.Typography.body)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(serviceIdentity)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func monitoringFreshness(alignment: HorizontalAlignment) -> some View {
+        VStack(alignment: alignment, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Label(freshnessTitle, systemImage: freshnessTone.systemImage)
+                .font(SpeechRailDesignTokens.Typography.label)
+                .foregroundStyle(freshnessTone.color)
+            Text("\(model.monitoringSamples.count)/60 个样本")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Text(latestSample.map { "最近样本 · \(relativeTime($0.capturedAt))" } ?? "等待样本")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: alignment == .trailing ? .trailing : .leading)
     }
 
     private var capabilityPanel: some View {
@@ -186,27 +245,27 @@ public struct RuntimeMonitoringView: View {
             VStack(spacing: 0) {
                 MonitoringCapabilityRow(
                     title: "语音转文字",
-                    detail: model.health?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                    ready: model.health?.asrReady
+                    detail: displayedHealth?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    ready: displayedHealth?.asrReady
                 )
                 Divider()
                 MonitoringCapabilityRow(
                     title: "文字转语音",
-                    detail: model.health?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                    ready: model.health?.ttsReady
+                    detail: displayedHealth?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    ready: displayedHealth?.ttsReady
                 )
                 Divider()
                 MonitoringCapabilityRow(
                     title: "实时语音",
-                    detail: model.health?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                    ready: model.health?.realtimeVAD?.ready
+                    detail: displayedHealth?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
+                    ready: displayedHealth?.realtimeVAD?.ready
                 )
                 Divider()
                 MonitoringCapabilityRow(
                     title: "分人识别",
-                    detail: model.health?.diarization.map(SpeechRailDiarizationPresentation.text)
+                    detail: displayedHealth?.diarization.map(SpeechRailDiarizationPresentation.text)
                         ?? "按当前档位启用",
-                    ready: model.health?.diarizationReady
+                    ready: displayedHealth?.diarizationReady
                 )
             }
 
@@ -225,7 +284,7 @@ public struct RuntimeMonitoringView: View {
 
     private var sectionDivider: some View {
         Divider()
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.List.sectionSpacing)
     }
 
     private var runtimeComponentsSection: some View {
@@ -248,7 +307,7 @@ public struct RuntimeMonitoringView: View {
                 Label("暂无 worker 生命周期数据", systemImage: "hourglass")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .frame(minHeight: SpeechRailDesignTokens.Layout.monitoringWorkerRowHeight)
+                    .frame(minHeight: SpeechRailDesignTokens.List.compactRowHeight)
             }
         }
     }
@@ -337,11 +396,15 @@ public struct RuntimeMonitoringView: View {
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.label)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(2)
+                    .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             Text(value)
                 .font(SpeechRailDesignTokens.Typography.technical)
@@ -349,9 +412,13 @@ public struct RuntimeMonitoringView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(minWidth: 84, maxWidth: 110, alignment: .trailing)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.List.numericValueMinimumWidth,
+                    maxWidth: SpeechRailDesignTokens.List.numericValueMaximumWidth,
+                    alignment: .trailing
+                )
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue("\(value)，\(detail)")
@@ -363,20 +430,21 @@ public struct RuntimeMonitoringView: View {
 
     private var chartPanel: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            HStack(alignment: .firstTextBaseline) {
-                SectionHeading(
-                    title: "资源脉冲",
-                    detail: "每 5 秒采样一次活跃请求；趋势只展示当前 App 会话内的数据。"
-                )
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                Text(latestSample == nil ? "等待首个样本" : "自动刷新 · 5 秒")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline) {
+                    chartHeading
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                    chartRefreshStatus
+                }
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    chartHeading
+                    chartRefreshStatus
+                }
             }
             if !RuntimeMonitoringChartDescriptor.isSufficient(chartPoints) {
                 ContentUnavailableView(
                     "等待监控样本",
-                systemImage: AppRoute.monitoring.systemImage,
+                    systemImage: AppRoute.monitoring.systemImage,
                     description: Text("打开此页面后读取本机服务 metrics，至少需要两个样本才绘制趋势。")
                 )
                 .frame(
@@ -389,13 +457,13 @@ public struct RuntimeMonitoringView: View {
                         x: .value("时间", sample.capturedAt),
                         y: .value("活跃请求", sample.activeRequests)
                     )
-                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .foregroundStyle(SpeechRailDesignTokens.SteelRail.railheadGleam)
                     .interpolationMethod(.catmullRom)
                     PointMark(
                         x: .value("时间", sample.capturedAt),
                         y: .value("活跃请求", sample.activeRequests)
                     )
-                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .foregroundStyle(SpeechRailDesignTokens.SteelRail.railheadGleam)
                 }
                 .frame(height: SpeechRailDesignTokens.Layout.monitoringChartHeight)
                 .chartYAxisLabel("请求数")
@@ -412,7 +480,22 @@ public struct RuntimeMonitoringView: View {
             }
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        .speechRailConsoleChassis()
+    }
+
+    private var chartHeading: some View {
+        SectionHeading(
+            title: "资源脉冲",
+            detail: "每 5 秒采样一次活跃请求；趋势只展示当前 App 会话内的数据。"
+        )
+    }
+
+    private var chartRefreshStatus: some View {
+        Text(latestSample == nil ? "等待首个样本" : "自动刷新 · 5 秒")
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
     }
 
     @ViewBuilder
@@ -446,8 +529,7 @@ public struct RuntimeMonitoringView: View {
             }
             if let resources = latestResources {
                 Divider()
-                Text("资源与准入")
-                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                SectionHeading(title: "资源与准入")
                 detailRow("主机物理内存", resources.physicalMemoryBytes.map(formatBytes) ?? "未提供")
                 detailRow("服务内存预算", resources.memoryBudgetBytes.map(formatBytes) ?? "未提供")
                 detailRow(
@@ -476,18 +558,19 @@ public struct RuntimeMonitoringView: View {
             }
             if !(model.metrics?.workers.isEmpty ?? true) {
                 Divider()
-                Text("Worker")
-                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                SectionHeading(title: "Worker")
                 ForEach(model.metrics?.workers.keys.sorted() ?? [], id: \.self) { key in
                     detailRow(key, model.metrics?.workers[key] ?? "未知")
                 }
             }
-            if let health = model.health {
+            if let health = displayedHealth {
                 Divider()
-                Text("能力状态")
-                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                SectionHeading(title: "能力状态")
                 detailRow("ASR", health.asrReady == true ? "ready" : "not ready")
                 detailRow("TTS", health.ttsReady == true ? "ready" : "not ready")
+                if let lifecycle = health.ttsLifecycle {
+                    detailRow("TTS 常驻能力", ttsWarmCapabilitiesText(lifecycle))
+                }
                 detailRow("Realtime", health.realtimeVAD?.ready == true ? "ready" : "not ready")
             }
         }
@@ -499,6 +582,17 @@ public struct RuntimeMonitoringView: View {
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
+    }
+
+    private func ttsWarmCapabilitiesText(
+        _ lifecycle: TTSCapabilityLifecycleSnapshot
+    ) -> String {
+        if let warmCapabilities = lifecycle.warmCapabilities {
+            return warmCapabilities.isEmpty
+                ? "无（按请求加载）"
+                : warmCapabilities.joined(separator: "、")
+        }
+        return lifecycle.warmCapability ?? "未公开"
     }
 
     private func formatCount(_ value: Double) -> String {
@@ -534,10 +628,9 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var serviceIdentity: String {
-        let profile = model.health?.profile.map { SpeechRailProfilePresentation.title($0) }
-            ?? model.profile?.preset.map { SpeechRailProfilePresentation.title($0) }
+        let profile = displayedHealth?.profile.map { SpeechRailProfilePresentation.title($0) }
             ?? "档位未读取"
-        let version = model.health?.version ?? "版本未读取"
+        let version = displayedHealth?.version ?? "版本未读取"
         return profile + " · " + version
     }
 
@@ -588,9 +681,9 @@ public struct RuntimeMonitoringView: View {
         SpeechRail 脱敏监控摘要
         generated_at: \(formatter.string(from: Date()))
         service_state: \(model.service.serviceState)
-        profile: \(model.health?.profile?.rawValue ?? model.profile?.preset?.rawValue ?? "未读取")
-        version: \(model.health?.version ?? "未读取")
-        health_ready: \(model.health?.ready.map { $0 ? "true" : "false" } ?? "未读取")
+        profile: \(displayedHealth?.profile?.rawValue ?? "未读取")
+        version: \(displayedHealth?.version ?? "未读取")
+        health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
         metrics_updated_at: \(model.lastMetricsRefresh.map { formatter.string(from: $0) } ?? "未读取")
         sample_count: \(model.monitoringSamples.count)/60
         freshness: \(freshnessTitle)
@@ -634,23 +727,24 @@ public struct RuntimeMonitoringView: View {
                 .foregroundStyle(workerTone(for: state).color)
                 .imageScale(.small)
                 .accessibilityHidden(true)
-                .frame(width: SpeechRailDesignTokens.Icon.navigationFrame, alignment: .leading)
+                .frame(width: SpeechRailDesignTokens.List.rowIconFrame, alignment: .leading)
             Text(workerTitle(for: key))
                 .font(SpeechRailDesignTokens.Typography.label)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             Text(workerStateText(for: state))
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(workerTone(for: state).color)
                 .lineLimit(1)
                 .frame(
-                    minWidth: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
+                    width: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
                     alignment: .trailing
                 )
         }
-        .frame(minHeight: SpeechRailDesignTokens.Layout.monitoringWorkerRowHeight)
+        .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.List.compactRowHeight)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(workerTitle(for: key))
         .accessibilityValue(workerStateText(for: state))
@@ -700,7 +794,7 @@ public struct RuntimeMonitoringView: View {
         if model.metricsMessage != nil || model.metrics == nil || model.monitoringMessage != nil {
             return .attention
         }
-        if model.health?.ready == false || model.health == nil || model.metrics == nil {
+        if displayedHealth?.ready == false || displayedHealth == nil {
             return .attention
         }
         return .healthy
@@ -753,29 +847,31 @@ private struct MonitoringCapabilityRow: View {
                 .foregroundStyle(statusColor)
                 .imageScale(.medium)
                 .accessibilityHidden(true)
-                .frame(width: SpeechRailDesignTokens.Icon.navigationFrame, alignment: .leading)
+                .frame(width: SpeechRailDesignTokens.List.rowIconFrame, alignment: .leading)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.label)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             Text(statusText)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(statusColor)
                 .lineLimit(1)
                 .frame(
-                    minWidth: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
+                    width: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
                     alignment: .trailing
                 )
         }
-        .frame(minHeight: SpeechRailDesignTokens.Layout.monitoringCapabilityRowHeight)
+        .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.List.tallRowHeight)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue("\(statusText)，\(detail)")

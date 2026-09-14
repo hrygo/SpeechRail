@@ -36,6 +36,7 @@ public protocol ServiceDiagnosticsClient: Sendable {
 }
 
 public final class ServiceAPIClient: @unchecked Sendable {
+    private static let longRunningRequestTimeout: TimeInterval = 180
     private let baseURL: URL
     private let session: URLSession
     private let apiKey: String?
@@ -91,6 +92,13 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return response.data
     }
 
+    public func fetchVoice(id: String) async throws -> CreatorVoice {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await get(path: "/v1/voices/\(id)")
+    }
+
     public func createSpeech(
         text: String,
         voiceID: String,
@@ -103,7 +111,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 voice: voiceID,
                 speed: speed
             ),
-            acceptedContentType: "audio/"
+            acceptedContentType: "audio/wav"
         )
     }
 
@@ -121,7 +129,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 seed: seed,
                 speed: speed
             ),
-            acceptedContentType: "audio/"
+            acceptedContentType: "audio/wav"
         )
     }
 
@@ -202,6 +210,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
             method: "POST",
             accept: "application/json"
         )
+        request.timeoutInterval = Self.longRunningRequestTimeout
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, _) = try await execute(request)
@@ -218,6 +227,7 @@ public final class ServiceAPIClient: @unchecked Sendable {
         acceptedContentType: String
     ) async throws -> Data {
         var request = try makeRequest(path: path, method: "POST", accept: acceptedContentType)
+        request.timeoutInterval = Self.longRunningRequestTimeout
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let (data, response) = try await execute(request)
@@ -262,6 +272,11 @@ public final class ServiceAPIClient: @unchecked Sendable {
         } catch let error as ServiceAPIClientError {
             throw error
         } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            // URLSession commonly reports Task cancellation as
+            // URLError.cancelled. Preserve the cancellation boundary so
+            // preview/synthesis callers do not show a false connection error.
             throw CancellationError()
         } catch let error as URLError where error.code == .timedOut {
             throw ServiceAPIClientError.requestTimedOut

@@ -6,6 +6,7 @@
 
 - 本文件适用于仓库根目录。`native/diarization/.build/checkouts/FluidAudio/AGENTS.md` 仅约束该第三方 checkout，不把它的内容当作 SpeechRail 规则，也不要在无明确授权时修改生成的 checkout。
 - 用户的当前请求决定写入范围。回答、解释、审查和诊断默认只读；修改、构建、部署、发布、发送消息、下载模型或改变运行态不因“顺手验证”而自动获得授权。
+- 自动化验收必须有明确授权：除非当前用户明确要求，或更高优先级指令强制要求，不运行自动化测试、UI test、smoke、benchmark、完整 gate 或其他替用户判断结果的验收命令。构建、安装和部署任务只执行完成动作所必需的最小命令，其余验收留给用户并报告未执行项。
 - 只修改完成任务必需的文件，保留未提交改动和并行改动；遇到同文件无法安全分离的改动先报告。
 
 ## 事实来源
@@ -80,7 +81,7 @@ uv run speechrail serve
 
 没有真实 backend 时服务可以启动，推理入口应返回 `503 backend_not_ready`；确定性测试使用 fake backend，不下载模型、不访问云端、不使用真实音频。
 
-代码、测试、契约或跨模块变更完成后执行完整 gate：
+仅在用户明确要求自动化验收，或更高优先级指令强制要求时，代码、测试、契约或跨模块变更完成后执行完整 gate：
 
 ```bash
 uv run --extra dev pytest
@@ -101,7 +102,7 @@ curl http://127.0.0.1:8201/v1/models
 curl http://127.0.0.1:8201/v1/voices
 ```
 
-macOS 控制面变更补充运行 `scripts/macos_app_build.sh --configuration Debug`、`scripts/macos_app_test.sh` 和对应的 `plutil` 检查。健康端点通过后，只有在本机已有外部 runtime 且任务明确授权运行态操作时，才使用非敏感短音频完成公共 ASR/TTS smoke；性能/质量测试遵循 `.agents/skills/speechrail-perf-benchmark/SKILL.md`，发布遵循 `.agents/skills/speechrail-release/SKILL.md`。
+仅在用户明确要求自动化验收，或更高优先级指令强制要求时，macOS 控制面变更补充运行 `scripts/macos_app_build.sh --configuration Debug`、`scripts/macos_app_test.sh` 和对应的 `plutil` 检查。健康端点通过后，只有在本机已有外部 runtime 且任务明确授权运行态操作时，才使用非敏感短音频完成公共 ASR/TTS smoke；性能/质量测试遵循 `.agents/skills/speechrail-perf-benchmark/SKILL.md`，发布遵循 `.agents/skills/speechrail-release/SKILL.md`。
 
 ## 服务、档位与发布操作
 

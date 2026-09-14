@@ -20,8 +20,11 @@ final class SpeechRailAppUITests: XCTestCase {
             workspaceTitle.label.contains("音色创作"),
             "workspace-title label was: \(workspaceTitle.label)"
         )
-        XCTAssertTrue(app.menuButtons["操作"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["刷新状态"].exists)
+        let actionsMenu = app.menuButtons["更多操作"]
+        XCTAssertTrue(actionsMenu.waitForExistence(timeout: 5))
+        actionsMenu.click()
+        XCTAssertTrue(app.menuItems["刷新服务状态"].waitForExistence(timeout: 2))
+        app.typeKey(.escape, modifierFlags: [])
 
         app.buttons["模型"].click()
         let modelsTitle = app.descendants(matching: .any)["workspace-title"]
@@ -69,9 +72,6 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(downloadButton.waitForExistence(timeout: 5))
         downloadButton.tap()
 
-        XCTAssertTrue(
-            app.staticTexts["确认下载并校验 quality 档位模型？"].waitForExistence(timeout: 2)
-        )
         let dialog = app.windows["SpeechRail 管理控制台"].sheets.firstMatch
         XCTAssertTrue(dialog.buttons["取消"].waitForExistence(timeout: 2))
         dialog.buttons["取消"].tap()
@@ -91,7 +91,7 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
         app.buttons["模型"].tap()
 
-        XCTAssertTrue(app.staticTexts["上次准备被中断"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["上次模型准备被中断"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新下载并校验"].exists)
         XCTAssertFalse(app.buttons["停止下载"].exists)
     }
@@ -126,39 +126,64 @@ final class SpeechRailAppUITests: XCTestCase {
         app.buttons["音色创作"].click()
 
         XCTAssertTrue(app.staticTexts["从一句话开始"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["声学特征胶囊 (点击插入)"].exists)
+        XCTAssertTrue(app.staticTexts["快速加入声学特征"].exists)
         XCTAssertTrue(app.buttons["插入声学特征：磁性胸腔"].exists)
         app.buttons["插入声学特征：磁性胸腔"].click()
 
-        XCTAssertTrue(app.staticTexts["候选试听机架 (A/B/C/D 候选池)"].exists)
-        XCTAssertTrue(app.staticTexts["A"].exists)
-        XCTAssertTrue(app.staticTexts["B"].exists)
-        XCTAssertTrue(app.buttons["A 槽位试听：播放"].exists)
+        XCTAssertTrue(app.staticTexts["候选试听"].exists)
+        let generateButton = app.buttons["生成候选音色"]
+        XCTAssertTrue(generateButton.waitForExistence(timeout: 2))
+        generateButton.click()
+        XCTAssertTrue(app.buttons["A 槽位试听：播放"].waitForExistence(timeout: 5))
         app.buttons["A 槽位试听：播放"].click()
         XCTAssertTrue(app.buttons["A 槽位试听：暂停"].waitForExistence(timeout: 2))
     }
 
-    func testWorksViewExposesFullPromptAndPrivacyDecoupledInspector() {
+    func testVoiceLibraryCanCancelAnInFlightPreview() {
+        let app = launchSpeechRail(
+            arguments: [
+                "--ui-test",
+                "--ui-test-open-control-center",
+                "--ui-test-slow-voice-preview",
+            ]
+        )
+        openControlCenter(in: app)
+        app.buttons["音色库"].click()
+
+        XCTAssertTrue(app.staticTexts["系统音色与创作资产"].waitForExistence(timeout: 5))
+        let previewButton = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "试听")
+        ).firstMatch
+        XCTAssertTrue(previewButton.waitForExistence(timeout: 5))
+        previewButton.click()
+
+        let cancelButton = app.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "取消试听")
+        ).firstMatch
+        XCTAssertTrue(cancelButton.waitForExistence(timeout: 2))
+        cancelButton.click()
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "试听"))
+                .firstMatch
+                .waitForExistence(timeout: 2)
+        )
+    }
+
+    func testWorksViewExposesEmptyStateAndSafeActions() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
         app.buttons["我的作品"].click()
 
         XCTAssertTrue(app.staticTexts["创作历史与文稿回溯"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["《流浪地球》旁白选段"].exists)
-        XCTAssertTrue(app.staticTexts["起初，没有人在意这一场灾难。这不过是一场山火，一次旱灾，一个物种的灭绝，一座城市的消失。直到这场灾难和每个人息息相关。"].exists)
+        XCTAssertTrue(app.staticTexts["还没有作品"].exists)
+        XCTAssertTrue(app.buttons["去配音台"].exists)
 
         let window = app.windows["SpeechRail 管理控制台"]
-        let actionMenu = window.menuButtons["操作"].firstMatch
+        let actionMenu = window.menuButtons["更多操作"].firstMatch
         XCTAssertTrue(actionMenu.waitForExistence(timeout: 5))
         actionMenu.click()
-        let auditItem = app.menuItems["显示技术审计"].firstMatch
-        XCTAssertTrue(auditItem.waitForExistence(timeout: 3))
-        auditItem.click()
-        XCTAssertTrue(app.staticTexts["开发者审计 (隐私脱敏)"].waitForExistence(timeout: 3))
-        XCTAssertTrue(app.staticTexts["请求 ID"].exists)
-        XCTAssertTrue(app.staticTexts["req_7f2b918a"].exists)
-        XCTAssertTrue(app.staticTexts["分人标识"].exists)
-        XCTAssertTrue(app.staticTexts["speaker_0"].exists)
+        XCTAssertTrue(app.menuItems["导出选中作品"].waitForExistence(timeout: 3))
+        app.typeKey(.escape, modifierFlags: [])
     }
 
     private func launchSpeechRail(arguments: [String] = ["--ui-test", "--ui-test-open-control-center"]) -> XCUIApplication {

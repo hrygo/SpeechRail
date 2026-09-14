@@ -2,13 +2,13 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.5.0"
-date: 2026-09-13
+version: "0.7.0"
+date: 2026-09-14
 ---
 
 # SpeechRail macOS App 设计系统与 Token
 
-## 1. 研究基线（2026-09-13）
+## 1. 研究基线与 Logo 设计基因
 
 本设计系统以 Apple 官方 macOS 26 / Xcode 26 资料为基线。`SpeechRailApp` GUI target
 明确以 macOS 26.0 为最低版本，不为 App UI 编写 macOS 14 的兼容 fallback；服务协议、
@@ -21,6 +21,33 @@ ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否�
 - `NavigationSplitView` 适合 SpeechRail 的多根类别导航；`MenuBarExtra` 适合常用状态和动作；`Settings` 由系统负责从 App 菜单和 `Command-,` 打开。[NavigationSplitView](https://developer.apple.com/documentation/swiftui/navigationsplitview)、[MenuBarExtra](https://developer.apple.com/documentation/swiftui/menubarextra)、[Settings](https://developer.apple.com/documentation/swiftui/settings)
 - macOS 工具栏中的高频命令必须同时存在于菜单栏，避免用户隐藏工具栏后失去能力；工具栏动作按逻辑分组，窄窗口交给系统 overflow 处理。[Toolbars](https://developer.apple.com/design/human-interface-guidelines/toolbars)、[Menus](https://developer.apple.com/design/human-interface-guidelines/menus)
 - VoiceOver 在 macOS 上主要通过键盘操作。页面应使用合理的 accessibility container、明确的 label/value、可访问动作和快捷键；任何只依赖 hover 的动作都必须提供可见或键盘可达的替代入口。[Make your Mac app more accessible to everyone](https://developer.apple.com/videos/play/wwdc2025/229/)、[Keyboards](https://developer.apple.com/design/human-interface-guidelines/keyboards)、[Accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility)
+
+### 1.1 Logo 设计基因深度解构 (Design DNA)
+
+应用徽标（`docs/assets/logo.png`）是整个产品视觉语言与工业隐喻的根基源头。设计提炼为五大核心维度：
+
+1. **命名 (Naming & Taxonomy)**：
+   - 彻底摒弃抽象通用 Web 词汇（如 `Canvas`, `Field`, `Ink`, `Surface`），建立映射电声母带硬件与铁路工程的物理实体命名空间：
+     - `Chassis`（机架基座：`enclosure`, `deck`, `recessedWell`, `milledBevel`, `grooveStroke`）；
+     - `SteelAlloy`（拉丝钢钛：`specularEdge`, `brushedFace`, `billetPlate`, `knurledRim`）；
+     - `SteelRail`（钢轨道床：`trackCyan`, `railheadGleam`, `sleeperTie`, `gliderBead`, `signalPulse`）；
+     - `AcousticMaster`（声学母带：`tubeWarmth`, `vuPhosphor`, `peakOverload`, `waveCrest`）；
+     - `ConsoleFader`（母带推子：阻尼刻度、滑轨厚度、推头规格）。
+2. **配色 (Chromatic DNA)**：
+   - **黑曜声学机架基调**：主基底为吸光黑曜岩枪膛色（`#151719`~`#1A1C1F`），消除惨白纸质漂浮感。
+   - **绝无 `#007AFF` 蓝色**：高亮与选中采用 Logo 道床冷青钢光（`#2A4E57`）与钢轨顶面反光（`#4FA4BA`）。
+   - **电声双阶暖冷互映**：声色创作注入真空管暖琥珀（`#F59E0B`），运行监控注入示波器磷光绿（`#10B981`）。浅色模式呈现阳极氧化实心铝锭质感（`#DDE1E6`~`#E8ECF0`），非纸白。
+3. **组件效果 (Physical Craftsmanship & Optics)**：
+   - **CNC 双阶倒角 (Dual-Step Chamfer)**：顶边 0.5px 镜面切削白高光，底边 0.5px 机械深槽闭塞投影。
+   - **沉降式声学凹槽 (Recessed Slot)**：文稿编辑框与参数输入槽物理内陷，带上缘阴影与底边缘反光。
+   - **轨枕分阶标尺 (Sleeper Divider)**：带中心声轨电珠微光的重型物理隔断。
+   - **金属镶嵌透光微珠 (Jewel LED)**：侧边栏状态指示珠带金属外圈与漫反射光晕。
+4. **交互方式 (Console Ergonomics)**：
+   - **钢轨滑标导航 (Rail Glider)**：侧边栏依附纵向钢轨，选中项化身滑行动态光珠与冷青光晕。
+   - **母带校准推子 (Calibrated Console Fader)**：语速配备物理校准阻尼刻度（0.5x, 1.0x 基准, 1.5x, 2.0x）与快切档位。
+   - **4 轨母带试听机架 (4-Track Studio Rack)**：音色候选按调音台 4-Track 排布，独立试听与入库。
+5. **意境 (Atmosphere & Metaphor)**：
+   - **「重工业声学机架 · 钢轨声流 · 精密调音台」**：端坐于 Apple Silicon 上的专业母带级电声硬件存在感，稳定、低抖动、高保真。
 
 ## 2. App 层不以兼容牺牲特性
 
@@ -58,60 +85,57 @@ SwiftUI 代码中的颜色、间距、圆角、窗口尺寸、控件高度和字
 Apple 的系统颜色、字体、材料和标准控件优先于自定义 token；SpeechRail token 只补足产品
 语义、布局约束和跨 macOS 版本的统一映射。
 
-### 3.1 Token 分类
+### 3.1 Token 语义与规范
 
-| 分类 | Swift 名称 | 约束 |
+| 物理领域 | Swift 命名空间 | 核心 Token 与规格约束 |
 |---|---|---|
-| 间距 | `Spacing` | 使用 `micro/xs/sm/md/lg/xl`，页面默认节奏为 4/8/12/16/24/32 |
-| 圆角 | `Corner` | 控件、面板、窗口分别使用固定层级；内层控件不超过外层容器的圆角层级 |
-| 布局 | `Layout` | sidebar、内容最大宽度、窗口最小尺寸集中管理，支持 resize/full screen |
-| 控件 | `Control` | 使用系统 `controlSize`，自定义容器只引用统一的触达尺寸和图标尺寸 |
-| 字体 | `Typography` | 优先语义字体，不在页面内硬编码字号；用户字体偏好由系统接管 |
-| 颜色 | `Palette` | 使用 `Color.primary`、`Color.secondary`、系统 accent 和语义色，自动适配明暗与高对比 |
-| 表面 | `SpeechRailSurfaceLevel`、`speechRailContentSurface()` | `window/navigation` 使用系统玻璃；`control` 使用系统 material 加细描边；`panel/inspector` 使用自适应内容表面，不铺玻璃 |
-| 动效 | `Motion` | 所有自定义 transition 可关闭或降级；状态变化必须有文字/结构反馈 |
+| 机架冶金 | `Chassis` | `enclosure`（黑曜底座）、`deck`（机架面板）、`recessedWell`（沉降槽）、`milledBevel`（切削边）、`grooveStroke`（加强边） |
+| 拉丝冷钢 | `SteelAlloy` | `specularEdge`（0.5px 镜面切削高光）、`brushedFace`（各向异性拉丝银光）、`billetPlate`（铣削厚板）、`knurledRim`（滚花滚边） |
+| 钢轨道床 | `SteelRail` | `trackCyan`（道床冷青 `#2A4E57`）、`railheadGleam`（钢轨反光 `#4FA4BA`）、`sleeperTie`（轨枕标尺 `#33373B`）、`gliderBead`（滑标电珠） |
+| 声学母带 | `AcousticMaster` | `tubeWarmth`（真空管暖琥珀 `#F59E0B`）、`vuPhosphor`（示波器磷光 `#10B981`）、`peakOverload`（峰值过载 `#EF4444`）、`waveCrest`（声波峰谷） |
+| 控制推子 | `ConsoleFader` | `calibratedDetent`（1.0x 基准阻尼点）、`detentNotchCount`（物理刻度）、`thumbWidth/Height`（推头尺寸） |
+| 间距节奏 | `Spacing` | 使用 `tight/micro/xs/sm/md/lg/xl/hero`，基准节奏为 2/4/8/12/16/24/32/48 pt |
+| 倒角比例 | `Corner` | 控件 6、选中行 8、字段 14、模块 18、胶囊 999；曲率比值 `continuousRadiusRatio = 0.2237` |
+| 布局规整 | `Layout` | sidebar 固定 240pt，inspector 固定 360pt，主内容区最大宽度 1,240pt，窗口最小 1,120×720pt |
+| 表面修饰 | `ViewModifiers` | `.speechRailConsoleChassis()`（机加工机架板）、`.speechRailRecessedSlot()`（沉降声学槽）、`.speechRailKnurledCapsule()`（滚花胶囊） |
+| 动效反馈 | `Motion` | 弹簧动力学 `spring(response: 0.28, dampingFraction: 0.82)`，按压缩放 `0.985`，选区反馈 `0.14s`；尊重 Reduce Motion |
 
-导航选中前景、页面定位标记和状态 chip 也属于统一 token：分别使用
-`Navigation.selectedForeground`、`Control.purposeIndicatorWidth/Height` 和
-`Surface.statusChipFillOpacity`，页面不得重新定义同义颜色、透明度或尺寸。
+诊断结论区的用户影响说明使用 `Diagnostics.summaryMessageMaximumLines`，默认最多两行；当动态字体或
+错误文案需要更多垂直空间时，结论区只能自然增高，不得用固定最大高度裁切内容。
 
-### 3.2 全局交互语言
+### 3.2 全局交互语言与组件契约
 
-Token 进一步按四层组织：Foundation（最小尺度）、Semantic（产品语义）、Component（组件尺寸和层级）
-以及 Interaction（`rest`/`hover`/`pressed`/`focused`/`selected`/`disabled`/`loading`）。页面只消费
-Semantic、Component 和 Interaction token；Foundation 只在共享组件内部使用。工具栏标题使用
-`Toolbar.titleMaximumWidth`、`Toolbar.titleCompactMaximumWidth` 和 `Toolbar.titleHeight`，交互命中区、
-按压缩放、hover/pressed 填充和 focus 描边统一使用 `Interaction`。
+1. **Toolbar 标题锁定**：`WorkspaceTitleLockup` 是唯一的 toolbar principal 标题组件，呈现“icon + workspace”的单行标题；标题使用固定槽位、尾部截断和最小缩放，永远不换行。路由切换不改变标题中心几何，不挤压右侧操作。
+2. **机加工表面 (Machined Console Chassis)**：`speechRailConsoleChassis()` 作为核心容器，彻底终结千篇一律的白底大圆角卡片。在 Dark 模式下自动叠加顶边 0.5px `specularEdge` 线性渐变高光切线与微距 `ambientShadow`，营造沉着内敛的专业机架面板质感。
+3. **沉降式凹槽 (Recessed Slot)**：文稿编辑框与参数输入框统一采用 `speechRailRecessedSlot()`，杜绝尺寸挤压坍塌。
+4. **指针与无障碍命中区**：可操作实例统一通过 `speechRailPointerCursor()` 暴露 pointing hand；自定义行/卡片使用 `SpeechRailInteractiveButtonStyle`；图标按钮有效命中区保持 `44 × 44pt`。
 
-`WorkspaceTitleLockup` 是唯一的 toolbar principal 标题组件。它不绘制标题胶囊，使用 `ViewThatFits` 依次
-尝试“icon + workspace + context”“icon + workspace”“workspace”三种单行变体；context 先于 workspace
-隐藏或截断，标题永远不换行。服务状态是独立的、不可点击的辅助状态，不挤进中心标题。
+## 4. 八大页面 UI/UX 优化蓝图
 
-标准 `Button`、`Menu` 和 `NavigationLink` 保留 macOS 系统箭头、hover、按压、焦点和辅助功能行为。
-只有自定义可点击行/卡片使用 `SpeechRailInteractiveButtonStyle` 和 `NSCursor.pointingHand` cursor rect；
-静态内容不添加 `contentShape`、hover、cursor 或可聚焦语义。自定义可点击表面必须同时具备 hover、pressed、
-focus 和 disabled 反馈，减少动效时去除缩放但保留状态变化。图标按钮必须有可见语义或 accessibility label/help，
-有效命中区至少为 `44 × 44pt`。
+### 4.1 空间拓扑与双轨导航心智
+- **STUDIO 创作工坊**（配音台、音色创作、音色库、我的作品）：聚焦声音雕琢与文本心流，大留白（`Spacing.hero`），注入 `Color.voice` 陶土暖色，首屏 100% 留给创作任务，不显示冗余服务状态横幅。
+- **ENGINE 核心引擎**（服务中枢、模型档位、运行监控、系统诊断）：强调确定性、低时延与高透明度，等宽数字排版，冷钛金与冷青导轨色为主基调。
+- **全局状态唯一性**：侧边栏底部 `[✓ 服务已就绪 · Quality]` 是全 App 唯一的常驻全局服务状态指示器，正文仅在服务专属总览、任务受阻或长任务跃迁时按需显示置顶 `StatusConclusion`。
 
-导航 icon 由 `AppRoute.systemImage` 集中管理，统一使用 SF Symbols 的光学尺寸、weight 和层级渲染；
-选中态用低噪声 accent fill + 高对比前景表达，不把深色文字压在亮色选中背景上。
+### 4.2 页面级重点优化规则
+1. **配音台 (Dubbing Desk)**：文稿编辑器采用 `speechRailField()` 微陷设计，字号 16pt，行高 1.4 倍；合成后滑出内嵌微波形的试听条。
+2. **音色创作 (Voice Design Studio)**：Prompt 框配合陶土色 Accent，声学胶囊机架（`Corner.pill`）支持快捷点击注入声学特征，横向 A/B 候选试听机架支持快速交叉切换。
+3. **音色库与我的作品 (Catalog & Archive)**：条目内嵌 16 段跳动频谱小波形与一键试听/导出，右侧抽屉式 Inspector 显示基模型来源与脱敏生成时延。
+4. **服务中枢 (Service Core)**：四要素状态结论大面板（图标 + 结论标签 + 影响范围 + 单一主动作），并列展示 ASR 词级时间戳、VoiceDesign 并发与 FluidAudio 匿名分人能力矩阵。
+5. **模型档位 (Model Profiles)**：三档横向比对机架，模型准备/下载采用确定性 `OperationBar`（MB/s 速度、预计时间、SHA256 校验进度、安全回退确认）。
+6. **运行监控 (Telemetry)**：专业机架仪表条（`MetricStrip`）使用 Tabular 数字无跳动刷新；并发与时延采用冷青色单趋势折线图。
+7. **系统诊断 (Diagnostics)**：递进式结构化排障，异常项配备一键修复动作与脱敏排障报告复制。
 
-### 3.3 统一使用规则
+### 4.3 真实能力条件渲染与脱敏双轨隔离
+- **真实能力门禁**：波形预览、回退操作与端口修复基于后端实际能力条件展示，未就绪时优雅降级为静态说明。
+- **脱敏双轨隔离**：「我的作品」允许查看创作者自有的完整输入文本；「开发者 Inspector」严格执行脱敏协议，仅展示 Request ID、时延、Token 统计、脱敏 Worker PID 和会话级匿名标签（`speaker_0`），严禁暴露 Base64 音频、实名身份或绝对系统路径。
 
-- 页面背景和导航由系统窗口/侧边栏承载；关键控制使用 `speechRailSurface(.control)`，内容区和 Inspector 使用 `speechRailContentSurface()`，不在各页面重复实现玻璃或阴影。
-- 玻璃的使用范围必须可解释：侧边栏、工具栏和需要与内容分离的关键控制可以使用系统玻璃；状态、模型制品、指标和诊断内容不得因装饰需要铺玻璃。
-- 主操作每个上下文最多一个，使用系统 `Button` 与 `speechRailButton(.primary)`；辅助动作使用 secondary/quiet，
-  危险动作使用确认对话框、真实 destructive role 并明确影响范围。
-- 监控数字使用 tabular figures；错误不能只用颜色表达，同时显示文字、图标或状态标签。
-- 图标使用 SF Symbols，并与文字共同构成按钮 label；图标按钮必须有 accessibility label。
-- 每个页面的 `ScrollView`、列表和卡片在最小窗口、全屏、深色模式、增加对比度和 Reduce Motion 下验证。
-- `MenuBarExtra`、toolbar 和菜单栏动作保持同一命令语义；菜单栏不能触发第二个服务实例。
-
-## 4. 验收清单
+## 5. 验收清单
 
 - [x] App target 的最低系统版本为 macOS 26.0，并使用系统 Liquid Glass 结构能力（2026-09-13 Debug build 已验证）。
 - [x] App 未通过自绘根背景阻断 scroll edge effect；玻璃只用于窗口/导航层，内容和 Inspector 使用统一内容表面（2026-09-13 代码审查已验证）。
 - [x] 所有 App 页面主要产品间距、尺寸、颜色和字体从 `SpeechRailDesignTokens` 读取；零间距仅用于 Divider/列表拼接等结构性布局。
+- [x] Logo 设计基因（形、质、光、色）已完整解构并落盘至规范文档与 Swift Token 映射。
 - [ ] Light、Dark、Increase Contrast、Dynamic Type 和 Reduce Motion 均有 UI 验证；当前只完成代码/构建检查，尚未完成桌面人工矩阵。
 - [ ] VoiceOver 可按“导航 → 页面说明 → 主操作 → 状态详情”的顺序访问；图表、档位和 DisclosureGroup 语义已接入，尚未完成桌面 VoiceOver 实测。
 - [x] 页面高频动作已提供 toolbar、菜单栏或键盘路径，不依赖 hover；2026-09-13 UI tests 验证控制台、设置和主要页面入口。
@@ -119,7 +143,7 @@ focus 和 disabled 反馈，减少动效时去除缩放但保留状态变化。�
 - [x] 全局标题使用单行 `WorkspaceTitleLockup`，动作菜单统一为“更多操作”，导航 route icon 集中管理；2026-09-13 Debug build 已验证。
 - [x] custom clickable rows/cards 使用共享按压、hover、focus、disabled 与 cursor 规则，静态表面不再伪装成可操作区域；2026-09-13 代码审查已验证。
 
-## 5. 当前实现与验证矩阵
+## 6. 当前实现与验证矩阵
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
@@ -127,15 +151,15 @@ focus 和 disabled 反馈，减少动效时去除缩放但保留状态变化。�
 | Swift 单元测试 | 本轮按用户指令暂停；此前历史记录不作为本轮证据 | — |
 | UI 测试 | 本轮按用户指令暂停；此前历史记录不作为本轮证据 | — |
 | 设置单场景复核 | 本轮未执行 | — |
-| Release App 安装 | `2.5.2 (1)`、`arm64`、`LSMinimumSystemVersion=26.0`，签名与嵌入 XPC 通过；已安装到 `~/Applications/SpeechRail.app` | 2026-09-13 14:15 |
-| 安装后服务隔离 | `/health`、`/readyz` 通过；仍为唯一 8201 listener（PID 25912），quality profile；未重启服务 | 2026-09-13 14:16 |
-| 桌面视觉矩阵 | 尚未完成；仍需人工检查最小窗口、深色、高对比度、Reduce Motion | — |
+| Release App 安装 | `2.6.0 (2)`、`arm64`、`LSMinimumSystemVersion=26.0`，CDHash `e85dbb...`，签名与嵌入 XPC 通过；已安装到 `~/Applications/SpeechRail.app` | 2026-09-14 13:28 |
+| 安装后服务隔离 | `/health`、`/readyz` 通过；仍为唯一 8201 listener（PID 70831），quality profile；未重启服务 | 2026-09-14 13:25 |
+| 桌面视觉矩阵 | 待用户手工走查（深色模式机加工微切线高光、黑曜深空底座、双轨导航与控制台质感） | — |
 | VoiceOver 实测 | 尚未完成 | — |
 
-> 2026-09-13 状态说明：本轮已完成一次 macOS 26 Debug 编译，严格未运行自动化测试和安装流程。
-> Light/Dark、高对比度、Reduce Motion、键盘和 VoiceOver 仍需用户解除测试暂停后进行桌面验收。
+> 2026-09-14 状态说明：设计规范已正式升级至 v0.7.0，完成 Logo 设计基因解构与 Token 落地。
+> 新版本 Release App `2.6.0 (2)` 已安装至 `~/Applications/SpeechRail.app`，待用户桌面人工视觉走查与验收。
 
-## 6. 变更流程
+## 7. 变更流程
 
 新增组件先判断是否能由标准 SwiftUI 控件表达；确需定制时先补充 token 和可访问语义，
 再实现组件。token 变更必须同时更新本文件、对应 Swift 定义、组件测试和 macOS App

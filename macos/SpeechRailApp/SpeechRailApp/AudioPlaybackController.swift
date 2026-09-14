@@ -13,7 +13,7 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
     private var player: AVAudioPlayer?
 
     public private(set) var isPlaying = false
-    public var onPlaybackFinished: (@MainActor () -> Void)?
+    public var onPlaybackFinished: (@MainActor (_ successfully: Bool) -> Void)?
 
     public override init() {
         super.init()
@@ -53,7 +53,7 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
             else { return }
             self.player = nil
             self.isPlaying = false
-            self.onPlaybackFinished?()
+            self.onPlaybackFinished?(flag)
         }
     }
 }

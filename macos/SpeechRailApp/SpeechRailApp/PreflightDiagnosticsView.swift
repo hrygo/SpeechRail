@@ -37,6 +37,7 @@ public struct PreflightDiagnosticsView: View {
                         copyDiagnosticReport()
                     } label: {
                         Label("复制脱敏诊断报告", systemImage: "doc.on.clipboard")
+                            .speechRailMenuRow()
                     }
                     .disabled(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
                     Divider()
@@ -47,6 +48,7 @@ public struct PreflightDiagnosticsView: View {
                             showInspector ? "隐藏开发者详情" : "显示开发者详情",
                             systemImage: "info.circle"
                         )
+                        .speechRailMenuRow()
                     }
                 }
             }
@@ -132,7 +134,7 @@ public struct PreflightDiagnosticsView: View {
                 )
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.List.rowSpacing) {
                         ForEach(model.preflightChecks, id: \.name) { check in
                             Button {
                                 selectedCheckName = check.name
@@ -143,7 +145,7 @@ public struct PreflightDiagnosticsView: View {
                                     selected: selectedCheckName == check.name
                                 )
                             }
-                            .speechRailInteractiveButtonStyle()
+                            .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
                             .accessibilityIdentifier("preflight-\(check.name)")
                         }
                     }
@@ -222,7 +224,7 @@ public struct PreflightDiagnosticsView: View {
                     }
                 }
 
-                DisclosureGroup("开发者详情") {
+                DisclosureGroup {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         LabeledContent("检查标识", value: selectedCheck.name)
                         LabeledContent("安全技术结果", value: safeTechnicalResult(for: selectedCheck))
@@ -234,8 +236,13 @@ public struct PreflightDiagnosticsView: View {
                     .font(SpeechRailDesignTokens.Typography.technical)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                } label: {
+                    Text("开发者详情")
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
-                .speechRailPointerCursor()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
             } else {
                 ContentUnavailableView(
                     "选择一项检查",
@@ -733,44 +740,14 @@ private struct DiagnosticsSummaryView: View {
     }
 
     var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-            Image(systemName: tone.systemImage)
-                .font(SpeechRailDesignTokens.Typography.statusGlyph)
-                .foregroundStyle(tone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Text(title)
-                        .font(SpeechRailDesignTokens.Typography.diagnosticsSummary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text(countText)
-                        .font(SpeechRailDesignTokens.Typography.metricValue)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                }
-                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Text(message)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(1)
-                    if let updatedText {
-                        Text(updatedText)
-                            .font(SpeechRailDesignTokens.Typography.technical)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .lineLimit(1)
-                    }
-                }
-            }
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Button("重新运行诊断", action: action)
-                .speechRailButton(.primary)
-                .disabled(isBusy)
-                .accessibilityIdentifier("diagnostics-run")
+        ViewThatFits(in: .horizontal) {
+            horizontalLayout
+            verticalLayout
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.lg)
         .frame(
             maxWidth: .infinity,
             minHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight,
-            maxHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight,
             alignment: .leading
         )
         .speechRailContentSurface()
@@ -779,6 +756,95 @@ private struct DiagnosticsSummaryView: View {
         .accessibilityValue(
             checks.isEmpty ? "尚未检查" : "\(passedCount) 项通过，\(failedCount) 项失败"
         )
+    }
+
+    private var horizontalLayout: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+            summaryIcon
+            summaryCopy
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            summaryAction
+        }
+    }
+
+    private var verticalLayout: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                summaryIcon
+                summaryCopy
+            }
+            summaryAction
+        }
+    }
+
+    private var summaryIcon: some View {
+        Image(systemName: tone.systemImage)
+            .font(SpeechRailDesignTokens.Typography.statusGlyph)
+            .foregroundStyle(tone.color)
+            .accessibilityHidden(true)
+    }
+
+    private var summaryCopy: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Text(title)
+                    .font(SpeechRailDesignTokens.Typography.diagnosticsSummary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(countText)
+                    .font(SpeechRailDesignTokens.Typography.metricValue)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            ViewThatFits(in: .horizontal) {
+                summaryMetadataHorizontal
+                summaryMetadataVertical
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var summaryMetadataHorizontal: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            summaryMessage
+            updatedLabel
+        }
+    }
+
+    private var summaryMetadataVertical: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            summaryMessage
+            updatedLabel
+        }
+    }
+
+    private var summaryMessage: some View {
+        Text(message)
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            .lineLimit(SpeechRailDesignTokens.Diagnostics.summaryMessageMaximumLines)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private var updatedLabel: some View {
+        if let updatedText {
+            Text(updatedText)
+                .font(SpeechRailDesignTokens.Typography.technical)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    private var summaryAction: some View {
+        Button("重新运行诊断", action: action)
+            .speechRailButton(.primary)
+            .disabled(isBusy)
+            .accessibilityIdentifier("diagnostics-run")
     }
 }
 
@@ -812,19 +878,25 @@ private struct PreflightCheckRow: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
         .frame(
             maxWidth: .infinity,
-            minHeight: SpeechRailDesignTokens.Layout.diagnosticsRowHeight,
+            minHeight: SpeechRailDesignTokens.List.rowHeight,
             alignment: .leading
         )
         .background(
             selected ? SpeechRailDesignTokens.Navigation.selectedFill : Color.clear,
-            in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+            in: .rect(
+                cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
+                style: .continuous
+            )
         )
         .overlay {
             if selected {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
+                RoundedRectangle(
+                    cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
+                    style: .continuous
+                )
                     .stroke(
                         SpeechRailDesignTokens.Navigation.focusRing,
                         lineWidth: SpeechRailDesignTokens.Stroke.strong
