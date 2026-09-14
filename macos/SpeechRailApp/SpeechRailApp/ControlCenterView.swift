@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SpeechRailControlKit
 
@@ -75,9 +76,16 @@ public struct ControlCenterView: View {
             }
             .navigationSplitViewStyle(.balanced)
             .frame(
-                minWidth: SpeechRailDesignTokens.Layout.windowMinimumWidth,
+                minWidth: controlCenterMinimumWidth,
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
             )
+            .background {
+                if isUITestSession {
+                    ControlCenterWindowActivator()
+                        .frame(width: 1, height: 1)
+                        .allowsHitTesting(false)
+                }
+            }
             .task { await model.refresh() }
             .onAppear {
                 if let route = navigation.consumeRequestedRoute() {
@@ -338,4 +346,78 @@ public struct ControlCenterView: View {
         return false
 #endif
     }
+
+    private var isUITestSession: Bool {
+#if DEBUG
+        ProcessInfo.processInfo.arguments.contains("--ui-test")
+#else
+        false
+#endif
+    }
+
+    private var controlCenterMinimumWidth: CGFloat {
+        if isUITestSession {
+            return 1_000
+        }
+        return SpeechRailDesignTokens.Layout.windowMinimumWidth
+    }
 }
+
+#if DEBUG
+private struct ControlCenterWindowActivator: NSViewRepresentable {
+    func makeNSView(context: Context) -> ControlCenterWindowActivationView {
+        ControlCenterWindowActivationView()
+    }
+
+    func updateNSView(_ nsView: ControlCenterWindowActivationView, context: Context) {
+        nsView.activateIfPossible()
+    }
+}
+
+private final class ControlCenterWindowActivationView: NSView {
+    private var hasActivatedWindow = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        activateIfPossible()
+    }
+
+    fileprivate func activateIfPossible() {
+        guard window != nil, !hasActivatedWindow else { return }
+        hasActivatedWindow = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let window = self.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            self.fit(window)
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func fit(_ window: NSWindow) {
+        guard let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+
+        let maximumSize = NSSize(
+            width: max(1, visibleFrame.width - 16),
+            height: max(1, visibleFrame.height - 16)
+        )
+        window.minSize = NSSize(
+            width: min(window.minSize.width, maximumSize.width),
+            height: min(window.minSize.height, maximumSize.height)
+        )
+
+        var frame = window.frame
+        frame.size.width = min(frame.size.width, maximumSize.width)
+        frame.size.height = min(frame.size.height, maximumSize.height)
+        frame.origin.x = min(
+            max(frame.origin.x, visibleFrame.minX + 8),
+            visibleFrame.maxX - frame.width - 8
+        )
+        frame.origin.y = min(
+            max(frame.origin.y, visibleFrame.minY + 8),
+            visibleFrame.maxY - frame.height - 8
+        )
+        window.setFrame(frame, display: true, animate: false)
+    }
+}
+#endif
