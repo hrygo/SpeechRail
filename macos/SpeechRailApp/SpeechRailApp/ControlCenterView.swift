@@ -21,23 +21,22 @@ public struct ControlCenterView: View {
         } else {
             NavigationSplitView(columnVisibility: $columnVisibility) {
                 VStack(spacing: 0) {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                            if !visibleCreatorRoutes.isEmpty {
-                                sidebarSection(title: AppRouteGroup.creator.title, routes: visibleCreatorRoutes)
-                            }
-                            if !visibleServiceRoutes.isEmpty {
-                                sidebarSection(title: AppRouteGroup.service.title, routes: visibleServiceRoutes)
-                            }
-                            if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
-                                ContentUnavailableView.search(text: searchText)
-                                    .padding(.top, SpeechRailDesignTokens.Spacing.xl)
-                            }
+                    List(selection: $selection) {
+                        if !visibleCreatorRoutes.isEmpty {
+                            sidebarSection(title: AppRouteGroup.creator.title, routes: visibleCreatorRoutes)
                         }
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-                        .frame(minWidth: SpeechRailDesignTokens.Layout.sidebarMinimumWidth - SpeechRailDesignTokens.Spacing.sm * 2)
+                        if !visibleServiceRoutes.isEmpty {
+                            sidebarSection(title: AppRouteGroup.service.title, routes: visibleServiceRoutes)
+                        }
+                        if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
+                            ContentUnavailableView.search(text: searchText)
+                                .listRowBackground(Color.clear)
+                        }
                     }
+                    .listStyle(.sidebar)
+                    .scrollContentBackground(.hidden)
+                    .background(SpeechRailDesignTokens.Chassis.obsidian)
+                    .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
                     .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
 
                     Divider()
@@ -119,18 +118,15 @@ public struct ControlCenterView: View {
 
     @ViewBuilder
     private func sidebarSection(title: String, routes: [AppRoute]) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+        Section {
+            ForEach(routes, id: \.self) { route in
+                navigationRow(for: route)
+            }
+        } header: {
             Text(title)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .fontWeight(.medium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.tight)
-
-            ForEach(routes, id: \.self) { route in
-                navigationRow(for: route)
-            }
         }
     }
 
@@ -206,6 +202,16 @@ public struct ControlCenterView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .listRowInsets(
+            EdgeInsets(
+                top: SpeechRailDesignTokens.Spacing.micro,
+                leading: SpeechRailDesignTokens.Spacing.xs,
+                bottom: SpeechRailDesignTokens.Spacing.micro,
+                trailing: SpeechRailDesignTokens.Spacing.xs
+            )
+        )
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
         .accessibilityIdentifier(route.id)
         .help(route.purpose)
         .accessibilityValue(
