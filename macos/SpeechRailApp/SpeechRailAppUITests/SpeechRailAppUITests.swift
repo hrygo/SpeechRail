@@ -12,7 +12,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["模型"].exists)
         XCTAssertTrue(app.staticTexts["本地控制通道已就绪"].exists)
 
-        clickSidebarRoute("voiceDesign", in: app)
+        app.buttons["音色创作"].click()
         let workspaceTitle = app.descendants(matching: .any)["workspace-title"]
         XCTAssertTrue(workspaceTitle.waitForExistence(timeout: 5))
         XCTAssertTrue(
@@ -25,7 +25,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.menuItems["刷新服务状态"].waitForExistence(timeout: 2))
         app.typeKey(.escape, modifierFlags: [])
 
-        clickSidebarRoute("models", in: app)
+        app.buttons["模型"].click()
         let modelsTitle = app.descendants(matching: .any)["workspace-title"]
         XCTAssertTrue(modelsTitle.waitForExistence(timeout: 5))
         XCTAssertTrue(
@@ -46,14 +46,14 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["能力"].exists)
         XCTAssertTrue(app.buttons["运行预检"].exists)
 
-        clickSidebarRoute("models", in: app)
+        app.buttons["模型"].tap()
         XCTAssertTrue(app.staticTexts["模型"].waitForExistence(timeout: 2))
     }
 
     func testDiagnosticsUsesCompactSummaryAndSelectedDetail() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
-        clickSidebarRoute("diagnostics", in: app)
+        app.buttons["诊断"].tap()
 
         XCTAssertTrue(app.otherElements["diagnostics-summary"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.otherElements["diagnostics-check-list"].exists)
@@ -64,7 +64,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testModelDownloadRequiresExplicitConfirmation() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
-        clickSidebarRoute("models", in: app)
+        app.buttons["模型"].tap()
 
         let downloadButton = app.buttons["下载并校验"]
         XCTAssertTrue(downloadButton.waitForExistence(timeout: 5))
@@ -78,7 +78,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testMonitoringExplainsMissingMetrics() {
         let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-metrics-unavailable"])
         openControlCenter(in: app)
-        clickSidebarRoute("monitoring", in: app)
+        app.buttons["运行监控"].tap()
 
         XCTAssertTrue(app.staticTexts["等待监控样本"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["运行监控"].exists)
@@ -87,7 +87,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testModelRecoveryRestoresInterruptedOperationAndRetryAction() {
         let app = launchSpeechRail(arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-model-recovery"])
         openControlCenter(in: app)
-        clickSidebarRoute("models", in: app)
+        app.buttons["模型"].tap()
 
         XCTAssertTrue(app.staticTexts["上次模型准备被中断"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["重新下载并校验"].exists)
@@ -99,7 +99,7 @@ final class SpeechRailAppUITests: XCTestCase {
             arguments: ["--ui-test", "--ui-test-open-control-center", "--ui-test-model-unsupported"]
         )
         openControlCenter(in: app)
-        clickSidebarRoute("models", in: app)
+        app.buttons["模型"].tap()
 
         XCTAssertTrue(
             app.staticTexts["模型管理暂不可用：服务组件版本不匹配"].waitForExistence(timeout: 5)
@@ -121,7 +121,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testVoiceDesignAcousticChipsAndCandidateRack() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
-        clickSidebarRoute("voiceDesign", in: app)
+        app.buttons["音色创作"].click()
 
         XCTAssertTrue(app.staticTexts["从一句话开始"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["快速加入声学特征"].exists)
@@ -146,7 +146,7 @@ final class SpeechRailAppUITests: XCTestCase {
             ]
         )
         openControlCenter(in: app)
-        clickSidebarRoute("voiceLibrary", in: app)
+        app.buttons["音色库"].click()
 
         XCTAssertTrue(app.staticTexts["系统音色与创作资产"].waitForExistence(timeout: 5))
         let previewButton = app.buttons.matching(
@@ -170,7 +170,7 @@ final class SpeechRailAppUITests: XCTestCase {
     func testWorksViewExposesEmptyStateAndSafeActions() {
         let app = launchSpeechRail()
         openControlCenter(in: app)
-        clickSidebarRoute("works", in: app)
+        app.buttons["我的作品"].click()
 
         XCTAssertTrue(app.staticTexts["创作历史与文稿回溯"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["还没有作品"].exists)
@@ -199,9 +199,4 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.windows["SpeechRail 管理控制台"].waitForExistence(timeout: 5))
     }
 
-    private func clickSidebarRoute(_ identifier: String, in app: XCUIApplication) {
-        let route = app.buttons[identifier]
-        XCTAssertTrue(route.waitForExistence(timeout: 5))
-        route.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).click()
-    }
 }

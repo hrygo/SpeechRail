@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import SpeechRailControlKit
 
@@ -79,6 +80,10 @@ public struct ControlCenterView: View {
                 minWidth: SpeechRailDesignTokens.Layout.windowMinimumWidth,
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
             )
+            .overlay {
+                ControlCenterWindowActivator()
+                    .allowsHitTesting(false)
+            }
             .task { await model.refresh() }
             .onAppear {
                 if let route = navigation.consumeRequestedRoute() {
@@ -331,5 +336,19 @@ public struct ControlCenterView: View {
 #else
         return false
 #endif
+    }
+}
+
+private struct ControlCenterWindowActivator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 }
