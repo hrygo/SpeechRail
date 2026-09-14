@@ -424,6 +424,94 @@ def _entry_path(entry: object, app_home: Path) -> Path | None:
         return None
 
 
+_FILE_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+_CACHE_FILENAME = ".model_integrity_cache.json"
+
+
+def _read_integrity_cache(app_home: Path) -> dict[str, dict[str, object]]:
+    cache_path = app_home / "state" / _CACHE_FILENAME
+    if cache_path.is_symlink() or not cache_path.is_file():
+        return {}
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_integrity_cache(app_home: Path, data: Mapping[str, object]) -> None:
+    cache_path = app_home / "state" / _CACHE_FILENAME
+    if cache_path.is_symlink():
+        return
+    try:
+        _ensure_directory(cache_path.parent)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=".integrity-cache-", dir=cache_path.parent
+        )
+        temporary = Path(temporary_name)
+        committed = False
+        try:
+            raw = (json.dumps(data, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            with os.fdopen(descriptor, "wb") as output:
+                os.fchmod(output.fileno(), 0o600)
+                output.write(raw)
+                output.flush()
+                os.fsync(output.fileno())
+            temporary.replace(cache_path)
+            committed = True
+        finally:
+            if not committed:
+                with contextlib.suppress(OSError):
+                    temporary.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def cached_file_hash(
+    path: Path,
+    *,
+    persistent_cache: dict[str, dict[str, object]] | None = None,
+) -> str:
+    """Return sha256 using (size, mtime_ns) stat-cache to avoid repeated IO."""
+    try:
+        stat_result = path.stat()
+    except OSError as exc:
+        raise ModelStoreError("could not read prepared model file") from exc
+
+    size = stat_result.st_size
+    mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1e9))
+    try:
+        resolved_str = str(path.resolve())
+    except Exception:
+        resolved_str = str(path)
+
+    mem_key = (resolved_str, size, mtime_ns)
+    if mem_key in _FILE_HASH_CACHE:
+        return _FILE_HASH_CACHE[mem_key]
+
+    if persistent_cache is not None and resolved_str in persistent_cache:
+        entry = persistent_cache[resolved_str]
+        if (
+            isinstance(entry, dict)
+            and entry.get("size") == size
+            and entry.get("mtime_ns") == mtime_ns
+            and isinstance(entry.get("sha256"), str)
+        ):
+            digest = cast(str, entry["sha256"])
+            _FILE_HASH_CACHE[mem_key] = digest
+            return digest
+
+    digest = _snapshot_file_hash(path)
+    _FILE_HASH_CACHE[mem_key] = digest
+    if persistent_cache is not None:
+        persistent_cache[resolved_str] = {
+            "size": size,
+            "mtime_ns": mtime_ns,
+            "sha256": digest,
+        }
+    return digest
+
+
 def _snapshot_file_hash(path: Path) -> str:
     digest = hashlib.sha256()
     try:
@@ -435,7 +523,12 @@ def _snapshot_file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _verify_snapshot(directory: Path, artifact: ModelArtifact) -> bool:
+def _verify_snapshot(
+    directory: Path,
+    artifact: ModelArtifact,
+    *,
+    persistent_cache: dict[str, dict[str, object]] | None = None,
+) -> bool:
     if directory.is_symlink() or not directory.is_dir():
         return False
     try:
@@ -466,7 +559,7 @@ def _verify_snapshot(directory: Path, artifact: ModelArtifact) -> bool:
             path = safe_artifact_path(resolved_directory, item.path)
             if path.is_symlink() or not path.is_file() or path.stat().st_size != item.size:
                 return False
-            if _snapshot_file_hash(path) != item.sha256:
+            if cached_file_hash(path, persistent_cache=persistent_cache) != item.sha256:
                 return False
         except (OSError, ValueError, ModelStoreError):
             return False
@@ -474,7 +567,10 @@ def _verify_snapshot(directory: Path, artifact: ModelArtifact) -> bool:
 
 
 def _artifact_integrity(
-    directory: Path, artifact: ModelArtifact
+    directory: Path,
+    artifact: ModelArtifact,
+    *,
+    persistent_cache: dict[str, dict[str, object]] | None = None,
 ) -> tuple[ModelIntegrity, int]:
     """Inspect a snapshot without exposing its local path."""
     if directory.is_symlink() or not directory.is_dir():
@@ -505,7 +601,7 @@ def _artifact_integrity(
                 path.is_symlink()
                 or not path.is_file()
                 or path.stat().st_size != item.size
-                or _snapshot_file_hash(path) != item.sha256
+                or cached_file_hash(path, persistent_cache=persistent_cache) != item.sha256
             ):
                 integrity = "mismatch"
             else:
@@ -535,6 +631,9 @@ def inspect_prepared_artifacts(
     except ModelStoreError:
         registry = _empty_registry()
         registry_error = True
+
+    persistent_cache = _read_integrity_cache(resolved_app_home)
+    initial_cache_len = len(persistent_cache)
 
     prepared = registry.get("prepared")
     prepared_entries = prepared.values() if isinstance(prepared, dict) else ()
@@ -576,7 +675,9 @@ def inspect_prepared_artifacts(
         if models_root_is_symlink:
             integrity, verified_count = "mismatch", 0
         else:
-            integrity, verified_count = _artifact_integrity(inspected_path, artifact)
+            integrity, verified_count = _artifact_integrity(
+                inspected_path, artifact, persistent_cache=persistent_cache
+            )
         if not evidence and integrity == "not_checked":
             state: ModelState = "not_downloaded"
         elif matching_entry and integrity == "verified":
@@ -594,6 +695,8 @@ def inspect_prepared_artifacts(
                 total_file_count=len(artifact.files),
             )
         )
+    if len(persistent_cache) != initial_cache_len:
+        _write_integrity_cache(resolved_app_home, persistent_cache)
     return tuple(statuses)
 
 

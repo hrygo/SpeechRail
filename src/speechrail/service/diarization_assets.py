@@ -25,6 +25,11 @@ from speechrail.config.model_catalog import (
     SourceLocation,
     load_catalog,
 )
+from speechrail.service.model_store import (
+    _read_integrity_cache,
+    _write_integrity_cache,
+    cached_file_hash,
+)
 from speechrail.service.modelscope import ModelScopeDownloader
 
 _COREML_REPOSITORY = "FluidInference/diar-streaming-sortformer-coreml"
@@ -159,7 +164,10 @@ def _verify_directory(root: Path, files: dict[str, tuple[int, str]]) -> bool:
 
 
 def _inspect_directory(
-    root: Path, files: dict[str, tuple[int, str]]
+    root: Path,
+    files: dict[str, tuple[int, str]],
+    *,
+    persistent_cache: dict[str, dict[str, object]] | None = None,
 ) -> tuple[DiarizationIntegrity, int]:
     if root.is_symlink() or not root.is_dir():
         return "not_checked", 0
@@ -182,7 +190,7 @@ def _inspect_directory(
                 path.is_symlink()
                 or not path.is_file()
                 or path.stat().st_size != expected_size
-                or _sha256(path) != expected_digest
+                or cached_file_hash(path, persistent_cache=persistent_cache) != expected_digest
             ):
                 integrity = "mismatch"
             else:
@@ -358,8 +366,12 @@ def inspect_diarization_assets(
         raise DiarizationAssetError(f"unknown diarization preset: {preset_id}") from exc
     if not preset.diarization:
         return ()
-    base = app_home.resolve() / "diarization"
+    resolved_app_home = app_home.resolve()
+    base = resolved_app_home / "diarization"
     base_is_symlink = base.is_symlink()
+    persistent_cache = _read_integrity_cache(resolved_app_home)
+    initial_cache_len = len(persistent_cache)
+
     coreml_files = {
         key: (size, MODEL_FILE_SHA256[key])
         for key, size in zip(MODEL_FILE_SHA256, _COREML_FILE_SIZES, strict=True)
@@ -379,7 +391,9 @@ def inspect_diarization_assets(
         if base_is_symlink:
             integrity, verified_count = "mismatch", 0
         else:
-            integrity, verified_count = _inspect_directory(root, files)
+            integrity, verified_count = _inspect_directory(
+                root, files, persistent_cache=persistent_cache
+            )
         state: DiarizationState = (
             "not_downloaded"
             if integrity == "not_checked"
@@ -396,6 +410,8 @@ def inspect_diarization_assets(
                 total_file_count=len(files),
             )
         )
+    if len(persistent_cache) != initial_cache_len:
+        _write_integrity_cache(resolved_app_home, persistent_cache)
     return tuple(result)
 
 
