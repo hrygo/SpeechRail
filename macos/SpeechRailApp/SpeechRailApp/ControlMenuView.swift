@@ -4,6 +4,7 @@ import SpeechRailControlKit
 public struct ControlMenuView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.dismiss) private var dismiss
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @State private var pendingServiceAction: ControlCommand?
@@ -139,6 +140,11 @@ public struct ControlMenuView: View {
             await model.refresh()
 #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--ui-test-open-control-center") {
+                // The window is requested from inside MenuBarExtra's popover.
+                // Close that event target before presenting the test window so
+                // XCUITest can interact with the newly opened controls.
+                dismiss()
+                try? await Task.sleep(for: .milliseconds(150))
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             }
             if ProcessInfo.processInfo.arguments.contains("--ui-test-open-settings") {
