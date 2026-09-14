@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-09-14
+
+### Fixed
+
+- 修复 tag 触发的 Release 流水线无法发布：`.github/workflows/ci.yml` 与 `release.yml` 声明了相同的 concurrency group 表达式，而 reusable workflow 中 `github.workflow` 会解析为调用方名称，导致被调用的 CI 以 `cancel-in-progress` 取消同一 group 内的 caller 运行，`ci` job 从未创建、`publish` 被跳过。现为 `ci.yml` 改用独立的 `ci-${{ github.ref }}` group（直接运行时的 supersede 语义不变）。受此影响，v2.6.2 的 tag 未能产出 GitHub Release。
+
 ## [2.6.2] - 2026-09-14
 
 ### Changed
