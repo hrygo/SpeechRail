@@ -64,7 +64,7 @@ jobs:
         run: npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
 
       - name: Run explicit diarization contract regression tests
-        run: uv run pytest --no-cov tests/test_diarization_contracts.py tests/test_diarization_extensions.py
+        run: uv run pytest --no-cov tests/test_diarization_extensions.py tests/test_diarization_sdk.py
 
       - name: Check patch whitespace
         env:

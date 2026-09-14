@@ -39,6 +39,14 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
     assert jobs["macos-app"]["runs-on"] == "macos-26"
     assert jobs["package"]["needs"] == ["quality", "test"]
     assert "speechrail-${version}-*.whl" in ci_text
+    assert "tests/test_diarization_extensions.py" in ci_text
+    assert "tests/test_diarization_sdk.py" in ci_text
+    assert "tests/test_diarization_contracts.py" not in ci_text
+    for relative_path in (
+        "tests/test_diarization_extensions.py",
+        "tests/test_diarization_sdk.py",
+    ):
+        assert (ROOT / relative_path).is_file()
 
 
 def test_release_blocks_publish_until_tag_ci_and_unsigned_dmg_are_verified() -> None:
