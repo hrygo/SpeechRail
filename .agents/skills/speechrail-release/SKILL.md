@@ -17,7 +17,7 @@ description: >-
 |---|---|---|
 | 只问版本或 bump | 读取代码/标签并给出 SemVer 建议 | 否 |
 | 只构建 wheel/App | 版本材料、代码门、构建和产物校验 | 否 |
-| App 本机验证或 bundle 整理 | 构建、XCTest/UI test、唯一安装路径和清理 | 否 |
+| App 本机验证或 bundle 整理 | 构建、唯一安装路径和清理；XCTest/UI test 仅在当前用户明确要求时运行 | 否 |
 | 安装/替换本机服务或 App | 完整发布、运行态验收和回滚点 | 是 |
 
 全新 Mac 首装、下载模型和首次注册服务读
@@ -126,11 +126,14 @@ scope 包含 App 时读取 [macOS App 分发与签名](../../../docs/developers/
 
 ```bash
 scripts/macos_app_build.sh --configuration Debug
-scripts/macos_app_test.sh
 plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist
+# XCUITest 属 UI 自动化，会接管前台窗口与焦点：默认不运行，仅在当前用户明确要求时执行（见 AGENTS.md 硬约束）
+# scripts/macos_app_test.sh
 ```
 
-本机门禁使用 fake transport，不注册生产 helper，不启动/停止生产服务，不访问真实模型。没有 Developer ID
+本机门禁使用 fake transport，不注册生产 helper，不启动/停止生产服务，不访问真实模型。`macos_app_test.sh`
+属 UI 自动化，会接管前台窗口与焦点，默认不运行，只有当前用户明确要求时才执行；未运行不构成发布失败，
+但必须在报告中列为未执行项。没有 Developer ID
 时只能交付本地 Debug/Release 测试包，不能称为可分发版本；Distribution 还需逐项验证 nested code、
 Hardened Runtime、notarization、staple、Gatekeeper 和最终 ZIP，不能用 `codesign --deep` 掩盖问题。
 

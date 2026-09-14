@@ -105,8 +105,9 @@ profile/generation；切换失败停止后续动作，只允许一次明确回�
 ## 完成证据
 
 结论至少能回溯到：版本/commit、runtime target、active profile/generation、唯一 listener、
-PID/executable、health/ready、models/voices、必要的真实 smoke、回退目标和未验证项。若请求
-包含 App，另记录 bundle version/build、bundle identifier、control-agent 状态和唯一安装路径。
+PID/executable、health/ready、models/voices、必要的真实 smoke（仅在当前用户明确授权时执行，否则列为
+未执行项）、回退目标和未验证项。若请求包含 App，另记录 bundle version/build、bundle identifier、
+control-agent 状态和唯一安装路径。
 
 只报告状态、版本、profile、generation、错误码和脱敏 stderr 尾部；不报告 API key、Authorization、
 音频、完整转写、完整 prompt、完整日志或无关私人路径。
