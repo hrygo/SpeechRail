@@ -1854,30 +1854,49 @@ public struct VoiceLibraryView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $selectedVoiceID) {
-                    ForEach(filteredVoices) { voice in
-                        voiceLibraryRow(voice)
-                            .tag(voice.id)
+                ListCard(
+                    header: { ListCardHeader(title: "音色") },
+                    footer: {
+                        ListCardFooter(note: "复刻音色保存在本机，不会上传。") {
+                            Button {
+                                navigation.request(.voiceDesign)
+                            } label: {
+                                Label("新建音色", systemImage: "sparkles")
+                            }
+                            .speechRailButton(.secondary)
+                        }
                     }
-                }
-                .listStyle(.inset)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityLabel("音色列表")
-                .onKeyPress(.space) {
-                    guard let voice = selectedVoice else { return .ignored }
-                    togglePreview(voice)
-                    return .handled
+                ) {
+                    List(selection: $selectedVoiceID) {
+                        ForEach(filteredVoices) { voice in
+                            voiceLibraryRow(voice)
+                                .tag(voice.id)
+                        }
+                    }
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityLabel("音色列表")
+                    .onKeyPress(.space) {
+                        guard let voice = selectedVoice else { return .ignored }
+                        togglePreview(voice)
+                        return .handled
+                    }
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
+    /// 「8 个音色 · 3 个来自复刻」（Figma `filters` 右侧计数）。来源拆分只在筛选
+    /// 没有藏起任何音色时才成立，否则退回「筛选数 / 总数」。
     private var countText: String {
         let total = filteredVoices.count
-        return total == model.creatorVoices.count
-            ? "\(total) 个音色"
-            : "\(total) / \(model.creatorVoices.count) 个音色"
+        guard total == model.creatorVoices.count else {
+            return "\(total) / \(model.creatorVoices.count) 个音色"
+        }
+        let cloned = filteredVoices.filter { !$0.isSystem }.count
+        return cloned > 0 ? "\(total) 个音色 · \(cloned) 个来自复刻" : "\(total) 个音色"
     }
 
     /// One row: name, source badge, one line of description, the availability
@@ -1917,10 +1936,18 @@ public struct VoiceLibraryView: View {
                 if isPreviewing {
                     ProgressView()
                         .controlSize(.small)
+                        .frame(
+                            width: SpeechRailDesignTokens.Control.iconButtonSize,
+                            height: SpeechRailDesignTokens.Control.iconButtonSize
+                        )
                 } else {
                     Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
                         .font(SpeechRailDesignTokens.Typography.statusIcon)
                         .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                        .frame(
+                            width: SpeechRailDesignTokens.Control.iconButtonSize,
+                            height: SpeechRailDesignTokens.Control.iconButtonSize
+                        )
                 }
             }
             .speechRailButton(.quiet)
@@ -1930,10 +1957,67 @@ public struct VoiceLibraryView: View {
                     ? "取消 \(voice.name) 的试听"
                     : "\(voice.name)\(isPlaying ? "停止试听" : "试听")"
             )
+
+            Menu {
+                voiceRowActions(voice)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(SpeechRailDesignTokens.Typography.statusIcon)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        width: SpeechRailDesignTokens.Control.iconButtonSize,
+                        height: SpeechRailDesignTokens.Control.iconButtonSize
+                    )
+            }
+            .menuStyle(.button)
+            .buttonStyle(.borderless)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .accessibilityLabel("更多操作：\(voice.name)")
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
         .accessibilityElement(children: .contain)
         .accessibilityHint("选中后可在右侧查看详情、重命名或删除")
+    }
+
+    /// 行内「更多操作」与 Inspector 动作同源，避免同一动作在两处漂移
+    /// （Figma `iconButton(row, "ellipsis", 28)`）；系统音色不提供编辑与删除。
+    @ViewBuilder
+    private func voiceRowActions(_ voice: CreatorVoice) -> some View {
+        let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
+        Button {
+            togglePreview(voice)
+        } label: {
+            Label(isPlaying ? "停止试听" : "试听", systemImage: isPlaying ? "stop" : "play")
+        }
+        .disabled(previewDisabled(for: voice))
+
+        if !voice.isSystem {
+            Divider()
+            Button {
+                editorFocus = .name
+                editingVoice = voice
+            } label: {
+                Label("重命名…", systemImage: "pencil")
+            }
+            .disabled(model.isUpdatingVoice)
+            Button {
+                editorFocus = .instruction
+                editingVoice = voice
+            } label: {
+                Label("编辑描述…", systemImage: "text.bubble")
+            }
+            .disabled(model.isUpdatingVoice || voice.mode == "clone")
+            Divider()
+            Button(role: .destructive) {
+                deletionMessage = nil
+                pendingDeleteVoice = voice
+                isConfirmingDeletion = true
+            } label: {
+                Label("删除…", systemImage: "trash")
+            }
+            .disabled(model.isDeletingVoice)
+        }
     }
 
     private func sourceBadge(_ voice: CreatorVoice) -> some View {
@@ -2454,6 +2538,11 @@ public struct WorksView: View {
         }
     }
 
+    /// Figma `cols`：时长列 64pt，动作列 = 三个 28pt 图标按钮 + 两个 4pt 间距。
+    private static let durationColumnWidth: CGFloat = 64
+    private static let actionColumnWidth: CGFloat =
+        SpeechRailDesignTokens.Control.iconButtonSize * 3 + SpeechRailDesignTokens.Spacing.micro * 2
+
     public init() {}
 
     public var body: some View {
@@ -2809,26 +2898,62 @@ public struct WorksView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $selectedWorkID) {
-                    ForEach(filteredWorks) { work in
-                        workListRow(work)
-                            .tag(work.id)
-                            .contextMenu {
-                                workContextMenu(work)
+                ListCard(
+                    header: { workColumnsHeader },
+                    footer: {
+                        ListCardFooter(note: "导出快捷键 ⌘E。删除作品会同时移除本地音频文件。") {
+                            Button {
+                                navigation.request(.dubbing)
+                            } label: {
+                                Label("新建配音", systemImage: AppRoute.dubbing.systemImage)
                             }
+                            .speechRailButton(.secondary)
+                        }
                     }
-                }
-                .listStyle(.inset)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityLabel("作品列表")
-                .onKeyPress(.space) {
-                    guard let work = selectedWork else { return .ignored }
-                    model.playWork(work)
-                    return .handled
+                ) {
+                    List(selection: $selectedWorkID) {
+                        ForEach(filteredWorks) { work in
+                            workListRow(work)
+                                .tag(work.id)
+                                .contextMenu {
+                                    workContextMenu(work)
+                                }
+                        }
+                    }
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityLabel("作品列表")
+                    .onKeyPress(.space) {
+                        guard let work = selectedWork else { return .ignored }
+                        model.playWork(work)
+                        return .handled
+                    }
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// Figma `cols`：列头让右侧的时长与行内动作不再像无主的装饰
+    /// （REDESIGN-SPEC §7.4）。
+    private var workColumnsHeader: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("作品")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("时长")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(width: Self.durationColumnWidth, alignment: .trailing)
+            Text("操作")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(width: Self.actionColumnWidth, alignment: .trailing)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
     }
 
     private func workListRow(_ work: CreativeWork) -> some View {
@@ -2837,46 +2962,87 @@ public struct WorksView: View {
         return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(work.title)
-                    .font(SpeechRailDesignTokens.Typography.body)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text("音色：\(work.voiceName)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                Text(workListSummary(work))
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text(work.createdAt.formatted(date: .abbreviated, time: .shortened))
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(1)
-
             Text(durationText(for: work))
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .monospacedDigit()
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .frame(width: 56, alignment: .trailing)
+                .lineLimit(1)
+                .frame(width: Self.durationColumnWidth, alignment: .trailing)
 
-            Button {
-                model.playWork(work)
-            } label: {
-                Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
-                    .font(SpeechRailDesignTokens.Typography.statusIcon)
-                    .foregroundStyle(
-                        isPlaying
-                            ? SpeechRailDesignTokens.Color.ready
-                            : SpeechRailDesignTokens.Color.voice
-                    )
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Button {
+                    model.playWork(work)
+                } label: {
+                    Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
+                        .font(SpeechRailDesignTokens.Typography.statusIcon)
+                        .foregroundStyle(
+                            isPlaying
+                                ? SpeechRailDesignTokens.Color.ready
+                                : SpeechRailDesignTokens.Color.voice
+                        )
+                        .frame(
+                            width: SpeechRailDesignTokens.Control.iconButtonSize,
+                            height: SpeechRailDesignTokens.Control.iconButtonSize
+                        )
+                }
+                .speechRailButton(.quiet)
+                .accessibilityLabel("\(work.title)\(isPlaying ? "停止试听" : "试听")")
+
+                Button {
+                    prepareExport(for: work)
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(SpeechRailDesignTokens.Typography.statusIcon)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .frame(
+                            width: SpeechRailDesignTokens.Control.iconButtonSize,
+                            height: SpeechRailDesignTokens.Control.iconButtonSize
+                        )
+                }
+                .speechRailButton(.quiet)
+                .accessibilityLabel("导出 \(work.title)")
+
+                Menu {
+                    workContextMenu(work)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(SpeechRailDesignTokens.Typography.statusIcon)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .frame(
+                            width: SpeechRailDesignTokens.Control.iconButtonSize,
+                            height: SpeechRailDesignTokens.Control.iconButtonSize
+                        )
+                }
+                .menuStyle(.button)
+                .buttonStyle(.borderless)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .accessibilityLabel("更多操作：\(work.title)")
             }
-            .speechRailButton(.quiet)
-            .accessibilityLabel("\(work.title)\(isPlaying ? "停止试听" : "试听")")
+            .frame(width: Self.actionColumnWidth, alignment: .trailing)
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
         .accessibilityElement(children: .contain)
         .accessibilityHint("选中后可导出、在 Finder 中显示、重命名或删除")
+    }
+
+    /// 「时间 · 音色」：作品行只有这两条可靠事实。设计稿还画了「24-bit 44.1 kHz」，
+    /// 但服务的公开 PCM profile 是 24 kHz / 16-bit / 单声道
+    /// （`backends/qwen3_tts.py`、`domain/tts.py`），行内不写与实测不符的格式声明。
+    private func workListSummary(_ work: CreativeWork) -> String {
+        "\(work.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(work.voiceName)"
     }
 
     @ViewBuilder
@@ -2933,10 +3099,17 @@ public struct WorksView: View {
         }
     }
 
+    /// 「8 个作品 · 共 11:05」（Figma `toolbar` 右侧计数）。总时长只在每条作品
+    /// 都读出时长时才相加，不把「未读取」当成 0。
     private var countText: String {
-        filteredWorks.count == model.works.count
-            ? "\(model.works.count) 个作品"
-            : "\(filteredWorks.count) / \(model.works.count) 个作品"
+        let total = filteredWorks.count
+        guard total == model.works.count else {
+            return "\(total) / \(model.works.count) 个作品"
+        }
+        let durations = filteredWorks.compactMap(\.durationSeconds)
+        guard total > 0, durations.count == total else { return "\(total) 个作品" }
+        let seconds = Int(durations.reduce(0, +).rounded())
+        return "\(total) 个作品 · 共 \(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
 
     private func revealInFinder(_ work: CreativeWork) {
@@ -2980,6 +3153,92 @@ public struct WorksView: View {
         } catch {
             exportMessage = "导出失败：作品音频暂时不可用，请重新生成或重试。"
         }
+    }
+}
+
+// MARK: - 列表卡（Figma `listHead` / `listFoot`）
+
+/// 列表卡：卡片固定的三段结构 —— 标题带 / 行 / 说明带，中间用发丝线分隔
+/// （Figma `card("list")` + `listHead` + `hairline` + 行 + `hairline` + `listFoot`）。
+/// 卡片按内容取高，不靠撑开把说明带推到窗口底边（REDESIGN-SPEC §7.3 / §7.4）。
+private struct ListCard<Header: View, Footer: View, Content: View>: View {
+    private let header: Header
+    private let footer: Footer
+    private let content: Content
+
+    init(
+        @ViewBuilder header: () -> Header,
+        @ViewBuilder footer: () -> Footer,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.header = header()
+        self.footer = footer()
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            content
+            Divider()
+            footer
+        }
+        .speechRailSurface(.panel)
+        .clipShape(ConcentricRectangle())
+    }
+}
+
+/// Figma `listHead`：标题左、排序说明或控件右的固定带。
+private struct ListCardHeader<Trailing: View>: View {
+    private let title: String
+    private let trailing: Trailing
+
+    init(title: String, @ViewBuilder trailing: () -> Trailing) {
+        self.title = title
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            trailing
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+    }
+}
+
+private extension ListCardHeader where Trailing == EmptyView {
+    init(title: String) {
+        self.init(title: title) { EmptyView() }
+    }
+}
+
+/// Figma `listFoot`：说明左、次级动作右的固定带。
+private struct ListCardFooter<Action: View>: View {
+    private let note: String
+    private let action: Action
+
+    init(note: String, @ViewBuilder action: () -> Action) {
+        self.note = note
+        self.action = action()
+    }
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(note)
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            action
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
     }
 }
 
