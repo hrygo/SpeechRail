@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App UI/UX 重设计规格（macOS 26 原生）"
 status: accepted
 audience: "SpeechRail macOS App 设计与开发人员"
-version: "1.4.0"
+version: "1.5.0"
 date: 2026-09-15
 ---
 
@@ -351,7 +351,17 @@ SpeechRail · 服务已就绪 · Quality      (不可点状态行)
 
 ## 10. 迁移路径与 Swift 映射
 
-落地状态（2026-09-15，`main` 工作区）：阶段 1 外壳与阶段 3 的路由快捷键/开发者详情开关已实现，`./scripts/macos_app_build.sh --configuration Debug` 通过（`BUILD SUCCEEDED`，无新增编译警告）。阶段 2（token 收敛）与阶段 4（逐页重构）未开始，因此 `SpeechRailDesignTokens` 目前新旧语义并存。
+落地状态（2026-09-15，`main`）：阶段 1–4 均已在 `macos/SpeechRailApp` 落地，
+`./scripts/macos_app_build.sh --configuration Debug` 通过（`BUILD SUCCEEDED`，0 条新增 warning）。
+Debug 构建已覆盖安装到 `~/Applications/SpeechRail.app`。**尚未执行**：桌面人工视觉走查、
+VoiceOver 实测、UI 自动化测试（AGENTS.md 硬约束），因此本文不宣称视觉或无障碍验收通过。
+
+| 阶段 | 状态 | 提交 |
+|---|---|---|
+| 1 外壳 | 已完成 | `465f7d41` |
+| 2 Token 收敛 | 已完成 | `51898504` |
+| 3 命令与键盘 | 已完成 | `51898504`、`641a5517` |
+| 4 逐页重构（8 页） | 已完成 | `51898504`（配音台/音色创作/音色库/我的作品）、`641a5517`（服务状态/运行监控/模型/诊断） |
 
 ### 阶段 1：外壳（低风险，独立可见）
 
@@ -368,6 +378,11 @@ SpeechRail · 服务已就绪 · Quality      (不可点状态行)
 底部状态区去掉磷光珠光晕与自绘字体，`StatusTone` 改用系统语义色（`.green/.orange/.red/.secondary`）。
 
 ### 阶段 2：Token 收敛
+
+状态：**已完成**（2026-09-15，`51898504`）。`SpeechRailDesignTokens` 的颜色/字体/圆角/表面已改为系统语义映射
+（`labelColor` 层级、`controlBackgroundColor`、`textBackgroundColor`、`Color.accentColor`、`ConcentricRectangle`），
+`Color.rail` 收敛为单一强调色事实来源；`Chassis`/`SteelAlloy`/`AcousticMaster`/`Surface` 仅作为兼容别名保留，
+新代码不再引用。本文 §12.4 记录的 `#23687D` vs `#2A4E57` 冲突随之一并解决。
 
 | 现在 | 改为 |
 |---|---|
@@ -386,13 +401,21 @@ SpeechRail · 服务已就绪 · Quality      (不可点状态行)
 
 在 `App.swift` 增加 `.commands { … }`，并把 `AppNavigationState` 扩展为可由命令触发路由切换。
 
-状态：**部分完成**（2026-09-15）。已加 `View` 菜单的 `⌘1`–`⌘8` 路由切换与 `⌘⌥I` 开发者详情开关（后者复用既有 `@AppStorage("speechrail.showDeveloperDetails")`，各页 Inspector 已经响应它）。`⌘N`（新建配音文稿）、`⌘E`（导出选中作品）、页面内 `⌘⏎` 与列表 `空格` 试听依赖各页的本地状态，随阶段 4 对应页面一起实现。
+状态：**已完成**（2026-09-15，`641a5517`）。`App.swift` 中的 `SpeechRailCommands` 提供 File（`⌘N` 新建配音文稿、`⌘E` 导出选中作品）、View（`⌘1`–`⌘8`、`⌘⌥I`）与 Help（`⌘?` 帮助窗口）。`⌘E` 通过
+`FocusedValues.selectedWorkCommand` 绑定到当前场景选中的作品，因此菜单标题会显示具体作品名，未选中时禁用。
+页面内 `⌘⏎` 在配音台与音色创作分别触发生成与生成候选；列表 `空格` 试听在音色库与我的作品接入 `.onKeyPress(.space)`，
+仅在列表获得焦点时生效。
+
+> 未验证：`空格` 试听与 `.searchable` 在真实焦点/窄窗口下的行为未做 UI 验证（本机未获 UI 自动化授权）。
 
 ### 阶段 4：逐页重构
 
 顺序：配音台 → 音色创作 → 音色库 → 我的作品 → 服务状态 → 运行监控 → 模型 → 诊断。
 
 每页完成后应更新 [`docs/developers/macos-app-design-system.md`](../../developers/macos-app-design-system.md) 的对应章节，而不是保留两份规范。
+
+状态：**已完成**（2026-09-15）。八页均按 §7 各自规格重建，`docs/developers/macos-app-design-system.md`
+已同步到 v0.8.0（含 §3.1 token 表与 §4.2 页面规则的 v2 语义），不再与新旧两套规范并行。
 
 ## 11. Figma 构建规格
 
@@ -623,6 +646,11 @@ sidebar/width         220 240 280
 2. **纳入**作品删除/重命名（D12），随「我的作品」页面批次一起实现（删除需破坏性确认）。
 3. 落地按 §10 阶段推进，从阶段 1 外壳开始。
 
+4. **已解决（2026-09-15，阶段 2）**：浅色强调色的两处数值冲突（资产 `#23687D` vs Figma/`Color.rail` `#2A4E57`）
+   按“交给系统”收口——`Color.rail` 改为 `Color.accentColor`，App 跟随用户在系统设置中选择的强调色，
+   不再由一个写死的浅色数值定义品牌色。Figma 变量保留为设计参考，不再作为运行时事实来源（§11.6 已按此记录）。
+
 未决：
 
-- **浅色强调色有两处数值**：`Assets.xcassets/AccentColor` 浅色为 `#23687D`，而 Figma 变量与 `Color.rail` 为 `#2A4E57`（深色两者一致，均为 `#4FA4BA`）。§5.4 写“继续保持资产色”，§11 又写 Figma 数值是设计事实来源，两者冲突；进入阶段 2 前需要定一个，届时同步资产与 token。
+- **视觉与无障碍矩阵未实测**：本机未获 UI 自动化授权，Light/Dark、Increase Contrast、Dynamic Type、
+  Reduce Motion、VoiceOver 顺序与列表 `空格` 试听均只完成代码层验证。

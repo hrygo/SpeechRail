@@ -656,6 +656,17 @@ public struct RuntimeMonitoringView: View {
         .chartLegend(position: .bottom, alignment: .leading)
         .accessibilityLabel("时延趋势")
         .accessibilityIdentifier("runtime-latency-chart")
+        .accessibilityChartDescriptor(
+            RuntimeLatencyChartDescriptor(
+                samples: windowedSamples.map {
+                    RuntimeLatencySample(
+                        capturedAt: $0.capturedAt,
+                        asrSeconds: $0.asrLatencySeconds,
+                        ttsSeconds: $0.ttsLatencySeconds
+                    )
+                }
+            )
+        )
     }
 
     /// Grid lines use the system separator colour and 12pt labels so the data

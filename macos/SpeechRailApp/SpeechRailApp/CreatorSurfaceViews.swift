@@ -941,6 +941,15 @@ public struct VoiceDesignView: View {
             )
 
             if !candidates.isEmpty {
+                Text(candidateProgressText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(candidateProgressText)
+            }
+
+            if !candidates.isEmpty {
                 candidateGrid
             } else if voiceDesignAvailability == .checking {
                 checkingCandidates
@@ -952,6 +961,16 @@ public struct VoiceDesignView: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailContentSurface()
+    }
+
+    /// §8 部分成功：`n/4 可试听` has to be readable at a glance instead of
+    /// making the user count cards.
+    private var candidateProgressText: String {
+        let ready = candidates.filter { candidate in
+            if case .ready = candidate.status { return true }
+            return false
+        }.count
+        return "\(ready)/\(candidates.count) 可试听"
     }
 
     private var candidateGrid: some View {
@@ -1071,7 +1090,7 @@ public struct VoiceDesignView: View {
             TextField("例如：夜航主持", text: $voiceName)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .frame(height: SpeechRailDesignTokens.Control.regularHeight)
+                .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
                 .speechRailRecessedSlot()
                 .accessibilityLabel("音色保存名称")
         }
@@ -1556,7 +1575,7 @@ private struct VoiceCandidateSaveSheet: View {
                     .textFieldStyle(.plain)
                     .focused($isNameFocused)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                    .frame(height: SpeechRailDesignTokens.Control.regularHeight)
+                    .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
                     .speechRailRecessedSlot()
                     .accessibilityLabel("音色名称")
             }
@@ -2092,7 +2111,7 @@ public struct VoiceLibraryView: View {
                 TextField("输入试听文案", text: $sampleText)
                     .textFieldStyle(.plain)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                    .frame(height: SpeechRailDesignTokens.Control.regularHeight)
+                    .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
                     .speechRailRecessedSlot()
                     .accessibilityLabel("音色试听文案")
             }
@@ -2650,7 +2669,7 @@ public struct WorksView: View {
             TextField("作品名称", text: $renameText)
                 .textFieldStyle(.plain)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .frame(height: SpeechRailDesignTokens.Control.regularHeight)
+                .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
                 .speechRailRecessedSlot()
                 .accessibilityLabel("作品名称")
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
