@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.7.1"
+version: "0.7.2"
 date: 2026-09-15
 ---
 
@@ -36,6 +36,10 @@ ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否�
 2. **配色 (Chromatic DNA)**：
    - **黑曜声学机架基调**：主基底为吸光黑曜岩枪膛色（`#151719`~`#1A1C1F`），消除惨白纸质漂浮感。
    - **绝无 `#007AFF` 蓝色**：高亮与选中采用 Logo 道床冷青钢光（`#2A4E57`）与钢轨顶面反光（`#4FA4BA`）。
+   - **选中高亮必须走系统强调色机制**：侧边栏/列表选中色取自 App 强调色，需同时具备 `Assets.xcassets/AccentColor`
+     与构建设置 `ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor`（后者产出 `NSAccentColorName`）；
+     缺少构建设置时资产不会生效，选中色回落系统默认蓝。不得用 `.listRowBackground` 自绘选中背景替代。
+     macOS 仅在系统强调色为「多彩 Multicolor」时应用 App 强调色，用户显式选择其他强调色时系统优先。
    - **电声双阶暖冷互映**：声色创作注入真空管暖琥珀（`#F59E0B`），运行监控注入示波器磷光绿（`#10B981`）。浅色模式呈现阳极氧化实心铝锭质感（`#DDE1E6`~`#E8ECF0`），非纸白。
 3. **组件效果 (Physical Craftsmanship & Optics)**：
    - **CNC 双阶倒角 (Dual-Step Chamfer)**：顶边 0.5px 镜面切削白高光，底边 0.5px 机械深槽闭塞投影。
