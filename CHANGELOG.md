@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-09-15
+
+### Fixed
+
+- 修复 macOS 侧边栏导航使用自定义设计 token 而非系统原生组件，现改用 `NavigationLink` + `Label` 并新增 ⌘1-⌘8 路由快捷键。
+- 修复安装器生成的 console script 硬编码 Python 绝对路径，导致 `runtime/current` 切换后 MCP 客户端（Codex、Antigravity 等）加载旧版代码；现在 entry point 委托给 `runtime/current` 动态解析。
+- 修复 `speechrail service preflight` 不传 `--app-home` 时回退到 `Path.cwd()` 而非默认 app home，导致配置文件检查误报 missing。
+
+### Changed
+
+- 侧边栏状态指示器和导航行简化为系统 `Color` 和标准 `Label`，减少自定义绘制。
+- App 控制面 UI/UX 重设计规范（`docs/design/2026-09-15-macos-uiux-redesign/`）作为迁移目标纳入仓库。
+- 开发者详情开关（⌘⌥I）和路由快捷键菜单命令加入 App 菜单栏。
+
+
 ## [2.6.3] - 2026-09-14
 
 ### Fixed
