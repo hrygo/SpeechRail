@@ -332,6 +332,37 @@ def _assert_service_port_free(port: int, directory: Path | None) -> None:
         raise InstallerError("managed installation could not verify the service lock") from exc
 
 
+
+def _patch_entry_points(release_dir: Path) -> None:
+    """Replace uv-generated console scripts with stable runtime/current wrappers.
+
+    uv pip install hardcodes the Python absolute path into console scripts.
+    After a ``runtime/current`` switch those scripts still reference the old
+    release.  Patching them to resolve ``runtime/current`` at startup keeps
+    ``~/.local/bin/speechrail[-mcp]`` (which symlinks into the current venv)
+    working across releases without client-side changes.
+    """
+    app_home_default = "$HOME/Library/Application Support/SpeechRail"
+    for name, module in (("speechrail-mcp", "speechrail.mcp"), ("speechrail", "speechrail")):
+        script = release_dir / ".venv" / "bin" / name
+        if not script.is_file():
+            continue
+        lines = [
+            "#!/bin/sh",
+            "# Stable entry point: always delegates to runtime/current.",
+            '_app_home="${SPEECHRAIL_APP_HOME:-' + app_home_default + '}"',
+            '_python="$_app_home/runtime/current/.venv/bin/python"',
+            'if [ ! -x "$_python" ]; then',
+            '  echo "' + name + ': runtime/current python not found" >&2',
+            "  exit 1",
+            "fi",
+            'exec "$_python" -m ' + module + ' "$@"',
+            "",
+        ]
+        script.write_text("\n".join(lines), encoding="utf-8")
+        script.chmod(0o755)
+
+
 def _stage_wheel(
     wheel: Path,
     layout: ServiceLayout,
@@ -377,6 +408,7 @@ def _stage_wheel(
             ),
             runner,
         )
+        _patch_entry_points(release_dir)
     except BaseException:
         shutil.rmtree(release_dir, ignore_errors=True)
         raise
