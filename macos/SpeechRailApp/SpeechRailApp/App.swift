@@ -4,8 +4,7 @@ import SpeechRailControlKit
 
 @main
 struct SpeechRailApp: App {
-    /// ⌘1–⌘8 的显示顺序与 `AppRoute.allCases` 一致（创作四页 + 服务四页）。
-    private static let routeShortcuts: [KeyEquivalent] = ["1", "2", "3", "4", "5", "6", "7", "8"]
+    static let helpWindowID = "speechrail-help"
 
     @State private var model: AppModel
     @State private var navigation: AppNavigationState
@@ -101,19 +100,10 @@ struct SpeechRailApp: App {
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
-            CommandGroup(after: .sidebar) {
-                Toggle("显示开发者详情", isOn: $showDeveloperDetails)
-                    .keyboardShortcut("i", modifiers: [.command, .option])
-            }
-            CommandGroup(after: .toolbar) {
-                Divider()
-                ForEach(Array(AppRoute.allCases.enumerated()), id: \.element) { index, route in
-                    Button(route.title) {
-                        navigation.request(route)
-                    }
-                    .keyboardShortcut(Self.routeShortcuts[index], modifiers: .command)
-                }
-            }
+            SpeechRailCommands(
+                navigation: navigation,
+                showDeveloperDetails: $showDeveloperDetails
+            )
         }
         MenuBarExtra("SpeechRail", systemImage: AppRoute.dubbing.systemImage) {
             ControlMenuView()
@@ -122,7 +112,69 @@ struct SpeechRailApp: App {
         }
         Settings {
             SettingsView()
+                .environment(model)
         }
+        Window("SpeechRail 帮助", id: Self.helpWindowID) {
+            SpeechRailHelpView()
+        }
+        .windowResizability(.contentSize)
+    }
+}
+
+/// The menu bar and keyboard map from REDESIGN-SPEC §6.3. Focused scene values
+/// let「导出选中作品」follow the page the user is actually looking at.
+struct SpeechRailCommands: Commands {
+    /// ⌘1–⌘8 的显示顺序与 `AppRoute.allCases` 一致（创作四页 + 服务四页）。
+    private static let routeShortcuts: [KeyEquivalent] = ["1", "2", "3", "4", "5", "6", "7", "8"]
+
+    let navigation: AppNavigationState
+    @Binding var showDeveloperDetails: Bool
+    @FocusedValue(\.selectedWorkCommand) private var selectedWorkCommand
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("新建配音文稿") {
+                navigation.request(.dubbing)
+            }
+            .keyboardShortcut("n", modifiers: .command)
+
+            Button(exportTitle) {
+                selectedWorkCommand?()
+            }
+            .keyboardShortcut("e", modifiers: .command)
+            .disabled(selectedWorkCommand == nil)
+        }
+
+        CommandGroup(after: .sidebar) {
+            Toggle("显示开发者详情", isOn: $showDeveloperDetails)
+                .keyboardShortcut("i", modifiers: [.command, .option])
+        }
+
+        CommandGroup(after: .toolbar) {
+            Divider()
+            ForEach(Array(AppRoute.allCases.enumerated()), id: \.element) { index, route in
+                Button(route.title) {
+                    navigation.request(route)
+                }
+                .keyboardShortcut(
+                    Self.routeShortcuts[index % Self.routeShortcuts.count],
+                    modifiers: .command
+                )
+            }
+        }
+
+        CommandGroup(replacing: .help) {
+            Button("SpeechRail 帮助") {
+                openWindow(id: SpeechRailApp.helpWindowID)
+            }
+            .keyboardShortcut("?", modifiers: .command)
+        }
+    }
+
+    private var exportTitle: String {
+        guard let selectedWorkCommand else { return "导出选中作品…" }
+        return "导出“\(selectedWorkCommand.title)”…"
     }
 }
 

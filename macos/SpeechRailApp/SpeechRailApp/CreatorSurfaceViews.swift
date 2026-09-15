@@ -35,7 +35,12 @@ public struct DubbingDeskView: View {
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     @SceneStorage("speechrail.dubbing.text") private var dubbingText = "在星际航行的漫长岁月里，人类学会了倾听寂静。每当脉冲信号穿越猎户座悬臂，控制台都会闪烁起熟悉的琥珀色微光。"
     @SceneStorage("speechrail.dubbing.voiceID") private var selectedVoiceID = ""
-    @SceneStorage("speechrail.dubbing.speed") private var speechSpeed: Double = 1.0
+    /// `0` means "this window has no opinion yet", so the Settings default
+    /// applies until the user moves the control in this window
+    /// (REDESIGN-SPEC §7.10).
+    @SceneStorage("speechrail.dubbing.speed") private var storedSpeed: Double = 0
+    @AppStorage("speechrail.creator.defaultVoiceID") private var defaultVoiceID = ""
+    @AppStorage("speechrail.creator.defaultSpeed") private var defaultSpeed: Double = 1.0
     @State private var showInspector = false
     @State private var isVoicePickerPresented = false
     @State private var selectionNotice: String?
@@ -367,12 +372,12 @@ public struct DubbingDeskView: View {
             }
 
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Slider(value: $speechSpeed, in: 0.5...2.0, step: 0.1)
+                Slider(value: speechSpeedBinding, in: 0.5...2.0, step: 0.1)
                     .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
                     .disabled(isSpeedLocked)
                     .accessibilityLabel("语速")
 
-                Stepper(value: $speechSpeed, in: 0.5...2.0, step: 0.1) {
+                Stepper(value: speechSpeedBinding, in: 0.5...2.0, step: 0.1) {
                     EmptyView()
                 }
                 .labelsHidden()
@@ -406,7 +411,18 @@ public struct DubbingDeskView: View {
             get: {
                 [0.8, 1.0, 1.2, 1.5].min { abs($0 - speechSpeed) < abs($1 - speechSpeed) } ?? 1.0
             },
-            set: { speechSpeed = $0 }
+            set: { storedSpeed = $0 }
+        )
+    }
+
+    private var speechSpeed: Double {
+        storedSpeed == 0 ? defaultSpeed : storedSpeed
+    }
+
+    private var speechSpeedBinding: Binding<Double> {
+        Binding(
+            get: { speechSpeed },
+            set: { storedSpeed = $0 }
         )
     }
 
@@ -624,7 +640,8 @@ public struct DubbingDeskView: View {
     }
 
     private func syncSelectedVoice() {
-        guard let firstVoice = availableVoices.first else {
+        let preferredVoice = availableVoices.first { $0.id == defaultVoiceID } ?? availableVoices.first
+        guard let firstVoice = preferredVoice else {
             if !selectedVoiceID.isEmpty {
                 selectionNotice = "当前所选音色已不可用，请先读取可用音色。"
             }
@@ -642,7 +659,7 @@ public struct DubbingDeskView: View {
 
     private func normalizeSelectedVoiceSettings() {
         if selectedVoice?.mode == "clone", speechSpeed != 1.0 {
-            speechSpeed = 1.0
+            storedSpeed = 1.0
         }
     }
 }
@@ -1838,6 +1855,11 @@ public struct VoiceLibraryView: View {
                 .listStyle(.inset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel("音色列表")
+                .onKeyPress(.space) {
+                    guard let voice = selectedVoice else { return .ignored }
+                    togglePreview(voice)
+                    return .handled
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -2430,6 +2452,14 @@ public struct WorksView: View {
         PageScaffold(route: .works, scrollable: false) {
             worksBody
         }
+        .focusedSceneValue(
+            \.selectedWorkCommand,
+            selectedWork.map { work in
+                SelectedWorkCommand(title: work.title) {
+                    prepareExport(for: work)
+                }
+            }
+        )
         .searchable(text: $searchText, placement: .toolbar, prompt: "搜索作品标题")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -2783,6 +2813,11 @@ public struct WorksView: View {
                 .listStyle(.inset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel("作品列表")
+                .onKeyPress(.space) {
+                    guard let work = selectedWork else { return .ignored }
+                    model.playWork(work)
+                    return .handled
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

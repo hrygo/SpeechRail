@@ -9,6 +9,8 @@ public struct PreflightDiagnosticsView: View {
     @State private var selectedCheckName: String?
     @State private var showInspector = false
     @State private var reportMessage: String?
+    @State private var showsPassingChecks = false
+    @AppStorage("speechrail.diagnostics.includeServiceContext") private var includeServiceContext = true
 
     public init() {}
 
@@ -88,25 +90,45 @@ public struct PreflightDiagnosticsView: View {
     }
 
     private var diagnosticWorkspace: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            checkList
-                .frame(
-                    minWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
-                    idealWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
-                    maxWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
-                    minHeight: SpeechRailDesignTokens.Layout.diagnosticsBodyMinimumHeight,
-                    maxHeight: .infinity,
-                    alignment: .topLeading
-                )
-            ScrollView(.vertical, showsIndicators: false) {
-                detailPanel
+        Group {
+            if allChecksPassed && !showsPassingChecks {
+                // A clean run is a conclusion, not an empty list
+                // (REDESIGN-SPEC §7.8).
+                ContentUnavailableView {
+                    Label("未发现问题", systemImage: "checkmark.seal")
+                } description: {
+                    Text("\(model.preflightChecks.count) 项预检全部通过。这只说明环境与配置满足启动条件，不代表模型质量、性能或发布验收通过。")
+                } actions: {
+                    Button("重新运行预检") {
+                        Task { await model.refreshPreflight() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.isBusy || model.isRefreshingPreflight)
+                    Button("查看检查明细") {
+                        showsPassingChecks = true
+                    }
+                }
+            } else {
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
+                    checkList
+                        .frame(
+                            minWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
+                            idealWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
+                            maxWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
+                            minHeight: SpeechRailDesignTokens.Layout.diagnosticsBodyMinimumHeight,
+                            maxHeight: .infinity,
+                            alignment: .topLeading
+                        )
+                    detailPanel
+                        .frame(
+                            minWidth: 0,
+                            maxWidth: .infinity,
+                            minHeight: SpeechRailDesignTokens.Layout.diagnosticsBodyMinimumHeight,
+                            maxHeight: .infinity,
+                            alignment: .topLeading
+                        )
+                }
             }
-                .frame(
-                    minWidth: 0,
-                    maxWidth: .infinity,
-                    maxHeight: .infinity,
-                    alignment: .topLeading
-                )
         }
         .frame(
             maxWidth: .infinity,
@@ -114,6 +136,10 @@ public struct PreflightDiagnosticsView: View {
             maxHeight: .infinity,
             alignment: .topLeading
         )
+    }
+
+    private var allChecksPassed: Bool {
+        !model.preflightChecks.isEmpty && model.preflightChecks.allSatisfy(\.ok)
     }
 
     private var checkList: some View {
@@ -133,24 +159,20 @@ public struct PreflightDiagnosticsView: View {
                     minHeight: SpeechRailDesignTokens.Layout.diagnosticsEmptyListMinimumHeight
                 )
             } else {
-                ScrollView(.vertical, showsIndicators: false) {
-                    LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.List.rowSpacing) {
-                        ForEach(model.preflightChecks, id: \.name) { check in
-                            Button {
-                                selectedCheckName = check.name
-                            } label: {
-                                PreflightCheckRow(
-                                    check: check,
-                                    title: checkTitle(for: check.name),
-                                    selected: selectedCheckName == check.name
-                                )
-                            }
-                            .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
-                            .accessibilityIdentifier("preflight-\(check.name)")
-                        }
+                List(selection: $selectedCheckName) {
+                    ForEach(model.preflightChecks, id: \.name) { check in
+                        PreflightCheckRow(
+                            check: check,
+                            title: checkTitle(for: check.name),
+                            detail: explanation(for: check.name)
+                        )
+                        .tag(check.name)
+                        .accessibilityIdentifier("preflight-\(check.name)")
                     }
-                    .frame(maxHeight: .infinity, alignment: .topLeading)
                 }
+                .listStyle(.inset)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .accessibilityLabel("预检检查项")
             }
         }
         .frame(
@@ -164,7 +186,21 @@ public struct PreflightDiagnosticsView: View {
         .accessibilityIdentifier("diagnostics-check-list")
     }
 
+    /// The card owns the full column height and scrolls inside itself, so the
+    /// numbered steps never get cut off after the technical context
+    /// (REDESIGN-SPEC §7.8).
     private var detailPanel: some View {
+        ScrollView(.vertical) {
+            detailContent
+                .padding(SpeechRailDesignTokens.Spacing.lg)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .speechRailContentSurface()
+        .accessibilityIdentifier("diagnostics-check-detail")
+    }
+
+    private var detailContent: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             if let selectedCheck {
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -194,6 +230,9 @@ public struct PreflightDiagnosticsView: View {
                 detailFact("这项检查确认", explanation(for: selectedCheck.name))
                 detailFact("对当前服务的影响", impact(for: selectedCheck))
                 detailFact("建议动作", recoveryPath(for: selectedCheck).detail)
+                if !selectedCheck.ok {
+                    recoverySteps(recoveryPath(for: selectedCheck).steps)
+                }
 
                 if isModelRelatedCheck(selectedCheck) {
                     modelEvidence
@@ -262,14 +301,7 @@ public struct PreflightDiagnosticsView: View {
                     .lineLimit(2)
             }
         }
-        .frame(
-            maxWidth: .infinity,
-            minHeight: SpeechRailDesignTokens.Layout.diagnosticsBodyMinimumHeight,
-            alignment: .topLeading
-        )
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
-        .accessibilityIdentifier("diagnostics-check-detail")
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func detailFact(_ title: String, _ value: String) -> some View {
@@ -282,6 +314,35 @@ public struct PreflightDiagnosticsView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// Steps are numbered because the order matters: applying a profile before
+    /// its artifacts verify is exactly the mistake this page exists to prevent.
+    private func recoverySteps(_ steps: [String]) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("修复步骤")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                    HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        Text("\(index + 1)")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .frame(width: 16, alignment: .trailing)
+                        Text(step)
+                            .font(SpeechRailDesignTokens.Typography.diagnosticsDetail)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("修复步骤")
     }
 
     @ViewBuilder
@@ -359,7 +420,12 @@ public struct PreflightDiagnosticsView: View {
         if isModelRelatedCheck(check) {
             return DiagnosticRecoveryPath(
                 route: .models,
-                detail: "打开模型管理核对目标档位的目录、文件完整性和当前服务使用状态；仅在制品通过校验后应用档位。"
+                detail: "打开模型管理核对目标档位的目录、文件完整性和当前服务使用状态；仅在制品通过校验后应用档位。",
+                steps: [
+                    "打开模型管理，确认目标档位需要的制品都已登记。",
+                    "运行「下载并校验」，直到每项的存在状态与校验状态都通过。",
+                    "回到本页重新运行预检，确认这一项已经通过。",
+                ]
             )
         }
         if normalized.contains("config")
@@ -371,12 +437,22 @@ public struct PreflightDiagnosticsView: View {
         {
             return DiagnosticRecoveryPath(
                 route: .overview,
-                detail: "先打开服务状态确认控制通道和受管 runtime，再重新运行预检；该页面不自动改写配置或权限。"
+                detail: "先打开服务状态确认控制通道和受管 runtime，再重新运行预检；该页面不自动改写配置或权限。",
+                steps: [
+                    "打开服务状态，确认控制通道可用且服务已就绪。",
+                    "确认受管 runtime、配置文件和模型的访问权限满足运行条件。",
+                    "回到本页重新运行预检，确认这一项已经通过。",
+                ]
             )
         }
         return DiagnosticRecoveryPath(
             route: .developer,
-            detail: "没有安全的自动修复动作；复制脱敏报告交给开发者，报告不包含凭据、原始音频或本地绝对路径。"
+            detail: "没有安全的自动修复动作；复制脱敏报告交给开发者，报告不包含凭据、原始音频或本地绝对路径。",
+            steps: [
+                "复制脱敏诊断报告（不含凭据、原始音频或本地绝对路径）。",
+                "把报告连同本页的检查项交给开发者。",
+                "修复后回到本页重新运行预检，确认这一项已经通过。",
+            ]
         )
     }
 
@@ -537,9 +613,6 @@ public struct PreflightDiagnosticsView: View {
         let formatter = ISO8601DateFormatter()
         let generatedAt = formatter.string(from: Date())
         let lastUpdated = model.lastPreflightRefresh.map(formatter.string(from:)) ?? "未提供"
-        let runtimeProfile = displayedHealth?.profile?.rawValue ?? "未读取"
-        let configuredProfile = model.profile?.preset?.rawValue ?? "未配置"
-        let ready = displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取"
         let checks = model.preflightChecks.map { check in
             let status = check.ok ? "passed" : "failed"
             return "- \(safeIdentifier(check.name)): \(status); \(safeTechnicalResult(for: check))"
@@ -550,11 +623,7 @@ public struct PreflightDiagnosticsView: View {
         generated_at: \(generatedAt)
         preflight_updated_at: \(lastUpdated)
         preflight_request_id: \(model.preflightRequestID?.uuidString ?? "未提供")
-        runtime_profile: \(runtimeProfile)
-        configured_profile: \(configuredProfile)
-        service_state: \(safeIdentifier(model.service.serviceState))
-        health_ready: \(ready)
-        health_failure: \(healthFailureSummary)
+        \(serviceContextLines)
         control_plane: \(model.controlPlaneMessage == nil ? "available" : "unavailable")
         checks: \(model.preflightChecks.filter(\.ok).count)/\(model.preflightChecks.count) passed
 
@@ -568,6 +637,22 @@ public struct PreflightDiagnosticsView: View {
         } else {
             reportMessage = "复制失败，请稍后重试"
         }
+    }
+
+    /// Settings ▸ 服务 decides whether the report carries the runtime context.
+    /// Credentials, raw audio, full transcripts and absolute paths are never
+    /// included either way (REDESIGN-SPEC §7.10).
+    private var serviceContextLines: String {
+        guard includeServiceContext else {
+            return "service_context: 按设置省略（运行档位、配置档位、服务状态、健康结果）"
+        }
+        return """
+        runtime_profile: \(displayedHealth?.profile?.rawValue ?? "未读取")
+        configured_profile: \(model.profile?.preset?.rawValue ?? "未配置")
+        service_state: \(safeIdentifier(model.service.serviceState))
+        health_ready: \(displayedHealth?.ready.map { $0 ? "true" : "false" } ?? "未读取")
+        health_failure: \(healthFailureSummary)
+        """
     }
 
     private func safeIdentifier(_ value: String) -> String {
@@ -693,6 +778,9 @@ private struct DiagnosticRecoveryPath {
 
     let route: Route
     let detail: String
+    /// Numbered, ordered steps. A single suggestion line is not a recovery plan
+    /// (REDESIGN-SPEC §7.8).
+    let steps: [String]
 }
 
 private struct DiagnosticsSummaryView: View {
@@ -851,7 +939,7 @@ private struct DiagnosticsSummaryView: View {
 private struct PreflightCheckRow: View {
     let check: PreflightCheckSnapshot
     let title: String
-    let selected: Bool
+    let detail: String
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -868,15 +956,22 @@ private struct PreflightCheckRow: View {
                     .font(SpeechRailDesignTokens.Typography.label)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
-                Text(check.ok ? "通过" : "失败")
+                    .truncationMode(.tail)
+                Text(detail)
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(
-                        check.ok
-                            ? SpeechRailDesignTokens.Color.ready
-                            : SpeechRailDesignTokens.Color.critical
-                    )
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             Spacer(minLength: 0)
+            Text(check.ok ? "通过" : "失败")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(
+                    check.ok
+                        ? SpeechRailDesignTokens.Color.ready
+                        : SpeechRailDesignTokens.Color.critical
+                )
+                .lineLimit(1)
         }
         .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
         .frame(
@@ -884,27 +979,8 @@ private struct PreflightCheckRow: View {
             minHeight: SpeechRailDesignTokens.List.rowHeight,
             alignment: .leading
         )
-        .background(
-            selected ? SpeechRailDesignTokens.Navigation.selectedFill : Color.clear,
-            in: .rect(
-                cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
-                style: .continuous
-            )
-        )
-        .overlay {
-            if selected {
-                RoundedRectangle(
-                    cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
-                    style: .continuous
-                )
-                    .stroke(
-                        SpeechRailDesignTokens.Navigation.focusRing,
-                        lineWidth: SpeechRailDesignTokens.Stroke.strong
-                    )
-            }
-        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
-        .accessibilityValue(check.ok ? "通过" : "失败")
+        .accessibilityValue("\(check.ok ? "通过" : "失败")，\(detail)")
     }
 }

@@ -13,24 +13,12 @@ public struct ControlMenuView: View {
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Menu.sectionSpacing) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: AppRoute.dubbing.systemImage)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                Text("SpeechRail")
-                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-            }
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(statusSummary)
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(SpeechRailRuntimeStatePresentation.text(model.service.serviceState))
-                    .font(SpeechRailDesignTokens.Typography.technical)
+                Text(statusLine)
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                Spacer(minLength: 0)
             }
             if let operation = model.serviceOperation,
                operation.phase.isActive || operation.phase == .failed
@@ -43,34 +31,28 @@ public struct ControlMenuView: View {
             Button {
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             } label: {
-                Label("打开管理控制台", systemImage: "rectangle.3.group")
+                Label("打开 SpeechRail", systemImage: "macwindow")
                     .speechRailMenuRow()
             }
-            .keyboardShortcut("0", modifiers: [.command, .option])
+            .keyboardShortcut("o", modifiers: .command)
 
             Button {
-                navigation.request(.models)
+                navigation.request(.dubbing)
                 openWindow(id: AppNavigationState.controlCenterWindowID)
             } label: {
-                Label("管理模型", systemImage: AppRoute.models.systemImage)
+                Label("开始配音", systemImage: AppRoute.dubbing.systemImage)
                     .speechRailMenuRow()
             }
-
-            Button {
-                navigation.request(.voiceDesign)
-                openWindow(id: AppNavigationState.controlCenterWindowID)
-            } label: {
-                Label("开始音色创作", systemImage: AppRoute.voiceDesign.systemImage)
-                    .speechRailMenuRow()
-            }
-            .keyboardShortcut("N", modifiers: [.command])
+            .keyboardShortcut("n", modifiers: .command)
 
             Divider()
 
             Button {
-                pendingServiceAction = .start
+                navigation.request(.diagnostics)
+                openWindow(id: AppNavigationState.controlCenterWindowID)
+                Task { await model.refreshPreflight() }
             } label: {
-                Label("启动服务", systemImage: "play.circle")
+                Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
                     .speechRailMenuRow()
             }
             .disabled(
@@ -79,22 +61,11 @@ public struct ControlMenuView: View {
                     || model.isRefreshingService
                     || !canMutate
             )
+
             Button {
                 pendingServiceAction = .stop
             } label: {
-                Label("停止服务", systemImage: "stop.circle")
-                    .speechRailMenuRow()
-            }
-            .disabled(
-                model.isBusy
-                    || model.hasActiveMutation
-                    || model.isRefreshingService
-                    || !canMutate
-            )
-            Button {
-                pendingServiceAction = .restart
-            } label: {
-                Label("重启服务", systemImage: "arrow.clockwise.circle")
+                Label("停止服务…", systemImage: "stop.circle")
                     .speechRailMenuRow()
             }
             .disabled(
@@ -107,11 +78,12 @@ public struct ControlMenuView: View {
             Divider()
 
             Button {
-                openSettings()
+                NSApplication.shared.terminate(nil)
             } label: {
-                Text("打开设置")
+                Label("退出 SpeechRail", systemImage: "power")
                     .speechRailMenuRow()
             }
+            .keyboardShortcut("q", modifiers: .command)
         }
         .padding(SpeechRailDesignTokens.Menu.contentPadding)
         .frame(width: SpeechRailDesignTokens.Menu.contentWidth, alignment: .leading)
@@ -145,38 +117,51 @@ public struct ControlMenuView: View {
         }
     }
 
+    /// One non-clickable line: product · conclusion · profile
+    /// (REDESIGN-SPEC §7.9).
+    private var statusLine: String {
+        "SpeechRail · \(statusSummary) · \(profileText)"
+    }
+
+    private var profileText: String {
+        guard model.healthFailure == nil, let profile = model.health?.profile else {
+            return "档位未读取"
+        }
+        return SpeechRailProfilePresentation.title(profile)
+    }
+
     private var statusSummary: String {
         if model.serviceOperation?.phase.isActive == true {
-            return "服务操作进行中，请等待结果"
+            return "操作进行中"
         }
         if model.serviceOperation?.phase == .failed {
-            return "服务操作未完成，请重新读取"
+            return "操作未完成"
         }
         if model.healthMessage != nil {
             switch model.healthFailure {
             case .some(.timeout):
-                return "健康检查超时，请重新读取"
+                return "健康检查超时"
             case .some(.connection):
-                return "服务未连接，请打开管理控制台"
+                return "服务未连接"
             case .some(.invalidResponse), .some(.server):
-                return "健康状态异常，请打开管理控制台"
+                return "健康状态异常"
             default:
-                return "服务状态暂不可用，请打开管理控制台"
+                return "状态暂不可用"
             }
         }
         if model.controlPlaneMessage != nil {
-            return "服务状态已读取，但控制通道不可用"
+            return "控制通道不可用"
         }
         if displayedHealth?.ready == true {
             if !model.controlAgentStatus.allowsMutation {
-                return "本机服务已就绪，但控制受限"
+                return "服务已就绪 · 控制受限"
             }
-            return "本机服务已就绪"
+            return "服务已就绪"
         }
         if model.service.serviceState == "unavailable" {
-            return "服务不可用，请打开控制台诊断"
+            return "服务不可用"
         }
-        return "服务尚未就绪"
+        return "服务需要关注"
     }
 
     private var displayedHealth: HealthSnapshot? {

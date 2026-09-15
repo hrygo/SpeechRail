@@ -8,7 +8,34 @@ public struct RuntimeMonitoringView: View {
     @Environment(AppModel.self) private var model
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     @State private var showInspector = false
+    @State private var timeWindow = MonitoringTimeWindow.fiveMinutes
     @State private var reportMessage: String?
+
+    /// The chart samples are session-scoped, so the window only ever trims the
+    /// buffer the app already holds (REDESIGN-SPEC §7.6).
+    private enum MonitoringTimeWindow: String, CaseIterable, Identifiable {
+        case oneMinute
+        case fiveMinutes
+        case session
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .oneMinute: "1 分钟"
+            case .fiveMinutes: "5 分钟"
+            case .session: "本次会话"
+            }
+        }
+
+        var interval: TimeInterval? {
+            switch self {
+            case .oneMinute: 60
+            case .fiveMinutes: 300
+            case .session: nil
+            }
+        }
+    }
 
     public init() {}
 
@@ -22,29 +49,12 @@ public struct RuntimeMonitoringView: View {
                     .transition(.opacity)
             }
             metricStrip
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                    capabilityPanel
-                        .frame(
-                            minWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityMinimumWidth,
-                            maxWidth: SpeechRailDesignTokens.Layout.monitoringCapabilityIdealWidth,
-                            alignment: .topLeading
-                        )
-                    chartPanel
-                        .frame(
-                            minWidth: SpeechRailDesignTokens.Layout.monitoringChartMinimumWidth,
-                            maxWidth: .infinity,
-                            alignment: .topLeading
-                        )
-                }
-
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-                    capabilityPanel
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                    chartPanel
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-            }
+            // The time series is the page, so it gets the full width and the
+            // top slot instead of sharing a row with a capability panel
+            // (REDESIGN-SPEC §7.6).
+            chartPanel
+            histogramSummarySection
+            capabilityPanel
             resourcePanel
         }
         .toolbar {
@@ -293,23 +303,126 @@ public struct RuntimeMonitoringView: View {
                 title: "运行组件",
                 detail: "来自最近一次 metrics 读取的生命周期状态。"
             )
-            if let workers = model.metrics?.workers, !workers.isEmpty {
-                let workerKeys = workers.keys.sorted()
-                VStack(spacing: 0) {
-                    ForEach(Array(workerKeys.enumerated()), id: \.element) { index, key in
-                        workerRow(key: key, state: workers[key] ?? "unknown")
-                        if index < workerKeys.count - 1 {
-                            Divider()
-                        }
-                    }
-                }
-            } else {
+            if workerRows.isEmpty {
                 Label("暂无 worker 生命周期数据", systemImage: "hourglass")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .frame(minHeight: SpeechRailDesignTokens.List.compactRowHeight)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.List.compactRowHeight,
+                        alignment: .leading
+                    )
+            } else {
+                Table(workerRows) {
+                    TableColumn("组件") { row in
+                        Text(row.title)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    TableColumn("状态") { row in
+                        Label(row.state, systemImage: row.tone.systemImage)
+                            .foregroundStyle(row.tone.color)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                    }
+                    .width(min: 120, ideal: 160)
+                }
+                .frame(height: Self.tableHeight(for: workerRows.count))
+                .accessibilityLabel("运行组件状态表")
             }
         }
+    }
+
+    private var histogramSummarySection: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(
+                title: "直方图摘要",
+                detail: "服务端累计的时延与 RTF 分布；平均值由服务端计算。"
+            )
+            if histogramRows.isEmpty {
+                Label("暂无直方图数据", systemImage: "chart.bar")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.List.compactRowHeight,
+                        alignment: .leading
+                    )
+            } else {
+                Table(histogramRows) {
+                    TableColumn("指标") { row in
+                        Text(row.title)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    TableColumn("样本") { row in
+                        Text(String(row.count))
+                            .monospacedDigit()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .width(min: 64, ideal: 72)
+                    TableColumn("平均值") { row in
+                        Text(row.average)
+                            .monospacedDigit()
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                    .width(min: 80, ideal: 96)
+                }
+                .frame(height: Self.tableHeight(for: histogramRows.count))
+                .accessibilityLabel("直方图摘要表")
+            }
+        }
+    }
+
+    private struct WorkerStatusRow: Identifiable {
+        let id: String
+        let title: String
+        let state: String
+        let tone: StatusTone
+    }
+
+    private struct HistogramSummaryRow: Identifiable {
+        let id: String
+        let title: String
+        let count: Int
+        let average: String
+    }
+
+    private var workerRows: [WorkerStatusRow] {
+        guard let workers = model.metrics?.workers, !workers.isEmpty else { return [] }
+        return workers.keys.sorted().map { key in
+            let state = workers[key] ?? "unknown"
+            return WorkerStatusRow(
+                id: key,
+                title: workerTitle(for: key),
+                state: workerStateText(for: state),
+                tone: workerTone(for: state)
+            )
+        }
+    }
+
+    private var histogramRows: [HistogramSummaryRow] {
+        guard let histograms = model.metrics?.histograms, !histograms.isEmpty else { return [] }
+        return histograms.keys.sorted().flatMap { name -> [HistogramSummaryRow] in
+            guard let series = histograms[name] else { return [] }
+            return series.keys.sorted().map { labels in
+                let summary = series[labels]
+                return HistogramSummaryRow(
+                    id: "\(name)/\(labels)",
+                    title: labels.isEmpty ? name : "\(name) · \(labels)",
+                    count: summary?.count ?? 0,
+                    average: summary.map { String(format: "%.3f", $0.average) } ?? "—"
+                )
+            }
+        }
+    }
+
+    /// A Table renders its own scroller, so it has to be given an explicit
+    /// height that matches the rows it holds.
+    private static func tableHeight(for rowCount: Int) -> CGFloat {
+        let header: CGFloat = 36
+        let row: CGFloat = 26
+        return header + CGFloat(min(rowCount, 12)) * row
     }
 
     private var resourceSection: some View {
@@ -430,48 +543,46 @@ public struct RuntimeMonitoringView: View {
 
     private var chartPanel: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .firstTextBaseline) {
-                    chartHeading
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                chartHeading
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Picker("时间窗", selection: $timeWindow) {
+                        ForEach(MonitoringTimeWindow.allCases) { window in
+                            Text(window.title).tag(window)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("监控时间窗")
+
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                    chartRefreshStatus
+
+                    Text(sampleStatusText)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
                 }
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    chartHeading
-                    chartRefreshStatus
-                }
+                chartRefreshStatus
             }
-            if !RuntimeMonitoringChartDescriptor.isSufficient(chartPoints) {
+            if !RuntimeMonitoringChartDescriptor.isSufficient(visibleChartPoints) {
                 ContentUnavailableView(
-                    "等待监控样本",
+                    windowedSamples.isEmpty ? "等待监控样本" : "样本还不够",
                     systemImage: AppRoute.monitoring.systemImage,
-                    description: Text("打开此页面后读取本机服务 metrics，至少需要两个样本才绘制趋势。")
+                    description: Text(
+                        windowedSamples.isEmpty
+                            ? "打开此页面后会每 5 秒读取一次本机服务 metrics；没有样本不代表服务异常。"
+                            : "当前时间窗内只有一个样本，至少需要两个样本才绘制趋势。"
+                    )
                 )
                 .frame(
                     maxWidth: .infinity,
                     minHeight: SpeechRailDesignTokens.Layout.monitoringEmptyMinimumHeight
                 )
             } else {
-                Chart(model.monitoringSamples) { sample in
-                    LineMark(
-                        x: .value("时间", sample.capturedAt),
-                        y: .value("活跃请求", sample.activeRequests)
-                    )
-                    .foregroundStyle(SpeechRailDesignTokens.SteelRail.railheadGleam)
-                    .interpolationMethod(.catmullRom)
-                    PointMark(
-                        x: .value("时间", sample.capturedAt),
-                        y: .value("活跃请求", sample.activeRequests)
-                    )
-                    .foregroundStyle(SpeechRailDesignTokens.SteelRail.railheadGleam)
-                }
-                .frame(height: SpeechRailDesignTokens.Layout.monitoringChartHeight)
-                .chartYAxisLabel("请求数")
-                .accessibilityLabel("最近运行监控趋势")
-                .accessibilityIdentifier("runtime-chart")
-                .accessibilityChartDescriptor(
-                    RuntimeMonitoringChartDescriptor(points: chartPoints)
-                )
+                concurrencyChart
+                latencyChart
             }
             if let message = model.monitoringMessage, !message.isEmpty {
                 Text(message)
@@ -481,6 +592,102 @@ public struct RuntimeMonitoringView: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailConsoleChassis()
+    }
+
+    private var concurrencyChart: some View {
+        Chart(windowedSamples) { sample in
+            LineMark(
+                x: .value("时间", sample.capturedAt),
+                y: .value("活跃请求", sample.activeRequests)
+            )
+            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            .interpolationMethod(.catmullRom)
+            PointMark(
+                x: .value("时间", sample.capturedAt),
+                y: .value("活跃请求", sample.activeRequests)
+            )
+            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+        }
+        .frame(height: SpeechRailDesignTokens.Layout.monitoringChartHeight)
+        .chartYAxisLabel("并发请求")
+        .chartXAxis { monitoringAxisMarks() }
+        .chartYAxis { monitoringAxisMarks() }
+        .accessibilityLabel("活跃请求趋势")
+        .accessibilityIdentifier("runtime-chart")
+        .accessibilityChartDescriptor(
+            RuntimeMonitoringChartDescriptor(points: visibleChartPoints)
+        )
+    }
+
+    /// Latency keeps its own chart: concurrency counts requests and latency
+    /// counts seconds, and one shared axis would flatten both
+    /// (REDESIGN-SPEC §7.6).
+    private var latencyChart: some View {
+        Chart {
+            ForEach(windowedSamples) { sample in
+                if let asrLatency = sample.asrLatencySeconds {
+                    LineMark(
+                        x: .value("时间", sample.capturedAt),
+                        y: .value("秒", asrLatency),
+                        series: .value("指标", "ASR 时延")
+                    )
+                    .foregroundStyle(by: .value("指标", "ASR 时延"))
+                    .interpolationMethod(.catmullRom)
+                }
+                if let ttsLatency = sample.ttsLatencySeconds {
+                    LineMark(
+                        x: .value("时间", sample.capturedAt),
+                        y: .value("秒", ttsLatency),
+                        series: .value("指标", "TTS 时延")
+                    )
+                    .foregroundStyle(by: .value("指标", "TTS 时延"))
+                    .interpolationMethod(.catmullRom)
+                }
+            }
+        }
+        .frame(height: SpeechRailDesignTokens.Layout.monitoringChartHeight)
+        .chartYAxisLabel("秒")
+        .chartXAxis { monitoringAxisMarks() }
+        .chartYAxis { monitoringAxisMarks() }
+        .chartForegroundStyleScale([
+            "ASR 时延": SpeechRailDesignTokens.Color.info,
+            "TTS 时延": SpeechRailDesignTokens.Color.voice,
+        ])
+        .chartLegend(position: .bottom, alignment: .leading)
+        .accessibilityLabel("时延趋势")
+        .accessibilityIdentifier("runtime-latency-chart")
+    }
+
+    /// Grid lines use the system separator colour and 12pt labels so the data
+    /// reads louder than the chrome (REDESIGN-SPEC §7.6).
+    private func monitoringAxisMarks() -> some AxisContent {
+        AxisMarks { _ in
+            AxisGridLine()
+                .foregroundStyle(SpeechRailDesignTokens.Color.separator)
+            AxisValueLabel()
+                .font(.system(size: 12))
+        }
+    }
+
+    private var windowedSamples: [RuntimeMetricsSample] {
+        guard let interval = timeWindow.interval else { return model.monitoringSamples }
+        let cutoff = Date().addingTimeInterval(-interval)
+        return model.monitoringSamples.filter { $0.capturedAt >= cutoff }
+    }
+
+    private var visibleChartPoints: [RuntimeMonitoringChartPoint] {
+        windowedSamples.map {
+            RuntimeMonitoringChartPoint(
+                capturedAt: $0.capturedAt,
+                activeRequests: $0.activeRequests
+            )
+        }
+    }
+
+    private var sampleStatusText: String {
+        let count = windowedSamples.count
+        guard count > 0 else { return "等待监控样本" }
+        return "最近 \(count) 个样本"
     }
 
     private var chartHeading: some View {
@@ -719,35 +926,6 @@ public struct RuntimeMonitoringView: View {
         } else {
             reportMessage = "复制失败，请稍后重试"
         }
-    }
-
-    private func workerRow(key: String, state: String) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: workerTone(for: state).systemImage)
-                .foregroundStyle(workerTone(for: state).color)
-                .imageScale(.small)
-                .accessibilityHidden(true)
-                .frame(width: SpeechRailDesignTokens.List.rowIconFrame, alignment: .leading)
-            Text(workerTitle(for: key))
-                .font(SpeechRailDesignTokens.Typography.label)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-            Text(workerStateText(for: state))
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(workerTone(for: state).color)
-                .lineLimit(1)
-                .frame(
-                    width: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth,
-                    alignment: .trailing
-                )
-        }
-        .frame(maxWidth: .infinity, minHeight: SpeechRailDesignTokens.List.compactRowHeight)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(workerTitle(for: key))
-        .accessibilityValue(workerStateText(for: state))
     }
 
     private func workerTitle(for key: String) -> String {

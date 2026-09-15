@@ -9,6 +9,7 @@ public struct ControlCenterView: View {
     @State private var selection: AppRoute? = .overview
     @State private var searchText = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
 
     public init() {}
 
@@ -77,7 +78,12 @@ public struct ControlCenterView: View {
                 }
 #endif
             }
-            .task { await model.refresh() }
+            .task {
+                // Settings ▸ 通用 can opt out of the launch-time read
+                // (REDESIGN-SPEC §7.10).
+                guard refreshOnLaunch else { return }
+                await model.refresh()
+            }
             .onAppear {
                 if let route = navigation.consumeRequestedRoute() {
                     selection = route

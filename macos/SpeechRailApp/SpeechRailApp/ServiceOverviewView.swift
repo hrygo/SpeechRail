@@ -127,28 +127,39 @@ public struct ServiceOverviewView: View {
         } else {
             .attention
         }
+        // The panel reaches exactly four conclusions. Every specific cause
+        // belongs in the impact sentence, not in a fifth headline
+        // (REDESIGN-SPEC §7.5).
         let title: String
         if operationFailed {
             title = "服务操作未完成"
-        } else if serviceReady && !canMutate {
-            title = "服务可用，但控制受限"
-        } else if isProfileMismatch {
-            title = "服务档位未生效"
-        } else if model.healthFailure == .timeout {
-            title = "健康检查超时"
-        } else if model.healthFailure == .connection {
-            title = "服务未连接"
-        } else if model.healthFailure == .invalidResponse {
-            title = "健康响应无效"
-        } else if model.healthFailure != nil {
-            title = "服务报告异常"
         } else if isReady {
-            title = "服务可用"
-        } else if isUnavailable {
+            title = "服务已就绪"
+        } else if isUnavailable && healthFailureIsCritical {
             title = "服务不可用"
         } else {
-            title = "服务尚未就绪"
+            title = "服务需要关注"
         }
+        let cause: String? = if operationFailed {
+            nil
+        } else if isProfileMismatch {
+            "服务正在运行的档位与当前配置不一致。"
+        } else if model.healthFailure == .timeout {
+            "健康检查超时。"
+        } else if model.healthFailure == .connection {
+            "无法连接本机服务。"
+        } else if model.healthFailure == .invalidResponse {
+            "健康响应无法解析。"
+        } else if model.healthFailure != nil {
+            "服务报告了异常状态。"
+        } else if serviceReady && !canMutate {
+            "服务可用，但控制通道受限。"
+        } else {
+            nil
+        }
+        let message = [cause, statusMessage]
+            .compactMap { $0 }
+            .joined(separator: " ")
         let actionTitle: String = if !canMutate {
             "打开诊断"
         } else if operationFailed {
@@ -165,7 +176,7 @@ public struct ServiceOverviewView: View {
         return StatusBanner(
             tone: tone,
             title: title,
-            message: statusMessage,
+            message: message,
             actionTitle: actionTitle,
             actionDisabled: model.isBusy
                 || model.hasActiveMutation
@@ -193,35 +204,40 @@ public struct ServiceOverviewView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 SectionHeading(
                     title: "能力",
-                    detail: "这些能力由当前运行档位和已验证模型共同决定。"
+                    detail: "每项由当前运行档位和已验证模型共同决定；未就绪不代表服务异常。"
                 )
                 VStack(spacing: 0) {
-                    capabilityRow(
-                        title: "语音识别",
-                        detail: displayedHealth?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                        ready: displayedHealth?.asrReady
-                    )
-                    Divider()
-                    capabilityRow(
-                        title: "语音合成",
-                        detail: displayedHealth?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                        ready: displayedHealth?.ttsReady
-                    )
-                    Divider()
-                    capabilityRow(
-                        title: "实时语音",
-                        detail: displayedHealth?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
-                        ready: displayedHealth?.realtimeVAD?.ready
-                    )
-                    Divider()
-                    capabilityRow(
-                        title: "分人识别",
-                        detail: displayedHealth?.diarization.map { SpeechRailDiarizationPresentation.text($0) }
-                            ?? displayedHealth?.diarizationReady.map { $0 ? "已就绪" : "未就绪" }
-                            ?? "未读取",
-                        ready: displayedHealth?.diarizationReady
-                    )
+                    ForEach(Array(capabilities.enumerated()), id: \.element.title) { index, capability in
+                        if index > 0 {
+                            Divider()
+                        }
+                        capabilityRow(capability)
+                    }
                 }
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                SectionHeading(
+                    title: "运行信息",
+                    detail: nil
+                )
+                VStack(alignment: .leading, spacing: 0) {
+                    LabeledContent(
+                        "运行档位",
+                        value: displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取"
+                    )
+                    LabeledContent(
+                        "配置档位",
+                        value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取"
+                    )
+                    LabeledContent("端口", value: model.service.port.map(String.init) ?? "未读取")
+                    LabeledContent("版本", value: displayedHealth?.version ?? "未读取")
+                    LabeledContent("常驻 worker", value: residentWorkerText)
+                    LabeledContent("作业队列", value: displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
+                }
+                .speechRailInspectorContent()
             }
 
             Divider()
@@ -251,6 +267,123 @@ public struct ServiceOverviewView: View {
         }
         .padding(SpeechRailDesignTokens.Spacing.lg)
         .speechRailContentSurface()
+    }
+
+    /// `warm_capabilities` is the only field that names the lanes actually
+    /// resident in memory, so it is what "常驻 worker" reports.
+    private var residentWorkerText: String {
+        guard let lifecycle = displayedHealth?.ttsLifecycle else { return "未读取" }
+        let capabilities = lifecycle.warmCapabilities
+            ?? lifecycle.warmCapability.map { [$0] }
+            ?? []
+        guard !capabilities.isEmpty else { return "无 TTS 常驻" }
+        return capabilities.joined(separator: " + ")
+    }
+
+    private struct ServiceCapability: Equatable {
+        let title: String
+        let status: CapabilityStatus
+        let reason: String
+    }
+
+    private enum CapabilityStatus: Equatable {
+        case ready
+        case notReady
+        case unsupported
+
+        var label: String {
+            switch self {
+            case .ready: "可用"
+            case .notReady: "未就绪"
+            case .unsupported: "当前档位不支持"
+            }
+        }
+
+        var tone: StatusTone {
+            switch self {
+            case .ready: .healthy
+            case .notReady: .critical
+            case .unsupported: .neutral
+            }
+        }
+    }
+
+    /// Six capabilities, each with a status and one sentence of reason. Status
+    /// never relies on colour alone (REDESIGN-SPEC §7.5, §9).
+    private var capabilities: [ServiceCapability] {
+        guard let health = displayedHealth else {
+            let reason = model.healthFailure == nil
+                ? "尚未读取服务健康快照。"
+                : "健康检查未返回结果，无法确认这一项。"
+            return [
+                ServiceCapability(title: "语音识别", status: .notReady, reason: reason),
+                ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
+                ServiceCapability(title: "语音合成 · VoiceDesign", status: .notReady, reason: reason),
+                ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
+                ServiceCapability(title: "实时语音 VAD", status: .notReady, reason: reason),
+                ServiceCapability(title: "分人识别", status: .notReady, reason: reason),
+            ]
+        }
+
+        let asrReady = health.asrReady == true
+        let asrState = health.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 ASR 运行状态。"
+        let ttsReady = health.ttsReady == true
+        let ttsState = health.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 TTS 运行状态。"
+        let voiceDesignVoice = model.creatorVoices.first { voice in
+            voice.available && voice.variant == "voice_design" && voice.capabilities.supportsInstruction
+        }
+        let cloneVoice = model.creatorVoices.first { voice in
+            voice.available && voice.capabilities.supportsClone
+        }
+        let diarizationSupported = health.profile != .light
+
+        return [
+            ServiceCapability(
+                title: "语音识别",
+                status: asrReady ? .ready : .notReady,
+                reason: asrReady ? "\(asrState)；词级时间戳由 ASR 原生提供。" : asrState
+            ),
+            ServiceCapability(
+                title: "语音合成 · Base",
+                status: ttsReady ? .ready : .notReady,
+                reason: ttsState
+            ),
+            ServiceCapability(
+                title: "语音合成 · VoiceDesign",
+                status: voiceDesignVoice != nil ? .ready : (health.profile == .quality ? .notReady : .unsupported),
+                reason: voiceDesignVoice != nil
+                    ? "服务已公开可用的 VoiceDesign capability。"
+                    : (health.profile == .quality
+                        ? "Quality 档位下服务未公开 VoiceDesign capability。"
+                        : "VoiceDesign 只在 Quality 档位加载。")
+            ),
+            ServiceCapability(
+                title: "音色复刻",
+                status: cloneVoice != nil ? .ready : .notReady,
+                reason: cloneVoice != nil
+                    ? "服务已公开可用的音色复刻 capability。"
+                    : "服务未公开可用的音色复刻 capability。"
+            ),
+            ServiceCapability(
+                title: "实时语音 VAD",
+                status: health.realtimeVAD?.ready == true ? .ready : .notReady,
+                reason: health.realtimeVAD?.message
+                    ?? health.streamingState.map(SpeechRailRuntimeStatePresentation.text)
+                    ?? "未读取实时语音状态。"
+            ),
+            ServiceCapability(
+                title: "分人识别",
+                status: diarizationSupported
+                    ? (health.diarizationReady == true ? .ready : .notReady)
+                    : .unsupported,
+                reason: diarizationSupported
+                    ? (health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
+                        ?? (health.diarizationReady == true
+                            ? "只输出本次会话的匿名标签；不管理实名或声纹库。"
+                            : "分人 worker 尚未就绪。"))
+                    : "Light 档位不加载分人能力。"
+            ),
+        ]
     }
 
     private var preflightSummary: some View {
@@ -367,68 +500,36 @@ public struct ServiceOverviewView: View {
         .disabled(isOperating || model.isRefreshingPreflight)
     }
 
-    private func capabilityRow(title: String, detail: String, ready: Bool?) -> some View {
+    private func capabilityRow(_ capability: ServiceCapability) -> some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: capabilityIcon(ready))
-                .foregroundStyle(capabilityColor(ready))
+            Image(systemName: capability.status.tone.systemImage)
+                .foregroundStyle(capability.status.tone.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(title)
+                Text(capability.title)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text(detail)
+                Text(capability.reason)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Text(capabilityStatus(ready))
+            Text(capability.status.label)
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(capabilityColor(ready))
+                .foregroundStyle(capability.status.tone.color)
                 .lineLimit(1)
                 .frame(width: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title)，\(capabilityStatus(ready))，\(detail)")
-    }
-
-    private func capabilityStatus(_ ready: Bool?) -> String {
-        switch ready {
-        case .some(true):
-            "已就绪"
-        case .some(false):
-            "未就绪"
-        case .none:
-            "未读取"
-        }
-    }
-
-    private func capabilityColor(_ ready: Bool?) -> SwiftUI.Color {
-        switch ready {
-        case .some(true):
-            SpeechRailDesignTokens.Color.ready
-        case .some(false):
-            SpeechRailDesignTokens.Color.critical
-        case .none:
-            SpeechRailDesignTokens.Color.inkSecondary
-        }
-    }
-
-    private func capabilityIcon(_ ready: Bool?) -> String {
-        switch ready {
-        case .some(true):
-            "checkmark.circle.fill"
-        case .some(false):
-            "xmark.circle.fill"
-        case .none:
-            "questionmark.circle"
-        }
+        .accessibilityLabel("\(capability.title)，\(capability.status.label)，\(capability.reason)")
     }
 
     private var serviceActions: some View {

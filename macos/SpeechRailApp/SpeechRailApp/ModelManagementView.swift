@@ -230,6 +230,12 @@ public struct ModelManagementView: View {
                 ) {
                     handleOperationAction(operation, canRetry: canRetry)
                 }
+                if operation.state == .interrupted {
+                    Text("上一次准备被中断。本机不做断点续传：重试会重新核对已存在的文件，再从起点完成校验。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             Divider()
             actionSection
@@ -336,6 +342,7 @@ public struct ModelManagementView: View {
                                     status: status(for: artifact),
                                     usage: usage(for: artifact),
                                     targetProfile: selectedProfile,
+                                    quantization: quantizationText(for: artifact),
                                     selected: selectedArtifactKey == artifact.key
                                 )
                             }
@@ -420,11 +427,11 @@ public struct ModelManagementView: View {
                 .accessibilityHint("将所选档位写入服务配置并重启相关 worker")
             }
             if let disk = model.modelStatus?.disk {
-                Text("本机模型占用 \(formatBytes(disk.modelBytes)) · 可用空间 \(formatBytes(disk.freeBytes))")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
+                VStack(alignment: .leading, spacing: 0) {
+                    LabeledContent("模型已用", value: formatBytes(disk.modelBytes))
+                    LabeledContent("磁盘可用", value: formatBytes(disk.freeBytes))
+                }
+                .speechRailInspectorContent()
             }
             if !missingDiarizationKeys.isEmpty {
                 Text("此档位还需要 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))通过校验。")
@@ -1143,11 +1150,11 @@ private struct ProfileChoiceRow: View {
     private var profilePurpose: String {
         return switch profile {
         case .quality:
-            "VoiceDesign 与高质量对齐，适合音色创作"
+            "aligner-bf16，可分人；VoiceDesign 与 Base 双常驻，可跨 lane 并发 —— 适合音色创作"
         case .balanced:
-            "8-bit 运行与分人能力的平衡选择"
+            "aligner-q8，可分人；单个 TTS worker —— 日常配音的平衡选择"
         case .light:
-            "更小的 ASR 组合，适合快速启动"
+            "无 aligner、无分人；单个 TTS worker —— 更小的 ASR 组合，启动最快"
         }
     }
 
@@ -1227,6 +1234,7 @@ private struct ArtifactChoiceRow: View {
     let status: ModelArtifactStatusSnapshot?
     let usage: ModelArtifactUsagePresentation
     let targetProfile: SpeechRailProfile
+    let quantization: String
     let selected: Bool
 
     var body: some View {
@@ -1238,6 +1246,11 @@ private struct ArtifactChoiceRow: View {
                 Text(artifact.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(modelSourceText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text("目标：\(SpeechRailProfilePresentation.title(targetProfile)) · 必需")
@@ -1258,11 +1271,18 @@ private struct ArtifactChoiceRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Text(artifact.variant.replacingOccurrences(of: "_", with: " "))
-                .font(SpeechRailDesignTokens.Typography.technical)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(1)
-                .layoutPriority(1)
+            VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(quantization)
+                    .font(SpeechRailDesignTokens.Typography.technical)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                Text("\(artifact.fileCount) 个文件 · \(sizeText)")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+            }
+            .layoutPriority(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
@@ -1274,9 +1294,27 @@ private struct ArtifactChoiceRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.key)
         .accessibilityValue(
-            "目标：\(SpeechRailProfilePresentation.title(targetProfile))，存在：\(statusPresentation.summary)，使用：\(usage.text)"
+            "\(modelSourceText)，\(quantization)，\(artifact.fileCount) 个文件，目标：\(SpeechRailProfilePresentation.title(targetProfile))，存在：\(statusPresentation.summary)，使用：\(usage.text)"
         )
         .accessibilityHint("在开发者详情中查看模型来源和校验信息")
+    }
+
+    /// Model IDs can carry a local snapshot path. Keep the logical
+    /// `<provider> · <identifier>` pair and drop the path prefix, because an
+    /// absolute model path must never reach the UI (REDESIGN-SPEC §7.7).
+    private var modelSourceText: String {
+        var identifier = artifact.modelID
+        if identifier.hasPrefix("/") || identifier.hasPrefix("~") {
+            identifier = identifier
+                .split(separator: "/")
+                .suffix(2)
+                .joined(separator: "/")
+        }
+        return artifact.provider.isEmpty ? identifier : "\(artifact.provider) · \(identifier)"
+    }
+
+    private var sizeText: String {
+        String(format: "%.1f GiB", Double(artifact.sizeBytes) / 1_073_741_824)
     }
 
     private var statusPresentation: ModelArtifactStatusPresentation {

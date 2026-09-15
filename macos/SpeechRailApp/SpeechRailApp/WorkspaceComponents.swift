@@ -1354,3 +1354,39 @@ public struct SpeechRailInspectorLabeledContentStyle: LabeledContentStyle {
         .padding(.vertical, SpeechRailDesignTokens.Inspector.rowVerticalPadding)
     }
 }
+
+// MARK: - Focused scene commands
+
+/// A per-window action the focused page publishes, so menu commands can act on
+/// "the selected work" without the App layer reaching into page state
+/// (REDESIGN-SPEC §6.3).
+public struct SelectedWorkCommand {
+    public let title: String
+    private let action: () -> Void
+
+    public init(title: String, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
+    public func callAsFunction() {
+        action()
+    }
+}
+
+extension SelectedWorkCommand: Equatable {
+    public static func == (lhs: SelectedWorkCommand, rhs: SelectedWorkCommand) -> Bool {
+        lhs.title == rhs.title
+    }
+}
+
+private struct SelectedWorkCommandKey: FocusedValueKey {
+    typealias Value = SelectedWorkCommand
+}
+
+public extension FocusedValues {
+    var selectedWorkCommand: SelectedWorkCommand? {
+        get { self[SelectedWorkCommandKey.self] }
+        set { self[SelectedWorkCommandKey.self] = newValue }
+    }
+}
