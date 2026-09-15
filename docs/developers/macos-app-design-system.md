@@ -110,9 +110,9 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 分隔与描边 | `Color` | `separator` → `separatorColor`；静态表面不再有自绘描边、机加工微切线与辉光 |
 | 强调色 | `Color` | `rail` → **`Color.accentColor`**（跟随系统强调色）。全 App 只有这一个产品强调色，替代原先 `#23687D` 与 `#2A4E57` 并存的冲突 |
 | 语义状态 | `Color` | `ready/attention/critical/info` → 系统 `.green/.orange/.red/.blue`；`voice`（音色/声学）为唯一产品语义色 |
-| 控件描边与焦点 | `Color` | `focusRing` → `keyboardFocusIndicatorColor`；`disabled`/`quaternaryFill` 表示禁用层级 |
+| 控件描边与焦点 | `Color` | `focusRing` 与自定义行的 `Navigation.focusRing` 都解析为 `keyboardFocusIndicatorColor`，全 App 焦点环同色；`disabled`/`quaternaryFill` 表示禁用层级 |
 | 间距节奏 | `Spacing` | 使用 `tight/micro/xs/sm/md/lg/xl/hero`，基准节奏为 2/4/8/12/16/24/32/48 pt |
-| 圆角几何 | `ConcentricRectangle` | 控件/面板/槽位一律使用 SwiftUI `ConcentricRectangle`，由系统按容器计算同心圆角；`Corner.*` 仅保留给仍需显式半径的旧调用点 |
+| 圆角几何 | `ConcentricRectangle` | 控件/面板/槽位/列表行一律使用 SwiftUI `ConcentricRectangle`，由系统按容器计算同心圆角；`Corner.row`、`Corner.module`、`Corner.continuousRadiusRatio` 已删除，`Corner.control/field` 仅由尚未迁走的 legacy modifier 自身引用 |
 | 布局规整 | `Layout` | sidebar 220–280pt（ideal 240）、inspector 300–440pt（ideal 360）、模型档位列 220–320pt（ideal 280）、音色名列 160–260pt（ideal 220）、页面内容内边距 `contentPadding = 20`、窗口最小 1,120×720pt |
 | 表面修饰 | `ViewModifiers` | `.speechRailSurface(_:)` / `.speechRailContentSurface()`（系统 `controlBackgroundColor` + 同心圆角，无描边无阴影）、`.speechRailRecessedSlot()` / `.speechRailField()`（`textBackgroundColor`）、`.speechRailKnurledCapsule()`（系统胶囊，仅选中态用强调色） |
 | 字体层级 | `Typography` | 只用系统文本样式（`.body/.caption/.caption2` 等），不再使用 `design: .rounded` 或手挑字号；数字一律 `.monospacedDigit()` |
@@ -168,17 +168,31 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
-| App Debug 构建 | `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`，0 条新增 warning；未运行测试 | 2026-09-15 21:0x |
+| App Debug 构建 | `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`，0 条新增 warning；未运行测试 | 2026-09-15 20:33 |
 | Swift 单元测试 | 本轮未运行；此前历史记录不作为本轮证据 | — |
 | UI 测试 | 本轮未运行（AGENTS.md 硬约束：未经当次明确授权不运行 UI 自动化） | — |
 | 设置单场景复核 | 本轮未执行 | — |
-| App 安装 | `2.6.4 (8)`、`arm64`、`LSMinimumSystemVersion=26.0`，ad-hoc 签名与嵌入 XPC 通过；Debug 构建已覆盖安装到 `~/Applications/SpeechRail.app`，旧版本存档于 `~/Library/Application Support/SpeechRail/app-archive/` | 2026-09-15 19:46 |
+| App 安装 | `2.6.4 (8)`、`arm64`、`LSMinimumSystemVersion=26.0`，ad-hoc 签名与嵌入 XPC 通过；Debug 构建已覆盖安装到 `~/Applications/SpeechRail.app`，旧版本存档于 `~/Library/Application Support/SpeechRail/app-archive/` | 2026-09-15 20:33 |
 | 桌面视觉矩阵 | 待用户手工走查：本机无 UI 自动化授权，Light/Dark、Increase Contrast、Dynamic Type、Reduce Motion 均未实测 | — |
 | VoiceOver 实测 | 尚未完成 | — |
 
 > 2026-09-15 状态说明：设计规范升级至 v0.8.0，token 收敛（阶段 2）与逐页重构（阶段 4）已落地，
 > 本文与 REDESIGN-SPEC 不再并行描述两套规范。Debug 构建已覆盖安装到 `~/Applications/SpeechRail.app`
 > （旧版本存档保留），但**视觉与无障碍矩阵尚未人工走查**，因此本文件不作「已验收」结论。
+>
+> 2026-09-15 20:33 逐条对照审计（§5/§6/§7/§8/§9 对源码）：8 页结构、状态矩阵、键盘路径与
+> `ViewThatFits` 窄窗口换行均已落地；本轮补齐 4 处偏差并删除已无引用的 token——
+> 自定义行/档位行的选中与 hover 容器改为 `ConcentricRectangle`、焦点环统一为系统焦点色、
+> 参考文案框由固定 80pt 改 `minHeight`（`Layout.creatorReferenceMinimumHeight`）、
+> 音色徽标改用 v2 琥珀 `Color.voice`（同时获得 Increase Contrast 变体）、
+> 音色创作门禁动作措辞对齐 §7.2「去模型页切档」。
+> 已删除的 token：`Layout.contentMaximumWidth`、`List.selectionCornerRadius`、`Button.cornerRadius`、
+> `Interaction.pressedScale`、`Motion.springTransition`、`Navigation.selectedFill`、
+> `Corner.continuousRadiusRatio`。**仍保留**：`Chassis`/`SteelAlloy`/`SteelRail`/`AcousticMaster`/
+> `ConsoleFader`/`Palette` 以及 `SpeechRailSurfaceModifier`/`SpeechRailFieldModifier`/
+> `SpeechRailContentSurfaceModifier`/`SpeechRailKnurledCapsuleModifier`/`SpeechRailSleeperDivider`
+> 等 legacy 类型（页面零引用，但删除它们需连带改写其内部引用，留待下次触及该文件时处理）。
+> 上述改动只经编译验证，**视觉观感仍待人工走查**。
 
 ## 7. 变更流程
 

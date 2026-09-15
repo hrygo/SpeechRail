@@ -1103,7 +1103,7 @@ public struct VoiceDesignView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             TextEditor(text: $referenceText)
                 .font(SpeechRailDesignTokens.Typography.body)
-                .frame(height: 80)
+                .frame(minHeight: SpeechRailDesignTokens.Layout.creatorReferenceMinimumHeight)
                 .scrollContentBackground(.hidden)
                 .padding(SpeechRailDesignTokens.Spacing.xs)
                 .speechRailRecessedSlot()
@@ -1236,7 +1236,7 @@ public struct VoiceDesignView: View {
             AvailabilityBanner(
                 title: "音色创作需要 Quality 档位",
                 message: "当前档位不会加载 VoiceDesign 能力。切换档位不会自动发生，请在模型页确认后再操作。",
-                actionTitle: "打开模型页",
+                actionTitle: "去模型页切档",
                 route: .models
             )
         case .serviceUnavailable:
@@ -1250,7 +1250,7 @@ public struct VoiceDesignView: View {
             AvailabilityBanner(
                 title: "当前 TTS 不支持 VoiceDesign",
                 message: "服务未公开可用的 VoiceDesign preview 能力。请在模型页核对 Quality 制品和当前档位。",
-                actionTitle: "打开模型页",
+                actionTitle: "去模型页切档",
                 route: .models
             )
         }

@@ -356,6 +356,14 @@ SpeechRail · 服务已就绪 · Quality      (不可点状态行)
 Debug 构建已覆盖安装到 `~/Applications/SpeechRail.app`。**尚未执行**：桌面人工视觉走查、
 VoiceOver 实测、UI 自动化测试（AGENTS.md 硬约束），因此本文不宣称视觉或无障碍验收通过。
 
+审计补充（2026-09-15 20:33）：按 §5/§6/§7/§8/§9 逐条对照源码复核后，补齐 4 处偏差
+（自定义行容器改 `ConcentricRectangle`、焦点环统一为系统焦点色、参考文案框改 `minHeight`、
+音色徽标改用 `Color.voice`）并把 §7.2 门禁动作措辞对齐为「去模型页切档」，
+同时删除零引用的 `Layout.contentMaximumWidth`、`List.selectionCornerRadius` 等 7 个 token。
+再次构建、覆盖安装并重启后，`~/Applications/SpeechRail.app` 为本次构建（bundle 20:33:44），
+进程稳定且无崩溃日志。**注意**：macOS 不会替换运行中 App 的代码，安装后必须退出并重开
+才能看到新 UI——否则会误判为「装了没生效」。视觉与无障碍结论仍待人工走查。
+
 | 阶段 | 状态 | 提交 |
 |---|---|---|
 | 1 外壳 | 已完成 | `465f7d41` |

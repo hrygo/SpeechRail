@@ -1119,17 +1119,11 @@ private struct ProfileChoiceRow: View {
                 isSelected
                     ? SpeechRailDesignTokens.Surface.selectedFill
                     : Color.clear,
-                in: .rect(
-                    cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
-                    style: .continuous
-                )
+                in: ConcentricRectangle()
             )
             .overlay {
                 if isSelected {
-                    RoundedRectangle(
-                        cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius,
-                        style: .continuous
-                    )
+                    ConcentricRectangle()
                         .stroke(
                             SpeechRailDesignTokens.Navigation.focusRing,
                             lineWidth: SpeechRailDesignTokens.Stroke.strong
@@ -1289,7 +1283,7 @@ private struct ArtifactChoiceRow: View {
         .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
         .background(
             selected ? SpeechRailDesignTokens.Surface.selectedFill : Color.clear,
-            in: .rect(cornerRadius: SpeechRailDesignTokens.List.selectionCornerRadius)
+            in: ConcentricRectangle()
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.key)

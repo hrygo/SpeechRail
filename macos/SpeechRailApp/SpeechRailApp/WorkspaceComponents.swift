@@ -173,10 +173,7 @@ private struct SpeechRailInteractiveButtonBody: View {
             .background(backgroundShape)
             .overlay {
                 if isFocused {
-                    RoundedRectangle(
-                        cornerRadius: SpeechRailDesignTokens.Corner.row,
-                        style: .continuous
-                    )
+                    ConcentricRectangle()
                     .stroke(
                         SpeechRailDesignTokens.Navigation.focusRing,
                         lineWidth: SpeechRailDesignTokens.Interaction.focusLineWidth
@@ -219,10 +216,7 @@ private struct SpeechRailInteractiveButtonBody: View {
     }
 
     private var backgroundShape: some View {
-        RoundedRectangle(
-            cornerRadius: SpeechRailDesignTokens.Corner.row,
-            style: .continuous
-        )
+        ConcentricRectangle()
         .fill(
             !isEnabled
                 ? SwiftUI.Color.clear
@@ -234,10 +228,7 @@ private struct SpeechRailInteractiveButtonBody: View {
         )
         .overlay {
             if isHovered && isEnabled {
-                RoundedRectangle(
-                    cornerRadius: SpeechRailDesignTokens.Corner.row,
-                    style: .continuous
-                )
+                ConcentricRectangle()
                 .stroke(
                     SpeechRailDesignTokens.Surface.border,
                     lineWidth: SpeechRailDesignTokens.Stroke.hairline

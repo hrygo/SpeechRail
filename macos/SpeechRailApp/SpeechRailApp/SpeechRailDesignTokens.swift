@@ -47,7 +47,6 @@ public enum SpeechRailDesignTokens {
         public static let inspectorMinimumWidth: CGFloat = 300
         public static let inspectorIdealWidth: CGFloat = inspectorWidth
         public static let inspectorMaximumWidth: CGFloat = 440
-        public static let contentMaximumWidth: CGFloat = 1_240
         /// Page content margin. 20pt keeps the workspace readable at 1120–1280pt
         /// window widths instead of squeezing it with the old 32pt (§5.6).
         public static let contentPadding: CGFloat = 20
@@ -130,7 +129,6 @@ public enum SpeechRailDesignTokens {
         public static let numericValueMinimumWidth: CGFloat = 84
         public static let numericValueMaximumWidth: CGFloat = 110
         public static let descriptionPreviewMaximumCharacters: Int = 180
-        public static let selectionCornerRadius: CGFloat = Corner.row
         public static let dividerInset: CGFloat = Spacing.lg
         public static let disclosureContentInset: CGFloat = Spacing.lg
     }
@@ -208,7 +206,6 @@ public enum SpeechRailDesignTokens {
         public static let standardHeight: CGFloat = 34
         public static let prominentHeight: CGFloat = 40
         public static let iconHitTarget: CGFloat = Interaction.minimumHitTarget
-        public static let cornerRadius: CGFloat = Corner.control
     }
 
     public enum Icon {
@@ -233,7 +230,6 @@ public enum SpeechRailDesignTokens {
     /// NavigationLink controls retain the system's own equivalent states.
     public enum Interaction {
         public static let minimumHitTarget: CGFloat = 44
-        public static let pressedScale: CGFloat = 0.985
         public static let focusRingInset: CGFloat = 1
         public static let hoverFillOpacity: Double = 0.07
         public static let pressedFillOpacity: Double = 0.12
@@ -459,7 +455,7 @@ public enum SpeechRailDesignTokens {
         public static let selectedFill = Color.rail.opacity(0.16)
         public static let selectedFillStrong = Color.rail.opacity(0.22)
         public static let voiceSelectedFill = Console.tubeAmber.opacity(0.16)
-        public static let voiceBadgeFill = Console.tubeAmber.opacity(0.20)
+        public static let voiceBadgeFill = Color.voice.opacity(0.20)
         public static let focusRing = Color.focusRing
         public static let controlFill = Color.field
         public static let navigationFill = SwiftUI.Color.clear
@@ -491,8 +487,9 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Navigation {
-        public static let selectedFill = Surface.selectedFillStrong
-        public static let focusRing = TrackRail.railGleam.opacity(0.72)
+        /// Custom rows and the page editors share one focus ring: the system
+        /// focus indicator, so focus never changes color between pages (§9).
+        public static let focusRing = Color.focusRing
         /// Sonic Rail cyan foreground for the selected icon/accent in custom navigation
         public static let selectedForeground = TrackRail.railGleam
         public static let unselectedForeground = Color.ink
@@ -504,7 +501,6 @@ public enum SpeechRailDesignTokens {
         public static let reducedDuration: Double = 0
         public static let hoverDuration: Double = 0.14
         public static let pressDuration: Double = 0.12
-        public static let springTransition = Animation.spring(response: 0.28, dampingFraction: 0.82)
         public static let selectionFeedback = Animation.easeOut(duration: 0.14)
         public static let hoverFeedback = Animation.easeOut(duration: hoverDuration)
         public static let pressFeedback = Animation.easeOut(duration: pressDuration)
