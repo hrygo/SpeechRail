@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.5.0"
-date: 2026-09-14
+version: "0.5.1"
+date: 2026-09-15
 ---
 
 # SpeechRail macOS App 分发与签名
@@ -38,8 +38,10 @@ App 正式发布必须有可审计的 `CFBundleShortVersionString`（用户可�
 
 ```bash
 scripts/macos_app_build.sh --configuration Debug
-scripts/macos_app_test.sh
+# scripts/macos_app_test.sh  # XCTest/UI test：接管前台窗口/输入，仅在当前用户明确要求时运行
 ```
+
+UI 自动化测试（XCTest/UI test，含 `scripts/macos_app_test.sh`）会接管前台窗口、焦点和输入，仅在当前用户明确要求时逐次运行（见 [AGENTS.md](../../AGENTS.md) 硬约束），不因生产分发或验收流程自动触发；默认不执行，并在结果中记为未验证项。
 
 本地测试不需要 Developer ID。测试使用 `--ui-test` fake transport，不注册生产 helper、不启动 `com.speechrail`、不下载模型。测试脚本使用一次性临时 DerivedData，结束时注销本次构建 App/runner 的 LaunchServices 注册并清理测试产物；不会把测试 App 留在用户目录或仓库中。Distribution archive/export 仍只在显式指定的输出路径保留。
 
