@@ -144,6 +144,7 @@
 
 | 版本 | 报告 | 关键事件 / 说明 |
 |---|---|---|
+| **原始制品清理（2026-09-15）** | [2026-09-15-benchmark-raw-artifacts-cleanup.md](2026-09-15-benchmark-raw-artifacts-cleanup.md) | 仓库外 `benchmarks/` 的 34 条目 / 5.2 GB 原始制品整体退役；含逐项清单、结论留存位置与重新下载路径；22 MB 原始 JSON 不可精确复原 |
 | **v2.4.0 重叠 A/B** | [2026-09-11-v2.4.0-overlap-ab.md](2026-09-11-v2.4.0-overlap-ab.md) | 单档重叠 ON/OFF ABBA 受控对照；ON 使 C1 governor 峰值 1→2、ASR 延迟 ~3.78→~0.31 s；顺序/Realtime 差在噪声带内；三档变慢不可归因于重叠 |
 | **v2.4.0** | [2026-09-11-v2.4.0-performance-benchmark.md](2026-09-11-v2.4.0-performance-benchmark.md) | MINOR 三档完整性能基准；新增并启用 ASR∥TTS 重计算重叠；每档 HTTP 36/36、Realtime 3/3 与物理 footprint 采样通过；相对 v2.2.0 RTF/commit 上升、内存持平（重叠状态与背景差异不可比）；性能回归与独立质量 gate unset |
 | **v2.2.2** | [2026-09-11-v2.2.2-performance-benchmark.md](2026-09-11-v2.2.2-performance-benchmark.md) | PATCH quality；HTTP ASR/TTS 36/36 与物理 footprint 采样通过；迁移 `speechrail-mcp` 至 MCP Python SDK v2（修复安装态 `-32000`），managed stdio 握手 9 工具；相对 v2.2.1 持平；Realtime 未执行；性能回归与独立质量 gate unset |
