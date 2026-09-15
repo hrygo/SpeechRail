@@ -591,6 +591,109 @@ public struct SectionHeading: View {
     }
 }
 
+/// Figma `card`：内容卡只负责外观 —— 系统内容面与圆角裁切。卡片按内容取高，
+/// 内部的标题带、行与说明带由调用方按 `head` / `hairline` / `listFoot` 的顺序排列，
+/// 因此同一张卡既能装列表，也能装矩阵或键值行（REDESIGN-SPEC §5.2）。
+public struct CardSurface<Content: View>: View {
+    private let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .speechRailSurface(.panel)
+        .clipShape(ConcentricRectangle())
+    }
+}
+
+/// Figma `head` / `listHead`：卡片顶部的标题带 —— 标题与一句说明在左，
+/// 计数、状态或控件在右。与 `SectionHeading` 同源，卡片内外的标题不会分成两套。
+public struct CardHead<Trailing: View>: View {
+    private let title: String
+    private let detail: String?
+    private let trailing: Trailing
+
+    public init(title: String, detail: String? = nil, @ViewBuilder trailing: () -> Trailing) {
+        self.title = title
+        self.detail = detail
+        self.trailing = trailing()
+    }
+
+    public var body: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            SectionHeading(title: title, detail: detail)
+            trailing
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+public extension CardHead where Trailing == EmptyView {
+    init(title: String, detail: String? = nil) {
+        self.init(title: title, detail: detail) { EmptyView() }
+    }
+}
+
+/// Figma `listFoot`：卡片底部的说明带 —— 一句本机事实在左，次级动作在右。
+public struct CardFoot<Action: View>: View {
+    private let note: String
+    private let action: Action
+
+    public init(note: String, @ViewBuilder action: () -> Action) {
+        self.note = note
+        self.action = action()
+    }
+
+    public var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(note)
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            action
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+    }
+}
+
+/// Figma `Status Pill`：语义色胶囊，图标 + 短标签。状态永远不只靠颜色表达
+/// （REDESIGN-SPEC §9），所以每一项都自带图标与文字。
+public struct StatusPill: View {
+    public let tone: StatusTone
+    public let label: String
+
+    public init(tone: StatusTone, label: String) {
+        self.tone = tone
+        self.label = label
+    }
+
+    public var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Image(systemName: tone.systemImage)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .accessibilityHidden(true)
+            Text(label)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .foregroundStyle(tone.color)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+        .background(tone.color.opacity(SpeechRailDesignTokens.Surface.statusTintOpacity), in: .capsule)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 /// A single, named entry point for low-frequency workspace actions.
 ///
 /// The menu deliberately owns the label so pages cannot drift into a row of

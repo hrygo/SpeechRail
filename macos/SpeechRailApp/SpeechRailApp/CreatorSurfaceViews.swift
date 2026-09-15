@@ -1854,19 +1854,9 @@ public struct VoiceLibraryView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ListCard(
-                    header: { ListCardHeader(title: "音色") },
-                    footer: {
-                        ListCardFooter(note: "复刻音色保存在本机，不会上传。") {
-                            Button {
-                                navigation.request(.voiceDesign)
-                            } label: {
-                                Label("新建音色", systemImage: "sparkles")
-                            }
-                            .speechRailButton(.secondary)
-                        }
-                    }
-                ) {
+                CardSurface {
+                    CardHead(title: "音色")
+                    Divider()
                     List(selection: $selectedVoiceID) {
                         ForEach(filteredVoices) { voice in
                             voiceLibraryRow(voice)
@@ -1881,6 +1871,17 @@ public struct VoiceLibraryView: View {
                         guard let voice = selectedVoice else { return .ignored }
                         togglePreview(voice)
                         return .handled
+                    }
+                    Divider()
+                    CardFoot(note: "复刻音色保存在本机，不会上传。") {
+                        Group {
+                            Button {
+                                navigation.request(.voiceDesign)
+                            } label: {
+                                Label("新建音色", systemImage: "sparkles")
+                            }
+                            .speechRailButton(.secondary)
+                        }
                     }
                 }
             }
@@ -2898,19 +2899,9 @@ public struct WorksView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ListCard(
-                    header: { workColumnsHeader },
-                    footer: {
-                        ListCardFooter(note: "导出快捷键 ⌘E。删除作品会同时移除本地音频文件。") {
-                            Button {
-                                navigation.request(.dubbing)
-                            } label: {
-                                Label("新建配音", systemImage: AppRoute.dubbing.systemImage)
-                            }
-                            .speechRailButton(.secondary)
-                        }
-                    }
-                ) {
+                CardSurface {
+                    workColumnsHeader
+                    Divider()
                     List(selection: $selectedWorkID) {
                         ForEach(filteredWorks) { work in
                             workListRow(work)
@@ -2928,6 +2919,17 @@ public struct WorksView: View {
                         guard let work = selectedWork else { return .ignored }
                         model.playWork(work)
                         return .handled
+                    }
+                    Divider()
+                    CardFoot(note: "导出快捷键 ⌘E。删除作品会同时移除本地音频文件。") {
+                        Group {
+                            Button {
+                                navigation.request(.dubbing)
+                            } label: {
+                                Label("新建配音", systemImage: AppRoute.dubbing.systemImage)
+                            }
+                            .speechRailButton(.secondary)
+                        }
                     }
                 }
             }
@@ -3153,92 +3155,6 @@ public struct WorksView: View {
         } catch {
             exportMessage = "导出失败：作品音频暂时不可用，请重新生成或重试。"
         }
-    }
-}
-
-// MARK: - 列表卡（Figma `listHead` / `listFoot`）
-
-/// 列表卡：卡片固定的三段结构 —— 标题带 / 行 / 说明带，中间用发丝线分隔
-/// （Figma `card("list")` + `listHead` + `hairline` + 行 + `hairline` + `listFoot`）。
-/// 卡片按内容取高，不靠撑开把说明带推到窗口底边（REDESIGN-SPEC §7.3 / §7.4）。
-private struct ListCard<Header: View, Footer: View, Content: View>: View {
-    private let header: Header
-    private let footer: Footer
-    private let content: Content
-
-    init(
-        @ViewBuilder header: () -> Header,
-        @ViewBuilder footer: () -> Footer,
-        @ViewBuilder content: () -> Content
-    ) {
-        self.header = header()
-        self.footer = footer()
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            content
-            Divider()
-            footer
-        }
-        .speechRailSurface(.panel)
-        .clipShape(ConcentricRectangle())
-    }
-}
-
-/// Figma `listHead`：标题左、排序说明或控件右的固定带。
-private struct ListCardHeader<Trailing: View>: View {
-    private let title: String
-    private let trailing: Trailing
-
-    init(title: String, @ViewBuilder trailing: () -> Trailing) {
-        self.title = title
-        self.trailing = trailing()
-    }
-
-    var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text(title)
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            trailing
-        }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-    }
-}
-
-private extension ListCardHeader where Trailing == EmptyView {
-    init(title: String) {
-        self.init(title: title) { EmptyView() }
-    }
-}
-
-/// Figma `listFoot`：说明左、次级动作右的固定带。
-private struct ListCardFooter<Action: View>: View {
-    private let note: String
-    private let action: Action
-
-    init(note: String, @ViewBuilder action: () -> Action) {
-        self.note = note
-        self.action = action()
-    }
-
-    var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Text(note)
-                .font(SpeechRailDesignTokens.Typography.secondary)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            action
-        }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
     }
 }
 

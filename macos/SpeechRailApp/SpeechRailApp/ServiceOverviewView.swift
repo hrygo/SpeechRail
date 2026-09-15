@@ -201,72 +201,118 @@ public struct ServiceOverviewView: View {
 
     private var serviceBody: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                SectionHeading(
-                    title: "能力",
-                    detail: "每项由当前运行档位和已验证模型共同决定；未就绪不代表服务异常。"
-                )
-                VStack(spacing: 0) {
-                    ForEach(Array(capabilities.enumerated()), id: \.element.title) { index, capability in
-                        if index > 0 {
-                            Divider()
-                        }
-                        capabilityRow(capability)
-                    }
-                }
-            }
+            capabilitiesCard
+            runtimeCard
+            preflightCard
+        }
+    }
 
+    /// Figma `capabilities`：标题带一句话说明，下面是一条能力矩阵。名称与状态各占
+    /// 固定列，说明从同一 x 起排；否则矩阵会退化成六行长短不齐的句子
+    /// （REDESIGN-SPEC §7.5）。
+    private var capabilitiesCard: some View {
+        CardSurface {
+            CardHead(
+                title: "能力",
+                detail: "按当前运行档位如实发布，不做能力预支。"
+            )
             Divider()
-
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                SectionHeading(
-                    title: "运行信息",
-                    detail: nil
-                )
-                VStack(alignment: .leading, spacing: 0) {
-                    LabeledContent(
-                        "运行档位",
-                        value: displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取"
-                    )
-                    LabeledContent(
-                        "配置档位",
-                        value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取"
-                    )
-                    LabeledContent("端口", value: model.service.port.map(String.init) ?? "未读取")
-                    LabeledContent("版本", value: displayedHealth?.version ?? "未读取")
-                    LabeledContent("常驻 worker", value: residentWorkerText)
-                    LabeledContent("作业队列", value: displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
+            ForEach(Array(capabilities.enumerated()), id: \.element.title) { index, capability in
+                if index > 0 {
+                    Divider()
                 }
-                .speechRailInspectorContent()
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                SectionHeading(
-                    title: "下一步",
-                    detail: "预检只读取环境和配置，不会下载模型或改变当前服务。"
-                )
-                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Button {
-                        Task { await model.refreshPreflight() }
-                    } label: {
-                        Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
-                    }
-                    .speechRailButton(.secondary)
-                    .disabled(model.isBusy || model.isRefreshingPreflight)
-                    Button {
-                        navigation.request(.models)
-                    } label: {
-                        Label("打开模型管理", systemImage: AppRoute.models.systemImage)
-                    }
-                    .speechRailButton(.secondary)
-                }
-                preflightSummary
+                capabilityRow(capability)
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+    }
+
+    /// Figma `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
+    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。
+    private var runtimeCard: some View {
+        CardSurface {
+            CardHead(
+                title: "运行信息",
+                detail: "只反映本机当前取值；修改运行态一律走 profile 与 preflight。"
+            )
+            Divider()
+            runtimeRow(
+                "运行档位",
+                displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取"
+            )
+            Divider()
+            runtimeRow(
+                "配置档位",
+                model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取"
+            )
+            Divider()
+            runtimeRow("端口", model.service.port.map(String.init) ?? "未读取")
+            Divider()
+            runtimeRow("版本", displayedHealth?.version ?? "未读取")
+            Divider()
+            runtimeRow("常驻 worker", residentWorkerText)
+            Divider()
+            runtimeRow("作业队列", displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
+        }
+    }
+
+    private func runtimeRow(_ label: String, _ value: String) -> some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(label)
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.serviceRuntimeLabelWidth,
+                    alignment: .leading
+                )
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+            Text(value)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label)，\(value)")
+    }
+
+    /// 设计稿的服务状态页只有「结论 + 能力 + 运行信息」；本机多这一张预检摘要卡，
+    /// 它给出「现在能不能用」的结论。先按同一张卡片语言保留，去留见交付说明。
+    private var preflightCard: some View {
+        CardSurface {
+            CardHead(
+                title: "预检",
+                detail: "预检只读取环境和配置，不会下载模型或改变当前服务。"
+            )
+            Divider()
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button {
+                    Task { await model.refreshPreflight() }
+                } label: {
+                    Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
+                }
+                .speechRailButton(.secondary)
+                .disabled(model.isBusy || model.isRefreshingPreflight)
+
+                Button {
+                    navigation.request(.models)
+                } label: {
+                    Label("打开模型管理", systemImage: AppRoute.models.systemImage)
+                }
+                .speechRailButton(.secondary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+
+            preflightSummary
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+        }
     }
 
     /// `warm_capabilities` is the only field that names the lanes actually
@@ -500,34 +546,37 @@ public struct ServiceOverviewView: View {
         .disabled(isOperating || model.isRefreshingPreflight)
     }
 
+    /// Figma `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
+    /// 状态用胶囊承载，颜色、图标与文字三者都在，不靠颜色单独表达（§9）。
     private func capabilityRow(_ capability: ServiceCapability) -> some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: capability.status.tone.systemImage)
-                .foregroundStyle(capability.status.tone.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(capability.title)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(capability.reason)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Text(capability.status.label)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(capability.status.tone.color)
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(capability.title)
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(1)
-                .frame(width: SpeechRailDesignTokens.Layout.monitoringStatusColumnWidth, alignment: .trailing)
+                .truncationMode(.tail)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.serviceCapabilityNameWidth,
+                    alignment: .leading
+                )
+
+            StatusPill(tone: capability.status.tone, label: capability.status.label)
+                .frame(
+                    width: SpeechRailDesignTokens.Layout.serviceCapabilityPillWidth,
+                    alignment: .leading
+                )
+
+            Text(capability.reason)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(capability.title)，\(capability.status.label)，\(capability.reason)")
     }

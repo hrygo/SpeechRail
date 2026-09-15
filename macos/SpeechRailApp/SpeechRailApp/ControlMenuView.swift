@@ -12,14 +12,29 @@ public struct ControlMenuView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Menu.sectionSpacing) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text(statusLine)
-                    .font(SpeechRailDesignTokens.Typography.caption)
+            // Figma `menuHead`：产品名 + 结论 + 版本与端口。菜单栏面板是唯一
+            // 不经过页面就打开的窗口，所以它自带身份与两条本机事实。
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "waveform")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        .accessibilityHidden(true)
+                    Text("SpeechRail")
+                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                }
+                Text(statusSummary + " · " + profileText)
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(detailLine)
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Spacer(minLength: 0)
             }
+            .accessibilityElement(children: .combine)
             if let operation = model.serviceOperation,
                operation.phase.isActive || operation.phase == .failed
             {
@@ -45,6 +60,14 @@ public struct ControlMenuView: View {
             }
             .keyboardShortcut("n", modifiers: .command)
 
+            Button {
+                navigation.request(.voiceDesign)
+                openWindow(id: AppNavigationState.controlCenterWindowID)
+            } label: {
+                Label("音色创作", systemImage: AppRoute.voiceDesign.systemImage)
+                    .speechRailMenuRow()
+            }
+
             Divider()
 
             Button {
@@ -62,18 +85,61 @@ public struct ControlMenuView: View {
                     || !canMutate
             )
 
+            // A greyed-out group with no reason on screen is the failure mode
+            // this line exists to prevent (Figma `warning`).
+            if !canMutate {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .accessibilityHidden(true)
+                    Text("控制通道不可用，服务操作已禁用")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    SpeechRailDesignTokens.Color.attention.opacity(
+                        SpeechRailDesignTokens.Surface.statusTintOpacity
+                    ),
+                    in: ConcentricRectangle()
+                )
+            }
+
+            Button {
+                pendingServiceAction = .start
+            } label: {
+                Label("启动服务…", systemImage: "play.circle")
+                    .speechRailMenuRow()
+            }
+            .disabled(serviceActionsDisabled)
+
             Button {
                 pendingServiceAction = .stop
             } label: {
                 Label("停止服务…", systemImage: "stop.circle")
                     .speechRailMenuRow()
             }
-            .disabled(
-                model.isBusy
-                    || model.hasActiveMutation
-                    || model.isRefreshingService
-                    || !canMutate
-            )
+            .disabled(serviceActionsDisabled)
+
+            Button {
+                pendingServiceAction = .restart
+            } label: {
+                Label("重启服务…", systemImage: "arrow.clockwise")
+                    .speechRailMenuRow()
+            }
+            .disabled(serviceActionsDisabled)
+
+            Divider()
+
+            Button {
+                openSettings()
+            } label: {
+                Label("打开设置…", systemImage: "gearshape")
+                    .speechRailMenuRow()
+            }
+            .keyboardShortcut(",", modifiers: .command)
 
             Divider()
 
@@ -117,10 +183,22 @@ public struct ControlMenuView: View {
         }
     }
 
-    /// One non-clickable line: product · conclusion · profile
-    /// (REDESIGN-SPEC §7.9).
-    private var statusLine: String {
-        "SpeechRail · \(statusSummary) · \(profileText)"
+    /// 版本 + 端口：菜单面板里仅有的两条纯事实（Figma `menuHead` 第二行）。
+    private var detailLine: String {
+        let version = Bundle.main.shortVersionString
+        guard let port = model.service.port else {
+            return "版本 \(version) · 端口未读取"
+        }
+        return "版本 \(version) · 端口 \(port)"
+    }
+
+    /// 服务操作在「控制通道不可用」或任一步操作进行中时必须一起禁用，
+    /// 三个动作共用同一条判据，免得漏掉其中一个（Figma `warning` 组的语义）。
+    private var serviceActionsDisabled: Bool {
+        model.isBusy
+            || model.hasActiveMutation
+            || model.isRefreshingService
+            || !canMutate
     }
 
     private var profileText: String {

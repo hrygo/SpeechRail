@@ -149,64 +149,43 @@ public struct ModelManagementView: View {
     }
 
     private var modelWorkspace: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            profileList
-                .frame(
-                    minWidth: SpeechRailDesignTokens.Layout.modelProfileListMinimumWidth,
-                    idealWidth: SpeechRailDesignTokens.Layout.modelProfileListWidth,
-                    maxWidth: SpeechRailDesignTokens.Layout.modelProfileListMaximumWidth
-                )
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            profileCards
             selectedProfilePanel
-                .frame(maxWidth: .infinity, alignment: .topLeading)
         }
     }
 
-    private var profileList: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            SectionHeading(
-                title: "运行档位",
-                detail: "先选择目标，再分别准备模型或应用服务配置。"
-            )
-            VStack(spacing: SpeechRailDesignTokens.List.rowSpacing) {
-                ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
-                    ProfileChoiceRow(
-                        profile: profile,
-                        summary: summary(for: profile),
-                        isSelected: selectedProfile == profile
-                    ) {
-                        selectedProfile = profile
-                    }
+    /// Figma `profiles`：三个档位并排一行，每张卡给出「分人 / aligner / TTS lane」
+    /// 三行规格，选择依据是差异而不是档位名（REDESIGN-SPEC §7.7）。
+    private var profileCards: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
+                ProfileChoiceCard(
+                    profile: profile,
+                    sizeText: summary(for: profile).map { "准备大小 \(formatBytes($0.downloadBytes))" },
+                    specs: profileSpecs(for: profile),
+                    isSelected: selectedProfile == profile,
+                    isRunning: currentServiceProfile == profile
+                ) {
+                    selectedProfile = profile
                 }
             }
-            Divider()
-            Text("当前运行档位")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            Text(currentServiceProfile.map { profileTitle(for: $0) } ?? "未读取")
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            if let configuredProfile = configuredProfile {
-                Text("配置档位：\(profileTitle(for: configuredProfile))")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
         }
-        .padding(.horizontal, SpeechRailDesignTokens.List.contentHorizontalPadding)
-        .padding(.vertical, SpeechRailDesignTokens.List.contentVerticalPadding)
-        .speechRailContentSurface()
+    }
+
+    /// 三行规格全部来自已读取的档位摘要；读不到时如实写「未读取」，不写死结论。
+    private func profileSpecs(for profile: SpeechRailProfile) -> [ProfileSpec] {
+        let summary = summary(for: profile)
+        let lanes = profile == .quality ? "2 个 · 跨 lane 并发" : "1 个"
+        return [
+            ProfileSpec(label: "分人", value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"),
+            ProfileSpec(label: "aligner", value: summary.map { $0.aligner ?? "无" } ?? "未读取"),
+            ProfileSpec(label: "TTS lane", value: lanes),
+        ]
     }
 
     private var selectedProfilePanel: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(profileTitle(for: selectedProfile))
-                    .font(SpeechRailDesignTokens.Typography.windowTitle)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(profilePurpose(for: selectedProfile))
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
-
             profileContext
             profileFacts
             Divider()
@@ -257,6 +236,13 @@ public struct ModelManagementView: View {
                 title: "当前服务",
                 value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取",
                 tone: currentServiceProfile == selectedProfile ? .healthy : .attention
+            )
+            Divider()
+                .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
+            profileContextValue(
+                title: "配置档位",
+                value: configuredProfile.map { profileTitle(for: $0) } ?? "未配置",
+                tone: configuredProfile == selectedProfile ? .healthy : .attention
             )
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
@@ -314,11 +300,12 @@ public struct ModelManagementView: View {
     }
 
     private var artifactSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
+        CardSurface {
+            CardHead(
                 title: "模型制品",
                 detail: "存在状态看文件与 SHA-256；使用状态看当前服务档位和 worker 生命周期。已释放表示可按需加载，不等于缺失。"
             )
+            Divider()
             if model.modelCatalog != nil {
                 let artifacts = visibleArtifacts
                 if artifacts.isEmpty {
@@ -365,7 +352,27 @@ public struct ModelManagementView: View {
                     minHeight: SpeechRailDesignTokens.Layout.modelEmptyStateMinimumHeight
                 )
             }
+            Divider()
+            // 设计稿的脚注动作是「仅校验缺失项」；本机只有「下载并校验」这一条准备
+            // 路径，没有独立的重新校验操作，所以这里只给出事实，不摆做不到的按钮。
+            CardFoot(note: artifactFootnote) {
+                EmptyView()
+            }
         }
+    }
+
+    /// Figma `listFoot`：当前档位的制品总数、待校验数量，以及它对分人能力的影响。
+    private var artifactFootnote: String {
+        let artifacts = visibleArtifacts
+        guard !artifacts.isEmpty else { return "当前档位没有已登记的制品。" }
+        let pending = artifacts.filter { !isVerified(status(for: $0)) }.count
+        let base = pending == 0
+            ? "\(artifacts.count) 个制品 · 全部已校验"
+            : "\(artifacts.count) 个制品 · \(pending) 个待校验"
+        let diarizationNote = missingDiarizationKeys.isEmpty
+            ? ""
+            : "，分人能力在补齐前不可用"
+        return base + diarizationNote + "。"
     }
 
     private var diarizationSection: some View {
@@ -425,13 +432,17 @@ public struct ModelManagementView: View {
                 .speechRailButton(.secondary)
                 .disabled(!canApplyProfile)
                 .accessibilityHint("将所选档位写入服务配置并重启相关 worker")
-            }
-            if let disk = model.modelStatus?.disk {
-                VStack(alignment: .leading, spacing: 0) {
-                    LabeledContent("模型已用", value: formatBytes(disk.modelBytes))
-                    LabeledContent("磁盘可用", value: formatBytes(disk.freeBytes))
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+
+                // Figma 把磁盘事实放在动作行的右端：准备模型前先看有没有地方放。
+                if let disk = model.modelStatus?.disk {
+                    Text("磁盘：模型已用 \(formatBytes(disk.modelBytes)) · 可用 \(formatBytes(disk.freeBytes))")
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
                 }
-                .speechRailInspectorContent()
             }
             if !missingDiarizationKeys.isEmpty {
                 Text("此档位还需要 \(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))通过校验。")
@@ -579,7 +590,9 @@ public struct ModelManagementView: View {
         default:
             consistency = "配置与运行一致性未确认"
         }
-        return [target, current, consistency].joined(separator: "，")
+        let configured = configuredProfile.map { "配置档位：\(profileTitle(for: $0))" }
+            ?? "配置档位：未配置"
+        return [target, current, configured, consistency].joined(separator: "，")
     }
 
     private var visibleArtifacts: [ModelArtifactSnapshot] {
@@ -1072,63 +1085,91 @@ private enum ModelAction {
     case apply
 }
 
-private struct ProfileChoiceRow: View {
+/// 档位规格行：标签列固定，取值右对齐（Figma `kvRow` 的 76pt 标签列）。
+private struct ProfileSpec: Identifiable {
+    let label: String
+    let value: String
+
+    var id: String { label }
+}
+
+/// Figma `Profile Card`：档位名 + 「当前使用」胶囊、一句适用场景、发丝线，再接三行
+/// 规格。选中态用底色加轨道色描边，不用 2pt 粗框 —— 粗框读起来像错误态。
+private struct ProfileChoiceCard: View {
     let profile: SpeechRailProfile
-    let summary: ProfileSummary?
+    let sizeText: String?
+    let specs: [ProfileSpec]
     let isSelected: Bool
+    let isRunning: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(
-                            isSelected
-                                ? SpeechRailDesignTokens.Color.rail
-                                : SpeechRailDesignTokens.Color.inkSecondary
-                        )
-                        .accessibilityHidden(true)
-
+                HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(profileTitle)
-                        .font(SpeechRailDesignTokens.Typography.body)
-                        .fontWeight(.medium)
+                        .font(SpeechRailDesignTokens.Typography.windowTitle)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         .lineLimit(1)
 
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
 
-                    if let summary {
-                        Text(formatBytes(summary.downloadBytes))
-                            .font(SpeechRailDesignTokens.Typography.technical)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            .lineLimit(1)
+                    if isRunning {
+                        StatusPill(tone: .healthy, label: "当前使用")
                     }
                 }
 
                 Text(profilePurpose)
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.leading, 20)
+
+                Divider()
+
+                VStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    ForEach(specs) { spec in
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text(spec.label)
+                                .font(SpeechRailDesignTokens.Typography.callout)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .frame(
+                                    width: SpeechRailDesignTokens.Layout.modelProfileSpecLabelWidth,
+                                    alignment: .leading
+                                )
+                            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                            Text(spec.value)
+                                .font(SpeechRailDesignTokens.Typography.callout)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
+                }
+
+                if let sizeText {
+                    Text(sizeText)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(SpeechRailDesignTokens.List.rowContentPadding)
+            .padding(SpeechRailDesignTokens.Spacing.md)
             .background(
                 isSelected
                     ? SpeechRailDesignTokens.Surface.selectedFill
-                    : Color.clear,
+                    : SpeechRailDesignTokens.Color.field,
                 in: ConcentricRectangle()
             )
             .overlay {
-                if isSelected {
-                    ConcentricRectangle()
-                        .stroke(
-                            SpeechRailDesignTokens.Navigation.focusRing,
-                            lineWidth: SpeechRailDesignTokens.Stroke.strong
-                        )
-                }
+                ConcentricRectangle()
+                    .stroke(
+                        isSelected
+                            ? SpeechRailDesignTokens.Color.rail
+                            : SpeechRailDesignTokens.Surface.border,
+                        lineWidth: isSelected ? 1.5 : 1
+                    )
             }
         }
         .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
@@ -1152,9 +1193,6 @@ private struct ProfileChoiceRow: View {
         }
     }
 
-    private func formatBytes(_ bytes: Int64) -> String {
-        String(format: "%.1f GiB", Double(bytes) / 1_073_741_824)
-    }
 }
 
 private struct ModelArtifactUsagePresentation {

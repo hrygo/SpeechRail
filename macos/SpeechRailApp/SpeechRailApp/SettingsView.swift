@@ -11,8 +11,28 @@ public struct SettingsView: View {
     public init() {}
 
     public var body: some View {
-        Form {
-            Section("通用") {
+        // Figma `05 Menu & Settings`：设置窗口是「通用 / 创作 / 服务」三个目的地，
+        // 用系统 TabView（macOS 26 的图标 + 文字页签）而不是再加一条侧边栏。
+        TabView {
+            Tab("通用", systemImage: "slider.horizontal.3") {
+                generalPane
+            }
+            Tab("创作", systemImage: "sparkles") {
+                creativePane
+            }
+            Tab("服务", systemImage: "server.rack") {
+                servicePane
+            }
+        }
+        .frame(
+            minWidth: SpeechRailDesignTokens.Layout.settingsWindowMinimumWidth,
+            minHeight: SpeechRailDesignTokens.Layout.settingsWindowMinimumHeight
+        )
+    }
+
+    private var generalPane: some View {
+        settingsForm {
+            Section("启动与窗口") {
                 Toggle("启动时读取服务状态", isOn: $refreshOnLaunch)
                     .help("关闭后，打开管理控制台不会自动发起一次服务状态读取。")
                 Text("控制台仍可在任意页面手动刷新。")
@@ -21,7 +41,28 @@ public struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("创作") {
+            Section("开发者") {
+                Toggle("默认展开技术详情", isOn: $showDeveloperDetails)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget,
+                        alignment: .leading
+                    )
+                    .contentShape(Rectangle())
+                    .speechRailPointerCursor()
+                Text("面向开发者的接口状态、阶段和标识信息仍只在管理控制台中展开。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(SpeechRailDesignTokens.Settings.secondaryTextMaximumLines)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var creativePane: some View {
+        settingsForm {
+            Section("创作默认值") {
                 Picker("默认音色", selection: $defaultVoiceID) {
                     Text("服务返回的第一个可用音色").tag("")
                     ForEach(defaultVoiceChoices) { voice in
@@ -48,25 +89,17 @@ public struct SettingsView: View {
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
                 }
+            }
+        }
+    }
 
-                Toggle("默认展开技术详情", isOn: $showDeveloperDetails)
-                    .frame(
-                        maxWidth: .infinity,
-                        minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget,
-                        alignment: .leading
-                    )
-                    .contentShape(Rectangle())
-                    .speechRailPointerCursor()
-                Text("面向开发者的接口状态、阶段和标识信息仍只在管理控制台中展开。")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(SpeechRailDesignTokens.Settings.secondaryTextMaximumLines)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+    private var servicePane: some View {
+        settingsForm {
+            Section("连接") {
+                LabeledContent("服务端口", value: portText)
             }
 
-            Section("服务") {
-                LabeledContent("服务端口", value: portText)
+            Section("诊断") {
                 Toggle("诊断报告包含运行档位与版本", isOn: $includeServiceContextInReports)
                 Text("报告始终不含凭据、原始音频、完整转写或本地绝对路径。")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -74,21 +107,23 @@ public struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Section("关于 SpeechRail") {
+            Section("关于") {
                 LabeledContent("产品定位", value: "本机 Apple Silicon 语音服务控制面")
                 LabeledContent("最低系统", value: "macOS 26.0")
                 LabeledContent("版本", value: Bundle.main.shortVersionString)
             }
+        }
+    }
+
+    private func settingsForm<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        Form {
+            content()
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .background(SpeechRailDesignTokens.Color.canvas)
         .environment(\.defaultMinListRowHeight, SpeechRailDesignTokens.Interaction.minimumHitTarget)
         .padding(SpeechRailDesignTokens.Spacing.lg)
-        .frame(
-            minWidth: SpeechRailDesignTokens.Layout.settingsWindowMinimumWidth,
-            minHeight: SpeechRailDesignTokens.Layout.settingsWindowMinimumHeight
-        )
     }
 
     @AppStorage("speechrail.diagnostics.includeServiceContext") private var includeServiceContextInReports = true
@@ -103,7 +138,7 @@ public struct SettingsView: View {
     }
 }
 
-private extension Bundle {
+extension Bundle {
     var shortVersionString: String {
         object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版本"
     }

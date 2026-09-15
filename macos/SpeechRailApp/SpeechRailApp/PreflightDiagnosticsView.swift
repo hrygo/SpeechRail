@@ -153,11 +153,13 @@ public struct PreflightDiagnosticsView: View {
     }
 
     private var checkList: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "检查清单",
-                detail: "选择一项查看原因和处理建议。"
+        CardSurface {
+            CardHead(
+                title: "检查项",
+                detail: "选择一项查看原因和处理建议。",
+                trailing: { pendingNote }
             )
+            Divider()
             if model.preflightChecks.isEmpty {
                 ContentUnavailableView(
                     "还没有检查项",
@@ -181,8 +183,19 @@ public struct PreflightDiagnosticsView: View {
                     }
                 }
                 .listStyle(.inset)
+                .scrollContentBackground(.hidden)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel("预检检查项")
+            }
+            Divider()
+            CardFoot(note: checklistFootnote) {
+                Button {
+                    copyDiagnosticReport()
+                } label: {
+                    Label("复制诊断报告", systemImage: "doc.on.clipboard")
+                }
+                .speechRailButton(.secondary)
+                .disabled(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
             }
         }
         .frame(
@@ -191,9 +204,36 @@ public struct PreflightDiagnosticsView: View {
             maxHeight: .infinity,
             alignment: .topLeading
         )
-        .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailContentSurface()
         .accessibilityIdentifier("diagnostics-check-list")
+    }
+
+    /// Figma `listHead` 右侧：需要处理的检查项数量。颜色之外还有文字，
+    /// 不靠颜色单独表达（REDESIGN-SPEC §9）。
+    private var pendingNote: some View {
+        let pending = model.preflightChecks.filter { !$0.ok }.count
+        return Text(pending == 0 ? "全部通过" : "\(pending) 项需要处理")
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(
+                pending == 0
+                    ? SpeechRailDesignTokens.Color.ready
+                    : SpeechRailDesignTokens.Color.attention
+            )
+            .lineLimit(1)
+    }
+
+    /// Figma `listFoot`：上次预检多久前、一共查了几项 —— 两个本机事实，
+    /// 不涉及任何检查内容或路径。
+    private var checklistFootnote: String {
+        let count = model.preflightChecks.count
+        guard let lastUpdated = model.lastPreflightRefresh else {
+            return count == 0 ? "尚未运行预检" : "共 \(count) 项 · 上次预检时间未记录"
+        }
+        return "上次预检 \(relativeAgeText(lastUpdated)) · 共 \(count) 项"
+    }
+
+    private func relativeAgeText(_ date: Date) -> String {
+        let age = max(0, Int(Date().timeIntervalSince(date).rounded()))
+        return age < 60 ? "\(age) 秒前" : "\(age / 60) 分钟前"
     }
 
     /// The card owns the full column height and scrolls inside itself, so the
@@ -213,27 +253,26 @@ public struct PreflightDiagnosticsView: View {
     private var detailContent: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
             if let selectedCheck {
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Image(systemName: selectedCheck.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .font(SpeechRailDesignTokens.Typography.statusIcon)
-                        .foregroundStyle(
-                            selectedCheck.ok
-                                ? SpeechRailDesignTokens.Color.ready
-                                : SpeechRailDesignTokens.Color.critical
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    // Figma `pillRow`：结论胶囊在左，这次预检的时间在右；
+                    // 状态由胶囊承载，标题下面不再重复一遍「检查通过 / 失败」。
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        StatusPill(
+                            tone: selectedCheck.ok ? .healthy : .critical,
+                            label: selectedCheck.ok ? "通过" : "需要处理"
                         )
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text(checkTitle(for: selectedCheck.name))
-                            .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        Text(selectedCheck.ok ? "检查通过" : "检查失败")
-                            .font(SpeechRailDesignTokens.Typography.label)
-                            .foregroundStyle(
-                                selectedCheck.ok
-                                    ? SpeechRailDesignTokens.Color.ready
-                                    : SpeechRailDesignTokens.Color.critical
-                            )
+                        Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                        if let lastUpdated = model.lastPreflightRefresh {
+                            Text(relativeAgeText(lastUpdated))
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                .lineLimit(1)
+                        }
                     }
+                    Text(checkTitle(for: selectedCheck.name))
+                        .font(SpeechRailDesignTokens.Typography.windowTitle)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 detailFact("检测结果", resultMessage(for: selectedCheck))

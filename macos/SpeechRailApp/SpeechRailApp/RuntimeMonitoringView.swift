@@ -53,6 +53,8 @@ public struct RuntimeMonitoringView: View {
             // top slot instead of sharing a row with a capability panel
             // (REDESIGN-SPEC §7.6).
             chartPanel
+            // Figma 把「运行组件」放在图表卡之后：先看趋势，再看是谁在跑。
+            runtimeComponentsSection
             histogramSummarySection
             capabilityPanel
             resourcePanel
@@ -247,31 +249,33 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var capabilityPanel: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            SectionHeading(
+        CardSurface {
+            CardHead(
                 title: "能力状态",
                 detail: "来自最近一次 health 读取。"
             )
-            .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
-
+            Divider()
             VStack(spacing: 0) {
                 MonitoringCapabilityRow(
                     title: "语音转文字",
                     detail: displayedHealth?.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
                     ready: displayedHealth?.asrReady
                 )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 Divider()
                 MonitoringCapabilityRow(
                     title: "文字转语音",
                     detail: displayedHealth?.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
                     ready: displayedHealth?.ttsReady
                 )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 Divider()
                 MonitoringCapabilityRow(
                     title: "实时语音",
                     detail: displayedHealth?.streamingState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取",
                     ready: displayedHealth?.realtimeVAD?.ready
                 )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 Divider()
                 MonitoringCapabilityRow(
                     title: "分人识别",
@@ -279,32 +283,31 @@ public struct RuntimeMonitoringView: View {
                         ?? "按当前档位启用",
                     ready: displayedHealth?.diarizationReady
                 )
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             }
-
-            sectionDivider
-            runtimeComponentsSection
         }
-        .padding(SpeechRailDesignTokens.Spacing.md)
-        .speechRailContentSurface()
     }
 
     private var resourcePanel: some View {
-        resourceSection
-            .padding(SpeechRailDesignTokens.Spacing.md)
-            .speechRailContentSurface()
-    }
-
-    private var sectionDivider: some View {
-        Divider()
-            .padding(.vertical, SpeechRailDesignTokens.List.sectionSpacing)
-    }
-
-    private var runtimeComponentsSection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "运行组件",
-                detail: "来自最近一次 metrics 读取的生命周期状态。"
+        CardSurface {
+            CardHead(
+                title: "资源与准入",
+                detail: "实测 footprint 与配置预算分开显示，不用模型大小替代内存占用。"
             )
+            Divider()
+            resourceSection
+        }
+    }
+
+    /// Figma `workers`：标题带 + worker 表 + 说明带。「运行组件」在原实现里和
+    /// 能力状态共用一张卡，矩阵与表叠在一起，看不出这是两组不同的数据。
+    private var runtimeComponentsSection: some View {
+        CardSurface {
+            CardHead(
+                title: "运行组件",
+                detail: "指标为最近样本的平均值；ASR、双 TTS lane 与分人各自独立常驻。"
+            )
+            Divider()
             if workerRows.isEmpty {
                 Label("暂无 worker 生命周期数据", systemImage: "hourglass")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -314,6 +317,7 @@ public struct RuntimeMonitoringView: View {
                         minHeight: SpeechRailDesignTokens.List.compactRowHeight,
                         alignment: .leading
                     )
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             } else {
                 Table(workerRows) {
                     TableColumn("组件") { row in
@@ -332,15 +336,26 @@ public struct RuntimeMonitoringView: View {
                 .frame(height: Self.tableHeight(for: workerRows.count))
                 .accessibilityLabel("运行组件状态表")
             }
+            Divider()
+            CardFoot(note: sampleWindowNote) {
+                Button {
+                    Task { await model.refreshMonitoring() }
+                } label: {
+                    Label("立即刷新", systemImage: "arrow.clockwise")
+                }
+                .speechRailButton(.secondary)
+                .disabled(model.isRefreshingMonitoring)
+            }
         }
     }
 
     private var histogramSummarySection: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
+        CardSurface {
+            CardHead(
                 title: "直方图摘要",
                 detail: "服务端累计的时延与 RTF 分布；平均值由服务端计算。"
             )
+            Divider()
             if histogramRows.isEmpty {
                 Label("暂无直方图数据", systemImage: "chart.bar")
                     .font(SpeechRailDesignTokens.Typography.caption)
@@ -350,6 +365,7 @@ public struct RuntimeMonitoringView: View {
                         minHeight: SpeechRailDesignTokens.List.compactRowHeight,
                         alignment: .leading
                     )
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             } else {
                 Table(histogramRows) {
                     TableColumn("指标") { row in
@@ -452,17 +468,14 @@ public struct RuntimeMonitoringView: View {
             overlapDetail = "metrics 未提供资源策略"
         }
 
-        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "资源与准入",
-                detail: "实测 footprint 与配置预算分开显示，不用模型大小替代内存占用。"
-            )
+        return VStack(alignment: .leading, spacing: 0) {
             resourceRow(
                 title: "主机物理内存",
                 value: physicalMemory,
                 detail: resources == nil ? "metrics 未提供" : "用于计算服务预算",
                 tone: resources?.physicalMemoryBytes == nil ? .neutral : .healthy
             )
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             Divider()
             resourceRow(
                 title: "服务内存预算",
@@ -470,6 +483,7 @@ public struct RuntimeMonitoringView: View {
                 detail: "当前重计算准入上限",
                 tone: resources?.memoryBudgetBytes == nil ? .neutral : .attention
             )
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             Divider()
             resourceRow(
                 title: "声明常驻占用",
@@ -477,6 +491,7 @@ public struct RuntimeMonitoringView: View {
                 detail: "配置估算，非实测 footprint",
                 tone: resources?.declarationComplete == true ? .attention : .neutral
             )
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             Divider()
             resourceRow(
                 title: "服务 physical footprint",
@@ -486,6 +501,7 @@ public struct RuntimeMonitoringView: View {
                     : "采样不完整，不展示部分总量",
                 tone: resources?.physicalFootprintComplete == true ? .healthy : .neutral
             )
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             Divider()
             resourceRow(
                 title: overlapTitle,
@@ -493,6 +509,7 @@ public struct RuntimeMonitoringView: View {
                 detail: overlapDetail,
                 tone: overlapAllowed.map { $0 ? StatusTone.healthy : .attention } ?? .neutral
             )
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         }
     }
 
@@ -544,34 +561,35 @@ public struct RuntimeMonitoringView: View {
     }
 
     private var chartPanel: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            chartHeading
-            if !RuntimeMonitoringChartDescriptor.isSufficient(visibleChartPoints) {
-                ContentUnavailableView(
-                    windowedSamples.isEmpty ? "等待监控样本" : "样本还不够",
-                    systemImage: AppRoute.monitoring.systemImage,
-                    description: Text(
-                        windowedSamples.isEmpty
-                            ? "打开此页面后会每 5 秒读取一次本机服务 metrics；没有样本不代表服务异常。"
-                            : "当前时间窗内只有一个样本，至少需要两个样本才绘制趋势。"
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                chartHeading
+                if !RuntimeMonitoringChartDescriptor.isSufficient(visibleChartPoints) {
+                    ContentUnavailableView(
+                        windowedSamples.isEmpty ? "等待监控样本" : "样本还不够",
+                        systemImage: AppRoute.monitoring.systemImage,
+                        description: Text(
+                            windowedSamples.isEmpty
+                                ? "打开此页面后会每 5 秒读取一次本机服务 metrics；没有样本不代表服务异常。"
+                                : "当前时间窗内只有一个样本，至少需要两个样本才绘制趋势。"
+                        )
                     )
-                )
-                .frame(
-                    maxWidth: .infinity,
-                    minHeight: SpeechRailDesignTokens.Layout.monitoringEmptyMinimumHeight
-                )
-            } else {
-                concurrencyChart
-                latencyChart
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.Layout.monitoringEmptyMinimumHeight
+                    )
+                } else {
+                    concurrencyChart
+                    latencyChart
+                }
+                if let message = model.monitoringMessage, !message.isEmpty {
+                    Text(message)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(monitoringTone.color)
+                }
             }
-            if let message = model.monitoringMessage, !message.isEmpty {
-                Text(message)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(monitoringTone.color)
-            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailConsoleChassis()
     }
 
     private var concurrencyChart: some View {
@@ -679,6 +697,14 @@ public struct RuntimeMonitoringView: View {
         let count = windowedSamples.count
         guard count > 0 else { return "等待监控样本" }
         return "最近 \(count) 个样本"
+    }
+
+    /// Figma `foot`：「采样窗口 + 上次刷新多久前」是判断曲线还新不新的唯一本机事实。
+    private var sampleWindowNote: String {
+        guard let latestSample else { return "采样窗口 0 · 等待第一个样本" }
+        let age = max(0, Int(Date().timeIntervalSince(latestSample.capturedAt).rounded()))
+        let ageText = age < 60 ? "\(age) 秒前" : "\(age / 60) 分钟前"
+        return "采样窗口 \(windowedSamples.count) · 上次刷新 \(ageText)"
     }
 
     /// 页头第二行承载采样状态与刷新节奏，时间窗控件与它同行（Figma `pageHead`）。

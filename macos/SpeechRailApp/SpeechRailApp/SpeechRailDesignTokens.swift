@@ -58,6 +58,14 @@ public enum SpeechRailDesignTokens {
         public static let modelArtifactEmptyStateMinimumHeight: CGFloat = 130
         public static let modelFactMinimumWidth: CGFloat = 100
         public static let modelVariantWidth: CGFloat = 120
+        /// 档位卡的规格行：标签列固定，取值右对齐（Figma `Profile Card` 的 76pt）。
+        public static let modelProfileSpecLabelWidth: CGFloat = 76
+        /// 服务状态能力矩阵：名称列与状态胶囊列各占固定宽度，说明列吸收余量
+        /// （Figma `caps` 的 250 / 96）。
+        public static let serviceCapabilityNameWidth: CGFloat = 250
+        public static let serviceCapabilityPillWidth: CGFloat = 96
+        /// 服务状态运行信息：标签列固定，取值右对齐（Figma `infoRow` 的 120）。
+        public static let serviceRuntimeLabelWidth: CGFloat = 120
         public static let diagnosticsEmptyListMinimumHeight: CGFloat = 180
         public static let diagnosticsEmptyDetailMinimumHeight: CGFloat = 300
         public static let monitoringEmptyMinimumHeight: CGFloat = 220
@@ -305,6 +313,8 @@ public enum SpeechRailDesignTokens {
     public enum Surface {
         public static let selectedFill = Color.rail.opacity(0.16)
         public static let voiceBadgeFill = Color.voice.opacity(0.20)
+        /// Figma `Status Pill` 的语义色底色；状态色本身带图标与文字，颜色只是补充。
+        public static let statusTintOpacity: Double = 0.14
         public static let inspectorFill = Color.field
         public static let border = Color.separator
         /// Only window-level floating layers cast a shadow (§5.2).
