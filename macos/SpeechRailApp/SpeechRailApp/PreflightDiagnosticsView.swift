@@ -31,6 +31,16 @@ public struct PreflightDiagnosticsView: View {
                     .transition(.opacity)
             }
             diagnosticWorkspace
+        } trailing: {
+            Button {
+                Task { await model.refreshPreflight() }
+            } label: {
+                Label("重新运行预检", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.isBusy || model.isRefreshingPreflight)
+            .help("重新运行预检")
+            .accessibilityLabel("重新运行预检")
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {

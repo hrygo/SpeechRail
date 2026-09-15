@@ -40,7 +40,7 @@ public struct RuntimeMonitoringView: View {
     public init() {}
 
     public var body: some View {
-        PageScaffold(route: .monitoring) {
+        PageScaffold(route: .monitoring, subtitle: pageSubtitle) {
             monitoringSummary
             if let reportMessage {
                 Label(reportMessage, systemImage: "checkmark.circle.fill")
@@ -56,6 +56,8 @@ public struct RuntimeMonitoringView: View {
             histogramSummarySection
             capabilityPanel
             resourcePanel
+        } trailing: {
+            timeWindowPicker
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
@@ -543,29 +545,7 @@ public struct RuntimeMonitoringView: View {
 
     private var chartPanel: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                chartHeading
-                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    Picker("时间窗", selection: $timeWindow) {
-                        ForEach(MonitoringTimeWindow.allCases) { window in
-                            Text(window.title).tag(window)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .fixedSize()
-                    .accessibilityLabel("监控时间窗")
-
-                    Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-
-                    Text(sampleStatusText)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                }
-                chartRefreshStatus
-            }
+            chartHeading
             if !RuntimeMonitoringChartDescriptor.isSufficient(visibleChartPoints) {
                 ContentUnavailableView(
                     windowedSamples.isEmpty ? "等待监控样本" : "样本还不够",
@@ -701,19 +681,28 @@ public struct RuntimeMonitoringView: View {
         return "最近 \(count) 个样本"
     }
 
+    /// 页头第二行承载采样状态与刷新节奏，时间窗控件与它同行（Figma `pageHead`）。
+    private var pageSubtitle: String {
+        "\(sampleStatusText) · 刷新间隔 5 秒"
+    }
+
+    private var timeWindowPicker: some View {
+        Picker("时间窗", selection: $timeWindow) {
+            ForEach(MonitoringTimeWindow.allCases) { window in
+                Text(window.title).tag(window)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .fixedSize()
+        .accessibilityLabel("监控时间窗")
+    }
+
     private var chartHeading: some View {
         SectionHeading(
             title: "资源脉冲",
             detail: "每 5 秒采样一次活跃请求；趋势只展示当前 App 会话内的数据。"
         )
-    }
-
-    private var chartRefreshStatus: some View {
-        Text(latestSample == nil ? "等待首个样本" : "自动刷新 · 5 秒")
-            .font(SpeechRailDesignTokens.Typography.caption)
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
     }
 
     @ViewBuilder

@@ -478,19 +478,25 @@ enum SpeechRailOperationMessagePresentation {
 /// of repeating the title as a purpose sentence (REDESIGN-SPEC §7).
 /// Full-height workspaces such as diagnostics can opt out of the outer scroll
 /// container while keeping the same geometry.
-public struct PageScaffold<Content: View>: View {
+public struct PageScaffold<Content: View, Trailing: View>: View {
     public let route: AppRoute
     public let scrollable: Bool
+    private let subtitle: String?
+    private let trailing: Trailing
     private let content: Content
 
     public init(
         route: AppRoute,
         scrollable: Bool = true,
-        @ViewBuilder content: () -> Content
+        subtitle: String? = nil,
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder trailing: () -> Trailing
     ) {
         self.route = route
         self.scrollable = scrollable
+        self.subtitle = subtitle
         self.content = content()
+        self.trailing = trailing()
     }
 
     @ViewBuilder
@@ -505,13 +511,53 @@ public struct PageScaffold<Content: View>: View {
         }
     }
 
+    /// 页头：八个页面都以同一套「标题 + 一句话说明」开场，可带右侧控件，
+    /// 这样八个屏幕读起来是一个产品而不是八个变体（Figma `pageHead`）。
+    private var pageHead: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text(route.title)
+                    .font(SpeechRailDesignTokens.Typography.display)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(subtitle ?? route.pageSubtitle)
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            trailing
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+    }
+
     private var pageContent: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+            pageHead
             content
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.vertical, SpeechRailDesignTokens.Layout.contentPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+public extension PageScaffold where Trailing == EmptyView {
+    init(
+        route: AppRoute,
+        scrollable: Bool = true,
+        subtitle: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(
+            route: route,
+            scrollable: scrollable,
+            subtitle: subtitle,
+            content: content,
+            trailing: { EmptyView() }
+        )
     }
 }
 
@@ -534,7 +580,7 @@ public struct SectionHeading: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let detail, !detail.isEmpty {
                 Text(detail)
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)

@@ -9,7 +9,8 @@ public enum AppRouteGroup: String, CaseIterable, Sendable {
         case .creator:
             "创作"
         case .service:
-            "服务"
+            // 技术页与服务状态同组，沿用 Figma shell 的分组名（REDESIGN-SPEC §6.1）。
+            "引擎"
         }
     }
 }
@@ -53,6 +54,29 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "模型"
         case .diagnostics:
             "诊断"
+        }
+    }
+
+    /// 页头第二行，与 Figma `pageHead` 的副标题逐字一致；运行监控的动态采样
+    /// 状态由页面自己覆盖（`PageScaffold(subtitle:)`）。
+    public var pageSubtitle: String {
+        switch self {
+        case .dubbing:
+            "输入文稿、选择音色，直接生成可交付的语音。"
+        case .voiceDesign:
+            "用一句话描述你想要的音色，从真实预览里挑一个保存进音色库。"
+        case .voiceLibrary:
+            "管理系统音色，以及用参考音频复刻出来的音色。"
+        case .works:
+            "本机生成过的音频都留在这里，可随时播放、导出或删除。"
+        case .overview:
+            "本机语音引擎的当前结论与运行事实。"
+        case .monitoring:
+            "最近的内存样本与刷新间隔。"
+        case .models:
+            "先下载并校验，再应用到运行档位；两者是独立操作。"
+        case .diagnostics:
+            "本机自检结论与可执行的修复动作。"
         }
     }
 

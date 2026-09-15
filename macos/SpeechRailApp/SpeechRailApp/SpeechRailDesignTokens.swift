@@ -228,6 +228,8 @@ public enum SpeechRailDesignTokens {
         public static let body: Font = .body
         /// Figma `Body / Medium`：候选卡槽位名与表格主列等需要中等字重的正文。
         public static let bodyMedium: Font = .body.weight(.medium)
+        /// Figma `Callout`：页头副标题、区块说明与结果条时长等 12pt 正文。
+        public static let callout: Font = .callout
         public static let secondary: Font = .subheadline
         public static let label: Font = .system(.callout, weight: .medium)
         public static let caption: Font = .caption
