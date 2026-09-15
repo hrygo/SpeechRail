@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.5.0"
-date: 2026-09-13
+version: "0.5.1"
+date: 2026-09-15
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -51,7 +51,7 @@ App 只连接 loopback；健康/目录读取保持公开状态语义，创作 RE
 
 1. 在 Xcode 中打开 `macos/SpeechRailApp/SpeechRailApp.xcodeproj`，选择 `SpeechRailApp` scheme。
 2. Debug/Release 默认使用 `Sign to Run Locally` 的 ad hoc 本地签名；测试脚本默认保留签名，以满足当前 Xcode UI test runner 的 `Testing.framework` 运行库要求。只有明确需要未签名 bundle 时才设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=0`。
-3. 修改 Python 服务后先执行 `uv sync --extra dev`，再运行 `scripts/macos_app_test.sh` 与 Python 定向测试。
+3. 修改 Python 服务后先执行 `uv sync --extra dev`，再运行 Python 定向测试（`uv run --extra dev pytest`）。`scripts/macos_app_test.sh` 属于 XCTest/UI test，会接管前台窗口、焦点和输入，仅在当前用户明确要求时运行（见根目录 [AGENTS.md](../../AGENTS.md) 硬约束），不因开发或验收流程自动触发。
 4. UI test 通过 `--ui-test` 使用 fake transport；不会注册生产 helper、启动 `com.speechrail` 或访问真实模型。Debug build 和 UI test 使用一次性临时 DerivedData，命令结束会注销本次构建 App 的 LaunchServices 注册并清理 App/runner；不会留下可搜索的测试 App。
 
 ## 测试隔离
@@ -88,8 +88,10 @@ App 只连接 loopback；健康/目录读取保持公开状态语义，创作 RE
 
 ```bash
 scripts/macos_app_build.sh --configuration Debug
-scripts/macos_app_test.sh
 plutil -lint macos/SpeechRailApp/Resources/LaunchAgents/com.speechrail.desktop.control.plist
+# scripts/macos_app_test.sh  # XCTest/UI test：接管前台窗口/输入，仅在当前用户明确要求时运行
 ```
+
+`scripts/macos_app_test.sh` 是 UI 自动化测试，仅在当前用户明确要求时逐次运行（见根目录 [AGENTS.md](../../AGENTS.md)）；默认不执行，未执行时在结果中记为未验证项而非通过。
 
 分发签名、archive、notarization 和回滚流程见 `docs/developers/macos-app-release.md`。
