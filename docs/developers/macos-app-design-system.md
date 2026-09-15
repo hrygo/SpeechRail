@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.7.0"
-date: 2026-09-14
+version: "0.7.1"
+date: 2026-09-15
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -96,7 +96,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 控制推子 | `ConsoleFader` | `calibratedDetent`（1.0x 基准阻尼点）、`detentNotchCount`（物理刻度）、`thumbWidth/Height`（推头尺寸） |
 | 间距节奏 | `Spacing` | 使用 `tight/micro/xs/sm/md/lg/xl/hero`，基准节奏为 2/4/8/12/16/24/32/48 pt |
 | 倒角比例 | `Corner` | 控件 6、选中行 8、字段 14、模块 18、胶囊 999；曲率比值 `continuousRadiusRatio = 0.2237` |
-| 布局规整 | `Layout` | sidebar 固定 240pt，inspector 固定 360pt，主内容区最大宽度 1,240pt，窗口最小 1,120×720pt |
+| 布局规整 | `Layout` | sidebar 220–280pt（ideal 240）、inspector 300–440pt（ideal 360，可压缩以免挤压页面内容）、模型档位列 220–320pt（ideal 280）、音色名列 160–260pt（ideal 220）、主内容区最大宽度 1,240pt、窗口最小 1,120×720pt |
 | 表面修饰 | `ViewModifiers` | `.speechRailConsoleChassis()`（机加工机架板）、`.speechRailRecessedSlot()`（沉降声学槽）、`.speechRailKnurledCapsule()`（滚花胶囊） |
 | 动效反馈 | `Motion` | 弹簧动力学 `spring(response: 0.28, dampingFraction: 0.82)`，按压缩放 `0.985`，选区反馈 `0.14s`；尊重 Reduce Motion |
 

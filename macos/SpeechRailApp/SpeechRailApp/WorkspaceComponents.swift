@@ -1335,7 +1335,7 @@ public struct DeveloperInspector<Content: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(
-                width: SpeechRailDesignTokens.Inspector.contentWidth,
+                maxWidth: .infinity,
                 alignment: .leading
             )
             .padding(SpeechRailDesignTokens.Inspector.contentPadding)
@@ -1344,17 +1344,17 @@ public struct DeveloperInspector<Content: View>: View {
         .scrollIndicators(.automatic)
         .scrollBounceBehavior(.basedOnSize)
         .frame(
-            minWidth: SpeechRailDesignTokens.Inspector.width,
-            idealWidth: SpeechRailDesignTokens.Inspector.width,
-            maxWidth: SpeechRailDesignTokens.Inspector.width,
+            minWidth: SpeechRailDesignTokens.Layout.inspectorMinimumWidth,
+            idealWidth: SpeechRailDesignTokens.Layout.inspectorIdealWidth,
+            maxWidth: SpeechRailDesignTokens.Layout.inspectorMaximumWidth,
             alignment: .topLeading
         )
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .clipped()
         .inspectorColumnWidth(
-            min: SpeechRailDesignTokens.Inspector.width,
-            ideal: SpeechRailDesignTokens.Inspector.width,
-            max: SpeechRailDesignTokens.Inspector.width
+            min: SpeechRailDesignTokens.Layout.inspectorMinimumWidth,
+            ideal: SpeechRailDesignTokens.Layout.inspectorIdealWidth,
+            max: SpeechRailDesignTokens.Layout.inspectorMaximumWidth
         )
         .background(SpeechRailDesignTokens.Surface.inspectorFill)
     }

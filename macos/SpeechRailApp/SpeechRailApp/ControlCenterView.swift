@@ -183,28 +183,6 @@ public struct ControlCenterView: View {
                 minHeight: SpeechRailDesignTokens.List.rowHeight,
                 alignment: .leading
             )
-            .background {
-                if isSelected {
-                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                stops: [
-                                    .init(color: SpeechRailDesignTokens.SteelRail.trackCyan.opacity(0.30), location: 0.0),
-                                    .init(color: SpeechRailDesignTokens.SteelRail.trackCyan.opacity(0.12), location: 1.0)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.row, style: .continuous)
-                                .strokeBorder(
-                                    SpeechRailDesignTokens.SteelRail.railheadGleam.opacity(0.40),
-                                    lineWidth: 0.75
-                                )
-                        }
-                }
-            }
             .contentShape(Rectangle())
         }
         .listRowInsets(

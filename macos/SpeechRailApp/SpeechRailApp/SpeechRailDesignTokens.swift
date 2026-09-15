@@ -41,10 +41,12 @@ public enum SpeechRailDesignTokens {
         public static let sidebarIdealWidth: CGFloat = 240
         public static let sidebarMaximumWidth: CGFloat = 280
         public static let modelProfileListWidth: CGFloat = 280
+        public static let modelProfileListMinimumWidth: CGFloat = 220
+        public static let modelProfileListMaximumWidth: CGFloat = 320
         public static let inspectorWidth: CGFloat = 360
-        public static let inspectorMinimumWidth: CGFloat = inspectorWidth
+        public static let inspectorMinimumWidth: CGFloat = 300
         public static let inspectorIdealWidth: CGFloat = inspectorWidth
-        public static let inspectorMaximumWidth: CGFloat = inspectorWidth
+        public static let inspectorMaximumWidth: CGFloat = 440
         public static let contentMaximumWidth: CGFloat = 1_240
         public static let windowMinimumWidth: CGFloat = 1_120
         public static let windowMinimumHeight: CGFloat = 720
@@ -53,6 +55,8 @@ public enum SpeechRailDesignTokens {
         public static let creatorVoiceInstructionMinimumHeight: CGFloat = 120
         public static let creatorVoicePickerWidth: CGFloat = 180
         public static let creatorVoiceNameWidth: CGFloat = 220
+        public static let creatorVoiceNameMinimumWidth: CGFloat = 160
+        public static let creatorVoiceNameMaximumWidth: CGFloat = 260
         public static let creatorVoiceControlWidth: CGFloat = 240
         public static let creatorSpeedSliderWidth: CGFloat = 120
         public static let creatorSpeedValueWidth: CGFloat = 32
@@ -127,13 +131,12 @@ public enum SpeechRailDesignTokens {
         public static let disclosureContentInset: CGFloat = Spacing.lg
     }
 
-    /// Developer-facing metadata is deliberately denser than page content, but
-    /// its width and text rules are fixed so an implementation detail can never
-    /// resize the main workspace or push the navigation column.
+    /// Developer-facing metadata is deliberately denser than page content. Its
+    /// width is a compressible range (`Layout.inspector*Width`) so a narrow
+    /// window shrinks this panel instead of displacing page content or pushing
+    /// the navigation column.
     public enum Inspector {
-        public static let width: CGFloat = Layout.inspectorWidth
         public static let contentPadding: CGFloat = Spacing.md
-        public static let contentWidth: CGFloat = width - contentPadding * 2
         public static let sectionSpacing: CGFloat = Spacing.md
         public static let rowSpacing: CGFloat = Spacing.sm
         public static let labelValueSpacing: CGFloat = Spacing.micro

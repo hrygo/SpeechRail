@@ -151,7 +151,11 @@ public struct ModelManagementView: View {
     private var modelWorkspace: some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
             profileList
-                .frame(width: SpeechRailDesignTokens.Layout.modelProfileListWidth)
+                .frame(
+                    minWidth: SpeechRailDesignTokens.Layout.modelProfileListMinimumWidth,
+                    idealWidth: SpeechRailDesignTokens.Layout.modelProfileListWidth,
+                    maxWidth: SpeechRailDesignTokens.Layout.modelProfileListMaximumWidth
+                )
             selectedProfilePanel
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }

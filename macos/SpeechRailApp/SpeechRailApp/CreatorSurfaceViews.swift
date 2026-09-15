@@ -308,6 +308,7 @@ public struct DubbingDeskView: View {
                                 )
                         }
                         .buttonStyle(.plain)
+                        .speechRailPointerCursor()
                         .disabled(isSpeedLocked)
                     }
                 }
@@ -599,7 +600,11 @@ public struct VoiceDesignView: View {
 
             HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                 voiceNameField
-                    .frame(width: SpeechRailDesignTokens.Layout.creatorVoiceNameWidth)
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameMinimumWidth,
+                        idealWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameWidth,
+                        maxWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameMaximumWidth
+                    )
                 referenceTextField
             }
 
