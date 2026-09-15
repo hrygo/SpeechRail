@@ -374,6 +374,17 @@ VoiceOver 实测、UI 自动化测试（AGENTS.md 硬约束），因此本文不
 legacy 机架代码删除（6 个枚举 + 5 个类型 + `Corner` 枚举 + `SpeechRailSurfaceLevel.cornerRadius`），
 `SpeechRailDesignTokens.swift` 从 975 行降到 465 行，`Surface` 只保留仍被引用的系统语义成员。
 
+第四轮（2026-09-15 21:3x）：收口最后两条结构性偏差。
+**D9 落地**：状态呈现的唯一性改为严格执行——`WorkspaceTitleLockup` 去掉全部状态入参，
+工具栏 principal 只剩「这是哪一页」，配音台「更多操作」里的「查看服务状态」入口删除，
+零引用的 `WorkspaceTitleView` 包装一并删除；全局状态常驻位置只剩侧边栏底部状态区
+（服务状态页的结论面板按 §6.4 保留）。**菜单栏状态项**按 `menuBarStrip` 结构实施：
+常态只渲染图标，`serviceOperation.phase.isActive` 时才追加「SpeechRail」文字与 6pt
+琥珀状态点，新增 `Menu.menuBarItemSpacing` / `Menu.menuBarStatusDotSize` 两个 token。
+构建 `BUILD SUCCEEDED`。**未实施且不拟实施**：设置窗口「候选数量 2/4」与「默认导出位置」——
+§7.10 的创作分组本就不含这两项，且 App 目前没有对应存储或能力（候选固定 4 槽、导出走
+系统面板逐次选择），摆上没有作用的控件等于假声明。
+
 | 阶段 | 状态 | 提交 |
 |---|---|---|
 | 1 外壳 | 已完成 | `465f7d41` |

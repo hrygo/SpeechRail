@@ -105,10 +105,12 @@ struct SpeechRailApp: App {
                 showDeveloperDetails: $showDeveloperDetails
             )
         }
-        MenuBarExtra("SpeechRail", systemImage: AppRoute.dubbing.systemImage) {
+        MenuBarExtra {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)
+        } label: {
+            MenuBarStatusLabel(isOperating: model.serviceOperation?.phase.isActive == true)
         }
         Settings {
             SettingsView()

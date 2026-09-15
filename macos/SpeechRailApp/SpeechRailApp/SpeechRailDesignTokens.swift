@@ -100,6 +100,10 @@ public enum SpeechRailDesignTokens {
         public static let rowHeight: CGFloat = Interaction.minimumHitTarget
         public static let triggerHeight: CGFloat = Toolbar.controlHeight
         public static let triggerHorizontalPadding: CGFloat = Spacing.xs
+        /// Figma `menuBarStrip`：状态项内图标、文字与状态点之间的间距。
+        public static let menuBarItemSpacing: CGFloat = 6
+        /// Figma `menuBarStrip`：操作进行中的琥珀色状态点直径。
+        public static let menuBarStatusDotSize: CGFloat = 6
     }
 
     /// List geometry is shared by sidebar navigation and custom content lists.

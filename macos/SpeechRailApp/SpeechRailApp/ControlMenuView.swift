@@ -293,3 +293,28 @@ public struct ControlMenuView: View {
         command == .stop || command == .restart
     }
 }
+
+/// Figma `menuBarStrip`（`figma-kit/main.js`）：常态只有图标，操作进行中才
+/// 出现文字与琥珀色状态点。菜单栏属于系统，不属于产品，所以产品名默认不
+/// 占用标题宽度；只有长任务真的在跑时才占用。
+struct MenuBarStatusLabel: View {
+    let isOperating: Bool
+
+    var body: some View {
+        HStack(spacing: SpeechRailDesignTokens.Menu.menuBarItemSpacing) {
+            Image(systemName: AppRoute.dubbing.systemImage)
+            if isOperating {
+                Text("SpeechRail")
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.voice)
+                    .frame(
+                        width: SpeechRailDesignTokens.Menu.menuBarStatusDotSize,
+                        height: SpeechRailDesignTokens.Menu.menuBarStatusDotSize
+                    )
+                    .accessibilityHidden(true)
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(isOperating ? "SpeechRail，服务操作进行中" : "SpeechRail")
+    }
+}

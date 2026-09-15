@@ -68,7 +68,8 @@ public struct DubbingDeskView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "刷新服务状态，或打开服务状态页") {
+                // D9：配音台不再复制「服务状态」入口，全局状态只留在侧边栏底部。
+                WorkspaceActionsMenu(helpText: "刷新服务状态，或调整开发者详情") {
                     Button {
                         Task { await model.refresh() }
                     } label: {
@@ -76,13 +77,6 @@ public struct DubbingDeskView: View {
                             .speechRailMenuRow()
                     }
                     .disabled(model.isRefreshingService)
-                    Divider()
-                    Button {
-                        navigation.request(.overview)
-                    } label: {
-                        Label("查看服务状态", systemImage: AppRoute.overview.systemImage)
-                            .speechRailMenuRow()
-                    }
                     Divider()
                     Button {
                         showInspector.toggle()

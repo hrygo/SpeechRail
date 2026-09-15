@@ -51,14 +51,8 @@ public struct ControlCenterView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .toolbar {
                         ToolbarItem(placement: .principal) {
-                            WorkspaceTitleLockup(
-                                route: selection ?? .overview,
-                                service: model.service,
-                                health: displayedHealth,
-                                healthMessage: model.healthMessage,
-                                operation: model.serviceOperation,
-                                controlPlaneMessage: model.controlPlaneMessage
-                            )
+                            // 状态只由侧边栏底部状态区承担（REDESIGN-SPEC §6.4 / D9）。
+                            WorkspaceTitleLockup(route: selection ?? .overview)
                         }
                         .sharedBackgroundVisibility(.hidden)
                         ToolbarSpacer(.flexible)
