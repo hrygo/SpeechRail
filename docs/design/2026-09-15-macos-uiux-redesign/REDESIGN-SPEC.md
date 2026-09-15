@@ -364,6 +364,16 @@ VoiceOver 实测、UI 自动化测试（AGENTS.md 硬约束），因此本文不
 进程稳定且无崩溃日志。**注意**：macOS 不会替换运行中 App 的代码，安装后必须退出并重开
 才能看到新 UI——否则会误判为「装了没生效」。视觉与无障碍结论仍待人工走查。
 
+第三轮（2026-09-15 20:5x）：改以 Figma 生成器 `figma-kit/main.js` 的结构定义（节点、布局、
+文本样式、变量绑定）为对照基准，而不是只看导出的 PNG。据此发现候选卡头部与设计不一致：
+设计稿 `Candidate Tile`（组件定义与页面实例一致）是三段头部——槽位名 `候选 1`（Body / Medium、
+主文本色）→ 状态胶囊 → 右对齐 `seed 101`（Caption / tertiary），实现却多画了一个 32pt 琥珀方块、
+把状态推到最右、并把 seed 藏进副标题行，槽位还用 A–D 命名（与 §8 的 `n/4` 口径不一致）。
+现已按设计对齐：槽位改为 1–4、头部改为三段、删掉 `Layout.creatorSlotBadgeSize` 与
+`VoiceDesignCandidateSnapshot.detail`。同时把 §5.2/§5.3/§5.4 要求"迁移完成后废弃"的整套
+legacy 机架代码删除（6 个枚举 + 5 个类型 + `Corner` 枚举 + `SpeechRailSurfaceLevel.cornerRadius`），
+`SpeechRailDesignTokens.swift` 从 975 行降到 465 行，`Surface` 只保留仍被引用的系统语义成员。
+
 | 阶段 | 状态 | 提交 |
 |---|---|---|
 | 1 外壳 | 已完成 | `465f7d41` |

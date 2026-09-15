@@ -69,7 +69,6 @@ public struct VoiceDesignCandidateSnapshot: Equatable, Identifiable, Sendable {
     public let slot: String
     public let seed: Int
     public let title: String
-    public let detail: String
     public let instructionSnapshot: String
     public let referenceTextSnapshot: String
     public var status: VoiceDesignCandidateStatus
@@ -82,7 +81,6 @@ public struct VoiceDesignCandidateSnapshot: Equatable, Identifiable, Sendable {
         slot: String,
         seed: Int,
         title: String,
-        detail: String,
         instructionSnapshot: String,
         referenceTextSnapshot: String,
         status: VoiceDesignCandidateStatus,
@@ -92,7 +90,6 @@ public struct VoiceDesignCandidateSnapshot: Equatable, Identifiable, Sendable {
         self.slot = slot
         self.seed = seed
         self.title = title
-        self.detail = detail
         self.instructionSnapshot = instructionSnapshot
         self.referenceTextSnapshot = referenceTextSnapshot
         self.status = status
@@ -188,11 +185,12 @@ public final class AppModel {
     private var voiceDesignGenerationTask: Task<Void, Never>?
     private var voiceDesignSaveTask: Task<Void, Never>?
 
-    private static let voiceDesignCandidateSpecs: [(slot: String, seed: Int, title: String, detail: String)] = [
-        ("A", 101, "候选 A", "同一试听文案 · seed 101"),
-        ("B", 202, "候选 B", "同一试听文案 · seed 202"),
-        ("C", 303, "候选 C", "同一试听文案 · seed 303"),
-        ("D", 404, "候选 D", "同一试听文案 · seed 404")
+    /// 槽位编号与 Figma `Candidate Tile` 一致：候选 1–4 配 seed 101/202/303/404。
+    private static let voiceDesignCandidateSpecs: [(slot: String, seed: Int, title: String)] = [
+        ("1", 101, "候选 1"),
+        ("2", 202, "候选 2"),
+        ("3", 303, "候选 3"),
+        ("4", 404, "候选 4")
     ]
 
     public init(
@@ -285,7 +283,6 @@ public final class AppModel {
                 slot: $0.slot,
                 seed: $0.seed,
                 title: $0.title,
-                detail: $0.detail,
                 instructionSnapshot: trimmedInstruction,
                 referenceTextSnapshot: trimmedReferenceText,
                 status: .loading

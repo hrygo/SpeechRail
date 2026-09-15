@@ -1353,35 +1353,16 @@ private struct VoiceCandidateCard: View {
 
     // MARK: 头部
 
+    /// 头部三件套与 Figma `Candidate Tile` 一致：槽位名（Body / Medium）→
+    /// 状态胶囊 → 右对齐 seed（Caption / tertiary）。四张卡共用同一骨架，
+    /// 网格才读起来是网格（REDESIGN-SPEC §7.2）。
     private var header: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text(candidate.slot)
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                .foregroundStyle(SpeechRailDesignTokens.Color.voice)
-                .frame(
-                    width: SpeechRailDesignTokens.Layout.creatorSlotBadgeSize,
-                    height: SpeechRailDesignTokens.Layout.creatorSlotBadgeSize
-                )
-                .background(
-                    SpeechRailDesignTokens.Surface.voiceBadgeFill,
-                    in: .rect(cornerRadius: SpeechRailDesignTokens.Corner.control)
-                )
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(candidate.title)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(candidate.detail)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-
-            Spacer(minLength: 0)
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(candidate.title)
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             Text(statusText)
                 .font(SpeechRailDesignTokens.Typography.caption)
@@ -1390,6 +1371,14 @@ private struct VoiceCandidateCard: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                 .background(statusColor.opacity(0.14), in: .capsule)
+
+            Spacer(minLength: 0)
+
+            Text("seed \(candidate.seed)")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .monospacedDigit()
+                .lineLimit(1)
         }
     }
 

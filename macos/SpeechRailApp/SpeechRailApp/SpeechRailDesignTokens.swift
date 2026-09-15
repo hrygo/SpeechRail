@@ -18,22 +18,6 @@ public enum SpeechRailDesignTokens {
         public static let xxl: CGFloat = 40
     }
 
-    public enum Corner {
-        public static let control: CGFloat = 6
-        public static let row: CGFloat = 8
-        public static let field: CGFloat = 14
-        public static let module: CGFloat = 18
-        public static let pill: CGFloat = 999
-
-        /// Apple HIG 连续曲率超椭圆比例（提取自 Logo Master 矢量母版）
-        public static let continuousRadiusRatio: CGFloat = 0.2237
-
-        // Source-compatibility aliases for compiled legacy surfaces.
-        public static let surface: CGFloat = 12
-        public static let panel = surface
-        public static let window: CGFloat = 16
-    }
-
     public enum Layout {
         /// Navigation and inspector columns are calibrated for console stability.
         public static let sidebarWidth: CGFloat = 240
@@ -66,7 +50,6 @@ public enum SpeechRailDesignTokens {
         public static let creatorEditorMinimumWidth: CGFloat = 520
         public static let creatorEditorMinimumHeight: CGFloat = 470
         public static let creatorEditorCloneMinimumHeight: CGFloat = 320
-        public static let creatorSlotBadgeSize: CGFloat = 32
         public static let creatorWaveformWidth: CGFloat = 72
         public static let creatorWaveformHeight: CGFloat = 20
         public static let creatorListRowMinimumHeight: CGFloat = 72
@@ -243,6 +226,8 @@ public enum SpeechRailDesignTokens {
         public static let sectionTitle: Font = .system(.headline, weight: .semibold)
         public static let section = sectionTitle
         public static let body: Font = .body
+        /// Figma `Body / Medium`：候选卡槽位名与表格主列等需要中等字重的正文。
+        public static let bodyMedium: Font = .body.weight(.medium)
         public static let secondary: Font = .subheadline
         public static let label: Font = .system(.callout, weight: .medium)
         public static let caption: Font = .caption
@@ -310,188 +295,29 @@ public enum SpeechRailDesignTokens {
         public static let waveformInactive = Color.inkSecondary.opacity(0.35)
     }
 
-    // MARK: - 1. 冶金机架底座 (Chassis & Metallurgy)
-    public enum Chassis {
-        /// 黑曜岩枪膛底座（Logo 背景最深处哑光吸光质感）
-        public static let enclosure = Color.canvas
-        public static let obsidian = enclosure
-        /// 机加工底板表面（机架面板主表面）
-        public static let deck = Color.field
-        public static let machined = deck
-        /// 沉降凹槽底色（文本框内陷槽位）
-        public static let recessedWell = Color.recessedField
-        public static let recessed = recessedWell
-        /// 机架切削边界描边
-        public static let milledBevel = Color.separator
-        public static let border = milledBevel
-        /// 强化铣削边框（外边缘）
-        public static let grooveStroke = Color.separator
-        public static let borderStrong = grooveStroke
-    }
-
-    // MARK: - 2. 拉丝冷钢与航天冷钛 (SteelAlloy & Specular)
-    public enum SteelAlloy {
-        /// Logo 顶光 1px 镜面切削反光（最高光）
-        public static let specularEdge = dynamicColor(
-            named: "SteelSpecular",
-            lightHex: 0xFFFFFF,
-            darkHex: 0xF0F0EF,
-            hcLightHex: 0xFFFFFF,
-            hcDarkHex: 0xFFFFFF
-        )
-        public static let specular = specularEdge
-        /// 拉丝冷钛中段银光（S 徽记主反光）
-        public static let brushedFace = dynamicColor(
-            named: "SteelGleam",
-            lightHex: 0xD4D8DC,
-            darkHex: 0xC8CDD2,
-            hcLightHex: 0xB0B6BE,
-            hcDarkHex: 0xE2E5E8
-        )
-        public static let gleam = brushedFace
-        /// 铣削结构厚板
-        public static let billetPlate = Color.titanium
-        public static let titanium = billetPlate
-        /// 滚花机械边缘 / 各向异性暗影切槽
-        public static let knurledRim = dynamicColor(
-            named: "SteelGroove",
-            lightHex: 0x9CA3AF,
-            darkHex: 0x202226,
-            hcLightHex: 0x6B7280,
-            hcDarkHex: 0x141518
-        )
-        public static let groove = knurledRim
-    }
-    public typealias Steel = SteelAlloy
-
-    // MARK: - 3. 重轨、道床与声学导轨系统 (SteelRail & Sleepers)
-    public enum SteelRail {
-        /// 道床冷青钢光（直接取自 Logo 轨道深槽，核心声轨基调）
-        public static let trackCyan = dynamicColor(
-            named: "PetrolCyan",
-            lightHex: 0x2A4E57,
-            darkHex: 0x2A4E57,
-            hcLightHex: 0x1B363D,
-            hcDarkHex: 0x3D6F7B
-        )
-        public static let petrolCyan = trackCyan
-        /// 钢轨表面冷光（光线掠过钢轨顶部的电容青绿）
-        public static let railheadGleam = Color.rail
-        public static let railGleam = railheadGleam
-        /// 轨道脉冲信号色
-        public static let signalPulse = dynamicColor(
-            named: "SignalPulse",
-            lightHex: 0x1E5C6B,
-            darkHex: 0x388B9E,
-            hcLightHex: 0x133E48,
-            hcDarkHex: 0x56B3C8
-        )
-        /// 轨枕标尺颜色（物理节奏分割刻度）
-        public static let sleeperTie = dynamicColor(
-            named: "SleeperTie",
-            lightHex: 0xB8BEC7,
-            darkHex: 0x33373B,
-            hcLightHex: 0x9098A3,
-            hcDarkHex: 0x484E53
-        )
-        /// 声轨微光光晕
-        public static let trackGlow = Color.rail.opacity(0.18)
-        /// 钢轨导航滑块发光珠
-        public static let gliderBead = railheadGleam
-    }
-    public typealias TrackRail = SteelRail
-
-    // MARK: - 4. 实体母带台声学系统 (AcousticMaster & Metering)
-    public enum AcousticMaster {
-        /// 真空管暖琥珀色（声色创作暖光、重要声学交互）
-        public static let tubeWarmth = Color.voice
-        public static let tubeAmber = tubeWarmth
-        /// 示波器荧光绿（实体 VU 表针、播放状态）
-        public static let vuPhosphor = Color.ready
-        /// 峰值过载红色
-        public static let peakOverload = Color.critical
-        /// 声波峰值描边
-        public static let waveCrest = Color.rail
-        /// 微孔 LED 外圈金属包边
-        public static let ledBezel = SteelAlloy.knurledRim
-    }
-    public typealias Console = AcousticMaster
-
-    // MARK: - 5. 母带控制台推子规格 (ConsoleFader & Detents)
-    public enum ConsoleFader {
-        public static let trackWidth: CGFloat = 6
-        public static let trackHeight: CGFloat = 160
-        public static let thumbWidth: CGFloat = 24
-        public static let thumbHeight: CGFloat = 36
-        public static let detentNotchCount: Int = 4
-        public static let calibratedDetent: Double = 1.0
-    }
-
-    public enum Palette {
-        public static let canvas = Color.canvas
-        public static let content = Color.field
-        public static let primaryText: SwiftUI.Color = .primary
-        public static let secondaryText: SwiftUI.Color = .secondary
-        public static let separator: SwiftUI.Color = Chassis.border
-
-        public static let railSignal = Color.rail
-        public static let voiceAccent = Color.voice
-        public static let titanium = Color.titanium
-        public static let healthy = Color.ready
-        public static let attention = Color.attention
-        public static let critical = Color.critical
-        public static let information = Color.info
-
-        // Source-compatibility aliases for compiled legacy surfaces.
-        public static let groupedCanvas = content
-        public static let tint = railSignal
-        public static let success = healthy
-        public static let warning = attention
-    }
-
+    /// Interactive surfaces. Every member resolves to a system semantic color,
+    /// so light, dark, Increase Contrast and reduced transparency come from the
+    /// system (REDESIGN-SPEC §5.4). The logo-derived chrome tokens (specular
+    /// chamfer, ambient shadow, rail glow) were removed once the pages stopped
+    /// drawing their own containers (§5.2).
     public enum Surface {
-        public static let hairlineStroke = Chassis.border
-        public static let contentStroke = Chassis.borderStrong
         public static let selectedFill = Color.rail.opacity(0.16)
-        public static let selectedFillStrong = Color.rail.opacity(0.22)
-        public static let voiceSelectedFill = Console.tubeAmber.opacity(0.16)
         public static let voiceBadgeFill = Color.voice.opacity(0.20)
-        public static let focusRing = Color.focusRing
-        public static let controlFill = Color.field
-        public static let navigationFill = SwiftUI.Color.clear
-        public static let panelFill = Color.field
         public static let inspectorFill = Color.field
-        public static let fieldHighlight = SwiftUI.Color.clear
-        public static let fieldHighlightDark = SwiftUI.Color.clear
-        public static let statusChipFillOpacity: Double = 0.16
-        public static let surfaceRaised = panelFill
         public static let border = Color.separator
-        public static let borderStrong = Color.separator
-        public static let divider = Color.separator
-        public static let disabledFill = Color.quaternaryFill.opacity(0.20)
         /// Only window-level floating layers cast a shadow (§5.2).
         public static let elevatedShadow = SwiftUI.Color.black.opacity(0.18)
         public static let interactionHover = Color.quaternaryFill.opacity(Interaction.hoverFillOpacity * 6)
         public static let interactionPressed = Color.quaternaryFill.opacity(Interaction.pressedFillOpacity * 6)
-
-        // MARK: - Logo 物理微雕与光学反光 Token (Crafted from App Icon)
-
-        /// Logo 顶光高光微倒角（Specular Chamfer Highlight，还原 Logo 2px 微光切削边缘）
-        public static let specularChamfer = SwiftUI.Color.clear
-        /// Static surfaces no longer cast shadows; the window handles elevation.
-        public static let ambientShadow = SwiftUI.Color.clear
-        /// 精密钛金属卡片边框描边
-        public static let cardStroke = Chassis.borderStrong
-        /// 声轨冷青微发光
-        public static let railGlow = SwiftUI.Color.clear
     }
 
     public enum Navigation {
         /// Custom rows and the page editors share one focus ring: the system
         /// focus indicator, so focus never changes color between pages (§9).
         public static let focusRing = Color.focusRing
-        /// Sonic Rail cyan foreground for the selected icon/accent in custom navigation
-        public static let selectedForeground = TrackRail.railGleam
+        /// Selection keeps the single product accent as its source of truth
+        /// (§5.4); the bespoke rail-cyan highlights were retired.
+        public static let selectedForeground = Color.rail
         public static let unselectedForeground = Color.ink
         public static let secondaryForeground = Color.inkSecondary
     }
@@ -541,303 +367,6 @@ public enum SpeechRailSurfaceLevel: Sendable {
     case inspector
     case panel
     case elevated
-
-    fileprivate var cornerRadius: CGFloat {
-        switch self {
-        case .window:
-            SpeechRailDesignTokens.Corner.window
-        case .navigation, .inspector:
-            SpeechRailDesignTokens.Corner.surface
-        case .control, .panel:
-            SpeechRailDesignTokens.Corner.row
-        case .elevated:
-            SpeechRailDesignTokens.Corner.control
-        }
-    }
-}
-
-@available(*, deprecated, message: "Retired in the v2 redesign: speechRailSurface(_:) renders a system panel surface now.")
-public struct SpeechRailSurfaceModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-    private let level: SpeechRailSurfaceLevel
-
-    public init(level: SpeechRailSurfaceLevel) {
-        self.level = level
-    }
-
-    @ViewBuilder
-    public func body(content: Content) -> some View {
-        switch level {
-        case .window:
-            content
-                .background(SpeechRailDesignTokens.Color.canvas)
-        case .navigation:
-            content
-                .background(SpeechRailDesignTokens.Surface.navigationFill)
-        case .control:
-            content
-                .background(
-                    SpeechRailDesignTokens.Surface.controlFill,
-                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                        .stroke(
-                            SpeechRailDesignTokens.Surface.border,
-                            lineWidth: SpeechRailDesignTokens.Stroke.standard
-                        )
-                }
-                .overlay(alignment: .top) {
-                    if colorScheme == .dark {
-                        RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: SpeechRailDesignTokens.Surface.specularChamfer, location: 0.0),
-                                        .init(color: SpeechRailDesignTokens.Surface.specularChamfer.opacity(0.15), location: 0.15),
-                                        .init(color: .clear, location: 0.35)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                            )
-                    }
-                }
-                .shadow(
-                    color: SpeechRailDesignTokens.Surface.ambientShadow,
-                    radius: 2,
-                    x: 0,
-                    y: 1
-                )
-        case .inspector:
-            content
-                .background(
-                    SpeechRailDesignTokens.Surface.inspectorFill,
-                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                        .stroke(
-                            SpeechRailDesignTokens.Surface.border,
-                            lineWidth: SpeechRailDesignTokens.Stroke.standard
-                        )
-                }
-        case .panel:
-            content
-                .background(
-                    SpeechRailDesignTokens.Surface.panelFill,
-                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                        .stroke(
-                            SpeechRailDesignTokens.Surface.border,
-                            lineWidth: SpeechRailDesignTokens.Stroke.standard
-                        )
-                }
-                .overlay(alignment: .top) {
-                    if colorScheme == .dark {
-                        RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: SpeechRailDesignTokens.Surface.specularChamfer, location: 0.0),
-                                        .init(color: SpeechRailDesignTokens.Surface.specularChamfer.opacity(0.15), location: 0.15),
-                                        .init(color: .clear, location: 0.35)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                ),
-                                lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                            )
-                    }
-                }
-                .shadow(
-                    color: SpeechRailDesignTokens.Surface.ambientShadow,
-                    radius: 3,
-                    x: 0,
-                    y: 1.5
-                )
-        case .elevated:
-            content
-                .background(
-                    SpeechRailDesignTokens.Surface.surfaceRaised,
-                    in: .rect(cornerRadius: level.cornerRadius, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: level.cornerRadius, style: .continuous)
-                        .stroke(
-                            SpeechRailDesignTokens.Surface.borderStrong,
-                            lineWidth: SpeechRailDesignTokens.Stroke.standard
-                        )
-                }
-                .shadow(
-                    color: SpeechRailDesignTokens.Surface.elevatedShadow,
-                    radius: SpeechRailDesignTokens.Shadow.elevatedRadius,
-                    y: SpeechRailDesignTokens.Shadow.elevatedYOffset
-                )
-        }
-    }
-}
-
-@available(*, deprecated, message: "Retired in the v2 redesign: speechRailRecessedSlot() renders a system input slot now.")
-public struct SpeechRailFieldModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-
-    public init() {}
-
-    public func body(content: Content) -> some View {
-        content
-            .background {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .fill(SpeechRailDesignTokens.Chassis.recessed)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .strokeBorder(
-                        SpeechRailDesignTokens.Chassis.border,
-                        lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                    )
-            }
-            .overlay(alignment: .top) {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? Color.black.opacity(0.50)
-                                        : Color.black.opacity(0.10),
-                                    location: 0.0
-                                ),
-                                .init(color: .clear, location: 0.22)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 1.5
-                    )
-            }
-            .overlay(alignment: .bottom) {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                                .init(color: .clear, location: 0.85),
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? SpeechRailDesignTokens.Steel.specular.opacity(0.18)
-                                        : SwiftUI.Color.white.opacity(0.65),
-                                    location: 1.0
-                                )
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.75
-                    )
-            }
-    }
-}
-
-@available(*, deprecated, message: "Retired in the v2 redesign: speechRailContentSurface() renders a system panel surface now.")
-public struct SpeechRailContentSurfaceModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-
-    public init() {}
-
-    public func body(content: Content) -> some View {
-        content
-            .background {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            stops: [
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? Color(red: 0x22 / 255.0, green: 0x24 / 255.0, blue: 0x28 / 255.0)
-                                        : Color(red: 0xF7 / 255.0, green: 0xF8 / 255.0, blue: 0xFA / 255.0),
-                                    location: 0.0
-                                ),
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? Color(red: 0x1A / 255.0, green: 0x1B / 255.0, blue: 0x1E / 255.0)
-                                        : Color(red: 0xEC / 255.0, green: 0xEF / 255.0, blue: 0xF2 / 255.0),
-                                    location: 1.0
-                                )
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .strokeBorder(
-                        SpeechRailDesignTokens.Chassis.borderStrong,
-                        lineWidth: SpeechRailDesignTokens.Stroke.standard
-                    )
-            }
-            .overlay(alignment: .top) {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? SpeechRailDesignTokens.Steel.specular.opacity(0.35)
-                                        : SwiftUI.Color.white.opacity(0.95),
-                                    location: 0.0
-                                ),
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? SpeechRailDesignTokens.Steel.specular.opacity(0.08)
-                                        : SwiftUI.Color.white.opacity(0.20),
-                                    location: 0.12
-                                ),
-                                .init(color: .clear, location: 0.30)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                    )
-            }
-            .overlay(alignment: .bottom) {
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.field, style: .continuous)
-                    .strokeBorder(
-                        LinearGradient(
-                            stops: [
-                                .init(color: .clear, location: 0.70),
-                                .init(
-                                    color: colorScheme == .dark
-                                        ? Color.black.opacity(0.40)
-                                        : Color(red: 0x90 / 255.0, green: 0x98 / 255.0, blue: 0xA4 / 255.0).opacity(0.25),
-                                    location: 1.0
-                                )
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: SpeechRailDesignTokens.Stroke.hairline
-                    )
-            }
-            .shadow(
-                color: SpeechRailDesignTokens.Surface.ambientShadow,
-                radius: 6,
-                x: 0,
-                y: 3
-            )
-    }
-}
-
-public struct SpeechRailSleeperDivider: View {
-    public init() {}
-
-    public var body: some View {
-        Divider()
-    }
 }
 
 public extension View {
@@ -931,45 +460,6 @@ public struct SpeechRailChipModifier: ViewModifier {
                     ? SwiftUI.Color.accentColor.opacity(0.18)
                     : SwiftUI.Color(nsColor: .quaternaryLabelColor).opacity(0.6),
                 in: Capsule(style: .continuous)
-            )
-    }
-}
-
-@available(*, deprecated, message: "Retired in the v2 redesign: speechRailKnurledCapsule(selected:) renders a system chip now.")
-public struct SpeechRailKnurledCapsuleModifier: ViewModifier {
-    @Environment(\.colorScheme) private var colorScheme
-    public let selected: Bool
-
-    public init(selected: Bool = false) {
-        self.selected = selected
-    }
-
-    public func body(content: Content) -> some View {
-        content
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
-            .background {
-                Capsule(style: .continuous)
-                    .fill(
-                        selected
-                            ? SpeechRailDesignTokens.SteelRail.petrolCyan.opacity(0.35)
-                            : SpeechRailDesignTokens.Chassis.recessedWell
-                    )
-            }
-            .overlay {
-                Capsule(style: .continuous)
-                    .strokeBorder(
-                        selected
-                            ? SpeechRailDesignTokens.SteelRail.railheadGleam
-                            : SpeechRailDesignTokens.Chassis.milledBevel,
-                        lineWidth: selected ? 1.0 : 0.5
-                    )
-            }
-            .shadow(
-                color: selected
-                    ? SpeechRailDesignTokens.SteelRail.trackGlow
-                    : Color.clear,
-                radius: 3
             )
     }
 }

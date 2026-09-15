@@ -33,6 +33,11 @@ ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否�
 
 ### 1.1 Logo 设计基因深度解构 (Design DNA)
 
+> 本节记录 Logo DNA 的**原始解构**，不是当前实现契约。v2 视觉语言（见 §3.1 与 REDESIGN-SPEC §5）
+> 已把下面第 1 项的物理命名（`Chassis`/`SteelAlloy`/`SteelRail`/`AcousticMaster`/`ConsoleFader`）与
+> 第 3、4 项的自绘倒角、沉降凹槽、轨枕分阶、钢轨滑标全部移除：这些 token 已从代码中删除，界面改为
+> 系统语义色与系统控件。token 的事实来源以 §3.1 为准，本节保留的是品牌基因与配色研究。
+
 应用徽标（`docs/assets/logo.png`）是整个产品视觉语言与工业隐喻的根基源头。设计提炼为五大核心维度：
 
 1. **命名 (Naming & Taxonomy)**：
@@ -112,7 +117,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 | 语义状态 | `Color` | `ready/attention/critical/info` → 系统 `.green/.orange/.red/.blue`；`voice`（音色/声学）为唯一产品语义色 |
 | 控件描边与焦点 | `Color` | `focusRing` 与自定义行的 `Navigation.focusRing` 都解析为 `keyboardFocusIndicatorColor`，全 App 焦点环同色；`disabled`/`quaternaryFill` 表示禁用层级 |
 | 间距节奏 | `Spacing` | 使用 `tight/micro/xs/sm/md/lg/xl/hero`，基准节奏为 2/4/8/12/16/24/32/48 pt |
-| 圆角几何 | `ConcentricRectangle` | 控件/面板/槽位/列表行一律使用 SwiftUI `ConcentricRectangle`，由系统按容器计算同心圆角；`Corner.row`、`Corner.module`、`Corner.continuousRadiusRatio` 已删除，`Corner.control/field` 仅由尚未迁走的 legacy modifier 自身引用 |
+| 圆角几何 | `ConcentricRectangle` | 控件/面板/槽位/列表行一律使用 SwiftUI `ConcentricRectangle`，由系统按容器计算同心圆角；`Corner` 枚举（手挑 6/8/14/18/12/16）已整体删除，代码中不再存在自挑圆角 |
 | 布局规整 | `Layout` | sidebar 220–280pt（ideal 240）、inspector 300–440pt（ideal 360）、模型档位列 220–320pt（ideal 280）、音色名列 160–260pt（ideal 220）、页面内容内边距 `contentPadding = 20`、窗口最小 1,120×720pt |
 | 表面修饰 | `ViewModifiers` | `.speechRailSurface(_:)` / `.speechRailContentSurface()`（系统 `controlBackgroundColor` + 同心圆角，无描边无阴影）、`.speechRailRecessedSlot()` / `.speechRailField()`（`textBackgroundColor`）、`.speechRailKnurledCapsule()`（系统胶囊，仅选中态用强调色） |
 | 字体层级 | `Typography` | 只用系统文本样式（`.body/.caption/.caption2` 等），不再使用 `design: .rounded` 或手挑字号；数字一律 `.monospacedDigit()` |
@@ -139,8 +144,8 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 - **全局状态唯一性**：侧边栏底部 `[✓ 服务已就绪 · Quality]` 是全 App 唯一的常驻全局服务状态指示器，正文仅在服务专属总览、任务受阻或长任务跃迁时按需显示置顶 `StatusConclusion`。
 
 ### 4.2 页面级重点优化规则
-1. **配音台 (Dubbing Desk)**：文稿编辑器采用 `speechRailField()` 微陷设计，字号 16pt，行高 1.4 倍；合成后滑出内嵌微波形的试听条。
-2. **音色创作 (Voice Design Studio)**：Prompt 框配合陶土色 Accent，声学胶囊机架（`Corner.pill`）支持快捷点击注入声学特征，横向 A/B 候选试听机架支持快速交叉切换。
+1. **配音台 (Dubbing Desk)**：文稿编辑器占满剩余高度（最小 320pt），系统文本背景 + 系统焦点环，正文 `.body`；页脚在分隔线之内给出 `n/上限 字`（超限转红并带图标）与「清空」；控制条在窄窗口自动换行；生成结果条留在本页，提供播放 / 在 Finder 中显示 / 导出… / 查看我的作品。
+2. **音色创作 (Voice Design Studio)**：描述文本框（最小 160pt）+ 计数行 + 琥珀色系统胶囊 chips（点击追加声学特征）+ 页脚键帽；「更多设置」把参考文案与保存名称折叠起来；候选区为 2×2 网格（候选 1–4），每张卡头部按 Figma `Candidate Tile` 固定为 槽位名（Body / Medium）/ 状态胶囊 / 右对齐 seed，动作行为「试听或停止 + 保存为音色」，失败卡保持同一骨架并把波形区换成原因说明 + 重试；档位不满足时用 `ContentUnavailableView` 给出「去模型页切档」。
 3. **音色库与我的作品 (Catalog & Archive)**：两页都是「系统 `List` + 右侧 `.inspector`」详情面。音色库顶部为 `.searchable`（名称与描述）与来源分段控件（全部/系统/我的），行内只有名称、来源徽标、一行描述、可用性说明和行内试听；试听文案、seed、变体、模式、使用次数、关联作品、描述全文与「重命名/编辑描述/删除」都在 Inspector。我的作品顶部为 `.searchable`（标题）与时间排序，行内是标题、音色、创建时间、等宽时长和行内播放，次动作（导出 `⌘E`、在 Finder 中显示、重命名、删除）走行内右键菜单与工具栏；删除作品会连同本机音频文件一起移除，因此必须有破坏性确认。
 4. **服务中枢 (Service Core)**：四要素状态结论大面板（图标 + 结论标签 + 影响范围 + 单一主动作），并列展示 ASR 词级时间戳、VoiceDesign 并发与 FluidAudio 匿名分人能力矩阵。
 5. **模型档位 (Model Profiles)**：三档横向比对机架，模型准备/下载采用确定性 `OperationBar`（MB/s 速度、预计时间、SHA256 校验进度、安全回退确认）。
@@ -188,10 +193,14 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 > 音色创作门禁动作措辞对齐 §7.2「去模型页切档」。
 > 已删除的 token：`Layout.contentMaximumWidth`、`List.selectionCornerRadius`、`Button.cornerRadius`、
 > `Interaction.pressedScale`、`Motion.springTransition`、`Navigation.selectedFill`、
-> `Corner.continuousRadiusRatio`。**仍保留**：`Chassis`/`SteelAlloy`/`SteelRail`/`AcousticMaster`/
-> `ConsoleFader`/`Palette` 以及 `SpeechRailSurfaceModifier`/`SpeechRailFieldModifier`/
-> `SpeechRailContentSurfaceModifier`/`SpeechRailKnurledCapsuleModifier`/`SpeechRailSleeperDivider`
-> 等 legacy 类型（页面零引用，但删除它们需连带改写其内部引用，留待下次触及该文件时处理）。
+> `Corner.continuousRadiusRatio`、`Layout.creatorSlotBadgeSize`。
+>
+> 2026-09-15 20:5x 第二轮：整块 legacy 机架代码已删除——`Chassis`、`SteelAlloy`、`SteelRail`
+> （含 `typealias TrackRail`）、`AcousticMaster`（含 `typealias Console`）、`ConsoleFader`、`Palette`
+> 六个枚举，`SpeechRailSurfaceModifier` / `SpeechRailFieldModifier` / `SpeechRailContentSurfaceModifier` /
+> `SpeechRailKnurledCapsuleModifier` / `SpeechRailSleeperDivider` 五个类型，`Corner` 枚举与
+> `SpeechRailSurfaceLevel.cornerRadius`；`Surface` 只保留仍被引用的系统语义成员，
+> `Navigation.selectedForeground` 收敛为 `Color.rail`（唯一强调色）。tokens 文件 975 → 465 行。
 > 上述改动只经编译验证，**视觉观感仍待人工走查**。
 
 ## 7. 变更流程
