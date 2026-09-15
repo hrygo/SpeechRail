@@ -4,8 +4,12 @@ import SpeechRailControlKit
 
 @main
 struct SpeechRailApp: App {
+    /// ⌘1–⌘8 的显示顺序与 `AppRoute.allCases` 一致（创作四页 + 服务四页）。
+    private static let routeShortcuts: [KeyEquivalent] = ["1", "2", "3", "4", "5", "6", "7", "8"]
+
     @State private var model: AppModel
     @State private var navigation: AppNavigationState
+    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
 
     init() {
         let isUITest: Bool
@@ -97,6 +101,21 @@ struct SpeechRailApp: App {
                 .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+        .commands {
+            CommandGroup(after: .sidebar) {
+                Toggle("显示开发者详情", isOn: $showDeveloperDetails)
+                    .keyboardShortcut("i", modifiers: [.command, .option])
+            }
+            CommandGroup(after: .toolbar) {
+                Divider()
+                ForEach(Array(AppRoute.allCases.enumerated()), id: \.element) { index, route in
+                    Button(route.title) {
+                        navigation.request(route)
+                    }
+                    .keyboardShortcut(Self.routeShortcuts[index], modifiers: .command)
+                }
+            }
+        }
         MenuBarExtra("SpeechRail", systemImage: AppRoute.dubbing.systemImage) {
             ControlMenuView()
                 .environment(model)

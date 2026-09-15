@@ -35,13 +35,9 @@ public struct ControlCenterView: View {
                         }
                     }
                     .listStyle(.sidebar)
-                    .scrollContentBackground(.hidden)
-                    .background(SpeechRailDesignTokens.Chassis.obsidian)
-                    .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
                     .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
 
                     Divider()
-                        .overlay(SpeechRailDesignTokens.Chassis.milledBevel)
                     sidebarServiceStatus
                 }
                 .navigationSplitViewColumnWidth(
@@ -49,11 +45,9 @@ public struct ControlCenterView: View {
                     ideal: SpeechRailDesignTokens.Layout.sidebarIdealWidth,
                     max: SpeechRailDesignTokens.Layout.sidebarMaximumWidth
                 )
-                .background(SpeechRailDesignTokens.Chassis.obsidian)
             } detail: {
                 detailView(for: selection ?? .overview)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    .background(SpeechRailDesignTokens.Chassis.obsidian)
                     .toolbar {
                         ToolbarItem(placement: .principal) {
                             WorkspaceTitleLockup(
@@ -68,11 +62,6 @@ public struct ControlCenterView: View {
                         .sharedBackgroundVisibility(.hidden)
                         ToolbarSpacer(.flexible)
                     }
-                    .toolbarBackground(
-                        SpeechRailDesignTokens.Color.canvas,
-                        for: .windowToolbar
-                    )
-                    .toolbarBackgroundVisibility(.visible, for: .windowToolbar)
             }
             .navigationSplitViewStyle(.balanced)
             .frame(
@@ -128,62 +117,26 @@ public struct ControlCenterView: View {
 
     @ViewBuilder
     private func sidebarSection(title: String, routes: [AppRoute]) -> some View {
-        Section {
+        Section(title) {
             ForEach(routes, id: \.self) { route in
                 navigationRow(for: route)
             }
-        } header: {
-            Text(title)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .fontWeight(.medium)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
         }
     }
 
     @ViewBuilder
     private func navigationRow(for route: AppRoute) -> some View {
-        let isSelected = selection == route
         NavigationLink(value: route) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                RouteIconView(route: route, selected: isSelected)
-                    .frame(width: SpeechRailDesignTokens.Icon.navigationFrame)
-                    .foregroundStyle(
-                        isSelected
-                            ? SpeechRailDesignTokens.SteelRail.railheadGleam
-                            : SpeechRailDesignTokens.Color.inkSecondary
-                    )
-
-                Text(route.title)
-                    .font(isSelected ? SpeechRailDesignTokens.Typography.sectionTitle : SpeechRailDesignTokens.Typography.label)
-                    .foregroundStyle(
-                        isSelected
-                            ? SpeechRailDesignTokens.Color.ink
-                            : SpeechRailDesignTokens.Navigation.unselectedForeground
-                    )
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-
-                if isSelected {
-                    // Physical Rail Indicator Bead (嵌入钢轨内的声轨冷青指示滑标)
-                    HStack(spacing: 0) {
-                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.pill, style: .continuous)
-                            .fill(SpeechRailDesignTokens.SteelRail.railheadGleam)
-                            .frame(width: 3, height: 16)
-                            .shadow(color: SpeechRailDesignTokens.SteelRail.trackGlow, radius: 3)
-                    }
-                    .accessibilityHidden(true)
-                }
-            }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-            .frame(
-                maxWidth: .infinity,
-                minHeight: SpeechRailDesignTokens.List.rowHeight,
-                alignment: .leading
-            )
-            .contentShape(Rectangle())
+            Label(route.title, systemImage: route.systemImage)
+                .symbolRenderingMode(.monochrome)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(
+                    maxWidth: .infinity,
+                    minHeight: SpeechRailDesignTokens.List.rowHeight,
+                    alignment: .leading
+                )
+                .contentShape(Rectangle())
         }
         .listRowInsets(
             EdgeInsets(
@@ -198,48 +151,39 @@ public struct ControlCenterView: View {
         .accessibilityIdentifier(route.id)
         .help(route.purpose)
         .accessibilityValue(
-            isSelected ? "已选中。\(route.purpose)" : route.purpose
+            selection == route ? "已选中。\(route.purpose)" : route.purpose
         )
         .speechRailPointerCursor()
     }
 
     private var sidebarServiceStatus: some View {
         Button {
-            withAnimation(SpeechRailDesignTokens.Motion.springTransition) {
-                selection = .overview
-            }
+            selection = .overview
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                // Micro-LED Jewel with Phosphor Diffusion (机架镶嵌式状态透光珠)
-                ZStack {
-                    Circle()
-                        .fill(sidebarStatusTone.color.opacity(0.20))
-                        .frame(width: 14, height: 14)
-                    Circle()
-                        .fill(sidebarStatusTone.color)
-                        .frame(width: 6, height: 6)
-                        .shadow(color: sidebarStatusTone.color.opacity(0.8), radius: 2)
-                }
-                .accessibilityHidden(true)
+                Circle()
+                    .fill(sidebarStatusTone.color)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     Text("服务状态")
-                        .font(SpeechRailDesignTokens.Typography.label)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
                     Text(sidebarStatusText)
-                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .font(.caption)
                         .foregroundStyle(sidebarStatusTone.color)
                         .lineLimit(1)
                 }
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 Image(systemName: "chevron.right")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                     .accessibilityHidden(true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
-                .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
+            .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         }
         .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
         .help("打开服务状态")

@@ -341,13 +341,13 @@ public enum StatusTone: Sendable {
     var color: Color {
         switch self {
         case .neutral:
-            SpeechRailDesignTokens.Color.inkSecondary
+            Color.secondary
         case .healthy:
-            SpeechRailDesignTokens.Color.ready
+            Color.green
         case .attention:
-            SpeechRailDesignTokens.Color.attention
+            Color.orange
         case .critical:
-            SpeechRailDesignTokens.Color.critical
+            Color.red
         }
     }
 

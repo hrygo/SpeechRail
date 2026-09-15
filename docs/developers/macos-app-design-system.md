@@ -2,11 +2,16 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.7.2"
+version: "0.7.3"
 date: 2026-09-15
 ---
 
 # SpeechRail macOS App 设计系统与 Token
+
+> **迁移进行中（2026-09-15）**：[`docs/design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md`](../design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md)
+> 已采纳为 App UI/UX 的目标规范。其中 §5（材质、圆角、颜色、字体）与 §7（逐页规格）与本文冲突时以那份为准。
+> 本文 §3.1 列出的 `Chassis` / `SteelAlloy` / `AcousticMaster` / 手挑圆角描述的是**迁移前现状**，将随对应页面重构逐节替换，
+> 不保留两份长期并行；外壳（阶段 1）与路由快捷键（阶段 3）已落地，token 层尚未收敛。
 
 ## 1. 研究基线与 Logo 设计基因
 
