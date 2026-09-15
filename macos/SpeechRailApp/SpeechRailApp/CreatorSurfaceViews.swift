@@ -967,8 +967,8 @@ public struct VoiceDesignView: View {
                 emptyCandidates
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
-        .speechRailContentSurface()
+        // Figma 把「候选试听」的区块标题放在页面上，卡片只属于四个候选本身；
+        // 外面再套一层卡会变成卡里装卡，网格也就不再读起来是网格。
     }
 
     /// §8 部分成功：`n/4 可试听` has to be readable at a glance instead of
