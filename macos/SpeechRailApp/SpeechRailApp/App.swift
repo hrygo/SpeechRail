@@ -98,7 +98,6 @@ struct SpeechRailApp: App {
             ControlCenterView()
                 .environment(model)
                 .environment(navigation)
-                .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
@@ -120,11 +119,9 @@ struct SpeechRailApp: App {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)
-                .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
         Settings {
             SettingsView()
-                .tint(SpeechRailDesignTokens.SteelRail.railheadGleam)
         }
     }
 }

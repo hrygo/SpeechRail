@@ -48,11 +48,15 @@ public enum SpeechRailDesignTokens {
         public static let inspectorIdealWidth: CGFloat = inspectorWidth
         public static let inspectorMaximumWidth: CGFloat = 440
         public static let contentMaximumWidth: CGFloat = 1_240
+        /// Page content margin. 20pt keeps the workspace readable at 1120–1280pt
+        /// window widths instead of squeezing it with the old 32pt (§5.6).
+        public static let contentPadding: CGFloat = 20
         public static let windowMinimumWidth: CGFloat = 1_120
         public static let windowMinimumHeight: CGFloat = 720
-        public static let creatorComposerMinimumHeight: CGFloat = 180
+        /// The script gets the most space on the page (§5.6 / §7.1).
+        public static let creatorComposerMinimumHeight: CGFloat = 320
         public static let creatorReferenceMinimumHeight: CGFloat = 72
-        public static let creatorVoiceInstructionMinimumHeight: CGFloat = 120
+        public static let creatorVoiceInstructionMinimumHeight: CGFloat = 160
         public static let creatorVoicePickerWidth: CGFloat = 180
         public static let creatorVoiceNameWidth: CGFloat = 220
         public static let creatorVoiceNameMinimumWidth: CGFloat = 160
@@ -146,6 +150,9 @@ public enum SpeechRailDesignTokens {
         public static let bodyMaximumLines: Int = 4
         public static let actionColumnMinimumWidth: CGFloat = 120
         public static let actionGridSpacing: CGFloat = Spacing.sm
+        /// Inspectors keep one label column so values line up and read as data
+        /// (REDESIGN-SPEC §7.3).
+        public static let labelColumnWidth: CGFloat = 92
     }
 
     public enum Control {
@@ -235,24 +242,24 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Typography {
-        public static let display: Font = .system(.title, design: .default, weight: .bold)
-        public static let windowTitle: Font = .system(.title2, design: .default, weight: .semibold)
-        public static let sectionTitle: Font = .system(.headline, design: .default, weight: .semibold)
+        public static let display: Font = .system(.title2, weight: .semibold)
+        public static let windowTitle: Font = .system(.title2, weight: .semibold)
+        public static let sectionTitle: Font = .system(.headline, weight: .semibold)
         public static let section = sectionTitle
         public static let body: Font = .body
         public static let secondary: Font = .subheadline
-        public static let label: Font = .system(.callout, design: .default, weight: .medium)
+        public static let label: Font = .system(.callout, weight: .medium)
         public static let caption: Font = .caption
-        public static let technical: Font = .system(.caption2, design: .monospaced)
-        public static let metricValue: Font = .system(.title3, design: .rounded, weight: .semibold).monospacedDigit()
+        public static let technical: Font = .caption2.monospacedDigit()
+        public static let metricValue: Font = .system(.title3, weight: .semibold).monospacedDigit()
         public static let metric = metricValue
-        public static let statusTitle: Font = .system(.title3, design: .default, weight: .semibold)
-        public static let workspaceTitle: Font = .system(.headline, design: .default, weight: .semibold)
-        public static let toolbarTitle: Font = .system(.headline, design: .default, weight: .semibold)
-        public static let diagnosticsSummary: Font = .system(.title3, design: .default, weight: .semibold)
-        public static let diagnosticsDetail: Font = .system(.callout, design: .default, weight: .medium)
+        public static let statusTitle: Font = .system(.title3, weight: .semibold)
+        public static let workspaceTitle: Font = .system(.headline, weight: .semibold)
+        public static let toolbarTitle: Font = .system(.headline, weight: .semibold)
+        public static let diagnosticsSummary: Font = .system(.title3, weight: .semibold)
+        public static let diagnosticsDetail: Font = .system(.callout, weight: .medium)
         public static let statusIcon: Font = .system(size: Control.statusIconSize, weight: .semibold)
-        public static let statusGlyph: Font = .system(.title2, design: .default, weight: .semibold)
+        public static let statusGlyph: Font = .system(.title2, weight: .semibold)
         public static let emptyStateGlyph: Font = .system(size: 30, weight: .medium)
 
         // Source-compatibility aliases for compiled legacy surfaces.
@@ -261,56 +268,29 @@ public enum SpeechRailDesignTokens {
     }
 
     public enum Color {
-        public static let ink = dynamicColor(
-            named: "Ink",
-            lightHex: 0x111822,
-            darkHex: 0xF0F4F8,
-            hcLightHex: 0x000000,
-            hcDarkHex: 0xFFFFFF
-        )
-        public static let inkSecondary = dynamicColor(
-            named: "InkSecondary",
-            lightHex: 0x586374,
-            darkHex: 0x8C9AA9,
-            hcLightHex: 0x222222,
-            hcDarkHex: 0xE0E0E0
-        )
-        public static let inkTertiary = dynamicColor(
-            named: "InkTertiary",
-            lightHex: 0x77818E,
-            darkHex: 0x73808C,
-            hcLightHex: 0x333333,
-            hcDarkHex: 0xD6D6D6
-        )
-        public static let onRail = dynamicColor(
-            named: "OnRail",
-            lightHex: 0xFFFFFF,
-            darkHex: 0x07151A,
-            hcLightHex: 0xFFFFFF,
-            hcDarkHex: 0x07151A
-        )
-        public static let canvas = dynamicColor(
-            named: "Canvas",
-            lightHex: 0xE5E8EC,
-            darkHex: 0x15171A,
-            hcLightHex: 0xFFFFFF,
-            hcDarkHex: 0x000000
-        )
-        public static let field = dynamicColor(
-            named: "Field",
-            lightHex: 0xEDF0F3,
-            darkHex: 0x1D1E21,
-            hcLightHex: 0xFFFFFF,
-            hcDarkHex: 0x141518
-        )
+        // The system owns the neutral ramp: labels, window floor, panels, slots
+        // and separators all resolve through AppKit semantic colors so light,
+        // dark, Increase Contrast and reduced transparency behave for free
+        // (REDESIGN-SPEC §5.4).
+        public static let ink = SwiftUI.Color(nsColor: .labelColor)
+        public static let inkSecondary = SwiftUI.Color(nsColor: .secondaryLabelColor)
+        public static let inkTertiary = SwiftUI.Color(nsColor: .tertiaryLabelColor)
+        /// Content drawn on top of the accent fill.
+        public static let onRail = SwiftUI.Color(nsColor: .alternateSelectedControlTextColor)
+        /// The window owns its background; this is the system window floor.
+        public static let canvas = SwiftUI.Color(nsColor: .windowBackgroundColor)
+        /// Content panels and control surfaces.
+        public static let field = SwiftUI.Color(nsColor: .controlBackgroundColor)
+        /// Input slots sit one level below panels.
+        public static let recessedField = SwiftUI.Color(nsColor: .textBackgroundColor)
+        public static let separator = SwiftUI.Color(nsColor: .separatorColor)
+        public static let focusRing = SwiftUI.Color(nsColor: .keyboardFocusIndicatorColor)
+        public static let disabled = SwiftUI.Color(nsColor: .disabledControlTextColor)
+        public static let quaternaryFill = SwiftUI.Color(nsColor: .quaternaryLabelColor)
         /// 声轨信号色：提取自 Logo 纵深延伸的双高速导轨（Sonic Rail Cyan 冷青铁轨钢光与道床）
-        public static let rail = dynamicColor(
-            named: "RailSignal",
-            lightHex: 0x2A4E57,
-            darkHex: 0x4FA4BA,
-            hcLightHex: 0x1B363D,
-            hcDarkHex: 0x7FD3E6
-        )
+        /// The app accent is the asset catalog color: one source of truth for
+        /// selection, focus and primary controls (§5.4).
+        public static let rail = SwiftUI.Color.accentColor
         /// 航天冷钛金属色：提取自 Logo 核心 'S' Crest 微雕质感与频谱微光
         public static let titanium = dynamicColor(
             named: "Titanium",
@@ -327,34 +307,10 @@ public enum SpeechRailDesignTokens {
             hcLightHex: 0xB45309,
             hcDarkHex: 0xFBBF24
         )
-        public static let ready = dynamicColor(
-            named: "SignalReady",
-            lightHex: 0x059669,
-            darkHex: 0x10B981,
-            hcLightHex: 0x047857,
-            hcDarkHex: 0x34D399
-        )
-        public static let attention = dynamicColor(
-            named: "SignalAttention",
-            lightHex: 0xD97706,
-            darkHex: 0xF59E0B,
-            hcLightHex: 0xB45309,
-            hcDarkHex: 0xFBBF24
-        )
-        public static let critical = dynamicColor(
-            named: "SignalCritical",
-            lightHex: 0xDC2626,
-            darkHex: 0xEF4444,
-            hcLightHex: 0xB91C1C,
-            hcDarkHex: 0xF87171
-        )
-        public static let info = dynamicColor(
-            named: "SignalInfo",
-            lightHex: 0x2563EB,
-            darkHex: 0x38BDF8,
-            hcLightHex: 0x1D4ED8,
-            hcDarkHex: 0x7DD3FC
-        )
+        public static let ready = SwiftUI.Color(nsColor: .systemGreen)
+        public static let attention = SwiftUI.Color(nsColor: .systemOrange)
+        public static let critical = SwiftUI.Color(nsColor: .systemRed)
+        public static let info = SwiftUI.Color(nsColor: .systemBlue)
         public static let waveformInactive = Color.inkSecondary.opacity(0.35)
     }
 
@@ -367,31 +323,13 @@ public enum SpeechRailDesignTokens {
         public static let deck = Color.field
         public static let machined = deck
         /// 沉降凹槽底色（文本框内陷槽位）
-        public static let recessedWell = dynamicColor(
-            named: "RecessedSlot",
-            lightHex: 0xDFE2E6,
-            darkHex: 0x101113,
-            hcLightHex: 0xD0D4DA,
-            hcDarkHex: 0x0A0B0C
-        )
+        public static let recessedWell = Color.recessedField
         public static let recessed = recessedWell
         /// 机架切削边界描边
-        public static let milledBevel = dynamicColor(
-            named: "ChassisBorder",
-            lightHex: 0xCBD0D8,
-            darkHex: 0x2E3238,
-            hcLightHex: 0x9AA2B0,
-            hcDarkHex: 0x464C54
-        )
+        public static let milledBevel = Color.separator
         public static let border = milledBevel
         /// 强化铣削边框（外边缘）
-        public static let grooveStroke = dynamicColor(
-            named: "ChassisBorderStrong",
-            lightHex: 0xB0B8C4,
-            darkHex: 0x3A3F46,
-            hcLightHex: 0x7E8898,
-            hcDarkHex: 0x58606B
-        )
+        public static let grooveStroke = Color.separator
         public static let borderStrong = grooveStroke
     }
 
@@ -518,37 +456,38 @@ public enum SpeechRailDesignTokens {
     public enum Surface {
         public static let hairlineStroke = Chassis.border
         public static let contentStroke = Chassis.borderStrong
-        public static let selectedFill = TrackRail.railGleam.opacity(0.14)
-        public static let selectedFillStrong = TrackRail.railGleam.opacity(0.20)
-        public static let voiceSelectedFill = Console.tubeAmber.opacity(0.14)
-        public static let voiceBadgeFill = Console.tubeAmber.opacity(0.18)
-        public static let focusRing = TrackRail.railGleam.opacity(0.80)
-        public static let controlFill = Chassis.machined
-        public static let navigationFill = Chassis.obsidian
-        public static let panelFill = Chassis.machined
-        public static let inspectorFill = Chassis.machined
-        public static let fieldHighlight = Steel.specular.opacity(0.35)
-        public static let fieldHighlightDark = Steel.specular.opacity(0.08)
+        public static let selectedFill = Color.rail.opacity(0.16)
+        public static let selectedFillStrong = Color.rail.opacity(0.22)
+        public static let voiceSelectedFill = Console.tubeAmber.opacity(0.16)
+        public static let voiceBadgeFill = Console.tubeAmber.opacity(0.20)
+        public static let focusRing = Color.focusRing
+        public static let controlFill = Color.field
+        public static let navigationFill = SwiftUI.Color.clear
+        public static let panelFill = Color.field
+        public static let inspectorFill = Color.field
+        public static let fieldHighlight = SwiftUI.Color.clear
+        public static let fieldHighlightDark = SwiftUI.Color.clear
         public static let statusChipFillOpacity: Double = 0.16
         public static let surfaceRaised = panelFill
-        public static let border = Chassis.border
-        public static let borderStrong = Chassis.borderStrong
-        public static let divider = Chassis.border
-        public static let disabledFill = Chassis.border.opacity(0.2)
-        public static let elevatedShadow = SwiftUI.Color.black.opacity(0.22)
-        public static let interactionHover = TrackRail.railGleam.opacity(Interaction.hoverFillOpacity)
-        public static let interactionPressed = TrackRail.railGleam.opacity(Interaction.pressedFillOpacity)
+        public static let border = Color.separator
+        public static let borderStrong = Color.separator
+        public static let divider = Color.separator
+        public static let disabledFill = Color.quaternaryFill.opacity(0.20)
+        /// Only window-level floating layers cast a shadow (§5.2).
+        public static let elevatedShadow = SwiftUI.Color.black.opacity(0.18)
+        public static let interactionHover = Color.quaternaryFill.opacity(Interaction.hoverFillOpacity * 6)
+        public static let interactionPressed = Color.quaternaryFill.opacity(Interaction.pressedFillOpacity * 6)
 
         // MARK: - Logo 物理微雕与光学反光 Token (Crafted from App Icon)
 
         /// Logo 顶光高光微倒角（Specular Chamfer Highlight，还原 Logo 2px 微光切削边缘）
-        public static let specularChamfer = Steel.specular.opacity(0.16)
-        /// Logo 环境闭塞微投影（Ambient Occlusion，赋予控件真实物理沉降感）
-        public static let ambientShadow = SwiftUI.Color.black.opacity(0.25)
+        public static let specularChamfer = SwiftUI.Color.clear
+        /// Static surfaces no longer cast shadows; the window handles elevation.
+        public static let ambientShadow = SwiftUI.Color.clear
         /// 精密钛金属卡片边框描边
         public static let cardStroke = Chassis.borderStrong
         /// 声轨冷青微发光
-        public static let railGlow = TrackRail.trackGlow
+        public static let railGlow = SwiftUI.Color.clear
     }
 
     public enum Navigation {
@@ -621,6 +560,7 @@ public enum SpeechRailSurfaceLevel: Sendable {
     }
 }
 
+@available(*, deprecated, message: "Retired in the v2 redesign: speechRailSurface(_:) renders a system panel surface now.")
 public struct SpeechRailSurfaceModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
     private let level: SpeechRailSurfaceLevel
@@ -745,6 +685,7 @@ public struct SpeechRailSurfaceModifier: ViewModifier {
     }
 }
 
+@available(*, deprecated, message: "Retired in the v2 redesign: speechRailRecessedSlot() renders a system input slot now.")
 public struct SpeechRailFieldModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -804,6 +745,7 @@ public struct SpeechRailFieldModifier: ViewModifier {
     }
 }
 
+@available(*, deprecated, message: "Retired in the v2 redesign: speechRailContentSurface() renders a system panel surface now.")
 public struct SpeechRailContentSurfaceModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -895,51 +837,109 @@ public struct SpeechRailContentSurfaceModifier: ViewModifier {
 }
 
 public struct SpeechRailSleeperDivider: View {
-    @Environment(\.colorScheme) private var colorScheme
-
     public init() {}
 
     public var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Rectangle()
-                .fill(SpeechRailDesignTokens.Chassis.border)
-                .frame(height: 1)
-            Circle()
-                .fill(SpeechRailDesignTokens.TrackRail.railGleam.opacity(0.6))
-                .frame(width: 3, height: 3)
-            Rectangle()
-                .fill(SpeechRailDesignTokens.Chassis.border)
-                .frame(height: 1)
-        }
+        Divider()
     }
 }
 
 public extension View {
     func speechRailSurface(_ level: SpeechRailSurfaceLevel = .control) -> some View {
-        modifier(SpeechRailSurfaceModifier(level: level))
+        modifier(SpeechRailSystemSurfaceModifier(level: level))
     }
 
     func speechRailField() -> some View {
-        modifier(SpeechRailFieldModifier())
+        modifier(SpeechRailSlotModifier())
     }
 
     func speechRailContentSurface() -> some View {
-        modifier(SpeechRailContentSurfaceModifier())
+        modifier(SpeechRailSystemSurfaceModifier(level: .panel))
     }
 
     func speechRailConsoleChassis() -> some View {
-        modifier(SpeechRailContentSurfaceModifier())
+        modifier(SpeechRailSystemSurfaceModifier(level: .panel))
     }
 
     func speechRailRecessedSlot() -> some View {
-        modifier(SpeechRailFieldModifier())
+        modifier(SpeechRailSlotModifier())
     }
 
     func speechRailKnurledCapsule(selected: Bool = false) -> some View {
-        modifier(SpeechRailKnurledCapsuleModifier(selected: selected))
+        modifier(SpeechRailChipModifier(selected: selected))
     }
 }
 
+// MARK: - System surfaces (v2)
+
+/// Content panel. Concentric corners and a system fill; a surface that neither
+/// carries interaction nor expresses hierarchy gets no border and no shadow
+/// (REDESIGN-SPEC §5.2).
+public struct SpeechRailSystemSurfaceModifier: ViewModifier {
+    private let level: SpeechRailSurfaceLevel
+
+    public init(level: SpeechRailSurfaceLevel) {
+        self.level = level
+    }
+
+    @ViewBuilder
+    public func body(content: Content) -> some View {
+        switch level {
+        case .window, .navigation:
+            // The window and the system sidebar own their own backgrounds.
+            content
+        case .control, .panel, .inspector:
+            content.background(
+                SwiftUI.Color(nsColor: .controlBackgroundColor),
+                in: ConcentricRectangle()
+            )
+        case .elevated:
+            // Only window-level floating layers elevate (§5.2).
+            content
+                .background(.regularMaterial, in: ConcentricRectangle())
+                .shadow(
+                    color: SpeechRailDesignTokens.Surface.elevatedShadow,
+                    radius: SpeechRailDesignTokens.Shadow.elevatedRadius,
+                    y: SpeechRailDesignTokens.Shadow.elevatedYOffset
+                )
+        }
+    }
+}
+
+/// Input slot: one level below a panel, radius concentric with its container.
+public struct SpeechRailSlotModifier: ViewModifier {
+    public init() {}
+
+    public func body(content: Content) -> some View {
+        content.background(
+            SwiftUI.Color(nsColor: .textBackgroundColor),
+            in: ConcentricRectangle()
+        )
+    }
+}
+
+/// Interactive chip: system capsule geometry, accent only for selection.
+public struct SpeechRailChipModifier: ViewModifier {
+    public let selected: Bool
+
+    public init(selected: Bool = false) {
+        self.selected = selected
+    }
+
+    public func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+            .background(
+                selected
+                    ? SwiftUI.Color.accentColor.opacity(0.18)
+                    : SwiftUI.Color(nsColor: .quaternaryLabelColor).opacity(0.6),
+                in: Capsule(style: .continuous)
+            )
+    }
+}
+
+@available(*, deprecated, message: "Retired in the v2 redesign: speechRailKnurledCapsule(selected:) renders a system chip now.")
 public struct SpeechRailKnurledCapsuleModifier: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
     public let selected: Bool

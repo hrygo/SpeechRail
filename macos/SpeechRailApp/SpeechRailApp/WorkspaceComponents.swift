@@ -25,15 +25,12 @@ public struct SpeechRailButtonAppearance: ViewModifier {
             case .primary:
                 content
                     .buttonStyle(.borderedProminent)
-                    .tint(SpeechRailDesignTokens.Color.rail)
             case .secondary:
                 content
                     .buttonStyle(.bordered)
-                    .tint(SpeechRailDesignTokens.Color.rail)
             case .quiet:
                 content
                     .buttonStyle(.borderless)
-                    .tint(SpeechRailDesignTokens.Color.rail)
             case .destructive:
                 content
                     .buttonStyle(.bordered)
@@ -41,10 +38,6 @@ public struct SpeechRailButtonAppearance: ViewModifier {
             }
         }
         .controlSize(.regular)
-        .frame(
-            minWidth: SpeechRailDesignTokens.Interaction.minimumHitTarget,
-            minHeight: SpeechRailDesignTokens.Interaction.minimumHitTarget
-        )
         .contentShape(Rectangle())
         .speechRailPointerCursor()
     }
@@ -193,12 +186,9 @@ private struct SpeechRailInteractiveButtonBody: View {
             }
             // The visual treatment stays rounded, but the complete button
             // bounds—including transparent padding—remain one hit target.
+            // The system already animates press; a custom scale would double
+            // that feedback (REDESIGN-SPEC §5.8).
             .contentShape(Rectangle())
-            .scaleEffect(
-                configuration.isPressed && isEnabled && !reduceMotion
-                    ? SpeechRailDesignTokens.Interaction.pressedScale
-                    : 1
-            )
             .opacity(isEnabled ? 1 : SpeechRailDesignTokens.Interaction.disabledOpacity)
             .onHover { hovering in
                 isHovered = isEnabled && hovering
@@ -293,6 +283,12 @@ private struct SpeechRailCursorRegion: NSViewRepresentable {
 public extension View {
     func speechRailButton(_ level: SpeechRailButtonLevel) -> some View {
         modifier(SpeechRailButtonAppearance(level: level))
+    }
+
+    /// Applies the fixed-label-column inspector row shape to every
+    /// `LabeledContent` in the subtree.
+    func speechRailInspectorContent() -> some View {
+        labeledContentStyle(SpeechRailInspectorLabeledContentStyle())
     }
 
     func speechRailInteractiveButtonStyle(fillsAvailableWidth: Bool = false) -> some View {
@@ -484,42 +480,13 @@ enum SpeechRailOperationMessagePresentation {
     }
 }
 
-public struct PageIntroView: View {
-    public let route: AppRoute
-
-    public init(route: AppRoute) {
-        self.route = route
-    }
-
-    public var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
-                .fill(SpeechRailDesignTokens.SteelRail.railheadGleam)
-                .frame(
-                    width: SpeechRailDesignTokens.Control.purposeIndicatorWidth,
-                    height: SpeechRailDesignTokens.Control.purposeIndicatorHeight
-                )
-                .shadow(color: SpeechRailDesignTokens.SteelRail.trackGlow, radius: 2)
-            Text(route.purpose)
-                .font(SpeechRailDesignTokens.Typography.body)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(2)
-                .truncationMode(.tail)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(route.purpose)
-    }
-}
-
 /// The shared page geometry for every workspace surface.
 ///
-/// The scaffold owns the single purpose line and the content margins so a
-/// page cannot accidentally grow a second title or a route-specific chrome.
+/// The scaffold owns the content margins and nothing else: the toolbar carries
+/// the page title, and the page body starts straight at its main object instead
+/// of repeating the title as a purpose sentence (REDESIGN-SPEC §7).
 /// Full-height workspaces such as diagnostics can opt out of the outer scroll
-/// container while keeping the same geometry and intro treatment.
+/// container while keeping the same geometry.
 public struct PageScaffold<Content: View>: View {
     public let route: AppRoute
     public let scrollable: Bool
@@ -549,12 +516,10 @@ public struct PageScaffold<Content: View>: View {
 
     private var pageContent: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
-            PageIntroView(route: route)
             content
         }
-        .frame(maxWidth: SpeechRailDesignTokens.Layout.contentMaximumWidth, alignment: .leading)
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xl)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xl)
+        .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
+        .padding(.vertical, SpeechRailDesignTokens.Layout.contentPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
@@ -1329,7 +1294,7 @@ public struct DeveloperInspector<Content: View>: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.rowSpacing) {
                     content
-                        .labeledContentStyle(SpeechRailInspectorLabeledContentStyle())
+                        .speechRailInspectorContent()
                         .accessibilityElement(children: .contain)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1360,22 +1325,30 @@ public struct DeveloperInspector<Content: View>: View {
     }
 }
 
-private struct SpeechRailInspectorLabeledContentStyle: LabeledContentStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.labelValueSpacing) {
+/// One label column, one right-aligned value. A fixed label column is what
+/// makes a stack of inspector rows scannable instead of ragged
+/// (REDESIGN-SPEC §7.3).
+public struct SpeechRailInspectorLabeledContentStyle: LabeledContentStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
             configuration.label
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .lineLimit(SpeechRailDesignTokens.Inspector.titleMaximumLines)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(
+                    width: SpeechRailDesignTokens.Inspector.labelColumnWidth,
+                    alignment: .leading
+                )
             configuration.content
                 .font(SpeechRailDesignTokens.Typography.technical)
                 .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 .lineLimit(SpeechRailDesignTokens.Inspector.valueMaximumLines)
-                .truncationMode(.middle)
-                .multilineTextAlignment(.leading)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, SpeechRailDesignTokens.Inspector.rowVerticalPadding)

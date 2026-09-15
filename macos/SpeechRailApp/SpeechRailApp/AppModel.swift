@@ -164,6 +164,9 @@ public final class AppModel {
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
     public private(set) var worksMessage: String?
+    /// Result of an explicit work action (delete/rename). Kept apart from
+    /// `worksMessage`, which reports that the history itself is unreadable.
+    public private(set) var workActionMessage: String?
     public private(set) var workPlaybackMessage: String?
 
     public var hasActiveMutation: Bool {
@@ -303,6 +306,50 @@ public final class AppModel {
 
     public func cancelVoiceDesignGeneration() {
         voiceDesignGenerationTask?.cancel()
+    }
+
+    /// Regenerate a single candidate in place, reusing its own instruction,
+    /// reference text and seed so a failed card can recover without throwing
+    /// away its three siblings (REDESIGN-SPEC §7.2).
+    public func retryVoiceDesignCandidate(slot: String) {
+        guard voiceDesignGenerationTask == nil, !isGeneratingVoiceDesign else { return }
+        guard let candidate = voiceDesignCandidates.first(where: { $0.slot == slot }),
+              !candidate.instructionSnapshot.isEmpty
+        else {
+            return
+        }
+
+        voiceDesignErrorMessage = nil
+        voiceDesignSuccessMessage = nil
+        updateVoiceDesignCandidate(slot: slot, status: .loading)
+        stopAudio()
+        isGeneratingVoiceDesign = true
+        voiceDesignGenerationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let data = await self.previewDesignedVoice(
+                text: candidate.referenceTextSnapshot,
+                instruction: candidate.instructionSnapshot,
+                speed: 1.0,
+                seed: candidate.seed
+            )
+            if Task.isCancelled {
+                self.updateVoiceDesignCandidate(slot: slot, status: .cancelled)
+            } else if let data {
+                self.updateVoiceDesignCandidate(
+                    slot: slot,
+                    status: .ready,
+                    audioData: data,
+                    durationSeconds: self.audioDuration(for: data)
+                )
+            } else {
+                self.updateVoiceDesignCandidate(
+                    slot: slot,
+                    status: .failed(self.creatorMessage ?? "预览未生成，请稍后重试")
+                )
+            }
+            self.isGeneratingVoiceDesign = false
+            self.voiceDesignGenerationTask = nil
+        }
     }
 
     public func saveVoiceDesignCandidate(
@@ -805,6 +852,52 @@ public final class AppModel {
 
     public func loadWorkAudio(_ work: CreativeWork) throws -> Data {
         try workStore.loadAudio(for: work)
+    }
+
+    /// Where a saved work's audio lives, for reveal-in-Finder and export.
+    public func workAudioURL(_ work: CreativeWork) -> URL? {
+        try? workStore.audioURL(for: work)
+    }
+
+    /// Deletes a saved work and the audio file it owns. The audio is gone for
+    /// good, so the caller must confirm before calling this
+    /// (REDESIGN-SPEC §7.4 / D12).
+    @discardableResult
+    public func deleteWork(_ work: CreativeWork) -> Bool {
+        if playingWorkID == work.id {
+            stopAudio()
+        }
+        do {
+            try workStore.delete(work)
+            works = try workStore.list()
+            worksMessage = nil
+            workPlaybackMessage = nil
+            workActionMessage = "“\(work.title)” 及其音频文件已从本机删除。"
+            if lastCreatedWork?.id == work.id {
+                lastCreatedWork = nil
+            }
+            return true
+        } catch {
+            workActionMessage = (error as? CreativeWorkStoreError)?.errorDescription
+                ?? "作品删除失败，请重试"
+            return false
+        }
+    }
+
+    /// Renames a saved work. The audio file is not moved or rewritten.
+    @discardableResult
+    public func renameWork(_ work: CreativeWork, title: String) -> Bool {
+        do {
+            let updated = try workStore.rename(work, title: title)
+            works = try workStore.list()
+            worksMessage = nil
+            workActionMessage = "作品已重命名为“\(updated.title)”。"
+            return true
+        } catch {
+            workActionMessage = (error as? CreativeWorkStoreError)?.errorDescription
+                ?? "作品重命名失败，请重试"
+            return false
+        }
     }
 
     /// Own the request task at the app-model level so navigating between pages
@@ -1355,6 +1448,8 @@ public final class AppModel {
             return switch workStoreError {
             case .invalidWorkID:
                 "生成结果的作品标识无效，请重试"
+            case .invalidTitle:
+                "作品名称不能为空"
             case .storageUnavailable:
                 "音频已生成，但本机作品库未能完成保存；请检查磁盘权限和可用空间后重试"
             case .audioUnavailable:

@@ -31,8 +31,28 @@ public struct CreativeWork: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+public extension CreativeWork {
+    /// `m:ss`, or nil while the duration has not been read from the audio.
+    var durationText: String? {
+        guard let durationSeconds else { return nil }
+        let totalSeconds = max(0, Int(durationSeconds.rounded()))
+        return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
+    }
+
+    /// Filesystem-safe stem for exporting this work.
+    var exportBaseName: String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")
+        let cleaned = title
+            .components(separatedBy: invalidCharacters)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "SpeechRail-作品" : String(cleaned.prefix(80))
+    }
+}
+
 public enum CreativeWorkStoreError: Error, LocalizedError, Sendable {
     case invalidWorkID
+    case invalidTitle
     case storageUnavailable
     case audioUnavailable
 
@@ -40,6 +60,8 @@ public enum CreativeWorkStoreError: Error, LocalizedError, Sendable {
         switch self {
         case .invalidWorkID:
             "作品标识无效"
+        case .invalidTitle:
+            "作品名称不能为空"
         case .storageUnavailable:
             "作品存储暂时不可用"
         case .audioUnavailable:
@@ -100,17 +122,86 @@ public final class CreativeWorkStore {
             var works = try list()
             works.removeAll { $0.id == work.id }
             works.append(work)
-            works.sort { $0.createdAt > $1.createdAt }
-
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(works).write(to: indexURL, options: [.atomic])
+            try writeIndex(works)
         } catch let error as CreativeWorkStoreError {
             throw error
         } catch {
             throw CreativeWorkStoreError.storageUnavailable
         }
+    }
+
+    /// Removes a work and the audio file it owns. The audio goes first: a
+    /// failure then leaves an index entry that still resolves, instead of an
+    /// orphaned file no longer reachable from the list (REDESIGN-SPEC §7.4).
+    public func delete(_ work: CreativeWork) throws {
+        guard Self.isSafeIdentifier(work.id),
+              work.audioFileName == "\(work.id).wav"
+        else {
+            throw CreativeWorkStoreError.invalidWorkID
+        }
+        do {
+            var works = try list()
+            guard let index = works.firstIndex(where: { $0.id == work.id }) else { return }
+            let audioURL = directory.appendingPathComponent(work.audioFileName, isDirectory: false)
+            if fileManager.fileExists(atPath: audioURL.path) {
+                try fileManager.removeItem(at: audioURL)
+            }
+            works.remove(at: index)
+            try writeIndex(works)
+        } catch let error as CreativeWorkStoreError {
+            throw error
+        } catch {
+            throw CreativeWorkStoreError.storageUnavailable
+        }
+    }
+
+    /// Renames a work without touching its audio: the file keeps the
+    /// identifier-based name, so a rename never moves bytes on disk
+    /// (REDESIGN-SPEC §7.4).
+    @discardableResult
+    public func rename(_ work: CreativeWork, title: String) throws -> CreativeWork {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw CreativeWorkStoreError.invalidTitle
+        }
+        do {
+            var works = try list()
+            guard let index = works.firstIndex(where: { $0.id == work.id }) else {
+                throw CreativeWorkStoreError.invalidWorkID
+            }
+            let existing = works[index]
+            let updated = CreativeWork(
+                id: existing.id,
+                title: String(trimmed.prefix(Self.titleMaximumLength)),
+                scriptText: existing.scriptText,
+                voiceID: existing.voiceID,
+                voiceName: existing.voiceName,
+                createdAt: existing.createdAt,
+                durationSeconds: existing.durationSeconds,
+                audioFileName: existing.audioFileName
+            )
+            works[index] = updated
+            try writeIndex(works)
+            return updated
+        } catch let error as CreativeWorkStoreError {
+            throw error
+        } catch {
+            throw CreativeWorkStoreError.storageUnavailable
+        }
+    }
+
+    /// Absolute location of a saved work's audio, without reading it.
+    public func audioURL(for work: CreativeWork) throws -> URL {
+        guard Self.isSafeIdentifier(work.id),
+              work.audioFileName == "\(work.id).wav"
+        else {
+            throw CreativeWorkStoreError.invalidWorkID
+        }
+        let audioURL = directory.appendingPathComponent(work.audioFileName, isDirectory: false)
+        guard fileManager.fileExists(atPath: audioURL.path) else {
+            throw CreativeWorkStoreError.audioUnavailable
+        }
+        return audioURL
     }
 
     public func loadAudio(for work: CreativeWork) throws -> Data {
@@ -131,7 +222,22 @@ public final class CreativeWorkStore {
         }
     }
 
+    private func writeIndex(_ works: [CreativeWork]) throws {
+        do {
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder
+                .encode(works.sorted { $0.createdAt > $1.createdAt })
+                .write(to: indexURL, options: [.atomic])
+        } catch {
+            throw CreativeWorkStoreError.storageUnavailable
+        }
+    }
+
     private static func isSafeIdentifier(_ value: String) -> Bool {
         value.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil
     }
+
+    private static let titleMaximumLength = 120
 }
