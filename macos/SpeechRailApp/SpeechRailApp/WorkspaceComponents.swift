@@ -694,6 +694,32 @@ public struct StatusPill: View {
     }
 }
 
+/// Figma `kbd`：键帽。裸写「⌘⏎」读起来像一个游离的字符，键帽才读得出这是
+/// 快捷键（REDESIGN-SPEC §7.1 / §7.2）。键帽本身不承载点击，只承载提示，
+/// 因此对辅助技术隐藏 —— 按钮自己的 accessibilityHint 已经说明了这个快捷键。
+public struct KeyboardHint: View {
+    public let label: String
+
+    public init(_ label: String) {
+        self.label = label
+    }
+
+    public var body: some View {
+        Text(label)
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            .lineLimit(1)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+            .background(SpeechRailDesignTokens.Color.field, in: ConcentricRectangle())
+            .overlay {
+                ConcentricRectangle()
+                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+            }
+            .accessibilityHidden(true)
+    }
+}
+
 /// A single, named entry point for low-frequency workspace actions.
 ///
 /// The menu deliberately owns the label so pages cannot drift into a row of

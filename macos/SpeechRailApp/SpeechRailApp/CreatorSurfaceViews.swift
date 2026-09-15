@@ -216,6 +216,7 @@ public struct DubbingDeskView: View {
                 voicePickerButton
                 speedControl
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                KeyboardHint("⌘⏎")
                 generateButton
             }
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -835,6 +836,7 @@ public struct VoiceDesignView: View {
 
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                KeyboardHint("⌘⏎")
                 generateCandidatesButton
             }
         }
@@ -873,27 +875,33 @@ public struct VoiceDesignView: View {
     }
 
     private var acousticChipRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                ForEach(acousticChips, id: \.self) { chip in
-                    Button {
-                        appendChip(chip)
-                    } label: {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                            Image(systemName: "plus")
-                                .font(SpeechRailDesignTokens.Typography.technical)
-                            Text(chip)
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text("快速加入声学特征")
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    ForEach(acousticChips, id: \.self) { chip in
+                        Button {
+                            appendChip(chip)
+                        } label: {
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                Image(systemName: "plus")
+                                    .font(SpeechRailDesignTokens.Typography.technical)
+                                Text(chip)
+                            }
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .speechRailKnurledCapsule(selected: false)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                         }
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .speechRailKnurledCapsule(selected: false)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                        .buttonStyle(.plain)
+                        .speechRailPointerCursor()
+                        .accessibilityLabel("插入声学特征：\(chip)")
                     }
-                    .buttonStyle(.plain)
-                    .speechRailPointerCursor()
-                    .accessibilityLabel("插入声学特征：\(chip)")
                 }
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
             }
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
         }
     }
 
