@@ -103,7 +103,9 @@ listed above.
 - Python `>=3.12,<3.13` for source development and the Python service CLI.
 - [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
 - `ffmpeg` for the audio decoding/transcoding paths used by local setup and
-  selected audio formats.
+  selected audio formats. The managed installer ships a pinned
+  `imageio-ffmpeg` inside the isolated runtime, so a system copy is optional
+  for `speechrail install`.
 - Local model snapshots and vendor runtimes stored outside the repository.
 
 Inference requests do not download models, fetch remote audio URLs, or make
@@ -120,7 +122,8 @@ then install with only `uv` — no source checkout:
 
 ```bash
 cd ~/Downloads
-uvx --python 3.12 --from ./speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl \
+shasum -a 256 -c SHA256SUMS
+uvx --python 3.12 --from ./speechrail-*.whl \
   speechrail install \
   --preset balanced \
   --yes \
@@ -131,7 +134,10 @@ uvx --python 3.12 --from ./speechrail-<version>-cp312-cp312-macosx_26_0_arm64.wh
 prepares and verifies the tier's model artifacts, runs preflight, switches
 `runtime/current` atomically, and with `--enable` registers and starts
 `com.speechrail`. It refuses a wheel whose version differs from the installer,
-so the installer can never drift from the code it installs.
+so the installer can never drift from the code it installs. Repeating the
+command upgrades an existing install; stop the running service first, because
+the installer refuses to replace `runtime/current` while port 8201 is owned.
+The `--from` glob needs exactly one `speechrail-*.whl` in the directory.
 
 ### From the repository
 

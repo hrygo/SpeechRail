@@ -179,14 +179,15 @@ def _write_private_config(destination: Path, content: str | bytes) -> None:
         temporary_path.unlink(missing_ok=True)
 
 
-def _setup_launcher_path(app_home: Path) -> Path:
+def setup_launcher_path(app_home: Path) -> Path:
+    """Return the double-click setup entry written for an installed app home."""
     return app_home.absolute() / "SpeechRail 设置.command"
 
 
 def _write_setup_launcher(app_home: Path) -> Path:
     """Atomically install a double-click entry for the current managed release."""
     resolved_home = app_home.absolute()
-    destination = _setup_launcher_path(resolved_home)
+    destination = setup_launcher_path(resolved_home)
     if destination.is_symlink():
         raise InstallerError("setup launcher must not be a symlink")
     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

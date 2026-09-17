@@ -17,10 +17,12 @@ from zipfile import ZipFile
 
 import pytest
 
-from speechrail import __version__
+from speechrail import __version__, cli
 from speechrail.cli import main
 from speechrail.service import managed_install, profile_commands
+from speechrail.service.installer_errors import InstallerError
 from speechrail.service.managed_install import InstallResult
+from speechrail.service.profile_store import ProfileStore
 
 
 def _write_wheel(directory: Path, version: str) -> Path:
@@ -53,6 +55,8 @@ def install_calls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[dict[
 
     monkeypatch.setattr(managed_install, "install_managed", fake_install_managed)
     monkeypatch.chdir(tmp_path)
+    # Never read the developer's real selection from the default app home.
+    monkeypatch.setattr(cli, "_default_app_home", lambda: tmp_path / "app-home")
     return calls
 
 
@@ -128,6 +132,33 @@ def test_install_recommends_the_preset_when_none_is_given(
     assert install_calls[0]["preset_id"] == "balanced"
 
 
+def test_install_keeps_the_preset_the_app_home_already_committed_to(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An upgrade must not restart the memory recommendation lottery."""
+    _write_wheel(tmp_path, __version__)
+    app_home = tmp_path / "SpeechRail"
+    ProfileStore(app_home).initialize(
+        {
+            "schema_version": 1,
+            "preset": "light",
+            "generation": 1,
+            "asr": "asr-1.7b-q8",
+            "tts": "tts-1.7b-design-q8",
+            "runtime_lock_id": "runtime-v1",
+        }
+    )
+    monkeypatch.setattr(profile_commands, "recommend_profile", lambda _: "quality")
+
+    assert main(["install", "--yes", "--app-home", str(app_home)]) == 0
+
+    assert install_calls[0]["preset_id"] == "light"
+    assert "kept from the installed service" in capsys.readouterr().out
+
+
 def test_install_emits_one_machine_envelope(
     install_calls: list[dict[str, Any]], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -140,6 +171,126 @@ def test_install_emits_one_machine_envelope(
     assert payload["status"] == "committed"
     assert payload["preset"] == "light"
     assert payload["enabled"] is False
+
+
+class _ReadyResponse:
+    status = 200
+
+    def __enter__(self) -> _ReadyResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+
+class _FakeTime:
+    """Advance instantly so a readiness timeout never really waits."""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+
+    def monotonic(self) -> float:
+        self._now += 1_000.0
+        return self._now
+
+    def sleep(self, _seconds: float) -> None:
+        raise AssertionError("readiness polling must not sleep in this test")
+
+
+def test_install_names_the_missing_prerequisite(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: None)
+
+    assert main(["install", "--yes"]) == 1
+
+    stderr = capsys.readouterr().err
+    assert "uv" in stderr
+    assert "astral.sh" in stderr
+    assert install_calls == []
+
+
+def test_install_reports_readiness_after_enabling(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+    monkeypatch.setattr(cli.shutil, "which", lambda _name: "/opt/homebrew/bin/uv")
+    monkeypatch.setattr(cli, "urlopen", lambda request, timeout: _ReadyResponse())
+
+    assert main(["install", "--yes", "--preset", "light", "--enable"]) == 0
+
+    assert install_calls[0]["uv_executable"] == "/opt/homebrew/bin/uv"
+    out = capsys.readouterr().out
+    assert "Service is ready" in out
+    assert "Change profile later" in out
+
+
+def test_install_reports_a_service_that_never_becomes_ready(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+
+    def unavailable(request: object, timeout: float) -> object:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(cli, "urlopen", unavailable)
+    monkeypatch.setattr(cli, "time", _FakeTime())
+
+    assert main(["install", "--yes", "--preset", "light", "--enable"]) == 0
+
+    out = capsys.readouterr().out
+    assert "is not ready yet" in out
+    assert "service preflight" in out
+
+
+def test_install_turns_a_running_service_into_a_stop_instruction(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+
+    def refuses(wheel: Path, **kwargs: Any) -> InstallResult:
+        raise InstallerError("managed installation requires the SpeechRail service to be stopped")
+
+    monkeypatch.setattr(managed_install, "install_managed", refuses)
+
+    assert main(["install", "--yes", "--preset", "light"]) == 1
+
+    stderr = capsys.readouterr().err
+    assert "service stop" in stderr
+    assert "/runtime/current/.venv/bin/speechrail" in stderr
+
+
+def test_install_turns_a_preset_conflict_into_a_choice(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+
+    def refuses(wheel: Path, **kwargs: Any) -> InstallResult:
+        raise InstallerError("a different managed preset is already configured")
+
+    monkeypatch.setattr(managed_install, "install_managed", refuses)
+
+    assert main(["install", "--yes", "--preset", "quality"]) == 1
+
+    stderr = capsys.readouterr().err
+    assert "one preset per app home" in stderr
+    assert "profile apply <tier> --yes" in stderr
 
 
 def test_repository_shim_reexports_the_packaged_installer() -> None:

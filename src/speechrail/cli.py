@@ -8,9 +8,11 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -699,20 +701,96 @@ def _resolve_install_wheel(explicit: Path | None, *, version: str) -> Path:
     return wheel
 
 
+def _require_uv() -> str:
+    """Return the uv executable, or fail with the step that is actually missing."""
+    uv = shutil.which("uv")
+    if uv is None:
+        raise ServiceError(
+            "install drives uv to build the managed runtime, but uv is not on PATH; "
+            "install it first: https://docs.astral.sh/uv/getting-started/installation/"
+        )
+    return uv
+
+
+def _wait_until_ready(
+    base_url: str,
+    *,
+    timeout_seconds: float,
+    app_home: Path | None,
+) -> tuple[bool, str]:
+    """Poll /readyz so a first-time user learns whether the service works.
+
+    The install is already committed at this point, so a timeout is reported as
+    a status instead of failing the command.
+    """
+    headers = {"Accept": "application/json"}
+    api_key = resolve_api_key(app_home=app_home)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    deadline = time.monotonic() + timeout_seconds
+    detail = "no response yet"
+    while True:
+        try:
+            with urlopen(Request(f"{base_url}/readyz", headers=headers), timeout=5.0) as response:
+                if response.status == 200:
+                    return True, "ready"
+                detail = f"HTTP {response.status}"
+        except HTTPError as exc:
+            detail = f"HTTP {exc.code}"
+        except (URLError, OSError) as exc:
+            detail = type(exc).__name__
+        if time.monotonic() >= deadline:
+            return False, detail
+        time.sleep(2.0)
+
+
+def _install_service_base_url(app_home: Path) -> str:
+    return f"http://127.0.0.1:{_service_port(app_home)}"
+
+
+def _installed_preset(app_home: Path) -> str | None:
+    """Return the preset this app home already committed to, if any.
+
+    One app home keeps exactly one preset, so an upgrade must repeat the
+    installed tier instead of falling back to the memory recommendation.
+    """
+    from speechrail.service.profile_store import recover_selection
+
+    try:
+        selection = recover_selection(app_home)
+    except (OSError, ValueError):
+        return None
+    if not selection:
+        return None
+    preset = selection.get("preset")
+    return preset if isinstance(preset, str) else None
+
+
 def _run_install(args: argparse.Namespace) -> int:
     """Install one release wheel as the managed runtime, disabled unless asked to start."""
     from speechrail import __version__
     from speechrail.service import profile_commands
-    from speechrail.service.managed_install import install_managed
+    from speechrail.service.installer_errors import InstallerError
+    from speechrail.service.managed_install import install_managed, setup_launcher_path
 
     machine_output = bool(getattr(args, "json", False))
     app_home = (args.app_home or _default_app_home()).resolve()
     wheel = _resolve_install_wheel(getattr(args, "wheel", None), version=__version__)
-    preset = args.preset or profile_commands.recommend_profile(_physical_memory_bytes())
+    uv_executable = _require_uv()
+    installed_preset = _installed_preset(app_home)
+    preset = (
+        args.preset
+        or installed_preset
+        or profile_commands.recommend_profile(_physical_memory_bytes())
+    )
     summary = next(item for item in profile_commands.list_profiles() if item.id == preset)
+    enable = bool(getattr(args, "enable", False))
+    installed_cli = f'"{app_home}/runtime/current/.venv/bin/speechrail"'
     if not machine_output:
+        carried = installed_preset is not None and args.preset is None
         print(f"Wheel: {wheel.name}")
-        print(f"Profile: {preset} (ASR={summary.asr}, TTS={summary.tts})")
+        suffix = " (kept from the installed service)" if carried else ""
+        print(f"Profile: {preset}{suffix} (ASR={summary.asr}, TTS={summary.tts})")
         print(f"App home: {app_home}")
         budget = _format_bytes(summary.download_bytes)
         print(f"Download up to {budget} before the service is ready.")
@@ -744,39 +822,77 @@ def _run_install(args: argparse.Namespace) -> int:
             print(f"{phase}{suffix}", flush=True)
 
     timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
-    with httpx.Client(timeout=timeout) as client:
-        result = install_managed(
-            wheel,
-            app_home=app_home,
-            preset_id=preset,
-            downloader=ModelScopeDownloader(client=client),
-            enable=bool(getattr(args, "enable", False)),
-            progress=progress,
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            result = install_managed(
+                wheel,
+                app_home=app_home,
+                preset_id=preset,
+                downloader=ModelScopeDownloader(client=client),
+                enable=enable,
+                progress=progress,
+                uv_executable=uv_executable,
+            )
+    except InstallerError as exc:
+        if "to be stopped" in str(exc):
+            raise ServiceError(
+                "install must not replace a running service; stop it first: "
+                f"{installed_cli} service stop --app-home \"{app_home}\""
+            ) from exc
+        if "different managed preset is already configured" in str(exc):
+            raise ServiceError(
+                "install keeps one preset per app home; an installed service already "
+                f"selected {installed_preset or 'a tier'}, so repeat that preset or switch "
+                f"tiers with: {installed_cli} profile apply <tier> --yes"
+            ) from exc
+        raise
+
+    runtime_cli = result.runtime_python.parent / "speechrail"
+    base_url = _install_service_base_url(result.app_home)
+    ready: bool | None = None
+    readiness_detail = ""
+    if enable:
+        ready, readiness_detail = _wait_until_ready(
+            base_url,
+            timeout_seconds=60.0,
+            app_home=result.app_home,
         )
     if machine_output:
-        _print_machine(
-            {
-                "app_home": str(result.app_home),
-                "command": "install",
-                "enabled": result.enabled,
-                "prepared_id": result.prepared_id,
-                "preset": preset,
-                "runtime_python": str(result.runtime_python),
-                "status": "committed",
-            }
-        )
+        envelope: dict[str, object] = {
+            "app_home": str(result.app_home),
+            "base_url": base_url,
+            "command": "install",
+            "enabled": result.enabled,
+            "prepared_id": result.prepared_id,
+            "preset": preset,
+            "runtime_cli": str(runtime_cli),
+            "runtime_python": str(result.runtime_python),
+            "status": "committed",
+        }
+        if ready is not None:
+            envelope["readyz"] = ready
+        _print_machine(envelope)
         return 0
     print(f"Installed {wheel.name} into {result.app_home}")
     print(f"Runtime: {result.runtime_python}")
     if result.prepared_id is not None:
         print(f"Prepared models: {result.prepared_id}")
-    runtime_cli = result.runtime_python.parent / "speechrail"
     if result.enabled:
         print("com.speechrail is registered and started.")
-        print("Check it: curl -s -i http://127.0.0.1:8201/readyz | head -1")
+        if ready:
+            print(f"Service is ready at {base_url} (/readyz returned HTTP 200).")
+        else:
+            print(f"Service is not ready yet ({readiness_detail}); check it with:")
+            print(f'  "{runtime_cli}" service preflight --app-home "{result.app_home}"')
+            print(f"  curl -s -i {base_url}/readyz | head -1")
     else:
         print("The service is installed but not started.")
         print(f'Start it: "{runtime_cli}" service start --app-home "{result.app_home}"')
+    print(
+        f'Service CLI: "{runtime_cli}" service <status|start|stop> '
+        f'--app-home "{result.app_home}"'
+    )
+    print(f"Change profile later: double-click {setup_launcher_path(result.app_home)}")
     return 0
 
 
