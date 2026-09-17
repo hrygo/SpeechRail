@@ -12,7 +12,7 @@ date: 2026-09-17
 
 > [!TIP]
 > 还没在本机装好服务？先看 **[📦 SpeechRail 安装与首次使用](installing-speechrail.md)**：它说明 GitHub Release 上
-> wheel、DMG 和校验文件分别是什么、安装顺序，以及装完如何确认服务可用。
+> wheel、DMG 和校验文件分别是什么、安装顺序、装完如何确认服务可用，以及升级与卸载的安全顺序。
 
 ---
 

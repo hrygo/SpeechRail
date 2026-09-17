@@ -42,13 +42,17 @@ shasum -a 256 -c SHA256SUMS
   及以上接受它。需要在 macOS 14/15 上部署时，用第 3.2 节的仓库流程在目标机构建 wheel。
 - 磁盘：单次全新安装预留 **≥ 25 GB**（`light` 约 2.99 GB、`balanced` 约 5.96 GB、`quality` 约
   10.73 GB 的模型，外加隔离运行时；每次安装都会在 `runtime/releases` 新增目录，installer 不自动清理旧版本）。
-- 首次安装需要联网访问项目锁定的模型源；模型准备只在显式确认（`--yes`）后发生，请求路径不会下载模型。
+- 首次安装需要联网：先访问 PyPI 装 wheel 的依赖，再访问项目锁定的模型源取模型 snapshot。模型准备
+  只在显式确认（`--yes`）后发生，请求路径不会下载模型。
 - `uv`：安装命令通过 `uvx` 调用，Python 3.12 由它按需取用。缺少 `uv` 时 `install` 会在准备模型前
   直接给出安装地址，不会跑到一半才失败。
 - 不需要预装 `ffmpeg`：安装器把锁定的 `imageio-ffmpeg` 装进隔离 runtime，并让服务指向该副本；
   只有仓库首装脚本（第 3.2 节）会自行检查并安装系统 `ffmpeg`。
 
 ## 3. 安装服务
+
+先确认拿到的是哪个版本：`speechrail install` 安装入口从 2.7.0 起随 wheel 发布，所以 2.7.0 及以后
+走 3.1；2.6.6 及更早的 wheel 里没有这个子命令，走 3.2 的仓库流程。
 
 ### 3.1 从 release wheel 安装（2.7.0 起）
 
@@ -194,6 +198,7 @@ SPEECHRAIL_CLI="$HOME/Library/Application Support/SpeechRail/runtime/current/.ve
 | 打开 App 提示无法验证开发者 / 无法检查恶意软件 | DMG 为 unsigned、未公证制品 | 确认来源与 `SHA256SUMS` 后走「隐私与安全性 → 仍要打开」；企业托管 Mac 可能禁止 |
 | `pip install` / `uv pip install` wheel 报平台不兼容 | wheel 平台标签为 `macosx_26_0_arm64` | 在 macOS 26 上安装，或在目标机用第 3.2 节流程构建 wheel |
 | `uvx` 报 `no wheels with a matching Python version tag` | 默认用了比 3.12 更新的解释器 | 按第 3.1 节加上 `--python 3.12` |
+| `uvx ... speechrail install` 报 `invalid choice: 'install'` | 用的是 2.6.6 及更早的 wheel，里面的 CLI 还没有安装子命令 | 按第 3.2 节走仓库首装流程，或改用 2.7.0 及以后的 wheel |
 | `install` 报 `uv is not on PATH` | 机器上没有 `uv` | 按提示访问 `https://docs.astral.sh/uv/getting-started/installation/` 安装后重试 |
 | `install` 报 wheel 版本与 installer 不一致 | CLI 与待安装 wheel 不是同一个版本 | 让 `uvx --from` 指向要安装的那个 wheel |
 | `install` 报 `requires the SpeechRail service to be stopped` | 旧实例还在运行，安装器拒绝热替换 | 先执行同一条报错里给出的 `service stop` 命令，再重跑安装（见第 6 节） |
