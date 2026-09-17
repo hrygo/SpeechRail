@@ -700,6 +700,63 @@ def inspect_prepared_artifacts(
     return tuple(statuses)
 
 
+def registered_prepared_artifacts(
+    app_home: Path,
+    *,
+    preset_id: str,
+    catalog: ModelCatalog | None = None,
+    runtime_lock: RuntimeLock | None = None,
+) -> tuple[str, ...]:
+    """Return the preset's artifact keys a registered snapshot already covers.
+
+    This reads the registry and does one directory check per artifact, so a
+    caller can tell a first-time download apart from an upgrade that only
+    re-verifies local bytes.  It is not proof of content: preparation still
+    re-verifies every file and downloads whatever fails.
+    """
+    resolved_app_home, selected_catalog, selected_lock = _resolver_inputs(
+        app_home, catalog, runtime_lock
+    )
+    try:
+        preset = selected_catalog.preset(preset_id)
+    except KeyError as exc:
+        raise ModelStoreError(f"unknown preset: {preset_id}") from exc
+    artifacts_by_key = {artifact.key: artifact for artifact in selected_catalog.artifacts}
+    keys = [preset.asr, preset.tts]
+    if preset.tts_clone is not None:
+        keys.append(preset.tts_clone)
+    registry = _read_registry(_registry_path(resolved_app_home))
+    prepared = registry.get("prepared")
+    if not isinstance(prepared, dict):
+        return ()
+    models_root = resolved_app_home / "models"
+    covered: list[str] = []
+    for key in keys:
+        try:
+            artifact = artifacts_by_key[key]
+        except KeyError as exc:
+            raise ModelStoreError(f"preset {preset_id} references an unknown artifact") from exc
+        destination = models_root / artifact.key
+        if destination.is_symlink() or not destination.is_dir():
+            continue
+        for candidate in prepared.values():
+            if not isinstance(candidate, dict):
+                continue
+            if candidate.get("runtime_lock_id") != selected_lock.id:
+                continue
+            candidate_artifacts = candidate.get("artifacts")
+            if not isinstance(candidate_artifacts, dict):
+                continue
+            entry = candidate_artifacts.get(artifact.key)
+            if not _entry_matches_artifact(entry, artifact):
+                continue
+            if _entry_path(entry, resolved_app_home) != destination:
+                continue
+            covered.append(artifact.key)
+            break
+    return tuple(covered)
+
+
 def _cache_path(
     registry: Mapping[str, object], app_home: Path, models_root: Path, artifact: ModelArtifact
 ) -> Path | None:
@@ -1504,6 +1561,7 @@ __all__ = [
     "PreparedModelSet",
     "inspect_prepared_artifacts",
     "prepare_models",
+    "registered_prepared_artifacts",
     "resolve_prepared_models",
     "resolve_prepared_selection",
     "safe_artifact_path",

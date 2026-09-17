@@ -137,7 +137,9 @@ prepares and verifies the tier's model artifacts, runs preflight, switches
 so the installer can never drift from the code it installs. Repeating the
 command upgrades an existing install; stop the running service first, because
 the installer refuses to replace `runtime/current` while port 8201 is owned.
-The `--from` glob needs exactly one `speechrail-*.whl` in the directory.
+Verified local model snapshots are reused instead of re-downloaded, and the
+command reports what it will fetch before it starts. The `--from` glob needs
+exactly one `speechrail-*.whl` in the directory.
 
 ### From the repository
 

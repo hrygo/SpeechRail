@@ -748,6 +748,80 @@ def _install_service_base_url(app_home: Path) -> str:
     return f"http://127.0.0.1:{_service_port(app_home)}"
 
 
+_INSTALL_PHASES = {
+    "cache_hit": "Reusing verified model",
+    "download": "Downloading",
+    "retry": "Retrying",
+    "verifying": "Verifying",
+    "publishing": "Publishing verified models",
+    "verified": "Verified local models",
+}
+
+
+def _describe_install_event(event: dict[str, object]) -> str | None:
+    """Render one installer progress event as a line a first-time user can read."""
+    phase = event.get("phase")
+    if not isinstance(phase, str):
+        return None
+    label = _INSTALL_PHASES.get(phase)
+    if label is None:
+        return phase
+    artifact = event.get("artifact")
+    target = artifact if isinstance(artifact, str) else event.get("file")
+    done = event.get("bytes")
+    expected = event.get("expected_bytes")
+    if (
+        phase == "download"
+        and isinstance(done, int)
+        and isinstance(expected, int)
+        and expected > 0
+    ):
+        # One line per 10%: a chunk-by-chunk log would bury the interesting phases.
+        percent = min(max(done, 0), expected) * 10 // expected * 10
+        reported = expected * percent // 100
+        name = target if isinstance(target, str) else "model"
+        return f"{label} {name} {percent}% ({_format_bytes(reported)} / {_format_bytes(expected)})"
+    if isinstance(target, str):
+        return f"{label} {target}"
+    return label
+
+
+def _install_download_plan(app_home: Path, preset_id: str) -> tuple[tuple[str, ...], int] | None:
+    """Return the artifacts an install still has to fetch, and their size.
+
+    Only the registry and the catalog are read, so this stays cheap and cannot
+    itself download: preparation still re-verifies every local file and fetches
+    whatever fails.  ``None`` means the plan could not be determined.
+    """
+    from speechrail.config.model_catalog import load_catalog, load_runtime_lock
+    from speechrail.service.model_store import (
+        ModelStoreError,
+        registered_prepared_artifacts,
+    )
+
+    try:
+        catalog = load_catalog()
+        runtime_lock = load_runtime_lock()
+        covered = set(
+            registered_prepared_artifacts(
+                app_home,
+                preset_id=preset_id,
+                catalog=catalog,
+                runtime_lock=runtime_lock,
+            )
+        )
+        preset = catalog.preset(preset_id)
+    except (KeyError, ModelStoreError, OSError, ValueError):
+        return None
+    keys = [preset.asr, preset.tts]
+    if preset.tts_clone is not None:
+        keys.append(preset.tts_clone)
+    artifacts_by_key = {artifact.key: artifact for artifact in catalog.artifacts}
+    pending = tuple(key for key in keys if key not in covered and key in artifacts_by_key)
+    size = sum(item.size for key in pending for item in artifacts_by_key[key].files)
+    return pending, size
+
+
 def _installed_preset(app_home: Path) -> str | None:
     """Return the preset this app home already committed to, if any.
 
@@ -792,8 +866,21 @@ def _run_install(args: argparse.Namespace) -> int:
         suffix = " (kept from the installed service)" if carried else ""
         print(f"Profile: {preset}{suffix} (ASR={summary.asr}, TTS={summary.tts})")
         print(f"App home: {app_home}")
-        budget = _format_bytes(summary.download_bytes)
-        print(f"Download up to {budget} before the service is ready.")
+        plan = _install_download_plan(app_home, preset)
+        if plan is None:
+            budget = _format_bytes(summary.download_bytes)
+            print(f"Download up to {budget} before the service is ready.")
+        elif not plan[0]:
+            print(
+                "Models: local snapshots are already registered; "
+                "expect no download unless those files changed."
+            )
+        else:
+            pending, pending_bytes = plan
+            print(
+                f"Models: downloading {', '.join(pending)} "
+                f"(up to {_format_bytes(pending_bytes)})."
+            )
     if not _confirm(args.yes):
         if machine_output:
             _print_machine(
@@ -812,14 +899,33 @@ def _run_install(args: argparse.Namespace) -> int:
 
     from speechrail.service.modelscope import ModelScopeDownloader
 
+    last_line = ""
+    downloaded: dict[tuple[str, str], int] = {}
+    reused: set[str] = set()
+
     def progress(event: dict[str, object]) -> None:
+        nonlocal last_line
         if machine_output:
             _print_machine({"event": "progress", "command": "install", **event})
-        else:
-            phase = event.get("phase", "preparing")
-            artifact = event.get("artifact")
-            suffix = f" ({artifact})" if isinstance(artifact, str) else ""
-            print(f"{phase}{suffix}", flush=True)
+            return
+        phase = event.get("phase")
+        artifact = event.get("artifact")
+        file_name = event.get("file")
+        written = event.get("bytes")
+        if (
+            phase == "download"
+            and isinstance(artifact, str)
+            and isinstance(file_name, str)
+            and isinstance(written, int)
+        ):
+            key = (artifact, file_name)
+            downloaded[key] = max(downloaded.get(key, 0), written)
+        elif phase == "cache_hit" and isinstance(artifact, str):
+            reused.add(artifact)
+        line = _describe_install_event(event)
+        if line is not None and line != last_line:
+            last_line = line
+            print(line, flush=True)
 
     timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
     try:
@@ -849,6 +955,7 @@ def _run_install(args: argparse.Namespace) -> int:
 
     runtime_cli = result.runtime_python.parent / "speechrail"
     base_url = _install_service_base_url(result.app_home)
+    downloaded_bytes = sum(downloaded.values())
     ready: bool | None = None
     readiness_detail = ""
     if enable:
@@ -862,9 +969,11 @@ def _run_install(args: argparse.Namespace) -> int:
             "app_home": str(result.app_home),
             "base_url": base_url,
             "command": "install",
+            "downloaded_bytes": downloaded_bytes,
             "enabled": result.enabled,
             "prepared_id": result.prepared_id,
             "preset": preset,
+            "reused_artifacts": sorted(reused),
             "runtime_cli": str(runtime_cli),
             "runtime_python": str(result.runtime_python),
             "status": "committed",
@@ -877,6 +986,10 @@ def _run_install(args: argparse.Namespace) -> int:
     print(f"Runtime: {result.runtime_python}")
     if result.prepared_id is not None:
         print(f"Prepared models: {result.prepared_id}")
+    if downloaded_bytes:
+        print(f"Model download: {_format_bytes(downloaded_bytes)} of new files.")
+    elif reused:
+        print(f"Model download: none; reused {len(reused)} verified local snapshots.")
     if result.enabled:
         print("com.speechrail is registered and started.")
         if ready:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import shutil
 import stat
 from collections import Counter
 from collections.abc import AsyncIterator, Mapping
@@ -24,6 +25,7 @@ from speechrail.service.model_store import (
     PreparedModelSet,
     inspect_prepared_artifacts,
     prepare_models,
+    registered_prepared_artifacts,
     resolve_prepared_models,
     resolve_prepared_selection,
     safe_artifact_path,
@@ -589,6 +591,64 @@ async def test_cache_snapshot_hashes_each_reused_artifact_file_once(
     asr = next(item for item in catalog.artifacts if item.key == "asr")
     for item in asr.files:
         assert counts[f"models/asr/{item.path}"] == 1
+
+
+@pytest.mark.anyio
+async def test_registered_artifacts_separate_reuse_from_download(tmp_path: Path) -> None:
+    """The install plan must not promise a download the registry already covers."""
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+
+    balanced = registered_prepared_artifacts(
+        tmp_path, preset_id="balanced", catalog=catalog, runtime_lock=lock
+    )
+    assert set(balanced) == {"asr", "custom"}
+
+    quality = registered_prepared_artifacts(
+        tmp_path, preset_id="quality", catalog=catalog, runtime_lock=lock
+    )
+    assert set(quality) == {"asr"}
+
+
+@pytest.mark.anyio
+async def test_registered_artifacts_ignore_a_stale_catalog_or_runtime(tmp_path: Path) -> None:
+    """A changed revision or runtime lock means the local bytes are re-fetched."""
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+
+    changed_catalog, _ = _catalog(revision_suffix="0")
+    assert (
+        registered_prepared_artifacts(
+            tmp_path, preset_id="balanced", catalog=changed_catalog, runtime_lock=lock
+        )
+        == ()
+    )
+    assert (
+        registered_prepared_artifacts(
+            tmp_path,
+            preset_id="balanced",
+            catalog=catalog,
+            runtime_lock=_runtime_lock("other-lock"),
+        )
+        == ()
+    )
+
+
+@pytest.mark.anyio
+async def test_registered_artifacts_ignore_a_missing_local_directory(tmp_path: Path) -> None:
+    """Registry evidence alone is not reuse: the snapshot directory must exist."""
+    catalog, payloads = _catalog()
+    lock = _runtime_lock()
+    await _prepare(tmp_path, catalog, lock, FakeDownloader(payloads), preset="balanced")
+
+    shutil.rmtree(tmp_path / "models" / "custom")
+
+    covered = registered_prepared_artifacts(
+        tmp_path, preset_id="balanced", catalog=catalog, runtime_lock=lock
+    )
+    assert set(covered) == {"asr"}
 
 
 @pytest.mark.anyio

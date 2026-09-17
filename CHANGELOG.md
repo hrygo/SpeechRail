@@ -10,11 +10,13 @@
 - CI 在 macOS 打包阶段用刚构建的 wheel 真实执行 `speechrail install --help`，"release 可独立安装"因此有回归门，而不只是文档承诺。
 - `install_managed(...)` 增加可选 `progress` 回调，安装过程可按阶段回报进度。
 - `speechrail install --enable` 现在会轮询 `/readyz` 再报告结果：就绪时打印服务地址与 HTTP 200，超时不算失败，而是打印 preflight 与 curl 排查命令；命令结尾固定打印已安装 runtime 的 `speechrail` CLI 路径和双击即可换档位的 `SpeechRail 设置.command` 路径。
+- `speechrail install` 开始前给出下载计划：只读本机登记表（新增公开查询 `registered_prepared_artifacts()`），模型已登记时打印 `expect no download`，否则列出待下载制品与上限；过程中把原始事件渲染成 `Reusing verified model …` / `Downloading … 30% (0.9 GiB / 2.9 GiB)`（每 10% 一行，不再逐块刷屏），结束后打印本次实际下载量。`--json` envelope 相应增加 `downloaded_bytes` 与 `reused_artifacts`。
 
 ### Changed
 
 - [安装与首次使用](docs/users/installing-speechrail.md) 改为 release wheel 优先：安装、升级、卸载都用已安装 runtime 自带的 CLI，clone 仓库的零配置流程下沉为 2.6.6 及更早版本的路径。根 `README.md` 与 [运行时与部署](docs/operations/runtime-deployment.md) 同步，后者的安装示例改用 `speechrail.service.managed_install`。
 - `speechrail install` 的首次使用门槛按实测反馈收紧：只有一个 app home 时省略 `--preset` 会沿用已安装档位（不再被内存推荐改档），缺 `uv` 时在准备模型前直接给出安装地址，两类阻塞失败（服务在运行、显式档位与已装档位冲突）翻译成可直接复制执行的命令而不是原始 installer 错误。
+- [安装与首次使用](docs/users/installing-speechrail.md) 补上"升级不会重新下载已校验模型"的判定依据（`prepared_id` = 档位 + runtime lock + 逐文件 sha256）、`runtime/releases` 旧目录不会自动清理及各档位实际磁盘占用口径。
 
 ### Fixed
 

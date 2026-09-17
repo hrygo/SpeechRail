@@ -171,6 +171,120 @@ def test_install_emits_one_machine_envelope(
     assert payload["status"] == "committed"
     assert payload["preset"] == "light"
     assert payload["enabled"] is False
+    assert payload["downloaded_bytes"] == 0
+    assert payload["reused_artifacts"] == []
+
+
+def test_install_says_when_local_snapshots_are_already_registered(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The header must answer "will this download my models again?" up front."""
+    _write_wheel(tmp_path, __version__)
+    monkeypatch.setattr(cli, "_install_download_plan", lambda _home, _preset: ((), 0))
+
+    assert main(["install", "--yes", "--preset", "light"]) == 0
+
+    assert "expect no download" in capsys.readouterr().out
+
+
+def test_install_names_the_artifacts_it_still_has_to_fetch(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+    monkeypatch.setattr(
+        cli, "_install_download_plan", lambda _home, _preset: (("tts-1.7b-base-q8",), 2 * 1024**3)
+    )
+
+    assert main(["install", "--yes", "--preset", "quality"]) == 0
+
+    out = capsys.readouterr().out
+    assert "downloading tts-1.7b-base-q8" in out
+    assert "up to 2.0 GiB" in out
+
+
+def test_install_renders_progress_and_a_download_summary(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Chunk-level events must collapse into readable lines plus one honest total."""
+    _write_wheel(tmp_path, __version__)
+    expected_bytes = 1_600_000_000
+
+    def fake_install_managed(wheel: Path, **kwargs: Any) -> InstallResult:
+        progress = kwargs["progress"]
+        progress({"phase": "cache_hit", "artifact": "asr-1.7b-q8"})
+        for written in range(0, 1_500_000_000, 100_000_000):
+            progress(
+                {
+                    "phase": "download",
+                    "artifact": "tts-1.7b-base-q8",
+                    "file": "model.safetensors",
+                    "bytes": written,
+                    "expected_bytes": expected_bytes,
+                }
+            )
+        progress({"phase": "verifying", "artifact": "tts-1.7b-base-q8"})
+        progress({"phase": "verified", "preset": "quality"})
+        install_calls.append({"wheel": wheel, **kwargs})
+        app_home = Path(kwargs["app_home"])
+        return InstallResult(
+            app_home=app_home,
+            runtime_python=app_home / "runtime/current/.venv/bin/python",
+            plist_path=Path.home() / "Library/LaunchAgents/com.speechrail.plist",
+            enabled=False,
+            prepared_id="prepared-quality",
+            runtime_key="runtime-test",
+        )
+
+    monkeypatch.setattr(managed_install, "install_managed", fake_install_managed)
+
+    assert main(["install", "--yes", "--preset", "quality"]) == 0
+
+    out = capsys.readouterr().out
+    assert "Reusing verified model asr-1.7b-q8" in out
+    assert "Verifying tts-1.7b-base-q8" in out
+    assert "Verified local models" in out
+    assert "Downloading tts-1.7b-base-q8 80% (1.2 GiB / 1.5 GiB)" in out
+    # 15 chunk events collapse into one line per 10% bucket that is reached.
+    assert out.count("Downloading tts-1.7b-base-q8") == 9
+    assert "Model download: 1.3 GiB of new files." in out
+
+
+def test_install_reports_a_rerun_that_downloaded_nothing(
+    install_calls: list[dict[str, Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_wheel(tmp_path, __version__)
+
+    def fake_install_managed(wheel: Path, **kwargs: Any) -> InstallResult:
+        kwargs["progress"]({"phase": "cache_hit", "artifact": "asr-1.7b-q8"})
+        kwargs["progress"]({"phase": "cache_hit", "artifact": "tts-1.7b-base-q8"})
+        install_calls.append({"wheel": wheel, **kwargs})
+        app_home = Path(kwargs["app_home"])
+        return InstallResult(
+            app_home=app_home,
+            runtime_python=app_home / "runtime/current/.venv/bin/python",
+            plist_path=Path.home() / "Library/LaunchAgents/com.speechrail.plist",
+            enabled=False,
+            prepared_id="prepared-quality",
+            runtime_key="runtime-test",
+        )
+
+    monkeypatch.setattr(managed_install, "install_managed", fake_install_managed)
+
+    assert main(["install", "--yes", "--preset", "quality"]) == 0
+
+    assert "Model download: none; reused 2 verified local snapshots." in capsys.readouterr().out
 
 
 class _ReadyResponse:

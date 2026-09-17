@@ -41,7 +41,9 @@ shasum -a 256 -c SHA256SUMS
 - 已发布的 wheel 平台标签是 `macosx_26_0_arm64`；按 PEP 425 语义，`pip` / `uv` 只在 macOS 26
   及以上接受它。需要在 macOS 14/15 上部署时，用第 3.2 节的仓库流程在目标机构建 wheel。
 - 磁盘：单次全新安装预留 **≥ 25 GB**（`light` 约 2.99 GB、`balanced` 约 5.96 GB、`quality` 约
-  10.73 GB 的模型，外加隔离运行时；每次安装都会在 `runtime/releases` 新增目录，installer 不自动清理旧版本）。
+  10.73 GB 的模型，外加隔离运行时）。模型与 vendor runtime 按清单复用，升级不会重复占用；但每次
+  安装都会在 `runtime/releases` 新增一个目录，安装器不自动清理旧版本——确认不再需要回退后，可以手动
+  删除旧的 `runtime/releases/<旧版本>`，唯一不能删的是 `runtime/current` 指向的那份。
 - 首次安装需要联网：先访问 PyPI 装 wheel 的依赖，再访问项目锁定的模型源取模型 snapshot。模型准备
   只在显式确认（`--yes`）后发生，请求路径不会下载模型。
 - `uv`：安装命令通过 `uvx` 调用，Python 3.12 由它按需取用。缺少 `uv` 时 `install` 会在准备模型前
@@ -86,6 +88,9 @@ uvx --python 3.12 --from ./speechrail-*.whl \
 - 不加 `--enable` 时只安装不启动，命令结尾会打印该 runtime 自己的 `service start` 命令。
 - 命令结尾固定打印三样东西：已安装 runtime 的 `speechrail` CLI 路径、双击即可换档位的
   `SpeechRail 设置.command`、以及服务地址（默认 `http://127.0.0.1:8201`）。
+- 命令开始时就会说明要下载什么：本机已登记且校验通过的模型会打印
+  `Models: local snapshots are already registered; expect no download.`，否则列出待下载的制品；
+  过程中逐条打印 `Reusing verified model …` / `Downloading …`，结束时给出实际下载量。
 - **升级必须先停服务**：运行中的实例占用 8201，安装器会 fail-closed 拒绝在运行中替换
   `runtime/current`。完整三步见第 6 节；失败时安装器保持或恢复原状态，上一 release、私有 `.env`、
   档位记录和模型都保留。
@@ -176,6 +181,11 @@ uvx --python 3.12 --from ./speechrail-*.whl speechrail install --yes --enable
   省略 `--preset` 会沿用当前档位；换档位用 `"$SPEECHRAIL_CLI" profile apply <tier> --yes`。
   不要手工替换 `runtime/current` 或直接编辑 release venv。回退方式见
   [SpeechRail 版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)。
+
+  **升级不会重新下载已校验的模型。** 安装器按 `prepared_id`（档位 + runtime lock + 每个文件的
+  sha256 清单）复用本机 `models/<key>`，只重下清单变化、缺失或被改动的那些文件；分人资产按锁定清单、
+  vendor runtime 按 runtime lock 同样复用。所以升级的主要耗时是本机校验（读盘）与 preflight，
+  实测 `quality`（8.06 GiB 模型）复用校验约 3 秒，冷盘更慢但仍不产生下载流量。
 - **升级 App**：退出旧 App，把新的 `SpeechRail.app` 复制到同一安装路径，保留上一份制品以便回滚。
 - **卸载 App**：退出并删除 App bundle 即可，不影响正在运行的服务。
 - **卸载服务**：
