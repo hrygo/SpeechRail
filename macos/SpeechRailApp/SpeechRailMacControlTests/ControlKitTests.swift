@@ -217,6 +217,40 @@ final class ControlKitTests: XCTestCase {
         )
     }
 
+    /// 图上的耗时折线在无障碍侧也按毫秒报：序列名里的单位与 `y` 必须是同一个口径，
+    /// 否则 VoiceOver 读到的数与它说的单位对不上（2026-09-17）。
+    func testRuntimeMonitoringChartDescriptorReportsLatencyInMilliseconds() throws {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let chart = RuntimeMonitoringChartDescriptor(
+            points: [
+                RuntimeMonitoringChartPoint(capturedAt: start, activeRequests: 1),
+                RuntimeMonitoringChartPoint(
+                    capturedAt: start.addingTimeInterval(5),
+                    activeRequests: 2
+                ),
+            ],
+            latency: [
+                RuntimeLatencySample(capturedAt: start, asrSeconds: 0.42, ttsSeconds: nil),
+                RuntimeLatencySample(
+                    capturedAt: start.addingTimeInterval(5),
+                    asrSeconds: nil,
+                    ttsSeconds: 1.5
+                ),
+            ]
+        ).makeChartDescriptor()
+
+        let names = chart.series.map(\.name)
+        XCTAssertTrue(names.contains("语音识别耗时（毫秒）"))
+        XCTAssertTrue(names.contains("语音合成耗时（毫秒）"))
+        XCTAssertEqual(chart.yAxis?.title, "同时处理（左轴）／耗时（毫秒，右轴）")
+
+        let asrPoint = try XCTUnwrap(
+            chart.series.first { $0.name == "语音识别耗时（毫秒）" }?.dataPoints.first
+        )
+        // `AXDataPointValue.number` 是 `NS_REFINED_FOR_SWIFT`，Swift 侧的名字带前缀。
+        XCTAssertEqual(try XCTUnwrap(asrPoint.yValue?.__number), 420, accuracy: 0.001)
+    }
+
     func testRuntimeMetricsSamplerIncludesPublishedSignalsAndAdjacentRates() {
         let firstDate = Date(timeIntervalSince1970: 1_700_000_000)
         let first = RuntimeMetricsSnapshot(
@@ -506,7 +540,12 @@ final class ControlKitTests: XCTestCase {
         )
         XCTAssertEqual(
             RuntimeHistogramPresentation.unit(forMetric: "speechrail_tts_inference_duration_seconds"),
-            "秒"
+            "ms"
+        )
+        // 接口响应时间也是耗时，同样按毫秒读。
+        XCTAssertEqual(
+            RuntimeHistogramPresentation.unit(forMetric: "speechrail_http_request_duration_seconds"),
+            "ms"
         )
         // 倍率是比值，没有单位。
         XCTAssertEqual(RuntimeHistogramPresentation.unit(forMetric: "speechrail_asr_rtf"), "")
@@ -523,9 +562,30 @@ final class ControlKitTests: XCTestCase {
             "speechrail_unknown_seconds"
         )
         XCTAssertEqual(
-            RuntimeHistogramPresentation.formattedAverage(0.4125, unit: "秒"),
-            "0.412 秒"
+            RuntimeHistogramPresentation.formattedAverage(0.4126, unit: "ms"),
+            "413 ms"
         )
+    }
+
+    /// 耗时按毫秒报（2026-09-17 用户指令「时间单位改 ms」）：入参是秒域的原始值，
+    /// 1 ms 及以上取整、毫秒以下保留两位，绝不把真实的亚毫秒耗时写成 `0 ms`。
+    func testLatencyPresentationReportsMilliseconds() {
+        XCTAssertEqual(RuntimeLatencyPresentation.text(seconds: 0.4126), "413 ms")
+        XCTAssertEqual(RuntimeLatencyPresentation.text(seconds: 0.001), "1 ms")
+        XCTAssertEqual(RuntimeLatencyPresentation.text(seconds: 0.0004), "0.40 ms")
+        XCTAssertEqual(RuntimeLatencyPresentation.text(seconds: 0), "0 ms")
+        XCTAssertEqual(
+            RuntimeLatencyPresentation.milliseconds(fromSeconds: 0.064),
+            64,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(RuntimeLatencyPresentation.unit, "ms")
+        // 无障碍口径说「毫秒」：VoiceOver 把 `ms` 逐字母念出来不是中文页面的读法。
+        XCTAssertEqual(RuntimeLatencyPresentation.spokenUnit, "毫秒")
+        XCTAssertEqual(RuntimeLatencyPresentation.spokenText(seconds: 0.064), "64 毫秒")
+        XCTAssertEqual(RuntimeHistogramPresentation.spokenAverage(0.064, unit: "ms"), "64 毫秒")
+        // 倍率是比值：没有单位，两种口径都给同一个数。
+        XCTAssertEqual(RuntimeHistogramPresentation.spokenAverage(2.5, unit: ""), "2.500")
     }
 
     func testProfileSummaryAcceptsLegacyPayloadWithoutDiarization() throws {

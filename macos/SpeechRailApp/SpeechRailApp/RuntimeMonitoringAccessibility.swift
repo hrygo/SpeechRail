@@ -23,7 +23,7 @@ public struct RuntimeMonitoringChartPoint: Equatable, Sendable {
 
 public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
     public let points: [RuntimeMonitoringChartPoint]
-    /// 同一张图上的耗时折线（秒）。
+    /// 同一张图上的耗时折线（数据是秒，读数按毫秒给）。
     ///
     /// 2026-09-16 用户复核把「上下一共两张图、各一根纵轴」合并成一张图之后，
     /// 这张图的描述符必须同时讲清两件事：面积是请求量、折线是耗时——否则 VoiceOver
@@ -39,7 +39,7 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
         points: [RuntimeMonitoringChartPoint],
         latency: [RuntimeLatencySample] = [],
         seriesNames: [String] = ["实时语音会话", "单次请求"],
-        latencyCaption: String = "折线是每次的耗时（秒），读右侧刻度。"
+        latencyCaption: String = "折线是每次的耗时（\(RuntimeLatencyPresentation.spokenUnit)），读右侧刻度。"
     ) {
         self.points = points
         self.latency = latency
@@ -69,9 +69,11 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
             1,
             sortedPoints.map(\.activeRequests).max() ?? 1
         )
-        // 一个绘图区、两套刻度：左轴数请求个数、右轴数秒。只有耗时折线在场时才需要点明。
+        // 一个绘图区、两套刻度：左轴数请求个数、右轴数耗时（毫秒）。
+        // 只有耗时折线在场时才需要点明。
+        let latencyUnit = RuntimeLatencyPresentation.spokenUnit
         let yAxis = AXNumericDataAxisDescriptor(
-            title: latency.isEmpty ? "同时处理" : "同时处理（左轴）／耗时（秒，右轴）",
+            title: latency.isEmpty ? "同时处理" : "同时处理（左轴）／耗时（\(latencyUnit)，右轴）",
             range: 0 ... Double(maximumRequests),
             gridlinePositions: [0, Double(maximumRequests)],
             valueDescriptionProvider: { value in
@@ -101,22 +103,23 @@ public struct RuntimeMonitoringChartDescriptor: AXChartDescriptorRepresentable {
                 dataPoints: dataPoints(\.batchActiveRequests)
             ),
         ]
-        // 耗时序列的数据点是「桶里的平均值」，不是某一次请求的耗时（§7.6）。
+        // 耗时序列的数据点是「桶里的平均值」，不是某一次请求的耗时（§7.6）；
+        // 数值同样换成毫秒——序列名里的单位与 `y` 必须是同一个口径。
         let sortedLatency = latency.sorted { $0.capturedAt < $1.capturedAt }
         let latencySeries = [
-            ("语音识别耗时（秒）", sortedLatency.compactMap { sample -> AXDataPoint? in
+            ("语音识别耗时（\(latencyUnit)）", sortedLatency.compactMap { sample -> AXDataPoint? in
                 guard let seconds = sample.asrSeconds else { return nil }
                 return AXDataPoint(
                     x: sample.capturedAt.timeIntervalSince1970,
-                    y: seconds,
+                    y: RuntimeLatencyPresentation.milliseconds(fromSeconds: seconds),
                     label: sample.capturedAt.formatted(.dateTime.hour().minute())
                 )
             }),
-            ("语音合成耗时（秒）", sortedLatency.compactMap { sample -> AXDataPoint? in
+            ("语音合成耗时（\(latencyUnit)）", sortedLatency.compactMap { sample -> AXDataPoint? in
                 guard let seconds = sample.ttsSeconds else { return nil }
                 return AXDataPoint(
                     x: sample.capturedAt.timeIntervalSince1970,
-                    y: seconds,
+                    y: RuntimeLatencyPresentation.milliseconds(fromSeconds: seconds),
                     label: sample.capturedAt.formatted(.dateTime.hour().minute())
                 )
             }),

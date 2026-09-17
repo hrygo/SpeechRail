@@ -256,13 +256,13 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "tts-latency",
                 title: "合成耗时",
-                value: window.ttsLatencySeconds.map(formatDuration) ?? "—",
+                value: window.ttsLatencySeconds.map(formatLatency) ?? "—",
                 detail: latencyDetail(requestCount: usage.ttsRequests)
             ),
             MetricValue(
                 id: "asr-latency",
                 title: "识别耗时",
-                value: window.asrLatencySeconds.map(formatDuration) ?? "—",
+                value: window.asrLatencySeconds.map(formatLatency) ?? "—",
                 detail: latencyDetail(requestCount: usage.asrRequests)
             ),
             MetricValue(
@@ -312,7 +312,7 @@ public struct RuntimeMonitoringView: View {
         return "共 \(formatAudioDuration(seconds))"
     }
 
-    /// 耗时副行必须说明它是平均值、并给出证据量：「0.42 秒」单独放着，用户无法判断
+    /// 耗时副行必须说明它是平均值、并给出证据量：「420 ms」单独放着，用户无法判断
     /// 它是一次的结果还是一百次的平均。
     private func latencyDetail(requestCount: Double?) -> String {
         guard let count = requestCount, count > 0 else { return "这段时间没有样本" }
@@ -527,7 +527,7 @@ public struct RuntimeMonitoringView: View {
                             Text(RuntimeHistogramPresentation.voiceClassTitle(row.voiceClass))
                                 .font(SpeechRailDesignTokens.Typography.body)
                             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                            Text(formatSeconds(row.seconds))
+                            Text(formatLatency(row.seconds))
                                 .font(SpeechRailDesignTokens.Typography.technical)
                                 .monospacedDigit()
                             Text("样本 \(Int(row.count.rounded()))")
@@ -643,7 +643,10 @@ public struct RuntimeMonitoringView: View {
         let id: String
         let title: String
         let count: Int
+        /// 可见读数（耗时是毫秒）。
         let average: String
+        /// 朗读读数：同数不同单位，`ms` 让 VoiceOver 逐字母念。
+        let spokenAverage: String
     }
 
     private var workerRows: [WorkerStatusRow] {
@@ -664,7 +667,7 @@ public struct RuntimeMonitoringView: View {
         return histograms.keys.sorted().flatMap { name -> [HistogramSummaryRow] in
             guard let series = histograms[name] else { return [] }
             // 名字与标签都翻成用户语言，单位跟着指标走——「累计平均」这一列如果不带单位，
-            // 秒和倍率看上去就会是同一种东西（REDESIGN-SPEC §7.6）。
+            // 毫秒数和倍率看上去就会是同一种东西（REDESIGN-SPEC §7.6）。
             let unit = RuntimeHistogramPresentation.unit(forMetric: name)
             let title = RuntimeHistogramPresentation.title(forMetric: name)
             return series.keys.sorted().map { labels in
@@ -676,6 +679,9 @@ public struct RuntimeMonitoringView: View {
                     count: summary?.count ?? 0,
                     average: summary.map {
                         RuntimeHistogramPresentation.formattedAverage($0.average, unit: unit)
+                    } ?? "—",
+                    spokenAverage: summary.map {
+                        RuntimeHistogramPresentation.spokenAverage($0.average, unit: unit)
                     } ?? "—"
                 )
             }
@@ -787,7 +793,7 @@ public struct RuntimeMonitoringView: View {
         .frame(minHeight: SpeechRailDesignTokens.List.compactRowHeight)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(row.title)
-        .accessibilityValue("\(row.count) 个样本，累计平均 \(row.average)")
+        .accessibilityValue("\(row.count) 个样本，累计平均 \(row.spokenAverage)")
     }
 
     private var resourceSection: some View {
@@ -933,7 +939,7 @@ public struct RuntimeMonitoringView: View {
                     )
                 } else {
                     realtimeUsageChart
-                    usageLegendNote("面积读左轴（个） · 折线读右轴（秒）")
+                    usageLegendNote("面积读左轴（个） · 折线读右轴（ms）")
                     if !latencySamples.contains(where: { $0.asrSeconds != nil || $0.ttsSeconds != nil }) {
                         latencyEmptyState
                     }
@@ -980,18 +986,20 @@ public struct RuntimeMonitoringView: View {
 
     // MARK: - 使用趋势：一个坐标系，两套刻度
 
-    /// 图卡的纵轴刻度：左边数**请求量**（面积，整数），右边数**耗时**（折线，秒）。
+    /// 图卡的纵轴刻度：左边数**请求量**（面积，整数），右边数**耗时**（折线，毫秒）。
     ///
     /// 两个量单位不同，塞进同一根刻度会把彼此压扁——但画成上下两张图，又让人以为
     /// 「这是两张不同的图」（2026-09-16 用户复核：「为何搞俩坐标系？」→「合并到一个坐标系」）。
-    /// 现在是一根横轴、一个绘图区、**纵轴两套刻度**：左轴的次数是整数，右轴的秒取
-    /// 1 / 2 / 2.5 / 5 × 10ⁿ 的整档，两者用同一个线性比例对齐，所以右轴上读到的是整秒，
-    /// 而不是左轴刻度的换算残数。图上再用**面积 vs 折线**区分这两件事、用颜色区分
-    /// 「合成 / 识别」：面积回答「做了多少」，折线回答「快不快」。
+    /// 现在是一根横轴、一个绘图区、**纵轴两套刻度**：左轴的次数是整数，右轴的耗时取
+    /// 1 / 2 / 2.5 / 5 × 10ⁿ 的整档（最小 25 ms），两者用同一个线性比例对齐，所以右轴上
+    /// 读到的是整档值，而不是左轴刻度的换算残数。图上再用**面积 vs 折线**区分这两件事、
+    /// 用颜色区分「合成 / 识别」：面积回答「做了多少」，折线回答「快不快」。
+    ///
+    /// 刻度仍在**秒域**里算（数据本来就是秒），只在读数时换成毫秒。
     private struct UsageChartScale {
         /// 左轴上限（个 / 次）。
         let countPeak: Double
-        /// 右轴刻度的步长（秒）；右轴上限固定为它的 4 倍。
+        /// 右轴刻度的步长（秒，显示时换成毫秒）；右轴上限固定为它的 4 倍。
         let secondsStep: Double
 
         init(countPeak: Double, secondsPeak: Double) {
@@ -1021,7 +1029,7 @@ public struct RuntimeMonitoringView: View {
         }
     }
 
-    /// 左右两套刻度：左轴是次数（整数，画网格线），右轴是秒（只给刻度值，
+    /// 左右两套刻度：左轴是次数（整数，画网格线），右轴是耗时（毫秒，只给刻度值，
     /// 不画第二条网格线——两套网格叠在一张图上就是噪声）。
     @AxisContentBuilder
     private func usageYAxis(_ scale: UsageChartScale) -> some AxisContent {
@@ -1041,18 +1049,20 @@ public struct RuntimeMonitoringView: View {
         ) { value in
             AxisValueLabel {
                 if let scaled = value.as(Double.self) {
-                    Text(formatAxisSeconds(scaled / scale.secondsToCounts))
+                    Text(formatAxisLatency(scaled / scale.secondsToCounts))
                         .font(SpeechRailDesignTokens.Typography.secondary)
                 }
             }
         }
     }
 
-    /// 右轴刻度的秒：整秒不带小数，半秒这类留一位。
-    private func formatAxisSeconds(_ value: Double) -> String {
-        abs(value - value.rounded()) < 0.001
-            ? String(Int(value.rounded()))
-            : String(format: "%.1f", value)
+    /// 右轴刻度的耗时读数：入参是**秒**域的刻度值，显示成毫秒——整毫秒不带小数，
+    /// 半毫秒这类（刻度步长理论上的极端档）留一位。
+    private func formatAxisLatency(_ seconds: Double) -> String {
+        let ms = RuntimeLatencyPresentation.milliseconds(fromSeconds: seconds)
+        return abs(ms - ms.rounded()) < 0.001
+            ? String(Int(ms.rounded()))
+            : String(format: "%.1f", ms)
     }
 
     /// 图例：颜色（系统图例）说明「合成 / 识别」，这一行说明「面积 / 折线各读哪根轴」。
@@ -1145,7 +1155,7 @@ public struct RuntimeMonitoringView: View {
         )
     }
 
-    /// 耗时折线：值是秒，画之前先换算到左轴域，读数由右轴给出。
+    /// 耗时折线：数据是秒，画之前先换算到左轴域，读数由右轴按毫秒给出。
     ///
     /// 单点画不出线段（`LineMark` 不给单点画符号，它的值却仍会把右轴撑起来），
     /// 所以样本不足两点的序列改画点——装机截图里「有图例、有刻度、没有线」就是这么来的。
@@ -1241,7 +1251,7 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "tts-latency",
                 title: "合成耗时",
-                value: totals?.ttsSeconds.map(formatDuration) ?? "—",
+                value: totals?.ttsSeconds.map(formatLatency) ?? "—",
                 detail: historyLatencyDetail(
                     seconds: totals?.ttsSeconds,
                     p95Seconds: totals?.ttsP95Seconds,
@@ -1252,7 +1262,7 @@ public struct RuntimeMonitoringView: View {
             MetricValue(
                 id: "asr-latency",
                 title: "识别耗时",
-                value: totals?.asrSeconds.map(formatDuration) ?? "—",
+                value: totals?.asrSeconds.map(formatLatency) ?? "—",
                 detail: historyLatencyDetail(
                     seconds: totals?.asrSeconds,
                     p95Seconds: totals?.asrP95Seconds,
@@ -1296,7 +1306,7 @@ public struct RuntimeMonitoringView: View {
         guard seconds != nil else { return "这段时间没有\(action)样本" }
         // p95 取跨度内各桶的最大值，说清楚它是「最慢那一段」而不是整体分位。
         if let p95Seconds {
-            return "按样本量加权的平均 · 最慢一段 p95 \(formatSeconds(p95Seconds))"
+            return "按样本量加权的平均 · 最慢一段 p95 \(formatLatency(p95Seconds))"
         }
         if let requests, requests > 0 {
             return "\(formatCount(requests)) 次\(action)的加权平均"
@@ -1328,7 +1338,7 @@ public struct RuntimeMonitoringView: View {
                 chartHeading
                 if let history, !history.points.isEmpty {
                     historyUsageChart(points: history.points)
-                    usageLegendNote("面积读左轴（次） · 折线读右轴（秒）")
+                    usageLegendNote("面积读左轴（次） · 折线读右轴（ms）")
                     if !history.points.contains(where: { $0.asrSeconds != nil || $0.ttsSeconds != nil }) {
                         latencyEmptyState
                     }
@@ -1460,7 +1470,7 @@ public struct RuntimeMonitoringView: View {
                     )
                 },
                 seriesNames: ["语音合成", "语音识别"],
-                latencyCaption: "折线是每个统计桶的加权平均耗时（秒），读右侧刻度。"
+                latencyCaption: "折线是每个统计桶的加权平均耗时（ms），读右侧刻度。"
             )
         )
     }
@@ -1651,11 +1661,11 @@ public struct RuntimeMonitoringView: View {
             }
             if let sample = latestSample {
                 Divider()
-                detailRow("ASR 延迟", sample.asrLatencySeconds.map(formatSeconds) ?? "样本不足")
-                detailRow("TTS 延迟", sample.ttsLatencySeconds.map(formatSeconds) ?? "样本不足")
+                detailRow("ASR 延迟", sample.asrLatencySeconds.map(formatLatency) ?? "样本不足")
+                detailRow("TTS 延迟", sample.ttsLatencySeconds.map(formatLatency) ?? "样本不足")
                 detailRow("ASR RTF", sample.asrRTF.map(formatRTF) ?? "未提供")
                 detailRow("TTS RTF", sample.ttsRTF.map(formatRTF) ?? "未提供")
-                detailRow("TTS 首帧", sample.ttsTTFASeconds.map(formatSeconds) ?? "样本不足")
+                detailRow("TTS 首帧", sample.ttsTTFASeconds.map(formatLatency) ?? "样本不足")
                 detailRow("实时会话", sample.activeRealtimeSessions.map(String.init) ?? "样本不足")
                 detailRow("活跃请求", String(sample.activeRequests))
                 detailRow("排队请求", String(sample.pendingRequests))
@@ -1734,14 +1744,13 @@ public struct RuntimeMonitoringView: View {
         String(Int(value.rounded()))
     }
 
-    private func formatSeconds(_ value: Double) -> String {
-        String(format: "%.3f s", value)
-    }
-
-    /// 时延说人话：小于 10 秒保留两位，更长就只留一位——这里既不需要毫秒级精度，
-    /// 也不该把 `0.421 s` 这种工程写法摆在首屏。
-    private func formatDuration(_ value: Double) -> String {
-        value < 10 ? String(format: "%.2f 秒", value) : String(format: "%.1f 秒", value)
+    /// 耗时一律按毫秒读（2026-09-17 用户指令「时间单位改 ms」）。
+    ///
+    /// 这一页的耗时——首屏的合成 / 识别耗时、右轴刻度、直方图累计平均、
+    /// 复制摘要——全都走这一处，免得同一种量在同一页出现两种单位。
+    /// 换算规则在 `RuntimeLatencyPresentation`。
+    private func formatLatency(_ seconds: Double) -> String {
+        RuntimeLatencyPresentation.text(seconds: seconds)
     }
 
     /// 音频时长：不足一分钟按秒，超过按「x 分 y 秒」。
@@ -1878,11 +1887,11 @@ public struct RuntimeMonitoringView: View {
         - pending_requests: \(latestSample.map { String($0.pendingRequests) } ?? "未提供")
         - request_rate: \(latestSample?.requestRatePerSecond.map(formatRate) ?? "未提供")
         - queue_rejections: \(latestSample?.queueRejections.map(formatCount) ?? "未提供")
-        - asr_latency: \(latestSample?.asrLatencySeconds.map(formatSeconds) ?? "未提供")
-        - tts_latency: \(latestSample?.ttsLatencySeconds.map(formatSeconds) ?? "未提供")
+        - asr_latency: \(latestSample?.asrLatencySeconds.map(formatLatency) ?? "未提供")
+        - tts_latency: \(latestSample?.ttsLatencySeconds.map(formatLatency) ?? "未提供")
         - asr_rtf: \(latestSample?.asrRTF.map(formatRTF) ?? "未提供")
         - tts_rtf: \(latestSample?.ttsRTF.map(formatRTF) ?? "未提供")
-        - tts_ttfa: \(latestSample?.ttsTTFASeconds.map(formatSeconds) ?? "未提供")
+        - tts_ttfa: \(latestSample?.ttsTTFASeconds.map(formatLatency) ?? "未提供")
         - active_realtime_sessions: \(latestSample?.activeRealtimeSessions.map(String.init) ?? "未提供")
 
         workers:

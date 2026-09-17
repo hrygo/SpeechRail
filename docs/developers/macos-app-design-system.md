@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.5"
-date: 2026-09-16
+version: "0.8.6"
+date: 2026-09-17
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -256,7 +256,7 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
    服务端 lifetime 均值与累计计数器不作为「当前状态」展示；`rate` 与累计口径保留在开发者详情与复制摘要里。
    无数据（样本不足、计数器回退、指标缺失）显示「—」并说明原因，0 次与「读不到」不用同一个符号；
     并发与时延是**一张** Swift Charts 图：一根横轴、一个绘图区、**纵轴两套刻度**——面积读左轴（请求量，整数刻度）、
-    折线读右轴（耗时秒，刻度取 1 / 2 / 2.5 / 5 × 10ⁿ 整档，两者用一个线性比例对齐）。
+   折线读右轴（耗时毫秒，刻度取 1 / 2 / 2.5 / 5 × 10ⁿ 整档，两者用一个线性比例对齐）。
     单位不同不能共用一根刻度，但也不需要两张图（2026-09-16 用户复核「合并到一个坐标系」，§11.6 第六十五轮）。
     图上的点是相邻数据点之间的窗口值，网格线用系统分隔色（只画左轴那一套）、标签取 `secondary`(11)；
     运行组件**由卡自己画表**（列头 `captionMedium` + 行 `Callout` + 1pt `Divider`，
@@ -870,6 +870,17 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 > `scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**；复刻探针实测卡片自然高
 > 266（补齐真实 `CardFoot` 后 ≈ 280，与稿 280.2 同档），视图树里 `NSTableView`/`NSScrollView` 均为 0。
 > **未验证**：装机后的观感、窄窗（1120pt）下第一列与状态列的关系、单元测试与 UI 自动化。
+
+> 2026-09-17 运行监控的**耗时单位改成毫秒**（REDESIGN-SPEC §11.6 第六十九轮，
+> 用户在装机截图上指令「时间单位改 ms」）。展示层口径收进 `RuntimeLatencyPresentation`
+> （`RuntimeMetricsSampler.swift`）：`0.4126` → `413 ms`、`0.001` → `1 ms`、
+> `0.0004` → `0.40 ms`、`0` → `0 ms`，无障碍另给 `spokenUnit = "毫秒"`。
+> `RuntimeHistogramPresentation.unit(forMetric:)` 对四条耗时直方图返回 `ms`，
+> 首屏耗时 / 音色类型耗时 / 累计平均 / p95 / 右轴刻度与图例 / 折叠详情 / 复制摘要 /
+> AX 描述符都走这一处；音频时长与历史跨度仍是秒、分钟。
+> `scripts/macos_app_build.sh --configuration Debug` **BUILD SUCCEEDED**、
+> `xcodebuild … build-for-testing` 编译通过。**未运行单元测试与 UI 自动化**（需当次明确授权）；
+> **未验证**右轴刻度改成毫秒后的目视观感。
 
 ## 7. 变更流程
 新增组件先判断是否能由标准 SwiftUI 控件表达；确需定制时先补充 token 和可访问语义，

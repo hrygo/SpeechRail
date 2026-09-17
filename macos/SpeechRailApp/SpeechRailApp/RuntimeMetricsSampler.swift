@@ -419,10 +419,52 @@ public struct RuntimeVoiceClassLatency: Equatable, Sendable, Identifiable {
     }
 }
 
+/// 耗时的展示口径：界面上一律按毫秒读。
+///
+/// 本机服务的耗时大多落在 1–100 ms 这一档（2026-09-17 装机截图的累计统计里，
+/// `/health` 累计平均 `0.001 秒`、`/metrics` `0.064 秒`），写成秒既读不出量级、
+/// 又要靠小数位分辨快慢。
+/// 数据层与 Prometheus 指标仍是秒（`*_seconds`），换算只发生在展示层；
+/// **音频时长**（「合成 12.34 秒音频」）与**历史跨度**（「每 5 分钟」）是另一种量，
+/// 仍按秒 / 分钟说人话，不走这里。
+public enum RuntimeLatencyPresentation {
+    /// 可见文本的单位后缀：与技术口径一致，也短。
+    public static let unit = "ms"
+    /// 无障碍口径。VoiceOver 读 `ms` 是逐字母念，中文页面写「毫秒」。
+    public static let spokenUnit = "毫秒"
+
+    public static func milliseconds(fromSeconds seconds: Double) -> Double {
+        seconds * 1_000
+    }
+
+    /// `0.4126` → `413 ms`、`0.001` → `1 ms`、`0.0004` → `0.40 ms`、`0` → `0 ms`。
+    ///
+    /// 1 ms 及以上取整：服务的耗时没有比毫秒更细的意义。毫秒以下保留两位，
+    /// 免得真实的亚毫秒耗时被写成 `0 ms`——那和「没有测量」看起来一样。
+    public static func text(seconds: Double) -> String {
+        "\(numberText(seconds: seconds)) \(unit)"
+    }
+
+    /// 无障碍读数：数值一样，单位说「毫秒」。
+    public static func spokenText(seconds: Double) -> String {
+        "\(numberText(seconds: seconds)) \(spokenUnit)"
+    }
+
+    /// 数值部分，单位由调用方接——可见口径与朗读口径共用它，
+    /// 免得两种口径的换算规则各写一遍。
+    private static func numberText(seconds: Double) -> String {
+        let ms = milliseconds(fromSeconds: seconds)
+        return (ms > 0 && ms < 1) ? String(format: "%.2f", ms) : String(format: "%.0f", ms)
+    }
+}
+
 /// 把 `/metrics` 的直方图名字与标签串翻成用户语言。
 ///
 /// 指标原文是运维口径的唯一事实（排障、对 Grafana 时要用它），所以翻译只发生在展示层；
 /// 认不出的名字原样保留，不替它编一个含义。
+///
+/// 耗时一律按毫秒给读数（`RuntimeLatencyPresentation`），音频时长与历史跨度
+/// 是另一种量，仍按秒 / 分钟说人话。
 public enum RuntimeHistogramPresentation {
     public static func title(forMetric name: String) -> String {
         switch name {
@@ -443,7 +485,7 @@ public enum RuntimeHistogramPresentation {
         }
     }
 
-    /// 平均值这一列的单位。倍率是比值，没有单位。
+    /// 平均值这一列的单位。耗时是毫秒，倍率是比值、没有单位。
     public static func unit(forMetric name: String) -> String {
         switch name {
         case "speechrail_asr_rtf", "speechrail_tts_rtf":
@@ -452,7 +494,7 @@ public enum RuntimeHistogramPresentation {
              "speechrail_tts_inference_duration_seconds",
              "speechrail_tts_ttfa_seconds",
              "speechrail_http_request_duration_seconds":
-            "秒"
+            RuntimeLatencyPresentation.unit
         default:
             ""
         }
@@ -484,10 +526,21 @@ public enum RuntimeHistogramPresentation {
         return labels
     }
 
-    /// 带单位的平均值：`0.412 秒`；倍率只报数字。
+    /// 带单位的平均值：入参 `value` 是直方图原始的**秒数**，耗时换算成毫秒再显示
+    /// （`0.4126` → `413 ms`）；倍率是比值，只报数字。
     public static func formattedAverage(_ value: Double, unit: String) -> String {
-        let number = String(format: "%.3f", value)
-        return unit.isEmpty ? number : "\(number) \(unit)"
+        guard unit == RuntimeLatencyPresentation.unit else {
+            return String(format: "%.3f", value)
+        }
+        return RuntimeLatencyPresentation.text(seconds: value)
+    }
+
+    /// 无障碍口径的平均值：与 `formattedAverage` 同值，单位说「毫秒」。
+    public static func spokenAverage(_ value: Double, unit: String) -> String {
+        guard unit == RuntimeLatencyPresentation.unit else {
+            return String(format: "%.3f", value)
+        }
+        return RuntimeLatencyPresentation.spokenText(seconds: value)
     }
 }
 
