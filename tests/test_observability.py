@@ -442,6 +442,8 @@ def test_rollup_loop_appends_one_line_per_interval(tmp_path: Path) -> None:
     written = asyncio.run(_run_rollup_for(rollup, 0.24))
 
     assert written >= 1
+    # Wait for the last write to complete, avoiding race with task cancellation.
+    asyncio.run(asyncio.sleep(0.02))
     assert len(_rollup_file(tmp_path).read_text(encoding="utf-8").splitlines()) == written
 
 

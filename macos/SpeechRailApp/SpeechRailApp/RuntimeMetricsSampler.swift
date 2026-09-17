@@ -369,7 +369,7 @@ public enum RuntimeMetricsSampler {
 
     /// 服务端的 JSON 用 Prometheus 的标签串做键（`{voice_class="system"}`），
     /// 这里只取需要的那个标签值，不假设它在串里的位置。
-    static func labelValue(_ key: String, label: String) -> String? {
+    public static func labelValue(_ key: String, label: String) -> String? {
         let pattern = label + "=\""
         guard let start = key.range(of: pattern)?.upperBound else { return nil }
         guard let end = key[start...].firstIndex(of: "\"") else { return nil }
