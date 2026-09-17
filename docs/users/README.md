@@ -2,13 +2,17 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "2.0.9"
-date: 2026-09-16
+version: "2.0.10"
+date: 2026-09-17
 ---
 
 # 🔌 SpeechRail 用户与集成指南
 
 欢迎查阅 SpeechRail 用户与集成文档。本目录面向将 SpeechRail 接入到自身应用（如桌面智能体、实时会议转写系统、内容配音工具等）的开发者与产品集成方。
+
+> [!TIP]
+> 还没在本机装好服务？先看 **[📦 SpeechRail 安装与首次使用](installing-speechrail.md)**：它说明 GitHub Release 上
+> wheel、DMG 和校验文件分别是什么、安装顺序，以及装完如何确认服务可用。
 
 ---
 

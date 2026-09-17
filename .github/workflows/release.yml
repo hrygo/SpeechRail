@@ -158,7 +158,17 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          release_notes='The macOS DMG is an unsigned arm64 build. On first launch, macOS may require opening it from Privacy & Security > Open Anyway.'
+          release_notes='## 发布文件说明
+
+          - `speechrail-<version>-*.whl` — Python 服务包（CLI、FastAPI 应用、内置 CoreML 分人 worker）。不含模型 snapshot、vendor runtime 和安装器，单独安装它不会得到可用服务。
+          - `SpeechRail-<version>-macOS-arm64.dmg` — unsigned 的 macOS 控制面 App，最低 macOS 26.0。不加载模型、不启动服务、不监听 8201。
+          - `SHA256SUMS` — 上述两个制品的 SHA-256 校验值。
+
+          服务与 App 是两个独立发布单元：先安装服务，再安装 App；只装 App 会显示「无法连接本机服务」。DMG 未签名也未公证，首次打开时 macOS 可能要求在「隐私与安全性」中点击「仍要打开」。
+
+          安装顺序、wheel 的用途与限制、首次验证和常见问题见安装手册：'
+          release_notes="${release_notes}
+          https://github.com/${REPOSITORY}/blob/main/docs/users/installing-speechrail.md"
           assets=(release-assets/final/*.whl release-assets/final/*.dmg release-assets/final/SHA256SUMS)
 
           if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then

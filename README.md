@@ -131,6 +131,12 @@ Read the [zero-setup guide](.agents/skills/speechrail-zero-setup/SKILL.md)
 before using the bootstrap entry point. It documents disk requirements,
 profile selection, model verification, and recovery behavior.
 
+The same `--yes` flow is the only complete install path today: the published
+wheel ships the service package, and the unsigned DMG ships the App control
+plane, but neither installs the service. See the
+[install and first-run guide](docs/users/installing-speechrail.md) for what each
+release asset is for, the install order, and troubleshooting.
+
 After installation, inspect the service without starting a second instance:
 
 ```bash
@@ -270,6 +276,7 @@ endpoints documented in [`docs/users/api-contract.md`](docs/users/api-contract.m
 
 | Need | Start here |
 |---|---|
+| Install and first run | [`docs/users/installing-speechrail.md`](docs/users/installing-speechrail.md) |
 | Documentation overview | [`docs/README.md`](docs/README.md) |
 | API and client integration | [`docs/users/README.md`](docs/users/README.md), [`docs/users/api-contract.md`](docs/users/api-contract.md), [`contracts/openapi.yaml`](contracts/openapi.yaml) |
 | Realtime protocol | [`contracts/realtime-openai.md`](contracts/realtime-openai.md) |

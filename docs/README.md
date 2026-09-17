@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "2.0.6"
-date: 2026-09-13
+version: "2.0.7"
+date: 2026-09-17
 ---
 
 # 📚 SpeechRail 文档中心
@@ -40,6 +40,7 @@ date: 2026-09-13
 | 🎯 **产品经理 / 业务方** | 业务价值、应用场景、功能矩阵、边界与规划 | [📖 产品白皮书与全景概述](product/overview.md) <br/> [📋 产品边界与职责划分](architecture/product-scope.md) |
 | 🏛️ **架构师 / 技术决策** | 架构拓扑、进程隔离、私有 IPC、状态机、ADR | [🏛️ 总体架构设计](architecture/architecture.md) <br/> [⚖️ OpenAI 兼容性审计](architecture/openai-conformance-audit.md) <br/> [📜 架构决策记录 (ADR)](decisions/README.md) <br/> [👥 分人整洁架构](superpowers/specs/2026-09-08-diarization-clean-architecture-design.md) |
 | 🔌 **API 用户 / 客户端集成** | REST / WebSocket 契约、SDK 接入、MCP/Agent 集成、音色库、错误码 | [🔌 客户端与 SDK 接入指南](users/integrations.md) <br/> [🤖 MCP 主流 Agent 集成指南](users/mcp-agent-integration.md) <br/> [📡 公共 API 契约手册](users/api-contract.md) <br/> [⚡ OpenAI Realtime 协议规范](../contracts/realtime-openai.md) <br/> [👥 分人协议契约](../contracts/diarization/v1/) |
+| 📦 **本机用户 / 自部署** | 发布制品说明、安装顺序、首次验证、升级与卸载 | [📦 SpeechRail 安装与首次使用](users/installing-speechrail.md) |
 | 🛠️ **核心开发者 / 贡献者** | 5分钟启动、代码分层、测试金字塔、Worker 扩展 | [🛠️ 开发者开发指南](developers/development-guide.md) <br/> [🧪 测试与质量验收规范](developers/testing-acceptance.md) |
 | 📦 **运维工程师 / SRE** | LaunchAgent 常驻、Wheel 发布、排障决策树、监控 | [📖 运维操作手册 (Runbook)](operations/operations-runbook.md) <br/> [🚀 运行时部署方案](operations/runtime-deployment.md) <br/> [🔒 安全与可观测性](operations/security-observability.md) |
 
