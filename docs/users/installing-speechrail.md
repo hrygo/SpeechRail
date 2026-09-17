@@ -62,6 +62,7 @@ cd SpeechRail
 
 `--preset` 可选 `light`、`balanced`、`quality`，省略时按物理内存推荐。磁盘、模型校验、失败恢复和
 各档位差异见 [SpeechRail 零配置首装 SOP](../../.agents/skills/speechrail-zero-setup/SKILL.md)。
+不想用 git 时，可以在同一 Release 页面下载 `Source code (zip)`，解压后进入目录执行同一条命令。
 
 > [!NOTE]
 > 首装流程是在目标机自行构建 wheel，**不下载 Release 里的 wheel**。因此 Release 资产是给审计、
