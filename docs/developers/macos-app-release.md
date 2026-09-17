@@ -72,6 +72,10 @@ xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
 
 若没有同时得到两项有效值，先补齐 Xcode build settings，再继续发布；禁止用默认 `1.0` 或 Finder 显示名代替 App 版本。归档后从 `Contents/Info.plist` 读取并记录 `CFBundleDisplayName`、`CFBundleIdentifier`、`CFBundleShortVersionString` 和 `CFBundleVersion`，期望显示名为 `SpeechRail`、bundle identifier 为 `com.speechrail.desktop`。
 
+`MARKETING_VERSION` 必须与 `pyproject.toml` 的 `[project].version` 一致，DMG 脚本会据此拒绝版本不符的构建；
+这条约束现在由 `scripts/check_version_consistency.py` 覆盖（三个 build configuration 都要命中），
+漏 bump 会在仓库门禁和本地预检失败，而不是等到 tag 触发的 Release 在 `Create and verify unsigned DMG` 才暴露。
+
 ## Developer ID 发布前置
 
 发布机需要具备：

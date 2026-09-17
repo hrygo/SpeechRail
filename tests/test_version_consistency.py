@@ -30,6 +30,9 @@ def _write_tree(root: Path, version: str = VERSION) -> None:
         "tests/test_installer.py": f"speechrail-{version}-py3-none-any.whl\n",
         "tests/test_release_verification.py": f"speechrail-{version}.dist-info/METADATA\n",
         "uv.lock": f'name = "speechrail"\nversion = "{version}"\n',
+        "macos/SpeechRailApp/SpeechRailApp.xcodeproj/project.pbxproj": (
+            f"MARKETING_VERSION = {version};\n" * 3
+        ),
         "CHANGELOG.md": f"## [{version}] - 2026-09-02\n",
     }
     for relative, content in files.items():
@@ -124,3 +127,18 @@ def test_uv_lock_requires_the_speechrail_block(tmp_path: Path) -> None:
     )
 
     assert check_tree(tmp_path, VERSION) == []
+
+
+def test_app_version_must_reach_every_build_configuration(tmp_path: Path) -> None:
+    """A release shipped v2.7.0's DMG build because the App stayed on 2.6.6."""
+    _write_tree(tmp_path)
+    pbxproj = tmp_path / "macos/SpeechRailApp/SpeechRailApp.xcodeproj/project.pbxproj"
+    pbxproj.write_text(
+        f"MARKETING_VERSION = {VERSION};\nMARKETING_VERSION = {VERSION};\n"
+        "MARKETING_VERSION = 2.6.6;\n",
+        encoding="utf-8",
+    )
+
+    problems = check_tree(tmp_path, VERSION)
+
+    assert any("MARKETING_VERSION" in problem and "found 2/3" in problem for problem in problems)

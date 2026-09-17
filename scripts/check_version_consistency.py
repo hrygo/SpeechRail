@@ -83,6 +83,12 @@ def _checks(version: str) -> tuple[_Check, ...]:
             "uv.lock",
             f'name = "speechrail"\nversion = "{version}"',
         ),
+        _Check(
+            "macOS App MARKETING_VERSION (one per build configuration)",
+            "macos/SpeechRailApp/SpeechRailApp.xcodeproj/project.pbxproj",
+            f"MARKETING_VERSION = {version};",
+            min_count=3,
+        ),
         _Check("CHANGELOG release header", "CHANGELOG.md", f"## [{version}] - "),
     )
 

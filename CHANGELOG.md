@@ -14,12 +14,14 @@
 
 ### Changed
 
+- macOS App 对齐到 2.7.0（build 17）。
 - [安装与首次使用](docs/users/installing-speechrail.md) 改为 release wheel 优先：安装、升级、卸载都用已安装 runtime 自带的 CLI，clone 仓库的零配置流程下沉为 2.6.6 及更早版本的路径。根 `README.md` 与 [运行时与部署](docs/operations/runtime-deployment.md) 同步，后者的安装示例改用 `speechrail.service.managed_install`。
 - `speechrail install` 的首次使用门槛按实测反馈收紧：只有一个 app home 时省略 `--preset` 会沿用已安装档位（不再被内存推荐改档），缺 `uv` 时在准备模型前直接给出安装地址，两类阻塞失败（服务在运行、显式档位与已装档位冲突）翻译成可直接复制执行的命令而不是原始 installer 错误。
 - [安装与首次使用](docs/users/installing-speechrail.md) 补上"升级不会重新下载已校验模型"的判定依据（`prepared_id` = 档位 + runtime lock + 逐文件 sha256）、`runtime/releases` 旧目录不会自动清理及各档位实际磁盘占用口径。
 
 ### Fixed
 
+- 修复 v2.7.0 tag 触发的 Release 在 `Create and verify unsigned DMG` 失败、导致 `publish` 被跳过：App 的 `MARKETING_VERSION` 仍停在 2.6.6，而 `scripts/macos_app_create_dmg.sh` 要求 bundle 版本等于 tag 版本。App 已对齐到 2.7.0（build 17），并把 `MARKETING_VERSION`（App Debug / Release / Distribution 三个 build configuration）纳入 `scripts/check_version_consistency.py`——同类漏 bump 今后会在仓库门禁和本地预检就失败，不会等到 tag 之后才暴露。
 - 修复滚动指标写入者在停止时漏计已落盘的一行：`flush()` 把阻塞追加交给工作线程执行，而 `stop()` 的取消只会让 `await` 抛错，线程本身停不下来——那一行照样写进文件，`written` 却不再递增，两边此后一直相差一行。2.6.6 里加的 0.02 秒等待没有消除这个窗口，只是换个方向暴露（主 CI 上出现 `assert 4 == 3`）。现在 `flush()` 把取消交给调用方之前先等这次追加结束：文件行数与计数器按构造一致，测试也去掉了那个固定等待。
 - 修复 `uv` 失败分类失配：`install_managed` 原先按字面量判断 `command[0] == "uv"`，CLI 传入绝对路径后所有 `uv venv` / `uv pip install` 失败都会被误报成「installed service command failed」；现在按可执行文件名判断，失败信息仍指向真正出错的 `uv`。
 
