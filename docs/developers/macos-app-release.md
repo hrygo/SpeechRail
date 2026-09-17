@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.5.2"
-date: 2026-09-16
+version: "0.5.3"
+date: 2026-09-17
 ---
 
 # SpeechRail macOS App 分发与签名
@@ -12,6 +12,8 @@ date: 2026-09-16
 当前开发机按无 Apple Developer ID 模式运行：Debug/Release 使用 ad hoc 本地签名构建并关闭 Hardened Runtime，测试脚本默认保留该本地签名，以便 Xcode UI test runner 正常加载 `Testing.framework` 运行库；不会生成可分发的 archive，不会上传 notarization，也不会修改钥匙串或用户的登录项。只有显式设置 `SPEECHRAIL_MACOS_SIGNED_TESTS=0` 才会请求 unsigned test bundle；Distribution 配置才启用 Hardened Runtime。
 
 本地安装的 Debug/Release App 使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动控制 helper，不注册 `SMAppService`，也不会修改 Distribution 的登录项记录。只有 Distribution 包在具备 Team ID 和签名时，才使用 `SMAppService` LaunchAgent；App 先呈现系统授权状态，只有用户明确点击启用时才注册，这一步不代表 ad hoc 包具备 Developer ID 分发资格。
+
+这条本地控制通道依赖 App 的 bundle 签名：helper 在 `SPEECHRAIL_ALLOW_UNSIGNED_XPC=1` 下把对端固定为 `identifier "com.speechrail.desktop"`（即 `SpeechRailControlKit` 的 `ControlConstants.appBundleIdentifier`），所以 App 的签名标识必须等于它的 bundle identifier。用 `CODE_SIGNING_ALLOWED=NO` 构建时只剩 linker 写进二进制的 ad-hoc 签名：签名标识变成 `PRODUCT_NAME`（`SpeechRail`）、`Info.plist` 未绑定、没有 `Contents/_CodeSignature/CodeResources`。XPC 的 peer 校验会以 `errSecCSReqFailed`（`xpc_support_check_token ... status: -67050`）拒绝每一个请求，App 侧表现为主界面「控制通道不可用」、诊断页「操作未完成，请重试或打开系统诊断」，而 REST 只读信息仍然正常。Debug/Release 构建因此必须保持签名开启（`CODE_SIGN_IDENTITY=-`，无需证书），并由 `scripts/macos_app_verify_local_xpc.sh` 在打包前把关。
 
 这不等同于可交付给其他 Mac 的发布包。站外直接分发仍保留 Developer ID Application + notarization 路径，待用户准备 Apple Developer 账号、证书和 notarization credential 后再启用。
 
@@ -47,9 +49,9 @@ UI 自动化测试（XCTest/UI test，含 `scripts/macos_app_test.sh`）会接�
 
 ## GitHub Actions unsigned DMG
 
-匹配 `pyproject.toml` 版本的 `vX.Y.Z` tag 会触发 Release workflow。workflow 在 `macos-26` arm64 runner 上用 `Release` 配置构建 App，并显式设置 `CODE_SIGNING_ALLOWED=NO`、`CODE_SIGNING_REQUIRED=NO` 和 `ARCHS=arm64`；随后由 `scripts/macos_app_create_dmg.sh` 生成压缩 DMG。DMG 只包含 `SpeechRail.app` 和指向 `/Applications` 的符号链接，并随 wheel 与 `SHA256SUMS` 上传到 GitHub Release。
+匹配 `pyproject.toml` 版本的 `vX.Y.Z` tag 会触发 Release workflow。workflow 在 `macos-26` arm64 runner 上用 `Release` 配置和 `ARCHS=arm64` 构建 App，并保持 ad hoc 本地签名开启（沿用 `Release.xcconfig` 的 `CODE_SIGN_IDENTITY=-`，不需要证书或 provisioning）；随后 `scripts/macos_app_verify_local_xpc.sh` 核对签名标识、签名有效性和内嵌 local XPC helper 是否满足上面的控制通道约束，再由 `scripts/macos_app_create_dmg.sh` 生成压缩 DMG。DMG 只包含 `SpeechRail.app` 和指向 `/Applications` 的符号链接，并随 wheel 与 `SHA256SUMS` 上传到 GitHub Release。
 
-该 DMG 是 unsigned、未 notarize 的早期分发制品，不代表 Developer ID 发布验收。首次从互联网下载后打开时，macOS 可能显示无法验证开发者或无法检查恶意软件的提示；确认制品来源和 checksum 后，按系统设置“隐私与安全性”中的“仍要打开”流程放行。受企业策略管理的 Mac 可能不允许此覆盖。正式面向不熟悉终端用户的分发仍必须走下面的 Developer ID + notarization 路径。
+该 DMG 文件本身未签名、未 notarize，包内的 App 只有 ad hoc 本地签名，不代表 Developer ID 发布验收。首次从互联网下载后打开时，macOS 可能显示无法验证开发者或无法检查恶意软件的提示；确认制品来源和 checksum 后，按系统设置“隐私与安全性”中的“仍要打开”流程放行。受企业策略管理的 Mac 可能不允许此覆盖。正式面向不熟悉终端用户的分发仍必须走下面的 Developer ID + notarization 路径。
 
 本地只打包一个已经生成的 App 时可以执行：
 
@@ -60,7 +62,11 @@ scripts/macos_app_create_dmg.sh \
   --output-path "/path/outside/repository/SpeechRail-2.6.0-macOS-arm64.dmg"
 ```
 
-脚本会核对 App bundle identifier、`CFBundleShortVersionString`、`CFBundleVersion` 和 DMG 内容，并拒绝覆盖已有输出文件。它不签名、不修改钥匙串、不注册 LaunchAgent，也不改变服务 runtime。
+`scripts/macos_app_create_dmg.sh` 会核对 App bundle identifier、`CFBundleShortVersionString`、`CFBundleVersion` 和 DMG 内容，并拒绝覆盖已有输出文件。它不签名、不修改钥匙串、不注册 LaunchAgent，也不改变服务 runtime；打包前用 `scripts/macos_app_verify_local_xpc.sh <SpeechRail.app>` 验证签名身份和 local XPC helper，避免把控制通道已经失效的 App 装进 DMG：
+
+```bash
+scripts/macos_app_verify_local_xpc.sh "/path/to/SpeechRail.app"
+```
 
 归档前先确认版本字段已经进入实际构建设置：
 

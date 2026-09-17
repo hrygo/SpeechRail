@@ -67,18 +67,23 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks | grep -F 'macOS 26'
 
-      - name: Build unsigned Release App
+      - name: Build ad-hoc signed Release App
         env:
           APP_BUILD_DIRECTORY: ${{ runner.temp }}/speechrail-app-derived-data
         run: |
+          # Keep code signing enabled: Release.xcconfig already selects the
+          # ad-hoc identity (CODE_SIGN_IDENTITY=-), so no certificate is needed.
+          # The App embeds com.speechrail.desktop.local-control.xpc, whose peer
+          # policy pins the caller to `identifier "com.speechrail.desktop"`;
+          # CODE_SIGNING_ALLOWED=NO would leave only the linker's ad-hoc
+          # signature (identifier "SpeechRail", no resource seal) and every
+          # control request would fail with errSecCSReqFailed.
           xcodebuild \
             -project macos/SpeechRailApp/SpeechRailApp.xcodeproj \
             -scheme SpeechRailApp \
             -configuration Release \
             -sdk macosx \
             -derivedDataPath "$APP_BUILD_DIRECTORY" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
             ARCHS=arm64 \
             build
 
@@ -86,6 +91,11 @@ jobs:
           test -d "$app_path"
           test -x "$app_path/Contents/MacOS/SpeechRail"
           file "$app_path/Contents/MacOS/SpeechRail" | grep -F 'arm64'
+
+      - name: Verify the local XPC control channel survives packaging
+        env:
+          APP_PATH: ${{ runner.temp }}/speechrail-app-derived-data/Build/Products/Release/SpeechRail.app
+        run: scripts/macos_app_verify_local_xpc.sh "$APP_PATH"
 
       - name: Create and verify unsigned DMG
         env:
