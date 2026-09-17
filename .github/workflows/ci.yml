@@ -129,6 +129,17 @@ jobs:
       - name: Build wheel package
         run: uv build --no-sources --wheel
 
+      - name: Verify the wheel installs itself without a checkout (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          # The wheel carries the managed installer, so it must resolve and
+          # describe the install subcommand with no source checkout present.
+          shopt -s nullglob
+          wheels=(dist/speechrail-*.whl)
+          test "${#wheels[@]}" -eq 1
+          uvx --python 3.12 --from "${wheels[0]}" speechrail install --help \
+            | grep -F 'usage: speechrail install'
+
       - name: Run test suite with coverage gate (Pytest)
         run: uv run pytest --cov=src
 
