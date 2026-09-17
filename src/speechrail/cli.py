@@ -129,6 +129,29 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument("--app-home", type=Path, help="use this installed app home")
     setup.add_argument("--yes", action="store_true", help="apply without an interactive prompt")
 
+    install = subcommands.add_parser(
+        "install",
+        help="install a release wheel as the user runtime without a source checkout",
+    )
+    install.add_argument(
+        "--wheel",
+        type=Path,
+        help="release wheel to install; defaults to the only speechrail-*.whl in this directory",
+    )
+    install.add_argument(
+        "--preset", choices=("quality", "balanced", "light"), help="override the recommendation"
+    )
+    install.add_argument("--app-home", type=Path, help="use this installed app home")
+    install.add_argument("--yes", action="store_true", help="install without an interactive prompt")
+    install.add_argument(
+        "--enable",
+        action="store_true",
+        help="register and start the com.speechrail LaunchAgent after preflight passes",
+    )
+    install.add_argument(
+        "--json", action="store_true", help="emit one machine-readable JSON envelope"
+    )
+
     profile = subcommands.add_parser("profile", help="inspect or switch model profiles")
     profile_commands = profile.add_subparsers(dest="profile_command", required=True)
     for command in ("list", "status"):
@@ -634,6 +657,129 @@ def _run_setup(args: argparse.Namespace) -> int:
     return _print_apply_result(profile_commands.apply_profile(preset, app_home=app_home))
 
 
+def _wheel_metadata_version(wheel: Path) -> str:
+    """Read the wheel's own METADATA version instead of trusting its file name."""
+    from zipfile import BadZipFile, ZipFile
+
+    try:
+        with ZipFile(wheel) as archive:
+            candidates = [
+                name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            ]
+            if len(candidates) != 1:
+                raise ServiceError("install requires a wheel with exactly one METADATA file")
+            metadata = archive.read(candidates[0]).decode("utf-8", "replace")
+    except (BadZipFile, OSError) as exc:
+        raise ServiceError("install could not read the wheel metadata") from exc
+    for line in metadata.splitlines():
+        if line.startswith("Version: "):
+            return line.removeprefix("Version: ").strip()
+    raise ServiceError("install found no version in the wheel metadata")
+
+
+def _resolve_install_wheel(explicit: Path | None, *, version: str) -> Path:
+    """Resolve the wheel to install and refuse a version that cannot match this code."""
+    if explicit is None:
+        candidates = sorted(Path.cwd().glob("speechrail-*.whl"))
+        if len(candidates) != 1:
+            raise ServiceError(
+                "install needs exactly one speechrail-*.whl in this directory; pass --wheel"
+            )
+        wheel = candidates[0]
+    else:
+        wheel = explicit
+    if not wheel.is_file() or wheel.suffix != ".whl":
+        raise ServiceError("install requires an existing wheel file")
+    found = _wheel_metadata_version(wheel)
+    if found != version:
+        raise ServiceError(
+            f"install refuses a mismatched wheel: {wheel.name} is {found}, "
+            f"this installer is {version}"
+        )
+    return wheel
+
+
+def _run_install(args: argparse.Namespace) -> int:
+    """Install one release wheel as the managed runtime, disabled unless asked to start."""
+    from speechrail import __version__
+    from speechrail.service import profile_commands
+    from speechrail.service.managed_install import install_managed
+
+    machine_output = bool(getattr(args, "json", False))
+    app_home = (args.app_home or _default_app_home()).resolve()
+    wheel = _resolve_install_wheel(getattr(args, "wheel", None), version=__version__)
+    preset = args.preset or profile_commands.recommend_profile(_physical_memory_bytes())
+    summary = next(item for item in profile_commands.list_profiles() if item.id == preset)
+    if not machine_output:
+        print(f"Wheel: {wheel.name}")
+        print(f"Profile: {preset} (ASR={summary.asr}, TTS={summary.tts})")
+        print(f"App home: {app_home}")
+        budget = _format_bytes(summary.download_bytes)
+        print(f"Download up to {budget} before the service is ready.")
+    if not _confirm(args.yes):
+        if machine_output:
+            _print_machine(
+                {
+                    "command": "install",
+                    "error_code": "cancelled",
+                    "message": "installation requires confirmation",
+                    "status": "cancelled",
+                }
+            )
+        else:
+            print("Cancelled.")
+        return 1
+
+    import httpx
+
+    from speechrail.service.modelscope import ModelScopeDownloader
+
+    def progress(event: dict[str, object]) -> None:
+        if machine_output:
+            _print_machine({"event": "progress", "command": "install", **event})
+        else:
+            phase = event.get("phase", "preparing")
+            artifact = event.get("artifact")
+            suffix = f" ({artifact})" if isinstance(artifact, str) else ""
+            print(f"{phase}{suffix}", flush=True)
+
+    timeout = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
+    with httpx.Client(timeout=timeout) as client:
+        result = install_managed(
+            wheel,
+            app_home=app_home,
+            preset_id=preset,
+            downloader=ModelScopeDownloader(client=client),
+            enable=bool(getattr(args, "enable", False)),
+            progress=progress,
+        )
+    if machine_output:
+        _print_machine(
+            {
+                "app_home": str(result.app_home),
+                "command": "install",
+                "enabled": result.enabled,
+                "prepared_id": result.prepared_id,
+                "preset": preset,
+                "runtime_python": str(result.runtime_python),
+                "status": "committed",
+            }
+        )
+        return 0
+    print(f"Installed {wheel.name} into {result.app_home}")
+    print(f"Runtime: {result.runtime_python}")
+    if result.prepared_id is not None:
+        print(f"Prepared models: {result.prepared_id}")
+    runtime_cli = result.runtime_python.parent / "speechrail"
+    if result.enabled:
+        print("com.speechrail is registered and started.")
+        print("Check it: curl -s -i http://127.0.0.1:8201/readyz | head -1")
+    else:
+        print("The service is installed but not started.")
+        print(f'Start it: "{runtime_cli}" service start --app-home "{result.app_home}"')
+    return 0
+
+
 def _diagnostic_base_url(value: str) -> str:
     parsed = urlsplit(value)
     if (
@@ -987,6 +1133,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _run_model(args)
         if args.command == "setup":
             return _run_setup(args)
+        if args.command == "install":
+            return _run_install(args)
         raise ServiceError("unknown command")
     except (ServiceError, RuntimeError, ValueError) as exc:
         if getattr(args, "json", False):

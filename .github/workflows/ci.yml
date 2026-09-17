@@ -207,6 +207,10 @@ jobs:
           unzip -t "$wheel"
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             unzip -l "$wheel" | grep -F 'speechrail/_native/SpeechRailDiarizationWorker'
+            # A release must be installable from this wheel alone: the packaged
+            # installer has to resolve without a source checkout.
+            uvx --python 3.12 --from "$wheel" speechrail install --help \
+              | grep -F 'usage: speechrail install'
           fi
           uv run pytest --no-cov tests/test_wheel_contents.py -q
           uv run python scripts/check_version_consistency.py

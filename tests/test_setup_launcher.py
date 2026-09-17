@@ -1,16 +1,9 @@
 from __future__ import annotations
 
-import importlib.util
 import subprocess
-import sys
 from pathlib import Path
 
-_INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
-_SPEC = importlib.util.spec_from_file_location("speechrail_setup_installer", _INSTALLER_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-install_macos = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = install_macos
-_SPEC.loader.exec_module(install_macos)
+from speechrail.service import managed_install as install_macos
 
 
 def test_repository_launcher_never_executes_an_unverified_remote_script() -> None:

@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-13
+date: 2026-09-17
 ---
 
 # SpeechRail 运行时与部署
@@ -129,8 +129,18 @@ Governor。默认部署不包含内建的 `input_ref` 路径/URL resolver，不�
 
 发布安装与源码开发分开处理。macOS wheel 会编译并包含私有 CoreML diarization executable；其
 wheel tag 因而与当前 Python/Apple Silicon 平台绑定。ASR/TTS vendor runtime、全部模型 snapshot、
-`ffmpeg` 和 `.env` 仍由本机预先准备，CoreML bundle 也不打进 wheel。发布目录应同时提供 wheel、
-`tools/install_macos.py`、`configs/speechrail.example.env`、plist 模板和校验文件。
+`ffmpeg` 和 `.env` 仍由本机预先准备，CoreML bundle 也不打进 wheel。
+
+managed 安装器随 wheel 发布（`speechrail.service.managed_install`），对用户暴露为
+`speechrail install`：安装者只需要下载下来的 wheel，不必 clone 仓库，下载目录里执行
+
+```bash
+uvx --python 3.12 --from ./speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl \
+  speechrail install --preset balanced --yes --enable
+```
+
+即可完成 release staging、模型准备、preflight、LaunchAgent 与原子 `runtime/current` 切换；
+`tools/install_macos.py` 保留为兼容外壳，只重导出同一实现，不再存在第二份安装逻辑。
 
 ### 源码到 managed runtime 的不变量（2026-09-09）
 
@@ -140,7 +150,9 @@ SpeechRail 的任何修复、协议变更或 worker 变更都必须先落在本�
 
 1. 在 SpeechRail 源码根目录完成测试、类型、lint、契约与 `git diff --check`。
 2. 使用 `uv build --no-sources --wheel` 构建当前源码 wheel。
-3. 按 operator contract 安全停旧服务并确认 lock 释放；再用 `tools.install_macos.install_managed` 做候选 release preflight、LaunchAgent plist 安装和原子 `runtime/current` 切换。
+3. 按 operator contract 安全停旧服务并确认 lock 释放；再用
+   `speechrail.service.managed_install.install_managed` 做候选 release preflight、LaunchAgent plist
+   安装和原子 `runtime/current` 切换（`tools.install_macos` 是它的兼容入口）。
 4. 使用 lifecycle controller 启动新 runtime，通过 `/health`、`/readyz`、`/v1/models` 和目标 Realtime smoke 验证；任何失败都恢复旧 current/runtime。
 
 源码构建与安装沿用下方唯一的 managed installer 示例，避免维护两份可能漂移的命令。
@@ -157,7 +169,7 @@ import os
 from pathlib import Path
 import httpx
 from speechrail.service.modelscope import ModelScopeDownloader
-from tools.install_macos import install_managed
+from speechrail.service.managed_install import install_managed
 
 app_home = Path(os.environ.get("SPEECHRAIL_APP_HOME", Path.home() / "Library/Application Support/SpeechRail"))
 preset = os.environ.get("SPEECHRAIL_PRESET", "quality")

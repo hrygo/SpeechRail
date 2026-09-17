@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-09-17
+
+### Added
+
+- 安装入口随 wheel 发布：managed 安装器从仓库脚本 `tools/install_macos.py` 迁入包内 `speechrail.service.managed_install`，并暴露为 `speechrail install --preset <tier> --yes [--enable]`。只下载 release 的用户现在只需要 wheel 与 `uvx --python 3.12`，就能完成 release staging、按档位准备并逐文件校验模型、preflight 和原子 `runtime/current` 切换；`--enable` 再注册并启动 `com.speechrail`。命令拒绝版本与自身不一致的 wheel（否则 installer 会与被安装的代码脱节），默认只安装不启动。`tools/install_macos.py` 保留为兼容外壳，只重导出同一实现，不新增第二条安装路径。
+- CI 在 macOS 打包阶段用刚构建的 wheel 真实执行 `speechrail install --help`，"release 可独立安装"因此有回归门，而不只是文档承诺。
+- `install_managed(...)` 增加可选 `progress` 回调，安装过程可按阶段回报进度。
+
+### Changed
+
+- [安装与首次使用](docs/users/installing-speechrail.md) 改为 release wheel 优先：安装、升级、卸载都用已安装 runtime 自带的 CLI，clone 仓库的零配置流程下沉为 2.6.6 及更早版本的路径。根 `README.md` 与 [运行时与部署](docs/operations/runtime-deployment.md) 同步，后者的安装示例改用 `speechrail.service.managed_install`。
+
 ### Fixed
 
 - 修复滚动指标写入者在停止时漏计已落盘的一行：`flush()` 把阻塞追加交给工作线程执行，而 `stop()` 的取消只会让 `await` 抛错，线程本身停不下来——那一行照样写进文件，`written` 却不再递增，两边此后一直相差一行。2.6.6 里加的 0.02 秒等待没有消除这个窗口，只是换个方向暴露（主 CI 上出现 `assert 4 == 3`）。现在 `flush()` 把取消交给调用方之前先等这次追加结束：文件行数与计数器按构造一致，测试也去掉了那个固定等待。

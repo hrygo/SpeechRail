@@ -160,9 +160,15 @@ jobs:
         run: |
           release_notes='## 发布文件说明
 
-          - `speechrail-<version>-*.whl` — Python 服务包（CLI、FastAPI 应用、内置 CoreML 分人 worker）。不含模型 snapshot、vendor runtime 和安装器，单独安装它不会得到可用服务。
+          - `speechrail-<version>-*.whl` — Python 服务包（CLI、FastAPI 应用、内置 CoreML 分人 worker），自带 `speechrail install` 安装入口：不需要 clone 仓库即可安装服务并准备模型。
           - `SpeechRail-<version>-macOS-arm64.dmg` — unsigned 的 macOS 控制面 App，最低 macOS 26.0。不加载模型、不启动服务、不监听 8201。
           - `SHA256SUMS` — 上述两个制品的 SHA-256 校验值。
+
+          安装服务（把 `<version>` 换成本次版本号，先在下载目录校验 `shasum -a 256 -c SHA256SUMS`）：
+
+          ```bash
+          uvx --python 3.12 --from ./speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl speechrail install --preset balanced --yes --enable
+          ```
 
           服务与 App 是两个独立发布单元：先安装服务，再安装 App；只装 App 会显示「无法连接本机服务」。DMG 未签名也未公证，首次打开时 macOS 可能要求在「隐私与安全性」中点击「仍要打开」。
 

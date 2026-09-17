@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import subprocess
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast, final, override
@@ -22,19 +20,13 @@ from speechrail.config.model_catalog import (
 from speechrail.config.selection import resolve_selection
 from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service import diarization_assets
+from speechrail.service import managed_install as install_macos
 from speechrail.service.bootstrap import RuntimePaths
 from speechrail.service.diarization_assets import DiarizationAssetError
 from speechrail.service.modelscope import ModelScopeDownloader
 from speechrail.service.paths import ServiceLayout
 from speechrail.service.preflight import PreflightResult
 from speechrail.service.profile_store import recover_selection
-
-_INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
-_SPEC = importlib.util.spec_from_file_location("speechrail_test_installer", _INSTALLER_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-install_macos = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = install_macos
-_SPEC.loader.exec_module(install_macos)
 
 _REAL_MANAGED_DIARIZATION_PROVISIONING = install_macos._provision_managed_diarization_assets
 
@@ -77,7 +69,7 @@ def _runner_that_creates_python(calls: list[tuple[str, ...]]):
 
 
 def _inputs(tmp_path: Path) -> tuple[Path, Path]:
-    wheel = tmp_path / "speechrail-2.6.6-py3-none-any.whl"
+    wheel = tmp_path / "speechrail-2.7.0-py3-none-any.whl"
     wheel.touch()
     app_home = tmp_path / "Application Support" / "SpeechRail"
     return wheel, app_home

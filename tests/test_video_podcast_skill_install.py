@@ -9,15 +9,8 @@ from typing import Any
 
 import pytest
 
+from speechrail.service import managed_install as install_macos
 from speechrail.service import skill_installer
-
-_INSTALLER_PATH = Path(__file__).parents[1] / "tools" / "install_macos.py"
-_SPEC = importlib.util.spec_from_file_location("speechrail_skill_installer", _INSTALLER_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-install_macos = importlib.util.module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = install_macos
-_SPEC.loader.exec_module(install_macos)
-
 
 PROJECT_ROOT = Path(__file__).parents[1]
 PROJECT_SKILL = PROJECT_ROOT / ".agents" / "skills" / "video-podcast"

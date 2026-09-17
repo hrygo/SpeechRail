@@ -112,12 +112,34 @@ artifacts; review the relevant operation guide before running them.
 
 ## Quick start
 
-### Managed installation
+### From a release asset
 
-Use this path for a fresh Apple Silicon Mac or a user-level background service.
-The bootstrap flow installs prerequisites, prepares the selected local model
-artifacts, and registers the `com.speechrail` LaunchAgent. It performs external
-setup work and therefore requires the explicit `--yes` confirmation.
+Download the wheel and `SHA256SUMS` from
+[Releases](https://github.com/hrygo/SpeechRail/releases), verify the checksums,
+then install with only `uv` — no source checkout:
+
+```bash
+cd ~/Downloads
+uvx --python 3.12 --from ./speechrail-<version>-cp312-cp312-macosx_26_0_arm64.whl \
+  speechrail install \
+  --preset balanced \
+  --yes \
+  --enable
+```
+
+`speechrail install` ships inside the wheel since 2.7.0. It stages the release,
+prepares and verifies the tier's model artifacts, runs preflight, switches
+`runtime/current` atomically, and with `--enable` registers and starts
+`com.speechrail`. It refuses a wheel whose version differs from the installer,
+so the installer can never drift from the code it installs.
+
+### From the repository
+
+Use this path on a fresh Apple Silicon Mac that also needs prerequisites
+installed. The bootstrap flow installs prerequisites, prepares the selected
+local model artifacts, and registers the `com.speechrail` LaunchAgent. It
+performs external setup work and therefore requires the explicit `--yes`
+confirmation.
 
 ```bash
 git clone https://github.com/hrygo/SpeechRail.git
@@ -131,11 +153,10 @@ Read the [zero-setup guide](.agents/skills/speechrail-zero-setup/SKILL.md)
 before using the bootstrap entry point. It documents disk requirements,
 profile selection, model verification, and recovery behavior.
 
-The same `--yes` flow is the only complete install path today: the published
-wheel ships the service package, and the unsigned DMG ships the App control
-plane, but neither installs the service. See the
-[install and first-run guide](docs/users/installing-speechrail.md) for what each
-release asset is for, the install order, and troubleshooting.
+The [install and first-run guide](docs/users/installing-speechrail.md) explains
+what each release asset is for, the install order, and the common failure
+states. The unsigned DMG ships only the App control plane; it installs no
+service.
 
 After installation, inspect the service without starting a second instance:
 

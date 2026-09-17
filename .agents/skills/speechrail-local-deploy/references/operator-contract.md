@@ -39,7 +39,7 @@
 
 ## 安装与切换职责
 
-- `tools.install_macos.install_managed(...)` 只负责 wheel/release staging、preflight、共享 runtime、模型准备和原子切换 `runtime/current`；它不复制用户 skill，也不自行实现进程强杀。
+- `speechrail.service.managed_install.install_managed(...)`（`tools/install_macos.py` 是只重导出同一实现的兼容外壳）只负责 wheel/release staging、preflight、共享 runtime、模型准备和原子切换 `runtime/current`；它不复制用户 skill，也不自行实现进程强杀。用户侧唯一入口是 wheel 自带的 `speechrail install`，它调用同一个函数。
 - `speechrail.service.skill_installer` 只负责可移植用户 skill 的安全、原子安装；skill 安装失败不应改变 managed runtime。
 - profile apply/rollback 负责一次事务和一次回滚，候选启动、identity、ready、catalog 和真实 smoke 均失败时停止后续动作。
 - wheel 替换和 profile 切换分开执行；不要在同一个事务里同时改版本和模型档位。

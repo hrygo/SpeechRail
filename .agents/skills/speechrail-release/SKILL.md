@@ -98,10 +98,12 @@ git diff --check
 uv build --no-sources --wheel
 python3 -m zipfile -l dist/speechrail-<version>-py3-none-any.whl
 shasum -a 256 dist/speechrail-<version>-py3-none-any.whl
+uvx --python 3.12 --from dist/speechrail-<version>-py3-none-any.whl speechrail install --help
 ```
 
 测试清除环境中的 `SPEECHRAIL_API_KEY`，但不把任何凭据写入命令或输出。构建后核对文件名、dist-info、worker
-模块、assets 和版本；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
+模块、assets 和版本，并确认 wheel 能独立提供安装入口（`speechrail install --help` 在仓库外成功执行，
+macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日志和原始 benchmark 不提交 Git。
 
 ## 3. 安全替换 managed 服务
 
@@ -110,7 +112,8 @@ scope 包含服务时，先读 local-deploy 的
 
 1. 保存 active profile、旧 selection、runtime/vendor 回退点，并确认外部连接和 active request 已清零。
 2. 通过 controller 安全 stop；bootout 返回、旧 PID 或 lock 未经复核都不能证明服务已退出。
-3. 用 `tools.install_macos.install_managed(...)` 做 staging、preflight 和原子切换；失败时恢复旧
+3. 用 `speechrail.service.managed_install.install_managed(...)`（`tools/install_macos.py` 是它的兼容外壳）
+   做 staging、preflight 和原子切换；失败时恢复旧
    `runtime/current`/selection，不删除旧 release、模型、配置或日志。
 4. 用新 managed runtime 通过 controller start；等待真实 ready，核对 profile/model/voice identity 和
    必要公共 smoke。任何 PID、身份、lock 或 listener 不一致都 fail closed，不循环 restart。

@@ -16,6 +16,7 @@ _REQUIRED_WHEEL_FILES = {
     "speechrail/config/model_catalog.py",
     "speechrail/service/bootstrap.py",
     "speechrail/service/executable.py",
+    "speechrail/service/managed_install.py",
     "speechrail/service/preflight.py",
 }
 _BUILT_WHEEL: Path | None = None
@@ -55,6 +56,7 @@ def assert_wheel_contents(wheel_path: Path) -> None:
     assert "speechrail/assets/runtime/tts.txt" in names
     assert "speechrail/backends/qwen3_worker.py" in names
     assert "speechrail/backends/qwen3_tts_worker.py" in names
+    assert "speechrail/service/managed_install.py" in names
     assert "speechrail/service/preflight.py" in names
     assert "speechrail/runtime/executable.py" in names
     assert "speechrail/config/__init__.py" in names
@@ -82,6 +84,7 @@ def test_wheel_imports_workers_and_runtime_modules_outside_checkout(tmp_path: Pa
         "import speechrail.backends.qwen3_tts_worker\n"
         "import speechrail.config.model_catalog\n"
         "import speechrail.service.bootstrap\n"
+        "import speechrail.service.managed_install\n"
     )
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
