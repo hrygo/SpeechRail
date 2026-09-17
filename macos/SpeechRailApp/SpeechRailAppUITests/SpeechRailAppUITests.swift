@@ -38,11 +38,17 @@ final class SpeechRailAppUITests: XCTestCase {
         let app = launchSpeechRail()
         openControlCenter(in: app)
 
+        // REDESIGN-SPEC §6.1 / §11.6 第四十九轮：侧边栏是「创作」「引擎」两组，
+        // 服务那条线整体改名为「引擎」（`AppRouteGroup.service.title`）。
         XCTAssertTrue(app.staticTexts["创作"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["服务"].exists)
+        XCTAssertTrue(app.staticTexts["引擎"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["服务状态"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
-        XCTAssertTrue(app.staticTexts["确认本机语音服务能否使用"].exists)
+        // 页首那一句话取自 `AppRoute.overview.pageSubtitle`，与稿逐字一致；
+        // 旧文案「确认本机语音服务能否使用」只留在 `purpose`（侧栏行的帮助值）。
+        XCTAssertTrue(
+            app.staticTexts["本机语音引擎的当前结论与运行事实。"].waitForExistence(timeout: 5)
+        )
         XCTAssertTrue(app.staticTexts["能力"].exists)
         XCTAssertTrue(app.staticTexts["运行信息"].exists)
         // REDESIGN-SPEC §7.5：服务状态页只有「结论 + 能力 + 运行信息」。
@@ -56,6 +62,14 @@ final class SpeechRailAppUITests: XCTestCase {
         let app = launchSpeechRail()
         openControlCenter(in: app)
         app.buttons["诊断"].clickWhenReady()
+
+        // REDESIGN-SPEC §7.8 / §11.6 第六十四轮：预检全通过时整页先退化成
+        // 「未发现问题」结论面板，两栏清单（结论 + 清单 + 详情）由主动作展开，
+        // 展开可逆（清单头留「只看结论」）。UI 测试的 fixture 只有一项且通过，
+        // 所以这里走的就是用户真实路径，而不是绕开结论直接断言清单。
+        let expandCheckList = app.buttons["查看检查明细"]
+        XCTAssertTrue(expandCheckList.waitForExistence(timeout: 20))
+        expandCheckList.clickWhenReady()
 
         XCTAssertTrue(identifierElement("diagnostics-summary", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(identifierElement("diagnostics-check-list", in: app).exists)
@@ -119,7 +133,10 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.menuItems["打开 SpeechRail"].waitForExistence(timeout: 5))
         // 设置窗口在重设计后是「通用 / 创作 / 服务」三个页签，不再有「关于 SpeechRail」。
         XCTAssertTrue(app.staticTexts["通用"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["最低系统"].exists)
+        // 默认页签是「通用」，它只放 App 自己的偏好（「启动与窗口」「开发者」两节）；
+        // 「产品定位 / 最低系统 / 版本」已经搬进未选中的「服务」页签（§7.10），
+        // 所以这里断言通用页签自己的小节，而不是那一页的内容。
+        XCTAssertTrue(app.staticTexts["启动与窗口"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["服务状态"].exists)
     }
 
