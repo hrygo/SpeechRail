@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import re
 import signal
@@ -20,6 +21,8 @@ import uvicorn
 
 from speechrail.config import Settings
 from speechrail.config.auth import resolve_api_key
+from speechrail.observability.logging import configure_logging, default_log_directory
+from speechrail.observability.rollup import default_rollup_path
 from speechrail.runtime.server_lock import ServerInstanceLock
 from speechrail.service import (
     PreflightResult,
@@ -58,10 +61,43 @@ def run_server(env_file: Path | None = None, app_home: Path | None = None) -> No
     if selection is not None:
         settings = resolve_selection(settings, selection, load_catalog(), app_home)
 
+    _apply_observability_defaults(settings, app_home)
+    logging_handles = configure_logging(settings.log_dir or default_log_directory())
+    if logging_handles is not None:
+        logging.getLogger(__name__).info(
+            "SpeechRail logs: service=%s access=%s",
+            logging_handles.service_log,
+            logging_handles.access_log,
+        )
+
     from speechrail.app import create_app
 
     with ServerInstanceLock(settings.port):
-        uvicorn.run(create_app(settings), host=settings.host, port=settings.port, log_level="info")
+        # ``log_config=None`` keeps uvicorn out of the logging configuration: its
+        # loggers inherit the rotating handlers installed above instead of
+        # writing to the LaunchAgent's unrotated stdout/stderr files.
+        uvicorn.run(
+            create_app(settings),
+            host=settings.host,
+            port=settings.port,
+            log_level="info",
+            log_config=None,
+        )
+
+
+def _apply_observability_defaults(settings: Settings, app_home: Path) -> None:
+    """Fill in the telemetry locations that depend on the runtime layout.
+
+    The rollup directory is only implied for an installed runtime: a source
+    checkout must never write a rolling history into the working tree, so there
+    it stays opt-in through ``SPEECHRAIL_METRICS_ROLLUP_DIR``.
+    """
+    if (
+        settings.metrics_rollup_enabled
+        and settings.metrics_rollup_dir is None
+        and ServiceLayout.for_app_home(app_home).current_runtime.exists()
+    ):
+        settings.metrics_rollup_dir = default_rollup_path(app_home)
 
 
 def _parser() -> argparse.ArgumentParser:

@@ -5,44 +5,42 @@ import SwiftUI
 public struct ServiceOverviewView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var pendingAction: ControlCommand?
-    @State private var showInspector = false
 
     public init() {}
 
     public var body: some View {
         PageScaffold(route: .overview) {
-            statusArea
-            ControlAgentStatusView()
-            serviceBody
+            if isAwaitingFirstHealthRead {
+                loadingState
+            } else {
+                statusArea
+                ControlAgentStatusView()
+                serviceBody
+            }
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "刷新状态、查看技术详情，或启动、停止和重启本机 SpeechRail 服务") {
-                    Button {
-                        Task { await model.refresh() }
-                    } label: {
-                        Label("刷新服务状态", systemImage: "arrow.clockwise")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(model.isRefreshingService)
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
-                            systemImage: "info.circle"
-                        )
-                        .speechRailMenuRow()
-                    }
-                    Divider()
+                // 这一页的主动作就是服务生命周期，所以它拿到一个**具体的**标签：
+                // 启动 / 停止 / 重启不再藏在通用的「更多操作」下（§6.2）。
+                PageActionsMenu(
+                    title: "服务",
+                    systemImage: "power",
+                    helpText: "启动、停止或重启本机 SpeechRail 服务"
+                ) {
                     serviceActions
                 }
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        .focusedSceneValue(
+            \.reloadPageCommand,
+            ReloadPageCommand(title: "重新读取服务状态") {
+                Task { await model.refresh() }
+            }
+        )
         .inspector(isPresented: $showInspector) {
             DeveloperInspector {
                 LabeledContent("服务", value: displayedHealth?.service ?? "未读取")
@@ -60,6 +58,7 @@ public struct ServiceOverviewView: View {
                 LabeledContent("运行档位", value: displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取")
                 LabeledContent("配置档位", value: model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取")
                 LabeledContent("配置代次", value: model.profile?.generation.map(String.init) ?? "未读取")
+                LabeledContent("作业队列", value: displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
                 LabeledContent("控制 Agent", value: model.controlAgentStatus.title)
                 LabeledContent("影响", value: model.controlAgentStatus.impact)
             }
@@ -86,8 +85,6 @@ public struct ServiceOverviewView: View {
         .task {
             model.refreshControlAgentStatus()
             await model.refresh()
-            await model.refreshPreflight()
-            showInspector = showDeveloperDetails
         }
     }
 
@@ -98,6 +95,22 @@ public struct ServiceOverviewView: View {
         } else {
             statusBanner
         }
+    }
+
+    /// REDESIGN-SPEC §8：服务四页的「加载中」是 `ProgressView`。首次 health
+    /// 读取有结果之前，页面不给结论，也不用一屏「未就绪」占位冒充事实——
+    /// 那正是「空列表 + 0 值」。
+    private var isAwaitingFirstHealthRead: Bool {
+        model.lastHealthRefresh == nil && model.healthFailure == nil
+    }
+
+    private var loadingState: some View {
+        ProgressView("正在读取服务状态…")
+            .frame(
+                maxWidth: .infinity,
+                minHeight: SpeechRailDesignTokens.Layout.emptyStateMinimumHeight
+            )
+            .speechRailContentSurface()
     }
 
     private var statusBanner: some View {
@@ -174,6 +187,7 @@ public struct ServiceOverviewView: View {
             isReady ? "重启服务" : "启动服务"
         }
         return StatusBanner(
+            kind: .conclusion,
             tone: tone,
             title: title,
             message: message,
@@ -200,10 +214,9 @@ public struct ServiceOverviewView: View {
     }
 
     private var serviceBody: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             capabilitiesCard
             runtimeCard
-            preflightCard
         }
     }
 
@@ -227,7 +240,9 @@ public struct ServiceOverviewView: View {
     }
 
     /// Figma `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
-    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。
+    /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。规范与 Figma 稿在这一卡里
+    /// 都只放四行事实（档位 / 端口 / 版本 / 常驻 worker）；配置档位、配置代次与
+    /// 作业队列属于同一批技术事实，跟随开发者详情，而不是把这张卡撑成一张表。
     private var runtimeCard: some View {
         CardSurface {
             CardHead(
@@ -236,22 +251,15 @@ public struct ServiceOverviewView: View {
             )
             Divider()
             runtimeRow(
-                "运行档位",
+                "当前档位",
                 displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "未读取"
             )
             Divider()
-            runtimeRow(
-                "配置档位",
-                model.profile?.preset.map(SpeechRailProfilePresentation.title) ?? "未读取"
-            )
+            runtimeRow("服务端口", serviceAddressText)
             Divider()
-            runtimeRow("端口", model.service.port.map(String.init) ?? "未读取")
-            Divider()
-            runtimeRow("版本", displayedHealth?.version ?? "未读取")
+            runtimeRow("运行版本", displayedHealth?.version ?? "未读取")
             Divider()
             runtimeRow("常驻 worker", residentWorkerText)
-            Divider()
-            runtimeRow("作业队列", displayedHealth?.jobSpoolReady == true ? "可用" : "未就绪")
         }
     }
 
@@ -274,45 +282,19 @@ public struct ServiceOverviewView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        // 稿的 `infoRow` 是 padY 10 + Body 行（19.5）= 40pt 带；应用的行高 16，
+        // 取 `sm`(12) 补回同一档带高（帧实测 39.5）。REDESIGN-SPEC §11.6 第二十一轮。
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label)，\(value)")
     }
 
-    /// 设计稿的服务状态页只有「结论 + 能力 + 运行信息」；本机多这一张预检摘要卡，
-    /// 它给出「现在能不能用」的结论。先按同一张卡片语言保留，去留见交付说明。
-    private var preflightCard: some View {
-        CardSurface {
-            CardHead(
-                title: "预检",
-                detail: "预检只读取环境和配置，不会下载模型或改变当前服务。"
-            )
-            Divider()
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Button {
-                    Task { await model.refreshPreflight() }
-                } label: {
-                    Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
-                }
-                .speechRailButton(.secondary)
-                .disabled(model.isBusy || model.isRefreshingPreflight)
-
-                Button {
-                    navigation.request(.models)
-                } label: {
-                    Label("打开模型管理", systemImage: AppRoute.models.systemImage)
-                }
-                .speechRailButton(.secondary)
-
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-
-            preflightSummary
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
-        }
+    /// Figma `runtime` 的「服务端口」行是 `host:port`：只报端口时看不出这一行连的是哪台
+    /// 主机。主机名由诊断客户端给出，拿不到时如实退回端口。
+    private var serviceAddressText: String {
+        guard let port = model.service.port.map(String.init) else { return "未读取" }
+        guard let host = model.serviceConnectionHost, !host.isEmpty else { return port }
+        return "\(host):\(port)"
     }
 
     /// `warm_capabilities` is the only field that names the lanes actually
@@ -363,8 +345,8 @@ public struct ServiceOverviewView: View {
                 : "健康检查未返回结果，无法确认这一项。"
             return [
                 ServiceCapability(title: "语音识别", status: .notReady, reason: reason),
-                ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "语音合成 · VoiceDesign", status: .notReady, reason: reason),
+                ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
                 ServiceCapability(title: "实时语音 VAD", status: .notReady, reason: reason),
                 ServiceCapability(title: "分人识别", status: .notReady, reason: reason),
@@ -375,13 +357,30 @@ public struct ServiceOverviewView: View {
         let asrState = health.asrState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 ASR 运行状态。"
         let ttsReady = health.ttsReady == true
         let ttsState = health.ttsState.map(SpeechRailRuntimeStatePresentation.text) ?? "未读取 TTS 运行状态。"
-        let voiceDesignVoice = model.creatorVoices.first { voice in
-            voice.available && voice.variant == "voice_design" && voice.capabilities.supportsInstruction
-        }
-        let cloneVoice = model.creatorVoices.first { voice in
-            voice.available && voice.capabilities.supportsClone
-        }
-        let diarizationSupported = health.profile != .light
+        // 能力结论只读服务声明（`/v1/models.capabilities`）：音色列表是用户数据，
+        // 可以为空，而 capability 由当前档位与制品解析决定。拿“列表里有没有某一类
+        // 音色”当能力依据，会在服务已经发布能力时报出假的“未就绪”。
+        let declaredCapabilities = model.serviceCapabilitiesLoadState == .loaded
+            ? model.serviceCapabilities
+            : nil
+        let supportsQualityTier = health.profile == .quality
+        let voiceDesign = capabilityVerdict(
+            title: "语音合成 · VoiceDesign",
+            capability: "VoiceDesign",
+            declared: declaredCapabilities?.supportsInstruction,
+            supportedByProfile: supportsQualityTier,
+            missingReason: "Quality 档位下服务未公开 VoiceDesign capability。",
+            unsupportedReason: "VoiceDesign 只在 Quality 档位加载。"
+        )
+        let voiceClone = capabilityVerdict(
+            title: "音色复刻",
+            capability: "音色复刻",
+            declared: declaredCapabilities?.supportsClone,
+            supportedByProfile: supportsQualityTier,
+            missingReason: "Quality 档位下服务未公开音色复刻 capability（Base 制品未解析）。",
+            unsupportedReason: "音色复刻只在 Quality 档位加载。"
+        )
+        let diarization = diarizationCapability(for: health)
 
         return [
             ServiceCapability(
@@ -389,27 +388,13 @@ public struct ServiceOverviewView: View {
                 status: asrReady ? .ready : .notReady,
                 reason: asrReady ? "\(asrState)；词级时间戳由 ASR 原生提供。" : asrState
             ),
+            voiceDesign,
             ServiceCapability(
                 title: "语音合成 · Base",
                 status: ttsReady ? .ready : .notReady,
                 reason: ttsState
             ),
-            ServiceCapability(
-                title: "语音合成 · VoiceDesign",
-                status: voiceDesignVoice != nil ? .ready : (health.profile == .quality ? .notReady : .unsupported),
-                reason: voiceDesignVoice != nil
-                    ? "服务已公开可用的 VoiceDesign capability。"
-                    : (health.profile == .quality
-                        ? "Quality 档位下服务未公开 VoiceDesign capability。"
-                        : "VoiceDesign 只在 Quality 档位加载。")
-            ),
-            ServiceCapability(
-                title: "音色复刻",
-                status: cloneVoice != nil ? .ready : .notReady,
-                reason: cloneVoice != nil
-                    ? "服务已公开可用的音色复刻 capability。"
-                    : "服务未公开可用的音色复刻 capability。"
-            ),
+            voiceClone,
             ServiceCapability(
                 title: "实时语音 VAD",
                 status: health.realtimeVAD?.ready == true ? .ready : .notReady,
@@ -418,132 +403,82 @@ public struct ServiceOverviewView: View {
                     ?? "未读取实时语音状态。"
             ),
             ServiceCapability(
-                title: "分人识别",
-                status: diarizationSupported
-                    ? (health.diarizationReady == true ? .ready : .notReady)
-                    : .unsupported,
-                reason: diarizationSupported
-                    ? (health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
-                        ?? (health.diarizationReady == true
-                            ? "只输出本次会话的匿名标签；不管理实名或声纹库。"
-                            : "分人 worker 尚未就绪。"))
-                    : "Light 档位不加载分人能力。"
+                title: diarization.title,
+                status: diarization.status,
+                reason: diarization.reason
             ),
         ]
     }
 
-    private var preflightSummary: some View {
-        let failedCount = model.preflightChecks.filter { !$0.ok }.count
-        let isOperating = model.serviceOperation?.phase.isActive == true
-        let tone: StatusTone
-        if isOperating || model.isRefreshingPreflight {
-            tone = .attention
-        } else if model.preflightMessage != nil {
-            tone = .critical
-        } else if model.preflightChecks.isEmpty {
-            tone = .neutral
-        } else {
-            tone = failedCount == 0 ? .healthy : .critical
+    /// 分人行同样先看服务声明（`/health.diarization`），档位名只负责把 Light 的
+    /// 未配置解释成档位取舍。服务说“没有配置分人”时，报“未配置”比报“worker 尚未
+    /// 就绪”准确：后者把缺失的能力说成正在等待。
+    private func diarizationCapability(for health: HealthSnapshot) -> ServiceCapability {
+        let title = "分人识别"
+        if health.diarizationReady == true {
+            return ServiceCapability(
+                title: title,
+                status: .ready,
+                reason: health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
+                    ?? "只输出本次会话的匿名标签；不管理实名或声纹库。"
+            )
         }
-
-        let title: String
-        if isOperating {
-            title = "等待服务操作完成"
-        } else if model.isRefreshingPreflight {
-            title = "正在读取预检"
-        } else if model.preflightMessage != nil {
-            title = "预检读取失败"
-        } else if model.preflightChecks.isEmpty {
-            title = "尚未运行预检"
-        } else if failedCount == 0 {
-            title = "预检通过"
-        } else {
-            title = "预检需要处理"
+        if health.diarization?.configured == false {
+            return ServiceCapability(
+                title: title,
+                status: health.profile == .light ? .unsupported : .notReady,
+                reason: health.profile == .light
+                    ? "Light 档位不加载分人能力。"
+                    : "当前部署未配置分人能力。"
+            )
         }
-
-        let detail: String
-        if isOperating {
-            detail = "服务操作期间不沿用旧结论，终态会重新读取服务与预检状态。"
-        } else if model.isRefreshingPreflight {
-            detail = "正在核对运行环境、配置和模型制品。"
-        } else if let message = model.preflightMessage, !message.isEmpty {
-            detail = SpeechRailOperationMessagePresentation.text(message)
-        } else if model.preflightChecks.isEmpty {
-            detail = "运行预检后，这里会给出是否可以继续使用的结论。"
-        } else if failedCount == 0 {
-            detail = "环境与配置满足当前控制面的检查条件。"
-        } else {
-            detail = "有 \(failedCount) 项前置条件需要处理，打开诊断查看修复路径。"
+        if health.profile == .light {
+            return ServiceCapability(
+                title: title,
+                status: .unsupported,
+                reason: "Light 档位不加载分人能力。"
+            )
         }
-
-        return ViewThatFits(in: .horizontal) {
-            preflightSummaryHorizontal(tone: tone, title: title, detail: detail, isOperating: isOperating)
-            preflightSummaryVertical(tone: tone, title: title, detail: detail, isOperating: isOperating)
-        }
-        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("预检，\(title)，\(detail)")
+        return ServiceCapability(
+            title: title,
+            status: .notReady,
+            reason: health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
+                ?? "分人 worker 尚未就绪。"
+        )
     }
 
-    private func preflightSummaryHorizontal(
-        tone: StatusTone,
+    /// 能力行的统一口径：服务声明了就是可用；没声明时再区分「当前档位不加载」与
+    /// 「档位该有、服务没有发布」。还没读到能力清单时不下结论，也不把「用户还没有
+    /// 这类音色」当成「服务没有这项能力」。
+    private func capabilityVerdict(
         title: String,
-        detail: String,
-        isOperating: Bool
-    ) -> some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            preflightSummaryIcon(tone)
-            preflightSummaryCopy(title: title, detail: detail)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            preflightSummaryAction(isOperating: isOperating)
+        capability: String,
+        declared: Bool?,
+        supportedByProfile: Bool,
+        missingReason: String,
+        unsupportedReason: String
+    ) -> ServiceCapability {
+        if declared == true {
+            return ServiceCapability(
+                title: title,
+                status: .ready,
+                reason: "服务已公开可用的 \(capability) capability。"
+            )
         }
-    }
-
-    private func preflightSummaryVertical(
-        tone: StatusTone,
-        title: String,
-        detail: String,
-        isOperating: Bool
-    ) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                preflightSummaryIcon(tone)
-                preflightSummaryCopy(title: title, detail: detail)
-            }
-            preflightSummaryAction(isOperating: isOperating)
+        if declared == false {
+            return ServiceCapability(
+                title: title,
+                status: supportedByProfile ? .notReady : .unsupported,
+                reason: supportedByProfile ? missingReason : unsupportedReason
+            )
         }
-    }
-
-    private func preflightSummaryIcon(_ tone: StatusTone) -> some View {
-        Image(systemName: tone.systemImage)
-            .foregroundStyle(tone.color)
-            .accessibilityHidden(true)
-    }
-
-    private func preflightSummaryCopy(title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            Text(title)
-                .font(SpeechRailDesignTokens.Typography.label)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Text(detail)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(2)
-                .truncationMode(.tail)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func preflightSummaryAction(isOperating: Bool) -> some View {
-        Button("查看诊断") {
-            navigation.request(.diagnostics)
-        }
-        .speechRailButton(.quiet)
-        .disabled(isOperating || model.isRefreshingPreflight)
+        return ServiceCapability(
+            title: title,
+            status: .notReady,
+            reason: model.serviceCapabilitiesLoadState == .failed
+                ? "能力清单读取失败，无法确认这一项。"
+                : "尚未读取服务能力清单，无法确认这一项。"
+        )
     }
 
     /// Figma `cap`：名称（Body / Medium）｜状态胶囊（固定 96pt 列）｜一句原因。
@@ -645,11 +580,14 @@ public struct ServiceOverviewView: View {
             return "SpeechRail 健康状态已单独读取，但控制通道不可用。只读健康信息仍可查看，请打开诊断。"
         }
         if displayedHealth?.ready == true {
-            let profile = displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "运行档位未读取"
+            // Figma `conclusion`：结论面板先说「本机在跑、离线也能用」，当前档位属于
+            // 运行事实，已经在下面的「运行信息」卡里；在这句里重复一遍只会把唯一主动作推远。
+            let port = model.service.port.map(String.init) ?? "未知"
+            let ready = "本地语音服务正在 \(port) 端口运行；离线也有完整的识别与合成能力。"
             if !model.controlAgentStatus.allowsMutation {
-                return "SpeechRail 已准备好接收本机语音请求。当前运行档位：\(profile)。但控制 Agent 受限，服务操作和档位变更暂不可用；只读诊断仍可使用。"
+                return ready + "但控制 Agent 受限，服务操作和档位变更暂不可用；只读诊断仍可使用。"
             }
-            return "SpeechRail 已准备好接收本机语音请求。当前运行档位：\(profile)。"
+            return ready
         }
         if model.service.serviceState == "unavailable" {
             return "本机服务尚未响应健康检查；如果刚执行过启动或重启，请等待操作完成后重新读取。"

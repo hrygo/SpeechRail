@@ -32,7 +32,9 @@ public struct CreatorSurfaceView: View {
 public struct DubbingDeskView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I），
+    /// 页面直接绑定它，不再各写一条「显示开发者详情」菜单项（§6.2）。
+    @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @SceneStorage("speechrail.dubbing.text") private var dubbingText = "在星际航行的漫长岁月里，人类学会了倾听寂静。每当脉冲信号穿越猎户座悬臂，控制台都会闪烁起熟悉的琥珀色微光。"
     @SceneStorage("speechrail.dubbing.voiceID") private var selectedVoiceID = ""
     /// `0` means "this window has no opinion yet", so the Settings default
@@ -41,7 +43,6 @@ public struct DubbingDeskView: View {
     @SceneStorage("speechrail.dubbing.speed") private var storedSpeed: Double = 0
     @AppStorage("speechrail.creator.defaultVoiceID") private var defaultVoiceID = ""
     @AppStorage("speechrail.creator.defaultSpeed") private var defaultSpeed: Double = 1.0
-    @State private var showInspector = false
     @State private var isVoicePickerPresented = false
     @State private var selectionNotice: String?
     @State private var exportDocument = WAVFileDocument(data: Data())
@@ -55,7 +56,9 @@ public struct DubbingDeskView: View {
 
     public var body: some View {
         PageScaffold(route: .dubbing, scrollable: false) {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            // 输入卡 / 控制条 / 结果条之间是页面级「块与块」：帧实测 19–20pt
+            // （原先用 sm=12，比稿紧 8pt；REDESIGN-SPEC §5.6 / §11.6 第十七轮）。
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 scriptCard
                 controlBar
                 resultSlot
@@ -66,31 +69,17 @@ public struct DubbingDeskView: View {
                 value: model.lastCreatedWork?.id
             )
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                // D9：配音台不再复制「服务状态」入口，全局状态只留在侧边栏底部。
-                WorkspaceActionsMenu(helpText: "刷新服务状态，或调整开发者详情") {
-                    Button {
-                        Task { await model.refresh() }
-                    } label: {
-                        Label("刷新服务状态", systemImage: "arrow.clockwise")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(model.isRefreshingService)
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
-                            systemImage: "info.circle"
-                        )
-                        .speechRailMenuRow()
-                    }
+        // 头部（页面身份）由窗口组合根 `ControlCenterView` 声明；这一页没有头部动作：
+        // 「生成语音」（⌘⏎）在正文里紧挨文稿，D9 之后也没有「服务状态」入口（§6.2）。
+        .focusedSceneValue(
+            \.reloadPageCommand,
+            ReloadPageCommand(title: "重新读取音色列表") {
+                Task {
+                    await model.refreshCreatorVoices()
+                    syncSelectedVoice()
                 }
             }
-            .sharedBackgroundVisibility(.hidden)
-        }
+        )
         .inspector(isPresented: $showInspector) {
             dubbingInspector
         }
@@ -106,12 +95,6 @@ public struct DubbingDeskView: View {
             case .failure:
                 exportMessage = "导出失败：未能写入目标位置，请重试。"
             }
-        }
-        .onAppear {
-            showInspector = showDeveloperDetails
-        }
-        .onChange(of: showInspector) { _, value in
-            showDeveloperDetails = value
         }
         .task {
             await model.refreshCreatorVoices()
@@ -135,39 +118,44 @@ public struct DubbingDeskView: View {
     private static let voicePopoverWidth: CGFloat = 320
     private static let voicePopoverHeight: CGFloat = 280
 
-    /// The script owns the remaining window height. The count and the clear
-    /// action belong to the editor they act on, so they live inside the same
-    /// card, under a divider (§7.1).
+    /// 2026-09-15 用户复核 + 2026-09-16 三度、五度、六度校准（REDESIGN-SPEC §7.1）：
+    /// 输入区不占满剩余高度。高度**跟随正文**：短文稿给下限 144pt（静止状态看得见
+    /// 3 行写作区），正文每长一行就长一行，到上限 360pt 为止，再长由原生滚动条承担
+    /// （组件仍是原生 `TextEditor`，滚动条由系统画）。离屏实测（1440 × 900、默认 53 字
+    /// 一行文稿）证明固定区间会把 277pt 高的编辑框留给 16pt 的文字；跟随内容后编辑框
+    /// 高度只比正文多一行余量，下限收到 144 后一行文稿下方只空 45pt。区间与口径见
+    /// `Layout.creatorComposer*Height`。
     private var scriptCard: some View {
-        VStack(spacing: 0) {
-            TextEditor(text: $dubbingText)
-                .font(SpeechRailDesignTokens.Typography.body)
-                .lineSpacing(Self.scriptLineSpacing)
-                .scrollContentBackground(.hidden)
-                .padding(SpeechRailDesignTokens.Spacing.sm)
-                .focused($isScriptFocused)
-                .accessibilityLabel("配音文稿")
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            Divider()
-
+        SpeechRailComposerTextEditor(
+            text: $dubbingText,
+            label: "配音文稿",
+            isFocused: $isScriptFocused,
+            heightPolicy: .contentDriven(
+                minimum: SpeechRailDesignTokens.Layout.creatorComposerMinimumHeight,
+                maximum: SpeechRailDesignTokens.Layout.creatorComposerMaximumHeight
+            ),
+            lineSpacing: Self.scriptLineSpacing
+        ) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 scriptCountLabel
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                Button("清空") {
+                // 稿（Figma `editor/meta`）把「清空」画成「橡皮擦 + 文字」的安静按钮。
+                Button {
                     dubbingText = ""
+                } label: {
+                    Label("清空", systemImage: "eraser")
                 }
                 .buttonStyle(.borderless)
+                // 稿的 `editor/meta` 里「清空」是 `Subheadline`(11)：4x 帧上两个字的墨迹
+                // 各宽约 9.5–9.75pt ≈ 11pt 字号。按钮仍是原生 `.borderless`，只钉字号。
+                .font(SpeechRailDesignTokens.Typography.secondary)
                 .disabled(dubbingText.isEmpty)
                 .accessibilityLabel("清空文稿")
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+            // 页脚信息行与上方正文对齐（稿 `editor/meta` 是 padX 18 → `Layout.cardInset`，
+            // 由组件按 `chrome` 统一给）；竖直方向由组件按 `Layout.composerMetaRowHeight`
+            // （42pt 带）居中。
         }
-        .frame(maxHeight: .infinity, alignment: .top)
-        .frame(minHeight: SpeechRailDesignTokens.Layout.creatorComposerMinimumHeight)
-        .background(Color(nsColor: .textBackgroundColor), in: ConcentricRectangle())
-        .overlay { scriptFocusRing }
     }
 
     private var scriptCountLabel: some View {
@@ -179,10 +167,13 @@ public struct DubbingDeskView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .accessibilityHidden(true)
             }
-            Text("\(count)/\(limit) 字")
+            Text("\(count) / \(limit) 字")
                 .monospacedDigit()
         }
-        .font(SpeechRailDesignTokens.Typography.caption)
+        // 稿的 `editor/meta` 是 `Subheadline`(11) + `text/secondary`：4x 帧上这一行实测
+        // #6E6E73（= secondary）、数字 ink 7.75pt ≈ 11pt。应用此前用 `caption`（10）
+        // （REDESIGN-SPEC §11.6 第二十轮）。
+        .font(SpeechRailDesignTokens.Typography.secondary)
         .foregroundStyle(
             isOverLimit
                 ? SpeechRailDesignTokens.Color.critical
@@ -192,14 +183,6 @@ public struct DubbingDeskView: View {
         .accessibilityLabel("文稿 \(count) 字，上限 \(limit) 字")
     }
 
-    @ViewBuilder
-    private var scriptFocusRing: some View {
-        ConcentricRectangle()
-            .stroke(Color(nsColor: .keyboardFocusIndicatorColor), lineWidth: 2.5)
-            .opacity(isScriptFocused ? 1 : 0)
-            .allowsHitTesting(false)
-    }
-
     // MARK: 控制条
 
     /// One bar under the script. Narrow windows get two rows with the same
@@ -207,20 +190,33 @@ public struct DubbingDeskView: View {
     private var controlBar: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .bottom, spacing: SpeechRailDesignTokens.Spacing.md) {
-                voicePickerButton
+                voiceControl
                 speedControl
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-                KeyboardHint("⌘⏎")
                 generateButton
             }
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                voicePickerButton
+                voiceControl
                 speedControl
                 generateButton
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.sm)
+        // 稿的 `composer` 控制卡是 padX 16 / padY 12（帧实测文字左沿距卡沿约 18pt）。
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
         .speechRailSurface(.panel)
+    }
+
+    /// 稿的 `composer/fieldGroup` 给两组控件各配一个 `Subheadline`(11) 小标签：4x 帧实测
+    /// 「音色」在 x 278.75–299.25、「语速」在 459.5–480.25，两个字各约 9.5pt 宽 = 11pt。
+    /// 应用此前只在语速一侧有标签，胶囊上方是空的（REDESIGN-SPEC §11.6 第二十轮）。
+    private var voiceControl: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            Text("音色")
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            voicePickerButton
+        }
     }
 
     private var voicePickerButton: some View {
@@ -229,6 +225,10 @@ public struct DubbingDeskView: View {
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Image(systemName: "waveform")
+                    // 稿的胶囊是 `icon(capsule, "audio-waveform", 15, V["accent/voice"])`：
+                    // 波形是**琥珀**（4x 帧同样量到琥珀），与 §5.4「琥珀只标记声音/音色类
+                    // 对象——音色徽标、波形、候选卡」一致。应用此前不设色，继承成正文色。
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                     .accessibilityHidden(true)
                 Text(voicePickerTitle)
                     .lineLimit(1)
@@ -240,13 +240,19 @@ public struct DubbingDeskView: View {
                 }
                 Image(systemName: "chevron.down")
                     .font(.caption2)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    // 稿（脚本 1336）是 `icon(capsule, "chevron-down", 14, V["text/secondary"])`：
+                    // 次级色，不是三级色。应用自己的折叠行 chevron 也用 `inkSecondary`，
+                    // 只有这里用三级色，属于唯一异类（REDESIGN-SPEC §11.6 第三十九轮）。
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .accessibilityHidden(true)
             }
             .frame(minWidth: SpeechRailDesignTokens.Layout.creatorVoicePickerWidth, alignment: .leading)
         }
         .buttonStyle(.bordered)
         .buttonBorderShape(.capsule)
+        // 稿的 `voiceCapsule` 是 30pt 高（帧实测 757.0 → 786.75）；系统次按钮的
+        // `.large` 档是 28pt（本机离屏实测），取这一档。REDESIGN-SPEC §11.6 第二十一轮。
+        .controlSize(.large)
         .disabled(model.isRefreshingCreatorVoices && model.creatorVoices.isEmpty)
         .popover(isPresented: $isVoicePickerPresented, arrowEdge: .bottom) {
             voicePickerPopover
@@ -272,6 +278,7 @@ public struct DubbingDeskView: View {
                     isVoicePickerPresented = false
                     navigation.request(.voiceDesign)
                 }
+                .speechRailButton(.primary)
             }
             .frame(width: Self.voicePopoverWidth)
         } else {
@@ -348,30 +355,46 @@ public struct DubbingDeskView: View {
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.micro)
         .background(
             isSelected ? SpeechRailDesignTokens.Surface.selectedFill : Color.clear,
-            in: ConcentricRectangle()
+            in: SpeechRailDesignTokens.Corner.nestedShape
         )
     }
 
     private var speedControl: some View {
         let isSpeedLocked = selectedVoice?.mode == "clone"
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("语速")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                Text(String(format: "%.1fx", speechSpeed))
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-            }
+            Text("语速")
+                // 与「音色」同一档（稿 `fieldGroup/label` = Subheadline 11，帧实测同上）。
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
+            // 稿的 `speedRow` 是**一行**：滑块（132pt 定宽）、当前取值、快捷档位。
+            // 应用此前把取值塞进标签行并靠右浮着，滑块又被 HStack 拉成整行宽
+            // （4x 帧实测控件区 748pt vs 稿 132pt；REDESIGN-SPEC §11.6 第二十八轮）。
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Slider(value: speechSpeedBinding, in: 0.5...2.0, step: 0.1)
-                    .frame(minWidth: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
+                    // 稿 `speedRow/slider` 的轨道是 132pt 定宽、thumb 14；定宽也让
+                    // 控制条保持「左侧一组控件 + 右侧主动作」的稿式构图（§7.1）。
+                    .frame(width: SpeechRailDesignTokens.Layout.creatorSpeedSliderWidth)
                     .disabled(isSpeedLocked)
                     .accessibilityLabel("语速")
 
+                Text(String(format: "%.1fx", speechSpeed))
+                    // 稿的 `speedRow/value` 是 `Body / Medium`(13)：帧实测这一串 ink 9.5pt
+                    // ≈ 13pt 数字。保留等宽数字（§7.1 要求显示当前值），并给一个定宽槽
+                    // 免得数字位数变化时整行控件左右跳。
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .monospacedDigit()
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .frame(
+                        minWidth: SpeechRailDesignTokens.Layout.creatorSpeedValueWidth,
+                        alignment: .leading
+                    )
+
+                // **有意保留的偏离**：帧的 `speedRow` 只画了「滑块 / 取值 / 分段」三段
+                // （`figma-kit/main.js:1342-1360` 同样没有），但 §7.1 的「语速」条文
+                // 明确要求 `Slider` + `Stepper`（步长 0.1，范围 0.5–2.0）。两者冲突时
+                // 以明确条文为准，代价是整组比帧宽 28pt（§11.6 第二十八轮已记，
+                // 第五十二轮复核时再次确认）。
                 Stepper(value: speechSpeedBinding, in: 0.5...2.0, step: 0.1) {
                     EmptyView()
                 }
@@ -436,11 +459,16 @@ public struct DubbingDeskView: View {
                     Text("停止")
                 }
             } else {
-                Label("生成语音", systemImage: "waveform.badge.plus")
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Label("生成语音", systemImage: "waveform.badge.plus")
+                    ButtonShortcutHint("⌘⏎")
+                }
             }
         }
         .buttonStyle(.borderedProminent)
-        .controlSize(.large)
+        // 稿的主按钮是 34pt（帧实测 737.0 → 770.75）；系统 `.large` 是 28、`.extraLarge`
+        // 是 36（本机离屏实测），取最近的一档。REDESIGN-SPEC §11.6 第二十一轮。
+        .controlSize(.extraLarge)
         .keyboardShortcut(.return, modifiers: .command)
         .disabled(!canGenerate)
         .help("生成语音 ⌘⏎")
@@ -469,17 +497,33 @@ public struct DubbingDeskView: View {
     private func resultBar(for work: CreativeWork) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Image(systemName: "waveform")
-                    .symbolEffect(.variableColor.iterative, isActive: isPlaying(work))
-                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
-                    .accessibilityHidden(true)
+                // 稿的行首不是 SF Symbol，而是 `waveform(result, [5, 11, 16, …], voice, 2)`
+                // 这一排 **12 根 2pt 圆角条**（`main.js:1372`）：4x 帧 `▸ 配音台.png`
+                // 实测墨迹 46.0 × 17.0，应用此前那个 `waveform` 字形只有 11.5 × 10.0，
+                // 于是标题整列左移 34.5pt（REDESIGN-SPEC §11.6 第四十二轮）。
+                WaveformBars(
+                    pattern: SpeechRailDesignTokens.Waveform.resultBar,
+                    isPlaying: isPlaying(work)
+                )
+                .accessibilityHidden(true)
 
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    Text(work.title)
+                // 稿（`main.js` 1366-1375）的标题区是 `frame("titles", { gap: 8 })`：
+                // 名称 `Body / Medium` + 时长 `Callout` `text/secondary`，两者**并列**、
+                // 中间只有 8pt 间距。应用此前把时长并进同一行文本写成「· 0:12」，
+                // 于是多出一个稿上没有的分隔符、字号也跟着标题走。
+                // 4x 帧实测：名称墨迹 x 334.5–448（= 卡左沿 261 + pad 14 + 波形 46 + gap 12
+                // + 首字留白 1.5），时长墨迹 x 457.75–487.25，两者之间是 9.75pt 的字形间距
+                // ——对应脚本的 gap 8（REDESIGN-SPEC §11.6 第四十一轮）。
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    // 结果条是单行窄条：名称按可用宽度自然截断（`displayTitle` 见
+                    // `CreativeWork` 的说明，第四十八轮）。
+                    Text(work.displayTitle)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     if let durationText = work.durationText {
-                        Text("· \(durationText)")
+                        Text(durationText)
+                            .font(SpeechRailDesignTokens.Typography.callout)
                             .monospacedDigit()
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     }
@@ -511,9 +555,33 @@ public struct DubbingDeskView: View {
                 }
                 .accessibilityLabel("导出配音")
 
-                Button("查看我的作品") {
+                // 稿（`main.js` 1377-1383）把这一格画成**安静行**而不是第四颗边框按钮：
+                // `padX 8 / padY 4 / radius 7` 的无底色行，内容是 `Callout` `text/secondary`
+                // 的「查看我的作品」+ 13pt 框的 `chevron-right`（`text/tertiary`）。
+                // 4x 帧上它是纯文字 + `›`，与左边三颗白底按钮明显不同族。
+                // 应用此前用默认样式的 `Button`，离屏实渲出来是第四颗边框按钮。
+                Button {
                     navigation.request(.works)
+                } label: {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Text("查看我的作品")
+                        Image(systemName: "chevron.right")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .accessibilityHidden(true)
+                    }
                 }
+                .buttonStyle(.borderless)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                // 稿的安静行自带 `padX 8 / padY 4` 的内边距（hover/pressed 反馈就画在
+                // 这一圈上）。4x 帧实测它的 chevron 墨迹右沿距结果条右沿 27.5pt
+                // （= 条内边距 14 + 安静行 8 + 13 框里 4.25 宽墨迹的居中留白）；
+                // 应用不给这 8pt 时只有 17.5pt，整块出口比稿更贴右沿。
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+                .contentShape(Rectangle())
+                .accessibilityLabel("查看我的作品")
             }
 
             if let playbackMessage = model.workPlaybackMessage {
@@ -528,8 +596,10 @@ public struct DubbingDeskView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
         }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        // 稿 `resultBar` 是 `pad: 14`、高度实测 59pt（4x 帧 y820.5 → 879.5）。应用此前
+        // 12/8 的紧内边距只画到约 44pt。取 4pt 网格上最近的一档 16：整条 60pt，
+        // 与稿差 1pt，同时和卡片内边距同值（REDESIGN-SPEC §11.6 第二十八轮）。
+        .padding(SpeechRailDesignTokens.Spacing.md)
         .speechRailSurface(.elevated)
         .accessibilityElement(children: .contain)
         .transition(
@@ -546,8 +616,12 @@ public struct DubbingDeskView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                Text("配音未完成")
-                    .font(SpeechRailDesignTokens.Typography.label)
+                // 稿 `Result Bar` 的 `State=Error` 变体写的是「生成未完成：服务端没有返回音频」
+                // （`main.js` 912）。应用把它拆成「标题 + 真实原因」两行——原因由服务端给，
+                // 不能钉死成稿上的示例句——标题则取稿的前半句（REDESIGN-SPEC §11.6 第三十六轮改回）。
+                Text("生成未完成")
+                    // 失败条与结果条同骨架：稿的结果条标题是 `Body / Medium`。
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                 Text(message)
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -557,10 +631,13 @@ public struct DubbingDeskView: View {
             Button("重试") {
                 startSynthesis()
             }
+            // 稿把这一对都画成次级按钮（`main.js` 914–915 的 `secondaryButton`）。
+            .speechRailButton(.secondary)
             .disabled(!canGenerate)
             Button("查看诊断") {
                 navigation.request(.diagnostics)
             }
+            .speechRailButton(.secondary)
         }
         .padding(SpeechRailDesignTokens.Spacing.sm)
         .speechRailSurface(.panel)
@@ -664,8 +741,8 @@ public struct DubbingDeskView: View {
 public struct VoiceDesignView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
-    @State private var showInspector = false
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @SceneStorage("speechrail.voiceDesign.description") private var description = "温暖、清晰、亲近，像一位深夜电台耐心的播客主持人。"
     @SceneStorage("speechrail.voiceDesign.name") private var voiceName = "夜航主持"
     @SceneStorage("speechrail.voiceDesign.referenceText") private var referenceText = "欢迎来到 SpeechRail，这是用于试听和保存音色的参考文案。"
@@ -719,33 +796,17 @@ public struct VoiceDesignView: View {
             voiceDesignFeedback
             candidateSection
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "刷新服务状态，或查看开发信息") {
-                    Button {
-                        Task {
-                            await model.refresh()
-                            await model.refreshCreatorVoices()
-                        }
-                    } label: {
-                        Label("刷新状态", systemImage: "arrow.clockwise")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(model.isRefreshingCreatorVoices)
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
-                            systemImage: "info.circle"
-                        )
-                        .speechRailMenuRow()
-                    }
+        // 音色创作也是「描述 → 生成 → 保存」一路在正文里走完，所以没有头部动作；
+        // 页面身份由窗口组合根声明，重新读取音色列表与档位留在 ⌘R（§6.2）。
+        .focusedSceneValue(
+            \.reloadPageCommand,
+            ReloadPageCommand(title: "重新读取音色列表") {
+                Task {
+                    await model.refresh()
+                    await model.refreshCreatorVoices()
                 }
             }
-            .sharedBackgroundVisibility(.hidden)
-        }
+        )
         .inspector(isPresented: $showInspector) {
             voiceDesignInspector
         }
@@ -761,7 +822,6 @@ public struct VoiceDesignView: View {
             )
         }
         .task {
-            showInspector = showDeveloperDetails
             await model.refresh()
             await model.refreshCreatorVoices()
         }
@@ -775,9 +835,6 @@ public struct VoiceDesignView: View {
                 playingSlot = nil
             }
         }
-        .onChange(of: showInspector) { _, value in
-            showDeveloperDetails = value
-        }
     }
 
     /// Three steps, not a form: describe the voice, keep the reference text and
@@ -785,57 +842,84 @@ public struct VoiceDesignView: View {
     /// (§7.2).
     private var promptCard: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            VStack(spacing: 0) {
-                TextEditor(text: $description)
-                    .focused($isEditorFocused)
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .scrollContentBackground(.hidden)
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
-                    .accessibilityLabel("音色描述")
-                    .frame(minHeight: SpeechRailDesignTokens.Layout.creatorVoiceInstructionMinimumHeight)
-
-                Divider()
-
+            SpeechRailComposerTextEditor(
+                text: $description,
+                label: "音色描述",
+                isFocused: $isEditorFocused,
+                heightPolicy: .band(
+                    minimum: SpeechRailDesignTokens.Layout.creatorVoiceInstructionMinimumHeight,
+                    ideal: SpeechRailDesignTokens.Layout.creatorVoiceInstructionIdealHeight,
+                    maximum: SpeechRailDesignTokens.Layout.creatorVoiceInstructionMaximumHeight
+                ),
+                // 这一行的带高比配音台紧一档：整卡 160 = 稿字段 130 + 提示行 + 元信息行，
+                // 取一个紧凑控件的高度（28）作为下限。
+                metaRowHeight: SpeechRailDesignTokens.Control.compactHeight,
+                hint: "继续描述场景、听众或情绪，候选之间的差异会更明显。",
+                // 描述框不是自己一张卡：稿里正文、计数行、声学特征芯片与生成按钮同属
+                // `promptCard` 这张面板，面板给内边距，正文与计数行之间也没有分隔线。
+                chrome: .embedded
+            ) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     descriptionCountLabel
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                    Text("描述决定音色，参考文案只用于试听与保存。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
+                    // 稿的 `promptCard/meta` 右半是保存门禁的说明，不是描述作用的解释。
+                    Text("真实预览未返回前不可保存")
+                        // 与左侧计数同一档（稿 `promptCard/meta` 两处都是 `Subheadline`）。
+                        .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+                // 与上方正文对齐（稿 `promptCard/meta` 与字段同宽，内边距由外层面板的
+                // `Layout.cardInset` 给）；竖直方向由组件按 `Control.compactHeight` 居中。
             }
-            .background(Color(nsColor: .textBackgroundColor), in: ConcentricRectangle())
-            .overlay { descriptionFocusRing }
 
             acousticChipRow
             voiceDesignAvailabilityLine
 
-            DisclosureGroup("更多设置", isExpanded: $showsAdvanced) {
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    voiceNameField
-                        .frame(
-                            minWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameMinimumWidth,
-                            idealWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameWidth,
-                            maxWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameMaximumWidth
-                        )
-                    referenceTextField
+            // 稿的 `promptCard/foot` 是**一行**：左边折叠行，右边键帽 + 主按钮。帧实测
+            // 折叠行文字 ink 中心 395.4pt、按钮填充 378.5–412.5pt（中心 395.5、高 34），
+            // 两处中心重合。应用此前把按钮另起一行，卡片因此比稿高约 46pt
+            // （REDESIGN-SPEC §11.6 第二十轮）。
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                DisclosureGroup("更多设置：参考文案与保存名称", isExpanded: $showsAdvanced) {
+                    HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                        voiceNameField
+                            .frame(
+                                minWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameMinimumWidth,
+                                idealWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameWidth,
+                                maxWidth: SpeechRailDesignTokens.Layout.creatorVoiceNameMaximumWidth
+                            )
+                        referenceTextField
+                    }
+                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 }
-                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-            }
-            .font(SpeechRailDesignTokens.Typography.label)
+                // 稿的折叠行标签是 `Callout`（12pt Regular），不是中等字重。
+                .font(SpeechRailDesignTokens.Typography.callout)
+                // 之前这里吃的是系统默认样式：可点区域只有三角和文字本身，
+                // 整行右侧是死区（2026-09-15 用户反馈「点击困难」）。共享样式把
+                // 整行做成一个原生 Button 命中区域。
+                .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
 
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                KeyboardHint("⌘⏎")
+                // 快捷键不再是按钮左边那颗独立键帽，而是长在按钮标签尾部
+                // （`ButtonShortcutHint`，第四十八轮）。
                 generateCandidatesButton
+                // 折叠行是 44pt 命中区、内容竖直居中。右侧同一行时要对齐它的中心而不是
+                // 顶边：换个同样高的盒子居中，展开后按钮仍停在标签行上。
+                .frame(
+                    minHeight: SpeechRailDesignTokens.List.rowHeight,
+                    alignment: .center
+                )
             }
         }
-        .padding(SpeechRailDesignTokens.Spacing.sm)
-        .speechRailSurface(.panel)
+        // 稿的 `promptCard` 是 `pad: 18`（帧实测字段正文左沿距卡沿 20pt）→ `Layout.cardInset`。
+        .padding(SpeechRailDesignTokens.Layout.cardInset)
+        // **描述框就是这张卡**：稿的 `main.js:1448-1452` 明确写过「在白卡里再套一个白
+        // 输入框只会给同一句话画两圈边」，所以表面与边界都落在卡上，卡内不再有第二个框
+        // （4x 帧浅/深两版实测：卡内只有一圈描边，位于卡沿；描述区与卡面同值
+        // `#FFFFFF` / `#2B292C`）。焦点环同理，跟边界同一个形状。
+        .speechRailEditorCard()
+        .speechRailFocusRing(isEditorFocused)
     }
 
     private var descriptionCountLabel: some View {
@@ -847,25 +931,22 @@ public struct VoiceDesignView: View {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .accessibilityHidden(true)
             }
-            Text("\(count)/\(limit)")
+            // 计数行与配音台同一写法（`n/上限 字`，REDESIGN-SPEC §7.1/§7.2）：
+            // 同一个 App 里两个计数行各写一套是最容易被当成 bug 的差异。
+            Text("\(count) / \(limit) 字")
                 .monospacedDigit()
         }
-        .font(SpeechRailDesignTokens.Typography.caption)
+        // 稿的 `promptCard/meta` 是 `Subheadline`(11) + `text/tertiary`：4x 帧上这一行
+        // 实测 #A1A1A6（= tertiary）。应用此前用 `caption`（10）+ secondary，字号小一档、
+        // 颜色比稿重一档（REDESIGN-SPEC §11.6 第二十轮）。
+        .font(SpeechRailDesignTokens.Typography.secondary)
         .foregroundStyle(
             isOverLimit
                 ? SpeechRailDesignTokens.Color.critical
-                : SpeechRailDesignTokens.Color.inkSecondary
+                : SpeechRailDesignTokens.Color.inkTertiary
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("描述 \(count) 字，上限 \(limit) 字")
-    }
-
-    @ViewBuilder
-    private var descriptionFocusRing: some View {
-        ConcentricRectangle()
-            .stroke(Color(nsColor: .keyboardFocusIndicatorColor), lineWidth: 2.5)
-            .opacity(isEditorFocused ? 1 : 0)
-            .allowsHitTesting(false)
     }
 
     private var acousticChipRow: some View {
@@ -875,17 +956,27 @@ public struct VoiceDesignView: View {
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                // 稿的 `chips` 容器是 `gap: 6`（4x 帧实测相邻 chip 363 → 370）。
+                HStack(spacing: SpeechRailDesignTokens.Chip.spacing) {
                     ForEach(acousticChips, id: \.self) { chip in
                         Button {
                             appendChip(chip)
                         } label: {
-                            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
+                            HStack(spacing: SpeechRailDesignTokens.Chip.labelSpacing) {
                                 Image(systemName: "plus")
-                                    .font(SpeechRailDesignTokens.Typography.technical)
+                                    .font(.system(size: SpeechRailDesignTokens.Chip.iconSize))
+                                    // 墨迹按稿的 8.66pt，布局框仍是稿的 13pt（`iconBox`）：
+                                    // 只按墨迹改字号会让胶囊比稿窄约 3pt。
+                                    .frame(
+                                        width: SpeechRailDesignTokens.Chip.iconBox,
+                                        height: SpeechRailDesignTokens.Chip.iconBox
+                                    )
                                 Text(chip)
                             }
-                            .font(SpeechRailDesignTokens.Typography.caption)
+                            // 稿的 chip 标签是 `Subheadline`(11)，不是 `Caption`(10)：
+                            // 4x 帧上标签 ink 10.25pt，`secondary` 渲染出来 10.5pt
+                            // （REDESIGN-SPEC §11.6 第三十四轮）。
+                            .font(SpeechRailDesignTokens.Typography.secondary)
                             .speechRailKnurledCapsule(selected: false)
                             .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                         }
@@ -916,11 +1007,15 @@ public struct VoiceDesignView: View {
                     Text("停止生成")
                 }
             } else {
-                Label("生成候选音色", systemImage: AppRoute.voiceDesign.systemImage)
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Label("生成候选音色", systemImage: AppRoute.voiceDesign.systemImage)
+                    ButtonShortcutHint("⌘⏎")
+                }
             }
         }
         .buttonStyle(.borderedProminent)
-        .controlSize(.large)
+        // 同「生成语音」：稿的主按钮 34pt，取系统的 `.extraLarge`(36)。
+        .controlSize(.extraLarge)
         .keyboardShortcut(.return, modifiers: .command)
         .disabled(
             (!isGenerating && !voiceDesignAvailable)
@@ -993,6 +1088,7 @@ public struct VoiceDesignView: View {
                     isSelected: selectedSlot == candidate.slot,
                     onPlayToggle: { play(candidate) },
                     onSave: { pendingSave = candidate },
+                    onOpenLibrary: { navigation.request(.voiceLibrary) },
                     onRetry: { model.retryVoiceDesignCandidate(slot: candidate.slot) }
                 )
             }
@@ -1087,7 +1183,9 @@ public struct VoiceDesignView: View {
     private var voiceNameField: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             Text("保存名称")
-                .font(SpeechRailDesignTokens.Typography.caption)
+                // 字段标签按稿的 `fieldLabel`：`Caption / Medium`（10pt Medium），
+                // 不是 `caption`（Regular）——见 REDESIGN-SPEC §11.6 第三十七轮。
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             TextField("例如：夜航主持", text: $voiceName)
                 .textFieldStyle(.plain)
@@ -1101,7 +1199,7 @@ public struct VoiceDesignView: View {
     private var referenceTextField: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
             Text("试听与注册参考文案 · \(referenceText.count)/\(SpeechRailCreatorLimits.referenceTextMaximumLength)")
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             TextEditor(text: $referenceText)
                 .font(SpeechRailDesignTokens.Typography.body)
@@ -1117,15 +1215,15 @@ public struct VoiceDesignView: View {
     private var voiceDesignAvailabilityLine: some View {
         let status: (tone: StatusTone, title: String, message: String, image: String) = switch voiceDesignAvailability {
         case .checking:
-            (.neutral, "正在核对 VoiceDesign", "读取当前服务、档位和音色能力。", "arrow.clockwise")
+            (.neutral, "正在核对 VoiceDesign", "读取当前服务、档位和能力声明。", "arrow.clockwise")
         case .available:
-            (.healthy, "VoiceDesign 已确认可用", "Quality、TTS 和服务端 capability 均已读取。", "checkmark.circle")
+            (.healthy, "VoiceDesign 已确认可用", "Quality、TTS 与服务声明的 VoiceDesign capability 均已确认。", "checkmark.circle")
         case .requiresQuality:
             (.attention, "当前档位未提供 VoiceDesign", "请在模型页确认 Quality 制品并应用目标档位。", "slider.horizontal.3")
         case .serviceUnavailable:
             (.attention, "TTS 服务尚未就绪", "先恢复服务状态，再生成真实候选音频。", "exclamationmark.triangle")
         case .unsupported:
-            (.critical, "服务端未公开 VoiceDesign", "当前音色列表没有可用的 VoiceDesign capability。", "xmark.circle")
+            (.critical, "服务端未公开 VoiceDesign", "服务未公开 VoiceDesign capability，请在模型页核对 Quality 制品和当前档位。", "xmark.circle")
         }
 
         ViewThatFits(in: .horizontal) {
@@ -1178,8 +1276,8 @@ public struct VoiceDesignView: View {
                 tone: .critical,
                 title: "音色操作未完成",
                 message: message,
-                actionTitle: model.creatorVoicesLoadState == .failed ? "重新读取能力" : nil,
-                action: model.creatorVoicesLoadState == .failed
+                actionTitle: needsCapabilityRefresh ? "重新读取能力" : nil,
+                action: needsCapabilityRefresh
                     ? {
                         Task {
                             await model.refresh()
@@ -1201,14 +1299,14 @@ public struct VoiceDesignView: View {
     }
 
     private var voiceDesignAvailability: VoiceDesignAvailability {
-        guard !model.isRefreshingService, !model.isRefreshingCreatorVoices else {
+        guard !model.isRefreshingService,
+              !model.isRefreshingCreatorVoices,
+              !model.isRefreshingServiceCapabilities
+        else {
             return .checking
         }
         guard let health = displayedHealth else {
             return model.healthFailure == nil ? .checking : .serviceUnavailable
-        }
-        guard model.creatorVoicesLoadState == .loaded else {
-            return .checking
         }
         guard health.profile == .quality else {
             return .requiresQuality
@@ -1216,18 +1314,36 @@ public struct VoiceDesignView: View {
         guard health.status == "ok", health.ttsReady == true, health.ready == true else {
             return .serviceUnavailable
         }
-
-        let supportsVoiceDesign = model.creatorVoices.contains { voice in
-            voice.available
-                && voice.variant == "voice_design"
-                && voice.capabilities.supportsInstruction
+        // 门禁读服务声明（`/v1/models.capabilities`）。旧实现要求音色列表里先有
+        // 一条可用的 voice_design 音色，等于拿用户数据当能力依据：列表为空时，
+        // 能力明明已发布也会被判成“服务端未提供”。
+        switch model.serviceCapabilitiesLoadState {
+        case .unknown, .loading:
+            return .checking
+        case .failed:
+            // 读不到能力清单属于服务不可用，不要把“不知道”说成“服务端未提供”。
+            return .serviceUnavailable
+        case .loaded:
+            break
         }
-        return supportsVoiceDesign ? .available : .unsupported
+        guard let capabilities = model.serviceCapabilities else {
+            return .checking
+        }
+        return capabilities.supportsInstruction && capabilities.supportsPreview
+            ? .available
+            : .unsupported
     }
 
     private var displayedHealth: HealthSnapshot? {
         guard model.healthFailure == nil else { return nil }
         return model.health
+    }
+
+    /// 音色列表与能力声明任一读失败，都给同一个重试入口：能力结论不再依赖列表，
+    /// 但两个读取都是这一页的事实来源。
+    private var needsCapabilityRefresh: Bool {
+        model.creatorVoicesLoadState == .failed
+            || model.serviceCapabilitiesLoadState == .failed
     }
 
     private var voiceDesignAvailabilityBanner: AvailabilityBanner? {
@@ -1332,6 +1448,7 @@ private struct VoiceCandidateCard: View {
     let isSelected: Bool
     let onPlayToggle: () -> Void
     let onSave: () -> Void
+    let onOpenLibrary: () -> Void
     let onRetry: () -> Void
 
     var body: some View {
@@ -1345,8 +1462,12 @@ private struct VoiceCandidateCard: View {
         .speechRailSurface(.control)
         .overlay {
             if isSelected {
-                ConcentricRectangle()
-                    .stroke(Color.accentColor, lineWidth: 2)
+                // 底已经是容器形状：描边用同一形状，选中宽度与档位卡一致（1pt）。
+                SpeechRailDesignTokens.Corner.containerShape
+                    .stroke(
+                        Color.accentColor,
+                        lineWidth: SpeechRailDesignTokens.Stroke.strong
+                    )
                     .allowsHitTesting(false)
             }
         }
@@ -1394,12 +1515,16 @@ private struct VoiceCandidateCard: View {
                     ProgressView()
                         .controlSize(.small)
                 }
-                AcousticWaveformBar(active: isPlaying)
-                    .frame(
-                        width: SpeechRailDesignTokens.Layout.creatorWaveformWidth,
-                        height: SpeechRailDesignTokens.Layout.creatorWaveformHeight
-                    )
-                    .accessibilityHidden(true)
+                // 稿 `main.js` 1393 / 1425：波形区是 `waveRow`（`justify CENTER`）里那排
+                // **18 根、间隙 3** 的琥珀条（4x 帧 `▸ 音色创作.png` 实测 87.0 × 36.0），
+                // 整块在卡片里居中、竖直方向吃掉图片区剩余的高度。应用此前是 9 根 / 72 × 20
+                // 且靠左贴住（REDESIGN-SPEC §11.6 第四十二轮）。
+                WaveformBars(
+                    pattern: SpeechRailDesignTokens.Waveform.candidateTile,
+                    isPlaying: isPlaying
+                )
+                .frame(maxWidth: .infinity)
+                .accessibilityHidden(true)
                 Spacer(minLength: 0)
             }
         } else {
@@ -1446,16 +1571,27 @@ private struct VoiceCandidateCard: View {
                 .lineLimit(1)
 
             if hasAudio {
-                Button(action: onSave) {
-                    Label(
-                        isSaving ? "保存中" : (isSaved ? "已保存" : "保存为音色"),
-                        systemImage: isSaved ? "checkmark" : "square.and.arrow.down"
-                    )
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                // 保存成功后动作行改成入口而不是停用按钮：「已保存」已经由头部
+                // 状态胶囊承担，这里给出下一步（REDESIGN-SPEC §7.2）。
+                if isSaved {
+                    Button(action: onOpenLibrary) {
+                        Label("在音色库中查看", systemImage: "music.note.list")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .speechRailButton(.secondary)
+                    .accessibilityLabel("在音色库中查看候选 \(candidate.slot)")
+                } else {
+                    Button(action: onSave) {
+                        Label(
+                            isSaving ? "保存中" : "保存为音色",
+                            systemImage: "square.and.arrow.down"
+                        )
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .speechRailButton(.secondary)
+                    .disabled(isSaving || isRegistering)
+                    .accessibilityLabel("把候选 \(candidate.slot) 保存到音色库")
                 }
-                .speechRailButton(.secondary)
-                .disabled(isSaved || isSaving || isRegistering)
-                .accessibilityLabel("把候选 \(candidate.slot) 保存到音色库")
             }
         }
     }
@@ -1579,9 +1715,10 @@ private struct VoiceCandidateSaveSheet: View {
             HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                 Spacer(minLength: 0)
                 Button("取消", action: onCancel)
+                    .speechRailButton(.secondary)
                     .keyboardShortcut(.cancelAction)
                 Button("保存到音色库", action: onSave)
-                    .buttonStyle(.borderedProminent)
+                    .speechRailButton(.primary)
                     .keyboardShortcut(.defaultAction)
                     .disabled(voiceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -1614,26 +1751,87 @@ private struct VoiceCandidateSaveSheet: View {
     private static let sheetWidth: CGFloat = 420
 }
 
-private struct AcousticWaveformBar: View {
-    let active: Bool
+/// 稿 `waveform(...)` 的落点：按给定高度序列画一排 2pt 圆角条，宽高由 `pattern` 推出。
+///
+/// 三处调用都渲染**同一形态**（`Color.voice` 琥珀、满高），稿上没有「未播放 = 灰且半高」
+/// 这一态：候选卡用描边、动作行用「试听 / 停止」区分播放中，所以这里不再按
+/// `isPlaying` 改颜色或高度。`isPlaying` 只驱动播放中的脉冲（§5.7 / §5.8 的
+/// 「波形脉冲」），`reduceMotion` 下停在静态——条状视图接不了 `.symbolEffect`，
+/// 因此脉冲是一段显式的透明度动画。
+///
+/// 2026-09-16（第五十七轮）用户指出「播放音波效果是假的」后补上两条真实通道：
+/// - `levels`：条高改为这段音频**自己的幅度包络**（`AudioEnvelope`），按 `pattern`
+///   重采样；`pattern.heights` 因此只决定**条数与排布**（宽度 / 间隙 / 峰值高度）。
+/// - `progress`：播放中未播到的部分降到 `Waveform.remainingOpacity`，读的是
+///   `AppModel.playbackProgress`（播放器真实的 `currentTime / duration`）。
+///
+/// 两者都没有时（这段音频还没算过——例如还没试听过的音色）退回稿的固定数组，并且
+/// **只有这种情形**才保留脉冲：脉冲是「在播但画不出形状」时的状态提示，一旦能画出
+/// 真实形状与进度，它只会和真实信息打架。
+/// 三处波形（候选卡 / 结果条 / 目录页试听）共用的排布。内部可见而不是 `private`：
+/// 音色克隆页回放刚录的那段参考音频时用它画同一件事的形状（REDESIGN-SPEC §13.2）。
+struct WaveformBars: View {
+    let pattern: SpeechRailDesignTokens.Waveform.Pattern
+    var isPlaying = false
+    /// 真实包络（0…1，条数任意）。`nil` = 这段音频还没算过。
+    var levels: [CGFloat]?
+    /// 播放中的真实进度（0…1）。`nil` = 当前不是在播这一段。
+    var progress: Double?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPulsing = false
 
     var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Control.waveformBarSpacing) {
-            ForEach(0..<9, id: \.self) { index in
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Control.waveformBarRadius)
-                    .fill(active ? SpeechRailDesignTokens.Color.voice : SpeechRailDesignTokens.Color.waveformInactive)
+        HStack(spacing: pattern.gap) {
+            ForEach(Array(resolvedHeights.enumerated()), id: \.offset) { index, height in
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Waveform.barRadius)
+                    .fill(SpeechRailDesignTokens.Color.voice)
+                    .opacity(opacity(at: index))
                     .frame(
-                        width: SpeechRailDesignTokens.Control.waveformBarWidth,
-                        height: barHeight(for: index)
+                        width: SpeechRailDesignTokens.Waveform.barWidth,
+                        height: height
                     )
             }
         }
+        .frame(width: pattern.width, height: pattern.height)
+        .opacity(isPulsing ? 0.55 : 1)
+        .onAppear { isPulsing = pulses }
+        .onChange(of: isPlaying) { _, playing in
+            isPulsing = pulses
+        }
+        .onChange(of: levels?.count) { _, _ in isPulsing = pulses }
+        .onChange(of: reduceMotion) { _, reduced in
+            guard reduced else { return }
+            withAnimation(.linear(duration: 0.2)) { isPulsing = false }
+        }
+        .animation(pulseAnimation, value: isPulsing)
     }
 
-    private func barHeight(for index: Int) -> CGFloat {
-        let pattern: [CGFloat] = [6, 12, 18, 14, 20, 16, 10, 15, 8]
-        let base = pattern[index % pattern.count]
-        return active ? base : base * 0.5
+    /// 真实包络（重采样并按 `pattern` 的峰值高度缩放），没有就退回稿的固定数组。
+    private var resolvedHeights: [CGFloat] {
+        guard let levels, !levels.isEmpty else { return pattern.heights }
+        let peak = pattern.height
+        return AudioEnvelope.resample(levels, to: pattern.heights.count).map {
+            max(SpeechRailDesignTokens.Waveform.envelopeMinimumHeight, $0 * peak)
+        }
+    }
+
+    /// 播放中：已播到的条满色，未播到的降一档；没在播就不分档。
+    private func opacity(at index: Int) -> Double {
+        guard let progress, isPlaying else { return 1 }
+        let played = Double(index + 1) / Double(pattern.heights.count)
+        return played <= progress ? 1 : SpeechRailDesignTokens.Waveform.remainingOpacity
+    }
+
+    /// 只有「在播 + 没开减弱动态 + 画不出真实形状」三者同时成立时才脉动。
+    private var pulses: Bool {
+        isPlaying && !reduceMotion && (levels?.isEmpty ?? true)
+    }
+
+    /// 只有「开始播放且没开减弱动态」时才持续脉动；其他情形立即切回静态。
+    private var pulseAnimation: Animation? {
+        guard isPulsing, pulses else { return nil }
+        return .easeInOut(duration: 0.75).repeatForever(autoreverses: true)
     }
 }
 
@@ -1673,44 +1871,55 @@ public struct VoiceLibraryView: View {
         }
     }
 
+    /// 详情列（inspector）的开关。
+    ///
+    /// 它**不是**工具栏项（REDESIGN-SPEC §11.6 第六十二轮）：窗口工具栏里每一件动作的
+    /// 落点都由系统按「固定项 + 浮动间隔」重新分配，内容列右端没有可声明的槽位——
+    /// 离屏实测（`--hier`，本页与「我的作品」）同一枚按钮在窗口 1120 / 1280 / 1440 /
+    /// 1600pt 时分别落在 x 639.5 / 719.5 / 799.5 / 879.5（宽 44），到详情列左沿
+    /// （= 窗口宽 − 360）的距离随窗口宽从 76.5 涨到 316.5；`.status` / `.secondaryAction` /
+    /// 交给 inspector 自己声明 / 可拉伸容器四种写法都不改变「落点由系统分配」这件事。
+    /// 内容列**首行尾端**才是与详情列左沿固定间距的位置：这一行由页面内容列承载，
+    /// 它的右沿就是详情列左沿，间隔即 `Layout.contentPadding`（20pt）。
+    private var voiceInspectorToggle: some View {
+        PageActionButton(
+            systemImage: "sidebar.right",
+            helpText: showInspector ? "隐藏音色详情" : "显示音色详情"
+        ) {
+            showInspector.toggle()
+        }
+    }
+
     public init() {}
 
     public var body: some View {
         PageScaffold(route: .voiceLibrary, scrollable: false) {
             voiceLibraryBody
+        } trailing: {
+            voiceInspectorToggle
         }
-        .searchable(text: $searchText, placement: .toolbar, prompt: "搜索音色名称与描述")
+        // Figma `filters` 的占位符逐字一致：搜索范围由占位符自己说清楚。
+        .searchable(text: $searchText, placement: .toolbar, prompt: "按名称或描述搜索")
         .toolbar {
+            // 这一页的主动作是新建音色：它是头部**唯一**的入口，
+            // 列表页脚的重复按钮因此去掉（§6.2 / §6.4 唯一性）。
             ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "刷新音色列表，或打开音色创作") {
-                    Button {
-                        Task { await model.refreshCreatorVoices() }
-                    } label: {
-                        Label("刷新音色列表", systemImage: "arrow.clockwise")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(model.isRefreshingCreatorVoices)
-                    Divider()
-                    Button {
-                        navigation.request(.voiceDesign)
-                    } label: {
-                        Label("新建音色", systemImage: "plus")
-                            .speechRailMenuRow()
-                    }
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏详情" : "显示详情",
-                            systemImage: "sidebar.right"
-                        )
-                        .speechRailMenuRow()
-                    }
+                PageActionButton(
+                    title: "新建音色",
+                    systemImage: "plus",
+                    helpText: "用一句话描述新音色"
+                ) {
+                    navigation.request(.voiceDesign)
                 }
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        .focusedSceneValue(
+            \.reloadPageCommand,
+            ReloadPageCommand(title: "重新读取音色列表") {
+                Task { await model.refreshCreatorVoices() }
+            }
+        )
         .confirmationDialog(
             "确认删除音色？",
             isPresented: $isConfirmingDeletion,
@@ -1813,10 +2022,11 @@ public struct VoiceLibraryView: View {
                 Button("去音色创作") {
                     navigation.request(.voiceDesign)
                 }
-                .buttonStyle(.borderedProminent)
+                .speechRailButton(.primary)
                 Button("重新加载") {
                     Task { await model.refreshCreatorVoices() }
                 }
+                .speechRailButton(.secondary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -1863,6 +2073,14 @@ public struct VoiceLibraryView: View {
                         ForEach(filteredVoices) { voice in
                             voiceLibraryRow(voice)
                                 .tag(voice.id)
+                                // 选中行换成稿的 `surface/railTint`（§12.4 决定 15）：
+                                // 系统默认是实心强调蓝，既不是稿的淡底也不跟随本 App 的强调色。
+                                // 只有 `listRowBackground` 能换掉那层系统高亮，其余写法会被它合成掉。
+                                .listRowBackground(
+                                    voice.id == selectedVoiceID
+                                        ? SpeechRailDesignTokens.Surface.selectionTint
+                                        : nil
+                                )
                         }
                     }
                     .listStyle(.inset)
@@ -1875,16 +2093,9 @@ public struct VoiceLibraryView: View {
                         return .handled
                     }
                     Divider()
-                    CardFoot(note: "复刻音色保存在本机，不会上传。") {
-                        Group {
-                            Button {
-                                navigation.request(.voiceDesign)
-                            } label: {
-                                Label("新建音色", systemImage: "sparkles")
-                            }
-                            .speechRailButton(.secondary)
-                        }
-                    }
+                    // 「新建音色」只在工具栏有 **一处**入口（§6.4 唯一性）：
+                    // 页脚此前重复的那颗按钮已去掉，页脚只留本机事实。
+                    CardFoot(note: "复刻音色保存在本机，不会上传。") { EmptyView() }
                 }
             }
         }
@@ -1912,14 +2123,17 @@ public struct VoiceLibraryView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Text(voice.name)
-                        .font(SpeechRailDesignTokens.Typography.body)
+                        // 稿的行首是 `Body / Medium`（脚本 `row/name`），与作品行同一档。
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         .lineLimit(1)
                         .truncationMode(.tail)
                     sourceBadge(voice)
                 }
                 Text(voiceListDescription(for: voice))
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    // 副行是 `Callout`（脚本 `row/sub`）：4x 帧实测该行 ink 10.75pt ≈ 12pt，
+                    // 应用此前用 `caption`（10pt）比稿小一档，也与作品行的 `callout` 不一致。
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -1944,13 +2158,7 @@ public struct VoiceLibraryView: View {
                             height: SpeechRailDesignTokens.Control.iconButtonSize
                         )
                 } else {
-                    Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
-                        .font(SpeechRailDesignTokens.Typography.statusIcon)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.voice)
-                        .frame(
-                            width: SpeechRailDesignTokens.Control.iconButtonSize,
-                            height: SpeechRailDesignTokens.Control.iconButtonSize
-                        )
+                    RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
                 }
             }
             .speechRailButton(.quiet)
@@ -1961,66 +2169,21 @@ public struct VoiceLibraryView: View {
                     : "\(voice.name)\(isPlaying ? "停止试听" : "试听")"
             )
 
-            Menu {
-                voiceRowActions(voice)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(SpeechRailDesignTokens.Typography.statusIcon)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .frame(
-                        width: SpeechRailDesignTokens.Control.iconButtonSize,
-                        height: SpeechRailDesignTokens.Control.iconButtonSize
-                    )
-            }
-            .menuStyle(.button)
-            .buttonStyle(.borderless)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .accessibilityLabel("更多操作：\(voice.name)")
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        // 稿 `row` 是 padX 16 / padY 12。行内边距由行自己给、`listRowInsets` 清零，
+        // 行高由 `pageRowMinimumHeight` 钉住：4x 帧实测三页行距 64.00 = 行框 63 + 1pt hairline，
+        // 而应用的内容盒（系统行盒 16 + 4 + 15 = 35）比稿的 Figma 行盒（19.5 + 2 + 17.4）矮 3.9，
+        // 所以单靠 padY 12 只有 59——那一档的账见 token 注释与 REDESIGN-SPEC §11.6 第三十七轮。
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .listRowInsets(EdgeInsets())
+        .frame(
+            maxWidth: .infinity,
+            minHeight: SpeechRailDesignTokens.List.pageRowMinimumHeight,
+            alignment: .leading
+        )
         .accessibilityElement(children: .contain)
         .accessibilityHint("选中后可在右侧查看详情、重命名或删除")
-    }
-
-    /// 行内「更多操作」与 Inspector 动作同源，避免同一动作在两处漂移
-    /// （Figma `iconButton(row, "ellipsis", 28)`）；系统音色不提供编辑与删除。
-    @ViewBuilder
-    private func voiceRowActions(_ voice: CreatorVoice) -> some View {
-        let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
-        Button {
-            togglePreview(voice)
-        } label: {
-            Label(isPlaying ? "停止试听" : "试听", systemImage: isPlaying ? "stop" : "play")
-        }
-        .disabled(previewDisabled(for: voice))
-
-        if !voice.isSystem {
-            Divider()
-            Button {
-                editorFocus = .name
-                editingVoice = voice
-            } label: {
-                Label("重命名…", systemImage: "pencil")
-            }
-            .disabled(model.isUpdatingVoice)
-            Button {
-                editorFocus = .instruction
-                editingVoice = voice
-            } label: {
-                Label("编辑描述…", systemImage: "text.bubble")
-            }
-            .disabled(model.isUpdatingVoice || voice.mode == "clone")
-            Divider()
-            Button(role: .destructive) {
-                deletionMessage = nil
-                pendingDeleteVoice = voice
-                isConfirmingDeletion = true
-            } label: {
-                Label("删除…", systemImage: "trash")
-            }
-            .disabled(model.isDeletingVoice)
-        }
     }
 
     private func sourceBadge(_ voice: CreatorVoice) -> some View {
@@ -2050,6 +2213,12 @@ public struct VoiceLibraryView: View {
             || (model.isCreatingSpeech && model.previewingVoiceID != voice.id)
             || sampleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || sampleText.count > SpeechRailCreatorLimits.speechTextMaximumLength
+    }
+
+    /// 试听文案输入槽的行数区间（多行字段；两个取值都在 token 层，§11.6 第五十七轮）。
+    private var previewTextLineCount: ClosedRange<Int> {
+        let layout = SpeechRailDesignTokens.Layout.self
+        return layout.previewTextMinimumLines...layout.previewTextMaximumLines
     }
 
     private var filteredVoices: [CreatorVoice] {
@@ -2086,58 +2255,77 @@ public struct VoiceLibraryView: View {
     @ViewBuilder
     private var voiceInspector: some View {
         if let voice = selectedVoice {
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.sectionSpacing) {
-                    SectionHeading(
-                        title: voice.name,
-                        detail: voice.isSystem ? "系统音色" : "自定义音色"
-                    )
-
-                    voicePreviewSection(voice)
-
-                    if model.isRefreshingCreatorVoiceDetail {
-                        Label("正在读取服务端详情…", systemImage: "arrow.triangle.2.circlepath")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    } else if let detailMessage = model.creatorVoiceDetailMessage {
-                        StatusBanner(
-                            tone: .attention,
-                            title: "服务端详情未读取",
-                            message: detailMessage,
-                            actionTitle: "重新读取详情"
-                        ) {
-                            Task { await model.refreshCreatorVoiceDetail(id: voice.id) }
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 0) {
-                        LabeledContent("可用性", value: voice.available ? "可用" : "当前档位不可用")
-                        LabeledContent("采样种子", value: voice.seed.map(String.init) ?? "未提供")
-                        LabeledContent("创建时间", value: createdAtText(for: voice))
-                        LabeledContent("变体", value: voice.variant ?? "未提供")
-                        LabeledContent("模式", value: voice.mode ?? "未提供")
-                        LabeledContent(
-                            "音频时长",
-                            value: voice.durationSeconds.map { String(format: "%.1f s", $0) } ?? "未提供"
-                        )
-                        LabeledContent("使用次数", value: "\(worksUsing(voice).count) 个作品")
-                        LabeledContent("关联作品", value: relatedWorksText(for: voice))
-                    }
-                    .speechRailInspectorContent()
-
-                    voiceDescriptionSection(voice)
-                    voiceInspectorActions(voice)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(SpeechRailDesignTokens.Inspector.contentPadding)
-            }
-            .scrollBounceBehavior(.basedOnSize)
+            // 稿 `main.js` 1584–1631 的 Inspector 是一条竖列：身份带 → 试听行 →
+            // 取值区 → 压在底部的动作区，段与段之间是**整宽**的 1pt `border/separator`
+            // hairline（4x 帧 `▸ 音色库.png` 实测三条色带：y 260.0–261.0、
+            // 341.0–342.0、820.0–821.0，都从卡片左沿通到右沿；§11.6 第四十五轮）。
+            // 四段结构（身份带 / 试听 / 取值 / 固定动作区）与段间那条整宽 hairline
+            // 由 `SpeechRailInspectorPanel` 声明一次：这一页与「我的作品」共用它，
+            // 两块侧边栏的段落顺序、内边距与字号档不可能再各自漂移
+            // （REDESIGN-SPEC §11.6 第五十四轮）。
+            SpeechRailInspectorPanel(
+                title: voice.name,
+                badge: voice.isSystem ? "系统音色" : "自定义音色",
+                preview: { voicePreviewSection(voice) },
+                body: { voiceFactsSection(voice) },
+                actions: { voiceInspectorActions(voice) }
+            )
         } else {
             ContentUnavailableView(
                 "请选择一个音色",
                 systemImage: AppRoute.voiceLibrary.systemImage,
                 description: Text("选择列表中的音色后，这里会显示试听、参数和可用性。")
             )
+            // 空态也是这一列：列宽声明不能只挂在面板上，否则「列表还没读回来」的那一瞬
+            // 这一列会落回系统默认宽度（离屏实测 270），与我的作品那一列读起来是两个宽度
+            // （§11.6 第六十一轮）。
+            .speechRailInspectorColumn()
+        }
+    }
+
+    /// 取值段：服务端详情状态 + 取值行 + 描述全文。段内的间距与内边距由
+    /// `SpeechRailInspectorPanel` 给，这里只管内容本身。
+    @ViewBuilder
+    private func voiceFactsSection(_ voice: CreatorVoice) -> some View {
+        VStack(
+            alignment: .leading,
+            spacing: SpeechRailDesignTokens.Inspector.sectionSpacing
+        ) {
+            if model.isRefreshingCreatorVoiceDetail {
+                Label("正在读取服务端详情…", systemImage: "arrow.triangle.2.circlepath")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            } else if let detailMessage = model.creatorVoiceDetailMessage {
+                StatusBanner(
+                    tone: .attention,
+                    title: "服务端详情未读取",
+                    message: detailMessage,
+                    actionTitle: "重新读取详情"
+                ) {
+                    Task { await model.refreshCreatorVoiceDetail(id: voice.id) }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 0) {
+                LabeledContent(
+                    "可用性",
+                    value: voice.available ? "可用" : "当前档位不可用"
+                )
+                LabeledContent("采样种子", value: voice.seed.map(String.init) ?? "未提供")
+                LabeledContent("创建时间", value: createdAtText(for: voice))
+                LabeledContent("变体", value: voice.variant ?? "未提供")
+                LabeledContent("模式", value: voice.mode ?? "未提供")
+                LabeledContent(
+                    "音频时长",
+                    value: voice.durationSeconds.map { String(format: "%.1f s", $0) }
+                        ?? "未提供"
+                )
+                LabeledContent("使用次数", value: "\(worksUsing(voice).count) 个作品")
+                LabeledContent("关联作品", value: relatedWorksText(for: voice))
+            }
+            .speechRailInspectorContent()
+
+            voiceDescriptionSection(voice)
         }
     }
 
@@ -2147,17 +2335,26 @@ public struct VoiceLibraryView: View {
         let isPlaying = model.playingVoiceID == voice.id && model.isAudioPlaying
         let isPreviewing = model.previewingVoiceID == voice.id
         return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            // 稿 `main.js` 1594–1603：`previewWrap`（padX 16 / padY 14）里嵌一个
+            // `preview` 面板 —— `gap 10 / padX 12 / padY 10 / radius 10 / fill surface/panel`
+            // + 1pt `border/separator`，里面是 28pt 图标按钮与**居中**的波形。
+            // 4x 帧实测面板填充带 50.0（波形 30 + 上下各 10）、外框 52.0（描边画在填充外）。
+            HStack(spacing: SpeechRailDesignTokens.Inspector.previewGap) {
                 Button {
                     togglePreview(voice)
                 } label: {
                     if isPreviewing {
                         ProgressView()
                             .controlSize(.small)
+                            .frame(
+                                width: SpeechRailDesignTokens.Control.iconButtonSize,
+                                height: SpeechRailDesignTokens.Control.iconButtonSize
+                            )
                     } else {
-                        Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
-                            .font(SpeechRailDesignTokens.Typography.statusIcon)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                        // 稿这里和列表行用的是同一个原语（无底色、15pt 图标框、
+                        // `text/secondary`）；应用此前的琥珀实心圆是自造形态，
+                        // 见 `Icon.rowActionSize` 的帧量测。
+                        RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
                     }
                 }
                 .speechRailButton(.quiet)
@@ -2166,31 +2363,58 @@ public struct VoiceLibraryView: View {
                     isPreviewing ? "取消试听" : "\(voice.name)\(isPlaying ? "停止试听" : "试听")"
                 )
 
-                AcousticWaveformBar(active: isPlaying)
-                    .frame(
-                        width: SpeechRailDesignTokens.Layout.creatorWaveformWidth,
-                        height: SpeechRailDesignTokens.Layout.creatorWaveformHeight
-                    )
-                    .accessibilityHidden(true)
-
-                Spacer(minLength: 0)
+                // 稿 `main.js` 1596-1601：试听行是 `play` 图标按钮 + 一排
+                // **16 根、间隙 3** 的琥珀条（4x 帧 `▸ 音色库.png` 实测 77.0 × 30.0），
+                // 波形整块在剩余宽度里居中（`stretch(grow(wave))`）。
+                WaveformBars(
+                    pattern: SpeechRailDesignTokens.Waveform.libraryPreview,
+                    isPlaying: isPlaying,
+                    // 试听过的音色画它自己的包络与真实进度；没试听过则退回稿的
+                    // 固定图形（那时确实还没有音频可画，§11.6 第五十七轮）。
+                    levels: model.waveformEnvelope(forVoiceID: voice.id),
+                    progress: isPlaying ? model.playbackProgress : nil
+                )
+                .frame(maxWidth: .infinity)
+                .accessibilityHidden(true)
             }
+            // 面板底色、描边、半径与稿 `previewWrap` 的上下 14pt 留白都归
+            // `speechRailInspectorPreviewPanel()` 一处（音色库与我的作品共用它）。
+            .speechRailInspectorPreviewPanel()
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text("试听文案 · \(sampleText.count)/\(SpeechRailCreatorLimits.speechTextMaximumLength)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(
                         sampleText.count > SpeechRailCreatorLimits.speechTextMaximumLength
                             ? SpeechRailDesignTokens.Color.critical
                             : SpeechRailDesignTokens.Color.inkSecondary
                     )
-                TextField("输入试听文案", text: $sampleText)
+                // 这个槽是应用自有的入口（稿上没有，§11.6 第四十五轮 ⑤），上限
+                // 4096 字——**单行放不下**。单行字段的宽度由内容决定，长文案会让
+                // 「详情列多宽」变成「用户打了多少字」的函数；改成多行后宽度回给
+                // 容器，长文案改在槽内换行，两行起、五行封顶，再长由原生编辑器
+                // 内部滚动（REDESIGN-SPEC §11.6 第五十七轮）。
+                TextField("输入试听文案", text: $sampleText, axis: .vertical)
                     .textFieldStyle(.plain)
+                    .lineLimit(previewTextLineCount)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                    .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.Control.regularHeight,
+                        alignment: .topLeading
+                    )
                     .speechRailRecessedSlot()
                     .accessibilityLabel("音色试听文案")
             }
+            // 段尾留白：这块「试听文案」输入区是应用自有的（稿上没有入口，§11.6 第四十五轮 ⑤），
+            // 它排在试听面板之后、试听段之内，因此这不属于面板自己的 `padY 14`。没有这层留白
+            // 时，输入槽的下边框直接贴住下面那条 hairline、再贴住「可用性」表（用户复核：
+            // 「试听文案下方应该留有一定间距，不要与下方的表格紧挨着」）。取值用试听段自己的
+            // 那档留白（`Inspector.previewWrapInsetY` = 稿 `previewWrap` 的 `padY 14`）：试听段
+            // 因此上下都是 14pt，与我的作品那一页（段尾只有面板自带的 14pt）同值
+            // （REDESIGN-SPEC §11.6 第六十一轮）。
+            .padding(.bottom, SpeechRailDesignTokens.Inspector.previewWrapInsetY)
         }
     }
 
@@ -2202,7 +2426,10 @@ public struct VoiceLibraryView: View {
         if !voice.description.isEmpty {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text("描述")
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    // 稿 `sideBody` 的字段标签是 `Caption / Medium`（10pt Medium）：与本段
+                    // 同级的「试听文案」已经用这一档，原来这一处用 `caption`（10 Regular）
+                    // 又比它轻一档，同一块面板里出现两种标签字重（§11.6 第五十四轮）。
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Text(voice.description)
                     .font(SpeechRailDesignTokens.Typography.body)
@@ -2217,12 +2444,10 @@ public struct VoiceLibraryView: View {
     @ViewBuilder
     private func voiceInspectorActions(_ voice: CreatorVoice) -> some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Divider()
-
             Button("去配音台") {
                 navigation.request(.dubbing)
             }
-            .buttonStyle(.borderedProminent)
+            .speechRailButton(.primary)
 
             if !voice.isSystem {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -2230,12 +2455,14 @@ public struct VoiceLibraryView: View {
                         editorFocus = .name
                         editingVoice = voice
                     }
+                    .speechRailButton(.secondary)
                     .disabled(model.isUpdatingVoice)
 
                     Button("编辑描述") {
                         editorFocus = .instruction
                         editingVoice = voice
                     }
+                    .speechRailButton(.secondary)
                     .disabled(model.isUpdatingVoice || voice.mode == "clone")
 
                     Spacer(minLength: 0)
@@ -2245,6 +2472,9 @@ public struct VoiceLibraryView: View {
                         pendingDeleteVoice = voice
                         isConfirmingDeletion = true
                     }
+                    // 稿的 `actions` 里三颗都是同一个次级按钮（`secondaryButton`），
+                    // 删除没有单独的红底；`role` 保留给无障碍，视觉仍走次级档。
+                    .speechRailButton(.secondary)
                     .disabled(model.isDeletingVoice)
                 }
             }
@@ -2253,11 +2483,11 @@ public struct VoiceLibraryView: View {
                 DisclosureGroup("技术上下文") {
                     VStack(alignment: .leading, spacing: 0) {
                         LabeledContent(
-                            "支持 instruction",
+                            "本音色支持 instruction",
                             value: voice.capabilities.supportsInstruction ? "是" : "否"
                         )
                         LabeledContent(
-                            "支持 clone",
+                            "本音色来自参考音频复刻",
                             value: voice.capabilities.supportsClone ? "是" : "否"
                         )
                         LabeledContent(
@@ -2274,7 +2504,8 @@ public struct VoiceLibraryView: View {
                     .speechRailInspectorContent()
                     .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 }
-                .font(SpeechRailDesignTokens.Typography.label)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
             }
         }
     }
@@ -2363,16 +2594,18 @@ private struct VoiceEditorSheet: View {
                     : "修改后会写入当前 SpeechRail 服务，并同步到所有使用该音色的入口。"
             )
 
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("名称")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("名称")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 TextField("音色名称", text: $name)
                     .textFieldStyle(.plain)
                     .focused($focusedField, equals: .name)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
                     .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                    .speechRailField()
+                    // 可编辑 = 输入槽（带 1pt `border/strong` 边界）；`.speechRailField()`
+                    // 留给非输入的状态/操作槽（第四十八轮定形状、第五十一轮定边界语义）。
+                    .speechRailRecessedSlot()
                     .accessibilityLabel("音色名称")
             }
 
@@ -2398,7 +2631,7 @@ private struct VoiceEditorSheet: View {
                         .scrollContentBackground(.hidden)
                         .frame(minHeight: SpeechRailDesignTokens.Layout.creatorVoiceInstructionMinimumHeight)
                         .padding(SpeechRailDesignTokens.Spacing.xs)
-                        .speechRailField()
+                        .speechRailRecessedSlot()
                         .accessibilityLabel("自然语言音色描述")
                     Text("\(instruction.count)/\(SpeechRailCreatorLimits.voiceInstructionMaximumLength)")
                         .font(SpeechRailDesignTokens.Typography.caption)
@@ -2414,7 +2647,7 @@ private struct VoiceEditorSheet: View {
                         .textFieldStyle(.plain)
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
                         .frame(minHeight: SpeechRailDesignTokens.Control.regularHeight)
-                        .speechRailField()
+                        .speechRailRecessedSlot()
                         .accessibilityLabel("采样种子")
                 }
             }
@@ -2546,76 +2779,36 @@ public struct WorksView: View {
     private static let actionColumnWidth: CGFloat =
         SpeechRailDesignTokens.Control.iconButtonSize * 3 + SpeechRailDesignTokens.Spacing.micro * 2
 
+    /// 详情列（inspector）的开关。落点与理由见 `VoiceLibraryView.voiceInspectorToggle`
+    /// （REDESIGN-SPEC §11.6 第六十二轮）：作品的动作都挂在**那一行作品**上
+    /// （行内「⋯」+ 右键菜单），导出另有 ⌘E，内容列首行尾端只放这一枚列开关。
+    private var worksInspectorToggle: some View {
+        PageActionButton(
+            systemImage: "sidebar.right",
+            helpText: showInspector ? "隐藏作品详情" : "显示作品详情"
+        ) {
+            showInspector.toggle()
+        }
+    }
+
     public init() {}
 
     public var body: some View {
         PageScaffold(route: .works, scrollable: false) {
             worksBody
+        } trailing: {
+            worksInspectorToggle
         }
         .focusedSceneValue(
             \.selectedWorkCommand,
             selectedWork.map { work in
-                SelectedWorkCommand(title: work.title) {
+                SelectedWorkCommand(title: work.displayTitle) {
                     prepareExport(for: work)
                 }
             }
         )
-        .searchable(text: $searchText, placement: .toolbar, prompt: "搜索作品标题")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "导出、定位或删除选中的作品") {
-                    Button {
-                        if let work = selectedWork {
-                            prepareExport(for: work)
-                        }
-                    } label: {
-                        Label("导出选中作品", systemImage: "square.and.arrow.down")
-                            .speechRailMenuRow()
-                    }
-                    .keyboardShortcut("e", modifiers: .command)
-                    .disabled(selectedWork == nil)
-                    Button {
-                        if let work = selectedWork {
-                            revealInFinder(work)
-                        }
-                    } label: {
-                        Label("在 Finder 中显示", systemImage: "folder")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(selectedWork == nil)
-                    Divider()
-                    Button {
-                        if let work = selectedWork {
-                            beginRename(work)
-                        }
-                    } label: {
-                        Label("重命名…", systemImage: "pencil")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(selectedWork == nil)
-                    Button(role: .destructive) {
-                        if let work = selectedWork {
-                            requestDelete(work)
-                        }
-                    } label: {
-                        Label("删除…", systemImage: "trash")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(selectedWork == nil)
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏详情" : "显示详情",
-                            systemImage: "sidebar.right"
-                        )
-                        .speechRailMenuRow()
-                    }
-                }
-            }
-            .sharedBackgroundVisibility(.hidden)
-        }
+        // Figma `toolbar` 的占位符逐字一致。
+        .searchable(text: $searchText, placement: .toolbar, prompt: "按标题搜索")
         .inspector(isPresented: $showInspector) {
             worksInspector
         }
@@ -2625,7 +2818,7 @@ public struct WorksView: View {
             titleVisibility: .visible
         ) {
             if let work = pendingDeleteWork {
-                Button("删除“\(work.title)”", role: .destructive) {
+                Button("删除“\(work.displayTitle)”", role: .destructive) {
                     let workToDelete = work
                     pendingDeleteWork = nil
                     if model.deleteWork(workToDelete), selectedWorkID == workToDelete.id {
@@ -2734,7 +2927,7 @@ public struct WorksView: View {
                 Button("去配音台") {
                     navigation.request(.dubbing)
                 }
-                .buttonStyle(.borderedProminent)
+                .speechRailButton(.primary)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -2759,11 +2952,12 @@ public struct WorksView: View {
                     renamingWork = nil
                     isRenaming = false
                 }
+                .speechRailButton(.secondary)
                 .keyboardShortcut(.cancelAction)
                 Button("重命名") {
                     commitRename()
                 }
-                .buttonStyle(.borderedProminent)
+                .speechRailButton(.primary)
                 .keyboardShortcut(.defaultAction)
                 .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -2775,98 +2969,142 @@ public struct WorksView: View {
     @ViewBuilder
     private var worksInspector: some View {
         if let work = selectedWork ?? model.works.first {
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Inspector.sectionSpacing) {
-                    SectionHeading(title: work.title, detail: "本机作品")
-
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Button {
-                            model.playWork(work)
-                        } label: {
-                            Label(
-                                isPlaying(work) ? "停止" : "试听",
-                                systemImage: isPlaying(work) ? "stop.fill" : "play.fill"
-                            )
-                        }
-                        .speechRailButton(.secondary)
-
-                        Button("导出…") {
-                            prepareExport(for: work)
-                        }
-                        .speechRailButton(.secondary)
-                    }
-
-                    Button("在 Finder 中显示") {
-                        revealInFinder(work)
-                    }
-                    .speechRailButton(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 0) {
-                        LabeledContent("音色", value: work.voiceName)
-                        LabeledContent(
-                            "生成时间",
-                            value: work.createdAt.formatted(date: .abbreviated, time: .shortened)
-                        )
-                        LabeledContent("音频时长", value: durationText(for: work))
-                        LabeledContent("格式", value: "WAV")
-                        LabeledContent("文稿字数", value: "\(work.scriptText.count) 字")
-                    }
-                    .speechRailInspectorContent()
-
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                        Text("文稿")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        Text(work.scriptText)
-                            .font(SpeechRailDesignTokens.Typography.body)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-
-                    Divider()
-
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Button("重命名") {
-                            beginRename(work)
-                        }
-                        Button("删除", role: .destructive) {
-                            requestDelete(work)
-                        }
-                        Spacer(minLength: 0)
-                    }
-
-                    if showDeveloperDetails {
-                        DisclosureGroup("技术上下文") {
-                            VStack(alignment: .leading, spacing: 0) {
-                                LabeledContent("音色 ID", value: work.voiceID)
-                                LabeledContent("音频文件", value: work.audioFileName)
-                                LabeledContent("采样率", value: "未提供（遵循服务配置）")
-                                LabeledContent("请求延迟", value: "未提供（当前协议未返回）")
-                            }
-                            .speechRailInspectorContent()
-                            .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-                        }
-                        .font(SpeechRailDesignTokens.Typography.label)
-                    }
-
-                    Text("作品正文和音频保存在本机 Application Support，不会写入 SpeechRail 仓库。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(SpeechRailDesignTokens.Inspector.contentPadding)
-            }
-            .scrollBounceBehavior(.basedOnSize)
+            // 与音色库共用同一个结构声明（`SpeechRailInspectorPanel`）：身份带 / 试听 /
+            // 取值 / 固定动作区，段间一条整宽 hairline。此前这一页是另一套——用
+            // `SectionHeading`（13pt + 12pt）当标题带、唯一那条 `Divider` 被 16pt
+            // 内边距缩进、动作散在正文与滚动内容里（重命名/删除跟着内容滚走），
+            // 于是同一个窗口里两块侧边栏读起来像两个体系（§11.6 第五十四轮）。
+            SpeechRailInspectorPanel(
+                title: work.displayTitle,
+                badge: "本机作品",
+                preview: { workPreviewSection(work) },
+                body: { workFactsSection(work) },
+                actions: { workInspectorActions(work) }
+            )
         } else {
             ContentUnavailableView(
                 "请选择一个作品",
                 systemImage: AppRoute.works.systemImage,
                 description: Text("选择列表中的作品后，这里会显示文稿、音频和参数。")
             )
+            // 与音色库同一条列宽声明（见 `speechRailInspectorColumn()`）。
+            .speechRailInspectorColumn()
+        }
+    }
+
+    /// 试听段：与音色库同形——稿 `preview` 那个嵌套面板里是「28pt 图标按钮 +
+    /// 居中波形」。作品也是听觉对象，详情面板的第一件事同样是「听它」
+    /// （§7.4：行内主动作是播放）。
+    private func workPreviewSection(_ work: CreativeWork) -> some View {
+        let playing = isPlaying(work)
+        return HStack(spacing: SpeechRailDesignTokens.Inspector.previewGap) {
+            Button {
+                model.playWork(work)
+            } label: {
+                RowActionGlyph(systemImage: playing ? "stop" : "play")
+            }
+            .speechRailButton(.quiet)
+            .accessibilityLabel(playing ? "停止试听" : "试听")
+
+            WaveformBars(
+                pattern: SpeechRailDesignTokens.Waveform.resultBar,
+                isPlaying: playing,
+                levels: model.waveformEnvelope(forWorkID: work.id),
+                progress: playing ? model.playbackProgress : nil
+            )
+            .frame(maxWidth: .infinity)
+            .accessibilityHidden(true)
+        }
+        .speechRailInspectorPreviewPanel()
+        // 选中哪一条作品就先把那一条的包络算好（命中缓存立即返回），于是「点开详情
+        // 就能看见这段音频的形状」，不必先播一遍（§11.6 第五十七轮）。
+        .task(id: work.id) {
+            model.prepareWaveform(for: work)
+        }
+    }
+
+    /// 取值段：作品的可靠事实 + 文稿全文 + 本机存储说明。
+    @ViewBuilder
+    private func workFactsSection(_ work: CreativeWork) -> some View {
+        VStack(
+            alignment: .leading,
+            spacing: SpeechRailDesignTokens.Inspector.sectionSpacing
+        ) {
+            VStack(alignment: .leading, spacing: 0) {
+                LabeledContent("音色", value: work.voiceName)
+                LabeledContent(
+                    "生成时间",
+                    value: work.createdAt.formatted(date: .abbreviated, time: .shortened)
+                )
+                LabeledContent("音频时长", value: durationText(for: work))
+                LabeledContent("格式", value: "WAV")
+                LabeledContent("文稿字数", value: "\(work.scriptText.count) 字")
+            }
+            .speechRailInspectorContent()
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Text("文稿")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(work.scriptText)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+
+            Text("作品正文和音频保存在本机 Application Support，不会写入 SpeechRail 仓库。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 固定动作区：作品的动作与行内「⋯」/右键菜单同源，导出另有 `⌘E`
+    /// （`File ▸ 导出选中作品…`）。主按钮给导出，其次是在 Finder 中显示 / 重命名 / 删除；
+    /// 这一格**不随内容滚动**，破坏性动作不会再被正文推走。
+    @ViewBuilder
+    private func workInspectorActions(_ work: CreativeWork) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Button("导出…") {
+                prepareExport(for: work)
+            }
+            .speechRailButton(.primary)
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                Button("在 Finder 中显示") {
+                    revealInFinder(work)
+                }
+                .speechRailButton(.secondary)
+
+                Button("重命名") {
+                    beginRename(work)
+                }
+                .speechRailButton(.secondary)
+
+                Spacer(minLength: 0)
+
+                Button("删除", role: .destructive) {
+                    requestDelete(work)
+                }
+                .speechRailButton(.secondary)
+            }
+
+            if showDeveloperDetails {
+                DisclosureGroup("技术上下文") {
+                    VStack(alignment: .leading, spacing: 0) {
+                        LabeledContent("音色 ID", value: work.voiceID)
+                        LabeledContent("音频文件", value: work.audioFileName)
+                        LabeledContent("采样率", value: "未提供（遵循服务配置）")
+                        LabeledContent("请求延迟", value: "未提供（当前协议未返回）")
+                    }
+                    .speechRailInspectorContent()
+                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                }
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+            }
         }
     }
 
@@ -2908,6 +3146,12 @@ public struct WorksView: View {
                         ForEach(filteredWorks) { work in
                             workListRow(work)
                                 .tag(work.id)
+                                // 同音色库列表：选中行取稿的 `surface/railTint`（§12.4 决定 15）。
+                                .listRowBackground(
+                                    work.id == selectedWorkID
+                                        ? SpeechRailDesignTokens.Surface.selectionTint
+                                        : nil
+                                )
                                 .contextMenu {
                                     workContextMenu(work)
                                 }
@@ -2944,28 +3188,41 @@ public struct WorksView: View {
     private var workColumnsHeader: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             Text("作品")
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text("时长")
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .frame(width: Self.durationColumnWidth, alignment: .trailing)
             Text("操作")
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .frame(width: Self.actionColumnWidth, alignment: .trailing)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        // 稿 `cols` 是 padX 16 / padY 10 + `Caption / Medium`（10pt，行高 13.5）= 33.5，
+        // 帧实测 33.75（`▸ 我的作品.png` y=181..214.75）。
+        //
+        // 2026-09-16 第三十五轮改成稿的 **10**：此前取 4pt 节奏里的 `sm`(12) 是为了「和下方行
+        // 同为 padY 12」，但列头不是列表行（行是 padY 12 + 两行内容 = 64，列头只有一行），
+        // 套上去让带高变成 12 + 13 + 12 = **37**，比帧高 3.25pt。取 10 后 10 + 13 + 10 = 33，
+        // 残差 0.75；`Settings.rowLabelSpacing`(3) 先例说明「稿的非 4 倍数值可以直接用」。
+        // 离屏实测：分隔线由 y=158 上移到 y=154（上下各收 2pt）。
+        .padding(.vertical, Self.columnsHeaderVerticalPadding)
     }
+
+    /// 稿 `cols` 的 `padY: 10`。
+    private static let columnsHeaderVerticalPadding: CGFloat = 10
 
     private func workListRow(_ work: CreativeWork) -> some View {
         let isPlaying = model.playingWorkID == work.id && model.isAudioPlaying
 
         return HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(work.title)
+                // 名称按可用宽度自然截断：窗口越宽显示越多，不再被写入时的 24 字上限钉死
+                // （2026-09-16 用户反馈，`CreativeWork.generatedTitle` / `displayTitle`）。
+                Text(work.displayTitle)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
@@ -2989,57 +3246,46 @@ public struct WorksView: View {
                 Button {
                     model.playWork(work)
                 } label: {
-                    Image(systemName: isPlaying ? "stop.circle.fill" : "play.circle.fill")
-                        .font(SpeechRailDesignTokens.Typography.statusIcon)
-                        .foregroundStyle(
-                            isPlaying
-                                ? SpeechRailDesignTokens.Color.ready
-                                : SpeechRailDesignTokens.Color.voice
-                        )
-                        .frame(
-                            width: SpeechRailDesignTokens.Control.iconButtonSize,
-                            height: SpeechRailDesignTokens.Control.iconButtonSize
-                        )
+                    RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
                 }
                 .speechRailButton(.quiet)
-                .accessibilityLabel("\(work.title)\(isPlaying ? "停止试听" : "试听")")
+                .accessibilityLabel("\(work.displayTitle)\(isPlaying ? "停止试听" : "试听")")
 
                 Button {
                     prepareExport(for: work)
                 } label: {
-                    Image(systemName: "square.and.arrow.down")
-                        .font(SpeechRailDesignTokens.Typography.statusIcon)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(
-                            width: SpeechRailDesignTokens.Control.iconButtonSize,
-                            height: SpeechRailDesignTokens.Control.iconButtonSize
-                        )
+                    RowActionGlyph(systemImage: "square.and.arrow.down")
                 }
                 .speechRailButton(.quiet)
-                .accessibilityLabel("导出 \(work.title)")
+                .accessibilityLabel("导出 \(work.displayTitle)")
 
                 Menu {
                     workContextMenu(work)
                 } label: {
-                    Image(systemName: "ellipsis")
-                        .font(SpeechRailDesignTokens.Typography.statusIcon)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .frame(
-                            width: SpeechRailDesignTokens.Control.iconButtonSize,
-                            height: SpeechRailDesignTokens.Control.iconButtonSize
-                        )
+                    RowActionGlyph(systemImage: "ellipsis")
                 }
                 .menuStyle(.button)
                 .buttonStyle(.borderless)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .accessibilityLabel("更多操作：\(work.title)")
+                .accessibilityLabel("更多操作：\(work.displayTitle)")
             }
             .frame(width: Self.actionColumnWidth, alignment: .trailing)
         }
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        // 与音色库行同一条规则（稿 `row` = padX 16 / padY 12）：显示行填满、行高钉到帧的 63。
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .listRowInsets(EdgeInsets())
+        .frame(
+            maxWidth: .infinity,
+            minHeight: SpeechRailDesignTokens.List.pageRowMinimumHeight,
+            alignment: .leading
+        )
         .accessibilityElement(children: .contain)
         .accessibilityHint("选中后可导出、在 Finder 中显示、重命名或删除")
+        // UI 测试按标识定位行并选中：行标签本身是按标题拼出来的，测试侧无法先验
+        // 知道标题，所以给一个稳定的标识（同页 `workspace-title` 的同类做法）。
+        .accessibilityIdentifier("work-row")
     }
 
     /// 「时间 · 音色」：作品行只有这两条可靠事实。设计稿还画了「24-bit 44.1 kHz」，
@@ -3093,9 +3339,12 @@ public struct WorksView: View {
 
     private var filteredWorks: [CreativeWork] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 搜索匹配**界面上显示的名称**（`displayTitle`），不是磁盘里那一版：旧记录
+        // 存的是「24 字 + …」，用 `title` 匹配会让用户搜一个明明看得见的词却搜不到
+        // （第五十一轮）。
         let matched = query.isEmpty
             ? model.works
-            : model.works.filter { $0.title.localizedCaseInsensitiveContains(query) }
+            : model.works.filter { $0.displayTitle.localizedCaseInsensitiveContains(query) }
         return matched.sorted { left, right in
             sortOrder == .newestFirst
                 ? left.createdAt > right.createdAt
@@ -3113,7 +3362,9 @@ public struct WorksView: View {
         let durations = filteredWorks.compactMap(\.durationSeconds)
         guard total > 0, durations.count == total else { return "\(total) 个作品" }
         let seconds = Int(durations.reduce(0, +).rounded())
-        return "\(total) 个作品 · 共 \(seconds / 60):\(String(format: "%02d", seconds % 60))"
+        // 与作品行的时长同形（零填充 mm:ss），否则同一个工具栏里会出现
+        // 「共 9:05」配「09:05」两种写法（REDESIGN-SPEC §11.6 第四十一轮）。
+        return "\(total) 个作品 · 共 \(String(format: "%02d:%02d", seconds / 60, seconds % 60))"
     }
 
     private func revealInFinder(_ work: CreativeWork) {
@@ -3126,7 +3377,7 @@ public struct WorksView: View {
 
     private func beginRename(_ work: CreativeWork) {
         renamingWork = work
-        renameText = work.title
+        renameText = work.displayTitle
         isRenaming = true
     }
 

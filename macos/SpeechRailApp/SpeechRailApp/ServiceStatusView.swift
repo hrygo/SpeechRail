@@ -39,7 +39,8 @@ public struct ServiceStatusView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
+        // 卡片内容内边距按 4x 帧实测统一（稿 18 → Layout.cardInset）。
+        .padding(SpeechRailDesignTokens.Layout.cardInset)
         .speechRailContentSurface()
     }
 }

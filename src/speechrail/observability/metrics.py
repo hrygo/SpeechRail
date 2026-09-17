@@ -54,6 +54,56 @@ _TTS_DELIVERY_EVENTS = frozenset(
 LabelKey = tuple[tuple[str, str], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class HistogramReading:
+    """Immutable cumulative reading of one labelled histogram series."""
+
+    bounds: tuple[float, ...]
+    counts: tuple[int, ...]
+    total: int
+    total_sum: float
+
+    def delta(self, previous: HistogramReading | None) -> HistogramReading:
+        """Return the increments since an earlier reading of the same series.
+
+        A series that did not exist in the earlier reading contributes its full
+        count, because every observation in it happened after that reading.
+        Bucket mismatches are not silently rescaled: the newer series wins.
+        """
+        if previous is None or previous.bounds != self.bounds:
+            return self
+        return HistogramReading(
+            bounds=self.bounds,
+            counts=tuple(
+                max(0, value - base)
+                for value, base in zip(self.counts, previous.counts, strict=True)
+            ),
+            total=max(0, self.total - previous.total),
+            total_sum=max(0.0, self.total_sum - previous.total_sum),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MetricsState:
+    """Cumulative, immutable view of the registry used for interval rollups."""
+
+    counters: Mapping[str, Mapping[LabelKey, float]]
+    gauges: Mapping[str, Mapping[LabelKey, float]]
+    histograms: Mapping[str, Mapping[LabelKey, HistogramReading]]
+
+    def counter_total(self, name: str) -> float:
+        """Return the summed value of every series in one counter family."""
+        return sum(self.counters.get(name, {}).values())
+
+    def counter_delta(self, previous: MetricsState, name: str) -> float:
+        """Return the non-negative increment of one counter family."""
+        return max(0.0, self.counter_total(name) - previous.counter_total(name))
+
+    def gauge_total(self, name: str) -> float:
+        """Return the summed value of every series in one gauge family."""
+        return sum(self.gauges.get(name, {}).values())
+
+
 def _make_label_key(**labels: str | int | float) -> LabelKey:
     """Normalize label kwargs into an immutable sorted tuple of string pairs."""
     return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
@@ -234,6 +284,35 @@ class Metrics:
                 f"{name}:{outcome}": val
                 for (name, outcome), val in self._legacy_counters.items()
             }
+
+    def read_state(self) -> MetricsState:
+        """Return an immutable cumulative snapshot for interval rollups.
+
+        The returned mappings are copies, so a caller can diff two readings
+        without holding the registry lock and without observing later writes.
+        """
+        with self._lock:
+            counters = {
+                name: {key: float(value) for key, value in series.items()}
+                for name, series in self._counters.items()
+            }
+            gauges = {
+                name: {key: float(value) for key, value in series.items()}
+                for name, series in self._gauges.items()
+            }
+            histograms = {
+                name: {
+                    key: HistogramReading(
+                        bounds=tuple(hist.buckets),
+                        counts=tuple(hist.counts),
+                        total=hist.count,
+                        total_sum=hist.sum_val,
+                    )
+                    for key, hist in series.items()
+                }
+                for name, series in self._histograms.items()
+            }
+        return MetricsState(counters=counters, gauges=gauges, histograms=histograms)
 
     # --- Standard Metric Primitives ---
     def inc(self, name: str, amount: float = 1.0, **labels: str | int | float) -> None:

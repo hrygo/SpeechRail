@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 安全与可观测性"
 status: active
-date: 2026-09-08
+date: 2026-09-16
 ---
 
 # SpeechRail 安全与可观测性
@@ -32,6 +32,17 @@ HTTP access 记录在响应完成或异常退出时各写一条，字段固定�
 不会复制请求体、响应体、Authorization 或自定义 voice 值。流式响应在已发送响应头后失败时，
 记录已发送的 HTTP status 与失败 outcome，客户端不会收到第二个 JSON 错误响应。
 
+这些记录由服务自身的 logging handler 落盘，而不是依赖 LaunchAgent 的 stdout/stderr 重定向
+（后者只保留无法进入日志的崩溃输出、无时间戳且不轮转）：
+
+| 路径 | 内容 | 轮转 |
+|---|---|---|
+| `~/Library/Logs/SpeechRail/speechrail.log` | 服务与 vendor 日志；结构化字段以 `key=value` 追加，可直接人读 | 8 MiB × 5 份 |
+| `~/Library/Logs/SpeechRail/access.jsonl` | 每个结构化记录一行 JSON，字段与上表一致 | 8 MiB × 5 份 |
+
+目录为 `0700`、文件为 `0600`；`SPEECHRAIL_LOG_DIR` 可改位置。uvicorn 自带的 access 行被关闭，
+避免与 `http_access` 重复；日志目录不可写时退回控制台输出，不影响服务。
+
 ## 指标与可观测性
 
 `GET /metrics` 提供 Prometheus 文本（默认，`text/plain; version=0.0.4`）与 `Accept:
@@ -41,6 +52,15 @@ application/json` 结构化两种视图。指标全部前缀 `speechrail_`，标
 `/metrics` 与 `/health` 同属无鉴权系统端点（loopback-first）；非 loopback 暴露前须先完成
 CORS、TLS、网段限制与速率限制。`/metrics` 的 `endpoint` 标签对未匹配路由归一为
 `<unmatched>`，阻断任意路径集导致的无界基数。
+
+`/metrics` 是进程内累计值，重启归零，单次 scrape 只能回答「现在」。服务另外每
+`SPEECHRAIL_METRICS_ROLLUP_INTERVAL_SECONDS`（默认 60 秒）向
+`{app_home}/state/metrics-rollup/YYYY-MM-DD.jsonl` 追加一行区间摘要：单调计数器增量、
+按直方图桶插值的时延分位、区间内并发峰值、排队拒绝与 worker 驱逐、观测到的
+physical footprint、worker 状态与 ready 标志。它只包含上面已经允许的低基数字段，是同一套
+事实的时间序列，不是第二份监控系统。按天分文件、默认保留 30 天
+（`SPEECHRAIL_METRICS_ROLLUP_RETENTION_DAYS`），只对受管安装启用
+（`SPEECHRAIL_METRICS_ROLLUP_DIR` 可指定或关闭），写入失败只记一条 warning，不影响请求路径。
 
 ## 容量与隔离
 

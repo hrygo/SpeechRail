@@ -24,6 +24,15 @@ public enum CreatorVoicesLoadState: Equatable, Sendable {
     case failed
 }
 
+/// 服务级能力声明（`GET /v1/models`）的读取状态。能力结论只有“读到服务声明”
+/// 与“还没读到”两种前提，不能让空列表冒充“服务不支持”。
+public enum ServiceCapabilitiesLoadState: Equatable, Sendable {
+    case unknown
+    case loading
+    case loaded
+    case failed
+}
+
 public enum ServiceOperationPhase: Equatable, Sendable {
     case starting
     case stopping
@@ -105,10 +114,21 @@ private enum OperationWaitResult {
     case cancelled
 }
 
+/// 提词稿列表的读取状态。`empty` 与 `failed` 必须分开：服务端资产缺失时返回的是空数组
+/// （「没有官方提词稿」），连接失败才是「读不到」——两者的下一步动作不同。
+public enum ClonePromptLoadState: Equatable, Sendable {
+    case unknown
+    case empty
+    case ready
+    case failed(String)
+}
+
 @MainActor
 @Observable
 public final class AppModel {
     public private(set) var service = ServiceSnapshot(serviceState: "unknown")
+    /// 服务端口行的 `host` 部分：`ServiceSnapshot` 只带端口，主机名由诊断客户端给出。
+    public var serviceConnectionHost: String? { apiClient.connectionHost }
     public private(set) var profiles: [ProfileSummary] = []
     public private(set) var profile: ProfileSnapshot?
     public private(set) var operation: OperationSnapshot?
@@ -122,8 +142,12 @@ public final class AppModel {
     public private(set) var lastPreflightRefresh: Date?
     public private(set) var preflightRequestID: UUID?
     public private(set) var monitoringSamples: [RuntimeMetricsSample] = []
+    /// 服务落盘的历史指标（`state/metrics-rollup`）。App 自己的采样只覆盖 5 分钟，
+    /// 「上周快不快」这类问题只能由这份数据回答；它跨服务重启保留。
+    public private(set) var monitoringHistory: MetricsHistory?
     public private(set) var message: String?
     public private(set) var monitoringMessage: String? = nil
+    public private(set) var monitoringHistoryMessage: String? = nil
     public private(set) var healthMessage: String? = nil
     public private(set) var healthFailure: ServiceHealthFailureKind? = nil
     public private(set) var controlPlaneMessage: String? = nil
@@ -134,10 +158,19 @@ public final class AppModel {
     public private(set) var isRefreshingService = false
     public private(set) var isRefreshingModels = false
     public private(set) var isRefreshingMonitoring = false
+    public private(set) var isRefreshingMonitoringHistory = false
     public private(set) var isRefreshingPreflight = false
     public private(set) var controlAgentStatus: ControlAgentStatusSnapshot
     public private(set) var serviceOperation: ServiceOperationStatus?
     public private(set) var isAudioPlaying = false
+    /// 当前音频的**真实**播放进度 0…1（`AVAudioPlayer.currentTime / duration`）。
+    /// 详情面板的波形用它表示「播到哪了」（REDESIGN-SPEC §11.6 第五十七轮）。
+    public private(set) var playbackProgress: Double = 0
+    /// 服务公开的 TTS 能力（`/v1/models.capabilities`）。`nil` 表示还没有读到
+    /// 结论，界面此时只能说“未读取”，不能把“没有克隆音色”当成“没有能力”。
+    public private(set) var serviceCapabilities: ServiceModelCapabilities?
+    public private(set) var serviceCapabilitiesLoadState: ServiceCapabilitiesLoadState = .unknown
+    public private(set) var isRefreshingServiceCapabilities = false
     public private(set) var creatorVoices: [CreatorVoice] = []
     public private(set) var creatorVoicesLoadState: CreatorVoicesLoadState = .unknown
     public private(set) var isRefreshingCreatorVoiceDetail = false
@@ -158,6 +191,29 @@ public final class AppModel {
     public private(set) var isRegisteringVoice = false
     public private(set) var isUpdatingVoice = false
     public private(set) var isDeletingVoice = false
+    // MARK: 音色克隆（录音 → 回听 → 核对 → 注册）
+
+    /// 录音通道。视图直接观察它（`isRecording` / `elapsed` / `level`），因为电平表
+    /// 必须以 20Hz 更新，走 AppModel 中转只会多一层无用的拷贝。
+    public let recording = VoiceRecordingController()
+    public private(set) var clonePrompts: [ClonePrompt] = []
+    public private(set) var clonePromptLoadState: ClonePromptLoadState = .unknown
+    /// 最近一次本地检查的结果（`nil` = 还没有录音，或这段录音解不开）。
+    public private(set) var cloneReferenceAnalysis: AudioReferenceAnalysis?
+    /// 这次录音的字节。**只在内存里**：文件读过就删，注册成功后连内存也放掉，
+    /// 应用不保存用户的原始录音（§13.2）。
+    public private(set) var cloneRecordingAudio: Data?
+    /// 服务端预检报告（`/v1/voices/clone/validate`）。它不是注册结果：
+    /// 注册会重新走一遍同样的门（用户可能在预检后又改过文本或重录）。
+    public private(set) var cloneEvaluation: VoiceQualityReportSnapshot?
+    public private(set) var isEvaluatingCloneReference = false
+    public private(set) var isRegisteringCloneVoice = false
+    public private(set) var cloneMessage: String?
+    public private(set) var lastRegisteredCloneVoice: CreatorVoice?
+    /// 一次逻辑注册的稳定身份：响应丢失后重试必须带同一个 `id` 与 `Idempotency-Key`，
+    /// 否则服务端会把同一次注册再建一遍（§13.2 / `POST /v1/voices/clone`）。
+    public private(set) var cloneRegistrationID: String?
+    public private(set) var cloneIdempotencyKey: String?
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
     public private(set) var worksMessage: String?
@@ -173,14 +229,21 @@ public final class AppModel {
 
     private let transport: any SpeechRailControlTransport
     private let apiClient: any ServiceDiagnosticsClient
+    private let capabilityClient: any ServiceModelCapabilityClient
     private let creatorClient: any SpeechRailCreatorClient
     private let audioPlaybackController: AudioPlaybackController
     private let workStore: CreativeWorkStore
+    private let observabilityLocation: ObservabilityLocation
     private let registration: ControlAgentRegistration?
     private var healthRefreshGeneration: UInt64 = 0
     private var metricsRefreshGeneration: UInt64 = 0
+    private var monitoringHistoryGeneration: UInt64 = 0
     private var creatorVoiceDetailGeneration: UInt64 = 0
     private var synthesisTask: Task<Void, Never>?
+    /// 波形包络缓存（key = `voice:<id>` / `work:<id>`）。分辨率固定
+    /// `Waveform.envelopeBuckets`，视图按自己的排布重采样——同一段包络因此能给
+    /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11.6 第五十七轮）。
+    private var waveformEnvelopes: [String: [CGFloat]] = [:]
     private var voicePreviewTask: Task<Void, Never>?
     private var voiceDesignGenerationTask: Task<Void, Never>?
     private var voiceDesignSaveTask: Task<Void, Never>?
@@ -196,16 +259,20 @@ public final class AppModel {
     public init(
         transport: any SpeechRailControlTransport,
         apiClient: any ServiceDiagnosticsClient,
+        capabilityClient: (any ServiceModelCapabilityClient)? = nil,
         creatorClient: (any SpeechRailCreatorClient)? = nil,
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
         workStore: CreativeWorkStore = CreativeWorkStore(),
+        observabilityLocation: ObservabilityLocation = .default,
         registration: ControlAgentRegistration? = nil
     ) {
         self.transport = transport
         self.apiClient = apiClient
+        self.capabilityClient = capabilityClient ?? UnavailableModelCapabilityClient()
         self.creatorClient = creatorClient ?? UnavailableCreatorClient()
         self.audioPlaybackController = audioPlaybackController
         self.workStore = workStore
+        self.observabilityLocation = observabilityLocation
         self.registration = registration
         self.controlAgentStatus = registration?.statusSnapshot
             ?? ControlAgentStatusSnapshot(kind: .local)
@@ -216,12 +283,16 @@ public final class AppModel {
             self.isAudioPlaying = false
             self.playingWorkID = nil
             self.playingVoiceID = nil
+            self.playbackProgress = 0
             guard !successfully else { return }
             if workWasPlaying {
                 self.workPlaybackMessage = "作品播放失败，请重新试听或重新生成。"
             } else {
                 self.creatorMessage = "音频播放失败，请重试。"
             }
+        }
+        self.audioPlaybackController.onProgress = { [weak self] value in
+            self?.playbackProgress = value
         }
     }
 
@@ -553,6 +624,148 @@ public final class AppModel {
         }
     }
 
+    // MARK: - 音色克隆
+
+    /// 读取官方提词稿（`GET /v1/voices/clone/prompts`）。
+    public func refreshClonePrompts() async {
+        do {
+            let prompts = try await creatorClient.fetchClonePrompts()
+            clonePrompts = prompts
+            clonePromptLoadState = prompts.isEmpty ? .empty : .ready
+        } catch {
+            clonePrompts = []
+            clonePromptLoadState = .failed(Self.creatorErrorMessage(for: error))
+        }
+    }
+
+    /// 收下一段刚录完的临时文件：读字节 → 本地量测（主线程之外）→ **删掉磁盘上的原文件**。
+    ///
+    /// 同一段录音只生成一次注册身份（`cloneRegistrationID` + `cloneIdempotencyKey`），
+    /// 重录才会换新的——这正是「一次逻辑注册」的边界。
+    public func acceptCloneRecording(fileAt url: URL) async {
+        let audio = try? Data(contentsOf: url)
+        let analysis = await Task.detached(priority: .userInitiated) {
+            AudioReferenceCheck.analyze(fileAt: url)
+        }.value
+        try? FileManager.default.removeItem(at: url)
+        cloneRecordingAudio = audio
+        cloneReferenceAnalysis = analysis
+        cloneEvaluation = nil
+        cloneMessage = analysis == nil ? "这段录音无法解码，请重录。" : nil
+        cloneRegistrationID = Self.makeCloneRegistrationID()
+        cloneIdempotencyKey = UUID().uuidString.lowercased()
+    }
+
+    /// 丢弃这次录音（重录、离开页面、注册完成）。
+    public func discardCloneRecording() {
+        cloneRecordingAudio = nil
+        cloneReferenceAnalysis = nil
+        cloneEvaluation = nil
+        cloneRegistrationID = nil
+        cloneIdempotencyKey = nil
+    }
+
+    /// 服务端预检：与注册同一条管线，但不创建任何档案。
+    @discardableResult
+    public func evaluateCloneReference(
+        referenceText: String,
+        name: String
+    ) async -> VoiceQualityReportSnapshot? {
+        guard let audio = cloneRecordingAudio else {
+            cloneMessage = "请先录一段参考音频"
+            return nil
+        }
+        guard !isEvaluatingCloneReference else { return nil }
+        isEvaluatingCloneReference = true
+        cloneMessage = nil
+        defer { isEvaluatingCloneReference = false }
+        do {
+            let report = try await creatorClient.validateVoiceClone(
+                audio: audio,
+                referenceText: referenceText,
+                name: name,
+                voiceID: cloneRegistrationID
+            )
+            cloneEvaluation = report
+            return report
+        } catch is CancellationError {
+            return nil
+        } catch {
+            cloneMessage = Self.creatorErrorMessage(for: error)
+            return nil
+        }
+    }
+
+    /// 注册克隆音色。校验留在本地一遍，是为了让「名称没填」这类问题不用花一次上传
+    /// 就能说清楚；服务端仍会独立校验全部字段。
+    public func registerCloneVoice(
+        referenceText: String,
+        name: String
+    ) async -> CreatorVoice? {
+        guard !isRegisteringCloneVoice else { return nil }
+        guard let audio = cloneRecordingAudio else {
+            cloneMessage = "请先录一段参考音频"
+            return nil
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedReference = referenceText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            cloneMessage = "请先为音色命名"
+            return nil
+        }
+        guard trimmedName.count <= SpeechRailCreatorLimits.cloneNameMaximumLength else {
+            cloneMessage = "音色名称不能超过 \(SpeechRailCreatorLimits.cloneNameMaximumLength) 个字符"
+            return nil
+        }
+        guard !trimmedReference.isEmpty else {
+            cloneMessage = "请填写你实际朗读的文本"
+            return nil
+        }
+        guard trimmedReference.count <= SpeechRailCreatorLimits.cloneReferenceTextMaximumLength else {
+            cloneMessage = "朗读文本不能超过 \(SpeechRailCreatorLimits.cloneReferenceTextMaximumLength) 个字符"
+            return nil
+        }
+        guard !audio.isEmpty else {
+            cloneMessage = "这段录音是空的，请重录"
+            return nil
+        }
+
+        isRegisteringCloneVoice = true
+        cloneMessage = nil
+        defer { isRegisteringCloneVoice = false }
+        do {
+            let voice = try await creatorClient.registerVoiceClone(
+                audio: audio,
+                referenceText: trimmedReference,
+                name: trimmedName,
+                voiceID: cloneRegistrationID,
+                idempotencyKey: cloneIdempotencyKey
+            )
+            lastRegisteredCloneVoice = voice
+            // 注册成功后放掉内存里的原始录音：档案里留下的是服务端生成的参考音频，
+            // 不是用户这次读的那一段。
+            cloneRecordingAudio = nil
+            let refreshed = await refreshCreatorVoices()
+            if !refreshed {
+                cloneMessage = "音色已注册，但列表刷新失败：" + (creatorMessage ?? "请重新读取音色列表")
+            }
+            return voice
+        } catch is CancellationError {
+            return nil
+        } catch {
+            cloneMessage = Self.creatorErrorMessage(for: error)
+            return nil
+        }
+    }
+
+    public func clearCloneMessage() {
+        cloneMessage = nil
+    }
+
+    private static func makeCloneRegistrationID() -> String {
+        "voice_clone_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
     public func deleteVoice(_ voice: CreatorVoice) async -> Bool {
         guard !voice.isSystem else {
             creatorMessage = "系统音色受保护，不能删除"
@@ -691,6 +904,11 @@ public final class AppModel {
             isAudioPlaying = audioPlaybackController.isPlaying
             playingWorkID = nil
             playingVoiceID = voice.id
+            // 试听的音频就是这段 data：顺手把它的包络算出来，详情面板的波形
+            // 从此画的是这个音色真实的声音，而不是稿上的固定图形。
+            cacheEnvelope(key: Self.envelopeKey(kind: "voice", id: voice.id)) { buckets in
+                AudioEnvelope.levels(forAudioData: data, buckets: buckets)
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -759,8 +977,49 @@ public final class AppModel {
 
     private func clearPlaybackState() {
         isAudioPlaying = false
+        playbackProgress = 0
         playingWorkID = nil
         playingVoiceID = nil
+    }
+
+    // MARK: - 波形包络（真实音频）
+
+    /// 详情面板那排波形要用的包络；`nil` 表示这段音频还没算过（视图退回稿的固定图形）。
+    public func waveformEnvelope(forVoiceID id: String) -> [CGFloat]? {
+        waveformEnvelopes[Self.envelopeKey(kind: "voice", id: id)]
+    }
+
+    public func waveformEnvelope(forWorkID id: String) -> [CGFloat]? {
+        waveformEnvelopes[Self.envelopeKey(kind: "work", id: id)]
+    }
+
+    /// 作品详情面板选中的作品：把它的包络先算出来（命中缓存立即返回）。
+    /// 读文件是同步的本机小 I/O（与 `playWork` 同量级），解码放到主线程之外。
+    public func prepareWaveform(for work: CreativeWork) {
+        let key = Self.envelopeKey(kind: "work", id: work.id)
+        guard waveformEnvelopes[key] == nil,
+              let url = try? workStore.audioURL(for: work)
+        else { return }
+        cacheEnvelope(key: key) { buckets in
+            AudioEnvelope.levels(forAudioFileAt: url, buckets: buckets)
+        }
+    }
+
+    private static func envelopeKey(kind: String, id: String) -> String {
+        "\(kind):\(id)"
+    }
+
+    /// 解码放到主线程之外：这是 I/O 加解码，不该占用界面线程；算完再回主线程写缓存。
+    private func cacheEnvelope(
+        key: String,
+        compute: @escaping @Sendable (Int) -> [CGFloat]?
+    ) {
+        guard waveformEnvelopes[key] == nil else { return }
+        let buckets = SpeechRailDesignTokens.Waveform.envelopeBuckets
+        Task.detached(priority: .utility) { [weak self] in
+            guard let levels = compute(buckets) else { return }
+            await MainActor.run { self?.waveformEnvelopes[key] = levels }
+        }
     }
 
     @discardableResult
@@ -869,7 +1128,7 @@ public final class AppModel {
             works = try workStore.list()
             worksMessage = nil
             workPlaybackMessage = nil
-            workActionMessage = "“\(work.title)” 及其音频文件已从本机删除。"
+            workActionMessage = "“\(work.displayTitle)” 及其音频文件已从本机删除。"
             if lastCreatedWork?.id == work.id {
                 lastCreatedWork = nil
             }
@@ -958,7 +1217,9 @@ public final class AppModel {
             let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
             let work = CreativeWork(
                 id: workID,
-                title: Self.workTitle(for: scriptText),
+                // 名称取文稿首行的整行：截断由行内按可用宽度做，不在写入时预截
+                // （用户反馈「文本应随 UI 宽度自然截断，见 `CreativeWork.generatedTitle`」）。
+                title: CreativeWork.generatedTitle(fromScript: scriptText),
                 scriptText: scriptText,
                 voiceID: voice.id,
                 voiceName: voice.name,
@@ -981,6 +1242,9 @@ public final class AppModel {
                 try audioPlaybackController.play(data: data)
                 isAudioPlaying = audioPlaybackController.isPlaying
                 playingWorkID = work.id
+                cacheEnvelope(key: Self.envelopeKey(kind: "work", id: work.id)) { buckets in
+                    AudioEnvelope.levels(forAudioData: data, buckets: buckets)
+                }
             } catch {
                 clearPlaybackState()
                 workPlaybackMessage = "作品已保存，但本次音频无法播放；可以在“我的作品”中重新试听。"
@@ -1010,9 +1274,37 @@ public final class AppModel {
             }
             isAudioPlaying = audioPlaybackController.isPlaying
             playingWorkID = work.id
+            // 播放控制器只有一个，动手播作品就说明音色试听已经结束：留下旧的
+            // playingVoiceID 会让音色库显示一个并不在响的“停止试听”状态
+            // (REDESIGN-SPEC §7.1：全 App 同一时刻只有一个声音)。
+            playingVoiceID = nil
             workPlaybackMessage = nil
+            cacheEnvelope(key: Self.envelopeKey(kind: "work", id: work.id)) { buckets in
+                AudioEnvelope.levels(forAudioData: data, buckets: buckets)
+            }
         } catch {
             workPlaybackMessage = "作品音频暂时不可用，请重新生成或确认本机作品文件仍在。"
+        }
+    }
+
+    /// 读取服务公开的能力清单（`GET /v1/models.capabilities`）。
+    ///
+    /// 能力结论只认服务声明。音色列表是用户数据，可以为空；“列表里没有克隆音色”
+    /// 不能推出“服务不支持克隆”，那会把用户数据当成能力事实。
+    public func refreshServiceCapabilities() async {
+        guard !isRefreshingServiceCapabilities else { return }
+        isRefreshingServiceCapabilities = true
+        serviceCapabilitiesLoadState = .loading
+        defer { isRefreshingServiceCapabilities = false }
+        do {
+            serviceCapabilities = try await capabilityClient.fetchModelCapabilities()
+            serviceCapabilitiesLoadState = .loaded
+        } catch is CancellationError {
+            // 取消不是结论：丢掉未完成的读取，回到“还没有读到”。
+            serviceCapabilitiesLoadState = .unknown
+        } catch {
+            serviceCapabilities = nil
+            serviceCapabilitiesLoadState = .failed
         }
     }
 
@@ -1047,6 +1339,9 @@ public final class AppModel {
         controlPlaneMessage = nil
         profiles = []
         profile = nil
+        // 能力清单与健康快照同源（都是本机服务），一次刷新一起更新。能力读取失败
+        // 只影响能力结论，不回退已经读到的健康快照。
+        await refreshServiceCapabilities()
         do {
             let list = try await transport.send(ControlRequest(command: .profileList))
             guard refreshGeneration == healthRefreshGeneration else { return }
@@ -1155,6 +1450,9 @@ public final class AppModel {
         registration?.openLoginItemsSettings()
     }
 
+    /// 本机落盘产物（历史指标、日志）的位置，供页面显示与排障。
+    public var observability: ObservabilityLocation { observabilityLocation }
+
     public func refreshMonitoring() async {
         guard !isRefreshingMonitoring else { return }
         isRefreshingMonitoring = true
@@ -1223,6 +1521,36 @@ public final class AppModel {
                 ? "运行数据暂时不可用"
                 : messages.joined(separator: "；")
         }
+    }
+
+    /// 读取服务落盘的历史指标（`state/metrics-rollup`）。
+    ///
+    /// 走文件而不是 HTTP 是有意的：这份数据跨服务重启保留，所以服务刚换版重启、
+    /// 甚至停着的时候，历史仍然看得到；代价是路径按服务的落盘约定解析。
+    /// 读盘放到后台（30 天约 4 万行），主线程只接结果。
+    public func refreshMonitoringHistory(
+        windowSeconds: Double,
+        bucketSeconds: Double? = nil,
+        now: Date = Date()
+    ) async {
+        let location = observabilityLocation
+        monitoringHistoryGeneration &+= 1
+        let generation = monitoringHistoryGeneration
+        isRefreshingMonitoringHistory = true
+        defer { isRefreshingMonitoringHistory = false }
+        let history = await Task.detached(priority: .utility) {
+            MetricsHistoryLoader.load(
+                directory: location.historyDirectory,
+                now: now,
+                windowSeconds: windowSeconds,
+                bucketSeconds: bucketSeconds
+            )
+        }.value
+        guard generation == monitoringHistoryGeneration else { return }
+        monitoringHistory = history
+        monitoringHistoryMessage = history.directoryExists
+            ? nil
+            : "服务还没有写过历史指标；它每次运行会往 \(history.directoryPath) 追加 60 秒一行。"
     }
 
     public func refreshPreflight() async {
@@ -1576,13 +1904,6 @@ public final class AppModel {
                 return "服务健康检查未通过，请打开诊断查看恢复路径。"
             }
         }
-    }
-
-    private static func workTitle(for text: String) -> String {
-        let firstLine = text.split(whereSeparator: { $0.isNewline }).first.map(String.init) ?? text
-        let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.count <= 24 { return trimmed }
-        return String(trimmed.prefix(24)) + "…"
     }
 
     private static func controlAgentErrorMessage(for error: Error) -> String {

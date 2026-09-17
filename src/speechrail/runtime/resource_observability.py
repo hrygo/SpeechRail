@@ -51,20 +51,25 @@ def _service_process_ids(root_pid: int) -> tuple[int, ...]:
     """Find the current process and its descendants without reading commands."""
 
     try:
-        result = subprocess.run(
+        process = subprocess.Popen(
             ["/bin/ps", "-axo", "pid=,ppid="],
-            capture_output=True,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             text=True,
-            timeout=_PS_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return (root_pid,)
-    if result.returncode != 0:
+    try:
+        ps_output, _ = process.communicate(timeout=_PS_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return (root_pid,)
+    if process.returncode != 0 or not ps_output:
         return (root_pid,)
 
     children: dict[int, list[int]] = defaultdict(list)
-    for line in result.stdout.splitlines():
+    for line in ps_output.splitlines():
         match = _PROCESS_LINE_PATTERN.match(line)
         if match is None:
             continue
@@ -79,6 +84,10 @@ def _service_process_ids(root_pid: int) -> tuple[int, ...]:
             if child_pid not in found:
                 found.add(child_pid)
                 pending.append(child_pid)
+    # ``ps`` lists itself, and it is a child of this process while it runs.  That
+    # collector exits before ``footprint`` samples it, so keeping it in the set
+    # would make every aggregate look incomplete and hide the real reading.
+    found.discard(process.pid)
     return tuple(sorted(found))
 
 

@@ -54,23 +54,28 @@ struct SpeechRailApp: App {
         }
 #endif
         let diagnosticsClient: any ServiceDiagnosticsClient
+        let capabilityClient: any ServiceModelCapabilityClient
         let creatorClient: (any SpeechRailCreatorClient)?
 #if DEBUG
         if isUITest {
-            diagnosticsClient = UITestServiceDiagnosticsClient(
+            let fixtureClient = UITestServiceDiagnosticsClient(
                 metricsUnavailable: ProcessInfo.processInfo.arguments.contains(
                     "--ui-test-metrics-unavailable"
                 )
             )
+            diagnosticsClient = fixtureClient
+            capabilityClient = fixtureClient
             creatorClient = UITestCreatorClient()
         } else {
             let liveServiceClient = ServiceAPIClient()
             diagnosticsClient = liveServiceClient
+            capabilityClient = liveServiceClient
             creatorClient = liveServiceClient
         }
 #else
         let liveServiceClient = ServiceAPIClient()
         diagnosticsClient = liveServiceClient
+        capabilityClient = liveServiceClient
         creatorClient = liveServiceClient
 #endif
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
@@ -78,6 +83,7 @@ struct SpeechRailApp: App {
             initialValue: AppModel(
                 transport: transport,
                 apiClient: diagnosticsClient,
+                capabilityClient: capabilityClient,
                 creatorClient: creatorClient,
                 registration: registration
             )
@@ -126,12 +132,17 @@ struct SpeechRailApp: App {
 /// The menu bar and keyboard map from REDESIGN-SPEC §6.3. Focused scene values
 /// let「导出选中作品」follow the page the user is actually looking at.
 struct SpeechRailCommands: Commands {
-    /// ⌘1–⌘8 的显示顺序与 `AppRoute.allCases` 一致（创作四页 + 服务四页）。
-    private static let routeShortcuts: [KeyEquivalent] = ["1", "2", "3", "4", "5", "6", "7", "8"]
+    /// ⌘1–⌘9 的显示顺序与 `AppRoute.allCases` 一致（创作五页 + 引擎五页）。
+    /// 第十页「开发者文档」是 ⌘0：它排不进 1–9 的自然顺序，而给参考页一个
+    /// 记不住的组合键（⌘⇧D 之类）比给最后一个序位更糟（REDESIGN-SPEC §13.3）。
+    private static let routeShortcuts: [KeyEquivalent] = [
+        "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"
+    ]
 
     let navigation: AppNavigationState
     @Binding var showDeveloperDetails: Bool
     @FocusedValue(\.selectedWorkCommand) private var selectedWorkCommand
+    @FocusedValue(\.reloadPageCommand) private var reloadPageCommand
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -149,6 +160,16 @@ struct SpeechRailCommands: Commands {
         }
 
         CommandGroup(after: .sidebar) {
+            // 「重新读取当前页」由当前页面自己声明（`reloadPageCommand`），
+            // 所以八个页面不再各写一条含义不同的「刷新…」菜单项（§6.2 / §6.3）。
+            Button(reloadPageCommand?.title ?? "重新读取") {
+                reloadPageCommand?()
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(reloadPageCommand == nil)
+
+            Divider()
+
             Toggle("显示开发者详情", isOn: $showDeveloperDetails)
                 .keyboardShortcut("i", modifiers: [.command, .option])
         }
@@ -181,10 +202,23 @@ struct SpeechRailCommands: Commands {
 }
 
 #if DEBUG
-private struct UITestServiceDiagnosticsClient: ServiceDiagnosticsClient {
+private struct UITestServiceDiagnosticsClient:
+    ServiceDiagnosticsClient,
+    ServiceModelCapabilityClient
+{
     let metricsUnavailable: Bool
 
     var port: Int? { 8201 }
+
+    /// 与下面的健康快照一致：fixture 档位是 quality，VoiceDesign 与 Base 两个
+    /// capability 都在。能力结论读这里，不读音色列表。
+    func fetchModelCapabilities() async throws -> ServiceModelCapabilities {
+        ServiceModelCapabilities(
+            supportsPreview: true,
+            supportsClone: true,
+            supportsInstruction: true
+        )
+    }
 
     func fetchHealthSnapshot() async throws -> HealthSnapshot {
         HealthSnapshot(
@@ -305,6 +339,69 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
             mode: "clone",
             refText: referenceText,
             durationSeconds: 3
+        )
+        return await store.insert(voice)
+    }
+
+    func fetchClonePrompts() async throws -> [ClonePrompt] {
+        [
+            ClonePrompt(
+                id: "fixture_poetry",
+                category: "classic",
+                title: "盛唐气象 · 经典诗韵",
+                script: "白日依山尽，黄河入海流。欲穷千里目，更上一层楼。",
+                tips: "字正腔圆，声调平稳从容，注意句尾自然停顿。"
+            ),
+            ClonePrompt(
+                id: "fixture_tech",
+                category: "tech",
+                title: "科技浪潮 · 现代叙述",
+                script: "人工智能正在深刻改变我们的交互方式，让每一次人机对话都充满温度与智慧。",
+                tips: "语速适中，吐字清脆明快，保持自然表达状态。"
+            )
+        ]
+    }
+
+    func validateVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?
+    ) async throws -> VoiceQualityReportSnapshot {
+        VoiceQualityReportSnapshot(
+            policyVersion: "voice_quality_v1",
+            status: .pass,
+            failureCodes: [],
+            reference: VoiceQualityReportSnapshot.Reference(
+                durationSeconds: 11,
+                sampleRate: 24_000,
+                speechActiveRatio: 0.82,
+                noiseFloorDecibels: -58,
+                estimatedSNRDecibels: 24,
+                clippingRatio: 0,
+                transcriptMatch: 0.96
+            )
+        )
+    }
+
+    func registerVoiceClone(
+        audio: Data,
+        referenceText: String,
+        name: String,
+        voiceID: String?,
+        idempotencyKey: String?
+    ) async throws -> CreatorVoice {
+        let voice = CreatorVoice(
+            id: voiceID ?? "voice_clone_fixture",
+            name: name,
+            description: "参考录音注册的音色",
+            isSystem: false,
+            createdAt: 0,
+            available: true,
+            variant: "base",
+            mode: "clone",
+            refText: referenceText,
+            durationSeconds: 11
         )
         return await store.insert(voice)
     }

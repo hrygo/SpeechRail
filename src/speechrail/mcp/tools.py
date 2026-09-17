@@ -165,6 +165,11 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
     model_profile = _text(entry.get("profile")) if entry is not None else None
     health_profile = _text(health.get("profile"))
     profile = model_profile or health_profile
+    # 能力结论只读服务发布的 `capabilities`: `supports_preview` 曾经由这里按
+    # `variant == "voice_design"` 重算, 等于把服务端的判定规则抄了第二份; 两份
+    # 规则一旦分叉, agent 会拿到与服务不一致的答案。
+    declared = entry.get("capabilities") if entry is not None else None
+    capabilities = declared if isinstance(declared, dict) else {}
     return {
         "tier": _derive_tier(profile=profile, variant=variant),
         "profile": profile,
@@ -185,12 +190,8 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
             "asr_state": _text(health.get("asr_state")),
             "tts_state": _text(health.get("tts_state")),
         },
-        "clone_supported": (
-            _bool_flag(entry.get("capabilities", {}).get("supports_clone"))
-            if entry is not None and isinstance(entry.get("capabilities"), dict)
-            else False
-        ),
-        "preview_supported": variant == "voice_design",
+        "clone_supported": _bool_flag(capabilities.get("supports_clone")),
+        "preview_supported": _bool_flag(capabilities.get("supports_preview")),
         "jobs": {
             "spool_ready": _bool_flag(health.get("job_spool_ready")),
             "runner_active": _bool_flag(health.get("job_runner_active")),

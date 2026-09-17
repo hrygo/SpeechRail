@@ -153,8 +153,8 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
   "tier": "quality",
   "profile": "quality",
   "diarization_ready": false,          // 是否已安装/就绪（决定 diarize 是否可用）
-  "clone_supported": true,             // quality + Base clone capability → true
-  "preview_supported": true,           // quality&voice_design → true
+  "clone_supported": true,             // 取自 TTS 模型条目的 capabilities.supports_clone（Base capability 已解析）
+  "preview_supported": true,           // 取自同一份 capabilities.supports_preview，不在 proxy 侧重算
   "models": [{ "id": "...", "variant": "voice_design", "capabilities": { "supports_preview": true, "supports_clone": true } }], // supports_clone reflects the separate Base capability
   "voices": [{ "id": "serena", "variant": "voice_design", "mode": "system", "is_default": true, "available": true,
                "capabilities": { "supports_speaker": false, "supports_instruction": true, "supports_clone": false } }]

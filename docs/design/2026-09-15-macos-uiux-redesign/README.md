@@ -16,7 +16,8 @@
 |---|---|
 | [`README.md`](README.md) | 本文件：范围、证据口径、落地顺序 |
 | [`REDESIGN-SPEC.md`](REDESIGN-SPEC.md) | 完整重设计规格：诊断、原则、视觉语言、信息架构、逐页规格、无障碍、迁移路径、Figma 构建规格 |
-| [`figma-kit/`](figma-kit/) | 生成器：把规格生成到 Figma 的本机开发插件（7 页 / 19 帧：变量、组件、8 个屏幕画板与深色克隆、流程与菜单设置页、归档对照页、原型连线、自检 audit） |
+| [`figma-kit/`](figma-kit/) | 生成器：把规格生成到 Figma 的本机开发插件（两个真实页面、26 个画板：`01 Kit` = Cover + Foundations + Components；`02 Screens` = 10 个屏幕 × 浅/深 20 帧 + Flows + Menu & Settings + Archive，含 198 条原型连线与自检 audit） |
+| [`HANDOFF.md`](HANDOFF.md) | 设计交付交接包：本次轨道与证据、权威来源、已核对 / 未执行项、已知偏差、走查清单、回退方式 |
 
 已生成并核对过的 Figma 产物见 [`REDESIGN-SPEC.md` §11.6](REDESIGN-SPEC.md)。
 

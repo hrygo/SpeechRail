@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.5.1"
-date: 2026-09-15
+version: "0.5.4"
+date: 2026-09-16
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -20,7 +20,7 @@ token；新页面不得自行定义颜色、间距、圆角和字体层级。
 
 ## 边界
 
-`SpeechRail` 是控制面，不是 ASR/TTS runtime。它不采集麦克风、不播放音频、不加载模型，也不直接执行 `launchctl`。Distribution 的 `SpeechRailControlAgent` 由 `SMAppService` 管理；本机 Debug/Release 则使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动同一控制代码，通过 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
+`SpeechRail` 是控制面，不是 ASR/TTS runtime。它不加载模型，也不直接执行 `launchctl`。音频只在用户主动操作时进出：音色克隆页在「开始录制 → 停止」之间采集麦克风（只落系统临时目录，应用收下后立刻删文件、字节只留内存；采集链关闭 AEC / AGC / 降噪），播放只发生在用户点「播放 / 试听」时（合成预览与刚录的那一段），没有后台采集或后台播放。Distribution 的 `SpeechRailControlAgent` 由 `SMAppService` 管理；本机 Debug/Release 则使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动同一控制代码，通过 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
 
 App 只连接 loopback；健康/目录读取保持公开状态语义，创作 REST 请求通过进程环境或受管
 `Application Support/SpeechRail/config/.env` 发现 Bearer key。模型目录、`.env`、日志、原始音频、完整转写和 API key 均留在 App bundle 之外，key 只在请求内存中使用。
@@ -30,12 +30,18 @@ App 只连接 loopback；健康/目录读取保持公开状态语义，创作 RE
 因为测试参数而访问 loopback。`model.status` 另外返回分人 CoreML/aligner 状态，避免只看
 `models/` 快照就误判 diarization 已就绪。
 
+能力结论只认服务声明：`ServiceModelCapabilityClient` 读取 `GET /v1/models` 的
+`capabilities`（`supports_preview` / `supports_clone` / `supports_instruction`），服务只在对应
+capability 真正解析成功时才置为 `true`。服务状态页的能力矩阵与音色创作门禁都读这一份
+快照。音色列表（`/v1/voices`）是用户数据，可以为空，「还没有克隆音色」不能推出「服务没有
+克隆能力」；用列表反推能力会报出假的「未就绪」。
+
 ## 当前控制面 surface
 
 `WindowGroup(id: "control-center")` 承载同一个 `AppModel` 下的两类一级 surface：
 
-- 创作：配音台、音色创作、音色库、我的作品。音色创作保留 VoiceDesign 的描述、候选、试听和保存主线；配音与试听通过统一的本机 Bearer 凭据接入服务，音色库提供服务端列表、详情、更新和删除，失败时保留用户输入并解释稳定错误。
-- 服务：本机服务总览、运行监控、模型管理、预检与诊断。总览解释健康状态和能力，监控读取 `/metrics`，模型管理通过 XPC Agent 调用锁定目录的 `model catalog/status/prepare`，预检显示可操作的失败原因。
+- 创作：配音台、音色创作、音色克隆、音色库、我的作品。音色创作保留 VoiceDesign 的描述、候选、试听和保存主线；音色克隆在应用内读服务端下发的提词稿、录制参考音频，经 `validate` 预检后注册成新音色（录音只落系统临时目录、应用收下即删，采集链关闭 AEC / AGC / 降噪，注册需要 `quality` 档位）；配音与试听通过统一的本机 Bearer 凭据接入服务，音色库提供服务端列表、详情、更新和删除，失败时保留用户输入并解释稳定错误。
+- 服务：本机服务总览、运行监控、模型管理、预检与诊断、开发者文档。总览解释健康状态和能力，监控读取 `/metrics`，模型管理通过 XPC Agent 调用锁定目录的 `model catalog/status/prepare`，预检显示可操作的失败原因；开发者文档把接入信息（服务地址 / 鉴权 / 运行档位 / 已发布能力）与 8 个主题的最小示例放进应用，事实仍以 `contracts/` 与 `docs/users/` 为准。
 
 模型页明确区分“下载并校验”和“应用此档位”：前者执行逐文件大小/SHA-256 校验和原子发布，可显示 JSONL 进度并取消；后者才改变当前 profile。App 不直接访问模型源、不把本地路径或 hash 返回给页面，也不把模型下载放进请求路径。
 
@@ -63,7 +69,9 @@ App 只连接 loopback；健康/目录读取保持公开状态语义，创作 RE
 - `model prepare` 是独立的可取消 mutation；Agent 仅转发已确认的档位、进度和终态，取消后不会把部分 staging 目录当作可用模型。
 - 模型 progress 的 `phase` 使用 `download`、`verifying`、`publishing` 等受控值；文件名、字节数可以显示给用户，但不携带 URL、绝对路径或凭据。
 - `model prepare` 的 active operation 会在 managed app home 的受控 journal 中保存脱敏元数据；App/Agent 重启后只恢复 active/interrupted 的解释状态，不承诺续传。`model.status` 的 manifest 校验仍是模型可用性的最终事实来源，终态 operation 会清理 active journal。
-- 运行监控只保留最近 60 个内存样本，页面关闭不改变服务；无 metrics 时显示“等待监控样本”，不显示虚构的 0 值或容量。
+- 运行监控的实时档只保留最近 60 个采样点（App 会话级，每 5 秒一个），页面关闭不改变服务；无数据时显示「还没有运行数据」并说明这不代表服务异常，不显示虚构的 0 值或容量。
+- 运行监控的「服务落盘」档（最近 1 小时 / 24 小时 / 7 天 / 30 天）读 `{app_home}/state/metrics-rollup/*.jsonl`：App 直接读文件而不是走 HTTP，所以服务重启、换版甚至停服期间历史仍然可见，也不新增公共接口。目录按 `SPEECHRAIL_METRICS_ROLLUP_DIR`（环境变量或 `{app_home}/config/.env`）解析，日志目录同理。聚合口径必须与页面说明一致：次数与音频秒数求和、耗时按样本量加权（不是把各区间均值再平均）、`p95` 取区间内最大值、内存峰值只取完整读数；读到坏行计入「读不动的行数」，空档与重启分开计数，缺数据不能显示成 0。
+- 运行监控首屏只数语音接口（`/v1/audio/speech`、`/v1/voices/previews`、`/v1/audio/transcriptions`）：控制面轮询（`/health`、`/metrics`、`/v1/models`、`/v1/voices`）同样计入 `speechrail_http_requests_total`，本机实测占累计请求的 97.6%，不能用来表达「用户请求了多少」。`rate` 与直方图累计口径保留在开发者详情与复制摘要里。
 
 ## 控制操作错误契约
 

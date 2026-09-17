@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [2.6.5] - 2026-09-16
+
+### Added
+
+- 服务侧新增滚动指标摘要：每 60 秒向 `{app_home}/state/metrics-rollup/YYYY-MM-DD.jsonl` 追加一行区间 JSON（请求与失败数、合成/识别次数与音频秒数、时延分位、并发峰值、排队拒绝与 worker 驱逐、观测内存、worker 与 ready 状态），按 UTC 日期分文件、默认保留 30 天。`/metrics` 仍是进程内累计值、重启归零，超过单次 scrape 跨度的问题现在由这份历史回答。
+- macOS App 新增「音色克隆」页面（`VoiceCloneView`）：参考音频录制（`VoiceRecordingController` + 本地 `AudioReferenceCheck` 门控）、提词稿选项、克隆接口调用与进度回执；`/v1/voices/clone` / `validate` / `quality-runs` 的调用封装在 `CreatorServiceClient`。
+- macOS App 新增「开发者文档」页面（`DeveloperDocsView` + `DeveloperDocsContent`）：把「怎么接进本机语音能力」放在应用里，目录列按 Figma 4x 帧画成淡青底圆角块，正文渲染富文本 block（段落 / 要点 / 端点 / 代码块 / 复制）。
+
+### Fixed
+
+- 修复结构化 `http_access` 记录从不落盘：服务此前没有安装任何 logging handler，`~/Library/Logs/SpeechRail/*.log` 里 `grep http_access` 永远为零，排障只能用无时间戳、无耗时的 uvicorn 原始行。现在服务自行写入两份带轮转的文件（各 8 MiB × 5 份，目录 `0700`、文件 `0600`）：`speechrail.log` 为人读行并追加 `key=value` 结构化字段，`access.jsonl` 每个记录一行 JSON；uvicorn 自带 access 行关闭以免重复，日志目录不可写时退回控制台输出。
+- 修复 `physical_footprint` 观测恒为不可用：进程枚举把采样器自己启动的瞬时 `ps` 子进程也当成服务进程，采样时它已退出，于是每次聚合都判为不完整，`/metrics` 的 `physical_footprint_bytes` 永远是 `null`（监控页的内存读数因此永远为空）。现在排除该瞬时子进程，读数恢复为真实的服务进程树聚合值，无法完整采样时仍如实返回 `null` + `physical_footprint_complete=false`。
+- 修复 macOS 开发者文档目录列出现双重选中效果：系统 `List` 选中材质画在 `listRowBackground` 之下，原来的圆角块只铺了 `surface/railTint` 没铺底色，周围露出整行强调色带。现在选中行先铺一层与卡片同值的 `Color.field` 盖住系统层，圆角块叠在上面，选中反馈只剩一处。
+
+### Changed
+
+- macOS App 对齐到 2.6.5（build 14），并把运行监控页接到服务落盘的历史：时间窗从「App 内存采样的 1 分钟 / 5 分钟 / 本次会话」扩展出「服务落盘的 1 小时 / 24 小时 / 7 天 / 30 天」，读 `{app_home}/state/metrics-rollup/*.jsonl` 后按时长聚合成桶（1 小时跨度 60 秒一个点，30 天跨度 12 小时一个点）。结论句、六格数字、两张趋势图与卡页脚的空档 / 重启次数 / 内存峰值都按当前窗口走，历史在服务重启甚至停服期间仍然可见。App 不新增公共接口，直接读文件；目录按 `SPEECHRAIL_METRICS_ROLLUP_DIR`（环境变量或 `config/.env`）覆盖，日志目录同理，覆盖值缺失时回退到服务默认约定。
+
 ## [2.6.4] - 2026-09-15
 
 ### Fixed

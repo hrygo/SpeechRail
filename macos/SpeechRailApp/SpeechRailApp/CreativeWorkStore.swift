@@ -32,17 +32,57 @@ public struct CreativeWork: Codable, Equatable, Identifiable, Sendable {
 }
 
 public extension CreativeWork {
+    /// 作品名的长度上限。自动命名与手动重命名共用同一口径（`CreativeWorkStore.rename`）。
+    static let titleMaximumLength = 120
+    /// 名称被上限截断时的标记。
+    static let titleEllipsis = "…"
+
+    /// 自动命名：取文稿首行的**整行**，超过上限才截断。
+    ///
+    /// 2026-09-16 之前这里取的是「首行前 24 字 + …」，而 `title` 是持久化字段，
+    /// 于是行内永远只能显示那 24 个字——窗口拉宽也不会多显示一个字（用户反馈：
+    /// 文本应当随 UI 宽度自然截断、宽度变大时显示更多内容）。名称现在按整行保存，
+    /// 显示端的截断交给 `Text` 的 `lineLimit(1)` + 尾部截断按可用宽度处理。
+    static func generatedTitle(fromScript text: String) -> String {
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        return clampedTitle(firstLine.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// 按上限收敛名称；只有真的超限才补省略号。
+    static func clampedTitle(_ text: String) -> String {
+        guard text.count > titleMaximumLength else { return text }
+        return String(text.prefix(titleMaximumLength)) + titleEllipsis
+    }
+
+    /// 面向用户的名称：旧记录里「24 字 + …」的自动名还原成完整首行，不重写磁盘。
+    ///
+    /// 只有「去掉省略号后的部分确实是这份文稿首行的前缀」时才还原，用户自己改过的
+    /// 名字不会被覆盖；对同一份数据反复求值结果一致（已在题内上限的名字仍是它自己）。
+    var displayTitle: String {
+        guard title.hasSuffix(Self.titleEllipsis), title.count > 1 else { return title }
+        let head = String(title.dropLast())
+        let firstLine = (scriptText.split(whereSeparator: \.isNewline).first.map(String.init) ?? scriptText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard firstLine.count > head.count, firstLine.hasPrefix(head) else { return title }
+        return Self.clampedTitle(firstLine)
+    }
+
     /// `m:ss`, or nil while the duration has not been read from the audio.
     var durationText: String? {
         guard let durationSeconds else { return nil }
         let totalSeconds = max(0, Int(durationSeconds.rounded()))
-        return "\(totalSeconds / 60):\(String(format: "%02d", totalSeconds % 60))"
+        // 稿的时长一律是**零填充的 mm:ss**：`main.js` 里七条作品行的
+        // `dur` 是 00:12 / 01:47 / 00:26 / 03:18 / 00:48 / 00:09 / 02:31，
+        // 结果条与候选卡也是 00:12；4x 帧 `▸ 我的作品.png` 逐行量到同一形状
+        // （分钟两位、冒号、秒两位）。应用此前是 `m:ss`（"0:12"），
+        // 在 10 分钟以内与稿不同形（REDESIGN-SPEC §11.6 第四十一轮）。
+        return String(format: "%02d:%02d", totalSeconds / 60, totalSeconds % 60)
     }
 
     /// Filesystem-safe stem for exporting this work.
     var exportBaseName: String {
         let invalidCharacters = CharacterSet(charactersIn: "/\\:*?\"<>|\n\r")
-        let cleaned = title
+        let cleaned = displayTitle
             .components(separatedBy: invalidCharacters)
             .joined(separator: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -172,7 +212,7 @@ public final class CreativeWorkStore {
             let existing = works[index]
             let updated = CreativeWork(
                 id: existing.id,
-                title: String(trimmed.prefix(Self.titleMaximumLength)),
+                title: CreativeWork.clampedTitle(trimmed),
                 scriptText: existing.scriptText,
                 voiceID: existing.voiceID,
                 voiceName: existing.voiceName,
@@ -238,6 +278,4 @@ public final class CreativeWorkStore {
     private static func isSafeIdentifier(_ value: String) -> Bool {
         value.range(of: "^[A-Za-z0-9_-]{1,80}$", options: .regularExpression) != nil
     }
-
-    private static let titleMaximumLength = 120
 }

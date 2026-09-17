@@ -99,6 +99,11 @@ SpeechRail 不依赖或加载 LM Studio chat/embedding 模型、Whisper 或 `son
 | `SPEECHRAIL_QWEN3_ALIGNER_MODEL_DIR` | 分人档位由 `profile apply` 写入 `app_home/diarization/<aligner-key>` 的 tier 专用 aligner snapshot；私有 ASR worker 仅对固定正文调用它，不再次识别音频；`light` 不设置 |
 | `SPEECHRAIL_WORKER_IDLE_TIMEOUT_SECONDS` | 可驱逐组件的空闲超时，默认 `300` 秒；`0` 禁用；Quality 的 VD/Base 作为一个 TTS 能力组一起驱逐；物理内存回收取决于运行时 |
 | `SPEECHRAIL_API_KEY` | 非 loopback 绑定必填；loopback 可为空 |
+| `SPEECHRAIL_LOG_DIR` | 轮转日志目录，默认 `~/Library/Logs/SpeechRail`；服务在其中写 `speechrail.log`（人读）与 `access.jsonl`（每行一个 JSON 记录），各 8 MiB × 5 份 |
+| `SPEECHRAIL_METRICS_ROLLUP_DIR` | 历史指标目录；受管安装默认 `{app_home}/state/metrics-rollup`，源码检出须显式设置才启用 |
+| `SPEECHRAIL_METRICS_ROLLUP_INTERVAL_SECONDS` | 摘要写入间隔，默认 `60` 秒（5–3600） |
+| `SPEECHRAIL_METRICS_ROLLUP_RETENTION_DAYS` | 摘要文件保留天数，默认 `30`；按 UTC 日期文件名清理 |
+| `SPEECHRAIL_METRICS_ROLLUP_ENABLED` | 设为 `false` 关闭滚动摘要 |
 
 `SPEECHRAIL_ALLOW_MODEL_DOWNLOADS` 必须为 `false`。`allowed_origins` 与
 `SPEECHRAIL_MAX_AUDIO_SECONDS` 是预留配置字段：CORS middleware 与解码后时长拒绝逻辑

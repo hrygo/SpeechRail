@@ -13,10 +13,12 @@ from fastapi import FastAPI
 from speechrail import __version__
 from speechrail.application.services import (
     AppOverrides,
+    AppServices,
     Transcribe,
     build_app_services,
 )
 from speechrail.config import Settings
+from speechrail.config.selection import active_model_catalog
 from speechrail.domain.ports import (
     BatchTranscriber,
     DiarizationEngine,
@@ -30,10 +32,69 @@ from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 from speechrail.http.routes.system import create_system_router
 from speechrail.http.routes.voice_designs import create_voice_design_router
 from speechrail.observability.logging import access
+from speechrail.observability.rollup import MetricsRollup, RollupContext, RollupResources
 from speechrail.runtime.job_runner import JobProcessor
 from speechrail.runtime.jobs import JobRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _rollup_context(services: AppServices) -> RollupContext:
+    """Sample the runtime facts that change between rollup intervals."""
+    snapshot = services.governor.snapshot()
+    return RollupContext(
+        workers=services.subsystem_states,
+        ready={
+            "asr": services.asr_ready,
+            "tts": services.tts_ready,
+            "diarization": services.diarization_ready,
+            "realtime_vad": bool(services.realtime_vad_status["ready"]),
+        },
+        active_requests=int(snapshot.active_batch) + int(snapshot.active_realtime),
+        pending_requests=int(snapshot.pending_batch) + int(snapshot.pending_realtime),
+        total_capacity=services.settings.runtime_total_capacity,
+        allow_heavy_overlap=bool(snapshot.allow_heavy_overlap),
+    )
+
+
+def _rollup_resources(services: AppServices) -> RollupResources:
+    """Sample the observed memory facts once per interval, not once per tick."""
+    status = services.runtime_resource_status()
+    footprint = status.get("physical_footprint_bytes")
+    declared = status.get("declared_footprint_bytes")
+    process_count = status.get("physical_footprint_process_count")
+    return RollupResources(
+        physical_footprint_bytes=footprint if isinstance(footprint, int) else None,
+        footprint_complete=bool(status.get("physical_footprint_complete")),
+        footprint_process_count=process_count if isinstance(process_count, int) else 0,
+        declared_footprint_bytes=declared if isinstance(declared, int) else None,
+    )
+
+
+def _build_rollup(settings: Settings, services: AppServices) -> MetricsRollup | None:
+    """Build the durable interval rollup, or ``None`` when it is not configured."""
+    directory = settings.metrics_rollup_dir
+    if directory is None or not settings.metrics_rollup_enabled:
+        return None
+    return MetricsRollup(
+        directory=directory,
+        metrics=services.metrics,
+        context=lambda: _rollup_context(services),
+        resources=lambda: _rollup_resources(services),
+        service_version=settings.version,
+        profile=_active_profile(settings),
+        interval_seconds=settings.metrics_rollup_interval_seconds,
+        retention_days=settings.metrics_rollup_retention_days,
+    )
+
+
+def _active_profile(settings: Settings) -> str | None:
+    """Read the active profile label without letting telemetry block startup."""
+    try:
+        return active_model_catalog(settings).profile
+    except Exception:
+        logger.debug("active profile is unavailable for the metrics rollup", exc_info=True)
+        return None
 
 
 def create_app(
@@ -60,6 +121,7 @@ def create_app(
     )
     services = build_app_services(resolved_settings, overrides)
     resolved = services.settings
+    rollup = _build_rollup(resolved, services)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -72,8 +134,12 @@ def create_app(
             )
             raise
         try:
+            if rollup is not None:
+                await rollup.start()
             yield
         finally:
+            if rollup is not None:
+                await rollup.stop()
             await services.lifecycle.close()
 
     app = FastAPI(title="SpeechRail API", version=resolved.version, lifespan=lifespan)

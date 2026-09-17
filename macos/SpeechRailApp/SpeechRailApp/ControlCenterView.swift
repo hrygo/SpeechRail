@@ -7,7 +7,6 @@ public struct ControlCenterView: View {
     @Environment(AppNavigationState.self) private var navigation
     @Environment(\.dismiss) private var dismiss
     @State private var selection: AppRoute? = .overview
-    @State private var searchText = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
 
@@ -24,22 +23,23 @@ public struct ControlCenterView: View {
             NavigationSplitView(columnVisibility: $columnVisibility) {
                 VStack(spacing: 0) {
                     List(selection: $selection) {
-                        if !visibleCreatorRoutes.isEmpty {
-                            sidebarSection(title: AppRouteGroup.creator.title, routes: visibleCreatorRoutes)
-                        }
-                        if !visibleServiceRoutes.isEmpty {
-                            sidebarSection(title: AppRouteGroup.service.title, routes: visibleServiceRoutes)
-                        }
-                        if visibleCreatorRoutes.isEmpty && visibleServiceRoutes.isEmpty {
-                            ContentUnavailableView.search(text: searchText)
-                                .listRowBackground(Color.clear)
-                        }
+                        sidebarSection(
+                            title: AppRouteGroup.creator.title,
+                            routes: AppRoute.creatorRoutes
+                        )
+                        sidebarSection(
+                            title: AppRouteGroup.service.title,
+                            routes: AppRoute.serviceRoutes
+                        )
                     }
                     .listStyle(.sidebar)
-                    .searchable(text: $searchText, placement: .sidebar, prompt: "搜索创作和服务")
+                    // 侧栏搜索已移除：窗口里**只保留一个搜索框**，且它属于内容
+                    // （音色库 / 我的作品的工具栏搜索）。八条固定导航项做全文过滤
+                    // 的收益低于代价——它与内容搜索同屏并排、外观相近而作用域不同，
+                    // 用户无法从外观判断自己在搜什么（REDESIGN-SPEC §6.1 / §6.2，
+                    // §11.6 第四十九轮）。
 
-                    Divider()
-                    sidebarServiceStatus
+                    sidebarBottom
                 }
                 .navigationSplitViewColumnWidth(
                     min: SpeechRailDesignTokens.Layout.sidebarMinimumWidth,
@@ -49,16 +49,32 @@ public struct ControlCenterView: View {
             } detail: {
                 detailView(for: selection ?? .overview)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    // 页面地板：窗口内容区的底色是稿的一级表面（`surface/window`），
+                    // 卡片才是它上面更亮的一级；侧栏的材质与工具栏那一行不受影响
+                    // （REDESIGN-SPEC §11.6 第五十轮）。
+                    .background(SpeechRailDesignTokens.Color.canvas)
                     .toolbar {
-                        ToolbarItem(placement: .principal) {
-                            // 状态只由侧边栏底部状态区承担（REDESIGN-SPEC §6.4 / D9）。
-                            WorkspaceTitleLockup(route: selection ?? .overview)
-                        }
-                        .sharedBackgroundVisibility(.hidden)
+                        // 页面身份（`.navigation` 槽，第五十五轮前是 `.principal`）由
+                        // **窗口组合根**声明一次：它是当前路由的纯函数，页面自己没有
+                        // 需要额外携带的标题状态，所以八个屏幕不可能漂移成九种头部
+                        // （REDESIGN-SPEC §6.2 / §11.6 第四十九、五十五轮）。
+                        PageIdentityToolbarItem(selection ?? .overview)
+                        // 这一枚浮动间隔留着：页面动作由子视图声明、会排在它之前，而系统
+                        // 搜索框（`.searchable(placement: .toolbar)`）在它之后——去掉它，
+                        // 搜索框就会贴到页面动作旁边，右侧留一大片空白（装机件截图里
+                        // 「标题 · 动作 …… 搜索」的那道间距就是它）。
                         ToolbarSpacer(.flexible)
                     }
             }
             .navigationSplitViewStyle(.balanced)
+            // 侧边栏切换按钮**保留系统那一枚**。§6.2 曾按稿（`titlebar` 只画了红绿灯、
+            // 标题锁与右侧动作）要求用 `.toolbar(removing: .sidebarToggle)` 去掉它；
+            // 2026-09-16 复核：改写这条修饰符的那一版源码（文件 mtime 08:29）确实被
+            // 09:42 的装机件包含，而装机件截图里按钮仍在——修饰符在这套
+            // `NavigationSplitView` 布局下不生效。窗口最小宽 1120pt 里侧栏 240 + 内容 +
+            // inspector 360 本来就紧，收起侧栏是真实需求，系统这枚按钮是它唯一的
+            // 可发现入口（View ▸ Hide Sidebar ⌘⌃S 只是备选），因此不为了对上稿面而
+            // 保留一条不生效的修饰符（REDESIGN-SPEC §11.6 第四十九轮）。
             .frame(
                 minWidth: controlCenterMinimumWidth,
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
@@ -91,28 +107,9 @@ public struct ControlCenterView: View {
         }
     }
 
-    private var visibleCreatorRoutes: [AppRoute] {
-        matching(AppRoute.creatorRoutes)
-    }
-
     private var displayedHealth: HealthSnapshot? {
         guard model.healthFailure == nil else { return nil }
         return model.health
-    }
-
-    private var visibleServiceRoutes: [AppRoute] {
-        matching(AppRoute.serviceRoutes)
-    }
-
-    private func matching(_ routes: [AppRoute]) -> [AppRoute] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return routes }
-        return routes.filter {
-            $0.title.localizedCaseInsensitiveContains(query)
-                || $0.workspaceTitle.localizedCaseInsensitiveContains(query)
-                || $0.contextTitle.localizedCaseInsensitiveContains(query)
-                || $0.purpose.localizedCaseInsensitiveContains(query)
-        }
     }
 
     @ViewBuilder
@@ -133,16 +130,22 @@ public struct ControlCenterView: View {
                 .truncationMode(.tail)
                 .frame(
                     maxWidth: .infinity,
-                    minHeight: SpeechRailDesignTokens.List.rowHeight,
+                    // 稿 `navItemRow` 是 220 × 30（`gap: 8`、图标 16、标签 `Body`），
+                    // 不是 44 的命中区下限：侧栏是 macOS 上最密的列表，30 仍在指针
+                    // 目标下限之上（第四十三轮，见 token 注释）。
+                    minHeight: SpeechRailDesignTokens.List.sidebarRowHeight,
                     alignment: .leading
                 )
                 .contentShape(Rectangle())
         }
         .listRowInsets(
             EdgeInsets(
-                top: SpeechRailDesignTokens.Spacing.micro,
+                // 上下不再加内边距：稿的两行之间只有 1pt（`group` 的 `gap: 1`），
+                // 而 `.sidebar` 的行矩形已经有系统下限 32（第四十三轮实测），
+                // 再加就会把行距撑到 33 以上（改前是 44 + 4 + 4 = 52）。
+                top: 0,
                 leading: SpeechRailDesignTokens.Spacing.xs,
-                bottom: SpeechRailDesignTokens.Spacing.micro,
+                bottom: 0,
                 trailing: SpeechRailDesignTokens.Spacing.xs
             )
         )
@@ -156,36 +159,61 @@ public struct ControlCenterView: View {
         .speechRailPointerCursor()
     }
 
+    /// 侧栏底部状态区 = 稿的 `sidebarStatusWrap`：一条 hairline + 一行状态。
+    ///
+    /// 稿里这条 hairline 不是通栏——是 `sidebarStatusWrap` 里的 220 × 1 矩形，在 240 宽的
+    /// 侧栏里左右各内缩 10（= 稿侧栏的 `padX: 10`），与上方系统侧栏行的内缩对齐；
+    /// 4x 帧实测墨迹 x 10.0–230.0。系统 `Divider()` 只能通栏，所以用 1pt 矩形加内缩
+    /// （REDESIGN-SPEC §11.6 第四十轮）。
+    private var sidebarBottom: some View {
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor))
+                .frame(height: SpeechRailDesignTokens.Spacing.hairline)
+                .padding(.horizontal, SpeechRailDesignTokens.Control.sidebarHairlineInset)
+            sidebarServiceStatus
+        }
+    }
+
     private var sidebarServiceStatus: some View {
         Button {
             selection = .overview
         } label: {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            // 稿（Figma `Sidebar Status` 的三个 tone 变体；4x 帧侧栏底部实测墨迹
+            // 125.25 × 12.75，点 18–26 / 文本 34.5–143.25）是**一行**：8pt 状态点 +
+            // `Callout`(12) 的文本、颜色是 `text/secondary` 灰，没有标题行、也没有尾部
+            // chevron——「服务已就绪 · Quality」整句就是这一行的内容（§7 也写着
+            // 「一行状态点 + 状态文本，点击进入「服务状态」」）。应用此前是「服务状态」
+            // 标题行 + 小一号的语义色状态行两行，外加一个 chevron：块高只差 2pt
+            // （`SpeechRailInteractiveButtonStyle` 的 44pt 命中区下限本就主导了行高，
+            // 离屏实测 47 → 45），但多一行标题和一个尾随动作，读起来像「一个可以去的
+            // 页面」而不是「此刻的状态」。可点击性由 hover/pressed 反馈
+            // （`speechRailInteractiveButtonStyle`）、指针与 `.help` 承担
+            // （REDESIGN-SPEC §11.6 第四十轮）。
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Circle()
                     .fill(sidebarStatusTone.color)
                     .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                    Text("服务状态")
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                    Text(sidebarStatusText)
-                        .font(.caption)
-                        .foregroundStyle(sidebarStatusTone.color)
-                        .lineLimit(1)
-                }
+                Text(sidebarStatusText)
+                    .font(.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .accessibilityHidden(true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
             .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
         }
-        .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
+        // 稿 `sidebarStatus` 是 **220 × 30**（`padX 8 / padY 7`、8pt 点 + `Callout`）。
+        // 这一行按稿取 30，不再套 44 的命中区下限（第四十轮记下的「块高 45 vs 稿 53」
+        // 残差由此收掉；30 仍在 macOS 指针目标下限之上，第四十三轮）。
+        .speechRailInteractiveButtonStyle(
+            fillsAvailableWidth: true,
+            minimumHeight: SpeechRailDesignTokens.List.sidebarRowHeight
+        )
         .help("打开服务状态")
         .accessibilityLabel("服务状态")
         .accessibilityValue(sidebarStatusText)
@@ -205,7 +233,10 @@ public struct ControlCenterView: View {
             return "控制通道不可用"
         }
         if displayedHealth?.ready == true {
-            return "服务已就绪"
+            // macOS App 设计系统 §4.1：侧边栏底部是全 App 唯一的常驻服务状态指示器，
+            // 并且要带上当前运行档位（Figma 状态行同一写法）。
+            guard let profile = displayedHealth?.profile else { return "服务已就绪" }
+            return "服务已就绪 · \(SpeechRailProfilePresentation.shortTitle(profile))"
         }
         if model.service.serviceState == "unavailable" {
             return "服务不可用"
@@ -242,6 +273,8 @@ public struct ControlCenterView: View {
             DubbingDeskView()
         case .voiceDesign:
             VoiceDesignView()
+        case .voiceClone:
+            VoiceCloneView()
         case .voiceLibrary:
             VoiceLibraryView()
         case .works:
@@ -254,6 +287,8 @@ public struct ControlCenterView: View {
             ModelManagementView()
         case .diagnostics:
             PreflightDiagnosticsView()
+        case .developerDocs:
+            DeveloperDocsView()
         }
     }
 

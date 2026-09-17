@@ -14,8 +14,40 @@ const PAGE_NAMES = [
 // creating an empty page under the new name and leaving the old one behind.
 const PAGE_RENAMES = { "03 Screens": "04 Screens" };
 
+// A Starter (free) file holds at most three pages, and this kit used to create
+// seven. The logical pages are therefore laid out as two real pages: the
+// documentation group on the first, the screens plus the flows / menu /
+// archive on the second. Reusing two of the three leaves the file with
+// headroom, and nothing in the kit needs a page of its own.
+const PAGE_LAYOUT = [
+  { page: "01 Kit", groups: ["00 Cover", "01 Foundations", "02 Components"] },
+  { page: "02 Screens", groups: ["04 Screens", "03 Flows", "05 Menu & Settings", "06 Archive"] }
+];
+const REAL_PAGES = PAGE_LAYOUT.map(function (spec) { return spec.page; });
+// Gap between the tiled groups on a shared page, in canvas pixels.
+const GROUP_GAP = 400;
+
 const FONT_FAMILY = "Inter";
 const FONT_STYLES = ["Regular", "Medium", "Semi Bold", "Bold"];
+
+// Inter carries no CJK glyphs. Figma draws the missing runs with a system
+// fallback, but that fallback is resolved per session, and a document that was
+// just rebuilt exports those runs blank until something re-renders them at a
+// readable zoom. The CJK family is therefore loaded up front and written onto the
+// runs Inter cannot draw, which is also what macOS does on screen when SF Pro
+// meets a Chinese string. Order = preference; the first family Figma has wins.
+const CJK_FAMILIES = [
+  "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Source Han Sans SC", "Heiti SC", "Songti SC"
+];
+const CJK_STYLE_ORDER = ["Regular", "W3", "Medium", "W6", "Semibold", "Bold"];
+let CJK_FONT = null;
+
+// Screen hand-off exports. Figma re-renders vectors at the requested scale and
+// caps the scale at 4x, so 4 is the highest-fidelity PNG the canvas can hand
+// off: 1440 x 900 frames come out at 5760 x 3600 (288 dpi) instead of the soft
+// 1440 x 900 files. Drop to 2 (2880 x 1800, Retina-exact) if the file size
+// matters more than close-up detail: 16 screens are ~20 MB at 4x, ~4 MB at 2x.
+const SCREEN_EXPORT_SCALE = 4;
 
 // --- Colour tokens (Light / Dark) -------------------------------------------
 const COLOR_TOKENS = [
@@ -74,6 +106,7 @@ let TS = {};           // text styles by definition name
 let P = {};            // pages by name
 let VALUE_HEX = {};    // literal fallback colour per variable id
 const BIND_ERRORS = []; // paint-binding failures, surfaced in the run report
+const EXPORT_ERRORS = []; // export-setting failures, surfaced in the run report
 let DARK_COLLECTION_ID = null; // set when dark is delivered as a second collection
 
 // --- Small utilities ---------------------------------------------------------
@@ -205,7 +238,25 @@ function size(node, w, h) {
 
 function add(parent, node) {
   parent.appendChild(node);
+  // Every canvas frame carries its own hand-off settings, so Figma's Export
+  // panel writes the whole set without a dialog trip per file: 4x PNG for the
+  // pixel checks and SVG as the vector ceiling (rasterise it at any DPI later).
+  if (parent.type === "PAGE" && node.type === "FRAME") setCanvasExportSettings(node);
   return applyLayout(node);
+}
+
+function setCanvasExportSettings(node) {
+  try {
+    // SVG carries no `constraint`: it is vector, Figma rejects a scale on it and
+    // a rejected entry fails the whole array — which leaves the frame with no
+    // export settings at all and "0 of 0 selected" in the export dialog.
+    node.exportSettings = [
+      { format: "PNG", constraint: { type: "SCALE", value: SCREEN_EXPORT_SCALE } },
+      { format: "SVG" }
+    ];
+  } catch (e) {
+    EXPORT_ERRORS.push(node.name + ": " + (e && e.message ? e.message : String(e)));
+  }
 }
 
 // Figma rejects layoutGrow / layoutAlign while the node has no auto-layout
@@ -275,6 +326,7 @@ function text(name, chars, styleName, colorVar, o) {
   }
   t.characters = chars;
   if (colorVar) bindFill(t, colorVar);
+  applyCjkFont(t, def ? def[2] : "Regular");
   if (o.w != null) {
     t.textAutoResize = "HEIGHT";
     size(t, o.w, t.height);
@@ -360,6 +412,65 @@ async function loadFonts() {
   }
 }
 
+async function loadCjkFont() {
+  let available = [];
+  try {
+    available = await figma.listAvailableFontsAsync();
+  } catch (e) {
+    return;
+  }
+  for (const family of CJK_FAMILIES) {
+    const styles = available
+      .filter(function (f) { return f.fontName.family === family; })
+      .map(function (f) { return f.fontName.style; });
+    const wanted = CJK_STYLE_ORDER.filter(function (s) { return styles.indexOf(s) >= 0; });
+    if (!wanted.length) continue;
+    for (const style of wanted) {
+      await figma.loadFontAsync({ family: family, style: style });
+    }
+    CJK_FONT = { family: family, styles: wanted };
+    return;
+  }
+}
+
+// Full-width forms, CJK ideographs and the CJK punctuation blocks: the ranges
+// Inter cannot draw, and the only places a second family is written.
+function isWideGlyph(code) {
+  return (code >= 0x2e80 && code <= 0x9fff) || (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe30 && code <= 0xfe4f) || (code >= 0xff00 && code <= 0xffef) ||
+    (code >= 0x3000 && code <= 0x303f);
+}
+
+function cjkStyleFor(weight) {
+  const order = {
+    "Bold": ["Bold", "Semibold", "Medium", "Regular"],
+    "Semi Bold": ["Semibold", "Medium", "Bold", "Regular"],
+    "Medium": ["Medium", "Semibold", "Regular"],
+    "Regular": ["Regular", "W3", "Medium"]
+  }[weight] || ["Regular"];
+  for (const style of order) {
+    if (CJK_FONT.styles.indexOf(style) >= 0) return style;
+  }
+  return CJK_FONT.styles[0];
+}
+
+function applyCjkFont(node, weight) {
+  if (!CJK_FONT) return;
+  const style = cjkStyleFor(weight);
+  const chars = node.characters;
+  let start = -1;
+  for (let i = 0; i <= chars.length; i++) {
+    const wide = i < chars.length && isWideGlyph(chars.charCodeAt(i));
+    if (wide && start < 0) start = i;
+    if (!wide && start >= 0) {
+      try {
+        node.setRangeFontName(start, i, { family: CJK_FONT.family, style: style });
+      } catch (e) {}
+      start = -1;
+    }
+  }
+}
+
 function ensureCollection(name) {
   const found = figma.variables.getLocalVariableCollections().find(function (c) {
     return c.name === name;
@@ -374,30 +485,103 @@ function ensureVariable(collection, name, type) {
   return found || figma.variables.createVariable(name, collection, type);
 }
 
-function buildPages() {
+async function buildPages() {
   Object.keys(PAGE_RENAMES).forEach(function (from) {
     const to = PAGE_RENAMES[from];
     const stale = figma.root.children.find(function (p) { return p.name === from; });
     const taken = figma.root.children.find(function (p) { return p.name === to; });
     if (stale && !taken) stale.name = to;
   });
-  // Figma refuses to remove pages or collections that are still referenced, so
-  // re-runs reuse the same pages in place and simply clear their contents.
-  PAGE_NAMES.forEach(function (name) {
-    let page = figma.root.children.find(function (p) { return p.name === name; });
+  // Re-runs reuse pages in place, and a page left over from an earlier revision
+  // is adopted by renaming rather than asked for as a new one: on Starter the
+  // file is capped at three pages, so `createPage()` is the last resort, never
+  // the first move.
+  const owned = [];
+  REAL_PAGES.forEach(function (name) {
+    let page = figma.root.children.find(function (p) {
+      return p.name === name && owned.indexOf(p) === -1;
+    });
     if (!page) {
-      const spare = figma.root.children.find(function (p) {
-        return p.children.length === 0 && PAGE_NAMES.indexOf(p.name) === -1;
-      });
-      page = spare || figma.createPage();
+      const spare = figma.root.children.filter(function (p) {
+        return owned.indexOf(p) === -1 && REAL_PAGES.indexOf(p.name) === -1;
+      }).sort(function (a, b) { return a.children.length - b.children.length; })[0];
+      if (spare) {
+        page = spare;
+        page.name = name;
+      } else {
+        page = figma.createPage();
+        page.name = name;
+      }
     }
-    page.name = name;
+    owned.push(page);
+  });
+  // The current page cannot be removed, so step off the leftovers first.
+  await gotoPage(owned[0]);
+  figma.root.children.slice().forEach(function (p) {
+    if (owned.indexOf(p) === -1) {
+      // A page that cannot be removed (still referenced, or the file's last
+      // page) is emptied instead, so it can never leak stale frames into the
+      // audit or eat a page slot on the next run.
+      try { p.remove(); } catch (e) {
+        try { p.children.slice().forEach(function (child) { child.remove(); }); } catch (e2) {}
+      }
+    }
+  });
+  owned.forEach(function (page) {
+    page.name = REAL_PAGES[owned.indexOf(page)];
     page.children.slice().forEach(function (child) { child.remove(); });
-    P[name] = page;
   });
-  PAGE_NAMES.forEach(function (name, i) {
-    figma.root.insertChild(i, P[name]);
+  PAGE_LAYOUT.forEach(function (spec) {
+    spec.groups.forEach(function (logical) {
+      P[logical] = owned[REAL_PAGES.indexOf(spec.page)];
+    });
   });
+  owned.forEach(function (page, i) {
+    try { figma.root.insertChild(i, page); } catch (e) {}
+  });
+}
+
+// Tiles the groups that share a real page side by side, top-aligned, so two
+// real pages can carry the seven logical ones without overlapping.
+function tileGroups(groupNodes) {
+  PAGE_LAYOUT.forEach(function (spec) {
+    let cursorX = 0;
+    spec.groups.forEach(function (logical) {
+      const nodes = (groupNodes[logical] || []).filter(function (n) {
+        return !n.removed && n.parent;
+      });
+      if (!nodes.length) return;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      nodes.forEach(function (n) {
+        minX = Math.min(minX, n.x);
+        maxX = Math.max(maxX, n.x + n.width);
+        minY = Math.min(minY, n.y);
+      });
+      const dx = cursorX - minX;
+      const dy = -minY;
+      if (dx !== 0 || dy !== 0) {
+        nodes.forEach(function (n) { n.x += dx; n.y += dy; });
+      }
+      cursorX += (maxX - minX) + GROUP_GAP;
+    });
+  });
+}
+
+// What a top-level frame may be called on a given real page. The stray check
+// needs this because several logical groups now share a page.
+function allowedFrameName(realPageName) {
+  const spec = PAGE_LAYOUT.find(function (s) { return s.page === realPageName; });
+  const exact = [];
+  let screens = false;
+  (spec ? spec.groups : []).forEach(function (logical) {
+    if (logical === "04 Screens") screens = true;
+    else if (CANVAS_NAMES[logical]) exact.push(CANVAS_NAMES[logical]);
+  });
+  return function (name) {
+    return (screens && name.indexOf("▸ ") === 0) || exact.indexOf(name) >= 0;
+  };
 }
 
 function buildVariables() {
@@ -606,26 +790,98 @@ function comp(name, o) {
     c.paddingBottom = o.padY == null ? pad : o.padY;
     c.primaryAxisAlignItems = o.justify || "MIN";
     c.counterAxisAlignItems = o.align || "MIN";
-    c.primaryAxisSizingMode = o.w == null ? "AUTO" : "FIXED";
-    c.counterAxisSizingMode = o.h == null ? "AUTO" : "FIXED";
+    // A literal size belongs to the axis it names, and a vertical frame's width is
+    // its counter axis. Reading `w` as the primary axis left every vertical variant
+    // on a fixed 40px height: the states below the first row spilled out of the
+    // component and were clipped away from the export. Both axes are written every
+    // time, because an untouched axis keeps the 100x100 a fresh component starts
+    // with and the variant stops hugging its own content.
+    const vertical = c.layoutMode === "VERTICAL";
+    c.primaryAxisSizingMode = (vertical ? o.h : o.w) == null ? "AUTO" : "FIXED";
+    c.counterAxisSizingMode = (vertical ? o.w : o.h) == null ? "AUTO" : "FIXED";
   }
   if (o.fill) bindFill(c, o.fill);
   if (o.stroke) bindStroke(c, o.stroke, o.strokeWeight);
   if (o.radius != null) c.cornerRadius = o.radius;
-  if (o.w != null) c.resize(o.w, o.h == null ? 40 : o.h);
+  if (o.w != null || o.h != null) {
+    c.resize(o.w == null ? c.width : o.w, o.h == null ? c.height : o.h);
+  }
   return c;
 }
 
-function componentSet(setName, defs, x, y) {
+// The board frame owns its component sets. A variant set left on the page renders
+// in the same place but sits outside the board's subtree, so exporting the board
+// hands off only its title and lead paragraph — the component grid never reaches
+// the PNG or SVG. Absolute positioning keeps the hand-placed grid while making the
+// set a child of the board.
+// `combineAsVariants` only reparents the components: every variant keeps the
+// (0, 0) corner it was created at, so all states of a set land on the same pixel
+// and a multi-state set renders its labels on top of each other. The variants are
+// therefore laid out here, wrapping inside SET_W, and `gridCursor` walks each
+// artboard column downwards so a set that outgrew its declared slot pushes the
+// next one down instead of covering it.
+const SET_W = 704;
+const SET_GAP = 24;
+const SET_ROW_GAP = 48;
+const gridCursor = {};
+
+function componentSet(board, setName, defs, x, y) {
   const nodes = defs.map(function (d) {
     const c = comp(setName + "/" + d.prop, d.o || {});
     d.build(c);
     return c;
   });
-  const set = figma.combineAsVariants(nodes, P["02 Components"]);
+  const set = figma.combineAsVariants(nodes, board);
   set.name = setName;
+  if (set.layoutMode !== "NONE") {
+    try { set.layoutMode = "NONE"; } catch (e) {}
+  }
+  if (set.layoutMode === "NONE") {
+    let cx = 0, cy = 0, rowH = 0, rowW = 0, maxW = 0;
+    nodes.forEach(function (n) {
+      if (cx > 0 && cx + n.width > SET_W) {
+        cy += rowH + SET_GAP;
+        cx = 0;
+        rowH = 0;
+        rowW = 0;
+      }
+      n.x = cx;
+      n.y = cy;
+      cx += n.width + SET_GAP;
+      rowW = cx - SET_GAP;
+      rowH = Math.max(rowH, n.height);
+      maxW = Math.max(maxW, rowW);
+    });
+    set.resize(Math.max(maxW, 1), Math.max(cy + rowH, 1));
+  } else {
+    // A release that refuses to drop a component set's auto-layout still gets the
+    // same width contract, and Figma's engine places the variants in that box.
+    set.itemSpacing = SET_GAP;
+    set.counterAxisSpacing = SET_GAP;
+    set.layoutWrap = "WRAP";
+    set.counterAxisSizingMode = "AUTO";
+    set.primaryAxisSizingMode = "FIXED";
+    set.resize(SET_W, set.height);
+  }
+  const top = Math.max(y, gridCursor[x] == null ? 0 : gridCursor[x]);
+  set.layoutPositioning = "ABSOLUTE";
   set.x = x;
-  set.y = y;
+  set.y = top;
+  // Absolute children are measured from the frame's corner. A release that
+  // measures from the padded content box instead would push the whole grid one
+  // padding-step right and down; the read-back absorbs that without a second run,
+  // and ignores anything else so a stale rectangle can never move the grid.
+  const box = set.absoluteBoundingBox;
+  const origin = board.absoluteBoundingBox;
+  if (box && origin) {
+    const offX = Math.round(box.x - origin.x - x);
+    const offY = Math.round(box.y - origin.y - top);
+    if (offX === board.paddingLeft && offY === board.paddingTop) {
+      set.x = x - offX;
+      set.y = top - offY;
+    }
+  }
+  gridCursor[x] = top + set.height + SET_ROW_GAP;
   return set;
 }
 
@@ -693,6 +949,7 @@ function textField(parent, label, value, width, wrap) {
 
 function buildComponents() {
   const page = P["02 Components"];
+  Object.keys(gridCursor).forEach(function (k) { delete gridCursor[k]; });
   const canvas = frame("Components", { layout: "VERTICAL", gap: 40, pad: 64, fill: V["surface/content"] });
   add(page, canvas);
   size(canvas, 1600, 2400);
@@ -706,7 +963,7 @@ function buildComponents() {
     "Body", V["text/secondary"], { w: 900 }));
 
   // 1. Status Pill -----------------------------------------------------------
-  componentSet("Status Pill", [
+  componentSet(canvas, "Status Pill", [
     { prop: "Tone=Ready", build: function (c) { pill(c, "Ready", "可用"); } },
     { prop: "Tone=Attention", build: function (c) { pill(c, "Attention", "需要处理"); } },
     { prop: "Tone=Critical", build: function (c) { pill(c, "Critical", "不可用"); } },
@@ -715,7 +972,7 @@ function buildComponents() {
   ], 64, 320);
 
   // 2. Nav Item --------------------------------------------------------------
-  componentSet("Nav Item", [
+  componentSet(canvas, "Nav Item", [
     {
       prop: "State=Default",
       o: { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, w: 200, h: 30 },
@@ -737,7 +994,7 @@ function buildComponents() {
   ], 64, 460);
 
   // 3. Buttons ---------------------------------------------------------------
-  componentSet("Button / Primary", [
+  componentSet(canvas, "Button / Primary", [
     {
       prop: "State=Default",
       o: { layout: "HORIZONTAL", gap: 7, align: "CENTER", justify: "CENTER", padX: 14, w: 132, h: 34, fill: V["accent/rail"] },
@@ -759,7 +1016,7 @@ function buildComponents() {
     }
   ], 64, 570);
 
-  componentSet("Button / Secondary", [
+  componentSet(canvas, "Button / Secondary", [
     {
       prop: "State=Default",
       o: {
@@ -788,7 +1045,7 @@ function buildComponents() {
   ], 64, 680);
 
   // 4. Voice Chip ------------------------------------------------------------
-  componentSet("Voice Chip", [
+  componentSet(canvas, "Voice Chip", [
     {
       prop: "State=Default",
       o: {
@@ -803,7 +1060,7 @@ function buildComponents() {
   ], 64, 790);
 
   // 5. Sidebar Status --------------------------------------------------------
-  componentSet("Sidebar Status", [
+  componentSet(canvas, "Sidebar Status", [
     {
       prop: "Tone=Ready",
       o: { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, padY: 7, w: 210 },
@@ -831,12 +1088,12 @@ function buildComponents() {
   ], 64, 890);
 
   // 6. Profile Card ----------------------------------------------------------
-  componentSet("Profile Card", [
+  componentSet(canvas, "Profile Card", [
     {
       prop: "State=Default",
       o: {
         layout: "VERTICAL", gap: 6, pad: 12, radius: 10,
-        fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1, w: 220
+        fill: V["surface/panel"], w: 220
       },
       build: function (c) {
         add(c, text("name", "Balanced · 分人和日常", "Body / Medium", V["text/primary"]));
@@ -857,7 +1114,7 @@ function buildComponents() {
   ], 64, 1010);
 
   // 7. Empty State -----------------------------------------------------------
-  componentSet("Empty State", [
+  componentSet(canvas, "Empty State", [
     {
       prop: "Kind=NoData",
       o: { layout: "VERTICAL", gap: 8, pad: 32, align: "CENTER", w: 320 },
@@ -879,7 +1136,7 @@ function buildComponents() {
   ], 64, 1180);
 
   // 8. Result Bar ------------------------------------------------------------
-  componentSet("Result Bar", [
+  componentSet(canvas, "Result Bar", [
     {
       prop: "State=Success",
       o: {
@@ -911,12 +1168,11 @@ function buildComponents() {
   ], 64, 1400);
 
   // 9. List Row --------------------------------------------------------------
-  componentSet("List Row", [
+  componentSet(canvas, "List Row", [
     {
       prop: "Type=Voice",
       o: {
         layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 8, padY: 7, w: 560,
-        stroke: V["border/separator"], strokeWeight: 1
       },
       build: function (c) {
         const main = frame("main", { layout: "VERTICAL", gap: 1 });
@@ -934,7 +1190,6 @@ function buildComponents() {
       prop: "Type=Work",
       o: {
         layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 8, padY: 7, w: 560,
-        stroke: V["border/separator"], strokeWeight: 1
       },
       build: function (c) {
         const main = frame("main", { layout: "VERTICAL", gap: 1 });
@@ -951,12 +1206,12 @@ function buildComponents() {
   ], 820, 320);
 
   // 10. Candidate Tile -------------------------------------------------------
-  componentSet("Candidate Tile", [
+  componentSet(canvas, "Candidate Tile", [
     {
       prop: "State=Ready",
       o: {
         layout: "VERTICAL", gap: 9, pad: 12, radius: 10, w: 300,
-        fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+        fill: V["surface/panel"]
       },
       build: function (c) {
         const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
@@ -964,7 +1219,9 @@ function buildComponents() {
         pill(head, "Ready", "可试听");
         spacer(head);
         add(head, text("seed", "seed 101", "Caption", V["text/tertiary"]));
-        add(c, head);
+        // The spacer can only push the seed to the tile edge if the head itself
+        // fills the card: hugging the row would leave the gap on the outside.
+        add(c, stretch(head));
         waveform(c, [6, 13, 17, 9, 15, 7, 12, 16, 8, 11], V["accent/voice"], 2);
         const actions = frame("actions", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
         secondaryButton(actions, "试听", "play");
@@ -976,7 +1233,7 @@ function buildComponents() {
       prop: "State=Failed",
       o: {
         layout: "VERTICAL", gap: 9, pad: 12, radius: 10, w: 300,
-        fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+        fill: V["surface/panel"]
       },
       build: function (c) {
         const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
@@ -984,7 +1241,7 @@ function buildComponents() {
         pill(head, "Attention", "生成失败");
         spacer(head);
         add(head, text("seed", "seed 404", "Caption", V["text/tertiary"]));
-        add(c, head);
+        add(c, stretch(head));
         add(c, text("msg", "服务端未返回预览音频，可单独重试这一组。", "Callout", V["text/secondary"], { w: 276 }));
         const actions = frame("actions", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
         secondaryButton(actions, "重试", "refresh-cw");
@@ -994,7 +1251,7 @@ function buildComponents() {
   ], 820, 760);
 
   // 11. Text Field -----------------------------------------------------------
-  componentSet("Text Field", [
+  componentSet(canvas, "Text Field", [
     {
       prop: "State=Default",
       o: {
@@ -1019,7 +1276,96 @@ function buildComponents() {
     }
   ], 820, 1160);
 
-  size(canvas, 1600, canvas.height);
+  // 12. Prompt Option --------------------------------------------------------
+  // 提词稿选项：选中态同时用底色与描边两处表示，不靠单一颜色区分（§9 无障碍）。
+  componentSet(canvas, "Prompt Option", [
+    {
+      prop: "State=Default",
+      o: {
+        layout: "HORIZONTAL", gap: 4, align: "CENTER", padX: 10, padY: 4, radius: 999,
+        fill: V["surface/content"], stroke: V["border/separator"], strokeWeight: 1
+      },
+      build: function (c) {
+        add(c, text("label", "科技浪潮 · 现代叙述", "Subheadline", V["text/secondary"]));
+      }
+    },
+    {
+      prop: "State=Selected",
+      o: {
+        layout: "HORIZONTAL", gap: 4, align: "CENTER", padX: 10, padY: 4, radius: 999,
+        fill: V["surface/railTint"], stroke: V["accent/rail"], strokeWeight: 1
+      },
+      build: function (c) {
+        add(c, text("label", "盛唐气象 · 经典诗韵", "Subheadline", V["accent/rail"]));
+      }
+    }
+  ], 64, 1260);
+
+  // 13. Level Meter ----------------------------------------------------------
+  // 录音电平：已经过去的片段用音色语义色，尚未到达的刻度用分隔色——同一行同时
+  // 读得出「现在多响」和「离满还有多远」。
+  componentSet(canvas, "Level Meter", [
+    {
+      prop: "State=Recording",
+      o: { layout: "HORIZONTAL", gap: 3, align: "MAX", w: 320, h: 40 },
+      build: function (c) {
+        [10, 18, 28, 36, 22, 30, 38, 16, 24, 32, 20, 12, 8, 6, 6, 6].forEach(function (h, i) {
+          rect(c, "level", 3, h, i < 12 ? V["accent/voice"] : V["border/separator"], 1.5);
+        });
+      }
+    }
+  ], 64, 1420);
+
+  // 14. Doc Topic Row --------------------------------------------------------
+  componentSet(canvas, "Doc Topic Row", [
+    {
+      prop: "State=Default",
+      o: { layout: "VERTICAL", gap: 2, padX: 10, padY: 8, radius: 8, w: 248 },
+      build: function (c) {
+        const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
+        icon(head, "server", 15, V["text/secondary"]);
+        add(head, text("title", "接口一览", "Body / Medium", V["text/primary"]));
+        add(c, head);
+        add(c, text("desc", "REST 与 WebSocket 的入口与用途", "Subheadline", V["text/secondary"], { w: 228 }));
+      }
+    },
+    {
+      prop: "State=Selected",
+      o: { layout: "VERTICAL", gap: 2, padX: 10, padY: 8, radius: 8, w: 248, fill: V["surface/railTint"] },
+      build: function (c) {
+        const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
+        icon(head, "play", 15, V["accent/rail"]);
+        add(head, text("title", "快速开始", "Body / Medium", V["text/primary"]));
+        add(c, head);
+        add(c, text("desc", "改 base_url 就能用的最小示例", "Subheadline", V["text/secondary"], { w: 228 }));
+      }
+    }
+  ], 64, 1560);
+
+  // 15. Code Block -----------------------------------------------------------
+  componentSet(canvas, "Code Block", [
+    {
+      prop: "State=Default",
+      o: {
+        layout: "VERTICAL", gap: 8, padX: 14, padY: 12, radius: 8, w: 560,
+        fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+      },
+      build: function (c) {
+        const head = frame("codeHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
+        add(head, text("lang", "Python · OpenAI SDK", "Caption / Medium", V["text/tertiary"]));
+        spacer(head);
+        iconButton(head, "copy", 24);
+        add(c, stretch(head));
+        ["client = OpenAI(base_url=\"http://127.0.0.1:8201/v1\",",
+          "                api_key=\"not-needed-for-loopback\")"].forEach(function (line) {
+          add(c, text("line", line, "Callout", V["text/primary"], { w: 520 }));
+        });
+      }
+    }
+  ], 820, 1420);
+
+  const bottom = Math.max(gridCursor[64] || 0, gridCursor[820] || 0);
+  size(canvas, 1600, Math.max(2400, bottom + 16));
   return canvas;
 }
 
@@ -1030,12 +1376,14 @@ function buildComponents() {
 const ROUTES = [
   { key: "dubbing", group: "创作", label: "配音台", icon: "audio-lines" },
   { key: "voiceDesign", group: "创作", label: "音色创作", icon: "sparkles" },
+  { key: "voiceClone", group: "创作", label: "音色克隆", icon: "mic" },
   { key: "voiceLibrary", group: "创作", label: "音色库", icon: "library" },
   { key: "works", group: "创作", label: "我的作品", icon: "folder-open" },
   { key: "overview", group: "引擎", label: "服务状态", icon: "server" },
   { key: "monitoring", group: "引擎", label: "运行监控", icon: "activity" },
   { key: "models", group: "引擎", label: "模型", icon: "package" },
-  { key: "diagnostics", group: "引擎", label: "诊断", icon: "stethoscope" }
+  { key: "diagnostics", group: "引擎", label: "诊断", icon: "stethoscope" },
+  { key: "developerDocs", group: "引擎", label: "开发者文档", icon: "book-open" }
 ];
 
 const TRAFFIC = ["#FF5F57", "#FEBC2E", "#28C840"];
@@ -1071,8 +1419,8 @@ function hairline(parent) {
   return stretch(rect(parent, "hairline", 100, 1, V["border/separator"]));
 }
 
-// A 1px border alone does not separate a white card from a light page tint, so
-// each card gets the same soft shadow macOS gives grouped content.
+// Reserved for window-level floating layers (menu panels, popovers), the only
+// surfaces macOS itself gives a shadow. Static cards are flat by spec §5.2.
 function elevate(node) {
   try {
     node.effects = [{
@@ -1098,11 +1446,15 @@ function card(parent, name, o) {
     padY: o.padY,
     radius: o.radius == null ? 12 : o.radius,
     fill: o.fill || V["surface/content"],
-    stroke: o.stroke || V["border/separator"],
+    // REDESIGN-SPEC §5.2: a surface that neither carries interaction nor
+    // expresses hierarchy gets no stroke and no shadow. Cards are containers,
+    // so separation comes from the fill step and system dividers only; pass
+    // o.stroke / o.elevated when a variant genuinely encodes state.
+    stroke: o.stroke || null,
     strokeWeight: o.strokeWeight == null ? 1 : o.strokeWeight,
     clip: o.clip === true
   });
-  if (o.shadow !== false) elevate(c);
+  if (o.elevated === true) elevate(c);
   return add(parent, stretch(c));
 }
 
@@ -1280,10 +1632,16 @@ function screenDubbing(d) {
   // inside the same card behind a divider instead of floating on the page.
   const editor = frame("editor", {
     layout: "VERTICAL", gap: 0, radius: 12,
-    fill: V["surface/content"], stroke: V["accent/rail"], strokeWeight: 1.5
+    fill: V["surface/content"]
   });
-  add(d, stretch(grow(editor)));
-  elevate(editor);
+  // 2026-09-15 用户复核 + 2026-09-16 三度／四度／五度／六度校准：输入区不再占满剩余高度，
+  // 也不停在某个固定值。应用的高度**跟随正文**——下限 144pt（静止状态看得见 3 行写作区，
+  // 六度校准后从 160 收到 144；滚动条已可接受，下限不必再为「拖后出现滚动条」多留一行）、
+  // 上限 360pt（量的是整张卡：正文 + 页码行），中间由正文高度加一行余量决定，到上限后由
+  // 原生滚动条承担。画板是静态的，按最常见的这一档画：本页示例文稿（3 行）在应用里已经
+  // 越过下限、由正文自身高度决定（离屏实测 158），所以这里仍画 160。
+  size(editor, null, 160);
+  add(d, stretch(editor));
 
   const writing = frame("writing", { layout: "VERTICAL", gap: 10, padX: 18, padY: 16 });
   add(writing, text("body",
@@ -1293,12 +1651,12 @@ function screenDubbing(d) {
   add(writing, text("body2",
     "第二章从近地轨道开始：那是最后一次有人类在舱外挥手告别，也是第一条被完整保存下来的语音日志。",
     "Body", V["text/primary"], { w: 1080 }));
-  // The writing area takes every pixel the composer and the result bar leave.
+  // The writing area takes every pixel the editor's own metadata row leaves.
   add(editor, stretch(grow(writing)));
   hairline(editor);
 
   const meta = frame("meta", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 18, padY: 10 });
-  add(meta, text("count", "62 / 5000 字", "Subheadline", V["text/secondary"]));
+  add(meta, text("count", "62/5000 字", "Subheadline", V["text/secondary"]));
   spacer(meta);
   const clear = frame("quiet", { layout: "HORIZONTAL", gap: 6, align: "CENTER", padX: 8, padY: 3, radius: 7 });
   icon(clear, "eraser", 14, V["text/secondary"]);
@@ -1352,7 +1710,7 @@ function screenDubbing(d) {
   // Result bar -------------------------------------------------------------
   const result = frame("resultBar", {
     layout: "HORIZONTAL", gap: 12, align: "CENTER", pad: 14, radius: 12,
-    fill: V["surface/railTint"], stroke: V["accent/rail"], strokeWeight: 1
+    fill: V["surface/railTint"]
   });
   waveform(result, [5, 11, 16, 8, 14, 6, 12, 17, 9, 5, 13, 7], V["accent/voice"], 2);
   const rtitle = frame("titles", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
@@ -1378,7 +1736,8 @@ function candidateTile(def) {
   const tile = frame("Candidate Tile", {
     layout: "VERTICAL", gap: 12, pad: 14, radius: 12,
     fill: V["surface/content"],
-    stroke: playing ? V["accent/rail"] : V["border/separator"],
+    // Only the auditioning tile carries a stroke: it encodes playback state.
+    stroke: playing ? V["accent/rail"] : null,
     strokeWeight: playing ? 1.5 : 1
   });
 
@@ -1414,13 +1773,9 @@ function candidateTile(def) {
   if (playing) secondaryButton(actions, "停止", "pause");
   else secondaryButton(actions, "试听", "play");
   if (def.state === "saved") {
-    const saved = frame("savedPill", {
-      layout: "HORIZONTAL", gap: 5, align: "CENTER", padX: 10, padY: 5, radius: 8
-    });
-    bindFill(saved, V["surface/readyTint"]);
-    icon(saved, "check", 14, V["status/ready"]);
-    add(saved, text("label", "已保存", "Callout", V["status/ready"]));
-    add(actions, saved);
+    // 保存成功后动作行给的是下一步，不是一枚静态徽标：「已保存」由头部状态胶囊
+    // 承担，动作行的位置留给「在音色库中查看」（REDESIGN-SPEC §7.2）。
+    secondaryButton(actions, "在音色库中查看", "library");
   } else {
     primaryButton(actions, "保存为音色", null, 118);
   }
@@ -1437,16 +1792,19 @@ function screenVoiceDesign(d) {
   // only drew two borders around the same sentence.
   const prompt = frame("promptCard", {
     layout: "VERTICAL", gap: 12, pad: 18, radius: 12,
-    fill: V["surface/content"], stroke: V["accent/rail"], strokeWeight: 1.5
+    fill: V["surface/content"]
   });
   const field = frame("promptField", { layout: "VERTICAL", gap: 4 });
-  size(field, 1120, 130);
+  // 2026-09-16 三度校准：应用把字数与保存门禁那一行收进了框内（多一条分隔线，
+  // 见 REDESIGN-SPEC §7.2），所以描述框整卡是 160pt。画板这里把字段本身也画成
+  // 160，字段与卡同色，看过去仍是同一块。
+  size(field, 1120, 160);
   add(field, text("body", "温暖、清晰、亲近，像一位深夜电台耐心的播客主持人。", "Body", V["text/primary"], { w: 1080 }));
   add(field, text("hint", "继续描述场景、听众或情绪，候选之间的差异会更明显。", "Callout", V["text/tertiary"], { w: 1080 }));
   add(prompt, stretch(field));
 
   const meta = frame("meta", { layout: "HORIZONTAL", align: "CENTER" });
-  add(meta, text("count", "28 / 400 字", "Subheadline", V["text/tertiary"]));
+  add(meta, text("count", "28/400 字", "Subheadline", V["text/tertiary"]));
   spacer(meta);
   add(meta, text("hint", "真实预览未返回前不可保存", "Subheadline", V["text/tertiary"]));
   add(prompt, stretch(meta));
@@ -1489,7 +1847,7 @@ function screenVoiceDesign(d) {
   const defs = [
     { slot: "候选 1", seed: "seed 101", dur: "00:03", tone: "Ready", toneLabel: "可试听", state: "playing" },
     { slot: "候选 2", seed: "seed 202", dur: "00:03", tone: "Ready", toneLabel: "可试听", state: "ready" },
-    { slot: "候选 3", seed: "seed 303", dur: "00:03", tone: "Ready", toneLabel: "可试听", state: "saved" },
+    { slot: "候选 3", seed: "seed 303", dur: "00:03", tone: "Ready", toneLabel: "已保存", state: "saved" },
     { slot: "候选 4", seed: "seed 404", dur: "—", tone: "Attention", toneLabel: "生成失败", state: "failed" }
   ];
   [[0, 1], [2, 3]].forEach(function (pair) {
@@ -1501,7 +1859,155 @@ function screenVoiceDesign(d) {
   });
 }
 
-// --- 3. 音色库 ---------------------------------------------------------------
+// --- 3. 音色克隆 -------------------------------------------------------------
+// 录音链路（选稿 → 录制 → 回听核对 → 预检 → 注册）在同一页里走完；每一步都留在
+// 页面上，因为它同时也是「这段录音能不能用」的证据链。画板画的是刚录完、还没
+// 注册的那一档：提词稿已选、录音 00:11、本地检查通过、名称空着。
+function screenVoiceClone(d) {
+  pageHead(d, "音色克隆", "读一段提词稿，用你自己的声音注册一个可复用的音色。");
+
+  // 1. 提词稿 ---------------------------------------------------------------
+  // 稿件是这一页唯一的大字对象（朗读时眼睛只看它），所以它自己占一层
+  // `surface/panel`，其余说明都退到 Callout。
+  const script = card(d, "scriptCard", { gap: 14 });
+  const scriptHead = frame("scriptHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  add(scriptHead, text("title", "提词稿", "Heading / Section", V["text/primary"]));
+  spacer(scriptHead);
+  add(scriptHead, text("hint", "建议朗读 10–30 秒；服务接受 2–45 秒。", "Subheadline", V["text/tertiary"]));
+  add(script, stretch(scriptHead));
+
+  const picks = frame("promptPicks", { layout: "HORIZONTAL", gap: 6, align: "CENTER", wrap: true });
+  [
+    ["📜 盛唐气象 · 经典诗韵", true], ["⚡ 科技浪潮 · 现代叙述", false],
+    ["☕ 晨光午后 · 日常伴随", false], ["🌌 星辰大海 · 哲思沉稳", false],
+    ["自己写一段", false]
+  ].forEach(function (p) {
+    const chip = frame("Prompt Option", {
+      layout: "HORIZONTAL", gap: 4, align: "CENTER", padX: 10, padY: 4, radius: 999,
+      fill: p[1] ? V["surface/railTint"] : V["surface/content"],
+      stroke: p[1] ? V["accent/rail"] : V["border/separator"], strokeWeight: 1
+    });
+    add(chip, text("label", p[0], "Subheadline", p[1] ? V["accent/rail"] : V["text/secondary"]));
+    add(picks, chip);
+  });
+  size(picks, 1123, null);
+  add(script, stretch(picks));
+
+  const scriptBody = frame("scriptBody", {
+    layout: "VERTICAL", gap: 8, padX: 16, padY: 14, radius: 8, fill: V["surface/panel"]
+  });
+  add(scriptBody, text("line", "白日依山尽，黄河入海流。欲穷千里目，更上一层楼。", "Title / Page", V["text/primary"], { w: 1060 }));
+  add(scriptBody, text("line", "春江潮水连海平，海上明月共潮生。", "Title / Page", V["text/primary"], { w: 1060 }));
+  add(script, stretch(scriptBody));
+
+  const scriptTips = frame("tips", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
+  icon(scriptTips, "info", 13, V["text/secondary"]);
+  add(scriptTips, text("label", "字正腔圆，声调平稳从容，注意句尾自然停顿。", "Callout", V["text/secondary"]));
+  add(script, stretch(scriptTips));
+
+  // 2. 录制 ---------------------------------------------------------------
+  const record = card(d, "recordCard", { gap: 14 });
+  const recordHead = frame("recordHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  add(recordHead, text("title", "录制", "Heading / Section", V["text/primary"]));
+  pill(recordHead, "Attention", "录音中");
+  spacer(recordHead);
+  add(recordHead, text("device", "内建麦克风 · 48 kHz 单声道", "Subheadline", V["text/tertiary"]));
+  add(record, stretch(recordHead));
+
+  const recordRow = frame("recordRow", { layout: "HORIZONTAL", gap: 16, align: "CENTER" });
+  const recordButton = frame("recordButton", {
+    layout: "HORIZONTAL", align: "CENTER", justify: "CENTER", radius: 999, fill: V["status/critical"]
+  });
+  size(recordButton, 56, 56);
+  icon(recordButton, "square", 20, V["text/onAccent"]);
+  add(recordRow, recordButton);
+  const meter = frame("Level Meter", { layout: "HORIZONTAL", gap: 3, align: "MAX" });
+  grow(meter);
+  // 已经过去的电平用 `accent/voice`（这是「声音」的形状），尚未到达的刻度用
+  // `border/separator`：录音的电平表必须同时读得出「现在多响」和「离满有多远」。
+  [
+    [8, true], [14, true], [22, true], [30, true], [18, true], [26, true], [34, true],
+    [12, true], [20, true], [28, true], [36, true], [16, true], [24, true], [30, true],
+    [22, true], [14, true], [10, true], [6, false], [6, false], [6, false], [6, false],
+    [6, false], [6, false], [6, false], [6, false], [6, false], [6, false], [6, false]
+  ].forEach(function (bar) {
+    rect(meter, "level", 3, bar[0], bar[1] ? V["accent/voice"] : V["border/separator"], 1.5);
+  });
+  add(recordRow, stretch(meter));
+  const timer = frame("timerBox", { layout: "HORIZONTAL", align: "CENTER" });
+  add(timer, text("timer", "00:11", "Body / Medium", V["text/primary"]));
+  size(timer, 48, null);
+  add(recordRow, timer);
+  add(record, stretch(recordRow));
+
+  add(record, text("note",
+    "录音只用于这次注册；取消或注册完成后临时文件立刻删除，应用不保存原始录音。",
+    "Subheadline", V["text/tertiary"], { w: 1123 }));
+
+  // 3. 回听与核对 -----------------------------------------------------------
+  const review = card(d, "reviewCard", { gap: 14 });
+  const reviewHead = frame("reviewHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  add(reviewHead, text("title", "回听与核对", "Heading / Section", V["text/primary"]));
+  pill(reviewHead, "Ready", "本地检查通过");
+  spacer(reviewHead);
+  add(reviewHead, text("hint", "波形来自刚才这段录音本身", "Subheadline", V["text/tertiary"]));
+  add(review, stretch(reviewHead));
+
+  const take = frame("take", {
+    layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 14, padY: 10, radius: 8,
+    fill: V["surface/panel"]
+  });
+  waveform(take, [7, 15, 22, 11, 19, 9, 16, 24, 12, 20, 8, 14, 21, 10], V["accent/voice"], 2);
+  add(take, text("dur", "00:11", "Callout", V["text/tertiary"]));
+  spacer(take);
+  secondaryButton(take, "播放", "play");
+  secondaryButton(take, "重录", "mic");
+  add(review, stretch(take));
+
+  const spokenLabel = text("fieldLabel", "实际朗读的文本（服务用它给参考音频做内容校验）", "Caption / Medium", V["text/secondary"]);
+  add(review, spokenLabel);
+  const spoken = frame("Text Field", {
+    layout: "HORIZONTAL", align: "CENTER", padX: 12, padY: 9, radius: 8,
+    fill: V["surface/field"], stroke: V["border/strong"], strokeWeight: 1
+  });
+  add(spoken, text("value", "白日依山尽，黄河入海流。欲穷千里目，更上一层楼。春江潮水连海平，海上明月共潮生。",
+    "Body", V["text/primary"], { w: 1097 }));
+  add(review, stretch(spoken));
+
+  // 4. 注册 ---------------------------------------------------------------
+  const register = card(d, "registerCard", { gap: 12 });
+  const registerRow = frame("registerRow", { layout: "HORIZONTAL", gap: 12, align: "CENTER" });
+  const nameField = frame("Text Field", {
+    layout: "HORIZONTAL", align: "CENTER", padX: 12, padY: 9, radius: 8,
+    fill: V["surface/field"], stroke: V["border/strong"], strokeWeight: 1
+  });
+  add(nameField, text("value", "给这个音色起个名字", "Body", V["text/tertiary"]));
+  size(nameField, 360, 34);
+  add(registerRow, nameField);
+  spacer(registerRow);
+  secondaryButton(registerRow, "先检查参考音频", "shield-check");
+  primaryButton(registerRow, "注册音色", "mic", 140);
+  add(register, stretch(registerRow));
+
+  const conclusions = frame("conclusions", { layout: "HORIZONTAL", gap: 14, align: "CENTER" });
+  [
+    ["时长", "00:11"],
+    ["人声占比", "82%"],
+    ["估计信噪比", "24 dB"],
+    ["削波", "无"]
+  ].forEach(function (item) {
+    const k = frame("conclusion", { layout: "HORIZONTAL", gap: 5, align: "CENTER" });
+    add(k, text("k", item[0], "Subheadline", V["text/tertiary"]));
+    add(k, text("v", item[1], "Subheadline", V["text/secondary"]));
+    add(conclusions, k);
+  });
+  spacer(conclusions);
+  add(conclusions, text("hint", "注册需要 quality 档位；档位不支持时这里给出切换入口。",
+    "Subheadline", V["text/tertiary"]));
+  add(register, stretch(conclusions));
+}
+
+// --- 4. 音色库 ---------------------------------------------------------------
 function screenVoiceLibrary(d) {
   pageHead(d, "音色库", "管理系统音色，以及用参考音频复刻出来的音色。");
 
@@ -1520,19 +2026,17 @@ function screenVoiceLibrary(d) {
   grow(list);
   const listHead = frame("listHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 16, padY: 12 });
   add(listHead, text("title", "音色", "Heading / Section", V["text/primary"]));
-  spacer(listHead);
-  add(listHead, text("sort", "按最近使用排序", "Caption", V["text/tertiary"]));
   add(list, stretch(listHead));
   hairline(list);
   const voices = [
-    { name: "夜航主持", badge: "系统", sub: "温暖、清晰、亲近", sel: true, tone: "Ready", toneLabel: "可用", used: "刚刚使用" },
-    { name: "书卷 · 温和叙述", badge: "系统", sub: "从容、偏慢，适合长篇叙述", used: "昨天" },
-    { name: "沙哑沉郁", badge: "我的", sub: "低沉、有颗粒感 · 用参考音频复刻", used: "9月13日" },
-    { name: "少年清冽", badge: "系统", sub: "需要 Quality 档位的 VoiceDesign", tone: "Off", toneLabel: "当前不可用", used: "从未使用" },
-    { name: "午后书场", badge: "我的", sub: "明亮、利落 · 用参考音频复刻", used: "9月10日" },
-    { name: "晨间播报", badge: "系统", sub: "明亮、标准，适合资讯类口播", used: "9月5日" },
-    { name: "纪录旁白", badge: "系统", sub: "沉稳、克制，适合纪录片解说", used: "8月30日" },
-    { name: "远山低语", badge: "我的", sub: "气声、接近耳语 · 用描述生成", used: "9月8日" }
+    { name: "夜航主持", badge: "系统", sub: "温暖、清晰、亲近", sel: true },
+    { name: "书卷 · 温和叙述", badge: "系统", sub: "从容、偏慢，适合长篇叙述" },
+    { name: "沙哑沉郁", badge: "我的", sub: "低沉、有颗粒感 · 用参考音频复刻" },
+    { name: "少年清冽", badge: "系统", sub: "需要 Quality 档位的 VoiceDesign", unavailable: true },
+    { name: "午后书场", badge: "我的", sub: "明亮、利落 · 用参考音频复刻" },
+    { name: "晨间播报", badge: "系统", sub: "明亮、标准，适合资讯类口播" },
+    { name: "纪录旁白", badge: "系统", sub: "沉稳、克制，适合纪录片解说" },
+    { name: "远山低语", badge: "我的", sub: "气声、接近耳语 · 用描述生成" }
   ];
   voices.forEach(function (v) {
     const row = frame("row", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 16, padY: 12 });
@@ -1540,15 +2044,22 @@ function screenVoiceLibrary(d) {
     const info = frame("info", { layout: "VERTICAL", gap: 2 });
     const titleRow = frame("titleRow", { layout: "HORIZONTAL", gap: 7, align: "CENTER" });
     add(titleRow, text("name", v.name, "Body / Medium", V["text/primary"]));
-    if (v.badge === "我的") voiceBadge(titleRow, "我的");
-    if (v.tone) pill(titleRow, v.tone, v.toneLabel);
+    // 来源徽标每一行都有（系统 / 我的）：应用的 sourceBadge 不做条件分支，
+    // §7.3 也把「来源徽标」写成行内固定项。
+    voiceBadge(titleRow, v.badge);
     add(info, titleRow);
     add(info, text("sub", v.sub, "Callout", V["text/secondary"]));
     add(row, info);
     spacer(row);
-    add(row, text("used", v.used, "Caption", V["text/tertiary"]));
+    // 不可用说明只在不可用的那一行出现，位置与写法照应用：行尾、图标 + 文字，
+    // 不与可用行共享一个常驻胶囊（macOS App 设计系统 §4.2.3）。
+    if (v.unavailable) {
+      const warn = frame("warn", { layout: "HORIZONTAL", gap: 5, align: "CENTER" });
+      icon(warn, "triangle-alert", 13, V["status/attention"]);
+      add(warn, text("t", "当前档位不可用", "Caption", V["status/attention"]));
+      add(row, warn);
+    }
     iconButton(row, "play", 28);
-    iconButton(row, "ellipsis", 28);
     add(list, stretch(row));
     if (v !== voices[voices.length - 1]) hairline(list);
   });
@@ -1566,7 +2077,7 @@ function screenVoiceLibrary(d) {
   add(split, stretch(side));
   const sideHead = frame("sideHead", { layout: "VERTICAL", gap: 4, padX: 16, padY: 16 });
   add(sideHead, text("title", "夜航主持", "Title / Page", V["text/primary"]));
-  add(sideHead, text("badge", "系统音色 · 描述生成", "Caption", V["text/tertiary"]));
+  add(sideHead, text("badge", "系统音色", "Caption", V["text/tertiary"]));
   add(side, stretch(sideHead));
   hairline(side);
   // A voice is an object you audition, so the inspector opens with the sound
@@ -1574,7 +2085,7 @@ function screenVoiceLibrary(d) {
   const previewWrap = frame("previewWrap", { layout: "VERTICAL", padX: 16, padY: 14 });
   const preview = frame("preview", {
     layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 12, padY: 10, radius: 10,
-    fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/panel"]
   });
   iconButton(preview, "play", 28);
   const wave = frame("wave", { layout: "HORIZONTAL", gap: 3, align: "CENTER", justify: "CENTER" });
@@ -1584,13 +2095,17 @@ function screenVoiceLibrary(d) {
   add(side, stretch(previewWrap));
   hairline(side);
   const sideBody = frame("sideBody", { layout: "VERTICAL", gap: 10, padX: 16, padY: 16 });
+  // 取值行与应用 Inspector 同序同标签：变体与模式是两行，不合并
+  // （macOS App 设计系统 §4.2.3）。
   [
-    ["seed", "101"],
-    ["可用性", "当前可用"],
+    ["可用性", "可用"],
+    ["采样种子", "101"],
     ["创建时间", "今天 12:04"],
-    ["变体与模式", "描述生成 · 默认"],
-    ["使用次数", "12 次"],
-    ["关联作品", "3 个"]
+    ["变体", "默认"],
+    ["模式", "描述生成"],
+    ["音频时长", "6.2 s"],
+    ["使用次数", "12 个作品"],
+    ["关联作品", "最近：雨夜独白"]
   ]
     .forEach(function (kv) { kvRow(sideBody, kv[0], kv[1]); });
   add(sideBody, text("label", "描述", "Caption / Medium", V["text/secondary"]));
@@ -1607,11 +2122,14 @@ function screenVoiceLibrary(d) {
   add(side, stretch(acts));
 }
 
-// --- 4. 我的作品 -------------------------------------------------------------
+// --- 5. 我的作品 -------------------------------------------------------------
 function screenWorks(d) {
   pageHead(d, "我的作品", "本机生成过的音频都留在这里，可随时播放、导出或删除。");
 
   const bar = frame("toolbar", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  // 排序控件是应用工具栏行左侧的第一个控件（WorkSortOrder），§7.4 也写着
+  // 「按时间排序」。稿之前只画了搜索框，等于把这一页唯一的设置项漏掉了。
+  segmented(bar, ["最新优先", "最早优先"], 0);
   searchField(bar, "按标题搜索", 300);
   spacer(bar);
   add(bar, text("count", "8 个作品 · 共 11:05", "Callout", V["text/secondary"]));
@@ -1637,14 +2155,17 @@ function screenWorks(d) {
   hairline(list);
 
   const works = [
-    { name: "星际航行 · 夜航主持", sub: "今天 12:04 · 夜航主持 · 24-bit 44.1 kHz", dur: "00:12", sel: true },
-    { name: "雨夜独白 · 书卷", sub: "昨天 21:38 · 书卷 · 温和叙述 · 24-bit 44.1 kHz", dur: "01:47" },
-    { name: "开场白 v3 · 沙哑沉郁", sub: "9月13日 · 沙哑沉郁 · 24-bit 44.1 kHz", dur: "00:26" },
-    { name: "有声书试读 · 书卷", sub: "9月12日 · 书卷 · 温和叙述 · 24-bit 44.1 kHz", dur: "03:18" },
-    { name: "产品短片旁白 · 夜航主持", sub: "9月11日 · 夜航主持 · 24-bit 44.1 kHz", dur: "00:48" },
-    { name: "深夜电台片头 · 沙哑沉郁", sub: "9月9日 · 沙哑沉郁 · 24-bit 44.1 kHz", dur: "00:09" },
-    { name: "客服话术样本 · 夜航主持", sub: "9月6日 · 夜航主持 · 24-bit 44.1 kHz", dur: "02:31" },
-    { name: "课程引言 · 晨间播报", sub: "9月2日 · 晨间播报 · 24-bit 44.1 kHz", dur: "01:54" }
+    // 行内副行就是应用 workListSummary 的输出：系统格式的时间 + 音色名。稿上不写
+    // 「24-bit 44.1 kHz」——服务的公开 PCM profile 是 24 kHz / 16-bit / 单声道，
+    // 应用明确不写与实测不符的格式声明（ModelManagementView 同款判断）。
+    { name: "星际航行", sub: "2026年9月15日 12:04 · 夜航主持", dur: "00:12", sel: true },
+    { name: "雨夜独白", sub: "2026年9月14日 21:38 · 书卷", dur: "01:47" },
+    { name: "开场白 v3", sub: "2026年9月13日 09:15 · 沙哑沉郁", dur: "00:26" },
+    { name: "有声书试读", sub: "2026年9月12日 20:04 · 书卷", dur: "03:18" },
+    { name: "产品短片旁白", sub: "2026年9月11日 15:42 · 夜航主持", dur: "00:48" },
+    { name: "深夜电台片头", sub: "2026年9月9日 23:07 · 沙哑沉郁", dur: "00:09" },
+    { name: "客服话术样本", sub: "2026年9月6日 11:26 · 夜航主持", dur: "02:31" },
+    { name: "课程引言", sub: "2026年9月2日 08:53 · 晨间播报", dur: "01:54" }
   ];
   works.forEach(function (w) {
     const row = frame("row", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 16, padY: 12 });
@@ -1674,7 +2195,7 @@ function screenWorks(d) {
   add(list, stretch(foot));
 }
 
-// --- 5. 服务状态 -------------------------------------------------------------
+// --- 6. 服务状态 -------------------------------------------------------------
 function screenOverview(d) {
   pageHead(d, "服务状态", "本机语音引擎的当前结论与运行事实。");
 
@@ -1693,16 +2214,23 @@ function screenOverview(d) {
   const c = card(d, "capabilities", { pad: 0, gap: 0, clip: true });
   const cHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
   add(cHead, text("title", "能力", "Heading / Section", V["text/primary"]));
-  add(cHead, text("detail", "按当前 Quality 档位如实发布，不做能力预支。", "Callout", V["text/secondary"]));
+  // 这一行取自应用的原样输出（ServiceOverviewView.capabilitiesCard）：应用不写
+  // 「Quality」这一档的名字，因为卡片在任何档位下都要成立。
+  add(cHead, text("detail", "按当前运行档位如实发布，不做能力预支。", "Callout", V["text/secondary"]));
   add(c, stretch(cHead));
   hairline(c);
+  // 行序与措辞对齐 REDESIGN-SPEC §7.5（ASR → TTS VoiceDesign / Base → 音色复刻 →
+  // 实时 VAD → 分人）与 App 的 ServiceOverviewView.capabilities；稿上原先把最后
+  // 两行接反了。
   const caps = [
-    ["语音识别", "Ready", "可用", "词级时间戳由模型原生提供"],
-    ["语音合成 · VoiceDesign", "Ready", "可用", "可用描述生成新音色"],
-    ["语音合成 · Base", "Ready", "可用", "与 VoiceDesign 双常驻，跨 lane 并发"],
-    ["音色复刻", "Ready", "可用", "只读参考音频，不写声纹库"],
-    ["说话人分人", "Ready", "可用", "仅输出会话内匿名标签"],
-    ["实时语音", "Ready", "可用", "VAD 已启用"]
+    // 原因列逐字取自应用能力矩阵（ServiceOverviewView.capabilities）：这一列是运行时
+    // 事实，不是设计文案，稿上的示例串必须能在应用里原样出现。
+    ["语音识别", "Ready", "可用", "运行中；词级时间戳由 ASR 原生提供。"],
+    ["语音合成 · VoiceDesign", "Ready", "可用", "服务已公开可用的 VoiceDesign capability。"],
+    ["语音合成 · Base", "Ready", "可用", "运行中"],
+    ["音色复刻", "Ready", "可用", "服务已公开可用的音色复刻 capability。"],
+    ["实时语音 VAD", "Ready", "可用", "运行中"],
+    ["分人识别", "Ready", "可用", "只输出本次会话的匿名标签；不管理实名或声纹库。"]
   ];
   caps.forEach(function (cap, i) {
     const row = frame("cap", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 18, padY: 12 });
@@ -1731,9 +2259,12 @@ function screenOverview(d) {
   add(runtime, stretch(rHead));
   hairline(runtime);
   [
-    ["当前档位", "Quality · aligner-bf16 · 双 TTS lane"],
-    ["服务端口", "127.0.0.1:8201 · 仅 loopback"],
-    ["运行版本", "0.4.0 · 受管 runtime"],
+    // 取值行与应用同源：档位用「档位 · 取向」，端口用 host:port 原样，版本就是版本。
+    // aligner 精度与 TTS lane 数属于模型页的档位卡，LaunchAgent 与 runtime 归属属于
+    // 开发者详情，都不在这四行里重复。
+    ["当前档位", "Quality · 创作优先"],
+    ["服务端口", "127.0.0.1:8201"],
+    ["运行版本", "0.4.0"],
     ["常驻 worker", "asr · tts-design · tts-base"]
   ].forEach(function (r, i) {
     const row = frame("infoRow", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 18, padY: 10 });
@@ -1748,14 +2279,29 @@ function screenOverview(d) {
   });
 }
 
-// --- 6. 运行监控 -------------------------------------------------------------
+// --- 7. 运行监控 -------------------------------------------------------------
 function screenMonitoring(d) {
-  pageHead(d, "运行监控", "最近 60 个内存样本 · 刷新间隔 3 秒", function (row) {
-    segmented(row, ["最近 5 分钟", "最近 1 小时"], 0);
+  // 页首那句话与应用 `AppRoute.monitoring.pageSubtitle` 一致：先说这一页看什么，
+  // 再提读取节奏（REDESIGN-SPEC §7.6 第六十三轮）。稿上原先的「最近 60 个样本 ·
+  // 刷新间隔 5 秒」讲的是采样机制，没有一个字在说这一页看什么。
+  pageHead(d, "运行监控", "服务最近在做什么、快不快、占多少内存；每 5 秒读一次本机服务。", function (row) {
+    // 与 §7.6 / RuntimeMonitoringView.MonitoringTimeWindow 对齐：三档时间窗，
+    // 默认停在 5 分钟（与应用默认值一致）。
+    segmented(row, ["1 分钟", "5 分钟", "本次会话"], 1);
   });
 
   const c = card(d, "chart", { gap: 10 });
-  add(c, text("label", "请求并发", "Body / Medium", V["text/primary"]));
+  // 应用侧这张卡的标题是「使用趋势」，副标题说明采样范围；图上只画并发那一张曲线，
+  // 时延图是同一张卡里的第二张图（见 RuntimeMonitoringView.chartPanel）。
+  const chHead = frame("head", { layout: "VERTICAL", gap: 3 });
+  add(chHead, text("title", "使用趋势", "Heading / Section", V["text/primary"]));
+  add(chHead, text(
+    "detail",
+    "同时处理的请求数；每 5 秒记录一次，只覆盖 App 打开期间。",
+    "Callout",
+    V["text/secondary"]
+  ));
+  add(c, stretch(chHead));
   // Drawn at the panel's real size: an SVG imported at a fixed height cannot be
   // stretched to fill a taller card without distorting the series.
   const chartSvg =
@@ -1774,40 +2320,46 @@ function screenMonitoring(d) {
   const chartNode = figma.createNodeFromSvg(chartSvg);
   chartNode.name = "lineChart";
   add(c, chartNode);
-  add(c, text("legend", "实线：实时请求 · 虚线：批处理请求", "Subheadline", V["text/secondary"]));
+  add(c, text("legend", "实线：实时语音会话 · 虚线：单次请求", "Subheadline", V["text/secondary"]));
   add(d, stretch(c));
 
   const table = card(d, "workers", { pad: 0, gap: 0, clip: true });
   grow(table);
   const tHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
   add(tHead, text("title", "运行组件", "Heading / Section", V["text/primary"]));
-  add(tHead, text("detail", "指标为最近样本的平均值；ASR、双 TTS lane 与分人各自独立常驻。", "Callout", V["text/secondary"]));
+  add(tHead, text(
+    "detail",
+    "哪些模型现在留在内存里、哪些已经释放；空闲一段时间后会自动释放，下次使用再加载。",
+    "Callout",
+    V["text/secondary"]
+  ));
   add(table, stretch(tHead));
   hairline(table);
 
   // Fixed columns plus one column that absorbs the remainder, so the header can
   // never be a couple of pixels narrower than its own content.
-  const COLS = [380, 320, 220];
+  // 两列够了：worker 生命周期（状态）在应用里就是这张表的全部内容，平均时延与
+  // 样本数来自直方图摘要，是下面另一张表的字段（REDESIGN-SPEC §7.6）。
+  const COLS = [380];
   const header = frame("header", { layout: "HORIZONTAL", gap: 0, padX: 18, padY: 9 });
-  ["组件", "状态", "平均时延", "样本"].forEach(function (label, i) {
-    const holder = frame("cell", { layout: "HORIZONTAL", justify: i >= 2 ? "MAX" : "MIN" });
-    if (i === 3) grow(holder); else size(holder, COLS[i], null);
+  ["组件", "状态"].forEach(function (label, i) {
+    const holder = frame("cell", { layout: "HORIZONTAL", justify: "MIN" });
+    if (i === 0) size(holder, COLS[0], null); else grow(holder);
     add(holder, text("h", label, "Caption / Medium", V["text/secondary"]));
     add(header, holder);
   });
   add(table, stretch(header));
   hairline(table);
   const WORKERS = [
-    ["asr", "active", "0.30 s", "4"],
-    ["tts-design", "warm_standby", "0.40 s", "2"],
-    ["tts-base", "warm_standby", "0.31 s", "2"],
-    ["diarization", "cold", "—", "0"]
+    ["语音识别", "运行中"],
+    ["语音合成", "温待机"],
+    ["实时语音", "已释放"]
   ];
   WORKERS.forEach(function (r, ri) {
     const row = frame("row", { layout: "HORIZONTAL", gap: 0, padX: 18, padY: 11 });
     r.forEach(function (value, i) {
-      const holder = frame("cell", { layout: "HORIZONTAL", justify: i >= 2 ? "MAX" : "MIN" });
-      if (i === 3) grow(holder); else size(holder, COLS[i], null);
+      const holder = frame("cell", { layout: "HORIZONTAL", justify: "MIN" });
+      if (i === 0) size(holder, COLS[0], null); else grow(holder);
       add(holder, text("v", value, "Callout", i === 0 ? V["text/primary"] : V["text/secondary"]));
       add(row, holder);
     });
@@ -1823,7 +2375,7 @@ function screenMonitoring(d) {
   add(table, stretch(foot));
 }
 
-// --- 7. 模型 -----------------------------------------------------------------
+// --- 8. 模型 -----------------------------------------------------------------
 function screenModels(d) {
   pageHead(d, "模型", "先下载并校验，再应用到运行档位；两者是独立操作。");
 
@@ -1831,22 +2383,25 @@ function screenModels(d) {
   add(d, stretch(profiles));
   [
     {
-      name: "Light", sub: "轻量快速，占用最低", sel: false,
+      // 卡片文案取自应用 ProfileChoiceCard：标题是「档位 · 取向」，副行是它的适用场景
+      // 说明（profilePurpose），下面三行规格只列差异。
+      name: "Light · 轻量快速", sub: "无 aligner、无分人；单个 TTS worker —— 更小的 ASR 组合，启动最快", sel: false,
       specs: [["分人", "不支持"], ["aligner", "无"], ["TTS lane", "1 个"]]
     },
     {
-      name: "Balanced", sub: "分人与日常使用", sel: false,
+      name: "Balanced · 分人和日常", sub: "aligner-q8，可分人；单个 TTS worker —— 日常配音的平衡选择", sel: false,
       specs: [["分人", "支持"], ["aligner", "aligner-q8"], ["TTS lane", "1 个"]]
     },
     {
-      name: "Quality", sub: "创作优先，双 TTS lane", sel: true,
+      name: "Quality · 创作优先", sub: "aligner-bf16，可分人；VoiceDesign 与 Base 双常驻，可跨 lane 并发 —— 适合音色创作", sel: true,
       specs: [["分人", "支持"], ["aligner", "aligner-bf16"], ["TTS lane", "2 个 · 跨 lane 并发"]]
     }
   ].forEach(function (p) {
     const c = frame("Profile Card", {
       layout: "VERTICAL", gap: 8, pad: 16, radius: 12,
       fill: p.sel ? V["surface/railTint"] : V["surface/content"],
-      stroke: p.sel ? V["accent/rail"] : V["border/separator"],
+      // Only the active profile carries a stroke: it encodes selection.
+      stroke: p.sel ? V["accent/rail"] : null,
       strokeWeight: p.sel ? 1.5 : 1
     });
     const top = frame("top", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
@@ -1856,7 +2411,7 @@ function screenModels(d) {
     // error state rather than a selection.
     if (p.sel) pill(top, "Ready", "当前使用");
     add(c, stretch(top));
-    add(c, text("sub", p.sub, "Callout", V["text/secondary"], { w: 300 }));
+    add(c, text("sub", p.sub, "Callout", V["text/secondary"], { w: 320 }));
     // Three facts per card, so the choice is made on the difference that
     // matters (分人 / aligner / lane) instead of on the tier name.
     hairline(c);
@@ -1870,7 +2425,8 @@ function screenModels(d) {
   primaryButton(actions, "下载并校验", "download", 148);
   secondaryButton(actions, "应用此档位");
   spacer(actions);
-  add(actions, text("disk", "磁盘：已用 6.4 GB · 可用 182 GB", "Callout", V["text/secondary"]));
+  // 应用报的是「模型已用」而不是整盘已用：这一行只在准备模型前回答「有没有地方放」。
+  add(actions, text("disk", "磁盘：模型已用 6.4 GB · 可用 182 GB", "Callout", V["text/secondary"]));
   add(d, stretch(actions));
 
   const table = card(d, "artifacts", { pad: 0, gap: 0, clip: true });
@@ -1891,11 +2447,13 @@ function screenModels(d) {
   add(table, stretch(header));
   hairline(table);
   [
-    ["asr", "8-bit", "12", "已校验", "status/ready"],
-    ["tts-1.7b-design", "8-bit", "9", "已校验", "status/ready"],
-    ["tts-1.7b-base", "8-bit", "9", "已校验", "status/ready"],
-    ["aligner-bf16", "bf16", "4", "已校验", "status/ready"],
-    ["diarization-coreml", "fp16", "6", "待校验", "status/attention"]
+    // 校验列逐字取自应用 ArtifactChoiceRow 的 statusPresentation.title：
+    // 这一列是运行时事实，稿上的示例串必须能在应用里原样出现。
+    ["asr", "8-bit", "12", "已验证", "status/ready"],
+    ["tts-1.7b-design", "8-bit", "9", "已验证", "status/ready"],
+    ["tts-1.7b-base", "8-bit", "9", "已验证", "status/ready"],
+    ["aligner-bf16", "bf16", "4", "已验证", "status/ready"],
+    ["diarization-coreml", "fp16", "6", "未下载", "status/attention"]
   ].forEach(function (r, ri) {
     const row = frame("row", { layout: "HORIZONTAL", gap: 0, padX: 18, padY: 11 });
     [r[0], r[1], r[2], r[3]].forEach(function (value, i) {
@@ -1915,7 +2473,7 @@ function screenModels(d) {
   add(table, stretch(foot));
 }
 
-// --- 8. 诊断 -----------------------------------------------------------------
+// --- 9. 诊断 -----------------------------------------------------------------
 function screenDiagnostics(d) {
   pageHead(d, "诊断", "本机自检结论与可执行的修复动作。", function (row) {
     secondaryButton(row, "重新运行预检", "refresh-cw");
@@ -1933,14 +2491,16 @@ function screenDiagnostics(d) {
   add(list, stretch(lHead));
   hairline(list);
   [
-    { tone: "Attention", icon: "triangle-alert", ink: "status/attention", title: "模型校验未完成", sub: "分人模型有 1 个制品尚未校验", cur: true },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "受管 runtime 完整", sub: "版本与 public API 形状一致" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "LaunchAgent 已注册", sub: "com.speechrail 由当前用户托管，未使用系统级进程" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "服务实例唯一", sub: "只有一个 ASGI worker 在监听 8201" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "端口与鉴权", sub: "仅绑定 loopback，密钥未写入 URL" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "监控采样正常", sub: "最近 3 秒内有新的内存样本" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "磁盘余量充足", sub: "可用 182 GB，足以再放一个 Quality 档位" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "版本与运行态一致", sub: "runtime/current 指向当前 selection" }
+    // 检查项名称与副标题逐字取自应用：名称来自 PreflightDiagnosticsView.checkTitle，
+    // 副标题来自 explanation(for:)。稿上不能出现应用里不存在的检查项。
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "应用目录", sub: "确认 SpeechRail 的本机应用目录可访问。" },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "配置文件", sub: "确认服务配置文件存在且可以被受管 runtime 读取。" },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "音频编解码", sub: "确认音频编解码依赖可用，上传和输出流程能够正常工作。" },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "运行设置", sub: "确认当前 profile 和运行参数可以被服务读取。" },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "ASR 制品", sub: "确认语音识别能力的配置、制品和运行状态满足启动条件。" },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "TTS 制品", sub: "确认语音合成能力的配置、制品和运行状态满足启动条件。" },
+    { tone: "Attention", icon: "triangle-alert", ink: "status/attention", title: "分人对齐制品", sub: "确认分人对齐制品满足 SpeechRail 服务运行的前置条件。", cur: true },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "实时语音检测", sub: "确认实时语音检测满足 SpeechRail 服务运行的前置条件。" }
   ].forEach(function (item, i) {
     const row = frame("diagRow", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 16, padY: 12 });
     if (item.cur) bindFill(row, V["surface/railTint"]);
@@ -1971,32 +2531,41 @@ function screenDiagnostics(d) {
   spacer(pillRow);
   add(pillRow, text("when", "刚刚", "Caption", V["text/tertiary"]));
   add(sHead, stretch(pillRow));
-  add(sHead, text("title", "模型校验未完成", "Title / Page", V["text/primary"]));
-  add(sHead, text("body", "分人能力当前不可用；语音识别与合成不受影响。", "Callout", V["text/secondary"], { w: 288 }));
+  add(sHead, text("title", "分人对齐制品", "Title / Page", V["text/primary"]));
+  // 影响句取自应用 PreflightDiagnosticsView.impact(for:)：这一行说的是后果，不是重复结论。
+  add(sHead, text(
+    "body",
+    "相关模型或语音能力无法被证明可用；继续启动可能导致对应请求返回未就绪。",
+    "Callout",
+    V["text/secondary"],
+    { w: 288 }
+  ));
   const fix = frame("fix", { layout: "HORIZONTAL" });
-  primaryButton(fix, "去模型页下载并校验", "download", 268);
+  primaryButton(fix, "打开模型管理", "download", 268);
   add(sHead, fix);
   add(side, stretch(sHead));
   hairline(side);
   const sBody = frame("sideBody", { layout: "VERTICAL", gap: 10, padX: 18, padY: 16 });
   const disc = frame("disclosure", { layout: "HORIZONTAL", gap: 7, align: "CENTER" });
   icon(disc, "chevron-right", 14, V["text/secondary"]);
-  add(disc, text("label", "技术上下文", "Callout", V["text/secondary"]));
+  add(disc, text("label", "开发者详情", "Callout", V["text/secondary"]));
   add(sBody, stretch(disc));
   const code = frame("codeBox", {
     layout: "VERTICAL", gap: 4, pad: 10, radius: 8,
-    fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/panel"]
   });
-  add(code, text("k", "artifact_key    diarization-coreml", "Caption", V["text/secondary"], { w: 264 }));
-  add(code, text("k", "verify_status   pending", "Caption", V["text/secondary"], { w: 264 }));
+  // 字段与脱敏口径对齐应用：这一块只放标识、脱敏结果与当时的运行态，不放本地路径。
+  add(code, text("k", "检查标识         diarization_aligner_snapshot", "Caption", V["text/secondary"], { w: 264 }));
+  add(code, text("k", "安全技术结果     已通过脱敏", "Caption", V["text/secondary"], { w: 264 }));
+  add(code, text("k", "结果            失败", "Caption", V["text/secondary"], { w: 264 }));
   add(sBody, stretch(code));
   // The card is the tallest thing on the page, so it carries the repair route
   // rather than trailing off after the error code.
   add(sBody, text("label", "修复步骤", "Heading / Section", V["text/primary"]));
   [
-    "打开模型页，选中 artifact_key = diarization-coreml",
-    "下载并校验缺失制品，直到 verify_status 变为 verified",
-    "回到诊断重新运行预检，确认分人能力可用"
+    "打开模型管理，确认目标档位需要的制品都已登记。",
+    "运行「下载并校验」，直到每项的存在状态与校验状态都通过。",
+    "回到本页重新运行预检，确认这一项已经通过。"
   ].forEach(function (step, i) {
     const row = frame("step", { layout: "HORIZONTAL", gap: 8, align: "MIN" });
     const num = frame("num", { layout: "HORIZONTAL", align: "CENTER", justify: "CENTER", radius: 999 });
@@ -2011,15 +2580,156 @@ function screenDiagnostics(d) {
   spacer(side);
 }
 
+// --- 10. 开发者文档 ----------------------------------------------------------
+// 接入方要的三件事按顺序摆：地址与鉴权 → 例子 → 接口与故障。主题列表本身是目录，
+// 右栏一次只展开一个主题（渐进式披露）：文档页最忌讳的是一屏接一屏的正文。
+// 对象形式而不是数组元组：图标名带 `icon:` 键，静态自检才扫得到它（数组里第 3 位
+// 的字符串对 audit.js 是不可见的，等于静默失去覆盖）。
+const DOC_TOPICS = [
+  { title: "快速开始", desc: "改 base_url 就能用的最小示例", icon: "play" },
+  { title: "接口一览", desc: "REST 与 WebSocket 的入口与用途", icon: "server" },
+  { title: "实时语音", desc: "全双工流式 ASR/TTS 的协议子集", icon: "activity" },
+  { title: "音色与克隆", desc: "系统音色、声音设计、参考录音注册", icon: "sparkles" },
+  { title: "分档能力对照", desc: "light / balanced / quality 的差异", icon: "sliders-horizontal" },
+  { title: "MCP 接入", desc: "给 Agent 的 stdio 与 streamable-http", icon: "package" },
+  { title: "错误与排查", desc: "统一错误信封与常见码的下一步", icon: "triangle-alert" },
+  { title: "安全与部署", desc: "回环默认、密钥与日志脱敏", icon: "shield-check" }
+];
+
+// 接口表的一行：方法 / 路径 / 用途。三列固定，值再长也不推着邻居漂移。
+function endpointRow(parent, method, path, detail) {
+  const row = frame("endpoint", { layout: "HORIZONTAL", gap: 12, align: "CENTER" });
+  const methodCell = frame("methodCell", { layout: "HORIZONTAL" });
+  size(methodCell, 42, null);
+  add(methodCell, text("method", method, "Caption / Medium", V["accent/rail"]));
+  add(row, methodCell);
+  const pathCell = frame("pathCell", { layout: "HORIZONTAL" });
+  size(pathCell, 250, null);
+  add(pathCell, text("path", path, "Callout", V["text/primary"]));
+  add(row, pathCell);
+  add(row, text("detail", detail, "Callout", V["text/secondary"], { w: 440 }));
+  return add(parent, stretch(row));
+}
+
+// 代码块：一行语言标签 + 复制按钮，下面是原始行。稿用 Inter，生产映射到系统等宽
+// 字体（REDESIGN-SPEC §12.4 决定 16）。
+function codeBlock(parent, language, lines) {
+  const block = frame("Code Block", {
+    layout: "VERTICAL", gap: 8, padX: 14, padY: 12, radius: 8,
+    fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+  });
+  const head = frame("codeHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
+  add(head, text("lang", language, "Caption / Medium", V["text/tertiary"]));
+  spacer(head);
+  iconButton(head, "copy", 24);
+  add(block, stretch(head));
+  lines.forEach(function (line) {
+    add(block, text("line", line, "Callout", V["text/primary"], { w: 720 }));
+  });
+  return add(parent, stretch(block));
+}
+
+function screenDeveloperDocs(d) {
+  pageHead(d, "开发者文档", "把本机语音能力接入你的应用：地址、接口、示例与排查。",
+    function (row) {
+      secondaryButton(row, "复制接入信息", "copy");
+    });
+
+  // 接入信息 ---------------------------------------------------------------
+  const access = card(d, "accessCard", { gap: 12, padY: 14 });
+  const facts = frame("facts", { layout: "HORIZONTAL", gap: 24, align: "MIN" });
+  [
+    ["服务地址", "http://127.0.0.1:8201"],
+    ["鉴权", "回环免密钥；非回环需 Bearer"],
+    ["运行档位", "Quality"],
+    ["发布的能力", "识别 · 合成 · 匿名分人 · 声音复刻"]
+  ].forEach(function (fact) {
+    const col = frame("fact", { layout: "VERTICAL", gap: 3 });
+    add(col, text("k", fact[0], "Caption / Medium", V["text/tertiary"]));
+    add(col, text("v", fact[1], "Body", V["text/primary"]));
+    add(facts, col);
+  });
+  add(access, stretch(facts));
+
+  const accessNote = frame("accessNote", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
+  icon(accessNote, "info", 13, V["text/secondary"]);
+  add(accessNote, text("label",
+    "这里的档位与能力来自当前服务的真实声明；换档后回到本页即可看到新的能力集合。",
+    "Subheadline", V["text/secondary"]));
+  add(access, stretch(accessNote));
+
+  // 主题目录 + 正文 ---------------------------------------------------------
+  const docs = card(d, "docsCard", { gap: 0, pad: 0, layout: "HORIZONTAL" });
+  // 文档卡吃满剩余高度：这是唯一一页「读」的界面，让它像窗口里的一个面板，
+  // 而不是内容结束后空半屏。
+  grow(docs);
+  const topics = frame("topics", { layout: "VERTICAL", gap: 2, padX: 12, padY: 14 });
+  size(topics, 272, null);
+  DOC_TOPICS.forEach(function (topic, i) {
+    const selected = i === 0;
+    const row = frame("Doc Topic Row", {
+      layout: "VERTICAL", gap: 2, padX: 10, padY: 8, radius: 8
+    });
+    if (selected) bindFill(row, V["surface/railTint"]);
+    const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
+    icon(head, topic.icon, 15, selected ? V["accent/rail"] : V["text/secondary"]);
+    add(head, text("title", topic.title, "Body / Medium", V["text/primary"]));
+    add(row, stretch(head));
+    const desc = text("desc", topic.desc, "Subheadline", V["text/secondary"], { w: 230 });
+    add(row, desc);
+    add(topics, stretch(row));
+  });
+  add(docs, stretch(topics));
+  stretch(rect(docs, "topicsDivider", 1, 100, V["border/separator"]));
+
+  const body = frame("docBody", { layout: "VERTICAL", gap: 14, padX: 20, padY: 18 });
+  grow(body);
+  add(docs, stretch(body));
+
+  const topicHead = frame("topicHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  add(topicHead, text("title", "快速开始", "Title / Page", V["text/primary"]));
+  pill(topicHead, "Ready", "已按当前档位核对");
+  add(body, stretch(topicHead));
+  add(body, text("lead",
+    "服务默认只监听回环地址。任何 OpenAI 兼容客户端把 base_url 指到本机端口即可接入，" +
+    "不需要改模型名，也不需要感知 worker 的加载与回收。",
+    "Body", V["text/secondary"], { w: 740 }));
+
+  codeBlock(body, "Python · OpenAI SDK", [
+    "from openai import OpenAI",
+    "",
+    "client = OpenAI(base_url=\"http://127.0.0.1:8201/v1\",",
+    "                api_key=\"not-needed-for-loopback\")",
+    "",
+    "with open(\"meeting.wav\", \"rb\") as audio:",
+    "    print(client.audio.transcriptions.create(",
+    "        model=\"whisper-1\", file=audio).text)"
+  ]);
+
+  const endpoints = frame("endpoints", { layout: "VERTICAL", gap: 7 });
+  add(endpoints, text("label", "先认这四个入口", "Heading / Section", V["text/primary"]));
+  endpointRow(endpoints, "POST", "/v1/audio/transcriptions", "上传音频，拿回文本与可选词级时间戳");
+  endpointRow(endpoints, "POST", "/v1/audio/speech", "输入文本，拿回 wav 音频");
+  endpointRow(endpoints, "GET", "/v1/voices", "列出系统音色与已保存音色");
+  endpointRow(endpoints, "POST", "/v1/voices/clone", "用参考录音注册音色（需要 quality 档）");
+  endpointRow(endpoints, "WS", "/v1/realtime", "全双工流式识别与合成");
+  add(body, stretch(endpoints));
+  add(body, text("footnote",
+    "完整契约以仓库里的 contracts/openapi.yaml、contracts/realtime-openai.md 与 docs/users/ 为准。",
+    "Subheadline", V["text/tertiary"], { w: 740 }));
+}
+
 const SCREEN_DEFS = [
   ["dubbing", "配音台", "audio-lines", screenDubbing],
   ["voiceDesign", "音色创作", "sparkles", screenVoiceDesign],
+  ["voiceClone", "音色克隆", "mic", screenVoiceClone],
   ["voiceLibrary", "音色库", "library", screenVoiceLibrary],
   ["works", "我的作品", "folder-open", screenWorks],
   ["overview", "服务状态", "server", screenOverview],
   ["monitoring", "运行监控", "activity", screenMonitoring],
   ["models", "模型", "package", screenModels],
-  ["diagnostics", "诊断", "stethoscope", screenDiagnostics]
+  ["diagnostics", "诊断", "stethoscope", screenDiagnostics],
+  ["developerDocs", "开发者文档", "book-open", screenDeveloperDocs]
 ];
 
 function buildScreens(colorModeId) {
@@ -2029,10 +2739,8 @@ function buildScreens(colorModeId) {
     const win = buildShell(def[0], def[1], def[2], def[3]);
     win.x = 0;
     win.y = i * 1020;
-    // Handoff convenience: each screen exports at 1x PNG straight from Figma.
-    try {
-      win.exportSettings = [{ format: "PNG", constraint: { type: "SCALE", value: 1 } }];
-    } catch (e) {}
+    // Export settings come from add() — every page-level frame gets the same
+    // PNG @4x + SVG pair.
     add(page, win);
     built.push(win);
   });
@@ -2101,8 +2809,8 @@ function buildCover() {
   [
     "01 Foundations — 颜色、字体层级、间距、圆角、图标（全部为 Variables）",
     "02 Components — 状态胶囊、导航项、按钮、卡片、列表行、候选卡、空状态",
-    "03 Flows — 三条主流程连线，并注明跨页连线需在 Prototype 面板手动接入",
-    "04 Screens — 8 个页面 × Light / Dark 两种外观",
+    "03 Flows — 四条主流程连线，并注明跨页连线需在 Prototype 面板手动接入",
+    "04 Screens — 10 个页面 × Light / Dark 两种外观",
     "05 Menu & Settings — 菜单栏面板（默认 / 控制受限 / 深色）与设置窗口三个分组",
     "06 Archive — 迁移前的机架视觉对照，只作历史记录",
     "设计依据：docs/design/2026-09-15-macos-uiux-redesign/REDESIGN-SPEC.md"
@@ -2201,6 +2909,19 @@ const FLOWS = [
     ]
   },
   {
+    key: "clone",
+    title: "音色克隆流程",
+    detail: "用用户自己的录音注册音色。录音、核对、预检都在同一页，注册前先给出可读的结论。",
+    steps: [
+      ["音色克隆", "选提词稿", "四段官方提词稿任选，也可自己写一段", "voiceClone"],
+      ["音色克隆", "录制", "实时电平与计时；越过时长上下限就地提示", "voiceClone"],
+      ["音色克隆", "回听与核对", "回放原始录音，按实际说出的内容修正文本", "voiceClone"],
+      ["音色克隆", "先检查参考音频", "服务端预检给出信噪比、削波与内容匹配", "voiceClone"],
+      ["音色克隆", "注册音色", "保存为可复用音色；失败时保留录音与填好的名称", "voiceClone"],
+      ["音色库", "试听与使用", "在音色库试听新音色，并在配音台选用", "voiceLibrary"]
+    ]
+  },
+  {
     key: "recovery",
     title: "受阻恢复流程",
     detail: "能力缺失时不把错误丢给用户：先说明影响，再给出唯一的修复路径。",
@@ -2217,10 +2938,9 @@ const FLOWS = [
 function flowStep(parent, where, title, detail) {
   const step = frame("step · " + title, {
     layout: "VERTICAL", gap: 6, pad: 14, radius: 12,
-    fill: V["surface/content"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/content"]
   });
   size(step, 236, 104);
-  elevate(step);
   add(step, text("where", where, "Caption / Medium", V["accent/rail"]));
   add(step, text("title", title, "Body / Medium", V["text/primary"]));
   add(step, text("detail", detail, "Caption", V["text/secondary"], { w: 208 }));
@@ -2239,8 +2959,8 @@ function buildFlows() {
   const canvas = frame("Flows", { layout: "VERTICAL", gap: 44, pad: 64, fill: V["surface/window"] });
   size(canvas, 1680, null);
   add(page, canvas);
-  boardHead(canvas, "三条主流程",
-    "产品只有三条主路径，其余界面都是它们的入口或解释。每个节点都可点击，" +
+  boardHead(canvas, "四条主流程",
+    "产品只有四条主路径，其余界面都是它们的入口或解释。每个节点都可点击，" +
     "跳到承载它的那个页面——这张图同时是可点击原型。", 1120);
 
   FLOWS.forEach(function (flow) {
@@ -2311,12 +3031,13 @@ function menuPanel(name, o) {
   icon(title, "audio-lines", 15, V["accent/rail"]);
   add(title, text("label", "SpeechRail", "Heading / Section", V["text/primary"]));
   add(head, stretch(title));
-  add(head, text("status", o.status || "本机服务已就绪 · Quality", "Callout", V["text/secondary"], { w: 246 }));
-  add(head, text("detail", o.detail || "SpeechRail 0.7.3 · 端口 8201", "Subheadline", V["text/tertiary"], { w: 246 }));
+  // 状态行与副行都取自应用 ControlMenuView：档位用短名，副行是「版本 X · 端口 Y」。
+  add(head, text("status", o.status || "服务已就绪 · Quality", "Callout", V["text/secondary"], { w: 246 }));
+  add(head, text("detail", o.detail || "版本 0.7.3 · 端口 8201", "Subheadline", V["text/tertiary"], { w: 246 }));
   add(panel, head);
 
   menuSeparator(panel);
-  menuRow(panel, "打开管理控制台", { icon: "app-window", shortcut: "⌘⌥0" });
+  menuRow(panel, "打开 SpeechRail", { icon: "app-window", shortcut: "⌘O" });
   menuRow(panel, "开始配音", { icon: "audio-lines", shortcut: "⌘N" });
   menuRow(panel, "音色创作", { icon: "sparkles" });
   menuSeparator(panel);
@@ -2333,11 +3054,12 @@ function menuPanel(name, o) {
     add(warn, text("text", "控制通道不可用，服务操作已禁用", "Subheadline", V["status/attention"], { w: 220 }));
     add(panel, warn);
   }
-  [["启动服务", "play"], ["停止服务", "pause"], ["重启服务", "refresh-cw"]].forEach(function (r) {
+  // 省略号是承诺：这三个动作都会先弹确认对话框（REDESIGN-SPEC §7.9）。
+  [["启动服务…", "play"], ["停止服务…", "pause"], ["重启服务…", "refresh-cw"]].forEach(function (r) {
     menuRow(panel, r[0], { icon: r[1], disabled: o.restricted === true });
   });
   menuSeparator(panel);
-  menuRow(panel, "打开设置", { icon: "sliders-horizontal", shortcut: "⌘," });
+  menuRow(panel, "打开设置…", { icon: "sliders-horizontal", shortcut: "⌘," });
   menuRow(panel, "退出 SpeechRail", { icon: "power", shortcut: "⌘Q" });
   return panel;
 }
@@ -2433,10 +3155,9 @@ function settingsSection(parent, title) {
   add(parent, stretch(head));
   const group = frame("group", {
     layout: "VERTICAL", gap: 0, radius: 12,
-    fill: V["surface/content"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/content"]
   });
   size(group, SETTINGS_CARD_W, null);
-  elevate(group);
   add(parent, stretch(group));
   return group;
 }
@@ -2446,28 +3167,22 @@ function valueText(parent, chars, styleName) {
 }
 
 function paneGeneral(c) {
+  // 三个页签逐行对应应用 SettingsView 的 Section：稿上不放应用里不存在的开关
+  // （登录时启动服务、启动后打开管理控制台、菜单栏图标都不在产品设置里）。
   const basics = settingsSection(c, "启动与窗口");
-  controlRow(basics, "登录时启动服务",
-    "注册用户级 LaunchAgent，登录即可用。",
+  controlRow(basics, "启动时读取服务状态",
+    "控制台仍可在任意页面手动刷新。",
     function (p) { switchControl(p, true); });
-  hairline(basics);
-  controlRow(basics, "启动后打开管理控制台",
-    "只在首次就绪时前置窗口。",
-    function (p) { switchControl(p, false); });
-  hairline(basics);
-  controlRow(basics, "菜单栏图标",
-    "服务异常时在图标右侧加一个状态点。",
-    function (p) { segmented(p, ["仅图标", "图标 + 文字"], 0); }, { captionWidth: 300 });
   const dev = settingsSection(c, "开发者");
   controlRow(dev, "默认展开技术详情",
-    "接口状态、阶段和标识信息仍只在管理控制台中展开。",
+    "面向开发者的接口状态、阶段和标识信息仍只在管理控制台中展开。",
     function (p) { switchControl(p, false); });
 }
 
 function paneCreative(c) {
   const defaults = settingsSection(c, "创作默认值");
   controlRow(defaults, "默认音色",
-    "配音台新文稿的初始音色。",
+    "新打开的配音台优先选中这个音色；参考音色仍固定 1.0x。",
     function (p) {
       const v = frame("value", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
       valueText(v, "夜航主持");
@@ -2479,43 +3194,23 @@ function paneCreative(c) {
   controlRow(defaults, "默认语速",
     "0.5×–2.0×，可在配音台逐条覆盖。",
     function (p) { sliderControl(p, 132, 0.5, "1.0×"); }, { captionWidth: 260 });
-  hairline(defaults);
-  controlRow(defaults, "候选数量",
-    "音色创作一次生成的候选个数。",
-    function (p) { segmented(p, ["2", "4"], 1); });
-  const output = settingsSection(c, "产物");
-  controlRow(output, "默认导出位置",
-    "导出结果条的默认目录，每次导出仍可更改。",
-    function (p) { secondaryButton(p, "更改…"); });
 }
 
 function paneService(c) {
   const conn = settingsSection(c, "连接");
-  controlRow(conn, "服务地址",
-    "只绑定 loopback，外部访问需 API key。",
-    function (p) {
-      const v = frame("value", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
-      valueText(v, "127.0.0.1:8201", "Body / Medium");
-      iconButton(v, "copy", 26);
-      add(p, v);
-    }, { captionWidth: 300 });
-  hairline(conn);
-  controlRow(conn, "控制范围",
-    "控制面通过受约束的 XPC 委托本机服务。",
-    function (p) {
-      const v = frame("value", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
-      pill(v, "Ready", "用户级 LaunchAgent");
-      add(p, v);
-    }, { captionWidth: 300 });
+  controlRow(conn, "服务端口", null,
+    function (p) { valueText(p, "8201", "Body / Medium"); });
   const diag = settingsSection(c, "诊断");
-  controlRow(diag, "报告包含脱敏服务日志",
-    "路径与标识脱敏，不含音频与转写。",
+  controlRow(diag, "诊断报告包含运行档位与版本",
+    "报告始终不含凭据、原始音频、完整转写或本地绝对路径。",
     function (p) { switchControl(p, false); });
   const about = settingsSection(c, "关于");
   controlRow(about, "产品定位", null,
     function (p) { valueText(p, "本机 Apple Silicon 语音服务控制面"); });
   hairline(about);
   controlRow(about, "最低系统", null, function (p) { valueText(p, "macOS 26.0"); });
+  hairline(about);
+  controlRow(about, "版本", null, function (p) { valueText(p, "0.7.3"); });
 }
 
 const SETTINGS_TABS = [
@@ -2597,8 +3292,8 @@ function buildMenuAndSettings() {
     menuPanel("panel · 默认", {}),
     menuPanel("panel · 控制受限", {
       restricted: true,
-      status: "本机服务已就绪，但控制受限",
-      detail: "只读连接 · 端口 8201"
+      // 控制受限只改状态行：副行仍然是「版本 · 端口」，应用不会为它换一句话。
+      status: "服务已就绪 · 控制受限 · Quality"
     }),
     menuPanel("panel · 深色", {})
   ];
@@ -2692,10 +3387,9 @@ function buildArchive() {
   // 迁移前
   const before = frame("before", {
     layout: "VERTICAL", gap: 16, pad: 20, radius: 12,
-    fill: V["surface/field"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/field"]
   });
   size(before, 720, 452);
-  elevate(before);
   add(cols, before);
   add(before, text("title", "迁移前 · 机加工机架", "Heading / Section", V["text/primary"]));
   add(before, text("lead",
@@ -2730,10 +3424,9 @@ function buildArchive() {
   // 迁移后
   const after = frame("after", {
     layout: "VERTICAL", gap: 16, pad: 20, radius: 12,
-    fill: V["surface/content"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/content"]
   });
   size(after, 720, 452);
-  elevate(after);
   add(cols, after);
   add(after, text("title", "迁移后 · macOS 26 原生", "Heading / Section", V["text/primary"]));
   add(after, text("lead",
@@ -2742,14 +3435,14 @@ function buildArchive() {
 
   const newDeck = frame("deck", {
     layout: "VERTICAL", gap: 12, pad: 16, radius: 12,
-    fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/panel"]
   });
   size(newDeck, 680, 196);
   add(after, newDeck);
-  add(newDeck, text("label", "surface/panel · border/separator 1px", "Caption", V["text/tertiary"]));
+  add(newDeck, text("label", "surface/panel · 无描边，靠填充分层", "Caption", V["text/tertiary"]));
   const grouped = frame("groupedCard", {
     layout: "VERTICAL", gap: 6, pad: 12, radius: 10,
-    fill: V["surface/content"], stroke: V["border/separator"], strokeWeight: 1
+    fill: V["surface/content"]
   });
   size(grouped, 648, 84);
   add(newDeck, grouped);
@@ -2782,10 +3475,9 @@ function buildArchive() {
   ]]].forEach(function (def) {
     const card = frame("list · " + def[0], {
       layout: "VERTICAL", gap: 8, pad: 18, radius: 12,
-      fill: V["surface/content"], stroke: V["border/separator"], strokeWeight: 1
+      fill: V["surface/content"]
     });
     size(card, 720, null);
-    elevate(card);
     add(card, text("title", def[0], "Heading / Section", V["text/primary"]));
     archiveList(card, def[1]);
     add(tails, card);
@@ -3032,9 +3724,11 @@ function probeChain(root) {
 function auditFrames(pageNames) {
   const lines = [];
   let samplesShown = false;
+  const seen = [];
   pageNames.forEach(function (pageName) {
     const page = P[pageName];
-    if (!page) return;
+    if (!page || seen.indexOf(page) >= 0) return;
+    seen.push(page);
     page.children.forEach(function (frameNode) {
       if (frameNode.type !== "FRAME") return;
       const unbound = auditUnboundGray(frameNode);
@@ -3083,59 +3777,87 @@ async function main() {
 
   await figma.loadAllPagesAsync();
   await loadFonts();
-  await step("pages", function () { buildPages(); });
+  await loadCjkFont();
+  await step("pages", function () { return buildPages(); });
+  // Every builder writes its frames onto a shared real page, so each step's
+  // output is picked up by diffing the page before and after it runs.
+  const groupNodes = {};
+  const pageSnapshots = {};
+  REAL_PAGES.forEach(function (name) {
+    const page = figma.root.children.find(function (p) { return p.name === name; });
+    pageSnapshots[name] = {
+      page: page,
+      ids: page ? page.children.map(function (c) { return c.id; }) : []
+    };
+  });
+  function takeGroup(logical) {
+    const page = P[logical];
+    if (!page) return;
+    const snapshot = pageSnapshots[page.name];
+    if (!snapshot) return;
+    // Accumulate: one logical group can be built in more than one step (the
+    // dark screen variants land after the light ones), and replacing the list
+    // would tile only the later batch — straight on top of the earlier one.
+    groupNodes[logical] = (groupNodes[logical] || []).concat(page.children.filter(function (c) {
+      return snapshot.ids.indexOf(c.id) === -1;
+    }));
+    snapshot.ids = page.children.map(function (c) { return c.id; });
+  }
   await step("variables", function () { info = buildVariables(); });
   await step("text styles", function () { buildTextStyles(); });
   await step("foundations", async function () {
-    await gotoPage(P["01 Foundations"]); buildFoundations();
+    await gotoPage(P["01 Foundations"]); buildFoundations(); takeGroup("01 Foundations");
   });
   await step("components", async function () {
-    await gotoPage(P["02 Components"]); buildComponents();
+    await gotoPage(P["02 Components"]); buildComponents(); takeGroup("02 Components");
   });
   await step("screens", async function () {
-    await gotoPage(P["04 Screens"]); windows = buildScreens();
+    await gotoPage(P["04 Screens"]); windows = buildScreens(); takeGroup("04 Screens");
   });
   await step("dark variants", function () {
     darkWindows = info.darkModeId
       ? buildDarkVariants(windows, info.collection.id, info.darkModeId)
       : buildDarkReferenceVariants(windows);
+    takeGroup("04 Screens");
   });
   await step("flows", async function () {
-    await gotoPage(P["03 Flows"]); buildFlows();
+    await gotoPage(P["03 Flows"]); buildFlows(); takeGroup("03 Flows");
   });
   await step("menu & settings", async function () {
-    await gotoPage(P["05 Menu & Settings"]); buildMenuAndSettings();
+    await gotoPage(P["05 Menu & Settings"]); buildMenuAndSettings(); takeGroup("05 Menu & Settings");
   });
   await step("archive", async function () {
-    await gotoPage(P["06 Archive"]); buildArchive();
+    await gotoPage(P["06 Archive"]); buildArchive(); takeGroup("06 Archive");
   });
   await step("prototype wiring", function () {
     wiring = wirePrototype(windows, darkWindows);
   });
   await step("cover", async function () {
-    await gotoPage(P["00 Cover"]); buildCover();
+    await gotoPage(P["00 Cover"]); buildCover(); takeGroup("00 Cover");
+  });
+  await step("layout", function () {
+    tileGroups(groupNodes);
   });
   let audit = [];
-  // Every page, not just the ones that carry screens: the three documentation
-  // pages own exactly one frame each and can drift just as quietly.
-  const auditPages = PAGE_NAMES;
   let counts = [];
   let stray = [];
   await step("audit", async function () {
-    auditPages.forEach(function (name) {
-      const page = P[name];
+    // Real pages, not logical ones: several logical groups share a page now, and
+    // auditing per logical name would report the same page three times.
+    REAL_PAGES.forEach(function (name) {
+      const page = figma.root.children.find(function (p) { return p.name === name; });
       if (!page) return;
       const frames = page.children.filter(function (c) { return c.type === "FRAME"; });
       if (frames.length) counts.push(name.replace(/^[0-9]+ /, "") + " " + frames.length);
       // A builder that forgets to append a node leaves it on the page instead of
       // inside the frame: it renders as a float in the corner and no other check
       // notices it.
+      const expected = allowedFrameName(name);
       frames.forEach(function (f) {
-        const expected = name === "04 Screens" ? f.name.indexOf("▸ ") === 0 : CANVAS_NAMES[name] === f.name;
-        if (!expected) stray.push(name + " → " + f.name);
+        if (!expected(f.name)) stray.push(name + " → " + f.name);
       });
     });
-    audit = auditFrames(auditPages);
+    audit = auditFrames(PAGE_NAMES);
   });
 
   try {
@@ -3198,7 +3920,10 @@ async function main() {
     "\n\nprototype links: " + wiring.wired + "/" + wiring.attempts +
     (WIRE_ERRORS.length ? "\n" + WIRE_ERRORS.slice(0, 8).join("\n") : "") +
     "\nbind errors: " + BIND_ERRORS.length +
+    "\nCJK runs: " + (CJK_FONT ? CJK_FONT.family : "none available — export may drop them") +
     (bindErrors.length ? "\n" + bindErrors.join("\n") : "") +
+    (EXPORT_ERRORS.length ? "\nexport settings: " + EXPORT_ERRORS.length + " failed\n" +
+      EXPORT_ERRORS.slice(0, 4).join("\n") : "") +
     "\n\n" + report.join("\n") +
     (audit.length ? "\n\nAUDIT\n" + audit.join("\n") : "") +
     (info.modeError ? "\n\nmodes: " + info.modeError : "") +

@@ -43,7 +43,7 @@ class Settings(BaseSettings):
         return cls(_env_file=env_file)  # type: ignore[call-arg]
 
     service_name: str = "speechrail"
-    version: str = "2.6.4"
+    version: str = "2.6.5"
     host: str = "127.0.0.1"
     port: int = Field(default=8201, ge=1, le=65535)
     model_id: str = "speechrail/qwen3-asr-1.7b"
@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     realtime_vad_model_path: Path | None = None
     realtime_vad_shadow_enabled: bool = False
     realtime_vad_bargein_cooldown_ms: int = Field(default=250, ge=0, le=5_000)
+    # Durable telemetry: rotating operator logs and the per-interval metrics
+    # rollup that backs any monitoring span longer than the live /metrics view.
+    # ``log_dir`` defaults to the macOS user log directory; the rollup directory
+    # is only filled in by the managed service, so embedded and test apps never
+    # touch the filesystem.
+    log_dir: Path | None = None
+    metrics_rollup_enabled: bool = True
+    metrics_rollup_dir: Path | None = None
+    metrics_rollup_interval_seconds: float = Field(default=60.0, ge=5.0, le=3600.0)
+    metrics_rollup_retention_days: int = Field(default=30, ge=1, le=3650)
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -163,6 +173,17 @@ class Settings(BaseSettings):
         if value is not None and not value.is_absolute():
             raise ValueError("job_spool_dir must be an external absolute path")
         return value
+
+    @field_validator("log_dir", "metrics_rollup_dir", mode="before")
+    @classmethod
+    def resolve_observability_directory(cls, value: Any) -> Any:
+        """Treat a blank environment value as unset and require absolute paths."""
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        path = value if isinstance(value, Path) else Path(str(value))
+        if not path.is_absolute():
+            raise ValueError("log_dir and metrics_rollup_dir must be absolute paths")
+        return path
 
     @field_validator(
         "diarization_coreml_model_path",

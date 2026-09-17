@@ -23,6 +23,9 @@ public struct ControlMenuView: View {
                         .font(SpeechRailDesignTokens.Typography.sectionTitle)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
+                // 状态行用档位短名：`服务已就绪 · Quality`（REDESIGN-SPEC §7.9、
+                // macOS App 设计系统 §4.1）。长写法「Quality · 创作优先」属于卡片标题，
+                // 拼进这一行会变成两段「 · 」。
                 Text(statusSummary + " · " + profileText)
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -103,7 +106,8 @@ public struct ControlMenuView: View {
                     SpeechRailDesignTokens.Color.attention.opacity(
                         SpeechRailDesignTokens.Surface.statusTintOpacity
                     ),
-                    in: ConcentricRectangle()
+                    // 跟随菜单面板自己的圆角；面板不提供容器形状时退到叶面保底值。
+                    in: SpeechRailDesignTokens.Corner.nestedShape
                 )
             }
 
@@ -205,7 +209,9 @@ public struct ControlMenuView: View {
         guard model.healthFailure == nil, let profile = model.health?.profile else {
             return "档位未读取"
         }
-        return SpeechRailProfilePresentation.title(profile)
+        // 状态行要的是短名：`服务已就绪 · Quality`（REDESIGN-SPEC §7.9、
+        // macOS App 设计系统 §4.1）。「Quality · 创作优先」是卡片标题的写法。
+        return SpeechRailProfilePresentation.shortTitle(profile)
     }
 
     private var statusSummary: String {
@@ -306,7 +312,9 @@ struct MenuBarStatusLabel: View {
             if isOperating {
                 Text("SpeechRail")
                 Circle()
-                    .fill(SpeechRailDesignTokens.Color.voice)
+                    // 「服务操作进行中」是注意状态，不是声音语义：琥珀只标记
+                    // 音色类对象（REDESIGN-SPEC §5.4）。
+                    .fill(SpeechRailDesignTokens.Color.attention)
                     .frame(
                         width: SpeechRailDesignTokens.Menu.menuBarStatusDotSize,
                         height: SpeechRailDesignTokens.Menu.menuBarStatusDotSize

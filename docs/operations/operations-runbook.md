@@ -2,8 +2,8 @@
 title: "SpeechRail 运维操作实战手册 (Runbook)"
 status: active
 audience: "运维工程师、SRE、系统管理员"
-version: "1.7.0"
-date: 2026-09-13
+version: "1.8.0"
+date: 2026-09-16
 ---
 
 # 📖 SpeechRail 运维操作实战手册 (Runbook)
@@ -205,3 +205,38 @@ controller-backed `service start` 启动。启动或 smoke 失败时停止候选
 - App 安装前服务必须已经 ready；签名 Distribution App 通过 `SMAppService` 管理 `com.speechrail.desktop.control`，本机 Debug/Release 使用内嵌 `com.speechrail.desktop.local-control.xpc` 按需控制；两者都不直接调用 `launchctl`，不加载模型，不创建第二个 worker。
 - 联合发布固定顺序为：服务 wheel gate → managed preflight/原子切换 → 服务 health/ready/smoke → App archive/verify/notarize → 唯一安装路径与 XPC `status`/`preflight` smoke → 退出 App 后再次确认服务仍 healthy。
 - App/XPC 失败只回滚 App；服务失败按本 Runbook 的服务回滚处理。两套回退点、版本/build、签名/公证和 SHA-256 分开记录。
+
+---
+
+## 6. 日志与历史指标 (Logs & Rolling Metrics)
+
+排障输入只有两类：随请求写下的日志，和每 60 秒落盘一行的历史指标。两者都由服务自己写入并轮转，
+权限为目录 `0700`、文件 `0600`。
+
+```bash
+LOG_DIR="${SPEECHRAIL_LOG_DIR:-$HOME/Library/Logs/SpeechRail}"
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+
+# 1. 人读日志：时间戳 + 级别 + 模块 + 结构化字段
+tail -f "$LOG_DIR/speechrail.log"
+
+# 2. 结构化访问记录：每个请求一行 JSON（request_id / route / status / duration_ms / error_code）
+tail -f "$LOG_DIR/access.jsonl"
+jq -r 'select(.status >= 500) | [.timestamp, .route, .status, .error_code, .duration_ms] | @tsv' \
+  "$LOG_DIR/access.jsonl"
+
+# 3. 历史指标：按 UTC 日期分文件，默认保留 30 天
+jq -c 'select(.requests.speech_total > 0) | {interval_end, requests, latency_ms}' \
+  "$APP_HOME/state/metrics-rollup/"*.jsonl
+```
+
+| 文件 | 内容 | 轮转与保留 |
+|---|---|---|
+| `$LOG_DIR/speechrail.log` | 服务与 vendor 运行日志，含结构化字段的 `key=value` 追加 | 8 MiB × 5 份 |
+| `$LOG_DIR/access.jsonl` | 结构化记录，每行一个 JSON 对象；HTTP 访问与结构化事件 | 8 MiB × 5 份 |
+| `$LOG_DIR/stdout.log`、`stderr.log` | LaunchAgent 捕获的崩溃输出；正常运行时基本为空 | 由 launchd 持有，不轮转 |
+| `$APP_HOME/state/metrics-rollup/YYYY-MM-DD.jsonl` | 每 60 秒一行的指标摘要（请求、音频秒数、时延分位、并发、内存、worker 状态） | 按天分文件，默认保留 30 天 |
+
+`/metrics` 是进程内累计值，重启归零；时间跨度更长的结论只能从 `metrics-rollup` 读取。摘要行是**区间增量**
+而不是累计值，`latency_ms` 的分位由直方图桶插值得到，桶宽决定精度上限；跨行求和即可得到任意跨度的
+总量。相关配置键见 [运行时与部署](runtime-deployment.md#配置)。

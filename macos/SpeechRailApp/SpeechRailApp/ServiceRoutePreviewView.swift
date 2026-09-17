@@ -25,7 +25,7 @@ public struct ServiceRoutePreviewView: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
             }
-            .padding(SpeechRailDesignTokens.Spacing.lg)
+            .padding(SpeechRailDesignTokens.Layout.cardInset)
             .speechRailContentSurface()
         }
     }

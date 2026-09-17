@@ -3,12 +3,17 @@ import SpeechRailControlKit
 import SwiftUI
 
 public struct PreflightDiagnosticsView: View {
+    /// 复制回执在页脚停留的时长。
+    private static let reportReceiptDuration: Duration = .seconds(4)
+
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
-    @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var selectedCheckName: String?
-    @State private var showInspector = false
     @State private var reportMessage: String?
+    @State private var reportCopySucceeded = true
     @State private var showsPassingChecks = false
     @AppStorage("speechrail.diagnostics.includeServiceContext") private var includeServiceContext = true
 
@@ -16,20 +21,6 @@ public struct PreflightDiagnosticsView: View {
 
     public var body: some View {
         PageScaffold(route: .diagnostics, scrollable: false) {
-            DiagnosticsSummaryView(
-                checks: model.preflightChecks,
-                isBusy: model.isBusy || model.isRefreshingPreflight,
-                isRefreshing: model.isRefreshingPreflight,
-                errorMessage: model.preflightMessage,
-                lastUpdated: model.lastPreflightRefresh,
-                action: { Task { await model.refreshPreflight() } }
-            )
-            if let reportMessage {
-                Label(reportMessage, systemImage: "checkmark.circle.fill")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ready)
-                    .transition(.opacity)
-            }
             diagnosticWorkspace
         } trailing: {
             Button {
@@ -38,34 +29,33 @@ public struct PreflightDiagnosticsView: View {
                 Label("重新运行预检", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
+            // 稿的页头次按钮是 30pt（脚本 `secondaryButton`）；系统 `.large` 是 28。
+            .controlSize(.large)
             .disabled(model.isBusy || model.isRefreshingPreflight)
             .help("重新运行预检")
             .accessibilityLabel("重新运行预检")
+            .accessibilityIdentifier("diagnostics-run")
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "查看预检上下文与脱敏技术详情") {
-                    Button {
-                        copyDiagnosticReport()
-                    } label: {
-                        Label("复制脱敏诊断报告", systemImage: "doc.on.clipboard")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
-                            systemImage: "info.circle"
-                        )
-                        .speechRailMenuRow()
-                    }
+                // 重新运行预检是这一页的主动作，它留在正文的结论面板旁；
+                // 头部只放跨页要用的那一件事（§6.2）。
+                PageActionButton(
+                    systemImage: "doc.on.clipboard",
+                    helpText: "复制脱敏诊断报告",
+                    isEnabled: !(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
+                ) {
+                    copyDiagnosticReport()
                 }
             }
             .sharedBackgroundVisibility(.hidden)
         }
+        .focusedSceneValue(
+            \.reloadPageCommand,
+            ReloadPageCommand(title: "重新运行预检") {
+                Task { await model.refreshPreflight() }
+            }
+        )
         .inspector(isPresented: $showInspector) {
             DeveloperInspector {
                 SectionHeading(
@@ -85,41 +75,51 @@ public struct PreflightDiagnosticsView: View {
             }
         }
         .task {
-            showInspector = showDeveloperDetails
             model.refreshControlAgentStatus()
             await model.refreshModelsAndHealth()
             await model.refreshPreflight()
             selectFirstCheckIfNeeded()
         }
-        .onChange(of: showInspector) { _, value in
-            showDeveloperDetails = value
-        }
         .onChange(of: model.preflightChecks) { _, _ in
             selectFirstCheckIfNeeded()
+        }
+        .onChange(of: model.preflightRequestID) { _, _ in
+            // 新的一次预检要回到它自己的结论，而不是停在上一轮点开的明细上。
+            showsPassingChecks = false
         }
     }
 
     private var diagnosticWorkspace: some View {
         Group {
-            if allChecksPassed && !showsPassingChecks {
+            if model.preflightChecks.isEmpty && model.isRefreshingPreflight {
+                // REDESIGN-SPEC §8：服务四页的「加载中」是 ProgressView，
+                // 不是一份空清单，也不是一个结论。
+                ProgressView("正在运行预检…")
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: SpeechRailDesignTokens.Layout.diagnosticsBodyMinimumHeight,
+                        alignment: .center
+                    )
+            } else if allChecksPassed && !showsPassingChecks {
                 // A clean run is a conclusion, not an empty list
-                // (REDESIGN-SPEC §7.8).
-                ContentUnavailableView {
-                    Label("未发现问题", systemImage: "checkmark.seal")
-                } description: {
-                    Text("\(model.preflightChecks.count) 项预检全部通过。这只说明环境与配置满足启动条件，不代表模型质量、性能或发布验收通过。")
-                } actions: {
-                    Button("重新运行预检") {
-                        Task { await model.refreshPreflight() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.isBusy || model.isRefreshingPreflight)
-                    Button("查看检查明细") {
-                        showsPassingChecks = true
-                    }
+                // (REDESIGN-SPEC §7.8). It uses the shared state-conclusion
+                // panel so the tint/stroke/icon say "checked, clean"; grey
+                // stays reserved for 「还没有检查项」(未执行) below.
+                // `ContentUnavailableView` is the system *empty* component and
+                // renders grey, which reads as "diagnostics never ran".
+                StatusBanner(
+                    kind: .conclusion,
+                    tone: .healthy,
+                    title: "未发现问题",
+                    message: "\(model.preflightChecks.count) 项预检全部通过。这只说明环境与配置满足启动条件，不代表模型质量、性能或发布验收通过。",
+                    actionTitle: "查看检查明细"
+                ) {
+                    showsPassingChecks = true
                 }
             } else {
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.lg) {
+                // 两栏之间是「栏与栏」，不是页面块：帧实测两栏底色带 15pt（即 16pt），
+                // 比页面级 20pt 紧一档（REDESIGN-SPEC §5.6 / §11.6 第十七轮）。
+                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
                     checkList
                         .frame(
                             minWidth: SpeechRailDesignTokens.Layout.diagnosticsListWidth,
@@ -157,7 +157,7 @@ public struct PreflightDiagnosticsView: View {
             CardHead(
                 title: "检查项",
                 detail: "选择一项查看原因和处理建议。",
-                trailing: { pendingNote }
+                trailing: { checkListHeadTrailing }
             )
             Divider()
             if model.preflightChecks.isEmpty {
@@ -192,10 +192,13 @@ public struct PreflightDiagnosticsView: View {
                 Button {
                     copyDiagnosticReport()
                 } label: {
-                    Label("复制诊断报告", systemImage: "doc.on.clipboard")
+                    // 复制回执留在这个动作自己身上：设计稿的页脚只有「一句事实 + 一个动作」，
+                    // 回执不能另起一条横贯页面的提示带。
+                    Label(copyReportTitle, systemImage: copyReportIcon)
                 }
                 .speechRailButton(.secondary)
                 .disabled(model.isRefreshingPreflight || model.preflightChecks.isEmpty)
+                .accessibilityIdentifier("diagnostics-copy-report")
             }
         }
         .frame(
@@ -211,14 +214,60 @@ public struct PreflightDiagnosticsView: View {
     /// 不靠颜色单独表达（REDESIGN-SPEC §9）。
     private var pendingNote: some View {
         let pending = model.preflightChecks.filter { !$0.ok }.count
-        return Text(pending == 0 ? "全部通过" : "\(pending) 项需要处理")
+        let note = if model.preflightChecks.isEmpty {
+            "尚未检查"
+        } else if pending == 0 {
+            "全部通过"
+        } else {
+            "\(pending) 项需要处理"
+        }
+        let tone: Color = if model.preflightChecks.isEmpty {
+            SpeechRailDesignTokens.Color.inkTertiary
+        } else if pending == 0 {
+            SpeechRailDesignTokens.Color.ready
+        } else {
+            SpeechRailDesignTokens.Color.attention
+        }
+        return Text(note)
             .font(SpeechRailDesignTokens.Typography.caption)
-            .foregroundStyle(
-                pending == 0
-                    ? SpeechRailDesignTokens.Color.ready
-                    : SpeechRailDesignTokens.Color.attention
-            )
+            .foregroundStyle(tone)
             .lineLimit(1)
+            .accessibilityIdentifier("diagnostics-summary")
+            .accessibilityLabel("检查项结论")
+            .accessibilityValue(
+                model.preflightChecks.isEmpty
+                    ? "尚未检查"
+                    : "\(model.preflightChecks.count - pending) 项通过，\(pending) 项失败"
+            )
+    }
+
+    /// 全通过时清单是「从结论面板点进来」看的，所以清单头要留一条回结论的路：
+    /// `showsPassingChecks` 不能是单向门。
+    @ViewBuilder
+    private var checkListHeadTrailing: some View {
+        if showsPassingChecks && allChecksPassed {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                pendingNote
+                Button("只看结论") {
+                    showsPassingChecks = false
+                }
+                .speechRailButton(.secondary)
+                .accessibilityIdentifier("diagnostics-collapse-passing")
+            }
+        } else {
+            pendingNote
+        }
+    }
+
+    /// 页脚动作兼回执：复制成功与失败都在这一个控件上说清楚，图标与文字同时变化，
+    /// 不依赖颜色单独表达（REDESIGN-SPEC §9）。
+    private var copyReportTitle: String {
+        reportMessage ?? "复制诊断报告"
+    }
+
+    private var copyReportIcon: String {
+        guard reportMessage != nil else { return "doc.on.clipboard" }
+        return reportCopySucceeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
     }
 
     /// Figma `listFoot`：上次预检多久前、一共查了几项 —— 两个本机事实，
@@ -242,7 +291,7 @@ public struct PreflightDiagnosticsView: View {
     private var detailPanel: some View {
         ScrollView(.vertical) {
             detailContent
-                .padding(SpeechRailDesignTokens.Spacing.lg)
+                .padding(SpeechRailDesignTokens.Layout.cardInset)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -275,48 +324,38 @@ public struct PreflightDiagnosticsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                detailFact("检测结果", resultMessage(for: selectedCheck))
+                // 「检测结果」这一行删掉了：它与折叠区里的「安全技术结果」是同一句话
+                // （`safeTechnicalResult(for:)` 就是 `resultMessage(for:)` 的返回值），
+                // 同一屏写两遍只是重复（全局密度约定；当前生成脚本的详情卡里这两条
+                // 也只在折叠区出现一次）。
                 detailFact("这项检查确认", explanation(for: selectedCheck.name))
                 detailFact("对当前服务的影响", impact(for: selectedCheck))
-                detailFact("建议动作", recoveryPath(for: selectedCheck).detail)
-                if !selectedCheck.ok {
-                    recoverySteps(recoveryPath(for: selectedCheck).steps)
-                }
 
-                if isModelRelatedCheck(selectedCheck) {
-                    modelEvidence
-                }
-
-                Divider()
-
-                SectionHeading(
-                    title: "下一步",
-                    detail: selectedCheck.ok
-                        ? "这项检查不需要操作。继续查看其他检查项即可。"
-                        : "先处理这项阻塞，再重新运行诊断确认结果。"
-                )
+                // Figma `fix`：结论与影响之后就是这一项的动作，而且是详情卡里**唯一**
+                // 的按钮（当前生成脚本：`primaryButton(fix, "打开模型管理", "download", 268)`，
+                // 整宽 268/300、图标是托盘 + 下箭头）。这一格也是「不需要操作」的回执位置。
                 if selectedCheck.ok {
                     Text("当前项目状态正常。")
                         .font(SpeechRailDesignTokens.Typography.body)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 } else {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Button {
-                            Task { await model.refreshPreflight() }
-                        } label: {
-                            Label("重新运行诊断", systemImage: "arrow.clockwise")
-                        }
-                        .speechRailButton(.primary)
-                        .disabled(model.isBusy || model.isRefreshingPreflight)
-                        recoveryAction(for: selectedCheck)
-                    }
+                    recoveryAction(for: selectedCheck)
                 }
+
+                Divider()
 
                 DisclosureGroup {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         LabeledContent("检查标识", value: selectedCheck.name)
                         LabeledContent("安全技术结果", value: safeTechnicalResult(for: selectedCheck))
                         LabeledContent("结果", value: selectedCheck.ok ? "通过" : "失败")
+                        // 建议动作与模型证据收进这一层：前者与下面的编号修复步骤讲同一件事，
+                        // 后者与模型页、Inspector 同源，都是「要查的时候才展开」的技术事实
+                        // （§7.6.1 全局密度约束；稿的详情卡首屏只有结论、一句影响和一个动作）。
+                        LabeledContent("建议动作", value: recoveryPath(for: selectedCheck).detail)
+                        if isModelRelatedCheck(selectedCheck) {
+                            modelEvidenceRows
+                        }
                         LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
                         LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
                         LabeledContent("服务状态", value: model.service.serviceState)
@@ -325,12 +364,20 @@ public struct PreflightDiagnosticsView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .padding(.top, SpeechRailDesignTokens.Spacing.xs)
                 } label: {
+                    // 生成脚本这一格写的是「开发者详情」（`▸ 诊断.png` 那张 22:04 的帧上
+                    // 还写着「技术上下文」，属于第十五轮判定的旧一代，不采用）。
                     Text("开发者详情")
                         .font(SpeechRailDesignTokens.Typography.body)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+
+                // 生成脚本的顺序是「开发者详情 → 修复步骤」（分隔线下方先是折叠区，
+                // 再是编号步骤），条文的列举顺序与此不同，按稿。
+                if !selectedCheck.ok {
+                    recoverySteps(recoveryPath(for: selectedCheck).steps)
+                }
             } else {
                 ContentUnavailableView(
                     "选择一项检查",
@@ -394,6 +441,10 @@ public struct PreflightDiagnosticsView: View {
         .accessibilityLabel("修复步骤")
     }
 
+    /// Figma `fix`：详情卡里只有一个动作，而且是整宽主按钮。
+    /// 稿实测（2026-09-15 22:04 的 4x 帧）按钮 268×34、内容宽 300.8pt——稿是手画的
+    /// 固定宽度，应用取整宽；稿的图标是托盘 + 下箭头，文案是目的地而不是动作
+    /// （「打开模型管理」）。另外两条路由在稿上没有画面，沿用原文案与各自路由图标。
     @ViewBuilder
     private func recoveryAction(for check: PreflightCheckSnapshot) -> some View {
         switch recoveryPath(for: check).route {
@@ -401,51 +452,47 @@ public struct PreflightDiagnosticsView: View {
             Button {
                 navigation.request(.models)
             } label: {
-                Label("打开模型管理", systemImage: AppRoute.models.systemImage)
+                Label("打开模型管理", systemImage: "tray.and.arrow.down")
+                    .frame(maxWidth: .infinity)
             }
-            .speechRailButton(.secondary)
+            .speechRailButton(.primary)
         case .overview:
             Button {
                 navigation.request(.overview)
             } label: {
                 Label("查看服务状态", systemImage: AppRoute.overview.systemImage)
+                    .frame(maxWidth: .infinity)
             }
-            .speechRailButton(.secondary)
+            .speechRailButton(.primary)
         case .developer:
             Button {
                 copyDiagnosticReport()
             } label: {
                 Label("复制脱敏报告", systemImage: "doc.on.clipboard")
+                    .frame(maxWidth: .infinity)
             }
-            .speechRailButton(.secondary)
+            .speechRailButton(.primary)
         }
     }
 
-    private var modelEvidence: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Divider()
-            SectionHeading(
-                title: "模型证据",
-                detail: "以下与模型页使用同一组 XPC model.catalog / model.status 快照；使用状态再结合当前 health 和 worker 生命周期判断。"
-            )
-            if let catalog = model.modelCatalog, let status = model.modelStatus {
-                let statuses = status.artifacts + status.diarization
-                let verifiedCount = statuses.filter {
-                    $0.state == .verified && $0.integrity == .verified
-                }.count
-                detailFact("受管制品", "\(catalog.artifacts.count) 个目录项")
-                detailFact("完整性", "\(verifiedCount)/\(statuses.count) 个制品已通过校验")
-                detailFact(
-                    "当前服务",
-                    displayedHealth?.profile.map(SpeechRailProfilePresentation.title) ?? "运行态未读取"
-                )
-            } else {
-                Text("模型 XPC 快照尚未读取，不能在诊断页推断模型存在或使用状态。")
-                    .font(SpeechRailDesignTokens.Typography.body)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            }
+    /// 模型相关检查的证据行，整块收进「开发者详情」。取值与模型页使用同一组
+    /// XPC `model.catalog` / `model.status` 快照；快照没读到就如实说不能判断，
+    /// 不猜。原先这里在首屏上另起一块「模型证据」（分隔线 + 小标题 + 一句说明 +
+    /// 三行事实），2026-09-16 的密度复查把它降为折叠区里的两行——同一份事实，
+    /// 只是不再和结论抢首屏。第三行「当前服务」与折叠区里的「运行档位」同值，
+    /// 合并成一行。
+    @ViewBuilder
+    private var modelEvidenceRows: some View {
+        if let catalog = model.modelCatalog, let status = model.modelStatus {
+            let statuses = status.artifacts + status.diarization
+            let verifiedCount = statuses.filter {
+                $0.state == .verified && $0.integrity == .verified
+            }.count
+            LabeledContent("受管制品", value: "\(catalog.artifacts.count) 个目录项")
+            LabeledContent("完整性", value: "\(verifiedCount)/\(statuses.count) 个制品已通过校验")
+        } else {
+            LabeledContent("模型快照", value: "尚未读取，不能在诊断页推断模型存在或使用状态")
         }
-        .padding(.top, SpeechRailDesignTokens.Spacing.xs)
     }
 
     private var displayedHealth: HealthSnapshot? {
@@ -679,12 +726,17 @@ public struct PreflightDiagnosticsView: View {
         \(checks)
         """
         _ = NSPasteboard.general.clearContents()
-        if NSPasteboard.general.setString(report, forType: .string) {
-            withAnimation(.easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
-                reportMessage = "已复制脱敏诊断报告"
+        reportCopySucceeded = NSPasteboard.general.setString(report, forType: .string)
+        withAnimation(reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+            reportMessage = reportCopySucceeded ? "已复制脱敏诊断报告" : "复制失败，请重试"
+        }
+        // 回执是临时的：几秒后页脚的事实位要还给「上次预检 … · 共 N 项」。
+        Task {
+            try? await Task.sleep(for: Self.reportReceiptDuration)
+            guard reportMessage != nil else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
+                reportMessage = nil
             }
-        } else {
-            reportMessage = "复制失败，请稍后重试"
         }
     }
 
@@ -832,200 +884,80 @@ private struct DiagnosticRecoveryPath {
     let steps: [String]
 }
 
-private struct DiagnosticsSummaryView: View {
-    let checks: [PreflightCheckSnapshot]
-    let isBusy: Bool
-    let isRefreshing: Bool
-    let errorMessage: String?
-    let lastUpdated: Date?
-    let action: () -> Void
-
-    private var passedCount: Int { checks.filter(\.ok).count }
-    private var failedCount: Int { checks.count - passedCount }
-
-    private var tone: StatusTone {
-        if isRefreshing { return .attention }
-        if let errorMessage, !errorMessage.isEmpty { return .critical }
-        if checks.isEmpty { return .attention }
-        return failedCount == 0 ? .healthy : .critical
-    }
-
-    private var title: String {
-        if isRefreshing { return "正在运行诊断" }
-        if checks.isEmpty, errorMessage != nil { return "预检读取失败" }
-        if checks.isEmpty { return "尚未运行诊断" }
-        return failedCount == 0 ? "预检通过" : "需要处理的检查"
-    }
-
-    private var message: String {
-        if isRefreshing { return "正在读取本机环境、配置和模型准备状态。" }
-        if let errorMessage, !errorMessage.isEmpty {
-            let prefix = checks.isEmpty ? "无法读取预检结果" : "保留上次结果；本次读取失败"
-            return "\(prefix)：\(SpeechRailOperationMessagePresentation.text(errorMessage))"
-        }
-        if checks.isEmpty { return "运行一次诊断，控制台会说明阻塞原因和下一步动作。" }
-        if failedCount == 0 { return "当前受管 runtime、配置和模型目录满足控制面检查条件。" }
-        return "有 \(failedCount) 项前置条件需要处理，先从右侧详情开始。"
-    }
-
-    private var countText: String {
-        checks.isEmpty ? "尚未检查" : "\(passedCount)/\(checks.count) 项通过"
-    }
-
-    private var updatedText: String? {
-        lastUpdated.map { "更新于 \($0.formatted(date: .omitted, time: .shortened))" }
-    }
-
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            horizontalLayout
-            verticalLayout
-        }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.lg)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: SpeechRailDesignTokens.Layout.diagnosticsSummaryHeight,
-            alignment: .leading
-        )
-        .speechRailContentSurface()
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("diagnostics-summary")
-        .accessibilityValue(
-            checks.isEmpty ? "尚未检查" : "\(passedCount) 项通过，\(failedCount) 项失败"
-        )
-    }
-
-    private var horizontalLayout: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-            summaryIcon
-            summaryCopy
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            summaryAction
-        }
-    }
-
-    private var verticalLayout: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                summaryIcon
-                summaryCopy
-            }
-            summaryAction
-        }
-    }
-
-    private var summaryIcon: some View {
-        Image(systemName: tone.systemImage)
-            .font(SpeechRailDesignTokens.Typography.statusGlyph)
-            .foregroundStyle(tone.color)
-            .accessibilityHidden(true)
-    }
-
-    private var summaryCopy: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                Text(title)
-                    .font(SpeechRailDesignTokens.Typography.diagnosticsSummary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(countText)
-                    .font(SpeechRailDesignTokens.Typography.metricValue)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            ViewThatFits(in: .horizontal) {
-                summaryMetadataHorizontal
-                summaryMetadataVertical
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var summaryMetadataHorizontal: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            summaryMessage
-            updatedLabel
-        }
-    }
-
-    private var summaryMetadataVertical: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-            summaryMessage
-            updatedLabel
-        }
-    }
-
-    private var summaryMessage: some View {
-        Text(message)
-            .font(SpeechRailDesignTokens.Typography.caption)
-            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-            .lineLimit(SpeechRailDesignTokens.Diagnostics.summaryMessageMaximumLines)
-            .truncationMode(.tail)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    @ViewBuilder
-    private var updatedLabel: some View {
-        if let updatedText {
-            Text(updatedText)
-                .font(SpeechRailDesignTokens.Typography.technical)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
-    private var summaryAction: some View {
-        Button("重新运行诊断", action: action)
-            .speechRailButton(.primary)
-            .disabled(isBusy)
-            .accessibilityIdentifier("diagnostics-run")
-    }
-}
-
 private struct PreflightCheckRow: View {
     let check: PreflightCheckSnapshot
     let title: String
     let detail: String
 
     var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+        // 稿的诊断检查行是 `frame("diagRow", { gap: 10, padX: 16, padY: 12 })`
+        // （`main.js` 2009），图标是 `icon(row, item.icon, 16)` 的 **16pt 框**。
+        // 上一轮只把墨迹从 10 收到 13（`Icon.rowStatusSize`），没有补框与间距，
+        // 于是文字列停在 `16 + 13 + 8 = 37`，稿是 `16 + 16 + 10 = 42`。
+        // 4x 帧 `▸ 诊断.png` 实测（`--cols`，就绪行在纯白底上）：图标墨迹 x 280.0
+        // （= 卡左沿 261 + padX 16 + lucide `check` 在 16 框里的 2.25 留白）、
+        // 标题墨迹 x 304.25（= 42 + 首字 1.25 字形留白）——与脚本的 16/10 逐位吻合。
+        // 10 不在应用的 4pt 间距档上，也没有第二处用到，所以不新造 token，
+        // 就地写明来源（REDESIGN-SPEC §11.6 第四十一轮）。
+        HStack(spacing: 10) {
             Image(systemName: check.ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+                // 稿的 `icon(row, item.icon, 16)` 是 16pt 图标框；4x 帧实测墨迹
+                // 对勾行 12.0 × 8.75、三角行 13.5 × 12.0。此前用 `.imageScale(.small)`
+                // 只有 10.0 × 10.0（比稿小 20–30%），改用行首状态字形这一档
+                // （`Icon.rowStatusSize` = 13，复现后 13 × 13 / 13 × 12）。
+                // REDESIGN-SPEC §11.6 第三十九轮。字号管**墨迹**，框由下面的
+                // `frame(width:)` 管，两者分开才是稿的写法。
+                .font(SpeechRailDesignTokens.Typography.rowStatusIcon)
                 .foregroundStyle(
                     check.ok
                         ? SpeechRailDesignTokens.Color.ready
                         : SpeechRailDesignTokens.Color.critical
                 )
-                .imageScale(.small)
+                .frame(width: SpeechRailDesignTokens.Control.diagnosticIconFrame)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(title)
-                    .font(SpeechRailDesignTokens.Typography.label)
+                    // 稿的诊断检查行：图标框 16（墨迹 12–13.5）+ 名称 `Body / Medium` + 说明 `Callout`。
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(detail)
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    // 稿的诊断检查行说明是 `Callout`（12pt），不是 `caption`（10pt）：
+                    // 4x 帧上这一行的墨迹高 12.50、名称行 12.00（两行都是中文，比例可比）——
+                    // 说明与名称同档，而非小一档。应用此前用 `caption`，与上面这行注释自相矛盾，
+                    // 也违反 `macos-app-design-system.md`「`caption` 只留给应用自有密集区块」的约定
+                    // （REDESIGN-SPEC §11.6 第三十七轮）。
+                    .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
             Spacer(minLength: 0)
-            Text(check.ok ? "通过" : "失败")
+            // 行尾是**导航指示**，不是状态词：稿 `main.js` 2016 写的是
+            // `icon(row, "chevron-right", 14, V["text/tertiary"])`，4x 帧
+            // `▸ 诊断.png` 每一行的右端也只有一个灰色 `›`。应用此前在这里放
+            // 「通过 / 失败」两个字的语义色文本，比稿多出一列文字，而状态在行首字形
+            // （`checkmark.circle.fill` / `xmark.circle.fill`）、列表头的「N 项需要处理」
+            // 和行自身的 `accessibilityValue` 里都已经说过一遍了
+            // （REDESIGN-SPEC §11.6 第四十一轮）。尺寸沿用应用自己的导航 chevron 档
+            // （`caption`，与折叠行、结果条同族），颜色取稿的 `text/tertiary`。
+            Image(systemName: "chevron.right")
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(
-                    check.ok
-                        ? SpeechRailDesignTokens.Color.ready
-                        : SpeechRailDesignTokens.Color.critical
-                )
-                .lineLimit(1)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .accessibilityHidden(true)
         }
-        .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
+        // 页面列表行与侧栏列表行不是一档：稿的侧栏项是 padX 8（`List.rowHorizontalPadding`
+        // 仍留给侧栏），页面里的 `row` 三处（音色库 / 我的作品 / 诊断）都是 **padX 16 /
+        // padY 12**。4x 帧实测这三页的行距都是 64.00 = 行框 63 + 1pt hairline，
+        // 所以行高钉 `pageRowMinimumHeight`（2026-09-16 第三十七轮；此前取 44 的命中区下限，
+        // 渲染出来只有 59，比帧矮 4）。行内边距由行自己给、`listRowInsets` 清零。
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .listRowInsets(EdgeInsets())
         .frame(
             maxWidth: .infinity,
-            minHeight: SpeechRailDesignTokens.List.rowHeight,
+            minHeight: SpeechRailDesignTokens.List.pageRowMinimumHeight,
             alignment: .leading
         )
         .accessibilityElement(children: .combine)

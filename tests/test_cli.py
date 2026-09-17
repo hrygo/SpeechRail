@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -86,16 +88,50 @@ def test_serve_uses_settings_host_and_port(
         @classmethod
         def from_env_file(cls, env_file: Path | None) -> SimpleNamespace:
             assert env_file is None
-            return SimpleNamespace(host="127.0.0.1", port=8317)
+            return _observability_settings(tmp_path, port=8317)
 
     monkeypatch.setattr(cli, "Settings", FakeSettings)
     monkeypatch.setattr("speechrail.app.create_app", lambda settings: settings)
     monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
 
     assert cli.main(["serve"]) == 0
-    assert captured == {"host": "127.0.0.1", "port": 8317, "log_level": "info"}
+    assert captured == {
+        "host": "127.0.0.1",
+        "port": 8317,
+        "log_level": "info",
+        "log_config": None,
+    }
     assert not (tmp_path / "state").exists()
     assert not (tmp_path / "config").exists()
+    assert (tmp_path / "logs" / "speechrail.log").is_file()
+
+
+def _observability_settings(
+    tmp_path: Path, *, port: int, host: str = "127.0.0.1"
+) -> SimpleNamespace:
+    """Build the settings shape ``run_server`` reads for a serve invocation."""
+    return SimpleNamespace(
+        host=host,
+        port=port,
+        log_dir=tmp_path / "logs",
+        metrics_rollup_enabled=False,
+        metrics_rollup_dir=None,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_root_logging() -> Iterator[None]:
+    """Undo the process-wide logging a serve invocation installs."""
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    root.handlers = handlers
+    root.setLevel(level)
 
 
 def test_serve_discovers_private_app_home_configuration(
@@ -110,7 +146,7 @@ def test_serve_discovers_private_app_home_configuration(
         @classmethod
         def from_env_file(cls, actual_env_file: Path | None) -> SimpleNamespace:
             captured["env_file"] = actual_env_file
-            return SimpleNamespace(host="127.0.0.1", port=8317)
+            return _observability_settings(tmp_path, port=8317)
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "Settings", FakeSettings)
@@ -134,7 +170,7 @@ def test_serve_explicit_app_home_resolves_private_config(
         @classmethod
         def from_env_file(cls, actual_env_file: Path | None) -> SimpleNamespace:
             captured["env_file"] = actual_env_file
-            return SimpleNamespace(host="127.0.0.1", port=8317)
+            return _observability_settings(tmp_path, port=8317)
 
     monkeypatch.setattr(cli, "Settings", FakeSettings)
     monkeypatch.setattr(
@@ -170,7 +206,7 @@ def test_serve_uses_one_shot_startup_claim(
         @classmethod
         def from_env_file(cls, actual_env_file: Path | None) -> SimpleNamespace:
             assert actual_env_file == env_file
-            return SimpleNamespace(host="127.0.0.1", port=8317)
+            return _observability_settings(tmp_path, port=8317)
 
     def claim(app_home: Path) -> dict[str, object]:
         captured["app_home"] = app_home

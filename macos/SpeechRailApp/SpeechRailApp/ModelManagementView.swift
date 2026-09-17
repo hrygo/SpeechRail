@@ -4,10 +4,11 @@ import SwiftUI
 public struct ModelManagementView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    /// 开发者详情是全 App 的一个偏好（View ▸ 显示/隐藏开发者详情 ⌘⌥I）。
+    @AppStorage("speechrail.showDeveloperDetails") private var showInspector = false
     @State private var selectedProfile: SpeechRailProfile = .balanced
     @State private var selectedArtifactKey: String?
     @State private var pendingAction: ModelAction?
-    @State private var showInspector = false
 
     public init() {}
 
@@ -15,30 +16,14 @@ public struct ModelManagementView: View {
         PageScaffold(route: .models) {
             mainContent
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                WorkspaceActionsMenu(helpText: "读取模型目录与校验状态，或查看选中制品的技术详情") {
-                    Button {
-                        Task { await model.refreshModelsAndHealth() }
-                    } label: {
-                        Label("刷新模型状态", systemImage: "arrow.clockwise")
-                            .speechRailMenuRow()
-                    }
-                    .disabled(model.isRefreshingModels)
-                    Divider()
-                    Button {
-                        showInspector.toggle()
-                    } label: {
-                        Label(
-                            showInspector ? "隐藏开发者详情" : "显示开发者详情",
-                            systemImage: "info.circle"
-                        )
-                        .speechRailMenuRow()
-                    }
-                }
+        // 这一页的动作全都属于卡片里的制品（下载并校验、应用到档位），所以没有头部动作；
+        // 页面身份由窗口组合根 `ControlCenterView` 声明（§6.2）。
+        .focusedSceneValue(
+            \.reloadPageCommand,
+            ReloadPageCommand(title: "重新读取模型目录") {
+                Task { await model.refreshModelsAndHealth() }
             }
-            .sharedBackgroundVisibility(.hidden)
-        }
+        )
         .inspector(isPresented: $showInspector) {
             modelInspector
         }
@@ -149,8 +134,9 @@ public struct ModelManagementView: View {
     }
 
     private var modelWorkspace: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             profileCards
+            actionSection
             selectedProfilePanel
         }
     }
@@ -188,6 +174,7 @@ public struct ModelManagementView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.lg) {
             profileContext
             profileFacts
+            modelReadinessSummary
             Divider()
             artifactSection
             if !unmanagedArtifactStatuses.isEmpty {
@@ -198,28 +185,8 @@ public struct ModelManagementView: View {
                 Divider()
                 diarizationSection
             }
-            if let operation = activeModelOperation {
-                let canRetry = operation.state == .interrupted
-                    || operation.state == .failed
-                    || operation.state == .cancelled
-                Divider()
-                OperationBar(
-                    operation: operation,
-                    actionTitle: operationActionTitle(for: operation)
-                ) {
-                    handleOperationAction(operation, canRetry: canRetry)
-                }
-                if operation.state == .interrupted {
-                    Text("上一次准备被中断。本机不做断点续传：重试会重新核对已存在的文件，再从起点完成校验。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Divider()
-            actionSection
         }
-        .padding(SpeechRailDesignTokens.Spacing.lg)
+        .padding(SpeechRailDesignTokens.Layout.cardInset)
         .speechRailContentSurface()
     }
 
@@ -261,7 +228,8 @@ public struct ModelManagementView: View {
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             Text(value)
-                .font(SpeechRailDesignTokens.Typography.label)
+                // 稿的 `kvRow`：键与值都是 `Callout`（12pt Regular）。
+                .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(tone.color)
                 .lineLimit(1)
         }
@@ -299,6 +267,34 @@ public struct ModelManagementView: View {
         .frame(minWidth: SpeechRailDesignTokens.Layout.modelFactMinimumWidth, alignment: .leading)
     }
 
+    /// Figma `artifacts` 的列头：右侧三个窄列没有列头时读起来像无主的装饰。
+    private var artifactColumnsHeader: some View {
+        ArtifactColumnGrid { metrics in
+            HStack(spacing: 0) {
+                Text("制品")
+                    .frame(
+                        minWidth: metrics.artifactMinimum,
+                        maxWidth: metrics.artifact,
+                        alignment: .leading
+                    )
+                Text("量化")
+                    .frame(width: metrics.quantization, alignment: .leading)
+                Text("文件")
+                    .frame(width: metrics.file, alignment: .trailing)
+                Text("校验")
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        // 稿的制品表列头是 `Caption / Medium`（脚本 1945）。
+        .font(SpeechRailDesignTokens.Typography.captionMedium)
+        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        // 列头与上方 `CardHead` 同一条左沿（稿 `header` 与 `head` 都是 padX 18；
+        // 应用此前 8pt，比卡头缩进 8pt，同一张卡里两行左沿对不齐）。
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .accessibilityHidden(true)
+    }
+
     private var artifactSection: some View {
         CardSurface {
             CardHead(
@@ -320,6 +316,11 @@ public struct ModelManagementView: View {
                     )
                 } else {
                     VStack(spacing: 0) {
+                        // Figma `artifacts`：制品表是四列，不是五行堆叠的说明块。
+                        // 来源、目标档位与使用状态都在右侧 Inspector，行里只留
+                        // 一眼要量的四个字段（§7.7、§7.6.1 密度约束）。
+                        artifactColumnsHeader
+                        Divider()
                         ForEach(Array(artifacts.enumerated()), id: \.element.key) { index, artifact in
                             Button {
                                 selectedArtifactKey = artifact.key
@@ -327,8 +328,6 @@ public struct ModelManagementView: View {
                                 ArtifactChoiceRow(
                                     artifact: artifact,
                                     status: status(for: artifact),
-                                    usage: usage(for: artifact),
-                                    targetProfile: selectedProfile,
                                     quantization: quantizationText(for: artifact),
                                     selected: selectedArtifactKey == artifact.key
                                 )
@@ -407,18 +406,24 @@ public struct ModelManagementView: View {
         }
     }
 
+    /// Figma `actions`：动作行紧跟档位卡、排在制品卡之前。4x 帧实测（`▸ 模型.png`）
+    /// 两张卡之间是一条 74.25pt 的页面底色带，里面只有一行 34pt 的动作，上下各留
+    /// 20pt——与页面级块间距 `Spacing.gutter` 同值；「磁盘」事实在这一行右端。
+    ///
+    /// 这里不再放「下一步」小标题：稿上没有，页头副标题「先下载并校验，再应用到运行
+    /// 档位；两者是独立操作。」已经说过同一句话（全局密度约定：不重复解释）。
+    /// 下方只保留会改变判断的阻塞原因，以及正在进行/被中断的操作本身。
     private var actionSection: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            SectionHeading(
-                title: "下一步",
-                detail: "下载只准备本机资产；应用档位才会改变服务配置。两项动作都会先确认影响。"
-            )
-            modelReadinessSummary
-            HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+            // 稿 `actions` 的 gap 是 8（脚本 `frame("actions", { gap: 8 })`）；4x 帧在
+            // 按钮中线上量的间距是 8.25（圆角矩形在中线最宽，顶边附近量会被圆角吃掉
+            // 几个 pt，这是上一轮把这一行判成「约 10」的原因）。应用此前取 `sm`(12)。
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Button {
                     pendingAction = .download
                 } label: {
-                    Label("下载并校验", systemImage: "arrow.down.circle")
+                    // 稿的主按钮图标是「托盘 + 下箭头」，不是 `arrow.down.circle`。
+                    Label("下载并校验", systemImage: "tray.and.arrow.down")
                 }
                 .speechRailButton(.primary)
                 .disabled(!canPrepareModels)
@@ -427,7 +432,8 @@ public struct ModelManagementView: View {
                 Button {
                     pendingAction = .apply
                 } label: {
-                    Label("应用此档位", systemImage: "checkmark.circle")
+                    // 稿上这个次按钮只有文字，没有图标（4x 帧里是 5 个字形簇）。
+                    Text("应用此档位")
                 }
                 .speechRailButton(.secondary)
                 .disabled(!canApplyProfile)
@@ -463,6 +469,25 @@ public struct ModelManagementView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                     .lineLimit(2)
             }
+            // 长任务进度贴在触发它的那一行下面（§6.4「在触发页内联」），
+            // 而不是沉到制品卡后面去。
+            if let operation = activeModelOperation {
+                let canRetry = operation.state == .interrupted
+                    || operation.state == .failed
+                    || operation.state == .cancelled
+                OperationBar(
+                    operation: operation,
+                    actionTitle: operationActionTitle(for: operation)
+                ) {
+                    handleOperationAction(operation, canRetry: canRetry)
+                }
+                if operation.state == .interrupted {
+                    Text("上一次准备被中断。本机不做断点续传：重试会重新核对已存在的文件，再从起点完成校验。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 
@@ -475,7 +500,7 @@ public struct ModelManagementView: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(presentation.title)
-                    .font(SpeechRailDesignTokens.Typography.label)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -515,7 +540,12 @@ public struct ModelManagementView: View {
                     LabeledContent("存在状态", value: statusText(for: status))
                     LabeledContent("完整性", value: integrityText(for: status))
                 }
-                LabeledContent("VoiceDesign 能力", value: voiceDesignCapability(for: selectedProfile))
+                // 这一行说的是目标档位的声明，不是当前服务：它紧挨「当前服务档位」，
+                // 不写清作用域会被读成服务现在的能力。
+                LabeledContent(
+                    "VoiceDesign 能力（目标档位）",
+                    value: voiceDesignCapability(for: selectedProfile)
+                )
                 LabeledContent(
                     "当前服务档位",
                     value: currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
@@ -1127,7 +1157,12 @@ private struct ProfileChoiceCard: View {
 
                 Divider()
 
-                VStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                // 稿 `Profile Card` 的 `spec` 是 VERTICAL / gap 6，`kvRow` 取 `Callout`
+                // （12pt，行盒 17.4）→ 行距 23.4。4x 帧 `▸ 模型.png` 实测三行 ink 起点
+                // 221.75 / 245.75 / 268（行距 24 / 22.25）。系统 `callout` 行盒是 15，
+                // 用间距补回同一行距：15 + 8 = 23（残差 0.4），因此这里取 `xs` 而不是
+                // 稿的 6（应用的 4pt 节奏里没有 6，`micro`(4) 会让行距只剩 19）。
+                VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     ForEach(specs) { spec in
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Text(spec.label)
@@ -1156,23 +1191,36 @@ private struct ProfileChoiceCard: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(SpeechRailDesignTokens.Spacing.md)
-            .background(
-                isSelected
-                    ? SpeechRailDesignTokens.Surface.selectedFill
-                    : SpeechRailDesignTokens.Color.field,
-                in: ConcentricRectangle()
-            )
+            // 卡片这层只**声明形状**（子层的 `.concentric` 靠它推导）；底色交给下面的
+            // 交互样式：样式把底色与悬停/按压色叠在同一个背景层里，卡片自己再画一层
+            // 不透明底色会把悬停反馈整个盖住——样式那层填色只在卡片左右各露 8pt，
+            // 读起来是一条侧向晕边而不是悬停态（REDESIGN-SPEC §11.6 第五十 / 五十二轮）。
+            .containerShape(SpeechRailDesignTokens.Corner.containerShape)
             .overlay {
-                ConcentricRectangle()
-                    .stroke(
-                        isSelected
-                            ? SpeechRailDesignTokens.Color.rail
-                            : SpeechRailDesignTokens.Surface.border,
-                        lineWidth: isSelected ? 1.5 : 1
-                    )
+                // Only the active profile is outlined; an idle profile card is a
+                // static surface and separates by fill alone (§5.2, Figma
+                // `Profile Card` 的 Default 变体同样无描边). 选中描边与其他选中面
+                // 同为 1pt：粗细不再充当状态信号，只由填充与「当前使用」胶囊承担。
+                if isSelected {
+                    SpeechRailDesignTokens.Corner.containerShape
+                        .stroke(
+                            SpeechRailDesignTokens.Color.rail,
+                            lineWidth: SpeechRailDesignTokens.Stroke.strong
+                        )
+                }
             }
         }
-        .speechRailInteractiveButtonStyle(fillsAvailableWidth: true)
+        // 卡片的底色与状态色都在这里：`horizontalInset: 0` 让卡片**铺满自己的格位**，
+        // 于是相邻卡片的可见间隔回到 `HStack` 的 `Spacing.sm`(12)——与帧一致；
+        // 此前样式自带左右各 8pt，间隔被撑到 27.5pt（帧 12pt）。
+        .speechRailInteractiveButtonStyle(
+            fillsAvailableWidth: true,
+            horizontalInset: 0,
+            baseFill: isSelected
+                ? SpeechRailDesignTokens.Surface.selectedFill
+                : SpeechRailDesignTokens.Color.field,
+            corner: .container
+        )
         .accessibilityIdentifier(profile.rawValue)
         .accessibilityLabel(profileTitle)
         .accessibilityValue(isSelected ? "已选择" : "未选择")
@@ -1261,72 +1309,105 @@ private struct ModelReadinessPresentation {
     let detail: String
 }
 
+/// 稿 `artifacts` 的列几何：`COLS = [440, 200, 140]` + 校验列吃掉余量，**列间距 0**
+/// （列自己留白）。4x 帧实测列沿：制品 280.5、量化 720.5、文件右沿 1060.5、
+/// 校验右沿 1400.5 —— 应用此前是「弹性制品 + 84 / 64 / 120 挤在右侧」，最右一列
+/// 的位置与稿差约 250pt（REDESIGN-SPEC §11.6 第二十一轮）。
+private struct ArtifactColumnMetrics {
+    let artifact: CGFloat
+    let artifactMinimum: CGFloat
+    let quantization: CGFloat
+    let file: CGFloat
+
+    /// 稿的原值（1440 宽窗口下与帧列沿逐列重合）。
+    static let frame = ArtifactColumnMetrics(
+        artifact: 440,
+        artifactMinimum: 440,
+        quantization: 200,
+        file: 140
+    )
+
+    /// 最小窗口（1120）下列内容区只剩约 808pt，按同一比例收窄三列，校验列继续吃余量。
+    static let compact = ArtifactColumnMetrics(
+        artifact: 440,
+        artifactMinimum: 220,
+        quantization: 140,
+        file: 100
+    )
+}
+
+/// 列头与数据行共用同一套列几何：先按稿的原值排，排不下再退到收窄版。
+private struct ArtifactColumnGrid<Content: View>: View {
+    private let content: (ArtifactColumnMetrics) -> Content
+
+    init(@ViewBuilder content: @escaping (ArtifactColumnMetrics) -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            content(.frame)
+            content(.compact)
+        }
+    }
+}
+
 private struct ArtifactChoiceRow: View {
     let artifact: ModelArtifactSnapshot
     let status: ModelArtifactStatusSnapshot?
-    let usage: ModelArtifactUsagePresentation
-    let targetProfile: SpeechRailProfile
     let quantization: String
     let selected: Bool
 
     var body: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Image(systemName: statusPresentation.systemImage)
-                .foregroundStyle(statusPresentation.color)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+        // 与列头同一套列网格，否则行与列头会各差几 pt。
+        ArtifactColumnGrid { metrics in
+            HStack(spacing: 0) {
                 Text(artifact.key)
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                Text(modelSourceText)
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text("目标：\(SpeechRailProfilePresentation.title(targetProfile)) · 必需")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text("存在：\(statusPresentation.summary)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(statusPresentation.color)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                Text("使用：\(usage.text)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(usage.tone.color)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    .frame(
+                        minWidth: metrics.artifactMinimum,
+                        maxWidth: metrics.artifact,
+                        alignment: .leading
+                    )
+
                 Text(quantization)
-                    .font(SpeechRailDesignTokens.Typography.technical)
+                    // 稿的制品表单元格是 `Callout`(12)（脚本 `cell/v`）
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
-                Text("\(artifact.fileCount) 个文件 · \(sizeText)")
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .frame(width: metrics.quantization, alignment: .leading)
+
+                Text(String(artifact.fileCount))
+                    .font(SpeechRailDesignTokens.Typography.technicalValue)
                     .monospacedDigit()
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .lineLimit(1)
+                    .frame(width: metrics.file, alignment: .trailing)
+                    .accessibilityLabel("\(artifact.fileCount) 个文件")
+
+                Label(statusPresentation.title, systemImage: statusPresentation.systemImage)
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(statusPresentation.color)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .layoutPriority(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, SpeechRailDesignTokens.List.rowVerticalPadding)
-        .padding(.horizontal, SpeechRailDesignTokens.List.rowHorizontalPadding)
+        // 稿的制品表行是 padX 18 / padY 11 + 一行 `Callout`(17.4) = 39.4pt；应用的行高
+        // 16，纵向取 `sm`(12) 补回同一档带高。REDESIGN-SPEC §11.6 第二十一轮。
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
         .background(
             selected ? SpeechRailDesignTokens.Surface.selectedFill : Color.clear,
-            in: ConcentricRectangle()
+            in: SpeechRailDesignTokens.Corner.nestedShape
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(artifact.key)
         .accessibilityValue(
-            "\(modelSourceText)，\(quantization)，\(artifact.fileCount) 个文件，目标：\(SpeechRailProfilePresentation.title(targetProfile))，存在：\(statusPresentation.summary)，使用：\(usage.text)"
+            "\(modelSourceText)，量化 \(quantization)，\(artifact.fileCount) 个文件，\(statusPresentation.summary)"
         )
         .accessibilityHint("在开发者详情中查看模型来源和校验信息")
     }
@@ -1345,9 +1426,6 @@ private struct ArtifactChoiceRow: View {
         return artifact.provider.isEmpty ? identifier : "\(artifact.provider) · \(identifier)"
     }
 
-    private var sizeText: String {
-        String(format: "%.1f GiB", Double(artifact.sizeBytes) / 1_073_741_824)
-    }
 
     private var statusPresentation: ModelArtifactStatusPresentation {
         ModelArtifactStatusPresentation(status: status)

@@ -1,4 +1,8 @@
+import json
 import logging
+from collections.abc import Iterator
+from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -225,3 +229,262 @@ def test_metrics_governor_uses_class_label() -> None:
     snap = SimpleNamespace(active_realtime=1, active_batch=0, pending_realtime=0, pending_batch=0)
     text = m.render_prometheus(governor_snapshot=snap)
     assert 'speechrail_governor_active_requests{class="realtime"} 1' in text
+
+
+@pytest.fixture
+def restore_logging() -> Iterator[None]:
+    """Undo the process-wide logging configuration installed by a test."""
+    root = logging.getLogger()
+    handlers = list(root.handlers)
+    level = root.level
+    vendor = logging.getLogger("uvicorn.access")
+    vendor_handlers = list(vendor.handlers)
+    vendor_propagate = vendor.propagate
+    vendor_level = vendor.level
+    yield
+    for handler in list(root.handlers):
+        if handler not in handlers:
+            root.removeHandler(handler)
+            handler.close()
+    root.handlers = handlers
+    root.setLevel(level)
+    vendor.handlers = vendor_handlers
+    vendor.propagate = vendor_propagate
+    vendor.setLevel(vendor_level)
+
+
+def test_configure_logging_writes_rotated_service_and_access_logs(
+    tmp_path: Path, restore_logging: None
+) -> None:
+    """Both files are created: readable lines and one JSON object per record."""
+    from speechrail.observability.logging import access, configure_logging
+
+    handles = configure_logging(tmp_path / "logs", console=False)
+
+    assert handles is not None
+    logger = logging.getLogger("speechrail.test.rotation")
+    logger.info("service started")
+    access(
+        logger,
+        timestamp="2026-09-16T00:00:00Z",
+        request_id="req_file",
+        route="/v1/audio/speech",
+        status=200,
+        outcome="completed",
+        duration_ms=812.5,
+        error_code=None,
+        tts_warm=True,
+        worker_state="active",
+        Authorization="Bearer secret",
+    )
+
+    service_text = handles.service_log.read_text(encoding="utf-8")
+    assert "service started" in service_text
+    assert "request_id=req_file" in service_text
+    assert "duration_ms=812.5" in service_text
+    assert "secret" not in service_text
+
+    records = [
+        json.loads(line) for line in handles.access_log.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [record["event"] for record in records] == ["http_access"]
+    assert records[0]["route"] == "/v1/audio/speech"
+    assert records[0]["status"] == 200
+    assert records[0]["duration_ms"] == 812.5
+    assert "secret" not in json.dumps(records)
+    assert handles.service_log.stat().st_mode & 0o777 == 0o600
+    assert handles.access_log.stat().st_mode & 0o777 == 0o600
+
+
+def test_configure_logging_fails_open_when_the_directory_is_unusable(
+    tmp_path: Path, restore_logging: None
+) -> None:
+    """An unusable log directory keeps the previous logging configuration."""
+    from speechrail.observability.logging import configure_logging
+
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+    root = logging.getLogger()
+    before = list(root.handlers)
+
+    assert configure_logging(blocked, console=False) is None
+    assert list(root.handlers) == before
+
+
+def test_access_records_reach_a_handler_and_the_file(tmp_path: Path, restore_logging: None) -> None:
+    """Regression: ``http_access`` used to be emitted with no handler at all."""
+    from fastapi.testclient import TestClient
+
+    from speechrail.app import create_app
+    from speechrail.config import Settings
+    from speechrail.observability.logging import configure_logging
+
+    handles = configure_logging(tmp_path / "logs", console=False)
+    assert handles is not None
+    with TestClient(create_app(Settings(qwen3_model_dir=None, qwen3_python=None))) as client:
+        response = client.get("/readyz", headers={"X-Request-ID": "req_file"})
+
+    assert response.status_code == 503
+    records = [
+        json.loads(line) for line in handles.access_log.read_text(encoding="utf-8").splitlines()
+    ]
+    http_access = [record for record in records if record["event"] == "http_access"]
+    assert http_access
+    assert http_access[-1]["request_id"] == "req_file"
+    assert http_access[-1]["route"] == "/readyz"
+    assert http_access[-1]["status"] == 503
+
+
+def _rollup(tmp_path: Path, metrics: Metrics, **overrides: object):
+    from speechrail.observability.rollup import MetricsRollup, RollupContext, RollupResources
+
+    arguments: dict[str, object] = {
+        "directory": tmp_path / "metrics-rollup",
+        "metrics": metrics,
+        "context": lambda: RollupContext(
+            workers={"asr": "active"},
+            ready={"asr": True, "tts": False},
+            active_requests=1,
+            pending_requests=2,
+            total_capacity=4,
+            allow_heavy_overlap=True,
+        ),
+        "resources": lambda: RollupResources(
+            physical_footprint_bytes=2048,
+            footprint_complete=True,
+            footprint_process_count=2,
+            declared_footprint_bytes=1024,
+        ),
+        "service_version": "2.6.5",
+        "profile": "quality",
+    }
+    arguments.update(overrides)
+    return MetricsRollup(**arguments)  # type: ignore[arg-type]
+
+
+def _rollup_file(tmp_path: Path) -> Path:
+    from datetime import UTC, datetime
+
+    return tmp_path / "metrics-rollup" / f"{datetime.now(UTC).date().isoformat()}.jsonl"
+
+
+def test_rollup_records_interval_deltas_without_leaking_paths(tmp_path: Path) -> None:
+    """One line per interval carries the usage, latency and capacity deltas."""
+    metrics = Metrics()
+    rollup = _rollup(tmp_path, metrics)
+    rollup.write_interval()
+
+    metrics.record_http_request("/v1/audio/speech", "POST", 200, 0.41)
+    metrics.record_http_request("/v1/audio/transcriptions", "POST", 500, 2.4)
+    metrics.record_http_request("/health", "GET", 200, 0.002)
+    metrics.record_tts(
+        voice_class="system", char_count=12, audio_duration_sec=2.5, inference_duration_sec=0.41
+    )
+    metrics.record_asr(audio_duration_sec=30.0, inference_duration_sec=2.4)
+    metrics.record_governor_rejection("batch_tts")
+    rollup.write_interval()
+
+    lines = _rollup_file(tmp_path).read_text(encoding="utf-8")
+    first, second = (json.loads(line) for line in lines.splitlines())
+
+    assert first["requests"]["http_total"] == 0
+    assert second["schema_version"] == 1
+    assert second["kind"] == "metrics_rollup"
+    assert second["requests"] == {
+        "http_total": 3,
+        "speech_total": 2,
+        "tts": 1,
+        "asr": 1,
+        "failed": 1,
+        "client_errors": 0,
+        "by_status": {"200": 2, "500": 1},
+        "by_endpoint": {
+            "/health": 1,
+            "/v1/audio/speech": 1,
+            "/v1/audio/transcriptions": 1,
+        },
+    }
+    assert second["audio_seconds"] == {"tts": 2.5, "asr": 30.0}
+    assert second["latency_ms"]["tts"]["count"] == 1
+    assert second["latency_ms"]["tts"]["avg"] == 410.0
+    assert second["latency_ms"]["asr"]["avg"] == 2400.0
+    assert second["latency_ms"]["by_endpoint"]["/v1/audio/speech"]["p95"] == 487.5
+    assert second["capacity"]["queue_rejections"] == 1
+    assert second["capacity"]["active_peak"] == 1
+    assert second["capacity"]["allow_heavy_overlap"] is True
+    assert second["memory"]["physical_footprint_bytes"] == 2048
+    assert second["workers"]["states"] == {"asr": "active"}
+    assert second["ready"] == {"asr": True, "tts": False}
+    assert str(Path.home()) not in lines
+    assert (tmp_path / "metrics-rollup").stat().st_mode & 0o777 == 0o700
+
+
+def test_rollup_purges_files_past_the_retention_window(tmp_path: Path) -> None:
+    """Retention is enforced by filename date without reading file contents."""
+    directory = tmp_path / "metrics-rollup"
+    directory.mkdir()
+    (directory / "2026-08-01.jsonl").write_text("{}\n", encoding="utf-8")
+    (directory / "2026-09-10.jsonl").write_text("{}\n", encoding="utf-8")
+    (directory / "notes.txt").write_text("keep me", encoding="utf-8")
+    rollup = _rollup(tmp_path, Metrics(), retention_days=30)
+
+    removed = rollup.purge(date(2026, 9, 16))
+
+    assert [path.name for path in removed] == ["2026-08-01.jsonl"]
+    assert sorted(path.name for path in directory.iterdir()) == ["2026-09-10.jsonl", "notes.txt"]
+
+
+def test_rollup_loop_appends_one_line_per_interval(tmp_path: Path) -> None:
+    """The background task writes on its own, without an external trigger."""
+    import asyncio
+
+    rollup = _rollup(tmp_path, Metrics(), interval_seconds=0.05, sample_seconds=0.01)
+    written = asyncio.run(_run_rollup_for(rollup, 0.24))
+
+    assert written >= 1
+    assert len(_rollup_file(tmp_path).read_text(encoding="utf-8").splitlines()) == written
+
+
+def test_rollup_retries_a_failed_append_without_losing_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed append extends the next interval instead of dropping counts."""
+    import asyncio
+
+    import speechrail.observability.rollup as rollup_module
+
+    metrics = Metrics()
+    rollup = _rollup(tmp_path, metrics)
+    original_append = rollup_module.MetricsRollup._append
+    attempts: list[int] = []
+
+    def flaky_append(path: Path, record: dict) -> None:
+        attempts.append(len(attempts))
+        if len(attempts) == 2:
+            raise OSError("disk full")
+        original_append(path, record)
+
+    monkeypatch.setattr(
+        rollup_module.MetricsRollup, "_append", staticmethod(flaky_append)
+    )
+    assert asyncio.run(rollup.flush()) is not None
+
+    metrics.record_http_request("/v1/audio/speech", "POST", 200, 0.5)
+    assert asyncio.run(rollup.flush()) is None
+    assert rollup.failures == 1
+
+    metrics.record_http_request("/v1/audio/speech", "POST", 200, 0.5)
+    assert asyncio.run(rollup.flush()) is not None
+
+    lines = _rollup_file(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[1])["requests"]["tts"] == 2
+
+
+async def _run_rollup_for(rollup, seconds: float) -> int:
+    import asyncio
+
+    await rollup.start()
+    await asyncio.sleep(seconds)
+    await rollup.stop()
+    return rollup.written
