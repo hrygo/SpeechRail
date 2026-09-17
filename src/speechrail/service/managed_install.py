@@ -75,7 +75,8 @@ def _run(command: tuple[str, ...], runner: CommandRunner) -> None:
     except OSError as exc:
         raise InstallerError("required local command could not be executed") from exc
     if completed.returncode != 0:
-        if command and command[0] == "uv":
+        # The CLI passes an absolute path, so classify by executable name.
+        if command and Path(command[0]).name == "uv":
             raise InstallerError("uv command failed")
         raise InstallerError("installed service command failed")
 
