@@ -212,18 +212,39 @@ class MetricsRollup:
 
     async def flush(self) -> Record | None:
         """Append one line for the interval that just closed, or ``None``."""
+        append = asyncio.ensure_future(asyncio.to_thread(self.write_interval))
         try:
-            record = await asyncio.to_thread(self.write_interval)
+            record = await asyncio.shield(append)
+        except asyncio.CancelledError:
+            # The worker thread cannot be cancelled: a line that has already
+            # begun its append still reaches the file, so wait for that append
+            # and its counter before the cancellation reaches the caller.
+            # Skipping them would leave `written` one behind the file for the
+            # rest of the process: the line is on disk, but nothing counted it.
+            await self._finish_interrupted_append(append)
+            raise
         except Exception as exc:
-            self._failures += 1
-            _LOGGER.warning(
-                "speechrail metrics rollup could not append an interval line (%s); "
-                "the service keeps running and the next line covers this interval",
-                exc.__class__.__name__,
-            )
+            self._report_failure(exc)
             return None
         self._written += 1
         return record
+
+    async def _finish_interrupted_append(self, append: asyncio.Future[Record]) -> None:
+        """Attribute the outcome of an append a cancellation interrupted."""
+        try:
+            await append
+        except Exception as exc:
+            self._report_failure(exc)
+        else:
+            self._written += 1
+
+    def _report_failure(self, exc: BaseException) -> None:
+        self._failures += 1
+        _LOGGER.warning(
+            "speechrail metrics rollup could not append an interval line (%s); "
+            "the service keeps running and the next line covers this interval",
+            exc.__class__.__name__,
+        )
 
     def write_interval(self) -> Record:
         """Diff the registry since the last write and append one bounded line.
