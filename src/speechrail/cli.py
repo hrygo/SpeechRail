@@ -863,8 +863,8 @@ def _run_install(args: argparse.Namespace) -> int:
     if not machine_output:
         carried = installed_preset is not None and args.preset is None
         print(f"Wheel: {wheel.name}")
-        suffix = " (kept from the installed service)" if carried else ""
-        print(f"Profile: {preset}{suffix} (ASR={summary.asr}, TTS={summary.tts})")
+        suffix = " — kept from the installed service" if carried else ""
+        print(f"Profile: {preset} (ASR={summary.asr}, TTS={summary.tts}){suffix}")
         print(f"App home: {app_home}")
         plan = _install_download_plan(app_home, preset)
         if plan is None:

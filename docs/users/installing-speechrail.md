@@ -41,9 +41,10 @@ shasum -a 256 -c SHA256SUMS
 - 已发布的 wheel 平台标签是 `macosx_26_0_arm64`；按 PEP 425 语义，`pip` / `uv` 只在 macOS 26
   及以上接受它。需要在 macOS 14/15 上部署时，用第 3.2 节的仓库流程在目标机构建 wheel。
 - 磁盘：单次全新安装预留 **≥ 25 GB**（`light` 约 2.99 GB、`balanced` 约 5.96 GB、`quality` 约
-  10.73 GB 的模型，外加隔离运行时）。模型与 vendor runtime 按清单复用，升级不会重复占用；但每次
-  安装都会在 `runtime/releases` 新增一个目录，安装器不自动清理旧版本——确认不再需要回退后，可以手动
-  删除旧的 `runtime/releases/<旧版本>`，唯一不能删的是 `runtime/current` 指向的那份。
+  10.73 GB 的模型，外加隔离运行时）。模型与 vendor runtime 按清单复用，升级不会重复占用；每装一个
+  **新版本** wheel 会在 `runtime/releases` 新增一个目录（重装同一份 wheel 则复用），而安装器不会
+  自动清理旧版本——确认不再需要回退后，可以手动删除旧的 `runtime/releases/<旧版本>`，唯一不能删的
+  是 `runtime/current` 指向的那份。
 - 首次安装需要联网：先访问 PyPI 装 wheel 的依赖，再访问项目锁定的模型源取模型 snapshot。模型准备
   只在显式确认（`--yes`）后发生，请求路径不会下载模型。
 - `uv`：安装命令通过 `uvx` 调用，Python 3.12 由它按需取用。缺少 `uv` 时 `install` 会在准备模型前
