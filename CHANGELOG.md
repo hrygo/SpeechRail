@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [2.6.6] - 2026-09-17
+
+### Fixed
+
+- 修复 macOS UI 测试停在重设计之前的断言，tag 触发的 Release 因此无法发布：三条用例仍在检查旧侧栏分组名「服务」（现为「引擎」）、旧页首文案「确认本机语音服务能否使用」（页首现在取 `AppRoute.overview.pageSubtitle`）、只有「查看检查明细」展开后才存在的诊断两栏清单，以及已搬进「服务」页签的「最低系统」。现在用例按当前设计走：诊断页从「未发现问题」结论面板展开清单，设置窗口断言「通用」页签自己的小节。受此影响，v2.6.4 与 v2.6.5 的 tag 都没产出 GitHub Release——v2.6.4 没有对应的 Release run，v2.6.5 的 run 在复用 CI 的 `macOS App Build & Tests` 上失败、`publish` 被跳过；v2.6.6 一并交付这两个版本的内容。
+- 修复 macOS 指标解析无法被 SwiftPM 测试覆盖：`RuntimeMetricsSampler.labelValue` 改为 `public`，`ControlKitTests` 按服务端真实 JSON 形状补齐时延分位、并发与 worker 解析用例（+578/−8）。
+- 修复 `tests/test_observability.py` 的滚动指标轮询用例偶发失败：取消 task 与最后一次落盘竞争，断言时行数偶尔比实际写入少一行；现在等最后一次写入完成后再断言。
+
+### Changed
+
+- 依赖更新（dev extra，运行时依赖未变）：`openai` 2.54.0 → 3.13.0（依赖树里 `distro` / `tqdm` 换成 `httpx2`）、`ruff` 0.16.5 → 0.16.7。
+- macOS App 对齐到 2.6.6（build 16）。
+
 ## [2.6.5] - 2026-09-16
 
 ### Added
