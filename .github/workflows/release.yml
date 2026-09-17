@@ -171,7 +171,7 @@ jobs:
           release_notes='## 发布文件说明
 
           - `speechrail-<version>-*.whl` — Python 服务包（CLI、FastAPI 应用、内置 CoreML 分人 worker），自带 `speechrail install` 安装入口：不需要 clone 仓库即可安装服务并准备模型。
-          - `SpeechRail-<version>-macOS-arm64.dmg` — unsigned 的 macOS 控制面 App，最低 macOS 26.0。不加载模型、不启动服务、不监听 8201。
+          - `SpeechRail-<version>-macOS-arm64.dmg` — macOS 控制面 App，最低 macOS 26.0。DMG 文件本身未签名、未公证，包内 App 带 ad hoc 本地签名（内嵌 `com.speechrail.desktop.local-control.xpc` 的 peer 校验依赖这个签名，缺了它 App 会显示「控制通道不可用」）。不加载模型、不启动服务、不监听 8201。
           - `SHA256SUMS` — 上述两个制品的 SHA-256 校验值。
 
           安装服务（在下载目录执行；`speechrail-*.whl` 需要是该目录里唯一的 wheel）：
@@ -186,7 +186,7 @@ jobs:
           `speechrail service stop --app-home "$HOME/Library/Application Support/SpeechRail"`，再执行上面的安装；
           省略 `--preset` 会沿用当前档位。
 
-          服务与 App 是两个独立发布单元：先安装服务，再安装 App；只装 App 会显示「无法连接本机服务」。DMG 未签名也未公证，首次打开时 macOS 可能要求在「隐私与安全性」中点击「仍要打开」。
+          服务与 App 是两个独立发布单元：先安装服务，再安装 App；只装 App 会显示「无法连接本机服务」。DMG 未签名也未公证（包内 App 只有 ad hoc 本地签名），首次打开时 macOS 可能要求在「隐私与安全性」中点击「仍要打开」。
 
           安装顺序、wheel 的用途与限制、首次验证和常见问题见安装手册：'
           release_notes="${release_notes}
