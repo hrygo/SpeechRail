@@ -19,17 +19,17 @@ final class SpeechRailAppUITests: XCTestCase {
             workspaceTitle.label.contains("音色创作"),
             "workspace-title label was: \(workspaceTitle.label)"
         )
-        let actionsMenu = app.menuButtons["更多操作"]
-        XCTAssertTrue(actionsMenu.waitForExistence(timeout: 5))
-        actionsMenu.clickWhenReady()
-        XCTAssertTrue(app.menuItems["刷新状态"].waitForExistence(timeout: 5))
-        app.typeKey(.escape, modifierFlags: [])
+        // 头部契约（REDESIGN-SPEC §6.2 / §11.6 第四十九轮）：页面身份只在工具栏，
+        // 创作页没有「更多操作」这类通用动作容器；重新读取走 View ▸ ⌘R
+        // （由页面声明的 `reloadPageCommand` 提供，菜单栏断言容易受系统语言影响，
+        // 这里只钉住「头部不再有通用菜单」这一条）。
+        XCTAssertFalse(app.menuButtons["更多操作"].exists)
 
         app.buttons["模型"].clickWhenReady()
         let modelsTitle = app.descendants(matching: .any)["workspace-title"]
         XCTAssertTrue(modelsTitle.waitForExistence(timeout: 5))
         XCTAssertTrue(
-            modelsTitle.label.contains("模型管理"),
+            modelsTitle.label.contains("模型"),
             "workspace-title label was: \(modelsTitle.label)"
         )
     }
@@ -44,10 +44,12 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["模型"].exists)
         XCTAssertTrue(app.staticTexts["确认本机语音服务能否使用"].exists)
         XCTAssertTrue(app.staticTexts["能力"].exists)
-        XCTAssertTrue(app.buttons["运行预检"].exists)
+        XCTAssertTrue(app.staticTexts["运行信息"].exists)
+        // REDESIGN-SPEC §7.5：服务状态页只有「结论 + 能力 + 运行信息」。
+        XCTAssertFalse(app.staticTexts["预检"].exists)
 
         app.buttons["模型"].clickWhenReady()
-        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型管理")
+        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型")
     }
 
     func testDiagnosticsUsesCompactSummaryAndSelectedDetail() {
@@ -58,7 +60,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(identifierElement("diagnostics-summary", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(identifierElement("diagnostics-check-list", in: app).exists)
         XCTAssertTrue(identifierElement("diagnostics-check-detail", in: app).exists)
-        XCTAssertTrue(app.buttons["重新运行诊断"].exists)
+        XCTAssertTrue(identifierElement("diagnostics-run", in: app).exists)
     }
 
     func testModelDownloadRequiresExplicitConfirmation() throws {
@@ -103,7 +105,7 @@ final class SpeechRailAppUITests: XCTestCase {
         app.buttons["模型"].clickWhenReady()
 
         XCTAssertTrue(app.staticTexts["模型管理暂不可用"].waitForExistence(timeout: 5))
-        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型管理")
+        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "模型")
         XCTAssertTrue(app.buttons["打开诊断"].exists)
     }
 
@@ -113,8 +115,10 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(statusItem.waitForExistence(timeout: 5))
         statusItem.click()
 
-        XCTAssertTrue(app.menuItems["打开管理控制台"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["关于 SpeechRail"].waitForExistence(timeout: 5))
+        // 菜单项与 REDESIGN-SPEC §7.9 一致：`打开 SpeechRail`（⌘O）。
+        XCTAssertTrue(app.menuItems["打开 SpeechRail"].waitForExistence(timeout: 5))
+        // 设置窗口在重设计后是「通用 / 创作 / 服务」三个页签，不再有「关于 SpeechRail」。
+        XCTAssertTrue(app.staticTexts["通用"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["最低系统"].exists)
         XCTAssertFalse(app.staticTexts["服务状态"].exists)
     }
@@ -124,7 +128,11 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
         app.buttons["音色创作"].clickWhenReady()
 
-        XCTAssertTrue(app.staticTexts["从一句话开始"].waitForExistence(timeout: 5))
+        // 页头副行取自 AppRoute.voiceDesign.pageSubtitle，与稿逐字一致。
+        XCTAssertTrue(
+            app.staticTexts["用一句话描述你想要的音色，从真实预览里挑一个保存进音色库。"]
+                .waitForExistence(timeout: 5)
+        )
         XCTAssertTrue(app.staticTexts["快速加入声学特征"].exists)
         XCTAssertTrue(app.buttons["插入声学特征：磁性胸腔"].exists)
         app.buttons["插入声学特征：磁性胸腔"].clickWhenReady()
@@ -134,10 +142,11 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(generateButton.waitForExistence(timeout: 20))
         try skipUnlessWorkspacePaneFits(app)
         generateButton.clickWhenReady()
-        let playButton = app.buttons["A 槽位试听：播放"]
+        // 候选槽位是 "1"…"4"，按钮标签由卡片给出（VoiceCandidateCard）。
+        let playButton = app.buttons["候选 1 试听：播放"]
         XCTAssertTrue(playButton.waitForExistence(timeout: 20))
         playButton.clickWhenReady()
-        XCTAssertTrue(app.buttons["A 槽位试听：暂停"].waitForExistence(timeout: 20))
+        XCTAssertTrue(app.buttons["候选 1 试听：停止"].waitForExistence(timeout: 20))
     }
 
     func testVoiceLibraryCanCancelAnInFlightPreview() {
@@ -151,13 +160,17 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
         app.buttons["音色库"].clickWhenReady()
 
-        XCTAssertTrue(app.staticTexts["系统音色与创作资产"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.staticTexts["管理系统音色，以及用参考音频复刻出来的音色。"]
+                .waitForExistence(timeout: 5)
+        )
         let previewButton = app.buttons.matching(
             NSPredicate(format: "label CONTAINS %@", "试听")
         ).firstMatch
         XCTAssertTrue(previewButton.waitForExistence(timeout: 5))
+        // 行进中试听时，行内按钮的标签是「取消 <音色名> 的试听」。
         let cancelControl = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", "取消试听")
+            NSPredicate(format: "label BEGINSWITH %@", "取消")
         ).firstMatch
 
         previewButton.clickWhenReady()
@@ -171,18 +184,44 @@ final class SpeechRailAppUITests: XCTestCase {
         openControlCenter(in: app)
         app.buttons["我的作品"].clickWhenReady()
 
-        XCTAssertTrue(app.staticTexts["回看 SpeechRail 创作的作品"].waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts["本机生成过的音频都留在这里，可随时播放、导出或删除。"]
+                .waitForExistence(timeout: 10)
+        )
         try skipUnlessWorkspacePaneFits(app)
 
-        let workRow = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "选择作品：")).firstMatch
+        let workRow = app.descendants(matching: .any)
+            .matching(identifier: "work-row")
+            .firstMatch
         XCTAssertTrue(workRow.waitForExistence(timeout: 20))
+        workRow.clickWhenReady()
 
         let window = app.windows["SpeechRail 管理控制台"]
-        let actionMenu = window.menuButtons["更多操作"].firstMatch
-        XCTAssertTrue(actionMenu.waitForExistence(timeout: 10))
-        actionMenu.clickWhenReady()
-        XCTAssertTrue(app.menuItems["导出选中作品"].waitForExistence(timeout: 10))
+        // 头部不再重复「只对选中行生效」的那批命令；作品的动作挂在行上
+        // （行内「⋯」+ 右键菜单），导出另有 ⌘E（REDESIGN-SPEC §6.2 / §6.4）。
+        XCTAssertFalse(window.menuButtons["更多操作"].exists)
+        let rowActions = window.descendants(matching: .any).matching(
+            NSPredicate(format: "label BEGINSWITH %@", "更多操作：")
+        ).firstMatch
+        XCTAssertTrue(rowActions.waitForExistence(timeout: 10))
+        rowActions.clickWhenReady()
+        XCTAssertTrue(app.menuItems["导出…"].waitForExistence(timeout: 10))
         app.typeKey(.escape, modifierFlags: [])
+    }
+
+    func testHeaderKeepsOneCreateEntryPointOnTheVoiceLibrary() {
+        let app = launchSpeechRail()
+        openControlCenter(in: app)
+        app.buttons["音色库"].clickWhenReady()
+
+        XCTAssertTrue(identifierElement("workspace-title", in: app).waitForExistence(timeout: 5))
+        XCTAssertEqual(identifierElement("workspace-title", in: app).label, "音色库")
+        // 「新建音色」在整页只有一处入口：页脚的重复按钮已去掉（§6.4 唯一性）。
+        let createEntries = app.buttons.matching(
+            NSPredicate(format: "label == %@", "新建音色")
+        )
+        XCTAssertEqual(createEntries.count, 1, "新建音色 应只有工具栏一处入口")
+        XCTAssertFalse(app.menuButtons["更多操作"].exists)
     }
 
     private func launchSpeechRail(arguments: [String] = ["--ui-test", "--ui-test-open-control-center"]) -> XCUIApplication {
