@@ -345,7 +345,7 @@ public struct ControlCenterView: View {
             // 记录库在它的右栏「记录」标签里，不再是另一页。
             AssistantView()
         case .meeting:
-            SessionLibraryView(kind: .meeting)
+            MeetingView()
         case .captions:
             SessionLibraryView(kind: .captions)
         case .overview:

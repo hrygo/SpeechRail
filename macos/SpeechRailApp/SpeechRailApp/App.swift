@@ -18,6 +18,10 @@ struct SpeechRailApp: App {
     @State private var captionBand: CaptionBandWindowController
     /// 语音助手的会话层（`SESSIONS-SPEC` §12 阶段 5）：麦克风 → ASR → Responses → TTS。
     @State private var assistant: AssistantSession
+    /// 会议助手的会话层（§12 阶段 6）：多路来源 → ASR → 分人 → 纪要。
+    @State private var meeting: MeetingSession
+    /// 全局热键（§12 阶段 8）。Carbon 路线，**不需要辅助功能授权**。
+    @State private var hotKeys = GlobalHotKeyCenter()
     /// 新会话的预填值（人设 / 音色 / 对讲模式 / 分人默认值 / 大模型地址与模型）。
     /// **密钥不在这里**：它只进钥匙串。
     @State private var preferences: SessionPreferences
@@ -151,6 +155,21 @@ struct SpeechRailApp: App {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
         }
+        // 会议助手的接线（§12 阶段 6）。它与字幕共用分人那条链路，差别在来源与纪要，
+        // 所以这里只接三件它自己不认识的事：服务就绪判定、新会话预填值、来源断了的出口。
+        let meetingSession = MeetingSession(coordinator: coordinator)
+        meetingSession.preferences = { sessionPreferences }
+        meetingSession.serviceReadiness = {
+            do {
+                let health = try await ServiceAPIClient().fetchHealthSnapshot()
+                guard health.ready == true else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
         coordinator.starter = { kind in
             // 未接线的能力**必须抛**：`guard … else { return }` 会被读成"已经开始采集"，
             // 于是界面显示在录、实际什么都没拿到（`CapabilityNotWired` 的注释里写了原因）。
@@ -160,7 +179,7 @@ struct SpeechRailApp: App {
             case .assistant:
                 try await assistantSession.beginCapture()
             case .meeting:
-                throw SessionCoordinator.CapabilityNotWired(kind: kind)
+                try await meetingSession.beginCapture()
             }
         }
         coordinator.stopper = { kind in
@@ -170,8 +189,13 @@ struct SpeechRailApp: App {
             case .assistant:
                 await assistantSession.stopCapture()
             case .meeting:
-                break
+                await meetingSession.stopCapture()
             }
+        }
+        // 「结束当前会话…」（菜单栏 `⌘⇧.` / 守卫确认之后）走会议自己的收尾。
+        coordinator.finisher = { kind in
+            guard kind == .meeting else { return }
+            await meetingSession.finishAndSummarize()
         }
 
         _model = State(initialValue: appModel)
@@ -179,6 +203,7 @@ struct SpeechRailApp: App {
         _session = State(initialValue: coordinator)
         _caption = State(initialValue: captionSession)
         _assistant = State(initialValue: assistantSession)
+        _meeting = State(initialValue: meetingSession)
         _preferences = State(initialValue: sessionPreferences)
         _captionBand = State(initialValue: band)
     }
@@ -198,8 +223,16 @@ struct SpeechRailApp: App {
                 .environment(session)
                 .environment(caption)
                 .environment(assistant)
+                .environment(meeting)
                 .environment(preferences)
-                .task { await session.openStore() }
+                .task {
+                    await session.openStore()
+                    // 启动时回收：① 上次没正常结束的会话已经封存（`openStore` 里做）；
+                    // ② 卡在 `queued` / 租约过期的纪要在这里重新排一次（§5.8）。
+                    await meeting.minutes.recoverPending(
+                        configuration: preferences.minutesConfiguration
+                    )
+                }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
@@ -214,8 +247,20 @@ struct SpeechRailApp: App {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)
+                .environment(session)
+                .environment(caption)
+                .environment(meeting)
         } label: {
             MenuBarStatusLabel(isOperating: model.serviceOperation?.phase.isActive == true)
+                // 热键接线挂在**菜单栏这个宿主**上，不挂在窗口上（§5.2）：
+                // 菜单栏项在 App 起的那一刻就在，而管理控制台窗口是可以被关掉的
+                // ——挂在窗口上时，"关了窗口再启动"会让四个全局键整场都不生效，
+                // 而且是静默失效（按键没有任何反馈）。
+                .environment(session)
+                .environment(caption)
+                .environment(meeting)
+                .environment(navigation)
+                .background(SessionHotKeyBridge(center: hotKeys))
         }
         Settings {
             SettingsView()
@@ -226,6 +271,59 @@ struct SpeechRailApp: App {
             SpeechRailHelpView()
         }
         .windowResizability(.contentSize)
+    }
+}
+
+/// 全局热键 → 动作的接线（`SESSIONS-SPEC` §5.2、§6.6）。
+///
+/// 它是一个**零尺寸的桥**：`App` 这个结构体里拿不到 `openWindow` 这类环境值，
+/// 而热键只在按下的那一刻才用到它们。接线放在这里，四个键各接一处，
+/// 而且都只做一件事——**把请求交给协调器**：「能不能开始」由占用守卫判，
+/// 热键自己不做判定，否则同一件事会有两处实现（§5.4 的同一条理由）。
+///
+/// 宿主是菜单栏标题（见 `body` 里那一处）：它从启动起就在，窗口不在也照样接线。
+/// `install()` 与 `setHandler` 都是幂等的，所以重复出现（标签重绘）不会重复注册。
+struct SessionHotKeyBridge: View {
+    @Environment(SessionCoordinator.self) private var session
+    @Environment(CaptionSession.self) private var caption
+    @Environment(MeetingSession.self) private var meeting
+    @Environment(AppNavigationState.self) private var navigation
+    @Environment(\.openWindow) private var openWindow
+    let center: GlobalHotKeyCenter
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .task {
+                center.setHandler(.toggleCaptions) {
+                    // 会议录着的时候按它：浮层以受阻态出现，给两个出口，**不开第二条会话**（§16.3）。
+                    Task { await caption.toggleFromGlobalShortcut() }
+                    reveal(.captions)
+                }
+                center.setHandler(.startMeeting) {
+                    // 会议的第一件事是**选来源**，所以热键把人送到那一页，而不替它选。
+                    reveal(.meeting)
+                }
+                center.setHandler(.finishCurrent) {
+                    session.requestEndCurrentSession()
+                    // 「结束当前会话…」带省略号：它要问一句。会议结束永远确认（防误停，§6.4），
+                    // 所以这里必须把窗口调出来，否则用户会看到"按了没反应"。
+                    openWindow(id: AppNavigationState.controlCenterWindowID)
+                }
+                center.setHandler(.toggleInnerOS) {
+                    guard session.occupancy?.kind == .meeting else { return }
+                    meeting.innerOS.isExpanded.toggle()
+                    reveal(.meeting)
+                }
+                center.install()
+            }
+    }
+
+    private func reveal(_ route: AppRoute) {
+        navigation.request(route)
+        openWindow(id: AppNavigationState.controlCenterWindowID)
+        NSApp.activate()
     }
 }
 

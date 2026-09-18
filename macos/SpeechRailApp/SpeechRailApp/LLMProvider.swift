@@ -173,6 +173,7 @@ public actor LLMProvider {
         messages: [LLMMessage],
         apiKey: String?,
         maxOutputTokens: Int? = nil,
+        textFormat: [String: Any]? = nil,
         timeout: TimeInterval = 120
     ) async throws -> String {
         let request = try makeRequest(
@@ -180,11 +181,88 @@ public actor LLMProvider {
             messages: messages,
             apiKey: apiKey,
             stream: false,
-            maxOutputTokens: maxOutputTokens
+            maxOutputTokens: maxOutputTokens,
+            textFormat: textFormat
         )
         let (data, response) = try await perform(request, timeout: timeout)
         try Self.validate(response: response, data: data)
         return try Self.extractText(from: data)
+    }
+
+    // MARK: - 长任务（Responses 的 background 模式，§5.8）
+
+    /// 纪要这一类长任务**不绑在界面上**：先在服务端起一个后台响应，再轮询它。
+    ///
+    /// 两件必须一起说清的事（文档口径，§5.8 的隐私一行）：
+    ///   · `store=false`：我们不使用服务端的会话状态；
+    ///   · **但后台模式下即使 `store=false`，响应数据仍会在服务端临时落盘约 10 分钟**
+    ///     以支持异步执行与轮询。所以界面**不许**说成"内容没经过服务器"。
+    public func startBackground(
+        configuration: LLMConfiguration,
+        messages: [LLMMessage],
+        apiKey: String?,
+        maxOutputTokens: Int? = nil,
+        textFormat: [String: Any]? = nil
+    ) async throws -> String {
+        let request = try makeRequest(
+            configuration: configuration,
+            messages: messages,
+            apiKey: apiKey,
+            stream: false,
+            maxOutputTokens: maxOutputTokens,
+            textFormat: textFormat,
+            background: true
+        )
+        // 后台响应的第一次 POST 只回一个 id 就返回，所以超时给短一点：卡住就重来。
+        let (data, response) = try await perform(request, timeout: 60)
+        try Self.validate(response: response, data: data)
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let id = object["id"] as? String, !id.isEmpty
+        else { throw LLMError.transport("服务没有回一个可轮询的响应 id。") }
+        return id
+    }
+
+    /// 轮询一个后台响应，直到它完成、失败或超时。
+    ///
+    /// 返回正文；`status` 为 `failed` / `incomplete` 时抛 `refused`（**拒答可程序化识别**）。
+    public func pollBackground(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        responseID: String,
+        timeout: TimeInterval = 900,
+        interval: TimeInterval = 3
+    ) async throws -> String {
+        guard
+            let url = URL(string: "\(configuration.normalizedBaseURL)/responses/\(responseID)")
+        else { throw LLMError.badBaseURL }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            if let apiKey, !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            let (data, response) = try await perform(request, timeout: 60)
+            try Self.validate(response: response, data: data)
+            guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw LLMError.transport("轮询回来的不是 JSON。")
+            }
+            switch object["status"] as? String {
+            case "completed":
+                let text = try Self.extractText(from: data)
+                if text.isEmpty, let reason = Self.failureReason(from: object) {
+                    throw LLMError.refused(reason)
+                }
+                return text
+            case "failed", "incomplete", "cancelled":
+                throw LLMError.refused(Self.failureReason(from: object) ?? "生成没有完成")
+            default:
+                // queued / in_progress：等下一轮。
+                try? await Task.sleep(for: .seconds(interval))
+            }
+        }
+        throw LLMError.transport("等了很久也没整理完（超时）。")
     }
 
     private func runStream(
@@ -247,7 +325,9 @@ public actor LLMProvider {
         messages: [LLMMessage],
         apiKey: String?,
         stream: Bool,
-        maxOutputTokens: Int?
+        maxOutputTokens: Int?,
+        textFormat: [String: Any]? = nil,
+        background: Bool = false
     ) throws -> URLRequest {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
         guard !configuration.embedsCredential,
@@ -281,6 +361,8 @@ public actor LLMProvider {
             "prompt_cache_options": ["mode": "explicit"]
         ]
         if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
+        if let textFormat { body["text"] = ["format": textFormat] }
+        if background { body["background"] = true }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
@@ -291,6 +373,12 @@ public actor LLMProvider {
         do {
             return try await session.data(for: request)
         } catch {
+            // 取消要单独成一类：`URLSession` 取消时抛的是 `URLError.cancelled`，
+            // 混进 `transport` 之后调用方只能靠文本去猜，于是"用户按了取消"会被记成
+            // 一次失败（内心 OS 的取消路径就靠这个区分）。
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                throw LLMError.cancelled
+            }
             throw LLMError.transport(error.localizedDescription)
         }
     }

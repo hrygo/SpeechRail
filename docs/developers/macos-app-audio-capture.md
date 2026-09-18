@@ -141,12 +141,50 @@ date: 2026-09-16
 **授权弹窗文案**也要跟着改：`NSMicrophoneUsageDescription` 已从「音色克隆需要读取麦克风」
 改成同时覆盖克隆与会话（`project.pbxproj` 三个 build configuration 各一份）。
 
-**尚未实装**：本机音频（进程 tap，阶段 6）与多来源合流。那里要处理 TCC 的系统录音授权、
-aggregate device、host time 对齐与 `processRestoreEnabled`，与麦克风这一路是两套机制。
+### 3.7.1 本机音频（进程 tap）与多来源合流（2026-09-18 补，会议助手落地时实装）
+
+会议助手要录的不只是屋里的人，还有**这台 Mac 正在播的声音**（腾讯会议、QQ 音乐…）。
+这一路与麦克风是两套机制，所以它的口径单独写在这里：
+
+| 项 | 本机音频的口径 | 位置 |
+|---|---|---|
+| API | macOS 的**按进程 tap**：`CATapDescription.bundleIDs` → `AudioHardwareCreateProcessTap` → 私有 aggregate device（tap 作为它的输入流）→ `AudioDeviceCreateIOProcID` | `CoreAudioTapCapture.swift` |
+| 不改变听感 | `muteBehavior` 保持默认 `CATapUnmuted`：抓取不该让本机静音 | 同上 |
+| 来源重开 | `isProcessRestoreEnabled = true`（SDK 语义：来源 App 重启后按 bundle id 自动接回）。**本机没有真机验证过它的行为**，所以实现里只把它当作"尽力而为" | 同上 |
+| 载体 | **App 内 XPC service**（`Resources/XPCServices/com.speechrail.desktop.capture-helper.xpc` + `SpeechRailCaptureHelper` target）。由 launchd 在 App 连接时启动、App 停采集后空闲退出，同时把 tap 的崩溃面与 App 隔开 | `SpeechRailCaptureHelper/` |
+| 出口格式 | 与麦克风**同一个出口**：16 kHz / 单声道 / PCM16。tap 的原始格式（通常是 48 kHz 的 Float32）在 helper 里用 `AVAudioConverter` 归一 | `CoreAudioTapCapture.swift` |
+| 实时约束 | IOProc 回调里只做"交错 + 写预分配环形缓冲"（2 的幂容量、原子读写下标），转换与电平都在 drain 线程；回调里没有锁、没有分配 | 同上 |
+| 合流 | 勾了多个来源时走 `StreamMixer`：每 40 ms 从每一路的抖动缓冲取 640 帧，**缺的补静音并计一次缺口**，而不是把两路硬拼成一条听起来连续的流 | `AudioSourceCoordinator.swift` |
+| 为什么选了本机音频就总走混音器 | 即使只有它一路：来源 App 退出之后要**换上新的那一路**，而直通的那条流没有换人的位置。「来源 App 退出」是四类中断里唯一会自动接回的一类 | 同上 |
+| 设备生命周期 | 与麦克风同一条规则：会话提交时拿、会话离开时释放。XPC 连接一作废，helper 的 `invalidationHandler` 立刻停采集并拆设备 | `CaptureHelperClient.swift` |
+| PCM 落盘 | 与麦克风一致：**没有写文件的路径**。PCM 只在内存里过一道 40 ms 的管道 | 全链 |
+
+**授权**：`NSAudioCaptureUsageDescription` 在两处给到——App 的
+`SpeechRailApp/Info.plist`（补进生成式 Info.plist 的那份偏量文件）与 helper 自己的
+`Resources/XPCServices/…/Contents/Info.plist`（tap 是在那个进程里建的）。
+按「按功能启用」的口径，这个权限**只在用户第一次选「本机音频」来源时**才会触发——
+只用字幕或只用麦克风的用户永远看不到它。
+
+> **踩过的坑（2026-09-18 实测）**：这个键**没有** `INFOPLIST_KEY_` 映射。写成
+> `INFOPLIST_KEY_NSAudioCaptureUsageDescription` 会被 Xcode **静默丢弃**：`plutil -p` 查产物时
+> 它不在，而同一批写法里的 `NSMicrophoneUsageDescription` 在（那条在映射表里）。
+> 判据只有一条——**构建之后查产物里的键**，不要看 build settings 里写没写。
+> App target 仍是 `GENERATE_INFOPLIST_FILE = YES`，`INFOPLIST_FILE` 指定的是**偏量**文件，
+> 生成器产出的键照常合并进来（同一次实测：`CFBundleName` / `LSApplicationCategoryType` /
+> `CFBundleShortVersionString` 都还在）。
+
+**helper 的签名**：嵌入脚本用 `codesign --force --sign …` 重签这个 `.xpc`，**没有**带
+`--options runtime`，也没有 entitements 文件——所以它在 Distribution 构建里不是 hardened runtime，
+而 tap 的 TCC 归属（算 App 还是算 XPC service）本机没验证过。两件事都算在 §6 那条 tap 真机验证里。
+
+**尚未实装**：设备变更（`AVAudioEngineConfigurationChangeNotification`）之后的重建与
+`device_switch` 行。今天设备被拔会表现为采集流结束并落一条中断（`source_lost`），
+而不是"重建引擎、继续录、新行标 `device_switch = 1`"（`TECHNICAL-DESIGN` §9 第 13 行）。
 
 ## 4. 与 SpeechRail 的差距（按性价比排序的建议）
 
-1. **补 entitlement**（Distribution）：`com.apple.security.device.audio-input`。
+1. **补 entitlement**（Distribution）：`com.apple.security.device.audio-input`
+   （2026-09-18 已加进 `Entitlements/SpeechRailApp.entitlements`；发布路径的真机验收仍未做）。
 2. **发布路径也要在真机上验收一次录音**，不能只用本机 Debug 构建的结论替代。
 3. **采集侧不做 AGC/AEC 的原则**已经是现状，值得在 ADR 里固化，避免以后被「更干净」说服。
 4. **默认输入设备变化**：录音中提示重录（§3.5）。
@@ -177,3 +215,8 @@ aggregate device、host time 对齐与 `processRestoreEnabled`，与麦克风这
   恢复后需要按 `.agents/skills/speechrail-perf-benchmark/SKILL.md` 的制品口径重新实测一次。
 - 建议里的 1、4、5、6 项尚未实施。
 - 未做：多设备切换实测、蓝牙耳机采集实测、长时间（>5 分钟）录音的稳定性实测。
+- 未做：**进程 tap 的真机验证**（`TECHNICAL-DESIGN` §12 第 1、2 条）——授权弹窗的实际触发点、
+  `bundleIDs` 是否真按 App 生效、`processRestoreEnabled` 的真实行为，三件都只有 SDK 标注语义。
+  会议助手的整个本机音频来源都建立在这三件事上，所以它现在是**这一版里最需要真机跑一次的地方**。
+- 未做：**tap 的 TCC 归属**（算 App 还是算 XPC service）与 helper 在 Distribution 下的签名形态
+  （嵌入脚本重签时没带 `--options runtime`、没有 entitlements）。Debug 路走通不等于发布路走通。

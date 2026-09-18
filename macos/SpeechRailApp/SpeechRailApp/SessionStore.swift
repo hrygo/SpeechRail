@@ -350,6 +350,39 @@ public actor SessionStore {
         }
     }
 
+    /// 上次没正常结束的那些会话：把 `recording` / `processing` 封存成 `archived`，
+    /// `end_reason = 'unexpected_exit'`（§9 第 10 行、§5.6 的第四类中断）。
+    ///
+    /// 它在 App 启动时跑一次。**只封存，不删**：那一段音频确实没录完，但它已经写下的
+    /// 正文是资产——下次启动要能回看、能导出。
+    ///
+    /// 返回值是**被改动的会话 id**（界面上那句「上次会议没有正常结束」用得到）。
+    @discardableResult
+    public func sealAbandonedSessions(now: Date = Date()) throws -> [String] {
+        let select = """
+        SELECT id FROM session WHERE state IN ('recording', 'processing') ORDER BY started_at;
+        """
+        let ids = try withStatement(select) { statement in
+            var found: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let id = columnText(statement, 0) { found.append(id) }
+            }
+            return found
+        }
+        guard !ids.isEmpty else { return [] }
+        let update = "UPDATE session SET state = 'archived', ended_at = ?, end_reason = ? WHERE id = ?;"
+        try withStatement(update) { statement in
+            for id in ids {
+                sqlite3_reset(statement)
+                bind(statement, 1, now.timeIntervalSince1970)
+                bind(statement, 2, SessionEndReason.unexpectedExit.rawValue)
+                bind(statement, 3, id)
+                try step(statement)
+            }
+        }
+        return ids
+    }
+
     /// 移除一条记录。靠 `ON DELETE CASCADE` 带走它的行、纪要、OS 问答、中断区间。
     /// **破坏性动作**，界面必须先确认（§16.6）。
     public func removeSession(id: String) throws {
@@ -452,6 +485,25 @@ public actor SessionStore {
             bind(statement, 1, reason)
             bind(statement, 2, minutesID)
             try step(statement)
+        }
+    }
+
+    /// 还有纪要没整理完的会话：排队中的，或者租约已经过期的 `running`。
+    ///
+    /// 启动时用它回收：App 崩一次之后，那一版纪要会永远卡在 `running`
+    /// ——没有这条查询，用户看到的是"一直在整理"，而实际上什么都没在跑（§5.8）。
+    public func sessionsWithPendingMinutes(now: Date = Date()) throws -> [String] {
+        let sql = """
+        SELECT DISTINCT session_id FROM minutes
+        WHERE status = 'queued' OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?));
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, 1, now.timeIntervalSince1970)
+            var found: [String] = []
+            while try step(statement) == SQLITE_ROW {
+                if let id = columnText(statement, 0) { found.append(id) }
+            }
+            return found
         }
     }
 

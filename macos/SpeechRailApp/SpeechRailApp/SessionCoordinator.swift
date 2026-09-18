@@ -120,6 +120,14 @@ public final class SessionCoordinator {
     /// 反过来的话，停止期间到达的最后一行会写进已归档的记录。
     public var stopper: (@MainActor (SessionKind) async -> Void)?
 
+    /// 「结束当前会话」的**收尾**钩子。
+    ///
+    /// 只有会议需要它：会议的收尾不是"停一下"，而是 EOF 屏障 → 封存 → 生成纪要。
+    /// 字幕与助手在 `stopCapture` 里就结束了，所以这个钩子缺席时走原来的路。
+    /// （不把这段塞进 `stopper`：`stopper` 在 `finalize` 里也会被调一次，
+    /// 而排纪要只能发生一次。）
+    public var finisher: (@MainActor (SessionKind) async -> Void)?
+
     private let store: SessionStore
     private let defaults: UserDefaults
     private var clockTask: Task<Void, Never>?
@@ -138,10 +146,16 @@ public final class SessionCoordinator {
         do {
             try await store.open()
             storeFailure = nil
+            // 上次没正常结束的那些会话在这里封存（§5.6 的 `unexpected_exit`）。
+            // 它必须在**任何新会话开始之前**跑完，否则新会话会与一个幽灵会话共享库里的状态。
+            sealedAbandonedSessions = (try? await store.sealAbandonedSessions()) ?? []
         } catch {
             storeFailure = error.localizedDescription
         }
     }
+
+    /// 启动时被封存的"上次没有正常结束"的会话。界面据此说一句话（§9 第 10 行的出口）。
+    public private(set) var sealedAbandonedSessions: [String] = []
 
     // MARK: - 守卫（§6.4）
 
@@ -203,7 +217,11 @@ public final class SessionCoordinator {
             await endCurrentIfNeeded()
             try? await begin(kind)
         case .endCurrentSession:
-            await stopCapture(endingWith: .user)
+            if let finisher, occupancy?.kind == .meeting {
+                await finisher(.meeting)
+            } else {
+                await stopCapture(endingWith: .user)
+            }
         case nil:
             break
         }
@@ -515,6 +533,11 @@ public final class SessionCoordinator {
 
     public func failMinutes(minutesID: String, reason: String) async throws {
         try await store.failMinutes(minutesID: minutesID, reason: reason)
+    }
+
+    /// 启动时回收那些"排队中或租约已过期"的纪要（§5.8）。
+    public func sessionsWithPendingMinutes() async throws -> [String] {
+        try await store.sessionsWithPendingMinutes()
     }
 
     public func searchLines(

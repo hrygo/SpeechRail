@@ -775,11 +775,21 @@ Token delta：
 | 1 会话所有权地基 | **已落地** | `AppRouteGroup.session` + 3 路由（`assistant` / `meeting` / `captions`）；侧边栏三组 + 第二行 `SessionOwnershipRow`；`SessionCoordinator`（三态所有权、`preparing/recording/processing/interrupted` 相位、设备租约按功能启停、四类中断写账本、§6.4 的确认形状唯一实现）；`SpeechCommands` 按 §5.2 重排（创作 ⌘1–⌘5 / 会话 ⌘6–⌘8 / 引擎 ⌘9 ⌘0 ⌘⇧M ⌘⇧D ⌘⇧H / 字幕带 `⌘⇧L`） |
 | 2 记录库（SQLite） | **已落地，含导出物** | `SessionStore`（系统 `SQLite3` + WAL + `user_version` 迁移，§15.2 + R1 + R2 的全部表与 §6.4 的动作表）；三页共用一份 `SessionLibraryView`（列表 / 选中 / 搜索 / 复制 / 移除带确认 / 导出）；`SessionExporter` + `SessionExportPanel`（Markdown / SRT / 纯文本 / JSON，走系统保存面板，命名按 §16.4） |
 | 3 实时字幕 | **已落地并端到端实测** | `RealtimeASRClient`（`URLSessionWebSocketTask`，16 kHz PCM16 / `server_vad` 400 ms / partial 只进内存 / `completed` 才落库）、`MicrophoneCapture`（`AVAudioEngine` tap + `AVAudioConverter`，环形缓冲，按功能启停）、`CaptionSession`（相位、暂停、受阻五类、`t_start` 取墙钟相对秒）、`CaptionBandWindowController`（非激活 `NSPanel`、`.hudWindow` 材质、按屏记忆位置与宽度、悬停工具条向上长、贴底跟随与「回到最新」） |
-| 4–8 | 未开工 | 分人接入、语音助手、会议助手、内心 OS、系统音频 tap |
+| 4 分人（会议与字幕共用） | **已落地** | `RealtimeASRClient` 的分人扩展（首个 PCM 前 opt-in、`attribution_units`、`diarization.updated/status/done`）、`SpeakerLabeling`（uid → 行 的账本，只写 `speaker_label` 与 `speaker_name`）、`SpeakerLabelingView`（行内 `SpeakerChip` + 会后 `SpeakerLabelingPanel`）；字幕与会议两侧同一套降级话术 |
+| 5 语音助手 | **已落地** | `LLMProvider`（只走 Responses、`store=false`、developer 消息上的 `prompt_cache_breakpoint`、四种连接结论、密钥进钥匙串）、`AssistantSession`（人设开始即锁、音色下一句生效并落 `session_change`、一问一答闭麦 / 实时对讲插话打断、打字不朗读但可重播、内置 24 kHz PCM 播放器）、`AssistantView`（五种态同页 + 记录库回看）、设置页第 4 个页签「会话」 |
+| 6 会议助手 | **已落地** | `CoreAudioTapCapture`（按进程 tap + 私有 aggregate device，编进 App 与 helper 两个 target）、`SpeechRailCaptureHelper`（App 内 XPC service，新 target + 嵌入脚本）、`CaptureHelperClient` / `Protocol`（双向 XPC，只传 PCM 与电平）、`AudioSourceCoordinator`（多选来源、`StreamMixer` 40 ms 栅格合流、缺口补静音、来源退出自动接回）、`MeetingSession`（900 ms 静音窗、四类中断、EOF 屏障、复用分人链路）、`MinutesGenerator`（排队 + 租约 + Responses background 轮询 + 结构化字段 → Markdown + 版本）、`MeetingView`（页头 → 状态带 → 转录 + 会议信息栏 → 贴底 OS 抽屉） |
+| 7 内心 OS | **已落地** | `InnerOSSession`（只喂本场已确认转录、结构化答案、无证据就说没有证据、可取消、默认 `in_minutes = 0`）、`InnerOSDrawer`（贴底一行收起 / 两栏展开：历史 + 答案卡，含证据、不确定度、可直接念的措辞与「写进纪要」） |
+| 8 全局热键与菜单栏 | **已落地** | `GlobalHotKeyCenter`（Carbon `RegisterEventHotKey`，不需要辅助功能授权）：`⌘⇧L` 字幕 / `⌘⇧N` 会议 / `⌘⇧.` 结束 / `⌘⇧I` 内心 OS；菜单栏新增「会话」组（状态行 + 三条命令 + 空闲时的原因说明），会议录制中按 `⌘⇧L` 走 §16.3 的受阻态（不开第二条会话） |
+| 9 Token 与文案归口 | **已落地** | `Layout` 补齐会话侧符号（§21.2 单点声明）；`AGENTS.md` 的采集边界句、`docs/developers/macos-app-audio-capture.md` 的会话级采集与进程 tap、`docs/architecture/current-boundaries.md` 的边界变更、`UX-UI-SPEC` §13 未决项 2 与 4 同步 |
 
-两处**有意缺席**，不是遗漏：「开始对话 / 开始会议」两个主按钮随各自的能力阶段落地——
-采集还没接上时，放一个按了不动的按钮比暂不提供更糟；`⌘⇧N` 同样等会议存在之后再加。
-字幕带那一侧的入口今天已经在了（页头「打开字幕带」+ `⌘⇧L`）。
+~~两处**有意缺席**，不是遗漏~~ **两边都已经补齐**（2026-09-18，阶段 5 与阶段 6）：
+「开始对话」在助手页底部控制行，「开始会议」在会议页空态里（先选来源）。
+两个会话主按钮都只在采集真的接上之后才出现，所以阶段 1–3 那会儿缺席是对的。
+
+**阶段 5.5 的 tap spike 没有单独做过**（`TECHNICAL-DESIGN` §10 的第 1 条硬依赖）：
+本机音频那条路是直接落成代码的，`bundleIDs` 的实际限定范围、授权弹窗的真实触发点、
+`processRestoreEnabled` 的行为**都还没有真机验证**。这是这一版最需要补的一步，
+已记在 `docs/developers/macos-app-audio-capture.md` §6 与本文 §16.9。
 
 #### 12.1.1 本批实测与两处口径修正（2026-09-18）
 
@@ -1440,7 +1450,7 @@ JSON 是完整记录，但里面**没有**密钥、音频与完整 prompt——�
 |---|---|---|---|
 | `service_lost` | 语音服务重启或不可达、streaming worker 被回收 | 收声先停，正文照旧；「继续这一段」新开一路音频并把中断区间写进记录 | 一条 interruption |
 | `sleep` | 系统睡眠 / 合盖 | 醒来即中断态：麦克风与 tap 都要重新拿一次，**不自动续** | 同上 |
-| `source_lost` | 被 tap 的 App 退出 | 按 Bundle ID **自动接回**（`processRestoreEnabled`）；录制不打断 | 同上（唯一不需要人决定的一种） |
+| `source_lost` | 被 tap 的 App 退出；**或采集流自己结束**（设备被拔 / 引擎停了） | 前者按 Bundle ID **自动接回**（`processRestoreEnabled`）、录制不打断；后者进中断态等用户选「继续这一段 / 结束并整理」 | 同上（前者不需要人决定） |
 | `unexpected_exit` | App 退出或崩溃 | 下次启动：把仍是 `recording` / `processing` 的会话封存为 `archived`，`end_reason='unexpected_exit'` | 一条 interruption + 封存 |
 
 **共同规则：不静默续录。** 断点之后如果悄悄接着写，记录里会出现一段没有来源的文本，

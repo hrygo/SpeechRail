@@ -141,6 +141,16 @@ public enum MinutesStatus: String, Codable, Sendable {
     case running
     case ready
     case failed
+
+    /// 界面上那个胶囊的字（与 `MinutesGenerator.State.title` 同一套词）。
+    public var title: String {
+        switch self {
+        case .queued: "排队中"
+        case .running: "整理中"
+        case .ready: "已生成"
+        case .failed: "没整理出来"
+        }
+    }
 }
 
 public enum InnerOSIntent: String, Codable, Sendable {
@@ -154,6 +164,16 @@ public enum InnerOSConfidence: String, Codable, Sendable {
     case low
     case medium
     case high
+
+    /// 答案卡上那个胶囊的字。**不确定度是要给用户看的**：判断与事实分开，
+    /// 也就是为了让这一格有意义（§5.9）。
+    public var label: String {
+        switch self {
+        case .high: "较有把握"
+        case .medium: "中等把握"
+        case .low: "不太确定"
+        }
+    }
 }
 
 public enum InnerOSStatus: String, Codable, Sendable {

@@ -33,6 +33,14 @@ date: 2026-09-12
 - 上传字节数与解码后音频时长受限（`SPEECHRAIL_MAX_AUDIO_SECONDS`，超限返回 400 `audio_too_long`）；CORS 与速率限制不在当前能力范围。
 - `diarization_ready` 只表示固定 CoreML bundle 与 worker 路径可用，不表示真实质量、尾部正确性或固定物理内存开销。它只在分人档位（`balanced`/`quality`）有意义：`light` 不供给 aligner 与 CoreML 路径，`/v1/models` 不出现 `gpt-4o-transcribe-diarize`。D1 仅记录 M5 Max、90 秒输入的 564 MB max RSS；DER/JER、P95、ASR 共存与两小时 soak 仍未验收。
 - 常驻运行提供 macOS `LaunchAgent` CLI、安装模板和操作手册；服务默认不自动安装或启用。
+- **2026-09-18 边界变更（App 侧，服务契约不变）**：会话层（语音助手 / 会议助手 / 实时字幕）
+  在 App 进程内采集音频，并新增一个 App 内嵌的 XPC service（`SpeechRailCaptureHelper`）用
+  按进程的 Core Audio tap 抓本机音频。对服务而言边界没有移动：它仍然只收
+  `/v1/realtime` 上的 16 kHz 单声道 PCM16，**不新增任何接口**，也不承载 LLM、会议持久化或
+  用户资产（`docs/architecture/product-scope.md` §3 的红线）。
+  新增的三件事都在 App 这一侧：设备按功能启用、功能离开即释放；PCM 不落盘、记录只落本机
+  SQLite；与大模型的编排（对话 / 纪要 / 内心 OS）走 Responses API 直连用户配置的端点。
+  详表见 `docs/design/2026-09-18-session-layer/TECHNICAL-DESIGN.md` §2.1。
 - `quality` 新增 Base clone artifact 会增加安装体积与双 worker 活跃态 RAM，但不再产生请求级 capability switch 冷启动；旧版 VoiceDesign-only RAM / latency 数据不能直接当作双 TTS 架构的实测数据。需要在目标 Apple Silicon 上重新测量双 worker 常驻峰值、VD∥Base 并发 RTF/P95、冷却驱逐后的恢复延迟与首音时间。
 - 2026-09-12 本地审计发现现有 synthesis quality-run 的最终通过条件对静音、极端削波/噪声与 deterministic 证据仍不够严格；在这些门禁修复并重新验收前，不得把绿色 `voice_quality_v1` 报告解释成跨文本音色和纯净度已经证明。
 

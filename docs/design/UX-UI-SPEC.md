@@ -280,12 +280,16 @@ hug 宽度、换行与字体仍只有 Figma 能证。
    页 `01 闭环`，确认几何、深色改绑与导出。产物包已是 16:10 那一版（closure kit md5
    `8ffdf02b07ca624d2d5196cab062c038`）；实跑要看的是插件报告的 `AUDIT VERDICT` 与
    `prototype links`（应为 234/234），以及本轮改过真实几何的那几处有没有新溢出。
-2. **会话组进 `AppRoute`**：当前实现只有 创作 / 引擎 两个组 10 个路由；`assistant` / `meeting` /
-   `captions` 尚未成为路由。三者要成为一等公民（同一个侧栏、同一套快捷键、同一份状态带），
-   第一步是把 `AppRouteGroup` 补上 `.session`。
+2. ~~**会话组进 `AppRoute`**~~ **已完成**（2026-09-18）：`AppRouteGroup.session` 与
+   `assistant` / `meeting` / `captions` 三个路由已是一等公民——同一个侧栏、同一套快捷键
+   （⌘6–⌘8）、同一份状态带。三条能力的页面实现见 `SESSIONS-SPEC` §12.1 的阶段 3–8。
 3. **`⌘⌃I` / `⌘⌥S` 冲突检测**（真机）。
-4. **实现侧 token 补齐**：`Layout` 里还没有「列表列 280 / 列表内宽 248 / 空态 320」这几个会话侧
-   用的符号，加的时候按 §3.4 的对照表命名，不要新造第三个名字。
+4. ~~**实现侧 token 补齐**~~ **已完成**（2026-09-18）：`Layout` 已有
+   `sessionListWidth`(280) / `sessionListInnerWidth`(248) / `sessionListRowInnerWidth`(228) /
+   `sessionEmptyIconSize`(28) / `sessionEmptyBodyMaximumWidth`(460) / `sessionInspectorWidth`(360)
+   与列宽、字幕带、内心 OS 抽屉那几个；命名按 §3.4 的对照表走，没有新造第二个名字。
+   同一轮补上的还有 `sessionSegmentedControlWidth` / `innerOSDrawerExpandedHeight` /
+   `innerOSHistoryColumnWidth`（会议页与内心 OS 抽屉落地时才有的三处）。
 5. **圆角注释债**：`SpeechRailDesignTokens.swift` 里两处注释引用稿的「圆角 7」，本轮稿已改为 8，
    实现侧数值本来就是 8（`Corner.nested`），只需更新注释文字。
 6. **收起态的覆盖面**：收起控件已落在 16 块画板；**收起态画面**只画了语音助手一块作为对齐样例，

@@ -4,6 +4,10 @@ import SpeechRailControlKit
 public struct ControlMenuView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    /// 会话那一组命令要读占用与浮层状态（§6.6 的「会话」段）。
+    @Environment(SessionCoordinator.self) private var session
+    @Environment(CaptionSession.self) private var caption
+    @Environment(MeetingSession.self) private var meeting
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @State private var pendingServiceAction: ControlCommand?
@@ -69,6 +73,73 @@ public struct ControlMenuView: View {
             } label: {
                 Label("音色创作", systemImage: AppRoute.voiceDesign.systemImage)
                     .speechRailMenuRow()
+            }
+
+            Divider()
+
+            // 「会话」这一段（§6.6）：状态行 + 三个命令。会话是这一版新增的产品面，
+            // 菜单栏是 App 不在前台时唯一能碰到它的地方。
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Circle()
+                        .fill(sessionTone.color)
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(session.ownershipText)
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .lineLimit(1)
+                }
+                .accessibilityElement(children: .combine)
+
+                if session.occupancy?.kind == .meeting, meeting.phase.isLive {
+                    Text("已存好 \(meeting.storedLineCount) 段"
+                        + (meeting.labeling.labels.isEmpty
+                            ? ""
+                            : " · \(meeting.labeling.labels.count) 位说话人"))
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
+
+                Button {
+                    Task { await caption.openBand() }
+                    openWindow(id: AppNavigationState.controlCenterWindowID)
+                } label: {
+                    Label("开始实时字幕", systemImage: AppRoute.captions.systemImage)
+                        .speechRailMenuRow()
+                }
+                .disabled(caption.phase.isLive)
+
+                Button {
+                    navigation.request(.meeting)
+                    openWindow(id: AppNavigationState.controlCenterWindowID)
+                } label: {
+                    Label("开始会议", systemImage: AppRoute.meeting.systemImage)
+                        .speechRailMenuRow()
+                }
+                .disabled(session.occupancy?.kind == .meeting)
+
+                Button {
+                    session.requestEndCurrentSession()
+                    // 带省略号 = 要问一句；窗口不出来的话那个确认没人能回答。
+                    openWindow(id: AppNavigationState.controlCenterWindowID)
+                } label: {
+                    Label("结束当前会话…", systemImage: "stop.circle")
+                        .speechRailMenuRow()
+                }
+                .disabled(session.isIdle)
+
+                // 禁用组要就地解释（面板里既有的约定）：空闲时说清为什么那颗按钮是灰的。
+                if session.isIdle {
+                    Text("没有正在进行的会话")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                } else if session.phase == .interrupted {
+                    Text("这一场中断了，去页面里选「继续这一段」或「结束并整理」")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             Divider()
@@ -280,6 +351,14 @@ public struct ControlMenuView: View {
         default:
             "确认操作？"
         }
+    }
+
+    /// 会话状态点的颜色：空闲中性、中断提醒、其余健康。与三页状态带同一套语义色。
+    private var sessionTone: StatusTone {
+        if session.isIdle { return .neutral }
+        if session.phase == .interrupted { return .attention }
+        if session.phase == .preparing { return .attention }
+        return .healthy
     }
 
     private func confirmationButtonTitle(for command: ControlCommand) -> String {
