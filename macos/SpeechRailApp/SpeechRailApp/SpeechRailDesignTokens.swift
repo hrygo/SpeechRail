@@ -202,6 +202,8 @@ public enum SpeechRailDesignTokens {
         public static let captionLinePaddingH: CGFloat = 16
         public static let captionLinePaddingV: CGFloat = 8
         public static let captionBandToolbarCornerRadius: CGFloat = 8
+        /// 工具条内部的元素间距（稿 `hoverToolbar` 的 `gap: 6`）。
+        public static let captionBandToolbarSpacing: CGFloat = 6
         public static let captionBandToolbarPaddingH: CGFloat = 10
         public static let captionBandToolbarPaddingV: CGFloat = 5
         public static let captionBandIconButtonSize: CGFloat = 26
@@ -209,8 +211,14 @@ public enum SpeechRailDesignTokens {
         public static let captionBandTagPaddingV: CGFloat = 3
         public static let captionBandFootPaddingH: CGFloat = 16
         public static let captionBandFootPaddingV: CGFloat = 4
-        public static let captionBandLevelBarWidth: CGFloat = 14
+        /// 电平柱：稿 `levelBars(foot, ratio, 14, 13)` 是 **14 根**、中间高两端低、
+        /// 每根 3pt 宽、间距 3pt（组宽约 81pt）。**14 是根数，不是组宽**——上一版
+        /// 把它当成组宽再除以 4，画出来是 3 根递升的柱子，与稿不是一回事。
+        public static let captionBandLevelBarCount: Int = 14
+        public static let captionBandLevelBarWidth: CGFloat = 3
+        public static let captionBandLevelBarSpacing: CGFloat = 3
         public static let captionBandLevelBarHeight: CGFloat = 13
+        public static let captionBandLevelBarCornerRadius: CGFloat = 1.5
         // Source-compatibility alias for the menu bar popover surface.
         public static let controlMenuMinimumWidth: CGFloat = controlMenuWidth
         /// 设置窗口尺寸，取自稿 `05 Menu & Settings`：窗口 **640** 宽（行卡 604 = 640 − 2×18，

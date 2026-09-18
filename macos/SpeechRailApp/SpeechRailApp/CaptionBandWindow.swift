@@ -429,7 +429,7 @@ struct CaptionBandView: View {
     // MARK: 悬停工具条
 
     private var toolbar: some View {
-        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+        HStack(spacing: SpeechRailDesignTokens.Layout.captionBandToolbarSpacing) {
             iconButton(
                 systemImage: session.phase == .running ? "pause.fill" : "play.fill",
                 label: session.phase == .running ? "暂停" : "继续"
@@ -487,6 +487,10 @@ struct CaptionBandView: View {
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
+            // 稿里这是一颗 chip（`sizeTag` 的 padX 8 / padY 3）：多一点留白，
+            // 点起来才不像在点一行文字。
+            .padding(.horizontal, SpeechRailDesignTokens.Layout.captionBandTagPaddingH)
+            .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandTagPaddingV)
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
@@ -516,6 +520,10 @@ struct CaptionBandView: View {
             Text(footerHint)
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                // 一行到底：页脚的高度是按一行算进窗口高度的，折行会把内容顶出窗口。
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(footerHelp)
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             if !isFollowing {
                 Button {
@@ -542,27 +550,45 @@ struct CaptionBandView: View {
         if session.blocked != nil { return "" }
         if session.phase == .paused { return "已暂停 · ⌘⇧L 继续" }
         if session.phase == .ending { return "正在保存最后一句…" }
+        // 服务端说过"这句不行"（`failed` / `error`）时要说出来：否则那一句就这么
+        // 从屏幕上消失，用户只会以为是自己没说话。完整原因在悬停提示里。
+        if let failure = session.lastFailure { return "上一句没能转写 · \(failure)" }
         return "⌘⇧L 暂停 · ✕ 结束并保存"
     }
 
-    /// 真实电平，不是自走的动画（`LevelMeter` 的同一处口径）。
+    /// 悬停提示：贴上去才需要看全文（页脚只放得下一行）。
+    private var footerHelp: String {
+        guard session.blocked == nil, let failure = session.lastFailure else { return footerHint }
+        return "上一句没能转写：\(failure)"
+    }
+
+    /// 真实电平，不是自走的动画。形状对着稿的 `levelBars`：**14 根、中间高两端低**，
+    /// 条高**不**跟着电平动——读数靠颜色分辨（已到达 / 未到达），条高一动就变成动画了。
     private var levelBars: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<3, id: \.self) { index in
-                let threshold = Double(index + 1) / 3.0
-                Capsule()
-                    .fill(
-                        session.level >= threshold
-                            ? SpeechRailDesignTokens.Color.rail
-                            : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.3)
-                    )
-                    .frame(
-                        width: SpeechRailDesignTokens.Layout.captionBandLevelBarWidth / 4,
-                        height: SpeechRailDesignTokens.Layout.captionBandLevelBarHeight / 3 * CGFloat(index + 1)
-                    )
+        let layout = SpeechRailDesignTokens.Layout.self
+        let count = layout.captionBandLevelBarCount
+        let ratio = min(max(session.level, 0), 1)
+        let lit = Int((Double(count) * ratio).rounded())
+        return HStack(alignment: .bottom, spacing: layout.captionBandLevelBarSpacing) {
+            ForEach(0..<count, id: \.self) { index in
+                let shape = count > 1 ? sin(.pi * Double(index) / Double(count - 1)) : 1
+                let height = max(
+                    layout.captionBandLevelBarWidth,
+                    (layout.captionBandLevelBarHeight * (0.35 + 0.65 * shape)).rounded()
+                )
+                RoundedRectangle(
+                    cornerRadius: layout.captionBandLevelBarCornerRadius,
+                    style: .continuous
+                )
+                .fill(
+                    index < lit
+                        ? SpeechRailDesignTokens.Color.rail
+                        : SpeechRailDesignTokens.Color.inkTertiary.opacity(0.3)
+                )
+                .frame(width: layout.captionBandLevelBarWidth, height: height)
             }
         }
-        .frame(height: SpeechRailDesignTokens.Layout.captionBandLevelBarHeight, alignment: .bottom)
+        .frame(height: layout.captionBandLevelBarHeight, alignment: .bottom)
         .accessibilityLabel("输入电平")
     }
 

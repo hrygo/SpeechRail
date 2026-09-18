@@ -45,6 +45,23 @@ public final class SessionCoordinator {
         public var isProcessing: Bool
     }
 
+    /// 这个能力还没有接线（语音助手 / 会议助手在阶段 5 / 6 之前）。
+    ///
+    /// 存在的理由是**那条"静默成功"的路**：`starter` 的契约是「抛错 = 受阻」，返回
+    /// `Void` 会被读成"已经开始采集了"。于是界面显示在录、实际什么也没拿到——这种谎
+    /// 比"还没做"难查得多，所以在接线之前，未接线的 kind 必须抛。
+    public struct CapabilityNotWired: LocalizedError, Equatable, Sendable {
+        public var kind: SessionKind
+
+        public init(kind: SessionKind) {
+            self.kind = kind
+        }
+
+        public var errorDescription: String? {
+            "\(kind.title)的采集还没有接上。"
+        }
+    }
+
     /// 一次「要开始另一个会话」的确认。`sheet` 不是 `alert`：需要说明与选项（§6.4）。
     public struct Confirmation: Identifiable, Equatable, Sendable {
         public var id: String
@@ -139,6 +156,10 @@ public final class SessionCoordinator {
 
     /// 任何「要开始一个会话」的动作都走这里：侧边栏会话页的主按钮、`⌘⇧N`、
     /// 菜单栏的「开始…」、字幕带的「开始会议」。判定通过就直接进入 `preparing`。
+    ///
+    /// `begin` 的异常在这里**只用于退回占用**（`begin` 自己已经退干净了）；原因是能力层
+    /// 自己记的（`CaptionSession.blocked`），所以这一层不需要再持有它——这也是为什么
+    /// 能力层的 `starter` 必须在抛之前先把原因落到自己的状态上。
     public func requestStart(_ kind: SessionKind) async {
         switch decision(for: kind) {
         case .granted:
@@ -411,7 +432,8 @@ public final class SessionCoordinator {
     }
 
     /// 落一行正文，返回库分配的 `ordinal`。取号与插入在库里是同一条语句（§15.7 R2 ①），
-    /// 所以重复的 `completed` 撞唯一索引，而不是产生第二行。
+    /// 所以序号在一个会话里单调且唯一；"同一条 `completed` 只落一次"由能力层保证
+    /// （见 `CaptionSession.committedItemIDs`），不在这里。
     @discardableResult
     public func appendLine(_ draft: LineDraft) async throws -> Int {
         let ordinal = try await store.appendLine(draft)

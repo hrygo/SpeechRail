@@ -70,7 +70,9 @@ public final class CaptionSession {
             case .storeUnavailable(let message):
                 message
             case .streamFailed(let message):
-                "丢掉的音频就是没录上；已经定稿的字幕都还在，可以重新接上往下听。"
+                // 断开码要带给用户：`1008`（握手被拒）与「服务中途挂了」是两件事，
+                // 只写"中断了"会让人没法判断该去检查 key 还是该去看服务。
+                "\(message)丢掉的音频就是没录上；已经定稿的字幕都还在，可以重新接上往下听。"
             }
         }
 
@@ -137,6 +139,10 @@ public final class CaptionSession {
     private var terminalCount = 0
     private var isStoppingIntentionally = false
     private var currentOrdinal = 0
+    /// 本次会话已经落库的 `item_id`。**序号唯一索引拦不住重复的 `completed`**——
+    /// 序号是库现场取的 `MAX+1`（§15.7 R2 ①），同一个 item 到两次就会多出一行；
+    /// 幂等这一层因此在客户端，而不是在库里。
+    private var committedItemIDs: Set<String> = []
 
     public init(
         coordinator: SessionCoordinator,
@@ -219,10 +225,31 @@ public final class CaptionSession {
     // MARK: - 生命周期（由协调器的钩子调用）
 
     /// 协调器拿定占用之后的"真的开始采集"。抛错 = 受阻，协调器会把占用退回去。
+    ///
+    /// **受阻的原因必须留在这一层**：协调器只负责退回占用与走时，它调 `starter` 时的
+    /// 异常不带界面的落点（`SessionCoordinator.requestStart` 只能 `try?`）。所以这里
+    /// 先把原因写进 `blocked`，再抛给协调器——浮层要显示的正是这句话（§6.3.1）。
     public func beginCapture() async throws {
         phase = .preparing
         blocked = nil
+        lastFailure = nil
+        do {
+            try await startPipeline()
+        } catch {
+            let reason = Self.blockReason(for: error)
+            blocked = reason
+            // 本地也要退回"没在跑"：采集没起来，界面不能显示成在录。
+            // 已经定稿的字幕留着（可读、可复制），受阻态就贴在这一句上面。
+            resetToIdleKeepingLines()
+            throw Blocked(reason)
+        }
+    }
 
+    /// 一次完整的启动：读档位 → 起采集 → 连服务 → 建库里的行 → 开始上行。
+    ///
+    /// 每一步失败都把已经拿到的资源还回去（来源、连接），不留给下一个人收拾；
+    /// 库里那一行只在采集与服务都起来之后才建（§5.3.1：不留空记录）。
+    private func startPipeline() async throws {
         // 档位是**服务的事实**，不是会话的选择：写进记录的是本次读到的那一个，
         // 读不到写 `unknown`（不为了一个标签去阻塞会话启动）。
         var profile = "unknown"
@@ -264,6 +291,7 @@ public final class CaptionSession {
         partialText = nil
         terminalCount = 0
         currentOrdinal = 0
+        committedItemIDs = []
         isStoppingIntentionally = false
         do {
             let record = try await coordinator.createSession(
@@ -290,8 +318,11 @@ public final class CaptionSession {
     }
 
     /// 协调器的 stopper：把最后半句交出去、关掉连接。**不封存记录**——那是协调器接下来做的事。
+    ///
+    /// 唯一要挡的是重入（`:ending` 里还等着最后一句）。其余相位都照做：`idle` 时也把浮层
+    /// 收起来——协调器决定"这次会话结束了"，浮层就不该继续挂在屏幕上。
     public func stopCapture() async {
-        guard phase.isLive || phase == .preparing else { return }
+        guard phase != .ending else { return }
         phase = .ending
         isStoppingIntentionally = true
         source?.stop()
@@ -306,21 +337,34 @@ public final class CaptionSession {
         pump?.cancel()
         pump = nil
         client = nil
+        resetToIdleKeepingLines()
+        // 浮层跟着这次结束一起收：来自 `✕`、`⌘⇧.`、或切到别的会话，都一样。
+        setBandVisible(false)
+    }
+
+    /// 用户在浮层上按 `✕`：字幕闭环**唯一**的结束点（E6）。结束即保存。
+    ///
+    /// 它只结束**自己的**会话。占用在别的能力手里时（字幕带正以受阻态贴在屏幕上，
+    /// `§16.3` X1 的那一条），`✕` 只把带子收起来——否则"关掉字幕"会把正在录的会议
+    /// 推进"整理中"：麦克风的所有权只由守卫（§6.4）交还，不由浮层的关闭键交还。
+    public func finish() async {
+        if coordinator.occupancy?.kind == .captions {
+            await coordinator.stopCapture(endingWith: .user)
+        }
+        blocked = nil
+        resetToIdleKeepingLines()
+        setBandVisible(false)
+    }
+
+    /// 把"正在跑"的那一套本地状态清掉，**保留已经定稿的字幕**。
+    private func resetToIdleKeepingLines() {
+        phase = .idle
         level = 0
         partialText = nil
         pendingItem = nil
         commitCursor = nil
         sessionStartedAt = nil
         sessionID = nil
-        phase = .idle
-        // 浮层跟着这次结束一起收：来自 `✕`、`⌘⇧.`、或切到别的会话，都一样。
-        setBandVisible(false)
-    }
-
-    /// 用户在浮层上按 `✕`：字幕闭环**唯一**的结束点（E6）。结束即保存。
-    public func finish() async {
-        await coordinator.stopCapture(endingWith: .user)
-        blocked = nil
     }
 
     // MARK: - 暂停 / 继续
@@ -359,11 +403,18 @@ public final class CaptionSession {
         }
     }
 
-    /// 受阻之后重新接上。流式中断走"接回原会话"，其余几种走守卫重新开始。
+    /// 受阻之后重新接上。判据是**占用还在不在自己手里**，而不是受阻的类型：
+    ///
+    ///   - 占用仍是 `.captions`（服务忙、中途断线、续接失败）：这不是"再开一次会话"，
+    ///     是"把这条断掉的链路接回去"。走 `requestStart` 只会拿到 `.alreadyActive`，
+    ///     于是按钮点了没反应、界面还显示成在跑——那是最糟的一种失败。
+    ///   - 占用不在自己手里（麦克风未授权、服务未就绪、别人占着）：走守卫重新开始，
+    ///     该弹确认就弹确认。**原因在成功之前不清掉**，用户取消后浮层回到原样。
     public func retry() async {
-        if blocked?.canResume == true {
-            await coordinator.resumeAfterInterruption()
-            blocked = nil
+        if coordinator.occupancy?.kind == .captions {
+            if coordinator.phase == .interrupted {
+                await coordinator.resumeAfterInterruption()
+            }
             commitCursor = Date()
             do {
                 try await restartPipeline()
@@ -372,11 +423,14 @@ public final class CaptionSession {
             }
             return
         }
-        blocked = nil
         await coordinator.requestStart(.captions)
     }
 
     private func restartPipeline() async throws {
+        // 续接是"新 epoch"，不是"再叠一路"：上一次留下的采集件先还回去，
+        // 否则旧的引擎会一直被持着（用户裁决：功能离开就释放）。
+        source?.stop()
+        source = nil
         let source = audioSourceFactory()
         self.source = source
         let stream: AsyncStream<AudioChunk>
@@ -453,9 +507,9 @@ public final class CaptionSession {
             // 段级切分与分人是同一条链路，随阶段 4 一起做。这一档按一次 utterance 一行，
             // 时间码取上面那份提交边界（与服务端 VAD 同源）。
             break
-        case .completed(_, let transcript):
+        case .completed(let itemID, let transcript):
             terminalCount += 1
-            await commit(transcript: transcript)
+            await commit(itemID: itemID, transcript: transcript)
         case .failed(_, let code, let message):
             terminalCount += 1
             lastFailure = "\(code)：\(message)"
@@ -467,11 +521,18 @@ public final class CaptionSession {
         }
     }
 
-    private func commit(transcript: String) async {
+    /// 定稿即落库。**同一个 `item_id` 只落一行**：序号是库现场取的 `MAX+1`
+    /// （§15.7 R2 ①），所以"同一个 `completed` 到了两次"不会被唯一索引拦住，
+    /// 会多出一行——幂等在这里，不在库里。
+    private func commit(itemID: String, transcript: String) async {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         partialText = nil
         defer { pendingItem = nil }
         guard !text.isEmpty, let sessionID, let startedAt = sessionStartedAt else { return }
+        if !itemID.isEmpty {
+            guard !committedItemIDs.contains(itemID) else { return }
+            committedItemIDs.insert(itemID)
+        }
         let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
         let ordinal: Int
         do {
@@ -486,6 +547,8 @@ public final class CaptionSession {
                 )
             )
         } catch {
+            // 没写成就不算处理过：同一个 item 再来一次还要有机会落库。
+            committedItemIDs.remove(itemID)
             lastFailure = error.localizedDescription
             return
         }

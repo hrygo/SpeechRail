@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<dict/>
+<dict>
+	<!-- 取音是两条采集链路的前提（音色克隆的录音，以及会话级采集的实时字幕 / 会议 / 助手）。
+	     Distribution 构建开了 hardened runtime，**没有这一条就拿不到麦克风**：Debug 不痛，
+	     签名之后才痛，所以它与 `NSMicrophoneUsageDescription` 一起放在这里。
+	     `docs/developers/macos-app-audio-capture.md` §4 第 1 条就是这件事。 -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
 </plist>

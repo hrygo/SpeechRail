@@ -86,11 +86,18 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
     public static let chunkDuration: TimeInterval = 0.1
 
     private let queue = DispatchQueue(label: "com.speechrail.app.session.capture", qos: .userInitiated)
-    private let ring = PCMRing(capacity: Int(MicrophoneCapture.sampleRate))
+    /// 一秒的 16 kHz 单声道 PCM16 = 32,000 字节。**上限按字节算**，不是按采样点数：
+    /// 写成 `Int(sampleRate)` 会得到半秒（一个采样两字节），与"容量上限就是 1 秒"对不上。
+    private static let ringCapacityBytes = Int(sampleRate) * MemoryLayout<Int16>.size
+    private let ring = PCMRing(capacity: MicrophoneCapture.ringCapacityBytes)
     private var engine: AVAudioEngine?
     private var converter: AVAudioConverter?
     private var drainTask: Task<Void, Never>?
     private var continuation: AsyncStream<AudioChunk>.Continuation?
+    /// `start()` 等在 `engine.start()` 上时**不持有调用方的 actor**（它是个 nonisolated
+    /// 异步函数），等待期间 `stop()` 完全可能从另一个上下文插进来，所以这一位用锁保护。
+    private let stateLock = NSLock()
+    private var stopped = false
 
     public init() {}
 
@@ -122,6 +129,10 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
     /// 采集队列上，调用点 `await` 的是结果而不是主线程。
     public func start() async throws -> AsyncStream<AudioChunk> {
         guard await Self.requestPermission() else { throw Failure.permissionDenied }
+        // 一个实例只服务一次采集期（文件头第 2 条）。停过之后再开始是编程错误：拆卸已经排在
+        // 这条串行队列上，就算引擎又起来了也会被拆掉——那会交出一个"看着活着、其实没有引擎"
+        // 的对象。宁可在这里拒绝。
+        guard !isStopped else { throw Failure.engineFailed("这个采集件已经停过了，一次会话一个实例。") }
 
         let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .bufferingNewest(64))
         self.continuation = continuation
@@ -143,12 +154,21 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
             continuation.finish()
             throw error
         }
-        startDraining()
+        // 等引擎起来的这段时间里用户可能已经按了停（`stop()` 的拆卸排在同一条串行队列上，
+        // 会在这之后跑）。这时**不能**把这一路当成活的交出去：设备已经拆了，返回一条活的流
+        // 只会在下游留下一个永远不出字的会话。宁可在这里失败，让调用点如实报受阻。
+        guard !isStopped else {
+            self.continuation = nil
+            continuation.finish()
+            throw Failure.engineFailed("采集在开始的过程中被取消。")
+        }
+        startDraining(into: continuation)
         return stream
     }
 
     /// 停止采集并**立刻释放设备**（引擎与 tap 都拆掉；不是挂起）。
     public func stop() {
+        markStopped(true)
         drainTask?.cancel()
         drainTask = nil
         continuation?.finish()
@@ -160,6 +180,18 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
             converter = nil
             ring.reset()
         }
+    }
+
+    private func markStopped(_ value: Bool) {
+        stateLock.lock()
+        stopped = value
+        stateLock.unlock()
+    }
+
+    private var isStopped: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stopped
     }
 
     // MARK: - 引擎（只在采集队列上碰）
@@ -203,15 +235,17 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
         }
     }
 
-    private func startDraining() {
+    /// 取数据的一方**直接拿着这条流的 continuation**，不再回头读那个会被 `stop()` 置空的
+    /// 属性：一条在后台跑的 drain 任务与主线程上的 `stop()` 读同一块内存是没有意义的竞争。
+    private func startDraining(into continuation: AsyncStream<AudioChunk>.Continuation) {
         drainTask?.cancel()
         drainTask = Task { [weak self] in
             let interval = Self.chunkDuration
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(interval))
                 guard let self, !Task.isCancelled else { return }
-                guard let chunk = ring.drain() else { continue }
-                continuation?.yield(chunk)
+                guard let chunk = self.ring.drain() else { continue }
+                continuation.yield(chunk)
             }
         }
     }
@@ -252,9 +286,10 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
 
 /// 预分配的字节环形缓冲：音频回调只 memcpy，取数据的一方按块拉走。
 ///
-/// 容量上限就是 1 秒。写满时**丢最旧的一块并计数**——丢了就是真的没录上，
-/// 这一点与 `TECHNICAL-DESIGN` §5.2 第 3 条（断线不重放 PCM）是同一条口径：
-/// 不假装音频还在，也不做"回源补全"。
+/// 容量上限就是 1 秒。写满时**丢最旧的字节**——丢了就是真的没录上，这一点与
+/// `TECHNICAL-DESIGN` §5.2 第 3 条（断线不重放 PCM）是同一条口径：不假装音频还在，
+/// 也不做"回源补全"。（不额外计数：这个数今天没有消费者，写一个没人读的计数器
+/// 比不写更容易被误当成"已经有监控了"。）
 private final class PCMRing: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: [UInt8]
@@ -280,14 +315,27 @@ private final class PCMRing: @unchecked Sendable {
         guard !data.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
-        for byte in data {
-            storage[writeIndex] = byte
-            writeIndex = (writeIndex + 1) % capacity
-            if count < capacity {
-                count += 1
-            } else {
-                // 满了：把读指针也往前推，即丢掉最旧的一个字节。
-                readIndex = (readIndex + 1) % capacity
+        // 音频回调里只有"一两次 memcpy"：逐字节写 3,200 个字节在实时线程上是白给的开销。
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            while offset < raw.count {
+                // 一次最多填到环形缓冲的末尾，绕回的那一段留给下一轮。
+                let run = min(capacity - writeIndex, raw.count - offset)
+                storage.withUnsafeMutableBytes { destination in
+                    destination.baseAddress?.advanced(by: writeIndex)
+                        .copyMemory(from: base.advanced(by: offset), byteCount: run)
+                }
+                writeIndex = (writeIndex + run) % capacity
+                offset += run
+                // 写满时丢掉最旧的那几个字节：读指针跟着往前推，写指针不回头。
+                let overflow = count + run - capacity
+                if overflow > 0 {
+                    count = capacity
+                    readIndex = (readIndex + overflow) % capacity
+                } else {
+                    count += run
+                }
             }
         }
     }

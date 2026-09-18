@@ -124,7 +124,11 @@ struct SpeechRailApp: App {
             }
         }
         coordinator.starter = { kind in
-            guard kind == .captions else { return }
+            // 未接线的能力**必须抛**：`guard … else { return }` 会被读成"已经开始采集"，
+            // 于是界面显示在录、实际什么都没拿到（`CapabilityNotWired` 的注释里写了原因）。
+            guard kind == .captions else {
+                throw SessionCoordinator.CapabilityNotWired(kind: kind)
+            }
             try await captionSession.beginCapture()
         }
         coordinator.stopper = { kind in

@@ -169,7 +169,11 @@ public actor SessionStore {
     }
 
     /// 落一行正文，返回库分配的 `ordinal`。取号与插入是同一条语句（§15.7 R2 ①），
-    /// 所以重复的 `completed` 撞唯一索引而不是产生第二行。
+    /// 所以同一个会话里不可能出现两个相同的序号。
+    ///
+    /// **它不提供"同一个 `completed` 只落一次"的保证**：序号是现场取的 `MAX+1`，
+    /// 同一个 item 到两次会老老实实落成两行。幂等在客户端（`CaptionSession.committedItemIDs`），
+    /// 库这一层只保证序号单调且唯一。
     @discardableResult
     public func appendLine(_ draft: LineDraft, id: String = UUID().uuidString) throws -> Int {
         let sql = """
