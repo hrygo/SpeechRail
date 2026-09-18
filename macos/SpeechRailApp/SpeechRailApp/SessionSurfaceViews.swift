@@ -236,6 +236,8 @@ public struct SessionLibraryView: View {
     @Environment(AppModel.self) private var model
     @Environment(SessionCoordinator.self) private var session
     @Environment(CaptionSession.self) private var caption
+    @Environment(SessionPreferences.self) private var preferences
+    @Environment(\.openSettings) private var openSettings
     @State private var summaries: [SessionSummary] = []
     @State private var selectedID: String?
     @State private var lines: [TranscriptLine] = []
@@ -377,6 +379,125 @@ public struct SessionLibraryView: View {
 
     @ViewBuilder
     private var emptyState: some View {
+        if kind == .captions {
+            return AnyView(captionsIdleState)
+        }
+        return AnyView(genericEmptyState)
+    }
+
+    /// 实时字幕的空态（稿 `实时字幕 · 记录库 · 未开始（前置检查）`）。
+    ///
+    /// 字幕这条闭环的入口不在主窗口里（⌘⇧L 或菜单栏），所以这一屏要把「开始之前要满足
+    /// 什么、三种受阻各给哪个出口」一次说清——起点没画清，后面全是悬空的。
+    private var captionsIdleState: some View {
+        VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            SessionConclusionBand(
+                tone: .healthy,
+                title: "现在就可以开始字幕",
+                message: "它只依赖语音识别，不依赖大模型；开始后字幕带贴在屏幕底部，SpeechRail 不必在前台。",
+                hint: "再按一次 ⌘⇧L 结束并保存。字幕带不持有焦点，所以 esc 不会关掉它。"
+            ) {
+                Button("字幕设置") { openSettings() }
+                    .speechRailButton(.secondary)
+            }
+
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                SessionPanel {
+                    SessionPanelHead(
+                        title: "开始之前",
+                        detail: "三件事里只有前两件是必须的；第三件决定字幕里有没有说话人。"
+                    )
+                    SessionHairline()
+                    SessionCheckRow(tone: microphoneTone, name: "麦克风", detail: microphoneDetail)
+                    SessionHairline()
+                    SessionCheckRow(tone: serviceTone, name: "语音服务", detail: serviceDetail)
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: preferences.captionsDiarizationEnabled ? .ready : .neutral,
+                        name: "说话人标签 · 可选",
+                        detail: "档位不够时只记文字、不标说话人，正文照常；它也不接大模型，不需要另配模型。"
+                    )
+                    Spacer(minLength: 0)
+                    SessionHairline()
+                    CardFoot(
+                        note: "字幕带只做识别与显示：不接大模型，也不替你做总结。"
+                            + "记录库空着的时候，这里只有「开始字幕」。"
+                    ) { EmptyView() }
+                }
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                SessionPanel {
+                    SessionPanelHead(title: "本次字幕", badge: "还没有开始")
+                    SessionHairline()
+                    VStack(alignment: .leading, spacing: 10) {
+                        SessionKVRow("运行档位", profileRowText)
+                        SessionKVRow("默认字号", "标准")
+                        SessionKVRow("字幕带位置", "屏幕底部居中 · 每块屏各记一套")
+                        SessionKVRow("采集设备", "系统默认")
+                        SessionKVRow("保存位置", "记录库 · 长期保留")
+                        SessionKVRow("最近一条记录", lastRecordText)
+                    }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text("运行档位是什么意思")
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        Text(
+                            "\(profileRowText) 是这台 Mac 现在跑的那一档：认得越准，越能标出说话人。"
+                                + "换档在设置里，已经存下的记录不跟着变。"
+                        )
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.bottom, SpeechRailDesignTokens.Spacing.md)
+                    Spacer(minLength: 0)
+                }
+                .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth)
+            }
+
+            SessionPanel {
+                SessionPanelHead(
+                    title: "受阻时",
+                    detail: nil,
+                    trailingDetail: "三种受阻共用同一个形状：说明影响 + 唯一出口；不弹对话框。"
+                )
+                SessionHairline()
+                SessionCheckRow(
+                    tone: microphoneAuthorized ? .ready : .attention,
+                    name: "麦克风未授权",
+                    detail: "系统设置里给过权限才能采音。拒绝一次不会反复弹窗。"
+                ) {
+                    Button("打开系统设置") { openMicrophoneSettings() }
+                        .speechRailButton(.secondary)
+                }
+                SessionHairline()
+                SessionCheckRow(
+                    tone: serviceTone,
+                    name: "语音服务未就绪",
+                    detail: "识别服务没起来时，字幕带换成同一条受阻带并保留最后一句。"
+                ) {
+                    // 稿这里写的是 `[去服务状态]`；实现给 `[重试]`——服务还没起来时重试会
+                    // 原样再报一次，出口在这一屏够用（SESSIONS-SPEC §12.1.2 第 3 条未决项）。
+                    Button("重试") { Task { await caption.retry() } }
+                        .speechRailButton(.secondary)
+                }
+                SessionHairline()
+                SessionCheckRow(
+                    tone: .attention,
+                    name: "麦克风被占用",
+                    detail: "同一时刻只有一个会话能用麦克风；交还要确认，不会静默抢。"
+                ) {
+                    Button("结束会话并切换") { Task { await caption.takeOverOccupiedMicrophone() } }
+                        .speechRailButton(.secondary)
+                }
+            }
+        }
+    }
+
+    private var genericEmptyState: some View {
         SessionEmptyState(
             systemImage: kind.systemImage,
             title: emptyTitle,
@@ -405,6 +526,51 @@ public struct SessionLibraryView: View {
         case .meeting: "还没有会议记录"
         case .captions: "还没有字幕记录"
         }
+    }
+
+    // MARK: 前置检查的读数（只读系统与服务的现状，不猜）
+
+    private var microphoneAuthorized: Bool {
+        MicrophoneCapture.authorizationStatus() == .authorized
+    }
+
+    private var microphoneTone: SessionRowTone {
+        microphoneAuthorized ? .ready : .attention
+    }
+
+    private var microphoneDetail: String {
+        switch MicrophoneCapture.authorizationStatus() {
+        case .authorized: "已经给过权限，开始就能采音。"
+        case .notDetermined: "第一次开始时会请求授权；拒绝后这一行会变成受阻态并给出出口。"
+        default: "系统里没给麦克风权限：识别拿不到声音，先去设置里打开。"
+        }
+    }
+
+    private var serviceTone: SessionRowTone {
+        model.health?.ready == true ? .ready : .attention
+    }
+
+    private var serviceDetail: String {
+        model.health?.ready == true
+            ? "识别在本机跑，服务已就绪。"
+            : "识别在本机跑；服务未就绪时字幕带会换成同一条受阻带。"
+    }
+
+    private var profileRowText: String {
+        guard let profile = model.health?.profile else { return "未读取" }
+        return SpeechRailProfilePresentation.shortTitle(profile)
+    }
+
+    private var lastRecordText: String {
+        guard let latest = summaries.first else { return "还没有记录" }
+        let when = latest.record.startedAt.formatted(date: .abbreviated, time: .shortened)
+        return "\(when) · \(latest.lineCount) 行"
+    }
+
+    private func openMicrophoneSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private var emptyMessage: String {
