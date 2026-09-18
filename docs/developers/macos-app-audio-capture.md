@@ -131,8 +131,8 @@ date: 2026-09-16
 | API | `AVAudioEngine.inputNode.installTap`（硬件格式）+ `AVAudioConverter` → 16 kHz / 单声道 / PCM16 | `MicrophoneCapture.swift` |
 | 出口格式 | **永远 16 kHz 单声道 PCM16**。契约规定 `/v1/realtime` 首个 PCM 之后不得改格式，把归一放在来源这一侧，客户端就不可能违反它 | 同上 |
 | 块大小 | 100 ms（3,200 字节）。端到端延迟里可忽略，事件数比 20 ms 一块少一个量级 | 同上 |
-| 实时约束 | 回调里只做一次转换 + 一次拷贝进**预分配环形缓冲**（容量 1 秒）；取数据由一条 40 ms 的 drain 任务负责。回调里不做 I/O、不分配、不等锁以外的任何东西 | 同上 |
-| 溢出 | 写满时丢最旧的字节并如实计数——丢的音频就是真的没录上，不做"回源补全" | 同上 |
+| 实时约束 | 回调里只做一次转换 + 一次拷贝进**预分配环形缓冲**（容量 1 秒 = 32,000 字节）；取数据由一条 100 ms 的 drain 任务负责（与上面的块大小同一个数）。回调里不做 I/O、不分配、不等锁以外的任何东西 | 同上 |
+| 溢出 | 写满时丢最旧的字节——丢的音频就是真的没录上，不做"回源补全"，也不假装它还在。**没有溢出计数器**：今天没有消费者，写一个没人读的数比不写更容易被误当成"已经有监控了" | 同上 |
 | 电平 | 与音色克隆**同一条曲线**（`AudioLevel.normalized`，-60 dBFS 为底），三页读数一致 | `MicrophoneCapture.swift` / `VoiceRecordingController.swift` |
 | 设备生命周期 | **按功能启用、功能离开释放**：`start()` 建引擎、`stop()` 拆 tap 并 `engine.stop()`；空闲时没有引擎、没有 tap | `MicrophoneCapture.swift` |
 | 阻塞调用 | `engine.start()` 跑在采集队列上（本机实测过 `AVAudioRecorder.record()` 最坏阻塞 36 秒，同类调用一律不回主线程） | 同上 |

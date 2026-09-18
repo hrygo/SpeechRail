@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App · 实时会话模块设计规格"
 status: proposed
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "1.12.0"
+version: "1.13.0"
 date: 2026-09-18
 ---
 
@@ -819,6 +819,48 @@ Token delta：
 
 **下一步**：阶段 4（会议与字幕接分人扩展、段级时间码、`speaker_name` 改名）与阶段 5
 （语音助手 + 设置第 4 页签的 Responses API 配置）。
+
+#### 12.1.2 审查修订（2026-09-18，第二轮）
+
+落地之后做了一次逐行审查，并**用同一份仓库源码**写了一个定点核对程序，把"启动受阻"这条
+支路跑出来（不碰麦克风、不碰窗口、不碰服务）。四条不符合预期的行为都复现了，已在本轮修掉：
+
+| # | 修之前的样子 | 修法 |
+|---|---|---|
+| 1 | `⌘⇧L` 遇到服务未就绪 / 麦克风未授权时，浮层以**空白**出现：不写受阻原因、相位卡在 `preparing`，`✕` 与 `⌘⇧L` 都按不动 | 受阻原因在 `CaptionSession.beginCapture()` 落进 `blocked` 再抛（协调器只负责退回占用）；本地状态回 `idle`；`✕` 一律收得起来 |
+| 2 | 浮层上的 `✕` 会打到别人的会话上：会议占着麦克风时点它，会议被推进"整理中" | `finish()` 只在占用是 `.captions` 时调 `stopCapture`，否则只收起带子 |
+| 3 | 受阻后的「重试」是死按钮：占用还在自己手里时走 `requestStart` 只会拿到 `.alreadyActive`，界面仍显示在跑 | `retry()` 改按**占用归属**分派：占用是自己就走续接（新 epoch），不是自己才走守卫 |
+| 4 | 未接线的能力静默成功：`begin(.meeting)` 拿占用、起走时，但没有任何采集 | 未接线的 kind 抛 `CapabilityNotWired`（钩子契约是"抛错 = 受阻"，返回 `Void` 等于说"已经在录了"） |
+
+同批修掉的五处（都不是新功能）：
+
+- **`completed` 的幂等不在库里**。序号是现场取的 `MAX+1`，同一个 item 到两次会落成两行
+  （已实测），所以 §15.7 R2 ① 的唯一索引**保证的是序号唯一，不是去重**；幂等这一层放到
+  `CaptionSession.committedItemIDs`，两处注释一并改正。
+- **Distribution 构建拿不到麦克风**：`Distribution.xcconfig` 开了 hardened runtime，而
+  `Entitlements/SpeechRailApp.entitlements` 是空的。已补 `com.apple.security.device.audio-input`
+  （Debug 不痛，签名之后才痛）。
+- **环形缓冲容量**：`PCMRing(capacity:)` 收的是**字节**，`Int(sampleRate)` 只有半秒
+  （与"容量 1 秒"的注释相反）——已改成 32,000 字节；`macos-app-audio-capture.md` §3.7 的
+  "40 ms 的 drain"改成 100 ms（与块大小同一个数），"如实计数"改成如实描述（没有计数器）。
+- **字幕带上的电平柱**：稿是 `levelBars(foot, ratio, 14, 13)`——14 根、中间高两端低；
+  实现画成了 3 根递升的柱子（把"14 根"读成了"14pt 的组宽"再除以 4）。已按稿重画。
+- **工具条的两处几何**：内部间距 4 → 稿的 6；「字号」补上稿 `sizeTag` 的 padX 8 / padY 3。
+
+**仍然开着、需要认领的两件事**（本轮没动：它们是产品决定，不是缺陷）：
+
+1. §6.3.2 记录库页的**筛选（全部 / 仅星标）、字号档、列表表头、星标行**在稿上有、在 §12 的
+   阶段表里没有归属，今天也没实现（库里 `line.starred` 与 `setLineStarred` 已经在了）。
+   要么认领到某个阶段，要么从 §6.3.2 划掉。
+2. §6.3.1 的字号"标准 20"与实现的 22（系统 `.title`）差 2pt：实现侧是有意保留文本样式
+   （随系统"更大文字"缩放，与 `display` 的既有口径一致）。这一格要不要跟着写成 22。
+3. §6.3.1 受阻表里「服务未就绪」的出口写的是 `[去服务状态]`，实现给的是 `[重试]`
+   （功能上够用：服务还没起来时重试会原样再报一次）。两者要不要都留（`X1` 那种两个出口）。
+
+两件**发现但故意没做**的：会话层至今没有任何自动化测试（`SpeechRailMacControlTests` 只覆盖
+ControlKit，而上面四条里至少三条是纯逻辑、进单测就拦得住）；一批未被引用的 API 与常量
+（`forgetDoNotAskAgain`、`hideBand()`、`SessionKind.shortTitle` 等）按项目约定"不顺手清理"，
+列在这里等使用者决定。
 
 ## 13. 风险与待裁决
 
