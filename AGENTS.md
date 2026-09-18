@@ -30,7 +30,7 @@ SpeechRail 是面向单人 Apple Silicon Mac 的本地共享 ASR/TTS 服务，�
 - REST：`/health`、`/readyz`、`/metrics`、`/v1/models`、`/v1/audio/transcriptions`、`/v1/audio/speech`、`/v1/voices`，以及可选的 owner-scoped `/v1/jobs`。
 - WebSocket：唯一的 `/v1/realtime`，只实现 OpenAI Realtime 的 ASR/TTS 子集与 SpeechRail 命名空间扩展，不承载 LLM response、tool call、播放、会议或应用级打断策略。
 - `speechrail-mcp`：无状态 REST 代理，支持 `stdio` 与 `streamable-http`；它不导入 FastAPI 应用、不加载模型，Realtime 仍直接使用 `/v1/realtime`。
-- `macos/SpeechRailApp`：SwiftUI 控制面，通过受约束的 XPC 委托现有 Python CLI 和唯一的 `com.speechrail` user `LaunchAgent`；不采集/播放音频、不加载模型、不直接执行 `launchctl`。
+- `macos/SpeechRailApp`：SwiftUI 控制面，通过受约束的 XPC 委托现有 Python CLI 和唯一的 `com.speechrail` user `LaunchAgent`；不加载模型、不直接执行 `launchctl`。采集与播放**只发生在会话语境**（语音助手 / 会议助手 / 实时字幕 / 音色克隆）且**按功能启用、功能离开即释放**：空闲时没有麦克风、没有系统音频 tap、没有音频引擎；PCM 不落盘，记录只落本机 SQLite 的文字。
 
 ## 必须保持的约束
 

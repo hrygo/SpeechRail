@@ -120,6 +120,30 @@ date: 2026-09-16
 - 涉及 AudioQueue 的创建/启动不要放主线程（见 §3.1 的阻塞实测）。
 - 实时回调里不做 I/O、不加锁、不分配大对象；写文件交给 `AVAudioFile` 或录音器自己。
 
+## 3.7 会话级采集（2026-09-18 补，实时字幕落地时实装）
+
+音色克隆是「录一段文件」，会话（语音助手 / 会议助手 / 实时字幕）是「连续出 PCM、立刻送走、随即丢掉」。
+两者共用权限口径与电平曲线，但**采集件不是一个**：文件那一条是 `AVAudioRecorder`（AudioQueue），
+会话这一条是 `AVAudioEngine` 的输入 tap + `AVAudioConverter`。
+
+| 项 | 会话级采集的口径 | 位置 |
+|---|---|---|
+| API | `AVAudioEngine.inputNode.installTap`（硬件格式）+ `AVAudioConverter` → 16 kHz / 单声道 / PCM16 | `MicrophoneCapture.swift` |
+| 出口格式 | **永远 16 kHz 单声道 PCM16**。契约规定 `/v1/realtime` 首个 PCM 之后不得改格式，把归一放在来源这一侧，客户端就不可能违反它 | 同上 |
+| 块大小 | 100 ms（3,200 字节）。端到端延迟里可忽略，事件数比 20 ms 一块少一个量级 | 同上 |
+| 实时约束 | 回调里只做一次转换 + 一次拷贝进**预分配环形缓冲**（容量 1 秒）；取数据由一条 40 ms 的 drain 任务负责。回调里不做 I/O、不分配、不等锁以外的任何东西 | 同上 |
+| 溢出 | 写满时丢最旧的字节并如实计数——丢的音频就是真的没录上，不做"回源补全" | 同上 |
+| 电平 | 与音色克隆**同一条曲线**（`AudioLevel.normalized`，-60 dBFS 为底），三页读数一致 | `MicrophoneCapture.swift` / `VoiceRecordingController.swift` |
+| 设备生命周期 | **按功能启用、功能离开释放**：`start()` 建引擎、`stop()` 拆 tap 并 `engine.stop()`；空闲时没有引擎、没有 tap | `MicrophoneCapture.swift` |
+| 阻塞调用 | `engine.start()` 跑在采集队列上（本机实测过 `AVAudioRecorder.record()` 最坏阻塞 36 秒，同类调用一律不回主线程） | 同上 |
+| PCM 落盘 | **没有写文件的路径**。内存里只有 1 秒的环形缓冲，出口直接进 WebSocket | 同上 |
+
+**授权弹窗文案**也要跟着改：`NSMicrophoneUsageDescription` 已从「音色克隆需要读取麦克风」
+改成同时覆盖克隆与会话（`project.pbxproj` 三个 build configuration 各一份）。
+
+**尚未实装**：本机音频（进程 tap，阶段 6）与多来源合流。那里要处理 TCC 的系统录音授权、
+aggregate device、host time 对齐与 `processRestoreEnabled`，与麦克风这一路是两套机制。
+
 ## 4. 与 SpeechRail 的差距（按性价比排序的建议）
 
 1. **补 entitlement**（Distribution）：`com.apple.security.device.audio-input`。
