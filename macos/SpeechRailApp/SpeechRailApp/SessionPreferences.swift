@@ -37,7 +37,7 @@ public enum AssistantMode: String, CaseIterable, Identifiable, Sendable {
 /// 人设。**它是 system prompt 的一部分**，所以本轮只读、只在开始那一刻写入一次（§14.4）。
 ///
 /// 目录内置几条，正文可由用户改（改的是"下一次开始"时用的那份）。
-public struct Persona: Identifiable, Hashable, Sendable {
+public struct Persona: Identifiable, Hashable, Codable, Sendable {
     public var id: String
     public var title: String
     public var body: String
@@ -106,6 +106,14 @@ public final class SessionPreferences {
     private var personaBodies: [String: String] {
         didSet { defaults.set(personaBodies, forKey: Key.personaBodies) }
     }
+    /// 自定义人设（用户自己写的，排在内置目录之后）。
+    ///
+    /// 稿的「新建自定义人设」要求它可建、可删、可长期留下（`SESSIONS-SPEC` §6.1 的
+    /// 未开始态）。它与人设**正文的改写**是两件事：改写动的是内置那几条的措辞，
+    /// 这里动的是目录本身，所以分开存。
+    private var customPersonas: [Persona] {
+        didSet { persistCustomPersonas() }
+    }
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -122,6 +130,7 @@ public final class SessionPreferences {
         self.minutesModel = defaults.string(forKey: Key.minutesModel) ?? ""
         self.notifyOnInterruption = defaults.bool(forKey: Key.notifyOnInterruption)
         self.personaBodies = defaults.dictionary(forKey: Key.personaBodies) as? [String: String] ?? [:]
+        self.customPersonas = Self.decodePersonas(defaults.data(forKey: Key.customPersonas))
     }
 
     // MARK: 派生
@@ -169,7 +178,7 @@ public final class SessionPreferences {
     ]
 
     public var personas: [Persona] {
-        Self.catalog.map { persona in
+        (Self.catalog + customPersonas).map { persona in
             var copy = persona
             if let body = personaBodies[persona.id], !body.isEmpty { copy.body = body }
             return copy
@@ -186,6 +195,44 @@ public final class SessionPreferences {
 
     public func updatePersonaBody(id: String, body: String) {
         personaBodies[id] = body
+    }
+
+    /// 新建一条自定义人设。「它是它开口前读的第一段话」，所以正文不能为空——
+    /// 空正文的人设不会让助手有任何变化，却会在列表里占一行。
+    @discardableResult
+    public func addPersona(title: String, body: String) -> Persona? {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedBody = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty, !trimmedBody.isEmpty else { return nil }
+        let persona = Persona(
+            id: "custom-\(UUID().uuidString.prefix(8))",
+            title: trimmedTitle,
+            body: trimmedBody
+        )
+        customPersonas.append(persona)
+        return persona
+    }
+
+    public func removePersona(id: String) {
+        customPersonas.removeAll { $0.id == id }
+        personaBodies[id] = nil
+        if defaultPersonaID == id { defaultPersonaID = Self.catalog[0].id }
+    }
+
+    public var isCustomPersona: (String) -> Bool {
+        { [customPersonas] id in customPersonas.contains { $0.id == id } }
+    }
+
+    private func persistCustomPersonas() {
+        guard let data = try? JSONEncoder().encode(customPersonas) else { return }
+        defaults.set(data, forKey: Key.customPersonas)
+    }
+
+    private static func decodePersonas(_ data: Data?) -> [Persona] {
+        guard let data, let personas = try? JSONDecoder().decode([Persona].self, from: data) else {
+            return []
+        }
+        return personas
     }
 
     /// 从记录库「继续这一轮」时预填当时的设置（§14.4：那里**可以**换人设，因为那是新会话）。
@@ -224,5 +271,6 @@ public final class SessionPreferences {
         static let minutesModel = "speechrail.session.meeting.minutesModel"
         static let notifyOnInterruption = "speechrail.session.notifyOnInterruption"
         static let personaBodies = "speechrail.session.personaBodies"
+        static let customPersonas = "speechrail.session.customPersonas"
     }
 }
