@@ -79,6 +79,8 @@ const SCREEN_EXPORT_SCALE = 4;
 // 三个值不能同时成立，所以**取 360**：稿与实现各少一个可以漂移的数字。
 // 要改宽度只改这一行，下面所有 `size(..., SESSION_SIDE_W, null)` 跟着走。
 const SESSION_SIDE_W = 360;
+// 目录列宽度（D10 / 未决项 1 归一化：会议 / 记录库 / 助手 / 文档全部收敛到 280）
+const SESSION_LIST_W = 280;
 
 // --- Colour tokens (Light / Dark) -------------------------------------------
 const COLOR_TOKENS = [
@@ -1737,6 +1739,25 @@ function pageHead(parent, title, subtitle, trailing) {
   return add(parent, stretch(row));
 }
 
+// 「非主框体」的收起控件（用户 2026-09-18：「本次对话」面板要能收起，其余非主框体同理）。
+//
+// 落点与形状沿用 app 里已经实测过的那一枚（REDESIGN-SPEC §11.6 第六十二轮）：**内容列首行
+// 尾端**、`sidebar.right` 图标、28pt（= `Control.iconButton`，不新增数值 token）。它**不是
+// 工具栏项**——工具栏里每一件动作的落点由系统按「固定项 + 浮动间隔」分配，锚不住「面板分界线」
+// 这个位置；首行由内容列承载，它的右沿就是面板左沿，间隔就是这一行自己的内边距。
+//
+// 面板自己**不再画第二个收起按钮**：一个动作一屏只出现一次（第七轮去重 7 处之后成为门禁，
+// 见 smoke.js 的「42 块闭环屏的动作没有重复」）。规则全文、清单与「收起之后主框体得到什么」
+// 见 `closurePanelRulesBoard`。
+function sideToggle(row, panelName) {
+  const box = frame("sideToggle · " + panelName, {
+    layout: "HORIZONTAL", gap: 4, align: "CENTER"
+  });
+  iconButton(box, "sidebar-right", 28);
+  add(row, box);
+  return box;
+}
+
 // One 1px divider that stretches to its container, used to separate list rows,
 // card headers and card footers.
 function hairline(parent) {
@@ -3145,7 +3166,7 @@ function screenDeveloperDocs(d) {
   // 而不是内容结束后空半屏。
   grow(docs);
   const topics = frame("topics", { layout: "VERTICAL", gap: 2, padX: 12, padY: 14 });
-  size(topics, 272, null);
+  size(topics, SESSION_LIST_W, null);
   DOC_TOPICS.forEach(function (topic, i) {
     const selected = i === 0;
     const row = frame("Doc Topic Row", {
@@ -3205,7 +3226,12 @@ function screenDeveloperDocs(d) {
 // 这一页回答四件事：机器在听吗、它正在干什么、刚才那句说了什么、下一句怎么说。
 // 大模型是**服务之外**的依赖（SESSIONS-SPEC §4 P7），所以「未配置」是本模块的一等状态，
 // 不是错误对话框。
-function screenAssistant(d) {
+function screenAssistant(d, o) {
+  // `o.collapsed` 是「本次对话」右栏收起后的同一屏（用户 2026-09-18）。收起不是另画一屏，
+  // 而是这个面板的另一个状态：那一栏 360pt 全归主框体，对话行按新宽度重排，
+  // 状态带与结论条原地不动——「不看面板也不会做错事」是收起的前提，
+  // 规则与清单见 `closurePanelRulesBoard`。
+  const collapsed = !!(o && o.collapsed);
   pageHead(d, "语音助手", "和它一来一往：说也行，打字也行；对话只留在这台 Mac 上。",
     function (row) {
       kbdInRow(row, "⌘⇧.", 34);
@@ -3213,6 +3239,7 @@ function screenAssistant(d) {
       // 页头这个入口通向对比板，而不是直接换：先说清代价，再决定换哪个。
       secondaryButton(row, "音色与风格", "sliders-horizontal");
       primaryButton(row, "结束对话", "square", 118);
+      sideToggle(row, "本次对话");
     });
 
   sessionStatusBar(d, {
@@ -3247,7 +3274,7 @@ function screenAssistant(d) {
   ].forEach(function (t) {
     turnRow(stream, {
       who: t.who, accent: t.accent, badge: t.badge, time: t.time, text: t.text,
-      partial: t.partial, actions: t.actions, width: 760
+      partial: t.partial, actions: t.actions, width: collapsed ? 1128 : 760
     });
   });
   spacer(stream);
@@ -3258,6 +3285,7 @@ function screenAssistant(d) {
     "Subheadline", V["text/tertiary"]));
   add(stream, stretch(streamFoot));
 
+  if (!collapsed) {
   const side = card(split, "inspector", { pad: 0, gap: 0, clip: true });
   size(side, SESSION_SIDE_W, null);
   add(split, stretch(side));
@@ -3289,6 +3317,7 @@ function screenAssistant(d) {
   spacer(sideActs);
   secondaryButton(sideActs, "新开一轮以换人设", "plus");
   add(side, stretch(sideActs));
+  }
 
   const controls = card(d, "controls", {
     layout: "VERTICAL", gap: 10, padX: 16, padY: 12
@@ -3327,10 +3356,24 @@ function screenAssistant(d) {
   add(controls, stretch(controlsRow));
 }
 
+// --- A7. 语音助手 · 对话页 · 对话中（本次对话收起） -------------------------------
+//
+// 用户 2026-09-18：「本次对话」面板需要可收起，举一反三，其他非主框体也通用要求。
+// 收起不是「少了一个面板」，而是同一个面板的另一个状态——所以它不是另画一屏，而是
+// `screenAssistant` 的另一个状态：右栏那 360pt 全归主框体，对话行按新宽度重排；
+// 状态带里「这一轮怎么进行的」仍在原地（收起的前提是不看面板也不会做错事）。
+// 判据与清单见「非主框体 · 收起规则（通用）」那一块板。
+function screenClosureAssistantCollapsed(d) {
+  return screenAssistant(d, { collapsed: true });
+}
+
 // --- 12. 语音助手 · 未配置对话模型 ---------------------------------------------
 function screenAssistantBlocked(d) {
   pageHead(d, "语音助手", "和本机大模型用语音一来一往；转录与对话只留在这台 Mac 上。",
-    function (row) { secondaryButton(row, "设置 · 会话", "sliders-horizontal"); });
+    function (row) {
+      secondaryButton(row, "设置 · 会话", "sliders-horizontal");
+      sideToggle(row, "本次对话");
+    });
 
   conclusionBand(d, {
     tone: "Attention",
@@ -3638,7 +3681,7 @@ function screenMeetingEmpty(d) {
   // 左：字幕记录库。字幕会话不是「一次演示」——记录长期保留，所以入口是列表，与语音
   // 助手、会议助手共用同一种形状：列表 + 选中 + 详情。
   const library = card(split, "library", { pad: 0, gap: 0, clip: true });
-  size(library, 240, null);
+  size(library, SESSION_LIST_W, null);
   add(split, stretch(library));
   const lHead = frame("lHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 16, padY: 12 });
   add(lHead, text("title", "字幕记录", "Heading / Section", V["text/primary"]));
@@ -3646,7 +3689,7 @@ function screenMeetingEmpty(d) {
   add(lHead, text("count", "42 段", "Callout", V["text/secondary"]));
   add(library, stretch(lHead));
   const lSearch = frame("lSearch", { layout: "HORIZONTAL", padX: 16, padY: 4 });
-  searchField(lSearch, "搜索记录", 208);
+  searchField(lSearch, "搜索记录", 248);
   add(library, stretch(lSearch));
   hairline(library);
   [
@@ -3656,14 +3699,14 @@ function screenMeetingEmpty(d) {
     { title: "9月15日 14:00", sub: "26 分钟 · 240 行 · 3 位", badge: ["Info", "已导出"] },
     { title: "9月12日 10:05", sub: "18 分钟 · 176 行 · 2 位" }
   ].forEach(function (m, i, all) {
-    meetingRow(library, { title: m.title, sub: m.sub, badge: m.badge, selected: m.selected, width: 156 });
+    meetingRow(library, { title: m.title, sub: m.sub, badge: m.badge, selected: m.selected, width: 196 });
     if (i < all.length - 1) hairline(library);
   });
   spacer(library);
   hairline(library);
   const lFoot = frame("lFoot", { layout: "HORIZONTAL", padX: 16, padY: 10 });
   add(lFoot, text("note", "按开始时间倒序；原始音频不留存。",
-    "Subheadline", V["text/tertiary"], { w: 208 }));
+    "Subheadline", V["text/tertiary"], { w: 248 }));
   add(library, stretch(lFoot));
 
   const list = card(split, "list", { pad: 0, gap: 0, clip: true });
@@ -4010,6 +4053,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
       kbdInRow(row, "⌘⇧L", 34);
       secondaryButton(row, "打开记录库", "clock");
       primaryButton(row, "开始字幕", "captions", 132);
+      sideToggle(row, "本次字幕");
     });
 
   conclusionBand(d, {
@@ -4100,6 +4144,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
     pageHead(d, "实时字幕", "字幕带贴在屏幕上看；这里回看、搜索和导出。", function (row) {
       secondaryButton(row, "复制全文", "copy");
       primaryButton(row, "导出 SRT", "download", 118);
+      sideToggle(row, "字幕文件");
     });
 
     conclusionBand(d, {
@@ -4261,7 +4306,11 @@ function screenClosureMeetingProcessing(d) {
 // 它不占主区，也不用离开转录——这样它才是「组件」，而不是「模式」。
 function meetingShell(d, o) {
   pageHead(d, "会议助手", o.subtitle || "把一段多人谈话变成可检索的文本与纪要；音频不留存。",
-    o.headActions);
+    function (row) {
+      if (o.headActions) o.headActions(row);
+      // 会议页的全部状态共用这一处右栏收起控件；空态的右栏是「音频来源」，不是会议信息。
+      sideToggle(row, o.sideName || "会议信息");
+    });
   sessionStatusBar(d, o.status);
   if (o.banner) o.banner();
   const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
@@ -4412,6 +4461,7 @@ function screenClosureMeetingSources(d) {
     kbdInRow(row, "⌘⇧N", 34);
     secondaryButton(row, "查看设置", "sliders-horizontal");
     primaryButton(row, "开始会议", "mic", 132);
+    sideToggle(row, "音频来源");
   });
 
     conclusionBand(d, {
@@ -4581,6 +4631,7 @@ function screenClosureMeetingInterrupted(d) {
     function (row) {
       secondaryButton(row, "打开数据目录", "folder-open");
       primaryButton(row, "继续这一段", "play", 132);
+      sideToggle(row, "会议信息");
     });
 
   sessionStatusBar(d, {
@@ -4672,6 +4723,125 @@ function screenClosureMeetingInterrupted(d) {
   return kinds;
 }
 
+// --- J0. 会话 · 首次使用 · 空态引导（三能力起点） ---------------------------------
+//
+// 产品经理面向用户旅程审查（未决项 4 / G6 缺口闭环）：全新安装或清空数据库后，
+// `sessions.sqlite3` 为空。此画板呈现无历史记录时的初见引导体验：
+// 顶部欢迎横幅（本地引擎就绪、音频不存盘、数据长期保留）+ 三条核心会话能力卡片
+// （语音助手 ⌘6 / 会议助手 ⌘7 / 实时字幕 ⌘8），每张卡片给出明确的起手入口与说明，
+// 底部标注数据存储位置与本地安全承诺。
+function screenClosureFirstRunEmpty(d) {
+  pageHead(d, "会话", "单人 Apple Silicon Mac 上的本地语音会话中心；音频不存盘，记录在库长期保留。",
+    function (row) {
+      secondaryButton(row, "会话设置", "sliders-horizontal");
+    });
+
+  conclusionBand(d, {
+    tone: "Ready",
+    title: "本地语音引擎已就绪",
+    body: "语音识别、语音合成与说话人分离常驻本机，不访问外部网络，原始音频不存盘。",
+    hint: "会话记录保存在本机 SQLite 数据库，跨启动长期留存。从下方三项任选一项开启。",
+    actions: []
+  });
+
+  const cardsRow = frame("cardsRow", { layout: "HORIZONTAL", gap: 16 });
+  add(d, stretch(grow(cardsRow)));
+
+  // 卡片 1：语音助手 (J1)
+  const cAssistant = card(cardsRow, "cardAssistant", { pad: 20, gap: 14, clip: true });
+  grow(cAssistant);
+  const aHead = frame("aHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  icon(aHead, "message-circle", 20, V["accent/rail"]);
+  add(aHead, text("title", "语音助手", "Heading / Section", V["text/primary"]));
+  spacer(aHead);
+  kbd(aHead, "⌘6");
+  add(cAssistant, stretch(aHead));
+  add(cAssistant, text("desc",
+    "与大模型进行语音与文字互动。支持自然打字、耳机实时对讲插话、随时切换音色，对话与记忆沉淀在本地。",
+    "Callout", V["text/secondary"], { w: 320 }));
+  hairline(cAssistant);
+  const aFeatures = frame("aFeatures", { layout: "VERTICAL", gap: 6 });
+  [
+    "语音与打字双通道输入",
+    "耳机实时对讲（支持自然插话打断）",
+    "对话跨启动记忆，音色随时可换"
+  ].forEach(function (ft) {
+    const fRow = frame("ft", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
+    icon(fRow, "check", 13, V["status/ready"]);
+    add(fRow, text("t", ft, "Subheadline", V["text/secondary"]));
+    add(aFeatures, fRow);
+  });
+  add(cAssistant, stretch(aFeatures));
+  spacer(cAssistant);
+  primaryButton(cAssistant, "进入语音助手", "message-circle");
+
+  // 卡片 2：会议助手 (J2)
+  const cMeeting = card(cardsRow, "cardMeeting", { pad: 20, gap: 14, clip: true });
+  grow(cMeeting);
+  const mHead = frame("mHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  icon(mHead, "users", 20, V["accent/voice"]);
+  add(mHead, text("title", "会议助手", "Heading / Section", V["text/primary"]));
+  spacer(mHead);
+  kbd(mHead, "⌘7");
+  add(cMeeting, stretch(mHead));
+  add(cMeeting, text("desc",
+    "多人会谈或线上会议记录。支持麦克风与本机 App 音频独立混音，CoreML 本地说话人分离与会后智能纪要。",
+    "Callout", V["text/secondary"], { w: 320 }));
+  hairline(cMeeting);
+  const mFeatures = frame("mFeatures", { layout: "VERTICAL", gap: 6 });
+  [
+    "麦克风与系统音频按 App 多选录制",
+    "CoreML 本地说话人分离（不上传声纹）",
+    "会中内心 OS 提问，会后多版本纪要"
+  ].forEach(function (ft) {
+    const fRow = frame("ft", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
+    icon(fRow, "check", 13, V["status/ready"]);
+    add(fRow, text("t", ft, "Subheadline", V["text/secondary"]));
+    add(mFeatures, fRow);
+  });
+  add(cMeeting, stretch(mFeatures));
+  spacer(cMeeting);
+  primaryButton(cMeeting, "进入会议助手", "users");
+
+  // 卡片 3：实时字幕 (J3)
+  const cCaptions = card(cardsRow, "cardCaptions", { pad: 20, gap: 14, clip: true });
+  grow(cCaptions);
+  const cpHead = frame("cpHead", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  icon(cpHead, "captions", 20, V["status/info"]);
+  add(cpHead, text("title", "实时字幕", "Heading / Section", V["text/primary"]));
+  spacer(cpHead);
+  kbd(cpHead, "⌘8");
+  add(cCaptions, stretch(cpHead));
+  add(cCaptions, text("desc",
+    "无感贴屏实时转录。轻量悬浮字幕带浮在任意窗口之上，不抢焦点；会后自动归档到记录库，支持导出 SRT。",
+    "Callout", V["text/secondary"], { w: 320 }));
+  hairline(cCaptions);
+  const cpFeatures = frame("cpFeatures", { layout: "VERTICAL", gap: 6 });
+  [
+    "悬浮字幕带贴屏跟随，不抢占焦点",
+    "上滚回看即停，支持大字档位切换",
+    "结束自动归档，一键导出标准 SRT"
+  ].forEach(function (ft) {
+    const fRow = frame("ft", { layout: "HORIZONTAL", gap: 6, align: "CENTER" });
+    icon(fRow, "check", 13, V["status/ready"]);
+    add(fRow, text("t", ft, "Subheadline", V["text/secondary"]));
+    add(cpFeatures, fRow);
+  });
+  add(cCaptions, stretch(cpFeatures));
+  spacer(cCaptions);
+  primaryButton(cCaptions, "启动实时字幕", "captions");
+
+  // 底部资产提示条
+  const foot = card(d, "foot", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 16, padY: 10 });
+  icon(foot, "shield-check", 15, V["status/ready"]);
+  add(foot, text("storage",
+    "隐私与资产：原始音频不上传也不存盘；转录、纪要与对话记录保存在本地 SQLite（~/Library/Application Support/SpeechRail/sessions.sqlite3）。",
+    "Caption", V["text/secondary"]));
+  spacer(foot);
+  add(foot, text("hint", "随时可在设置页备份或导出记录库", "Caption", V["text/tertiary"]));
+  add(d, stretch(foot));
+}
+
 // --- A0. 语音助手 · 未开始（先定人设与音色） -------------------------------------
 //
 // 人设为什么必须在这里定死：它是 system prompt 的一部分。会话开始之后再换，大模型的前缀
@@ -4684,6 +4854,7 @@ function screenClosureMeetingInterrupted(d) {
     pageHead(d, "语音助手", "定好人设与音色就能开始；说也行，打字也行。", function (row) {
       secondaryButton(row, "打开设置", "sliders-horizontal");
       primaryButton(row, "开始对话", "message-circle", 132);
+      sideToggle(row, "本次对话");
     });
 
     conclusionBand(d, {
@@ -4789,6 +4960,7 @@ function screenClosureMeetingInterrupted(d) {
         kbdInRow(row, "⌘⇧.", 34);
         secondaryButton(row, "导出 Markdown", "download");
         secondaryButton(row, "新建对话", "message-circle");
+        sideToggle(row, "记录信息");
       });
 
   conclusionBand(d, {
@@ -4807,7 +4979,7 @@ function screenClosureMeetingInterrupted(d) {
   // 左：记录库。三条闭环的产物长同一个样子——列表 + 选中 + 详情，因为三种记录住在
   // 同一个本机数据库里，没有理由让它们长得不一样。
   const library = card(split, "library", { pad: 0, gap: 0, clip: true });
-  size(library, 232, null);
+  size(library, SESSION_LIST_W, null);
   add(split, stretch(library));
   const lHead = frame("lHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 16, padY: 12 });
     add(lHead, text("title", "对话记录", "Heading / Section", V["text/primary"]));
@@ -4815,7 +4987,7 @@ function screenClosureMeetingInterrupted(d) {
   add(lHead, text("count", "38 段", "Callout", V["text/secondary"]));
   add(library, stretch(lHead));
   const lSearch = frame("lSearch", { layout: "HORIZONTAL", padX: 16, padY: 4 });
-  searchField(lSearch, "搜索记录", 200);
+  searchField(lSearch, "搜索记录", 248);
   add(library, stretch(lSearch));
   hairline(library);
   [
@@ -4827,7 +4999,7 @@ function screenClosureMeetingInterrupted(d) {
     { title: "文件命名讨论", sub: "9月11日 08:30 · 6 轮" }
   ].forEach(function (m, i, all) {
     meetingRow(library, {
-      title: m.title, sub: m.sub, badge: m.badge, selected: m.selected, width: 148
+      title: m.title, sub: m.sub, badge: m.badge, selected: m.selected, width: 196
     });
     if (i < all.length - 1) hairline(library);
   });
@@ -4835,7 +5007,7 @@ function screenClosureMeetingInterrupted(d) {
   hairline(library);
   const lFoot = frame("lFoot", { layout: "HORIZONTAL", padX: 16, padY: 10 });
     add(lFoot, text("note", "搜索标题与正文；记录长期留在记录库，App 重启也在。",
-      "Subheadline", V["text/tertiary"], { w: 200 }));
+      "Subheadline", V["text/tertiary"], { w: 248 }));
   add(library, stretch(lFoot));
 
   const record = card(split, "record", { pad: 0, gap: 0, clip: true });
@@ -4919,6 +5091,7 @@ function screenClosureMeetingInterrupted(d) {
     kbdInRow(row, "⌘⇧.", 34);
     secondaryButton(row, "人设与音色", "sliders-horizontal");
     primaryButton(row, "结束对话", "square", 118);
+    sideToggle(row, "本次对话");
   });
 
     sessionStatusBar(d, {
@@ -5020,7 +5193,10 @@ function screenClosureMeetingInterrupted(d) {
 // 「换音色 与 换人设 的影响 请深入分析，重新绘制」）。
 function screenClosureAssistantVoice(d) {
   pageHead(d, "语音助手", "声音随时能换，下一句就听得出来；要换人设得新开一轮。",
-    function (row) { primaryButton(row, "结束对话", "square", 118); });
+    function (row) {
+      primaryButton(row, "结束对话", "square", 118);
+      sideToggle(row, "本次对话");
+    });
 
   conclusionBand(d, {
     tone: "Ready",
@@ -5140,6 +5316,7 @@ function screenClosureAssistantMemory(d) {
   pageHead(d, "语音助手", "和本机大模型用语音一来一往；记忆跨轮次留着。", function (row) {
     kbdInRow(row, "⌘⇧.", 34);
     primaryButton(row, "结束对话", "square", 118);
+    sideToggle(row, "本次对话");
   });
 
   conclusionBand(d, {
@@ -5229,6 +5406,88 @@ function screenClosureAssistantMemory(d) {
     spacer(mActs);
     secondaryButton(mActs, "新开一轮以生效", "plus");
     add(side, stretch(mActs));
+}
+
+// --- S5. 非主框体 · 收起规则（通用） --------------------------------------------
+//
+// 用户 2026-09-18 的这条要求是**通用**的：先有「什么算非主框体」，再有「收起之后必须成立
+// 什么」，最后才是某一个面板上那枚按钮。所以这一块板不画某一个面板，而是把判据与清单摆在
+// 一起——它管现在这三屏，也管以后新加的面板。
+function closurePanelRulesBoard() {
+  const board = frame("▸ 非主框体 · 收起规则（通用）", {
+    layout: "VERTICAL", gap: 16, pad: 24, fill: V["surface/window"], radius: 12, clip: true
+  });
+  size(board, 1440, null);
+  pageHead(board, "非主框体 · 收起规则",
+    "凡是「关掉它，主任务照样能做完」的面板，都要能收起：收起是它的正常状态，不是缺省。");
+
+  const row = frame("row", { layout: "HORIZONTAL", gap: 24 });
+  add(board, stretch(row));
+
+  // 左：六条判据。缺哪一条，收起就会变成「东西不见了」。
+  const rules = card(row, "rules", { pad: 0, gap: 0, clip: true });
+  grow(rules);
+  const rHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 16, padY: 14 });
+  add(rHead, text("title", "六条判据", "Heading / Section", V["text/primary"]));
+  add(rHead, text("detail", "逐条对照：缺一条，就不算「可收起」。", "Callout", V["text/secondary"]));
+  add(rules, stretch(rHead));
+  hairline(rules);
+  [
+    ["Ready", "① 有收起态",
+      "面板必须有「收起」这一态，而且它是正常状态：不是被窗口挤没的，也不是把功能藏起来。"],
+    ["Ready", "② 控件贴着分界线",
+      "内容列首行尾端一枚 sidebar-right 图标按钮（28pt，复用现成 token）。它不是工具栏项——" +
+        "工具栏里每个动作的落点由系统分配，锚不住这条分界线。"],
+    ["Ready", "③ 一处唯一",
+      "面板自己不再画第二个收起按钮：同一个动作一屏只出现一次，由离线门禁守着。"],
+    ["Ready", "④ 收起后主框体吃满",
+      "让出来的宽度归主任务：对话行、转录、字幕按新宽度重排；不留空栏，也不退化成分隔线。"],
+    ["Ready", "⑤ 不看面板也不会做错事",
+      "这是收起的前提：关键状态在主框体里也要有一份——会议怎么记的、来源是什么、" +
+        "这一轮的人设与音色。做不到，这个面板就不该允许收起。"],
+    ["Ready", "⑥ 记得住",
+      "收起态按屏记忆、跨启动保留；菜单项与快捷键给键盘路径，不逼人去画布上找那枚图标。"]
+  ].forEach(function (r, i, all) {
+    closureCheckRow(rules, r[0], r[1], r[2], null, 556, "rule/" + i);
+    if (i < all.length - 1) hairline(rules);
+  });
+  spacer(rules);
+
+  // 右：清单。一次说清「现在算进来的」与「这一轮先不画的」，免得下一轮又从头猜一遍。
+  const list = card(row, "list", { pad: 0, gap: 0, clip: true });
+  size(list, 620, null);
+  const lHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 16, padY: 14 });
+  add(lHead, text("title", "非主框体清单", "Heading / Section", V["text/primary"]));
+  add(lHead, text("detail", "每一项：方位 · 收起控件 · 快捷键 · 记忆范围",
+    "Callout", V["text/secondary"]));
+  add(list, stretch(lHead));
+  hairline(list);
+  [
+    ["Ready", "本轮补齐", "详情列 360（本次对话 / 记录信息 / 会议信息 / 音频来源 / 本次字幕 / " +
+      "字幕文件）· 右 · 首行尾端的 sidebar-right · ⌘⌃I · 按屏"],
+    ["Info", "已有", "贴底抽屉（内心 OS）· 底 · 那一行上的 chevron · ⌘⇧I · 按屏"],
+    ["Info", "已有", "字幕带浮层 · 浮 · 悬停工具条上的 x · ⌘⇧. · 全局"],
+    ["Info", "已有", "导航侧栏 240 · 左 · 系统那一枚侧栏按钮 · ⌘⌃S · 系统"],
+    ["Info", "已有", "卡内明细（运行监控的「逐指标明细」等）· 卡内 · chevron-down · 无 · 按页"],
+    ["Ready", "本轮补齐", "目录列 280（统一会议 / 记录库 / 助手 / 文档）· 内 · " +
+      "⌘⌥S · 按屏记忆——列宽已归一化收敛至 280pt"],
+    ["Off", "不在这一版", "音色库与我的作品的详情列（全量稿那一份）· 右 · 同一枚按钮（应用里已在用）"]
+  ].forEach(function (r, i, all) {
+    closureCheckRow(list, r[0], r[1], r[2], null, 428, "panel/" + i);
+    if (i < all.length - 1) hairline(list);
+  });
+  spacer(list);
+
+  const acts = frame("actions", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
+  add(acts, text("note",
+    "两条边界：① 收起 ≠ 关掉功能——面板收起时任务照跑；②「开发者详情」（⌥⌘I）住在面板里，" +
+      "面板收起时它跟着收走、展开时回来，不因此拦住收起。",
+    "Caption", V["text/tertiary"], { w: 860 }));
+  spacer(acts);
+  secondaryButton(acts, "收起后的对话页", "sidebar-right");
+  secondaryButton(acts, "回到对话中", "message-circle");
+  add(board, stretch(acts));
+  return board;
 }
 
 // --- S1. 设置 · 会话 ------------------------------------------------------------
@@ -5773,6 +6032,21 @@ const CLOSURE_BOARDS = [
   { anchor: "diarization", title: "分人 · 说话人标签（会议与字幕共用）", icon: "users",
     route: "meeting", session: "meeting", full: closureDiarizationBoard,
     links: [["打开会议页", "meetingRecording"], ["打开字幕记录库", "captions"]] }
+  ,
+  // 用户 2026-09-18：「本次对话」要能收起，其余非主框体同理。左边这块是**规则**（判据 +
+  // 清单），右边那块是规则落到具体一屏上的样子——收起态不是另一屏，是同一屏的另一个状态。
+  { anchor: "panelRules", title: "非主框体 · 收起规则（通用）", icon: "sidebar-right",
+    route: "assistant", session: "assistant", full: closurePanelRulesBoard,
+    links: [["收起后的对话页", "assistantCollapsed"], ["回到对话中", "assistant"]] },
+  { anchor: "assistantCollapsed", title: "语音助手 · 对话页 · 对话中（本次对话收起）",
+    icon: "sidebar-right", route: "assistant", session: "assistant",
+    screen: screenClosureAssistantCollapsed,
+    links: [["结束对话", "assistantClosed"]] },
+  { anchor: "sessionFirstRun", title: "会话 · 首次使用 · 空态引导（三能力起点）",
+    icon: "sparkles", route: "assistant", session: "idle",
+    screen: screenClosureFirstRunEmpty,
+    links: [["进入语音助手", "assistantReady"], ["进入会议助手", "meetingEmpty"],
+      ["启动实时字幕", "bandFollow"], ["会话设置", "settingsSession"]] }
 ];
 
 // 字幕带是浮层，不是页面：它自己不成对出现，所以只作为连线目标登记。
@@ -5973,7 +6247,13 @@ const CLOSURE_JOURNEY = [
     "bandBlocked"],
   ["Critical", "移除与清空（记录库）",
     "移除一条记录 / 清空字幕记录共用一张破坏性确认：写清影响面与能不能恢复。",
-    null]
+    null],
+  ["Info", "面板收起（每一屏）",
+    "右栏、贴底抽屉、浮层、目录列都算非主框体：收起是正常状态，主框体吃满，关键状态留在主框体里。",
+    "panelRules"],
+  ["Ready", "首次启动 · 空态引导（初见）",
+    "全新安装或清空数据库：会话三能力起手导航，声明本地隐私保障与 SQLite 长期资产。",
+    "sessionFirstRun"]
 ];
 
 // 格子的节点名带上泳道与序号：同一格里两条路径可能指向同一块画板（语音助手的入口与主
@@ -6089,9 +6369,9 @@ function buildClosureJourneyNotes(parent) {
   add(section, text("title", "旅程还会走到这里：不是每个时刻都点得出来", "Heading / Section",
     V["text/primary"]));
   add(section, text("detail",
-    "这四种情况不属于「一条闭环的五个阶段」，但按用户故事走一遍一定会遇到：中断是事件，" +
-      "记忆是跨会话的资产，抢麦克风是三条闭环的交叉点，移除与清空是资产的维护。" +
-      "前三条点得进画板，第四条按既有 sheet 形状在实现阶段补。",
+    "这五种情况不属于「一条闭环的五个阶段」，但按用户故事走一遍一定会遇到：中断是事件，" +
+      "记忆是跨会话的资产，抢麦克风是三条闭环的交叉点，面板收起是每一屏都会有的状态，" +
+      "移除与清空是资产的维护。除最后一条按既有 sheet 形状在实现阶段补，其余都点得进画板。",
     "Callout", V["text/secondary"], { w: 1200 }));
   const table = frame("table", {
     layout: "VERTICAL", gap: 0, radius: 12, fill: V["surface/content"], clip: true

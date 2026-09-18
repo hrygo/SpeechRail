@@ -2,7 +2,7 @@
 title: "SpeechRail · 会话三闭环稿 · 实现就绪度核查"
 status: proposed
 audience: "SpeechRail macOS App 实现者与设计评审"
-version: "1.4.0"
+version: "1.4.1"
 date: 2026-09-18
 ---
 
@@ -274,10 +274,11 @@ md5 -q ~/Downloads/SpeechRail-closure-kit/code.js   # 7b1bca6e074d26c2ec4ab7b9a7
 
 **没有执行的（如实登记）**：
 
-- **Figma 桌面版已跑过并收敛**：2026-09-18 07:36
+- **Figma 桌面版已跑过并收敛**：2026-09-18 07:36（第五轮版）与 12:38（第七轮版），两次都是
   `AUDIT VERDICT · 53 frames · all clean (overflow / inner / unbound-gray / dark-binding / stray)`，
-  新增/重画的 5 处都在这一版里被审过，与上一版「6 次实跑收敛到 all clean」是同一档证据
-  （这一版用了 4 次）。更早一次取窗口时系统锁屏（`The Mac is locked and automatic unlock could
+  新增/重画的 5 处在 07:36 那一版里被审过；第七轮的十处文案与去重改动在 12:38 那一版里
+  （连线数仍是 248、几何仍是 0 溢出），与上一版「6 次实跑收敛到 all clean」是同一档证据
+  （第五轮用了 4 次运行收敛）。更早一次取窗口时系统锁屏（`The Mac is locked and automatic unlock could
   not unlock it`），按规则不自动解锁、也不在锁屏下驱动 UI，故改在授权后的下一次运行里补完；
   收敛过程与四条教训记在 `HANDOFF.md` 的「Figma 实跑报告」一节。
 - **没有导出**（用户明确说先不导出）。上一批 35 板的导出物留在
@@ -316,8 +317,31 @@ md5 -q ~/Downloads/SpeechRail-closure-kit/code.js   # 7b1bca6e074d26c2ec4ab7b9a7
 一张 7 行表 + 右栏三张卡，列宽按 1440 − 24×2（页边）− 420（右栏）− 16（栏间距）= 956 算，
 表内 150 + 290 + 420。会议页三态全部落在 `meetingShell` 这一套骨架上（页头 → 状态带 → 两栏 →
 贴底抽屉），构件全部复用已实跑 all clean 的那批（`pageHead` / `sessionStatusBar` / `card` /
-`turnRow` / `kvRow` / `segmented` / `conclusionBand`）。但**这都是推断，不是实测**——Figma 实跑前
-不能宣布几何干净。
+`turnRow` / `kvRow` / `segmented` / `conclusionBand`）。当时这都是推断而非实测；**2026-09-18 12:38
+的实跑已复核**（`root overflow=0 · inner overflow=0`），这一节从推断升级为实测。
+
+### 8.4 第八轮：非主框体收起的实现要求（2026-09-18）
+
+规范见 `SESSIONS-SPEC.md` §18。会话三屏要落地四件事：
+
+1. **收起控件不用自绘**：右栏就是 SwiftUI 的 `.inspector(isPresented:)`；控件沿用
+   `PageActionButton(systemImage: "sidebar.right")`，落在 `PageScaffold` 的 `trailing` 槽
+   （内容列首行尾端）——与音色库 / 我的作品同一枚按钮、同一个槽位、同一个间距
+   （`contentPadding` 20，不新增数值）。不要声明成工具栏项：第六十二轮的离屏实测证明
+   工具栏落点由系统分配。
+2. **面板可视性按屏记忆**：现在 `@AppStorage("speechrail.showDeveloperDetails")` 是**一个全局
+   开关**，而 §18 要求面板可视性按路由存（会议页收起的面板不该影响助手页）。实现时**拆成两个**：
+   面板可视性按路由一个键，开发者详情仍是那个全局键；面板收起时详情跟着收走、展开时回来。
+3. **快捷键**：View 菜单加一条「隐藏/显示<面板名>」`⌘⌃I`（与系统「隐藏侧栏」`⌘⌃S` 同族，
+   且避开已被「显示开发者详情」占用的 `⌥⌘I`）。加之前按 `App.swift` 的命令表核对一遍；
+   helpText 随状态变「隐藏本次对话 / 显示本次对话」，不要只靠图标表达状态。
+4. **收起是布局事实，不是可见性开关**：面板收起后内容列自然变宽，不许留占位列或分隔线；
+   同时把 §18 判据⑤ 逐屏核实一遍——收起之后主框体里仍然要有：会议怎么记的与来源是什么
+   （状态带已带）、这一轮的人设与音色（状态带已带）、记录是否安全落盘。这一条是收起的
+   **前提**，不是附带说明。
+
+**未做**：真机上一条都还没验——`.inspector` 收起时的动画与焦点顺序、`⌘⌃I` 的冲突、
+1120pt 最小宽下的行为，都要等实现阶段实测（见 `SESSIONS-SPEC.md` §18.5）。
 
 ## 9. 回退
 
