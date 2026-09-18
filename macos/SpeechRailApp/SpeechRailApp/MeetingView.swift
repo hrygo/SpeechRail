@@ -64,6 +64,16 @@ public struct MeetingView: View {
                 ) {
                     confirmingFinish = true
                 }
+            } else if meeting.minutes.isBusy {
+                // 整理中：这一态原本没有任何出口（纪要最长要跑十几分钟）。
+                // 出口是「停止整理」——转录已经存好，停下来不丢东西，可以重新生成。
+                PageActionButton(
+                    title: "停止整理",
+                    systemImage: "stop.circle",
+                    helpText: "停下这一次整理；转录已经存好，随时可以重新生成"
+                ) {
+                    meeting.minutes.stop()
+                }
             }
         }
         .task {
@@ -432,7 +442,6 @@ public struct MeetingView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
-                    .frame(width: SpeechRailDesignTokens.Layout.sessionSegmentedControlWidth)
                 }
                 ScrollView(.vertical) {
                     Group {

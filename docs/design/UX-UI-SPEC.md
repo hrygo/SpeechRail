@@ -288,8 +288,11 @@ hug 宽度、换行与字体仍只有 Figma 能证。
    `sessionListWidth`(280) / `sessionListInnerWidth`(248) / `sessionListRowInnerWidth`(228) /
    `sessionEmptyIconSize`(28) / `sessionEmptyBodyMaximumWidth`(460) / `sessionInspectorWidth`(360)
    与列宽、字幕带、内心 OS 抽屉那几个；命名按 §3.4 的对照表走，没有新造第二个名字。
-   同一轮补上的还有 `sessionSegmentedControlWidth` / `innerOSDrawerExpandedHeight` /
-   `innerOSHistoryColumnWidth`（会议页与内心 OS 抽屉落地时才有的三处）。
+   同一轮补上的还有 `innerOSDrawerExpandedHeight` / `innerOSHistoryColumnWidth`
+   （会议页与内心 OS 抽屉落地时才有的两处）。曾经还有一个
+   `sessionSegmentedControlWidth`(160)：2026-09-18 对着 4K 导出稿逐项核对时发现
+   **稿上根本没有这个数**（稿的 `segmented()` 按内容排，画出来是 90），已撤掉，
+   让系统分段控件自己按内容定宽。
 5. **圆角注释债**：`SpeechRailDesignTokens.swift` 里两处注释引用稿的「圆角 7」，本轮稿已改为 8，
    实现侧数值本来就是 8（`Corner.nested`），只需更新注释文字。
 6. **收起态的覆盖面**：收起控件已落在 16 块画板；**收起态画面**只画了语音助手一块作为对齐样例，

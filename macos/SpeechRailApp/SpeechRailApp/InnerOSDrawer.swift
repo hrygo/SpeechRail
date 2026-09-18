@@ -118,7 +118,8 @@ public struct InnerOSDrawer: View {
             }
             .frame(maxHeight: .infinity)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                TextField("问一句只有你想知道的…", text: $question)
+                // 占位文案按稿：说清"它只看哪一份上下文"，也是这一栏与助手页的区别。
+                TextField("问点什么（它只看这一场的转录，不联网）", text: $question)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { send() }
                 if session.state == .generating {

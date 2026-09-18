@@ -178,8 +178,9 @@ public enum SpeechRailDesignTokens {
         /// 转录行里的说话人列与时间码列；两者都是固定列，正文吃剩余宽度。
         public static let sessionSpeakerColumnWidth: CGFloat = 96
         public static let sessionTimecodeColumnWidth: CGFloat = 56
-        /// `纪要 / 转录` 分段控件的定宽：两段都是两个字，定宽才不会随标题字数左右跳。
-        public static let sessionSegmentedControlWidth: CGFloat = 160
+        // `纪要 / 转录` 分段控件**不定宽**：稿里的 `segmented()` 是按内容排的
+        // （每格 padX 9 + 标签），系统分段控件同样按内容定宽，两段都是两个字也不会跳。
+        // 实现里曾经钉过 160，那是稿上没有的数（稿画出来是 90），所以撤掉。
         /// 内心 OS 抽屉展开后的高度上限。**再高就会把转录挤出视野**，
         /// 而那正好与"边听边记"的用法相反（`SESSIONS-SPEC` §14.2 的形态那一行）。
         public static let innerOSDrawerExpandedHeight: CGFloat = 220

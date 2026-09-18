@@ -161,6 +161,9 @@ public final class MinutesGenerator {
     private let provider = LLMProvider()
     /// 一次只整理一份（§5.8「同会话单飞」）。
     private var inFlight: String?
+    /// 在飞的那一次整理。`stop()` 取消的是它——界面上的「停止整理」要真的停下，
+    /// 而不是只把按钮换掉（设计稿 `会议助手 · 会议页 · 整理中` 给出这个出口）。
+    private var runTask: Task<Void, Never>?
     /// 租约时长。它比一次整理该花的时间长一点，短了会被下一个启动误回收。
     private static let lease: TimeInterval = 600
 
@@ -191,7 +194,16 @@ public final class MinutesGenerator {
             )
             versions = try await coordinator.minutesVersions(sessionID: sessionID)
             guard !configuration.isConfigured else {
-                try await run(version: version, transcript: transcript, configuration: configuration)
+                let task = Task { [weak self] in
+                    _ = try? await self?.run(
+                        version: version,
+                        transcript: transcript,
+                        configuration: configuration
+                    )
+                }
+                runTask = task
+                await task.value
+                runTask = nil
                 return
             }
             // 没配大模型：转录已经封存好了，这一版如实失败（§9 第 18 行）。
@@ -211,6 +223,20 @@ public final class MinutesGenerator {
         guard let sessionIDs = try? await coordinator.sessionsWithPendingMinutes() else { return }
         for sessionID in sessionIDs {
             await generate(sessionID: sessionID, configuration: configuration)
+        }
+    }
+
+    /// 「停止整理」：取消在飞的那一次。**转录不受影响**——它早就封存好了，
+    /// 所以这里只把这一版如实标成失败并写明原因，用户可以随时重新生成。
+    public func stop() {
+        runTask?.cancel()
+    }
+
+    /// 界面上要不要给「停止整理」这个出口。
+    public var isBusy: Bool {
+        switch state {
+        case .queued, .running: true
+        default: false
         }
     }
 
@@ -260,7 +286,11 @@ public final class MinutesGenerator {
             latestBody = body
             state = .ready
         } catch {
-            let reason = Self.readableReason(for: error)
+            // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
+            let cancelled = Task.isCancelled || (error as? LLMError) == .cancelled
+            let reason = cancelled
+                ? "你停下了这一次整理。转录已经存好，可以重新生成。"
+                : Self.readableReason(for: error)
             try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
             state = .failed(reason)
         }

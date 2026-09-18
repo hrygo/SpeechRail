@@ -259,6 +259,7 @@ struct SpeechRailApp: App {
                 .environment(session)
                 .environment(caption)
                 .environment(meeting)
+                .environment(assistant)
                 .environment(navigation)
                 .background(SessionHotKeyBridge(center: hotKeys))
         }

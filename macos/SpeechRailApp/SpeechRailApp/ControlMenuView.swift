@@ -379,21 +379,33 @@ public struct ControlMenuView: View {
     }
 }
 
-/// Figma `menuBarStrip`（`figma-kit/main.js`）：常态只有图标，操作进行中才
-/// 出现文字与琥珀色状态点。菜单栏属于系统，不属于产品，所以产品名默认不
-/// 占用标题宽度；只有长任务真的在跑时才占用。
+/// Figma `menuBarStrip` + 会话状态（设计稿 `菜单栏 · 三个入口`，2026-09-18 导出）：
+///
+/// · **空闲**：常态只有图标（产品名不占标题宽度）；
+/// · **服务操作进行中**：产品名 + 琥珀点（既有行为）；
+/// · **会话进行中**：图标旁出现会话名——这是除主窗口之外唯一常驻的
+///   「谁在用麦克风」，用户不必打开面板或先被拒绝才知道（`SESSIONS-SPEC` §5.3 / P5）；
+/// · **会议录制中**：琥珀点（「现在正在被别人用着」）；
+/// · **受阻**：红点（麦克风未授权、服务不可达），不必打开面板就知道。
+///
+/// 「会话名」用 `SessionKind.shortTitle`：菜单栏宽度有限，这里要的是"是哪一个"，
+/// 不是一个句子（句子在面板里的状态行上）。
 struct MenuBarStatusLabel: View {
+    @Environment(SessionCoordinator.self) private var session
+    @Environment(CaptionSession.self) private var caption
+    @Environment(MeetingSession.self) private var meeting
+    @Environment(AssistantSession.self) private var assistant
     let isOperating: Bool
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Menu.menuBarItemSpacing) {
             Image(systemName: AppRoute.dubbing.systemImage)
-            if isOperating {
-                Text("SpeechRail")
+            if let title {
+                Text(title)
+            }
+            if let tone {
                 Circle()
-                    // 「服务操作进行中」是注意状态，不是声音语义：琥珀只标记
-                    // 音色类对象（REDESIGN-SPEC §5.4）。
-                    .fill(SpeechRailDesignTokens.Color.attention)
+                    .fill(toneColor(tone))
                     .frame(
                         width: SpeechRailDesignTokens.Menu.menuBarStatusDotSize,
                         height: SpeechRailDesignTokens.Menu.menuBarStatusDotSize
@@ -402,6 +414,68 @@ struct MenuBarStatusLabel: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(isOperating ? "SpeechRail，服务操作进行中" : "SpeechRail")
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    /// 图标旁那一段文字。**空闲且没有长任务时为空**：菜单栏属于系统，不该被产品名占着。
+    private var title: String? {
+        if let kind = blockedKind { return kind.shortTitle }
+        if let kind = session.occupancy?.kind { return kind.shortTitle }
+        return isOperating ? "SpeechRail" : nil
+    }
+
+    private enum Tone {
+        case attention
+        case critical
+    }
+
+    /// 状态点。三档与设计稿一一对应；「服务操作进行中」沿用既有行为。
+    private var tone: Tone? {
+        if blockedKind != nil { return .critical }
+        switch session.occupancy?.kind {
+        // 会议录着的时候，机器在收声——这是最需要"不打开也知道"的一态。
+        case .meeting: return .attention
+        case .assistant, .captions: return nil
+        case .none: return isOperating ? .attention : nil
+        }
+    }
+
+    /// 有会话停在受阻态上（麦克风未授权 / 服务不可达 / 被占用）。
+    /// 三个能力各自的 `blocked` 是同一种结论，所以这里合并成一个红点。
+    private var blockedKind: SessionKind? {
+        if caption.blocked != nil { return .captions }
+        if meeting.blocked != nil { return .meeting }
+        if assistant.blocked != nil { return .assistant }
+        return nil
+    }
+
+    private func toneColor(_ tone: Tone) -> Color {
+        switch tone {
+        // 「服务操作进行中」与「会议录制中」都是注意状态，不是声音语义：
+        // 琥珀只标记音色类对象（REDESIGN-SPEC §5.4）。
+        case .attention: SpeechRailDesignTokens.Color.attention
+        case .critical: SpeechRailDesignTokens.Color.critical
+        }
+    }
+
+    private var accessibilityLabel: String {
+        var parts = ["SpeechRail"]
+        if let kind = blockedKind {
+            parts.append("\(kind.shortTitle)受阻，\(blockedSummary ?? "需要处理")")
+        } else if let kind = session.occupancy?.kind {
+            parts.append("\(kind.shortTitle)进行中")
+            if kind == .meeting { parts.append("麦克风正在收声") }
+        } else if isOperating {
+            parts.append("服务操作进行中")
+        }
+        return parts.joined(separator: "，")
+    }
+
+    /// 受阻原因的一句话；文案直接取各自 `BlockReason` 的标题（三处共用同一套说法）。
+    private var blockedSummary: String? {
+        if let reason = caption.blocked { return reason.title }
+        if let reason = meeting.blocked { return reason.title }
+        if let reason = assistant.blocked { return reason.title }
+        return nil
     }
 }

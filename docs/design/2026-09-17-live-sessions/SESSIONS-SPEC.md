@@ -872,6 +872,51 @@ ControlKit，而上面四条里至少三条是纯逻辑、进单测就拦得住�
 （`forgetDoNotAskAgain`、`hideBand()`、`SessionKind.shortTitle` 等）按项目约定"不顺手清理"，
 列在这里等使用者决定。
 
+#### 12.1.2 4K 导出稿逐项核对（2026-09-18，用户导出到 `~/Downloads/SpeechRail-Luna-4K`）
+
+导出物：**53 块画板**（27 块浅色 + 26 块深色；「闭环总览 · 三条闭环」没有深色克隆），
+每块 `PNG@4x` + `SVG`。结构门禁实测通过
+（`verify-exports.sh ~/Downloads/SpeechRail-Luna-4K 53 4` → exit 0：PNG/SVG 成对、
+尺寸都是画板整数倍、53/53 的 SVG 里文字仍是 `<text>` 而不是转出来的路径）。
+核对办法是**读 SVG 的数值**（`rect` 的 x/y/w/h/rx、`fill`、`font-size`），不是看图猜。
+
+**对上的（稿值 ↔ 实现声明点）**：
+
+| 稿 | 实现 |
+|---|---|
+| 字幕带 760 宽、圆角 12、宽度可拖 420–1200 | `Layout.captionBandDefaultWidth/MinimumWidth/MaximumWidth`、`captionBandCornerRadius` |
+| 带子高度跟随 2–4 行 | `captionBandMinimumLineCount/MaximumLineCount` |
+| 电平柱 14 根、3×13、r1.5 | `captionBandLevelBarCount/Width/Height/CornerRadius` |
+| 字号三档 17/20/26 → `.title2 / .title / .largeTitle` | `Typography.captionBandCompact/Standard/Large` + `CaptionBandFontSize.textStyle` |
+| 受阻带的琥珀底 `#FBEEDA`、回看胶囊 `#DCE9EE` | `Surface.attentionTint` / `Surface.selectionTint` |
+| 会议页详情列 360、页面留白 20、卡片圆角 12 | `inspectorColumnWidth` / `contentPadding` / `Corner.container` |
+| 菜单面板 288 宽 | `Layout.controlMenuWidth` |
+
+**按规则不抄的取景数字**（§21.2 ②：画板宽度跟着字符串长度走，实现侧一个都不许抄）：
+内心 OS 抽屉展开后的画板高 348、左栏 460、对比板列宽 150/290/420。实现取
+`innerOSDrawerExpandedHeight`(220) / `innerOSHistoryColumnWidth`(260)，两栏比例因此比稿窄，
+这是**有据的偏差**，不是漏做。
+
+**本轮据此改掉的实现**（都按稿的明确要求，改完构建通过）：
+
+1. **菜单栏状态项**（稿 `菜单栏 · 三个入口`）：稿要求它随会话变化——会话进行中出现会话名、
+   会议录制中琥珀点、受阻红点（"除主窗口之外唯一常驻的『谁在用麦克风』"）。实现原本只有
+   「服务操作进行中」一态（`REDESIGN-SPEC` §7.9 的旧口径），现已按稿补三态。
+2. **「停止整理」**（稿 `会议助手 · 会议页 · 整理中`）：整理中原本没有任何出口
+   （纪要最长可跑十几分钟），现补 `MinutesGenerator.stop()` 与页头出口；停下来时这一版
+   如实标成失败并写明"转录已经存好，可以重新生成"。
+3. **内心 OS 输入框占位文案**：改成稿上的「问点什么（它只看这一场的转录，不联网）」。
+4. **撤掉 `sessionSegmentedControlWidth`(160)**：稿的 `segmented()` 按内容排（`main.js:1941`，
+   每格 padX 9 + 标签），画出来 90；160 是实现自己钉的数，现改回让系统分段控件按内容定宽。
+
+**稿侧自己的一处不自洽**：`大字` 那块板的批注把三档写成 `17 / 20 / 26 → .title2 / .title /
+.largeTitle`，但 macOS 的 `.title` 是 **22**（本机实测 `NSFont.preferredFont(forTextStyle:)`：
+largeTitle 26 / title1 22 / title2 17），20 不在系统档里（17 与 26 都对得上）。实现按稿给的
+**映射**取系统样式，所以这一处不跟稿画的值——要改就改稿的生成器（§12.1.1 第 2 条同源）。
+
+**未比对**：53 块板都只做了数值与结构核对，**没有与运行中的界面并排目视**（回捞界面要当次授权）；
+深色板只核对了结构与取色，没有做观感判断。叠字、缺行、右对齐这三类仍然要人看。
+
 ## 13. 风险与待裁决
 
 **D1–D9 全部结清（用户 2026-09-18：「采纳所有建议」）。** 阶段 0 因此关闭，可以直接进阶段 1。
