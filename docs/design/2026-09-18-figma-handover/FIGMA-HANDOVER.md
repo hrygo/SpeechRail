@@ -40,7 +40,7 @@ date: 2026-09-18
 
 | 稿 | Figma 文件 key | 分页 | 画板 | Development 菜单里的插件名 | 与生成器是否同步 |
 |---|---|---|---|---|---|
-| **会话闭环稿**（当前主线） | `sAPdzrT2zsxqLtJhUx4iVC`（桌面标签名被用户改为 `Sona2Speech`） | `01 闭环` | Figma 里 **53 块**；生成器已是 **59 块** | `SpeechRail Closure Kit` | **否**：第八/九轮已改生成器并通过离线门禁，未在桌面端重跑 |
+| **会话闭环稿**（当前主线） | `sAPdzrT2zsxqLtJhUx4iVC`（桌面标签名被用户改为 `Sona2Speech`） | `01 闭环` | Figma 里 **53 块**；生成器已是 **59 块** | `SpeechRail Closure Kit` | **否**：第八/九/十轮已改生成器并通过离线门禁，未在桌面端重跑 |
 | **全量稿**（已交付过一版） | `x5Ke0tKe9adeov4NG5baxP`（标签名 `SpeechRail`） | `01 Kit` + `02 Screens` | **48 块** | `SpeechRail Design Kit` | **否**：两稿共用的屏（语音助手、会议页、设置面板）内容已变，未重跑 |
 | 上一代界面稿（历史） | `7wZpCvjTTdfn4hMDMdcmRk` | — | 26 块 | 同 kit 的早期版本 | 历史文件，不再维护 |
 

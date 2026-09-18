@@ -3331,7 +3331,7 @@ function screenAssistant(d, o) {
     layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 12, padY: 9, radius: 8,
     fill: V["surface/field"], stroke: V["border/strong"], strokeWeight: 1
   });
-  add(askField, text("placeholder", "打字问也行…", "Body", V["text/tertiary"]));
+  add(askField, text("placeholder", "输入消息（↵ 发送 · 静音不外放）…", "Body", V["text/tertiary"]));
   add(compose, stretch(grow(askField)));
   iconButton(compose, "pencil", 28);
   primaryButton(compose, "发送", "message-circle", 96).opacity = 0.45;
@@ -4229,7 +4229,7 @@ function screenClosureMeetingProcessing(d) {
   meetingShell(d, {
     subtitle: "已经结束录制：先把转录存好，再生成纪要。这一步可以离开这一页。",
     headActions: function (row) {
-      secondaryButton(row, "打开数据目录", "folder-open");
+      secondaryButton(row, "先导出转录…", "download");
       primaryButton(row, "查看纪要", "book-open", 118).opacity = 0.45;
     },
       status: {
@@ -4491,7 +4491,7 @@ function screenClosureMeetingSources(d) {
     ["Ready", "麦克风", "房间里的人。第一次开始时会请求授权；拒绝后这一行变受阻并给出出口。", "已选"],
     ["Ready", "腾讯会议", "本机音频：抓这个 App 正在播放的声音；它退出再启动会自动接回，不用重新选。", "已选"],
     ["Ready", "QQ 音乐", "本机音频：会中放背景音乐时用它；歌词也会进转录，回看时能按来源区分。", "已选"],
-    ["Off", "两者混音", "会议室里开着线上会时用：麦克风与所选 App 各占一路，混音后一起送识别。", "未选"]
+    ["Ready", "自动混音", "多来源同时勾选时自动合流处理；转录中为每一句独立保留专属来源标签。", "生效中"]
   ].forEach(function (r, i, all) {
     closureCheckRow(src, r[0], r[1], r[2], function (box) {
       pill(box, r[0] === "Off" ? "Off" : "Ready", r[3]);
@@ -5996,7 +5996,7 @@ const CLOSURE_BOARDS = [
     links: [["写进纪要", "meetingMinutes"], ["结束会议", "meetingProcessing"]] },
   { anchor: "meetingProcessing", title: "会议助手 · 会议页 · 整理中", icon: "users",
     route: "meeting", session: "meeting", screen: screenClosureMeetingProcessing,
-    links: [["查看纪要", "meetingMinutes"]] },
+    links: [["查看纪要", "meetingMinutes"], ["先导出转录…", "meetingMinutes"]] },
   // 中断不是点出来的，是发生的：所以它由总览的「旅程还会走到这里」进入，不挂来源
   // 连线；它自己有两个出口（继续这一段 / 结束并整理）。
   { anchor: "meetingInterrupted", title: "会议助手 · 会议页 · 录制中断（服务或来源断了）",
