@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import SpeechRailControlKit
@@ -25,6 +26,10 @@ struct SpeechRailApp: App {
     /// 新会话的预填值（人设 / 音色 / 对讲模式 / 分人默认值 / 大模型地址与模型）。
     /// **密钥不在这里**：它只进钥匙串。
     @State private var preferences: SessionPreferences
+    /// 走内部路由与「把管理控制台调出来」时要用它。
+    /// **放在 `App` 上**：全局热键的接线在 `body` 里做（见 `wireGlobalShortcuts`），
+    /// 那里拿不到任何视图的环境。
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
 
     init() {
@@ -215,7 +220,50 @@ struct SpeechRailApp: App {
         return FileManager.default.fileExists(atPath: serviceURL.path)
     }
 
+    /// 全局热键的接线（`SESSIONS-SPEC` §5.2、§6.6）：四个键各接一处，都只做一件事——
+    /// 把请求交给协调器。「能不能开始」由占用守卫判，热键自己不做判定，
+    /// 否则同一件事会有两处实现（§5.4 的同一条理由）。
+    ///
+    /// **为什么在 `body` 里而不是某个视图的 `.task` 里**：2026-09-18 真机跑出过一次崩溃——
+    /// 这套接线原本挂在一个零尺寸的桥 View 上，而那个 View 挂在 `MenuBarExtra` 的 label 下。
+    /// label 由系统单独承载，挂在其上的 `.environment(...)` 不生效，于是桥里
+    /// `@Environment(SessionCoordinator.self)` 直接 `Fatal error: No Observable object ... found`。
+    /// `body` 在启动时求值，且 `openWindow` 从 App 自己的环境取，所以这里既不需要视图在场，
+    /// 也不依赖窗口是否打开。
+    private func wireGlobalShortcuts() {
+        hotKeys.setHandler(.toggleCaptions) {
+            // 会议录着的时候按它：浮层以受阻态出现，给两个出口，**不开第二条会话**（§16.3）。
+            Task { await caption.toggleFromGlobalShortcut() }
+            reveal(.captions)
+        }
+        hotKeys.setHandler(.startMeeting) {
+            // 会议的第一件事是**选来源**，所以热键把人送到那一页，而不替它选。
+            reveal(.meeting)
+        }
+        hotKeys.setHandler(.finishCurrent) {
+            session.requestEndCurrentSession()
+            // 「结束当前会话…」带省略号：它要问一句。会议结束永远确认（防误停，§6.4），
+            // 所以这里必须把窗口调出来，否则用户会看到"按了没反应"。
+            openWindow(id: AppNavigationState.controlCenterWindowID)
+            NSApp.activate()
+        }
+        hotKeys.setHandler(.toggleInnerOS) {
+            guard session.occupancy?.kind == .meeting else { return }
+            meeting.innerOS.isExpanded.toggle()
+            reveal(.meeting)
+        }
+        hotKeys.install()
+    }
+
+    private func reveal(_ route: AppRoute) {
+        navigation.request(route)
+        openWindow(id: AppNavigationState.controlCenterWindowID)
+        NSApp.activate()
+    }
+
     var body: some Scene {
+        // `body` 在启动时求值一次；`let _ =` 是 SceneBuilder 里唯一能放语句的位置。
+        let _ = wireGlobalShortcuts()
         Window("SpeechRail 管理控制台", id: AppNavigationState.controlCenterWindowID) {
             ControlCenterView()
                 .environment(model)
@@ -251,17 +299,15 @@ struct SpeechRailApp: App {
                 .environment(caption)
                 .environment(meeting)
         } label: {
-            MenuBarStatusLabel(isOperating: model.serviceOperation?.phase.isActive == true)
-                // 热键接线挂在**菜单栏这个宿主**上，不挂在窗口上（§5.2）：
-                // 菜单栏项在 App 起的那一刻就在，而管理控制台窗口是可以被关掉的
-                // ——挂在窗口上时，"关了窗口再启动"会让四个全局键整场都不生效，
-                // 而且是静默失效（按键没有任何反馈）。
-                .environment(session)
-                .environment(caption)
-                .environment(meeting)
-                .environment(assistant)
-                .environment(navigation)
-                .background(SessionHotKeyBridge(center: hotKeys))
+            // 状态项要的四个对象**显式传进去**，不走环境：`MenuBarExtra` 的 label 由系统
+            // 单独承载，挂在上面的 `.environment(...)` 不生效（2026-09-18 真机崩溃就是它）。
+            MenuBarStatusLabel(
+                isOperating: model.serviceOperation?.phase.isActive == true,
+                session: session,
+                caption: caption,
+                meeting: meeting,
+                assistant: assistant
+            )
         }
         Settings {
             SettingsView()
@@ -282,51 +328,9 @@ struct SpeechRailApp: App {
 /// 而且都只做一件事——**把请求交给协调器**：「能不能开始」由占用守卫判，
 /// 热键自己不做判定，否则同一件事会有两处实现（§5.4 的同一条理由）。
 ///
-/// 宿主是菜单栏标题（见 `body` 里那一处）：它从启动起就在，窗口不在也照样接线。
-/// `install()` 与 `setHandler` 都是幂等的，所以重复出现（标签重绘）不会重复注册。
-struct SessionHotKeyBridge: View {
-    @Environment(SessionCoordinator.self) private var session
-    @Environment(CaptionSession.self) private var caption
-    @Environment(MeetingSession.self) private var meeting
-    @Environment(AppNavigationState.self) private var navigation
-    @Environment(\.openWindow) private var openWindow
-    let center: GlobalHotKeyCenter
-
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .accessibilityHidden(true)
-            .task {
-                center.setHandler(.toggleCaptions) {
-                    // 会议录着的时候按它：浮层以受阻态出现，给两个出口，**不开第二条会话**（§16.3）。
-                    Task { await caption.toggleFromGlobalShortcut() }
-                    reveal(.captions)
-                }
-                center.setHandler(.startMeeting) {
-                    // 会议的第一件事是**选来源**，所以热键把人送到那一页，而不替它选。
-                    reveal(.meeting)
-                }
-                center.setHandler(.finishCurrent) {
-                    session.requestEndCurrentSession()
-                    // 「结束当前会话…」带省略号：它要问一句。会议结束永远确认（防误停，§6.4），
-                    // 所以这里必须把窗口调出来，否则用户会看到"按了没反应"。
-                    openWindow(id: AppNavigationState.controlCenterWindowID)
-                }
-                center.setHandler(.toggleInnerOS) {
-                    guard session.occupancy?.kind == .meeting else { return }
-                    meeting.innerOS.isExpanded.toggle()
-                    reveal(.meeting)
-                }
-                center.install()
-            }
-    }
-
-    private func reveal(_ route: AppRoute) {
-        navigation.request(route)
-        openWindow(id: AppNavigationState.controlCenterWindowID)
-        NSApp.activate()
-    }
-}
+/// **接线在 `App.body` 里做，不挂在任何视图上**（`SpeechRailApp.wireGlobalShortcuts()`）：
+/// `body` 在启动时就会求值，四个键因此不需要任何窗口或视图在场；反过来，挂到视图上会让
+/// 「窗口被关掉」变成「热键静默失效」。`install()` 与 `setHandler` 都是幂等的。
 
 /// The menu bar and keyboard map from REDESIGN-SPEC §6.3. Focused scene values
 /// let「导出选中作品」follow the page the user is actually looking at.

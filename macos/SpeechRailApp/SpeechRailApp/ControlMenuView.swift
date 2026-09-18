@@ -390,12 +390,16 @@ public struct ControlMenuView: View {
 ///
 /// 「会话名」用 `SessionKind.shortTitle`：菜单栏宽度有限，这里要的是"是哪一个"，
 /// 不是一个句子（句子在面板里的状态行上）。
+///
+/// 四个会话对象**由调用方显式传入**，不读环境：`MenuBarExtra` 的 label 由系统单独承载，
+/// 挂在其上的 `.environment(...)` 不生效（2026-09-18 真机崩溃即此）。`@Observable` 的对象
+/// 作为普通属性同样会被观测，所以视图照常随会话状态重绘。
 struct MenuBarStatusLabel: View {
-    @Environment(SessionCoordinator.self) private var session
-    @Environment(CaptionSession.self) private var caption
-    @Environment(MeetingSession.self) private var meeting
-    @Environment(AssistantSession.self) private var assistant
     let isOperating: Bool
+    let session: SessionCoordinator
+    let caption: CaptionSession
+    let meeting: MeetingSession
+    let assistant: AssistantSession
 
     var body: some View {
         HStack(spacing: SpeechRailDesignTokens.Menu.menuBarItemSpacing) {
