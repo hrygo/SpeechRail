@@ -22,7 +22,7 @@ graph TD
     D --> E[🔄 5. 客户端迁移与平滑回滚<br/>migration-runbook.md]
 ```
 
-1. **[🚀 运行时与环境部署 (runtime-deployment.md)](runtime-deployment.md)**：外部模型 Snapshot 目录规范、隔离 Python 虚拟环境配置与端口规划。
+1. **[🚀 运行时与环境部署 (runtime-deployment.md)](runtime-deployment.md)**：外部模型 Snapshot 目录规范、隔离 Python 虚拟环境配置、端口规划，以及 **app home 目录契约与重装/卸载/迁移语义**（哪些目录是用户数据、哪些可重建）。
 2. **[📖 运维操作手册 (operations-runbook.md)](operations-runbook.md)**：macOS `launchd` 用户级服务管理、原子化升级/回滚流程与故障排查决策树。
 3. **[📦 服务版本发布 SOP](../../.agents/skills/speechrail-release/SKILL.md)**：服务 wheel、managed runtime、LaunchAgent、三档验收、回滚与发布证据；同时规定 service-only/app-only/combined 范围。
 4. **[🖥️ macOS App 分发与签名](../developers/macos-app-release.md)**：App archive、Developer ID、notarization、唯一安装路径、control-agent smoke、清理与独立回滚。
