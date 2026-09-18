@@ -90,6 +90,8 @@ public final class CaptionSession {
         public var text: String
         public var start: TimeInterval?
         public var end: TimeInterval?
+        /// 分人给的匿名标签（`A`…`D`）。未开分人时为 `nil`，行内就不出现 chip。
+        public var speakerLabel: String?
     }
 
     public enum ServiceReadiness: Sendable {
@@ -123,8 +125,16 @@ public final class CaptionSession {
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
     /// 音频来源。默认麦克风；核对时换成文件源，链路其余部分完全不变。
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
+    /// 这一场要不要开分人。**每场一次**：契约规定只能在首个 PCM 之前协商。
+    /// 默认关（§14.3 的开关粒度）。
+    public var diarizationPreference: @MainActor () -> Bool = { false }
+    /// 档位能不能分人：给不出原因就说明可以。`light` 档返回一句人话，
+    /// 于是"开关置灰 + 写明原因"两侧说法一致（§14.3）。
+    public var diarizationGate: @MainActor () -> String? = { nil }
 
     private let coordinator: SessionCoordinator
+    /// 分人归属账本。会议与字幕共用底座，这里持有的是本场那一个实例。
+    public let labeling: SpeakerLabeling
     private let port: Int
     private let apiKey: String?
 
@@ -143,6 +153,10 @@ public final class CaptionSession {
     /// 序号是库现场取的 `MAX+1`（§15.7 R2 ①），同一个 item 到两次就会多出一行；
     /// 幂等这一层因此在客户端，而不是在库里。
     private var committedItemIDs: Set<String> = []
+    /// 这一场是否协商过分人（决定了结束时要等 EOF 屏障）。
+    private var diarizationActive = false
+    /// `speechrail.diarization.done` 是否已经到达。
+    private var diarizationDrained = false
 
     public init(
         coordinator: SessionCoordinator,
@@ -151,6 +165,7 @@ public final class CaptionSession {
         audioSourceFactory: (@MainActor () -> AudioChunkSource)? = nil
     ) {
         self.coordinator = coordinator
+        self.labeling = SpeakerLabeling(coordinator: coordinator)
         self.port = port
         self.apiKey = apiKey
         if let audioSourceFactory {
@@ -272,7 +287,20 @@ public final class CaptionSession {
             throw Blocked(Self.blockReason(for: error))
         }
 
-        let client = RealtimeASRClient(port: port, apiKey: apiKey)
+        // 分人在**首个 PCM 之前**协商一次，之后改不了（契约 §Diarization 扩展）。
+        // 档位不支持时不开，也不假装开——开关与说明由 `diarizationGate` 给同一句人话。
+        let wantedDiarization = diarizationPreference()
+        let gateNote = wantedDiarization ? diarizationGate() : nil
+        let diarizationEnabled = wantedDiarization && gateNote == nil
+        diarizationActive = diarizationEnabled
+        diarizationDrained = false
+
+        let client = RealtimeASRClient(
+            port: port,
+            silenceDurationMilliseconds: 400,
+            diarizationEnabled: diarizationEnabled,
+            apiKey: apiKey
+        )
         do {
             try await client.connect()
         } catch {
@@ -299,11 +327,14 @@ public final class CaptionSession {
                     kind: .captions,
                     engineProfile: profile,
                     audioSource: .microphone,
-                    diarization: .off,
+                    diarization: diarizationEnabled ? .active : (wantedDiarization ? .unavailable : .off),
+                    diarizationNote: gateNote,
                     startedAt: startedAt
                 )
             )
             sessionID = record.id
+            labeling.begin(sessionID: record.id, enabled: diarizationEnabled)
+            if let gateNote { labeling.markUnavailable(note: gateNote) }
             coordinator.sessionDidStartRecording(id: record.id)
         } catch {
             await client.close()
@@ -331,12 +362,19 @@ public final class CaptionSession {
             // 先 commit 再关：最后半句要走进 `committed` → `completed`，
             // 而不是留在服务端缓冲区里随连接一起消失。
             try? await client.commit()
+            if diarizationActive {
+                // 分人的 EOF 屏障（§14.3）：先把水位对齐、把末段的归属冲刷出来，再封存记录。
+                // 契约里同一个 `event_id` 重试是幂等的，所以这一条重试安全。
+                try? await client.finishDiarization()
+                await waitForDiarizationDrain()
+            }
             await waitForFinalLine()
             await client.close()
         }
         pump?.cancel()
         pump = nil
         client = nil
+        diarizationActive = false
         resetToIdleKeepingLines()
         // 浮层跟着这次结束一起收：来自 `✕`、`⌘⇧.`、或切到别的会话，都一样。
         setBandVisible(false)
@@ -440,7 +478,14 @@ public final class CaptionSession {
             self.source = nil
             throw Blocked(Self.blockReason(for: error))
         }
-        let client = RealtimeASRClient(port: port, apiKey: apiKey)
+        // 续接是**新连接、新 epoch**（§6.5）：分人在新连接上要重新协商一次，
+        // 否则这一段的归属会静默丢掉。
+        let client = RealtimeASRClient(
+            port: port,
+            silenceDurationMilliseconds: 400,
+            diarizationEnabled: diarizationActive,
+            apiKey: apiKey
+        )
         do {
             try await client.connect()
         } catch {
@@ -449,6 +494,7 @@ public final class CaptionSession {
             throw Blocked(.serviceNotReady(error.localizedDescription))
         }
         self.client = client
+        diarizationDrained = false
         isStoppingIntentionally = false
         blocked = nil
         phase = .running
@@ -504,16 +550,39 @@ public final class CaptionSession {
             guard !delta.isEmpty else { return }
             partialText = (partialText ?? "") + delta
         case .segment:
-            // 段级切分与分人是同一条链路，随阶段 4 一起做。这一档按一次 utterance 一行，
-            // 时间码取上面那份提交边界（与服务端 VAD 同源）。
+            // 分人扩展**不发** `.segment`（契约：避免双写）。真收到说明这一档没协商扩展，
+            // 那就不按它切行：一次 utterance 一行，时间码取上面那份提交边界（与服务端 VAD 同源）。
             break
-        case .completed(let itemID, let transcript):
+        case .completed(let itemID, let transcript, let units):
             terminalCount += 1
-            await commit(itemID: itemID, transcript: transcript)
+            await commit(itemID: itemID, transcript: transcript, units: units)
         case .failed(_, let code, let message):
             terminalCount += 1
             lastFailure = "\(code)：\(message)"
             partialText = nil
+        case .attribution(_, let units, let links):
+            await labeling.apply(units: units)
+            labeling.noteSuggestions(links)
+            // 归属修订不改正文，所以它**不留新行**：库里那一行的正文与时间码都不动（§15.3 第 2 条）。
+            if !lines.isEmpty {
+                lines = lines.map { line in
+                    var updated = line
+                    if let label = labeling.attributedLabel(forLineID: line.id) {
+                        updated.speakerLabel = label
+                    }
+                    return updated
+                }
+            }
+        case .diarizationDegraded(let code, let message):
+            labeling.markDegraded(code: code, message: message)
+            if let sessionID, let note = labeling.note {
+                await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
+            }
+        case .diarizationDone:
+            diarizationDrained = true
+        case .responseAudio, .responseDone:
+            // TTS 不属于这一层（字幕与会议都不说话）。
+            break
         case .serverError(let code, let message):
             await handleServerError(code: code, message: message)
         case .closed(let code):
@@ -524,7 +593,11 @@ public final class CaptionSession {
     /// 定稿即落库。**同一个 `item_id` 只落一行**：序号是库现场取的 `MAX+1`
     /// （§15.7 R2 ①），所以"同一个 `completed` 到了两次"不会被唯一索引拦住，
     /// 会多出一行——幂等在这里，不在库里。
-    private func commit(itemID: String, transcript: String) async {
+    private func commit(
+        itemID: String,
+        transcript: String,
+        units: [RealtimeASRClient.AttributionUnit] = []
+    ) async {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         partialText = nil
         defer { pendingItem = nil }
@@ -534,6 +607,13 @@ public final class CaptionSession {
             committedItemIDs.insert(itemID)
         }
         let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
+        // 归属先算：`LineDraft` 里就要带上它，否则修订事件到达之前这一行看起来是"未标注"。
+        let initialLabel = units.compactMap { unit -> String? in
+            guard let speaker = unit.speaker, !speaker.isEmpty else { return nil }
+            return speaker
+        }.first
+        let timingQuality = Self.timingQuality(from: units)
+        let lineID = UUID().uuidString
         let ordinal: Int
         do {
             ordinal = try await coordinator.appendLine(
@@ -542,9 +622,12 @@ public final class CaptionSession {
                     role: .speaker,
                     text: text,
                     source: .microphone,
+                    speakerLabel: initialLabel,
                     tStart: window.start.timeIntervalSince(startedAt),
-                    tEnd: window.end.timeIntervalSince(startedAt)
-                )
+                    tEnd: window.end.timeIntervalSince(startedAt),
+                    timingQuality: timingQuality
+                ),
+                id: lineID
             )
         } catch {
             // 没写成就不算处理过：同一个 item 再来一次还要有机会落库。
@@ -552,16 +635,30 @@ public final class CaptionSession {
             lastFailure = error.localizedDescription
             return
         }
+        // 行已经在了，这时候才把 `segment_uid` → 行 的对应关系记进账本：
+        // 之后的 `diarization.updated` 就是按这张表原位修订的。
+        labeling.register(units: units, lineID: lineID, ordinal: ordinal)
         currentOrdinal = ordinal
         lines.append(
             Line(
-                id: "\(sessionID)-\(ordinal)",
+                id: lineID,
                 ordinal: ordinal,
                 text: text,
                 start: window.start.timeIntervalSince(startedAt),
-                end: window.end.timeIntervalSince(startedAt)
+                end: window.end.timeIntervalSince(startedAt),
+                speakerLabel: initialLabel
             )
         )
+    }
+
+    /// 分人档位下 `timing_quality` 由归属单元给：有对齐结果就是 `aligned`，
+    /// 整 item 退成一个 `unavailable` 单元（契约）时就如实写 `unavailable`。
+    /// 没开分人时不写——那一档本来就没有对齐结果，写 `available` 是撒谎。
+    private static func timingQuality(
+        from units: [RealtimeASRClient.AttributionUnit]
+    ) -> SessionTimingQuality? {
+        guard !units.isEmpty else { return nil }
+        return units.contains { $0.timingQuality == "aligned" } ? .aligned : .unavailable
     }
 
     private func handleServerError(code: String, message: String) async {
@@ -618,6 +715,23 @@ public final class CaptionSession {
     }
 
     private static let finalLineTimeout: TimeInterval = 3
+
+    /// 等 `speechrail.diarization.done`。等不到不是"失败"：末段归属没冲刷出来的话，
+    /// 正文照样在库里，只是标签停在收到过的那一版——**如实记成降级**，不假装对齐了。
+    private func waitForDiarizationDrain() async {
+        guard diarizationActive else { return }
+        let deadline = Date().addingTimeInterval(Self.diarizationDrainTimeout)
+        while Date() < deadline {
+            if diarizationDrained { return }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        labeling.markDegraded(code: "finalization_timeout", message: "分人没能在结束前对齐，正文已经存好了。")
+        if let sessionID, let note = labeling.note {
+            await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
+        }
+    }
+
+    private static let diarizationDrainTimeout: TimeInterval = 8
 
     // MARK: - 浮层上的动作
 

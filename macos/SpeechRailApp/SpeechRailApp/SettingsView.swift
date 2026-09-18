@@ -3,10 +3,17 @@ import SwiftUI
 
 public struct SettingsView: View {
     @Environment(AppModel.self) private var model
+    @Environment(SessionPreferences.self) private var preferences
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
     @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
     @AppStorage("speechrail.creator.defaultVoiceID") private var defaultVoiceID = ""
     @AppStorage("speechrail.creator.defaultSpeed") private var defaultSpeed: Double = 1.0
+    @AppStorage(SpeechRailDesignTokens.CaptionBand.fontSizeDefaultsKey)
+    private var captionFontSizeRaw = CaptionBandFontSize.standard.rawValue
+    @State private var llmKeyDraft = ""
+    @State private var llmKeySaved = LLMKeychain.hasKey
+    @State private var connectionResult: LLMConnectionResult?
+    @State private var isChecking = false
 
     public init() {}
 
@@ -19,6 +26,9 @@ public struct SettingsView: View {
             }
             Tab("创作", systemImage: "sparkles") {
                 creativePane
+            }
+            Tab("会话", systemImage: "waveform.badge.mic") {
+                sessionPane
             }
             Tab("服务", systemImage: "server.rack") {
                 servicePane
@@ -197,6 +207,324 @@ public struct SettingsView: View {
     /// （4x 帧实测卡沿 x 80→688，640 宽窗口各留 16）。§7.10 明写「行卡宽度 608
     /// （640 − 2×16）」，所以这里改成应用自己的卡片语言——与全应用其余页面的
     /// `CardSurface` 同源，控件仍是系统 `Toggle` / `Picker` / `Slider` / `LabeledContent`。
+    // MARK: - 会话（第 4 个页签，`SESSIONS-SPEC` §6.5）
+
+    private var sessionPane: some View {
+        settingsPane {
+            settingsSection("大模型（对话与纪要）") {
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel(
+                            "服务地址",
+                            caption: "兼容 OpenAI 的服务地址，本机或局域网都行；不要把密钥写进地址里。"
+                        )
+                        TextField("http://127.0.0.1:8000/v1", text: addressBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 360)
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    // 「接口」是**只读事实**：不提供降级选项（§6.5）。
+                    LabeledContent {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text(preferences.llmInterface)
+                                .font(SpeechRailDesignTokens.Typography.body)
+                            StatusPill(tone: .neutral, label: "必须")
+                        }
+                    } label: {
+                        settingsRowLabel(
+                            "接口",
+                            caption: "对话与纪要都走 Responses API；只提供 Chat Completions 的服务接不上。"
+                        )
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel("模型", caption: "从该服务的模型列表里选；填错会得到「模型没加载」的结论。")
+                        TextField("模型名", text: modelBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 360)
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel(
+                            "密钥",
+                            caption: llmKeySaved
+                                ? "已存入钥匙串（不落配置文件、不进日志）。"
+                                : "只存钥匙串；服务不需要密钥时留空即可。"
+                        )
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            SecureField("粘贴密钥", text: $llmKeyDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 280)
+                            Button("保存到钥匙串") {
+                                do {
+                                    try LLMKeychain.save(llmKeyDraft)
+                                    llmKeyDraft = ""
+                                    llmKeySaved = LLMKeychain.hasKey
+                                } catch {
+                                    connectionResult = .unreachable(error.localizedDescription)
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            if llmKeySaved {
+                                Button("清除") {
+                                    try? LLMKeychain.remove()
+                                    llmKeySaved = false
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Button("检查连接") {
+                                Task { await checkConnection() }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .disabled(isChecking || !preferences.isLLMConfigured)
+                            if isChecking { ProgressView().controlSize(.small) }
+                            if let result = connectionResult {
+                                StatusPill(
+                                    tone: result.isReady ? .healthy : .attention,
+                                    label: result.title
+                                )
+                            }
+                        }
+                        if let result = connectionResult {
+                            Text(result.detail)
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    Text("对话与纪要都要靠一台兼容 OpenAI、支持 Responses API 的服务；SpeechRail 只提供识别、合成与分人。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            settingsSection("语音助手") {
+                settingsRow {
+                    Picker(selection: personaBinding) {
+                        ForEach(preferences.personas) { persona in
+                            Text(persona.title).tag(persona.id)
+                        }
+                    } label: {
+                        settingsRowLabel(
+                            "默认人设",
+                            caption: "只在新对话开始时预填；开始之后本轮不再变（中途换会让它把开头重读一遍）。"
+                        )
+                    }
+                    .pickerStyle(.menu)
+                }
+                settingsRowSeparator
+                settingsRow {
+                    Picker(selection: voiceBinding) {
+                        Text("跟随音色库默认").tag("")
+                        ForEach(defaultVoiceChoices) { voice in
+                            Text(voice.name).tag(voice.id)
+                        }
+                    } label: {
+                        settingsRowLabel("默认音色", caption: "对话中仍可随时换，下一句生效。")
+                    }
+                    .pickerStyle(.menu)
+                }
+                settingsRowSeparator
+                settingsRow {
+                    Picker(selection: modeBinding) {
+                        ForEach(AssistantMode.allCases) { option in
+                            Text(option.title).tag(option.rawValue)
+                        }
+                    } label: {
+                        settingsRowLabel(
+                            "对讲模式",
+                            caption: "一问一答：它说话时闭麦；实时对讲：随时插话打断（建议耳机）。"
+                        )
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+
+            settingsSection("实时字幕") {
+                settingsRow {
+                    Picker(selection: $captionFontSizeRaw) {
+                        ForEach(CaptionBandFontSize.allCases) { size in
+                            Text(size.title).tag(size.rawValue)
+                        }
+                    } label: {
+                        settingsRowLabel("默认字号", caption: "字幕带也可以悬停工具条里临时改。")
+                    }
+                    .pickerStyle(.segmented)
+                }
+                settingsRowSeparator
+                settingsRow {
+                    Toggle(isOn: diarizationCaptionsBinding) {
+                        settingsRowLabel(
+                            "分人标签",
+                            caption: diarizationCaption(for: preferences.captionsDiarizationEnabled)
+                        )
+                    }
+                }
+            }
+
+            settingsSection("会议") {
+                settingsRow {
+                    Toggle(isOn: diarizationMeetingBinding) {
+                        settingsRowLabel(
+                            "分人标签",
+                            caption: diarizationCaption(for: preferences.meetingDiarizationEnabled)
+                        )
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel("纪要模型", caption: "留空表示跟大模型用同一个。")
+                        TextField("同大模型", text: minutesModelBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 360)
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        settingsRowLabel("记录库", caption: "本机数据库（SQLite）；删掉 App 不会动它。")
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Button("打开数据目录") {
+                                if let url = SessionStore.defaultLibraryURL()?.deletingLastPathComponent() {
+                                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            Button("备份库文件…") {
+                                backupLibrary()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+                settingsRowSeparator
+                settingsRow {
+                    Text("不保存音频：会议只保留文本与说话人归属。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+            }
+
+            settingsSection("通用") {
+                settingsRow {
+                    Toggle(isOn: notifyBinding) {
+                        settingsRowLabel(
+                            "中断时用系统通知告诉我",
+                            caption: "默认关。只在「必须有人决定」的中断上发一次；通知里不出现转录原文。"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func diarizationCaption(for enabled: Bool) -> String {
+        if let note = SessionPreferences.diarizationGateNote(for: model.profile?.preset?.rawValue) {
+            return note
+        }
+        return enabled
+            ? "开着的：新会话会在行上标出说话人（匿名编号，改名字是你的动作）。"
+            : "默认关；打开后新会话才声明分人。"
+    }
+
+    // MARK: 绑定（偏好只有一处声明点：`SessionPreferences`）
+
+    private var addressBinding: Binding<String> {
+        Binding(get: { preferences.llmBaseURL }, set: { preferences.llmBaseURL = $0 })
+    }
+
+    private var modelBinding: Binding<String> {
+        Binding(get: { preferences.llmModel }, set: { preferences.llmModel = $0 })
+    }
+
+    private var personaBinding: Binding<String> {
+        Binding(get: { preferences.defaultPersonaID }, set: { preferences.defaultPersonaID = $0 })
+    }
+
+    private var voiceBinding: Binding<String> {
+        Binding(get: { preferences.defaultVoiceID }, set: { preferences.defaultVoiceID = $0 })
+    }
+
+    private var modeBinding: Binding<String> {
+        Binding(
+            get: { preferences.assistantMode.rawValue },
+            set: { preferences.assistantMode = AssistantMode(rawValue: $0) ?? .turnTaking }
+        )
+    }
+
+    private var diarizationCaptionsBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.captionsDiarizationEnabled },
+            set: { preferences.captionsDiarizationEnabled = $0 }
+        )
+    }
+
+    private var diarizationMeetingBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.meetingDiarizationEnabled },
+            set: { preferences.meetingDiarizationEnabled = $0 }
+        )
+    }
+
+    private var minutesModelBinding: Binding<String> {
+        Binding(get: { preferences.minutesModel }, set: { preferences.minutesModel = $0 })
+    }
+
+    private var notifyBinding: Binding<Bool> {
+        Binding(
+            get: { preferences.notifyOnInterruption },
+            set: { preferences.notifyOnInterruption = $0 }
+        )
+    }
+
+    private func checkConnection() async {
+        isChecking = true
+        defer { isChecking = false }
+        connectionResult = await LLMProvider().check(
+            configuration: preferences.llmConfiguration,
+            apiKey: LLMKeychain.load()
+        )
+    }
+
+    private func backupLibrary() {
+        guard let source = SessionStore.defaultLibraryURL() else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "sessions-\(Self.backupStamp()).sqlite3"
+        panel.title = "备份记录库"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        try? FileManager.default.removeItem(at: destination)
+        try? FileManager.default.copyItem(at: source, to: destination)
+    }
+
+    private static func backupStamp() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmm"
+        return formatter.string(from: Date())
+    }
+
     private func settingsPane<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Metrics.sectionGap) {

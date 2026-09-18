@@ -16,6 +16,11 @@ struct SpeechRailApp: App {
     /// 两者都不在启动时占设备：`⌘⇧L` 或页面上的「打开字幕带」按下去才拿麦克风。
     @State private var caption: CaptionSession
     @State private var captionBand: CaptionBandWindowController
+    /// 语音助手的会话层（`SESSIONS-SPEC` §12 阶段 5）：麦克风 → ASR → Responses → TTS。
+    @State private var assistant: AssistantSession
+    /// 新会话的预填值（人设 / 音色 / 对讲模式 / 分人默认值 / 大模型地址与模型）。
+    /// **密钥不在这里**：它只进钥匙串。
+    @State private var preferences: SessionPreferences
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
 
     init() {
@@ -100,6 +105,29 @@ struct SpeechRailApp: App {
         // 不认识字幕、会议、助手各自的采集与连接（`TECHNICAL-DESIGN` §5.2）。
         let coordinator = SessionCoordinator(store: SessionStore())
         let captionSession = CaptionSession(coordinator: coordinator)
+        let sessionPreferences = SessionPreferences()
+        let assistantSession = AssistantSession(coordinator: coordinator)
+        assistantSession.preferences = { sessionPreferences }
+        assistantSession.serviceReadiness = {
+            do {
+                let health = try await ServiceAPIClient().fetchHealthSnapshot()
+                guard health.ready == true else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
+        // 字幕的分人开关：档位给不出分人时接口会回 `diarization_not_available`，
+        // 所以这里先按档位挡一道——**开关置灰时要说得出原因**（§14.3 的档位门禁）。
+        captionSession.diarizationPreference = { sessionPreferences.captionsDiarizationEnabled }
+        captionSession.diarizationGate = {
+            SessionPreferences.diarizationGateNote(for: coordinator.lastKnownProfile)
+        }
+        assistantSession.availableVoices = { [weak appModel] in
+            (appModel?.creatorVoices ?? []).filter(\.available).map(\.name)
+        }
         let band = CaptionBandWindowController(
             session: captionSession,
             onOpenActiveSession: { [weak navigationState] in
@@ -126,20 +154,32 @@ struct SpeechRailApp: App {
         coordinator.starter = { kind in
             // 未接线的能力**必须抛**：`guard … else { return }` 会被读成"已经开始采集"，
             // 于是界面显示在录、实际什么都没拿到（`CapabilityNotWired` 的注释里写了原因）。
-            guard kind == .captions else {
+            switch kind {
+            case .captions:
+                try await captionSession.beginCapture()
+            case .assistant:
+                try await assistantSession.beginCapture()
+            case .meeting:
                 throw SessionCoordinator.CapabilityNotWired(kind: kind)
             }
-            try await captionSession.beginCapture()
         }
         coordinator.stopper = { kind in
-            guard kind == .captions else { return }
-            await captionSession.stopCapture()
+            switch kind {
+            case .captions:
+                await captionSession.stopCapture()
+            case .assistant:
+                await assistantSession.stopCapture()
+            case .meeting:
+                break
+            }
         }
 
         _model = State(initialValue: appModel)
         _navigation = State(initialValue: navigationState)
         _session = State(initialValue: coordinator)
         _caption = State(initialValue: captionSession)
+        _assistant = State(initialValue: assistantSession)
+        _preferences = State(initialValue: sessionPreferences)
         _captionBand = State(initialValue: band)
     }
 
@@ -157,6 +197,8 @@ struct SpeechRailApp: App {
                 .environment(navigation)
                 .environment(session)
                 .environment(caption)
+                .environment(assistant)
+                .environment(preferences)
                 .task { await session.openStore() }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
@@ -178,6 +220,7 @@ struct SpeechRailApp: App {
         Settings {
             SettingsView()
                 .environment(model)
+                .environment(preferences)
         }
         Window("SpeechRail 帮助", id: Self.helpWindowID) {
             SpeechRailHelpView()

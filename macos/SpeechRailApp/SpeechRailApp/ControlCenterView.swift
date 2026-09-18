@@ -341,7 +341,9 @@ public struct ControlCenterView: View {
         case .works:
             WorksView()
         case .assistant:
-            SessionLibraryView(kind: .assistant)
+            // 助手页本身就是那一块产品页（§6.1 的五种态在同一页上）；
+            // 记录库在它的右栏「记录」标签里，不再是另一页。
+            AssistantView()
         case .meeting:
             SessionLibraryView(kind: .meeting)
         case .captions:

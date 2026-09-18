@@ -73,6 +73,19 @@ public actor SessionStore {
 
     // MARK: - 生命周期
 
+    /// 默认数据目录与库文件位置。设置页的「打开数据目录 / 备份库文件」需要一个
+    /// **不依赖实例**的答案（那时 App 可能还没开过库）。
+    ///
+    /// 它必须与 `init` 里那条路径是同一条：两处各写一遍，迟早会指向两个地方。
+    public static func defaultDataDirectory(fileManager: FileManager = .default) -> URL? {
+        fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("SpeechRail", isDirectory: true)
+    }
+
+    public static func defaultLibraryURL(fileManager: FileManager = .default) -> URL? {
+        defaultDataDirectory(fileManager: fileManager)?.appendingPathComponent(fileName)
+    }
+
     public func open() throws {
         guard !isOpen else { return }
         do {
@@ -213,6 +226,23 @@ public actor SessionStore {
         try withStatement("UPDATE line SET speaker_label = ? WHERE id = ?;") { statement in
             bind(statement, 1, label)
             bind(statement, 2, lineID)
+            try step(statement)
+        }
+    }
+
+    /// 分人的状态与可读原因（§7.1 的三种状态 + 降级时那一刻写进记录）。
+    ///
+    /// 与 `attachSpeakerLabel` 一样是"只动归属那一侧"的写法：正文、时间码、序号都不参与。
+    public func updateSessionDiarization(
+        id: String,
+        state: SessionDiarizationState,
+        note: String? = nil
+    ) throws {
+        let sql = "UPDATE session SET diarization = ?, diarization_note = COALESCE(?, diarization_note) WHERE id = ?;"
+        try withStatement(sql) { statement in
+            bind(statement, 1, state.rawValue)
+            bind(statement, 2, note)
+            bind(statement, 3, id)
             try step(statement)
         }
     }
@@ -720,6 +750,32 @@ public actor SessionStore {
                         model: columnText(statement, 10),
                         status: columnText(statement, 11).flatMap(InnerOSStatus.init(rawValue:)) ?? .generating,
                         inMinutes: columnInt(statement, 12) != 0
+                    )
+                )
+            }
+            return rows
+        }
+    }
+
+    /// 一次问答引用的原文证据。**先当 `quote` 是事实**：`line_id` 可能已经被移除
+    /// （`ON DELETE SET NULL`），顺不回去也要读得懂当时引的是哪一句。
+    public func innerOSEvidence(exchangeID: String) throws -> [InnerOSEvidence] {
+        let sql = """
+        SELECT id, line_id, speaker_label, t_start, quote, content_hash
+        FROM inner_os_evidence WHERE exchange_id = ?;
+        """
+        return try withStatement(sql) { statement in
+            bind(statement, 1, exchangeID)
+            var rows: [InnerOSEvidence] = []
+            while try step(statement) == SQLITE_ROW {
+                rows.append(
+                    InnerOSEvidence(
+                        id: columnText(statement, 0) ?? UUID().uuidString,
+                        lineID: columnText(statement, 1),
+                        speakerLabel: columnText(statement, 2),
+                        tStart: columnIsNull(statement, 3) ? nil : columnDouble(statement, 3),
+                        quote: columnText(statement, 4),
+                        contentHash: columnText(statement, 5)
                     )
                 )
             }

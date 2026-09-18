@@ -103,6 +103,9 @@ public final class SessionCoordinator {
     public private(set) var elapsed: TimeInterval = 0
     /// 当前 epoch 内已经落库的行数水位（中断区间与「提问时的转录水位」都用它）。
     public private(set) var lineWatermark = 0
+    /// 最近一次读到的服务档位。分人的档位门禁（`light` 不给分人）要一个共同的事实来源，
+    /// 而档位是**服务的事实**：它由每场会话开始时那一次 `/health` 读回，记在这里。
+    public private(set) var lastKnownProfile: String?
 
     // MARK: - 能力层挂载点
     //
@@ -415,6 +418,127 @@ public final class SessionCoordinator {
         try await store.speakerNames(sessionID: sessionID)
     }
 
+    /// 分人链路只允许改归属列（§15.3 第 2 条）。正文一个字都不动，所以这条入口
+    /// 与"编辑文本"不是同一件事，也没有第二个调用点。
+    public func attachSpeakerLabel(lineID: String, label: String?) async throws {
+        try await store.attachSpeakerLabel(lineID: lineID, label: label)
+    }
+
+    /// 改显示名：写 `speaker_name`，`line.text` 与证据引用都不动（§6.2.1）。
+    public func renameSpeaker(sessionID: String, label: String, name: String) async throws {
+        try await store.renameSpeaker(sessionID: sessionID, label: label, name: name)
+    }
+
+    /// 一场里的中断区间（记录库详情与导出物都读它）。
+    public func interruptions(sessionID: String) async throws -> [SessionInterruption] {
+        try await store.interruptions(sessionID: sessionID)
+    }
+
+    /// 一场里的音色变更点（「第 N 句起」这句话的数据来源，§15.3 第 3 条）。
+    public func voiceChanges(sessionID: String) async throws -> [SessionChange] {
+        try await store.voiceChanges(sessionID: sessionID)
+    }
+
+    public func minutesVersions(sessionID: String) async throws -> [MinutesVersion] {
+        try await store.minutesVersions(sessionID: sessionID)
+    }
+
+    public func innerOSExchanges(sessionID: String) async throws -> [InnerOSExchange] {
+        try await store.innerOSExchanges(sessionID: sessionID)
+    }
+
+    public func innerOSEvidence(exchangeID: String) async throws -> [InnerOSEvidence] {
+        try await store.innerOSEvidence(exchangeID: exchangeID)
+    }
+
+    public func setInnerOSInMinutes(exchangeID: String, included: Bool) async throws {
+        try await store.setInnerOSInMinutes(exchangeID: exchangeID, included: included)
+    }
+
+    public func memories(activeOnly: Bool = true) async throws -> [AssistantMemory] {
+        try await store.memories(activeOnly: activeOnly)
+    }
+
+    @discardableResult
+    public func upsertMemory(
+        kind: AssistantMemoryKind,
+        body: String,
+        sourceSessionID: String?,
+        id: String = UUID().uuidString
+    ) async throws -> String {
+        try await store.upsertMemory(kind: kind, body: body, sourceSessionID: sourceSessionID, id: id)
+    }
+
+    public func setMemoryActive(id: String, active: Bool) async throws {
+        try await store.setMemoryActive(id: id, active: active)
+    }
+
+    public func removeMemory(id: String) async throws {
+        try await store.removeMemory(id: id)
+    }
+
+    @discardableResult
+    public func saveInnerOSExchange(
+        _ exchange: InnerOSExchange,
+        evidence: [InnerOSEvidence] = []
+    ) async throws -> String {
+        try await store.saveInnerOSExchange(exchange, evidence: evidence)
+    }
+
+    /// 落一条音色变更点（「第 N 句起」必须查得回来）。
+    public func noteVoiceChange(atOrdinal: Int, voice: VoiceSnapshot) async throws {
+        guard let activeSessionID else { return }
+        try await store.noteVoiceChange(sessionID: activeSessionID, atOrdinal: atOrdinal, voice: voice)
+    }
+
+    public func setSessionTitle(id: String, title: String?) async throws {
+        try await store.updateSessionTitle(id: id, title: title)
+    }
+
+    public func setLineStarred(lineID: String, starred: Bool) async throws {
+        try await store.setLineStarred(lineID: lineID, starred: starred)
+    }
+
+    @discardableResult
+    public func enqueueMinutes(sessionID: String, model: String?, promptChars: Int?) async throws -> MinutesVersion {
+        try await store.enqueueMinutes(sessionID: sessionID, model: model, promptChars: promptChars)
+    }
+
+    @discardableResult
+    public func claimMinutes(sessionID: String, lease: TimeInterval) async throws -> MinutesVersion? {
+        try await store.claimMinutes(sessionID: sessionID, lease: lease)
+    }
+
+    public func finishMinutes(minutesID: String, body: String, model: String?) async throws {
+        try await store.finishMinutes(minutesID: minutesID, body: body, model: model)
+    }
+
+    public func failMinutes(minutesID: String, reason: String) async throws {
+        try await store.failMinutes(minutesID: minutesID, reason: reason)
+    }
+
+    public func searchLines(
+        query: String,
+        kind: SessionKind? = nil,
+        limit: Int = 200
+    ) async throws -> [TranscriptLine] {
+        try await store.searchLines(query: query, kind: kind, limit: limit)
+    }
+
+    /// 关掉占用（**不改库里的行**）。给"会话在能建行之前就失败"这条路用，
+    /// 与 `finalize` 的区别是它不封存任何记录。
+    public func abandonOccupancy() {
+        releaseDevices()
+        stopClock()
+        activeSessionID = nil
+        occupancy = nil
+        startedAt = nil
+        elapsed = 0
+        lineWatermark = 0
+        lastInterruption = nil
+        phase = .idle
+    }
+
     /// 最新一版纪要（含正文）。导出物把它放在转录前面（§6.3.2）；
     /// 还没生成纪要时给 `nil`，导出物就只出转录。
     public func latestMinutes(sessionID: String) async throws -> MinutesVersion? {
@@ -428,7 +552,9 @@ public final class SessionCoordinator {
 
     /// 能力层写库的唯一入口（§5.1：业务模块不持有连接、不写 SQL）。
     public func createSession(_ draft: SessionDraft) async throws -> SessionRecord {
-        try await store.createSession(draft)
+        let record = try await store.createSession(draft)
+        lastKnownProfile = draft.engineProfile
+        return record
     }
 
     /// 落一行正文，返回库分配的 `ordinal`。取号与插入在库里是同一条语句（§15.7 R2 ①），
@@ -439,6 +565,24 @@ public final class SessionCoordinator {
         let ordinal = try await store.appendLine(draft)
         noteLineAppended()
         return ordinal
+    }
+
+    /// 落一行，并**指定它的行 id**。分人要用：`segment_uid` 必须能找到它落在哪一行，
+    /// 而行的 id 由建行的一方决定（库里不会事后告诉服务端）。
+    @discardableResult
+    public func appendLine(_ draft: LineDraft, id: String) async throws -> Int {
+        let ordinal = try await store.appendLine(draft, id: id)
+        noteLineAppended()
+        return ordinal
+    }
+
+    /// 分人的状态变了（协商失败 / 运行中降级）。**只动这两列**，正文与时间码不参与。
+    public func updateSessionDiarization(
+        id: String,
+        state: SessionDiarizationState,
+        note: String? = nil
+    ) async {
+        try? await store.updateSessionDiarization(id: id, state: state, note: note)
     }
 
     public var isIdle: Bool { occupancy == nil }

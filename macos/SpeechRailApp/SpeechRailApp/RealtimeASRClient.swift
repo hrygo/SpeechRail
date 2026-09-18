@@ -59,6 +59,63 @@ public actor RealtimeASRClient {
         }
     }
 
+    /// 分人扩展里的一个**归属单元**（`attribution_units`）。
+    ///
+    /// `segmentUID` 是服务端给的稳定标识：正文不可变，归属靠它原位修订。客户端因此必须
+    /// 记住「这个 uid 落在库里哪一行」——否则后续的修订事件无处可写（`SpeakerLabeling`）。
+    public struct AttributionUnit: Sendable, Equatable {
+        public var segmentUID: String
+        public var revision: Int
+        /// `tentative` / `stable` / `unknown`。**只有 unknown 会把 speaker 清空**。
+        public var status: String
+        public var speaker: String?
+        public var textStart: Int?
+        public var textEnd: Int?
+        public var audioStartSample: Int?
+        public var audioEndSample: Int?
+        public var timingQuality: String?
+
+        public init(
+            segmentUID: String,
+            revision: Int = 0,
+            status: String = "stable",
+            speaker: String? = nil,
+            textStart: Int? = nil,
+            textEnd: Int? = nil,
+            audioStartSample: Int? = nil,
+            audioEndSample: Int? = nil,
+            timingQuality: String? = nil
+        ) {
+            self.segmentUID = segmentUID
+            self.revision = revision
+            self.status = status
+            self.speaker = speaker
+            self.textStart = textStart
+            self.textEnd = textEnd
+            self.audioStartSample = audioStartSample
+            self.audioEndSample = audioEndSample
+            self.timingQuality = timingQuality
+        }
+
+        /// 修订是否已经"定下来"。`tentative` 中途可能被改掉，落库没有坏处（原位更新），
+        /// 但界面上的chip要区分「暂定」与「已定」。
+        public var isStable: Bool { status == "stable" || status == "unknown" }
+    }
+
+    /// 会话级声学建议：服务端认为这几个匿名标签可能是同一个人。
+    /// **只是建议**：要不要合并由用户按（§14.3 的边界：不做声纹、不跨会话）。
+    public struct SpeakerLink: Sendable, Equatable {
+        public var from: String
+        public var to: String
+        public var confidence: Double?
+
+        public init(from: String, to: String, confidence: Double? = nil) {
+            self.from = from
+            self.to = to
+            self.confidence = confidence
+        }
+    }
+
     /// 服务端事件里**字幕会话真正需要的**那一部分。其余事件（TTS 的 response.*）不收进枚举：
     /// 这一层不做播放，收进来只会多一条没人处理的分支。
     public enum Event: Sendable {
@@ -72,8 +129,19 @@ public actor RealtimeASRClient {
         /// partial（内存态）。它是增量，调用点自己累加。
         case partial(itemID: String, delta: String)
         case segment(itemID: String, segment: Segment)
-        case completed(itemID: String, transcript: String)
+        /// 终态。分人会话额外带归属单元（未启用分人时为空数组）。
+        case completed(itemID: String, transcript: String, units: [AttributionUnit])
         case failed(itemID: String, code: String, message: String)
+        /// `speechrail.diarization.updated`：归属修订，**只改归属列**。
+        case attribution(stableThroughSample: Int, units: [AttributionUnit], links: [SpeakerLink])
+        /// `speechrail.diarization.status`：一次 active→degraded。正文继续，标签停更。
+        case diarizationDegraded(code: String, message: String)
+        /// `speechrail.diarization.done`：EOF 屏障到位，末段不会丢。
+        case diarizationDone(throughSample: Int, status: String)
+        /// TTS 音频块（24 kHz PCM16）。助手那一侧才用得上。
+        case responseAudio(Data)
+        /// TTS 一轮结束：`completed` / `cancelled` / `failed`。
+        case responseDone(status: String)
         case serverError(code: String, message: String)
         case closed(code: Int?)
     }
@@ -85,6 +153,8 @@ public actor RealtimeASRClient {
     /// 服务端既有策略）：字幕要快，会议要整句。
     private let silenceDurationMilliseconds: Int
     private let threshold: Double
+    /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
+    private let diarizationEnabled: Bool
     private let session: URLSession
 
     private var task: URLSessionWebSocketTask?
@@ -92,12 +162,19 @@ public actor RealtimeASRClient {
     private var didClose = false
     private var continuation: AsyncStream<Event>.Continuation?
     private var stream: AsyncStream<Event>?
+    /// 最近一次写进 `session.update` 的音色。换音色走同一个字段（下一句生效）。
+    private var voice: String?
+    /// `finish` 的 event_id。契约要求同一个 id 重试幂等、不同 id 拒绝。
+    private var finishEventID: String?
+    private var finishSent = false
 
     public init(
         port: Int = 8201,
         model: String = RealtimeASRClient.canonicalASRModel,
         silenceDurationMilliseconds: Int = 400,
         threshold: Double = 0.5,
+        diarizationEnabled: Bool = false,
+        voice: String? = nil,
         apiKey: String? = nil,
         session: URLSession = .shared
     ) {
@@ -108,6 +185,8 @@ public actor RealtimeASRClient {
         self.model = model
         self.silenceDurationMilliseconds = silenceDurationMilliseconds
         self.threshold = threshold
+        self.diarizationEnabled = diarizationEnabled
+        self.voice = voice
         self.session = session
     }
 
@@ -161,6 +240,50 @@ public actor RealtimeASRClient {
         try await send(["type": "input_audio_buffer.commit"])
     }
 
+    /// 换音色。**下一句生效**，只影响 TTS，不进 prompt（§14.4）。
+    ///
+    /// 被拒时服务端回 `voice_not_found` / `voice_not_available`，走 `serverError`；
+    /// 调用点的规矩是**这一句仍用旧音色说**，会话继续（§9 第 14 行）。
+    public func updateVoice(_ voice: String) async throws {
+        self.voice = voice
+        try await send(["type": "session.update", "session": ["voice": voice]])
+    }
+
+    /// 让服务端把一段文本念出来（助手用；字幕/会议不调）。
+    ///
+    /// 契约里这是两步：先 `conversation.item.create`（`role=user` 的 `input_text`），
+    /// 再 `response.create`。文本 item 创建需要 TTS ready。
+    public func speak(_ text: String) async throws {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        try await send([
+            "type": "conversation.item.create",
+            "item": [
+                "type": "message",
+                "role": "user",
+                "content": [["type": "input_text", "text": text]]
+            ]
+        ])
+        var response: [String: Any] = ["type": "response.create"]
+        if let voice { response["response"] = ["voice": voice] }
+        try await send(response)
+    }
+
+    /// 取消正在合成的 TTS（用户插话）。未发送的音频由服务端丢弃。
+    public func cancelResponse() async throws {
+        try await send(["type": "response.cancel"])
+    }
+
+    /// 推流结束时的分人 EOF 屏障：等水位对齐再封存，末段不丢（§14.3）。
+    ///
+    /// 只在协商过分人的会话上调用。同一个 `event_id` 重试是幂等的——所以重试安全。
+    public func finishDiarization() async throws {
+        guard diarizationEnabled, !finishSent else { return }
+        finishSent = true
+        let id = finishEventID ?? UUID().uuidString
+        finishEventID = id
+        try await send(["type": "speechrail.diarization.finish", "event_id": id])
+    }
+
     private func send(_ payload: [String: Any]) async throws {
         guard let task else { throw Failure.transport("连接还没建立") }
         guard
@@ -179,24 +302,34 @@ public actor RealtimeASRClient {
     /// 转写会话的配置。形状对着服务端的解析写（`compatibility/openai_realtime.py` 的
     /// `apply_session_update`）：`audio.input.format` 收 `{type: "audio/pcm", rate: 16000}`，
     /// `turn_detection` 收 `server_vad` + 静音窗口，`transcription.language` 可省。
+    ///
+    /// 分人按 `session.speechrail.diarization.enabled` opt-in，**只能在这里声明一次**：
+    /// 首个 PCM 之后再协商，服务端按契约回 `invalid_state`（§14.3 的开关粒度）。
     private func configurationEvent() -> [String: Any] {
-        [
-            "type": "session.update",
-            "session": [
-                "model": model,
-                "audio": [
-                    "input": [
-                        "format": ["type": "audio/pcm", "rate": Int(Self.sampleRate)],
-                        "turn_detection": [
-                            "type": "server_vad",
-                            "threshold": threshold,
-                            "prefix_padding_ms": 300,
-                            "silence_duration_ms": silenceDurationMilliseconds
-                        ],
-                        "transcription": ["model": model]
-                    ]
+        var session: [String: Any] = [
+            "model": model,
+            "audio": [
+                "input": [
+                    "format": ["type": "audio/pcm", "rate": Int(Self.sampleRate)],
+                    "turn_detection": [
+                        "type": "server_vad",
+                        "threshold": threshold,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": silenceDurationMilliseconds
+                    ],
+                    "transcription": ["model": model]
                 ]
             ]
+        ]
+        if diarizationEnabled {
+            session["speechrail"] = ["diarization": ["enabled": true]]
+        }
+        if let voice {
+            session["voice"] = voice
+        }
+        return [
+            "type": "session.update",
+            "session": session
         ]
     }
 
@@ -267,9 +400,39 @@ public actor RealtimeASRClient {
             emit(
                 .completed(
                     itemID: object["item_id"] as? String ?? "",
-                    transcript: object["transcript"] as? String ?? ""
+                    transcript: object["transcript"] as? String ?? "",
+                    units: Self.attributionUnits(object["attribution_units"])
                 )
             )
+        case "speechrail.diarization.updated":
+            emit(
+                .attribution(
+                    stableThroughSample: Self.int(object["stable_through_sample"]) ?? 0,
+                    units: Self.attributionUnits(object["updates"]),
+                    links: Self.speakerLinks(object["speaker_links"])
+                )
+            )
+        case "speechrail.diarization.status":
+            emit(
+                .diarizationDegraded(
+                    code: object["code"] as? String ?? "diarization_degraded",
+                    message: object["message"] as? String ?? "分人停止更新了。"
+                )
+            )
+        case "speechrail.diarization.done":
+            emit(
+                .diarizationDone(
+                    throughSample: Self.int(object["through_sample"]) ?? 0,
+                    status: object["status"] as? String ?? "complete"
+                )
+            )
+        case "response.audio.delta", "response.output_audio.delta":
+            if let base64 = object["delta"] as? String, let data = Data(base64Encoded: base64) {
+                emit(.responseAudio(data))
+            }
+        case "response.done":
+            let status = (object["response"] as? [String: Any])?["status"] as? String ?? "completed"
+            emit(.responseDone(status: status))
         case "conversation.item.input_audio_transcription.failed":
             emit(
                 .failed(
@@ -291,6 +454,44 @@ public actor RealtimeASRClient {
             // 它们只是我们没订阅的那一半协议。
             break
         }
+    }
+
+    /// `attribution_units` 与 `updates` 的形状一致，共用一份解析（契约 §Diarization 扩展）。
+    private static func attributionUnits(_ value: Any?) -> [AttributionUnit] {
+        guard let items = value as? [[String: Any]] else { return [] }
+        return items.compactMap { item in
+            guard let uid = item["segment_uid"] as? String else { return nil }
+            return AttributionUnit(
+                segmentUID: uid,
+                revision: int(item["revision"]) ?? 0,
+                status: item["status"] as? String ?? "stable",
+                speaker: item["speaker"] as? String,
+                textStart: int(item["text_start"]),
+                textEnd: int(item["text_end"]),
+                audioStartSample: int(item["audio_start_sample"]),
+                audioEndSample: int(item["audio_end_sample"]),
+                timingQuality: item["timing_quality"] as? String
+            )
+        }
+    }
+
+    private static func speakerLinks(_ value: Any?) -> [SpeakerLink] {
+        guard let items = value as? [[String: Any]] else { return [] }
+        return items.compactMap { item in
+            guard
+                let from = item["from"] as? String ?? item["speaker"] as? String,
+                let to = item["to"] as? String ?? item["target"] as? String
+            else { return nil }
+            return SpeakerLink(from: from, to: to, confidence: seconds(item["confidence"]))
+        }
+    }
+
+    private static func int(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let double = value as? Double { return Int(double) }
+        if let number = value as? NSNumber { return number.intValue }
+        if let text = value as? String { return Int(text) }
+        return nil
     }
 
     private static func seconds(_ value: Any?) -> TimeInterval? {
