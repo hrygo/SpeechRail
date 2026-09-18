@@ -577,6 +577,12 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
     /// 2026-09-16 装机件上按稿改成「不滚动 + 卡片吃满窗口」后，页首整块被裁且没有任何
     /// 滚动能回到顶部（`pagePurpose` 注释里记的第三十轮是同一类失败）。
     private let minimumContentHeight: CGFloat?
+    /// 正文槽位的**高度口径**。`false`（默认）＝「定高」：正文恰好是 `slot` 高，
+    /// 内容再高也压在槽里（`minimumContentHeight` 注释里那条「换主题、换文档，卡片高度
+    /// 不变」）。`true` ＝「先吃满、再按内容长高」：槽位高度取 `minHeight`，内容比窗格矮
+    /// 时卡片照样吃满窗口，内容比窗格高时整页滚动——这一档是给「清单比窗口长」的页面用的
+    /// （会话三页：音色 18 条、转录几十段），它不是第三种默认值，默认仍是定高。
+    private let growsWithContent: Bool
     private let trailing: Trailing
     private let content: Content
 
@@ -585,6 +591,7 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
         scrollable: Bool = true,
         purpose: String? = nil,
         minimumContentHeight: CGFloat? = nil,
+        growsWithContent: Bool = false,
         @ViewBuilder content: () -> Content,
         @ViewBuilder trailing: () -> Trailing
     ) {
@@ -592,6 +599,7 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
         self.scrollable = scrollable
         self.purpose = purpose
         self.minimumContentHeight = minimumContentHeight
+        self.growsWithContent = growsWithContent
         self.content = content()
         self.trailing = trailing()
     }
@@ -605,7 +613,8 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
                     ScrollView {
                         pageContent(
                             paneHeight: proxy.size.height,
-                            minimumContentHeight: minimumContentHeight
+                            minimumContentHeight: minimumContentHeight,
+                            growsWithContent: growsWithContent
                         )
                     }
                 }
@@ -663,17 +672,33 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
     /// 正文槽位不低于 `minimumContentHeight`：矮窗口下正文保持声明的最小高度，多出来的
     /// 部分交给外层滚动，而不是把正文压扁——压扁目录列就是「点了主题，下面几个菜单
     /// 就没了」。
-    private func pageContent(paneHeight: CGFloat, minimumContentHeight: CGFloat) -> some View {
+    ///
+    /// `growsWithContent` 为真时这层框架用 `minHeight` 而不是固定高度：内容比窗格矮时
+    /// 效果与定高完全一样（卡片照样吃满窗口），内容比窗格高时页面**长高并整页滚动**，
+    /// 而不是把多出来的部分裁掉。会话三页要的是后者——稿上「音色」卡本来就伸出
+    /// 900pt 的画板（4x 帧在画板下沿被裁），清单长度由服务与用户决定，界面不该替它设上限。
+    private func pageContent(
+        paneHeight: CGFloat,
+        minimumContentHeight: CGFloat,
+        growsWithContent: Bool
+    ) -> some View {
         let padding = SpeechRailDesignTokens.Layout.contentPadding
         let slot = max(paneHeight - padding * 2, minimumContentHeight)
-        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+        let padded = VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             pagePurpose
             content
                 .frame(maxHeight: .infinity, alignment: .topLeading)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.vertical, SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(height: slot + padding * 2, alignment: .topLeading)
+
+        return Group {
+            if growsWithContent {
+                padded.frame(minHeight: slot + padding * 2, alignment: .topLeading)
+            } else {
+                padded.frame(height: slot + padding * 2, alignment: .topLeading)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }

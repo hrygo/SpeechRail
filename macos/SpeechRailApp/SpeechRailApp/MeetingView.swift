@@ -43,7 +43,15 @@ public struct MeetingView: View {
     public init() {}
 
     public var body: some View {
-        PageScaffold(route: .meeting, scrollable: false) {
+        // 与语音助手页同一个封套口径：先吃满窗格，内容比窗格长时整页滚动。
+        // 会议页的三张卡（音频来源 / 本机 App / 转录流）都会随运行中的 App 数与
+        // 转录长度变长，`scrollable: false` 会把它们的理想高度直接报给分栏
+        // （2026-09-19 实测：分栏被撑到 1355×9736、整窗全白，见 AssistantView.body 注）。
+        PageScaffold(
+            route: .meeting,
+            minimumContentHeight: 420,
+            growsWithContent: true
+        ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 statusBar
                 if let blocked = meeting.blocked, !meeting.phase.isLive {
@@ -53,14 +61,31 @@ public struct MeetingView: View {
                     VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                         mainArea
                     }
-                    inspector.speechRailInspectorColumn(alignment: .topLeading)
+                    if !isInspectorCollapsed {
+                        inspector.speechRailInspectorColumn(alignment: .topLeading)
+                    }
                 }
                 .frame(maxHeight: .infinity, alignment: .top)
                 InnerOSDrawer(session: meeting.innerOS, sessionID: meeting.sessionID)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } trailing: {
-            if meeting.phase.isLive || meeting.phase == .interrupted {
+            // 页头动作逐态一屏（稿 `meetingShell` 的 `headActions` + 那一处共用的右栏收起）。
+            // 空态这三件曾经一件都没有：设计稿的主按钮「开始会议」在界面上不存在，
+            // 只能靠 ⌘⇧N 或菜单栏——同一页的受阻卡里反倒有一个「重试」能开始（2026-09-19 实测）。
+            if meeting.phase == .idle, meeting.blocked == nil {
+                SessionHeaderKeycap("⌘⇧N")
+                PageActionButton(
+                    title: "查看设置",
+                    systemImage: "slider.horizontal.3",
+                    helpText: "打开会话设置：分人标签、纪要模型与默认对讲口径"
+                ) { openSettings() }
+                PageActionButton(
+                    title: "开始会议",
+                    systemImage: "mic",
+                    helpText: "按现在选的音频来源开始；麦克风第一次会请求系统授权"
+                ) { Task { await start() } }
+            } else if meeting.phase.isLive || meeting.phase == .interrupted {
                 PageActionButton(
                     title: "结束会议",
                     systemImage: "stop.circle",
@@ -78,6 +103,14 @@ public struct MeetingView: View {
                 ) {
                     meeting.minutes.stop()
                 }
+            }
+            // 右栏收起控件：会议页四个状态共用一处（稿 `meetingShell` 末行）。名字按右栏
+            // 当时装着什么说——空态是「本次会议」，录起来才是「会议信息」。
+            SessionPanelToggle(
+                panelName: meeting.phase == .idle ? "本次会议" : "会议信息",
+                isCollapsed: isInspectorCollapsed
+            ) {
+                isInspectorCollapsed.toggle()
             }
         }
         .task {
@@ -222,15 +255,13 @@ public struct MeetingView: View {
                     .speechRailButton(.secondary)
             }
 
-            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                SessionPanel { sourcesCard }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                if !isInspectorCollapsed {
-                    SessionPanel { meetingInfoCard }
-                        .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth)
-                }
-            }
-
+            // 空态只有**一条**右栏（页级 `inspector`，这一态渲染 `meetingInfoCard`）。
+            // 2026-09-19 真机走查：这里曾另起一个 `HStack`，把 `meetingInfoCard` 再摆一次——
+            // 于是「本次会议」在同一屏出现两遍，两个 360 栏加主区把宽 1105pt 的内容区挤成
+            // 3 列（来源卡只剩 308pt），连稿里那句「本机音频：抓这个 App 正在播放的声音…」
+            // 都被折成三行后截断。稿 `screenClosureMeetingSources` 里 split 只有
+            // 「音频来源 + 本次会议」两栏。
+            SessionPanel { sourcesCard }
             SessionPanel { blockedSourcesCard }
             libraryCard
         }
@@ -733,7 +764,9 @@ public struct MeetingView: View {
                 }
                 minutesVersionsCard
             } else if meeting.phase == .idle {
-                thisMeetingCard
+                // 稿 `screenClosureMeetingSources` 的右栏：「本次会议 · 还没有开始」+ 运行档位
+                // 那一组事实 + 「检查输入电平」。时长/转录这些读数在还没开始时都是 0。
+                meetingInfoCard
             } else {
                 thisMeetingCard
                 if meeting.phase == .interrupted { interruptionCard }

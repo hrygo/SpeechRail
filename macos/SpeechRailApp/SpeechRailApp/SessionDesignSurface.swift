@@ -132,6 +132,7 @@ public struct SessionCheckRow<Trailing: View>: View {
                 .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             trailing
@@ -740,10 +741,10 @@ public struct SessionLibraryColumn: View {
                 }
             }
             .frame(maxHeight: .infinity)
-            Spacer(minLength: 0)
             SessionHairline()
             CardFoot(note: foot) { EmptyView() }
         }
+        .frame(maxHeight: .infinity)
         .task(id: kind.rawValue) { await reload() }
     }
 

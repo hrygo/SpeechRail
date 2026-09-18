@@ -15,6 +15,8 @@ public struct AssistantView: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(AssistantSession.self) private var assistant
     @Environment(SessionPreferences.self) private var preferences
+    /// 受阻时的「去服务状态」是一条真出口，所以这一页要能发起跳转（与创作页同一套）。
+    @Environment(AppNavigationState.self) private var navigation
     @Environment(\.openSettings) private var openSettings
 
     @State private var typed = ""
@@ -61,9 +63,16 @@ public struct AssistantView: View {
 
     private var isLive: Bool { assistant.phase.isLive }
 
+    /// 受阻原因：运行时记下的优先，其次是**首屏就能知道的事实**。
+    ///
+    /// 「没配对话模型」不需要用户先点一次「开始对话」才知道。2026-09-19 真机走查里，
+    /// 首屏是绿的「现在就能开始」，同一屏右栏却写着红字「对话模型 未配置」，按下
+    /// 「开始对话」才翻到稿上的受阻板（`screenAssistantBlocked`）——**首屏骗人**。
+    /// 这一条本来就在 `preferences` 里躺着，所以判定要读它，而不是等一次失败。
     private var blockedReason: AssistantSession.BlockReason? {
-        guard let blocked = assistant.blocked, !isLive else { return nil }
-        return blocked
+        if isLive { return nil }
+        if let blocked = assistant.blocked { return blocked }
+        return preferences.isLLMConfigured ? nil : .llmNotConfigured
     }
 
     /// 三态：未开始 / 未配置模型 / 对话中。记录库是**同一个页面的另一个状态**（`reviewRecord`）。
@@ -83,13 +92,28 @@ public struct AssistantView: View {
     // MARK: - 页面
 
     public var body: some View {
-        PageScaffold(route: .assistant, scrollable: false, purpose: pagePurpose) {
+        // `scrollable: true` + `minimumContentHeight` + `growsWithContent`：正文**先吃满窗格**
+        // （卡片因此能像稿那样吃满、两列等高），清单比窗格长时页面整页滚动，而不是把
+        // 多出来的部分裁掉。
+        //
+        // 为什么必须这么做（2026-09-19 装机件实测）：`scrollable: false` 的封套把正文的
+        // **理想高度**直接报给 `NavigationSplitView`；只要正文里有一处理想高度超过窗格
+        // （音色列表有 18 条、约 790pt 就够），分栏就按理想高度铺开、再在窗口里垂直居中——
+        // 侧栏与正文一起被推出可视区，整窗全白（AX 树却完整）。实测：坏版分栏 1355×4317，
+        // 好版 1355×781（窗口内容区 741）。这与 `WorkspaceComponents.PageScaffold` 注里
+        // 记的「第三十轮」是同一个失败面，`minimumContentHeight` 那条滚动路径正是为它建的。
+        PageScaffold(
+            route: .assistant,
+            purpose: pagePurpose,
+            minimumContentHeight: 420,
+            growsWithContent: true
+        ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 statusBar
                 if state == .review {
                     reviewArea
                 } else {
-                    if let band { band }
+                    band
                     splitArea
                     if state == .ready { voicesCard } else { controlsCard }
                 }
@@ -128,7 +152,7 @@ public struct AssistantView: View {
             case .ready:
                 PageActionButton(
                     title: "打开设置",
-                    systemImage: "sliders.horizontal",
+                    systemImage: "slider.horizontal.3",
                     helpText: "打开会话设置：大模型、默认人设与音色"
                 ) { openSettings() }
                 PageActionButton(
@@ -139,14 +163,14 @@ public struct AssistantView: View {
             case .blocked:
                 PageActionButton(
                     title: "设置 · 会话",
-                    systemImage: "sliders.horizontal",
+                    systemImage: "slider.horizontal.3",
                     helpText: "打开会话设置，填对话模型的地址、模型与密钥"
                 ) { openSettings() }
             case .live:
                 SessionHeaderKeycap("⌘⇧.")
                 PageActionButton(
                     title: "音色与风格",
-                    systemImage: "sliders.horizontal",
+                    systemImage: "slider.horizontal.3",
                     helpText: "换音色只改声音，下一句生效；换人设要新开一轮"
                 ) { inspectorTab = .session }
                 PageActionButton(
@@ -221,12 +245,18 @@ public struct AssistantView: View {
 
     // MARK: - 结论条
 
-    /// 结论条只在「未开始」与「未配置模型」两态出现；用 `AnyView` 是因为这两条同族、
-    /// 出口个数不同，而调用点只想问一句"有没有"。
-    private var band: AnyView? {
+    /// 结论条只在「未开始」与「未配置模型」两态出现；调用点只想问一句"有没有"。
+    ///
+    /// **不要改回 `AnyView?`**：2026-09-19 装机件实测，这一条被 `AnyView` 包起来之后，
+    /// 整页的理想高度被报成 4317pt（窗口内容区只有 741pt），`NavigationSplitView` 于是
+    /// 按理想高度铺开、再垂直居中到窗口里——侧栏与正文一起被推出可视区，窗口看起来
+    /// 全白（AX 树却完整）。同一份内容直接写出来（`_ConditionalContent`，类型不擦除）
+    /// 布局正常。二分证据：`AnyView` 版本 1355×4317，直接版本 1355×781。
+    @ViewBuilder
+    private var band: some View {
         switch state {
         case .ready:
-            AnyView(SessionConclusionBand(
+            SessionConclusionBand(
                 tone: .healthy,
                 title: "现在就能开始",
                 message: "人设是它开口前读的第一段话，只在这一步定——开始之后再改，之后每一轮都会慢一点。"
@@ -240,25 +270,84 @@ public struct AssistantView: View {
                 }
                 .speechRailButton(.secondary)
                 .disabled(currentVoice == nil)
-            })
+            }
         case .blocked:
-            AnyView(SessionConclusionBand(
-                tone: .attention,
-                title: "还没有配置对话模型",
-                message: "语音识别和语音合成现在就能用；助手需要一台兼容 OpenAI 的服务："
-                    + "把地址、模型与密钥填进设置即可，地址是本机还是局域网都行。",
-                hint: "对接要求只有一条：服务要实现 Responses API（只支持 Chat Completions 的服务接不上）。"
-                    + "密钥只存钥匙串，不写进配置文件，也不出现在日志或导出物里。"
-            ) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("打开设置…") { openSettings() }
-                        .speechRailButton(.primary)
-                    Button("了解如何配置") { isShowingConfigHelp = true }
-                        .speechRailButton(.secondary)
+            // 结论条按**原因**说话：`BlockReason` 已经有 `title` / `detail`，八个原因
+            // 共用一条写死的「还没有配置对话模型」会让麦克风被占、服务没起来这类情况
+            // 全部指错方向（`MeetingView` 的受阻卡一直是按原因取的，这里是唯一一处例外）。
+            if let reason = blockedReason {
+                SessionConclusionBand(
+                    tone: .attention,
+                    title: reason.title,
+                    message: reason.detail,
+                    hint: blockedHint(reason)
+                ) {
+                    blockedActions(reason)
                 }
-            })
+            }
         case .live, .review:
-            nil
+            EmptyView()
+        }
+    }
+
+    /// 受阻的出口：每一类原因只有**一条**真能解决它的路，再配一个不改状态的「重试」。
+    /// 稿 `screenAssistantBlocked` 只画了「未配置」那一类（两条出口），其余按同一形状补。
+    @ViewBuilder
+    private func blockedActions(_ reason: AssistantSession.BlockReason) -> some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            switch reason {
+            case .llmNotConfigured:
+                Button("打开设置…") { openSettings() }
+                    .speechRailButton(.primary)
+                Button("了解如何配置") { isShowingConfigHelp = true }
+                    .speechRailButton(.secondary)
+            case .llmUnreachable:
+                Button("打开设置…") { openSettings() }
+                    .speechRailButton(.primary)
+                retryAction
+            case .microphoneDenied:
+                Button("打开系统设置") { openMicrophoneSettings() }
+                    .speechRailButton(.primary)
+                retryAction
+            case .serviceNotReady:
+                Button("去服务状态") { navigation.request(.overview) }
+                    .speechRailButton(.primary)
+                retryAction
+            case .occupiedBy:
+                // 出口就是占用守卫本身：协调器会先弹「结束那个会话并切换」的确认。
+                Button("结束会话并切换") { Task { await session.requestStart(.assistant) } }
+                    .speechRailButton(.primary)
+            case .serviceBusy, .storeUnavailable, .streamFailed:
+                retryAction
+            }
+        }
+    }
+
+    private var retryAction: some View {
+        Button("重试") { Task { await assistant.retry() } }
+            .speechRailButton(.secondary)
+    }
+
+    /// 结论条那一行小字：正文说的是「怎么了」，它说「改完在哪一步生效、要满足什么」。
+    private func blockedHint(_ reason: AssistantSession.BlockReason) -> String {
+        switch reason {
+        case .llmNotConfigured:
+            "密钥只存钥匙串，不写进配置文件，也不出现在日志或导出物里；"
+                + "改完不用重启 —— 设置页的「检查连接」会立刻给出结论。"
+        case .llmUnreachable:
+            "地址、模型或密钥改完点一次「重试」即可，不用重启 App。"
+        case .microphoneDenied:
+            "系统设置 → 隐私与安全性 → 麦克风；给过权限之后回来点「重试」。拒绝一次不会反复弹窗。"
+        case .serviceNotReady:
+            "识别与合成由侧边栏「服务状态」那一页管理；服务没起来时助手、会议、字幕都连不上。"
+        case .serviceBusy:
+            "服务同一时刻只跑一个重任务：等它跑完点「重试」，或者先打字问。"
+        case .occupiedBy:
+            "麦克风同一时刻只由一个会话使用；确认之后当前那个会先结束，不会静默抢。"
+        case .storeUnavailable:
+            "记录库写不进去就不开始对话：转录与对话都是要留下的资产，宁可不录。"
+        case .streamFailed:
+            "已经定稿的对话都还在库里；点「重试」重新接一段。"
         }
     }
 
@@ -279,7 +368,9 @@ public struct AssistantView: View {
                 inspectorColumn
             }
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        // 分栏吃掉卡片之间的余量：两列因此等高（稿的两张卡底边对齐），收起右栏时
+        // 主框体独自变宽（`closurePanelRulesBoard`）。
+        .frame(maxWidth: .infinity, minHeight: 300, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: 人设（未开始）
@@ -322,6 +413,7 @@ public struct AssistantView: View {
                 .speechRailButton(.secondary)
             }
         }
+        .frame(maxHeight: .infinity)
     }
 
     /// 人设那一行的说明。内置目录里每一条的正文是给模型看的，这里给的是给用户看的一句；
@@ -375,6 +467,7 @@ public struct AssistantView: View {
             SessionHairline()
             CardFoot(note: "设置里改完不用重启：连接检查会立刻给出结论。") { EmptyView() }
         }
+        .frame(maxHeight: .infinity)
     }
 
     private var capabilityRows: [(name: String, tone: StatusTone, pill: String, note: String)] {
@@ -391,8 +484,20 @@ public struct AssistantView: View {
             ("语音识别", asr.0, asr.1, "实时字幕与会议转录都靠它，现在就能用。"),
             ("语音合成", tts.0, tts.1, "助手说话用它；音色可以在设置里换。"),
             ("分人识别", diarization.0, diarization.1, "只输出本次会话的匿名标签；不管理实名或声纹库。"),
-            ("对话模型", .attention, "未配置", "填一个兼容 OpenAI、且支持 Responses API 的服务地址与模型。")
+            llmCapabilityRow
         ]
+    }
+
+    /// 「对话模型」这一行说的是**本机现在的配置**，不是「这一类能力有没有」。
+    /// 模型配好了、只是因为别的理由受阻（麦克风被占、服务没起来）时，仍报「未配置」
+    /// 就是这一屏第二处骗人的字（`BlockReason.title` 已经在说真正的原因）。
+    private var llmCapabilityRow: (name: String, tone: StatusTone, pill: String, note: String) {
+        guard preferences.isLLMConfigured else {
+            return ("对话模型", .attention, "未配置",
+                    "填一个兼容 OpenAI、且支持 Responses API 的服务地址与模型。")
+        }
+        return ("对话模型", .healthy, "已配置",
+                "已指向 \(preferences.llmConfiguration.model)；可达性与接口是否对得上由设置页的「检查连接」回答。")
     }
 
     // MARK: 对话流（对话中 / 换音色 / 记忆）
@@ -434,6 +539,7 @@ public struct AssistantView: View {
             SessionHairline()
             CardFoot(note: streamFootNote) { EmptyView() }
         }
+        .frame(maxHeight: .infinity)
     }
 
     private var emptyStream: some View {
@@ -611,6 +717,10 @@ public struct AssistantView: View {
                         .speechRailButton(.primary)
                         .disabled(!canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
+                // 打字这条路的可用性与「能不能开口说话」**不是**同一件事（§6.1）：
+                // 麦克风被占、服务正忙这几类受阻里，输入框照常亮着，所以淡出只作用在
+                // 用不了的那一行上，而不是整张卡（整卡 0.45 会让能用的输入框看起来也是坏的）。
+                .opacity(canCompose ? 1 : 0.45)
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                     Button(assistant.isMuted ? "取消静音" : "静音麦克风") {
@@ -643,9 +753,10 @@ public struct AssistantView: View {
                         }
                     }
                 }
+                .opacity(state == .blocked ? 0.45 : 1)
 
                 if state == .blocked {
-                    Text("配好对话模型后这里会亮起来。")
+                    Text(blockedControlsNote)
                         .font(SpeechRailDesignTokens.Typography.secondary)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -653,8 +764,18 @@ public struct AssistantView: View {
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-            .opacity(state == .blocked ? 0.45 : 1)
         }
+    }
+
+    /// 受阻时底部那行小字：说清楚**现在能用哪一条路**，而不是一律说「配好模型就会亮」。
+    private var blockedControlsNote: String {
+        guard let reason = blockedReason else { return "" }
+        if reason.allowsTyping {
+            return "打字是现在就能用的那条路：文字不经过麦克风，回答也只读给你听（点一下播放）。"
+        }
+        return reason == .llmNotConfigured
+            ? "配好对话模型后这里会亮起来。"
+            : "解决上面那一条之后，这里就会亮起来。"
     }
 
     private var canCompose: Bool {
@@ -679,6 +800,7 @@ public struct AssistantView: View {
             inspectorPanel
                 .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth, alignment: .leading)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var inspectorPanel: some View {
@@ -697,6 +819,7 @@ public struct AssistantView: View {
                 memoryTabBody
             }
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var headlineTitle: String {
@@ -834,6 +957,7 @@ public struct AssistantView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
             } else {
                 ForEach(recent.prefix(6)) { summary in
                     Button {
@@ -910,13 +1034,13 @@ public struct AssistantView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             }
+            Spacer(minLength: 0)
             Text("记忆在**下一轮**生效；移除记忆不会动历史记录。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
-            Spacer(minLength: 0)
         }
     }
 
@@ -940,6 +1064,7 @@ public struct AssistantView: View {
                 onSelect: { summary in Task { await openRecord(summary) } }
             )
             .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
+            .frame(maxHeight: .infinity)
 
             SessionPanel {
                 SessionPanelHead(title: reviewRecord?.title ?? "这一轮对话", detail: nil, trailingDetail: reviewDetail)
@@ -966,18 +1091,20 @@ public struct AssistantView: View {
                         }
                     }
                 }
+                .frame(maxHeight: .infinity)
                 SessionHairline()
                 CardFoot(note: "继续这一轮会接在后面，不会新建一段记录。") {
                     Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
                         .speechRailButton(.secondary)
                 }
             }
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if !isInspectorCollapsed {
                 inspectorColumn
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var reviewDetail: String {
@@ -1038,6 +1165,14 @@ public struct AssistantView: View {
         reviewRecord = nil
         reviewLines = []
         reviewSpeakerNames = [:]
+    }
+
+    /// 「麦克风未授权」的唯一出口。`Privacy_Microphone` 这个锚点与音色克隆、字幕带用的是
+    /// 同一处（`VoiceCloneView` / `CaptionBandWindow`），所以三页落进同一个系统面板。
+    private func openMicrophoneSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func reloadRecent() async {

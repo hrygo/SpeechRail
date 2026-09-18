@@ -225,18 +225,25 @@ public struct SettingsView: View {
                 }
                 settingsRowSeparator
                 settingsRow {
-                    // 「接口」是**只读事实**：不提供降级选项（§6.5）。
-                    LabeledContent {
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text(preferences.llmInterface)
-                                .font(SpeechRailDesignTokens.Typography.body)
-                            StatusPill(tone: .neutral, label: "必须")
-                        }
-                    } label: {
+                    // 「接口」是**只读事实**：不提供降级选项（§6.5），取值本身就是
+                    // 「Responses · 必须」这一句（`SessionPreferences.llmInterface`），
+                    // 所以不再另挂一颗「必须」胶囊——稿 `kvRow(req, ["接口",
+                    // "Responses API（必须）"])` 也是一句取值。
+                    //
+                    // 布局**不能**用 `LabeledContent`：真机走查（2026-09-19）里取值那一侧
+                    // 整段被挤出可视区，`Responses · 必须` 一个字都看不见，行尾只剩一个
+                    // 空胶囊。老毛病在本文件「服务端口」那一行已经记过一次（标签可伸缩时
+                    // 取值被挤出可视区），修法同那处：自己排「标签 → 弹性空隙 → 取值」。
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
                         settingsRowLabel(
                             "接口",
                             caption: "对话与纪要都走 Responses API；只提供 Chat Completions 的服务接不上。"
                         )
+                        Spacer(minLength: 0)
+                        Text(preferences.llmInterface)
+                            .font(SpeechRailDesignTokens.Typography.callout)
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
                 settingsRowSeparator

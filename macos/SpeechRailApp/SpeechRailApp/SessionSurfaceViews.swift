@@ -246,13 +246,22 @@ public struct SessionLibraryView: View {
     @State private var loadFailure: String?
     @State private var pendingRemoval: SessionSummary?
     @State private var isShowingDataDirectoryHint = false
+    /// 前置检查态那一栏「本次字幕」收起了没有（与语音助手、会议页同一套规矩）。
+    @State private var isInspectorCollapsed = false
 
     public init(kind: SessionKind) {
         self.kind = kind
     }
 
     public var body: some View {
-        PageScaffold(route: kind.route, scrollable: false) {
+        // 与语音助手 / 会议页同一个封套口径：先吃满窗格，内容比窗格长时整页滚动。
+        // 记录库这一屏的清单长度由使用量决定（转录几十段、字幕记录几百条），
+        // `scrollable: false` 会把它的理想高度直接报给分栏（见 AssistantView.body 注）。
+        PageScaffold(
+            route: kind.route,
+            minimumContentHeight: 420,
+            growsWithContent: true
+        ) {
             VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 SessionStatusBar(
                     title: session.ownershipText,
@@ -282,6 +291,13 @@ public struct SessionLibraryView: View {
         } trailing: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 if kind == .captions {
+                    // 稿 `screenClosureCaptionsIdle` 的页头第一件是 `kbdInRow(row, "⌘⇧L", 34)`：
+                    // 字幕这条闭环的入口**不在这个窗口里**，所以把键画在页头是最省事的一次说明。
+                    // 键是真装着的（`SpeechRailApp.wireGlobalShortcuts()`），不是装饰。
+                    // 只在空态画：稿的「回看中 / 刚结束」两块画板页头都没有这个键。
+                    if summaries.isEmpty {
+                        SessionHeaderKeycap("⌘⇧L")
+                    }
                     // 页头的主入口（稿 `primaryButton(row, "打开字幕带", …)`）。它**只放在这里**：
                     // 空态里再放一颗同一动作的按钮，等于同一件事两个入口。
                     PageActionButton(
@@ -295,6 +311,14 @@ public struct SessionLibraryView: View {
                     }
                 }
                 exportMenu
+                if kind == .captions, summaries.isEmpty {
+                    SessionPanelToggle(
+                        panelName: "本次字幕",
+                        isCollapsed: isInspectorCollapsed
+                    ) {
+                        isInspectorCollapsed.toggle()
+                    }
+                }
             }
         }
         .task(id: refreshToken) { await reload() }
@@ -426,36 +450,40 @@ public struct SessionLibraryView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .topLeading)
 
-                SessionPanel {
-                    SessionPanelHead(title: "本次字幕", badge: "还没有开始")
-                    SessionHairline()
-                    VStack(alignment: .leading, spacing: 10) {
-                        SessionKVRow("运行档位", profileRowText)
-                        SessionKVRow("默认字号", "标准")
-                        SessionKVRow("字幕带位置", "屏幕底部居中 · 每块屏各记一套")
-                        SessionKVRow("采集设备", "系统默认")
-                        SessionKVRow("保存位置", "记录库 · 长期保留")
-                        SessionKVRow("最近一条记录", lastRecordText)
-                    }
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("运行档位是什么意思")
-                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                // 「非主框体都能收起」这条规矩在这一屏也要成立（用户 2026-09-18），
+                // 稿 `screenClosureCaptionsIdle` 的页头末件就是 `sideToggle(row, "本次字幕")`。
+                if !isInspectorCollapsed {
+                    SessionPanel {
+                        SessionPanelHead(title: "本次字幕", badge: "还没有开始")
+                        SessionHairline()
+                        VStack(alignment: .leading, spacing: 10) {
+                            SessionKVRow("运行档位", profileRowText)
+                            SessionKVRow("默认字号", "标准")
+                            SessionKVRow("字幕带位置", "屏幕底部居中 · 每块屏各记一套")
+                            SessionKVRow("采集设备", "系统默认")
+                            SessionKVRow("保存位置", "记录库 · 长期保留")
+                            SessionKVRow("最近一条记录", lastRecordText)
+                        }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Text("运行档位是什么意思")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            Text(
+                                "\(profileRowText) 是这台 Mac 现在跑的那一档：认得越准，越能标出说话人。"
+                                    + "换档在设置里，已经存下的记录不跟着变。"
+                            )
+                            .font(SpeechRailDesignTokens.Typography.secondary)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        Text(
-                            "\(profileRowText) 是这台 Mac 现在跑的那一档：认得越准，越能标出说话人。"
-                                + "换档在设置里，已经存下的记录不跟着变。"
-                        )
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                        .padding(.bottom, SpeechRailDesignTokens.Spacing.md)
+                        Spacer(minLength: 0)
                     }
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.bottom, SpeechRailDesignTokens.Spacing.md)
-                    Spacer(minLength: 0)
+                    .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth)
                 }
-                .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth)
             }
 
             SessionPanel {
