@@ -29,6 +29,14 @@
 
 其中明确区分：模型下载/校验、profile 应用、服务运行状态、推理就绪状态和质量验证，不把原型中的概念状态直接当成后端事实。
 
+## 会话三闭环（2026-09-17 / 09-18）
+
+语音助手、会议助手、实时字幕三条能力的设计资料：
+
+- [`2026-09-17-live-sessions/SESSIONS-SPEC.md`](./2026-09-17-live-sessions/SESSIONS-SPEC.md)：模块规格（边界、逐面规格、状态矩阵、SQLite 数据模型、用户旅程）。
+- [`2026-09-17-session-closures/`](./2026-09-17-session-closures/)：53 板闭环稿的设计包、离线门禁与实现就绪度核查。
+- [`2026-09-18-session-layer/TECHNICAL-DESIGN.md`](./2026-09-18-session-layer/TECHNICAL-DESIGN.md)：**会话层技术方案（终态）**——哪些能力归 macOS 原生、哪些归 Python 服务、边界规矩、数据口径、验收判据与外部最佳实践依据。
+
 macOS 26-only 的 App 设计研究、Liquid Glass 分层、统一颜色/间距/字体/可访问性 token 见：
 
 [`macos-app-design-system.md`](../developers/macos-app-design-system.md)
