@@ -278,10 +278,10 @@ public final class VoiceRecordingController {
         }
     }
 
-    /// dBFS → 0…1。取 -60 dBFS 为底、0 dBFS 为顶：语音的可用动态基本落在这 60 dB 里。
+    /// dBFS → 0…1。曲线本身在 `AudioLevel`（会话采集与这一页共用同一条，
+    /// `IMPLEMENTATION-READINESS` §2.2 第 5 项）；这里保留这个方法是因为它是这一页的既有调用口径。
     nonisolated static func normalizedLevel(decibels: Double) -> Double {
-        guard decibels.isFinite else { return 0 }
-        return min(max((decibels + 60) / 60, 0), 1)
+        AudioLevel.normalized(decibels: decibels)
     }
 }
 

@@ -8,6 +8,14 @@ struct SpeechRailApp: App {
 
     @State private var model: AppModel
     @State private var navigation: AppNavigationState
+    /// 会话层的地基：所有权状态机 + 记录库（`SESSIONS-SPEC` §12 阶段 1 / 2）。
+    /// 它**不随 App 启动占用任何设备**——空闲时没有麦克风、没有系统录音 tap、没有音频引擎
+    /// （§5.3.1）。库里也还没有行：记录库这个库文件是懒建的。
+    @State private var session: SessionCoordinator
+    /// 实时字幕的会话层与浮层（`SESSIONS-SPEC` §12 阶段 3）。浮层是 App 里唯一一个 `NSPanel`。
+    /// 两者都不在启动时占设备：`⌘⇧L` 或页面上的「打开字幕带」按下去才拿麦克风。
+    @State private var caption: CaptionSession
+    @State private var captionBand: CaptionBandWindowController
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
 
     init() {
@@ -79,16 +87,56 @@ struct SpeechRailApp: App {
         creatorClient = liveServiceClient
 #endif
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
-        _model = State(
-            initialValue: AppModel(
-                transport: transport,
-                apiClient: diagnosticsClient,
-                capabilityClient: capabilityClient,
-                creatorClient: creatorClient,
-                registration: registration
-            )
+        let appModel = AppModel(
+            transport: transport,
+            apiClient: diagnosticsClient,
+            capabilityClient: capabilityClient,
+            creatorClient: creatorClient,
+            registration: registration
         )
-        _navigation = State(initialValue: AppNavigationState())
+        let navigationState = AppNavigationState()
+
+        // 会话层的三个件与它们的接线。**接线放在这里**：协调器只认"开始 / 停止采集"两个钩子，
+        // 不认识字幕、会议、助手各自的采集与连接（`TECHNICAL-DESIGN` §5.2）。
+        let coordinator = SessionCoordinator(store: SessionStore())
+        let captionSession = CaptionSession(coordinator: coordinator)
+        let band = CaptionBandWindowController(
+            session: captionSession,
+            onOpenActiveSession: { [weak navigationState] in
+                navigationState?.request(coordinator.ownershipRoute)
+            }
+        )
+        captionSession.presentBand = { visible in
+            band.setVisible(visible)
+        }
+        // 「就绪」要在**按下的那一刻**判定，不是读一轮缓存的健康快照：`⌘⇧L` 是全局键，
+        // 按下时很可能这一轮刷新还没跑完，拿旧结论会把可用说成不可用。loopback 上一次
+        // `/health` 就是毫秒级的事。
+        captionSession.serviceReadiness = {
+            do {
+                let health = try await ServiceAPIClient().fetchHealthSnapshot()
+                guard health.ready == true else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
+        coordinator.starter = { kind in
+            guard kind == .captions else { return }
+            try await captionSession.beginCapture()
+        }
+        coordinator.stopper = { kind in
+            guard kind == .captions else { return }
+            await captionSession.stopCapture()
+        }
+
+        _model = State(initialValue: appModel)
+        _navigation = State(initialValue: navigationState)
+        _session = State(initialValue: coordinator)
+        _caption = State(initialValue: captionSession)
+        _captionBand = State(initialValue: band)
     }
 
     private static var hasBundledLocalXPCService: Bool {
@@ -103,11 +151,16 @@ struct SpeechRailApp: App {
             ControlCenterView()
                 .environment(model)
                 .environment(navigation)
+                .environment(session)
+                .environment(caption)
+                .task { await session.openStore() }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
             SpeechRailCommands(
                 navigation: navigation,
+                session: session,
+                caption: caption,
                 showDeveloperDetails: $showDeveloperDetails
             )
         }
@@ -132,14 +185,30 @@ struct SpeechRailApp: App {
 /// The menu bar and keyboard map from REDESIGN-SPEC §6.3. Focused scene values
 /// let「导出选中作品」follow the page the user is actually looking at.
 struct SpeechRailCommands: Commands {
-    /// ⌘1–⌘9 的显示顺序与 `AppRoute.allCases` 一致（创作五页 + 引擎五页）。
-    /// 第十页「开发者文档」是 ⌘0：它排不进 1–9 的自然顺序，而给参考页一个
-    /// 记不住的组合键（⌘⇧D 之类）比给最后一个序位更糟（REDESIGN-SPEC §13.3）。
-    private static let routeShortcuts: [KeyEquivalent] = [
-        "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"
+    /// 路由 → 快捷键。十三页超出 ⌘1–⌘0 的十个槽位，所以让位规则被显式写在表里
+    /// （SESSIONS-SPEC §5.2，用户 2026-09-18 裁决 D2）：**创作页一个都不动**（它们频率最高，
+    /// 而且已形成肌肉记忆），**会话组拿中间三格** ⌘6–⌘8，**引擎页改用助记组合**。
+    private static let routeShortcuts: [AppRoute: (key: KeyEquivalent, modifiers: EventModifiers)] = [
+        .dubbing: ("1", .command),
+        .voiceDesign: ("2", .command),
+        .voiceClone: ("3", .command),
+        .voiceLibrary: ("4", .command),
+        .works: ("5", .command),
+        .assistant: ("6", .command),
+        .meeting: ("7", .command),
+        .captions: ("8", .command),
+        .overview: ("9", .command),
+        .monitoring: ("0", .command),
+        .models: ("m", [.command, .shift]),
+        .diagnostics: ("d", [.command, .shift]),
+        .developerDocs: ("h", [.command, .shift])
     ]
 
     let navigation: AppNavigationState
+    /// 会话命令要用它判「有没有正在进行的会话」（`⌘⇧.` 会话进行中才可用）。
+    let session: SessionCoordinator
+    /// 字幕带的全局入口（`⌘⇧L`）。它**不需要 App 在前台**——菜单命令本来就在系统这一侧。
+    let caption: CaptionSession
     @Binding var showDeveloperDetails: Bool
     @FocusedValue(\.selectedWorkCommand) private var selectedWorkCommand
     @FocusedValue(\.reloadPageCommand) private var reloadPageCommand
@@ -176,15 +245,27 @@ struct SpeechRailCommands: Commands {
 
         CommandGroup(after: .toolbar) {
             Divider()
-            ForEach(Array(AppRoute.allCases.enumerated()), id: \.element) { index, route in
+            ForEach(AppRoute.allCases, id: \.self) { route in
                 Button(route.title) {
                     navigation.request(route)
                 }
-                .keyboardShortcut(
-                    Self.routeShortcuts[index % Self.routeShortcuts.count],
-                    modifiers: .command
-                )
+                .keyboardShortcut(Self.shortcut(for: route))
             }
+
+            Divider()
+
+            // 会话动作。**只放今天真的会生效的**：字幕带（阶段 3 已落地）与会话结束；
+            // 会议的开始动作随阶段 6 落地，现在给一条按了不动的菜单项比不给更糟。
+            Button(caption.phase.isLive ? "暂停实时字幕" : "开始实时字幕") {
+                Task { await caption.toggleFromGlobalShortcut() }
+            }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+
+            Button("结束当前会话") {
+                session.requestEndCurrentSession()
+            }
+            .keyboardShortcut(".", modifiers: [.command, .shift])
+            .disabled(!session.phase.isActive)
         }
 
         CommandGroup(replacing: .help) {
@@ -198,6 +279,16 @@ struct SpeechRailCommands: Commands {
     private var exportTitle: String {
         guard let selectedWorkCommand else { return "导出选中作品…" }
         return "导出“\(selectedWorkCommand.title)”…"
+    }
+
+    /// 表里必须覆盖每一条路由；缺一条就退回 ⌘1，这会与「配音台」撞键——
+    /// 所以缺项要当成缺陷来修，而不是靠这里的兜底悄悄过去。
+    private static func shortcut(for route: AppRoute) -> KeyboardShortcut {
+        guard let entry = routeShortcuts[route] else {
+            assertionFailure("路由 \(route.rawValue) 没有登记快捷键")
+            return KeyboardShortcut("1", modifiers: .command)
+        }
+        return KeyboardShortcut(entry.key, modifiers: entry.modifiers)
     }
 }
 

@@ -5,9 +5,11 @@ import SpeechRailControlKit
 public struct ControlCenterView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
     @State private var selection: AppRoute? = .overview
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var skipsSwitchConfirmation = false
     @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
 
     public init() {}
@@ -26,6 +28,10 @@ public struct ControlCenterView: View {
                         sidebarSection(
                             title: AppRouteGroup.creator.title,
                             routes: AppRoute.creatorRoutes
+                        )
+                        sidebarSection(
+                            title: AppRouteGroup.session.title,
+                            routes: AppRoute.sessionRoutes
                         )
                         sidebarSection(
                             title: AppRouteGroup.service.title,
@@ -104,7 +110,59 @@ public struct ControlCenterView: View {
                     selection = route
                 }
             }
+            // 会话占用与交还的守卫：**全窗口只有一个确认形状**（§6.4）。
+            // 触发点是三个页面的开始动作、`⌘⇧N`、菜单栏「开始…」与字幕带的「开始会议」，
+            // 它们都只调用 `SessionCoordinator`，确认面板在这里统一呈现一次。
+            .sheet(item: switchConfirmation) { confirmation in
+                sessionConfirmationSheet(confirmation)
+            }
         }
+    }
+
+    private var switchConfirmation: Binding<SessionCoordinator.Confirmation?> {
+        Binding(
+            get: { session.pendingConfirmation },
+            set: { if $0 == nil { session.cancelPending() } }
+        )
+    }
+
+    @ViewBuilder
+    private func sessionConfirmationSheet(_ confirmation: SessionCoordinator.Confirmation) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(confirmation.title)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text(confirmation.message)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(maxWidth: 380, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button(confirmation.confirmTitle) {
+                    if skipsSwitchConfirmation, confirmation.allowsDoNotAskAgain {
+                        session.rememberDoNotAskAgain()
+                    }
+                    Task { await session.confirmPending() }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+
+                Button("取消", role: .cancel) {
+                    session.cancelPending()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                if confirmation.allowsDoNotAskAgain {
+                    Toggle("以后不再询问", isOn: $skipsSwitchConfirmation)
+                        .toggleStyle(.checkbox)
+                }
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.gutter)
+        .frame(minWidth: 440, alignment: .leading)
+        .onAppear { skipsSwitchConfirmation = false }
     }
 
     private var displayedHealth: HealthSnapshot? {
@@ -172,6 +230,9 @@ public struct ControlCenterView: View {
                 .frame(height: SpeechRailDesignTokens.Spacing.hairline)
                 .padding(.horizontal, SpeechRailDesignTokens.Control.sidebarHairlineInset)
             sidebarServiceStatus
+            // 第二行：谁在用麦克风（P1 的落点）。第一行答「引擎能不能用」，
+            // 这一行答「此刻是谁在用它」——两件事都常驻，顺序即优先级（§5.1）。
+            SessionOwnershipRow()
         }
     }
 
@@ -279,6 +340,12 @@ public struct ControlCenterView: View {
             VoiceLibraryView()
         case .works:
             WorksView()
+        case .assistant:
+            SessionLibraryView(kind: .assistant)
+        case .meeting:
+            SessionLibraryView(kind: .meeting)
+        case .captions:
+            SessionLibraryView(kind: .captions)
         case .overview:
             ServiceOverviewView()
         case .monitoring:

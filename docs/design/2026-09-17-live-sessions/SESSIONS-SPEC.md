@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App · 实时会话模块设计规格"
 status: proposed
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "1.11.0"
+version: "1.12.0"
 date: 2026-09-18
 ---
 
@@ -764,6 +764,61 @@ Token delta：
 - `AGENTS.md:33`「不采集/播放音频」→ 改为「只在会话模块与音色克隆页采集；播放只用于会话与试听」。
 - `docs/developers/macos-app-audio-capture.md`：补会话级采集（连续流、电平、VAD 边界、设备选择）。
 - `macos-app-design-system.md` §3.1：新增字幕文本样式两档与浮层几何（浮层不走卡片几何）。
+
+### 12.1 实现进度（2026-09-18，`macos/SpeechRailApp`）
+
+用户 2026-09-18：「先执行 app 编码落地」。按上表顺序开工，到今天为止落地的是**阶段 1、2（含导出物）
+与阶段 3（实时字幕整条闭环）**：
+
+| 阶段 | 状态 | 落点 |
+|---|---|---|
+| 1 会话所有权地基 | **已落地** | `AppRouteGroup.session` + 3 路由（`assistant` / `meeting` / `captions`）；侧边栏三组 + 第二行 `SessionOwnershipRow`；`SessionCoordinator`（三态所有权、`preparing/recording/processing/interrupted` 相位、设备租约按功能启停、四类中断写账本、§6.4 的确认形状唯一实现）；`SpeechCommands` 按 §5.2 重排（创作 ⌘1–⌘5 / 会话 ⌘6–⌘8 / 引擎 ⌘9 ⌘0 ⌘⇧M ⌘⇧D ⌘⇧H / 字幕带 `⌘⇧L`） |
+| 2 记录库（SQLite） | **已落地，含导出物** | `SessionStore`（系统 `SQLite3` + WAL + `user_version` 迁移，§15.2 + R1 + R2 的全部表与 §6.4 的动作表）；三页共用一份 `SessionLibraryView`（列表 / 选中 / 搜索 / 复制 / 移除带确认 / 导出）；`SessionExporter` + `SessionExportPanel`（Markdown / SRT / 纯文本 / JSON，走系统保存面板，命名按 §16.4） |
+| 3 实时字幕 | **已落地并端到端实测** | `RealtimeASRClient`（`URLSessionWebSocketTask`，16 kHz PCM16 / `server_vad` 400 ms / partial 只进内存 / `completed` 才落库）、`MicrophoneCapture`（`AVAudioEngine` tap + `AVAudioConverter`，环形缓冲，按功能启停）、`CaptionSession`（相位、暂停、受阻五类、`t_start` 取墙钟相对秒）、`CaptionBandWindowController`（非激活 `NSPanel`、`.hudWindow` 材质、按屏记忆位置与宽度、悬停工具条向上长、贴底跟随与「回到最新」） |
+| 4–8 | 未开工 | 分人接入、语音助手、会议助手、内心 OS、系统音频 tap |
+
+两处**有意缺席**，不是遗漏：「开始对话 / 开始会议」两个主按钮随各自的能力阶段落地——
+采集还没接上时，放一个按了不动的按钮比暂不提供更糟；`⌘⇧N` 同样等会议存在之后再加。
+字幕带那一侧的入口今天已经在了（页头「打开字幕带」+ `⌘⇧L`）。
+
+#### 12.1.1 本批实测与两处口径修正（2026-09-18）
+
+**怎么验的**：用 `say` 生成两段中文语音 → `afconvert` / `ffmpeg` 转 16 kHz 单声道 PCM16 →
+用**同一份仓库源码**编译成命令行程序，喂给**本机正在运行的服务**（`quality` 档，实测 `version 2.7.0`），
+再看库里落了什么、SRT 导出来长什么样。全程不碰麦克风、不接管界面，所以不需要任何 UI 自动化授权。
+
+实测结论（全部 PASS，2026-09-18）：
+
+- **事件顺序与契约一致**：`session.created(speechrail/qwen3-asr-1.7b)` → `session.updated` →
+  `speech_started` → `partial`* → `speech_stopped` → `committed` → `completed`，两次说话各一条 `completed`。
+- **两句话落成两行**，`t_start/t_end` 单调、相邻不重叠（`[0.00–4.10]` / `[4.10–9.15]`），
+  库里没有 `partial` 行，`timing_quality` 为 NULL，SRT 段数与行数一致，库可整体备份（126,976 字节）。
+- **中途有一处真问题被这条链路抓到**：本机服务配了 `SPEECHRAIL_API_KEY`，而最初的客户端实现没带
+  `Authorization`——握手直接被关掉。凭据解析因此从 REST 客户端里抽出来（`SpeechRailAPICredentials.swift`），
+  WebSocket 与 REST 共用同一份，避免两处各读一次环境变量再漂移。
+- **第一次启动会慢**：`/health` 里 streaming 是 `cold_evicted`，第一段音频要等模型加载（本次数十秒）。
+  字幕带在这一段里显示的是"已连上、还没出字"，不会报错——这是对的，但**用户感知到的首句延迟**需要真机复看。
+
+两处**按实测修正的口径**：
+
+1. **本轮没有收到任何 `.segment` 事件**（两次说话都没有）。也就是说 §15 的 `timing_quality='aligned'`
+   在这条链路上今天拿不到值，`t_start/t_end` 只能来自客户端自己的音频 / VAD 边界——落地实现就是这么写的，
+   并且如实把 `timing_quality` 留空。**段级时间码与分人是同一条链路的事**，随阶段 4 一起做（§5.7 已如此写明）。
+2. **导出物不再给无归属的行加「说话人：」前缀**（SRT 每行都写这一栏是噪声，不是信息）。
+   §16.4 的"保留说话人显示名"仍然成立：有分人标签或用户改过名时才出现那一栏。
+
+其它同批改动：`NSMicrophoneUsageDescription` 三处已改成覆盖"克隆 + 会话"的文案（原句只提克隆，
+会话上线后那句会直接骗用户）；`AGENTS.md` 的边界句与 `docs/developers/macos-app-audio-capture.md`
+（新增 §3.7 会话级采集）已同步；电平曲线抽成 `AudioLevel` 供采集与音色克隆共用
+（`IMPLEMENTATION-READINESS` §2.2 第 5 项的"抽取"落地）。
+
+**未验证（要如实说）**：没有启动 App 看浮层的几何、材质、悬停工具条与滚动跟随——那要占用前台窗口，
+需要当次授权；浮层宽度是否真的能从边缘拖动（`.resizable` + borderless 在 macOS 26 上的行为）
+与三档字号的实际观感同样待复看。没有跑任何自动化测试（`scripts/macos_app_test.sh` 等 UI 自动化
+按项目硬约束需要用户逐次授权）。
+
+**下一步**：阶段 4（会议与字幕接分人扩展、段级时间码、`speaker_name` 改名）与阶段 5
+（语音助手 + 设置第 4 页签的 Responses API 配置）。
 
 ## 13. 风险与待裁决
 
