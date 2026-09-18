@@ -11,13 +11,17 @@ import SwiftUI
 // ——所以它不可能被画成一个独立版面（那正好与"边听边记"的用法相反）。
 
 public struct MeetingView: View {
+    @Environment(AppModel.self) private var model
     @Environment(SessionCoordinator.self) private var session
     @Environment(MeetingSession.self) private var meeting
     @Environment(SessionPreferences.self) private var preferences
+    @Environment(\.openSettings) private var openSettings
 
     @State private var usesMicrophone = true
     @State private var systemApps: [SystemAudioApp] = []
     @State private var sourceCandidates: [SystemAudioApp] = []
+    @State private var isInspectorCollapsed = false
+    @State private var isCheckingInput = false
     /// 会后：正文区顶部的 `纪要 / 转录` 分段。
     @State private var postTab: PostTab = .minutes
     @State private var selectedMinutesVersionID: String?
@@ -102,6 +106,7 @@ public struct MeetingView: View {
         } message: {
             Text("麦克风同一时刻只能由一个会话使用。结束后转录会留着，接着开始整理纪要。")
         }
+        .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
     }
 
     // MARK: - 状态带
@@ -205,64 +210,151 @@ public struct MeetingView: View {
     /// 所以这里没有第三个「混音」选项。
     private var emptyState: some View {
         VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
-            CardSurface {
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    CardHead(title: "这场会的声音从哪来") { EmptyView() }
-                    Toggle(isOn: $usesMicrophone) {
-                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
-                            Text("麦克风").font(SpeechRailDesignTokens.Typography.body)
-                            Text("屋里说话的人，以及你自己。")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        }
-                    }
-                    .toggleStyle(.checkbox)
-
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text("本机音频（按 App）")
-                            .font(SpeechRailDesignTokens.Typography.body)
-                        Text("线上的会、正在播的音频都走这一条。勾几个就合几个；"
-                            + "第一次用系统会问一次录音权限。")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if sourceCandidates.isEmpty {
-                            Text("现在没有正在运行的 App 可以选。先打开要录的那个 App，再回来。")
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        ForEach(sourceCandidates) { app in
-                            Toggle(isOn: binding(for: app)) {
-                                Text(app.name).font(SpeechRailDesignTokens.Typography.callout)
-                            }
-                            .toggleStyle(.checkbox)
-                        }
-                        Button("刷新列表") {
-                            sourceCandidates = SystemAudioAppCatalog.runningApps(
-                                excluding: Bundle.main.bundleIdentifier
-                            )
-                        }
-                        .buttonStyle(.link)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                    }
-
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        Button("开始会议") { Task { await start() } }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(usesMicrophone == false && systemApps.isEmpty)
-                        Text(sourceSummary)
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        Spacer(minLength: 0)
-                    }
-                }
-                .padding(SpeechRailDesignTokens.Spacing.md)
+            SessionConclusionBand(
+                tone: .healthy,
+                title: "选好音频来源就能开始",
+                message: "房间里的人走麦克风；这台 Mac 正在播放的声音（腾讯会议、QQ 音乐等）按 App 抓取。"
+                    + "两边可以一起录，记录里会标出每一段来自哪一路。",
+                hint: "本机音频不改变你听到的音量与内容，也不保存：原始音频和麦克风一样用完即弃；"
+                    + "按 App 抓不需要装虚拟声卡。"
+            ) {
+                Button("说话人设置") { openSettings() }
+                    .speechRailButton(.secondary)
             }
+
+            HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+                SessionPanel { sourcesCard }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                if !isInspectorCollapsed {
+                    SessionPanel { meetingInfoCard }
+                        .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth)
+                }
+            }
+
+            SessionPanel { blockedSourcesCard }
             libraryCard
         }
+    }
+
+    /// 音频来源：麦克风一行、本机音频按 App 若干行，最后一行是「自动混音」——
+    /// 它是**行为**，不是用户要选的第三个选项（`AudioSourceCoordinator.swift:12`）。
+    private var sourcesCard: some View {
+        SessionPanel {
+            SessionPanelHead(
+                title: "音频来源",
+                detail: "麦克风单选；本机音频按 App 多选。两路一起来时分别标注来源，"
+                    + "转录里看得出哪句来自麦克风、哪句来自本机播放。"
+            )
+            SessionHairline()
+            SessionCheckRow(
+                tone: usesMicrophone ? .ready : .neutral,
+                name: "麦克风",
+                detail: "房间里的人。第一次开始时会请求授权；拒绝后这一行变受阻并给出出口。",
+                onSelect: { usesMicrophone.toggle() }
+            ) {
+                StatusPill(tone: usesMicrophone ? .healthy : .neutral, label: usesMicrophone ? "已选" : "未选")
+            }
+            ForEach(sourceCandidates) { app in
+                SessionHairline()
+                SessionCheckRow(
+                    tone: systemApps.contains(app) ? .ready : .neutral,
+                    name: app.name,
+                    detail: "本机音频：抓这个 App 正在播放的声音；它退出再启动会自动接回，不用重新选。",
+                    onSelect: { binding(for: app).wrappedValue.toggle() }
+                ) {
+                    StatusPill(
+                        tone: systemApps.contains(app) ? .healthy : .neutral,
+                        label: systemApps.contains(app) ? "已选" : "未选"
+                    )
+                }
+            }
+            if !systemApps.isEmpty {
+                SessionHairline()
+                SessionCheckRow(
+                    tone: .selected,
+                    name: "自动混音",
+                    detail: "多来源同时勾选时自动合流处理；转录中为每一句独立保留专属来源标签。"
+                ) {
+                    StatusPill(tone: .healthy, label: "生效中")
+                }
+            }
+            Spacer(minLength: 0)
+            SessionHairline()
+            CardFoot(note: "来源列表只列正在出声或最近出过声的 App；列表为空时先去那个 App 里放一声。") {
+                Button("刷新列表") { refreshSources() }
+                    .speechRailButton(.secondary)
+            }
+        }
+    }
+
+    /// 来源不可用的两种**当下就能处置**的情况。第三种（录制中来源中断）出现在录制页自己的
+    /// 中断卡上——这里不摆一个按了不动的「知道了」。
+    private var blockedSourcesCard: some View {
+        SessionPanel {
+            SessionPanelHead(
+                title: "来源不可用时",
+                detail: nil,
+                trailingDetail: "各自一行，说明影响与唯一出口；不弹对话框、不静默留空。"
+            )
+            SessionHairline()
+            SessionCheckRow(
+                tone: .attention,
+                name: "列表为空",
+                detail: "没有正在出声的 App：先去那个 App 里放一声再回来选；麦克风这一路不受影响。"
+            ) {
+                Button("重新扫描") { refreshSources() }
+                    .speechRailButton(.secondary)
+            }
+            SessionHairline()
+            SessionCheckRow(
+                tone: .attention,
+                name: "未授权",
+                detail: "本机音频：系统里没给「音频录制」权限时那一路会是空音轨——不如现在说清楚。"
+            ) {
+                Button("打开系统设置") { openAudioPrivacySettings() }
+                    .speechRailButton(.secondary)
+            }
+        }
+    }
+
+    private var meetingInfoCard: some View {
+        SessionPanel {
+            SessionPanelHead(title: "本次会议", badge: "还没有开始")
+            SessionHairline()
+            VStack(alignment: .leading, spacing: 10) {
+                SessionKVRow("运行档位", profileRowText)
+                SessionKVRow("音频来源", sourceSummary)
+                SessionKVRow("说话人标签", preferences.meetingDiarizationEnabled ? "已开" : "关着")
+                SessionKVRow("采集格式", "24 kHz → 内部 16 kHz")
+                SessionKVRow("保存位置", "记录库 · 长期保留")
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+            Spacer(minLength: 0)
+            SessionHairline()
+            SessionPanelActions(alignment: .spread) {
+                Button("检查输入电平") { isCheckingInput = true }
+                    .speechRailButton(.secondary)
+            }
+        }
+    }
+
+    private func refreshSources() {
+        sourceCandidates = SystemAudioAppCatalog.runningApps(
+            excluding: Bundle.main.bundleIdentifier
+        )
+    }
+
+    /// 运行档位那一行：读完档位才算「本机最强」，没读到就不替服务吹这一句。
+    private var profileRowText: String {
+        guard let profile = model.health?.profile else { return "未读取" }
+        return "\(SpeechRailProfilePresentation.shortTitle(profile))（本机最强）"
+    }
+
+    private func openAudioPrivacySettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture")
+        else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private var sourceSummary: String {
