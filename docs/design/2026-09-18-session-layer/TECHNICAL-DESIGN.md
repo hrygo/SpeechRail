@@ -53,7 +53,7 @@ date: 2026-09-18
 └──────────────┬──────────────────────────────────────────────────────────────┘
 ┌──────────────▼──── 客户端会话层（App 进程内的模块，不是新进程）────────────┐
 │  SessionCoordinator（所有权与状态机）   RealtimeASRClient（WS）             │
-│  AudioSourceCoordinator（来源三选一 + 设备获取/释放）                       │
+│  AudioSourceCoordinator（来源多选与自动合流 + 设备获取/释放）               │
 │  AssistantSession（Responses 编排）  MinutesGenerator（后台 + 租约）         │
 │  InnerOSSession  MemoryStore  SpeakerLabeling  Exporter                     │
 │  SessionStore（系统 SQLite3 + WAL）  KeychainStore（LLM 密钥）              │
@@ -322,7 +322,7 @@ idle → preparing → recording → processing → archived
 |---|---|---|
 | 麦克风 | 麦克风授权 + `AudioEngineSession` 输入 | 受阻行 + 系统设置出口 |
 | 本机音频 | 系统录音授权 + `CaptureHelper`（tap + aggregate device） | 受阻行 + 系统设置出口；不回退去抓整机 |
-| 两者混音 | 上述两者 + host time 对齐 | 单路可用时**不静默降级**，由用户选 |
+| 多来源合流 | 勾选多个来源（麦克风 + 若干本机 App）时自动走这一路：上述两者 + host time 对齐。**「合流」是行为，不是用户要选的第三个模式**（2026-09-18 第十一轮统一口径） | 单路可用时**不静默降级**，按实际可用来源继续并如实标注 |
 
 职责边界：它是**获取/释放与来源选择的唯一入口**（R4），不做 endpointing、不做文本、不碰播放音量。
 被 tap 的来源 App 退出时按 bundle id 自动接回（`processRestoreEnabled`），录制不打断，只记一条区间。
@@ -629,7 +629,7 @@ Sona 是这套能力的**经验来源**，不是代码来源：借它的判断�
 ### 8.2 会议助手（含内心 OS）
 
 ```
-用户点「开始会议」并选来源（麦克风 / 本机音频按 App / 两者混音）
+用户点「开始会议」并选来源（麦克风 / 本机音频按 App，可多选；勾多个就自动合流）
   → 按来源申请权限（系统录音**只在选「本机音频」时**才申请）
   → 麦克风：AudioEngineSession 输入；本机音频：CaptureHelper 建 tap + aggregate device
   → 两路各带 host time → 混音/归一 → 16k mono PCM16（缺口补静音并标记）

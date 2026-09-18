@@ -1,10 +1,10 @@
 # SpeechRail · 会话闭环稿 · 设计交付交接包
 
-**最近一次改动：第十轮（2026-09-18）**——「深入旅程摩擦点消解与操作通道优化」：
-1. J1 语音助手打字输入外放焦虑消解：输入框 placeholder 精细化为 `"输入消息（↵ 发送 · 静音不外放）…"`，消除公共打字焦虑；
-2. J2 会议助手音频来源混音交互理顺：消除第 4 行伪未选状态，重构为自动混音状态说明行；
-3. J2 会议整理中紧急导出通道：在 `meetingProcessing` 页头开辟 `先导出转录…` 按钮直通归档记录导出，消除长时间等待大模型纪要的阻塞摩擦；
-4. 离线门禁全过（59 板 / 29 深色 / 233 连线 / 53 条声明连线源全解析），**Figma 尚未重跑**（重跑插件需当次授权）：现在 Figma 里仍是 53 块（12:38 那一版），`main.js` 已经是 59 块。规范位置见 `SESSIONS-SPEC.md` §20。
+**最近一次改动：第十一轮（2026-09-18）**——「全 App 统一（一个整体，一个规范）」：
+1. 版式数值单点声明：新增 `LAYOUT` 块，`audit.js` 增加「版式单点声明」门禁（9 个受管值不得再以字面量出现在宽度位置）；
+2. 记录库列抽成 `recordListColumn`，字幕记录库与对话记录库不再各抄一遍。**此处要分清两处形状**：助手记录库的行折行宽是真从 196 改到 248（那 52pt 是原来的欠宽），而 `Doc Topic Row` 的 248 / 228 / 8 / 10 只是换成具名 token、数值未变；
+3. **归一化动作自身引入的一处内溢已在静态复核中修掉**：菜单面板告警行原为写死的 220，并入 `MENU_TEXT_W`（258）后越界 21pt → 新增 `MENU_TEXT_W_LEAD`（237）；
+4. 离线门禁全过（59 板 / 29 深色 / 234 连线 / 53 条声明连线源全解析），**Figma 实跑本轮仍未完成**：2026-09-18 16:05–16:12 的三次探测都返回「Mac 处于锁屏、自动解锁失败」，没有接管窗口、没有改文件、没有导出。Figma 里仍是 53 块（12:38 那一版），`main.js` 已经是 59 块。规范位置见 `SESSIONS-SPEC.md` §20，全 App 的统一规范见 [`../UX-UI-SPEC.md`](../UX-UI-SPEC.md)。
 
 生成时间：2026-09-18。
 本次轨道：**B（代理 / 自定义 provider）**——本会话可用工具里没有 `mcp__codex_apps__figma_*`，
@@ -16,7 +16,57 @@
 | 层 | 位置 | 说明 |
 |---|---|---|
 | 稿的源码 | `../2026-09-15-macos-uiux-redesign/figma-kit/main.js`（`build-closures.js` 合成 `code.js`） | 改稿改这里，不在 Figma 里手改 |
-| 稿的产物 | 新 Figma 文件（URL `figma.com/design/sAPdzrT2zsxqLtJhUx4iVC/…`，桌面版标签名被用户改为 **`Sona2Speech`**），页 `01 闭环`。**Figma 里是 53 块**（2026-09-18 12:38 实跑那一版）；**生成器已经是 59 块**（第九轮 +2 板：J0 空态引导浅色 + 深色克隆），等下一次实跑对齐 | 插件包在 `~/Downloads/SpeechRail-closure-kit/`（`code.js` md5 `862f468a620414a3e8e5fa90ee2acc2f`，352,603 字节，2026-09-18 第十轮版） |
+| 稿的产物 | 新 Figma 文件（URL `figma.com/design/sAPdzrT2zsxqLtJhUx4iVC/…`，桌面版标签名被用户改为 **`Sona2Speech`**），页 `01 闭环`。**Figma 里是 53 块**（2026-09-18 12:38 实跑那一版）；**生成器已经是 59 块**（第九轮 +2 板：J0 空态引导浅色 + 深色克隆），等下一次实跑对齐 | 插件包在 `~/Downloads/SpeechRail-closure-kit/`（MD5 与字节数以 `HANDOFF` 的「第十一轮」一节为准；**第十轮与更早记的「字节」其实是字符数**） |
+
+## 第十一轮 delta：全 App 统一（2026-09-18，同一份生成器）
+
+用户要求：「统筹 SpeechRail 所有功能，是一个有机融合的整体，执行 UX/UI 优化——一个整体，一个规范。」
+规范位置是 **[`../UX-UI-SPEC.md`](../UX-UI-SPEC.md)**（全 App 唯一规范，含本轮改动清单与回退），
+这一节只记代码落点与证据。
+
+| # | 改动 | 代码落点 |
+|---|---|---|
+| 1 | **版式数值单点声明**：新增 `LAYOUT`（29 处按名字引用数值 token），会话两列成为它的 `sideW` / `listW` | `main.js`：`NUMBER_TOKENS` + `NT` + `LAYOUT`；`SESSION_SIDE_W` / `SESSION_LIST_W` 变为别名 |
+| 2 | **记录库列抽成一个组件**：字幕记录库与对话记录库不再各抄一遍 | `main.js`：新增 `recordListColumn`，两处调用点改为传数据 |
+| 3 | 控制圆角 7 → `radius/control` 8（与实现 `Corner.nested` 同值） | `iconButton` / `navItemRow` / `searchField` / `Doc Topic Row` |
+| 4 | 列表行折行宽 196 → `LAYOUT.listInnerW` 248；页脚 / 搜索框同宽 | `recordListColumn`、字幕详情工具栏搜索框（原 260） |
+| 5 | 空态统一：图标 28 + `Heading / Section` + 正文 ≤ 容器内宽 | `Empty State` 组件（260 → 256，修掉 4pt 内溢）、会议空态 |
+| 6 | 设置说明列 240 / 260 / 300 → 260；菜单面板文本宽 246 / 246 / 220 → 258；文档目录列内边距 12 → 16 | `main.js`：`LAYOUT.settingsLabelW`、`MENU_TEXT_W`、`screenDeveloperDocs` |
+| 7 | 会议来源口径统一为「麦克风单选 + 本机音频多选，勾多个自动合流」 | `main.js` 旅程表；`SESSIONS-SPEC.md` §6.2 / §14.1 / E3；`USER-JOURNEYS.md` E3 |
+| 8 | **门禁升级**：`audit.js` 新增「版式单点声明」（9 个受管值不得再以字面量出现在宽度位置） | `audit.js` |
+| 9 | **修掉归一化引入的内溢**：菜单面板告警行「图标 14 + gap 7 + 文本」在 `padX 10` 的 278 行里需要 279 > 258 → 新增 `MENU_TEXT_W_LEAD` = 237；同时把这条形状写进 kit 的坑位清单 | `main.js`（`MENU_LEAD_ICON_W` / `MENU_LEAD_GAP` / `MENU_TEXT_W_LEAD`）、`figma-kit/README.md` |
+| 10 | **构建日志标签纠错**：`build.js` / `build-closures.js` 打印的 “bytes” 其实是 `code.length`（字符数）。这正是文档里「352,603 字节」那处错误的根因，改为同时打印 chars 与 bytes | `build.js`、`build-closures.js` |
+
+离线门禁实测（第十一轮，2026-09-18 16:10，修掉第 9 项之后重跑）：
+- `node audit.js`：`audit: clean`（颜色 23 / 图标 41 / 文本样式 11；数值 token 14 个、29 处按名字引用；版式单点声明通过）
+- `node smoke.js closures`：59 板 / 29 深色 / **234** 连线 / 48 闭环屏动作无重复 / SMOKE OK
+- `node smoke.js full`：48 板 / 478 连线 / 21 深色 / SMOKE OK（**全量稿板数与连线数未变**）
+- `node check-links.js closures`：53 条声明连线源全解析
+- 产物（第十一轮末次构建，2026-09-18）：`~/Downloads/SpeechRail-closure-kit/code.js` MD5
+  `8ffdf02b07ca624d2d5196cab062c038`（357,731 字符 / 435,847 字节）；`~/Downloads/SpeechRail-figma-kit/code.js` MD5
+  `1bec064bd120bb86affbb49c2fa1802a`（357,696 字符 / 435,812 字节）
+- **Figma 仍未重跑**：2026-09-18 16:05–16:12 三次探测（`cua.getApp("Figma")`）全部返回
+  「The Mac is locked and automatic unlock could not unlock it」，未取得窗口句柄。用户已在本轮说「执行」=
+  授权实跑，但锁屏使自动化无法开始；解锁后直接按 `figma-app-run-sop.md` 的「运行」一节重跑即可，
+  产物包已是 16:10 那一版。Figma 里是 53 板，生成器 59 板，且第十一轮又改了版式与组件——
+  几何在实跑之前不作结论。
+
+**静态复核补记（2026-09-18 16:10，实跑未成之后的替代核查）**：把 `LAYOUT` 的 9 个具名宽度逐个
+对回其容器内宽，并核对了本轮真正改过数值的位置。结论：`sidebarInnerW` 220 / `listInnerW` 248 /
+`listRowInnerW` 228 / `profileCardInnerW` 196 / `emptyBodyW` 256 / `MENU_TEXT_W` 258 都等于其
+容器的内宽（精确贴合，不是溢出）；`settingsLabelW` 260 落在 `grow` 的标签块里（可用宽 ≈ 356，
+余量充足）；`toolbarSearchW` 300 与字幕详情工具栏的 248 搜索框所在容器分别宽 1160 与 864，余量充足。
+唯一的溢出就是第 9 项。**这不能替代实跑**：它没有布局引擎，只核对了写死的宽度，hug 宽度、
+换行与字体仍只有 Figma 能证。
+
+### 第十一轮的文档更正（读者会撞上的四处）
+
+| 位置 | 原文 | 更正 |
+|---|---|---|
+| 第九轮「目录列归一化」 | 「会议 260 / 字幕 240 / 助手 232 / 文档 272 全部收敛」 | 实际归一的是 **3 处**（字幕 240 / 助手 232 / 文档 272）；**生成器里从来没有 260pt 的列表列**，当时唯一剩下的 260 是字幕详情区工具栏的搜索框（本轮并入 `LAYOUT.listInnerW`） |
+| 第十轮门禁表 | 「233 连线」 | **234**（第十轮多了一条 `先导出转录…` → `meetingMinutes`；第九轮的 233 在其提交上是对的） |
+| 产物体积 | 「352,603 / 352,568 字节」 | 那是**字符数**（`wc -m`）；实际字节数是 428,073 / 428,038（`wc -c`）。MD5 一直是对的。根因是 `build.js` 把 `code.length` 标成了 “bytes”，本轮已改成同时打印两者（见 delta 第 10 项） |
+| `SESSIONS-SPEC.md` §17.2 | 「要不要补一块独立空态板，留待用户裁决」 | 第九轮已结清（§19.2 的 J0 空态引导板） |
 
 ## 第十轮 delta：深入旅程摩擦点消解与操作通道优化（2026-09-18）
 
@@ -30,7 +80,7 @@
 离线门禁实测（第十轮）：
 - `node --check main.js`: OK
 - `node audit.js`: `audit: clean`
-- `node smoke.js closures`: 59 板 / 29 深色 / 233 连线 / 48 闭环屏动作无重复 / SMOKE OK
+- `node smoke.js closures`: 59 板 / 29 深色 / **234** 连线 / 48 闭环屏动作无重复 / SMOKE OK（第十一轮更正：这条曾写 233）
 - `node smoke.js full`: 48 板 / 478 连线 / 21 深色 / SMOKE OK
 - `node check-links.js closures`: 53 条声明连线源全解析通过
 - 产物 MD5：`~/Downloads/SpeechRail-closure-kit/code.js` (`862f468a620414a3e8e5fa90ee2acc2f`)；`~/Downloads/SpeechRail-figma-kit/code.js` (`d3e7ba40cd947aedd12c4002da662112`)
@@ -39,7 +89,7 @@
 
 | # | 优化项 | 旅程触点 | 代码落点 |
 |---|---|---|---|
-| 1 | **目录列宽度归一化至 280pt**：消除切页中栏抖动（会议 260 / 字幕 240 / 助手 232 / 文档 272 全部统领至 280pt） | J1/J2/J3 记录库与文档阅读旅程 | `main.js:82` 声明 `SESSION_LIST_W = 280`，`screenCaptions`、`screenClosureAssistantClosed`、`screenDeveloperDocs` 统一切换，搜索框（248pt）、折行（196pt）、页脚（248pt）同心对齐 |
+| 1 | **目录列宽度归一化至 280pt**：消除切页中栏抖动（字幕 240 / 助手 232 / 文档 272 **三处**统领至 280pt；原文的「会议 260」在生成器里没有对应列，第十一轮核对） | J1/J2/J3 记录库与文档阅读旅程 | `main.js` 的 `LAYOUT.listW = 280`（第十一轮起是唯一声明处），`screenCaptions`、`screenClosureAssistantClosed`、`screenDeveloperDocs` 统一切换；搜索框 / 行文本 / 页脚全部由 `LAYOUT.listInnerW` 推导 |
 | 2 | **补齐 J0 首次使用独立空态引导画板**：三能力起手入口与本地安全声明（音频不留存、SQLite 长期资产） | J0 首次使用旅程（结清 G6 与未决项 4） | 新增 `screenClosureFirstRunEmpty` 函数与 `sessionFirstRun` 画板注册，带 1:1 深色克隆，板数 57 → 59 |
 | 3 | **目录列收起规范提升为 Ready**：内侧栏支持通过 `⌘⌥S` / 分隔线收起并按屏记忆 | 非主框体规范与阅读专注旅程 | `closurePanelRulesBoard` 清单第 6 项升级为 `Ready` |
 | 4 | **旅程对账与连线全闭环**：`CLOSURE_JOURNEY` 补充第 6 项「首次启动 · 空态引导」 | 闭环总览与原型连线 | 原型连线 222 → 233，声明连线源 48 → 52 全部 100% 解析 |

@@ -71,16 +71,9 @@ let CJK_FONT = null;
 // matters more than close-up detail: 16 screens are ~20 MB at 4x, ~4 MB at 2x.
 const SCREEN_EXPORT_SCALE = 4;
 
-// 会话三页的右栏（「本次会话 / 记录信息 / 字幕文件 / 分人的两个出口」）只有这一个宽度。
-//
-// 用户 2026-09-18 裁决（SESSIONS-SPEC §13 D7）：稿上原来同时在用 320（会议来源、内心 OS 的
-// 邻居板）与 420（内心 OS、音色列表），而应用那边详情列的宽度只有一处声明——
-// `Layout.inspectorColumnWidth = 360`（SpeechRailDesignTokens.swift，2026-09-16 定死）。
-// 三个值不能同时成立，所以**取 360**：稿与实现各少一个可以漂移的数字。
-// 要改宽度只改这一行，下面所有 `size(..., SESSION_SIDE_W, null)` 跟着走。
-const SESSION_SIDE_W = 360;
-// 目录列宽度（D10 / 未决项 1 归一化：会议 / 记录库 / 助手 / 文档全部收敛到 280）
-const SESSION_LIST_W = 280;
+// 版式数值（右栏宽 / 目录列宽 / 页边距 / 窗口尺寸…）**只有一处声明**：下面的 `LAYOUT`
+// 块，见「LAYOUT —— 版式单点声明」。会话稿的两条裁决 D7（右栏 360）与 D10（目录列 280）
+// 就是那里的 `sideW` / `listW`，`SESSION_SIDE_W` / `SESSION_LIST_W` 只是它们的别名。
 
 // --- Colour tokens (Light / Dark) -------------------------------------------
 const COLOR_TOKENS = [
@@ -120,6 +113,12 @@ const NUMBER_TOKENS = [
   // 详情/侧栏列的唯一宽度。稿与实现各只有一处声明：这里是稿的那一处，
   // 实现那边是 `Layout.inspectorColumnWidth`（用户 2026-09-18 裁决 D7，= 360）。
   ["size/inspector", 360],
+  // 目录列（记录库 / 助手记录 / 文档目录列）的唯一宽度。实现那边已经有一个同值的
+  // `Layout.modelProfileListWidth`（= 280，模型配置列表）——两处是**同一个数**，所以
+  // 全 App 的「列表列」只有这一档（用户 2026-09-18 裁决 D10）。
+  ["size/list", 280],
+  // 菜单栏面板的宽度。实现那边是 `Menu.contentWidth`（= `Layout.controlMenuWidth`）。
+  ["size/menu", 288],
   ["size/windowMinW", 1120], ["size/windowMinH", 720]
 ];
 
@@ -138,6 +137,86 @@ const TEXT_STYLE_DEFS = [
   ["Caption Band / 标准", 20, "Regular", 145],
   ["Caption Band / 大字", 26, "Medium", 130]
 ];
+
+// 数值 token 按**名字**取用（`NT["space/16"]`）。颜色与文本样式一直是绑定的
+// （颜色走变量、字号走样式名），数值此前全是裸字面量——`audit.js` 那句「number variables: 21
+// defined, 0 referenced by name」说的就是这个缺口：同一件事在稿上能有两个数，而门禁看不见。
+//
+// 不要与下面 build-time 的注册表混淆：`let N = {}` 装的是 Figma 里的**变量对象**
+// （有 id，供 `bindPaint` 用），`NT` 是这些变量的**数值**——两者同名不同物，所以分开。
+const NT = (function () {
+  const map = {};
+  NUMBER_TOKENS.forEach(function (t) { map[t[0]] = t[1]; });
+  return map;
+})();
+
+// =============================================================================
+// LAYOUT —— 版式单点声明（「一个规范」在代码里的那一半）
+// =============================================================================
+//
+// 规则只有一条：**同一语义只声明一次，跟随值由它推导**。
+//   · 颜色 / 文本样式 → Figma 变量（`COLOR_TOKENS` / `TEXT_STYLE_DEFS`，按变量名取用）；
+//   · 版式数值       → 这里（`LAYOUT.*`），逐个与 `NUMBER_TOKENS` 里的同名变量对应；
+//   · 行内微间距（2 / 4 / 8…）保持就地字面量：它们不构成跨页约束，把 20 处 `gap: 8`
+//     改写成 20 处 `NT["space/8"]` 只会让代码更难读，不会少一个可漂移的数字（§5.6）。
+//
+// `audit.js` 里有对应的门禁：重复出现的固定宽度必须有名字或登记理由，`LAYOUT` 已经
+// 认领的值再以字面量出现即失败。改版式先改这里，再改调用点。
+const LAYOUT = {
+  // 窗口：每一块屏幕画板都是这个尺寸；最小值与实现 `Layout.windowMinimum*` 同值。
+  windowW: 1440, windowH: 900,
+  windowMinW: NT["size/windowMinW"], windowMinH: NT["size/windowMinH"],
+
+  // 页面骨架（`buildShell`）：这一组一改，13 个路由的每一屏跟着走。
+  sidebarW: NT["size/sidebar"],
+  sidebarPadX: 10,
+  pagePadX: NT["space/20"],
+  pagePadY: NT["space/20"],
+  blockGap: NT["space/20"],   // detail 里纵向块之间的间距
+  regionGap: NT["space/16"],  // 同屏两个区域之间（列表 ↔ 详情 / 转录 ↔ 详情列）
+
+  // 全 App 只有两个列宽：目录列与详情列。其余宽度都是这两列的内宽或某个列格的宽度。
+  listW: NT["size/list"],
+  sideW: NT["size/inspector"],
+
+  // 列表卡片：内边距定下来，里面的搜索框 / 行文本 / 页脚全部由它推导，不各写一个数。
+  listPadX: NT["space/16"],
+  listRowInset: 10,   // 列表行内文字两侧的留白（行自己的 padX）
+
+  // 空态：一个组件（`Empty State`）的几何。页面级空态只允许在它之上加动作行与一行状态胶囊。
+  emptyStateW: 320,
+  emptyStatePad: NT["space/32"],
+  emptyBodyMaxW: 460,   // 页面级空态正文的最大折行宽（分栏里的空态按容器内宽，不超这个数）
+
+  // Foundations 里的档位卡：正文折行宽 = 卡片内宽（不是另写一个数）。
+  profileCardW: 220,
+  profileCardPad: NT["space/12"],
+
+  // 详情区工具栏（整页宽，不分栏）里的搜索框；分栏时的搜索框用列表内宽。
+  toolbarSearchW: 300,
+
+  // 设置窗口里「说明列」的宽度。设置面板 16 行此前同时在用 240 / 260 / 300 三个值——
+  // 同一页里行的文字左沿对不齐，就是这一处漂移；现在只有这一个数。
+  settingsLabelW: 260,
+
+  // 文档画布（Cover / Foundations / Components / 闭环总览）的宽度。它不是窗口尺寸：
+  // 这些画布要横排多列内容，与 1440 的屏幕板不是同一件事。
+  canvasW: 1600
+};
+
+// 推导值（写回同一个对象——仍然是「一处声明」）。
+LAYOUT.sidebarInnerW = LAYOUT.sidebarW - 2 * LAYOUT.sidebarPadX;              // 220
+LAYOUT.listInnerW = LAYOUT.listW - 2 * LAYOUT.listPadX;                       // 248
+LAYOUT.listRowInnerW = LAYOUT.listInnerW - 2 * LAYOUT.listRowInset;           // 228
+LAYOUT.profileCardInnerW = LAYOUT.profileCardW - 2 * LAYOUT.profileCardPad;   // 196
+LAYOUT.emptyBodyW = Math.min(
+  LAYOUT.emptyStateW - 2 * LAYOUT.emptyStatePad,                              // 256
+  LAYOUT.emptyBodyMaxW
+);
+
+// 会话稿的两个别名（SESSIONS-SPEC §13：D7 = sideW、D10 = listW）。
+const SESSION_SIDE_W = LAYOUT.sideW;
+const SESSION_LIST_W = LAYOUT.listW;
 
 // --- Registries populated at build time --------------------------------------
 let V = {};            // colour variables by token name
@@ -718,7 +797,7 @@ function buildFoundations() {
   const page = P["01 Foundations"];
   const canvas = frame("Foundations", { layout: "VERTICAL", gap: 48, pad: 64, fill: V["surface/content"] });
   add(page, canvas);
-  size(canvas, 1600, 2000);
+  size(canvas, LAYOUT.canvasW, 2000);
   canvas.x = 0;
   canvas.y = 0;
 
@@ -810,7 +889,7 @@ function buildFoundations() {
   add(iconBlock, iconRow);
   add(canvas, iconBlock);
 
-  size(canvas, 1600, canvas.height);
+  size(canvas, LAYOUT.canvasW, canvas.height);
   canvas.primaryAxisSizingMode = "AUTO";
   return canvas;
 }
@@ -940,7 +1019,9 @@ function componentSet(board, setName, defs, x, y) {
 
 // `side` must not be called `size`: it would shadow the size() helper below.
 function iconButton(parent, name, side) {
-  const b = frame("iconButton", { layout: "HORIZONTAL", align: "CENTER", justify: "CENTER", radius: 7 });
+  const b = frame("iconButton", {
+    layout: "HORIZONTAL", align: "CENTER", justify: "CENTER", radius: NT["radius/control"]
+  });
   b.resize(side, side);
   icon(b, name, 15, V["text/secondary"]);
   return add(parent, b);
@@ -964,19 +1045,20 @@ function voiceBadge(parent, label) {
 
 function primaryButton(parent, label, iconName, width) {
   const b = frame("Button / Primary", {
-    layout: "HORIZONTAL", gap: 7, align: "CENTER", justify: "CENTER", padX: 14, radius: 8, fill: V["accent/rail"]
+    layout: "HORIZONTAL", gap: 7, align: "CENTER", justify: "CENTER", padX: 14,
+    radius: NT["radius/control"], fill: V["accent/rail"]
   });
   if (iconName) icon(b, iconName, 15, V["text/onAccent"]);
   add(b, text("label", label, "Body / Medium", V["text/onAccent"]));
   // Size after the content exists: the hugged width is the real minimum, so a
   // requested width acts as a floor instead of clipping the label.
-  size(b, Math.max(width == null ? 0 : width, Math.ceil(b.width)), 34);
+  size(b, Math.max(width == null ? 0 : width, Math.ceil(b.width)), NT["size/control"]);
   return add(parent, b);
 }
 
 function secondaryButton(parent, label, iconName) {
   const b = frame("Button / Secondary", {
-    layout: "HORIZONTAL", gap: 6, align: "CENTER", padX: 11, radius: 8,
+    layout: "HORIZONTAL", gap: 6, align: "CENTER", padX: 11, radius: NT["radius/control"],
     fill: V["surface/field"], stroke: V["border/strong"], strokeWeight: 1
   });
   if (iconName) icon(b, iconName, 15, V["text/primary"]);
@@ -988,7 +1070,8 @@ function secondaryButton(parent, label, iconName) {
 function textField(parent, label, value, width, wrap) {
   const box = frame("Text Field", {
     layout: "VERTICAL", gap: 2, padX: 12, padY: 9,
-    fill: V["surface/field"], stroke: V["border/strong"], strokeWeight: 1, radius: 8
+    fill: V["surface/field"], stroke: V["border/strong"], strokeWeight: 1,
+    radius: NT["radius/field"]
   });
   if (label) {
     const lbl = text("fieldLabel", label, "Caption / Medium", V["text/secondary"]);
@@ -1005,7 +1088,7 @@ function buildComponents() {
   Object.keys(gridCursor).forEach(function (k) { delete gridCursor[k]; });
   const canvas = frame("Components", { layout: "VERTICAL", gap: 40, pad: 64, fill: V["surface/content"] });
   add(page, canvas);
-  size(canvas, 1600, 2400);
+  size(canvas, LAYOUT.canvasW, 2400);
   canvas.x = 0;
   canvas.y = 0;
 
@@ -1145,23 +1228,26 @@ function buildComponents() {
     {
       prop: "State=Default",
       o: {
-        layout: "VERTICAL", gap: 6, pad: 12, radius: 10,
-        fill: V["surface/panel"], w: 220
+        layout: "VERTICAL", gap: 6, pad: LAYOUT.profileCardPad, radius: NT["radius/tile"],
+        fill: V["surface/panel"], w: LAYOUT.profileCardW
       },
       build: function (c) {
         add(c, text("name", "Balanced · 分人和日常", "Body / Medium", V["text/primary"]));
-        add(c, text("desc", "aligner-q8，可匿名分人", "Callout", V["text/secondary"], { w: 196 }));
+        add(c, text("desc", "aligner-q8，可匿名分人", "Callout", V["text/secondary"],
+          { w: LAYOUT.profileCardInnerW }));
       }
     },
     {
       prop: "State=Selected",
       o: {
-        layout: "VERTICAL", gap: 6, pad: 12, radius: 10,
-        fill: V["surface/panel"], stroke: V["accent/rail"], strokeWeight: 1.5, w: 220
+        layout: "VERTICAL", gap: 6, pad: LAYOUT.profileCardPad, radius: NT["radius/tile"],
+        fill: V["surface/panel"], stroke: V["accent/rail"], strokeWeight: 1.5,
+        w: LAYOUT.profileCardW
       },
       build: function (c) {
         add(c, text("name", "Quality · 创作优先", "Body / Medium", V["text/primary"]));
-        add(c, text("desc", "aligner-bf16，双 TTS lane", "Callout", V["text/secondary"], { w: 196 }));
+        add(c, text("desc", "aligner-bf16，双 TTS lane", "Callout", V["text/secondary"],
+          { w: LAYOUT.profileCardInnerW }));
       }
     }
   ], 64, 1010);
@@ -1170,20 +1256,28 @@ function buildComponents() {
   componentSet(canvas, "Empty State", [
     {
       prop: "Kind=NoData",
-      o: { layout: "VERTICAL", gap: 8, pad: 32, align: "CENTER", w: 320 },
+      o: {
+        layout: "VERTICAL", gap: 8, pad: LAYOUT.emptyStatePad, align: "CENTER",
+        w: LAYOUT.emptyStateW
+      },
       build: function (c) {
         icon(c, "folder-open", 28, V["text/tertiary"]);
         add(c, text("title", "还没有作品", "Heading / Section", V["text/primary"]));
-        add(c, text("body", "在配音台生成一段音频后，作品会保存在这里。", "Callout", V["text/secondary"], { w: 260, align: "CENTER" }));
+        add(c, text("body", "在配音台生成一段音频后，作品会保存在这里。", "Callout",
+          V["text/secondary"], { w: LAYOUT.emptyBodyW, align: "CENTER" }));
       }
     },
     {
       prop: "Kind=NoResults",
-      o: { layout: "VERTICAL", gap: 8, pad: 32, align: "CENTER", w: 320 },
+      o: {
+        layout: "VERTICAL", gap: 8, pad: LAYOUT.emptyStatePad, align: "CENTER",
+        w: LAYOUT.emptyStateW
+      },
       build: function (c) {
         icon(c, "search", 28, V["text/tertiary"]);
         add(c, text("title", "没有匹配结果", "Heading / Section", V["text/primary"]));
-        add(c, text("body", "换一个关键词，或清空搜索条件。", "Callout", V["text/secondary"], { w: 260, align: "CENTER" }));
+        add(c, text("body", "换一个关键词，或清空搜索条件。", "Callout",
+          V["text/secondary"], { w: LAYOUT.emptyBodyW, align: "CENTER" }));
       }
     }
   ], 64, 1180);
@@ -1373,24 +1467,32 @@ function buildComponents() {
   componentSet(canvas, "Doc Topic Row", [
     {
       prop: "State=Default",
-      o: { layout: "VERTICAL", gap: 2, padX: 10, padY: 8, radius: 8, w: 248 },
+      o: {
+        layout: "VERTICAL", gap: 2, padX: LAYOUT.listRowInset, padY: 8,
+        radius: NT["radius/control"], w: LAYOUT.listInnerW
+      },
       build: function (c) {
         const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
         icon(head, "server", 15, V["text/secondary"]);
         add(head, text("title", "接口一览", "Body / Medium", V["text/primary"]));
         add(c, head);
-        add(c, text("desc", "REST 与 WebSocket 的入口与用途", "Subheadline", V["text/secondary"], { w: 228 }));
+        add(c, text("desc", "REST 与 WebSocket 的入口与用途", "Subheadline",
+          V["text/secondary"], { w: LAYOUT.listRowInnerW }));
       }
     },
     {
       prop: "State=Selected",
-      o: { layout: "VERTICAL", gap: 2, padX: 10, padY: 8, radius: 8, w: 248, fill: V["surface/railTint"] },
+      o: {
+        layout: "VERTICAL", gap: 2, padX: LAYOUT.listRowInset, padY: 8,
+        radius: NT["radius/control"], w: LAYOUT.listInnerW, fill: V["surface/railTint"]
+      },
       build: function (c) {
         const head = frame("head", { layout: "HORIZONTAL", gap: 8, align: "CENTER" });
         icon(head, "play", 15, V["accent/rail"]);
         add(head, text("title", "快速开始", "Body / Medium", V["text/primary"]));
         add(c, head);
-        add(c, text("desc", "改 base_url 就能用的最小示例", "Subheadline", V["text/secondary"], { w: 228 }));
+        add(c, text("desc", "改 base_url 就能用的最小示例", "Subheadline",
+          V["text/secondary"], { w: LAYOUT.listRowInnerW }));
       }
     }
   ], 64, 1560);
@@ -1667,7 +1769,7 @@ function buildComponents() {
   ], 820, 2200);
 
   const bottom = Math.max(gridCursor[64] || 0, gridCursor[820] || 0);
-  size(canvas, 1600, Math.max(2400, bottom + 16));
+  size(canvas, LAYOUT.canvasW, Math.max(2400, bottom + 16));
   return canvas;
 }
 
@@ -1789,7 +1891,7 @@ function card(parent, name, o) {
     pad: o.pad == null ? 18 : o.pad,
     padX: o.padX,
     padY: o.padY,
-    radius: o.radius == null ? 12 : o.radius,
+    radius: o.radius == null ? NT["radius/container"] : o.radius,
     fill: o.fill || V["surface/content"],
     // REDESIGN-SPEC §5.2: a surface that neither carries interaction nor
     // expresses hierarchy gets no stroke and no shadow. Cards are containers,
@@ -1814,9 +1916,9 @@ function cell(parent, width, justify) {
 
 function navItemRow(parent, route, selected) {
   const row = frame("nav/" + route.key, {
-    layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, radius: 7
+    layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, radius: NT["radius/control"]
   });
-  size(row, 220, 30);
+  size(row, LAYOUT.sidebarInnerW, 30);
   if (selected) bindFill(row, V["surface/railTint"]);
   icon(row, route.icon, 16, selected ? V["accent/rail"] : V["text/secondary"]);
   add(row, text("label", route.label, selected ? "Body / Medium" : "Body", V["text/primary"]));
@@ -1825,7 +1927,7 @@ function navItemRow(parent, route, selected) {
 
 function searchField(parent, placeholder, width) {
   const box = frame("search", {
-    layout: "HORIZONTAL", gap: 6, align: "CENTER", padX: 8, padY: 5, radius: 7,
+    layout: "HORIZONTAL", gap: 6, align: "CENTER", padX: 8, padY: 5, radius: NT["radius/control"],
     fill: V["surface/field"], stroke: V["border/separator"], strokeWeight: 1
   });
   size(box, width, 26);
@@ -1890,9 +1992,9 @@ function kvRow(parent, label, value, labelW) {
 
 function buildShell(routeKey, title, iconName, contentFn, sessionState) {
   const win = frame("▸ " + title, {
-    layout: "VERTICAL", fill: V["surface/window"], radius: 12, clip: true
+    layout: "VERTICAL", fill: V["surface/window"], radius: NT["radius/container"], clip: true
   });
-  size(win, 1440, 900);
+  size(win, LAYOUT.windowW, LAYOUT.windowH);
 
   // Titlebar ---------------------------------------------------------------
   const bar = frame("titlebar", {
@@ -1925,13 +2027,13 @@ function buildShell(routeKey, title, iconName, contentFn, sessionState) {
   add(win, stretch(body));
 
   const sidebar = frame("sidebar", {
-    layout: "VERTICAL", gap: 14, padX: 10, padY: 12, fill: V["surface/sidebar"]
+    layout: "VERTICAL", gap: 14, padX: LAYOUT.sidebarPadX, padY: 12, fill: V["surface/sidebar"]
   });
-  size(sidebar, 240, 100);
+  size(sidebar, LAYOUT.sidebarW, 100);
   stretch(sidebar);
   add(body, sidebar);
 
-    searchField(sidebar, "搜索", 220);
+    searchField(sidebar, "搜索", LAYOUT.sidebarInnerW);
     ROUTE_GROUPS.forEach(function (groupName) {
       const group = frame("group/" + groupName, { layout: "VERTICAL", gap: 1 });
       const label = frame("groupLabel", { layout: "HORIZONTAL", padX: 8, padY: 2 });
@@ -1954,11 +2056,11 @@ function buildShell(routeKey, title, iconName, contentFn, sessionState) {
   spacer(sidebar);
 
   const statusWrap = frame("sidebarStatusWrap", { layout: "VERTICAL", gap: 6 });
-  const hairline = rect(statusWrap, "hairline", 220, 1, V["border/separator"]);
+  const hairline = rect(statusWrap, "hairline", LAYOUT.sidebarInnerW, 1, V["border/separator"]);
   const status = frame("sidebarStatus", {
     layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, padY: 7
   });
-  size(status, 220, 30);
+  size(status, LAYOUT.sidebarInnerW, 30);
   dot(status, 8, V["status/ready"]);
   add(status, text("label", "服务已就绪 · Quality", "Callout", V["text/secondary"]));
   add(statusWrap, status);
@@ -1968,7 +2070,7 @@ function buildShell(routeKey, title, iconName, contentFn, sessionState) {
   const sessionRow = frame("sidebarSession", {
     layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, padY: 7
   });
-  size(sessionRow, 220, 30);
+  size(sessionRow, LAYOUT.sidebarInnerW, 30);
   sessionDot(sessionRow, session.tone);
   add(sessionRow, text("label", session.label, "Callout", V["text/secondary"]));
   add(statusWrap, sessionRow);
@@ -1979,7 +2081,8 @@ function buildShell(routeKey, title, iconName, contentFn, sessionState) {
   // With detail at #FFFFFF and cards at #F5F5F7 the eight screens read as one
   // flat sheet: the delta was 2% and no group had an edge.
   const detail = frame("detail", {
-    layout: "VERTICAL", gap: 20, padX: 20, padY: 20, fill: V["surface/window"]
+    layout: "VERTICAL", gap: LAYOUT.blockGap, padX: LAYOUT.pagePadX, padY: LAYOUT.pagePadY,
+    fill: V["surface/window"]
   });
   grow(detail);
   stretch(detail);
@@ -2123,6 +2226,45 @@ function meetingRow(parent, o) {
   add(row, grow(info));
   if (o.right) add(row, text("right", o.right, "Callout", V["text/tertiary"]));
   return add(parent, stretch(row));
+}
+
+// 记录库列：一次性把「标题 + 计数 + 搜索 + 行 + 页脚」这一列造出来。
+//
+// 三个能力的产物住在同一个本机数据库里，所以它们长同一个样子——这条形状此前在
+// 字幕记录库与对话记录库各写了**一遍**（`screenCaptions` / `screenClosureAssistantClosed`），
+// 两边的宽度也是各写各的 240 / 232（D10 归一化以前）。现在列宽、行文本宽度、
+// 搜索框宽度、页脚宽度全部由 `LAYOUT` 推出来，调用点只给数据。
+//
+// 调用点要保证 `o.rows` 里的文案与原型连线用的文案一致：连线是**按文案找控件**的
+// （`check-links.js` 守着这一条），行标题改了就要跟着改 `CLOSURE_BOARDS` 的连线源。
+function recordListColumn(parent, o) {
+  const column = card(parent, o.name || "library", { pad: 0, gap: 0, clip: true });
+  size(column, LAYOUT.listW, null);
+  add(parent, stretch(column));
+  const head = frame("lHead", {
+    layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: LAYOUT.listPadX, padY: 12
+  });
+  add(head, text("title", o.title, "Heading / Section", V["text/primary"]));
+  spacer(head);
+  if (o.count) add(head, text("count", o.count, "Callout", V["text/secondary"]));
+  add(column, stretch(head));
+  const search = frame("lSearch", { layout: "HORIZONTAL", padX: LAYOUT.listPadX, padY: 4 });
+  searchField(search, o.search || "搜索记录", LAYOUT.listInnerW);
+  add(column, stretch(search));
+  hairline(column);
+  o.rows.forEach(function (r, i, all) {
+    meetingRow(column, {
+      title: r.title, sub: r.sub, badge: r.badge, selected: r.selected,
+      width: LAYOUT.listInnerW
+    });
+    if (i < all.length - 1) hairline(column);
+  });
+  spacer(column);
+  hairline(column);
+  const foot = frame("lFoot", { layout: "HORIZONTAL", padX: LAYOUT.listPadX, padY: 10 });
+  add(foot, text("note", o.foot, "Subheadline", V["text/tertiary"], { w: LAYOUT.listInnerW }));
+  add(column, stretch(foot));
+  return column;
 }
 
 // --- 1. 配音台 ---------------------------------------------------------------
@@ -2513,13 +2655,13 @@ function screenVoiceLibrary(d) {
   pageHead(d, "音色库", "管理系统音色，以及用参考音频复刻出来的音色。");
 
   const filters = frame("filters", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
-  searchField(filters, "按名称或描述搜索", 300);
+  searchField(filters, "按名称或描述搜索", LAYOUT.toolbarSearchW);
   segmented(filters, ["全部", "系统", "我的"], 0);
   spacer(filters);
   add(filters, text("count", "8 个音色 · 3 个来自复刻", "Callout", V["text/secondary"]));
   add(d, stretch(filters));
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   // Master list ------------------------------------------------------------
@@ -2633,7 +2775,7 @@ function screenWorks(d) {
   // 排序控件是应用工具栏行左侧的第一个控件（WorkSortOrder），§7.4 也写着
   // 「按时间排序」。稿之前只画了搜索框，等于把这一页唯一的设置项漏掉了。
   segmented(bar, ["最新优先", "最早优先"], 0);
-  searchField(bar, "按标题搜索", 300);
+  searchField(bar, "按标题搜索", LAYOUT.toolbarSearchW);
   spacer(bar);
   add(bar, text("count", "8 个作品 · 共 11:05", "Callout", V["text/secondary"]));
   add(d, stretch(bar));
@@ -3165,7 +3307,11 @@ function screenDeveloperDocs(d) {
   // 文档卡吃满剩余高度：这是唯一一页「读」的界面，让它像窗口里的一个面板，
   // 而不是内容结束后空半屏。
   grow(docs);
-  const topics = frame("topics", { layout: "VERTICAL", gap: 2, padX: 12, padY: 14 });
+  // 目录列的内边距与记录库相同（`LAYOUT.listPadX`）：同一个列宽，内宽也必须只有一个，
+  // 否则「列宽一样」而「行宽不一样」，切页时文字的左沿仍然会跳。
+  const topics = frame("topics", {
+    layout: "VERTICAL", gap: 2, padX: LAYOUT.listPadX, padY: 14
+  });
   size(topics, SESSION_LIST_W, null);
   DOC_TOPICS.forEach(function (topic, i) {
     const selected = i === 0;
@@ -3250,7 +3396,7 @@ function screenAssistant(d, o) {
     actions: []
   });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const stream = card(split, "stream", { pad: 0, gap: 0, clip: true });
@@ -3385,7 +3531,7 @@ function screenAssistantBlocked(d) {
     actions: [["打开设置…", "sliders-horizontal", "primary"], ["了解如何配置", "book-open"]]
   });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const caps = card(split, "caps", { pad: 0, gap: 0, clip: true });
@@ -3648,14 +3794,16 @@ function screenMeetingEmpty(d) {
 
   const empty = frame("Empty State", {
     layout: "VERTICAL", gap: 12, align: "CENTER", justify: "CENTER",
-    fill: V["surface/content"], radius: 12
+    fill: V["surface/content"], radius: NT["radius/container"]
   });
-  icon(empty, "users", 34, V["text/tertiary"]);
-  add(empty, text("title", "还没有会议", "Title / Page", V["text/primary"]));
+  // 空态只有一套：图标 28、标题 `Heading / Section`、正文 `Callout`——与 `02 Components`
+  // 里的 `Empty State` 组件同档。页面级空态只多两件东西：动作行与一行状态胶囊。
+  icon(empty, "users", 28, V["text/tertiary"]);
+  add(empty, text("title", "还没有会议", "Heading / Section", V["text/primary"]));
     add(empty, text("body",
       "开始会议后，转录会边听边出现；结束后可以生成纪要、改说话人的名字，并导出 Markdown 或 SRT。" +
       "原始音频不留存；记录写进这台 Mac 上的记录库，长期保留。",
-      "Callout", V["text/secondary"], { w: 460, align: "CENTER" }));
+      "Callout", V["text/secondary"], { w: LAYOUT.emptyBodyMaxW, align: "CENTER" }));
   const acts = frame("actions", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
   primaryButton(acts, "开始会议", "mic", 132);
   secondaryButton(acts, "查看设置", "sliders-horizontal");
@@ -3675,39 +3823,23 @@ function screenMeetingEmpty(d) {
       primaryButton(row, "打开字幕带", "captions", 132);
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   // 左：字幕记录库。字幕会话不是「一次演示」——记录长期保留，所以入口是列表，与语音
   // 助手、会议助手共用同一种形状：列表 + 选中 + 详情。
-  const library = card(split, "library", { pad: 0, gap: 0, clip: true });
-  size(library, SESSION_LIST_W, null);
-  add(split, stretch(library));
-  const lHead = frame("lHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 16, padY: 12 });
-  add(lHead, text("title", "字幕记录", "Heading / Section", V["text/primary"]));
-  spacer(lHead);
-  add(lHead, text("count", "42 段", "Callout", V["text/secondary"]));
-  add(library, stretch(lHead));
-  const lSearch = frame("lSearch", { layout: "HORIZONTAL", padX: 16, padY: 4 });
-  searchField(lSearch, "搜索记录", 248);
-  add(library, stretch(lSearch));
-  hairline(library);
-  [
-    { title: "今天 14:02", sub: "38 分钟 · 412 行 · 3 位", badge: ["Ready", "刚刚"], selected: true },
-    { title: "今天 09:30", sub: "12 分钟 · 128 行 · 2 位" },
-    { title: "9月16日 20:10", sub: "1 小时 02 分 · 640 行 · 4 位" },
-    { title: "9月15日 14:00", sub: "26 分钟 · 240 行 · 3 位", badge: ["Info", "已导出"] },
-    { title: "9月12日 10:05", sub: "18 分钟 · 176 行 · 2 位" }
-  ].forEach(function (m, i, all) {
-    meetingRow(library, { title: m.title, sub: m.sub, badge: m.badge, selected: m.selected, width: 196 });
-    if (i < all.length - 1) hairline(library);
+  recordListColumn(split, {
+    title: "字幕记录",
+    count: "42 段",
+    rows: [
+      { title: "今天 14:02", sub: "38 分钟 · 412 行 · 3 位", badge: ["Ready", "刚刚"], selected: true },
+      { title: "今天 09:30", sub: "12 分钟 · 128 行 · 2 位" },
+      { title: "9月16日 20:10", sub: "1 小时 02 分 · 640 行 · 4 位" },
+      { title: "9月15日 14:00", sub: "26 分钟 · 240 行 · 3 位", badge: ["Info", "已导出"] },
+      { title: "9月12日 10:05", sub: "18 分钟 · 176 行 · 2 位" }
+    ],
+    foot: "按开始时间倒序；原始音频不留存。"
   });
-  spacer(library);
-  hairline(library);
-  const lFoot = frame("lFoot", { layout: "HORIZONTAL", padX: 16, padY: 10 });
-  add(lFoot, text("note", "按开始时间倒序；原始音频不留存。",
-    "Subheadline", V["text/tertiary"], { w: 248 }));
-  add(library, stretch(lFoot));
 
   const list = card(split, "list", { pad: 0, gap: 0, clip: true });
   grow(list);
@@ -3722,7 +3854,9 @@ function screenMeetingEmpty(d) {
   add(head, who);
   add(list, stretch(head));
   const bar = frame("toolbar", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 16, padY: 6 });
-  searchField(bar, "按内容或说话人搜索", 260);
+  // 同一屏里两个搜索框一样宽：这一处是详情区工具栏，用的也是**列表内宽**——
+  // 分栏之后详情只有半个窗口，搜索框跟着列表列走才不会在最小窗口下挤掉后面的分段控件。
+  searchField(bar, "按内容或说话人搜索", LAYOUT.listInnerW);
   segmented(bar, ["全部", "仅星标"], 0);
   spacer(bar);
   add(bar, text("k", "字号", "Callout", V["text/secondary"]));
@@ -3779,7 +3913,7 @@ function buildSessionGuardBoard() {
   win.name = "▸ 会话占用 · 结束会议并切换";
   const scrim = figma.createRectangle();
   scrim.name = "scrim";
-  size(scrim, 1440, 900);
+  size(scrim, LAYOUT.windowW, LAYOUT.windowH);
   scrim.fills = [{ type: "SOLID", color: { r: 0, g: 0, b: 0 }, opacity: 0.32 }];
   // layoutPositioning = ABSOLUTE is only accepted on a node that already has an
   // auto-layout parent: set it before appendChild and Figma throws
@@ -4011,7 +4145,8 @@ const CLOSURE_LANE_W = 168;   // 泳道名那一列的宽
 const CLOSURE_CELL_W = 250;   // 每个阶段格子的宽
 const CLOSURE_CELL_H = 124;   // 固定高：五格一行要能横向比较，不能被自己的文案撑成阶梯
 const CLOSURE_GAP = 12;
-const CLOSURE_W = 1600;
+// 闭环总览与文档画布同宽（`LAYOUT.canvasW`）：它也是一块画布，不是屏幕。
+const CLOSURE_W = LAYOUT.canvasW;
 const CLOSURE_PAD = 48;
 const CLOSURE_STAGES = ["① 入口", "② 前置与受阻", "③ 主交互", "④ 交还与守卫", "⑤ 产物与回看"];
 // 291 × 5 + 12 × 4 = 1503：**这行现在是 5 格**（系统入口 / 大模型 / 记录落点 / 麦克风所有权 /
@@ -4064,7 +4199,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
       actions: [["字幕设置", "sliders-horizontal"]]
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const ready = card(split, "ready", { pad: 0, gap: 0, clip: true });
@@ -4156,7 +4291,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
       actions: [["打开数据目录", "folder-open"], ["打开记录库", "captions"]]
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const list = card(split, "tail", { pad: 0, gap: 0, clip: true });
@@ -4313,7 +4448,7 @@ function meetingShell(d, o) {
     });
   sessionStatusBar(d, o.status);
   if (o.banner) o.banner();
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
   const stream = card(split, "stream", { pad: 0, gap: 0, clip: true });
   grow(stream);
@@ -4474,7 +4609,7 @@ function screenClosureMeetingSources(d) {
       actions: [["说话人设置", "sliders-horizontal"]]
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const src = card(split, "sources", { pad: 0, gap: 0, clip: true });
@@ -4640,7 +4775,7 @@ function screenClosureMeetingInterrupted(d) {
     actions: [["结束并整理", "square"]]
   });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const stream = card(split, "transcript", { pad: 0, gap: 0, clip: true });
@@ -4866,7 +5001,7 @@ function screenClosureFirstRunEmpty(d) {
       actions: [["试听音色", "play"]]
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const persona = card(split, "persona", { pad: 0, gap: 0, clip: true });
@@ -4973,42 +5108,24 @@ function screenClosureFirstRunEmpty(d) {
       actions: []
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   // 左：记录库。三条闭环的产物长同一个样子——列表 + 选中 + 详情，因为三种记录住在
-  // 同一个本机数据库里，没有理由让它们长得不一样。
-  const library = card(split, "library", { pad: 0, gap: 0, clip: true });
-  size(library, SESSION_LIST_W, null);
-  add(split, stretch(library));
-  const lHead = frame("lHead", { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 16, padY: 12 });
-    add(lHead, text("title", "对话记录", "Heading / Section", V["text/primary"]));
-  spacer(lHead);
-  add(lHead, text("count", "38 段", "Callout", V["text/secondary"]));
-  add(library, stretch(lHead));
-  const lSearch = frame("lSearch", { layout: "HORIZONTAL", padX: 16, padY: 4 });
-  searchField(lSearch, "搜索记录", 248);
-  add(library, stretch(lSearch));
-  hairline(library);
-  [
-    { title: "分享开场", sub: "今天 14:02 · 12 轮", badge: ["Ready", "刚刚"], selected: true },
-    { title: "Podcast 提纲", sub: "今天 11:20 · 8 轮" },
-    { title: "纪要追问", sub: "9月16日 16:40 · 23 轮" },
-    { title: "英文发音练习", sub: "9月15日 09:05 · 41 轮", badge: ["Info", "已导出"] },
-    { title: "读书笔记口述", sub: "9月12日 21:10 · 17 轮" },
-    { title: "文件命名讨论", sub: "9月11日 08:30 · 6 轮" }
-  ].forEach(function (m, i, all) {
-    meetingRow(library, {
-      title: m.title, sub: m.sub, badge: m.badge, selected: m.selected, width: 196
-    });
-    if (i < all.length - 1) hairline(library);
+  // 同一个本机数据库里，没有理由让它们长得不一样（形状与几何见 `recordListColumn`）。
+  recordListColumn(split, {
+    title: "对话记录",
+    count: "38 段",
+    rows: [
+      { title: "分享开场", sub: "今天 14:02 · 12 轮", badge: ["Ready", "刚刚"], selected: true },
+      { title: "Podcast 提纲", sub: "今天 11:20 · 8 轮" },
+      { title: "纪要追问", sub: "9月16日 16:40 · 23 轮" },
+      { title: "英文发音练习", sub: "9月15日 09:05 · 41 轮", badge: ["Info", "已导出"] },
+      { title: "读书笔记口述", sub: "9月12日 21:10 · 17 轮" },
+      { title: "文件命名讨论", sub: "9月11日 08:30 · 6 轮" }
+    ],
+    foot: "搜索标题与正文；记录长期留在记录库，App 重启也在。"
   });
-  spacer(library);
-  hairline(library);
-  const lFoot = frame("lFoot", { layout: "HORIZONTAL", padX: 16, padY: 10 });
-    add(lFoot, text("note", "搜索标题与正文；记录长期留在记录库，App 重启也在。",
-      "Subheadline", V["text/tertiary"], { w: 248 }));
-  add(library, stretch(lFoot));
 
   const record = card(split, "record", { pad: 0, gap: 0, clip: true });
   grow(record);
@@ -5101,7 +5218,7 @@ function screenClosureFirstRunEmpty(d) {
       actions: [["静音麦克风", "mic-off"]]
     });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const stream = card(split, "stream", { pad: 0, gap: 0, clip: true });
@@ -5207,7 +5324,7 @@ function screenClosureAssistantVoice(d) {
     actions: [["它俩差在哪？", "audio-waveform"], ["新开一轮以换人设", "plus"]]
   });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const stream = card(split, "stream", { pad: 0, gap: 0, clip: true });
@@ -5329,7 +5446,7 @@ function screenClosureAssistantMemory(d) {
     actions: []
   });
 
-  const split = frame("split", { layout: "HORIZONTAL", gap: 16 });
+  const split = frame("split", { layout: "HORIZONTAL", gap: LAYOUT.regionGap });
   add(d, stretch(grow(split)));
 
   const stream = card(split, "stream", { pad: 0, gap: 0, clip: true });
@@ -5417,7 +5534,7 @@ function closurePanelRulesBoard() {
   const board = frame("▸ 非主框体 · 收起规则（通用）", {
     layout: "VERTICAL", gap: 16, pad: 24, fill: V["surface/window"], radius: 12, clip: true
   });
-  size(board, 1440, null);
+  size(board, LAYOUT.windowW, null);
   pageHead(board, "非主框体 · 收起规则",
     "凡是「关掉它，主任务照样能做完」的面板，都要能收起：收起是它的正常状态，不是缺省。");
 
@@ -5499,7 +5616,7 @@ function closureSettingsBoard() {
   const board = frame("▸ 设置 · 会话（配置大模型）", {
     layout: "VERTICAL", gap: 16, pad: 24, fill: V["surface/window"], radius: 12, clip: true
   });
-  size(board, 1440, null);
+  size(board, LAYOUT.windowW, null);
   pageHead(board, "设置 · 会话",
     "大模型是会话模块唯一的外部依赖：地址、模型与密钥都在这一页配，改完不用重启。");
 
@@ -5622,7 +5739,7 @@ function closureVoicePersonaBoard() {
   const board = frame("▸ 换音色 vs 换人设（影响面）", {
     layout: "VERTICAL", gap: 16, pad: 24, fill: V["surface/window"], radius: 12, clip: true
   });
-  size(board, 1440, null);
+  size(board, LAYOUT.windowW, null);
   pageHead(board, "换音色 vs 换人设",
     "两个动作都叫「换」，代价不一样：一个只改声音，一个改的是它怎么和你说话。");
 
@@ -5776,7 +5893,7 @@ function closureDiarizationBoard() {
   const board = frame("▸ 分人 · 说话人标签（会议与字幕共用）", {
     layout: "VERTICAL", gap: 16, pad: 24, fill: V["surface/window"], radius: 12, clip: true
   });
-  size(board, 1440, null);
+  size(board, LAYOUT.windowW, null);
   pageHead(board, "分人 · 会议与字幕共用一条链路",
     "同一个分人扩展、同一套匿名标签、同一套降级话术：会议与字幕只是这条链路的两个出口。");
 
@@ -5871,7 +5988,7 @@ function closureMenuBoard() {
   const board = frame("▸ 菜单栏 · 三个入口", {
     layout: "VERTICAL", gap: 18, pad: 24, fill: V["surface/window"], radius: 12, clip: true
   });
-  size(board, 1440, null);
+  size(board, LAYOUT.windowW, null);
   pageHead(board, "菜单栏 · 会话入口",
     "字幕与会议要在后台启动，所以入口在系统里；语音助手需要主窗口在场，所以它没有全局快捷键。");
 
@@ -5900,8 +6017,8 @@ function closureMenuBoard() {
     sessionActive: true, status: "实时字幕进行中 · 08:12"
   });
   const panelH = Math.max(idle.height, active.height);
-  size(idle, 288, panelH);
-  size(active, 288, panelH);
+  size(idle, NT["size/menu"], panelH);
+  size(active, NT["size/menu"], panelH);
   [["空闲：三个能力都从这三行进", idle], ["会话进行中：结束是一条要确认的命令", active]]
     .forEach(function (p) {
       const col = frame("column", { layout: "VERTICAL", gap: 8 });
@@ -6086,7 +6203,8 @@ const CLOSURE_LANES = [
     key: "meeting", icon: "users", title: "会议助手",
     detail: "麦克风在后台：边听边记，App 可以不在前台。",
     stages: [
-      ["① 入口", "开始会议 · 先选来源", "麦克风 / 本机音频（按 App 抓）/ 两者混音；⌘⇧N 直接开始。",
+      ["① 入口", "开始会议 · 先选来源",
+        "麦克风 / 本机音频（按 App 抓，可多选）；同时勾选就自动合流；⌘⇧N 直接开始。",
         "meetingEmpty"],
       ["② 前置与受阻", "占用 · 未授权 · 来源中断",
         "谁在用麦克风要确认；本机音频未授权、来源 App 退出各有一条出口。", "meetingGuard"],
@@ -6622,7 +6740,7 @@ function buildDarkReferenceVariants(windows) {
 function buildCover() {
   const page = P["00 Cover"];
   const canvas = frame("Cover", { layout: "VERTICAL", gap: 24, pad: 96, fill: V["surface/content"] });
-  size(canvas, 1600, 1040);
+  size(canvas, LAYOUT.canvasW, 1040);
   add(page, canvas);
   add(canvas, text("kicker", "SPEECHRAIL · macOS 26", "Caption / Medium", V["accent/rail"]));
   add(canvas, text("h1", "SpeechRail 管理控制台", "Title / Large", V["text/primary"]));
@@ -6662,7 +6780,16 @@ function buildCover() {
 // Archive keeps the retired rack visual on record so the direction cannot drift
 // back by accident.
 
-const MENU_ROW_W = 278;      // 288pt panel minus its 5pt inset on both sides
+const MENU_ROW_W = NT["size/menu"] - 2 * 5;  // 面板宽减去两侧各 5pt 的内缩
+// 菜单面板里文字的左右留白。行的内宽由它推出来，面板里不再手写 246 / 220 这类宽度
+// （同一块面板里曾经并存两个值，也就是「同一件事两种说法」）。
+const MENU_TEXT_INSET = 10;
+const MENU_TEXT_W = MENU_ROW_W - 2 * MENU_TEXT_INSET;
+// 行内还有前置图标时，文字要先让出「图标 + 间距」。`warn` 是这一形状的唯一一处：
+// 直接沿用 MENU_TEXT_W 会让这一行多出 21pt（14 + 7 + 258 > 258），实跑报内溢。
+const MENU_LEAD_ICON_W = 14;
+const MENU_LEAD_GAP = 7;
+const MENU_TEXT_W_LEAD = MENU_TEXT_W - MENU_LEAD_ICON_W - MENU_LEAD_GAP;  // 237
 const SETTINGS_CARD_W = 604; // 640pt window minus the 18pt pane padding
 const WIRE_ERRORS = [];      // prototype-link failures, surfaced in the report
 
@@ -6947,7 +7074,7 @@ function menuPanel(name, o) {
     layout: "VERTICAL", gap: 0, pad: 5, radius: 12,
     fill: V["surface/panel"], stroke: V["border/separator"], strokeWeight: 1
   });
-  size(panel, 288, null);
+  size(panel, NT["size/menu"], null);
   elevate(panel);
 
   const head = frame("menuHead", { layout: "VERTICAL", gap: 4, padX: 10, padY: 8 });
@@ -6957,8 +7084,10 @@ function menuPanel(name, o) {
   add(title, text("label", "SpeechRail", "Heading / Section", V["text/primary"]));
   add(head, stretch(title));
   // 状态行与副行都取自应用 ControlMenuView：档位用短名，副行是「版本 X · 端口 Y」。
-  add(head, text("status", o.status || "服务已就绪 · Quality", "Callout", V["text/secondary"], { w: 246 }));
-  add(head, text("detail", o.detail || "版本 0.7.3 · 端口 8201", "Subheadline", V["text/tertiary"], { w: 246 }));
+  add(head, text("status", o.status || "服务已就绪 · Quality", "Callout",
+    V["text/secondary"], { w: MENU_TEXT_W }));
+  add(head, text("detail", o.detail || "版本 0.7.3 · 端口 8201", "Subheadline",
+    V["text/tertiary"], { w: MENU_TEXT_W }));
   add(panel, head);
 
   menuSeparator(panel);
@@ -6985,12 +7114,13 @@ function menuPanel(name, o) {
     // The disabled group is explained where it appears: a greyed-out row with no
     // reason on screen is the failure mode this line exists to prevent.
     const warn = frame("warning", {
-      layout: "HORIZONTAL", gap: 7, align: "CENTER", padX: 10, padY: 6, radius: 8,
+      layout: "HORIZONTAL", gap: MENU_LEAD_GAP, align: "CENTER", padX: 10, padY: 6, radius: 8,
       fill: V["surface/attentionTint"]
     });
     size(warn, MENU_ROW_W, null);
-    icon(warn, "triangle-alert", 14, V["status/attention"]);
-    add(warn, text("text", "控制通道不可用，服务操作已禁用", "Subheadline", V["status/attention"], { w: 220 }));
+    icon(warn, "triangle-alert", MENU_LEAD_ICON_W, V["status/attention"]);
+    add(warn, text("text", "控制通道不可用，服务操作已禁用", "Subheadline",
+      V["status/attention"], { w: MENU_TEXT_W_LEAD }));
     add(panel, warn);
   }
   // 省略号是承诺：这三个动作都会先弹确认对话框（REDESIGN-SPEC §7.9）。
@@ -7128,11 +7258,11 @@ function paneCreative(c) {
       voiceBadge(v, "系统");
       icon(v, "chevron-right", 13, V["text/tertiary"]);
       add(p, v);
-    }, { captionWidth: 300 });
+    }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(defaults);
   controlRow(defaults, "默认语速",
     "0.5×–2.0×，可在配音台逐条覆盖。",
-    function (p) { sliderControl(p, 132, 0.5, "1.0×"); }, { captionWidth: 260 });
+    function (p) { sliderControl(p, 132, 0.5, "1.0×"); }, { captionWidth: LAYOUT.settingsLabelW });
 }
 
 // 会话页签是这一轮唯一新增的设置面：SpeechRail 只提供识别、合成与分人，对话与纪要
@@ -7141,7 +7271,7 @@ function paneSession(c) {
   const llm = settingsSection(c, "大模型（对话与纪要）");
   controlRow(llm, "服务地址",
     "兼容 OpenAI 的服务地址，本机或局域网都行；须支持 Responses API。",
-    function (p) { valueText(p, "http://127.0.0.1:8000/v1", "Body"); }, { captionWidth: 300 });
+    function (p) { valueText(p, "http://127.0.0.1:8000/v1", "Body"); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(llm);
   controlRow(llm, "接口",
     "助手与纪要都走 Responses API；只提供 Chat Completions 的服务连不上。",
@@ -7150,7 +7280,7 @@ function paneSession(c) {
       valueText(v, "Responses");
       pill(v, "Ready", "必须");
       add(p, v);
-    }, { captionWidth: 300 });
+    }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(llm);
   controlRow(llm, "模型",
     "从该服务的模型列表里选；列表为空时说明服务还没加载模型。",
@@ -7159,11 +7289,11 @@ function paneSession(c) {
       valueText(v, "qwen3-30b-a3b");
       icon(v, "chevron-right", 13, V["text/tertiary"]);
       add(p, v);
-    }, { captionWidth: 300 });
+    }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(llm);
   controlRow(llm, "密钥",
     "只写入钥匙串：不落配置文件，不进日志，也不进导出物。",
-    function (p) { valueText(p, "已存入钥匙串"); }, { captionWidth: 300 });
+    function (p) { valueText(p, "已存入钥匙串"); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(llm);
   controlRow(llm, "连接",
     "点一次检查两件事：服务可达，且支持 Responses API；改完不用重启。",
@@ -7172,20 +7302,20 @@ function paneSession(c) {
       pill(v, "Ready", "已连接 · 12 ms");
       secondaryButton(v, "检查连接", "refresh-cw");
       add(p, v);
-    }, { captionWidth: 300 });
+    }, { captionWidth: LAYOUT.settingsLabelW });
 
   const sub = settingsSection(c, "实时字幕");
   controlRow(sub, "默认字号",
     "字幕带与记录库共用这一档；在浮层上也能随时改。",
-    function (p) { segmented(p, ["紧凑", "标准", "大字"], 1); }, { captionWidth: 240 });
+    function (p) { segmented(p, ["紧凑", "标准", "大字"], 1); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(sub);
   controlRow(sub, "字幕带位置",
     "按屏幕记忆；改乱了可以重置回「屏幕底部居中」。",
-    function (p) { secondaryButton(p, "重置位置"); }, { captionWidth: 240 });
+    function (p) { secondaryButton(p, "重置位置"); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(sub);
   controlRow(sub, "分人标签",
     "只给这一段标出「说话人 A/B/C」；需要 balanced 或 quality 档位。",
-    function (p) { switchControl(p, false); }, { captionWidth: 240 });
+    function (p) { switchControl(p, false); }, { captionWidth: LAYOUT.settingsLabelW });
 
   // 人设在设置里的位置要短、要准：这里定的是「新对话开始时预填什么」，不是
   // 「随时可改的风格」。用户 2026-09-17：会话开始后不允许换人设。
@@ -7197,28 +7327,28 @@ function paneSession(c) {
       valueText(v, "耐心讲解");
       icon(v, "chevron-right", 13, V["text/tertiary"]);
       add(p, v);
-    }, { captionWidth: 240 });
+    }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(assistant);
   controlRow(assistant, "默认音色",
     "开始后仍然可以换，下一句生效；不影响已经说过的内容。",
-    function (p) { valueText(p, "夜航主持"); }, { captionWidth: 240 });
+    function (p) { valueText(p, "夜航主持"); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(assistant);
   controlRow(assistant, "对讲模式",
     "一问一答（外放）它说话时闭麦；实时对讲（耳机）你可以随时插话打断它。",
-    function (p) { segmented(p, ["一问一答", "实时对讲"], 0); }, { captionWidth: 240 });
+    function (p) { segmented(p, ["一问一答", "实时对讲"], 0); }, { captionWidth: LAYOUT.settingsLabelW });
 
   const meet = settingsSection(c, "会议");
   controlRow(meet, "会议说话人标签",
     "light 档位只保留正文，不出现说话人标签。",
-    function (p) { switchControl(p, true); }, { captionWidth: 240 });
+    function (p) { switchControl(p, true); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(meet);
   controlRow(meet, "纪要模型",
     "默认跟随上面的大模型；单场会议也可以用别的模型。",
-    function (p) { valueText(p, "同大模型"); }, { captionWidth: 240 });
+    function (p) { valueText(p, "同大模型"); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(meet);
   controlRow(meet, "保存位置",
     "会议、纪要、字幕与对话都写进本机的记录库，长期保留；导出时才生成文件。",
-    function (p) { secondaryButton(p, "打开数据目录"); }, { captionWidth: 240 });
+    function (p) { secondaryButton(p, "打开数据目录"); }, { captionWidth: LAYOUT.settingsLabelW });
 
   const note = frame("note", { layout: "HORIZONTAL", padX: 4, padY: 8 });
   add(note, text("t",
@@ -7343,7 +7473,7 @@ function buildMenuAndSettings() {
   // A menu panel is as tall as its item list. Level the three appearances to the
   // tallest so they can be compared side by side without a ragged bottom edge.
   const panelH = Math.max.apply(null, panels.map(function (p) { return p.height; }));
-  panels.forEach(function (p) { size(p, 288, panelH); });
+  panels.forEach(function (p) { size(p, NT["size/menu"], panelH); });
   panels.forEach(function (p, i) {
     const col = frame("column/" + i, { layout: "VERTICAL", gap: 8 });
     add(col, text("caption", labels[i], "Callout", V["text/secondary"]));

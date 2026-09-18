@@ -58,7 +58,9 @@ const colorUses = collect(/V\["([^"]+)"\]/g);
 // ({ fill: "surface/infoTint", ink: "status/info" }) and bind them later with a
 // dynamic lookup, so a `V["…"]`-only scan would call those two unused.
 merge(colorUses, collect(/\b(?:fill|ink|stroke|color):\s*"([a-z]+\/[A-Za-z]+)"/g));
-const numberUses = collect(/N\["([^"]+)"\]/g);
+// 数值 token 在生成器里按**名字**取用（`NT["space/16"]`，见 `main.js` 的 LAYOUT 一节）。
+// `N` 是 build-time 的变量注册表（装的是 Figma 变量对象），两者同名不同物，所以只扫 NT。
+const numberUses = collect(/NT\["([^"]+)"\]/g);
 
 // Icons are referenced four ways: icon(parent, "name", px, color),
 // iconButton(parent, "name", side), the icon argument of
@@ -136,15 +138,60 @@ bad += report("icons", iconUses, iconKeys);
 bad += report("text styles", styleUses, styleDefs);
 bad += reportKebab();
 
-if (numberUses.size === 0) {
-  console.log(
-    `\n== number variables: ${numberTokens.size} defined, 0 referenced by name`
-      + "\n   (spacing/radius/size values are written as literals at the call sites,"
-      + " by design — nothing to resolve)"
-  );
-} else {
-  bad += report("number variables", numberUses, numberTokens);
+bad += report("number tokens", numberUses, numberTokens);
+console.log(
+  `   （生成器按名字引用 ${[...numberUses.values()].reduce((n, l) => n + l.length, 0)} 处；`
+    + "版式数值走 LAYOUT，行内微间距仍是就地字面量）"
+);
+
+// --- 版式单点声明（LAYOUT / NT）----------------------------------------------
+//
+// 「一个规范」在代码里的检查点：`LAYOUT` / `NT` 已经认领的版式值，不允许再以字面量
+// 出现在**宽度位置**上。它拦的是「同一语义两个数值」——2026-09-18 的核查里
+// 「列表列 240 / 232 / 272 三分天下」「248 与 196 手写在四处」「字幕详情工具栏还留着 260」
+// 「设置面板 240 / 260 / 300 并存」都是这一类，此前没有任何门禁看得见。
+//
+// 折行宽度（`{ w: N }`）**不在**这条规则里：它们由所在容器决定、随文案走，数量多且
+// 大多是一次性的；列表列那一族的折行宽已经由 `LAYOUT` 推导出来（`listRowInnerW`）。
+const LAYOUT_OWNED = [
+  { value: 280, owner: "LAYOUT.listW（目录列）" },
+  { value: 248, owner: "LAYOUT.listInnerW（列表内宽）" },
+  { value: 228, owner: "LAYOUT.listRowInnerW（列表行内宽）" },
+  { value: 196, owner: "LAYOUT.profileCardInnerW（档位卡内宽）" },
+  { value: 220, owner: "LAYOUT.sidebarInnerW（侧栏内宽）" },
+  { value: 260, owner: "LAYOUT.settingsLabelW（设置说明列）" },
+  { value: 1440, owner: "LAYOUT.windowW（窗口宽）" },
+  { value: 1600, owner: "LAYOUT.canvasW（文档画布）" },
+  { value: 288, owner: "NT[size/menu]（菜单面板）" },
+];
+const WIDTH_POSITIONS = [
+  /\bsize\([A-Za-z_$][A-Za-z0-9_$.]*,\s*(\d+)\s*,/g,
+  /\bsearchField\([^,()]+,\s*[^,()]+,\s*(\d+)\s*\)/g,
+  /\bcaptionWidth:\s*(\d+)/g,
+];
+
+function reportLayoutLiterals() {
+  const hits = [];
+  WIDTH_POSITIONS.forEach((re) => {
+    let m;
+    while ((m = re.exec(main))) {
+      const value = Number(m[1]);
+      const owned = LAYOUT_OWNED.find((o) => o.value === value);
+      if (!owned) continue;
+      const line = main.slice(0, m.index).split("\n").length;
+      hits.push(`   main.js:${line} 把 ${value} 写成字面量（应走 ${owned.owner}）`);
+    }
+  });
+  console.log(`\n== 版式单点声明: ${LAYOUT_OWNED.length} 个值受管`);
+  if (!hits.length) {
+    console.log("   受管值都只在声明处出现，没有第二份字面量");
+    return 0;
+  }
+  hits.forEach((h) => console.log(h));
+  return hits.length;
 }
+
+bad += reportLayoutLiterals();
 
 // Unused definitions are informational: a token nobody binds is dead weight in
 // the Figma file, not a build error.

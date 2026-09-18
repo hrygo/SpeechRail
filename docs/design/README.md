@@ -2,6 +2,12 @@
 
 本目录保存 SpeechRail macOS App 的原始设计资料与本项目的补充设计。
 
+## 唯一规范（先读这一份）
+
+[`UX-UI-SPEC.md`](./UX-UI-SPEC.md)：**全 App 的 UX/UI 统一规范**——token 契约、组件、版式、
+交互语法、导航与键盘、状态模型、跨模块脊柱、模块覆盖矩阵、门禁与证据等级。
+它把「会话三屏」与「其余模块」两套口径合成一套；本目录里其余文档是它的详图、过程与历史。
+
 ## 原始设计包（归档）
 
 完整附件已归档到 [`archive/2026-09-12-macos-app-design-package/`](./archive/2026-09-12-macos-app-design-package/)，仅供设计追溯，不作为当前实现规范，包括：
@@ -34,7 +40,7 @@
 语音助手、会议助手、实时字幕三条能力的设计资料：
 
 - [`2026-09-17-live-sessions/SESSIONS-SPEC.md`](./2026-09-17-live-sessions/SESSIONS-SPEC.md)：模块规格（边界、逐面规格、状态矩阵、SQLite 数据模型、用户旅程）。
-- [`2026-09-17-session-closures/`](./2026-09-17-session-closures/)：闭环稿的设计包、离线门禁与实现就绪度核查（Figma 里 53 板；生成器已 57 板，见下一行）。
+- [`2026-09-17-session-closures/`](./2026-09-17-session-closures/)：闭环稿的设计包、离线门禁与实现就绪度核查（Figma 里 53 板；生成器已 59 板，见下一行）。
 - [`2026-09-18-figma-handover/FIGMA-HANDOVER.md`](./2026-09-18-figma-handover/FIGMA-HANDOVER.md)：**Figma 稿优化的独立团队交接文档**——权威来源、生成器路线、离线门禁、实跑 SOP、导出、资产清单、未决项与回退。
 - [`2026-09-18-session-layer/TECHNICAL-DESIGN.md`](./2026-09-18-session-layer/TECHNICAL-DESIGN.md)：**会话层技术方案（终态）**——哪些能力归 macOS 原生、哪些归 Python 服务、边界规矩、数据口径、验收判据与外部最佳实践依据。
 
