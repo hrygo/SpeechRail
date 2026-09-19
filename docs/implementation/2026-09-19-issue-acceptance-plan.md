@@ -597,6 +597,16 @@ chunks and implying false subtitle coordinates. Deterministic planner and route
 regressions cover both the pure mapping and public timing-resource boundary; this
 remains coordinate-integrity evidence, not acoustic timing accuracy.
 
+### 2026-09-20 timing display-mapping completeness guard
+
+`TtsTimingRegistry` now fails closed when an `identity` or `mapped` timing entry
+does not provide exactly one non-null display span per completed planner chunk.
+Previously an empty display-span tuple could still publish a `completed` sidecar,
+which contradicted the advertised mapping status. The regression covers both
+statuses and keeps the public result `unavailable` with
+`display_mapping_chunk_mismatch`; this is metadata-contract evidence only and
+does not establish real-model timing accuracy.
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or

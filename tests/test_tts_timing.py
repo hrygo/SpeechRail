@@ -85,6 +85,30 @@ def test_timing_registry_enriches_only_metadata_display_spans() -> None:
     assert "private reference" not in encoded
 
 
+@pytest.mark.parametrize(
+    ("display_mapping_status", "display_spans"),
+    [("identity", ()), ("mapped", (None, None))],
+)
+def test_timing_registry_downgrades_incomplete_display_mapping(
+    display_mapping_status: str,
+    display_spans: tuple[tuple[int, int] | None, ...],
+) -> None:
+    registry = TtsTimingRegistry()
+    timing_id = registry.begin(
+        request_id="req-1",
+        sample_rate=24_000,
+        display_mapping_status=display_mapping_status,  # type: ignore[arg-type]
+        expected_text_spans=((0, 3), (3, 5)),
+        display_spans=display_spans,
+    )
+    registry.complete(timing_id, _sidecar())
+
+    payload = registry.get(timing_id)
+    assert payload["status"] == "unavailable"
+    assert payload["reason"] == "display_mapping_chunk_mismatch"
+    assert payload["chunks"] == []
+
+
 def test_timing_registry_fails_closed_on_planner_contract_mismatch() -> None:
     registry = TtsTimingRegistry()
     timing_id = registry.begin(

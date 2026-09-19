@@ -106,7 +106,10 @@ class TtsTimingRegistry:
             elif actual_samples is not None and sidecar.total_samples != actual_samples:
                 state.status = "unavailable"
                 state.reason = "timing_sample_count_mismatch"
-            elif state.display_spans and len(state.display_spans) != len(sidecar.chunks):
+            elif state.display_mapping_status in {"identity", "mapped"} and (
+                len(state.display_spans) != len(sidecar.chunks)
+                or any(span is None for span in state.display_spans)
+            ):
                 state.status = "unavailable"
                 state.reason = "display_mapping_chunk_mismatch"
             else:
