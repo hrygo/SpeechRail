@@ -38,7 +38,7 @@ def test_v2_voice_update_revision_list_and_rollback(tmp_path, monkeypatch):
     )
 
     updated = client.patch(
-        "/v2/voices/narrator",
+        "/v1/speechrail/voices/narrator",
         json={
             "instruction": "second recipe",
             "seed": 2,
@@ -50,7 +50,7 @@ def test_v2_voice_update_revision_list_and_rollback(tmp_path, monkeypatch):
     assert second_revision != first.revision
 
     stale = client.patch(
-        "/v2/voices/narrator",
+        "/v1/speechrail/voices/narrator",
         json={
             "instruction": "stale write",
             "expected_revision": first.revision,
@@ -59,7 +59,7 @@ def test_v2_voice_update_revision_list_and_rollback(tmp_path, monkeypatch):
     assert stale.status_code == 409
     assert stale.json()["error"]["code"] == "voice_revision_conflict"
 
-    revisions = client.get("/v2/voices/narrator/revisions")
+    revisions = client.get("/v1/speechrail/voices/narrator/revisions")
     assert revisions.status_code == 200
     payload = revisions.json()
     assert {item["revision"] for item in payload["data"]} == {
@@ -71,7 +71,7 @@ def test_v2_voice_update_revision_list_and_rollback(tmp_path, monkeypatch):
     assert sum(bool(item["current"]) for item in payload["data"]) == 1
 
     rollback = client.post(
-        "/v2/voices/narrator/rollback",
+        "/v1/speechrail/voices/narrator/rollback",
         json={
             "target_revision": first.revision,
             "expected_revision": second_revision,
@@ -97,13 +97,13 @@ def test_v2_revoked_revision_cannot_be_rolled_back(tmp_path, monkeypatch):
     )
 
     revoked = client.post(
-        f"/v2/voices/narrator/revisions/{first.revision}/revoke"
+        f"/v1/speechrail/voices/narrator/revisions/{first.revision}/revoke"
     )
     assert revoked.status_code == 200
     assert revoked.json()["revoked"] is True
 
     rollback = client.post(
-        "/v2/voices/narrator/rollback",
+        "/v1/speechrail/voices/narrator/rollback",
         json={
             "target_revision": first.revision,
             "expected_revision": second.revision,
