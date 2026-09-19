@@ -10,6 +10,8 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["音色创作"].exists)
         XCTAssertTrue(app.buttons["运行监控"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
+        // 2026-09-19：落地页从「服务状态」改成「语音助手」，所以这一页要自己走过去。
+        app.buttons["服务状态"].clickWhenReady()
         // 2026-09-19：这一行的文案从「本地控制通道已就绪」改成「可以在这里管理服务」——
         // 首屏要说的是"能不能在这里管服务"，不是"哪条通道起来了"（SESSIONS-SPEC §12.1.8.1）。
         XCTAssertTrue(app.staticTexts["可以在这里管理服务"].exists)
@@ -46,6 +48,9 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["引擎"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["服务状态"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
+        // 2026-09-19：落地页改成「语音助手」；这一页的断言要先自己切过来
+        // （SESSIONS-SPEC §13 D15）。
+        app.buttons["服务状态"].clickWhenReady()
         // 页首那一句话取自 `AppRoute.overview.pageSubtitle`，与稿逐字一致；
         // 旧文案「确认本机语音服务能否使用」只留在 `purpose`（侧栏行的帮助值）。
         XCTAssertTrue(
