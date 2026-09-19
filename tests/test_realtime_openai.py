@@ -18,6 +18,7 @@ from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
     apply_session_update,
+    error_event,
     session_created,
     transcription_segment,
 )
@@ -383,6 +384,17 @@ def _client(
 
 def _pcm16(audio: bytes) -> str:
     return base64.b64encode(audio).decode("ascii")
+
+
+def test_backend_busy_error_keeps_compat_code_and_namespaced_reason() -> None:
+    event = error_event(
+        code="backend_busy",
+        message="realtime streaming session capacity is full",
+        busy_reason="realtime_session_limit",
+    )
+
+    assert event["error"]["code"] == "backend_busy"
+    assert event["speechrail"] == {"busy_reason": "realtime_session_limit"}
 
 
 def test_openai_session_created_and_updated() -> None:
