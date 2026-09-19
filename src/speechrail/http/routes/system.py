@@ -584,7 +584,11 @@ async def _evaluate_probe_intelligibility(
 ) -> float:
     """Transcribe one valid sample per fixed probe after the TTS phase completes."""
     scores: list[float] = []
-    async with services.governor.reserve(\n        WorkClass.BATCH_ASR,\n        expires_at=expires_at,\n        purpose=WorkPurpose.QUALITY_VALIDATION,\n    ):
+    async with services.governor.reserve(
+        WorkClass.BATCH_ASR,
+        expires_at=expires_at,
+        purpose=WorkPurpose.QUALITY_VALIDATION,
+    ):
         for probe in vq.VOICE_QUALITY_V1_ZH_PROBES:
             pcm = representative_pcm.get(probe["id"])
             if pcm is None:
