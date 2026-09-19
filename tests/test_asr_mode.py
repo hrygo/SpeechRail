@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 from speechrail.runtime.asr_mode import AsrModeBusy, AsrModeGate
+from speechrail.runtime.busy import BusyReason
 
 
 def test_batch_cannot_enter_unfinished_stream() -> None:
@@ -17,8 +18,10 @@ def test_batch_cannot_enter_unfinished_stream() -> None:
     assert gate.active_mode == "streaming"
     assert gate.active_count == 1
 
-    with pytest.raises(AsrModeBusy, match="streaming"):
+    with pytest.raises(AsrModeBusy, match="streaming") as caught:
         gate.acquire("batch")
+    assert caught.value.busy_reason == BusyReason.ASR_MODE_CONFLICT
+    assert caught.value.retryable is True
 
     gate.release(stream_lease)
     batch_lease = gate.acquire("batch")
