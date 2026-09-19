@@ -69,9 +69,11 @@ def test_conditional_lease_checks_revision_inside_registry_lock(tmp_path):
         expected_revision=created.revision,
     )
 
-    with pytest.raises(VoiceRevisionConflictError):
-        with registry.lease_profile("stable", expected_revision=created.revision):
-            pass
+    with (
+        pytest.raises(VoiceRevisionConflictError),
+        registry.lease_profile("stable", expected_revision=created.revision),
+    ):
+        pass
 
     with registry.lease_profile("stable", expected_revision=updated.revision) as leased:
         assert leased.revision == updated.revision
@@ -101,9 +103,11 @@ def test_legacy_record_without_revision_remains_unknown(tmp_path):
     legacy = registry.get_profile("legacy")
     assert legacy.revision is None
 
-    with pytest.raises(VoiceRevisionConflictError):
-        with registry.lease_profile("legacy", expected_revision="vr_" + "0" * 32):
-            pass
+    with (
+        pytest.raises(VoiceRevisionConflictError),
+        registry.lease_profile("legacy", expected_revision="vr_" + "0" * 32),
+    ):
+        pass
 
 
 def test_revision_persists_across_registry_restart(tmp_path):
