@@ -351,7 +351,9 @@ def test_design_eviction_deadline_prevents_asr_and_publication(
     import asyncio
 
     client, registry, synth, asr = make_client(tmp_path, monkeypatch)
-    client.app.state.settings.request_timeout_seconds = 0.1
+    # Leave enough budget to enter the wildcard maintenance handoff.  The
+    # eviction itself deliberately outlives the request and must be cancelled.
+    client.app.state.settings.request_timeout_seconds = 1.0
     cancelled = []
 
     async def slow_eviction() -> None:
