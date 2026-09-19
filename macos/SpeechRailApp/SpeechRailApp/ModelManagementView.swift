@@ -148,7 +148,8 @@ public struct ModelManagementView: View {
             ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
                 ProfileChoiceCard(
                     profile: profile,
-                    sizeText: summary(for: profile).map { "准备大小 \(formatBytes($0.downloadBytes))" },
+                    // 「准备大小」读不出是干什么的：这一格说的是"换到这一档要下载多少"。
+                    sizeText: summary(for: profile).map { "要下载 \(formatBytes($0.downloadBytes))" },
                     specs: profileSpecs(for: profile),
                     isSelected: selectedProfile == profile,
                     isRunning: currentServiceProfile == profile
@@ -257,7 +258,7 @@ public struct ModelManagementView: View {
 
     private var profileFacts: some View {
         HStack(spacing: 0) {
-            fact("准备大小", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
+            fact("要下载", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -400,7 +401,7 @@ public struct ModelManagementView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
                 title: "说话人区分要用的模型",
-                detail: "这一档做说话人区分还要单独下载的模型文件；它的对齐模型也列在下面的模型文件里。"
+                detail: "这一档做说话人区分还要单独下载模型文件；跟它配套的那几个也列在下面的模型文件里。"
             )
             VStack(spacing: 0) {
                 ForEach(independentDiarizationKeys, id: \.self) { key in
