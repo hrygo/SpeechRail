@@ -58,6 +58,7 @@ from speechrail.domain.tts import (
     canonicalize_clone_reference_audio,
     get_voice_registry,
 )
+from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
@@ -403,6 +404,7 @@ async def _synthesize_probes(
     voice_id: str,
     repetitions: int,
     *,
+    voice_revision: str | None = None,
     expires_at: float | None = None,
 ) -> tuple[bytes, int, int, list[str], bool, dict[str, bytes]]:
     pcm = bytearray()
@@ -419,6 +421,7 @@ async def _synthesize_probes(
                 voice=voice_id,
                 output_format="pcm16",
                 sample_rate=24_000,
+                expected_voice_revision=voice_revision,
             )
             probe_pcm = bytearray()
             try:
@@ -1561,6 +1564,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             return error_response(400, request_id, code, err_str)
         return JSONResponse(status_code=200, content=evaluation.report.to_dict())
 
+    @router.post("/v2/voices/{voice_id}/quality-runs")
     @router.post("/v1/voices/{voice_id}/quality-runs")
     async def run_voice_quality(voice_id: str, request: Request) -> JSONResponse:
         """Run bounded quality probes against a voice profile."""
@@ -1626,6 +1630,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                         synthesizer,
                         profile.id,
                         runs,
+                        voice_revision=profile.revision,
                         expires_at=expires_at,
                     )
         except GovernorQueueFullError:
@@ -1777,6 +1782,32 @@ def create_system_router(services: AppServices) -> APIRouter:
             variant_name,
             resolved.version,
         )
+        if request.url.path.startswith("/v2/"):
+            artifact = (
+                active.tts_clone
+                if profile.mode == "clone" and active.tts_clone is not None
+                else active.tts
+            )
+            evidence = build_quality_evidence(
+                profile=profile,
+                report=report,
+                probe_set=str(probe_set),
+                repetitions=runs,
+                model_artifact=artifact.key if artifact is not None else None,
+                model_source=artifact.model_id if artifact is not None else None,
+                model_variant=artifact.variant if artifact is not None else None,
+                model_catalog_revision=(
+                    artifact.revision if artifact is not None else None
+                ),
+                model_runtime_revision=None,
+            )
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "legacy_report": report.to_dict(),
+                    "evidence": evidence,
+                },
+            )
         return JSONResponse(status_code=200, content=report.to_dict())
 
     @router.delete("/v1/voices/{voice_id}")
