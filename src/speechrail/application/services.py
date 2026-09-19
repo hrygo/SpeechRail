@@ -588,6 +588,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     governor = ResourceGovernor(
         settings.governor_limits,
         on_reject=metrics.record_governor_rejection,
+        on_admit=metrics.record_governor_admission,
+        on_release=metrics.record_governor_release,
         allow_heavy_overlap=allow_heavy_overlap,
         policy_reason=policy_reason,
     )
