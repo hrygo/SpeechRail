@@ -18,9 +18,11 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from speechrail.backends.model_identity import observed_runtime_revision
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceStoreUnavailableError
+from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -127,8 +129,8 @@ class Qwen3TtsWorker:
     """One supervised local Qwen3-TTS worker behind the public TTS port.
 
     The worker owns all vendor imports and model weights.  This parent process
-    speaks only the private framed protocol and never passes a model ID, URL,
-    instruction, or arbitrary voice description across that boundary.  The
+    speaks only the private framed protocol. Leased recipes and explicit preview
+    instructions stay on that local pipe; they are not discovery or log fields. The
     profile policy stays here: one ready handshake with backend/device/dtype/
     sample-rate identity, one private response ID per synthesis, a strictly
     ordered ``audio* → completed`` stream, and abort on any unfinished stream.
@@ -144,12 +146,15 @@ class Qwen3TtsWorker:
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
+        self._supports_profile_snapshot = False
         self._epoch: int = 0
         self._fallback_abort_count = 0
         self._reload_count = 0
         self._on_delivery_event = on_delivery_event
+        self._timing_sidecars: dict[str, TtsTimingSidecar] = {}
         self.last_active: float = time.monotonic()
         self.model_variant: str = config.model_variant
+        self._runtime_revision: str | None = None
 
     @property
     def alive(self) -> bool:
@@ -159,6 +164,11 @@ class Qwen3TtsWorker:
     def ready(self) -> bool:
         """Return whether the supervised worker can accept another request."""
         return self._started and self._transport.alive
+
+    @property
+    def runtime_revision(self) -> str | None:
+        """Return the observed identity of the currently ready worker, if known."""
+        return self._runtime_revision if self.ready else None
 
     @property
     def lifecycle_stats(self) -> dict[str, int | bool]:
@@ -185,6 +195,8 @@ class Qwen3TtsWorker:
         if self._started:
             return
         is_reload = self._epoch > 0
+        self._supports_profile_snapshot = False
+        self._runtime_revision = None
         try:
             await self._transport.start()
             await self._transport.send(
@@ -207,6 +219,11 @@ class Qwen3TtsWorker:
                 or ready.get("model_variant") != self.config.model_variant
             ):
                 raise RuntimeError("backend_identity_mismatch")
+            snapshot_version = ready.get("profile_snapshot_version")
+            self._supports_profile_snapshot = (
+                type(snapshot_version) is int and snapshot_version == 1
+            )
+            self._runtime_revision = observed_runtime_revision(ready)
             self._started = True
             self._epoch += 1
             if is_reload:
@@ -214,6 +231,7 @@ class Qwen3TtsWorker:
                 self._record_delivery_event("reload")
             self.last_active = time.monotonic()
         except BaseException:
+            self._runtime_revision = None
             await self._transport.abort()
             raise
 
@@ -227,7 +245,9 @@ class Qwen3TtsWorker:
             # Keep the immutable clone reference alive until the worker has
             # completed (or the abort/reap path has finished).  The registry
             # lock itself is held only for the short snapshot/refcount steps.
-            with get_voice_registry().lease_profile(request.voice) as profile:
+            with get_voice_registry().lease_profile(
+                request.voice, expected_revision=request.expected_voice_revision
+            ) as profile:
                 async with self._lock:
                     if not self._started:
                         await self._start_locked()
@@ -247,11 +267,28 @@ class Qwen3TtsWorker:
                         frame_payload["instruction"] = request.instruction
                     if request.seed is not None:
                         frame_payload["seed"] = request.seed
+                    if request.timing_mode is not None:
+                        frame_payload["timing_mode"] = request.timing_mode
                     binding = resolve_binding(
                         self.model_variant,
                         request.voice,
                         profile=profile,
                     )
+                    if (
+                        self.model_variant == "voice_design" and request.instruction is None
+                        and not self._supports_profile_snapshot
+                    ):
+                        raise RuntimeError("worker_profile_snapshot_unsupported")
+                    if not binding.is_clone and self._supports_profile_snapshot:
+                        # The child must not re-resolve a mutable instruction profile
+                        # after this lease or between acoustic text chunks.
+                        frame_payload["voice_profile"] = {
+                            "id": profile.id,
+                            "mode": profile.mode,
+                            "instruction": profile.instruction,
+                            "seed": profile.seed,
+                            "temperature": profile.temperature,
+                        }
                     if binding.is_clone and binding.ref_audio_path:
                         frame_payload["ref_audio"] = binding.ref_audio_path
                         frame_payload["ref_text"] = binding.ref_text or ""
@@ -265,6 +302,8 @@ class Qwen3TtsWorker:
                                 raise RuntimeError("worker_response_id_mismatch")
                             if frame.get("type") == "completed":
                                 self._record_completion_stats(frame)
+                                if request.timing_mode == "chunk":
+                                    self._store_timing_sidecar(response_id, frame)
                                 completed = True
                                 return
                             if frame.get("type") == "error":
@@ -307,11 +346,33 @@ class Qwen3TtsWorker:
                         self.last_active = time.monotonic()
                         if not completed and self._epoch == epoch:
                             self._started = False
+                            self._runtime_revision = None
                             self._fallback_abort_count += 1
                             self._record_delivery_event("abort_fallback")
                             await self._transport.abort()
 
         return stream()
+
+    def _store_timing_sidecar(
+        self,
+        response_id: str,
+        frame: dict[str, object],
+    ) -> None:
+        raw = frame.get("timing_sidecar")
+        if not isinstance(raw, dict):
+            return
+        try:
+            sidecar = TtsTimingSidecar.model_validate(raw)
+        except ValueError:
+            return
+        self._timing_sidecars[response_id] = sidecar
+        while len(self._timing_sidecars) > 64:
+            self._timing_sidecars.pop(next(iter(self._timing_sidecars)))
+
+    def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
+        """Consume one completed timing result without affecting audio delivery."""
+
+        return self._timing_sidecars.pop(response_id, None)
 
     def _record_completion_stats(self, frame: dict[str, object]) -> None:
         raw = frame.get("delivery_stats")
@@ -325,6 +386,7 @@ class Qwen3TtsWorker:
             "clone_loudness_requests": "clone_loudness_request",
             "clone_loudness_calibrated": "clone_loudness_calibrated",
             "clone_loudness_peak_ceiling": "clone_loudness_peak_ceiling",
+            "float_overrange_chunks": "float_overrange",
         }
         for field, event in names.items():
             amount = raw.get(field)
@@ -351,6 +413,7 @@ class Qwen3TtsWorker:
         """Terminate the worker, waiting for any active stream to finish first."""
         async with self._lock:
             self._started = False
+            self._runtime_revision = None
             self._epoch += 1
             await self._transport.abort()
 
@@ -463,6 +526,15 @@ class Qwen3TtsCapabilityRouter:
             return "voice_clone" if self.clone is not None else "tts"
         return "voice_design" if self.clone is not None else "tts"
 
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        """Return the ready worker identity for the voice's selected lane."""
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(voice)
+        if profile.mode == "clone":
+            return self.clone.runtime_revision if self.clone is not None else None
+        return self.primary.runtime_revision
+
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         from speechrail.domain.tts import get_voice_registry
 
@@ -481,6 +553,16 @@ class Qwen3TtsCapabilityRouter:
         else:
             selected = self.primary
         return selected.synthesize(request)
+
+    def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
+        """Consume timing metadata from whichever worker served the response."""
+
+        sidecar = self.primary.take_timing_sidecar(response_id)
+        if sidecar is not None:
+            return sidecar
+        if self.clone is not None:
+            return self.clone.take_timing_sidecar(response_id)
+        return None
 
     async def evict_warm_capability(self) -> None:
         """Release all TTS workers before a heavyweight validation phase or idle eviction."""

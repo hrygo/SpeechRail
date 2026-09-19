@@ -27,6 +27,16 @@ class WorkClass(StrEnum):
         return self in {self.REALTIME_ASR, self.REALTIME_TTS}
 
 
+class WorkPurpose(StrEnum):
+    """Bounded service intent; never an arbitrary client priority."""
+
+    DEFAULT = "default"
+    INTERACTIVE = "interactive"
+    PREFETCH = "prefetch"
+    VOICE_CREATION = "voice_creation"
+    QUALITY_VALIDATION = "quality_validation"
+
+
 class GovernorQueueFullError(RuntimeError):
     """The bounded waiting queue for a work class is full."""
 
@@ -47,6 +57,7 @@ class GovernorSnapshot:
 class _Waiter:
     ticket: int
     work_class: WorkClass
+    purpose: WorkPurpose
     enqueued_at: float
     resource_key: str | None = None
 
@@ -75,12 +86,16 @@ class ResourceGovernor:
         limits: GovernorLimits,
         *,
         on_reject: Callable[[WorkClass], None] | None = None,
+        on_admit: Callable[[WorkClass, WorkPurpose, float], None] | None = None,
+        on_release: Callable[[WorkClass, WorkPurpose, float, str], None] | None = None,
         clock: Callable[[], float] | None = None,
         allow_heavy_overlap: bool = True,
         policy_reason: str = "caller default",
     ) -> None:
         self._limits = limits
         self._on_reject = on_reject
+        self._on_admit = on_admit
+        self._on_release = on_release
         self._clock = clock or time.monotonic
         self._allow_heavy_overlap = allow_heavy_overlap
         self._policy_reason = policy_reason
@@ -102,11 +117,15 @@ class ResourceGovernor:
         deadline: float | None = None,
         expires_at: float | None = None,
         resource_key: str | None = None,
+        purpose: WorkPurpose | str = WorkPurpose.DEFAULT,
     ) -> T:
         """Run work after capacity admission, respecting an optional deadline."""
         expiry = self._resolve_expiry(deadline=deadline, expires_at=expires_at)
         async with self.reserve(
-            work_class, expires_at=expiry, resource_key=resource_key
+            work_class,
+            expires_at=expiry,
+            resource_key=resource_key,
+            purpose=purpose,
         ):
             if expiry is None:
                 return await operation()
@@ -124,22 +143,47 @@ class ResourceGovernor:
         deadline: float | None = None,
         expires_at: float | None = None,
         resource_key: str | None = None,
+        purpose: WorkPurpose | str = WorkPurpose.DEFAULT,
     ) -> AsyncIterator[None]:
         """Hold one resource lane while an operation yields streamed output."""
         normalized_key = self._normalize_resource_key(work_class, resource_key)
+        normalized_purpose = self._normalize_purpose(purpose)
         expiry = self._resolve_expiry(deadline=deadline, expires_at=expires_at)
         if expiry is None:
-            await self._acquire(work_class, normalized_key)
+            queue_wait = await self._acquire(
+                work_class, normalized_key, normalized_purpose
+            )
         else:
             remaining = expiry - self._clock()
             if remaining <= 0:
                 raise TimeoutError
             async with asyncio.timeout(remaining):
-                await self._acquire(work_class, normalized_key)
+                queue_wait = await self._acquire(
+                    work_class, normalized_key, normalized_purpose
+                )
+        admitted_at = self._clock()
+        self._emit_admit(work_class, normalized_purpose, queue_wait)
+        outcome = "completed"
         try:
             yield
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
+        except GeneratorExit:
+            outcome = "cancelled"
+            raise
+        except BaseException:
+            outcome = "error"
+            raise
         finally:
+            service_seconds = max(0.0, self._clock() - admitted_at)
             await self._release(work_class, normalized_key)
+            self._emit_release(
+                work_class,
+                normalized_purpose,
+                service_seconds,
+                outcome,
+            )
 
     def snapshot(self) -> GovernorSnapshot:
         """Return a point-in-time metric view suitable for readiness/metrics."""
@@ -154,7 +198,12 @@ class ResourceGovernor:
             policy_reason=self._policy_reason,
         )
 
-    async def _acquire(self, work_class: WorkClass, resource_key: str | None) -> None:
+    async def _acquire(
+        self,
+        work_class: WorkClass,
+        resource_key: str | None,
+        purpose: WorkPurpose,
+    ) -> float:
         async with self._condition:
             waiters = self._waiters_for(work_class)
             if len(waiters) >= self._limits.max_pending_per_class:
@@ -165,6 +214,7 @@ class ResourceGovernor:
             waiter = _Waiter(
                 ticket=self._ticket,
                 work_class=work_class,
+                purpose=purpose,
                 enqueued_at=self._clock(),
                 resource_key=resource_key,
             )
@@ -190,6 +240,7 @@ class ResourceGovernor:
                         self._active_tts_lanes.get(waiter.resource_key, 0) + 1
                     )
                 self._condition.notify_all()
+                return max(0.0, self._clock() - waiter.enqueued_at)
             except BaseException:
                 if waiter in waiters:
                     waiters.remove(waiter)
@@ -279,6 +330,49 @@ class ResourceGovernor:
             raise ValueError("resource_key must be a non-empty string")
         return resource_key.strip()
 
+    @staticmethod
+    def _normalize_purpose(purpose: WorkPurpose | str) -> WorkPurpose:
+        if isinstance(purpose, WorkPurpose):
+            return purpose
+        if not isinstance(purpose, str):
+            raise ValueError("purpose must be a bounded WorkPurpose")
+        try:
+            return WorkPurpose(purpose.strip())
+        except ValueError as exc:
+            raise ValueError("unsupported work purpose") from exc
+
+    def _emit_admit(
+        self,
+        work_class: WorkClass,
+        purpose: WorkPurpose,
+        queue_wait_seconds: float,
+    ) -> None:
+        if self._on_admit is None:
+            return
+        with suppress(Exception):
+            self._on_admit(
+                work_class,
+                purpose,
+                max(0.0, queue_wait_seconds),
+            )
+
+    def _emit_release(
+        self,
+        work_class: WorkClass,
+        purpose: WorkPurpose,
+        service_seconds: float,
+        outcome: str,
+    ) -> None:
+        if self._on_release is None:
+            return
+        with suppress(Exception):
+            self._on_release(
+                work_class,
+                purpose,
+                max(0.0, service_seconds),
+                outcome,
+            )
+
     def _batch_aging_wait_timeout(self, waiter: _Waiter) -> float | None:
         if waiter.is_realtime or self._batch_waiters[0] != waiter:
             return None
@@ -316,4 +410,5 @@ __all__ = [
     "GovernorSnapshot",
     "ResourceGovernor",
     "WorkClass",
+    "WorkPurpose",
 ]

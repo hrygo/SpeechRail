@@ -156,10 +156,11 @@ def _find_voice(voices: list[dict[str, Any]], voice: str) -> dict[str, Any] | No
 
 
 async def describe(client: SpeechRailClient) -> dict[str, Any]:
-    """Merge /v1/models + /v1/voices + /health into one capability snapshot."""
+    """Return legacy observations plus a separately identified atomic v2 snapshot."""
     models = await client.fetch_models()
     voices = await client.fetch_voices()
     health = await client.fetch_health()
+    effective = await client.fetch_capabilities()
     variant = _tts_variant(models)
     entry = _first_tts_model(models)
     model_profile = _text(entry.get("profile")) if entry is not None else None
@@ -198,6 +199,8 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
         },
         "models": models,
         "voices": voices,
+        "effective_capabilities": effective,
+        "legacy_discovery_consistency": "independent_reads",
     }
 
 

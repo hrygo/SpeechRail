@@ -179,13 +179,30 @@ def test_metrics_record_tts_records_rtf() -> None:
 
 def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
     metrics = Metrics()
-    metrics.record_realtime_phase("asr_admission", 0.04)
-    metrics.record_realtime_phase("send", 0.01)
+    for phase in (
+        "asr_admission",
+        "asr_flush",
+        "asr_commit_ack",
+        "asr_terminal_wait",
+        "tts_admission",
+        "send",
+    ):
+        metrics.record_realtime_phase(phase, 0.04)
     text = metrics.render_prometheus()
 
     assert "speechrail_realtime_phase_duration_seconds_bucket" in text
-    assert 'phase="asr_admission"' in text
-    assert 'phase="send"' in text
+    for phase in (
+        "asr_admission",
+        "asr_flush",
+        "asr_commit_ack",
+        "asr_terminal_wait",
+        "tts_admission",
+        "send",
+    ):
+        assert f'phase="{phase}"' in text
+
+    with pytest.raises(ValueError, match="unsupported realtime phase"):
+        metrics.record_realtime_phase("request_id_or_text", 0.01)
 
 
 def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> None:
@@ -198,6 +215,7 @@ def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> Non
     metrics.record_tts_delivery_event("clone_loudness_request")
     metrics.record_tts_delivery_event("clone_loudness_calibrated")
     metrics.record_tts_delivery_event("clone_loudness_peak_ceiling", amount=2)
+    metrics.record_tts_delivery_event("float_overrange")
     metrics.record_tts_delivery_event("abort_fallback")
     metrics.record_tts_delivery_event("reload")
 
@@ -209,6 +227,7 @@ def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> Non
     assert 'speechrail_tts_delivery_events_total{event="clone_loudness_request"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="clone_loudness_calibrated"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="clone_loudness_peak_ceiling"} 2' in text
+    assert 'speechrail_tts_delivery_events_total{event="float_overrange"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="abort_fallback"} 1' in text
     assert 'speechrail_tts_delivery_events_total{event="reload"} 1' in text
 
@@ -219,6 +238,27 @@ def test_metrics_escapes_label_values() -> None:
     m.inc("esc_counter", **{"endpoint": 'weird"path\\with\nnewline'})
     text = m.render_prometheus()
     assert 'weird\\"path\\\\with\\nnewline' in text
+
+
+def test_asr_scheduler_progress_metrics_use_fixed_names_without_task_labels() -> None:
+    metrics = Metrics()
+    text = metrics.render_prometheus(
+        resources={
+            "asr_scheduler_pending_streaming": 2,
+            "asr_scheduler_pending_batch": 1,
+            "asr_batch_head_cumulative_wait_seconds": 3.5,
+            "asr_batch_head_service_windows": 4,
+            "asr_batch_head_seconds_since_progress": 0.75,
+        }
+    )
+
+    assert "speechrail_asr_scheduler_pending_streaming 2" in text
+    assert "speechrail_asr_scheduler_pending_batch 1" in text
+    assert "speechrail_asr_batch_head_cumulative_wait_seconds 3.5" in text
+    assert "speechrail_asr_batch_head_service_windows 4" in text
+    assert "speechrail_asr_batch_head_seconds_since_progress 0.75" in text
+    assert "request_id" not in text
+    assert "task_id" not in text
 
 
 def test_metrics_governor_uses_class_label() -> None:

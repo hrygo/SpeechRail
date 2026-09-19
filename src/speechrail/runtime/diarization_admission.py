@@ -5,9 +5,14 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from speechrail.runtime.busy import BusyReason
+
 
 class DiarizationAdmissionFullError(RuntimeError):
     """Another continuous diarization session already owns the worker."""
+
+    busy_reason = BusyReason.DIARIZATION_CAPACITY
+    retryable = True
 
 
 class DiarizationAdmission:

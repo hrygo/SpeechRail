@@ -135,6 +135,8 @@ class DescribeResult(BaseModel):
     jobs: JobsStatus
     models: list[ModelEntry] = Field(default_factory=list)
     voices: list[VoiceEntry] = Field(default_factory=list)
+    effective_capabilities: dict[str, Any] | None = None
+    legacy_discovery_consistency: str = "independent_reads"
 
 
 class VoiceRecord(BaseModel):

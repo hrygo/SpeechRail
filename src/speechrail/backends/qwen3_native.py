@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -16,6 +18,7 @@ from speechrail.application.transcript_merge import TranscriptMerger
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker, WorkerTransportError
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
+from speechrail.runtime.asr_mode import AsrBatchTicket, AsrModeScheduler
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
     error_frame_message,
@@ -308,6 +311,28 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
             raise RuntimeError("shared owner owns receive")
         return await self._shared_owner.request(payload, binary=binary_payload)
 
+    def _new_batch_ticket(self) -> AsrBatchTicket | None:
+        scheduler = getattr(self._shared_owner, "mode_scheduler", None)
+        if not isinstance(scheduler, AsrModeScheduler):
+            return None
+        return scheduler.new_batch_ticket()
+
+    @asynccontextmanager
+    async def _batch_window(
+        self,
+        ticket: AsrBatchTicket | None,
+    ) -> AsyncIterator[None]:
+        scheduler = getattr(self._shared_owner, "mode_scheduler", None)
+        if isinstance(scheduler, AsrModeScheduler) and ticket is not None:
+            async with scheduler.batch_window(ticket):
+                yield
+            return
+        lease = self._shared_owner.mode_gate.acquire("batch")
+        try:
+            yield
+        finally:
+            self._shared_owner.mode_gate.release(lease)
+
     async def transcribe(
         self,
         pcm: bytes,
@@ -319,27 +344,32 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
     ) -> TranscriptResult:
         resolved_request_id = request_id or f"req_{uuid4().hex}"
         blocks = split_pcm(pcm, window_samples=16000 * 30, overlap_samples=16000)
+        ticket = self._new_batch_ticket()
         if len(blocks) > 1:
-            lease = self._shared_owner.mode_gate.acquire("batch")
-            try:
-                merger = TranscriptMerger()
-                for idx, block in enumerate(blocks):
-                    sub_req_id = f"{resolved_request_id}_win_{idx}"
+            merger = TranscriptMerger()
+            for idx, block in enumerate(blocks):
+                sub_req_id = f"{resolved_request_id}_win_{idx}"
+                async with self._batch_window(ticket):
                     result = await self._transcribe_window_with_retry(
-                        block.pcm, language, prompt, include_timestamps, sub_req_id
+                        block.pcm,
+                        language,
+                        prompt,
+                        include_timestamps,
+                        sub_req_id,
                     )
-                    merger.add(block, result)
-                return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
-            finally:
-                self._shared_owner.mode_gate.release(lease)
+                merger.add(block, result)
+                if idx + 1 < len(blocks):
+                    await asyncio.sleep(0)
+            return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
 
-        lease = self._shared_owner.mode_gate.acquire("batch")
-        try:
+        async with self._batch_window(ticket):
             return await self._transcribe_window_with_retry(
-                pcm, language, prompt, include_timestamps, resolved_request_id
+                pcm,
+                language,
+                prompt,
+                include_timestamps,
+                resolved_request_id,
             )
-        finally:
-            self._shared_owner.mode_gate.release(lease)
 
     async def align_text(
         self, pcm: bytes, *, text: str, language: str | None
@@ -348,9 +378,9 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
 
         if not pcm or len(pcm) % 2 or not text:
             raise ValueError("fixed-text alignment requires non-empty PCM16 and text")
-        lease = self._shared_owner.mode_gate.acquire("batch")
         request_id = f"align_{uuid4().hex}"
-        try:
+        ticket = self._new_batch_ticket()
+        async with self._batch_window(ticket):
             await self.start()
             result = await self._shared_owner.request(
                 {
@@ -365,8 +395,6 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
                 },
                 binary=pcm,
             )
-        finally:
-            self._shared_owner.mode_gate.release(lease)
         if result.get("type") != "align_result" or result.get("request_id") != request_id:
             raise RuntimeError(error_frame_message(result, "worker_alignment_failed"))
         raw_tokens = result.get("tokens")
@@ -398,38 +426,41 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         request_id: str | None = None,
     ) -> TranscriptResult:
         resolved_request_id = request_id or f"req_{uuid4().hex}"
-        lease = self._shared_owner.mode_gate.acquire("batch")
-        try:
-            buffer = PcmWindowBuffer()
-            merger = TranscriptMerger()
-            window_idx = 0
+        buffer = PcmWindowBuffer()
+        merger = TranscriptMerger()
+        window_idx = 0
+        ticket = self._new_batch_ticket()
 
-            async def _process_block(block: PcmBlock) -> None:
-                nonlocal window_idx
-                sub_request_id = f"{resolved_request_id}_win_{window_idx}"
-                window_idx += 1
+        async def _process_block(block: PcmBlock) -> None:
+            nonlocal window_idx
+            sub_request_id = f"{resolved_request_id}_win_{window_idx}"
+            async with self._batch_window(ticket):
                 result = await self._transcribe_window_with_retry(
-                    block.pcm, language, prompt, include_timestamps, sub_request_id
+                    block.pcm,
+                    language,
+                    prompt,
+                    include_timestamps,
+                    sub_request_id,
                 )
-                merger.add(block, result)
+            merger.add(block, result)
+            window_idx += 1
+            await asyncio.sleep(0)
 
-            async for chunk in audio:
-                for block in buffer.feed(chunk):
-                    await _process_block(block)
-
-            for block in buffer.finish():
+        async for chunk in audio:
+            for block in buffer.feed(chunk):
                 await _process_block(block)
 
-            if window_idx == 0:
-                return TranscriptResult(
-                    request_id=resolved_request_id,
-                    model_id="speechrail/qwen3-asr-1.7b",
-                    duration_ms=0,
-                )
+        for block in buffer.finish():
+            await _process_block(block)
 
-            return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
-        finally:
-            self._shared_owner.mode_gate.release(lease)
+        if window_idx == 0:
+            return TranscriptResult(
+                request_id=resolved_request_id,
+                model_id="speechrail/qwen3-asr-1.7b",
+                duration_ms=0,
+            )
+
+        return merger.finish(resolved_request_id, "speechrail/qwen3-asr-1.7b")
 
     async def _transcribe_window_with_retry(
         self,

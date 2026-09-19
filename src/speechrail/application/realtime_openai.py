@@ -33,6 +33,7 @@ from speechrail.application.diarization import (
     SessionDone,
     StatusChanged,
 )
+from speechrail.application.render_receipts import bind_observed_runtime_revision
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
@@ -88,13 +89,20 @@ from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
+    VoiceRevisionConflictError,
+    VoiceRevokedError,
     VoiceStoreUnavailableError,
     resolve_voice,
 )
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
+from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 
@@ -156,6 +164,8 @@ class OpenAIRealtimeSession:
         self._diarization_engine = services.diarization_engine
         self._tts = services.tts_synthesizer
         active = active_model_catalog(self._settings)
+        self._tts_artifact = active.tts
+        self._tts_clone_artifact = active.tts_clone
         self._tts_variant = active.tts.variant if active.tts is not None else None
         self._tts_clone_variant = (
             active.tts_clone.variant if active.tts_clone is not None else None
@@ -184,6 +194,8 @@ class OpenAIRealtimeSession:
         self._asr_resources: AsyncExitStack | None = None
         self._tts_task: asyncio.Task[None] | None = None
         self._tts_response_id: str | None = None
+        self._tts_receipt_id: str | None = None
+        self._render_receipts_enabled = False
         self._diarization: DiarizationSession | None = None
         self._diarization_events: asyncio.Task[None] | None = None
         self._diarization_resources: AsyncExitStack | None = None
@@ -320,6 +332,7 @@ class OpenAIRealtimeSession:
         # its legacy wire shape never reaches a client.
         adapted_event = dict(event)
         requested_enabled: bool | None = None
+        requested_receipts: bool | None = None
         raw_session = event.get("session")
         if isinstance(raw_session, dict):
             raw_transcription = raw_session.get("input_audio_transcription")
@@ -333,19 +346,41 @@ class OpenAIRealtimeSession:
         if isinstance(raw_session, dict) and "speechrail" in raw_session:
             session = dict(raw_session)
             raw_extension = session.pop("speechrail")
-            if (
-                not isinstance(raw_extension, dict)
-                or set(raw_extension) != {"diarization"}
-                or not isinstance(raw_extension["diarization"], dict)
-                or set(raw_extension["diarization"]) != {"enabled"}
-                or not isinstance(raw_extension["diarization"].get("enabled"), bool)
-            ):
+            if not isinstance(raw_extension, dict):
                 raise RealtimeAdapterError(
-                    "invalid_diarization",
-                    "session.speechrail.diarization requires boolean enabled only",
+                    "invalid_speechrail_extension",
+                    "session.speechrail must be an object",
                 )
-            enabled = raw_extension["diarization"]["enabled"]
-            requested_enabled = enabled
+            unknown = set(raw_extension) - {"diarization", "render_receipts"}
+            if unknown:
+                raise RealtimeAdapterError(
+                    "invalid_speechrail_extension",
+                    "unsupported session.speechrail field",
+                )
+            if "diarization" in raw_extension:
+                raw_diarization = raw_extension["diarization"]
+                if (
+                    not isinstance(raw_diarization, dict)
+                    or set(raw_diarization) != {"enabled"}
+                    or not isinstance(raw_diarization.get("enabled"), bool)
+                ):
+                    raise RealtimeAdapterError(
+                        "invalid_diarization",
+                        "session.speechrail.diarization requires boolean enabled only",
+                    )
+                requested_enabled = raw_diarization["enabled"]
+            if "render_receipts" in raw_extension:
+                raw_receipts = raw_extension["render_receipts"]
+                if (
+                    not isinstance(raw_receipts, dict)
+                    or set(raw_receipts) != {"enabled"}
+                    or not isinstance(raw_receipts.get("enabled"), bool)
+                ):
+                    raise RealtimeAdapterError(
+                        "invalid_render_receipts",
+                        "session.speechrail.render_receipts requires boolean enabled only",
+                    )
+                requested_receipts = raw_receipts["enabled"]
             adapted_event["session"] = session
         updated, config = apply_session_update(
             adapted_event,
@@ -478,15 +513,25 @@ class OpenAIRealtimeSession:
                 else None
             )
         self._config = config
-        if self._diarization_enabled:
-            session_payload = updated.get("session")
-            if isinstance(session_payload, dict):
-                session_payload["speechrail"] = {
-                    "diarization": {"enabled": True, "version": 1, "max_speakers": 4}
+        if requested_receipts is not None:
+            self._render_receipts_enabled = requested_receipts
+        session_payload = updated.get("session")
+        if isinstance(session_payload, dict):
+            extension: dict[str, object] = {}
+            if self._diarization_enabled:
+                extension["diarization"] = {
+                    "enabled": True,
+                    "version": 1,
+                    "max_speakers": 4,
                 }
-                session_payload["speechrail"] = {
-                    "diarization": {"enabled": True, "version": 1, "max_speakers": 4}
+            if self._render_receipts_enabled:
+                extension["render_receipts"] = {
+                    "enabled": True,
+                    "version": 1,
+                    "integrity_boundary": "pcm16_after_websocket_send",
                 }
+            if extension:
+                session_payload["speechrail"] = extension
         await self._send(self._with_speech_capabilities(updated))
 
     def _with_speech_capabilities(
@@ -528,12 +573,14 @@ class OpenAIRealtimeSession:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             message = str(exc)
-            code = (
-                "language_not_supported"
-                if message.startswith("language_not_supported")
-                else "backend_busy"
-            )
-            raise RealtimeAdapterError(code, message) from exc
+            if message.startswith("language_not_supported"):
+                raise RealtimeAdapterError("language_not_supported", message) from exc
+            busy_reason = str(infer_backend_busy_reason(exc))
+            raise RealtimeAdapterError(
+                "backend_busy",
+                message,
+                busy_reason=busy_reason,
+            ) from exc
         self._asr = asr
         self._alignment_pcm.clear()
         self._alignment_overflow = False
@@ -626,8 +673,12 @@ class OpenAIRealtimeSession:
                 flush_threshold = max(1, int(chunk_sec * 32_000))
                 if self._unflushed_bytes >= flush_threshold:
                     self._unflushed_bytes = 0
+                    flush_started = time.monotonic()
                     with contextlib.suppress(Exception):
                         await self._asr.flush()
+                    self._services.metrics.record_realtime_phase(
+                        "asr_flush", time.monotonic() - flush_started
+                    )
 
         elif dec.kind == "end":
             self._services.metrics.record_vad("ended")
@@ -786,8 +837,12 @@ class OpenAIRealtimeSession:
             flush_threshold = max(1, int(chunk_sec * 32_000))
             if self._unflushed_bytes >= flush_threshold:
                 self._unflushed_bytes = 0
+                flush_started = time.monotonic()
                 with contextlib.suppress(Exception):
                     await self._asr.flush()
+                self._services.metrics.record_realtime_phase(
+                    "asr_flush", time.monotonic() - flush_started
+                )
 
     async def _commit_audio(self, reason: str = "client") -> None:
         # If speech admission is active, flush any remaining sub-frame leftover.
@@ -878,9 +933,17 @@ class OpenAIRealtimeSession:
             # terminal event.  Keep commit, final event delivery and teardown
             # under one request deadline so its governor lane is recoverable.
             async with asyncio.timeout(self._settings.request_timeout_seconds):
+                commit_started = time.monotonic()
                 await self._asr.commit(want_segments=False)
+                self._services.metrics.record_realtime_phase(
+                    "asr_commit_ack", time.monotonic() - commit_started
+                )
                 if self._asr_reader is not None:
+                    terminal_started = time.monotonic()
                     await self._asr_reader
+                    self._services.metrics.record_realtime_phase(
+                        "asr_terminal_wait", time.monotonic() - terminal_started
+                    )
                     self._asr_reader = None
         except TimeoutError as exc:
             await self._discard_failed_commit()
@@ -985,13 +1048,38 @@ class OpenAIRealtimeSession:
                     "voice_not_found", f"unknown voice: {response_voice[:200]}"
                 ) from None
             self._require_voice_available(response_voice)
+        selected_voice = response_voice or str(
+            self._config.get("voice") or DEFAULT_VOICE_ID
+        )
+        from speechrail.domain.tts import get_voice_profile
+
+        try:
+            selected_profile = get_voice_profile(selected_voice)
+        except VoiceStoreUnavailableError:
+            raise RealtimeAdapterError(
+                "voice_store_unavailable",
+                "custom voice storage is unavailable",
+            ) from None
+        except ValueError:
+            raise RealtimeAdapterError(
+                "voice_not_found",
+                f"unknown voice: {selected_voice[:200]}",
+            ) from None
+        if selected_profile.revoked:
+            raise RealtimeAdapterError(
+                "voice_revoked",
+                f"voice {selected_voice[:200]} is revoked",
+            )
+
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
         self._tts_response_id = response_id
         self._tts_task = asyncio.create_task(
             self._synthesize_tts(
                 self._pending_text,
-                voice=response_voice or str(self._config.get("voice") or DEFAULT_VOICE_ID),
+                voice=selected_voice,
+                voice_revision=selected_profile.revision,
+                voice_mode=selected_profile.mode,
                 language=str(self._config.get("language") or "auto"),
                 speed=response_speed,
                 response_id=response_id,
@@ -1020,6 +1108,11 @@ class OpenAIRealtimeSession:
                 "voice_not_found", f"unknown voice: {voice[:200]}"
             ) from None
 
+        if profile.revoked:
+            raise RealtimeAdapterError(
+                "voice_revoked",
+                f"voice {voice[:200]} is revoked",
+            )
         variant = self._tts_clone_variant if profile.mode == "clone" else self._tts_variant
         if variant not in {"voice_design", "custom_voice", "base"}:
             raise RealtimeAdapterError(
@@ -1054,11 +1147,19 @@ class OpenAIRealtimeSession:
         self._tts_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._tts_task
+        receipt_id = self._tts_receipt_id
+        if receipt_id is not None:
+            self._services.render_receipts.cancel(receipt_id)
         await self._send(
-            response_done(session_id=self._session_id, response_id=response_id, status="cancelled")
+            self._response_done_event(
+                response_id=response_id,
+                status="cancelled",
+                receipt_id=receipt_id,
+            )
         )
         self._tts_task = None
         self._tts_response_id = None
+        self._tts_receipt_id = None
 
     def _completed_event(self, *, transcript: str) -> dict[str, object]:
         """Render the terminal completed event for the current ASR item."""
@@ -1445,6 +1546,8 @@ class OpenAIRealtimeSession:
         text: str,
         *,
         voice: str,
+        voice_revision: str | None,
+        voice_mode: str,
         language: str,
         speed: float,
         response_id: str,
@@ -1460,6 +1563,39 @@ class OpenAIRealtimeSession:
         wire_profile: Literal["legacy", "current"] = (
             "current" if self._config.get("wire_profile") == "current" else "legacy"
         )
+        receipt_id: str | None = None
+        if self._render_receipts_enabled:
+            artifact = (
+                self._tts_clone_artifact
+                if voice_mode == "clone" and self._tts_clone_artifact is not None
+                else self._tts_artifact
+            )
+            try:
+                receipt_id = self._services.render_receipts.begin(
+                    request_id=response_id,
+                    response_id=response_id,
+                    voice_id=voice,
+                    voice_revision=voice_revision,
+                    model_artifact=artifact.key if artifact is not None else None,
+                    model_source=artifact.model_id if artifact is not None else None,
+                    model_variant=artifact.variant if artifact is not None else None,
+                    model_catalog_revision=(
+                        artifact.revision if artifact is not None else None
+                    ),
+                    model_runtime_revision=None,
+                    output_format="pcm16",
+                    sample_rate=24_000,
+                    boundary="pcm16_after_websocket_send",
+                )
+            except RuntimeError:
+                await self._send(
+                    error_event(
+                        code="render_receipt_store_full",
+                        message="render receipt store has no safe capacity",
+                    )
+                )
+                return
+        self._tts_receipt_id = receipt_id
         try:
             await self._send(response_created(session_id=self._session_id, response_id=response_id))
             await self._send(
@@ -1474,11 +1610,11 @@ class OpenAIRealtimeSession:
             )
 
             try:
-                import time as _time
-
-                _ttfa_t0 = _time.monotonic()
+                _ttfa_t0 = time.monotonic()
                 _ttfa_recorded = False
-                _admission_started = _time.monotonic()
+                _admission_started = time.monotonic()
+                emitted_samples = 0
+                runtime_revision_checked = False
                 request = SpeechRequest(
                     text=text,
                     voice=voice,
@@ -1486,19 +1622,21 @@ class OpenAIRealtimeSession:
                     sample_rate=24_000,
                     speed=speed,
                     language=language,
+                    expected_voice_revision=voice_revision,
                 )
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     async with self._services.governor.reserve(
                         WorkClass.REALTIME_TTS,
                         deadline=self._settings.request_timeout_seconds,
                         resource_key=tts_resource_key(self._tts, request.voice),
+                        purpose=WorkPurpose.INTERACTIVE,
                     ):
                         self._services.metrics.record_realtime_phase(
-                            "tts_admission", _time.monotonic() - _admission_started
+                            "tts_admission", time.monotonic() - _admission_started
                         )
                         async for chunk in iter_validated_audio(self._tts.synthesize(request)):
                             if not _ttfa_recorded:
-                                self._services.metrics.record_ttfa(_time.monotonic() - _ttfa_t0)
+                                self._services.metrics.record_ttfa(time.monotonic() - _ttfa_t0)
                                 _ttfa_recorded = True
                             await self._send(
                                 response_audio_delta(
@@ -1509,25 +1647,64 @@ class OpenAIRealtimeSession:
                                     wire_profile=wire_profile,
                                 )
                             )
+                            emitted_samples += len(chunk.audio) // 2
+                            if receipt_id is not None:
+                                if not runtime_revision_checked:
+                                    runtime_revision_checked = True
+                                    bind_observed_runtime_revision(
+                                        self._services.render_receipts,
+                                        receipt_id,
+                                        synthesizer=self._tts,
+                                        voice=request.voice,
+                                    )
+                                self._services.render_receipts.accept_pcm(
+                                    receipt_id,
+                                    chunk.audio,
+                                )
             except asyncio.CancelledError:
+                if receipt_id is not None:
+                    self._services.render_receipts.cancel(receipt_id)
                 raise
             except (
                 TTSDeliveryError,
                 GovernorQueueFullError,
                 TimeoutError,
+                VoiceRevisionConflictError,
+                VoiceRevokedError,
                 VoiceStoreUnavailableError,
             ) as exc:
                 code = getattr(exc, "code", None) or (
                     "queue_full" if isinstance(exc, GovernorQueueFullError) else "backend_timeout"
                 )
+                if receipt_id is not None:
+                    self._services.render_receipts.fail(receipt_id, code)
                 await self._send(error_event(code=code, message="TTS response failed"))
                 await self._send(
-                    response_done(
-                        session_id=self._session_id, response_id=response_id, status="failed"
+                    self._response_done_event(
+                        response_id=response_id,
+                        status="failed",
+                        receipt_id=receipt_id,
                     )
                 )
                 return
 
+            if emitted_samples == 0:
+                if receipt_id is not None:
+                    self._services.render_receipts.fail(receipt_id, "empty_audio")
+                await self._send(
+                    error_event(
+                        code="empty_audio",
+                        message="TTS backend returned no audio",
+                    )
+                )
+                await self._send(
+                    self._response_done_event(
+                        response_id=response_id,
+                        status="failed",
+                        receipt_id=receipt_id,
+                    )
+                )
+                return
             await self._send(
                 response_audio_transcript_delta(
                     session_id=self._session_id,
@@ -1568,22 +1745,88 @@ class OpenAIRealtimeSession:
                     transcript=text,
                 )
             )
-            await self._send(response_done(session_id=self._session_id, response_id=response_id))
+            if receipt_id is not None:
+                self._services.render_receipts.complete(receipt_id)
+            await self._send(
+                self._response_done_event(
+                    response_id=response_id,
+                    status="completed",
+                    receipt_id=receipt_id,
+                )
+            )
         except asyncio.CancelledError:
+            if receipt_id is not None:
+                self._services.render_receipts.cancel(receipt_id)
             raise
-        except (WebSocketDisconnect, RuntimeError):
+        except WebSocketDisconnect:
+            if receipt_id is not None:
+                self._services.render_receipts.cancel(
+                    receipt_id,
+                    error_code="client_disconnected",
+                )
+            return
+        except RuntimeError as exc:
+            if infer_backend_busy_reason(exc) == BusyReason.BACKEND_UNAVAILABLE:
+                if receipt_id is not None:
+                    self._services.render_receipts.fail(receipt_id, "backend_busy")
+                await self._send(
+                    error_event(
+                        code="backend_busy",
+                        message="TTS worker is unavailable",
+                        busy_reason=str(BusyReason.BACKEND_UNAVAILABLE),
+                    )
+                )
+                await self._send(
+                    self._response_done_event(
+                        response_id=response_id,
+                        status="failed",
+                        receipt_id=receipt_id,
+                    )
+                )
+                return
+            if receipt_id is not None:
+                self._services.render_receipts.fail(
+                    receipt_id,
+                    "transport_error",
+                )
             return
         except Exception as exc:
+            if receipt_id is not None:
+                self._services.render_receipts.fail(
+                    receipt_id,
+                    "tts_error",
+                )
             traceback.print_exc(file=sys.stderr)
             with contextlib.suppress(Exception):
                 await self._send(error_event(code="tts_error", message=str(exc)))
                 await self._send(
-                    response_done(
-                        session_id=self._session_id,
+                    self._response_done_event(
                         response_id=response_id,
                         status="failed",
+                        receipt_id=receipt_id,
                     )
                 )
+
+    def _response_done_event(
+        self,
+        *,
+        response_id: str,
+        status: str,
+        receipt_id: str | None,
+    ) -> dict[str, object]:
+        event = response_done(
+            session_id=self._session_id,
+            response_id=response_id,
+            status=status,
+        )
+        if not self._render_receipts_enabled or receipt_id is None:
+            return event
+        try:
+            receipt = self._services.render_receipts.get(receipt_id)
+        except KeyError:
+            return event
+        event["speechrail"] = {"render_receipt": receipt}
+        return event
 
     async def _reserve_asr(self) -> None:
         self._asr_resources = AsyncExitStack()
@@ -1591,7 +1834,9 @@ class OpenAIRealtimeSession:
         try:
             await self._asr_resources.enter_async_context(
                 self._services.governor.reserve(
-                    WorkClass.REALTIME_ASR, deadline=self._settings.request_timeout_seconds
+                    WorkClass.REALTIME_ASR,
+                    deadline=self._settings.request_timeout_seconds,
+                    purpose=WorkPurpose.INTERACTIVE,
                 )
             )
             self._services.metrics.record_realtime_phase(
@@ -1600,7 +1845,11 @@ class OpenAIRealtimeSession:
         except GovernorQueueFullError as exc:
             await self._asr_resources.aclose()
             self._asr_resources = None
-            raise RealtimeAdapterError("queue_full", "Realtime ASR queue is full") from exc
+            raise RealtimeAdapterError(
+                "queue_full",
+                "Realtime ASR queue is full",
+                busy_reason=str(BusyReason.GOVERNOR_QUEUE_FULL),
+            ) from exc
         except TimeoutError as exc:
             await self._asr_resources.aclose()
             self._asr_resources = None
@@ -1686,7 +1935,9 @@ class OpenAIRealtimeSession:
             await self._diarization_resources.aclose()
             self._diarization_resources = None
             raise RealtimeAdapterError(
-                "backend_busy", "another diarization session is active"
+                "backend_busy",
+                "another diarization session is active",
+                busy_reason=str(exc.busy_reason),
             ) from exc
 
     async def _release_diarization(self) -> None:

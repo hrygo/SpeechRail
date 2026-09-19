@@ -8,9 +8,8 @@ import io
 import json
 import logging
 import struct
-import threading
 import wave
-from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -20,6 +19,7 @@ from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from speechrail.application.deadline import await_until
+from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
@@ -36,6 +36,11 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
 from speechrail.domain import voice_quality as vq
+from speechrail.domain.idempotency import (
+    DurableIdempotencyJournal,
+    IdempotencyConflictError,
+    IdempotencyStoreUnavailableError,
+)
 from speechrail.domain.ports import (
     BatchTranscriber,
     SpeechRequest,
@@ -44,18 +49,33 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import (
     VOICE_ALIASES,
+    VoiceAlreadyExistsError,
     VoiceInUseError,
     VoiceProfile,
+    VoiceRevisionConflictError,
+    VoiceRevokedError,
     VoiceStoreUnavailableError,
     VoiceUpdateUnsupportedError,
     canonicalize_clone_reference_audio,
     get_voice_registry,
 )
+from speechrail.domain.tts_pronunciation import (
+    PronunciationConflictError,
+    PronunciationEntry,
+    PronunciationRevokedError,
+    PronunciationStoreUnavailableError,
+    get_pronunciation_registry,
+)
+from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.runtime.admission import QueueFullError
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 _CLONE_PROMPTS_ASSET = (
     Path(__file__).resolve().parent.parent.parent
@@ -88,29 +108,58 @@ _TTS_LIFECYCLE_FIELDS = frozenset(
 )
 _LOGGER = logging.getLogger(__name__)
 
-# Bounded idempotency store keyed by (Idempotency-Key, audio sha256, sha256 of
-# ref_text). It retains only the created profile id — never the raw ref_text or
-# the full VoiceProfile — and evicts the oldest entry past 128 keys.
-_CLONE_IDEMPOTENCY_MAX_ENTRIES = 128
-_clone_idempotency: OrderedDict[tuple[str, str, str], str] = OrderedDict()
-_clone_idempotency_lock = threading.Lock()
+# Clone publication is single-owner local state. The journal stores only hashes,
+# operation metadata and the resulting profile ID; raw audio/text/API keys are never persisted.
+_CLONE_IDEMPOTENCY_OWNER = "speechrail-local"
+_CLONE_IDEMPOTENCY_OPERATION = "voice.clone"
+_clone_idempotency_journal = DurableIdempotencyJournal(
+    Path.home() / ".speechrail" / "voice_clone_idempotency.json",
+    max_entries=128,
+)
 
 
-def _clone_idempotency_key(
-    idempotency_key: str, audio_content: bytes, ref_text: str
-) -> tuple[str, str, str]:
-    audio_hash = hashlib.sha256(audio_content).hexdigest()
-    ref_hash = hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest()
-    return (idempotency_key, audio_hash, ref_hash)
+def _clone_payload_fingerprint(
+    audio_content: bytes,
+    ref_text: str,
+    *,
+    name: str,
+    voice_id: str | None,
+) -> str:
+    payload = {
+        "audio_sha256": hashlib.sha256(audio_content).hexdigest(),
+        "ref_text_sha256": hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest(),
+        "name": name.strip(),
+        "voice_id": (
+            voice_id.strip().lower()
+            if isinstance(voice_id, str) and voice_id.strip()
+            else None
+        ),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
 
 
-def _store_clone_idempotency_locked(
-    cache_key: tuple[str, str, str], profile_id: str
-) -> None:
-    _clone_idempotency[cache_key] = profile_id
-    _clone_idempotency.move_to_end(cache_key)
-    while len(_clone_idempotency) > _CLONE_IDEMPOTENCY_MAX_ENTRIES:
-        _clone_idempotency.popitem(last=False)
+def _clone_result_matches(
+    profile: VoiceProfile,
+    *,
+    name: str,
+    ref_text: str,
+    canonical_wav: bytes,
+) -> bool:
+    """Prove a recovered clone belongs to the idempotent request payload."""
+
+    if (
+        profile.mode != "clone"
+        or profile.name != name.strip()
+        or profile.ref_text != ref_text.strip()
+        or profile.audio_path is None
+    ):
+        return False
+    try:
+        stored_digest = hashlib.sha256(Path(profile.audio_path).read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return stored_digest == hashlib.sha256(canonical_wav).hexdigest()
 
 
 def _tts_lifecycle_diagnostics(
@@ -179,7 +228,7 @@ def _voice_entry(
     enabled: bool = True,
 ) -> dict[str, Any]:
     variant = active.tts.variant if active.tts is not None else None
-    available = tts_ready and enabled
+    available = tts_ready and enabled and not profile.revoked
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
@@ -228,7 +277,61 @@ def _voice_entry(
         entry["quality"] = profile.quality
     if profile.creation is not None:
         entry["creation"] = profile.creation.model_dump(mode="json")
+    if profile.revision is not None:
+        entry["revision"] = profile.revision
+    if profile.revoked:
+        entry["revoked"] = True
     return entry
+
+
+def _voice_list_entry(
+    profile: VoiceProfile,
+    active: ActiveModelCatalog,
+    tts_ready: bool,
+    *,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """Project only routing-safe discovery fields for the public voice list."""
+
+    detailed = _voice_entry(
+        profile,
+        active,
+        tts_ready,
+        enabled=enabled,
+    )
+    safe_fields = (
+        "id",
+        "name",
+        "aliases",
+        "is_default",
+        "is_system",
+        "created_at",
+        "available",
+        "variant",
+        "capabilities",
+        "mode",
+        "revision",
+        "revoked",
+    )
+    return {
+        key: detailed[key]
+        for key in safe_fields
+        if key in detailed
+    }
+
+
+def _safe_revision_entry(
+    profile: VoiceProfile,
+    *,
+    current_revision: str | None,
+) -> dict[str, object]:
+    return {
+        "revision": profile.revision,
+        "current": profile.revision == current_revision,
+        "mode": profile.mode,
+        "revoked": profile.revoked,
+        "created_at": profile.created_at,
+    }
 
 
 def _empty_reference() -> vq.VoiceQualityReference:
@@ -372,6 +475,7 @@ async def _synthesize_probes(
     voice_id: str,
     repetitions: int,
     *,
+    voice_revision: str | None = None,
     expires_at: float | None = None,
 ) -> tuple[bytes, int, int, list[str], bool, dict[str, bytes]]:
     pcm = bytearray()
@@ -388,6 +492,7 @@ async def _synthesize_probes(
                 voice=voice_id,
                 output_format="pcm16",
                 sample_rate=24_000,
+                expected_voice_revision=voice_revision,
             )
             probe_pcm = bytearray()
             try:
@@ -539,7 +644,11 @@ async def _evaluate_probe_intelligibility(
 ) -> float:
     """Transcribe one valid sample per fixed probe after the TTS phase completes."""
     scores: list[float] = []
-    async with services.governor.reserve(WorkClass.BATCH_ASR, expires_at=expires_at):
+    async with services.governor.reserve(
+        WorkClass.BATCH_ASR,
+        expires_at=expires_at,
+        purpose=WorkPurpose.QUALITY_VALIDATION,
+    ):
         for probe in vq.VOICE_QUALITY_V1_ZH_PROBES:
             pcm = representative_pcm.get(probe["id"])
             if pcm is None:
@@ -683,7 +792,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         return {
             "object": "list",
             "data": [
-                _voice_entry(
+                _voice_list_entry(
                     profile,
                     active,
                     services.tts_ready,
@@ -697,6 +806,8 @@ def create_system_router(services: AppServices) -> APIRouter:
     async def voice_detail(voice_id: str, request: Request) -> JSONResponse:
         """Return one system or custom voice profile."""
         request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
         try:
             profile = get_voice_registry().get_profile(voice_id)
         except VoiceStoreUnavailableError:
@@ -832,6 +943,469 @@ def create_system_router(services: AppServices) -> APIRouter:
             content=_voice_entry(profile, active, services.tts_ready),
         )
 
+    @router.get("/v1/speechrail/pronunciation-sets")
+    async def list_pronunciation_sets(request: Request) -> JSONResponse:
+        """Enumerate safe set identity only; entries remain management data."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            values = get_pronunciation_registry().list_sets()
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "object": "list",
+                "data": [
+                    {
+                        "id": value.id,
+                        "revision": value.revision,
+                        "revoked": value.revoked,
+                        "entry_count": len(value.entries),
+                    }
+                    for value in values
+                ],
+            },
+        )
+
+    @router.get("/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}")
+    async def get_pronunciation_revision(
+        set_id: str,
+        revision: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Read one explicit management revision including its local entries."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            value = get_pronunciation_registry().get(
+                set_id,
+                revision=revision,
+            )
+        except PronunciationRevokedError:
+            return error_response(
+                409,
+                request_id,
+                "pronunciation_revoked",
+                "Pronunciation revision is revoked",
+            )
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "pronunciation_revision_not_found",
+                "Pronunciation set or revision not found",
+            )
+        return JSONResponse(status_code=200, content=value.to_dict())
+
+    @router.put("/v1/speechrail/pronunciation-sets/{set_id}")
+    async def put_pronunciation_set(
+        set_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Create or CAS-update a pronunciation set as a new immutable revision."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(
+                400,
+                request_id,
+                "invalid_json",
+                "Invalid JSON payload",
+            )
+        if not isinstance(body, dict) or set(body) != {
+            "expected_revision",
+            "entries",
+        }:
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "expected_revision and entries are required",
+            )
+        expected_revision = body.get("expected_revision")
+        if expected_revision is not None and not isinstance(expected_revision, str):
+            return error_response(
+                400,
+                request_id,
+                "invalid_expected_revision",
+                "expected_revision must be a string or null",
+            )
+        raw_entries = body.get("entries")
+        if not isinstance(raw_entries, list):
+            return error_response(
+                400,
+                request_id,
+                "invalid_entries",
+                "entries must be an array",
+            )
+        try:
+            entries = tuple(
+                PronunciationEntry(**entry)
+                for entry in raw_entries
+                if isinstance(entry, dict)
+            )
+            if len(entries) != len(raw_entries):
+                raise ValueError("every pronunciation entry must be an object")
+            value = get_pronunciation_registry().put(
+                set_id,
+                entries,
+                expected_revision=expected_revision,
+            )
+        except PronunciationConflictError as exc:
+            return error_response(
+                409,
+                request_id,
+                "pronunciation_conflict",
+                str(exc),
+            )
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except (TypeError, ValueError) as exc:
+            return error_response(
+                400,
+                request_id,
+                "invalid_pronunciation_set",
+                str(exc),
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": value.id,
+                "revision": value.revision,
+                "revoked": value.revoked,
+                "entry_count": len(value.entries),
+            },
+        )
+
+    @router.post(
+        "/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}/revoke"
+    )
+    async def revoke_pronunciation_revision(
+        set_id: str,
+        revision: str,
+        request: Request,
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            value = get_pronunciation_registry().revoke(set_id, revision)
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "pronunciation_revision_not_found",
+                "Pronunciation set or revision not found",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": value.id,
+                "revision": value.revision,
+                "revoked": True,
+            },
+        )
+
+    @router.delete("/v1/speechrail/pronunciation-sets/{set_id}")
+    async def delete_pronunciation_set(
+        set_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            get_pronunciation_registry().delete(set_id)
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "pronunciation_set_not_found",
+                "Pronunciation set not found",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={"status": "deleted", "id": set_id},
+        )
+
+    @router.patch("/v1/speechrail/voices/{voice_id}")
+    async def update_voice_v2(voice_id: str, request: Request) -> JSONResponse:
+        """CAS-update a custom voice without changing the strict v1 request shape."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(400, request_id, "invalid_json", "Invalid JSON payload")
+        if not isinstance(body, dict):
+            return error_response(400, request_id, "invalid_payload", "JSON object expected")
+        allowed = {"name", "instruction", "seed", "expected_revision"}
+        if set(body) - allowed:
+            return error_response(400, request_id, "invalid_payload", "Unknown voice field")
+        expected_revision = body.get("expected_revision")
+        if not isinstance(expected_revision, str):
+            return error_response(
+                400,
+                request_id,
+                "expected_revision_required",
+                "expected_revision is required for v2 voice updates",
+            )
+        name = body.get("name")
+        instruction = body.get("instruction")
+        seed = body.get("seed")
+        if name is None and instruction is None and seed is None:
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "At least one mutable voice field is required",
+            )
+        try:
+            profile = get_voice_registry().update_custom_profile(
+                voice_id,
+                name=name,
+                instruction=instruction,
+                seed=seed,
+                expected_revision=expected_revision,
+            )
+        except VoiceRevisionConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revision_conflict",
+                "Voice alias no longer points at expected_revision",
+            )
+        except VoiceUpdateUnsupportedError as exc:
+            return error_response(
+                403,
+                request_id,
+                "voice_update_unsupported",
+                str(exc),
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(404, request_id, "voice_not_found", "Voice not found")
+        except ValueError as exc:
+            return error_response(400, request_id, "voice_update_failed", str(exc))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": profile.id,
+                "name": profile.name or profile.id,
+                "voice_revision": profile.revision,
+                "mode": profile.mode,
+                "revoked": profile.revoked,
+            },
+        )
+
+    @router.get("/v1/speechrail/voices/{voice_id}/revisions")
+    async def list_voice_revisions(voice_id: str, request: Request) -> JSONResponse:
+        """List safe immutable revision metadata without private recipes or paths."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        registry = get_voice_registry()
+        try:
+            current = registry.get_profile(voice_id)
+            revisions = registry.list_revisions(voice_id)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except (KeyError, ValueError):
+            return error_response(404, request_id, "voice_not_found", "Voice not found")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "object": "list",
+                "data": [
+                    _safe_revision_entry(
+                        item,
+                        current_revision=current.revision,
+                    )
+                    for item in revisions
+                ],
+            },
+        )
+
+    @router.post("/v1/speechrail/voices/{voice_id}/rollback")
+    async def rollback_voice_revision(voice_id: str, request: Request) -> JSONResponse:
+        """Atomically point a friendly voice ID back to a non-revoked revision."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(400, request_id, "invalid_json", "Invalid JSON payload")
+        if not isinstance(body, dict) or set(body) != {
+            "target_revision",
+            "expected_revision",
+        }:
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "target_revision and expected_revision are required",
+            )
+        target = body.get("target_revision")
+        expected = body.get("expected_revision")
+        if not isinstance(target, str) or not isinstance(expected, str):
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "Voice revisions must be strings",
+            )
+        try:
+            profile = get_voice_registry().rollback_custom_profile(
+                voice_id,
+                target_revision=target,
+                expected_revision=expected,
+            )
+        except VoiceRevisionConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revision_conflict",
+                "Voice alias no longer points at expected_revision",
+            )
+        except VoiceRevokedError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revoked",
+                "Target voice revision is revoked",
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "voice_revision_not_found",
+                "Voice or target revision not found",
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "invalid_voice_revision", str(exc))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": profile.id,
+                "voice_revision": profile.revision,
+                "mode": profile.mode,
+                "revoked": profile.revoked,
+            },
+        )
+
+    @router.post("/v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke")
+    async def revoke_voice_revision(
+        voice_id: str,
+        revision: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Revoke one exact revision for future synthesis without killing active leases."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            profile = get_voice_registry().revoke_revision(
+                voice_id,
+                revision=revision,
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "voice_revision_not_found",
+                "Voice revision not found",
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "invalid_voice_revision", str(exc))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": profile.id,
+                "voice_revision": profile.revision,
+                "revoked": True,
+            },
+        )
+
     @router.post("/v1/voices")
     async def create_voice(request: Request) -> JSONResponse:
         """Create a persistent custom voice using natural language instruction."""
@@ -964,24 +1538,6 @@ def create_system_router(services: AppServices) -> APIRouter:
             return read_error
 
         idempotency_key = request.headers.get("Idempotency-Key")
-        cache_key: tuple[str, str, str] | None = None
-        if idempotency_key:
-            cache_key = _clone_idempotency_key(idempotency_key, audio_content, ref_text)
-            cached_id = _clone_idempotency.get(cache_key)
-            if cached_id is not None:
-                try:
-                    profile = get_voice_registry().get_profile(cached_id)
-                except ValueError:
-                    # Stale idempotency entry: the cached profile was deleted after
-                    # the original clone. Drop the key and fall through to normal
-                    # creation instead of leaking a bare 500.
-                    with _clone_idempotency_lock:
-                        _clone_idempotency.pop(cache_key, None)
-                else:
-                    return JSONResponse(
-                        status_code=201,
-                        content=_voice_entry(profile, active, services.tts_ready),
-                    )
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
@@ -1013,36 +1569,167 @@ def create_system_router(services: AppServices) -> APIRouter:
             if isinstance(voice_id, str) and voice_id.strip()
             else None
         )
+        if idempotency_key and vid_str is None:
+            key_hash = DurableIdempotencyJournal.key_hash(idempotency_key)
+            vid_str = f"clone_idem_{key_hash[:24]}"
 
-        def _build_profile() -> VoiceProfile:
-            return get_voice_registry().create_cloned_profile(
+        fingerprint: str | None = None
+        if idempotency_key:
+            fingerprint = _clone_payload_fingerprint(
+                audio_content,
+                ref_text,
+                name=name,
+                voice_id=vid_str,
+            )
+            try:
+                decision = _clone_idempotency_journal.begin(
+                    owner=_CLONE_IDEMPOTENCY_OWNER,
+                    operation=_CLONE_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    provisional_result_id=vid_str,
+                )
+            except IdempotencyConflictError:
+                return error_response(
+                    409,
+                    request_id,
+                    "idempotency_conflict",
+                    "Idempotency-Key was already used with a different clone payload",
+                )
+            except IdempotencyStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "idempotency_store_unavailable",
+                    "Durable idempotency state is unavailable",
+                    retryable=True,
+                )
+            if decision.state == "pending":
+                if decision.result_id is None:
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_pending",
+                        "Previous operation predates recoverable result identity",
+                        retryable=True,
+                    )
+                vid_str = decision.result_id
+                try:
+                    profile = get_voice_registry().get_profile(decision.result_id)
+                except VoiceStoreUnavailableError:
+                    return error_response(
+                        503,
+                        request_id,
+                        "voice_store_unavailable",
+                        "Custom voice storage is unavailable",
+                        retryable=True,
+                    )
+                except ValueError:
+                    profile = None
+                if profile is not None:
+                    if not _clone_result_matches(
+                        profile,
+                        name=name,
+                        ref_text=ref_text,
+                        canonical_wav=canonical_wav,
+                    ):
+                        return error_response(
+                            409,
+                            request_id,
+                            "voice_already_exists",
+                            "Target voice ID is owned by a different clone payload",
+                        )
+                    try:
+                        _clone_idempotency_journal.complete(
+                            owner=_CLONE_IDEMPOTENCY_OWNER,
+                            operation=_CLONE_IDEMPOTENCY_OPERATION,
+                            key=idempotency_key,
+                            fingerprint=fingerprint,
+                            result_id=profile.id,
+                        )
+                    except IdempotencyStoreUnavailableError:
+                        return error_response(
+                            503,
+                            request_id,
+                            "idempotency_store_unavailable",
+                            "Recovered voice exists but completion state could not be recorded",
+                            retryable=True,
+                        )
+                    return JSONResponse(
+                        status_code=201,
+                        content=_voice_entry(profile, active, services.tts_ready),
+                    )
+            if decision.state == "completed":
+                if decision.result_id is None:
+                    return error_response(
+                        503,
+                        request_id,
+                        "idempotency_store_unavailable",
+                        "Completed idempotency record is missing its result",
+                        retryable=True,
+                    )
+                try:
+                    profile = get_voice_registry().get_profile(decision.result_id)
+                except (ValueError, VoiceStoreUnavailableError):
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_result_unavailable",
+                        "The original idempotent clone result is no longer available",
+                    )
+                if not _clone_result_matches(
+                    profile,
+                    name=name,
+                    ref_text=ref_text,
+                    canonical_wav=canonical_wav,
+                ):
+                    return error_response(
+                        409,
+                        request_id,
+                        "voice_already_exists",
+                        "Idempotency result does not match the clone payload",
+                    )
+                return JSONResponse(
+                    status_code=201,
+                    content=_voice_entry(profile, active, services.tts_ready),
+                )
+
+        publication_started = False
+        try:
+            publication_started = True
+            profile = get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
                 audio_bytes=canonical_wav,
                 voice_id=vid_str,
                 duration_seconds=canonical_duration,
                 quality=report.to_dict(),
+                create_only=idempotency_key is not None,
             )
-
-        def _create_or_reuse() -> VoiceProfile:
-            if cache_key is None:
-                return _build_profile()
-            with _clone_idempotency_lock:
-                existing_id = _clone_idempotency.get(cache_key)
-                if existing_id is not None:
-                    try:
-                        return get_voice_registry().get_profile(existing_id)
-                    except ValueError:
-                        # Stale idempotency entry: the cached profile was deleted.
-                        # Drop the key and re-create instead of failing the request.
-                        _clone_idempotency.pop(cache_key, None)
-                profile = _build_profile()
-                _store_clone_idempotency_locked(cache_key, profile.id)
-                return profile
-
-        try:
-            profile = _create_or_reuse()
+            if idempotency_key and fingerprint is not None:
+                result_id = _clone_idempotency_journal.complete(
+                    owner=_CLONE_IDEMPOTENCY_OWNER,
+                    operation=_CLONE_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    result_id=profile.id,
+                )
+                if result_id != profile.id:
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_conflict",
+                        "Another completed result already owns this Idempotency-Key",
+                    )
         except VoiceStoreUnavailableError:
+            if idempotency_key and fingerprint is not None and not publication_started:
+                with suppress(IdempotencyStoreUnavailableError):
+                    _clone_idempotency_journal.abort(
+                        owner=_CLONE_IDEMPOTENCY_OWNER,
+                        operation=_CLONE_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
             return error_response(
                 503,
                 request_id,
@@ -1050,12 +1737,111 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "Custom voice storage is unavailable",
                 retryable=True,
             )
+        except IdempotencyStoreUnavailableError:
+            # If publication already happened, preserve pending state. Retrying must
+            # not create a second voice until an operator resolves the unknown state.
+            return error_response(
+                503,
+                request_id,
+                "idempotency_store_unavailable",
+                "Voice may have been created but durable completion could not be recorded",
+                retryable=True,
+            )
+        except VoiceAlreadyExistsError:
+            if idempotency_key is None or fingerprint is None or vid_str is None:
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_already_exists",
+                    "Target voice already exists",
+                )
+            try:
+                profile = get_voice_registry().get_profile(vid_str)
+                if not _clone_result_matches(
+                    profile,
+                    name=name,
+                    ref_text=ref_text,
+                    canonical_wav=canonical_wav,
+                ):
+                    return error_response(
+                        409,
+                        request_id,
+                        "voice_already_exists",
+                        "Target voice ID is owned by a different clone payload",
+                    )
+                _clone_idempotency_journal.complete(
+                    owner=_CLONE_IDEMPOTENCY_OWNER,
+                    operation=_CLONE_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    result_id=profile.id,
+                )
+            except (ValueError, IdempotencyStoreUnavailableError):
+                return error_response(
+                    503,
+                    request_id,
+                    "idempotency_store_unavailable",
+                    "Concurrent clone result could not be reconciled",
+                    retryable=True,
+                )
         except ValueError as exc:
+            if idempotency_key and fingerprint is not None and not publication_started:
+                with suppress(IdempotencyStoreUnavailableError):
+                    _clone_idempotency_journal.abort(
+                        owner=_CLONE_IDEMPOTENCY_OWNER,
+                        operation=_CLONE_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
             return error_response(400, request_id, "voice_creation_failed", str(exc))
 
         return JSONResponse(
             status_code=201,
             content=_voice_entry(profile, active, services.tts_ready),
+        )
+
+    @router.get("/v1/speechrail/voices/clone/idempotency")
+    async def clone_idempotency_status(request: Request) -> JSONResponse:
+        """Read durable clone operation state by proving possession of its key."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_clone"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        idempotency_key = request.headers.get("Idempotency-Key")
+        if not idempotency_key:
+            return error_response(
+                400,
+                request_id,
+                "idempotency_key_required",
+                "Idempotency-Key header is required",
+            )
+        try:
+            decision = _clone_idempotency_journal.lookup(
+                owner=_CLONE_IDEMPOTENCY_OWNER,
+                operation=_CLONE_IDEMPOTENCY_OPERATION,
+                key=idempotency_key,
+            )
+        except IdempotencyStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "idempotency_store_unavailable",
+                "Durable idempotency state is unavailable",
+                retryable=True,
+            )
+        if decision is None:
+            return error_response(
+                404,
+                request_id,
+                "idempotency_not_found",
+                "No clone operation is recorded for this key",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "state": decision.state,
+                "result_id": decision.result_id,
+            },
         )
 
     @router.post("/v1/voices/clone/validate")
@@ -1121,6 +1907,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             return error_response(400, request_id, code, err_str)
         return JSONResponse(status_code=200, content=evaluation.report.to_dict())
 
+    @router.post("/v1/speechrail/voices/{voice_id}/quality-runs")
     @router.post("/v1/voices/{voice_id}/quality-runs")
     async def run_voice_quality(voice_id: str, request: Request) -> JSONResponse:
         """Run bounded quality probes against a voice profile."""
@@ -1168,11 +1955,13 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         registry = get_voice_registry()
         expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
+        observed_model_runtime_revision: str | None = None
         try:
             async with services.governor.reserve(
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
                 resource_key=tts_resource_key(synthesizer, voice_id),
+                purpose=WorkPurpose.QUALITY_VALIDATION,
             ):
                 with registry.lease_profile(voice_id) as profile:
                     (
@@ -1186,7 +1975,14 @@ def create_system_router(services: AppServices) -> APIRouter:
                         synthesizer,
                         profile.id,
                         runs,
+                        voice_revision=profile.revision,
                         expires_at=expires_at,
+                    )
+                    # Capture identity while the probe worker is still ready;
+                    # the ASR intelligibility phase may evict it before the
+                    # evidence projection is built.
+                    observed_model_runtime_revision = (
+                        observed_runtime_revision_for_synthesizer(synthesizer, profile.id)
                     )
         except GovernorQueueFullError:
             return JSONResponse(
@@ -1230,9 +2026,15 @@ def create_system_router(services: AppServices) -> APIRouter:
                 intelligibility_unavailable = True
             else:
                 try:
-                    await _evict_quality_tts_if_supported(
-                        synthesizer, expires_at=expires_at,
-                    )
+                    async with services.governor.reserve(
+                        WorkClass.BATCH_TTS,
+                        expires_at=expires_at,
+                        purpose=WorkPurpose.QUALITY_VALIDATION,
+                    ):
+                        await _evict_quality_tts_if_supported(
+                            synthesizer,
+                            expires_at=expires_at,
+                        )
                     transcript_match = await _evaluate_probe_intelligibility(
                         services,
                         transcriber,
@@ -1337,6 +2139,32 @@ def create_system_router(services: AppServices) -> APIRouter:
             variant_name,
             resolved.version,
         )
+        if request.url.path.startswith("/v1/speechrail/"):
+            artifact = (
+                active.tts_clone
+                if profile.mode == "clone" and active.tts_clone is not None
+                else active.tts
+            )
+            evidence = build_quality_evidence(
+                profile=profile,
+                report=report,
+                probe_set=str(probe_set),
+                repetitions=runs,
+                model_artifact=artifact.key if artifact is not None else None,
+                model_source=artifact.model_id if artifact is not None else None,
+                model_variant=artifact.variant if artifact is not None else None,
+                model_catalog_revision=(
+                    artifact.revision if artifact is not None else None
+                ),
+                model_runtime_revision=observed_model_runtime_revision,
+            )
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "legacy_report": report.to_dict(),
+                    "evidence": evidence,
+                },
+            )
         return JSONResponse(status_code=200, content=report.to_dict())
 
     @router.delete("/v1/voices/{voice_id}")

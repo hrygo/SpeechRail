@@ -80,6 +80,7 @@ def _worker(
     fake = _FakeTransport(responses)
     worker._transport = fake  # type: ignore[assignment]
     worker._started = True
+    worker._supports_profile_snapshot = True
     return worker, fake
 
 
@@ -261,6 +262,9 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
                 "dtype": "float16",
                 "sample_rate": 24_000,
                 "model_variant": "voice_design",
+                "family": "qwen3_tts",
+                "weight_fingerprint": "shape:" + ("a" * 64),
+                "profile_snapshot_version": 1,
             }
         ]
     )
@@ -269,12 +273,15 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
     async def start_and_close() -> None:
         await worker.start()
         assert worker.ready is True
+        assert worker.runtime_revision is not None
+        assert worker.runtime_revision.startswith("rt_")
         assert fake.sends[0]["type"] == "start"
         assert fake.sends[0]["model_dir"].endswith("external-qwen3-tts-start")
         assert fake.sends[0]["device"] == "mps"
         assert fake.sends[0]["sample_rate"] == 24_000
         await worker.close()
         assert worker.ready is False
+        assert worker.runtime_revision is None
 
     asyncio.run(start_and_close())
 
@@ -338,6 +345,7 @@ def test_ready_identity_mismatch_aborts_the_tts_worker(tmp_path: Path) -> None:
                 "dtype": "float32",
                 "sample_rate": 24_000,
                 "model_variant": "voice_design",
+                "profile_snapshot_version": 1,
             }
         ]
     )
@@ -374,6 +382,7 @@ def test_ready_identity_rejects_model_variant_mismatch(tmp_path: Path) -> None:
                 "dtype": "float16",
                 "sample_rate": 24_000,
                 "model_variant": "voice_design",
+                "profile_snapshot_version": 1,
             }
         ]
     )
@@ -418,6 +427,7 @@ def test_ready_identity_rejects_dtype_mismatch_even_when_device_matches(
                 "dtype": "float32",
                 "sample_rate": 24_000,
                 "model_variant": "voice_design",
+                "profile_snapshot_version": 1,
             }
         ]
     )
@@ -572,6 +582,7 @@ def test_tts_worker_aborts_private_generation_when_consumer_cancels(tmp_path: Pa
                 "dtype": "float16",
                 "sample_rate": 24_000,
                 "model_variant": "voice_design",
+                "profile_snapshot_version": 1,
             }
         )
         fake.push(_chunk_frame("pending", 0, b"\x00\x00"))

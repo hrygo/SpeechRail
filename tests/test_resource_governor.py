@@ -11,6 +11,7 @@ from speechrail.runtime.resource_governor import (
     GovernorQueueFullError,
     ResourceGovernor,
     WorkClass,
+    WorkPurpose,
 )
 
 
@@ -383,6 +384,53 @@ def test_distinct_tts_resource_keys_can_run_concurrently() -> None:
     asyncio.run(scenario())
 
 
+def test_wildcard_tts_maintenance_waits_for_all_keyed_lanes() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=3)
+        )
+        release = asyncio.Event()
+        maintenance_started = asyncio.Event()
+
+        async def keyed_worker() -> None:
+            await release.wait()
+
+        async def maintenance() -> None:
+            maintenance_started.set()
+
+        design_task = asyncio.create_task(
+            governor.run(
+                keyed_worker,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+            )
+        )
+        clone_task = asyncio.create_task(
+            governor.run(
+                keyed_worker,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_clone",
+            )
+        )
+        await asyncio.sleep(0)
+        maintenance_task = asyncio.create_task(
+            governor.run(
+                maintenance,
+                WorkClass.BATCH_TTS,
+                purpose=WorkPurpose.QUALITY_VALIDATION,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not maintenance_started.is_set()
+        assert governor.snapshot().pending_batch == 1
+
+        release.set()
+        await asyncio.wait_for(maintenance_started.wait(), timeout=0.5)
+        await asyncio.gather(design_task, clone_task, maintenance_task)
+
+    asyncio.run(scenario())
+
+
 def test_distinct_tts_lane_can_bypass_waiter_blocked_on_another_lane() -> None:
     async def scenario() -> None:
         governor = ResourceGovernor(
@@ -731,5 +779,134 @@ def test_heavy_overlap_serialization_when_budget_constrained() -> None:
         await tts_task
         assert governor.snapshot().active_asr == 0
         assert governor.snapshot().active_tts == 0
+
+    asyncio.run(scenario())
+
+
+def test_interactive_tts_overtakes_prefetch_after_lane_release() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=2,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=4,
+                batch_aging_seconds=30.0,
+            )
+        )
+        holder_started = asyncio.Event()
+        release_holder = asyncio.Event()
+        order: list[str] = []
+
+        async def holder() -> None:
+            holder_started.set()
+            await release_holder.wait()
+
+        async def mark(value: str) -> None:
+            order.append(value)
+
+        holder_task = asyncio.create_task(
+            governor.run(
+                holder,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+                purpose=WorkPurpose.VOICE_CREATION,
+            )
+        )
+        await holder_started.wait()
+
+        prefetch_task = asyncio.create_task(
+            governor.run(
+                lambda: mark("prefetch"),
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+                purpose=WorkPurpose.PREFETCH,
+            )
+        )
+        interactive_task = asyncio.create_task(
+            governor.run(
+                lambda: mark("interactive"),
+                WorkClass.REALTIME_TTS,
+                resource_key="voice_design",
+                purpose=WorkPurpose.INTERACTIVE,
+            )
+        )
+        for _ in range(100):
+            snapshot = governor.snapshot()
+            if snapshot.pending_batch == 1 and snapshot.pending_realtime == 1:
+                break
+            await asyncio.sleep(0.005)
+        assert governor.snapshot().pending_batch == 1
+        assert governor.snapshot().pending_realtime == 1
+
+        release_holder.set()
+        await asyncio.gather(holder_task, prefetch_task, interactive_task)
+
+        assert order == ["interactive", "prefetch"]
+
+    asyncio.run(scenario())
+
+
+def test_governor_emits_bounded_cancel_release_telemetry() -> None:
+    from speechrail.observability.metrics import Metrics
+
+    async def scenario() -> None:
+        metrics = Metrics()
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=2,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=2,
+            ),
+            on_admit=metrics.record_governor_admission,
+            on_release=metrics.record_governor_release,
+        )
+        started = asyncio.Event()
+
+        async def work() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(
+            governor.run(
+                work,
+                WorkClass.REALTIME_TTS,
+                purpose=WorkPurpose.INTERACTIVE,
+                resource_key="voice_design",
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert governor.snapshot().active_tts == 0
+        text = metrics.render_prometheus()
+        assert "speechrail_governor_queue_wait_seconds" in text
+        assert "speechrail_governor_service_seconds" in text
+        assert "speechrail_governor_releases_total" in text
+        assert 'class="realtime_tts"' in text
+        assert 'purpose="interactive"' in text
+        assert 'outcome="cancelled"' in text
+
+    asyncio.run(scenario())
+
+
+def test_governor_rejects_unbounded_purpose_strings() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(
+                total_capacity=2,
+                realtime_reserved_capacity=1,
+                max_pending_per_class=2,
+            )
+        )
+        with pytest.raises(ValueError, match="unsupported work purpose"):
+            await governor.run(
+                lambda: asyncio.sleep(0),
+                WorkClass.BATCH_TTS,
+                purpose="highest_priority",
+            )
+        assert governor.snapshot().active_tts == 0
+        assert governor.snapshot().pending_batch == 0
 
     asyncio.run(scenario())

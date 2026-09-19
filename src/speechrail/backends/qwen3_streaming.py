@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -18,7 +19,8 @@ from speechrail.backends.qwen3_native import validate_forced_aligner_snapshot
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, StreamingAsrEvent
-from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease
+from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease, AsrModeScheduler
+from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
     offline_environment,
@@ -174,6 +176,10 @@ class Qwen3StreamingWorker:
         return self._shared_owner.mode_gate
 
     @property
+    def mode_scheduler(self) -> AsrModeScheduler:
+        return self._shared_owner.mode_scheduler
+
+    @property
     def alive(self) -> bool:
         return self._shared_owner.alive
 
@@ -247,6 +253,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._connected = False
         self._finished = asyncio.Event()
         self._mode_lease: AsrModeLease | None = None
+        self._mode_context: AbstractAsyncContextManager[None] | None = None
         self._cleanup_lock = asyncio.Lock()
         self._finalized = False
         self._capture_alignment = False
@@ -266,7 +273,13 @@ class Qwen3StreamingSession(RealtimeAsrSession):
             return
         self._finalized = False
         self._finished = asyncio.Event()
-        self._mode_lease = self._worker.mode_gate.acquire("streaming")
+        scheduler = getattr(self._worker, "mode_scheduler", None)
+        if scheduler is None:
+            self._mode_lease = self._worker.mode_gate.acquire("streaming")
+        else:
+            mode_context = scheduler.streaming()
+            await mode_context.__aenter__()
+            self._mode_context = mode_context
         registered = False
         try:
             await self._worker.start()
@@ -460,6 +473,14 @@ class Qwen3StreamingSession(RealtimeAsrSession):
                     except BaseException as exc:
                         if cleanup_error is None:
                             cleanup_error = exc
+                mode_context = self._mode_context
+                self._mode_context = None
+                if mode_context is not None:
+                    try:
+                        await mode_context.__aexit__(None, None, None)
+                    except BaseException as exc:
+                        if cleanup_error is None:
+                            cleanup_error = exc
                 lease = self._mode_lease
                 self._mode_lease = None
                 if lease is not None:
@@ -521,6 +542,13 @@ def _language(value: object) -> str | None:
     return value
 
 
+class RealtimeSessionLimitError(RuntimeError):
+    """The bounded streaming-session registry is full."""
+
+    busy_reason = BusyReason.REALTIME_SESSION_LIMIT
+    retryable = True
+
+
 class NativeRealtimeFactory(RealtimeAsrFactory):
     """Creates bounded concurrent streaming sessions on one shared native worker."""
 
@@ -545,7 +573,7 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
         if resolved not in _SUPPORTED_LANGUAGES and resolved != "auto":
             raise _unsupported_language(resolved)
         if len(self._sessions) >= self._max_sessions:
-            raise RuntimeError("realtime streaming backend busy")
+            raise RealtimeSessionLimitError("realtime streaming session capacity is full")
         config = getattr(self._worker, "config", None)
         session = Qwen3StreamingSession(
             worker=self._worker,
@@ -574,5 +602,6 @@ __all__ = [
     "Qwen3StreamingBackendConfig",
     "Qwen3StreamingSession",
     "Qwen3StreamingWorker",
+    "RealtimeSessionLimitError",
     "StreamingWorkerProtocol",
 ]

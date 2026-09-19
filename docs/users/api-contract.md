@@ -3,7 +3,7 @@ title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
 version: "2.1.2"
-date: 2026-09-14
+date: 2026-09-19
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -11,6 +11,11 @@ date: 2026-09-14
 > 机器可读的 OpenAPI 3.1 规范位于 [`contracts/openapi.yaml`](../../contracts/openapi.yaml)；WebSocket 全双工事件规范位于 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
 
 ---
+
+安全发现与强一致性管理统一位于 `/v1/speechrail/*`；OpenAI 兼容的 TTS 主路径始终是
+`POST /v1/audio/speech`。revision pin、发音集、完整性回执、调度意图与可选 TTS chunk timing 通过
+`SpeechRail-*` Header 渐进增强，不改变 OpenAI JSON 请求体。
+详见[有效能力快照与安全目录](effective-capabilities.md)。
 
 ## 1. 模型身份与别名映射
 
@@ -68,6 +73,8 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
+| `GET` | `/v1/speechrail/audio/receipts/{receipt_id}` | SpeechRail 完整性回执 | PCM sample count/hash 与终态元数据，不含音频正文 |
+| `GET` | `/v1/speechrail/audio/timings/{timing_id}` | SpeechRail 可选 TTS 时间轴 sidecar | 完整合成后返回 chunk 级文本 span ↔ 24kHz PCM sample span |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
@@ -77,6 +84,11 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 为 `false` 时表示冷/未配置，注入的 backend 无法报告驻留状态时为 `null`。`tts_state` 提供
 `active`、`warm_standby`、`cold_evicted`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态
 不会单独把仍可在请求时加载的 `tts_ready=true` 改成 false。
+
+启用完整性回执时，`model.runtime_revision` 只有在首个 PCM 已由 worker 产生且 ready
+handshake 提供完整可验证身份后才会填充 `rt_...`；否则保持 `null`。该值是当前加载 worker
+的低披露结构身份摘要，不是本地路径，也不把 `shape:` 元数据误称为权重内容哈希；只读能力快照
+仍保持 `configured_catalog` / `null`，不会为发现请求启动模型。
 
 ---
 
@@ -148,7 +160,14 @@ Content-Type: application/json
 生成、首块等待和后续流交付。响应头发送前超时返回 `503 backend_timeout`；响应头发送后
 则关闭流并在 access 记录中标记 `outcome=cancelled` 或 `outcome=error`。
 
-标准接口要求 `voice`。质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
+worker 已完成准入但生命周期不可用（未启动、启动失败、未就绪或已退出）时，服务返回
+`503 backend_busy`，并附带 `Retry-After: 1`、`SpeechRail-Busy-Reason: backend_unavailable`、
+`SpeechRail-Retry-Hint: retry_after_worker_recovery`。这些响应只暴露低基数诊断，不返回
+worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回 `502 backend_error`。
+
+标准接口要求 `voice`，同时接受 OpenAI 兼容的字符串形式和 custom voice 对象
+`{"id":"voice_1234"}`；对象中的 `id` 进入与字符串 voice 相同的本地解析流程。
+质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
 一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
 `400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
 音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
@@ -156,6 +175,23 @@ Content-Type: application/json
 `seed` 仅属于质量档 VoiceDesign preview 的确定性采样参数；系统 VoiceDesign 音色使用其
 固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
 组合返回稳定错误，不以“已接受”暗示参数生效。
+
+### 4.1 SpeechRail 可选准入扩展
+
+普通 OpenAI-compatible `POST /v1/audio/speech` 不携带以下 Header 时，继续使用历史
+`batch_tts` 准入语义。需要本地交互调度时，可显式协商：
+
+- `SpeechRail-Purpose: interactive`：映射到现有 `realtime_tts` 保留容量；
+- `SpeechRail-Purpose: prefetch`：保持 `batch_tts`，用于可延后预取；
+- `SpeechRail-Latency-Budget-Ms: 50..120000`：相对服务预算，最终取该值与
+  `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 的较小值。
+
+客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
+`ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
+允许时并行；实现不承诺对正在运行的 Metal kernel 做硬抢占。Voice creation、quality validation
+和 Realtime 会话由服务端内部标记为固定 purpose，不信任客户端把维护任务伪装成更高优先级。
+`/metrics` 仅按固定 class/purpose/outcome 暴露 queue-wait、service-time 与释放结果，不记录
+请求 ID、文本、音频或 voice ID。
 
 `/metrics` 的结构化 JSON 视图中，`histograms` 的 `speechrail_asr_rtf` 定义为 ASR 推理时长 /
 已处理音频时长，`speechrail_tts_rtf` 定义为 TTS 推理时长 / 已生成音频时长。只有分母为正且
@@ -166,6 +202,40 @@ RTF。资源快照中的 `physical_memory_bytes`、`memory_budget_bytes` 与完�
 `/metrics` 的 TTS 交付计数只使用固定事件标签：`planner_chunk`、参考缓存命中/未命中/淘汰、
 `abort_fallback` 与 `reload`。它们用于比较同一 runtime 与 profile 下的实现路径，不含文本、
 音色 ID、音频、路径或实际音质结论。
+
+### 4.2 可选 TTS chunk timing sidecar
+
+需要字幕高亮、粗粒度口型或后续对齐的客户端可显式发送：
+
+```http
+SpeechRail-Timing-Mode: chunk
+```
+
+服务仍先按正常 OpenAI `/v1/audio/speech` 语义返回音频；若 bounded timing registry
+接受该请求，响应头额外返回 `SpeechRail-Timing-Id: tm_...`。客户端随后读取：
+
+```http
+GET /v1/speechrail/audio/timings/{timing_id}
+```
+
+当前只声明 `timing_quality=chunk`，**不声明 word/phoneme/lip-sync precision**。每个 chunk
+包含 planner chunk 序号、normalized spoken text 的 Unicode code-point span，以及最终
+24 kHz PCM 的 `audio_start_sample/audio_end_sample`。这些音频边界来自实际生成样本累计值，
+不是按字符数或平均语速估算；clone loudness/crossfade 路径只改变幅值且保持样本数量，因此
+sample domain 与最终 PCM 守恒。
+
+文本坐标分两层：
+
+- 主坐标固定为 `normalized_spoken_unicode_codepoints`；
+- `display_start/display_end` 仅在原始 DisplayText 到最终 spoken text 的映射被证明时返回；
+- normalization 删除 Markdown/emoji/弱标点或追加句末标点后若无法保持一一坐标，DisplayText
+  映射显式为 `unavailable`，对应字段为 `null`，不会伪造位置；
+- 使用版本化 pronunciation set 且其 raw→spoken span 可证明时，可返回 `mapped`。
+
+Timing 是**独立资源**，与 #64 render receipt 分离：receipt 证明服务生成/传输边界的完整性，
+timing 描述文本与生成 PCM 的内容位置。Timing unavailable、后端未提供 timing metadata 或
+timing registry 容量不足均不会把成功的音频合成改判失败。取消/错误请求不会发布
+`completed` timing。普通 OpenAI 客户端不发送该 Header 时，不创建 timing 资源。
 
 ### 预设音色库 (Preset Voices)
 
@@ -178,6 +248,12 @@ VoiceDesign 预览与 Base reference clone 仅 `quality`），见 §1.1。
 ---
 
 ## 5. 音色管理与自然语言设计 API (`/v1/voices`)
+
+> **兼容边界**：这一组 `/v1/voices*` 是 SpeechRail 的历史本地管理 API，不冒充
+> OpenAI 当前的 `POST /v1/audio/voices`。OpenAI custom voice 创建要求
+> `audio_sample + consent + name`，其中 consent 是独立资源。SpeechRail 在没有实现
+> 等价 consent 生命周期前，不会把本地 clone/reference API 宣称为该 OpenAI endpoint 的兼容实现。
+> 已创建的本地 voice 仍可通过 `/v1/audio/speech` 的字符串或 `{"id": ...}` 形式使用。
 
 SpeechRail 提供系统角色目录与自然语言音色设计（Voice Design）体系。系统角色在三档均
 可用；自定义 VoiceDesign 音色仅在当前权重声明 `supports_instruction=true` 时可合成。
@@ -368,6 +444,11 @@ Authorization: Bearer <TOKEN>
 - 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
 - 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
 
+`/v1/speechrail/voices/{voice_id}/quality-runs` 还返回 `evidence` 命名空间。其
+`identity.model.runtime_revision` 只在 TTS worker 已完成 ready handshake 且 probe 已实际产生
+PCM 时填充 `rt_...`；worker 未提供完整身份或仅使用 fake/injected backend 时保持 `null`。
+TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获的 probe 执行身份。
+
 #### 5.7.4 `VoiceQualityReport` 结构与向后兼容
 
 报告顶层字段：
@@ -445,7 +526,7 @@ Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 
 | **409** | `voice_in_use` | `true` | 自定义音色仍有活动 TTS 读者，等待当前合成完成后重试删除 |
 | **403** | `voice_update_unsupported` | `false` | 系统音色或 clone 音色的不可变来源字段不能修改 |
 | **400** | `voice_update_failed` | `false` | 音色更新字段不符合校验规则，修正名称、instruction 或 seed 后重试 |
-| **503** | `backend_not_ready` | `true` | 对应模型 Worker 尚未启动或预检未通过，等待就绪 |
+| **503** | `backend_not_ready` / `backend_busy` | `true` | 对应模型 Worker 尚未启动、预检未通过或正在恢复；`backend_busy` 的 worker 生命周期错误附带 `SpeechRail-Busy-Reason: backend_unavailable` 与 `SpeechRail-Retry-Hint: retry_after_worker_recovery`，不暴露 worker stderr |
 | **503** | `backend_timeout` | `true` | 队列准入、worker 生成或音频交付超出总 deadline，减小音频分块 |
 | **503** | `voice_store_unavailable` | `true` | 自定义音色 registry 或音频存储不可读/不可写，先保留原文件并按手册修复 |
 
