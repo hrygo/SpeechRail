@@ -343,6 +343,15 @@ class FailingSynthesizer:
         return chunks()
 
 
+class UnavailableSynthesizer:
+    def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+        async def chunks() -> AsyncIterator[AudioChunk]:
+            raise RuntimeError("worker_unavailable; worker stderr tail: private detail")
+            yield AudioChunk(response_id="unreachable", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
 def test_speech_endpoint_maps_invalid_delivery_to_unified_error_envelope() -> None:
     client = TestClient(
         create_app(
@@ -362,6 +371,37 @@ def test_speech_endpoint_maps_invalid_delivery_to_unified_error_envelope() -> No
     assert error["type"] == "server_error"
     assert error["retryable"] is True
     assert error["request_id"]
+
+
+@pytest.mark.parametrize("response_format", ["pcm", "wav", "mp3"])
+def test_speech_endpoint_maps_worker_unavailable_to_stable_retry_diagnostic(
+    response_format: str,
+) -> None:
+    client = TestClient(
+        create_app(
+            Settings(qwen3_model_dir=None, qwen3_python=None),
+            tts_synthesizer=UnavailableSynthesizer(),
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": response_format,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "1"
+    assert response.headers["speechrail-busy-reason"] == "backend_unavailable"
+    assert response.headers["speechrail-retry-hint"] == "retry_after_worker_recovery"
+    error = response.json()["error"]
+    assert error["code"] == "backend_busy"
+    assert error["retryable"] is True
+    assert "private detail" not in response.text
 
 
 def test_speech_endpoint_maps_backend_runtime_failure_to_unified_error_envelope() -> None:

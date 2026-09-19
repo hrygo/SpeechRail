@@ -155,6 +155,11 @@ Content-Type: application/json
 生成、首块等待和后续流交付。响应头发送前超时返回 `503 backend_timeout`；响应头发送后
 则关闭流并在 access 记录中标记 `outcome=cancelled` 或 `outcome=error`。
 
+worker 已完成准入但生命周期不可用（未启动、启动失败、未就绪或已退出）时，服务返回
+`503 backend_busy`，并附带 `Retry-After: 1`、`SpeechRail-Busy-Reason: backend_unavailable`、
+`SpeechRail-Retry-Hint: retry_after_worker_recovery`。这些响应只暴露低基数诊断，不返回
+worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回 `502 backend_error`。
+
 标准接口要求 `voice`，同时接受 OpenAI 兼容的字符串形式和 custom voice 对象
 `{"id":"voice_1234"}`；对象中的 `id` 进入与字符串 voice 相同的本地解析流程。
 质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为

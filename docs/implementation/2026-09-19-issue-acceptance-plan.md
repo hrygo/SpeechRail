@@ -450,7 +450,10 @@ as implementation changes.
   transcription now applies the same worker-lifecycle distinction at its HTTP
   boundary: known unavailable/dead-worker failures return `503 backend_busy`
   with bounded `SpeechRail-Busy-Reason` and `SpeechRail-Retry-Hint` headers;
-  unknown runtime failures are not reclassified.
+  unknown runtime failures are not reclassified. TTS first-byte and complete-body
+  paths now apply the same distinction for `pcm`, container, and WAV responses;
+  receipts/timing records retain the bounded `backend_busy` terminal code while
+  encoder or unknown runtime failures retain their existing errors.
 - **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
   handling, protected URL/email/code spans, raw→normalized→spoken hashes and
   bounded raw-span projections. The optional v1 header applies a pinned set while
@@ -534,6 +537,15 @@ continuous RTF 分别为 0.28x、0.27x、0.27x，`phys_footprint` 峰值为
 ASR fixture 是外置合成静音，只能证明真实 worker 的调度/资源路径，不证明识别质量；
 持续负载、维护任务公平性、取消清理、thermal/soak、model identity 和人工听感仍未
 验证，不能将此切片写成 #44/#65 完成。
+
+### 2026-09-20 TTS worker availability boundary
+
+新增 TTS HTTP 回归覆盖 `pcm`、`wav` 与 `mp3` 首包/完整响应路径：已知
+`worker_unavailable` 生命周期失败统一返回 `503 backend_busy`，带有
+`backend_unavailable` 与 `retry_after_worker_recovery` 的有限诊断头，并确认私有 stderr
+不进入响应；未知 `RuntimeError` 仍保持 `502 backend_error`。OpenAPI、用户契约与本计划
+已同步。该证据是 Python 合成 fake 的 HTTP 边界回归，不替代真实 managed runtime 的
+worker 恢复、延迟、资源、thermal 或声学验收。
 
 ### Remaining acceptance gates
 
