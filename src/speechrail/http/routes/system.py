@@ -873,7 +873,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             content=_voice_entry(profile, active, services.tts_ready),
         )
 
-    @router.get("/v2/pronunciation-sets")
+    @router.get("/v1/speechrail/pronunciation-sets")
     async def list_pronunciation_sets(request: Request) -> JSONResponse:
         """Enumerate safe set identity only; entries remain management data."""
 
@@ -906,7 +906,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.get("/v2/pronunciation-sets/{set_id}/revisions/{revision}")
+    @router.get("/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}")
     async def get_pronunciation_revision(
         set_id: str,
         revision: str,
@@ -946,7 +946,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         return JSONResponse(status_code=200, content=value.to_dict())
 
-    @router.put("/v2/pronunciation-sets/{set_id}")
+    @router.put("/v1/speechrail/pronunciation-sets/{set_id}")
     async def put_pronunciation_set(
         set_id: str,
         request: Request,
@@ -1037,7 +1037,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         )
 
     @router.post(
-        "/v2/pronunciation-sets/{set_id}/revisions/{revision}/revoke"
+        "/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}/revoke"
     )
     async def revoke_pronunciation_revision(
         set_id: str,
@@ -1073,7 +1073,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.delete("/v2/pronunciation-sets/{set_id}")
+    @router.delete("/v1/speechrail/pronunciation-sets/{set_id}")
     async def delete_pronunciation_set(
         set_id: str,
         request: Request,
@@ -1103,7 +1103,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             content={"status": "deleted", "id": set_id},
         )
 
-    @router.patch("/v2/voices/{voice_id}")
+    @router.patch("/v1/speechrail/voices/{voice_id}")
     async def update_voice_v2(voice_id: str, request: Request) -> JSONResponse:
         """CAS-update a custom voice without changing the strict v1 request shape."""
 
@@ -1182,7 +1182,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.get("/v2/voices/{voice_id}/revisions")
+    @router.get("/v1/speechrail/voices/{voice_id}/revisions")
     async def list_voice_revisions(voice_id: str, request: Request) -> JSONResponse:
         """List safe immutable revision metadata without private recipes or paths."""
 
@@ -1217,7 +1217,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.post("/v2/voices/{voice_id}/rollback")
+    @router.post("/v1/speechrail/voices/{voice_id}/rollback")
     async def rollback_voice_revision(voice_id: str, request: Request) -> JSONResponse:
         """Atomically point a friendly voice ID back to a non-revoked revision."""
 
@@ -1294,7 +1294,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             },
         )
 
-    @router.post("/v2/voices/{voice_id}/revisions/{revision}/revoke")
+    @router.post("/v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke")
     async def revoke_voice_revision(
         voice_id: str,
         revision: str,
@@ -1694,7 +1694,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             content=_voice_entry(profile, active, services.tts_ready),
         )
 
-    @router.get("/v2/voices/clone/idempotency")
+    @router.get("/v1/speechrail/voices/clone/idempotency")
     async def clone_idempotency_status(request: Request) -> JSONResponse:
         """Read durable clone operation state by proving possession of its key."""
 
@@ -1801,7 +1801,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             return error_response(400, request_id, code, err_str)
         return JSONResponse(status_code=200, content=evaluation.report.to_dict())
 
-    @router.post("/v2/voices/{voice_id}/quality-runs")
+    @router.post("/v1/speechrail/voices/{voice_id}/quality-runs")
     @router.post("/v1/voices/{voice_id}/quality-runs")
     async def run_voice_quality(voice_id: str, request: Request) -> JSONResponse:
         """Run bounded quality probes against a voice profile."""
@@ -2019,7 +2019,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             variant_name,
             resolved.version,
         )
-        if request.url.path.startswith("/v2/"):
+        if request.url.path.startswith("/v1/speechrail/"):
             artifact = (
                 active.tts_clone
                 if profile.mode == "clone" and active.tts_clone is not None
