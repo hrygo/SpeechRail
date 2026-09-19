@@ -409,6 +409,7 @@ class PronunciationRegistry:
                 if not isinstance(set_id, str) or not isinstance(revisions, list):
                     raise ValueError("invalid pronunciation set record")
                 parsed: dict[str, PronunciationSet] = {}
+                current_revision: str | None = None
                 for raw_revision in revisions:
                     if not isinstance(raw_revision, dict):
                         raise ValueError("invalid pronunciation revision")
@@ -428,6 +429,15 @@ class PronunciationRegistry:
                         value,
                         revoked=bool(raw_revision.get("revoked", False)),
                     )
+                    if raw_revision.get("current") is True:
+                        if current_revision is not None:
+                            raise ValueError("multiple current pronunciation revisions")
+                        current_revision = revision
+                if parsed and current_revision is None:
+                    current_revision = next(reversed(parsed))
+                if current_revision is not None:
+                    current = parsed.pop(current_revision)
+                    parsed[current_revision] = current
                 result[set_id] = parsed
             return result
         except Exception as exc:
@@ -445,8 +455,11 @@ class PronunciationRegistry:
                     {
                         "id": set_id,
                         "revisions": [
-                            value.to_dict()
-                            for _, value in sorted(revisions.items())
+                            {
+                                **value.to_dict(),
+                                "current": revision == next(reversed(revisions)),
+                            }
+                            for revision, value in sorted(revisions.items())
                         ],
                     }
                     for set_id, revisions in sorted(data.items())
