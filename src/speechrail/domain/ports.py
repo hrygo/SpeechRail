@@ -43,7 +43,9 @@ class SpeechRequest(BaseModel):
     expected_voice_revision: str | None = Field(
         default=None,
         pattern=r"^vr_[0-9a-f]{32}$",
-        description=(\n            "Internal negotiated acoustic revision pin; legacy public v1 does not expose it."\n        ),
+        description=(
+            "Internal negotiated acoustic revision pin; legacy public v1 does not expose it."
+        ),
     )
 
 
