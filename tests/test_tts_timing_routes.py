@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 
+import jsonschema
+import yaml
 from fastapi.testclient import TestClient
 
 from speechrail.app import create_app
@@ -117,6 +120,13 @@ def test_chunk_timing_is_separate_resource_and_preserves_openai_audio_body() -> 
             "display_end": 3,
         }
     ]
+
+    spec = yaml.safe_load(Path("contracts/openapi.yaml").read_text(encoding="utf-8"))
+    schema = {
+        "$ref": "#/components/schemas/TtsTimingResource",
+        "components": spec["components"],
+    }
+    jsonschema.Draft202012Validator(schema).validate(timing)
 
 
 def test_normalization_change_does_not_fake_display_coordinates() -> None:
