@@ -85,13 +85,13 @@ def _payload() -> dict[str, object]:
     }
 
 
-def test_v2_speech_returns_completed_receipt_bound_to_revision(
+def test_v1_speech_returns_negotiated_receipt_bound_to_revision(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     client, synth, revision = _client(tmp_path, monkeypatch)
 
-    response = client.post("/v1/audio/speech", json=_payload())
+    response = client.post(\n        "/v1/audio/speech",\n        json=_payload(),\n        headers={"SpeechRail-Receipt-Mode": "integrity"},\n    )
     assert response.status_code == 200
     receipt_id = response.headers["SpeechRail-Receipt-Id"]
     assert receipt_id.startswith("rr_")
@@ -113,7 +113,7 @@ def test_v2_speech_returns_completed_receipt_bound_to_revision(
     assert "测试渲染回执" not in receipt_response.text
 
 
-def test_v1_rejects_revision_pin_header(
+def test_v1_accepts_namespaced_revision_pin_header(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -123,17 +123,18 @@ def test_v1_rejects_revision_pin_header(
         json=_payload(),
         headers={"SpeechRail-Expected-Voice-Revision": revision},
     )
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "voice_revision_pin_requires_v2"
-    assert synth.requests == []
+    assert response.status_code == 200
+    assert len(synth.requests) == 1
+    assert synth.requests[0].expected_voice_revision == revision
+    assert "SpeechRail-Receipt-Id" not in response.headers
 
 
-def test_failed_v2_speech_keeps_error_receipt_queryable_by_request(
+def test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     client, _synth, _revision = _client(tmp_path, monkeypatch, fail=True)
-    response = client.post("/v1/audio/speech", json=_payload())
+    response = client.post(\n        "/v1/audio/speech",\n        json=_payload(),\n        headers={"SpeechRail-Receipt-Mode": "integrity"},\n    )
     assert response.status_code == 502
     request_id = response.json()["error"]["request_id"]
 
