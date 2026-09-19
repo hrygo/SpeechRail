@@ -624,8 +624,10 @@ class VoiceRegistry:
         self._lock = threading.RLock()
         self._last_loaded_mtime_ns = 0
         self._custom_voices: dict[str, VoiceProfile] = {}
+        self._revision_history: dict[str, dict[str, VoiceProfile]] = {}
         self._store_error: str | None = None
         self._pending_profiles: dict[str, VoiceProfile] | None = None
+        self._pending_revision_history: dict[str, dict[str, VoiceProfile]] | None = None
         self._audio_readers: dict[Path, int] = {}
         self._retired_audio: set[Path] = set()
         self._load_custom_voices()
@@ -649,6 +651,7 @@ class VoiceRegistry:
                 self._mark_unavailable(ValueError("custom voice registry symlink is broken"))
                 return
             self._custom_voices = {}
+            self._revision_history = {}
             self._last_loaded_mtime_ns = 0
             self._store_error = None
             return
@@ -665,16 +668,32 @@ class VoiceRegistry:
             if not isinstance(data, list):
                 raise ValueError("custom voice registry must be a JSON list")
             loaded: dict[str, VoiceProfile] = {}
+            loaded_history: dict[str, dict[str, VoiceProfile]] = {}
             for item in data:
                 profile = self._profile_from_record(item)
                 if profile.id in loaded:
                     raise ValueError(f"duplicate custom voice id: {profile.id}")
+                history: dict[str, VoiceProfile] = {}
+                if not isinstance(item, dict):
+                    raise ValueError("custom voice record must be an object")
+                raw_history = item.get("_revisions", [])
+                if not isinstance(raw_history, list):
+                    raise ValueError("custom voice revision history must be a list")
+                for raw_revision in raw_history:
+                    historic = self._profile_from_record(raw_revision)
+                    if historic.id != profile.id or historic.revision is None:
+                        raise ValueError("custom voice revision history is invalid")
+                    history[historic.revision] = historic
+                if profile.revision is not None:
+                    history[profile.revision] = profile
                 loaded[profile.id] = profile
+                loaded_history[profile.id] = history
         except Exception as exc:
             self._last_loaded_mtime_ns = self._safe_mtime_ns()
             self._mark_unavailable(exc)
             return
         self._custom_voices = loaded
+        self._revision_history = loaded_history
         self._last_loaded_mtime_ns = stat.st_mtime_ns
         self._store_error = None
 
@@ -697,6 +716,7 @@ class VoiceRegistry:
                     return
                 if self._last_loaded_mtime_ns or self._custom_voices:
                     self._custom_voices = {}
+                    self._revision_history = {}
                     self._last_loaded_mtime_ns = 0
                     self._store_error = None
                 return
@@ -866,8 +886,22 @@ class VoiceRegistry:
             if self._pending_profiles is not None
             else self._custom_voices
         )
+        histories = (
+            self._pending_revision_history
+            if self._pending_revision_history is not None
+            else self._revision_history
+        )
         self._prepare_store_dirs_locked()
-        data = [profile.to_dict() for profile in profiles.values()]
+        data: list[dict[str, Any]] = []
+        for profile in profiles.values():
+            record = profile.to_dict()
+            history = histories.get(profile.id, {})
+            if history:
+                record["_revisions"] = [
+                    historic.to_dict()
+                    for _, historic in sorted(history.items())
+                ]
+            data.append(record)
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         written = _atomic_write_bytes(self._storage_path, payload, mode=0o600)
         self._last_loaded_mtime_ns = written.stat().st_mtime_ns
@@ -884,16 +918,26 @@ class VoiceRegistry:
         self,
         candidate: dict[str, VoiceProfile],
         *,
+        history_candidate: dict[str, dict[str, VoiceProfile]] | None = None,
         new_audio: Path | None = None,
     ) -> None:
         previous = self._custom_voices
+        previous_history = self._revision_history
+        next_history = (
+            history_candidate
+            if history_candidate is not None
+            else self._revision_history
+        )
         before = self._storage_state()
         self._pending_profiles = candidate
+        self._pending_revision_history = next_history
         try:
             self._save_custom_voices()
         except BaseException as exc:
             self._pending_profiles = None
+            self._pending_revision_history = None
             self._custom_voices = previous
+            self._revision_history = previous_history
             after = self._storage_state()
             safe_to_remove = after == before and (not before[0] or before[1] is not None)
             if new_audio is not None and safe_to_remove:
@@ -907,8 +951,26 @@ class VoiceRegistry:
             raise
         finally:
             self._pending_profiles = None
+            self._pending_revision_history = None
         self._custom_voices = candidate
+        self._revision_history = next_history
         self._store_error = None
+
+    def _history_candidate_locked(
+        self,
+        voice_id: str,
+        *profiles: VoiceProfile | None,
+    ) -> dict[str, dict[str, VoiceProfile]]:
+        history = {
+            key: dict(value)
+            for key, value in self._revision_history.items()
+        }
+        revisions = dict(history.get(voice_id, {}))
+        for profile in profiles:
+            if profile is not None and profile.revision is not None:
+                revisions[profile.revision] = profile
+        history[voice_id] = revisions
+        return history
 
     def _retire_audio_locked(self, raw_path: str | None, voice_id: str) -> None:
         if raw_path is None:
@@ -1064,8 +1126,9 @@ class VoiceRegistry:
             previous = self._custom_voices.get(vid)
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
-            self._commit_candidate(candidate)
-            if previous is not None:
+            history = self._history_candidate_locked(vid, previous, profile)
+            self._commit_candidate(candidate, history_candidate=history)
+            if previous is not None and previous.revision is None:
                 self._retire_audio_locked(previous.audio_path, vid)
             return profile
 
@@ -1149,8 +1212,13 @@ class VoiceRegistry:
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
-            self._commit_candidate(candidate, new_audio=target_file)
-            if previous is not None:
+            history = self._history_candidate_locked(vid, previous, profile)
+            self._commit_candidate(
+                candidate,
+                history_candidate=history,
+                new_audio=target_file,
+            )
+            if previous is not None and previous.revision is None:
                 self._retire_audio_locked(previous.audio_path, vid)
             return profile
 
@@ -1239,8 +1307,79 @@ class VoiceRegistry:
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = updated
-            self._commit_candidate(candidate)
+            history = (
+                self._history_candidate_locked(vid, profile, updated)
+                if acoustic_changed
+                else self._revision_history
+            )
+            self._commit_candidate(candidate, history_candidate=history)
             return updated
+
+    def list_revisions(self, voice_id: str) -> tuple[VoiceProfile, ...]:
+        """Return immutable acoustic revisions for one custom voice."""
+
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            if vid not in self._custom_voices:
+                raise KeyError(f"custom voice not found: {vid}")
+            history = self._revision_history.get(vid, {})
+            return tuple(
+                history[key]
+                for key in sorted(history)
+            )
+
+    def rollback_custom_profile(
+        self,
+        voice_id: str,
+        *,
+        target_revision: str,
+        expected_revision: str,
+    ) -> VoiceProfile:
+        """CAS the friendly voice ID back to one persisted acoustic revision."""
+
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        if not VOICE_REVISION_RE.fullmatch(target_revision):
+            raise ValueError("invalid target voice revision")
+        if not VOICE_REVISION_RE.fullmatch(expected_revision):
+            raise ValueError("invalid expected voice revision")
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            current = self._custom_voices.get(vid)
+            if current is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            if current.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {current.id}"
+                )
+            target = self._revision_history.get(vid, {}).get(target_revision)
+            if target is None:
+                raise KeyError(f"voice revision not found: {target_revision}")
+            if target.audio_path is not None:
+                try:
+                    self._controlled_audio_path(
+                        target.audio_path,
+                        vid,
+                        require_exists=True,
+                    )
+                except ValueError as exc:
+                    raise VoiceStoreUnavailableError(
+                        "historic voice audio is unavailable"
+                    ) from exc
+            restored = replace(
+                target,
+                name=current.name,
+                created_at=current.created_at,
+            )
+            candidate = dict(self._custom_voices)
+            candidate[vid] = restored
+            history = self._history_candidate_locked(vid, current, restored)
+            self._commit_candidate(candidate, history_candidate=history)
+            return restored
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()
@@ -1255,13 +1394,26 @@ class VoiceRegistry:
                 raise KeyError(f"custom voice not found: {vid}")
             if self._voice_has_readers_locked(vid):
                 raise VoiceInUseError(f"custom voice is in use: {vid}")
+            historic = self._revision_history.get(vid, {})
             candidate = dict(self._custom_voices)
             del candidate[vid]
-            self._commit_candidate(candidate)
-            if profile.audio_path is not None:
+            history = {
+                key: dict(value)
+                for key, value in self._revision_history.items()
+                if key != vid
+            }
+            self._commit_candidate(candidate, history_candidate=history)
+            audio_paths = {
+                item.audio_path
+                for item in (profile, *historic.values())
+                if item.audio_path is not None
+            }
+            for raw_path in audio_paths:
                 try:
                     path = self._controlled_audio_path(
-                        profile.audio_path, vid, require_exists=False
+                        raw_path,
+                        vid,
+                        require_exists=False,
                     )
                     path.unlink(missing_ok=True)
                 except OSError as exc:
