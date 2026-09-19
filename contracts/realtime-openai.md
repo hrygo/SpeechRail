@@ -58,6 +58,23 @@ ws://127.0.0.1:8201/v1/realtime
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
 `conversation.item.truncate`。
 
+### 可选 TTS 完整性回执
+
+客户端可在首个 TTS response 前发送：
+
+```json
+{
+  "type": "session.update",
+  "session": {"speechrail": {"render_receipts": {"enabled": true}}}
+}
+```
+
+服务端在 `session.updated` 中回显协商结果；启用后，最终 `response.done` 追加
+`speechrail.render_receipt`。回执只包含 voice/catalog identity、终态、24 kHz PCM sample
+count 与 SHA-256，不包含音频正文或原始文本。`model.runtime_revision` 只有在首个已验证
+PCM chunk 由 worker 产生且 ready handshake 身份完整时才填充 `rt_...`；缺少可信身份时保持
+`null`。该摘要不暴露本地路径，也不把 `shape:` 结构元数据宣称为权重内容哈希。
+
 ## 服务端事件
 
 | 事件 | 说明 |
