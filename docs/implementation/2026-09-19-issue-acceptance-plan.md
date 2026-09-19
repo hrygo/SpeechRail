@@ -97,7 +97,7 @@ the managed-model/latency/listening acceptance of #34.
 
 ### Increment 2 — effective capability snapshot and safe discovery
 
-Adds `/v2/capabilities`, `/v2/voices` and `/v2/voices/{voice_id}` from one detached
+Adds `/v1/speechrail/capabilities`, `/v1/speechrail/voices` and `/v1/speechrail/voices/{voice_id}` from one detached
 registry generation. Each voice resolves against its captured profile and actual
 configured lane, rather than looking up mutable registry data a second time.
 Read-only epochs/content validators, per-operation parameter domains, explicit
