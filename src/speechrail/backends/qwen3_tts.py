@@ -127,8 +127,8 @@ class Qwen3TtsWorker:
     """One supervised local Qwen3-TTS worker behind the public TTS port.
 
     The worker owns all vendor imports and model weights.  This parent process
-    speaks only the private framed protocol and never passes a model ID, URL,
-    instruction, or arbitrary voice description across that boundary.  The
+    speaks only the private framed protocol. Leased recipes and explicit preview
+    instructions stay on that local pipe; they are not discovery or log fields. The
     profile policy stays here: one ready handshake with backend/device/dtype/
     sample-rate identity, one private response ID per synthesis, a strictly
     ordered ``audio* → completed`` stream, and abort on any unfinished stream.
@@ -144,6 +144,7 @@ class Qwen3TtsWorker:
         self._transport = AsyncFramedWorkerProcess(config.worker_spec())
         self._lock = asyncio.Lock()
         self._started = False
+        self._supports_profile_snapshot = False
         self._epoch: int = 0
         self._fallback_abort_count = 0
         self._reload_count = 0
@@ -185,6 +186,7 @@ class Qwen3TtsWorker:
         if self._started:
             return
         is_reload = self._epoch > 0
+        self._supports_profile_snapshot = False
         try:
             await self._transport.start()
             await self._transport.send(
@@ -207,6 +209,10 @@ class Qwen3TtsWorker:
                 or ready.get("model_variant") != self.config.model_variant
             ):
                 raise RuntimeError("backend_identity_mismatch")
+            snapshot_version = ready.get("profile_snapshot_version")
+            self._supports_profile_snapshot = (
+                type(snapshot_version) is int and snapshot_version == 1
+            )
             self._started = True
             self._epoch += 1
             if is_reload:
@@ -252,6 +258,21 @@ class Qwen3TtsWorker:
                         request.voice,
                         profile=profile,
                     )
+                    if (
+                        self.model_variant == "voice_design" and request.instruction is None
+                        and not self._supports_profile_snapshot
+                    ):
+                        raise RuntimeError("worker_profile_snapshot_unsupported")
+                    if not binding.is_clone and self._supports_profile_snapshot:
+                        # The child must not re-resolve a mutable instruction profile
+                        # after this lease or between acoustic text chunks.
+                        frame_payload["voice_profile"] = {
+                            "id": profile.id,
+                            "mode": profile.mode,
+                            "instruction": profile.instruction,
+                            "seed": profile.seed,
+                            "temperature": profile.temperature,
+                        }
                     if binding.is_clone and binding.ref_audio_path:
                         frame_payload["ref_audio"] = binding.ref_audio_path
                         frame_payload["ref_text"] = binding.ref_text or ""

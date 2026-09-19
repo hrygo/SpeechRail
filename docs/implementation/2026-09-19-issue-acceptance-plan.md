@@ -193,3 +193,45 @@ Each tree was matched to the locally tested source before the feature ref moved.
 The isolated bridge used standard Actions authorization and a disposable branch;
 transport contents/workflows are not part of the feature PR. Local snapshot commit
 IDs are not represented as upstream commit IDs. No user service was changed.
+
+### Increment 6 — preserve the leased VoiceDesign recipe across private IPC
+
+Reproduced a real #63 subset: the parent leases a voice profile, but the old child
+resolved its alias again for instruction and seed/temperature, including between
+bounded text chunks. A fake model updated the registry after its first chunk and
+observed mixed old/new recipes in one synthesis. This is distinct from scaffolding
+failures for the new decoder helper, and does not require running a real model.
+
+The parent now passes the leased recipe on the existing private local pipe. A
+strict `profile_snapshot_version=1` handshake prevents an old worker from silently
+ignoring the pin: persisted VoiceDesign requests fail before the synth frame/PCM
+when support is absent. The worker validates an exact, bounded recipe schema and
+uses the same immutable profile for every text chunk. Legacy private frames also
+resolve the profile once per request. Clone reference leases and public request
+schemas are unchanged. No private recipe is added to discovery or logs.
+
+Tests cover alias changes while waiting for the worker lock, updates between
+acoustic chunks, instruction/seed/temperature consistency, strict handshake types,
+malformed snapshot rejection before engine execution, and recovery on the next
+valid private request. Validation: `tests/test_tts_profile_snapshot.py`,
+`tests/test_qwen3_tts.py`, `tests/test_qwen3_tts_worker.py`,
+`tests/test_tts_voice_clone.py`: **75 passed, Python 3.12.14**. Ruff over the full
+configured scope and Mypy over 115 source files passed. No acoustic claim is made.
+
+This is NOT full #63 acceptance. Durable revision history, alias CAS, durable
+owner/operation/payload-bound creation idempotency, restart/crash recovery,
+revocation, and atomic expected model/voice revision synthesis are unimplemented.
+Capability discovery correctly continues to report conditional synthesis as
+unsupported and unknown immutable revisions as null.
+
+Additional identity audit: `model_identity._fingerprint` hashes tensor metadata
+(names, dtypes, shapes and byte extents), not weight payload bytes. The existing
+`shape:` fingerprint must not be relabelled as an immutable model artifact revision.
+Also, selection of a routing lane and acquiring the actual voice lease remain
+separate operations; this patch does not claim an atomic cross-lane/model revision pin.
+
+Increment 5 was published as `983de74e91f068f3ad3dd4b365386a5549d5d903`, tree
+`db5680fdabecaea6ca4515238557e38704f4465c`, with a verified fast-forward of #74.
+At the last CI observation for that head, Quality Gates and Ubuntu tests/coverage
+passed; macOS tests/App were still running. Those results are not evidence for
+this subsequent increment until its own published head is checked.
