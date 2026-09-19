@@ -245,7 +245,7 @@ playerNode( TTS 24k PCM ) ───────────┘
 | TTS | `conversation.item.create`（`role=user` 的 `input_text`）+ `response.create` · `response.audio.delta`/`done` | 24 kHz PCM16；`response.voice` 与 `session.update.voice` 同规则校验，**失败保持 session 可用** |
 | 打断 | `input_audio_buffer.speech_started` → 原子 `response.cancel` → 250 ms 冷却（`realtime_vad_bargein_cooldown_ms`，本机配置默认 250、区间 0–5000） | 契约「全双工打断」 |
 | 分人 | `session.speechrail.diarization.enabled`（首个 PCM 前 opt-in）→ `…updated` / `…status` / `…finish` / `…done` | 归属修订事件带 `stable_through_sample`；`done` 带 `through_sample`、`status: complete \| degraded`、`last_update_sequence` |
-| 准入 | 最多 `SPEECHRAIL_REALTIME_MAX_SESSIONS`（默认 2，区间 1–8）个 backend 会话；超限 `backend_busy`，session 保持可用 | 契约「连接与认证」 |
+| 准入 | 最多 `SPEECHRAIL_REALTIME_MAX_SESSIONS`（源码默认 3，区间 1–8）个 backend 会话；超限 `backend_busy`，session 保持可用 | 契约「连接与认证」 |
 | 观测 | `/metrics` 已有 `speechrail_realtime_active_sessions`、`speechrail_realtime_sessions_total`、`speechrail_realtime_turn_commits_total`、`speechrail_realtime_bargein_events_total`、`speechrail_governor_queue_rejections_total`、`speechrail_worker_evictions_total` | 本机源码实测（`observability/rollup.py`） |
 
 ### 4.2 明确不做（红线复述，防止下一轮评审再提）
@@ -843,7 +843,7 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 | 1 | 本机音频 tap 未真机跑过：授权弹窗的实际触发点、`bundleIDs` 限定是否真按 App 生效 | 阶段 6 的整个来源模型 | 阶段 5.5 spike |
 | 2 | `processRestoreEnabled`（来源 App 重启后自动接回）是 SDK 标注语义，**不是实测行为** | §5.4「唯一自动接回」这条承诺 | 阶段 5.5 spike |
 | 3 | `AVAudioEngine` 上「输入 + 输出同引擎开 voice processing」在 macOS 26 的真实 AEC 收敛效果 | 实时对讲能不能外放用；§3.3 是整套设计的枢纽 | 阶段 5 |
-| 4 | `realtime_max_sessions` 的**生效值**：代码默认 3（`src/speechrail/config/__init__.py:104`），示例 env 写 2（`configs/speechrail.example.env:116`），本机部署实际值未核 | 能同时开几条会话；准入受阻态的频繁程度 | 阶段 1（只读核对部署配置） |
+| 4 | `realtime_max_sessions` 的**源码默认值**为 3（`src/speechrail/config/__init__.py:104`），示例 env 已与其对齐；本机部署的显式覆盖值仍需按部署配置只读核对 | 能同时开几条会话；准入受阻态的频繁程度 | 阶段 1（只读核对部署配置） |
 | 5 | 按会话配置 `server_vad` 静音窗口（字幕 400 / 会议 900 ms）是否真的被服务端接受并生效 | 字幕的即时感与会议的切句粒度 | 阶段 3 |
 | 6 | 目标大模型端点的**前缀缓存**行为：整段前缀完全匹配、显式断点是否可用、最小可缓存前缀长度 | 人设锁与前缀结构的价值成立与否 | 阶段 5 |
 | 7 | 端点是否支持 Responses **background** 模式与 `store=false` | 纪要的长任务形态与隐私承诺 | 阶段 5/6 |
@@ -939,7 +939,7 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 `speechrail_realtime_sessions_total` / `speechrail_realtime_turn_commits_total` /
 `speechrail_realtime_bargein_events_total` / `speechrail_governor_queue_rejections_total` /
 `speechrail_worker_evictions_total` · `configs/speechrail.example.env:116` 写的是
-`SPEECHRAIL_REALTIME_MAX_SESSIONS=2`（与代码默认不同，属示例值）。
+`configs/speechrail.example.env` 同样示例为 `SPEECHRAIL_REALTIME_MAX_SESSIONS=3`；部署可显式覆盖，不能把覆盖值当作源码默认。
 
 **Sona 侧读取的事实**（仅作为经验来源，不是本仓契约）：ADR-010（设备绑定 tap）、ADR-0013（按模式划分
 VAD 所有权）、ADR-007（有界纪要生成）、ADR-0009（共享本地推理层，已 superseded）、ADR-0006（契约优先）、
