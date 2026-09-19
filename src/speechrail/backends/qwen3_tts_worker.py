@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import sys
 import traceback
 from collections import Counter, OrderedDict
@@ -17,11 +18,14 @@ from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
+    VOICE_ID_RE,
+    VoiceProfile,
     VoiceStoreUnavailableError,
     apply_crossfade,
     generation_token_budget,
     get_voice_profile,
     normalize_tts_text,
+    resolve_voice,
 )
 from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
 from speechrail.domain.tts_text_planner import TtsTextPlanner
@@ -120,6 +124,7 @@ class TtsWorkerEngine(Protocol):
         seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]: ...
 
 
@@ -256,7 +261,8 @@ def _ready_identity_fields(identity: object) -> dict[str, object]:
 
 
 def generation_condition(
-    variant: str, voice: str, *, instruction: str | None = None
+    variant: str, voice: str, *, instruction: str | None = None,
+    profile: VoiceProfile | None = None,
 ) -> dict[str, object]:
     """根据模型变体解析生成条件 (音色或提示词指令)。"""
 
@@ -269,7 +275,7 @@ def generation_condition(
         return {"instruct": normalized}
 
     try:
-        binding = resolve_binding(variant, voice)
+        binding = resolve_binding(variant, voice, profile=profile)
     except ValueError as exc:
         raise ValueError(f"unsupported voice or variant: {voice}") from exc
     condition: dict[str, object] = {"voice": binding.speaker}
@@ -382,10 +388,15 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]:
         clean_text = normalize_tts_text(text)
         if not clean_text:
             return
+        if profile is None and instruction is None and ref_audio is None and ref_text is None:
+            # Legacy private callers still receive one request-local recipe, never
+            # a fresh registry resolution for each acoustic chunk.
+            profile = get_voice_profile(voice)
         first_chunk = True
         loudness_controller = (
             StreamingPcm16LoudnessController(
@@ -423,6 +434,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     seed=seed,
                     ref_audio=ref_audio,
                     ref_text=ref_text,
+                    profile=profile,
                 ):
                     if not pcm:
                         continue
@@ -464,6 +476,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]:
         if ref_audio is not None or ref_text is not None:
             # The Base reference-clone contract accepts neither SpeechRail speaking-rate
@@ -508,13 +521,15 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         variant = self.identity.model_variant or "voice_design"
         if variant == "custom_voice" and seed is not None:
             raise ValueError("custom_voice_seed_unsupported")
-        condition = generation_condition(variant, voice, instruction=instruction)
+        if profile is None and instruction is None and variant == "voice_design":
+            profile = get_voice_profile(voice)
+        condition = generation_condition(variant, voice, instruction=instruction, profile=profile)
         used_temperature = self._temperature
         if variant == "voice_design":
             if instruction is None:
                 if seed is not None:
                     raise ValueError("voice_design_seed_requires_instruction")
-                profile = get_voice_profile(voice)
+                assert profile is not None
                 used_temperature = profile.temperature
                 seed = profile.seed
             try:
@@ -711,6 +726,7 @@ def serve(
         "dtype": identity.dtype,
         "sample_rate": identity.sample_rate,
         "model_loaded": True,
+        "profile_snapshot_version": 1,
     }
     ready.update(_ready_identity_fields(identity))
     write_frame(
@@ -741,6 +757,11 @@ def serve(
                 "speed": speed,
                 "language": language,
             }
+            profile = _decode_profile_snapshot(frame.get("voice_profile"), voice=voice)
+            if profile is not None:
+                if ref_audio is not None or ref_text is not None:
+                    raise ProtocolError("invalid voice profile snapshot")
+                synth_kwargs["profile"] = profile
             if ref_audio is not None or ref_text is not None:
                 synth_kwargs["ref_audio"] = ref_audio
                 synth_kwargs["ref_text"] = ref_text
@@ -812,6 +833,32 @@ def serve(
                 },
             )
             _clear_metal_cache()
+
+
+
+def _decode_profile_snapshot(raw: object, *, voice: str) -> VoiceProfile | None:
+    """Validate private IPC recipe fields without querying mutable voice storage."""
+    if raw is None:
+        return None
+    keys = {"id", "mode", "instruction", "seed", "temperature"}
+    if not isinstance(raw, dict) or set(raw) != keys:
+        raise ProtocolError("invalid voice profile snapshot")
+    identifier, mode = raw["id"], raw["mode"]
+    instruction, seed, temperature = raw["instruction"], raw["seed"], raw["temperature"]
+    if (
+        not isinstance(identifier, str) or not VOICE_ID_RE.fullmatch(identifier)
+        or identifier != resolve_voice(voice)
+        or mode not in ("system", "instruction")
+        or not isinstance(instruction, str) or not instruction.strip()
+        or len(instruction) > 10_000 or type(seed) is not int or not 0 <= seed <= 2**32 - 1
+        or type(temperature) not in (float, int)
+        or not math.isfinite(temperature) or temperature < 0
+    ):
+        raise ProtocolError("invalid voice profile snapshot")
+    return VoiceProfile(
+        id=identifier, mode=mode, instruction=instruction, seed=seed,
+        temperature=float(temperature),
+    )
 
 
 def _decode_synthesis_request(

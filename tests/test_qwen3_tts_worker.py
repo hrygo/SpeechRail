@@ -138,6 +138,7 @@ def test_serve_reports_tts_model_identity_and_preserves_four_bit_value(
         "dtype": "int8",
         "sample_rate": 24_000,
         "model_loaded": True,
+        "profile_snapshot_version": 1,
         "family": "qwen3_tts",
         "model_variant": "voice_design",
         "quantization_bits": 4,
@@ -240,6 +241,7 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
         "dtype": "float16",
         "sample_rate": 24_000,
         "model_loaded": True,
+        "profile_snapshot_version": 1,
     }
     assert first.get("_binary") == b"\x00\x00"
     assert first["chunk_index"] == 0
