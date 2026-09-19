@@ -10,7 +10,7 @@ import pytest
 
 from speechrail.application.audio_stream import split_pcm
 from speechrail.backends.qwen3_native import Qwen3BatchTranscriber, Qwen3Worker
-from speechrail.runtime.asr_mode import AsrModeGate
+from speechrail.runtime.asr_mode import AsrModeGate, AsrModeScheduler
 from speechrail.runtime.worker_protocol import ProtocolError
 
 
@@ -27,6 +27,10 @@ def test_each_inference_window_is_bounded() -> None:
 class _FakeSharedWorker:
     def __init__(self) -> None:
         self.mode_gate = AsrModeGate()
+        self.mode_scheduler = AsrModeScheduler(
+            self.mode_gate,
+            batch_aging_seconds=0.05,
+        )
         self.requests: list[dict[str, object]] = []
         self.payloads: list[bytes | None] = []
         self.fail_on_request_id: str | None = None
@@ -59,6 +63,25 @@ class _FakeSharedWorker:
                 }
             ],
         }
+
+
+class _ContendedSharedWorker(_FakeSharedWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_window_entered = asyncio.Event()
+        self.release_first_window = asyncio.Event()
+        self.second_window_entered = asyncio.Event()
+
+    async def request(
+        self, payload: dict[str, object], binary: bytes | None = None
+    ) -> dict[str, object]:
+        request_id = str(payload.get("request_id"))
+        if request_id.endswith("_win_0") and not self.first_window_entered.is_set():
+            self.first_window_entered.set()
+            await self.release_first_window.wait()
+        if request_id.endswith("_win_1"):
+            self.second_window_entered.set()
+        return await super().request(payload, binary=binary)
 
 
 class _TransportLossSharedWorker(_FakeSharedWorker):
@@ -137,6 +160,59 @@ def test_transcribe_stream_chunks_long_audio_and_merges_results() -> None:
         # Verify mode gate token was fully released
         assert fake_shared.mode_gate.active_mode is None
         assert fake_shared.mode_gate.active_count == 0
+
+    asyncio.run(scenario())
+
+
+def test_long_batch_yields_to_waiting_realtime_between_windows() -> None:
+    async def scenario() -> None:
+        fake_shared = _ContendedSharedWorker()
+        worker = Qwen3Worker(MagicMock(), shared_owner=fake_shared)  # type: ignore[arg-type]
+
+        batch_task = asyncio.create_task(
+            worker.transcribe(
+                b"\0\0" * 16000 * 65,
+                "zh",
+                "prompt",
+                include_timestamps=True,
+                request_id="mixed_load",
+            )
+        )
+        await asyncio.wait_for(fake_shared.first_window_entered.wait(), timeout=1)
+        assert fake_shared.mode_gate.active_mode == "batch"
+
+        realtime_started = asyncio.Event()
+        release_realtime = asyncio.Event()
+
+        async def realtime() -> None:
+            async with fake_shared.mode_scheduler.streaming():
+                realtime_started.set()
+                await release_realtime.wait()
+
+        realtime_task = asyncio.create_task(realtime())
+        for _ in range(100):
+            if fake_shared.mode_scheduler.snapshot().pending_streaming == 1:
+                break
+            await asyncio.sleep(0)
+        assert fake_shared.mode_scheduler.snapshot().pending_streaming == 1
+
+        fake_shared.release_first_window.set()
+        await asyncio.wait_for(realtime_started.wait(), timeout=1)
+        assert fake_shared.mode_gate.active_mode == "streaming"
+        assert not fake_shared.second_window_entered.is_set()
+
+        release_realtime.set()
+        result = await asyncio.wait_for(batch_task, timeout=1)
+        await realtime_task
+
+        assert result.duration_ms == 65_000
+        assert fake_shared.second_window_entered.is_set()
+        assert [request["request_id"] for request in fake_shared.requests] == [
+            "mixed_load_win_0",
+            "mixed_load_win_1",
+            "mixed_load_win_2",
+        ]
+        assert fake_shared.mode_gate.active_mode is None
 
     asyncio.run(scenario())
 
