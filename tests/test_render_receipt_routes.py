@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 import hashlib
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi.testclient import TestClient
