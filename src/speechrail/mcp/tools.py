@@ -156,7 +156,11 @@ def _find_voice(voices: list[dict[str, Any]], voice: str) -> dict[str, Any] | No
 
 
 async def describe(client: SpeechRailClient) -> dict[str, Any]:
-    """Return legacy observations plus a separately identified atomic v2 snapshot."""
+    """Return legacy observations plus an atomic effective-capabilities snapshot.
+
+    Legacy fields come from independent reads for compatibility; when present,
+    ``effective_capabilities`` is the single consistent discovery response.
+    """
     models = await client.fetch_models()
     voices = await client.fetch_voices()
     health = await client.fetch_health()

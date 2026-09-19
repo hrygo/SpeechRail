@@ -2,8 +2,8 @@
 title: "SpeechRail MCP Proxy 工具与契约"
 status: active
 audience: "系统架构师、协议设计者、agent 集成方"
-version: "1.2.2"
-date: 2026-09-13
+version: "1.2.3"
+date: 2026-09-20
 supersedes: "docs/architecture/speechrail-mcp-proxy-draft.md (v0.2.0)"
 ---
 
@@ -126,7 +126,9 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 ```
 
 > `instructions` 是**静态常量**（`server.py` 的 `_INSTRUCTIONS`），不随 profile 动态变化；**动态能力发现
-> 走 `describe()` 工具**（实时读 `GET /v1/models` + `GET /v1/voices` + `GET /health`）。上方示例仅示意响应
+> 走 `describe()` 工具**：读取旧兼容投影 `GET /v1/models` + `GET /v1/voices` + `GET /health`，并尝试读取
+> `GET /v1/speechrail/capabilities`。后者按 `effective_capabilities_v1` 返回原子快照；旧 daemon 返回
+> `404/405` 或未知 schema 时，MCP 保留旧字段并将 `effective_capabilities` 置空。上方示例仅示意响应
 > 结构；实际 `discover` 由 MCPServer SDK（MCP Python SDK v2）生成。能力快照内容（`describe()` 的实时查询与
 > `resources/read`）**不缓存**；仅 `tools/list`、`prompts/list`、`resources/list` 配置 `ttlMs`/`cacheScope`
 > 提示（三者均为静态元数据），且只在
@@ -139,14 +141,17 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 > 全部工具执行时 Proxy 携带 `Authorization: Bearer <key>`（本机 keyless 时任意占位）。
 > 输入音频一律用 **`audio_ref`**，**禁止 base64 内联**（见 §8 传输契约）。
 
-### 4.1 `describe()` —— 单一能力快照（合并 `list_models` + `list_voices`）
+### 4.1 `describe()` —— 能力发现（兼容投影 + 原子快照）
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `--` | — | — | 无参数 |
 
-- **Proxy 调用**：`GET /v1/models`（`system.py:170`）+ `GET /v1/voices`（`system.py:226`）。
-- **返回**：当前档位 + 能力摘要 + 音色清单（含精准判别字段）。
+- **Proxy 调用**：旧兼容投影读取 `GET /v1/models`（`system.py:170`）+ `GET /v1/voices`
+  （`system.py:226`）+ `GET /health`；另尝试 `GET /v1/speechrail/capabilities`。
+- **返回**：当前档位 + 能力摘要 + 音色清单（含精准判别字段），以及可选的
+  `effective_capabilities` 原子快照。`legacy_discovery_consistency=independent_reads`
+  明确表示旧顶层字段来自不同时间的独立读取。
 
 ```jsonc
 {
@@ -248,7 +253,7 @@ Proxy 对 `server/discover` 返回统一的 capabilities 与 `instructions`。`i
 
 | MCP 资源 | 对应 REST | 说明 |
 |---|---|---|
-| `speechrail://capabilities` | `GET /v1/models` + `GET /v1/voices` + `GET /health` | 与 `describe()` 等价的合并能力快照 |
+| `speechrail://capabilities` | 旧兼容读取 + 可选 `GET /v1/speechrail/capabilities` | 与 `describe()` 等价；支持时包含 `effective_capabilities` 原子快照 |
 | `speechrail://voices` | `GET /v1/voices` | `{"data": [...]}` 原始音色列表 |
 | `speechrail://models` | `GET /v1/models` | `{"data": [...]}` 原始模型列表 |
 
@@ -346,7 +351,7 @@ per-tool 授权矩阵属**运维安全**，降为附录 B。
 
 | MCP 工具 | SpeechRail 端点 (file:line) | 是否推荐 | 备注 |
 |---|---|---|---|
-| `describe()` | `GET /v1/models`（`system.py:170`）+ `GET /v1/voices`（`system.py:226`） | ✅ 高（合并） | 单一能力快照，含 `mode/is_default/available` 判别字段 |
+| `describe()` | 旧兼容读取 + 可选 `GET /v1/speechrail/capabilities` | ✅ 高 | 含 `mode/is_default/available` 判别字段及可选原子快照 |
 | `transcribe` | `POST /v1/audio/transcriptions`（`audio.py:677`） | ✅ 高 | `audio_ref`；`diarize?`/`timestamps?` 语义化 |
 | `synthesize` | `POST /v1/audio/speech`（`audio.py:1144`） | ✅ 高 | **tier 硬强制**；输出 `audio_path` |
 | `preview_voice` | `POST /v1/voices/previews`（`audio.py:1010`） | ✅ 高（quality-only） | 代理强制档位，先试再选 |

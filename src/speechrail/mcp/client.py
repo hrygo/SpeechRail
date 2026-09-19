@@ -265,7 +265,12 @@ class SpeechRailClient:
         return cast(list[dict[str, Any]], [entry for entry in data if isinstance(entry, dict)])
 
     async def fetch_capabilities(self) -> dict[str, Any] | None:
-        """Read the atomic SpeechRail capability snapshot; older missing routes permit fallback."""
+        """Read the ``effective_capabilities_v1`` snapshot when available.
+
+        Older servers without the namespaced route return ``None`` so callers
+        can use legacy discovery; authentication and other server errors
+        propagate.
+        """
         try:
             response = await self._request("GET", "speechrail/capabilities")
         except SpeechRailError as exc:

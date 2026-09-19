@@ -209,13 +209,14 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         ),
     )
     async def describe() -> DescribeResult:
-        """Return the current capability snapshot.
+        """Return current capability observations and an optional atomic snapshot.
 
-        Merges GET /v1/models, GET /v1/voices and GET /health into one
-        payload: active tier/profile, diarization readiness, clone/preview
-        support and the full model + voice lists.  Every voice entry carries
-        mode, available and capability discriminators; only choose voices
-        with available=true.
+        Legacy tier/profile, readiness, model and voice fields come from
+        independent reads for compatibility.  When the daemon supports the
+        namespaced route, ``effective_capabilities`` contains the single
+        consistent ``effective_capabilities_v1`` response.  Every voice entry
+        carries mode, available and capability discriminators; only choose
+        voices with available=true.
         """
         return DescribeResult.model_validate(await _map_errors(tools.describe(client)))
 
@@ -523,7 +524,8 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         name="capabilities",
         title="SpeechRail capabilities",
         description=(
-            "Merged capability snapshot: active tier/profile, readiness, "
+            "Capability observations plus an optional atomic "
+            "effective-capabilities snapshot: active tier/profile, readiness, "
             "models and voices."
         ),
         mime_type="application/json",

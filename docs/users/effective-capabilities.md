@@ -2,7 +2,7 @@
 title: "有效能力快照与安全音色目录"
 status: active
 audience: "SDK、MCP 与本地语音客户端开发者"
-date: 2026-09-19
+date: 2026-09-20
 ---
 
 # 有效能力快照与安全音色目录
@@ -42,7 +42,7 @@ prepared-reference 条件缓存和精细时间轴，在适配与验收前不得�
 
 ## 最小披露和兼容迁移
 
-v2 目录不返回 reference text、本机音频路径、私有 instruction、creation 正文或完整
+namespaced 能力目录不返回 reference text、本机音频路径、私有 instruction、creation 正文或完整
 quality 调试对象。descriptors 只使用显式系统声明；缺失的 locale/音高/音色族/速度等
 保留 unknown，不根据私有参考推断年龄、性别、族裔或真实身份。
 
@@ -53,7 +53,7 @@ quality 调试对象。descriptors 只使用显式系统声明；缺失的 local
 MCP `describe` 的旧顶层 models/readiness 来自独立读取，明确标记
 `legacy_discovery_consistency=independent_reads`；新增 `effective_capabilities` 保存
 一次 namespaced capability 响应。只有旧服务返回 404/405 或未知 schema 时该字段为空；鉴权和存储故障
-不被悄悄降级掩盖。MCP 的兼容 voice 列表也使用白名单投影，不把 v1 来源正文带入
+不被悄悄降级掩盖。MCP 的兼容 voice 列表也使用白名单投影，不把 `/v1/voices` 来源正文带入
 Agent 上下文。需要原子路由时使用嵌套快照，而非顶层旧字段拼接。
 
 ## 证据和剩余验收
