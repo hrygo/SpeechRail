@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from collections import deque
 from collections.abc import AsyncIterator, Callable
@@ -247,13 +248,11 @@ class AsrModeScheduler:
                     if timeout is None:
                         await self._condition.wait()
                     else:
-                        try:
+                        with contextlib.suppress(TimeoutError):
                             await asyncio.wait_for(
                                 self._condition.wait(),
                                 timeout=timeout,
                             )
-                        except TimeoutError:
-                            pass
                 self._batch_waiters.remove(ticket)
                 ticket._queued = False
                 now = self._clock()
@@ -300,9 +299,9 @@ class AsrModeScheduler:
             return False
         if self._gate.active_mode is not None:
             return False
-        if self._pending_streaming and not self._ticket_is_aged(ticket):
-            return False
-        return True
+        return not (
+            self._pending_streaming and not self._ticket_is_aged(ticket)
+        )
 
     def _head_batch_is_aged(self) -> bool:
         return bool(
