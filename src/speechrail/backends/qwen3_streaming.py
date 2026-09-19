@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncContextManager, AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -252,7 +253,7 @@ class Qwen3StreamingSession(RealtimeAsrSession):
         self._connected = False
         self._finished = asyncio.Event()
         self._mode_lease: AsrModeLease | None = None
-        self._mode_context: AsyncContextManager[None] | None = None
+        self._mode_context: AbstractAsyncContextManager[None] | None = None
         self._cleanup_lock = asyncio.Lock()
         self._finalized = False
         self._capture_alignment = False
