@@ -68,7 +68,11 @@ from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
@@ -1280,6 +1284,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
                 resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                purpose=WorkPurpose.VOICE_CREATION,
             ):
                 async for chunk in iter_until(
                     iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
@@ -1403,6 +1408,16 @@ def create_audio_router(services: AppServices) -> APIRouter:
         receipt_mode: Literal["integrity"] | None = Header(
             default=None,
             alias="SpeechRail-Receipt-Mode",
+        ),
+        purpose: Literal["interactive", "prefetch"] | None = Header(
+            default=None,
+            alias="SpeechRail-Purpose",
+        ),
+        latency_budget_ms: int | None = Header(
+            default=None,
+            alias="SpeechRail-Latency-Budget-Ms",
+            ge=50,
+            le=120_000,
         ),
     ) -> Response:
         request_id = request.state.request_id
@@ -1604,7 +1619,21 @@ def create_audio_router(services: AppServices) -> APIRouter:
             instruction=body.instructions,
             expected_voice_revision=effective_revision,
         )
-        expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
+        if purpose == "interactive":
+            work_class = WorkClass.REALTIME_TTS
+            work_purpose = WorkPurpose.INTERACTIVE
+        elif purpose == "prefetch":
+            work_class = WorkClass.BATCH_TTS
+            work_purpose = WorkPurpose.PREFETCH
+        else:
+            # Compatibility default: ordinary OpenAI requests keep the historical
+            # batch admission class unless the caller explicitly opts in.
+            work_class = WorkClass.BATCH_TTS
+            work_purpose = WorkPurpose.DEFAULT
+        budget_seconds = resolved.request_timeout_seconds
+        if latency_budget_ms is not None:
+            budget_seconds = min(budget_seconds, latency_budget_ms / 1000.0)
+        expires_at = asyncio.get_running_loop().time() + budget_seconds
 
         async def audio_stream(
             *, counter: PcmOutputCounter | None = None
@@ -1612,9 +1641,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
             # Integrity is accumulated over validated PCM16 before encoding.
             try:
                 async with services.governor.reserve(
-                    WorkClass.BATCH_TTS,
+                    work_class,
                     expires_at=expires_at,
                     resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                    purpose=work_purpose,
                 ):
                     async for chunk in iter_until(
                         iter_validated_audio(synthesizer.synthesize(synthesis)),
