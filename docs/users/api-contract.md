@@ -2,8 +2,8 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "2.1.2"
-date: 2026-09-19
+version: "2.1.3"
+date: 2026-09-20
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
