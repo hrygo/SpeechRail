@@ -226,7 +226,10 @@ public final class AssistantSession {
     // MARK: 挂载点（由 App 注入）
 
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
-    public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
+    /// 助手默认使用一台同时负责采集与播放的引擎，让系统 voice processing 能看到
+    /// near-end capture 与 far-end render。旧的 `AudioChunkSource` 注入仍保留：外部
+    /// 测试替身或历史调用方若返回普通 source，就继续走下面的兼容播放器。
+    public var audioSourceFactory: @MainActor () -> AudioChunkSource = { AudioEngineSession() }
     public var preferences: (@MainActor () -> SessionPreferences)?
     /// 取密钥。**只有这一处读钥匙串**，密钥不进任何状态、不进日志。
     public var apiKeyProvider: @MainActor () -> String? = { LLMKeychain.load() }
@@ -239,6 +242,7 @@ public final class AssistantSession {
     private let serviceKey: String?
 
     private var source: AudioChunkSource?
+    private var audioSession: (any AssistantAudioSession)?
     private var client: RealtimeASRClient?
     private var pump: Task<Void, Never>?
     private var playback: PCMStreamPlayer?
@@ -392,7 +396,11 @@ public final class AssistantSession {
     public func stopSpeaking() async {
         guard phase == .speaking || phase == .thinking || isSpeaking else { return }
         currentReplyInterrupted = true
-        await playback?.stop()
+        if let audioSession {
+            await audioSession.stopPlayback()
+        } else {
+            await playback?.stop()
+        }
         isSpeaking = false
         if let client { try? await client.cancelResponse() }
         streamingReply = nil
@@ -429,12 +437,17 @@ public final class AssistantSession {
         }
 
         let source = audioSourceFactory()
+        let audioSession = source as? any AssistantAudioSession
+        audioSession?.configure(mode: mode)
         self.source = source
+        self.audioSession = audioSession
         let stream: AsyncStream<AudioChunk>
         do {
             stream = try await source.start()
         } catch {
+            source.stop()
             self.source = nil
+            self.audioSession = nil
             throw Blocked(Self.blockReason(for: error))
         }
 
@@ -451,27 +464,38 @@ public final class AssistantSession {
         } catch {
             source.stop()
             self.source = nil
+            self.audioSession = nil
             throw Blocked(.serviceNotReady(error.localizedDescription))
         }
         self.client = client
 
-        let player = PCMStreamPlayer()
-        do {
-            try await player.start()
-        } catch {
-            await client.close()
-            source.stop()
-            self.source = nil
-            self.client = nil
-            throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
-        }
-        player.onDrained = { [weak self] in
+        let playbackDrained: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
             self.isSpeaking = false
             if self.phase == .speaking { self.phase = .listening }
             self.isMutedForPlayback = false
         }
-        playback = player
+        if let audioSession {
+            audioSession.onPlaybackDrained = playbackDrained
+            audioSession.onFailure = { [weak self] message in
+                guard let self else { return }
+                self.lastFailure = message
+            }
+        } else {
+            let player = PCMStreamPlayer()
+            do {
+                try await player.start()
+            } catch {
+                await client.close()
+                source.stop()
+                self.source = nil
+                self.audioSession = nil
+                self.client = nil
+                throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
+            }
+            player.onDrained = playbackDrained
+            playback = player
+        }
 
         let startedAt = Date()
         sessionStartedAt = startedAt
@@ -502,10 +526,16 @@ public final class AssistantSession {
             sessionID = record.id
             coordinator.sessionDidStartRecording(id: record.id)
         } catch {
-            await player.stop()
+            if let audioSession {
+                audioSession.stop()
+            } else if let playback {
+                await playback.stop()
+                self.playback = nil
+                source.stop()
+            }
             await client.close()
-            source.stop()
             self.source = nil
+            self.audioSession = nil
             self.client = nil
             throw Blocked(.storeUnavailable(error.localizedDescription))
         }
@@ -518,12 +548,17 @@ public final class AssistantSession {
         guard phase != .ending else { return }
         phase = .ending
         isStoppingIntentionally = true
-        source?.stop()
-        source = nil
-        if let playback {
-            await playback.stop()
-            self.playback = nil
+        if let audioSession {
+            audioSession.stop()
+            self.audioSession = nil
+        } else {
+            source?.stop()
+            if let playback {
+                await playback.stop()
+                self.playback = nil
+            }
         }
+        source = nil
         if let client {
             try? await client.commit()
             await waitForFinalTurn()
@@ -619,7 +654,11 @@ public final class AssistantSession {
             // 客户端把还没播的缓冲丢掉，并把这一句标成"被打断"（不是错误）。
             guard mode.allowsBargeIn, isSpeaking else { return }
             currentReplyInterrupted = true
-            await playback?.stop()
+            if let audioSession {
+                await audioSession.stopPlayback()
+            } else {
+                await playback?.stop()
+            }
             isSpeaking = false
             phase = .listening
             if let client { try? await client.cancelResponse() }
@@ -628,7 +667,11 @@ public final class AssistantSession {
             phase = .speaking
             // 半双工：从这一刻起闭麦（一问一答的口径）。
             isMutedForPlayback = !mode.allowsBargeIn
-            await playback?.enqueue(pcm)
+            if let audioSession {
+                await audioSession.enqueuePlayback(pcm)
+            } else {
+                await playback?.enqueue(pcm)
+            }
         case .responseDone(let status):
             if status == "cancelled" { currentReplyInterrupted = true }
         case .serverError(let code, let message):
@@ -812,7 +855,16 @@ public final class AssistantSession {
     private func handleUnexpectedClose(code: Int?) async {
         guard !isStoppingIntentionally, phase.isLive else { return }
         let reason = code.map { "语音服务断开了连接（\($0)）。" } ?? "语音服务断开了连接。"
-        source?.stop()
+        if let audioSession {
+            audioSession.stop()
+            self.audioSession = nil
+        } else {
+            source?.stop()
+            if let playback {
+                await playback.stop()
+                self.playback = nil
+            }
+        }
         source = nil
         pump?.cancel()
         pump = nil
@@ -865,6 +917,19 @@ public final class AssistantSession {
         if let failure = error as? MicrophoneCapture.Failure, failure == .permissionDenied {
             return .microphoneDenied
         }
+        if let failure = error as? AudioEngineSession.Failure {
+            switch failure {
+            case .permissionDenied:
+                return .microphoneDenied
+            case .voiceProcessingUnavailable(let message):
+                return .serviceNotReady(
+                    "实时对讲的系统回声消除没有在当前音频设备上启用：\(message)"
+                        + "请连接支持双向语音处理的耳机，或切换到「一问一答（外放）」。"
+                )
+            default:
+                break
+            }
+        }
         return .serviceNotReady(error.localizedDescription)
     }
 
@@ -873,6 +938,482 @@ public final class AssistantSession {
 
         init(_ reason: BlockReason) {
             self.reason = reason
+        }
+    }
+}
+
+// MARK: - 助手共享音频引擎
+
+/// 助手专用的音频会话接口。普通 `AudioChunkSource` 仍是兼容边界；只有默认源实现这个
+/// 扩展接口时，采集和播放才会共享一台 `AVAudioEngine`，从而让系统 AEC 同时看到两路信号。
+private protocol AssistantAudioSession: AnyObject, AudioChunkSource {
+    func configure(mode: AssistantMode)
+    var onPlaybackDrained: (@MainActor () -> Void)? { get set }
+    var onFailure: (@MainActor (String) -> Void)? { get set }
+    func enqueuePlayback(_ pcm: Data) async
+    func stopPlayback() async
+}
+
+/// 一台用于语音助手的全双工音频引擎。
+///
+/// - `.duplex`：在启动前同时给 input/output I/O node 打开系统 voice processing，让
+///   macOS 的 AEC/NS/AGC 看到真实的播放参考；输入 tap 只拿处理后的 near-end 音频。
+/// - `.turnTaking`：不依赖 AEC，仍共享同一台引擎，但在助手说话时由会话层丢弃上行帧。
+/// - 播放停止只停 `AVAudioPlayerNode`，不拆输入引擎；插话后的下一块 TTS 仍能立即播放。
+///
+/// 音频回调只做系统 converter + 环形缓冲写入；网络、锁等待和 UI 回调都在回调之外。
+final class AudioEngineSession: AssistantAudioSession, @unchecked Sendable {
+    enum Failure: LocalizedError, Equatable {
+        case permissionDenied
+        case unsupportedInput
+        case converterUnavailable
+        case voiceProcessingUnavailable(String)
+        case engineFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .permissionDenied:
+                "麦克风未授权。"
+            case .unsupportedInput:
+                "输入设备没有可用的采样率。"
+            case .converterUnavailable:
+                "这个输入设备的格式转不成 16 kHz 单声道。"
+            case .voiceProcessingUnavailable(let message):
+                "系统语音处理不可用：\(message)"
+            case .engineFailed(let message):
+                "共享音频引擎没有开始：\(message)"
+            }
+        }
+    }
+
+    private static let inputSampleRate: Double = 16_000
+    private static let playbackSampleRate: Double = 24_000
+    private static let chunkDuration: Duration = .milliseconds(100)
+
+    private let queue = DispatchQueue(
+        label: "com.speechrail.app.assistant.audio-engine",
+        qos: .userInitiated
+    )
+    private let stateLock = NSLock()
+    private let ring = AssistantAudioRing(capacity: Int(inputSampleRate) * MemoryLayout<Int16>.size)
+    private let playbackFormat: AVAudioFormat?
+
+    private var mode: AssistantMode = .turnTaking
+    private var stopped = false
+    private var started = false
+    private var continuation: AsyncStream<AudioChunk>.Continuation?
+    private var drainTask: Task<Void, Never>?
+
+    // 下列引擎对象只在 `queue` 上创建、重建和拆卸；播放入队也串到同一条队列。
+    private var engine: AVAudioEngine?
+    private var player: AVAudioPlayerNode?
+    private var converter: AVAudioConverter?
+    private var configurationObserver: NSObjectProtocol?
+
+    // 播放缓冲的计数与代次由锁保护，避免停止/插话与 completion 同时到来时误报 drained。
+    private var playbackGeneration = 0
+    private var pendingBuffers = 0
+    private var playbackDrainedHandler: (@MainActor () -> Void)?
+    private var failureHandler: (@MainActor (String) -> Void)?
+
+    init() {
+        playbackFormat = AVAudioFormat(
+            commonFormat: .pcmFormatInt16,
+            sampleRate: Self.playbackSampleRate,
+            channels: 1,
+            interleaved: true
+        )
+    }
+
+    var onPlaybackDrained: (@MainActor () -> Void)? {
+        get { stateLock.withLock { playbackDrainedHandler } }
+        set { stateLock.withLock { playbackDrainedHandler = newValue } }
+    }
+
+    var onFailure: (@MainActor (String) -> Void)? {
+        get { stateLock.withLock { failureHandler } }
+        set { stateLock.withLock { failureHandler = newValue } }
+    }
+
+    func configure(mode: AssistantMode) {
+        stateLock.withLock {
+            guard !started else { return }
+            self.mode = mode
+        }
+    }
+
+    func start() async throws -> AsyncStream<AudioChunk> {
+        guard await MicrophoneCapture.requestPermission() else {
+            throw Failure.permissionDenied
+        }
+        let canStart = stateLock.withLock { !stopped && !started }
+        guard canStart else {
+            throw Failure.engineFailed("一个音频会话实例只能启动一次。")
+        }
+
+        let (stream, continuation) = AsyncStream<AudioChunk>.makeStream(
+            bufferingPolicy: .bufferingNewest(64)
+        )
+        stateLock.withLock { self.continuation = continuation }
+        ring.reset()
+
+        do {
+            try await withCheckedThrowingContinuation { (result: CheckedContinuation<Void, Error>) in
+                queue.async { [weak self] in
+                    guard let self else {
+                        result.resume(throwing: Failure.engineFailed("音频会话已释放。"))
+                        return
+                    }
+                    do {
+                        try self.startEngineOnQueue()
+                        self.stateLock.withLock { self.started = true }
+                        result.resume()
+                    } catch {
+                        result.resume(throwing: error)
+                    }
+                }
+            }
+        } catch {
+            stateLock.withLock { self.continuation = nil }
+            continuation.finish()
+            throw error
+        }
+
+        let canDrain = stateLock.withLock { !stopped && started }
+        guard canDrain else {
+            continuation.finish()
+            throw Failure.engineFailed("音频会话在启动时被取消。")
+        }
+        startDraining(into: continuation)
+        return stream
+    }
+
+    func stop() {
+        let (continuation, drainTask) = stateLock.withLock {
+            stopped = true
+            started = false
+            playbackGeneration += 1
+            pendingBuffers = 0
+            let continuation = self.continuation
+            let drainTask = self.drainTask
+            self.continuation = nil
+            self.drainTask = nil
+            return (continuation, drainTask)
+        }
+        continuation?.finish()
+        drainTask?.cancel()
+        queue.async { [weak self] in
+            self?.tearDownEngineOnQueue()
+        }
+    }
+
+    func enqueuePlayback(_ pcm: Data) async {
+        guard !pcm.isEmpty, let playbackFormat else { return }
+        let frameCount = pcm.count / MemoryLayout<Int16>.size
+        guard frameCount > 0,
+              let buffer = AVAudioPCMBuffer(
+                pcmFormat: playbackFormat,
+                frameCapacity: AVAudioFrameCount(frameCount)
+              )
+        else { return }
+        buffer.frameLength = AVAudioFrameCount(frameCount)
+        if let destination = buffer.int16ChannelData?[0] {
+            pcm.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                destination.update(
+                    from: base.assumingMemoryBound(to: Int16.self),
+                    count: frameCount
+                )
+            }
+        }
+
+        let reservation: (generation: Int, resetCapture: Bool)? = stateLock.withLock {
+            guard !stopped, started else { return nil }
+            let resetCapture = !mode.allowsBargeIn && pendingBuffers == 0
+            pendingBuffers += 1
+            return (playbackGeneration, resetCapture)
+        }
+        guard let reservation else { return }
+        if reservation.resetCapture { ring.reset() }
+        let boxedBuffer = AssistantPCMBufferBox(buffer)
+
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            queue.async { [weak self] in
+                guard let self else {
+                    done.resume()
+                    return
+                }
+                let accepted = self.stateLock.withLock {
+                    !self.stopped
+                        && self.started
+                        && reservation.generation == self.playbackGeneration
+                }
+                guard accepted, let player = self.player else {
+                    self.cancelPlaybackReservation(generation: reservation.generation)
+                    done.resume()
+                    return
+                }
+                player.scheduleBuffer(boxedBuffer.buffer) { [weak self] in
+                    self?.didFinishPlaybackBuffer(generation: reservation.generation)
+                }
+                if !player.isPlaying { player.play() }
+                done.resume()
+            }
+        }
+    }
+
+    func stopPlayback() async {
+        let resetCapture = stateLock.withLock {
+            playbackGeneration += 1
+            pendingBuffers = 0
+            return !mode.allowsBargeIn
+        }
+        if resetCapture { ring.reset() }
+        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+            queue.async { [weak self] in
+                self?.player?.stop()
+                self?.player?.reset()
+                done.resume()
+            }
+        }
+    }
+
+    private func startDraining(into continuation: AsyncStream<AudioChunk>.Continuation) {
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.chunkDuration)
+                guard !Task.isCancelled, let self else { return }
+                guard self.stateLock.withLock({ !self.stopped && self.started }) else { return }
+                if let chunk = self.ring.drain() { continuation.yield(chunk) }
+            }
+        }
+        let cancel = stateLock.withLock { () -> Bool in
+            guard !stopped else { return true }
+            drainTask = task
+            return false
+        }
+        if cancel { task.cancel() }
+    }
+
+    /// 只在串行音频队列上建立图。voice processing 必须在 engine running 之前同时配置在
+    /// input/output I/O node；只给 input 开启会丢掉 far-end render 参考，AEC 不完整。
+    private func startEngineOnQueue() throws {
+        guard !stateLock.withLock({ stopped }) else {
+            throw Failure.engineFailed("音频会话已停止。")
+        }
+        guard let playbackFormat else { throw Failure.converterUnavailable }
+
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let output = engine.outputNode
+        let mode = stateLock.withLock { self.mode }
+
+        if mode.allowsBargeIn {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                try output.setVoiceProcessingEnabled(true)
+            } catch {
+                throw Failure.voiceProcessingUnavailable(error.localizedDescription)
+            }
+            guard input.isVoiceProcessingEnabled, output.isVoiceProcessingEnabled else {
+                throw Failure.voiceProcessingUnavailable("当前输入/输出节点拒绝启用 voice processing。")
+            }
+        }
+
+        let inputFormat = input.inputFormat(forBus: 0)
+        guard inputFormat.sampleRate > 0 else { throw Failure.unsupportedInput }
+        guard let converter = AVAudioConverter(from: inputFormat, to: Self.captureFormat) else {
+            throw Failure.converterUnavailable
+        }
+
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+        input.installTap(onBus: 0, bufferSize: 2_048, format: inputFormat) { [weak self] buffer, _ in
+            guard let self,
+                  let converted = MicrophoneCapture.convert(
+                    buffer,
+                    using: converter,
+                    to: Self.captureFormat
+                  )
+            else { return }
+            self.ring.write(converted)
+        }
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            input.removeTap(onBus: 0)
+            player.stop()
+            player.reset()
+            engine.detach(player)
+            throw Failure.engineFailed(error.localizedDescription)
+        }
+
+        self.engine = engine
+        self.player = player
+        self.converter = converter
+        player.play()
+        installConfigurationObserver(for: engine)
+    }
+
+    private static let captureFormat = AVAudioFormat(
+        commonFormat: .pcmFormatInt16,
+        sampleRate: inputSampleRate,
+        channels: 1,
+        interleaved: true
+    )!
+
+    private func installConfigurationObserver(for engine: AVAudioEngine) {
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.queue.async { [weak self] in
+                self?.rebuildAfterConfigurationChangeOnQueue()
+            }
+        }
+    }
+
+    /// 设备切换会让 AVAudioEngine 停止并重置图；保留同一条 PCM stream，重建 input tap、
+    /// converter 和 player。若新路由不支持 duplex，明确回调到会话层，不静默上传坏帧。
+    private func rebuildAfterConfigurationChangeOnQueue() {
+        guard stateLock.withLock({ !stopped && started }) else { return }
+        stateLock.withLock {
+            playbackGeneration += 1
+            pendingBuffers = 0
+        }
+        tearDownEngineOnQueue()
+        do {
+            try startEngineOnQueue()
+            stateLock.withLock { started = true }
+        } catch {
+            let message = error.localizedDescription
+            let (continuation, handler) = stateLock.withLock {
+                started = false
+                pendingBuffers = 0
+                let continuation = self.continuation
+                self.continuation = nil
+                return (continuation, failureHandler)
+            }
+            continuation?.finish()
+            Task { @MainActor in handler?("音频设备切换后无法恢复：\(message)") }
+        }
+    }
+
+    private func tearDownEngineOnQueue() {
+        if let configurationObserver {
+            NotificationCenter.default.removeObserver(configurationObserver)
+            self.configurationObserver = nil
+        }
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            if let player {
+                player.stop()
+                player.reset()
+                engine.detach(player)
+            }
+            engine.stop()
+        }
+        engine = nil
+        player = nil
+        converter = nil
+        ring.reset()
+    }
+
+    private func cancelPlaybackReservation(generation: Int) {
+        stateLock.withLock {
+            guard generation == playbackGeneration else { return }
+            pendingBuffers = max(0, pendingBuffers - 1)
+        }
+    }
+
+    private func didFinishPlaybackBuffer(generation: Int) {
+        let result: (@MainActor () -> Void)? = stateLock.withLock {
+            guard generation == playbackGeneration, !stopped else { return nil }
+            pendingBuffers = max(0, pendingBuffers - 1)
+            guard pendingBuffers == 0 else { return nil }
+            return playbackDrainedHandler
+        }
+        guard let result else { return }
+        if stateLock.withLock({ !mode.allowsBargeIn }) { ring.reset() }
+        Task { @MainActor in result() }
+    }
+}
+
+/// AVFAudio 的 buffer 由旧式 ObjC API 管理；这里只把它从调用任务安全地转交到同一条
+/// 音频工作队列，不把它暴露给其它模块或跨线程共享。生命周期由 player 的调度完成回调结束。
+private final class AssistantPCMBufferBox: @unchecked Sendable {
+    let buffer: AVAudioPCMBuffer
+
+    init(_ buffer: AVAudioPCMBuffer) {
+        self.buffer = buffer
+    }
+}
+
+/// 助手共享引擎自己的 1 秒 PCM 环形缓冲。`MicrophoneCapture` 的 ring 是 private，避免
+/// 为了复用而扩大其他会话的实现边界；两者都遵守“满了丢最旧，不回放补录”的口径。
+private final class AssistantAudioRing: @unchecked Sendable {
+    private let lock = NSLock()
+    private let capacity: Int
+    private var storage: [UInt8]
+    private var readIndex = 0
+    private var writeIndex = 0
+    private var count = 0
+
+    init(capacity: Int) {
+        self.capacity = capacity
+        self.storage = [UInt8](repeating: 0, count: capacity)
+    }
+
+    func reset() {
+        lock.withLock {
+            readIndex = 0
+            writeIndex = 0
+            count = 0
+        }
+    }
+
+    func write(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.withLock {
+            data.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                var offset = 0
+                while offset < raw.count {
+                    let run = min(capacity - writeIndex, raw.count - offset)
+                    storage.withUnsafeMutableBytes { destination in
+                        destination.baseAddress?.advanced(by: writeIndex)
+                            .copyMemory(from: base.advanced(by: offset), byteCount: run)
+                    }
+                    writeIndex = (writeIndex + run) % capacity
+                    offset += run
+                    let overflow = count + run - capacity
+                    if overflow > 0 {
+                        count = capacity
+                        readIndex = (readIndex + overflow) % capacity
+                    } else {
+                        count += run
+                    }
+                }
+            }
+        }
+    }
+
+    func drain() -> AudioChunk? {
+        lock.withLock {
+            guard count > 0 else { return nil }
+            var bytes = [UInt8]()
+            bytes.reserveCapacity(count)
+            for _ in 0..<count {
+                bytes.append(storage[readIndex])
+                readIndex = (readIndex + 1) % capacity
+            }
+            let data = Data(bytes)
+            count = 0
+            let level = data.withUnsafeBytes { AudioLevel.peak($0.bindMemory(to: Int16.self)) }
+            return AudioChunk(pcm: data, level: level)
         }
     }
 }

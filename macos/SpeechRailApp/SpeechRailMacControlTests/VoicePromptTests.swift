@@ -1,5 +1,8 @@
 import Foundation
 import XCTest
+#if SWIFT_PACKAGE
+@testable import SpeechRailAppSupport
+#endif
 
 /// 语音契约与"送进 TTS 之前"的清洗（`TECHNICAL-DESIGN` §5.5）。
 ///
