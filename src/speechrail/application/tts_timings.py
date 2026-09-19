@@ -19,6 +19,7 @@ class _TimingState:
     request_id: str
     sample_rate: int
     display_mapping_status: Literal["identity", "mapped", "unavailable"]
+    expected_text_spans: tuple[tuple[int, int], ...]
     display_spans: tuple[tuple[int, int] | None, ...]
     display_mapping_reason: str | None = None
     status: TimingStatus = "pending"
@@ -45,6 +46,7 @@ class TtsTimingRegistry:
         request_id: str,
         sample_rate: int,
         display_mapping_status: Literal["identity", "mapped", "unavailable"],
+        expected_text_spans: tuple[tuple[int, int], ...],
         display_spans: tuple[tuple[int, int] | None, ...] = (),
         display_mapping_reason: str | None = None,
     ) -> str:
@@ -56,6 +58,7 @@ class TtsTimingRegistry:
             request_id=request_id,
             sample_rate=sample_rate,
             display_mapping_status=display_mapping_status,
+            expected_text_spans=expected_text_spans,
             display_spans=display_spans,
             display_mapping_reason=display_mapping_reason,
         )
@@ -85,9 +88,15 @@ class TtsTimingRegistry:
             state = self._entries[timing_id]
             if state.status != "pending":
                 return
+            backend_spans = tuple(
+                (chunk.text_start, chunk.text_end) for chunk in sidecar.chunks
+            )
             if sidecar.sample_rate != state.sample_rate:
                 state.status = "unavailable"
                 state.reason = "timing_sample_rate_mismatch"
+            elif backend_spans != state.expected_text_spans:
+                state.status = "unavailable"
+                state.reason = "planner_contract_mismatch"
             elif state.display_spans and len(state.display_spans) != len(sidecar.chunks):
                 state.status = "unavailable"
                 state.reason = "display_mapping_chunk_mismatch"
