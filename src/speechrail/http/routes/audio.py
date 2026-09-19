@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal, cast
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
@@ -42,6 +42,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
+    VoiceRevisionConflictError,
     VoiceStoreUnavailableError,
     resolve_voice,
     tts_voice_class,
@@ -1317,12 +1318,32 @@ def create_audio_router(services: AppServices) -> APIRouter:
         return Response(content=content, media_type=media_type)
 
     @router.post(
+        "/v2/audio/speech",
+        response_class=Response,
+        responses={200: _TTS_OPENAPI_RESPONSE},
+    )
+    @router.post(
         "/v1/audio/speech",
         response_class=Response,
         responses={200: _TTS_OPENAPI_RESPONSE},
     )
-    async def speech(request: Request, body: _SpeechHTTPBody) -> Response:
+    async def speech(
+        request: Request,
+        body: _SpeechHTTPBody,
+        expected_voice_revision: str | None = Header(
+            default=None,
+            alias="SpeechRail-Expected-Voice-Revision",
+            pattern=r"^vr_[0-9a-f]{32}$",
+        ),
+    ) -> Response:
         request_id = request.state.request_id
+        if expected_voice_revision is not None and request.url.path == "/v1/audio/speech":
+            return error_response(
+                422,
+                request_id,
+                "voice_revision_pin_requires_v2",
+                "SpeechRail-Expected-Voice-Revision is available only on /v2/audio/speech",
+            )
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
         if canonical_tts_model(
@@ -1432,6 +1453,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             speed=body.speed,
             language=body.language,
             instruction=body.instructions,
+            expected_voice_revision=expected_voice_revision,
         )
         expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
 
@@ -1494,6 +1516,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 await _close_audio_stream(pcm_stream)
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
+                )
+            except VoiceRevisionConflictError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revision_conflict",
+                    "Requested voice revision no longer matches the resolved voice",
                 )
             except RuntimeError:
                 await _close_audio_stream(pcm_stream)
