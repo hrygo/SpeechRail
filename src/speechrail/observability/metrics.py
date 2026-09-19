@@ -65,6 +65,7 @@ _TTS_DELIVERY_EVENTS = frozenset(
         "clone_loudness_request",
         "clone_loudness_calibrated",
         "clone_loudness_peak_ceiling",
+        "float_overrange",
         "abort_fallback",
         "reload",
     }
