@@ -104,7 +104,7 @@ ws://127.0.0.1:8201/v1/realtime
 `conversation.item.input_audio_transcription.segment`，每项含 `speaker`；**未启用
 diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无分人路径一致。
 
-`/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
+`/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v1/speechrail/realtime`
 已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。
 
 ## 语音准入与无声闭环（SR-SILENCE-1）
@@ -204,7 +204,7 @@ codepoints/chunk）生成声学输入；没有将 Realtime 改成增量文本摄
 
 该版本保持既有逐 chunk 模型调用和波形平滑，不添加跨请求 decoder/KV 共享、不插入
 额外静音，也不声称已适配原生跨句 context。`suggested_pause_ms=null` 表示未提供建议，
-不是测得零停顿。`/v2/capabilities.operations.tts_text_planner` 公布策略版本；策略
+不是测得零停顿。`/v1/speechrail/capabilities.operations.tts_text_planner` 公布策略版本；策略
 变更会使目录 revision 失效。内部 `summary()` 可提供低基数版本/数量摘要，但尚未
 增加 TTS 完成回执、网络事件或新的指标。协议 chunk 不等于网络 audio delta。
 
