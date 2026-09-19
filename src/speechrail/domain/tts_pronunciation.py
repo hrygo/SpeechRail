@@ -24,12 +24,12 @@ PRONUNCIATION_ENTRY_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _MARKDOWN_CHARS = frozenset("*#`~_>")
 _TRAILING_WEAK = frozenset("，,、：:")
 _SENTENCE_TERMINATORS = frozenset("。！？!?；;…—.")
-_URL_RE = re.compile(r"(?i)(?:https?://|www\\.)[^\\s]+")
+_URL_RE = re.compile(r"(?i)(?:https?://|www\.)[^\s]+")
 _EMAIL_RE = re.compile(
-    r"(?i)(?<![\\w.+-])[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}(?![\\w.-])"
+    r"(?i)(?<![\w.+-])[\w.+-]+@[\w.-]+\.[a-z]{2,}(?![\w.-])"
 )
 _FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`\\n]+`")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 EntrySource = Literal["system", "user"]
 
 
