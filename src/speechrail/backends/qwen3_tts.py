@@ -375,6 +375,7 @@ class Qwen3TtsWorker:
             "clone_loudness_requests": "clone_loudness_request",
             "clone_loudness_calibrated": "clone_loudness_calibrated",
             "clone_loudness_peak_ceiling": "clone_loudness_peak_ceiling",
+            "float_overrange_chunks": "float_overrange",
         }
         for field, event in names.items():
             amount = raw.get(field)
