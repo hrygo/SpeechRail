@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.diarization_admission import (
     DiarizationAdmission,
     DiarizationAdmissionFullError,
@@ -24,9 +25,11 @@ def test_diarization_admission_rejects_a_second_session_and_releases_after_close
         first = asyncio.create_task(hold_first_session())
         await entered.wait()
         assert admission.active == 1
-        with pytest.raises(DiarizationAdmissionFullError):
+        with pytest.raises(DiarizationAdmissionFullError) as caught:
             async with admission.reserve():
                 raise AssertionError("second diarization session must not start")
+        assert caught.value.busy_reason == BusyReason.DIARIZATION_CAPACITY
+        assert caught.value.retryable is True
 
         release.set()
         await first
