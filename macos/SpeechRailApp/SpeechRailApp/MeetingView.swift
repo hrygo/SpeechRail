@@ -86,6 +86,23 @@ public struct MeetingView: View {
                     helpText: "按现在选的音频来源开始；麦克风第一次会请求系统授权"
                 ) { Task { await start() } }
             } else if meeting.phase.isLive || meeting.phase == .interrupted {
+                // 稿 `screenMeetingRecording` 的页头三件：`⌘⇧.` 键帽 / 静音麦克风 / 结束会议。
+                // 键帽跟在它对应的那个按钮旁边说"这个动作还有键位"（§8：⌘⇧. = 结束当前会话；
+                // 内心 OS 是 ⌘⇧I，与本页底部抽屉的那条链路同源）。
+                // 静音只在这一处给，状态带是状态不是第二个控制区（`main.js:3394` 的同一条口径）。
+                // 纯本机音频的会议**不摆**这个开关：没有麦克风可静，摆着就是个按了没反应的死按钮。
+                SessionHeaderKeycap("⌘⇧.")
+                if meeting.phase == .recording, meeting.usesMicrophone {
+                    PageActionButton(
+                        title: meeting.isMicrophoneMuted ? "取消静音" : "静音麦克风",
+                        systemImage: meeting.isMicrophoneMuted ? "mic.slash.fill" : "mic.slash",
+                        helpText: meeting.isMicrophoneMuted
+                            ? "恢复把你这边的话送进转录；本机音频那一侧一直没停"
+                            : "只是暂时不把你这边的声音送进去；录制、本机音频、转录都照旧"
+                    ) {
+                        meeting.toggleMicrophoneMute()
+                    }
+                }
                 PageActionButton(
                     title: "结束会议",
                     systemImage: "stop.circle",
@@ -168,7 +185,11 @@ public struct MeetingView: View {
         case .idle:
             return meeting.blocked != nil ? "这一场没有开始" : "还没有开始会议"
         case .preparing: return "正在准备…"
-        case .recording: return meeting.isPaused ? "已暂停" : "正在录音"
+        // 暂停与静音**不是**同一件事：暂停是整条上行都停（含本机音频），静音只关掉麦克风
+        // 那一路。两句都成立时先说更强的那一句——"已暂停"已经蕴含"你这边的声音进不去"。
+        case .recording:
+            if meeting.isPaused { return "已暂停" }
+            return meeting.isMicrophoneMuted ? "正在录音 · 麦克风已静音" : "正在录音"
         case .interrupted: return "录制中断"
         case .processing: return "正在整理会议…"
         case .archived: return "这一场已经结束"
@@ -200,6 +221,9 @@ public struct MeetingView: View {
         if meeting.labeling.isEnabled { facts.append("分人已开") }
         facts.append("\(meeting.storedLineCount) 段已存好")
         if meeting.gapCount > 0 { facts.append("\(meeting.gapCount) 处补过静音") }
+        // 标题已经说了"麦克风已静音"时不重复；只有暂停把标题占掉时才在这里补一句，
+        // 否则"暂停 + 静音"两个开关叠在一起时，界面上会看不见后者的存在。
+        if meeting.isMicrophoneMuted, meeting.isPaused { facts.append("麦克风已静音") }
         if meeting.reconnectedSources > 0 {
             facts.append("接回过 \(meeting.reconnectedSources) 次")
         }

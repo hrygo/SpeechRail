@@ -138,6 +138,12 @@ public final class MeetingSession {
     /// 因为 `source_lost` 自动接回过几次（§9 第 9 行：无打扰，只记区间）。
     public private(set) var reconnectedSources = 0
     public private(set) var isPaused = false
+    /// 麦克风这一路被用户静音了没有（会中「我暂时不说」）。
+    ///
+    /// 三件事互不等价，页头与状态带必须分开说：**静音**只让麦克风一路往下送静音（设备还在、
+    /// 会还在录，本机音频那一侧照旧进转录）；**暂停**是整条上行都停；**结束**才是释放设备。
+    /// 所以它与 `isPaused` 是两个独立的开关，一个开着不影响另一个。
+    public private(set) var isMicrophoneMuted = false
 
     /// 分人账本：与会话同生共死，**会议与字幕共用同一份实现**。
     public let labeling: SpeakerLabeling
@@ -257,6 +263,20 @@ public final class MeetingSession {
         isPaused.toggle()
     }
 
+    /// 这一场的来源里有没有麦克风（页头的静音按钮据此决定露不露）。
+    public var usesMicrophone: Bool { selection?.usesMicrophone ?? false }
+
+    /// 静音 / 取消静音麦克风这一路（页头那一个按钮，§6.2）。
+    ///
+    /// 只有"这一场正录着、且来源里确实有麦克风"时才有效：纯本机音频的会议按不动它——
+    /// 静音一个没在采的来源是个假装有反馈的死按钮。中断态也算不上"正录着"：那里的设备
+    /// 已经释放（§9 第 8 行），静音跟着设备一起归零，不给一个跨中断还亮着的假开关。
+    public func toggleMicrophoneMute() {
+        guard phase == .recording, usesMicrophone else { return }
+        isMicrophoneMuted.toggle()
+        audio.setMicrophoneMuted(isMicrophoneMuted)
+    }
+
     // MARK: - 生命周期
 
     private func startPipeline(isNewSession: Bool) async throws {
@@ -337,6 +357,8 @@ public final class MeetingSession {
         diarizationDrained = false
         isStoppingIntentionally = false
         isPaused = false
+        // 静音状态与设备同生共死：`audio.start` 已经把闸门重置回"能说话"，这里的镜像跟上。
+        isMicrophoneMuted = false
         phase = .recording
         // 来源退出之后**自动接回**只发生在这一条路上：来源 App 退出不打断录制，只记一条区间。
         audio.onSystemAudioLost = { [weak self] reason in
@@ -361,6 +383,8 @@ public final class MeetingSession {
         client = nil
         level = 0
         partialText = nil
+        // 设备走了，静音跟着走：`audio.stop()` 已经把闸门清掉，镜像不能留在"还静着"上。
+        isMicrophoneMuted = false
     }
 
     private func resetKeepingLines() {

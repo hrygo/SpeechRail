@@ -137,6 +137,11 @@ public final class AudioSourceCoordinator {
     private var system: SystemAudioCapture?
     private var mixer: StreamMixer?
     private var currentSource: SessionAudioSource = .microphone
+    /// 麦克风这一路被用户静音了没有（会中「我暂时不说」）。
+    ///
+    /// 它与启停**不是**同一件事：静音时设备与采集流照旧开着（`AGENTS.md` 那条"按功能启用、
+    /// 离开释放"讲的是设备归属，静音的人还在会话里），所以它只影响这一路往下送什么。
+    public private(set) var isMicrophoneMuted = false
     /// 正在**主动**收尾。它区分"我们让它停"与"它自己断了"——只有后者才是 `source_lost`。
     private var isTearingDown = false
 
@@ -162,7 +167,7 @@ public final class AudioSourceCoordinator {
         if selection.usesMicrophone {
             let capture = MicrophoneCapture()
             do {
-                streams.append(("麦克风", try await capture.start()))
+                streams.append(("麦克风", gate(microphone: try await capture.start())))
             } catch {
                 throw Blocked(reason: Self.blockReason(forMicrophone: error))
             }
@@ -192,6 +197,8 @@ public final class AudioSourceCoordinator {
         systemAudioStopReason = nil
         gapCount = 0
         level = 0
+        // 新的一场从"能说话"开始：上一场留在闸门上的状态不跟过来（最小意外）。
+        isMicrophoneMuted = false
 
         // 只有**麦克风**这一条路时才直通：它不需要热插拔。
         // 一旦选了本机音频，即使只有它一路，也走混音器——因为来源 App 退出之后要能**换上新的那一路**，
@@ -244,6 +251,36 @@ public final class AudioSourceCoordinator {
         await release()
         level = 0
         activeSelection = nil
+        isMicrophoneMuted = false
+    }
+
+    /// 静音 / 取消静音麦克风这一路。只有选了麦克风时才有效果（调用点负责判断）。
+    public func setMicrophoneMuted(_ muted: Bool) {
+        isMicrophoneMuted = muted
+    }
+
+    /// 麦克风静音闸：静音时把每一块换成**等长静音**再往下走。
+    ///
+    /// 为什么不是把块丢掉：混音器按 40 ms 栅格合流，某一路这一格没有样本时它会补静音
+    /// **并记一笔缺口**（`gapCount`），状态带上就会出现「N 处补过静音」——那是给真断源
+    /// （来源 App 退出、设备被拔）准备的事实。用静音表达"我主动不说"才不算撒谎；
+    /// 块长不变，所以下游的栅格、时间轴与分人链路都不需要知道这件事。
+    ///
+    /// 电平一并归零：静音时状态带上的电平柱应当落下去，而不是继续显示"房间里很吵"。
+    private func gate(microphone stream: AsyncStream<AudioChunk>) -> AsyncStream<AudioChunk> {
+        let (out, continuation) = AsyncStream<AudioChunk>.makeStream(bufferingPolicy: .unbounded)
+        Task { @MainActor [weak self] in
+            for await chunk in stream {
+                guard let self else { break }
+                if self.isMicrophoneMuted {
+                    continuation.yield(AudioChunk(pcm: Data(count: chunk.pcm.count), level: 0))
+                } else {
+                    continuation.yield(chunk)
+                }
+            }
+            continuation.finish()
+        }
+        return out
     }
 
     /// 包一层观察者：这一路**自己在没有 teardown 的情况下结束**才算断了。
