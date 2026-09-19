@@ -1171,7 +1171,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return PlainTextResponse(format_srt(result), media_type="application/x-subrip")
         return PlainTextResponse(format_vtt(result), media_type="text/vtt")
 
-    @router.get("/v2/audio/receipts/{receipt_id}")
+    @router.get("/v1/speechrail/audio/receipts/{receipt_id}")
     async def render_receipt(receipt_id: str, request: Request) -> JSONResponse:
         """Return safe service-side rendering evidence without audio or text."""
 
@@ -1189,7 +1189,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         return JSONResponse(status_code=200, content=payload)
 
-    @router.get("/v2/audio/receipts/by-request/{source_request_id}")
+    @router.get("/v1/speechrail/audio/receipts/by-request/{source_request_id}")
     async def render_receipt_by_request(
         source_request_id: str,
         request: Request,
@@ -1365,11 +1365,6 @@ def create_audio_router(services: AppServices) -> APIRouter:
         return Response(content=content, media_type=media_type)
 
     @router.post(
-        "/v2/audio/speech",
-        response_class=Response,
-        responses={200: _TTS_OPENAPI_RESPONSE},
-    )
-    @router.post(
         "/v1/audio/speech",
         response_class=Response,
         responses={200: _TTS_OPENAPI_RESPONSE},
@@ -1387,22 +1382,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
             alias="SpeechRail-Pronunciation-Set",
             pattern=r"^[a-zA-Z0-9_-]{1,64}@pr_[0-9a-f]{32}$",
         ),
+        receipt_mode: Literal["integrity"] | None = Header(
+            default=None,
+            alias="SpeechRail-Receipt-Mode",
+        ),
     ) -> Response:
         request_id = request.state.request_id
-        if expected_voice_revision is not None and request.url.path == "/v1/audio/speech":
-            return error_response(
-                422,
-                request_id,
-                "voice_revision_pin_requires_v2",
-                "SpeechRail-Expected-Voice-Revision is available only on /v2/audio/speech",
-            )
-        if pronunciation_set is not None and request.url.path == "/v1/audio/speech":
-            return error_response(
-                422,
-                request_id,
-                "pronunciation_set_requires_v2",
-                "SpeechRail-Pronunciation-Set is available only on /v2/audio/speech",
-            )
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
         if canonical_tts_model(
@@ -1439,7 +1424,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if profile.revoked:
             return error_response(
-                409 if request.url.path == "/v2/audio/speech" else 400,
+                409 if expected_voice_revision is not None else 400,
                 request_id,
                 "voice_revoked",
                 "Requested voice revision has been revoked",
@@ -1517,37 +1502,35 @@ def create_audio_router(services: AppServices) -> APIRouter:
         planner_summary: dict[str, object] | None = None
         text_summary: dict[str, object] | None = None
         synthesis_text = body.input
-        if request.url.path == "/v2/audio/speech":
-            selected_set = None
-            if pronunciation_set is not None:
-                set_id, set_revision = pronunciation_set.split("@", 1)
-                try:
-                    selected_set = get_pronunciation_registry().get(
-                        set_id,
-                        revision=set_revision,
-                    )
-                except PronunciationRevokedError:
-                    return error_response(
-                        409,
-                        request_id,
-                        "pronunciation_revoked",
-                        "Requested pronunciation revision is revoked",
-                    )
-                except PronunciationStoreUnavailableError:
-                    return error_response(
-                        503,
-                        request_id,
-                        "pronunciation_store_unavailable",
-                        "Pronunciation registry is unavailable",
-                        retryable=True,
-                    )
-                except KeyError:
-                    return error_response(
-                        404,
-                        request_id,
-                        "pronunciation_revision_not_found",
-                        "Pronunciation set or revision not found",
-                    )
+        if pronunciation_set is not None:
+            set_id, set_revision = pronunciation_set.split("@", 1)
+            try:
+                selected_set = get_pronunciation_registry().get(
+                    set_id,
+                    revision=set_revision,
+                )
+            except PronunciationRevokedError:
+                return error_response(
+                    409,
+                    request_id,
+                    "pronunciation_revoked",
+                    "Requested pronunciation revision is revoked",
+                )
+            except PronunciationStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "pronunciation_store_unavailable",
+                    "Pronunciation registry is unavailable",
+                    retryable=True,
+                )
+            except KeyError:
+                return error_response(
+                    404,
+                    request_id,
+                    "pronunciation_revision_not_found",
+                    "Pronunciation set or revision not found",
+                )
             spoken = apply_pronunciation(
                 body.input,
                 selected_set,
@@ -1559,7 +1542,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
 
         receipt_id: str | None = None
         effective_revision = expected_voice_revision
-        if request.url.path == "/v2/audio/speech":
+        if receipt_mode == "integrity":
             if effective_revision is None:
                 effective_revision = profile.revision
             artifact = (
@@ -1594,7 +1577,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
 
         synthesis = SpeechRequest(
-            text=body.input,
+            text=synthesis_text,
             voice=preset_voice,
             output_format="pcm16",
             speed=body.speed,
