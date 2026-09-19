@@ -673,11 +673,11 @@ class OpenAIRealtimeSession:
                 flush_threshold = max(1, int(chunk_sec * 32_000))
                 if self._unflushed_bytes >= flush_threshold:
                     self._unflushed_bytes = 0
-                    flush_started = _time.monotonic()
+                    flush_started = time.monotonic()
                     with contextlib.suppress(Exception):
                         await self._asr.flush()
                     self._services.metrics.record_realtime_phase(
-                        "asr_flush", _time.monotonic() - flush_started
+                        "asr_flush", time.monotonic() - flush_started
                     )
 
         elif dec.kind == "end":
@@ -837,11 +837,11 @@ class OpenAIRealtimeSession:
             flush_threshold = max(1, int(chunk_sec * 32_000))
             if self._unflushed_bytes >= flush_threshold:
                 self._unflushed_bytes = 0
-                flush_started = _time.monotonic()
+                flush_started = time.monotonic()
                 with contextlib.suppress(Exception):
                     await self._asr.flush()
                 self._services.metrics.record_realtime_phase(
-                    "asr_flush", _time.monotonic() - flush_started
+                    "asr_flush", time.monotonic() - flush_started
                 )
 
     async def _commit_audio(self, reason: str = "client") -> None:
@@ -933,16 +933,16 @@ class OpenAIRealtimeSession:
             # terminal event.  Keep commit, final event delivery and teardown
             # under one request deadline so its governor lane is recoverable.
             async with asyncio.timeout(self._settings.request_timeout_seconds):
-                commit_started = _time.monotonic()
+                commit_started = time.monotonic()
                 await self._asr.commit(want_segments=False)
                 self._services.metrics.record_realtime_phase(
-                    "asr_commit_ack", _time.monotonic() - commit_started
+                    "asr_commit_ack", time.monotonic() - commit_started
                 )
                 if self._asr_reader is not None:
-                    terminal_started = _time.monotonic()
+                    terminal_started = time.monotonic()
                     await self._asr_reader
                     self._services.metrics.record_realtime_phase(
-                        "asr_terminal_wait", _time.monotonic() - terminal_started
+                        "asr_terminal_wait", time.monotonic() - terminal_started
                     )
                     self._asr_reader = None
         except TimeoutError as exc:
@@ -1612,9 +1612,9 @@ class OpenAIRealtimeSession:
             try:
                 import time as _time
 
-                _ttfa_t0 = _time.monotonic()
+                _ttfa_t0 = time.monotonic()
                 _ttfa_recorded = False
-                _admission_started = _time.monotonic()
+                _admission_started = time.monotonic()
                 request = SpeechRequest(
                     text=text,
                     voice=voice,
@@ -1632,11 +1632,11 @@ class OpenAIRealtimeSession:
                         purpose=WorkPurpose.INTERACTIVE,
                     ):
                         self._services.metrics.record_realtime_phase(
-                            "tts_admission", _time.monotonic() - _admission_started
+                            "tts_admission", time.monotonic() - _admission_started
                         )
                         async for chunk in iter_validated_audio(self._tts.synthesize(request)):
                             if not _ttfa_recorded:
-                                self._services.metrics.record_ttfa(_time.monotonic() - _ttfa_t0)
+                                self._services.metrics.record_ttfa(time.monotonic() - _ttfa_t0)
                                 _ttfa_recorded = True
                             await self._send(
                                 response_audio_delta(
