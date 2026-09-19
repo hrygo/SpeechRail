@@ -1087,7 +1087,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ),
                 headers={"Retry-After": "1"},
             )
-        except AsrModeBusy:
+        except AsrModeBusy as exc:
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -1097,7 +1097,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     request_id=request_id,
                     retryable=True,
                 ),
-                headers={"Retry-After": "1"},
+                headers={
+                    "Retry-After": "1",
+                    "SpeechRail-Busy-Reason": str(exc.busy_reason),
+                },
             )
         except TimeoutError:
             return error_response(
@@ -1135,14 +1138,16 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         epoch=f"batch-{request_id}",
                         new_unit_id=lambda index: f"segment-{index}",
                     )
-            except DiarizationAdmissionFullError:
-                return error_response(
+            except DiarizationAdmissionFullError as exc:
+                response = error_response(
                     429,
                     request_id,
                     "backend_busy",
                     "another diarization session is active",
                     retryable=True,
                 )
+                response.headers["SpeechRail-Busy-Reason"] = str(exc.busy_reason)
+                return response
             except DiarizationError as exc:
                 return error_response(
                     502,
