@@ -96,7 +96,11 @@ from speechrail.domain.tts import (
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 
@@ -1605,6 +1609,7 @@ class OpenAIRealtimeSession:
                         WorkClass.REALTIME_TTS,
                         deadline=self._settings.request_timeout_seconds,
                         resource_key=tts_resource_key(self._tts, request.voice),
+                        purpose=WorkPurpose.INTERACTIVE,
                     ):
                         self._services.metrics.record_realtime_phase(
                             "tts_admission", _time.monotonic() - _admission_started
@@ -1765,7 +1770,9 @@ class OpenAIRealtimeSession:
         try:
             await self._asr_resources.enter_async_context(
                 self._services.governor.reserve(
-                    WorkClass.REALTIME_ASR, deadline=self._settings.request_timeout_seconds
+                    WorkClass.REALTIME_ASR,
+                    deadline=self._settings.request_timeout_seconds,
+                    purpose=WorkPurpose.INTERACTIVE,
                 )
             )
             self._services.metrics.record_realtime_phase(
