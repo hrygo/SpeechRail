@@ -106,12 +106,14 @@ def test_alias_update_does_not_mutate_an_inflight_revision_lease(tmp_path) -> No
     assert updated.revision is not None
     assert updated.revision != created.revision
 
-    with pytest.raises(VoiceRevisionConflictError):
-        with registry.lease_profile(
+    with (
+        pytest.raises(VoiceRevisionConflictError),
+        registry.lease_profile(
             "narrator",
             expected_revision=created.revision,
-        ):
-            pass
+        ),
+    ):
+        pass
 
     release.set()
     thread.join(timeout=2)
