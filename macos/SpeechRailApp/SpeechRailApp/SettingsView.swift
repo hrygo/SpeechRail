@@ -441,7 +441,7 @@ public struct SettingsView: View {
                     Toggle(isOn: notifyBinding) {
                         settingsRowLabel(
                             "中断时用系统通知告诉我",
-                            caption: "默认关。只在「必须有人决定」的中断上发一次；通知里不出现转录原文。"
+                            caption: "默认关。只在「必须有人决定」的中断上发一次；通知里不出现记录原文。"
                         )
                     }
                 }

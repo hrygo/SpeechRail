@@ -257,7 +257,7 @@ public final class InnerOSSession {
     ) -> [LLMMessage] {
         let transcript = MinutesGenerator.render(lines: lines, names: names)
         let context = transcript.isEmpty
-            ? "（本场到目前为止还没有任何已经确认的转录。）"
+            ? "（本场到目前为止还没有任何已经确认的文字记录。）"
             : transcript
         return [
             LLMMessage(
@@ -290,7 +290,7 @@ public final class InnerOSSession {
             answer: trimmed.isEmpty ? "这一问没有拿到内容。" : trimmed,
             draft: "",
             confidence: "unknown",
-            limitsNote: "这一版是以纯文本返回的（端点没有按结构返回），所以没有逐条列证据。",
+            limitsNote: "这一版是以纯文本返回的（服务地址没有按结构返回），所以没有逐条列证据。",
             evidence: []
         )
     }

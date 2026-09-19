@@ -643,19 +643,19 @@ public struct PreflightDiagnosticsView: View {
         case "tts configuration validation failed":
             "合成配置校验失败。"
         case "diarization configuration validation failed":
-            "说话人区分配置校验失败。"
+            "「谁在说话」的配置没通过校验。"
         case "optional diarization profile is not configured":
-            "当前未配置可选的说话人区分能力。"
+            "当前没有配置可选的「谁在说话」能力。"
         case "diarization profile is configured":
-            "说话人区分配置已登记。"
+            "「谁在说话」的配置已经登记。"
         case "compiled coreml diarization bundle is available":
-            "说话人区分的模型可用。"
+            "「谁在说话」要用的模型可用。"
         case "compiled coreml diarization bundle is missing or incorrect":
-            "说话人区分要用的模型缺失，或版本不正确。"
+            "「谁在说话」要用的模型缺失，或版本不正确。"
         case "coreml diarization worker is executable":
-            "说话人区分的运行组件可以执行。"
+            "「谁在说话」的后台组件可以执行。"
         case "coreml diarization worker is missing or not executable":
-            "说话人区分的运行组件缺失或无法执行。"
+            "「谁在说话」的后台组件缺失或无法执行。"
         case "legacy vad is ready":
             "实时语音断句（旧引擎）已就绪。"
         case "silero vad model file is available":
@@ -811,13 +811,13 @@ public struct PreflightDiagnosticsView: View {
         case "tts_clone_variant":
             "音色克隆版本"
         case "diarization_config":
-            "说话人区分配置"
+            "「谁在说话」的配置"
         case "diarization_snapshot":
-            "说话人区分模型"
+            "「谁在说话」的模型"
         case "diarization_runtime":
-            "说话人区分运行状态"
+            "「谁在说话」的运行状态"
         case "diarization_aligner_snapshot":
-            "说话人区分对齐模型"
+            "「谁在说话」的配套模型"
         case "realtime_vad":
             "实时语音断句"
         case "realtime_vad_model":

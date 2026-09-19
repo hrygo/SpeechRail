@@ -41,7 +41,7 @@ public struct MeetingView: View {
         case transcript
 
         var id: String { rawValue }
-        var title: String { self == .minutes ? "纪要" : "转录" }
+        var title: String { self == .minutes ? "纪要" : "文字记录" }
     }
 
     public init() {}
@@ -82,7 +82,7 @@ public struct MeetingView: View {
                 PageActionButton(
                     title: "查看设置",
                     systemImage: "slider.horizontal.3",
-                    helpText: "打开会话设置：说话人标签、纪要模型与默认对话方式"
+                    helpText: "打开会话设置：谁在说话、纪要模型与默认对话方式"
                 ) { openSettings() }
             } else if meeting.phase.isLive || meeting.phase == .interrupted {
                 // 稿 `screenMeetingRecording` 的页头三件：`⌘⇧.` 键帽 / 静音麦克风 / 结束会议。
@@ -96,8 +96,8 @@ public struct MeetingView: View {
                         title: meeting.isMicrophoneMuted ? "取消静音" : "静音麦克风",
                         systemImage: meeting.isMicrophoneMuted ? "mic.slash.fill" : "mic.slash",
                         helpText: meeting.isMicrophoneMuted
-                            ? "恢复把你这边的话送进转录；本机音频那一侧一直没停"
-                            : "只是暂时不把你这边的声音送进去；录制、本机音频、转录都照旧"
+                            ? "恢复把你这边的话送进文字记录；本机音频那一侧一直没停"
+                            : "只是暂时不把你这边的声音送进去；录制、本机音频、文字记录都照旧"
                     ) {
                         meeting.toggleMicrophoneMute()
                     }
@@ -124,7 +124,7 @@ public struct MeetingView: View {
                     PageActionButton(
                         title: "结束会议",
                         systemImage: "stop.circle",
-                        helpText: "结束这一场；转录会留下，接着开始整理纪要"
+                        helpText: "结束这一场；文字记录会留下，接着开始整理纪要"
                     ) {
                         confirmingFinish = true
                     }
@@ -134,17 +134,17 @@ public struct MeetingView: View {
                 // ①「先导出转录…」——纪要最长要跑十几分钟，等它出来才让导是不合理的：
                 //   转录此时**已经封存**，导出读库、不等纪要（§20.3 的 J2 摩擦点）。
                 // ②「停止整理」——停下来不丢东西，可以重新生成。
-                exportMenu(title: "先导出转录…", helpText: "把已经存好的转录导出成文件；纪要还在生成，不等它")
+                exportMenu(title: "先导出文字记录…", helpText: "把已经存好的文字记录导出成文件；纪要还在生成，不等它")
                 PageActionButton(
                     title: "停止整理",
                     systemImage: "stop.circle",
-                    helpText: "停下这一次整理；转录已经存好，随时可以重新生成"
+                    helpText: "停下这一次整理；文字记录已经存好，随时可以重新生成"
                 ) {
                     meeting.minutes.stop()
                 }
             } else if meeting.phase == .archived, meeting.sessionID != nil {
                 // 已归档（稿 `screenMeetingMinutes` 的页头两件）。
-                exportMenu(title: "导出…", helpText: "导出这一场：转录加已生成的纪要")
+                exportMenu(title: "导出…", helpText: "导出这一场：文字记录加已生成的纪要")
                 PageActionButton(
                     title: "重新生成纪要",
                     systemImage: "arrow.clockwise",
@@ -186,7 +186,7 @@ public struct MeetingView: View {
             Button("结束并整理") { Task { await meeting.requestFinish() } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("麦克风同一时刻只能由一个会话使用。结束后转录会留着，接着开始整理纪要。")
+            Text("麦克风同一时刻只能由一个会话使用。结束后文字记录会留着，接着开始整理纪要。")
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isLabelingSpeakers) {
@@ -212,7 +212,7 @@ public struct MeetingView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("只是暂时不把声音送进去；会话、转录都在，麦克风也还归这一场")
+                .help("只是暂时不把声音送进去；会话、文字记录都在，麦克风也还归这一场")
             }
         }
     }
@@ -250,11 +250,11 @@ public struct MeetingView: View {
         }
         var facts: [String] = []
         if let selection = meeting.selection { facts.append("来源：\(selection.label)") }
-        // 说话人这件事只说**一句**：有编号就说几位，没有就说这一场标不标。
+        // 「谁在说话」这件事只说**一句**：有编号就说几位，没有就说这一场标不标。
         // 原来"还没有分人"与"分人已开"会同时出现（开着但一个编号都还没有时），
         // 两句摆在一起自相矛盾，也是用户点名的那个看不懂的词（2026-09-19）。
         if meeting.labeling.labels.isEmpty {
-            facts.append(meeting.labeling.isEnabled ? "还没标出说话人" : "不区分说话人")
+            facts.append(meeting.labeling.isEnabled ? "还没标出谁在说话" : "不标出谁在说话")
         } else {
             facts.append("\(meeting.labeling.labels.count) 位说话人")
         }
@@ -407,7 +407,7 @@ public struct MeetingView: View {
                 SessionCheckRow(
                     tone: .selected,
                     name: "自动混音",
-                    detail: "多来源同时勾选时自动合流处理；转录行上的来源会如实记为「合流」。"
+                    detail: "多来源同时勾选时自动合流处理；记录行上的来源会如实记为「合流」。"
                 ) {
                     StatusPill(tone: .healthy, label: "生效中")
                 }
@@ -456,9 +456,9 @@ public struct MeetingView: View {
             SessionPanelHead(title: "本次会议", badge: "还没有开始")
             SessionHairline()
             VStack(alignment: .leading, spacing: 10) {
-                SessionKVRow("识别精度", profileRowText)
+                SessionKVRow("档位", profileRowText)
                 SessionKVRow("音频来源", sourceSummary)
-                SessionKVRow("说话人标签", preferences.meetingDiarizationEnabled ? "已开" : "关着")
+                SessionKVRow("谁在说话", preferences.meetingDiarizationEnabled ? "已开" : "关着")
                 SessionKVRow("保存位置", "记录库 · 长期保留")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -527,8 +527,8 @@ public struct MeetingView: View {
         CardSurface {
             VStack(alignment: .leading, spacing: 0) {
                 CardHead(
-                    title: "转录",
-                    detail: meeting.labeling.isEnabled ? "点说话人标签就能改名，正文不会动" : nil
+                    title: "实时记录",
+                    detail: meeting.labeling.isEnabled ? "点名字那一列就能改名，正文不会动" : nil
                 ) {
                     // 稿 `screenMeetingRecording` 表头那一颗（`main.js:3642`）：会中人工标注的
                     // 入口必须看得见。点行上的标签是**第一条路**（就地改名 / 合并），这颗按钮是
@@ -719,7 +719,7 @@ public struct MeetingView: View {
                     StatusBanner(
                         kind: .standard,
                         tone: .attention,
-                        title: "纪要要用对话模型 · 转录已经存好了",
+                        title: "纪要要用对话模型 · 文字记录已经存好了",
                         message: reason,
                         actionTitle: "去设置里填"
                     ) {
@@ -729,7 +729,7 @@ public struct MeetingView: View {
                     StatusBanner(
                         kind: .standard,
                         tone: .attention,
-                        title: "纪要没整理出来 · 转录已经存好了",
+                        title: "纪要没整理出来 · 文字记录已经存好了",
                         message: reason,
                         actionTitle: "重新生成"
                     ) {
@@ -790,7 +790,7 @@ public struct MeetingView: View {
     private var transcriptBody: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             if reviewLines.isEmpty {
-                Text("这一场还没有转录。")
+                Text("这一场还没有文字记录。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             }
@@ -992,7 +992,7 @@ public struct MeetingView: View {
                         "时间",
                         record.startedAt.formatted(date: .numeric, time: .shortened)
                     )
-                    inspectorRow("转录", "\(reviewLines.count) 段")
+                    inspectorRow("文字记录", "\(reviewLines.count) 段")
                     inspectorRow(
                         "说话人",
                         reviewSpeakerNames.isEmpty ? "还没有" : "\(reviewSpeakerNames.count) 位"
@@ -1024,7 +1024,7 @@ public struct MeetingView: View {
                 CardHead(title: "本次会议") { EmptyView() }
                 VStack(alignment: .leading, spacing: 0) {
                     inspectorRow("时长", SessionCoordinator.formatted(meeting.elapsed))
-                    inspectorRow("转录", "\(meeting.storedLineCount) 段")
+                    inspectorRow("文字记录", "\(meeting.storedLineCount) 段")
                     inspectorRow(
                         "说话人",
                         meeting.labeling.labels.isEmpty
@@ -1099,7 +1099,7 @@ public struct MeetingView: View {
     private var interruptionDetail: String {
         switch meeting.interruption {
         case .serviceLost:
-            "语音服务断开了。丢掉的音频就是没录上；已经定稿的转录都在。继续之后是新的一段。"
+            "语音服务断开了。丢掉的音频就是没录上；已经定稿的文字记录都在。继续之后是新的一段。"
         case .sleep:
             "这台 Mac 睡过。醒来之后麦克风与本机音频都要重新拿一次，所以不会自动接着录。"
         case .sourceLost:
@@ -1107,7 +1107,7 @@ public struct MeetingView: View {
             // 那种情况根本不会进中断态）与**采集流自己结束**（设备被拔、引擎停了）。
             // 能走到这张卡上的只有后者，所以以现场那句 note 为准；没有 note 时给一句
             // 不替它下结论的话——绝不写"已经自动接回"。
-            meeting.interruptionNote ?? "音频来源停下来了。已经定稿的转录都在。"
+            meeting.interruptionNote ?? "音频来源停下来了。已经定稿的文字记录都在。"
         case .unexpectedExit:
             "上一次没有正常结束。这一段已经封存，可以回看、导出。"
         case .none:
@@ -1253,7 +1253,7 @@ struct SpeakerLabelingSheet: View {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
                     Text("标注说话人")
                         .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                    Text("改的是说话人的名字与归属，转录正文一个字都不动。")
+                    Text("改的是说话人的名字与归属，记录正文一个字都不动。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }

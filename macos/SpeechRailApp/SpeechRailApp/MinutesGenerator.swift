@@ -146,7 +146,7 @@ public final class MinutesGenerator {
             case .queued: "正在排队整理…"
             case .running: "正在整理会议…"
             case .ready: "纪要在下面"
-            case .failed: "纪要没整理出来 · 转录已经存好了"
+            case .failed: "纪要没整理出来 · 文字记录已经存好了"
             }
         }
     }
@@ -220,13 +220,13 @@ public final class MinutesGenerator {
                 runTask = nil
                 return
             }
-            // 没配大模型：转录已经封存好了，这一版如实失败（§9 第 18 行）。
+            // 没配大模型：文字记录已经封存好了，这一版如实失败（§9 第 18 行）。
             try? await coordinator.failMinutes(
                 minutesID: version.id,
-                reason: "还没有配置对话模型（设置 → 会话）。转录已经存好，配好之后可以重新生成。"
+                reason: "还没有配置对话模型（设置 → 会话）。文字记录已经存好，配好之后可以重新生成。"
             )
             failedOnSetup = true
-            state = .failed("还没有配置对话模型。转录已经存好，配好之后可以重新生成。")
+            state = .failed("还没有配置对话模型。文字记录已经存好，配好之后可以重新生成。")
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -305,7 +305,7 @@ public final class MinutesGenerator {
             // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
             let cancelled = Task.isCancelled || (error as? LLMError) == .cancelled
             let reason = cancelled
-                ? "你停下了这一次整理。转录已经存好，可以重新生成。"
+                ? "你停下了这一次整理。文字记录已经存好，可以重新生成。"
                 : Self.readableReason(for: error)
             try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
             // 地址写错、服务没有 Responses API 这类失败，按「重新生成」只会再撞一次；
@@ -361,7 +361,7 @@ public final class MinutesGenerator {
         else {
             return trimmed.isEmpty
                 ? "这一版没有拿到内容。可以重新生成一次。"
-                : trimmed + "\n\n> 这一版是以纯文本返回的（端点没有按结构返回）。\n"
+                : trimmed + "\n\n> 这一版是以纯文本返回的（服务地址没有按结构返回）。\n"
         }
         return document.markdown
     }
@@ -370,7 +370,7 @@ public final class MinutesGenerator {
         if let llm = error as? LLMError {
             switch llm {
             case .refused(let reason): return "大模型没有给结果：\(reason)"
-            case .http(let status, _): return "大模型服务回了 \(status)。转录已经存好，可以重新生成。"
+            case .http(let status, _): return "大模型服务回了 \(status)。文字记录已经存好，可以重新生成。"
             case .notConfigured: return "还没有配置对话模型。"
             default: return llm.errorDescription ?? "整理没有完成。"
             }

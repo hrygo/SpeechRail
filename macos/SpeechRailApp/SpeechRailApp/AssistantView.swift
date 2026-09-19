@@ -163,7 +163,7 @@ public struct AssistantView: View {
     private var pagePurpose: String {
         switch state {
         case .ready: "定好角色与声音就能开始；说也行，打字也行。"
-        case .blocked: "和本机大模型用语音一来一往；转录与对话只留在这台 Mac 上。"
+        case .blocked: "和本机大模型用语音一来一往；识别与回复只留在这台 Mac 上。"
         case .live: "和它一来一往：说也行，打字也行；对话只留在这台 Mac 上。"
         case .review: "和本机大模型用语音一来一往；记录长期留在记录库。"
         }
@@ -387,7 +387,7 @@ public struct AssistantView: View {
         case .occupiedBy:
             "麦克风同一时刻只由一个会话使用；确认之后当前那个会先结束，不会静默抢。"
         case .storeUnavailable:
-            "记录库写不进去就不开始对话：转录与对话都是要留下的记录，宁可不录。"
+            "记录库写不进去就不开始对话：识别与回复都是要留下的记录，宁可不录。"
         case .streamFailed:
             "已经定稿的对话都还在库里；点「重试」重新接一段。"
         }
@@ -707,10 +707,10 @@ public struct AssistantView: View {
             // 这一行只写"它是干什么的"：能不能用由左边那颗状态胶囊回答。
             // 原来那句尾巴是「……现在就能用」——服务没起来时它和「未就绪」正面打架
             // （2026-09-19 离屏走查，同一屏两句话说反）。
-            ("语音识别", asr.0, asr.1, "实时字幕与会议转录都靠它。"),
+            ("语音识别", asr.0, asr.1, "实时字幕与会议记录都靠它。"),
             ("语音合成", tts.0, tts.1, "助手说话用它；音色可以在设置里换。"),
-            ("说话人区分", diarization.0, diarization.1,
-             "会议里谁在说话会自动编号（一号、二号…），号码只在这一场里有效；不用提前录声纹。"),
+            ("谁在说话", diarization.0, diarization.1,
+             "多人说话时自动标出每一句是谁说的（一号、二号…），只在这一场里有效，不用提前录声音。"),
             llmCapabilityRow
         ]
     }
@@ -1620,7 +1620,7 @@ public struct AssistantView: View {
                 1. 打开「设置 · 会话」，填服务地址与模型名。
                 2. 服务必须实现 Responses API；只支持 Chat Completions 的服务接不上。
                 3. 密钥填进设置后只存钥匙串：不写进配置文件，也不出现在日志或导出物里。
-                4. 地址是本机还是局域网都行；识别、合成与说话人区分由 SpeechRail 本机提供。
+                4. 地址是本机还是局域网都行；识别、合成与「谁在说话」由 SpeechRail 本机提供。
                 """
             )
             .font(SpeechRailDesignTokens.Typography.callout)

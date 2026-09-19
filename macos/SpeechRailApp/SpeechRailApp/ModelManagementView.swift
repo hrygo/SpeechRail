@@ -169,7 +169,7 @@ public struct ModelManagementView: View {
         let summary = summary(for: profile)
         return [
             ProfileSpec(
-                label: "说话人区分",
+                label: "谁在说话",
                 value: summary.map {
                     $0.diarization ? (profile == .quality ? "支持（更准）" : "支持") : "不支持"
                 } ?? "未读取"
@@ -383,7 +383,7 @@ public struct ModelManagementView: View {
         }
     }
 
-    /// Figma `listFoot`：当前档位的模型文件总数、待校验数量，以及它对说话人区分的影响。
+    /// Figma `listFoot`：当前档位的模型文件总数、待校验数量，以及它对「谁在说话」的影响。
     private var artifactFootnote: String {
         let artifacts = visibleArtifacts
         guard !artifacts.isEmpty else { return "这一档还没有登记模型文件。" }
@@ -393,15 +393,15 @@ public struct ModelManagementView: View {
             : "\(artifacts.count) 个模型文件 · \(pending) 个待校验"
         let diarizationNote = missingDiarizationKeys.isEmpty
             ? ""
-            : "，说话人区分在补齐前不可用"
+            : "，谁在说话在补齐前用不了"
         return base + diarizationNote + "。"
     }
 
     private var diarizationSection: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
-                title: "说话人区分要用的模型",
-                detail: "这一档做说话人区分还要单独下载模型文件；跟它配套的那几个也列在下面的模型文件里。"
+                title: "谁在说话要用的模型",
+                detail: "这一档要标出每句话是谁说的，还得再下载几个小模型；它们也列在下面的模型文件里。"
             )
             VStack(spacing: 0) {
                 ForEach(independentDiarizationKeys, id: \.self) { key in
@@ -460,7 +460,7 @@ public struct ModelManagementView: View {
                 }
                 .speechRailButton(.secondary)
                 .disabled(!canApplyProfile)
-                .accessibilityHint("将所选档位写入服务配置并重启相关 worker")
+                .accessibilityHint("把所选档位写进服务配置，并重启相关的后台组件")
 
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
@@ -796,7 +796,7 @@ public struct ModelManagementView: View {
     }
 
     private func assetTitle(for key: String) -> String {
-        key == "diarization-coreml" ? "说话人区分的模型（CoreML）" : key
+        key == "diarization-coreml" ? "谁在说话用的小模型" : key
     }
 
     private func summary(for profile: SpeechRailProfile) -> ProfileSummary? {
@@ -895,12 +895,12 @@ public struct ModelManagementView: View {
             let ready = health.diarization?.ready ?? health.diarizationReady
             guard let ready else {
                 return ModelArtifactUsagePresentation(
-                    text: "当前说话人区分链路 · 状态未读取",
+                    text: "当前谁在说话 · 状态未读取",
                     tone: .neutral
                 )
             }
             return ModelArtifactUsagePresentation(
-                text: ready ? "当前说话人区分链路 · 已就绪" : "当前说话人区分链路 · 未就绪",
+                text: ready ? "当前谁在说话 · 已就绪" : "当前谁在说话 · 未就绪",
                 tone: ready ? .healthy : .critical
             )
         }
@@ -928,35 +928,35 @@ public struct ModelManagementView: View {
         }
 
         guard let lifecycle = health.ttsLifecycle else {
-            return ModelArtifactUsagePresentation(
-                text: "\(label) · 已验证；独立常驻状态未公开",
-                tone: .neutral
-            )
-        }
+                return ModelArtifactUsagePresentation(
+                text: "\(label) · 已验证；是否留在内存里没有读到",
+                    tone: .neutral
+                )
+            }
 
-        let hasWarmStateSignal = lifecycle.warmCapability != nil
-            || lifecycle.warmCapabilities != nil
-        guard hasWarmStateSignal else {
-            return ModelArtifactUsagePresentation(
-                text: "\(label) · 已验证；独立常驻状态未公开",
-                tone: .neutral
-            )
-        }
+            let hasWarmStateSignal = lifecycle.warmCapability != nil
+                || lifecycle.warmCapabilities != nil
+            guard hasWarmStateSignal else {
+                return ModelArtifactUsagePresentation(
+                text: "\(label) · 已验证；是否留在内存里没有读到",
+                    tone: .neutral
+                )
+            }
 
         let warmCapabilities = lifecycle.warmCapabilities ?? []
         let isWarm = warmCapabilities.contains("voice_clone")
             || lifecycle.warmCapability == "voice_clone"
             || lifecycle.warmCapability == "both"
-        if isWarm {
+            if isWarm {
+                return ModelArtifactUsagePresentation(
+                text: "\(label) · 现在就在内存里",
+                    tone: .healthy
+                )
+            }
             return ModelArtifactUsagePresentation(
-                text: "\(label) · 当前常驻",
-                tone: .healthy
+            text: "\(label) · 已验证，用到时才加载",
+                tone: .attention
             )
-        }
-        return ModelArtifactUsagePresentation(
-            text: "\(label) · 已验证，按请求加载",
-            tone: .attention
-        )
     }
 
     private func runtimeUsage(
@@ -1457,7 +1457,7 @@ private struct DiarizationStatusRow: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 // 行的名字说**这一份文件是干什么的**；`aligner-bf16` 这类机器名留在后面，
                 // 它对不上名字时还能拿去比对诊断输出（用户 2026-09-19：去掉行话）。
-                Text(key == "diarization-coreml" ? "说话人识别（CoreML）" : "对齐模型 · \(key)")
+                Text(key == "diarization-coreml" ? "谁在说话用的模型" : "配套模型 · \(key)")
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)

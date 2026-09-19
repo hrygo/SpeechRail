@@ -66,7 +66,7 @@ public final class CaptionSession {
             case .serviceBusy(let message):
                 message
             case .occupiedBy:
-                "字幕带不会再开第二条会话。可以在会议转录里看，或者结束会议并启动字幕。"
+                "字幕带不会再开第二条会话。可以在会议的文字记录里看，或者结束会议并启动字幕。"
             case .storeUnavailable(let message):
                 message
             case .streamFailed(let message):

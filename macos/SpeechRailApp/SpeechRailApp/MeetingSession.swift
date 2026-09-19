@@ -78,7 +78,7 @@ public final class MeetingSession {
             case .storeUnavailable(let message):
                 message
             case .streamFailed(let message):
-                "\(message)丢掉的音频就是没录上；已经定稿的转录都还在，可以导出。"
+                "\(message)丢掉的音频就是没录上；已经定稿的文字记录都还在，可以导出。"
             }
         }
 
@@ -619,7 +619,7 @@ public final class MeetingSession {
             lastFailure = "本机音频的来源 App 退出过（\(reason)）；已经按 App 的标识接回，录制没有停。"
         } else {
             lastFailure = "本机音频的那一路断开了（\(reason)），也没有接回来；"
-                + "麦克风这一路还在录，已经定稿的转录都在。"
+                + "麦克风这一路还在录，已经定稿的文字记录都在。"
         }
     }
 
@@ -649,7 +649,7 @@ public final class MeetingSession {
         }
         if !diarizationDrained {
             // 未对齐不是错误：正文照常，只是时间码要说实话（§8.2 唯一允许降级的位置）。
-            lastFailure = "说话人编号没能在结束前全部对齐；转录还在，时间码可能不完整。"
+            lastFailure = "说话人编号没能在结束前全部对齐；文字记录还在，时间码可能不完整。"
         }
     }
 
@@ -693,7 +693,7 @@ public final class MeetingSession {
     private static func readableError(code: String, message: String) -> String {
         switch code {
         case "backend_busy":
-            "语音服务同时在跑的会话已经满了。已经定稿的转录都还在。"
+            "语音服务同时在跑的会话已经满了。已经定稿的文字记录都还在。"
         case "diarization_not_available":
             "这一档不标说话人；正文照常记录。"
         default:

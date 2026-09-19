@@ -65,11 +65,11 @@ public enum LLMConnectionResult: Sendable, Equatable {
     public var detail: String {
         switch self {
         case .connected(_, let model):
-            "用的是 \(model)。对话与纪要都走这一个端点。"
+            "用的是 \(model)。对话与纪要都走这一个服务地址。"
         case .serviceReachableModelMissing(let model):
             "服务在，但它的模型列表里没有 \(model)。先在那边加载/下载这个模型，或者在这里换一个。"
         case .notResponsesAPI:
-            "这个地址只提供 Chat Completions，助手与纪要需要 Responses API。换一个实现 Responses 的服务，或者换个端点。"
+            "这个地址只提供 Chat Completions，助手与纪要需要 Responses API。换一个实现了 Responses 的服务，或者换个地址。"
         case .unreachable(let message):
             message
         case .notConfigured:

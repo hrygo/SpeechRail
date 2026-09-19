@@ -202,7 +202,7 @@ public final class SessionCoordinator {
         pendingConfirmation = Confirmation(
             id: "end-meeting",
             title: "结束这次会议？",
-            message: "结束之后会先分完最后半句、再生成纪要；转录现在就能看。",
+            message: "结束之后会先分完最后半句、再生成纪要；文字记录现在就能看。",
             confirmTitle: "结束会议",
             allowsDoNotAskAgain: false
         )

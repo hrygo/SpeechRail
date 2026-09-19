@@ -48,7 +48,7 @@ public struct InnerOSDrawer: View {
         }
         .animation(.smooth(duration: 0.18), value: session.isExpanded)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("内心 OS。只有你看得到：这里的提问与回答不会进入会议录音、转录或纪要。")
+        .accessibilityLabel("内心 OS。会议中随时私下问它一句，只有你看得到：这里的提问与回答不会进入会议录音、文字记录或纪要。")
         .onChange(of: session.exchanges.count) { _, _ in
             if selectedExchangeID == nil { selectedExchangeID = session.exchanges.last?.id }
         }
@@ -66,7 +66,9 @@ public struct InnerOSDrawer: View {
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .accessibilityHidden(true)
                     Text("内心 OS").font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    Text("只你可见")
+                    // 「内心 OS」是这一版的叫法（沿用 Sona）；名字本身不解释用途，
+                    // 所以紧跟一句人话说明它**干什么**（用户 2026-09-19：界面要说人话）。
+                    Text("随时私下问它一句 · 只你可见")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     Text("已问 \(session.askedCount) 次 · \(session.inMinutesCount) 条已写进纪要")
@@ -82,6 +84,7 @@ public struct InnerOSDrawer: View {
             }
             .buttonStyle(.plain)
             .speechRailPointerCursor()
+            .help("会议进行中随时问它一句话（比如「刚才那个数字是多少」）；答案只有你看得到，不会进会议音频、文字记录或纪要。")
             .accessibilityValue(session.isExpanded ? "已展开" : "已收起")
             Button {
                 session.isExpanded.toggle()
@@ -119,7 +122,7 @@ public struct InnerOSDrawer: View {
             .frame(maxHeight: .infinity)
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 // 占位文案按稿：说清"它只看哪一份上下文"，也是这一栏与助手页的区别。
-                TextField("问点什么（它只看这一场的转录，不联网）", text: $question)
+                TextField("问点什么（它只看这一场的文字记录，不联网）", text: $question)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { send() }
                 if session.state == .generating {
@@ -133,7 +136,7 @@ public struct InnerOSDrawer: View {
                         .disabled(question.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
-            Text("追问接着上一问的上下文；回答不会进会议音频与转录，"
+            Text("追问接着上一问的上下文；回答不会进会议音频与文字记录，"
                 + "想让它写进纪要得点一下「写进纪要」。")
                 .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
@@ -251,7 +254,7 @@ public struct InnerOSDrawer: View {
         let rows = session.evidence[exchange.id] ?? []
         if rows.isEmpty {
             // 没有证据就说没有证据——这是"我不知道"唯一有用的说法（§5.9）。
-            labelled("证据", "转录里没有能支撑这一问的内容。")
+            labelled("证据", "文字记录里没有能支撑这一问的内容。")
         } else {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text("证据")

@@ -188,7 +188,7 @@ public enum SessionExporter {
         }
 
         rows.append("")
-        rows.append("## 转录")
+        rows.append("## 文字记录")
         rows.append("")
         for line in payload.lines {
             let timecode = line.tStart.map { "[\(Self.clock($0))] " } ?? ""
@@ -204,9 +204,9 @@ public enum SessionExporter {
     private static func diarizationText(_ record: SessionRecord) -> String {
         switch record.diarization {
         case .active: "标出说话人"
-        case .off: "不区分说话人"
+        case .off: "不标出谁在说话"
         case .degraded: record.diarizationNote ?? "中途停了"
-        case .unavailable: record.diarizationNote ?? "当前识别精度不支持"
+        case .unavailable: record.diarizationNote ?? "当前档位不支持"
         }
     }
 

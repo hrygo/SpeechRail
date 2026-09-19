@@ -739,7 +739,7 @@ struct CaptionBandView: View {
             }
         case .occupiedBy:
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Button("打开\(session.activeOwnerTitle)转录") {
+                Button("打开\(session.activeOwnerTitle)的文字记录") {
                     onOpenActiveSession()
                 }
                 Button("结束并启动字幕") {

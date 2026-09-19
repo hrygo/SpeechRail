@@ -435,7 +435,7 @@ public struct SessionLibraryView: View {
                 SessionPanel {
                     SessionPanelHead(
                         title: "开始之前",
-                        detail: "三件事里只有前两件是必须的；第三件决定字幕里有没有说话人。"
+                        detail: "三件事里只有前两件是必须的；第三件决定字幕里标不标出谁在说话。"
                     )
                     SessionHairline()
                     SessionCheckRow(tone: microphoneTone, name: "麦克风", detail: microphoneDetail)
@@ -444,8 +444,8 @@ public struct SessionLibraryView: View {
                     SessionHairline()
                     SessionCheckRow(
                         tone: preferences.captionsDiarizationEnabled ? .ready : .neutral,
-                        name: "说话人标签 · 可选",
-                        detail: "这台 Mac 标不了说话人时就只记文字，正文照常；它也不用配对话模型。"
+                        name: "谁在说话 · 可选",
+                        detail: "这台 Mac 标不出谁在说话时就只记文字，正文照常；它也不用配对话模型。"
                     )
                     Spacer(minLength: 0)
                     SessionHairline()
@@ -631,7 +631,7 @@ public struct SessionLibraryView: View {
         case .assistant:
             "开始对话之后，你说过的话和助手的回答会留在这里，可以回看、搜索、复制。原始音频不留存。"
         case .meeting:
-            "开始会议之后，转录会边听边出现；结束后可以生成纪要、改说话人的名字，并导出 Markdown 或 SRT。原始音频不留存。"
+            "开始会议之后，文字记录会边听边出现；结束后可以生成纪要、改说话人的名字，并导出 Markdown 或 SRT。原始音频不留存。"
         case .captions:
             "字幕带打开之后，看过的字幕会留在这里，可以回看、搜索和导出 SRT。原始音频不留存。"
         }

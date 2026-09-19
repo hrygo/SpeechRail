@@ -366,7 +366,7 @@ public struct ServiceOverviewView: View {
                 ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
                 ServiceCapability(title: "实时语音断句", status: .notReady, reason: reason),
-                ServiceCapability(title: "说话人区分", status: .notReady, reason: reason),
+                ServiceCapability(title: "谁在说话", status: .notReady, reason: reason),
             ]
         }
 
@@ -440,7 +440,7 @@ public struct ServiceOverviewView: View {
     /// 未配置解释成档位取舍。服务说“没有配置”时，报“未配置”比报“worker 尚未
     /// 就绪”准确：后者把缺失的能力说成正在等待。
     private func diarizationCapability(for health: HealthSnapshot) -> ServiceCapability {
-        let title = "说话人区分"
+        let title = "谁在说话"
         if health.diarizationReady == true {
             return ServiceCapability(
                 title: title,
@@ -455,7 +455,7 @@ public struct ServiceOverviewView: View {
                 status: health.profile == .light ? .unsupported : .notReady,
                 reason: health.profile == .light
                     ? "这一档不标说话人。"
-                    : "当前部署没有开启说话人区分。"
+                    : "当前部署没有开启「谁在说话」。"
             )
         }
         if health.profile == .light {
@@ -469,7 +469,7 @@ public struct ServiceOverviewView: View {
             title: title,
             status: .notReady,
             reason: health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
-                ?? "说话人区分还没准备好。"
+                ?? "「谁在说话」还没准备好。"
         )
     }
 
