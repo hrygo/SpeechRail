@@ -392,3 +392,76 @@ acoustic contract.
 Current code-level acceptance therefore covers the reproduced algorithm defects;
 multi-clone/multi-text MLX measurements, first-audio/service-output timings, and
 listening evidence remain required for final #34 closure.
+
+
+## Current-head reconciliation — 2026-09-19
+
+The seven-increment sections above are historical checkpoints. They remain useful
+as an audit trail, but the current remote head has continued the same single-PR
+integration and supersedes the earlier “unimplemented” entries where the changes
+below are now present. This section does not convert synthetic evidence into
+managed-runtime or human-acoustic evidence.
+
+Current source head at this checkpoint: `db117796b42bc86b3623cbdd03c3722808cd1fe3`.
+
+### Implementation deltas since the seven-increment checkpoint
+
+- **#34**: the frozen clone loudness path now has explicit regression cases for
+  leading silence, isolated transients, cross-block peak release and near-gate
+  samples in `tests/test_tts_loudness.py`; the existing production controller
+  remains request-scoped and length-preserving. This closes the reproduced F1–F4
+  code boundary, not the managed multi-voice or listening gate.
+- **#53**: the two macOS UI tests that targeted the ambiguous “服务状态” label now
+  select the unique `overview` accessibility identifier. Current-head CI must still
+  execute the App job before this issue is called accepted.
+- **#63**: custom voices now persist content-addressed `vr_` revisions and bounded
+  revision history, support expected-revision CAS update/rollback/revoke/delete
+  behavior, preserve reader leases across changes, and keep legacy records at
+  `revision=null`. Voice-design and clone creation use separate durable,
+  owner/operation/key/fingerprint journals; pending records survive restart and an
+  uncertain registry write remains pending instead of silently retrying publication.
+  Recovery validates the stored result against the canonical request payload.
+- **#64**: HTTP and negotiated Realtime receipts record the resolved voice/catalog
+  identity, pre-transport PCM sample count and SHA-256, and explicit completed,
+  cancelled or error terminals. Empty audio can no longer become `completed`.
+  Runtime model identity remains `null` until a worker can substantiate it.
+- **#65**: purpose and bounded latency-budget headers use the existing governor;
+  quality/voice maintenance now acquires a wildcard TTS reservation, which waits
+  for all keyed capability lanes before eviction. Same-lane serialization,
+  interactive fairness and cancellation cleanup remain governor responsibilities.
+- **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
+  handling, protected URL/email/code spans, raw→normalized→spoken hashes and
+  bounded raw-span projections. The optional v1 header applies a pinned set while
+  keeping ordinary OpenAI requests unchanged.
+- **#73**: the optional HTTP chunk sidecar is validated against the planner and the
+  actual delivered PCM sample count; mismatches become `unavailable` rather than a
+  false complete timeline. Normalization changes, backend absence, cancellation
+  and partial/error delivery retain explicit downgrade states.
+- **#66/#67/#68/#71/#72**: the pinned vendor reference-condition cache remains
+  explicitly unsupported; quality evidence is dimensioned and revision-bound with
+  identity/repeatability/naturalness kept separate; clone expression remains an
+  explicit unsupported capability with neutral fixed-identity behavior; the safe
+  namespaced voice catalog remains the default new integration surface while the
+  legacy detail route is retained as a documented compatibility projection; and
+  the common bounded planner is used for pronunciation-aware timing/receipt
+  summaries without claiming native cross-sentence conditioning.
+
+### Current deterministic validation
+
+On Python **3.12.14**, the focused integration set covering revisions, durable
+idempotency, voice-quality routes, render receipts, timing, pronunciation,
+governor maintenance and frozen loudness contains **179 tests: all passed**. The
+voice-quality route tests use per-test temporary idempotency journals so rerunning
+the suite cannot read a developer's default `~/.speechrail` journal. This is local
+source/synthetic evidence; the full repository gate and current-head macOS App job
+remain separate checks.
+
+### Remaining acceptance gates
+
+The PR is still Draft. No merge, deployment, model download, voice registration or
+issue closure was performed. Final acceptance still requires current-head CI,
+managed Apple-Silicon measurements for #34/#44/#65/#72, actual worker/runtime
+identity evidence for #62/#63/#64/#67, vendor/runtime cache evidence for #66,
+matched identity/listening experiments for #68, and the human/acoustic portions of
+#34/#67/#72/#73. These gates are intentionally not inferred from fake backends,
+HTTP success, or the deterministic test count.
