@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  这份文件**不是**完整的 Info.plist：App target 仍然是 GENERATE_INFOPLIST_FILE = YES，
+	  这里只补 Xcode 那套 `INFOPLIST_KEY_*` 映射表里没有的键，生成器产出的键照常合并进来。
+	  为什么非得单独写一份：`NSAudioCaptureUsageDescription` 没有对应的
+	  `INFOPLIST_KEY_` 映射——写进 build settings 会被**静默丢弃**，产物里查不到这个键
+	  （2026-09-18 实测：Debug 产物缺它，而 `NSMicrophoneUsageDescription` 在）。
+	  进程 tap 的授权口径要求这个键在 Info.plist 里，缺了它，会议助手的本机音频来源
+	  在最坏情况下会直接失败，且失败点看不出原因。
+	-->
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>录制这台 Mac 上其他 App 正在播放的声音，用于会议助手的本机音频来源。只在你选了本机音频时才会录，原始音频不留存。</string>
+</dict>
+</plist>

@@ -151,6 +151,86 @@ public enum SpeechRailDesignTokens {
         public static let monitoringChartHeight: CGFloat = 240
         public static let compactDividerHeight: CGFloat = 42
         public static let controlMenuWidth: CGFloat = 288
+
+        // MARK: 会话（语音助手 / 会议助手 / 实时字幕）
+        //
+        // 这几个数与稿是一一对应的单点声明（`UX-UI-SPEC` §3.3 / §3.4 的对照表）：
+        // 目录列 = 280，与 `modelProfileListWidth` 是**同一个数、同一个角色**，所以这里
+        // 引用它而不是再写一个 280；列表内宽与行内宽由它推导；空态取稿的 320 / pad 32 / 上限 460。
+        // 改这里的值要同时改 `figma-kit/main.js` 的 `LAYOUT`——两侧各只有一处声明，值必须相同。
+
+        /// 目录列：记录库 / 助手记录 / 文档目录列 / 模型配置列表共用一个数。
+        public static let sessionListWidth: CGFloat = modelProfileListWidth
+        /// 列表卡片的内边距（稿 `LAYOUT.listPadX` = 16）。
+        public static let sessionListPadding: CGFloat = Spacing.md
+        /// 列表内宽 = 列宽 − 2 × 内边距（稿 `LAYOUT.listInnerW` = 248）。
+        public static var sessionListInnerWidth: CGFloat { sessionListWidth - 2 * sessionListPadding }
+        /// 列表行内文字两侧的留白（稿 `LAYOUT.listRowInset` = 10）。
+        public static let sessionListRowInset: CGFloat = 10
+        /// 行内宽 = 列表内宽 − 2 × 行内留白（稿 `LAYOUT.listRowInnerW` = 228）。
+        public static var sessionListRowInnerWidth: CGFloat { sessionListInnerWidth - 2 * sessionListRowInset }
+        /// 空态图标边长（稿 §12 第 5 项：三页与 J0 统一到 28）。
+        public static let sessionEmptyIconSize: CGFloat = 28
+        /// 页面级空态正文的折行上限（稿 `LAYOUT.emptyBodyMaxW` = 460）。
+        public static let sessionEmptyBodyMaximumWidth: CGFloat = 460
+        /// 详情列：与 `inspectorColumnWidth` 是同一个数（D7 裁决 360）。
+        public static let sessionInspectorWidth: CGFloat = inspectorColumnWidth
+        /// 转录行里的说话人列与时间码列；两者都是固定列，正文吃剩余宽度。
+        public static let sessionSpeakerColumnWidth: CGFloat = 96
+        public static let sessionTimecodeColumnWidth: CGFloat = 56
+        // `纪要 / 转录` 分段控件**不定宽**：稿里的 `segmented()` 是按内容排的
+        // （每格 padX 9 + 标签），系统分段控件同样按内容定宽，两段都是两个字也不会跳。
+        // 实现里曾经钉过 160，那是稿上没有的数（稿画出来是 90），所以撤掉。
+        /// 内心 OS 抽屉展开后的高度上限。**再高就会把转录挤出视野**，
+        /// 而那正好与"边听边记"的用法相反（`SESSIONS-SPEC` §14.2 的形态那一行）。
+        public static let innerOSDrawerExpandedHeight: CGFloat = 220
+        /// 抽屉展开后左栏（问答历史 + 输入）的宽度。右栏吃剩余宽度。
+        public static let innerOSHistoryColumnWidth: CGFloat = 260
+
+        // MARK: 字幕带（窗口级浮层，不走卡片几何）
+        //
+        // 这一组数与稿的 `captionBandFrame`（`figma-kit/main.js` 3958）一一对应。**浮层不用
+        // 卡片几何**（`Corner.container` / `CardSurface` 那一套）：它贴在屏幕上是薄片，
+        // 不是窗口里的一张卡——用卡片圆角与卡片阴影画，评审时就会被当成普通卡片
+        // （`UX-UI-SPEC` §2 第 8 行、`SESSIONS-SPEC` §6.3.1）。改这里的值要同时改稿那一处。
+
+        /// 默认宽度；用户可拖到 `captionBandMinimumWidth`…`captionBandMaximumWidth`。
+        public static let captionBandDefaultWidth: CGFloat = 760
+        public static let captionBandMinimumWidth: CGFloat = 420
+        public static let captionBandMaximumWidth: CGFloat = 1_200
+        /// 默认位置：主屏底部居中，距屏幕底 96pt（避开 Dock 与常见视频控制条）。
+        public static let captionBandBottomInset: CGFloat = 96
+        /// 高度按内容撑，下限 2 行、上限 4 行（再多的行走回看）。
+        // 行数是**视觉行**（折行算两行），不是逻辑句数：一句长话在带子里占几行，
+        // 高度就得留几行，否则最后半句会被窗口切掉。见 `CaptionBandMetrics`。
+        public static let captionBandMinimumLineCount: Int = 2
+        public static let captionBandMaximumLineCount: Int = 4
+        /// 受阻行右侧要给动作按钮留出的宽度；算说明文字能折几行时先扣掉它。
+        public static let captionBandBlockedActionsReserve: CGFloat = 240
+        public static let captionBandCornerRadius: CGFloat = 12
+        public static let captionBandPaddingV: CGFloat = 10
+        /// 工具条 / 字幕行 / 页脚之间的间隙（稿 `gap: 4`）。
+        public static let captionBandSpacing: CGFloat = 4
+        public static let captionLinePaddingH: CGFloat = 16
+        public static let captionLinePaddingV: CGFloat = 8
+        public static let captionBandToolbarCornerRadius: CGFloat = 8
+        /// 工具条内部的元素间距（稿 `hoverToolbar` 的 `gap: 6`）。
+        public static let captionBandToolbarSpacing: CGFloat = 6
+        public static let captionBandToolbarPaddingH: CGFloat = 10
+        public static let captionBandToolbarPaddingV: CGFloat = 5
+        public static let captionBandIconButtonSize: CGFloat = 26
+        public static let captionBandTagPaddingH: CGFloat = 8
+        public static let captionBandTagPaddingV: CGFloat = 3
+        public static let captionBandFootPaddingH: CGFloat = 16
+        public static let captionBandFootPaddingV: CGFloat = 4
+        /// 电平柱：稿 `levelBars(foot, ratio, 14, 13)` 是 **14 根**、中间高两端低、
+        /// 每根 3pt 宽、间距 3pt（组宽约 81pt）。**14 是根数，不是组宽**——上一版
+        /// 把它当成组宽再除以 4，画出来是 3 根递升的柱子，与稿不是一回事。
+        public static let captionBandLevelBarCount: Int = 14
+        public static let captionBandLevelBarWidth: CGFloat = 3
+        public static let captionBandLevelBarSpacing: CGFloat = 3
+        public static let captionBandLevelBarHeight: CGFloat = 13
+        public static let captionBandLevelBarCornerRadius: CGFloat = 1.5
         // Source-compatibility alias for the menu bar popover surface.
         public static let controlMenuMinimumWidth: CGFloat = controlMenuWidth
         /// 设置窗口尺寸，取自稿 `05 Menu & Settings`：窗口 **640** 宽（行卡 604 = 640 − 2×18，
@@ -394,6 +474,24 @@ public enum SpeechRailDesignTokens {
                 heights.max() ?? 0
             }
         }
+    }
+
+    /// 字幕带的行为常量。几何在 `Layout`、字体在 `Typography`，这里只放"它怎么表现"：
+    /// 位置按屏记忆的键、跟随的判定阈值。**没有主题相关的取值**——浮层材质由系统给。
+    public enum CaptionBand {
+        /// 位置与宽度按屏记忆（`SESSIONS-SPEC` §6.3.1「位置记忆每屏一套」）。
+        /// 追加屏幕的稳定标识（`CGDirectDisplayID` 派生的 UUID），换显示器不会跑到别处。
+        public static let positionDefaultsPrefix = "speechrail.captionBand.frame."
+        /// 字号档。它是用户设置，跨会话记住（稿上「字号」是浮层工具条里的一档）。
+        public static let fontSizeDefaultsKey = "speechrail.captionBand.fontSize"
+        /// 「钉住位置」：钉住之后窗口不再跟着拖动走（工具条上那一颗要真的生效）。
+        public static let pinnedDefaultsKey = "speechrail.captionBand.pinned"
+        /// 「还贴着底」的判定：内容底部与可视底部的距离小于这个值就算在跟随。
+        /// 给一点余量是因为滚轮的惯性会把偏移留在几像素上，按 0 判定会一直弹「回到最新」。
+        public static let followThreshold: CGFloat = 24
+        /// 浮层不低于这个高度：2 行 + 页脚 + 上下内边距。内容只有一行时也要撑住，
+        /// 否则带子会在首句出现前先"跳"一下高度。
+        public static let minimumHeight: CGFloat = 96
     }
 
     /// Figma `Voice Chip` 组件的几何（脚本 `componentSet("Voice Chip", …)` 是
@@ -726,6 +824,13 @@ public enum SpeechRailDesignTokens {
         /// 应用此前这些位置一律用 `caption`（10pt Regular），字重比稿轻
         /// （REDESIGN-SPEC §11.6 第二十轮）。
         public static let captionMedium: Font = .system(.caption, weight: .medium)
+        /// 字幕正文三档（`SESSIONS-SPEC` §6.3.1）：紧凑 17 / 标准 20 / 大字 26，映射
+        /// `.title2` / `.title` / `.largeTitle`。与页标题同一条取舍：系统文本样式里没有 20，
+        /// 标准档取 `.title`（22，+2pt 残差）——保留文本样式才随系统「更大文字」缩放，
+        /// 这与 `display` 的既有口径一致（REDESIGN-SPEC §11.6 第十八轮）。
+        public static let captionBandCompact: Font = .system(.title2, weight: .regular)
+        public static let captionBandStandard: Font = .system(.title, weight: .regular)
+        public static let captionBandLarge: Font = .system(.largeTitle, weight: .medium)
         public static let technical: Font = .caption2.monospacedDigit()
         /// 取值槽的等宽数字档。稿的取值单元格与 Inspector 取值行都是 `Callout`(12)
         /// （脚本 `kvRow`、制品表 `cell/v`；4x 帧实测取值行的 em 步进 11.75pt ≈ 12pt）。

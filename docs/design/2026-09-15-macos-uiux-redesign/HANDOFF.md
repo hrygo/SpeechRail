@@ -1,5 +1,14 @@
 # SpeechRail macOS App · 设计交付交接包
 
+> 后续修订：2026-09-17 的「实时会话模块」在同一份稿与同一个生成器上增补了 22 块画板（会话屏幕 7 ×
+> 浅/深 + 字幕带浮层 4 × 浅/深），稿现在是 **48 块画板**；本文件描述的 26 块画板与其导出物是
+> 2026-09-16 那一版的状态。当前版本见
+> [`../2026-09-17-live-sessions/HANDOFF.md`](../2026-09-17-live-sessions/HANDOFF.md)。
+> 本文件里的 `Flows: overflow → step · 试听与使用+30` 已在 2026-09-17 修掉（画板 1680 → 1840）。
+> 同一天另开了一份**按路径组织**的第二份稿（只画三个会话能力的闭环，当前 **53 块画板**，页 `01 闭环`）：
+> [`../2026-09-17-session-closures/HANDOFF.md`](../2026-09-17-session-closures/HANDOFF.md)。它用同一个
+> 生成器加 `SPEECHRAIL_SCOPE = "closures"`，**不影响**本文件描述的全量稿（`smoke.js full` 仍是 48 板 / 478 连线）。
+
 生成时间：2026-09-16 18:10 CST（本节更新：音色克隆与开发者文档两页 + 稿已在 Figma 桌面版真跑）
 本次轨道：**B（代理 / 自定义 provider）**
 轨道证据：`codex doctor --all`（2026-09-16 16:49）→ `default model provider cliproxyapi`，

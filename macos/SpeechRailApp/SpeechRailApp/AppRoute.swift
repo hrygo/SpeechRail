@@ -2,12 +2,17 @@ import Foundation
 
 public enum AppRouteGroup: String, CaseIterable, Sendable {
     case creator
+    case session
     case service
 
     public var title: String {
         switch self {
         case .creator:
             "创作"
+        case .session:
+            // 它是「用引擎」的事，与「管引擎」的页面不是同一件事，所以独立成组，
+            // 且插在创作之后、引擎之前（SESSIONS-SPEC §5.1）。
+            "会话"
         case .service:
             // 技术页与服务状态同组，沿用 Figma shell 的分组名（REDESIGN-SPEC §6.1）。
             "引擎"
@@ -21,6 +26,9 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     case voiceClone
     case voiceLibrary
     case works
+    case assistant
+    case meeting
+    case captions
     case overview
     case monitoring
     case models
@@ -33,6 +41,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing, .voiceDesign, .voiceClone, .voiceLibrary, .works:
             .creator
+        case .assistant, .meeting, .captions:
+            .session
         case .overview, .monitoring, .models, .diagnostics, .developerDocs:
             .service
         }
@@ -50,6 +60,12 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "音色库"
         case .works:
             "我的作品"
+        case .assistant:
+            "语音助手"
+        case .meeting:
+            "会议助手"
+        case .captions:
+            "实时字幕"
         case .overview:
             "服务状态"
         case .monitoring:
@@ -78,6 +94,12 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "管理系统音色，以及用参考音频复刻出来的音色。"
         case .works:
             "本机生成过的音频都留在这里，可随时播放、导出或删除。"
+        case .assistant:
+            "用这台 Mac 的语音能力对话：你说、它听、它答。原始音频不留存。"
+        case .meeting:
+            "边开会边记：谁说了什么、说了哪些要点，都留在本机记录库里。"
+        case .captions:
+            "字幕带贴在屏幕上看；记录长期留在记录库，这里回看、搜索和导出。"
         case .overview:
             "本机语音引擎的当前结论与运行事实。"
         case .monitoring:
@@ -85,7 +107,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .models:
             "先下载并校验，再应用到运行档位；两者是独立操作。"
         case .diagnostics:
-            "本机自检结论与可执行的修复动作。"
+            "本机检查的结论与每一步可以照做的修复动作。"
         case .developerDocs:
             "把本机语音能力接入你的应用：地址、接口、示例与排查。"
         }
@@ -107,6 +129,12 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "music.note.list"
         case .works:
             "square.stack.3d.up"
+        case .assistant:
+            "message.circle"
+        case .meeting:
+            "person.2"
+        case .captions:
+            "captions.bubble"
         case .overview:
             "server.rack"
         case .monitoring:
@@ -132,6 +160,12 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "管理可复用的已保存音色"
         case .works:
             "回看 SpeechRail 创作的作品"
+        case .assistant:
+            "和这台 Mac 上的语音助手对话"
+        case .meeting:
+            "记录会议、标注说话人并生成纪要"
+        case .captions:
+            "把正在说的话变成屏幕上的字幕"
         case .overview:
             "确认本机语音服务能否使用"
         case .monitoring:
@@ -151,5 +185,19 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
 
     public static var serviceRoutes: [AppRoute] {
         [.overview, .monitoring, .models, .diagnostics, .developerDocs]
+    }
+
+    public static var sessionRoutes: [AppRoute] {
+        [.assistant, .meeting, .captions]
+    }
+
+    /// 这个路由属于哪条会话能力；不是会话页时为 `nil`。
+    public var sessionKind: SessionKind? {
+        switch self {
+        case .assistant: .assistant
+        case .meeting: .meeting
+        case .captions: .captions
+        default: nil
+        }
     }
 }

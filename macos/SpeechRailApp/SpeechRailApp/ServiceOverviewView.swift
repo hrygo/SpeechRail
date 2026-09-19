@@ -241,13 +241,13 @@ public struct ServiceOverviewView: View {
 
     /// Figma `runtime`：这一页就是为看结论与事实而打开的，取值直接列出，
     /// 不再藏在一次点击之后（REDESIGN-SPEC §7.5）。规范与 Figma 稿在这一卡里
-    /// 都只放四行事实（档位 / 端口 / 版本 / 常驻 worker）；配置档位、配置代次与
+    /// 都只放四行事实（档位 / 端口 / 版本 / 已加载的模型）；配置档位、配置代次与
     /// 作业队列属于同一批技术事实，跟随开发者详情，而不是把这张卡撑成一张表。
     private var runtimeCard: some View {
         CardSurface {
             CardHead(
                 title: "运行信息",
-                detail: "只反映本机当前取值；修改运行态一律走 profile 与 preflight。"
+                detail: "只反映此刻的取值；要换档位或改运行方式，去「模型」页。"
             )
             Divider()
             runtimeRow(
@@ -259,7 +259,7 @@ public struct ServiceOverviewView: View {
             Divider()
             runtimeRow("运行版本", displayedHealth?.version ?? "未读取")
             Divider()
-            runtimeRow("常驻 worker", residentWorkerText)
+            runtimeRow("已加载的模型", residentWorkerText)
         }
     }
 
@@ -299,13 +299,30 @@ public struct ServiceOverviewView: View {
 
     /// `warm_capabilities` is the only field that names the lanes actually
     /// resident in memory, so it is what "常驻 worker" reports.
+    /// 「已加载的模型」那一行的取值。
+    ///
+    /// 服务给的是 `voice_design` / `voice_clone` / `tts` 这类内部名（`/health` 的
+    /// `tts_lifecycle.warm_capabilities`）——它们**会原样漏到这一页上**，用户看到的是
+    /// 一串英文下划线名。页面上换成人话；内部名留在开发者详情与文档里
+    /// （用户 2026-09-19：「有一些用户看不懂的词汇」）。
     private var residentWorkerText: String {
         guard let lifecycle = displayedHealth?.ttsLifecycle else { return "未读取" }
         let capabilities = lifecycle.warmCapabilities
             ?? lifecycle.warmCapability.map { [$0] }
             ?? []
-        guard !capabilities.isEmpty else { return "无 TTS 常驻" }
-        return capabilities.joined(separator: " + ")
+        // 没有常驻就是"没有"：`无 TTS 常驻` 里那个 TTS 是给排障看的写法。
+        guard !capabilities.isEmpty else { return "没有" }
+        return capabilities.map(Self.residentCapabilityTitle).joined(separator: " + ")
+    }
+
+    private static func residentCapabilityTitle(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "voice_design": "语音设计"
+        case "voice_clone": "音色克隆"
+        case "tts": "内置音色"
+        case "both": "语音设计 + 音色克隆"
+        default: raw
+        }
     }
 
     private struct ServiceCapability: Equatable {
@@ -348,8 +365,8 @@ public struct ServiceOverviewView: View {
                 ServiceCapability(title: "语音合成 · VoiceDesign", status: .notReady, reason: reason),
                 ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
-                ServiceCapability(title: "实时语音 VAD", status: .notReady, reason: reason),
-                ServiceCapability(title: "分人识别", status: .notReady, reason: reason),
+                ServiceCapability(title: "实时语音断句", status: .notReady, reason: reason),
+                ServiceCapability(title: "谁在说话", status: .notReady, reason: reason),
             ]
         }
 
@@ -365,20 +382,23 @@ public struct ServiceOverviewView: View {
             : nil
         let supportsQualityTier = health.profile == .quality
         let voiceDesign = capabilityVerdict(
-            title: "语音合成 · VoiceDesign",
-            capability: "VoiceDesign",
+            // 页面上不摆内部名：`VoiceDesign` / `Base` 是制品名，用户看到的是"两种合成各能做什么"。
+            title: "语音合成 · 语音设计",
+            capability: "语音设计",
             declared: declaredCapabilities?.supportsInstruction,
             supportedByProfile: supportsQualityTier,
-            missingReason: "Quality 档位下服务未公开 VoiceDesign capability。",
-            unsupportedReason: "VoiceDesign 只在 Quality 档位加载。"
+            missingReason: "这一档没有发布「语音设计」。",
+            unsupportedReason: "语音设计只在最准的一档（精准）加载。"
         )
         let voiceClone = capabilityVerdict(
-            title: "音色复刻",
-            capability: "音色复刻",
+            // 名字跟着侧栏那一项走：用户点的、看到的、读到的都是「音色克隆」。
+            // `复刻` 是能力声明里的措辞，留在开发者文档里（用户 2026-09-19）。
+            title: "音色克隆",
+            capability: "音色克隆",
             declared: declaredCapabilities?.supportsClone,
             supportedByProfile: supportsQualityTier,
-            missingReason: "Quality 档位下服务未公开音色复刻 capability（Base 制品未解析）。",
-            unsupportedReason: "音色复刻只在 Quality 档位加载。"
+            missingReason: "这一档没有发布音色克隆（需要的模型还没就位）。",
+            unsupportedReason: "音色克隆只在「精准」这一档加载。"
         )
         let diarization = diarizationCapability(for: health)
 
@@ -386,21 +406,27 @@ public struct ServiceOverviewView: View {
             ServiceCapability(
                 title: "语音识别",
                 status: asrReady ? .ready : .notReady,
-                reason: asrReady ? "\(asrState)；词级时间戳由 ASR 原生提供。" : asrState
+                reason: asrReady ? "\(asrState)；每个字的时间点由识别模型直接给出。" : asrState
             ),
             voiceDesign,
             ServiceCapability(
-                title: "语音合成 · Base",
+                title: "语音合成 · 内置音色",
                 status: ttsReady ? .ready : .notReady,
                 reason: ttsState
             ),
             voiceClone,
             ServiceCapability(
-                title: "实时语音 VAD",
+                title: "实时语音断句",
                 status: health.realtimeVAD?.ready == true ? .ready : .notReady,
-                reason: health.realtimeVAD?.message
-                    ?? health.streamingState.map(SpeechRailRuntimeStatePresentation.text)
-                    ?? "未读取实时语音状态。"
+                // 就绪时**不照抄服务端那句英文**（本机实测原文：
+                // `Silero VAD runtime and model are ready`）——它是写给调用方看的，
+                // 用户在这一列要读的是"这件事现在什么状态"。没就绪时才把服务给的原因
+                // 原样带出来：那一刻它是唯一的线索。
+                reason: health.realtimeVAD?.ready == true
+                    ? "运行中；说话与安静的边界由它在线判断，字幕带据此断句。"
+                    : (health.realtimeVAD?.message
+                        ?? health.streamingState.map(SpeechRailRuntimeStatePresentation.text)
+                        ?? "未读取实时语音状态。")
             ),
             ServiceCapability(
                 title: diarization.title,
@@ -410,11 +436,11 @@ public struct ServiceOverviewView: View {
         ]
     }
 
-    /// 分人行同样先看服务声明（`/health.diarization`），档位名只负责把 Light 的
-    /// 未配置解释成档位取舍。服务说“没有配置分人”时，报“未配置”比报“worker 尚未
+    /// 说话人那一行同样先看服务声明（`/health.diarization`），档位名只负责把 Light 的
+    /// 未配置解释成档位取舍。服务说“没有配置”时，报“未配置”比报“worker 尚未
     /// 就绪”准确：后者把缺失的能力说成正在等待。
     private func diarizationCapability(for health: HealthSnapshot) -> ServiceCapability {
-        let title = "分人识别"
+        let title = "谁在说话"
         if health.diarizationReady == true {
             return ServiceCapability(
                 title: title,
@@ -428,22 +454,22 @@ public struct ServiceOverviewView: View {
                 title: title,
                 status: health.profile == .light ? .unsupported : .notReady,
                 reason: health.profile == .light
-                    ? "Light 档位不加载分人能力。"
-                    : "当前部署未配置分人能力。"
+                    ? "这一档不标说话人。"
+                    : "当前部署没有开启「谁在说话」。"
             )
         }
         if health.profile == .light {
             return ServiceCapability(
                 title: title,
                 status: .unsupported,
-                reason: "Light 档位不加载分人能力。"
+                reason: "这一档不标说话人。"
             )
         }
         return ServiceCapability(
             title: title,
             status: .notReady,
             reason: health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
-                ?? "分人 worker 尚未就绪。"
+                ?? "「谁在说话」还没准备好。"
         )
     }
 
@@ -462,7 +488,7 @@ public struct ServiceOverviewView: View {
             return ServiceCapability(
                 title: title,
                 status: .ready,
-                reason: "服务已公开可用的 \(capability) capability。"
+                reason: "服务声明「\(capability)」已经可用。"
             )
         }
         if declared == false {
@@ -570,7 +596,9 @@ public struct ServiceOverviewView: View {
            let configured = model.profile?.preset,
            let runtime = displayedHealth?.profile
         {
-            return "服务正在运行 \(SpeechRailProfilePresentation.title(runtime))，但配置档位为 \(SpeechRailProfilePresentation.title(configured))。请打开模型管理重新应用目标档位。"
+            return "服务正在跑 \(SpeechRailProfilePresentation.shortTitle(runtime)) 这一档，"
+                + "但配置里存的是 \(SpeechRailProfilePresentation.shortTitle(configured))。"
+                + "去「模型」页重新应用一次就会一致。"
         }
         if let healthMessage = model.healthMessage {
             let lastRead = model.lastHealthRefresh.map { "最近成功读取于 \(relativeTime($0))" } ?? "尚无成功读取"
@@ -595,7 +623,7 @@ public struct ServiceOverviewView: View {
         if !model.controlAgentStatus.allowsMutation {
             return "\(model.controlAgentStatus.detail) 只读诊断仍可使用。"
         }
-        return "先启动服务或运行预检，控制台会说明阻塞原因。"
+        return "先启动服务；还是不起作用就跑一次「诊断」里的预检，它会说清卡在哪里。"
     }
 
     private func relativeTime(_ date: Date) -> String {

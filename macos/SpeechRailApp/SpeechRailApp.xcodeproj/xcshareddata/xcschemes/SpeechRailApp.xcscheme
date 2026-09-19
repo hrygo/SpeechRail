@@ -34,6 +34,22 @@
                ReferencedContainer = "container:SpeechRailApp.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
+         <!-- 本机音频的采集服务是 App 内嵌的 XPC service：它的二进制必须先编出来，
+              才能被 App 的 Embed 阶段装进 Contents/XPCServices。 -->
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "A20000000000000000000007"
+               BuildableName = "SpeechRailCaptureHelper"
+               BlueprintName = "SpeechRailCaptureHelper"
+               ReferencedContainer = "container:SpeechRailApp.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
       </BuildActionEntries>
    </BuildAction>
    <TestAction

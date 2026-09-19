@@ -461,27 +461,50 @@ enum SpeechRailRuntimeStatePresentation {
 }
 
 enum SpeechRailProfilePresentation {
-    /// 侧边栏底部状态区用的是短名（`服务已就绪 · Quality`，macOS App 设计系统 §4.1），
+    /// 侧边栏底部状态区用的是短名（`服务已就绪 · 均衡`，macOS App 设计系统 §4.1），
     /// 卡片与取值行才用 `title` 的「档位 · 取向」写法。
+    ///
+    /// **一律给中文名**（用户 2026-09-19：「还有一些用户看不懂的词汇」）：原来这里原样
+    /// 摆着 `Quality` / `Balanced` / `Light`——那是制品与 CLI 的 preset 名，中文界面里
+    /// 既读不出来也记不住，而用户在这一行要知道的只是「这台 Mac 现在处在哪一档」。
+    /// 内部键（`quality` 等）只留在开发者文档与诊断页：那里本来就是对着 CLI 看的。
     static func shortTitle(_ profile: SpeechRailProfile) -> String {
         switch profile {
         case .quality:
-            "Quality"
+            "精准"
         case .balanced:
-            "Balanced"
+            "均衡"
         case .light:
-            "Light"
+            "轻量"
         }
     }
 
     static func title(_ profile: SpeechRailProfile) -> String {
         switch profile {
         case .quality:
-            "Quality · 创作优先"
+            "精准 · 更适合创作"
         case .balanced:
-            "Balanced · 分人和日常"
+            "均衡 · 日常够用"
         case .light:
-            "Light · 轻量快速"
+            "轻量 · 最快最省"
+        }
+    }
+
+    /// 档位卡上那句「这一档对用户意味着什么」。
+    ///
+    /// 事实来自 `model-catalog.json` 的 `presets`：三档的识别与合成权重不只是"快慢"
+    /// 之别——`light` 用的是 0.6B 识别 + 0.6B 合成、且没有对齐模型（不分说话人、
+    /// 不能创作音色），`balanced` 换成 1.7B 识别并可分人，`quality` 再把合成换成 1.7B
+    /// 的语音设计与内置音色两套。所以这句话说的是**用户拿到什么**，而不是制品名
+    /// （用户 2026-09-19：「有用户看不懂的词汇」）。
+    static func purpose(_ profile: SpeechRailProfile) -> String {
+        switch profile {
+        case .quality:
+            "识别与配音质量最好，支持音色创作和克隆；占用最多，换档要等一会儿。"
+        case .balanced:
+            "日常够用：识别更准、能区分说话人，配音也正常；内存占用适中。"
+        case .light:
+            "启动最快、占内存最少；识别与配音是基础质量，不区分说话人，也不能创作音色。"
         }
     }
 }
@@ -518,7 +541,7 @@ enum SpeechRailOperationMessagePresentation {
             break
         }
         if normalized.hasPrefix("profile") {
-            return "档位应用未完成，请重试或打开系统诊断。"
+            return "换档没成功，请重试；还不行就打开「诊断」看原因。"
         }
         if normalized.hasPrefix("model preparation was cancelled") {
             return "模型准备已取消。"
@@ -577,6 +600,12 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
     /// 2026-09-16 装机件上按稿改成「不滚动 + 卡片吃满窗口」后，页首整块被裁且没有任何
     /// 滚动能回到顶部（`pagePurpose` 注释里记的第三十轮是同一类失败）。
     private let minimumContentHeight: CGFloat?
+    /// 正文槽位的**高度口径**。`false`（默认）＝「定高」：正文恰好是 `slot` 高，
+    /// 内容再高也压在槽里（`minimumContentHeight` 注释里那条「换主题、换文档，卡片高度
+    /// 不变」）。`true` ＝「先吃满、再按内容长高」：槽位高度取 `minHeight`，内容比窗格矮
+    /// 时卡片照样吃满窗口，内容比窗格高时整页滚动——这一档是给「清单比窗口长」的页面用的
+    /// （会话三页：音色 18 条、转录几十段），它不是第三种默认值，默认仍是定高。
+    private let growsWithContent: Bool
     private let trailing: Trailing
     private let content: Content
 
@@ -585,6 +614,7 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
         scrollable: Bool = true,
         purpose: String? = nil,
         minimumContentHeight: CGFloat? = nil,
+        growsWithContent: Bool = false,
         @ViewBuilder content: () -> Content,
         @ViewBuilder trailing: () -> Trailing
     ) {
@@ -592,6 +622,7 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
         self.scrollable = scrollable
         self.purpose = purpose
         self.minimumContentHeight = minimumContentHeight
+        self.growsWithContent = growsWithContent
         self.content = content()
         self.trailing = trailing()
     }
@@ -605,7 +636,8 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
                     ScrollView {
                         pageContent(
                             paneHeight: proxy.size.height,
-                            minimumContentHeight: minimumContentHeight
+                            minimumContentHeight: minimumContentHeight,
+                            growsWithContent: growsWithContent
                         )
                     }
                 }
@@ -663,17 +695,43 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
     /// 正文槽位不低于 `minimumContentHeight`：矮窗口下正文保持声明的最小高度，多出来的
     /// 部分交给外层滚动，而不是把正文压扁——压扁目录列就是「点了主题，下面几个菜单
     /// 就没了」。
-    private func pageContent(paneHeight: CGFloat, minimumContentHeight: CGFloat) -> some View {
+    ///
+    /// `growsWithContent` 为真时这层框架用 `minHeight` 而不是固定高度：内容比窗格矮时
+    /// 效果与定高完全一样（卡片照样吃满窗口），内容比窗格高时页面**长高并整页滚动**，
+    /// 而不是把多出来的部分裁掉。会话三页要的是后者——稿上「音色」卡本来就伸出
+    /// 900pt 的画板（4x 帧在画板下沿被裁），清单长度由服务与用户决定，界面不该替它设上限。
+    private func pageContent(
+        paneHeight: CGFloat,
+        minimumContentHeight: CGFloat,
+        growsWithContent: Bool
+    ) -> some View {
         let padding = SpeechRailDesignTokens.Layout.contentPadding
         let slot = max(paneHeight - padding * 2, minimumContentHeight)
-        return VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+        let padded = VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             pagePurpose
             content
                 .frame(maxHeight: .infinity, alignment: .topLeading)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Layout.contentPadding)
         .padding(.vertical, SpeechRailDesignTokens.Layout.contentPadding)
-        .frame(height: slot + padding * 2, alignment: .topLeading)
+
+        return Group {
+            if growsWithContent {
+                // `+ Spacing.xs` 是**刀口余量**，不是排版偏好：卡片吃满窗口之后，内容真正
+                // 需要的高度比它报出去的多几 pt（亚像素累积），滚动容器于是判「装得下」，
+                // SwiftUI 就从最后一行文字身上挤出那几 pt，卡片再 `clipShape` 就是一道硬切。
+                // 留出这一档余量后，内容**永远**比窗格高一点点：多出来的高度落在卡片自己的
+                // 留白里（可见版面不变），滚动条也不会再判错。
+                // 离屏实测 2026-09-19（1200 宽）：窗高 900 裁掉字幕空态页脚那一行的下半截，
+                // 820 与 ≥905 都不裁——正是这个刀口。
+                padded.frame(
+                    minHeight: slot + padding * 2 + SpeechRailDesignTokens.Spacing.xs,
+                    alignment: .topLeading
+                )
+            } else {
+                padded.frame(height: slot + padding * 2, alignment: .topLeading)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
@@ -1710,7 +1768,7 @@ public struct OperationBar: View {
             }
             if let progress = operation.progress {
                 if let artifactKey = progress.artifactKey ?? progress.file {
-                    Text("当前制品：\(artifactKey)")
+                    Text("正在处理：\(artifactKey)")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .lineLimit(1)

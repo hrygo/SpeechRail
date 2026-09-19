@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail 运行时与部署"
 status: active
-date: 2026-09-17
+date: 2026-09-18
 ---
 
 # SpeechRail 运行时与部署
@@ -222,6 +222,53 @@ release 作为分人 profile 安装并在 preflight 中检查 CoreML bundle、wh
 `SpeechRailDiarizationWorker` 与 fixed-text aligner snapshot（aligner 校验由 `preset.aligner` 驱动，
 `light` 无 aligner 时跳过）。切换后还须确认 `/v1/models` 包含 `gpt-4o-transcribe-diarize`；任何一项
 失败都不切换 `runtime/current`，或恢复上一 release。
+
+## app home 目录契约与重装语义（2026-09-18）
+
+划分判据是**能不能重建**，不是"是不是用户数据"（Apple 对 Application Support / Caches 的口径）。
+app home 默认 `~/Library/Application Support/SpeechRail`（可用 `SPEECHRAIL_APP_HOME` 改），分三块：
+
+| 区 | 内容 | 重装 / 升级 | 备份 | Time Machine |
+|---|---|---|---|---|
+| **数据区**（丢了没法重建） | `Works/`（作品）、`sessions.sqlite3`（会话记录 / 纪要 / 记忆）、`voices/` + `custom-voices.json`（音色）、`config/.env`（私有配置） | **不动** | **必须备** | 保留 |
+| **可重建区** | `runtime/`、`vendor/`、`state/`、`artifacts/`、`benchmarks/`、`app-archive/`、`app-releases/`、`app-backups/` | 可删 | 不备 | **排除** |
+| **模型区** | `models/` | 可删 | 不备 | 保留 |
+
+`models/` 单列的理由：它可重建但要重下 25 GB 以上，且没有网络就完全不可用——重下的成本高于备份成本，
+所以默认留在备份里；想省空间由用户手动 `tmutil addexclusion`。
+
+目录名保留 `SpeechRail/` 而不改成 bundle identifier：Apple 的约定是子目录用 bundle id，但这是单产品
+独占的本地工具，人类可读的名字对"打开数据目录"更有用，也不存在同名冲突。这是**有意的偏离**，不是遗漏。
+
+### 重装、卸载与迁移各自动什么
+
+| 动作 | 动什么 | 数据区 |
+|---|---|---|
+| 换服务版本（wheel 替换） | 只换 `runtime/releases/*` 与 `runtime/current`；失败回滚还原旧 current，并删掉本次新建的 config / selection / release | 不动 |
+| `speechrail service uninstall` | 只 `bootout` + 删 plist | 不动 |
+| 重装 App | 只替换 `~/Applications/SpeechRail.app` | 不动 |
+| **想清干净重来** | 删可重建区即可（连 `models/` 一起删就需重下） | **不动** |
+| 换新 Mac | 拷 `~/Library/Application Support/SpeechRail/` 整个目录；不带 `models/` 则重装后重下 | 拷走 |
+
+**用户最可能丢数据的动作不是重装，是删 `~/.speechrail`。** 那个目录在 2026-09-18 之前是音色注册表
+（`custom_voices.json`）与音色参考音频（`voices/`）的落点。终态把两者移进数据区的 `voices/` 与
+`custom-voices.json`；兼容策略是**新路径优先，旧路径存在则自动搬一次并留日志**，旧目录留空壳不删。
+在搬迁代码落地之前，`~/.speechrail` 仍然是活的存储位置，**不要手工删**。
+
+### 备份口径
+
+数据区是**唯一**的备份对象。App 设置里的备份入口产出 `<日期>-speechrail-backup/`，内含
+`sessions.sqlite3`（用 `VACUUM INTO` 取一致快照，不复制 `-wal` / `-shm`）、`Works/`、
+`voices/` + `custom-voices.json`，以及一份说明恢复方式的 README。**不含** `models/` 与可重建区。
+
+Time Machine 排除由创建目录的一方设置（`NSURLIsExcludedFromBackupKey`，macOS 10.8+）：服务在
+`ensure_directories` 之后对可重建区逐个设置；App 的数据目录一个都不设。
+
+> **状态（2026-09-18）**：目录契约已定并作为后续实现的依据。
+> **Time Machine 排除、数据区备份入口、音色路径搬迁三项尚未实现**——它们的设计口径见
+> [会话层技术方案 §6.6](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md) 与
+> [会话模块规格 §15.1](../design/2026-09-17-live-sessions/SESSIONS-SPEC.md)。
+> 在那之前，本节的"重装不动数据"描述的是**已实测的四条路径**（上表前四行），不含尚未存在的命令。
 
 ## 端口与进程策略
 

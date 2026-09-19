@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import SpeechRailControlKit
@@ -8,6 +9,27 @@ struct SpeechRailApp: App {
 
     @State private var model: AppModel
     @State private var navigation: AppNavigationState
+    /// 会话层的地基：所有权状态机 + 记录库（`SESSIONS-SPEC` §12 阶段 1 / 2）。
+    /// 它**不随 App 启动占用任何设备**——空闲时没有麦克风、没有系统录音 tap、没有音频引擎
+    /// （§5.3.1）。库里也还没有行：记录库这个库文件是懒建的。
+    @State private var session: SessionCoordinator
+    /// 实时字幕的会话层与浮层（`SESSIONS-SPEC` §12 阶段 3）。浮层是 App 里唯一一个 `NSPanel`。
+    /// 两者都不在启动时占设备：`⌘⇧L` 或页面上的「打开字幕带」按下去才拿麦克风。
+    @State private var caption: CaptionSession
+    @State private var captionBand: CaptionBandWindowController
+    /// 语音助手的会话层（`SESSIONS-SPEC` §12 阶段 5）：麦克风 → ASR → Responses → TTS。
+    @State private var assistant: AssistantSession
+    /// 会议助手的会话层（§12 阶段 6）：多路来源 → ASR → 分人 → 纪要。
+    @State private var meeting: MeetingSession
+    /// 全局热键（§12 阶段 8）。Carbon 路线，**不需要辅助功能授权**。
+    @State private var hotKeys = GlobalHotKeyCenter()
+    /// 新会话的预填值（人设 / 音色 / 对讲模式 / 分人默认值 / 大模型地址与模型）。
+    /// **密钥不在这里**：它只进钥匙串。
+    @State private var preferences: SessionPreferences
+    /// 走内部路由与「把管理控制台调出来」时要用它。
+    /// **放在 `App` 上**：全局热键的接线在 `body` 里做（见 `wireGlobalShortcuts`），
+    /// 那里拿不到任何视图的环境。
+    @Environment(\.openWindow) private var openWindow
     @AppStorage("speechrail.showDeveloperDetails") private var showDeveloperDetails = false
 
     init() {
@@ -98,17 +120,117 @@ struct SpeechRailApp: App {
         workStore = CreativeWorkStore()
 #endif
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
-        _model = State(
-            initialValue: AppModel(
-                transport: transport,
-                apiClient: diagnosticsClient,
-                capabilityClient: capabilityClient,
-                creatorClient: creatorClient,
-                workStore: workStore,
-                registration: registration
-            )
+        let appModel = AppModel(
+            transport: transport,
+            apiClient: diagnosticsClient,
+            capabilityClient: capabilityClient,
+            creatorClient: creatorClient,
+            workStore: workStore,
+            registration: registration
         )
-        _navigation = State(initialValue: AppNavigationState())
+        let navigationState = AppNavigationState()
+
+        // 会话层的三个件与它们的接线。**接线放在这里**：协调器只认"开始 / 停止采集"两个钩子，
+        // 不认识字幕、会议、助手各自的采集与连接（`TECHNICAL-DESIGN` §5.2）。
+        let coordinator = SessionCoordinator(store: SessionStore())
+        let captionSession = CaptionSession(coordinator: coordinator)
+        let sessionPreferences = SessionPreferences()
+        let assistantSession = AssistantSession(coordinator: coordinator)
+        assistantSession.preferences = { sessionPreferences }
+        assistantSession.serviceReadiness = {
+            do {
+                let health = try await ServiceAPIClient().fetchHealthSnapshot()
+                guard health.ready == true else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
+        // 字幕的分人开关：档位给不出分人时接口会回 `diarization_not_available`，
+        // 所以这里先按档位挡一道——**开关置灰时要说得出原因**（§14.3 的档位门禁）。
+        captionSession.diarizationPreference = { sessionPreferences.captionsDiarizationEnabled }
+        captionSession.diarizationGate = {
+            SessionPreferences.diarizationGateNote(for: coordinator.lastKnownProfile)
+        }
+        assistantSession.availableVoices = { [weak appModel] in
+            (appModel?.creatorVoices ?? []).filter(\.available).map(\.name)
+        }
+        let band = CaptionBandWindowController(
+            session: captionSession,
+            onOpenActiveSession: { [weak navigationState] in
+                navigationState?.request(coordinator.ownershipRoute)
+            }
+        )
+        captionSession.presentBand = { visible in
+            band.setVisible(visible)
+        }
+        // 「就绪」要在**按下的那一刻**判定，不是读一轮缓存的健康快照：`⌘⇧L` 是全局键，
+        // 按下时很可能这一轮刷新还没跑完，拿旧结论会把可用说成不可用。loopback 上一次
+        // `/health` 就是毫秒级的事。
+        captionSession.serviceReadiness = {
+            do {
+                let health = try await ServiceAPIClient().fetchHealthSnapshot()
+                guard health.ready == true else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
+        // 会议助手的接线（§12 阶段 6）。它与字幕共用分人那条链路，差别在来源与纪要，
+        // 所以这里只接三件它自己不认识的事：服务就绪判定、新会话预填值、来源断了的出口。
+        let meetingSession = MeetingSession(coordinator: coordinator)
+        meetingSession.preferences = { sessionPreferences }
+        meetingSession.serviceReadiness = {
+            do {
+                let health = try await ServiceAPIClient().fetchHealthSnapshot()
+                guard health.ready == true else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
+        coordinator.starter = { kind in
+            // 未接线的能力**必须抛**：`guard … else { return }` 会被读成"已经开始采集"，
+            // 于是界面显示在录、实际什么都没拿到（`CapabilityNotWired` 的注释里写了原因）。
+            switch kind {
+            case .captions:
+                try await captionSession.beginCapture()
+            case .assistant:
+                try await assistantSession.beginCapture()
+            case .meeting:
+                try await meetingSession.beginCapture()
+            }
+        }
+        coordinator.stopper = { kind in
+            switch kind {
+            case .captions:
+                await captionSession.stopCapture()
+            case .assistant:
+                await assistantSession.stopCapture()
+            case .meeting:
+                await meetingSession.stopCapture()
+            }
+        }
+        // 「结束当前会话…」（菜单栏 `⌘⇧.` / 守卫确认之后）走会议自己的收尾。
+        coordinator.finisher = { kind in
+            guard kind == .meeting else { return }
+            await meetingSession.finishAndSummarize()
+        }
+
+        _model = State(initialValue: appModel)
+        _navigation = State(initialValue: navigationState)
+        _session = State(initialValue: coordinator)
+        _caption = State(initialValue: captionSession)
+        _assistant = State(initialValue: assistantSession)
+        _meeting = State(initialValue: meetingSession)
+        _preferences = State(initialValue: sessionPreferences)
+        _captionBand = State(initialValue: band)
     }
 
 #if DEBUG
@@ -138,16 +260,74 @@ struct SpeechRailApp: App {
         return FileManager.default.fileExists(atPath: serviceURL.path)
     }
 
+    /// 全局热键的接线（`SESSIONS-SPEC` §5.2、§6.6）：四个键各接一处，都只做一件事——
+    /// 把请求交给协调器。「能不能开始」由占用守卫判，热键自己不做判定，
+    /// 否则同一件事会有两处实现（§5.4 的同一条理由）。
+    ///
+    /// **为什么在 `body` 里而不是某个视图的 `.task` 里**：2026-09-18 真机跑出过一次崩溃——
+    /// 这套接线原本挂在一个零尺寸的桥 View 上，而那个 View 挂在 `MenuBarExtra` 的 label 下。
+    /// label 由系统单独承载，挂在其上的 `.environment(...)` 不生效，于是桥里
+    /// `@Environment(SessionCoordinator.self)` 直接 `Fatal error: No Observable object ... found`。
+    /// `body` 在启动时求值，且 `openWindow` 从 App 自己的环境取，所以这里既不需要视图在场，
+    /// 也不依赖窗口是否打开。
+    private func wireGlobalShortcuts() {
+        hotKeys.setHandler(.toggleCaptions) {
+            // 会议录着的时候按它：浮层以受阻态出现，给两个出口，**不开第二条会话**（§16.3）。
+            Task { await caption.toggleFromGlobalShortcut() }
+            reveal(.captions)
+        }
+        hotKeys.setHandler(.startMeeting) {
+            // 会议的第一件事是**选来源**，所以热键把人送到那一页，而不替它选。
+            reveal(.meeting)
+        }
+        hotKeys.setHandler(.finishCurrent) {
+            session.requestEndCurrentSession()
+            // 「结束当前会话…」带省略号：它要问一句。会议结束永远确认（防误停，§6.4），
+            // 所以这里必须把窗口调出来，否则用户会看到"按了没反应"。
+            openWindow(id: AppNavigationState.controlCenterWindowID)
+            NSApp.activate()
+        }
+        hotKeys.setHandler(.toggleInnerOS) {
+            guard session.occupancy?.kind == .meeting else { return }
+            meeting.innerOS.isExpanded.toggle()
+            reveal(.meeting)
+        }
+        hotKeys.install()
+    }
+
+    private func reveal(_ route: AppRoute) {
+        navigation.request(route)
+        openWindow(id: AppNavigationState.controlCenterWindowID)
+        NSApp.activate()
+    }
+
     var body: some Scene {
+        // `body` 在启动时求值一次；`let _ =` 是 SceneBuilder 里唯一能放语句的位置。
+        let _ = wireGlobalShortcuts()
         Window("SpeechRail 管理控制台", id: AppNavigationState.controlCenterWindowID) {
             ControlCenterView()
                 .environment(model)
                 .environment(navigation)
+                .environment(session)
+                .environment(caption)
+                .environment(assistant)
+                .environment(meeting)
+                .environment(preferences)
+                .task {
+                    await session.openStore()
+                    // 启动时回收：① 上次没正常结束的会话已经封存（`openStore` 里做）；
+                    // ② 卡在 `queued` / 租约过期的纪要在这里重新排一次（§5.8）。
+                    await meeting.minutes.recoverPending(
+                        configuration: preferences.minutesConfiguration
+                    )
+                }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))
         .commands {
             SpeechRailCommands(
                 navigation: navigation,
+                session: session,
+                caption: caption,
                 showDeveloperDetails: $showDeveloperDetails
             )
         }
@@ -155,12 +335,24 @@ struct SpeechRailApp: App {
             ControlMenuView()
                 .environment(model)
                 .environment(navigation)
+                .environment(session)
+                .environment(caption)
+                .environment(meeting)
         } label: {
-            MenuBarStatusLabel(isOperating: model.serviceOperation?.phase.isActive == true)
+            // 状态项要的四个对象**显式传进去**，不走环境：`MenuBarExtra` 的 label 由系统
+            // 单独承载，挂在上面的 `.environment(...)` 不生效（2026-09-18 真机崩溃就是它）。
+            MenuBarStatusLabel(
+                isOperating: model.serviceOperation?.phase.isActive == true,
+                session: session,
+                caption: caption,
+                meeting: meeting,
+                assistant: assistant
+            )
         }
         Settings {
             SettingsView()
                 .environment(model)
+                .environment(preferences)
         }
         Window("SpeechRail 帮助", id: Self.helpWindowID) {
             SpeechRailHelpView()
@@ -169,17 +361,44 @@ struct SpeechRailApp: App {
     }
 }
 
+/// 全局热键 → 动作的接线（`SESSIONS-SPEC` §5.2、§6.6）。
+///
+/// 它是一个**零尺寸的桥**：`App` 这个结构体里拿不到 `openWindow` 这类环境值，
+/// 而热键只在按下的那一刻才用到它们。接线放在这里，四个键各接一处，
+/// 而且都只做一件事——**把请求交给协调器**：「能不能开始」由占用守卫判，
+/// 热键自己不做判定，否则同一件事会有两处实现（§5.4 的同一条理由）。
+///
+/// **接线在 `App.body` 里做，不挂在任何视图上**（`SpeechRailApp.wireGlobalShortcuts()`）：
+/// `body` 在启动时就会求值，四个键因此不需要任何窗口或视图在场；反过来，挂到视图上会让
+/// 「窗口被关掉」变成「热键静默失效」。`install()` 与 `setHandler` 都是幂等的。
+
 /// The menu bar and keyboard map from REDESIGN-SPEC §6.3. Focused scene values
 /// let「导出选中作品」follow the page the user is actually looking at.
 struct SpeechRailCommands: Commands {
-    /// ⌘1–⌘9 的显示顺序与 `AppRoute.allCases` 一致（创作五页 + 引擎五页）。
-    /// 第十页「开发者文档」是 ⌘0：它排不进 1–9 的自然顺序，而给参考页一个
-    /// 记不住的组合键（⌘⇧D 之类）比给最后一个序位更糟（REDESIGN-SPEC §13.3）。
-    private static let routeShortcuts: [KeyEquivalent] = [
-        "1", "2", "3", "4", "5", "6", "7", "8", "9", "0"
+    /// 路由 → 快捷键。十三页超出 ⌘1–⌘0 的十个槽位，所以让位规则被显式写在表里
+    /// （SESSIONS-SPEC §5.2，用户 2026-09-18 裁决 D2）：**创作页一个都不动**（它们频率最高，
+    /// 而且已形成肌肉记忆），**会话组拿中间三格** ⌘6–⌘8，**引擎页改用助记组合**。
+    private static let routeShortcuts: [AppRoute: (key: KeyEquivalent, modifiers: EventModifiers)] = [
+        .dubbing: ("1", .command),
+        .voiceDesign: ("2", .command),
+        .voiceClone: ("3", .command),
+        .voiceLibrary: ("4", .command),
+        .works: ("5", .command),
+        .assistant: ("6", .command),
+        .meeting: ("7", .command),
+        .captions: ("8", .command),
+        .overview: ("9", .command),
+        .monitoring: ("0", .command),
+        .models: ("m", [.command, .shift]),
+        .diagnostics: ("d", [.command, .shift]),
+        .developerDocs: ("h", [.command, .shift])
     ]
 
     let navigation: AppNavigationState
+    /// 会话命令要用它判「有没有正在进行的会话」（`⌘⇧.` 会话进行中才可用）。
+    let session: SessionCoordinator
+    /// 字幕带的全局入口（`⌘⇧L`）。它**不需要 App 在前台**——菜单命令本来就在系统这一侧。
+    let caption: CaptionSession
     @Binding var showDeveloperDetails: Bool
     @FocusedValue(\.selectedWorkCommand) private var selectedWorkCommand
     @FocusedValue(\.reloadPageCommand) private var reloadPageCommand
@@ -216,15 +435,27 @@ struct SpeechRailCommands: Commands {
 
         CommandGroup(after: .toolbar) {
             Divider()
-            ForEach(Array(AppRoute.allCases.enumerated()), id: \.element) { index, route in
+            ForEach(AppRoute.allCases, id: \.self) { route in
                 Button(route.title) {
                     navigation.request(route)
                 }
-                .keyboardShortcut(
-                    Self.routeShortcuts[index % Self.routeShortcuts.count],
-                    modifiers: .command
-                )
+                .keyboardShortcut(Self.shortcut(for: route))
             }
+
+            Divider()
+
+            // 会话动作。**只放今天真的会生效的**：字幕带（阶段 3 已落地）与会话结束；
+            // 会议的开始动作随阶段 6 落地，现在给一条按了不动的菜单项比不给更糟。
+            Button(caption.phase.isLive ? "暂停实时字幕" : "开始实时字幕") {
+                Task { await caption.toggleFromGlobalShortcut() }
+            }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+
+            Button("结束当前会话") {
+                session.requestEndCurrentSession()
+            }
+            .keyboardShortcut(".", modifiers: [.command, .shift])
+            .disabled(!session.phase.isActive)
         }
 
         CommandGroup(replacing: .help) {
@@ -238,6 +469,16 @@ struct SpeechRailCommands: Commands {
     private var exportTitle: String {
         guard let selectedWorkCommand else { return "导出选中作品…" }
         return "导出“\(selectedWorkCommand.title)”…"
+    }
+
+    /// 表里必须覆盖每一条路由；缺一条就退回 ⌘1，这会与「配音台」撞键——
+    /// 所以缺项要当成缺陷来修，而不是靠这里的兜底悄悄过去。
+    private static func shortcut(for route: AppRoute) -> KeyboardShortcut {
+        guard let entry = routeShortcuts[route] else {
+            assertionFailure("路由 \(route.rawValue) 没有登记快捷键")
+            return KeyboardShortcut("1", modifiers: .command)
+        }
+        return KeyboardShortcut(entry.key, modifiers: entry.modifiers)
     }
 }
 

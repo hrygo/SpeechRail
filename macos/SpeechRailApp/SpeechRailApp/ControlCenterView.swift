@@ -5,9 +5,22 @@ import SpeechRailControlKit
 public struct ControlCenterView: View {
     @Environment(AppModel.self) private var model
     @Environment(AppNavigationState.self) private var navigation
+    @Environment(SessionCoordinator.self) private var session
     @Environment(\.dismiss) private var dismiss
-    @State private var selection: AppRoute? = .overview
+    /// 打开窗口时落在哪一页。
+    ///
+    /// 2026-09-19（用户：「门槛极高」「面向用户体验」）：原先是「服务状态」——那是**服务
+    /// 控制台**的视角，全新用户第一眼看到的是一张能力表与运行信息，而不是"我能做什么"。
+    /// 现在落在「语音助手」：它自己就能开始，服务没起来时它的受阻态给一条真出口
+    /// （「去服务状态」），不会把人卡住。内部键 `quality` 那类仍只在高级页出现。
+    /// 回归方式：把这一行改回 `.overview` 即可（SESSIONS-SPEC §13 D15）。
+    @State private var selection: AppRoute? = Self.landingRoute
+
+    /// 窗口没有选中项时显示的那一页：与落地页同一个值，免得"打开时是语音助手、点空
+    /// 一下变服务状态"。
+    private static let landingRoute: AppRoute = .assistant
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var skipsSwitchConfirmation = false
     @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
 
     public init() {}
@@ -26,6 +39,10 @@ public struct ControlCenterView: View {
                         sidebarSection(
                             title: AppRouteGroup.creator.title,
                             routes: AppRoute.creatorRoutes
+                        )
+                        sidebarSection(
+                            title: AppRouteGroup.session.title,
+                            routes: AppRoute.sessionRoutes
                         )
                         sidebarSection(
                             title: AppRouteGroup.service.title,
@@ -47,7 +64,7 @@ public struct ControlCenterView: View {
                     max: SpeechRailDesignTokens.Layout.sidebarMaximumWidth
                 )
             } detail: {
-                detailView(for: selection ?? .overview)
+                detailView(for: selection ?? Self.landingRoute)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     // 页面地板：窗口内容区的底色是稿的一级表面（`surface/window`），
                     // 卡片才是它上面更亮的一级；侧栏的材质与工具栏那一行不受影响
@@ -58,7 +75,7 @@ public struct ControlCenterView: View {
                         // **窗口组合根**声明一次：它是当前路由的纯函数，页面自己没有
                         // 需要额外携带的标题状态，所以八个屏幕不可能漂移成九种头部
                         // （REDESIGN-SPEC §6.2 / §11.6 第四十九、五十五轮）。
-                        PageIdentityToolbarItem(selection ?? .overview)
+                        PageIdentityToolbarItem(selection ?? Self.landingRoute)
                         // 这一枚浮动间隔留着：页面动作由子视图声明、会排在它之前，而系统
                         // 搜索框（`.searchable(placement: .toolbar)`）在它之后——去掉它，
                         // 搜索框就会贴到页面动作旁边，右侧留一大片空白（装机件截图里
@@ -104,7 +121,59 @@ public struct ControlCenterView: View {
                     selection = route
                 }
             }
+            // 会话占用与交还的守卫：**全窗口只有一个确认形状**（§6.4）。
+            // 触发点是三个页面的开始动作、`⌘⇧N`、菜单栏「开始…」与字幕带的「开始会议」，
+            // 它们都只调用 `SessionCoordinator`，确认面板在这里统一呈现一次。
+            .sheet(item: switchConfirmation) { confirmation in
+                sessionConfirmationSheet(confirmation)
+            }
         }
+    }
+
+    private var switchConfirmation: Binding<SessionCoordinator.Confirmation?> {
+        Binding(
+            get: { session.pendingConfirmation },
+            set: { if $0 == nil { session.cancelPending() } }
+        )
+    }
+
+    @ViewBuilder
+    private func sessionConfirmationSheet(_ confirmation: SessionCoordinator.Confirmation) -> some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(confirmation.title)
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text(confirmation.message)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(maxWidth: 380, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Button(confirmation.confirmTitle) {
+                    if skipsSwitchConfirmation, confirmation.allowsDoNotAskAgain {
+                        session.rememberDoNotAskAgain()
+                    }
+                    Task { await session.confirmPending() }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+
+                Button("取消", role: .cancel) {
+                    session.cancelPending()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+                if confirmation.allowsDoNotAskAgain {
+                    Toggle("以后不再询问", isOn: $skipsSwitchConfirmation)
+                        .toggleStyle(.checkbox)
+                }
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.gutter)
+        .frame(minWidth: 440, alignment: .leading)
+        .onAppear { skipsSwitchConfirmation = false }
     }
 
     private var displayedHealth: HealthSnapshot? {
@@ -172,6 +241,9 @@ public struct ControlCenterView: View {
                 .frame(height: SpeechRailDesignTokens.Spacing.hairline)
                 .padding(.horizontal, SpeechRailDesignTokens.Control.sidebarHairlineInset)
             sidebarServiceStatus
+            // 第二行：谁在用麦克风（P1 的落点）。第一行答「引擎能不能用」，
+            // 这一行答「此刻是谁在用它」——两件事都常驻，顺序即优先级（§5.1）。
+            SessionOwnershipRow()
         }
     }
 
@@ -279,6 +351,14 @@ public struct ControlCenterView: View {
             VoiceLibraryView()
         case .works:
             WorksView()
+        case .assistant:
+            // 助手页本身就是那一块产品页（§6.1 的五种态在同一页上）；
+            // 记录库在它的右栏「记录」标签里，不再是另一页。
+            AssistantView()
+        case .meeting:
+            MeetingView()
+        case .captions:
+            SessionLibraryView(kind: .captions)
         case .overview:
             ServiceOverviewView()
         case .monitoring:

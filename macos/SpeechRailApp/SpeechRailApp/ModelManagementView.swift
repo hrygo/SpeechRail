@@ -148,7 +148,8 @@ public struct ModelManagementView: View {
             ForEach(SpeechRailProfile.allCases, id: \.self) { profile in
                 ProfileChoiceCard(
                     profile: profile,
-                    sizeText: summary(for: profile).map { "准备大小 \(formatBytes($0.downloadBytes))" },
+                    // 「准备大小」读不出是干什么的：这一格说的是"换到这一档要下载多少"。
+                    sizeText: summary(for: profile).map { "要下载 \(formatBytes($0.downloadBytes))" },
                     specs: profileSpecs(for: profile),
                     isSelected: selectedProfile == profile,
                     isRunning: currentServiceProfile == profile
@@ -159,15 +160,35 @@ public struct ModelManagementView: View {
         }
     }
 
-    /// 三行规格全部来自已读取的档位摘要；读不到时如实写「未读取」，不写死结论。
+    /// 三行规格只列**用户能感知的差异**（用户 2026-09-19：界面里不该出现 `aligner` /
+    /// `TTS lane` 这类内部名）。第一行仍取自已读取的档位摘要——读不到时如实写「未读取」，
+    /// 不写死结论；后两行是目录里的固定事实（`model-catalog.json` 的 `presets`：只有
+    /// `quality` 带语音设计与音色克隆，识别与合成的权重也随档位变），所以直接写结论，
+    /// 不假装成运行时读回来的数。
     private func profileSpecs(for profile: SpeechRailProfile) -> [ProfileSpec] {
         let summary = summary(for: profile)
-        let lanes = profile == .quality ? "2 个 · 跨 lane 并发" : "1 个"
         return [
-            ProfileSpec(label: "分人", value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"),
-            ProfileSpec(label: "aligner", value: summary.map { $0.aligner ?? "无" } ?? "未读取"),
-            ProfileSpec(label: "TTS lane", value: lanes),
+            ProfileSpec(
+                label: "谁在说话",
+                value: summary.map {
+                    $0.diarization ? (profile == .quality ? "支持（更准）" : "支持") : "不支持"
+                } ?? "未读取"
+            ),
+            // 标签格是定宽 76pt（稿 `kvRow`），放不下「音色创作与克隆」——多出来的字会
+            // 折成第二行，把三行规格的行距从 23 撑开。克隆归在取值里说。
+            ProfileSpec(label: "音色创作", value: profile == .quality ? "支持（含克隆）" : "不支持"),
+            ProfileSpec(label: "识别与配音", value: qualityGrade(for: profile)),
         ]
+    }
+
+    /// 「识别与配音」那一行的取值。事实是目录里的权重：`light` 是 0.6B 识别 + 0.6B
+    /// 合成，`balanced` 换成 1.7B 识别，`quality` 再把合成换成 1.7B 的两套。
+    private func qualityGrade(for profile: SpeechRailProfile) -> String {
+        switch profile {
+        case .quality: "最好"
+        case .balanced: "更好"
+        case .light: "基础"
+        }
     }
 
     private var selectedProfilePanel: some View {
@@ -237,7 +258,7 @@ public struct ModelManagementView: View {
 
     private var profileFacts: some View {
         HStack(spacing: 0) {
-            fact("准备大小", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
+            fact("要下载", value: summary(for: selectedProfile).map { formatBytes($0.downloadBytes) } ?? "未读取")
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -249,7 +270,9 @@ public struct ModelManagementView: View {
             Divider()
                 .frame(height: SpeechRailDesignTokens.Layout.compactDividerHeight)
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            fact("VoiceDesign", value: voiceDesignCapability(for: selectedProfile))
+            // 这一行的三格是「这一档要用哪几个模型」（取值是制品 key），标题就用页面上
+            // 的名字；`VoiceDesign` 只留在开发者详情里（用户 2026-09-19）。
+            fact("语音设计", value: voiceDesignCapability(for: selectedProfile))
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
         }
     }
@@ -271,7 +294,7 @@ public struct ModelManagementView: View {
     private var artifactColumnsHeader: some View {
         ArtifactColumnGrid { metrics in
             HStack(spacing: 0) {
-                Text("制品")
+                Text("模型文件")
                     .frame(
                         minWidth: metrics.artifactMinimum,
                         maxWidth: metrics.artifact,
@@ -298,17 +321,17 @@ public struct ModelManagementView: View {
     private var artifactSection: some View {
         CardSurface {
             CardHead(
-                title: "模型制品",
-                detail: "存在状态看文件与 SHA-256；使用状态看当前服务档位和 worker 生命周期。已释放表示可按需加载，不等于缺失。"
+                title: "模型文件",
+                detail: "「已下载」看文件是否完整；「在用」看当前这一档有没有把它加载起来。写着「已释放」只是暂时没占用内存，不等于文件缺失。"
             )
             Divider()
             if model.modelCatalog != nil {
                 let artifacts = visibleArtifacts
                 if artifacts.isEmpty {
                     ContentUnavailableView(
-                    "当前档位没有已登记制品",
+                        "这一档还没有登记模型文件",
                         systemImage: AppRoute.models.systemImage,
-                        description: Text("请运行预检或检查受管 runtime 的模型目录。")
+                        description: Text("先运行一次预检，或者去受管的运行环境目录里看看模型在不在。")
                     )
                     .frame(
                         maxWidth: .infinity,
@@ -360,25 +383,25 @@ public struct ModelManagementView: View {
         }
     }
 
-    /// Figma `listFoot`：当前档位的制品总数、待校验数量，以及它对分人能力的影响。
+    /// Figma `listFoot`：当前档位的模型文件总数、待校验数量，以及它对「谁在说话」的影响。
     private var artifactFootnote: String {
         let artifacts = visibleArtifacts
-        guard !artifacts.isEmpty else { return "当前档位没有已登记的制品。" }
+        guard !artifacts.isEmpty else { return "这一档还没有登记模型文件。" }
         let pending = artifacts.filter { !isVerified(status(for: $0)) }.count
         let base = pending == 0
-            ? "\(artifacts.count) 个制品 · 全部已校验"
-            : "\(artifacts.count) 个制品 · \(pending) 个待校验"
+            ? "\(artifacts.count) 个模型文件 · 全部已校验"
+            : "\(artifacts.count) 个模型文件 · \(pending) 个待校验"
         let diarizationNote = missingDiarizationKeys.isEmpty
             ? ""
-            : "，分人能力在补齐前不可用"
+            : "，谁在说话在补齐前用不了"
         return base + diarizationNote + "。"
     }
 
     private var diarizationSection: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
-                title: "分人资产",
-                detail: "当前档位需要的独立 FluidAudio CoreML 资产；对应 aligner 已列在模型制品中。"
+                title: "谁在说话要用的模型",
+                detail: "这一档要标出每句话是谁说的，还得再下载几个小模型；它们也列在下面的模型文件里。"
             )
             VStack(spacing: 0) {
                 ForEach(independentDiarizationKeys, id: \.self) { key in
@@ -396,7 +419,7 @@ public struct ModelManagementView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
                 title: "已检测但未纳入当前目录",
-                detail: "这些本机制品仍存在，但当前锁定 catalog 未登记；不会被受管档位选择或运行时映射。"
+                detail: "这些模型文件还在本机，但没有登记在当前这一档里；选档和运行都不会用到它们。"
             )
             VStack(spacing: 0) {
                 ForEach(unmanagedArtifactStatuses, id: \.key) { status in
@@ -437,7 +460,7 @@ public struct ModelManagementView: View {
                 }
                 .speechRailButton(.secondary)
                 .disabled(!canApplyProfile)
-                .accessibilityHint("将所选档位写入服务配置并重启相关 worker")
+                .accessibilityHint("把所选档位写进服务配置，并重启相关的后台组件")
 
                 Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
@@ -457,7 +480,7 @@ public struct ModelManagementView: View {
                     .lineLimit(2)
                     .truncationMode(.tail)
             } else if !visibleArtifacts.isEmpty && !profileArtifactsVerified {
-                Text("应用档位前，请先完成当前档位制品的下载与校验。")
+                Text("换到这一档之前，先把这一档需要的模型下载并校验完。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.attention)
                     .lineLimit(2)
@@ -567,7 +590,7 @@ public struct ModelManagementView: View {
             } else {
                 SectionHeading(
                     title: "模型运行信息",
-                    detail: "选择制品查看锁定来源、revision 和本机校验结果。"
+                    detail: "选中一个模型文件，看它的来源、锁定版本和本机校验结果。"
                 )
                 LabeledContent("目标档位", value: profileTitle(for: selectedProfile))
                 LabeledContent(
@@ -712,8 +735,8 @@ public struct ModelManagementView: View {
             return ModelReadinessPresentation(
                 systemImage: "shippingbox",
                 tone: .attention,
-                title: "目标档位没有可用制品",
-                detail: "请检查受管 runtime 的模型目录，或打开诊断查看原因。"
+                title: "这一档还没有可用的模型文件",
+                detail: "去受管运行时目录看一眼，或者打开「诊断」看原因。"
             )
         }
         if let operation = activeModelOperation,
@@ -731,7 +754,7 @@ public struct ModelManagementView: View {
         }
         guard profileArtifactsVerified else {
             let detail = missingDiarizationKeys.isEmpty
-                ? "当前档位制品尚未全部通过文件与 SHA-256 校验。"
+                ? "这一档的模型文件还没全部校验通过。"
                 : "还需要校验：\(missingDiarizationKeys.map(assetTitle(for:)).joined(separator: "、"))。"
             return ModelReadinessPresentation(
                 systemImage: "arrow.down.circle",
@@ -747,24 +770,24 @@ public struct ModelManagementView: View {
             return ModelReadinessPresentation(
                 systemImage: "checkmark.seal.fill",
                 tone: .healthy,
-                title: "制品已验证，当前服务正在使用此档位",
-                detail: "配置档位与运行档位一致；worker 是否常驻由运行态生命周期决定。"
+                title: "模型文件已验证，服务正在用这一档",
+                detail: "配置与运行是同一档；模型按需加载，空闲后自动释放内存。"
             )
         }
         if currentServiceProfile == selectedProfile {
             return ModelReadinessPresentation(
                 systemImage: "checkmark.circle",
                 tone: .healthy,
-                title: "制品已验证，运行时正在使用此档位",
-                detail: "配置档位尚未完整读取，应用状态仍以新的 profile/health 回读为准。"
+                title: "模型文件已验证，服务正在用这一档",
+                detail: "还没读到完整的配置档位；以重新读取的服务状态为准。"
             )
         }
         let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
         return ModelReadinessPresentation(
             systemImage: "checkmark.circle",
             tone: .attention,
-            title: "制品已验证，可应用此档位",
-            detail: "当前服务为 \(current)；点击“应用此档位”后才会切换服务配置。"
+            title: "模型文件已验证，可以换到这一档",
+            detail: "服务现在跑的是 \(current)；按下「应用此档位」才会换。"
         )
     }
 
@@ -773,7 +796,7 @@ public struct ModelManagementView: View {
     }
 
     private func assetTitle(for key: String) -> String {
-        key == "diarization-coreml" ? "FluidAudio CoreML 分人资产" : key
+        key == "diarization-coreml" ? "谁在说话用的小模型" : key
     }
 
     private func summary(for profile: SpeechRailProfile) -> ProfileSummary? {
@@ -842,7 +865,7 @@ public struct ModelManagementView: View {
         }
         guard isVerified(artifactStatus) else {
             return ModelArtifactUsagePresentation(
-                text: "配置引用 · 制品未验证",
+                text: "配置里引用了它 · 还没校验",
                 tone: .attention
             )
         }
@@ -872,12 +895,12 @@ public struct ModelManagementView: View {
             let ready = health.diarization?.ready ?? health.diarizationReady
             guard let ready else {
                 return ModelArtifactUsagePresentation(
-                    text: "当前分人链路 · 状态未读取",
+                    text: "当前谁在说话 · 状态未读取",
                     tone: .neutral
                 )
             }
             return ModelArtifactUsagePresentation(
-                text: ready ? "当前分人链路 · 已就绪" : "当前分人链路 · 未就绪",
+                text: ready ? "当前谁在说话 · 已就绪" : "当前谁在说话 · 未就绪",
                 tone: ready ? .healthy : .critical
             )
         }
@@ -905,35 +928,35 @@ public struct ModelManagementView: View {
         }
 
         guard let lifecycle = health.ttsLifecycle else {
-            return ModelArtifactUsagePresentation(
-                text: "\(label) · 已验证；独立常驻状态未公开",
-                tone: .neutral
-            )
-        }
+                return ModelArtifactUsagePresentation(
+                text: "\(label) · 已验证；是否留在内存里没有读到",
+                    tone: .neutral
+                )
+            }
 
-        let hasWarmStateSignal = lifecycle.warmCapability != nil
-            || lifecycle.warmCapabilities != nil
-        guard hasWarmStateSignal else {
-            return ModelArtifactUsagePresentation(
-                text: "\(label) · 已验证；独立常驻状态未公开",
-                tone: .neutral
-            )
-        }
+            let hasWarmStateSignal = lifecycle.warmCapability != nil
+                || lifecycle.warmCapabilities != nil
+            guard hasWarmStateSignal else {
+                return ModelArtifactUsagePresentation(
+                text: "\(label) · 已验证；是否留在内存里没有读到",
+                    tone: .neutral
+                )
+            }
 
         let warmCapabilities = lifecycle.warmCapabilities ?? []
         let isWarm = warmCapabilities.contains("voice_clone")
             || lifecycle.warmCapability == "voice_clone"
             || lifecycle.warmCapability == "both"
-        if isWarm {
+            if isWarm {
+                return ModelArtifactUsagePresentation(
+                text: "\(label) · 现在就在内存里",
+                    tone: .healthy
+                )
+            }
             return ModelArtifactUsagePresentation(
-                text: "\(label) · 当前常驻",
-                tone: .healthy
+            text: "\(label) · 已验证，用到时才加载",
+                tone: .attention
             )
-        }
-        return ModelArtifactUsagePresentation(
-            text: "\(label) · 已验证，按请求加载",
-            tone: .attention
-        )
     }
 
     private func runtimeUsage(
@@ -1042,7 +1065,9 @@ public struct ModelManagementView: View {
 
     private var applyConfirmationTitle: String {
         let current = currentServiceProfile.map { profileTitle(for: $0) } ?? "运行态未读取"
-        return "确认应用 \(profileTitle(for: selectedProfile))？当前服务为 \(current)。这会更新服务配置、重新启动相关 worker，并回读健康状态；不会重新下载已验证制品。"
+        return "确认应用 \(profileTitle(for: selectedProfile))？当前服务为 \(current)。"
+            + "这会更新服务配置、重新加载语音模型，再重新读一次状态；"
+            + "已经下载并校验过的模型文件不会重下。"
     }
 
     private var downloadConfirmationTitle: String {
@@ -1074,14 +1099,7 @@ public struct ModelManagementView: View {
     }
 
     private func profilePurpose(for profile: SpeechRailProfile) -> String {
-        return switch profile {
-        case .quality:
-            "VoiceDesign 与高质量对齐，适合音色创作"
-        case .balanced:
-            "8-bit 运行与分人能力的平衡选择"
-        case .light:
-            "更小的 ASR 组合，适合快速启动"
-        }
+        SpeechRailProfilePresentation.purpose(profile)
     }
 
     private func quantizationText(for artifact: ModelArtifactSnapshot) -> String {
@@ -1231,14 +1249,8 @@ private struct ProfileChoiceCard: View {
     }
 
     private var profilePurpose: String {
-        return switch profile {
-        case .quality:
-            "aligner-bf16，可分人；VoiceDesign 与 Base 双常驻，可跨 lane 并发 —— 适合音色创作"
-        case .balanced:
-            "aligner-q8，可分人；单个 TTS worker —— 日常配音的平衡选择"
-        case .light:
-            "无 aligner、无分人；单个 TTS worker —— 更小的 ASR 组合，启动最快"
-        }
+        // 一份文案只写在一处：档位名、短名与这句话都在 `SpeechRailProfilePresentation`。
+        SpeechRailProfilePresentation.purpose(profile)
     }
 
 }
@@ -1443,7 +1455,9 @@ private struct DiarizationStatusRow: View {
                 .foregroundStyle(statusPresentation.color)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                Text(key == "diarization-coreml" ? "FluidAudio CoreML" : "Aligner · \(key)")
+                // 行的名字说**这一份文件是干什么的**；`aligner-bf16` 这类机器名留在后面，
+                // 它对不上名字时还能拿去比对诊断输出（用户 2026-09-19：去掉行话）。
+                Text(key == "diarization-coreml" ? "谁在说话用的模型" : "配套模型 · \(key)")
                     .font(SpeechRailDesignTokens.Typography.body)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                     .lineLimit(1)

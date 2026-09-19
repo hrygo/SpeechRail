@@ -23,5 +23,5 @@ fs.mkdirSync(STAGE_DIR, { recursive: true });
 fs.writeFileSync(path.join(STAGE_DIR, "code.js"), code);
 fs.copyFileSync(path.join(SRC_DIR, "manifest.json"), path.join(STAGE_DIR, "manifest.json"));
 
-console.log("code.js " + code.length + " bytes");
+console.log("code.js " + code.length + " chars / " + Buffer.byteLength(code) + " bytes");
 console.log("staged  " + STAGE_DIR);

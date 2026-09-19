@@ -476,7 +476,7 @@ public struct RuntimeMonitoringView: View {
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 Divider()
                 MonitoringCapabilityRow(
-                    title: "分人识别",
+                    title: "谁在说话",
                     detail: displayedHealth?.diarization.map(SpeechRailDiarizationPresentation.text)
                         ?? "按当前档位启用",
                     ready: displayedHealth?.diarizationReady
@@ -1930,7 +1930,7 @@ public struct RuntimeMonitoringView: View {
         case "streaming", "realtime":
             "实时语音"
         case "diarization":
-            "分人识别"
+            "谁在说话"
         case "realtime_vad":
             "实时语音检测"
         default:
