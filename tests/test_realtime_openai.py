@@ -403,7 +403,11 @@ def test_backend_busy_error_keeps_compat_code_and_namespaced_reason() -> None:
     )
 
     assert event["error"]["code"] == "backend_busy"
-    assert event["speechrail"] == {"busy_reason": "realtime_session_limit"}
+    assert event["speechrail"] == {
+        "busy_reason": "realtime_session_limit",
+        "retryable": True,
+        "retry_hint": "wait_for_realtime_session_slot",
+    }
 
 
 def test_openai_session_created_and_updated() -> None:
@@ -2103,7 +2107,11 @@ def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "backend_busy"
-        assert error["speechrail"] == {"busy_reason": "backend_unavailable"}
+        assert error["speechrail"] == {
+            "busy_reason": "backend_unavailable",
+            "retryable": True,
+            "retry_hint": "retry_after_worker_recovery",
+        }
         assert factory.released == [factory.sessions[0]]
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}

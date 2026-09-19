@@ -444,7 +444,8 @@ as implementation changes.
   `SPEECHRAIL_REALTIME_MAX_SESSIONS=3` with the `Settings` default. E1/E3 and
   real scheduling, memory and thermal measurements remain pending. Realtime keeps
   the public `backend_busy` code while exposing worker lifecycle failures as the
-  distinct low-cardinality `speechrail.busy_reason=backend_unavailable`.
+  distinct low-cardinality `speechrail.busy_reason=backend_unavailable`, with
+  namespaced `retryable` and `retry_hint` guidance for each busy cause.
 - **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
   handling, protected URL/email/code spans, raw→normalized→spoken hashes and
   bounded raw-span projections. The optional v1 header applies a pinned set while

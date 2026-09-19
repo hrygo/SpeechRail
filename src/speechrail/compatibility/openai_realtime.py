@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, resolve_voice
+from speechrail.runtime.busy import busy_retry_policy
 
 _PROTOCOL_VERSION = "realtime=v1"
 _DIARIZATION_EVENT_VERSION = 1
@@ -584,7 +585,12 @@ def error_event(
         error["event_id"] = client_event_id
     event: dict[str, object] = {"type": "error", "error": error}
     if busy_reason is not None:
-        event["speechrail"] = {"busy_reason": busy_reason}
+        policy = busy_retry_policy(busy_reason)
+        event["speechrail"] = {
+            "busy_reason": busy_reason,
+            "retryable": policy.retryable,
+            "retry_hint": policy.hint,
+        }
     return event
 
 

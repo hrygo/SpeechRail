@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
+from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend_busy_reason
 
 
 def test_worker_failures_have_a_distinct_busy_reason() -> None:
@@ -33,3 +33,14 @@ def test_explicit_busy_reason_wins_over_message_classification() -> None:
     assert infer_backend_busy_reason(ExplicitBusyError("worker_unavailable")) == (
         BusyReason.ASR_MODE_CONFLICT
     )
+
+
+def test_busy_retry_policy_is_stable_and_low_cardinality() -> None:
+    assert busy_retry_policy(BusyReason.REALTIME_SESSION_LIMIT).retryable is True
+    assert busy_retry_policy(BusyReason.REALTIME_SESSION_LIMIT).hint == (
+        "wait_for_realtime_session_slot"
+    )
+    assert busy_retry_policy(BusyReason.BACKEND_UNAVAILABLE).hint == (
+        "retry_after_worker_recovery"
+    )
+    assert busy_retry_policy("future_reason").hint == "backoff_and_retry"
