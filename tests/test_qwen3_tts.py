@@ -262,6 +262,8 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
                 "dtype": "float16",
                 "sample_rate": 24_000,
                 "model_variant": "voice_design",
+                "family": "qwen3_tts",
+                "weight_fingerprint": "shape:" + ("a" * 64),
                 "profile_snapshot_version": 1,
             }
         ]
@@ -271,12 +273,15 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
     async def start_and_close() -> None:
         await worker.start()
         assert worker.ready is True
+        assert worker.runtime_revision is not None
+        assert worker.runtime_revision.startswith("rt_")
         assert fake.sends[0]["type"] == "start"
         assert fake.sends[0]["model_dir"].endswith("external-qwen3-tts-start")
         assert fake.sends[0]["device"] == "mps"
         assert fake.sends[0]["sample_rate"] == 24_000
         await worker.close()
         assert worker.ready is False
+        assert worker.runtime_revision is None
 
     asyncio.run(start_and_close())
 

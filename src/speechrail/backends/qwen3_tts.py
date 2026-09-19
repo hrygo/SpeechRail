@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Literal
 from uuid import uuid4
 
+from speechrail.backends.model_identity import observed_runtime_revision
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceStoreUnavailableError
@@ -153,6 +154,7 @@ class Qwen3TtsWorker:
         self._timing_sidecars: dict[str, TtsTimingSidecar] = {}
         self.last_active: float = time.monotonic()
         self.model_variant: str = config.model_variant
+        self._runtime_revision: str | None = None
 
     @property
     def alive(self) -> bool:
@@ -162,6 +164,11 @@ class Qwen3TtsWorker:
     def ready(self) -> bool:
         """Return whether the supervised worker can accept another request."""
         return self._started and self._transport.alive
+
+    @property
+    def runtime_revision(self) -> str | None:
+        """Return the observed identity of the currently ready worker, if known."""
+        return self._runtime_revision if self.ready else None
 
     @property
     def lifecycle_stats(self) -> dict[str, int | bool]:
@@ -189,6 +196,7 @@ class Qwen3TtsWorker:
             return
         is_reload = self._epoch > 0
         self._supports_profile_snapshot = False
+        self._runtime_revision = None
         try:
             await self._transport.start()
             await self._transport.send(
@@ -215,6 +223,7 @@ class Qwen3TtsWorker:
             self._supports_profile_snapshot = (
                 type(snapshot_version) is int and snapshot_version == 1
             )
+            self._runtime_revision = observed_runtime_revision(ready)
             self._started = True
             self._epoch += 1
             if is_reload:
@@ -222,6 +231,7 @@ class Qwen3TtsWorker:
                 self._record_delivery_event("reload")
             self.last_active = time.monotonic()
         except BaseException:
+            self._runtime_revision = None
             await self._transport.abort()
             raise
 
@@ -336,6 +346,7 @@ class Qwen3TtsWorker:
                         self.last_active = time.monotonic()
                         if not completed and self._epoch == epoch:
                             self._started = False
+                            self._runtime_revision = None
                             self._fallback_abort_count += 1
                             self._record_delivery_event("abort_fallback")
                             await self._transport.abort()
@@ -402,6 +413,7 @@ class Qwen3TtsWorker:
         """Terminate the worker, waiting for any active stream to finish first."""
         async with self._lock:
             self._started = False
+            self._runtime_revision = None
             self._epoch += 1
             await self._transport.abort()
 
@@ -513,6 +525,15 @@ class Qwen3TtsCapabilityRouter:
         if profile.mode == "clone":
             return "voice_clone" if self.clone is not None else "tts"
         return "voice_design" if self.clone is not None else "tts"
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        """Return the ready worker identity for the voice's selected lane."""
+        from speechrail.domain.tts import get_voice_registry
+
+        profile = get_voice_registry().get_profile(voice)
+        if profile.mode == "clone":
+            return self.clone.runtime_revision if self.clone is not None else None
+        return self.primary.runtime_revision
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         from speechrail.domain.tts import get_voice_registry

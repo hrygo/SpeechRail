@@ -435,7 +435,11 @@ as implementation changes.
 - **#64**: HTTP and negotiated Realtime receipts record the resolved voice/catalog
   identity, pre-transport PCM sample count and SHA-256, and explicit completed,
   cancelled or error terminals. Empty audio can no longer become `completed`.
-  Runtime model identity remains `null` until a worker can substantiate it.
+  Read-only discovery and fake/unknown executions keep `runtime_revision=null`; a
+  real TTS worker receipt may now bind a low-disclosure `rt_...` revision only
+  after its ready handshake is validated and the first PCM is produced. The
+  structural `shape:` metadata remains explicitly distinct from weight-content
+  identity.
 - **#65**: purpose and bounded latency-budget headers use the existing governor;
   quality/voice maintenance now acquires a wildcard TTS reservation, which waits
   for all keyed capability lanes before eviction. Same-lane serialization,
@@ -553,6 +557,18 @@ the response with `response.done(status=failed)`, and records `backend_busy` in 
 enabled render receipt. The regression also verifies that worker stderr details do
 not cross the WebSocket boundary. This is a deterministic handler test, not proof
 of managed worker recovery or realtime quality.
+
+### 2026-09-20 observed TTS runtime identity
+
+The TTS worker parent now retains a revision derived only from the validated
+ready handshake (`backend`, device/dtype/sample rate, family/variant,
+quantization and the existing structural fingerprint). HTTP and negotiated
+Realtime receipts bind it after the first validated PCM chunk; injected
+synthesizers without this optional resolver and workers with incomplete
+identity remain `null`. The revision contains no model path or audio content,
+and is not an immutable weight-content hash. Focused receipt, worker, route and
+Realtime tests passed; a managed runtime receipt and cross-restart identity
+check remain external acceptance evidence.
 
 ### Remaining acceptance gates
 

@@ -33,6 +33,7 @@ from speechrail.application.diarization import (
     SessionDone,
     StatusChanged,
 )
+from speechrail.application.render_receipts import bind_observed_runtime_revision
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import TTSDeliveryError, iter_validated_audio
@@ -1613,6 +1614,7 @@ class OpenAIRealtimeSession:
                 _ttfa_recorded = False
                 _admission_started = time.monotonic()
                 emitted_samples = 0
+                runtime_revision_checked = False
                 request = SpeechRequest(
                     text=text,
                     voice=voice,
@@ -1647,6 +1649,14 @@ class OpenAIRealtimeSession:
                             )
                             emitted_samples += len(chunk.audio) // 2
                             if receipt_id is not None:
+                                if not runtime_revision_checked:
+                                    runtime_revision_checked = True
+                                    bind_observed_runtime_revision(
+                                        self._services.render_receipts,
+                                        receipt_id,
+                                        synthesizer=self._tts,
+                                        voice=request.voice,
+                                    )
                                 self._services.render_receipts.accept_pcm(
                                     receipt_id,
                                     chunk.audio,

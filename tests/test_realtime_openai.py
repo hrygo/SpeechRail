@@ -1897,8 +1897,13 @@ def test_openai_rejects_oversized_transcription_prompt() -> None:
 
 
 class RecordingSpeechSynthesizer:
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_revision: str | None = None) -> None:
         self.requests: list[SpeechRequest] = []
+        self.runtime_revision = runtime_revision
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        del voice
+        return self.runtime_revision
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
@@ -3124,6 +3129,27 @@ def test_realtime_render_receipts_are_opt_in_and_completed() -> None:
     assert receipt["audio"]["sample_count"] == 1
     assert receipt["audio"]["pcm_sha256"] == hashlib.sha256(b"\x00\x00").hexdigest()
     assert receipt["audio"]["integrity_boundary"] == "pcm16_after_websocket_send"
+
+
+def test_realtime_render_receipt_binds_observed_runtime_revision() -> None:
+    runtime_revision = "rt_" + ("e" * 64)
+    client, _ = _client(
+        tts_synthesizer=RecordingSpeechSynthesizer(runtime_revision=runtime_revision)
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"speechrail": {"render_receipts": {"enabled": True}}},
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        events = _drive_tts(socket)
+
+    receipt = events[-1]["speechrail"]["render_receipt"]
+    assert receipt["model"]["runtime_revision"] == runtime_revision
 
 
 def test_realtime_render_receipt_cancelled_terminal() -> None:

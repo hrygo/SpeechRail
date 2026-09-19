@@ -45,6 +45,15 @@ def test_completed_receipt_hashes_exact_pcm_boundary() -> None:
     assert receipt["model"]["runtime_revision"] is None
 
 
+def test_pending_receipt_can_bind_observed_runtime_revision() -> None:
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin(registry)
+
+    registry.bind_model_runtime_revision(receipt_id, "rt_" + ("b" * 64))
+
+    assert registry.get(receipt_id)["model"]["runtime_revision"] == "rt_" + ("b" * 64)
+
+
 @pytest.mark.parametrize(
     ("finish", "status", "error_code"),
     [

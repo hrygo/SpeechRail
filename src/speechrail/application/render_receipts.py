@@ -117,6 +117,21 @@ class RenderReceiptRegistry:
             self._order.append(receipt_id)
         return receipt_id
 
+    def bind_model_runtime_revision(self, receipt_id: str, revision: str) -> bool:
+        """Bind one observed worker revision while the receipt is still pending."""
+        if not isinstance(revision, str) or not revision:
+            raise ValueError("runtime revision must be a non-empty string")
+        with self._lock:
+            state = self._entries[receipt_id]
+            if state.status != "pending":
+                return False
+            if state.model_runtime_revision is not None:
+                if state.model_runtime_revision != revision:
+                    raise RuntimeError("render receipt runtime revision mismatch")
+                return True
+            state.model_runtime_revision = revision
+            return True
+
     def accept_pcm(self, receipt_id: str, pcm16: bytes) -> None:
         if len(pcm16) % 2:
             raise ValueError("PCM16 receipt input must contain whole samples")
@@ -219,3 +234,28 @@ class RenderReceiptRegistry:
                 "created_at": state.created_at,
                 "completed_at": state.completed_at,
             }
+
+
+def bind_observed_runtime_revision(
+    registry: RenderReceiptRegistry,
+    receipt_id: str,
+    *,
+    synthesizer: object,
+    voice: str,
+) -> bool:
+    """Bind an optional worker identity without changing the synthesis port."""
+    resolver = getattr(synthesizer, "runtime_revision_for_voice", None)
+    if not callable(resolver):
+        return False
+    try:
+        revision = resolver(voice)
+    except Exception:
+        # Receipt metadata is best-effort and must not turn a valid audio chunk
+        # into a failed synthesis if a mutable voice registry changes mid-stream.
+        return False
+    if not isinstance(revision, str) or not revision:
+        return False
+    try:
+        return registry.bind_model_runtime_revision(receipt_id, revision)
+    except Exception:
+        return False
