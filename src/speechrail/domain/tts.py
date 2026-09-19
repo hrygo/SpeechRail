@@ -54,6 +54,7 @@ class VoiceProfile:
     quality: dict[str, Any] | None = None
     creation: VoiceCreation | None = None
     revision: str | None = None
+    revoked: bool = False
 
     @property
     def description(self) -> str:
@@ -84,6 +85,8 @@ class VoiceProfile:
             data["creation"] = self.creation.model_dump(mode="json")
         if self.revision is not None:
             data["revision"] = self.revision
+        if self.revoked:
+            data["revoked"] = True
         return data
 
 
@@ -582,6 +585,12 @@ class VoiceRevisionConflictError(RuntimeError):
     code = "voice_revision_conflict"
 
 
+class VoiceRevokedError(RuntimeError):
+    """A voice revision was explicitly revoked for future synthesis."""
+
+    code = "voice_revoked"
+
+
 def _voice_revision(
     *,
     mode: str,
@@ -806,9 +815,15 @@ class VoiceRegistry:
         revision_raw = item.get("revision")
         revision: str | None = None
         if revision_raw is not None:
-            if not isinstance(revision_raw, str) or not VOICE_REVISION_RE.fullmatch(revision_raw):
+            if (
+                not isinstance(revision_raw, str)
+                or not VOICE_REVISION_RE.fullmatch(revision_raw)
+            ):
                 raise ValueError("custom voice revision is invalid")
             revision = revision_raw
+        revoked = item.get("revoked", False)
+        if not isinstance(revoked, bool):
+            raise ValueError("custom voice revoked flag is invalid")
         return VoiceProfile(
             id=vid,
             name=name,
@@ -825,6 +840,7 @@ class VoiceRegistry:
             quality=quality,
             creation=creation,
             revision=revision,
+            revoked=revoked,
         )
 
     def _controlled_audio_path(
@@ -1052,6 +1068,10 @@ class VoiceRegistry:
                 if custom_profile is None:
                     raise ValueError(f"unknown preset voice: {voice}")
                 profile = custom_profile
+                if profile.revoked:
+                    raise VoiceRevokedError(
+                        f"voice revision is revoked: {profile.id}"
+                    )
                 if expected_revision is not None and profile.revision != expected_revision:
                     raise VoiceRevisionConflictError(
                         f"voice revision changed for {profile.id}"
@@ -1304,6 +1324,7 @@ class VoiceRegistry:
                 instruction=next_instruction,
                 seed=next_seed,
                 revision=next_revision,
+                revoked=False if acoustic_changed else profile.revoked,
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = updated
@@ -1359,6 +1380,10 @@ class VoiceRegistry:
             target = self._revision_history.get(vid, {}).get(target_revision)
             if target is None:
                 raise KeyError(f"voice revision not found: {target_revision}")
+            if target.revoked:
+                raise VoiceRevokedError(
+                    f"voice revision is revoked: {target_revision}"
+                )
             if target.audio_path is not None:
                 try:
                     self._controlled_audio_path(
@@ -1380,6 +1405,45 @@ class VoiceRegistry:
             history = self._history_candidate_locked(vid, current, restored)
             self._commit_candidate(candidate, history_candidate=history)
             return restored
+
+    def revoke_revision(
+        self,
+        voice_id: str,
+        *,
+        revision: str,
+    ) -> VoiceProfile:
+        """Revoke one persisted revision; active leases remain valid until release."""
+
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        if not VOICE_REVISION_RE.fullmatch(revision):
+            raise ValueError("invalid voice revision")
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            current = self._custom_voices.get(vid)
+            if current is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            history = self._revision_history.get(vid, {})
+            target = history.get(revision)
+            if target is None:
+                raise KeyError(f"voice revision not found: {revision}")
+            revoked_target = replace(target, revoked=True)
+            history_candidate = {
+                key: dict(value)
+                for key, value in self._revision_history.items()
+            }
+            revisions = dict(history_candidate.get(vid, {}))
+            revisions[revision] = revoked_target
+            history_candidate[vid] = revisions
+            candidate = dict(self._custom_voices)
+            if current.revision == revision:
+                candidate[vid] = replace(current, revoked=True)
+            self._commit_candidate(
+                candidate,
+                history_candidate=history_candidate,
+            )
+            return revoked_target
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()
@@ -1739,6 +1803,7 @@ __all__ = [
     "VoiceProfile",
     "VoiceRegistry",
     "VoiceRevisionConflictError",
+    "VoiceRevokedError",
     "apply_crossfade",
     "bounded_sentences",
     "canonicalize_clone_reference_audio",
