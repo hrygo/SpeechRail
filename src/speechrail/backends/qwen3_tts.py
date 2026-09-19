@@ -233,7 +233,9 @@ class Qwen3TtsWorker:
             # Keep the immutable clone reference alive until the worker has
             # completed (or the abort/reap path has finished).  The registry
             # lock itself is held only for the short snapshot/refcount steps.
-            with get_voice_registry().lease_profile(request.voice) as profile:
+            with get_voice_registry().lease_profile(
+                request.voice, expected_revision=request.expected_voice_revision
+            ) as profile:
                 async with self._lock:
                     if not self._started:
                         await self._start_locked()
