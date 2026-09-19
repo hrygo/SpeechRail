@@ -122,6 +122,14 @@ def _worker_unavailable_response(
     return response
 
 
+def _tts_backend_failure_code(exc: BaseException) -> str:
+    """Keep receipt/timing failure codes aligned with the public TTS response."""
+
+    if infer_backend_busy_reason(exc) == BusyReason.BACKEND_UNAVAILABLE:
+        return "backend_busy"
+    return "backend_error"
+
+
 class _SpeechVoiceID(BaseModel):
     """OpenAI custom voice reference accepted by /v1/audio/speech."""
 
@@ -1863,11 +1871,12 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 if timing_id is not None:
                     services.tts_timings.fail(timing_id, "audio_encode_failed")
                 raise
-            except RuntimeError:
+            except RuntimeError as exc:
+                failure_code = _tts_backend_failure_code(exc)
                 if receipt_id is not None:
-                    services.render_receipts.fail(receipt_id, "backend_error")
+                    services.render_receipts.fail(receipt_id, failure_code)
                 if timing_id is not None:
-                    services.tts_timings.fail(timing_id, "backend_error")
+                    services.tts_timings.fail(timing_id, failure_code)
                 raise
 
         if body.response_format == "pcm":
@@ -1928,8 +1937,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "voice_revoked",
                     "Requested voice revision has been revoked",
                 )
-            except RuntimeError:
+            except RuntimeError as exc:
                 await _close_audio_stream(pcm_stream)
+                if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
+                    return worker_response
                 return error_response(
                     502,
                     request_id,
@@ -2067,8 +2078,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "voice_revoked",
                     "Requested voice revision has been revoked",
                 )
-            except RuntimeError:
+            except RuntimeError as exc:
                 await _close_audio_stream(encoded_stream)
+                if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
+                    return worker_response
                 return error_response(
                     502,
                     request_id,
@@ -2192,7 +2205,9 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "voice_revoked",
                 "Requested voice revision has been revoked",
             )
-        except RuntimeError:
+        except RuntimeError as exc:
+            if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
+                return worker_response
             return error_response(
                 502,
                 request_id,

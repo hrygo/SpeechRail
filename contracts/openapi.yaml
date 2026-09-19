@@ -652,7 +652,10 @@ paths:
         voice unsupported by the active TTS weights returns
         `400 voice_not_available` before inference starts. A corrupt or
         unreadable custom voice registry returns `503 voice_store_unavailable`;
-        system voices remain available.
+        system voices remain available. A known worker lifecycle failure after
+        admission returns `503 backend_busy` with bounded
+        `SpeechRail-Busy-Reason` / `SpeechRail-Retry-Hint` headers; private
+        worker stderr is never returned.
       security:
         - BearerAuth: []
         - {}
@@ -772,6 +775,22 @@ paths:
           $ref: '#/components/responses/BackendDeliveryInvalid'
         '503':
           description: Model runtime or custom voice storage is unavailable
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 1
+              description: Present for retryable worker lifecycle failures.
+            SpeechRail-Busy-Reason:
+              schema:
+                type: string
+                enum: [backend_unavailable]
+              description: Present when the inference worker is unavailable.
+            SpeechRail-Retry-Hint:
+              schema:
+                type: string
+                enum: [retry_after_worker_recovery]
+              description: Present when the inference worker is unavailable.
           content:
             application/json:
               schema:
