@@ -188,6 +188,8 @@ base remains `28755de8cc51046f25ce75c7869fe1bacd34752d`. Published increments:
 | 2 | `16fdfc4ee814f8273f4fe46f4ab9221b5e63375a` | `d340650b55e28fdf0ba6a31ece4ff1d479de78c7` |
 | 3 | `1d4fade67ede7d22bc3c0c1daac0d916c0a14513` | `80b6b5b719fda213abeee5d196d2c7aa1d746bc1` |
 | 4 | `34b2d8b678246db7ea419137d4258270bad343c0` | `bc694c257aa4fd7cb93da10c02d6d4934979ca33` |
+| 5 | `983de74e91f068f3ad3dd4b365386a5549d5d903` | `db5680fdabecaea6ca4515238557e38704f4465c` |
+| 6 | `ca5b98b3041e4682a56491b406e282ad9732481d` | `2daf6c1c78f722563b7b71598b1a77dcfb6f8c98` |
 
 Each tree was matched to the locally tested source before the feature ref moved.
 The isolated bridge used standard Actions authorization and a disposable branch;
@@ -235,3 +237,60 @@ Increment 5 was published as `983de74e91f068f3ad3dd4b365386a5549d5d903`, tree
 At the last CI observation for that head, Quality Gates and Ubuntu tests/coverage
 passed; macOS tests/App were still running. Those results are not evidence for
 this subsequent increment until its own published head is checked.
+
+
+### Increment 7 — close the ASR failure-barrier regression matrix
+
+Adds actual-handler tests for both commit exceptions and hung-terminal deadlines,
+followed by FIFO clear. Both return `backend_timeout`, release the factory slot,
+and leave the reference collector failed with no final transcript. Adds explicit
+bounded event/item/text exhaustion and late terminal/clear after failure, cancel
+or disconnect. These complement rollover, empty turn, duplicate, epoch, sequence,
+append-during-close, and existing inbound queue-overflow regressions.
+
+Manual collector + actual Realtime handler suite: **114 passed, Python 3.12.14**.
+One combined, deduplicated run covering profile snapshots, Qwen adapters/worker,
+clone leases, worker lifecycle, manual ASR, effective capabilities, all MCP tests,
+planner, frozen/dynamic loudness and diarization compatibility: **424 passed**.
+This is a targeted regression milestone, not the entire repository coverage gate.
+
+## Acceptance status at the seven-increment checkpoint
+
+**The requested all-issue acceptance is NOT complete.** Missing implementation and
+missing external evidence are distinct. No issue has been automatically closed,
+no merge/deployment was performed, and the PR remains Draft. A green CI run alone
+will not close the real-model or human-evaluation gates.
+
+| Issue | Delivered in this PR | Still required before full acceptance |
+|---|---|---|
+| #34 | Existing frozen-gain regression rerun; no redundant algorithm rewrite | Current multi-clone/model PCM, distortion, latency and human listening evidence |
+| #44 | Baseline audit and corrected planner/lane documentation | E1/E2/E3 measurements and remaining scheduling/memory work; conditional items only after their measurement gates |
+| #53 | Isolated temporary UI stores; populated fixture retained; explicit empty-state/navigation test | Confirm current-head macOS execution and distinguish any skipped assertions |
+| #62 | Atomic safe read-only discovery, nine-case profile/mode matrix, parameter domains, cache/epoch semantics | Actual execution revision identity and atomic conditional synthesis integration with #63; vendor-dependent domains remain unknown |
+| #63 | Reproduced and fixed leased recipe loss between parent/child and acoustic chunks | Durable history, alias CAS, durable creation idempotency, revision/model pin, restart/crash/revoke races; these are unimplemented, not hardware-only blockers |
+| #64 | Existing delivery/terminal boundary audit only | Negotiated HTTP/Realtime integrity receipts, actual resolved identity and count/hash lifecycle; unimplemented |
+| #65 | Existing governor/lane baseline audit only | Negotiated purpose/budget, maintenance handoff and mixed-workload/cancellation acceptance; unimplemented |
+| #66 | Honest unsupported prepared-condition cache in discovery | Pinned vendor public-port audit, cache/invalidation/single-flight implementation where supported and controlled measurements |
+| #67 | Safe projection of existing quality states | Versioned multi-dimensional evidence bound to actual revisions; identity vs repeatability and human/ASR missing-evidence cases; unimplemented |
+| #68 | Native clone expression remains explicitly unsupported; no silent parameter acceptance | Explicit fixed-identity fallback contract and matched-identity listening/latency experiments; not an implemented native expression feature |
+| #69 | Reference consumer, contract documentation and deterministic actual-handler acceptance matrix implemented | Current-head repository gates; no claim of acoustic transcription accuracy is required or made |
+| #70 | Dependencies and boundaries documented | Versioned pronunciation lexicon, conflicts/revocation, raw-to-spoken span mapping and semantic-preservation corpus; unimplemented |
+| #71 | Safe v2 voice catalogue and MCP allowlisted projection | Legacy v1 source-detail migration/owner-access policy; v1 still has private source fields for compatibility |
+| #72 | Immutable versioned common planner, normalized-text spans, stable acoustic input | Raw-text mapping, context/pause policy, receipt/metrics integration and actual naturalness/TTFA/RTF evidence |
+| #73 | Discovery correctly reports unsupported; sample-domain mismatch identified | Optional timing sidecar, sample-domain conversion and lexicon/source mapping, partial/cancel acceptance; unimplemented |
+
+### Next implementation boundaries
+
+Keep #74 as the only integration PR. Continue from its current real remote head,
+not a local synthetic commit. First finish #63 on the existing registry/lease
+transaction boundary; publish history and idempotency atomically, and never treat
+`shape:` model metadata as weight-content identity. Then #64 can bind terminal
+receipts to that actual execution identity without altering raw PCM bodies or
+claiming that transport completion proves audible/correct content.
+
+After those P0 dependencies, implement #70's immutable raw-to-spoken mapping before
+#73 timing, preserving #72's common planner. #65 must use the existing governor;
+#44 policy changes require the stated measurement evidence. #66/#67/#68 require
+separate identity, reference-conditioning, intelligibility and listening evidence,
+not a global synthetic quality score. External runtime changes/model downloads and
+user-desktop automation remain outside this repository-only implementation run.

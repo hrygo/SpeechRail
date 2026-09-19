@@ -91,3 +91,39 @@ def test_malformed_terminals_fail_closed(mutation: str) -> None:
         bad = _event(3, COMPLETED, item_id="i", transcript="too long")
     turn.accept(bad, epoch="a")
     assert turn.state == "failed"
+
+
+@pytest.mark.parametrize("budget", ["event", "item", "text"])
+def test_collection_resource_limits_fail_closed(budget: str) -> None:
+    limits = {"event": {"max_events": 1}, "item": {"max_items": 1}, "text": {"max_text_chars": 1}}
+    turn = ManualTurnCollector(epoch="a", **limits[budget])
+    turn.accept(_event(1, COMMITTED, item_id="first"), epoch="a")
+    if budget == "item":
+        event = _event(2, COMMITTED, item_id="second")
+    else:
+        event = _event(2, COMPLETED, item_id="first", transcript="xx")
+    turn.accept(event, epoch="a")
+    expected = {"event": "event_budget_exceeded", "item": "invalid_committed_item",
+                "text": "text_budget_exceeded"}
+    assert turn.state == "failed"
+    assert turn.failure_reason == expected[budget]
+    turn.accept(_event(3, CLEARED), epoch="a")
+    assert turn.result is None
+
+
+@pytest.mark.parametrize("kind", ["failed", "disconnect", "cancel"])
+def test_late_completed_and_cleared_cannot_resurrect_an_aborted_turn(kind: str) -> None:
+    turn = ManualTurnCollector(epoch="a")
+    turn.accept(_event(1, COMMITTED, item_id="first"), epoch="a")
+    turn.begin_close()
+    if kind == "failed":
+        turn.accept(_event(2, "conversation.item.input_audio_transcription.failed",
+                           item_id="first"), epoch="a")
+    elif kind == "disconnect":
+        turn.disconnect()
+    else:
+        turn.cancel()
+    turn.accept(_event(3, COMPLETED, item_id="first", transcript="late"), epoch="a")
+    turn.accept(_event(4, CLEARED), epoch="a")
+    assert turn.result is None
+    assert turn.state in {"failed", "cancelled"}

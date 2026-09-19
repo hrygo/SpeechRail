@@ -2896,3 +2896,40 @@ def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) 
     assert collector.state == "completed"
     assert collector.result is not None
     assert collector.result.text == ("" if empty else "你好")
+
+
+@pytest.mark.parametrize("timeout_reader", [False, True])
+def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: bool) -> None:
+    """A successful FIFO cleanup cannot erase a failed commit or hung ASR terminal."""
+    from speechrail.realtime.turn_collection import ManualTurnCollector
+
+    factory: FakeStreamingFactory = (
+        HangingCommitStreamingFactory() if timeout_reader else FailingCommitStreamingFactory()
+    )
+    client, factory = _client(
+        factory=factory, settings_kwargs={"request_timeout_seconds": 0.01}
+    )
+    collector = ManualTurnCollector(epoch="wire")
+    with client.websocket_connect("/v1/realtime") as socket:
+        for _ in range(2):
+            collector.accept(socket.receive_json(), epoch="wire")
+        socket.send_json({
+            "type": "session.update",
+            "session": {"model": "whisper-1", "turn_detection": None},
+        })
+        collector.accept(socket.receive_json(), epoch="wire")
+        collector.note_append()
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0\0")})
+        collector.begin_close()
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        events = [socket.receive_json() for _ in range(3)]
+        assert [event["type"] for event in events] == [
+            "input_audio_buffer.committed", "error", "input_audio_buffer.cleared",
+        ]
+        assert events[1]["error"]["code"] == "backend_timeout"
+        for event in events:
+            collector.accept(event, epoch="wire")
+    assert collector.state == "failed"
+    assert collector.result is None
+    assert len(factory.released) == 1
