@@ -166,13 +166,13 @@ public enum SessionExporter {
             rows.append("| 时长 | 未结束 |")
         }
         rows.append("| 音频来源 | \(payload.record.audioSource.title) |")
-        rows.append("| 运行档位 | \(payload.record.engineProfile) |")
-        rows.append("| 分人 | \(diarizationText(payload.record)) |")
+        rows.append("| 识别精度 | \(payload.record.engineProfile) |")
+        rows.append("| 说话人 | \(diarizationText(payload.record)) |")
         if let voice = payload.record.voice {
             rows.append("| 音色 | \(voice.name ?? voice.id) |")
         }
         if let persona = payload.record.persona {
-            rows.append("| 人设 | \(persona.title) |")
+            rows.append("| 角色 | \(persona.title) |")
         }
         if payload.record.endedReason != .user {
             rows.append("| 结束方式 | \(payload.record.endedReason.title) |")
@@ -203,10 +203,10 @@ public enum SessionExporter {
 
     private static func diarizationText(_ record: SessionRecord) -> String {
         switch record.diarization {
-        case .active: "已开启"
-        case .off: "未开启"
-        case .degraded: record.diarizationNote ?? "已降级"
-        case .unavailable: record.diarizationNote ?? "当前档位不支持"
+        case .active: "标出说话人"
+        case .off: "不区分说话人"
+        case .degraded: record.diarizationNote ?? "中途停了"
+        case .unavailable: record.diarizationNote ?? "当前识别精度不支持"
         }
     }
 

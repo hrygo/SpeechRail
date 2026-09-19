@@ -416,7 +416,7 @@ public actor RealtimeASRClient {
             emit(
                 .diarizationDegraded(
                     code: object["code"] as? String ?? "diarization_degraded",
-                    message: object["message"] as? String ?? "分人停止更新了。"
+                    message: object["message"] as? String ?? "说话人编号停止更新了。"
                 )
             )
         case "speechrail.diarization.done":

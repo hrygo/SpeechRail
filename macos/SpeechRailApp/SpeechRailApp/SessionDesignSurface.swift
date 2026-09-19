@@ -581,7 +581,7 @@ public struct SessionVoiceCapsule<Content: View>: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help("换音色下一句生效；它只改声音，不改人设")
+        .help("换音色下一句生效；它只改声音，不改角色")
         .accessibilityLabel("音色：\(name)")
     }
 }

@@ -643,19 +643,19 @@ public struct PreflightDiagnosticsView: View {
         case "tts configuration validation failed":
             "TTS 配置校验失败。"
         case "diarization configuration validation failed":
-            "分人配置校验失败。"
+            "说话人区分配置校验失败。"
         case "optional diarization profile is not configured":
-            "当前未配置可选的分人能力。"
+            "当前未配置可选的说话人区分能力。"
         case "diarization profile is configured":
-            "分人配置已登记。"
+            "说话人区分配置已登记。"
         case "compiled coreml diarization bundle is available":
-            "CoreML 分人制品可用。"
+            "CoreML 说话人区分制品可用。"
         case "compiled coreml diarization bundle is missing or incorrect":
-            "CoreML 分人制品缺失或版本不正确。"
+            "CoreML 说话人区分制品缺失或版本不正确。"
         case "coreml diarization worker is executable":
-            "CoreML 分人运行时可执行。"
+            "CoreML 说话人区分运行时可执行。"
         case "coreml diarization worker is missing or not executable":
-            "CoreML 分人运行时缺失或不可执行。"
+            "CoreML 说话人区分运行时缺失或不可执行。"
         case "legacy vad is ready":
             "传统 VAD 能力已就绪。"
         case "silero vad model file is available":
@@ -807,13 +807,13 @@ public struct PreflightDiagnosticsView: View {
         case "tts_clone_variant":
             "音色克隆版本"
         case "diarization_config":
-            "分人配置"
+            "说话人区分配置"
         case "diarization_snapshot":
-            "分人制品"
+            "说话人区分制品"
         case "diarization_runtime":
-            "分人运行时"
+            "说话人区分运行时"
         case "diarization_aligner_snapshot":
-            "分人对齐制品"
+            "说话人区分对齐制品"
         case "realtime_vad":
             "实时语音检测"
         case "realtime_vad_model":

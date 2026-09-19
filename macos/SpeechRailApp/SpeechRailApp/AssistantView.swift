@@ -40,6 +40,13 @@ public struct AssistantView: View {
     @State private var renameDraft = ""
     @State private var confirmingRemove = false
     @State private var libraryReloadToken = 0
+    /// 就地配置对话模型的那三个字段（2026-09-19 用户反馈「门槛极高」之后加的）。
+    @State private var llmBaseURLDraft = ""
+    @State private var llmModelDraft = ""
+    @State private var llmKeyDraft = ""
+    @State private var llmSaveNote: String?
+    /// 「未开始」态里"换个角色 / 换个声音"是可选项，默认收起：想开始的人不该先做两道选择题。
+    @State private var showsStyleOptions = false
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
         case session
@@ -120,7 +127,7 @@ public struct AssistantView: View {
                 } else {
                     band
                     splitArea
-                    if state == .ready { voicesCard } else { controlsCard }
+                    if state != .ready { controlsCard }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -131,6 +138,8 @@ public struct AssistantView: View {
             selectedPersonaID = preferences.defaultPersonaID
             selectedVoiceID = preferences.defaultVoiceID
             mode = preferences.assistantMode
+            llmBaseURLDraft = preferences.llmBaseURL
+            llmModelDraft = preferences.llmModel
             await reloadMemories()
             await reloadRecent()
         }
@@ -153,7 +162,7 @@ public struct AssistantView: View {
 
     private var pagePurpose: String {
         switch state {
-        case .ready: "定好人设与音色就能开始；说也行，打字也行。"
+        case .ready: "定好角色与声音就能开始；说也行，打字也行。"
         case .blocked: "和本机大模型用语音一来一往；转录与对话只留在这台 Mac 上。"
         case .live: "和它一来一往：说也行，打字也行；对话只留在这台 Mac 上。"
         case .review: "和本机大模型用语音一来一往；记录长期留在记录库。"
@@ -167,16 +176,13 @@ public struct AssistantView: View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             switch state {
             case .ready:
+                // 「开始对话」**不在页头**：它已经在结论条上（用户第一眼看的地方）。
+                // 同一个动作在一屏里画两遍，是上一轮刚收掉的毛病。
                 PageActionButton(
                     title: "打开设置",
                     systemImage: "slider.horizontal.3",
-                    helpText: "打开会话设置：大模型、默认人设与音色"
+                    helpText: "打开会话设置：模型地址、默认角色与声音"
                 ) { openSettings() }
-                PageActionButton(
-                    title: "开始对话",
-                    systemImage: "message",
-                    helpText: "按当前人设与音色开始；开始之后人设本轮不再变"
-                ) { Task { await start() } }
             case .blocked:
                 PageActionButton(
                     title: "设置 · 会话",
@@ -188,7 +194,7 @@ public struct AssistantView: View {
                 PageActionButton(
                     title: "音色与风格",
                     systemImage: "slider.horizontal.3",
-                    helpText: "换音色只改声音，下一句生效；换人设要新开一轮"
+                    helpText: "换音色只改声音，下一句生效；换角色要新开一轮"
                 ) { inspectorTab = .session }
                 PageActionButton(
                     title: "结束对话",
@@ -212,7 +218,7 @@ public struct AssistantView: View {
                 PageActionButton(
                     title: "新建对话",
                     systemImage: "message",
-                    helpText: "回到「先定人设与音色」：这一条记录留在库里，一个字都不动"
+                    helpText: "回到「先定角色与声音」：这一条记录留在库里，一个字都不动"
                 ) { startNewRound() }
             }
             // 收起控件的名字按右栏**此刻装着什么**说（稿 `sideToggle`）：回看时那一栏叫
@@ -292,18 +298,16 @@ public struct AssistantView: View {
         case .ready:
             SessionConclusionBand(
                 tone: .healthy,
-                title: "现在就能开始",
-                message: "人设是它开口前读的第一段话，只在这一步定——开始之后再改，之后每一轮都会慢一点。"
-                    + "音色只影响朗读，随时能换，下一句就听得出来。",
-                hint: "两条都随这段记录保存；从记录库「继续这一轮」是一轮新对话，所以那里可以重新选人设。"
+                title: "按默认就能开始",
+                message: "角色和声音已经替你选好，直接开始就行；想换在下面那一行展开。"
+                    + "说话或打字都可以，对话只留在这台 Mac 上。",
+                hint: "开始之后角色本轮不再变（要换就新开一轮）；声音随时能换，下一句就听得出来。"
             ) {
-                Button {
-                    previewSelectedVoice()
-                } label: {
-                    Label("试听音色", systemImage: "play")
-                }
-                .speechRailButton(.secondary)
-                .disabled(currentVoice == nil)
+                // 首屏只放**一件事**：开始。角色与声音在下面那一行里，默认收起——
+                // 想开始的人不该先做两道选择题（用户 2026-09-19：门槛极高）。
+                Button("开始对话") { Task { await start() } }
+                    .speechRailButton(.primary)
+                    .help("按现在选好的角色与声音开始；开始之后角色本轮不再变")
             }
         case .blocked:
             // 结论条按**原因**说话：`BlockReason` 已经有 `title` / `detail`，八个原因
@@ -379,7 +383,7 @@ public struct AssistantView: View {
         case .occupiedBy:
             "麦克风同一时刻只由一个会话使用；确认之后当前那个会先结束，不会静默抢。"
         case .storeUnavailable:
-            "记录库写不进去就不开始对话：转录与对话都是要留下的资产，宁可不录。"
+            "记录库写不进去就不开始对话：转录与对话都是要留下的记录，宁可不录。"
         case .streamFailed:
             "已经定稿的对话都还在库里；点「重试」重新接一段。"
         }
@@ -391,8 +395,17 @@ public struct AssistantView: View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 switch state {
-                case .ready: personaCard
-                case .blocked: capabilitiesCard
+                case .ready: styleOptions
+                case .blocked:
+                    // 没配模型时**就地填**，不把人送去设置页：这是"必要时刻"。
+                    // 其他受阻（麦克风被拒、服务没起来、被占用）与模型配置无关，
+                    // 那时要看的仍然是"这台 Mac 现在能做什么"那张能力表。
+                    if blockedReason == .llmNotConfigured {
+                        llmSetupCard
+                        capabilitiesCard
+                    } else {
+                        capabilitiesCard
+                    }
                 default: streamCard
                 }
             }
@@ -409,12 +422,38 @@ public struct AssistantView: View {
 
     // MARK: 人设（未开始）
 
+    /// 「未开始」态里的**可选项**：角色与声音，默认收起成一行。
+    ///
+    /// 理由（用户 2026-09-19：「门槛极高」）：想开始的人只需要按一次「开始对话」——
+    /// 默认角色与默认声音本来就能用。把一条角色列表加一条音色列表摆在首屏，
+    /// 等于用户还没听到一句话就得先做两道选择题。这里默认收起，展开才给全部选择。
+    private var styleOptions: some View {
+        DisclosureGroup(isExpanded: $showsStyleOptions) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                personaCard
+                voicesCard
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("换个角色或声音（可选）")
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text("现在是「\(selectedPersonaTitle)」·「\(currentVoiceName ?? "默认声音")」")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer(minLength: 0)
+            }
+        }
+        .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+    }
+
     private var personaCard: some View {
         SessionPanel {
             SessionPanelHead(
-                title: "人设（角色风格）",
+                title: "角色（它怎么跟你说话）",
                 badge: nil,
-                detail: "只改「怎么答」，不改「知道什么」：助手记住的事归「记忆」那一栏管，不在这里改。"
+                detail: "只改它怎么答，不改它知道什么；记住的事在「记忆」那一栏。"
             )
             SessionHairline()
             ForEach(Array(preferences.personas.enumerated()), id: \.element.id) { index, persona in
@@ -434,13 +473,13 @@ public struct AssistantView: View {
                         )
                     }
                     .buttonStyle(.plain)
-                    .help("用这条人设开始下一轮；开始之后本轮不再变")
+                    .help("用这条角色开始下一轮；开始之后本轮不再变")
                 }
             }
             Spacer(minLength: 0)
             SessionHairline()
-            CardFoot(note: "开始之后这一项变成只读：要换人设就新开一轮对话，记录不会丢。") {
-                Button("新建自定义人设") {
+            CardFoot(note: "开始之后这一项变成只读：要换角色就新开一轮对话，记录不会丢。") {
+                Button("新建自定义角色") {
                     personaDraft = PersonaDraft()
                     isCreatingPersona = true
                 }
@@ -470,12 +509,120 @@ public struct AssistantView: View {
 
     // MARK: 本机能做什么（未配置模型）
 
+    /// 对话模型**就地配置**（2026-09-19 用户反馈「门槛极高」）。
+    ///
+    /// 为什么长在这一页：这是**必要时刻**——用户按「开始对话」时才知道要填这三样。
+    /// 把人送去设置页，等于让他放下正在做的事、在一个有四组的表单里找到「会话」那一组，
+    /// 填完再回来按第二次。这里只问三个字段，填完**原地开始**。
+    ///
+    /// 接口不在这里选：今天只走 Responses API（兼容 OpenAI 的那一套），给一个选择器
+    /// 只会让"该选哪个"变成新的门槛；要换的地方在设置页，那里是给探索的人准备的。
+    private var llmSetupCard: some View {
+        SessionPanel {
+            SessionPanelHead(
+                title: "连一台模型服务就能说话",
+                badge: "一次填好，长期有效",
+                detail: "助手要连一台兼容 OpenAI 的模型服务才能回话。地址和模型名由那台服务给，"
+                    + "密钥只存这把 Mac 的钥匙串。"
+            )
+            SessionHairline()
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                llmField(
+                    label: "服务地址",
+                    hint: "那台服务的地址，末尾不用带 /v1",
+                    placeholder: "http://127.0.0.1:1234",
+                    text: $llmBaseURLDraft,
+                    isSecret: false
+                )
+                llmField(
+                    label: "模型名",
+                    hint: "服务端列出的名字，原样照抄",
+                    placeholder: "例如 gpt-4o-mini",
+                    text: $llmModelDraft,
+                    isSecret: false
+                )
+                llmField(
+                    label: "密钥",
+                    hint: "那台服务不需要密钥就留空",
+                    placeholder: "sk-…",
+                    text: $llmKeyDraft,
+                    isSecret: true
+                )
+                Text("接口固定走 Responses API（兼容 OpenAI 的那一套），不需要选。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                if let llmSaveNote {
+                    Text(llmSaveNote)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(StatusTone.attention.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+            CardFoot(note: "密钥只进钥匙串，不写进配置文件，也不出现在日志和导出物里。") {
+                Button("保存并开始对话") { Task { await saveLLMAndStart() } }
+                    .speechRailButton(.primary)
+                    .disabled(!canSaveLLM)
+                    .help(canSaveLLM ? "存下这三样，立刻开始这一次对话" : "地址与模型名都要填")
+            }
+        }
+    }
+
+    private func llmField(
+        label: String,
+        hint: String,
+        placeholder: String,
+        text: Binding<String>,
+        isSecret: Bool
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text(label)
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .frame(width: 88, alignment: .leading)
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
+                if isSecret {
+                    SecureField(placeholder, text: text)
+                        .textFieldStyle(.roundedBorder)
+                } else {
+                    TextField(placeholder, text: text)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Text(hint)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+        }
+    }
+
+    private var canSaveLLM: Bool {
+        !llmBaseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !llmModelDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 存下这三样并**立刻开始**：按钮写着「保存并开始对话」，那就必须真的开始，
+    /// 不能存完停在原地让人再找一次「开始对话」（那正是"点了没反应"的另一种写法）。
+    private func saveLLMAndStart() async {
+        preferences.llmBaseURL = llmBaseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        preferences.llmModel = llmModelDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            try LLMKeychain.save(llmKeyDraft)
+        } catch {
+            llmSaveNote = "密钥没能存进钥匙串：\(error.localizedDescription)"
+            return
+        }
+        llmSaveNote = nil
+        llmKeyDraft = ""
+        await start()
+    }
+
     private var capabilitiesCard: some View {
         SessionPanel {
             SessionPanelHead(
                 title: "本机能做什么",
                 badge: nil,
-                detail: "按当前运行档位如实发布；不做能力预支。"
+                detail: "照这台 Mac 现在的实际情况报，能用的就写能用。"
             )
             SessionHairline()
             ForEach(Array(capabilityRows.enumerated()), id: \.offset) { index, row in
@@ -517,7 +664,8 @@ public struct AssistantView: View {
         return [
             ("语音识别", asr.0, asr.1, "实时字幕与会议转录都靠它，现在就能用。"),
             ("语音合成", tts.0, tts.1, "助手说话用它；音色可以在设置里换。"),
-            ("分人识别", diarization.0, diarization.1, "只输出本次会话的匿名标签；不管理实名或声纹库。"),
+            ("说话人区分", diarization.0, diarization.1,
+             "会议里谁在说话会自动编号（一号、二号…），号码只在这一场里有效；不用提前录声纹。"),
             llmCapabilityRow
         ]
     }
@@ -580,7 +728,7 @@ public struct AssistantView: View {
         SessionEmptyState(
             systemImage: "message",
             title: "还没有开始说",
-            message: "说一句，或者直接在下面打字；人设与音色在下面的两行里定。"
+            message: "说一句，或者直接在下面打字；角色与声音在下面那一行里定。"
         ) { EmptyView() }
     }
 
@@ -685,7 +833,7 @@ public struct AssistantView: View {
 
     private func voiceSubtitle(_ voice: CreatorVoice) -> String {
         if !voice.available {
-            return "这个音色现在跑不了：服务端没有它的参考音频，或者当前档位不加载它"
+            return "这个音色现在用不了：服务端没有它的参考音频，或者当前识别精度下不加载它"
         }
         return voice.description.isEmpty ? "服务端可用音色" : voice.description
     }
@@ -930,7 +1078,7 @@ public struct AssistantView: View {
                 } else if state == .live {
                     Button("换音色") { inspectorTab = .record }
                         .speechRailButton(.secondary)
-                    Button("新开一轮以换人设") { Task { await restartWithPersonaPick() } }
+                    Button("新开一轮以换角色") { Task { await restartWithPersonaPick() } }
                         .speechRailButton(.secondary)
                 } else if state == .review {
                     // 稿 `screenClosureAssistantClosed` 右栏那三颗：「继续这一轮」是主按钮，
@@ -962,7 +1110,7 @@ public struct AssistantView: View {
                 ("输入方式", "语音或打字"),
                 ("对讲模式", mode.title),
                 ("输入设备", "系统默认"),
-                ("人设", "\(selectedPersonaTitle) · 本轮定"),
+                ("角色", "\(selectedPersonaTitle) · 本轮定"),
                 ("音色", currentVoiceName ?? "未选")
             ]
         case .blocked:
@@ -971,16 +1119,16 @@ public struct AssistantView: View {
                 ("服务地址", preferences.llmBaseURL.isEmpty ? "—" : preferences.llmBaseURL),
                 ("密钥", LLMKeychain.load() == nil ? "—" : "已存钥匙串"),
                 ("音色", currentVoiceName ?? "未选"),
-                ("人设", selectedPersonaTitle),
+                ("角色", selectedPersonaTitle),
                 ("采集设备", "系统默认")
             ]
         case .live, .review:
             [
                 ("大模型", assistant.llmModel ?? "未配置"),
                 ("音色", "\(currentVoiceName ?? "未选") · 下一句可换"),
-                ("人设", "\(activePersonaTitle) · 本轮已定"),
+                ("角色", "\(activePersonaTitle) · 本轮已定"),
                 ("打断", mode.allowsBargeIn ? "实时对讲时生效" : "一问一答：它说话时闭麦"),
-                ("上下文", "\(assistant.turns.count) 轮"),
+                ("已聊", "\(assistant.turns.count) 轮"),
                 ("输入", "语音或打字"),
                 ("采集设备", "系统默认")
             ]
@@ -1003,7 +1151,7 @@ public struct AssistantView: View {
         case .blocked:
             "这里会显示模型名、连接延迟与记忆轮数；对话本身从第一轮开始记，之前的不用补。"
         default:
-            "人设改的是它怎么和你说话，本轮锁住；音色只改声音，下一句就换。"
+            "角色改的是它怎么和你说话，本轮锁住；音色只改声音，下一句就换。"
         }
     }
 
@@ -1161,7 +1309,7 @@ public struct AssistantView: View {
                 SessionHairline()
                 // 这句话今天必须与右栏那颗按钮说的是同一件事（`SESSIONS-SPEC` §15 的 E7）：
                 // 继续这一轮是**新开一轮**（库里另起一条），不是把新对话接进这一条。
-                CardFoot(note: "继续这一轮是新开一轮：人设与音色可以重新选；这一条记录一个字不动。") {
+                CardFoot(note: "继续这一轮是新开一轮：角色与声音可以重新选；这一条记录一个字不动。") {
                     Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
                         .speechRailButton(.secondary)
                 }
@@ -1177,7 +1325,7 @@ public struct AssistantView: View {
 
     private var reviewDetail: String {
         let rounds = reviewLines.count
-        return "\(rounds) 句 · 人设与音色随记录一起存"
+        return "\(rounds) 句 · 角色与声音随记录一起存"
     }
 
     /// 回看时把「这一句是谁说的」与「它有没有被打断」都挂在句子上（稿的分人标签口径）。
@@ -1355,9 +1503,9 @@ public struct AssistantView: View {
 
     private var personaSheet: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            Text("新建自定义人设")
+            Text("新建自定义角色")
                 .font(SpeechRailDesignTokens.Typography.display)
-            Text("人设是它开口前读的第一段话：写清「怎么答」，不用写「知道什么」（那是记忆的事）。")
+            Text("角色是它开口前读的第一段话：写清「怎么答」，不用写「知道什么」（那是记忆的事）。")
                 .font(SpeechRailDesignTokens.Typography.callout)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1399,7 +1547,7 @@ public struct AssistantView: View {
                 1. 打开「设置 · 会话」，填服务地址与模型名。
                 2. 服务必须实现 Responses API；只支持 Chat Completions 的服务接不上。
                 3. 密钥填进设置后只存钥匙串：不写进配置文件，也不出现在日志或导出物里。
-                4. 地址是本机还是局域网都行；SpeechRail 自己只提供识别、合成与分人。
+                4. 地址是本机还是局域网都行；识别、合成与说话人区分由 SpeechRail 本机提供。
                 """
             )
             .font(SpeechRailDesignTokens.Typography.callout)

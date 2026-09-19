@@ -348,8 +348,8 @@ public struct ServiceOverviewView: View {
                 ServiceCapability(title: "语音合成 · VoiceDesign", status: .notReady, reason: reason),
                 ServiceCapability(title: "语音合成 · Base", status: .notReady, reason: reason),
                 ServiceCapability(title: "音色复刻", status: .notReady, reason: reason),
-                ServiceCapability(title: "实时语音 VAD", status: .notReady, reason: reason),
-                ServiceCapability(title: "分人识别", status: .notReady, reason: reason),
+                ServiceCapability(title: "实时语音断句", status: .notReady, reason: reason),
+                ServiceCapability(title: "说话人区分", status: .notReady, reason: reason),
             ]
         }
 
@@ -410,11 +410,11 @@ public struct ServiceOverviewView: View {
         ]
     }
 
-    /// 分人行同样先看服务声明（`/health.diarization`），档位名只负责把 Light 的
-    /// 未配置解释成档位取舍。服务说“没有配置分人”时，报“未配置”比报“worker 尚未
+    /// 说话人那一行同样先看服务声明（`/health.diarization`），档位名只负责把 Light 的
+    /// 未配置解释成档位取舍。服务说“没有配置”时，报“未配置”比报“worker 尚未
     /// 就绪”准确：后者把缺失的能力说成正在等待。
     private func diarizationCapability(for health: HealthSnapshot) -> ServiceCapability {
-        let title = "分人识别"
+        let title = "说话人区分"
         if health.diarizationReady == true {
             return ServiceCapability(
                 title: title,
@@ -428,22 +428,22 @@ public struct ServiceOverviewView: View {
                 title: title,
                 status: health.profile == .light ? .unsupported : .notReady,
                 reason: health.profile == .light
-                    ? "Light 档位不加载分人能力。"
-                    : "当前部署未配置分人能力。"
+                    ? "这一档不标说话人。"
+                    : "当前部署没有开启说话人区分。"
             )
         }
         if health.profile == .light {
             return ServiceCapability(
                 title: title,
                 status: .unsupported,
-                reason: "Light 档位不加载分人能力。"
+                reason: "这一档不标说话人。"
             )
         }
         return ServiceCapability(
             title: title,
             status: .notReady,
             reason: health.diarization.map { SpeechRailDiarizationPresentation.text($0) }
-                ?? "分人 worker 尚未就绪。"
+                ?? "说话人区分还没准备好。"
         )
     }
 

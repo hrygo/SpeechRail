@@ -164,7 +164,10 @@ public struct ModelManagementView: View {
         let summary = summary(for: profile)
         let lanes = profile == .quality ? "2 个 · 跨 lane 并发" : "1 个"
         return [
-            ProfileSpec(label: "分人", value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"),
+            ProfileSpec(
+                label: "说话人区分",
+                value: summary.map { $0.diarization ? "支持" : "不支持" } ?? "未读取"
+            ),
             ProfileSpec(label: "aligner", value: summary.map { $0.aligner ?? "无" } ?? "未读取"),
             ProfileSpec(label: "TTS lane", value: lanes),
         ]
@@ -370,14 +373,14 @@ public struct ModelManagementView: View {
             : "\(artifacts.count) 个制品 · \(pending) 个待校验"
         let diarizationNote = missingDiarizationKeys.isEmpty
             ? ""
-            : "，分人能力在补齐前不可用"
+            : "，说话人区分在补齐前不可用"
         return base + diarizationNote + "。"
     }
 
     private var diarizationSection: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             SectionHeading(
-                title: "分人资产",
+                title: "说话人区分资产",
                 detail: "当前档位需要的独立 FluidAudio CoreML 资产；对应 aligner 已列在模型制品中。"
             )
             VStack(spacing: 0) {
@@ -773,7 +776,7 @@ public struct ModelManagementView: View {
     }
 
     private func assetTitle(for key: String) -> String {
-        key == "diarization-coreml" ? "FluidAudio CoreML 分人资产" : key
+        key == "diarization-coreml" ? "FluidAudio CoreML 说话人区分资产" : key
     }
 
     private func summary(for profile: SpeechRailProfile) -> ProfileSummary? {
@@ -872,12 +875,12 @@ public struct ModelManagementView: View {
             let ready = health.diarization?.ready ?? health.diarizationReady
             guard let ready else {
                 return ModelArtifactUsagePresentation(
-                    text: "当前分人链路 · 状态未读取",
+                    text: "当前说话人区分链路 · 状态未读取",
                     tone: .neutral
                 )
             }
             return ModelArtifactUsagePresentation(
-                text: ready ? "当前分人链路 · 已就绪" : "当前分人链路 · 未就绪",
+                text: ready ? "当前说话人区分链路 · 已就绪" : "当前说话人区分链路 · 未就绪",
                 tone: ready ? .healthy : .critical
             )
         }
@@ -1078,7 +1081,7 @@ public struct ModelManagementView: View {
         case .quality:
             "VoiceDesign 与高质量对齐，适合音色创作"
         case .balanced:
-            "8-bit 运行与分人能力的平衡选择"
+            "8-bit 运行与说话人区分的平衡选择"
         case .light:
             "更小的 ASR 组合，适合快速启动"
         }
@@ -1233,11 +1236,11 @@ private struct ProfileChoiceCard: View {
     private var profilePurpose: String {
         return switch profile {
         case .quality:
-            "aligner-bf16，可分人；VoiceDesign 与 Base 双常驻，可跨 lane 并发 —— 适合音色创作"
+            "aligner-bf16，可区分说话人；VoiceDesign 与 Base 双常驻，可跨 lane 并发 —— 适合音色创作"
         case .balanced:
-            "aligner-q8，可分人；单个 TTS worker —— 日常配音的平衡选择"
+            "aligner-q8，可区分说话人；单个 TTS worker —— 日常配音的平衡选择"
         case .light:
-            "无 aligner、无分人；单个 TTS worker —— 更小的 ASR 组合，启动最快"
+            "无 aligner、不区分说话人；单个 TTS worker —— 更小的 ASR 组合，启动最快"
         }
     }
 

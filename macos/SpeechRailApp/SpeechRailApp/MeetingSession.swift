@@ -637,7 +637,7 @@ public final class MeetingSession {
         }
         if !diarizationDrained {
             // 未对齐不是错误：正文照常，只是时间码要说实话（§8.2 唯一允许降级的位置）。
-            lastFailure = "分人收尾没有在预期时间内完成；转录还在，时间码可能不完整。"
+            lastFailure = "说话人编号没能在结束前全部对齐；转录还在，时间码可能不完整。"
         }
     }
 

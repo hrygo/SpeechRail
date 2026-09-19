@@ -248,6 +248,8 @@ public struct SessionLibraryView: View {
     @State private var isShowingDataDirectoryHint = false
     /// 前置检查态那一栏「本次字幕」收起了没有（与语音助手、会议页同一套规矩）。
     @State private var isInspectorCollapsed = false
+    /// 字幕空态里「遇到问题怎么办」那一行可选项（2026-09-19 低门槛改造）。
+    @State private var showsBlockedHelp = false
 
     public init(kind: SessionKind) {
         self.kind = kind
@@ -418,8 +420,9 @@ public struct SessionLibraryView: View {
             SessionConclusionBand(
                 tone: .healthy,
                 title: "现在就可以开始字幕",
-                message: "它只依赖语音识别，不依赖大模型；开始后字幕带贴在屏幕底部，SpeechRail 不必在前台。",
-                hint: "再按一次 ⌘⇧L 结束并保存。字幕带不持有焦点，所以 esc 不会关掉它。"
+                message: "只靠语音识别，不用配大模型。开始后字幕带贴在屏幕底部，SpeechRail 不必在前台。",
+                hint: "页头的「打开字幕带」或 ⌘⇧L 都能开始；再按一次 ⌘⇧L 结束并保存。"
+                    + "字幕带不抢焦点，所以 esc 不会关掉它。"
             ) {
                 Button("字幕设置") { openSettings() }
                     .speechRailButton(.secondary)
@@ -439,7 +442,7 @@ public struct SessionLibraryView: View {
                     SessionCheckRow(
                         tone: preferences.captionsDiarizationEnabled ? .ready : .neutral,
                         name: "说话人标签 · 可选",
-                        detail: "档位不够时只记文字、不标说话人，正文照常；它也不接大模型，不需要另配模型。"
+                        detail: "这台 Mac 标不了说话人时就只记文字，正文照常；它也不用配对话模型。"
                     )
                     Spacer(minLength: 0)
                     SessionHairline()
@@ -457,7 +460,7 @@ public struct SessionLibraryView: View {
                         SessionPanelHead(title: "本次字幕", badge: "还没有开始")
                         SessionHairline()
                         VStack(alignment: .leading, spacing: 10) {
-                            SessionKVRow("运行档位", profileRowText)
+                            SessionKVRow("识别精度", profileRowText)
                             SessionKVRow("默认字号", "标准")
                             SessionKVRow("字幕带位置", "屏幕底部居中 · 每块屏各记一套")
                             SessionKVRow("采集设备", "系统默认")
@@ -467,12 +470,12 @@ public struct SessionLibraryView: View {
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                         .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
                         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Text("运行档位是什么意思")
+                            Text("「识别精度」是什么意思")
                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             Text(
-                                "\(profileRowText) 是这台 Mac 现在跑的那一档：认得越准，越能标出说话人。"
-                                    + "换档在设置里，已经存下的记录不跟着变。"
+                                "\(profileRowText) 是这台 Mac 现在的识别精度：越高，认字越准，"
+                                    + "也越能标出谁在说话。换精度在设置里，已经存下的记录不跟着变。"
                             )
                             .font(SpeechRailDesignTokens.Typography.secondary)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -486,42 +489,58 @@ public struct SessionLibraryView: View {
                 }
             }
 
-            SessionPanel {
-                SessionPanelHead(
-                    title: "受阻时",
-                    detail: nil,
-                    trailingDetail: "三种受阻共用同一个形状：说明影响 + 唯一出口；不弹对话框。"
-                )
-                SessionHairline()
-                SessionCheckRow(
-                    tone: microphoneAuthorized ? .ready : .attention,
-                    name: "麦克风未授权",
-                    detail: "系统设置里给过权限才能采音。拒绝一次不会反复弹窗。"
-                ) {
-                    Button("打开系统设置") { openMicrophoneSettings() }
-                        .speechRailButton(.secondary)
+            // 「受阻时」是**查表**，不是首屏要做的事：一切正常的人一辈子用不上它。
+            // 2026-09-19 用户反馈「门槛极高」之后折成一行可选项——首页只留
+            // 「结论条 + 开始之前（三行前置检查）+ 本次字幕右栏」。
+            DisclosureGroup(isExpanded: $showsBlockedHelp) {
+                SessionPanel {
+                    SessionPanelHead(
+                        title: "受阻时",
+                        detail: nil,
+                        trailingDetail: "三种受阻共用同一个形状：说明影响 + 唯一出口；不弹对话框。"
+                    )
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: microphoneAuthorized ? .ready : .attention,
+                        name: "麦克风未授权",
+                        detail: "系统设置里给过权限才能采音。拒绝一次不会反复弹窗。"
+                    ) {
+                        Button("打开系统设置") { openMicrophoneSettings() }
+                            .speechRailButton(.secondary)
+                    }
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: serviceTone,
+                        name: "语音服务未就绪",
+                        detail: "识别服务没起来时，字幕带换成同一条受阻带并保留最后一句。"
+                    ) {
+                        // 稿这里写的是 `[去服务状态]`；实现给 `[重试]`——服务还没起来时重试会
+                        // 原样再报一次，出口在这一屏够用（SESSIONS-SPEC §12.1.2 第 3 条未决项）。
+                        Button("重试") { Task { await caption.retry() } }
+                            .speechRailButton(.secondary)
+                    }
+                    SessionHairline()
+                    SessionCheckRow(
+                        tone: .attention,
+                        name: "麦克风被占用",
+                        detail: "同一时刻只有一个会话能用麦克风；交还要确认，不会静默抢。"
+                    ) {
+                        Button("结束会话并切换") { Task { await caption.takeOverOccupiedMicrophone() } }
+                            .speechRailButton(.secondary)
+                    }
                 }
-                SessionHairline()
-                SessionCheckRow(
-                    tone: serviceTone,
-                    name: "语音服务未就绪",
-                    detail: "识别服务没起来时，字幕带换成同一条受阻带并保留最后一句。"
-                ) {
-                    // 稿这里写的是 `[去服务状态]`；实现给 `[重试]`——服务还没起来时重试会
-                    // 原样再报一次，出口在这一屏够用（SESSIONS-SPEC §12.1.2 第 3 条未决项）。
-                    Button("重试") { Task { await caption.retry() } }
-                        .speechRailButton(.secondary)
-                }
-                SessionHairline()
-                SessionCheckRow(
-                    tone: .attention,
-                    name: "麦克风被占用",
-                    detail: "同一时刻只有一个会话能用麦克风；交还要确认，不会静默抢。"
-                ) {
-                    Button("结束会话并切换") { Task { await caption.takeOverOccupiedMicrophone() } }
-                        .speechRailButton(.secondary)
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text("遇到问题怎么办（可选）")
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Text("麦克风没授权 / 服务没起来 / 麦克风被占用")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer(minLength: 0)
                 }
             }
+            .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
         }
     }
 

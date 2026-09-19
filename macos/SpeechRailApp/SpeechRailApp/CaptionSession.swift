@@ -668,7 +668,7 @@ public final class CaptionSession {
             // 但它意味着这一段音频进不去——按中断处理，给"重新接上"的出口（§3 同条结论）。
             await enterInterrupted(.serviceBusy("已有另一个实时转写会话在用语音引擎。等它结束后重新接上。"))
         case "language_not_supported":
-            await enterInterrupted(.serviceNotReady("这个档位的模型不支持当前语言。"))
+            await enterInterrupted(.serviceNotReady("这台 Mac 现在的模型不支持当前语言。"))
         default:
             // 契约里这些失败都**保持 session 可用**：记下来，不打断采集
             // （`voice_not_found` 那种属于助手/TTS，这一档收不到）。
@@ -725,7 +725,10 @@ public final class CaptionSession {
             if diarizationDrained { return }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        labeling.markDegraded(code: "finalization_timeout", message: "分人没能在结束前对齐，正文已经存好了。")
+        labeling.markDegraded(
+            code: "finalization_timeout",
+            message: "说话人编号没能在结束前对齐，正文已经存好了。"
+        )
         if let sessionID, let note = labeling.note {
             await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
         }

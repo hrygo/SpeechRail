@@ -318,7 +318,8 @@ public struct SettingsView: View {
                 }
                 settingsRowSeparator
                 settingsRow {
-                    Text("对话与纪要都要靠一台兼容 OpenAI、支持 Responses API 的服务；SpeechRail 只提供识别、合成与分人。")
+                    Text("对话与纪要都要靠一台兼容 OpenAI、支持 Responses API 的服务；"
+                        + "识别、合成与「谁在说话」由 SpeechRail 本机提供。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -333,7 +334,7 @@ public struct SettingsView: View {
                         }
                     } label: {
                         settingsRowLabel(
-                            "默认人设",
+                            "默认角色",
                             caption: "只在新对话开始时预填；开始之后本轮不再变（中途换会让它把开头重读一遍）。"
                         )
                     }
@@ -382,7 +383,7 @@ public struct SettingsView: View {
                 settingsRow {
                     Toggle(isOn: diarizationCaptionsBinding) {
                         settingsRowLabel(
-                            "分人标签",
+                            "说话人标签",
                             caption: diarizationCaption(for: preferences.captionsDiarizationEnabled)
                         )
                     }
@@ -393,7 +394,7 @@ public struct SettingsView: View {
                 settingsRow {
                     Toggle(isOn: diarizationMeetingBinding) {
                         settingsRowLabel(
-                            "分人标签",
+                            "说话人标签",
                             caption: diarizationCaption(for: preferences.meetingDiarizationEnabled)
                         )
                     }
@@ -454,7 +455,7 @@ public struct SettingsView: View {
         }
         return enabled
             ? "开着的：新会话会在行上标出说话人（匿名编号，改名字是你的动作）。"
-            : "默认关；打开后新会话才声明分人。"
+            : "默认关；打开后新会话才开始标出谁在说话。"
     }
 
     // MARK: 绑定（偏好只有一处声明点：`SessionPreferences`）

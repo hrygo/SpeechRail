@@ -176,7 +176,7 @@ public final class SpeakerLabeling {
     public func markDegraded(code: String, message: String) {
         guard state == .active else { return }
         state = .degraded
-        note = message.isEmpty ? "分人停止更新了（\(code)），正文照常记录。" : message
+        note = message.isEmpty ? "说话人编号停止更新了（\(code)），正文照常记录。" : message
     }
 
     /// 档位不支持（`light`）：**不给一个永远点不动的开关**，只给一句说明（§6.2.1 的降级形状）。

@@ -254,7 +254,7 @@ public final class SessionPreferences {
         guard let profile else { return nil }
         let normalized = profile.lowercased()
         guard normalized.contains("light") else { return nil }
-        return "这台 Mac 现在的档位（light）不标说话人；换到 balanced 或 quality 档位之后，"
+        return "这台 Mac 现在用的是省资源的一档，不标说话人；在设置里换成 Balanced 或 Quality，"
             + "新开的会话就能在行上看到说话人。"
     }
 

@@ -479,7 +479,7 @@ enum SpeechRailProfilePresentation {
         case .quality:
             "Quality · 创作优先"
         case .balanced:
-            "Balanced · 分人和日常"
+            "Balanced · 说话人与日常"
         case .light:
             "Light · 轻量快速"
         }

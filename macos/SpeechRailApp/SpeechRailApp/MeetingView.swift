@@ -33,6 +33,8 @@ public struct MeetingView: View {
     @State private var reviewMinutes: MinutesVersion?
     /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
     @State private var isLabelingSpeakers = false
+    /// 空态里「想连电脑里的声音一起记」那一行可选项的展开态。
+    @State private var showsSourceOptions = false
 
     private enum PostTab: String, CaseIterable, Identifiable {
         case minutes
@@ -80,13 +82,8 @@ public struct MeetingView: View {
                 PageActionButton(
                     title: "查看设置",
                     systemImage: "slider.horizontal.3",
-                    helpText: "打开会话设置：分人标签、纪要模型与默认对讲口径"
+                    helpText: "打开会话设置：说话人标签、纪要模型与默认对话方式"
                 ) { openSettings() }
-                PageActionButton(
-                    title: "开始会议",
-                    systemImage: "mic",
-                    helpText: "按现在选的音频来源开始；麦克风第一次会请求系统授权"
-                ) { Task { await start() } }
             } else if meeting.phase.isLive || meeting.phase == .interrupted {
                 // 稿 `screenMeetingRecording` 的页头三件：`⌘⇧.` 键帽 / 静音麦克风 / 结束会议。
                 // 键帽跟在它对应的那个按钮旁边说"这个动作还有键位"（§8：⌘⇧. = 结束当前会话；
@@ -215,7 +212,7 @@ public struct MeetingView: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
-                .help("只是暂时不再上行音频；会话、转录都在，麦克风也还归这一场")
+                .help("只是暂时不把声音送进去；会话、转录都在，麦克风也还归这一场")
             }
         }
     }
@@ -253,12 +250,14 @@ public struct MeetingView: View {
         }
         var facts: [String] = []
         if let selection = meeting.selection { facts.append("来源：\(selection.label)") }
+        // 说话人这件事只说**一句**：有编号就说几位，没有就说这一场标不标。
+        // 原来"还没有分人"与"分人已开"会同时出现（开着但一个编号都还没有时），
+        // 两句摆在一起自相矛盾，也是用户点名的那个看不懂的词（2026-09-19）。
         if meeting.labeling.labels.isEmpty {
-            facts.append("还没有分人")
+            facts.append(meeting.labeling.isEnabled ? "还没标出说话人" : "不区分说话人")
         } else {
             facts.append("\(meeting.labeling.labels.count) 位说话人")
         }
-        if meeting.labeling.isEnabled { facts.append("分人已开") }
         facts.append("\(meeting.storedLineCount) 段已存好")
         if meeting.gapCount > 0 { facts.append("\(meeting.gapCount) 处补过静音") }
         // 标题已经说了"麦克风已静音"时不重复；只有暂停把标题占掉时才在这里补一句，
@@ -303,20 +302,25 @@ public struct MeetingView: View {
         }
     }
 
-    /// 空态（§6.2 第一行那一条）：**音频来源必须先答**。勾多个来源就是自动合流，
-    /// 所以这里没有第三个「混音」选项。
+    /// 空态（§6.2 第一行那一条）：音频来源有**默认答案**（麦克风），不问也能开始。
+    /// 勾多个来源就是自动合流，所以这里没有第三个「混音」选项。
+    ///
+    /// 2026-09-19 低门槛改造（用户反馈「门槛极高」）：**默认已经选好麦克风**，
+    /// 结论条上只放一件事——「开始会议」；本机音频那 9 个 App 的清单折进一行可选项里，
+    /// 想连电脑里的声音一起记的人展开就有全部选择，不想的人一眼都不用扫。
     private var emptyState: some View {
         VStack(spacing: SpeechRailDesignTokens.Spacing.gutter) {
             SessionConclusionBand(
                 tone: .healthy,
-                title: "选好音频来源就能开始",
-                message: "房间里的人走麦克风；这台 Mac 正在播放的声音（腾讯会议、QQ 音乐等）按 App 抓取。"
-                    + "两边可以一起录；进转录的是合成后的一条流，所以每一行的来源如实记成「合流」。",
-                hint: "本机音频不改变你听到的音量与内容，也不保存：原始音频和麦克风一样用完即弃；"
-                    + "按 App 抓不需要装虚拟声卡。"
+                title: "直接开始就能记",
+                message: "默认从麦克风记房间里的声音。想连这台 Mac 正在放的声音（腾讯会议、"
+                    + "QQ 音乐等）一起记，在下面展开勾一个 App 就行。",
+                hint: "原始音频不留存，只有文字进记录库；本机音频不需要装虚拟声卡，"
+                    + "也不改变你听到的音量和内容。"
             ) {
-                Button("说话人设置") { openSettings() }
-                    .speechRailButton(.secondary)
+                Button("开始会议") { Task { await start() } }
+                    .speechRailButton(.primary)
+                    .help("按现在选的来源开始记；第一次用麦克风会请求系统授权")
             }
 
             // 空态只有**一条**右栏（页级 `inspector`，这一态渲染 `meetingInfoCard`）。
@@ -325,10 +329,44 @@ public struct MeetingView: View {
             // 3 列（来源卡只剩 308pt），连稿里那句「本机音频：抓这个 App 正在播放的声音…」
             // 都被折成三行后截断。稿 `screenClosureMeetingSources` 里 split 只有
             // 「音频来源 + 本次会议」两栏。
-            SessionPanel { sourcesCard }
-            SessionPanel { blockedSourcesCard }
+            sourceOptions
             libraryCard
         }
+    }
+
+    /// 「按什么来源记」是**可选项**，默认收起成一行。
+    ///
+    /// 理由（用户 2026-09-19：「门槛极高」）：默认就是麦克风，直接按「开始会议」即可开始。
+    /// 本机音频那 9 个 App 的清单 + 两张「来源不可用时」的处置卡摆在首屏，
+    /// 等于让人在按「开始」之前先读完一份设置手册。这里折成一行，展开才有全部选择。
+    private var sourceOptions: some View {
+        DisclosureGroup(isExpanded: $showsSourceOptions) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+                SessionPanel { sourcesCard }
+                SessionPanel { blockedSourcesCard }
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Text("想连电脑里的声音一起记（可选）")
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(sourceSummaryText)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer(minLength: 0)
+            }
+        }
+        .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+    }
+
+    /// 收起时也要一眼看见「这一场到底在录什么」——所以摘要说来源名字，不说技术词。
+    private var sourceSummaryText: String {
+        var parts: [String] = []
+        if usesMicrophone { parts.append("麦克风") }
+        parts.append(contentsOf: systemApps.map(\.name))
+        guard !parts.isEmpty else { return "现在没有选任何来源" }
+        return "现在记：" + parts.joined(separator: " + ")
     }
 
     /// 音频来源：麦克风一行、本机音频按 App 若干行，最后一行是「自动混音」——
@@ -418,10 +456,9 @@ public struct MeetingView: View {
             SessionPanelHead(title: "本次会议", badge: "还没有开始")
             SessionHairline()
             VStack(alignment: .leading, spacing: 10) {
-                SessionKVRow("运行档位", profileRowText)
+                SessionKVRow("识别精度", profileRowText)
                 SessionKVRow("音频来源", sourceSummary)
                 SessionKVRow("说话人标签", preferences.meetingDiarizationEnabled ? "已开" : "关着")
-                SessionKVRow("采集格式", "24 kHz → 内部 16 kHz")
                 SessionKVRow("保存位置", "记录库 · 长期保留")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -980,7 +1017,7 @@ public struct MeetingView: View {
                             : "\(meeting.labeling.labels.count) 位"
                     )
                     inspectorRow("音频来源", meeting.selection?.label ?? "还没选")
-                    inspectorRow("分人", diarizationFact)
+                    inspectorRow("说话人", diarizationFact)
                     inspectorRow("整理", meeting.minutes.state.title)
                     inspectorRow("保存位置", session.libraryURL.lastPathComponent)
                 }
@@ -996,11 +1033,12 @@ public struct MeetingView: View {
         }
     }
 
+    /// 右栏那一行说的也是人话：不出现「分人」这类行话（用户 2026-09-19）。
     private var diarizationFact: String {
         switch meeting.labeling.state {
-        case .off: "关着"
-        case .active: "已开"
-        case .degraded: "停更了"
+        case .off: "不标"
+        case .active: "会标出"
+        case .degraded: "中途停了"
         case .unavailable: "这一档不支持"
         }
     }

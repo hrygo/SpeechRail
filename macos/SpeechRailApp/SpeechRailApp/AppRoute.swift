@@ -97,7 +97,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .assistant:
             "用这台 Mac 的语音能力对话：你说、它听、它答。原始音频不留存。"
         case .meeting:
-            "边开会边记：转录、分人、纪要，都留在本机记录库里。"
+            "边开会边记：谁说了什么、说了哪些要点，都留在本机记录库里。"
         case .captions:
             "字幕带贴在屏幕上看；记录长期留在记录库，这里回看、搜索和导出。"
         case .overview:

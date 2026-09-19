@@ -83,10 +83,10 @@ public struct SpeakerLabelingPanel: View {
     private var unavailable: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("这台 Mac 现在的档位不标说话人")
+                Text("这台 Mac 现在的设置不标说话人")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text(labeling.note ?? "正文照常记录；换到能分人的档位之后，新开的会话就会有说话人。")
+                Text(labeling.note ?? "正文照常记录；换成更准的一档之后，新开的会话就会有说话人。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -98,10 +98,10 @@ public struct SpeakerLabelingPanel: View {
     private var off: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("这一场没有开分人")
+                Text("这一场没有标说话人")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("正文照常记录。下一次开始前在「实时字幕 / 会议」里打开分人，就能在行上看到说话人。")
+                Text("正文照常记录。下一次开始前在「实时字幕 / 会议」里打开「说话人标签」，就能在行上看到谁在说。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     .fixedSize(horizontal: false, vertical: true)
