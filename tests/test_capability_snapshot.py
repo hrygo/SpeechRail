@@ -148,6 +148,19 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
         "public_contract": "generate(ref_audio, ref_text)",
         "private_cache_observed": True,
     }
+    timing = entry["timing_sidecar"]
+    if entry["available"]:
+        assert timing == {
+            "status": "supported",
+            "values": ["chunk"],
+            "coordinate_space": "normalized_spoken_unicode_codepoints",
+            "display_mapping": "conditional",
+            "delivery": "async_resource",
+            "reason": "planner_chunk_sample_conservation",
+        }
+    else:
+        assert timing["status"] == "unsupported"
+        assert timing["values"] == []
 
 
 def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> None:
