@@ -115,6 +115,8 @@ def _voice_entry(
     reason = (
         "disabled"
         if not enabled
+        else "voice_revoked"
+        if profile.revoked
         else "model_identity_unknown"
         if variant is None
         else "voice_incompatible"
@@ -165,6 +167,7 @@ def _voice_entry(
         "voice_identity_assurance": (
             "content_addressed" if profile.revision is not None else "legacy"
         ),
+        "revoked": profile.revoked,
         "model": model_identity(artifact),
         "descriptors": safe_voice_descriptor(profile),
         "quality_summary": _safe_quality_summary(profile.quality),
@@ -187,10 +190,16 @@ def _voice_entry(
             },
         },
         "conditional_synthesis": parameter(
-            "supported" if profile.revision is not None and compatible else "unsupported",
+            (
+                "supported"
+                if profile.revision is not None and compatible and not profile.revoked
+                else "unsupported"
+            ),
             reason=(
                 "legacy_voice_has_no_verified_revision"
                 if profile.revision is None
+                else "voice_revoked"
+                if profile.revoked
                 else "voice_not_available"
                 if not compatible
                 else "atomic_registry_lease_pin"
