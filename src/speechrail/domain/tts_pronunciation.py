@@ -8,12 +8,15 @@ import os
 import re
 import tempfile
 import threading
-import unicodedata
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from speechrail.domain.tts import normalize_tts_text
+from speechrail.domain.tts import (
+    _EMOJI_RE,
+    _MARKDOWN_CLEANUP_RE,
+    normalize_tts_text,
+)
 
 PRONUNCIATION_SET_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 PRONUNCIATION_REVISION_RE = re.compile(r"^pr_[0-9a-f]{32}$")
@@ -182,26 +185,32 @@ def make_pronunciation_set(
 def _normalization_mapping(raw: str) -> tuple[str, tuple[tuple[int, int], ...]]:
     """Mirror normalize_tts_text while retaining source spans for every codepoint."""
 
-    kept: list[tuple[str, int, int]] = []
-    for index, char in enumerate(raw):
-        if char in _MARKDOWN_CHARS:
-            continue
-        category = unicodedata.category(char)
-        codepoint = ord(char)
-        if (
-            category in {"So", "Sk"}
-            or 0x1F000 <= codepoint <= 0x1FAFF
-            or 0x2600 <= codepoint <= 0x27BF
-            or codepoint in {0x200D, 0xFE0F}
-        ):
-            continue
-        kept.append((char, index, index + 1))
+    stage1: list[tuple[str, int, int]] = []
+    cursor = 0
+    for match in _MARKDOWN_CLEANUP_RE.finditer(raw):
+        for index in range(cursor, match.start()):
+            stage1.append((raw[index], index, index + 1))
+        cursor = match.end()
+    for index in range(cursor, len(raw)):
+        stage1.append((raw[index], index, index + 1))
+
+    stage1_text = "".join(char for char, _, _ in stage1)
+    removed: set[int] = set()
+    for match in _EMOJI_RE.finditer(stage1_text):
+        removed.update(range(match.start(), match.end()))
+    kept = [
+        item
+        for index, item in enumerate(stage1)
+        if index not in removed
+    ]
 
     while kept and kept[0][0].isspace():
         kept.pop(0)
     while kept and kept[-1][0].isspace():
         kept.pop()
-    while kept and (kept[-1][0].isspace() or kept[-1][0] in _TRAILING_WEAK):
+    while kept and (
+        kept[-1][0].isspace() or kept[-1][0] in _TRAILING_WEAK
+    ):
         kept.pop()
 
     if not kept:
@@ -219,7 +228,6 @@ def _normalization_mapping(raw: str) -> tuple[str, tuple[tuple[int, int], ...]]:
 
     expected = normalize_tts_text(raw)
     if normalized != expected:
-        # Mapping must never silently diverge from the production normalizer.
         raise ValueError("normalization_mapping_policy_mismatch")
     return normalized, mapping
 
