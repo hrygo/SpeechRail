@@ -8,7 +8,7 @@ separate pronunciation/normalization contract. Plans stay request-local.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from speechrail.domain.tts import (
@@ -17,6 +17,7 @@ from speechrail.domain.tts import (
     _find_bounded_boundary,
     bounded_sentences,
 )
+from speechrail.domain.tts_pronunciation import SpokenText
 
 PLANNER_VERSION = "tts_bounded_v1"
 BoundaryKind = Literal["sentence", "secondary", "whitespace", "hard_limit", "end_of_input"]
@@ -29,6 +30,10 @@ class TtsPlannerChunk:
     source_end: int
     spoken_text: str
     boundary: BoundaryKind
+    # Raw coordinates are present only when the planner receives a SpokenText map.
+    raw_start: int | None = None
+    raw_end: int | None = None
+    pronunciation_entry_ids: tuple[str, ...] = ()
     # No additional silence is currently inserted. None is not a measured pause.
     suggested_pause_ms: int | None = None
 
@@ -80,7 +85,39 @@ class TtsTextPlanner:
             ascii_quote_open = _advance_quote_state(text, quote_stack, ascii_quote_open)
             position = end
         return TtsTextPlan(
-            version=PLANNER_VERSION, max_chars=self.max_chars,
+            version=PLANNER_VERSION,
+            max_chars=self.max_chars,
             input_sha256=hashlib.sha256(normalized_text.encode("utf-8")).hexdigest(),
             chunks=tuple(chunks),
         )
+
+    def plan_spoken(self, spoken: SpokenText) -> TtsTextPlan:
+        """Plan final spoken text while projecting every chunk back to raw input."""
+
+        base = self.plan(spoken.text)
+        mapped: list[TtsPlannerChunk] = []
+        for chunk in base.chunks:
+            overlaps = [
+                span
+                for span in spoken.spans
+                if span.spoken_end > chunk.source_start
+                and span.spoken_start < chunk.source_end
+            ]
+            raw_start = min((span.raw_start for span in overlaps), default=None)
+            raw_end = max((span.raw_end for span in overlaps), default=None)
+            entry_ids = tuple(
+                dict.fromkeys(
+                    span.entry_id
+                    for span in overlaps
+                    if span.entry_id is not None
+                )
+            )
+            mapped.append(
+                replace(
+                    chunk,
+                    raw_start=raw_start,
+                    raw_end=raw_end,
+                    pronunciation_entry_ids=entry_ids,
+                )
+            )
+        return replace(base, chunks=tuple(mapped))
