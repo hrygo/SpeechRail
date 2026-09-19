@@ -58,6 +58,26 @@ ws://127.0.0.1:8201/v1/realtime
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
 `conversation.item.truncate`。
 
+### 可选 TTS model revision 条件绑定
+
+在首个 TTS response 前，客户端可以通过 `session.update` 提供：
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "speechrail": {
+      "model_revision": {"expected": "<40-char-hex>"}
+    }
+  }
+}
+```
+
+服务端会在 `session.updated` 回显 `expected` 与匹配的 `catalog_revision`。条件不满足时返回
+`model_revision_conflict`，候选配置不会提交，当前 session 仍可继续使用或重新协商。该 revision
+是已加载 catalog artifact 的配置身份，不是模型权重内容 hash，也不替代真实 worker/runtime
+身份回执或跨重启证据。
+
 ### 可选 TTS 完整性回执
 
 客户端可在首个 TTS response 前发送：

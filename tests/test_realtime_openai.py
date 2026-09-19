@@ -2048,6 +2048,116 @@ def _drive_tts(
             return events
 
 
+def _quality_model_settings() -> tuple[dict[str, Any], str]:
+    catalog = load_catalog()
+    preset = catalog.preset("quality")
+    assert preset.tts_clone is not None
+    artifact = next(item for item in catalog.artifacts if item.key == preset.tts)
+    return (
+        {
+            "qwen3_model_dir": Path(preset.asr),
+            "qwen3_tts_model_dir": Path(preset.tts),
+            "qwen3_tts_clone_model_dir": Path(preset.tts_clone),
+        },
+        artifact.revision,
+    )
+
+
+def test_realtime_model_revision_pin_is_negotiated_and_forwarded() -> None:
+    settings_kwargs, revision = _quality_model_settings()
+    synthesizer = RecordingSpeechSynthesizer()
+    client, _ = _client(
+        tts_synthesizer=synthesizer,
+        settings_kwargs=settings_kwargs,
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {"model_revision": {"expected": revision}}
+                },
+            }
+        )
+        updated = socket.receive_json()
+        assert updated["type"] == "session.updated"
+        assert updated["session"]["speechrail"]["model_revision"] == {
+            "expected": revision,
+            "catalog_revision": revision,
+        }
+        events = _drive_tts(socket)
+
+    assert events[-1]["type"] == "response.done"
+    assert synthesizer.requests[0].expected_model_revision == revision
+
+
+def test_realtime_model_revision_pin_rejects_stale_revision_before_tts() -> None:
+    settings_kwargs, revision = _quality_model_settings()
+    synthesizer = RecordingSpeechSynthesizer()
+    client, _ = _client(
+        tts_synthesizer=synthesizer,
+        settings_kwargs=settings_kwargs,
+    )
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {"model_revision": {"expected": "0" * 40}}
+                },
+            }
+        )
+        error = socket.receive_json()
+        assert error["type"] == "error"
+        assert error["error"]["code"] == "model_revision_conflict"
+
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {"model_revision": {"expected": revision}}
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "session.updated"
+        events = _drive_tts(socket)
+
+    assert events[-1]["type"] == "response.done"
+    assert len(synthesizer.requests) == 1
+    assert synthesizer.requests[0].expected_model_revision == revision
+
+
+@pytest.mark.parametrize(
+    "model_revision",
+    [
+        {"expected": "A" * 40},
+        {"expected": "0" * 39},
+        {"expected": 42},
+        {"unexpected": "0" * 40},
+        "0" * 40,
+    ],
+)
+def test_realtime_model_revision_pin_rejects_invalid_shape(model_revision: object) -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {"speechrail": {"model_revision": model_revision}},
+            }
+        )
+        error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "invalid_model_revision"
+
+
 def test_realtime_tts_worker_unavailable_publishes_retryable_busy_error() -> None:
     async def scenario() -> list[dict[str, object]]:
         settings = Settings(

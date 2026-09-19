@@ -6,6 +6,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+import re
 import time
 import warnings
 from collections import deque
@@ -72,6 +73,7 @@ from speechrail.compatibility.openai_realtime import (
     transcription_segment,
     validate_append,
 )
+from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain.diarization import (
     AlignmentRequest,
@@ -108,6 +110,7 @@ SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 
 _MAX_UPDATES_PER_EVENT = 256
 _MAX_ALIGNMENT_PCM_BYTES = 30 * 32_000
+_MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
 logger = logging.getLogger(__name__)
 
@@ -261,6 +264,7 @@ class OpenAIRealtimeSession:
             "language": None,
             "prompt": "",
             "input_sample_rate": 16_000,
+            "expected_model_revision": None,
         }
 
     @staticmethod
@@ -337,6 +341,8 @@ class OpenAIRealtimeSession:
         adapted_event = dict(event)
         requested_enabled: bool | None = None
         requested_receipts: bool | None = None
+        requested_model_revision: str | None = None
+        model_revision_present = False
         raw_session = event.get("session")
         if isinstance(raw_session, dict):
             raw_transcription = raw_session.get("input_audio_transcription")
@@ -355,7 +361,7 @@ class OpenAIRealtimeSession:
                     "invalid_speechrail_extension",
                     "session.speechrail must be an object",
                 )
-            unknown = set(raw_extension) - {"diarization", "render_receipts"}
+            unknown = set(raw_extension) - {"diarization", "render_receipts", "model_revision"}
             if unknown:
                 raise RealtimeAdapterError(
                     "invalid_speechrail_extension",
@@ -385,6 +391,26 @@ class OpenAIRealtimeSession:
                         "session.speechrail.render_receipts requires boolean enabled only",
                     )
                 requested_receipts = raw_receipts["enabled"]
+            if "model_revision" in raw_extension:
+                model_revision_present = True
+                raw_model_revision = raw_extension["model_revision"]
+                if raw_model_revision is None:
+                    requested_model_revision = None
+                elif (
+                    not isinstance(raw_model_revision, dict)
+                    or set(raw_model_revision) != {"expected"}
+                    or not isinstance(raw_model_revision.get("expected"), str)
+                    or _MODEL_REVISION_RE.fullmatch(raw_model_revision["expected"]) is None
+                ):
+                    raise RealtimeAdapterError(
+                        "invalid_model_revision",
+                        (
+                            "session.speechrail.model_revision requires a 40-character "
+                            "lowercase hexadecimal expected revision"
+                        ),
+                    )
+                else:
+                    requested_model_revision = raw_model_revision["expected"]
             adapted_event["session"] = session
         updated, config = apply_session_update(
             adapted_event,
@@ -397,6 +423,10 @@ class OpenAIRealtimeSession:
             tts_voice_ids=self._tts_voice_ids,
             current_config=self._config,
         )
+        if model_revision_present:
+            config["expected_model_revision"] = requested_model_revision
+        else:
+            config.setdefault("expected_model_revision", None)
         input_sample_rate = int(config.get("input_sample_rate", 16_000))
         if self._timeline.accepted_samples > 0 and input_sample_rate != self._input_sample_rate:
             raise RealtimeAdapterError(
@@ -424,6 +454,16 @@ class OpenAIRealtimeSession:
         configured_voice = config.get("voice")
         if isinstance(configured_voice, str):
             self._require_voice_available(configured_voice)
+        expected_model_revision = config.get("expected_model_revision")
+        if expected_model_revision is not None:
+            artifact = self._tts_artifact_for_voice(
+                configured_voice if isinstance(configured_voice, str) else DEFAULT_VOICE_ID
+            )
+            if artifact is None or artifact.revision != expected_model_revision:
+                raise RealtimeAdapterError(
+                    "model_revision_conflict",
+                    "Requested model revision is not the active TTS artifact",
+                )
         if self._diarization_enabled:
             try:
                 await self._ensure_diarization()
@@ -533,6 +573,12 @@ class OpenAIRealtimeSession:
                     "enabled": True,
                     "version": 1,
                     "integrity_boundary": "pcm16_after_websocket_send",
+                }
+            expected_model_revision = self._config.get("expected_model_revision")
+            if isinstance(expected_model_revision, str):
+                extension["model_revision"] = {
+                    "expected": expected_model_revision,
+                    "catalog_revision": expected_model_revision,
                 }
             if extension:
                 session_payload["speechrail"] = extension
@@ -1076,6 +1122,14 @@ class OpenAIRealtimeSession:
                 "voice_revoked",
                 f"voice {selected_voice[:200]} is revoked",
             )
+        expected_model_revision = self._config.get("expected_model_revision")
+        if isinstance(expected_model_revision, str):
+            artifact = self._tts_artifact_for_mode(selected_profile.mode)
+            if artifact is None or artifact.revision != expected_model_revision:
+                raise RealtimeAdapterError(
+                    "model_revision_conflict",
+                    "Requested model revision is not the active TTS artifact",
+                )
 
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
@@ -1086,6 +1140,7 @@ class OpenAIRealtimeSession:
                 voice=selected_voice,
                 voice_revision=selected_profile.revision,
                 voice_mode=selected_profile.mode,
+                expected_model_revision=expected_model_revision,
                 language=str(self._config.get("language") or "auto"),
                 speed=response_speed,
                 response_id=response_id,
@@ -1093,6 +1148,20 @@ class OpenAIRealtimeSession:
             )
         )
         self._pending_text = None
+
+    def _tts_artifact_for_mode(self, voice_mode: str) -> ModelArtifact | None:
+        if voice_mode == "clone" and self._tts_clone_artifact is not None:
+            return self._tts_clone_artifact
+        return self._tts_artifact
+
+    def _tts_artifact_for_voice(self, voice: str) -> ModelArtifact | None:
+        from speechrail.domain.tts import get_voice_profile
+
+        try:
+            profile = get_voice_profile(voice)
+        except (ValueError, VoiceStoreUnavailableError):
+            return None
+        return self._tts_artifact_for_mode(profile.mode)
 
     def _require_voice_available(self, voice: str) -> None:
         from speechrail.domain.tts import get_voice_profile
@@ -1559,6 +1628,7 @@ class OpenAIRealtimeSession:
         voice: str,
         voice_revision: str | None,
         voice_mode: str,
+        expected_model_revision: str | None,
         language: str,
         speed: float,
         response_id: str,
@@ -1632,6 +1702,7 @@ class OpenAIRealtimeSession:
                     speed=speed,
                     language=language,
                     expected_voice_revision=voice_revision,
+                    expected_model_revision=expected_model_revision,
                 )
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     async with self._services.governor.reserve(

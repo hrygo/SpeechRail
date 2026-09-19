@@ -194,6 +194,12 @@ model revision 必须等于当前有效 TTS artifact 的 catalog revision，未�
 `409 model_revision_conflict`，不会启动该次合成。未携带这些扩展 Header 的旧请求保持原有
 alias/模型选择行为。
 
+Realtime 客户端可在 `session.update.session.speechrail` 中使用
+`model_revision: {"expected": "<40-char-hex>"}` 绑定同一 catalog artifact；服务端在
+`session.updated` 回显匹配 revision，并在首个 PCM 前以 `model_revision_conflict` 拒绝未知或
+不匹配的 revision。该扩展只证明配置 catalog 身份，不等同于权重内容 hash 或 worker 重启后
+身份证明。
+
 客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
 `ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
 允许时并行；实现不承诺对正在运行的 Metal kernel 做硬抢占。Voice creation、quality validation

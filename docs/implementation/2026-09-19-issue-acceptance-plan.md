@@ -629,6 +629,15 @@ HTTP/port contract tests cover accepted and stale pins. This guards the configur
 catalog generation only; it does not turn catalog metadata into a verified runtime
 weight hash and does not replace managed receipt/restart evidence.
 
+The same configured-artifact boundary is now available to Realtime sessions through
+`session.update.session.speechrail.model_revision.expected`. A matching session update
+echoes `expected` and `catalog_revision`; an unknown or stale value returns
+`model_revision_conflict` without committing the candidate configuration. The selected
+TTS lane is checked again before `response.create`, and the accepted value is carried
+into the vendor-neutral `SpeechRequest`. Realtime and HTTP therefore share the same
+fail-closed catalog-pin semantics, while actual worker weight identity and cross-restart
+stability remain external acceptance evidence.
+
 ### 2026-09-20 ambiguous pronunciation span downgrade
 
 The #70 raw→spoken projection now treats a planner boundary that cuts through one
