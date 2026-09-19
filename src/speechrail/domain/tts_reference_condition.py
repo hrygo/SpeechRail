@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-
 PREPARED_REFERENCE_SCHEMA = "prepared_reference_condition_v1"
 
 
