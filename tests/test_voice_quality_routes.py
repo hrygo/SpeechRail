@@ -99,6 +99,9 @@ class SineSynthesizer:
         del voice
         return self.runtime_revision
 
+    async def evict_warm_capability(self) -> None:
+        self.runtime_revision = None
+
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
 
