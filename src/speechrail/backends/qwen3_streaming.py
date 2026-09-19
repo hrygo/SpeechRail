@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from contextlib import AbstractAsyncContextManager
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
