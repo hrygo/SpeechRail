@@ -359,3 +359,36 @@ also cover aged-batch anti-starvation and cancelled-waiter cleanup.
 
 This is code/protocol evidence. Current-head Ubuntu/macOS CI and real MLX mixed-load
 latency distributions remain required before declaring E5/E13 fully accepted.
+
+
+## #34 frozen loudness algorithm checkpoint
+
+The current production frozen-gain path now has deterministic code-level coverage
+for the previously reproduced F1–F4 boundaries:
+
+- leading silence does not consume the credible calibration window;
+- a single impulse cannot establish request gain;
+- peak limiting attacks sample-by-sample and releases across process() calls instead
+  of attenuating an entire 200 ms block and immediately resetting;
+- a near-threshold sample cannot toggle a whole chunk between bypass and full gain;
+- processing is invariant to transport partitioning and preserves sample count;
+- short/insufficient calibration stays at unity rather than locking unreliable gain;
+- reset clears calibration, ramp and limiter state.
+
+Calibration uses fixed media-time analysis frames, a minimum active fraction and a
+median of multiple eligible frame powers. The first credible frame arms a bounded
+collection deadline; silence before that does not age the request into fallback.
+
+The known remaining quantization boundary is now observable without changing acoustic
+behavior: before float output is converted to PCM16, the worker records a bounded
+`float_overrange` delivery event whenever finite model samples exceed |1.0|.
+The metric contains no amplitude, sample sequence, text, voice ID or reference data.
+
+This evidence does NOT prove that the real MLX model commonly emits overrange floats,
+nor does it prove subjective transient quality. Moving the limiter into the float
+domain remains conditional on real-model evidence because doing so would change the
+acoustic contract.
+
+Current code-level acceptance therefore covers the reproduced algorithm defects;
+multi-clone/multi-text MLX measurements, first-audio/service-output timings, and
+listening evidence remain required for final #34 closure.
