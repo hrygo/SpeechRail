@@ -196,6 +196,25 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(previewButton.waitForExistence(timeout: 10))
     }
 
+    func testWorksEmptyFixtureOffersSafeNavigationWithoutStoredWorks() {
+        let app = launchSpeechRail(arguments: [
+            "--ui-test", "--ui-test-open-control-center", "--ui-test-empty-works"
+        ])
+        openControlCenter(in: app)
+        app.buttons["我的作品"].clickWhenReady()
+        XCTAssertTrue(app.staticTexts["还没有作品"].waitForExistence(timeout: 10))
+        XCTAssertFalse(identifierElement("work-row", in: app).exists)
+        app.buttons["去配音台"].clickWhenReady()
+        let title = identifierElement("workspace-title", in: app)
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        let navigated = NSPredicate(format: "label == %@", "配音台")
+        expectation(for: navigated, evaluatedWith: title)
+        waitForExpectations(timeout: 10)
+        app.buttons["我的作品"].clickWhenReady()
+        XCTAssertTrue(app.staticTexts["还没有作品"].waitForExistence(timeout: 10))
+        XCTAssertFalse(identifierElement("work-row", in: app).exists)
+    }
+
     func testWorksViewExposesSelectionAndExportActions() throws {
         let app = launchSpeechRail()
         openControlCenter(in: app)

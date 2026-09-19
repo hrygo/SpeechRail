@@ -127,3 +127,19 @@ because package-index DNS is unavailable. These are NOT recorded as passed gates
 current-head CI and packaging evidence remain required. The initial published
 commit's Ubuntu/macOS tests, macOS App and package checks succeeded; they do not
 validate this later increment until it is published and checked separately.
+
+### Increment 3 — isolated populated and empty macOS Works fixtures
+
+Code inspection corrected the initial #53 finding: App's UI-test composition used
+the default real `CreativeWorkStore`, so persisted user/previous-test state could
+control whether the list appeared. Debug UI-test composition now always creates a
+unique temporary store; default fixtures seed one synthetic silent work, and
+`--ui-test-empty-works` leaves it empty. Failure cannot fall back to user storage.
+Release composition ignores these fixture flags and retains the real store.
+
+Adds an empty-state UI scenario checking the title, absence of work rows, navigation
+to Dubbing, and return to an unchanged empty view. Existing populated/export scenario
+is preserved. This Linux environment cannot compile SwiftUI or execute XCUITest;
+macOS CI evidence is required. No UI automation was run on the user's desktop.
+The existing populated test can skip lower-pane assertions on small CI displays;
+a green job must not be described as proof that skipped assertions executed.
