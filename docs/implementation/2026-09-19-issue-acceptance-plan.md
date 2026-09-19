@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail issue acceptance implementation ledger"
 status: active
-date: 2026-09-19
+date: 2026-09-20
 ---
 
 # Single-PR implementation and acceptance plan
@@ -585,6 +585,17 @@ snapshot remains a configured catalog view and continues to report its model
 metadata into a model pin. Synthetic handshake and HTTP contract tests cover the
 state boundary; managed ASR identity and cross-restart observations remain external
 acceptance evidence.
+
+### 2026-09-20 ambiguous pronunciation span downgrade
+
+The #70 raw→spoken projection now treats a planner boundary that cuts through one
+pronunciation replacement span as non-unique: affected chunks retain their bounded
+entry IDs but expose `raw_start/raw_end=null`. The optional #73 HTTP timing resource
+therefore reports `display_mapping.status=unavailable` with the bounded reason
+`display_mapping_ambiguous`, rather than repeating one raw range for several spoken
+chunks and implying false subtitle coordinates. Deterministic planner and route
+regressions cover both the pure mapping and public timing-resource boundary; this
+remains coordinate-integrity evidence, not acoustic timing accuracy.
 
 ### Remaining acceptance gates
 

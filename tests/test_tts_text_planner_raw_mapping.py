@@ -57,3 +57,26 @@ def test_plan_spoken_is_deterministic_for_same_revision_and_text() -> None:
     spoken = apply_pronunciation("GPU 测试", pronunciation)
     planner = TtsTextPlanner(max_chars=8)
     assert planner.plan_spoken(spoken) == planner.plan_spoken(spoken)
+
+
+def test_plan_spoken_downgrades_chunks_split_inside_one_pronunciation_span() -> None:
+    pronunciation = make_pronunciation_set(
+        "split",
+        (
+            PronunciationEntry(
+                id="chang-an",
+                surface="长安",
+                spoken="常安",
+                language="zh",
+            ),
+        ),
+    )
+    spoken = apply_pronunciation("长安", pronunciation, language="zh")
+
+    plan = TtsTextPlanner(max_chars=1).plan_spoken(spoken)
+
+    assert [chunk.spoken_text for chunk in plan.chunks[:2]] == ["常", "安"]
+    assert [(chunk.raw_start, chunk.raw_end) for chunk in plan.chunks[:2]] == [
+        (None, None),
+        (None, None),
+    ]

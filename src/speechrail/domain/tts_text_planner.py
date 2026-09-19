@@ -103,8 +103,25 @@ class TtsTextPlanner:
                 if span.spoken_end > chunk.source_start
                 and span.spoken_start < chunk.source_end
             ]
-            raw_start = min((span.raw_start for span in overlaps), default=None)
-            raw_end = max((span.raw_end for span in overlaps), default=None)
+            split_span = any(
+                span.spoken_start < chunk.source_start
+                or span.spoken_end > chunk.source_end
+                for span in overlaps
+            )
+            # A chunk that cuts through one replacement span cannot be mapped
+            # to a unique raw interval. Keep the entry audit IDs, but make the
+            # coordinate projection explicitly unavailable instead of
+            # repeating the full raw span for every split chunk.
+            raw_start = (
+                None
+                if split_span
+                else min((span.raw_start for span in overlaps), default=None)
+            )
+            raw_end = (
+                None
+                if split_span
+                else max((span.raw_end for span in overlaps), default=None)
+            )
             entry_ids = tuple(
                 dict.fromkeys(
                     span.entry_id

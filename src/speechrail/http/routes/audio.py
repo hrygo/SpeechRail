@@ -1662,8 +1662,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ) == tuple(
                     (item.source_start, item.source_end) for item in timing_plan.chunks
                 ):
-                    display_mapping_status = "mapped"
-                    display_spans = tuple(
+                    mapped_display_spans = tuple(
                         (
                             (item.raw_start, item.raw_end)
                             if item.raw_start is not None and item.raw_end is not None
@@ -1671,6 +1670,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         )
                         for item in mapped.chunks
                     )
+                    if any(item is None for item in mapped_display_spans):
+                        display_mapping_status = "unavailable"
+                        display_mapping_reason = "display_mapping_ambiguous"
+                        display_spans = ()
+                    else:
+                        display_mapping_status = "mapped"
+                        display_spans = tuple(
+                            item for item in mapped_display_spans if item is not None
+                        )
                 else:
                     display_mapping_status = "unavailable"
                     display_mapping_reason = "planner_mapping_mismatch"

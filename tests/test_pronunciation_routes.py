@@ -159,6 +159,56 @@ def test_v1_pronunciation_header_does_not_force_receipt(
     assert "SpeechRail-Receipt-Id" not in response.headers
 
 
+def test_timing_mapping_downgrades_when_a_pronunciation_span_is_split(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, _synth, _registry = _client(tmp_path, monkeypatch)
+    response = client.put(
+        "/v1/speechrail/pronunciation-sets/long",
+        json={
+            "expected_revision": None,
+            "entries": [
+                {
+                    "id": "long-rewrite",
+                    "surface": "长",
+                    "spoken": "常" * 250,
+                    "language": "zh",
+                    "case_sensitive": True,
+                    "word_boundary": False,
+                    "source": "user",
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    revision = response.json()["revision"]
+
+    speech = client.post(
+        "/v1/audio/speech",
+        headers={
+            "SpeechRail-Pronunciation-Set": f"long@{revision}",
+            "SpeechRail-Timing-Mode": "chunk",
+        },
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "长",
+            "voice": "narrator",
+            "response_format": "pcm",
+            "language": "zh",
+        },
+    )
+    assert speech.status_code == 200
+
+    timing = client.get(
+        f"/v1/speechrail/audio/timings/{speech.headers['SpeechRail-Timing-Id']}"
+    ).json()
+    assert timing["display_mapping"] == {
+        "status": "unavailable",
+        "reason": "display_mapping_ambiguous",
+    }
+
+
 def test_pronunciation_management_cas_privacy_and_revoke(
     tmp_path: Path,
     monkeypatch,
