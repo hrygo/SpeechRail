@@ -49,6 +49,19 @@ worker 的阶段/资源切片，不是 paced speech、CER/WER 或长时稳定性
 C1 证明当前运行态可观察到 TTS 活跃期间的 ASR∥TTS overlap；C2 中 ASR 很快
 完成，不能据此推出反向公平性或优先级结论。
 
+## 受保护 metrics 快照
+
+在同一服务上通过鉴权 `/metrics` 做了只读核对。当前 managed `2.7.0` 实际
+暴露的 Realtime phase histogram 包含 `asr_admission`（累计 58 次）、
+`tts_admission`（累计 53 次）和 `send`（累计 3871 次）；这些是服务累计值，
+不是上面 3 个 session 的独立样本。标签只包含固定 phase 与 histogram bucket，
+没有 request ID、文本或音频内容。
+
+本次快照未出现 `asr_commit_ack`、`asr_terminal_wait` 或 governor queue
+wait/release histogram。当前 PR 源码虽包含更完整的 phase 集合，但 managed
+release 没有证明已经安装该观测契约；因此不能用这份旧 runtime metrics 快照
+宣称当前 PR 的 E3a 已完成。
+
 ## 身份与限制
 
 本轮 benchmark 输出的 `model_identity` 仍为空；`quality` profile 的配置声明

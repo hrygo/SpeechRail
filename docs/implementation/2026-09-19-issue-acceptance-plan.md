@@ -625,6 +625,12 @@ managed `2.7.0` 在 integrity receipt 请求中未返回 `SpeechRail-Receipt-Id`
 所以没有将 #44/#65 或 #62/#63/#64/#67 标记为完成，也没有把它当作当前 PR head
 的 managed wheel 一致性证明。
 
+同一服务的鉴权 `/metrics` 只读快照实际暴露 `asr_admission`、`tts_admission`、
+`send` 三类 Realtime phase histogram，未见 `asr_commit_ack`、`asr_terminal_wait`
+或 governor wait/release histogram；标签未包含 request ID、文本或音频内容。
+由于当前源码包含更完整的 phase 集合，这一差异进一步证明 managed `2.7.0`
+不是当前 PR head 的观测契约证明，不能据此宣称 #44 E3a 完成。
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
