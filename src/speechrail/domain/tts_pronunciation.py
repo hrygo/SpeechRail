@@ -270,12 +270,17 @@ def _boundary_ok(text: str, start: int, end: int) -> bool:
     # Numeric-unit fixtures such as "5km" are a required pronunciation
     # use case. Treat digit -> alphabetic surface as a boundary, but keep
     # ordinary alphabetic/underscore prefix collisions fail-closed.
-    if (
-        start > 0
-        and word_char(text[start - 1])
-        and not (text[start - 1].isdigit() and text[start].isalpha())
-    ):
-        return False
+    if start > 0 and word_char(text[start - 1]):
+        previous = text[start - 1]
+        current = text[start]
+        allows_numeric_prefix = previous.isdigit() and current.isalpha()
+        allows_cjk_to_ascii = (
+            "\u4e00" <= previous <= "\u9fff"
+            and current.isascii()
+            and current.isalnum()
+        )
+        if not (allows_numeric_prefix or allows_cjk_to_ascii):
+            return False
     if end >= len(text) or not word_char(text[end]):
         return True
     # ASCII terminology is commonly adjacent to CJK text ("AI模式").
