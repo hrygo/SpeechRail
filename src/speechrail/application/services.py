@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from speechrail.application.diarization.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
+from speechrail.application.render_receipts import RenderReceiptRegistry
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
 from speechrail.backends.model_identity import inspect_model
 from speechrail.backends.qwen3_native import (
@@ -176,6 +177,7 @@ class AppServices:
     alignment_admission: AlignmentAdmission = field(default_factory=AlignmentAdmission)
     diarization_admission: DiarizationAdmission = field(default_factory=DiarizationAdmission)
     metrics: Metrics = field(default_factory=Metrics)
+    render_receipts: RenderReceiptRegistry = field(default_factory=RenderReceiptRegistry)
 
     @property
     def asr_ready(self) -> bool:
