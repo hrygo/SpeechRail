@@ -18,7 +18,7 @@ from speechrail.application.transcript_merge import TranscriptMerger
 from speechrail.backends.qwen3_shared import Qwen3SharedWorker, WorkerTransportError
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment, TranscriptWord
 from speechrail.domain.ports import BatchTranscriber, TranscriptionRequest
-from speechrail.runtime.asr_mode import AsrBatchTicket
+from speechrail.runtime.asr_mode import AsrBatchTicket, AsrModeScheduler
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
     error_frame_message,
@@ -313,7 +313,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
 
     def _new_batch_ticket(self) -> AsrBatchTicket | None:
         scheduler = getattr(self._shared_owner, "mode_scheduler", None)
-        if scheduler is None:
+        if not isinstance(scheduler, AsrModeScheduler):
             return None
         return scheduler.new_batch_ticket()
 
@@ -323,7 +323,7 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         ticket: AsrBatchTicket | None,
     ) -> AsyncIterator[None]:
         scheduler = getattr(self._shared_owner, "mode_scheduler", None)
-        if scheduler is not None and ticket is not None:
+        if isinstance(scheduler, AsrModeScheduler) and ticket is not None:
             async with scheduler.batch_window(ticket):
                 yield
             return
