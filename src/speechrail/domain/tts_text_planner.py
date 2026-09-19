@@ -47,7 +47,7 @@ class TtsTextPlan:
     coordinate_space: str = "normalized_text_unicode_codepoints"
     native_context_conditioning: str = "unsupported"
 
-    def summary(self) -> dict[str, str | int]:
+    def summary(self) -> dict[str, object]:
         """Low-cardinality policy/count fields, never source text or its hash."""
         return {
             "planner_version": self.version,
