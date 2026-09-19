@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
-from speechrail.runtime.asr_mode import AsrModeGate
+from speechrail.runtime.asr_mode import AsrModeGate, AsrModeScheduler
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -102,7 +102,13 @@ class _PendingRequest:
 class Qwen3SharedWorker:
     """管理一个 Qwen3 子进程, 并由单一 dispatcher 分发所有返回帧。"""
 
-    def __init__(self, config: SharedWorkerConfig, *, max_sessions: int = MAX_SESSIONS) -> None:
+    def __init__(
+        self,
+        config: SharedWorkerConfig,
+        *,
+        max_sessions: int = MAX_SESSIONS,
+        batch_aging_seconds: float = 30.0,
+    ) -> None:
         if not 1 <= max_sessions <= MAX_SESSIONS:
             raise ValueError(f"max_sessions must be between 1 and {MAX_SESSIONS}")
         self.config = config
@@ -111,8 +117,12 @@ class Qwen3SharedWorker:
         self._start_lock = asyncio.Lock()
         self._ready = False
         self._identity: tuple[str, str] | None = None
-        # gate 的生命周期属于 owner, 重启子进程时也必须保持同一个对象。
+        # The gate/scheduler lifetime belongs to the owner across worker restarts.
         self._mode_gate = AsrModeGate()
+        self._mode_scheduler = AsrModeScheduler(
+            self._mode_gate,
+            batch_aging_seconds=batch_aging_seconds,
+        )
         self._generation_guard = GenerationGuard()
         self._failure_task: asyncio.Task[None] | None = None
         self._dispatcher: asyncio.Task[None] | None = None
@@ -155,6 +165,12 @@ class Qwen3SharedWorker:
         """返回 owner 共用的 ASR 模式门, 不随子进程重启替换。"""
 
         return self._mode_gate
+
+    @property
+    def mode_scheduler(self) -> AsrModeScheduler:
+        """Return the shared fair scheduler layered above the final mode gate."""
+
+        return self._mode_scheduler
 
     @property
     def timeout_seconds(self) -> float:
