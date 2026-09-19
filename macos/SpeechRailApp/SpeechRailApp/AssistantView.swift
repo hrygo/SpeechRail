@@ -444,7 +444,7 @@ public struct AssistantView: View {
                 Text("换个角色、声音或对话方式（可选）")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("现在是「\(selectedPersonaTitle)」·「\(currentVoiceName ?? "默认声音")」·「\(mode.title)」")
+                Text("现在是「\(selectedPersonaTitle)」·「\(currentVoiceName ?? Self.defaultVoiceLabel)」·「\(mode.title)」")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Spacer(minLength: 0)
@@ -704,7 +704,10 @@ public struct AssistantView: View {
         let tts = verdict(health?.ttsReady == true)
         let diarization = verdict(health?.diarizationReady == true)
         return [
-            ("语音识别", asr.0, asr.1, "实时字幕与会议转录都靠它，现在就能用。"),
+            // 这一行只写"它是干什么的"：能不能用由左边那颗状态胶囊回答。
+            // 原来那句尾巴是「……现在就能用」——服务没起来时它和「未就绪」正面打架
+            // （2026-09-19 离屏走查，同一屏两句话说反）。
+            ("语音识别", asr.0, asr.1, "实时字幕与会议转录都靠它。"),
             ("语音合成", tts.0, tts.1, "助手说话用它；音色可以在设置里换。"),
             ("说话人区分", diarization.0, diarization.1,
              "会议里谁在说话会自动编号（一号、二号…），号码只在这一场里有效；不用提前录声纹。"),
@@ -915,6 +918,10 @@ public struct AssistantView: View {
         guard !id.isEmpty else { return nil }
         return model.creatorVoices.first { $0.id == id }?.name ?? id
     }
+
+    /// 一个音色都没选时**生效的**东西：服务端自己的默认声音。
+    /// 界面上只有一个说法——「默认声音」——可选项那一行与右栏事实行共用它。
+    private static let defaultVoiceLabel = "默认声音"
 
     private func selectVoice(_ voice: CreatorVoice) {
         selectedVoiceID = voice.id
@@ -1164,26 +1171,34 @@ public struct AssistantView: View {
         switch state {
         case .ready:
             [
-                ("对话模型", preferences.isLLMConfigured ? "已连接 · \(preferences.llmConfiguration.model)" : "未配置"),
+                // 「已配置」不是「已连接」：这一行读的是**填过没有**，还没发过一次请求。
+                // 能不能连上由设置页的「检查连接」回答（2026-09-19 走查：上一版写「已连接」，
+                // 地址写错时这一屏照样说连上了）。
+                ("对话模型", preferences.isLLMConfigured
+                    ? "已配置 · \(preferences.llmConfiguration.model)"
+                    : "未配置"),
                 ("输入方式", "语音或打字"),
                 ("对话方式", mode.title),
                 ("输入设备", "系统默认"),
                 ("角色", "\(selectedPersonaTitle) · 本轮定"),
-                ("音色", currentVoiceName ?? "未选")
+                // 没选音色时真正生效的是服务端的默认声音（`AssistantSession` 不传 id 就是它），
+                // 所以这里与上面那行可选项说同一句话：默认声音。原来写「未选」，
+                // 同一屏就出现「默认声音」与「未选」两种说法（2026-09-19 离屏走查）。
+                ("音色", currentVoiceName ?? Self.defaultVoiceLabel)
             ]
         case .blocked:
             [
                 ("大模型", "未配置"),
                 ("服务地址", preferences.llmBaseURL.isEmpty ? "—" : preferences.llmBaseURL),
                 ("密钥", LLMKeychain.load() == nil ? "—" : "已存钥匙串"),
-                ("音色", currentVoiceName ?? "未选"),
+                ("音色", currentVoiceName ?? Self.defaultVoiceLabel),
                 ("角色", selectedPersonaTitle),
                 ("采集设备", "系统默认")
             ]
         case .live, .review:
             [
                 ("大模型", assistant.llmModel ?? "未配置"),
-                ("音色", "\(currentVoiceName ?? "未选") · 下一句可换"),
+                ("音色", "\(currentVoiceName ?? Self.defaultVoiceLabel) · 下一句可换"),
                 ("角色", "\(activePersonaTitle) · 本轮已定"),
                 ("打断", mode.allowsBargeIn ? "实时对讲时生效" : "一问一答：它说话时闭麦"),
                 ("已聊", "\(assistant.turns.count) 轮"),

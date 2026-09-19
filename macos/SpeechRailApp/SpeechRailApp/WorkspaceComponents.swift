@@ -717,7 +717,17 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
 
         return Group {
             if growsWithContent {
-                padded.frame(minHeight: slot + padding * 2, alignment: .topLeading)
+                // `+ Spacing.xs` 是**刀口余量**，不是排版偏好：卡片吃满窗口之后，内容真正
+                // 需要的高度比它报出去的多几 pt（亚像素累积），滚动容器于是判「装得下」，
+                // SwiftUI 就从最后一行文字身上挤出那几 pt，卡片再 `clipShape` 就是一道硬切。
+                // 留出这一档余量后，内容**永远**比窗格高一点点：多出来的高度落在卡片自己的
+                // 留白里（可见版面不变），滚动条也不会再判错。
+                // 离屏实测 2026-09-19（1200 宽）：窗高 900 裁掉字幕空态页脚那一行的下半截，
+                // 820 与 ≥905 都不裁——正是这个刀口。
+                padded.frame(
+                    minHeight: slot + padding * 2 + SpeechRailDesignTokens.Spacing.xs,
+                    alignment: .topLeading
+                )
             } else {
                 padded.frame(height: slot + padding * 2, alignment: .topLeading)
             }

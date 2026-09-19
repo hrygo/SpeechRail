@@ -418,9 +418,15 @@ public struct ServiceOverviewView: View {
             ServiceCapability(
                 title: "实时语音断句",
                 status: health.realtimeVAD?.ready == true ? .ready : .notReady,
-                reason: health.realtimeVAD?.message
-                    ?? health.streamingState.map(SpeechRailRuntimeStatePresentation.text)
-                    ?? "未读取实时语音状态。"
+                // 就绪时**不照抄服务端那句英文**（本机实测原文：
+                // `Silero VAD runtime and model are ready`）——它是写给调用方看的，
+                // 用户在这一列要读的是"这件事现在什么状态"。没就绪时才把服务给的原因
+                // 原样带出来：那一刻它是唯一的线索。
+                reason: health.realtimeVAD?.ready == true
+                    ? "运行中；说话与安静的边界由它在线判断，字幕带据此断句。"
+                    : (health.realtimeVAD?.message
+                        ?? health.streamingState.map(SpeechRailRuntimeStatePresentation.text)
+                        ?? "未读取实时语音状态。")
             ),
             ServiceCapability(
                 title: diarization.title,
