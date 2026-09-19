@@ -31,6 +31,8 @@ public struct MeetingView: View {
     @State private var reviewLines: [TranscriptLine] = []
     @State private var reviewSpeakerNames: [String: String] = [:]
     @State private var reviewMinutes: MinutesVersion?
+    /// 录制中打开「标注说话人」面板（稿 `screenMeetingRecording` 表头那一颗）。
+    @State private var isLabelingSpeakers = false
 
     private enum PostTab: String, CaseIterable, Identifiable {
         case minutes
@@ -103,22 +105,55 @@ public struct MeetingView: View {
                         meeting.toggleMicrophoneMute()
                     }
                 }
-                PageActionButton(
-                    title: "结束会议",
-                    systemImage: "stop.circle",
-                    helpText: "结束这一场；转录会留下，接着开始整理纪要"
-                ) {
-                    confirmingFinish = true
+                if meeting.phase == .interrupted {
+                    // 中断板（稿 `screenClosureMeetingInterrupted`）：页头两件是「打开数据目录」与
+                    // 「继续这一段」；结束这一场仍在中断卡里（那里它叫「结束并整理」，与卡片自己的
+                    // 说明在同一处看），所以页头不再重复第三个按钮。
+                    PageActionButton(
+                        title: "打开数据目录",
+                        systemImage: "folder",
+                        helpText: "在访达里选中记录库文件；它一直在本机，随时可以复制走"
+                    ) {
+                        NSWorkspace.shared.activateFileViewerSelecting([session.libraryURL])
+                    }
+                    PageActionButton(
+                        title: "继续这一段",
+                        systemImage: "play.fill",
+                        helpText: "重新拿一次来源接着录：序号继续，断点期间没录上的就是没有"
+                    ) {
+                        Task { await meeting.continueAfterInterruption() }
+                    }
+                } else {
+                    PageActionButton(
+                        title: "结束会议",
+                        systemImage: "stop.circle",
+                        helpText: "结束这一场；转录会留下，接着开始整理纪要"
+                    ) {
+                        confirmingFinish = true
+                    }
                 }
             } else if meeting.minutes.isBusy {
-                // 整理中：这一态原本没有任何出口（纪要最长要跑十几分钟）。
-                // 出口是「停止整理」——转录已经存好，停下来不丢东西，可以重新生成。
+                // 整理中（稿 `screenClosureMeetingProcessing`）：页头两件。
+                // ①「先导出转录…」——纪要最长要跑十几分钟，等它出来才让导是不合理的：
+                //   转录此时**已经封存**，导出读库、不等纪要（§20.3 的 J2 摩擦点）。
+                // ②「停止整理」——停下来不丢东西，可以重新生成。
+                exportMenu(title: "先导出转录…", helpText: "把已经存好的转录导出成文件；纪要还在生成，不等它")
                 PageActionButton(
                     title: "停止整理",
                     systemImage: "stop.circle",
                     helpText: "停下这一次整理；转录已经存好，随时可以重新生成"
                 ) {
                     meeting.minutes.stop()
+                }
+            } else if meeting.phase == .archived, meeting.sessionID != nil {
+                // 已归档（稿 `screenMeetingMinutes` 的页头两件）。
+                exportMenu(title: "导出…", helpText: "导出这一场：转录加已生成的纪要")
+                PageActionButton(
+                    title: "重新生成纪要",
+                    systemImage: "arrow.clockwise",
+                    helpText: "按现在的模型设置再整理一遍；旧版本都留着，不会覆盖"
+                ) {
+                    Task { await regenerateMinutes(for: pageSessionID) }
                 }
             }
             // 右栏收起控件：会议页四个状态共用一处（稿 `meetingShell` 末行）。名字按右栏
@@ -157,6 +192,11 @@ public struct MeetingView: View {
             Text("麦克风同一时刻只能由一个会话使用。结束后转录会留着，接着开始整理纪要。")
         }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
+        .sheet(isPresented: $isLabelingSpeakers) {
+            SpeakerLabelingSheet(labeling: meeting.labeling, sessionID: meeting.sessionID) {
+                isLabelingSpeakers = false
+            }
+        }
     }
 
     // MARK: - 状态带
@@ -271,7 +311,7 @@ public struct MeetingView: View {
                 tone: .healthy,
                 title: "选好音频来源就能开始",
                 message: "房间里的人走麦克风；这台 Mac 正在播放的声音（腾讯会议、QQ 音乐等）按 App 抓取。"
-                    + "两边可以一起录，记录里会标出每一段来自哪一路。",
+                    + "两边可以一起录；进转录的是合成后的一条流，所以每一行的来源如实记成「合流」。",
                 hint: "本机音频不改变你听到的音量与内容，也不保存：原始音频和麦克风一样用完即弃；"
                     + "按 App 抓不需要装虚拟声卡。"
             ) {
@@ -298,7 +338,8 @@ public struct MeetingView: View {
             SessionPanelHead(
                 title: "音频来源",
                 detail: "麦克风单选；本机音频按 App 多选。两路一起来时分别标注来源，"
-                    + "转录里看得出哪句来自麦克风、哪句来自本机播放。"
+                    + "这里如实说明：多选时两路合成一条流转录，来源只记「合流」——"
+                    + "哪一句出在哪一路，这条链路上分不出来，也就不猜。"
             )
             SessionHairline()
             SessionCheckRow(
@@ -328,7 +369,7 @@ public struct MeetingView: View {
                 SessionCheckRow(
                     tone: .selected,
                     name: "自动混音",
-                    detail: "多来源同时勾选时自动合流处理；转录中为每一句独立保留专属来源标签。"
+                    detail: "多来源同时勾选时自动合流处理；转录行上的来源会如实记为「合流」。"
                 ) {
                     StatusPill(tone: .healthy, label: "生效中")
                 }
@@ -451,7 +492,22 @@ public struct MeetingView: View {
                 CardHead(
                     title: "转录",
                     detail: meeting.labeling.isEnabled ? "点说话人标签就能改名，正文不会动" : nil
-                ) { EmptyView() }
+                ) {
+                    // 稿 `screenMeetingRecording` 表头那一颗（`main.js:3642`）：会中人工标注的
+                    // 入口必须看得见。点行上的标签是**第一条路**（就地改名 / 合并），这颗按钮是
+                    // 同一件事的**第二条路**——会中不想在长长的转录里找标签时，从这里进来一次改完。
+                    // `labeling.state` 三种（没开 / 不支持 / 在用）面板自己会说话，所以按钮常在；
+                    // 会话还没建起来时不给（那时没有可标注的行）。
+                    if meeting.sessionID != nil {
+                        Button {
+                            isLabelingSpeakers = true
+                        } label: {
+                            Label("标注说话人", systemImage: "person.2")
+                        }
+                        .speechRailButton(.secondary)
+                        .help("谁说了哪句：改显示名或合并；正文一个字不动")
+                    }
+                }
                 if meeting.phase == .interrupted, let at = meeting.interruptedElapsed {
                     interruptionRow(at)
                 }
@@ -751,13 +807,73 @@ public struct MeetingView: View {
     }
 
     private func regenerateMinutes() async {
-        guard let id = meeting.sessionID else { return }
+        await regenerateMinutes(for: meeting.sessionID)
+    }
+
+    /// 重新生成**指定那一场**的纪要（在看旧记录时页头那颗按钮作用在旧记录上）。
+    /// 生成之后回到「纪要」页签看新版；选中态清掉，否则会以为"重新生成没生效"。
+    private func regenerateMinutes(for sessionID: String?) async {
+        guard let id = sessionID else { return }
         await meeting.minutes.generate(sessionID: id, configuration: preferences.minutesConfiguration)
+        if reviewRecord?.id == id {
+            reviewMinutes = try? await session.latestMinutes(sessionID: id)
+            selectedMinutesVersionID = nil
+            postTab = .minutes
+            return
+        }
         await meeting.minutes.reload(sessionID: id)
-        // 重新生成之后看新的那一版：留着旧的选中，用户会以为"重新生成没生效"。
         selectedMinutesVersionID = nil
         postTab = .minutes
     }
+
+    // MARK: - 导出（稿 M3「先导出转录…」与会后板「导出…」）
+
+    /// 页头的导出动作。四种格式收进一个菜单：页头是低频动作的地方，四个格式不值得占四个槽位
+    /// （与记录库页同一个口径）。默认格式排第一——会议是 Markdown。
+    private func exportMenu(title: String, helpText: String) -> some View {
+        PageActionsMenu(title: title, systemImage: "square.and.arrow.down", helpText: helpText) {
+            ForEach(orderedFormats) { format in
+                Button(format.title) {
+                    exportCurrentSession(includeMinutes: true, as: format)
+                }
+            }
+        }
+    }
+
+    private var orderedFormats: [SessionExportFormat] {
+        let preferred = SessionExportFormat.preferred(for: .meeting)
+        return [preferred] + SessionExportFormat.allCases.filter { $0 != preferred }
+    }
+
+    /// 导出**重新从库里读一遍**，不拿界面上正在显示的那份内存镜像：整理中也好、归档也好，
+    /// 要带走的是库里定稿的内容（`includePartial == false`），与这一页此刻渲染到哪儿无关。
+    ///
+    /// `includeMinutes` 只有一处为真：**归档之后**才连纪要一起导。整理中那一颗叫「先导出转录」，
+    /// 此时纪要还没生成——把它拼进去只会得到一个空章节，那正是"先导出转录"要避免的事。
+    private func exportCurrentSession(includeMinutes: Bool, as format: SessionExportFormat) {
+        guard let id = pageSessionID else { return }
+        Task {
+            guard let record = (try? await session.record(id: id)) ?? nil else { return }
+            let rows = (try? await session.lines(sessionID: id)) ?? []
+            let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
+            let minutes = includeMinutes ? (try? await session.latestMinutes(sessionID: id)) : nil
+            SessionExportPanel.write(
+                SessionExportPayload(
+                    record: record,
+                    lines: rows,
+                    speakerNames: names,
+                    minutes: minutes
+                ),
+                as: format
+            )
+        }
+    }
+
+    /// 页头动作到底作用在哪一场上。**在看旧记录时以旧记录为准**：这一页可以一边开着
+    /// 上一场的记录（`reviewRecord`）一边保持 `phase == .archived`，若动作跟着
+    /// `meeting.sessionID` 走，用户就会把「导出的那一场」和「屏幕上这一场」搞混——
+    /// 一个导错对象的导出比没有导出更糟。
+    private var pageSessionID: String? { reviewRecord?.id ?? meeting.sessionID }
 
     private func openRecord(_ summary: SessionSummary) async {
         guard let record = (try? await session.record(id: summary.id)) ?? nil else { return }
@@ -782,7 +898,12 @@ public struct MeetingView: View {
 
     private var inspector: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-            if meeting.phase == .archived {
+            if let reviewing = reviewRecord {
+                // 在看**以前的一场**（从空态的「会议记录库」点进来的）时，右栏必须跟着换人：
+                // 主区说的是旧记录，右栏若还挂着这一场的说话人与纪要版本，同一屏就有两个对象
+                // ——和"导错一场"是同一类错误（2026-09-19 回读代码时发现，真机未验）。
+                reviewInspectorCard(reviewing)
+            } else if meeting.phase == .archived {
                 if let id = meeting.sessionID {
                     SpeakerLabelingPanel(labeling: meeting.labeling, sessionID: id, isLive: false)
                 }
@@ -800,6 +921,51 @@ public struct MeetingView: View {
 
     /// 「本次会议」：这一场现在的基本事实。**保存位置也写在这里**——
     /// 「记录只保存在这台 Mac 上」这句话要有一个能看见的落点（§6.3.2 的同一条口径）。
+    /// 在看**以前的一场**时右栏换成它：这一栏说的永远是"你现在看的这一场"，
+    /// 不是"后台还开着的那一场"。逐行读的都是这一场自己的读数（`reviewRecord` /
+    /// `reviewLines` / `reviewSpeakerNames` / `reviewMinutes`），没有一处回读 `meeting`。
+    private func reviewInspectorCard(_ record: SessionRecord) -> some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                CardHead(title: "这一场") {
+                    Button("回到这一场") { closeReview() }
+                        .buttonStyle(.link)
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                }
+                Text(record.title ?? "这一场会议")
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 0) {
+                    inspectorRow(
+                        "时间",
+                        record.startedAt.formatted(date: .numeric, time: .shortened)
+                    )
+                    inspectorRow("转录", "\(reviewLines.count) 段")
+                    inspectorRow(
+                        "说话人",
+                        reviewSpeakerNames.isEmpty ? "还没有" : "\(reviewSpeakerNames.count) 位"
+                    )
+                    inspectorRow("结束方式", record.endedReason.title)
+                    inspectorRow("音频来源", record.audioSource.title)
+                    inspectorRow("纪要", reviewMinutesVersionFact)
+                    inspectorRow("保存位置", session.libraryURL.lastPathComponent)
+                }
+                Text("这一栏说的是这一场当时的样子：说话人名与纪要都按当时记录的原样显示。改名与合并要在那一场刚结束、这一页还停在这一场时做。")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, SpeechRailDesignTokens.Spacing.micro)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+        }
+    }
+
+    /// 在看的那一场有没有纪要、是哪一版（只有一版时不必说"第 1 版"）。
+    private var reviewMinutesVersionFact: String {
+        guard let reviewMinutes else { return "还没有" }
+        return reviewMinutes.version > 1 ? "第 \(reviewMinutes.version) 版" : "有"
+    }
+
     private var thisMeetingCard: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -905,14 +1071,14 @@ public struct MeetingView: View {
     ]
 
     /// 纪要版本：**重新生成只新增版本**，旧版一直可看可导出（§5.8）。
+    ///
+    /// 这张卡**只列版本**：动作「重新生成纪要」在页头（稿 `screenMeetingMinutes` 的页头两件之一），
+    /// 卡片里再放一颗就是同一个动作在一屏里画两遍（§17 / §19 的去重口径）。页头还有一处好处：
+    /// 右栏可以收起，页面动作不会跟着被收起。
     private var minutesVersionsCard: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                CardHead(title: "纪要版本") {
-                    Button("重新生成") { Task { await regenerateMinutes() } }
-                        .buttonStyle(.link)
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                }
+                CardHead(title: "纪要版本") { EmptyView() }
                 if meeting.minutes.versions.isEmpty {
                     Text("这一场还没有生成过纪要。")
                         .font(SpeechRailDesignTokens.Typography.caption)
@@ -1010,5 +1176,50 @@ public struct MeetingView: View {
     private static func timecode(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds.rounded()))
         return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+}
+
+// MARK: - 录制中的「标注说话人」面板
+
+/// 稿 `screenMeetingRecording` 表头那颗按钮落成的面板：录制中也能打开，边走边改。
+///
+/// 它**不是**第二个实现：打开的就是会后右栏那块 `SpeakerLabelingPanel`，只是 `isLive` 为真
+/// （文案从"说话人"变成"标注说话人"，并且说清"改的是归属，正文不动"）。
+/// 单独一个 sheet，是因为录制中主区和右栏都已经被转录与会议占满——把这块内容塞进任何一栏
+/// 都会挤掉正在看的转录。
+struct SpeakerLabelingSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let labeling: SpeakerLabeling
+    let sessionID: String?
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.hairline) {
+                    Text("标注说话人")
+                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                    Text("改的是说话人的名字与归属，转录正文一个字都不动。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                }
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
+                Button("完成") { close() }
+                    .keyboardShortcut(.defaultAction)
+            }
+            if let sessionID {
+                ScrollView(.vertical) {
+                    SpeakerLabelingPanel(labeling: labeling, sessionID: sessionID, isLive: true)
+                }
+            }
+        }
+        .padding(SpeechRailDesignTokens.Spacing.gutter)
+        .frame(width: 460, height: 520, alignment: .topLeading)
+    }
+
+    private func close() {
+        onClose()
+        dismiss()
     }
 }
