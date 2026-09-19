@@ -29,7 +29,7 @@ from speechrail.domain.tts import (
 )
 from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
 from speechrail.domain.tts_text_planner import TtsTextPlanner
-from speechrail.domain.tts_timing import TtsTimingSidecar
+from speechrail.domain.tts_timing import TtsTimingChunk, TtsTimingSidecar
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -426,7 +426,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return pcm
 
         plan = TtsTextPlanner().plan(clean_text)
-        timing_chunks: list[dict[str, object]] = []
+        timing_chunks: list[TtsTimingChunk] = []
         source_sample_cursor = 0
         emitted_samples = 0
         try:
@@ -462,14 +462,13 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     emitted_samples += len(output) // 2
                     yield output
                 timing_chunks.append(
-                    {
-                        "planner_chunk": planned_chunk.index,
-                        "text_start": planned_chunk.source_start,
-                        "text_end": planned_chunk.source_end,
-                        "audio_start_sample": chunk_start_sample,
-                        "audio_end_sample": source_sample_cursor,
-                        "timing_quality": "chunk",
-                    }
+                    TtsTimingChunk(
+                        planner_chunk=planned_chunk.index,
+                        text_start=planned_chunk.source_start,
+                        text_end=planned_chunk.source_end,
+                        audio_start_sample=chunk_start_sample,
+                        audio_end_sample=source_sample_cursor,
+                    )
                 )
             if loudness_controller is not None and pending_clone_pcm:
                 clone_pcm = loudness_controller.process(bytes(pending_clone_pcm))
