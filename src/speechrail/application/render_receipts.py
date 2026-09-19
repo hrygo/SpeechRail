@@ -136,8 +136,17 @@ class RenderReceiptRegistry:
     def complete(self, receipt_id: str) -> None:
         self._finish(receipt_id, status="completed")
 
-    def cancel(self, receipt_id: str) -> None:
-        self._finish(receipt_id, status="cancelled", error_code="cancelled")
+    def cancel(
+        self,
+        receipt_id: str,
+        *,
+        error_code: str = "cancelled",
+    ) -> None:
+        self._finish(
+            receipt_id,
+            status="cancelled",
+            error_code=error_code,
+        )
 
     def fail(self, receipt_id: str, error_code: str) -> None:
         self._finish(receipt_id, status="error", error_code=error_code)
