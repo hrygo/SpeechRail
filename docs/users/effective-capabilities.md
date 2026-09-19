@@ -7,10 +7,10 @@ date: 2026-09-19
 
 # 有效能力快照与安全音色目录
 
-`GET /v2/capabilities` 返回 `effective_capabilities_v1`：同一份已脱离 registry
+`GET /v1/speechrail/capabilities` 返回 `effective_capabilities_v1`：同一份已脱离 registry
 可变对象的音色目录、活动模型配置、逐音色逐操作参数域。读取不启动、卸载 worker，
-不执行推理、不下载模型。`/v2/voices` 和 `/v2/voices/{voice_id}` 是同一安全模型的
-列表/详情投影；需要跨对象一致性时，只使用一次 `/v2/capabilities` 返回的数据，
+不执行推理、不下载模型。`/v1/speechrail/voices` 和 `/v1/speechrail/voices/{voice_id}` 是同一安全模型的
+列表/详情投影；需要跨对象一致性时，只使用一次 `/v1/speechrail/capabilities` 返回的数据，
 不要把不同时间的多个 GET 拼成原子快照。
 
 ## 身份和缓存保证
