@@ -1267,7 +1267,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
 
         synthesis = SpeechRequest(
-            text=synthesis_text,
+            text=body.input,
             voice=DEFAULT_VOICE_ID,
             output_format="pcm16",
             speed=body.speed,
