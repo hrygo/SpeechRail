@@ -182,9 +182,12 @@ def test_clone_replacement_keeps_immutable_reference_until_lease_release(tmp_pat
         with pytest.raises(VoiceInUseError):
             registry.delete_custom_profile("replaceable_clone")
 
-    assert not old_path.exists()
+    # Revision history intentionally retains immutable historical clone
+    # assets after an active lease ends so rollback remains reproducible.
+    assert old_path.is_file()
     assert Path(second.audio_path).is_file()
     registry.delete_custom_profile("replaceable_clone")
+    assert not old_path.exists()
     assert not Path(second.audio_path).exists()
 
 
