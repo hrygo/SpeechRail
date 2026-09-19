@@ -17,10 +17,10 @@ from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile
-from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
 from speechrail.domain.tts_reference_condition import (
     MLX_AUDIO_0_4_8_QWEN3_TTS_SUPPORT,
 )
+from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
 
 SCHEMA_VERSION = "effective_capabilities_v1"
 Support = Literal["supported", "unsupported", "unknown"]
