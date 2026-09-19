@@ -19,7 +19,7 @@ from speechrail.domain.tts import (
 )
 from speechrail.domain.tts_pronunciation import SpokenText
 
-PLANNER_VERSION = "tts_bounded_v1"
+PLANNER_VERSION: Literal["tts_bounded_v1"] = "tts_bounded_v1"
 BoundaryKind = Literal["sentence", "secondary", "whitespace", "hard_limit", "end_of_input"]
 
 
