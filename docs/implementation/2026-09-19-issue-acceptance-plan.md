@@ -404,8 +404,11 @@ managed-runtime or human-acoustic evidence.
 
 The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
 the later ledger commit, deadline-test stabilization, runtime-default documentation,
-cross-process journal-lock fix, and unsafe-parent hardening fix are now followed
-by current head `2cd7d61db0bdca24a510ccc7dcaa3286d5942ec4`.
+cross-process journal-lock fix, unsafe-parent hardening fix, and Realtime worker
+contention classification are represented by code checkpoint
+`32a92416f97766acc018e3b4c179964caa9cce50`. This ledger remains an acceptance
+record after that checkpoint, so its own documentation commits are not presented
+as implementation changes.
 
 ### Implementation deltas since the seven-increment checkpoint
 
@@ -415,8 +418,8 @@ by current head `2cd7d61db0bdca24a510ccc7dcaa3286d5942ec4`.
   remains request-scoped and length-preserving. This closes the reproduced F1–F4
   code boundary, not the managed multi-voice or listening gate.
 - **#53**: the two macOS UI tests that targeted the ambiguous “服务状态” label now
-  select the unique `overview` accessibility identifier. Current-head CI run
-  `35457829975` passed the macOS App Build & Tests job; this remains CI evidence,
+  select the unique `overview` accessibility identifier. The latest full CI run
+  `35459381100` passed the macOS App Build & Tests job; this remains CI evidence,
   not a local UI-automation run.
 - **#63**: custom voices now persist content-addressed `vr_` revisions and bounded
   revision history, support expected-revision CAS update/rollback/revoke/delete
@@ -470,7 +473,7 @@ governor maintenance, streaming, Realtime, planner and frozen loudness contains
 temporary idempotency journals so rerunning the suite cannot read a developer's
 default `~/.speechrail` journal. This is local source/synthetic evidence; the full
 repository gate and current-head macOS App job also passed in CI run
-`35457829975`.
+`35459381100`.
 
 ### 2026-09-20 durable registry cross-process serialization
 
