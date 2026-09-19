@@ -408,6 +408,16 @@ public struct ControlCenterView: View {
     private func handleWindowWidthChange(_ width: CGFloat, in window: NSWindow?) {
         guard width > 0 else { return }
         navigation.updateWindowWidth(width)
+
+#if DEBUG
+        // UI 契约测试必须通过侧栏切换页面；测试窗口会按屏幕尺寸落在 medium tier，
+        // 但这不应让测试依赖响应式折叠行为。生产窗口仍按真实宽度自动收起/恢复侧栏。
+        if isUITestSession {
+            columnVisibility = .all
+            return
+        }
+#endif
+
         let isColdStart = (lastObservedWindowWidth == 0)
         lastObservedWindowWidth = width
 
