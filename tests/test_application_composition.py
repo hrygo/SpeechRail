@@ -46,6 +46,8 @@ def test_audio_router_can_be_built_from_fake_services(fake_services: AppServices
         "/v1/audio/transcriptions",
         "/v1/audio/speech",
         "/v2/audio/speech",
+        "/v2/audio/receipts/{receipt_id}",
+        "/v2/audio/receipts/by-request/{source_request_id}",
         "/v1/voices/previews",
     }
 
