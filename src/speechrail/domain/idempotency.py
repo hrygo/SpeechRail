@@ -71,7 +71,7 @@ class DurableIdempotencyJournal:
             if self._path.parent.is_symlink():
                 raise OSError("unsafe idempotency journal parent")
             self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            payload = json.dumps(records[-self._max_entries :], ensure_ascii=False, indent=2).encode()
+            payload = json.dumps(\n                records[-self._max_entries :], ensure_ascii=False, indent=2\n            ).encode()
             fd, tmp_name = tempfile.mkstemp(
                 prefix=f".{self._path.name}.", suffix=".tmp", dir=self._path.parent
             )
@@ -82,7 +82,7 @@ class DurableIdempotencyJournal:
                     handle.flush()
                     os.fsync(handle.fileno())
                 tmp.chmod(0o600)
-                os.replace(tmp, self._path)
+                tmp.replace(self._path)
                 dir_fd = os.open(self._path.parent, os.O_RDONLY)
                 try:
                     os.fsync(dir_fd)
@@ -92,7 +92,7 @@ class DurableIdempotencyJournal:
                 if tmp.exists():
                     tmp.unlink(missing_ok=True)
         except Exception as exc:
-            raise IdempotencyStoreUnavailableError("idempotency journal cannot be persisted") from exc
+            raise IdempotencyStoreUnavailableError(\n                "idempotency journal cannot be persisted"\n            ) from exc
 
     def begin(
         self,
