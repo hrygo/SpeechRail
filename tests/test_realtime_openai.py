@@ -545,6 +545,50 @@ def test_openai_append_commit_produces_transcription_completed() -> None:
         assert len(factory.released) == 1
 
 
+def test_realtime_completed_turn_records_commit_tail_duration() -> None:
+    async def scenario() -> dict[str, object]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                batch_transcriber=FakeTranscriber(),
+                tts_synthesizer=FakeSpeechSynthesizer(),
+                realtime_asr_factory=FakeStreamingFactory(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_metrics_test",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        await session.handle({"type": "input_audio_buffer.commit"})
+        await session.close()
+        return services.metrics.render_json()
+
+    metrics = asyncio.run(scenario())
+    histograms = metrics["histograms"]
+    assert isinstance(histograms, dict)
+    duration = histograms["speechrail_realtime_turn_duration_seconds"]
+    assert isinstance(duration, dict)
+    reading = next(iter(duration.values()))
+    assert reading["count"] == 1
+    assert reading["avg"] > 0.0
+
+
 def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:

@@ -566,6 +566,17 @@ exception paths: both terminate with a sanitized `backend_error` and failed
 internal exception text. This closes a protocol/privacy boundary; it does not
 replace managed worker or acoustic acceptance.
 
+### 2026-09-20 Realtime commit-tail metric wiring
+
+The Realtime completion path now records one `speechrail_realtime_turn_duration_seconds`
+observation for each non-empty ASR item, anchored at the client commit and stopped
+when the terminal transcription event is observed by the ASR reader. The anchor is
+request-local monotonic state only; no session ID, request ID, transcript or audio
+content enters metric labels. A focused regression verifies that a completed fake
+turn produces exactly one positive observation. This makes the current-head metric
+usable as a commit-tail distribution input for E1; it does not provide managed
+runtime evidence, per-request stage correlation, or acoustic accuracy.
+
 ### 2026-09-20 observed TTS runtime identity
 
 The TTS worker parent now retains a revision derived only from the validated

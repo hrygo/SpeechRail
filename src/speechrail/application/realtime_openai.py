@@ -192,6 +192,10 @@ class OpenAIRealtimeSession:
         self._asr: RealtimeAsrSession | None = None
         self._asr_reader: asyncio.Task[None] | None = None
         self._asr_resources: AsyncExitStack | None = None
+        # Set only while the current ASR item is being committed.  The reader
+        # uses this monotonic anchor to record commit-tail latency without
+        # putting a session/request identifier into metrics labels.
+        self._asr_commit_started_at: float | None = None
         self._tts_task: asyncio.Task[None] | None = None
         self._tts_response_id: str | None = None
         self._tts_receipt_id: str | None = None
@@ -934,6 +938,7 @@ class OpenAIRealtimeSession:
             # under one request deadline so its governor lane is recoverable.
             async with asyncio.timeout(self._settings.request_timeout_seconds):
                 commit_started = time.monotonic()
+                self._asr_commit_started_at = commit_started
                 await self._asr.commit(want_segments=False)
                 self._services.metrics.record_realtime_phase(
                     "asr_commit_ack", time.monotonic() - commit_started
@@ -954,6 +959,7 @@ class OpenAIRealtimeSession:
             await self._discard_failed_commit()
             raise
         finally:
+            self._asr_commit_started_at = None
             self._turn_has_admitted_speech = False
         await self._close_asr_session()
         await self._release_asr()
@@ -1431,6 +1437,11 @@ class OpenAIRealtimeSession:
                         outcome="text" if norm_text else "empty",
                         characters=len(norm_text),
                         active_samples=max(0, self._item_end_sample - self._item_start_sample),
+                        duration_seconds=(
+                            max(0.0, time.monotonic() - self._asr_commit_started_at)
+                            if self._asr_commit_started_at is not None
+                            else 0.0
+                        ),
                     )
                     if self._diarization_enabled:
                         # Extension mode: unique item, session-sample bounds and
