@@ -712,14 +712,29 @@ public struct MeetingView: View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             switch meeting.minutes.state {
             case .failed(let reason):
-                StatusBanner(
-                    kind: .standard,
-                    tone: .attention,
-                    title: "纪要没整理出来 · 转录已经存好了",
-                    message: reason,
-                    actionTitle: "重新生成"
-                ) {
-                    Task { await regenerateMinutes() }
+                // 出口按**失败的性质**给：配置还没填（或填错）时，「重新生成」按下去只会
+                // 原样再失败一次——那一刻用户真正要做的是把对话模型填上，所以这里直接给
+                // 设置那条路（用户 2026-09-19：一次性设置只在最需要它的时刻打扰）。
+                if meeting.minutesNeedsSetup {
+                    StatusBanner(
+                        kind: .standard,
+                        tone: .attention,
+                        title: "纪要要用对话模型 · 转录已经存好了",
+                        message: reason,
+                        actionTitle: "去设置里填"
+                    ) {
+                        openSettings()
+                    }
+                } else {
+                    StatusBanner(
+                        kind: .standard,
+                        tone: .attention,
+                        title: "纪要没整理出来 · 转录已经存好了",
+                        message: reason,
+                        actionTitle: "重新生成"
+                    ) {
+                        Task { await regenerateMinutes() }
+                    }
                 }
             case .queued, .running:
                 Text(meeting.minutes.state.title)

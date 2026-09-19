@@ -244,6 +244,18 @@ public final class MeetingSession {
         await finishAndSummarize()
     }
 
+    /// 纪要失败之后，下一步该去哪儿。
+    ///
+    /// 配置问题（没填模型 / 地址写错 / 端点没有 Responses API）→ 去设置；其余 → 重新生成。
+    /// 「配置仍然空着」这一条也在这里判：重启后 `reload` 只读得回失败原因文本，
+    /// 而"当前配置还是空的"本身就说明下一步是把模型填上（用户 2026-09-19：
+    /// 一次性设置只在最需要它的时刻打扰，且那一刻给的必须是能走通的那条路）。
+    public var minutesNeedsSetup: Bool {
+        guard case .failed = minutes.state else { return false }
+        if minutes.failureNeedsSetup { return true }
+        return !(preferences?().isLLMConfigured ?? true)
+    }
+
     /// 「继续这一段」= 新 epoch：序号与水位不重置，丢掉的音频就是没录上（§5.6）。
     public func continueAfterInterruption() async {
         guard sessionID != nil, phase == .interrupted else { return }

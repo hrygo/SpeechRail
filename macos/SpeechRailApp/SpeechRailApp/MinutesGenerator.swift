@@ -156,6 +156,19 @@ public final class MinutesGenerator {
     public private(set) var latestBody: String?
     /// 最近一次整理用的服务端响应 id（诊断用；它不是用户内容）。
     public private(set) var lastResponseID: String?
+    /// 这一次失败是不是**配置问题**（没填模型 / 地址不对 / 端点没有 Responses API）。
+    /// 由它决定失败条给哪个出口：配置问题给「去设置里填对话模型」，其它给「重新生成」——
+    /// 配置没填时按「重新生成」只会原样再失败一次，是个死循环（用户 2026-09-19：
+    /// 一次性设置要在最需要它的那一刻给）。
+    private var failedOnSetup = false
+
+    /// 这一次失败本身**是不是配置引起的**（生成器管不到配置，只如实报自己看到的）。
+    /// 界面要不要给「去设置里填」，由 `MeetingSession.minutesNeedsSetup` 合并"当前配置
+    /// 仍然空着"之后再判——重启后 `reload` 只读得回失败原因文本（库里没有 code 列）。
+    public var failureNeedsSetup: Bool {
+        guard case .failed = state else { return false }
+        return failedOnSetup
+    }
 
     private let coordinator: SessionCoordinator
     private let provider = LLMProvider()
@@ -177,6 +190,7 @@ public final class MinutesGenerator {
         inFlight = sessionID
         defer { inFlight = nil }
         state = .queued
+        failedOnSetup = false
 
         let version: MinutesVersion
         do {
@@ -211,6 +225,7 @@ public final class MinutesGenerator {
                 minutesID: version.id,
                 reason: "还没有配置对话模型（设置 → 会话）。转录已经存好，配好之后可以重新生成。"
             )
+            failedOnSetup = true
             state = .failed("还没有配置对话模型。转录已经存好，配好之后可以重新生成。")
         } catch {
             state = .failed(error.localizedDescription)
@@ -284,6 +299,7 @@ public final class MinutesGenerator {
                 model: configuration.model.isEmpty ? nil : configuration.model
             )
             latestBody = body
+            failedOnSetup = false
             state = .ready
         } catch {
             // 取消与失败要分开说：用户按的「停止整理」不该在记录里留下一条"整理失败"。
@@ -292,6 +308,16 @@ public final class MinutesGenerator {
                 ? "你停下了这一次整理。转录已经存好，可以重新生成。"
                 : Self.readableReason(for: error)
             try? await coordinator.failMinutes(minutesID: claimed.id, reason: reason)
+            // 地址写错、服务没有 Responses API 这类失败，按「重新生成」只会再撞一次；
+            // 它们和「没填模型」是同一类下一步：去设置里改配置。
+            if let llm = error as? LLMError {
+                switch llm {
+                case .notConfigured, .badBaseURL, .notResponsesAPI: failedOnSetup = true
+                default: failedOnSetup = false
+                }
+            } else {
+                failedOnSetup = false
+            }
             state = .failed(reason)
         }
     }
