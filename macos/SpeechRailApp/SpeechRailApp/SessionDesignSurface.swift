@@ -225,9 +225,11 @@ struct SessionRowMark: View {
 /// 稿里带「头 / 正文 / 动作带」的容器卡。会话三页的右栏、人设区、音色区、对话流、
 /// 记录卡都用这一形状，区别只在内容。
 public struct SessionPanel<Content: View>: View {
+    private let expandsVertically: Bool
     private let content: Content
 
-    public init(@ViewBuilder content: () -> Content) {
+    public init(expandsVertically: Bool = false, @ViewBuilder content: () -> Content) {
+        self.expandsVertically = expandsVertically
         self.content = content()
     }
 
@@ -235,7 +237,11 @@ public struct SessionPanel<Content: View>: View {
         VStack(spacing: 0) {
             content
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(
+            maxWidth: .infinity,
+            maxHeight: expandsVertically ? .infinity : nil,
+            alignment: .topLeading
+        )
         .speechRailSurface(.panel)
         .clipShape(SpeechRailDesignTokens.Corner.containerShape)
     }
@@ -408,6 +414,8 @@ public struct SessionTurnRow: View {
     public let actions: [SessionTurnAction]
     public let onAction: ((SessionTurnAction) -> Void)?
 
+    @State private var isHovered: Bool = false
+
     public init(
         who: String,
         isVoice: Bool = false,
@@ -434,55 +442,198 @@ public struct SessionTurnRow: View {
         self.onAction = onAction
     }
 
+    private var isAssistant: Bool {
+        isVoice || who == "助手"
+    }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text(who)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .foregroundStyle(isVoice ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.ink)
-                if let voiceBadge {
-                    SessionVoiceBadge(label: voiceBadge)
+        HStack(alignment: .top, spacing: 0) {
+            if isAssistant {
+                assistantBubble
+                Spacer(minLength: 32)
+            } else {
+                Spacer(minLength: 32)
+                userBubble
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    // MARK: - 助手消息气泡（靠左）
+
+    private var assistantBubble: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // 助手形象徽标
+            ZStack {
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
+                    .frame(width: 26, height: 26)
+                Image(systemName: "waveform.and.mic")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            }
+            .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                // 助手头部标识行
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(who)
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    if let voiceBadge {
+                        SessionVoiceBadge(label: voiceBadge)
+                    }
+                    if isPartial {
+                        StatusPill(tone: .neutral, label: "生成中…")
+                    }
+                    ForEach(Array(pills.enumerated()), id: \.offset) { _, pill in
+                        StatusPill(tone: pill.tone, label: pill.label)
+                    }
+                    if let source {
+                        Text("· \(source)")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    }
                 }
+
+                // 助手正文气泡容器
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(text)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                        .foregroundStyle(isPartial ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.ink)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    SpeechRailDesignTokens.Color.field,
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                )
+                .contextMenu {
+                    contextMenuItems
+                }
+
+                // 助手气泡底部时间与动作
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    if let timestamp {
+                        Text(timestamp)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .monospacedDigit()
+                    }
+
+                    if !actions.isEmpty {
+                        HStack(spacing: 2) {
+                            ForEach(actions) { action in
+                                actionIconButton(action)
+                            }
+                        }
+                        .opacity(isHovered ? 1.0 : 0.0)
+                        .animation(.easeInOut(duration: 0.15), value: isHovered)
+                    }
+
+                    Spacer(minLength: 4)
+                }
+            }
+            .frame(maxWidth: bodyWidth ?? 640, alignment: .leading)
+        }
+    }
+
+    // MARK: - 用户消息气泡（靠右）
+
+    private var userBubble: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            // 用户发言气泡容器
+            VStack(alignment: .leading, spacing: 4) {
+                Text(text)
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(isPartial ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                SpeechRailDesignTokens.Color.rail.opacity(0.14),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Color.rail.opacity(0.24), lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            )
+            .contextMenu {
+                contextMenuItems
+            }
+
+            // 用户气泡底部标签与时间
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Spacer(minLength: 4)
+
+                if !actions.isEmpty {
+                    HStack(spacing: 2) {
+                        ForEach(actions) { action in
+                            actionIconButton(action)
+                        }
+                    }
+                    .opacity(isHovered ? 1.0 : 0.0)
+                    .animation(.easeInOut(duration: 0.15), value: isHovered)
+                }
+
                 if isPartial {
-                    StatusPill(tone: .neutral, label: "识别中")
+                    StatusPill(tone: .neutral, label: "识别中…")
                 }
                 ForEach(Array(pills.enumerated()), id: \.offset) { _, pill in
                     StatusPill(tone: pill.tone, label: pill.label)
                 }
-                if let source {
-                    Text("· \(source)")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 if let timestamp {
                     Text(timestamp)
-                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         .monospacedDigit()
                 }
-                ForEach(actions) { action in
-                    Button {
-                        onAction?(action)
-                    } label: {
-                        RowActionGlyph(systemImage: action.systemImage)
-                    }
-                    .buttonStyle(.borderless)
-                    .help(action.help)
-                    .accessibilityLabel(action.title)
-                }
             }
-            Text(text)
-                .font(SpeechRailDesignTokens.Typography.body)
-                .foregroundStyle(isPartial ? SpeechRailDesignTokens.Color.inkSecondary : SpeechRailDesignTokens.Color.ink)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: bodyWidth, alignment: .leading)
         }
-        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .contain)
+        .frame(maxWidth: bodyWidth ?? 560, alignment: .trailing)
+    }
+
+    private func actionIconButton(_ action: SessionTurnAction) -> some View {
+        Button {
+            onAction?(action)
+        } label: {
+            Image(systemName: action.systemImage)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .frame(width: 22, height: 20)
+                .background(
+                    SpeechRailDesignTokens.Color.recessedField,
+                    in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .help(action.help)
+        .accessibilityLabel(action.title)
+    }
+
+    @ViewBuilder
+    private var contextMenuItems: some View {
+        ForEach(actions) { action in
+            Button {
+                onAction?(action)
+            } label: {
+                Label(action.help, systemImage: action.systemImage)
+            }
+        }
     }
 }
 
@@ -502,17 +653,17 @@ public enum SessionTurnAction: String, CaseIterable, Identifiable, Sendable {
 
     var systemImage: String {
         switch self {
-        case .play: "play"
-        case .copy: "copy"
+        case .play: "play.fill"
+        case .copy: "doc.on.doc"
         case .remember: "bookmark"
         }
     }
 
     var title: String {
         switch self {
-        case .play: "重播这一句"
-        case .copy: "复制这一句"
-        case .remember: "记住这一句"
+        case .play: "重播"
+        case .copy: "复制"
+        case .remember: "记住"
         }
     }
 
@@ -703,7 +854,7 @@ public struct SessionLibraryColumn: View {
     }
 
     public var body: some View {
-        SessionPanel {
+        SessionPanel(expandsVertically: true) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(title)
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)

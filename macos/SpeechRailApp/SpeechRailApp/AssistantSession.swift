@@ -1,4 +1,3 @@
-import AVFoundation
 import Foundation
 import Observation
 
@@ -179,7 +178,7 @@ public final class AssistantSession {
     public private(set) var startVoiceID: String?
     /// 本场换音色的变更点（内存镜像；权威在库里 `session_change`，回看读那一份）。
     public private(set) var voiceChanges: [VoiceChange] = []
-    public private(set) var mode: AssistantMode = .turnTaking
+    public private(set) var mode: AssistantMode = .duplex
     /// 本场用的大模型（库里也记这一份，用于复现）。
     public private(set) var llmModel: String?
 
@@ -203,7 +202,7 @@ public final class AssistantSession {
         voiceID: String? = nil,
         startVoiceID: String? = nil,
         voiceChanges: [VoiceChange] = [],
-        mode: AssistantMode = .turnTaking,
+        mode: AssistantMode = .duplex,
         llmModel: String? = nil
     ) {
         self.phase = phase
@@ -226,7 +225,10 @@ public final class AssistantSession {
     // MARK: 挂载点（由 App 注入）
 
     public var serviceReadiness: (@MainActor () async -> ServiceReadiness)?
-    public var audioSourceFactory: @MainActor () -> AudioChunkSource = { MicrophoneCapture() }
+    /// 助手默认使用一台同时负责采集与播放的引擎，让系统 voice processing 能看到
+    /// near-end capture 与 far-end render。旧的 `AudioChunkSource` 注入仍保留：外部
+    /// 测试替身或历史调用方若返回普通 source，就继续走下面的兼容播放器。
+    public var audioSourceFactory: @MainActor () -> AudioChunkSource = { AudioEngineSession() }
     public var preferences: (@MainActor () -> SessionPreferences)?
     /// 取密钥。**只有这一处读钥匙串**，密钥不进任何状态、不进日志。
     public var apiKeyProvider: @MainActor () -> String? = { LLMKeychain.load() }
@@ -239,6 +241,7 @@ public final class AssistantSession {
     private let serviceKey: String?
 
     private var source: AudioChunkSource?
+    private var audioSession: (any AssistantAudioSession)?
     private var client: RealtimeASRClient?
     private var pump: Task<Void, Never>?
     private var playback: PCMStreamPlayer?
@@ -392,7 +395,11 @@ public final class AssistantSession {
     public func stopSpeaking() async {
         guard phase == .speaking || phase == .thinking || isSpeaking else { return }
         currentReplyInterrupted = true
-        await playback?.stop()
+        if let audioSession {
+            await audioSession.stopPlayback()
+        } else {
+            await playback?.stop()
+        }
         isSpeaking = false
         if let client { try? await client.cancelResponse() }
         streamingReply = nil
@@ -429,12 +436,17 @@ public final class AssistantSession {
         }
 
         let source = audioSourceFactory()
+        let audioSession = source as? any AssistantAudioSession
+        audioSession?.configure(mode: mode)
         self.source = source
+        self.audioSession = audioSession
         let stream: AsyncStream<AudioChunk>
         do {
             stream = try await source.start()
         } catch {
+            source.stop()
             self.source = nil
+            self.audioSession = nil
             throw Blocked(Self.blockReason(for: error))
         }
 
@@ -451,27 +463,38 @@ public final class AssistantSession {
         } catch {
             source.stop()
             self.source = nil
+            self.audioSession = nil
             throw Blocked(.serviceNotReady(error.localizedDescription))
         }
         self.client = client
 
-        let player = PCMStreamPlayer()
-        do {
-            try await player.start()
-        } catch {
-            await client.close()
-            source.stop()
-            self.source = nil
-            self.client = nil
-            throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
-        }
-        player.onDrained = { [weak self] in
+        let playbackDrained: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
             self.isSpeaking = false
             if self.phase == .speaking { self.phase = .listening }
             self.isMutedForPlayback = false
         }
-        playback = player
+        if let audioSession {
+            audioSession.onPlaybackDrained = playbackDrained
+            audioSession.onFailure = { [weak self] message in
+                guard let self else { return }
+                self.lastFailure = message
+            }
+        } else {
+            let player = PCMStreamPlayer()
+            do {
+                try await player.start()
+            } catch {
+                await client.close()
+                source.stop()
+                self.source = nil
+                self.audioSession = nil
+                self.client = nil
+                throw Blocked(.serviceNotReady("播放通道没起来：\(error.localizedDescription)"))
+            }
+            player.onDrained = playbackDrained
+            playback = player
+        }
 
         let startedAt = Date()
         sessionStartedAt = startedAt
@@ -502,10 +525,16 @@ public final class AssistantSession {
             sessionID = record.id
             coordinator.sessionDidStartRecording(id: record.id)
         } catch {
-            await player.stop()
+            if let audioSession {
+                audioSession.stop()
+            } else if let playback {
+                await playback.stop()
+                self.playback = nil
+                source.stop()
+            }
             await client.close()
-            source.stop()
             self.source = nil
+            self.audioSession = nil
             self.client = nil
             throw Blocked(.storeUnavailable(error.localizedDescription))
         }
@@ -518,12 +547,17 @@ public final class AssistantSession {
         guard phase != .ending else { return }
         phase = .ending
         isStoppingIntentionally = true
-        source?.stop()
-        source = nil
-        if let playback {
-            await playback.stop()
-            self.playback = nil
+        if let audioSession {
+            audioSession.stop()
+            self.audioSession = nil
+        } else {
+            source?.stop()
+            if let playback {
+                await playback.stop()
+                self.playback = nil
+            }
         }
+        source = nil
         if let client {
             try? await client.commit()
             await waitForFinalTurn()
@@ -619,7 +653,11 @@ public final class AssistantSession {
             // 客户端把还没播的缓冲丢掉，并把这一句标成"被打断"（不是错误）。
             guard mode.allowsBargeIn, isSpeaking else { return }
             currentReplyInterrupted = true
-            await playback?.stop()
+            if let audioSession {
+                await audioSession.stopPlayback()
+            } else {
+                await playback?.stop()
+            }
             isSpeaking = false
             phase = .listening
             if let client { try? await client.cancelResponse() }
@@ -628,7 +666,11 @@ public final class AssistantSession {
             phase = .speaking
             // 半双工：从这一刻起闭麦（一问一答的口径）。
             isMutedForPlayback = !mode.allowsBargeIn
-            await playback?.enqueue(pcm)
+            if let audioSession {
+                await audioSession.enqueuePlayback(pcm)
+            } else {
+                await playback?.enqueue(pcm)
+            }
         case .responseDone(let status):
             if status == "cancelled" { currentReplyInterrupted = true }
         case .serverError(let code, let message):
@@ -812,7 +854,16 @@ public final class AssistantSession {
     private func handleUnexpectedClose(code: Int?) async {
         guard !isStoppingIntentionally, phase.isLive else { return }
         let reason = code.map { "语音服务断开了连接（\($0)）。" } ?? "语音服务断开了连接。"
-        source?.stop()
+        if let audioSession {
+            audioSession.stop()
+            self.audioSession = nil
+        } else {
+            source?.stop()
+            if let playback {
+                await playback.stop()
+                self.playback = nil
+            }
+        }
         source = nil
         pump?.cancel()
         pump = nil
@@ -865,6 +916,19 @@ public final class AssistantSession {
         if let failure = error as? MicrophoneCapture.Failure, failure == .permissionDenied {
             return .microphoneDenied
         }
+        if let failure = error as? AudioEngineSession.Failure {
+            switch failure {
+            case .permissionDenied:
+                return .microphoneDenied
+            case .voiceProcessingUnavailable(let message):
+                return .serviceNotReady(
+                    "实时对讲的系统回声消除没有在当前音频设备上启用：\(message)"
+                        + "请连接支持双向语音处理的耳机，或切换到「一问一答（外放）」。"
+                )
+            default:
+                break
+            }
+        }
         return .serviceNotReady(error.localizedDescription)
     }
 
@@ -877,118 +941,12 @@ public final class AssistantSession {
     }
 }
 
+// MARK: - 助手共享音频引擎
+//
+// `AssistantAudioSession` and `AudioEngineSession` live in
+// `AssistantAudioSession.swift`; this file keeps only session orchestration.
+
+
 // MARK: - TTS 播放
-
-/// 24 kHz / 单声道 / PCM16 的流式播放（契约里 TTS 的输出格式）。
-///
-/// 为什么不用 `AVAudioPlayer`：它要一个完整的文件，而这里的音频是一块块到的；
-/// 打断要求"立刻静音"，缓冲队列必须能一次丢掉。所以用 `AVAudioEngine` + `AVAudioPlayerNode`。
-///
-/// 阻塞式 CoreAudio 调用（`engine.start()`）**不在主线程**上做（§5.13 的实测教训：
-/// 最坏 36 秒）。
-final class PCMStreamPlayer: @unchecked Sendable {
-    enum Failure: LocalizedError {
-        case unsupportedFormat
-        case engineFailed(String)
-
-        var errorDescription: String? {
-            switch self {
-            case .unsupportedFormat: "这个输出格式没法播放。"
-            case .engineFailed(let message): message
-            }
-        }
-    }
-
-    /// 契约：TTS 输出 24 kHz PCM16。
-    static let sampleRate: Double = 24_000
-
-    private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
-    private let queue = DispatchQueue(label: "com.speechrail.app.assistant.player", qos: .userInitiated)
-    private var format: AVAudioFormat?
-    private let lock = NSLock()
-    private var pendingBuffers = 0
-    private var stopped = false
-
-    /// 队列播完（真正静音）时回调一次。界面用它把相位从"正在说话"退回"正在聆听"。
-    var onDrained: (@MainActor () -> Void)?
-
-    func start() async throws {
-        guard
-            let format = AVAudioFormat(
-                commonFormat: .pcmFormatInt16,
-                sampleRate: Self.sampleRate,
-                channels: 1,
-                interleaved: true
-            )
-        else { throw Failure.unsupportedFormat }
-        self.format = format
-        let engine = self.engine
-        let player = self.player
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async {
-                engine.attach(player)
-                engine.connect(player, to: engine.mainMixerNode, format: format)
-                engine.prepare()
-                do {
-                    try engine.start()
-                    player.play()
-                    continuation.resume()
-                } catch {
-                    continuation.resume(throwing: Failure.engineFailed(error.localizedDescription))
-                }
-            }
-        }
-    }
-
-    /// 入队一块音频。空块与停止之后到的块都被丢掉（不假装播了）。
-    func enqueue(_ pcm: Data) async {
-        guard !pcm.isEmpty else { return }
-        let frames = pcm.count / MemoryLayout<Int16>.size
-        guard frames > 0, let format else { return }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
-            return
-        }
-        buffer.frameLength = AVAudioFrameCount(frames)
-        if let destination = buffer.int16ChannelData?[0] {
-            pcm.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                destination.update(from: base.assumingMemoryBound(to: Int16.self), count: frames)
-            }
-        }
-        let shouldSchedule = lock.withLock { () -> Bool in
-            guard !stopped else { return false }
-            pendingBuffers += 1
-            return true
-        }
-        guard shouldSchedule else { return }
-        player.scheduleBuffer(buffer) { [weak self] in
-            guard let self else { return }
-            let isLast = self.lock.withLock { () -> Bool in
-                self.pendingBuffers = max(0, self.pendingBuffers - 1)
-                return self.pendingBuffers == 0
-            }
-            if isLast {
-                Task { @MainActor in self.onDrained?() }
-            }
-        }
-    }
-
-    /// 立刻静音并丢掉还没播的部分（插话打断 / 结束会话）。
-    func stop() async {
-        lock.withLock {
-            pendingBuffers = 0
-            stopped = true
-        }
-        let player = self.player
-        let engine = self.engine
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            queue.async {
-                player.stop()
-                player.reset()
-                engine.stop()
-                continuation.resume()
-            }
-        }
-    }
-}
+//
+// `PCMStreamPlayer` lives in `AssistantAudioPlayback.swift`.

@@ -22,6 +22,8 @@ public struct AssistantView: View {
     @State private var typed = ""
     /// 「本次会话」那一栏收起了没有。稿：收起不是少一个面板，是同一个面板的另一个状态。
     @State private var isInspectorCollapsed = false
+    /// 记录是否是因为窗口拉窄而由响应式布局自动收起右栏（拉宽时据此决定是否自动恢复展开）
+    @State private var autoCollapsedDueToWidth = false
     @State private var inspectorTab: InspectorTab = .session
     @State private var memories: [AssistantMemory] = []
     @State private var recent: [SessionSummary] = []
@@ -32,7 +34,7 @@ public struct AssistantView: View {
     @State private var reviewVoiceChanges: [SessionChange] = []
     @State private var selectedPersonaID = ""
     @State private var selectedVoiceID = ""
-    @State private var mode: AssistantMode = .turnTaking
+    @State private var mode: AssistantMode = .duplex
     @State private var isCheckingInput = false
     @State private var isCreatingPersona = false
     @State private var personaDraft = PersonaDraft()
@@ -127,13 +129,13 @@ public struct AssistantView: View {
     }
 
     /// 四态：未开始 / 运行时受阻 / 对话中 / 记录库回看。
-    private var state: ViewState {
+    private var state: PageState {
         if reviewRecord != nil { return .review }
         if isLive { return .live }
         return blockedReason == nil ? .ready : .blocked
     }
 
-    private enum ViewState {
+    private enum PageState {
         case ready
         case blocked
         case live
@@ -155,13 +157,15 @@ public struct AssistantView: View {
         // 记的「第三十轮」是同一个失败面，`minimumContentHeight` 那条滚动路径正是为它建的。
         PageScaffold(
             route: .assistant,
+            scrollable: false,
             purpose: pagePurpose,
             minimumContentHeight: 420,
-            growsWithContent: true
+            growsWithContent: false
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 if state == .live {
                     statusBar
+                    splitArea
                 } else if state == .review {
                     justEndedBand
                     reviewArea
@@ -173,6 +177,12 @@ public struct AssistantView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .onChange(of: navigation.layoutTier, initial: true) { _, newTier in
+                syncInspectorWithLayoutTier(newTier)
+            }
+            .onChange(of: state) { _, _ in
+                syncInspectorWithLayoutTier(navigation.layoutTier)
+            }
         } trailing: {
             headerActions
         }
@@ -291,7 +301,10 @@ public struct AssistantView: View {
                 panelName: inspectorTogglePanelName,
                 isCollapsed: isInspectorCollapsed
             ) {
-                isInspectorCollapsed.toggle()
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                    isInspectorCollapsed.toggle()
+                    autoCollapsedDueToWidth = false
+                }
             }
         }
     }
@@ -495,17 +508,18 @@ public struct AssistantView: View {
                     }
                     controlsCard
                 default:
-                    streamCard
-                    controlsCard
+                    liveChatWorkbenchCard
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(minWidth: 500, maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if !isInspectorCollapsed {
                 inspectorColumn
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity, minHeight: 460, maxHeight: .infinity, alignment: .topLeading)
+        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: isInspectorCollapsed)
     }
 
     // MARK: 人设（未开始）
@@ -542,30 +556,33 @@ public struct AssistantView: View {
     /// 「未开始」态下的一体化全高声学主工作台：
     /// 声学舞台中枢、角色与音色双核名片、2×2 场景任务矩阵、最近会话回溯、锚定底部的输入中枢。
     private var readyMainWorkbenchCard: some View {
-        SessionPanel {
+        SessionPanel(expandsVertically: true) {
             SessionPanelHead(
                 title: "声学对讲工作台",
                 badge: "待机就绪"
             )
             SessionHairline()
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                // 1. 声学舞台中枢：动态呼吸声波与环境状态条
-                acousticStageRow
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
+                    // 1. 声学舞台中枢：动态呼吸声波与环境状态条
+                    acousticStageRow
 
-                // 2. 伙伴角色与发音音色双核心名片
-                personaAndVoiceRow
+                    // 2. 伙伴角色与发音音色双核心名片
+                    personaAndVoiceRow
 
-                // 3. 灵感任务与场景卡片矩阵（2×2）
-                scenarioGrid
+                    // 3. 灵感任务与场景卡片矩阵（2×2）
+                    scenarioGrid
 
-                // 4. 最近会话快速回溯（若有记录）
-                if let latest = recent.first {
-                    recentSessionResumeBar(latest)
+                    // 4. 最近会话快速回溯（若有记录）
+                    if let latest = recent.first {
+                        recentSessionResumeBar(latest)
+                    }
+
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
                 }
-
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+                .padding(SpeechRailDesignTokens.Spacing.md)
             }
-            .padding(SpeechRailDesignTokens.Spacing.md)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             SessionHairline()
 
@@ -846,10 +863,10 @@ public struct AssistantView: View {
                             } else if isLive {
                                 // 麦克风录音对讲中：由真实输入电平驱动
                                 let currentLevel = CGFloat(max(0.1, min(1.0, level * 3.0)))
-                                let sine = CGFloat(sin(date * 5.0 + Double(index) * 0.4))
-                                let pulse = 0.5 + 0.5 * abs(sine)
-                                let liveFactor = currentLevel * pulse
-                                return 0.3 + 0.7 * liveFactor
+                                let phase = date * 5.0 + Double(index) * 0.4
+                                let sineAmplitude = CGFloat(abs(sin(phase)))
+                                let modulation = currentLevel * (0.5 + 0.5 * sineAmplitude)
+                                return 0.3 + 0.7 * modulation
                             } else {
                                 return 0.4
                             }
@@ -1364,78 +1381,443 @@ public struct AssistantView: View {
                 "已指向 \(preferences.llmConfiguration.model)；可达性与接口是否对得上由设置页的「检查连接」回答。")
     }
 
-    // MARK: 对话流（对话中 / 换音色 / 记忆）
+    // MARK: 实时对讲主 Chat 工作台（对话中）
 
-    private var streamCard: some View {
-        SessionPanel {
-            SessionPanelHead(title: "对话", detail: nil, trailingDetail: streamHeadDetail)
+    private var liveChatWorkbenchCard: some View {
+        SessionPanel(expandsVertically: true) {
+            liveChatHeader
             SessionHairline()
+
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(assistant.turns.enumerated()), id: \.element.id) { index, turn in
-                            if index > 0 { SessionHairline() }
-                            turnRow(turn)
-                                .id(turn.id)
-                        }
-                        if let partial = assistant.partialText, !partial.isEmpty {
-                            if !assistant.turns.isEmpty { SessionHairline() }
-                            SessionTurnRow(who: "你", text: partial, isPartial: true, bodyWidth: bodyWidth)
-                        }
-                        if let streaming = assistant.streamingReply, !streaming.isEmpty {
-                            if !assistant.turns.isEmpty || assistant.partialText != nil { SessionHairline() }
-                            SessionTurnRow(
-                                who: "助手", isVoice: true, voiceBadge: currentVoiceName,
-                                text: streaming, isPartial: true, bodyWidth: bodyWidth
-                            )
-                        }
-                        if assistant.turns.isEmpty, assistant.partialText == nil {
-                            emptyStream
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        if assistant.turns.isEmpty && assistant.partialText == nil && assistant.streamingReply == nil {
+                            liveListeningWorkspace
+                        } else {
+                            ForEach(Array(assistant.turns.enumerated()), id: \.element.id) { index, turn in
+                                turnRow(turn)
+                                    .id(turn.id)
+                            }
+                            // 用户实时语音转写中
+                            if let partial = assistant.partialText, !partial.isEmpty {
+                                SessionTurnRow(who: "你", text: partial, isPartial: true, bodyWidth: bodyWidth)
+                            }
+                            // 助手思考态
+                            if assistant.phase == .thinking && assistant.streamingReply == nil {
+                                liveAssistantThinkingBubble
+                            }
+                            // 助手实时朗读回复流
+                            if let streaming = assistant.streamingReply, !streaming.isEmpty {
+                                SessionTurnRow(
+                                    who: "助手", isVoice: true, voiceBadge: currentVoiceName,
+                                    text: streaming, isPartial: true, bodyWidth: bodyWidth
+                                )
+                            }
                         }
                     }
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onChange(of: assistant.turns.count) { _, _ in
                     guard let last = assistant.turns.last else { return }
                     withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             SessionHairline()
-            // 页脚先让位给回执：点了「记住」之后那一句必须有人答应（写库是一次无提示的写入，
-            // 屏幕上不变的话，用户只会再点一次）。回执说过之后才是常驻的那句说明。
-            CardFoot(note: memoryNote ?? streamFootNote) { EmptyView() }
+            liveChatIntegratedControls
         }
-        .frame(maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var emptyStream: some View {
-        SessionEmptyState(
-            systemImage: "message",
-            title: "还没有开始说",
-            message: "说一句，或者直接在下面打字；角色与声音在下面那一行里定。"
-        ) { EmptyView() }
-    }
+    // MARK: - 对讲顶栏状态与控制
 
-    private var streamHeadDetail: String {
-        if isLive {
-            // 右栏那一行已经用「已聊」这个说法了（术语表：`上下文` → `已聊`），
-            // 页头再写一次「上下文 N 轮」就是同一个数两个名字；单位也从「行」改成
-            // 「轮 + 句」两个都写清（2026-09-19 离屏走查）。
-            let base = "已聊 \(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句"
-            // 换过音色就把生效点写在页头上（稿的核心信息之一）：它是"新音色从哪一句
-            // 开始起作用"的唯一一处说明，而每行的徽标只说得清"这一句是谁"。
-            guard let last = assistant.voiceChanges.last else { return base }
-            let name = last.name ?? voiceName(forID: last.voiceID) ?? "新音色"
-            return base + " · 第 \(last.atOrdinal) 句起：\(name)"
+    private var liveChatHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            liveChatHeaderRow
+            liveChatHeaderWrapped
         }
-        return "已结束 · 共 \(assistant.turns.count) 句"
     }
 
-    private var streamFootNote: String {
-        // 上一版写「带多少上下文由设置里那一项控制」——设置里**没有**那一项，
-        // 而这一轮其实是把本场所有已定稿的对话都带上（`history` 只追加）。
-        // 指向一个不存在的开关比不说更糟（2026-09-19 离屏走查）。
-        "对话记录只在这台 Mac 上，服务侧不存对话；这一轮说过的它都还记得。"
+    private var liveChatHeaderRow: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            liveChatIdentity
+            liveChatVoiceButton
+            liveChatPhasePill
+
+            Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
+
+            liveChatStats
+            liveChatElapsed
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var liveChatHeaderWrapped: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                liveChatIdentity
+                Spacer(minLength: 0)
+                liveChatElapsed
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    liveChatVoiceButton
+                    liveChatPhasePill
+                    Spacer(minLength: 0)
+                    liveChatStats
+                }
+
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        liveChatVoiceButton
+                        liveChatPhasePill
+                        Spacer(minLength: 0)
+                    }
+                    liveChatStats
+                }
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var liveChatIdentity: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            ZStack {
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
+                    .frame(width: 22, height: 22)
+                Image(systemName: "waveform.and.mic")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .accessibilityHidden(true)
+            }
+            Text(activePersonaTitle)
+                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: 180, alignment: .leading)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var liveChatVoiceButton: some View {
+        Button {
+            inspectorTab = .voice
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "person.wave.2")
+                    .font(.system(size: 9))
+                    .accessibilityHidden(true)
+                Text(currentVoiceName ?? "默认音色")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 140, alignment: .leading)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                SpeechRailDesignTokens.Color.voice.opacity(0.12),
+                in: Capsule()
+            )
+            .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("当前使用的朗读音色；点击在右栏切换音色，下一句生效")
+    }
+
+    private var liveChatPhasePill: some View {
+        StatusPill(
+            tone: assistant.isMuted ? .attention : (assistant.phase == .speaking ? .healthy : .neutral),
+            label: livePhaseStatusLabel
+        )
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var liveChatStats: some View {
+        Text("已聊 \(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句")
+            .font(SpeechRailDesignTokens.Typography.caption)
+            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var liveChatElapsed: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(assistant.isMuted ? Color.orange : Color.green)
+                .frame(width: 6, height: 6)
+            Text(formatElapsed(session.elapsed))
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .monospacedDigit()
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+        )
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func formatElapsed(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let m = total / 60
+        let s = total % 60
+        return String(format: "%02d:%02d", m, s)
+    }
+
+    private var livePhaseStatusLabel: String {
+        if assistant.isMuted { return "麦克风已静音" }
+        return assistant.phase.title
+    }
+
+    // MARK: - 助手思考中动效气泡
+
+    private var liveAssistantThinkingBubble: some View {
+        HStack(alignment: .top, spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
+                    .frame(width: 26, height: 26)
+                Image(systemName: "waveform.and.mic")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            }
+            .padding(.top, 2)
+
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("助手正在思考与生成回答…")
+                    .font(SpeechRailDesignTokens.Typography.body)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                SpeechRailDesignTokens.Color.field,
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            )
+
+            Spacer(minLength: 40)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, 4)
+    }
+
+    // MARK: - 正在聆听交互中心（刚开麦对话空态）
+
+    private var liveListeningWorkspace: some View {
+        VStack(spacing: SpeechRailDesignTokens.Spacing.md) {
+            Spacer(minLength: 20)
+
+            // 呼吸式声学雷达指示
+            ZStack {
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.08))
+                    .frame(width: 80, height: 80)
+                Circle()
+                    .stroke(SpeechRailDesignTokens.Color.rail.opacity(0.2), lineWidth: 1.5)
+                    .frame(width: 64, height: 64)
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.rail.opacity(0.15))
+                    .frame(width: 48, height: 48)
+                Image(systemName: assistant.isMuted ? "mic.slash.fill" : "waveform.and.mic")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(assistant.isMuted ? Color.orange : SpeechRailDesignTokens.Color.rail)
+            }
+
+            VStack(spacing: 4) {
+                Text(assistant.isMuted ? "麦克风当前已静音" : "对讲已就绪，正在聆听您的声音")
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(assistant.isMuted ? "点击下方「取消静音」即可开口对讲" : "请直接开口说话，或在下方输入文字（回车或 ⌘⏎ 发送）")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+
+            // 快捷破冰话题推荐
+            VStack(spacing: 8) {
+                Text("快捷破冰提问：")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                HStack(spacing: 8) {
+                    Button("👋 你好，介绍一下你自己") {
+                        sendPrompt("你好，介绍一下你自己")
+                    }
+                    .speechRailButton(.secondary)
+
+                    Button("💡 讲一个有趣的科技冷知识") {
+                        sendPrompt("讲一个有趣的科技冷知识")
+                    }
+                    .speechRailButton(.secondary)
+
+                    Button("🎙️ 测试朗读语速与音色效果") {
+                        sendPrompt("请用当前音色朗读一段优美散文，测试音色效果")
+                    }
+                    .speechRailButton(.secondary)
+                }
+            }
+            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+
+            Spacer(minLength: 20)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+    }
+
+    private func sendPrompt(_ text: String) {
+        typed = text
+        send()
+    }
+
+    // MARK: - 沉底集成式控制底座
+
+    private var liveChatIntegratedControls: some View {
+        ViewThatFits(in: .horizontal) {
+            liveChatIntegratedControlsRow
+            liveChatIntegratedControlsWrapped
+        }
+    }
+
+    private var liveChatIntegratedControlsRow: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            liveChatMuteButton
+            liveChatTextField
+            if isAssistantSpeaking {
+                liveChatStopButton
+            }
+            liveChatSendButton
+            liveChatEndButton
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var liveChatIntegratedControlsWrapped: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                liveChatTextField
+                liveChatSendButton
+            }
+
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                liveChatMuteButton
+                if isAssistantSpeaking {
+                    liveChatStopButton
+                }
+                Spacer(minLength: 0)
+                liveChatEndButton
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var liveChatMuteButton: some View {
+        Button {
+            assistant.toggleMute()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: assistant.isMuted ? "mic.slash.fill" : "mic.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .accessibilityHidden(true)
+                Text(assistant.isMuted ? "取消静音" : "静音")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+            }
+        }
+        .speechRailButton(assistant.isMuted ? .primary : .secondary)
+        .fixedSize(horizontal: true, vertical: false)
+        .help(assistant.isMuted ? "取消静音，恢复麦克风拾音" : "静音麦克风，暂停语音输入")
+    }
+
+    private var liveChatTextField: some View {
+        TextField("说点什么，或在此打字输入…", text: $typed)
+            .textFieldStyle(.plain)
+            .font(SpeechRailDesignTokens.Typography.body)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.vertical, 7)
+            .background(
+                SpeechRailDesignTokens.Color.inputField,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            }
+            .onSubmit { send() }
+            .disabled(!canCompose)
+            .frame(maxWidth: .infinity)
+    }
+
+    private var liveChatStopButton: some View {
+        Button {
+            Task { await assistant.stopSpeaking() }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: assistant.phase == .speaking ? "speaker.wave.2.fill" : "circle.dotted")
+                    .font(.system(size: 10))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                    .accessibilityHidden(true)
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 8, weight: .bold))
+                    .accessibilityHidden(true)
+                Text("停止朗读")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+            }
+        }
+        .speechRailButton(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
+        .keyboardShortcut(.escape, modifiers: [])
+        .help("停止当前语音朗读（Esc）；保留会话与上下文")
+    }
+
+    private var liveChatSendButton: some View {
+        Button("发送") { send() }
+            .speechRailButton(.primary)
+            .fixedSize(horizontal: true, vertical: false)
+            .disabled(!canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .keyboardShortcut(.return, modifiers: .command)
+    }
+
+    private var liveChatEndButton: some View {
+        Button {
+            Task { await endConversation() }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "stop.circle")
+                    .font(.system(size: 11))
+                    .accessibilityHidden(true)
+                Text("结束")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+            }
+        }
+        .speechRailButton(.quiet)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("结束这次对话；记录会保存在记录库里")
+    }
+
+    private var isAssistantSpeaking: Bool {
+        assistant.phase == .speaking || assistant.phase == .thinking
     }
 
     /// 对话正文的折行宽：收起右栏之后主框体变宽，正文跟着变宽（稿的收起态）。
@@ -2091,7 +2473,7 @@ public struct AssistantView: View {
     }
 
     private var inspectorPanel: some View {
-        SessionPanel {
+        SessionPanel(expandsVertically: true) {
             SessionPanelHead(title: headlineTitle, badge: headlineBadge)
             SessionHairline()
             if state != .review {
@@ -2166,14 +2548,21 @@ public struct AssistantView: View {
 
     private var factsTabBody: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(factRows.enumerated()), id: \.offset) { _, row in
-                    SessionKVRow(row.0, row.1)
+            if state == .live {
+                liveFactsCard
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.top, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(factRows.enumerated()), id: \.offset) { _, row in
+                        SessionKVRow(row.0, row.1)
+                    }
                 }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.top, SpeechRailDesignTokens.Spacing.md)
+                .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.top, SpeechRailDesignTokens.Spacing.md)
-            .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
 
             SessionHairline()
 
@@ -2189,11 +2578,9 @@ public struct AssistantView: View {
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
 
-            if state == .ready {
-                acousticPipelineCard
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-            }
+            acousticPipelineCard
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                .padding(.top, SpeechRailDesignTokens.Spacing.xs)
 
             Spacer(minLength: 0)
             SessionHairline()
@@ -2211,14 +2598,11 @@ public struct AssistantView: View {
                                 : "还没填服务地址与模型；先在「设置 · 会话」里填好，再来点它"
                         )
                 } else if state == .live {
-                    Button("换音色") { inspectorTab = .voice }
+                    Button("🎨 换音色") { inspectorTab = .voice }
                         .speechRailButton(.secondary)
-                    Button("新开一轮以换角色") { Task { await restartWithPersonaPick() } }
+                    Button("🔄 新开一轮换角色") { Task { await restartWithPersonaPick() } }
                         .speechRailButton(.secondary)
                 } else if state == .review {
-                    // 稿 `screenClosureAssistantClosed` 右栏那三颗：「继续这一轮」是主按钮，
-                    // 重命名与移除在下面一行。移除**只在这一处给**（稿上写明的唯一入口），
-                    // 而且要先确认——记录是资产（用户 2026-09-17）。
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Button("继续这一轮") { continueFromReview() }
                             .speechRailButton(.primary)
@@ -2233,6 +2617,27 @@ public struct AssistantView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private var liveFactsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("实时对讲链路")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer()
+                StatusPill(tone: .healthy, label: "已连线")
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                SessionKVRow("对话模型", assistant.llmModel ?? "未连接")
+                SessionKVRow("当前音色", "\(currentVoiceName ?? Self.defaultVoiceLabel) · 下一句生效")
+                SessionKVRow("对话角色", "\(activePersonaTitle) · 本轮已锁定")
+                SessionKVRow("打断策略", assistant.mode.detail)
+                SessionKVRow("拾音设备", microphoneLabel)
+                SessionKVRow("交互进度", "\(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句")
             }
         }
     }
@@ -2576,6 +2981,11 @@ public struct AssistantView: View {
 
             SessionHairline()
 
+            // 当前朗读生效音色高亮卡片
+            activeVoiceCard
+
+            SessionHairline()
+
             // 分页音色列表：单页限制条数，告别超长铺满
             if voiceRows.isEmpty {
                 VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
@@ -2682,11 +3092,71 @@ public struct AssistantView: View {
         .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.35))
     }
 
+    private var activeVoiceCard: some View {
+        let currentVoice = model.creatorVoices.first(where: { $0.id == effectiveVoiceID })
+        let name = currentVoice?.name ?? currentVoiceName ?? Self.defaultVoiceLabel
+        let isPlaying = model.isAudioPlaying && model.playingVoiceID == currentVoice?.id
+        let isLoading = model.isCreatingSpeech && model.previewingVoiceID == currentVoice?.id
+
+        return HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            ZStack {
+                Circle()
+                    .fill(SpeechRailDesignTokens.Color.voice.opacity(0.15))
+                    .frame(width: 28, height: 28)
+                Image(systemName: "person.wave.2.fill")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(name)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    StatusPill(tone: .healthy, label: "当前生效")
+                }
+                Text("下一句朗读时将使用此音色输出")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+
+            Spacer()
+
+            if let voice = currentVoice {
+                Button {
+                    if isPlaying || isLoading {
+                        model.stopAudio()
+                    } else {
+                        Task { await model.previewVoice(voice) }
+                    }
+                } label: {
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        HStack(spacing: 3) {
+                            Image(systemName: isPlaying ? "stop.fill" : "play.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text(isPlaying ? "停止" : "试听")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        }
+                    }
+                }
+                .speechRailButton(.secondary)
+                .help(isPlaying ? "停止试听" : "试听当前生效的音色")
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, 8)
+        .background(SpeechRailDesignTokens.Color.voice.opacity(0.06))
+    }
+
     private var recordTabBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
-                SessionKVRow("这一段", "\(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句")
-                SessionKVRow("记录库", recent.isEmpty ? "还没有对话记录" : "\(recent.count) 段 · 长期保留")
+                SessionKVRow("当前会话", "\(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句")
+                SessionKVRow("历史归档", recent.isEmpty ? "还没有对话记录" : "\(recent.count) 段 · 本地加密留存")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.top, SpeechRailDesignTokens.Spacing.md)
@@ -2711,46 +3181,67 @@ public struct AssistantView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(recent.prefix(6).enumerated()), id: \.element.id) { index, summary in
-                            if index > 0 { SessionHairline() }
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(recent.prefix(8).enumerated()), id: \.element.id) { _, summary in
                             Button {
                                 Task { await openRecord(summary) }
                             } label: {
-                                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                                    Text(summary.record.title ?? "这一轮对话")
-                                        .font(SpeechRailDesignTokens.Typography.callout)
-                                        .lineLimit(1)
-                                    Text(recordSubtitle(summary))
-                                        .font(SpeechRailDesignTokens.Typography.caption)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                        .lineLimit(1)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                        Text(summary.record.title ?? "未命名对话")
+                                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        StatusPill(tone: .neutral, label: "\(summary.lineCount) 句")
+                                    }
+
+                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                        if let persona = summary.record.persona?.title {
+                                            Text(persona)
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                            Text("·")
+                                                .font(SpeechRailDesignTokens.Typography.caption)
+                                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                        }
+                                        Text(recordSubtitle(summary))
+                                            .font(SpeechRailDesignTokens.Typography.caption)
+                                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                            .lineLimit(1)
+                                    }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                                .contentShape(Rectangle())
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                                .padding(.vertical, 8)
+                                .background(
+                                    SpeechRailDesignTokens.Color.field,
+                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                                )
                             }
                             .buttonStyle(.plain)
                             .speechRailPointerCursor()
                         }
                     }
-                }
-                if recent.count > 6 {
-                    Text("这里只列最近 6 条；点开任意一条可查看完整记录库。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                 }
             }
 
             Spacer(minLength: 0)
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
-                Text(recent.isEmpty ? "本地加密留存" : "共 \(recent.count) 段对话归档")
-                    .font(SpeechRailDesignTokens.Typography.caption)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                Button("查看完整记录库") {
+                    if let first = recent.first {
+                        Task { await openRecord(first) }
+                    }
+                }
+                .speechRailButton(.secondary)
+                .disabled(recent.isEmpty)
+
                 Button("回到会话") { inspectorTab = .session }
                     .speechRailButton(.primary)
             }
@@ -2764,9 +3255,14 @@ public struct AssistantView: View {
     private var memoryTabBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("长期记忆资产")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("长期记忆资产")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Text("自动注入提示词上下文，下一轮起效")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                }
                 Spacer()
                 Button(isAddingMemory ? "取消" : "+ 添加记忆") {
                     withAnimation {
@@ -2774,8 +3270,7 @@ public struct AssistantView: View {
                         newMemoryDraft = ""
                     }
                 }
-                .buttonStyle(.link)
-                .font(SpeechRailDesignTokens.Typography.caption)
+                .speechRailButton(.secondary)
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.top, SpeechRailDesignTokens.Spacing.sm)
@@ -2786,9 +3281,20 @@ public struct AssistantView: View {
             if isAddingMemory {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     TextField("输入要记住的事（如：回答优先使用 Swift）…", text: $newMemoryDraft)
-                        .textFieldStyle(.roundedBorder)
+                        .textFieldStyle(.plain)
                         .font(SpeechRailDesignTokens.Typography.body)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                        .padding(.vertical, 6)
+                        .background(
+                            SpeechRailDesignTokens.Color.inputField,
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                        )
                         .onSubmit { Task { await saveNewMemory() } }
+
                     HStack {
                         Spacer()
                         Button("取消") {
@@ -2798,13 +3304,14 @@ public struct AssistantView: View {
                             }
                         }
                         .speechRailButton(.secondary)
+
                         Button("保存") { Task { await saveNewMemory() } }
                             .speechRailButton(.primary)
                             .disabled(newMemoryDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                 SessionHairline()
             }
 
@@ -2827,14 +3334,13 @@ public struct AssistantView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(memories.enumerated()), id: \.element.id) { index, memory in
-                            if index > 0 { SessionHairline() }
-                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(memories.enumerated()), id: \.element.id) { _, memory in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                                     Text(memory.body)
-                                        .font(SpeechRailDesignTokens.Typography.callout)
-                                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                        .font(SpeechRailDesignTokens.Typography.body)
+                                        .foregroundStyle(memory.isActive ? SpeechRailDesignTokens.Color.ink : SpeechRailDesignTokens.Color.inkSecondary)
                                         .fixedSize(horizontal: false, vertical: true)
                                     Spacer(minLength: 0)
                                     StatusPill(
@@ -2842,36 +3348,50 @@ public struct AssistantView: View {
                                         label: memory.isActive ? memoryKindTitle(memory.kind) : "已停用"
                                     )
                                 }
-                                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                                     Button(memory.isActive ? "停用" : "启用") {
                                         Task {
                                             try? await session.setMemoryActive(id: memory.id, active: !memory.isActive)
                                             await reloadMemories()
                                         }
                                     }
-                                    .buttonStyle(.link)
+                                    .buttonStyle(.plain)
                                     .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+
                                     Button("移除") {
                                         Task {
                                             try? await session.removeMemory(id: memory.id)
                                             await reloadMemories()
                                         }
                                     }
-                                    .buttonStyle(.link)
+                                    .buttonStyle(.plain)
                                     .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(Color.red.opacity(0.8))
                                 }
                             }
-                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                            .padding(.vertical, 8)
+                            .background(
+                                SpeechRailDesignTokens.Color.field,
+                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                            )
                         }
                     }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                 }
             }
 
             Spacer(minLength: 0)
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
-                Text("记忆长期留存，下一轮生效")
+                Text(memories.isEmpty ? "记忆留存本机" : "已记录 \(memories.count) 条记忆资产")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                 Button("回到会话") { inspectorTab = .session }
@@ -2879,6 +3399,8 @@ public struct AssistantView: View {
             }
         }
     }
+
+
 
     private func memoryKindTitle(_ kind: AssistantMemoryKind) -> String {
         switch kind {
@@ -2903,13 +3425,53 @@ public struct AssistantView: View {
             .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
             .frame(maxHeight: .infinity)
 
-            SessionPanel {
+            SessionPanel(expandsVertically: true) {
                 SessionPanelHead(title: reviewRecord?.title ?? "这一轮对话", detail: nil, trailingDetail: reviewDetail)
                 SessionHairline()
+
+                // 历史记录摘要状态栏
+                if let record = reviewRecord {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.crop.circle")
+                                .font(.system(size: 10))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                            Text(record.persona?.title ?? "默认角色")
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        }
+
+                        Text("·")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                        HStack(spacing: 4) {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 10))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                            Text(reviewVoiceLabel)
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        }
+
+                        Text("·")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+                        Text("耗时 \(reviewDurationText)")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+
+                        Spacer()
+
+                        StatusPill(tone: .healthy, label: "已归档")
+                    }
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, 6)
+                    .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.5))
+
+                    SessionHairline()
+                }
+
                 ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(reviewLines.enumerated()), id: \.element.id) { index, line in
-                            if index > 0 { SessionHairline() }
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(reviewLines.enumerated()), id: \.element.id) { _, line in
                             SessionTurnRow(
                                 who: line.role == .assistant ? "助手" : "你",
                                 isVoice: line.role == .assistant,
@@ -2919,7 +3481,7 @@ public struct AssistantView: View {
                                 pills: reviewPills(line),
                                 timestamp: Self.clock(line.createdAt),
                                 text: line.text,
-                                bodyWidth: 520
+                                bodyWidth: 640
                             )
                         }
                         if reviewLines.isEmpty {
@@ -2930,23 +3492,31 @@ public struct AssistantView: View {
                             ) { EmptyView() }
                         }
                     }
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
                 }
-                .frame(maxHeight: .infinity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 SessionHairline()
-                // 这句话今天必须与右栏那颗按钮说的是同一件事（`SESSIONS-SPEC` §15 的 E7）：
-                // 继续这一轮是**新开一轮**（库里另起一条），不是把新对话接进这一条。
                 CardFoot(note: "继续这一轮是新开一轮：角色与声音可以重新选；这一条记录一个字不动。") {
-                    Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
-                        .speechRailButton(.secondary)
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
+                            .speechRailButton(.secondary)
+                            .fixedSize()
+
+                        Button("继续这一轮") { continueFromReview() }
+                            .speechRailButton(.primary)
+                            .fixedSize()
+                    }
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
 
             if !isInspectorCollapsed {
                 inspectorColumn
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: isInspectorCollapsed)
     }
 
     private var reviewDetail: String {
@@ -3086,8 +3656,11 @@ public struct AssistantView: View {
     /// `inspectorTab` 的话，右栏收着的时候按下去屏幕上一个像素都不动——`inspectorTab` 已经
     /// 换到音色页了，只是那一栏没露出来。这正是"点了没反应"（2026-09-19 离屏走查）。
     private func showInspector(tab: InspectorTab) {
-        isInspectorCollapsed = false
-        inspectorTab = tab
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+            isInspectorCollapsed = false
+            autoCollapsedDueToWidth = false
+            inspectorTab = tab
+        }
     }
 
     // MARK: - 记录库那一栏的三个动作（稿 `screenClosureAssistantClosed` 的右栏）
@@ -3268,6 +3841,37 @@ public struct AssistantView: View {
         }
         .padding(SpeechRailDesignTokens.Layout.cardInset)
         .frame(width: 520)
+    }
+
+    // MARK: - 辅助面板响应式联动（接入中央 WindowLayoutTier 断点总线）
+
+    private func syncInspectorWithLayoutTier(_ tier: WindowLayoutTier) {
+        let shouldCollapse: Bool
+        if state == .review {
+            // 在「对话记录复盘/回看态」下，左侧已有 280pt 的对话记录库栏目（三栏结构）！
+            // 除非处于宽屏全景（expanded，≥ 1340pt），否则优先自动收起最右侧的「记录信息」，
+            // 全力保障中央的对话正文主窗体饱满充裕（至少 560pt+ 空间），绝不压缩主窗体！
+            shouldCollapse = (tier != .expanded)
+        } else {
+            // 在「对讲主工作台态」下，双栏结构，仅在 compact 阶梯下收起辅助面板
+            shouldCollapse = (tier == .compact)
+        }
+
+        if shouldCollapse {
+            if !isInspectorCollapsed {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
+                    isInspectorCollapsed = true
+                    autoCollapsedDueToWidth = true
+                }
+            }
+        } else {
+            if isInspectorCollapsed && autoCollapsedDueToWidth {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
+                    isInspectorCollapsed = false
+                    autoCollapsedDueToWidth = false
+                }
+            }
+        }
     }
 }
 

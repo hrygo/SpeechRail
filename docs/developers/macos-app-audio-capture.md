@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 录音通道与音频采集最佳实践"
 status: active
 audience: "SpeechRail macOS App 设计与开发人员"
-version: "0.1.0"
-date: 2026-09-16
+version: "0.2.0"
+date: 2026-09-19
 ---
 
 # SpeechRail macOS App 录音通道与音频采集最佳实践
@@ -177,9 +177,33 @@ date: 2026-09-16
 `--options runtime`，也没有 entitements 文件——所以它在 Distribution 构建里不是 hardened runtime，
 而 tap 的 TCC 归属（算 App 还是算 XPC service）本机没验证过。两件事都算在 §6 那条 tap 真机验证里。
 
-**尚未实装**：设备变更（`AVAudioEngineConfigurationChangeNotification`）之后的重建与
-`device_switch` 行。今天设备被拔会表现为采集流结束并落一条中断（`source_lost`），
-而不是"重建引擎、继续录、新行标 `device_switch = 1`"（`TECHNICAL-DESIGN` §9 第 13 行）。
+**现状分层（2026-09-19）**：以上 `MicrophoneCapture` 仍服务字幕与会议，设备变化时保持原有
+「采集流结束 → 中断」口径；语音助手不再直接使用它，而是使用下方的 `AudioEngineSession`。
+因此助手已经有自己的引擎重建路径，但会议/字幕仍未实现 `device_switch` 行。
+
+### 3.7.2 语音助手的共享播放/采集与系统 AEC（2026-09-19 实装）
+
+`AssistantSession` 的默认 `audioSourceFactory` 现在返回 `AudioEngineSession`：采集与 TTS 播放共用
+同一台 `AVAudioEngine`。这条链路只在助手会话期间建立，结束时拆 tap、停止 engine 并释放播放节点；
+音色克隆仍然保持未经 AEC/AGC/降噪处理的独立录音链路。
+
+新安装或没有历史偏好的会话默认使用「实时对讲（耳机）」（`duplex`），这样不会再依赖
+「播放时闭麦」来避免自回采；已有用户明确保存的「一问一答（外放）」偏好继续保留。
+如果当前音频设备无法启用系统 voice processing，会话会给出可读失败，并建议切回半双工模式。
+
+| 模式 | 原生配置 | 上行口径 |
+|---|---|---|
+| 一问一答（外放） | 同一 engine 播放与采集；不强制 voice processing | 播放开始时清空旧输入，播放期间由会话门闩不上行，播放结束再清空残留 |
+| 实时对讲（耳机） | engine 启动前同时对 `inputNode` / `outputNode` 调用 `setVoiceProcessingEnabled(true)` | 全程上行；系统 voice processing 获得同 engine 的 far-end 播放参考，服务端 `speech_started` 负责取消 TTS |
+
+输入 tap 仍归一为 16 kHz / 单声道 / PCM16；TTS 以 24 kHz / 单声道 PCM16 进入同一 engine 的
+`AVAudioPlayerNode`。插话或用户点停止只停播放器并使旧缓冲失效，不拆输入引擎，所以下一块 TTS
+可以继续播放。`AVAudioEngineConfigurationChangeNotification` 触发后会重建 input tap、converter
+和 player；新路由不支持 duplex 时回调为可读失败，而不是静默发送未经处理的帧。
+
+**尚未完成的验收**：本机 Debug 构建已通过，但系统 AEC 的真实 ERLE、双讲不收敛、外放距离与不同
+耳机/麦克风组合仍需在实际设备上测量。没有这组声学数据，不把「已调用 voice processing」写成
+「外放也一定不回采」。
 
 ## 4. 与 SpeechRail 的差距（按性价比排序的建议）
 

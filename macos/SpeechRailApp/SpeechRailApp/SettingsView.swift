@@ -485,7 +485,7 @@ public struct SettingsView: View {
     private var modeBinding: Binding<String> {
         Binding(
             get: { preferences.assistantMode.rawValue },
-            set: { preferences.assistantMode = AssistantMode(rawValue: $0) ?? .turnTaking }
+            set: { preferences.assistantMode = AssistantMode(rawValue: $0) ?? .duplex }
         )
     }
 

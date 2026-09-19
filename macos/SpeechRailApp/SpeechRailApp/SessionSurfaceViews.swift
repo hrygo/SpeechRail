@@ -409,9 +409,10 @@ public struct SessionLibraryView: View {
     @ViewBuilder
     private var emptyState: some View {
         if kind == .captions {
-            return AnyView(captionsIdleState)
+            AnyView(captionsIdleState)
+        } else {
+            AnyView(genericEmptyState)
         }
-        return AnyView(genericEmptyState)
     }
 
     /// 实时字幕的空态（稿 `实时字幕 · 记录库 · 未开始（前置检查）`）。
