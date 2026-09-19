@@ -188,6 +188,12 @@ worker 的 stderr 或内部异常文本；未知的 TTS 运行时错误仍返回
 - `SpeechRail-Latency-Budget-Ms: 50..120000`：相对服务预算，最终取该值与
   `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 的较小值。
 
+需要把合成绑定到发现快照时，可同时提供 `SpeechRail-Expected-Voice-Revision: vr_...`
+和 `SpeechRail-Expected-Model-Revision: <40-char-hex>`。两者均在首个 PCM 前校验；
+model revision 必须等于当前有效 TTS artifact 的 catalog revision，未知或不匹配返回
+`409 model_revision_conflict`，不会启动该次合成。未携带这些扩展 Header 的旧请求保持原有
+alias/模型选择行为。
+
 客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
 `ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
 允许时并行；实现不承诺对正在运行的 Metal kernel 做硬抢占。Voice creation、quality validation

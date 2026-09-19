@@ -1470,6 +1470,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             alias="SpeechRail-Expected-Voice-Revision",
             pattern=r"^vr_[0-9a-f]{32}$",
         ),
+        expected_model_revision: str | None = Header(
+            default=None,
+            alias="SpeechRail-Expected-Model-Revision",
+            pattern=r"^[0-9a-f]{40}$",
+        ),
         pronunciation_set: str | None = Header(
             default=None,
             alias="SpeechRail-Pronunciation-Set",
@@ -1543,6 +1548,21 @@ def create_audio_router(services: AppServices) -> APIRouter:
             if profile.mode == "clone" and active.tts_clone is not None
             else tts_variant
         )
+        tts_artifact = (
+            active.tts_clone
+            if profile.mode == "clone" and active.tts_clone is not None
+            else active.tts
+        )
+        if expected_model_revision is not None and (
+            tts_artifact is None or tts_artifact.revision != expected_model_revision
+        ):
+            return error_response(
+                409,
+                request_id,
+                "model_revision_conflict",
+                "Requested model revision is not the active TTS artifact",
+                param="model",
+            )
         if binding_variant in {"voice_design", "custom_voice", "base"}:
             try:
                 resolve_binding(binding_variant, preset_voice)
@@ -1713,21 +1733,16 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if receipt_mode == "integrity":
             if effective_revision is None:
                 effective_revision = profile.revision
-            artifact = (
-                active.tts_clone
-                if profile.mode == "clone" and active.tts_clone is not None
-                else active.tts
-            )
             try:
                 receipt_id = services.render_receipts.begin(
                     request_id=request_id,
                     voice_id=preset_voice,
                     voice_revision=profile.revision,
-                    model_artifact=artifact.key if artifact is not None else None,
-                    model_source=artifact.model_id if artifact is not None else None,
-                    model_variant=artifact.variant if artifact is not None else None,
+                    model_artifact=tts_artifact.key if tts_artifact is not None else None,
+                    model_source=tts_artifact.model_id if tts_artifact is not None else None,
+                    model_variant=tts_artifact.variant if tts_artifact is not None else None,
                     model_catalog_revision=(
-                        artifact.revision if artifact is not None else None
+                        tts_artifact.revision if tts_artifact is not None else None
                     ),
                     model_runtime_revision=None,
                     output_format=body.response_format,
@@ -1752,6 +1767,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             language=body.language,
             instruction=body.instructions,
             expected_voice_revision=effective_revision,
+            expected_model_revision=expected_model_revision,
             timing_mode=timing_mode,
         )
         if purpose == "interactive":

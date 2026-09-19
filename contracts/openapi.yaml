@@ -669,6 +669,16 @@ paths:
             pattern: '^vr_[0-9a-f]{32}$'
           description: Optional SpeechRail acoustic voice revision pin.
         - in: header
+          name: SpeechRail-Expected-Model-Revision
+          required: false
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{40}$'
+          description: |
+            Optional SpeechRail model artifact revision pin. The request is rejected
+            with `409 model_revision_conflict` before synthesis when the active TTS
+            artifact is unknown or has a different catalog revision.
+        - in: header
           name: SpeechRail-Pronunciation-Set
           required: false
           schema:

@@ -90,6 +90,13 @@ def _payload() -> dict[str, object]:
     }
 
 
+def _quality_tts_revision() -> str:
+    catalog = load_catalog()
+    artifact_key = catalog.preset("quality").tts
+    artifact = next(item for item in catalog.artifacts if item.key == artifact_key)
+    return artifact.revision
+
+
 def test_v1_speech_returns_negotiated_receipt_bound_to_revision(
     tmp_path: Path,
     monkeypatch,
@@ -158,6 +165,37 @@ def test_v1_accepts_namespaced_revision_pin_header(
     assert len(synth.requests) == 1
     assert synth.requests[0].expected_voice_revision == revision
     assert "SpeechRail-Receipt-Id" not in response.headers
+
+
+def test_v1_accepts_namespaced_model_revision_pin(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, synth, _revision = _client(tmp_path, monkeypatch)
+    model_revision = _quality_tts_revision()
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Expected-Model-Revision": model_revision},
+    )
+    assert response.status_code == 200
+    assert len(synth.requests) == 1
+    assert synth.requests[0].expected_model_revision == model_revision
+
+
+def test_v1_rejects_stale_model_revision_before_synthesis(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, synth, _revision = _client(tmp_path, monkeypatch)
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Expected-Model-Revision": "0" * 40},
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "model_revision_conflict"
+    assert synth.requests == []
 
 
 def test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request(

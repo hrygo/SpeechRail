@@ -432,6 +432,12 @@ as implementation changes.
   read/modify/write transactions, so separate instances cannot overwrite pending
   creations or revision history.
   Recovery validates the stored result against the canonical request payload.
+  The HTTP synthesis extension now also accepts an optional
+  `SpeechRail-Expected-Model-Revision` pin and rejects an unknown/stale active TTS
+  catalog artifact with `409 model_revision_conflict` before admission; the
+  resolved pin is carried into the vendor-neutral `SpeechRequest`. This is a
+  configured-artifact conditional boundary, not proof of the worker's immutable
+  weight identity or managed cross-restart evidence.
 - **#64**: HTTP and negotiated Realtime receipts record the resolved voice/catalog
   identity, pre-transport PCM sample count and SHA-256, and explicit completed,
   cancelled or error terminals. Empty audio can no longer become `completed`.
@@ -609,6 +615,18 @@ snapshot remains a configured catalog view and continues to report its model
 metadata into a model pin. Synthetic handshake and HTTP contract tests cover the
 state boundary; managed ASR identity and cross-restart observations remain external
 acceptance evidence.
+
+### 2026-09-20 configured model artifact revision pin
+
+`POST /v1/audio/speech` now accepts the additive
+`SpeechRail-Expected-Model-Revision: <40-char-hex>` header. The route resolves the
+voice and the active TTS artifact together, rejects an unknown or mismatched
+catalog revision with `409 model_revision_conflict` before governor admission and
+worker iteration, and carries the accepted value on `SpeechRequest`. Existing
+OpenAI-compatible requests remain unchanged when the header is absent. Focused
+HTTP/port contract tests cover accepted and stale pins. This guards the configured
+catalog generation only; it does not turn catalog metadata into a verified runtime
+weight hash and does not replace managed receipt/restart evidence.
 
 ### 2026-09-20 ambiguous pronunciation span downgrade
 
