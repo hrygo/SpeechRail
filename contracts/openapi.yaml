@@ -183,7 +183,10 @@ paths:
           WebSocket contract in contracts/realtime-openai.md instead. The file may use
         the OpenAI-compatible audio containers flac, mp3, mp4, mpeg, mpga, m4a,
         ogg, wav, or webm. The multipart Content-Type and filename are format
-        hints; the service validates and decodes the uploaded content.
+        hints; the service validates and decodes the uploaded content. A worker
+        lifecycle failure after admission returns 503 with the compatible
+        `backend_busy` code and low-cardinality `SpeechRail-Busy-Reason` /
+        `SpeechRail-Retry-Hint` headers; private worker stderr is never returned.
       security:
         - BearerAuth: []
         - {}
@@ -224,7 +227,22 @@ paths:
         '429':
           $ref: '#/components/responses/QueueFull'
         '503':
-          $ref: '#/components/responses/BackendNotReady'
+          description: Model runtime is not ready or a worker is recovering
+          headers:
+            SpeechRail-Busy-Reason:
+              schema:
+                type: string
+                enum: [backend_unavailable]
+              description: Present for a worker lifecycle failure.
+            SpeechRail-Retry-Hint:
+              schema:
+                type: string
+                enum: [retry_after_worker_recovery]
+              description: Present for a worker lifecycle failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
   /v1/voices:
     get:
       operationId: listVoices
