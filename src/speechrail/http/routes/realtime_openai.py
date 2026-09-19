@@ -117,7 +117,13 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 model = settings.model_id
                 display_model = settings.model_id
         except RealtimeAdapterError as exc:
-            await send_event(error_event(code=exc.code, message=exc.message))
+            await send_event(
+                error_event(
+                    code=exc.code,
+                    message=exc.message,
+                    busy_reason=exc.busy_reason,
+                )
+            )
             await websocket.close(code=HANDSHAKE_MODEL_CLOSE_CODE)
             return
 
@@ -173,7 +179,13 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         # A malformed frame is a client protocol error, not a
                         # task failure.  Keep this session usable and leave its
                         # admission slot to the normal close path.
-                        await send_event(error_event(code=exc.code, message=exc.message))
+                        await send_event(
+                error_event(
+                    code=exc.code,
+                    message=exc.message,
+                    busy_reason=exc.busy_reason,
+                )
+            )
                         continue
                     event_type = event.get("type")
                     append_dispatch: asyncio.Future[None] | None = None
@@ -234,6 +246,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         code=exc.code,
                         message=exc.message,
                         client_event_id=exc.event_id or client_event_id,
+                        busy_reason=exc.busy_reason,
                     )
                 )
             except DiarizationError as exc:
