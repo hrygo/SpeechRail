@@ -95,7 +95,7 @@ from speechrail.domain.tts import (
 )
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
-from speechrail.runtime.busy import BusyReason
+from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.resource_governor import (
     GovernorQueueFullError,
@@ -574,8 +574,7 @@ class OpenAIRealtimeSession:
             message = str(exc)
             if message.startswith("language_not_supported"):
                 raise RealtimeAdapterError("language_not_supported", message) from exc
-            raw_reason = getattr(exc, "busy_reason", BusyReason.BACKEND_TRANSITION)
-            busy_reason = str(raw_reason)
+            busy_reason = str(infer_backend_busy_reason(exc))
             raise RealtimeAdapterError(
                 "backend_busy",
                 message,

@@ -79,7 +79,7 @@ ws://127.0.0.1:8201/v1/realtime
 | `response.output_audio.delta` / `done` | current nested `audio` session profile 的 TTS 音频块；同一 response 只会使用一组 audio event literal，避免客户端重复播放 |
 | `response.audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
 | `response.done` | TTS response 终态（`status: completed`、`failed` 或 `cancelled`） |
-| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；格式错误 JSON 或非对象事件返回 `invalid_event`，不使会话任务异常退出；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy` |
+| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；格式错误 JSON 或非对象事件返回 `invalid_event`，不使会话任务异常退出；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy`。后端忙的 Realtime 错误可在顶层 `speechrail.busy_reason` 中提供低基数原因：`asr_mode_conflict`、`realtime_session_limit`、`diarization_capacity`、`governor_queue_full`、`backend_transition` 或 `backend_unavailable`；worker 生命周期不可用仍保持兼容的 `code=backend_busy`。 |
 
 每个服务端事件还带顶层 `event_id`、`session_id` 和从 1 开始单调递增的 `sequence`。
 `event_id` 由服务端每次发送时生成、在一个连接内唯一；断线不会恢复旧事件，重连会创建新的 session。

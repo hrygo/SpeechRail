@@ -2081,7 +2081,7 @@ def test_realtime_response_create_voice_override_resolves_alias_and_type() -> No
 def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
     class ConnectFailureSession(FakeStreamingSession):
         async def connect(self) -> None:
-            raise RuntimeError("streaming session.open failed")
+            raise RuntimeError("worker_unavailable")
 
     class FlakyConnectFactory(FakeStreamingFactory):
         def __init__(self) -> None:
@@ -2103,6 +2103,7 @@ def test_realtime_connect_failure_releases_factory_slot_and_recovers() -> None:
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "backend_busy"
+        assert error["speechrail"] == {"busy_reason": "backend_unavailable"}
         assert factory.released == [factory.sessions[0]]
         socket.send_json(
             {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00" * 80)}
