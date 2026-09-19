@@ -12,7 +12,7 @@ date: 2026-09-19
 
 ---
 
-新增安全发现入口：`GET /v2/capabilities`、`/v2/voices`、`/v2/voices/{voice_id}`。
+新增安全发现入口：`GET /v1/speechrail/capabilities`、`/v1/speechrail/voices`、`/v1/speechrail/voices/{voice_id}`。
 详见[有效能力快照与安全目录](effective-capabilities.md)；旧 `/v1` 合成请求不变。
 
 ## 1. 模型身份与别名映射
