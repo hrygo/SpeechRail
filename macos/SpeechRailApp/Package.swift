@@ -67,8 +67,10 @@ let package = Package(
             ],
             sources: [
                 "ControlAgentRegistration.swift",
+                "LLMProvider.swift",
                 "RuntimeMetricsSampler.swift",
                 "RuntimeMonitoringAccessibility.swift",
+                "VoicePrompt.swift",
             ]
         ),
         .testTarget(
