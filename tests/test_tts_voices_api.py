@@ -314,7 +314,11 @@ def test_custom_voice_detail_and_metadata_update_round_trip() -> None:
             voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]
         }
         assert listed[voice_id]["name"] == "更新后的名称"
-        assert listed[voice_id]["seed"] == 2026
+        assert "seed" not in listed[voice_id]
+        assert "instruction" not in listed[voice_id]
+        detail_after = client.get(f"/v1/voices/{voice_id}")
+        assert detail_after.status_code == 200
+        assert detail_after.json()["seed"] == 2026
     finally:
         client.delete(f"/v1/voices/{voice_id}")
 
@@ -362,7 +366,10 @@ def test_custom_voice_accepts_and_returns_explicit_seed() -> None:
         assert response.status_code == 201
         assert response.json()["seed"] == 12345
         listed = {voice["id"]: voice for voice in client.get("/v1/voices").json()["data"]}
-        assert listed[voice_id]["seed"] == 12345
+        assert "seed" not in listed[voice_id]
+        detail = client.get(f"/v1/voices/{voice_id}")
+        assert detail.status_code == 200
+        assert detail.json()["seed"] == 12345
     finally:
         client.delete(f"/v1/voices/{voice_id}")
 
