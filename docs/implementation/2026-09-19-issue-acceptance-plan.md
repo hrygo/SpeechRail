@@ -464,6 +464,21 @@ default `~/.speechrail` journal. This is local source/synthetic evidence; the fu
 repository gate and current-head macOS App job also passed in CI run
 `35451951303`.
 
+### 2026-09-20 durable idempotency cross-process serialization
+
+`DurableIdempotencyJournal` now places a sibling lock file beside its JSON journal
+and holds an exclusive `fcntl` lock across each load/modify/save transaction.
+The existing in-process `RLock` remains in place; the file lock closes the gap
+between separate journal instances or a process handoff, where two writers could
+otherwise each read the same state and overwrite the other's pending creation.
+The regression test externally holds that lock from a separate file descriptor,
+verifies the journal operation waits, and then releases it without changing the
+existing `idempotency_conflict` error semantics. The durable idempotency, voice
+design registration, revision contract, and revision route slice is **67 passed**
+on Python 3.12.14, with Ruff and targeted Mypy passing. This proves cross-process
+serialization behavior, not power-loss durability, filesystem repair, or the
+managed runtime's actual model/revision identity.
+
 ### 2026-09-20 managed model measurement: partial TTS warm slice
 
 在现有 managed `quality` profile（release `2.7.0`、generation `102`）上完成了一次
