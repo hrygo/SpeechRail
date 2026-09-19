@@ -1164,6 +1164,45 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return PlainTextResponse(format_srt(result), media_type="application/x-subrip")
         return PlainTextResponse(format_vtt(result), media_type="text/vtt")
 
+    @router.get("/v2/audio/receipts/{receipt_id}")
+    async def render_receipt(receipt_id: str, request: Request) -> JSONResponse:
+        """Return safe service-side rendering evidence without audio or text."""
+
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            payload = services.render_receipts.get(receipt_id)
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "render_receipt_not_found",
+                "Render receipt not found",
+            )
+        return JSONResponse(status_code=200, content=payload)
+
+    @router.get("/v2/audio/receipts/by-request/{source_request_id}")
+    async def render_receipt_by_request(
+        source_request_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Return the newest receipt for one public request ID."""
+
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            payload = services.render_receipts.find_by_request_id(source_request_id)
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "render_receipt_not_found",
+                "Render receipt not found",
+            )
+        return JSONResponse(status_code=200, content=payload)
+
     @router.post("/v1/voices/previews")
     async def voice_preview(request: Request, body: _VoicePreviewHTTPBody) -> Response:
         """Generate a transient VoiceDesign sample without registering a voice."""
@@ -1455,6 +1494,40 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "SpeechRail TTS backend is not ready",
                 retryable=True,
             )
+        receipt_id: str | None = None
+        effective_revision = expected_voice_revision
+        if request.url.path == "/v2/audio/speech":
+            if effective_revision is None:
+                effective_revision = profile.revision
+            artifact = (
+                active.tts_clone
+                if profile.mode == "clone" and active.tts_clone is not None
+                else active.tts
+            )
+            try:
+                receipt_id = services.render_receipts.begin(
+                    request_id=request_id,
+                    voice_id=preset_voice,
+                    voice_revision=profile.revision,
+                    model_artifact=artifact.key if artifact is not None else None,
+                    model_source=artifact.model_id if artifact is not None else None,
+                    model_variant=artifact.variant if artifact is not None else None,
+                    model_catalog_revision=(
+                        artifact.revision if artifact is not None else None
+                    ),
+                    model_runtime_revision=None,
+                    output_format=body.response_format,
+                    sample_rate=resolved.tts_sample_rate,
+                )
+            except RuntimeError:
+                return error_response(
+                    503,
+                    request_id,
+                    "render_receipt_store_full",
+                    "Render receipt store has no safe capacity",
+                    retryable=True,
+                )
+
         synthesis = SpeechRequest(
             text=body.input,
             voice=preset_voice,
@@ -1462,7 +1535,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             speed=body.speed,
             language=body.language,
             instruction=body.instructions,
-            expected_voice_revision=expected_voice_revision,
+            expected_voice_revision=effective_revision,
         )
         expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
 
@@ -1482,6 +1555,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ):
                     if counter is not None:
                         counter.accept(len(chunk.audio))
+                    if receipt_id is not None:
+                        services.render_receipts.accept_pcm(
+                            receipt_id,
+                            chunk.audio,
+                        )
                     yield chunk.audio
 
         if body.response_format == "pcm":
