@@ -1542,25 +1542,70 @@ def create_audio_router(services: AppServices) -> APIRouter:
         async def audio_stream(
             *, counter: PcmOutputCounter | None = None
         ) -> AsyncIterator[bytes]:
-            # Batch TTS flows through the governor so it cannot consume the
-            # reserved realtime TTS lane; the reserve is held while the stream
-            # is consumed and released as soon as the generator closes.
-            async with services.governor.reserve(
-                WorkClass.BATCH_TTS,
-                expires_at=expires_at,
-                resource_key=tts_resource_key(synthesizer, synthesis.voice),
-            ):
-                async for chunk in iter_until(
-                    iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
+            # Integrity is accumulated over validated PCM16 before encoding.
+            try:
+                async with services.governor.reserve(
+                    WorkClass.BATCH_TTS,
+                    expires_at=expires_at,
+                    resource_key=tts_resource_key(synthesizer, synthesis.voice),
                 ):
-                    if counter is not None:
-                        counter.accept(len(chunk.audio))
-                    if receipt_id is not None:
-                        services.render_receipts.accept_pcm(
-                            receipt_id,
-                            chunk.audio,
-                        )
-                    yield chunk.audio
+                    async for chunk in iter_until(
+                        iter_validated_audio(synthesizer.synthesize(synthesis)),
+                        expires_at,
+                    ):
+                        if counter is not None:
+                            counter.accept(len(chunk.audio))
+                        if receipt_id is not None:
+                            services.render_receipts.accept_pcm(
+                                receipt_id,
+                                chunk.audio,
+                            )
+                        yield chunk.audio
+            except asyncio.CancelledError:
+                if receipt_id is not None:
+                    services.render_receipts.cancel(receipt_id)
+                raise
+            except TTSDeliveryError as exc:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, exc.code)
+                raise
+            except VoiceRevisionConflictError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "voice_revision_conflict",
+                    )
+                raise
+            except VoiceRevokedError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "voice_revoked")
+                raise
+            except VoiceStoreUnavailableError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "voice_store_unavailable",
+                    )
+                raise
+            except GovernorQueueFullError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "queue_full")
+                raise
+            except TimeoutError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "backend_timeout")
+                raise
+            except OverflowError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "audio_encode_failed",
+                    )
+                raise
+            except RuntimeError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "backend_error")
+                raise
 
         if body.response_format == "pcm":
             pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
@@ -1640,6 +1685,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             if not first:
                 await _close_audio_stream(pcm_stream)
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "empty_audio")
                 return error_response(
                     502,
                     request_id,
@@ -1667,10 +1714,29 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         _emitted_bytes += len(chunk)
                         yield chunk
                     await _record_if_complete()
+                    if receipt_id is not None:
+                        services.render_receipts.complete(receipt_id)
+                except asyncio.CancelledError:
+                    if receipt_id is not None:
+                        services.render_receipts.cancel(receipt_id)
+                    raise
+                except BaseException:
+                    if receipt_id is not None:
+                        services.render_receipts.fail(
+                            receipt_id,
+                            "stream_delivery_error",
+                        )
+                    raise
                 finally:
                     await _close_audio_stream(pcm_stream)
 
-            return StreamingResponse(streamed_pcm(), media_type="audio/x-pcm")
+            response = StreamingResponse(
+                streamed_pcm(),
+                media_type="audio/x-pcm",
+            )
+            if receipt_id is not None:
+                response.headers["SpeechRail-Receipt-Id"] = receipt_id
+            return response
         pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
         if body.response_format in _TTS_CONTAINER_ENCODERS:
             media_type, _ = _TTS_CONTAINER_ENCODERS[body.response_format]
@@ -1747,6 +1813,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             except (OverflowError, ValueError):
                 await _close_audio_stream(encoded_stream)
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "audio_encode_failed",
+                    )
                 return error_response(
                     502,
                     request_id,
@@ -1756,6 +1827,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             if not first:
                 await _close_audio_stream(encoded_stream)
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "empty_audio")
                 return error_response(
                     502,
                     request_id,
@@ -1777,10 +1850,29 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         / resolved.tts_sample_rate,
                         inference_duration_sec=_time.monotonic() - _tts_t0,
                     )
+                    if receipt_id is not None:
+                        services.render_receipts.complete(receipt_id)
+                except asyncio.CancelledError:
+                    if receipt_id is not None:
+                        services.render_receipts.cancel(receipt_id)
+                    raise
+                except BaseException:
+                    if receipt_id is not None:
+                        services.render_receipts.fail(
+                            receipt_id,
+                            "stream_delivery_error",
+                        )
+                    raise
                 finally:
                     await _close_audio_stream(encoded_stream)
 
-            return StreamingResponse(streamed_encoded(), media_type=media_type)
+            response = StreamingResponse(
+                streamed_encoded(),
+                media_type=media_type,
+            )
+            if receipt_id is not None:
+                response.headers["SpeechRail-Receipt-Id"] = receipt_id
+            return response
 
         pcm = bytearray()
         _tts_t0 = _time.monotonic()
@@ -1851,6 +1943,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         _tts_inference_sec = _time.monotonic() - _tts_t0
         if not pcm:
+            if receipt_id is not None:
+                services.render_receipts.fail(receipt_id, "empty_audio")
             return error_response(
                 502,
                 request_id,
@@ -1870,6 +1964,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
             media_type = "audio/wav"
         except (OverflowError, ValueError):
+            if receipt_id is not None:
+                services.render_receipts.fail(
+                    receipt_id,
+                    "audio_encode_failed",
+                )
             return error_response(
                 502,
                 request_id,
@@ -1877,6 +1976,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Failed to encode the synthesized audio",
                 retryable=True,
             )
-        return Response(content=content, media_type=media_type)
+        if receipt_id is not None:
+            services.render_receipts.complete(receipt_id)
+        response = Response(content=content, media_type=media_type)
+        if receipt_id is not None:
+            response.headers["SpeechRail-Receipt-Id"] = receipt_id
+        return response
 
     return router
