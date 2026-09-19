@@ -8,9 +8,7 @@ import io
 import json
 import logging
 import struct
-import threading
 import wave
-from collections import OrderedDict
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
