@@ -100,7 +100,7 @@ def _create_set(client: TestClient) -> str:
     return response.json()["revision"]
 
 
-def test_v2_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
+def test_v1_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -109,7 +109,7 @@ def test_v2_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
 
     response = client.post(
         "/v1/audio/speech",
-        headers={"SpeechRail-Pronunciation-Set": f"story@{revision}"},
+        headers={\n            "SpeechRail-Pronunciation-Set": f"story@{revision}",\n            "SpeechRail-Receipt-Mode": "integrity",\n        },
         json={
             "model": "speechrail/qwen3-tts",
             "input": "去长安",
@@ -132,7 +132,7 @@ def test_v2_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
     assert "去常安" not in str(receipt)
 
 
-def test_v1_pronunciation_header_is_explicitly_rejected(
+def test_v1_pronunciation_header_does_not_force_receipt(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -150,9 +150,10 @@ def test_v1_pronunciation_header_is_explicitly_rejected(
             "response_format": "wav",
         },
     )
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "pronunciation_set_requires_v2"
-    assert len(synth.requests) == before
+    assert response.status_code == 200
+    assert len(synth.requests) == before + 1
+    assert synth.requests[-1].text == "去常安。"
+    assert "SpeechRail-Receipt-Id" not in response.headers
 
 
 def test_pronunciation_management_cas_privacy_and_revoke(
