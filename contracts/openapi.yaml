@@ -1086,8 +1086,2747 @@ components:
         variant:
           type: [string, 'null']
         voice_revision:
+          type: [string, 'null']
+          pattern: '^vr_[0-9a-f]{32}        voice_identity_assurance:
+          type: string
+          enum: [legacy, content_addressed]
+        model:
+          $ref: '#/components/schemas/ConfiguredModelIdentity'
+        descriptors:
+          $ref: '#/components/schemas/SafeVoiceDescriptor'
+        operations:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              parameters:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/CapabilityParameter'
+        quality_summary:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [pass, warn, reject, unevaluated]
+            policy_version:
+              type: [string, 'null']
+        snapshot_id:
+          type: string
+    SafeVoiceList:
+      type: object
+      required: [object, snapshot_id, catalog_revision, data]
+      properties:
+        object:
+          type: string
+          const: list
+        snapshot_id:
+          type: string
+        catalog_revision:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SafeVoiceEntry'
+    EffectiveCapabilitySnapshot:
+      type: object
+      required: [schema_version, service_instance_epoch, catalog_revision, snapshot_id, profile, models, voices, operations, guarantees]
+      properties:
+        schema_version:
+          type: string
+          const: effective_capabilities_v1
+        service_instance_epoch:
+          type: string
+        catalog_revision:
+          type: string
+          description: Content validator, NOT an immutable voice revision or inference lease.
+        snapshot_id:
+          type: string
+        profile:
+          type: [string, 'null']
+        models:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ConfiguredModelIdentity'
+        voices:
+          type: array
+          items:
+            $ref: '#/components/schemas/SafeVoiceEntry'
+        operations:
+          type: object
+          additionalProperties: true
+        guarantees:
+          type: object
+          additionalProperties:
+            type: boolean
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+        - version
+        - backend
+        - profile
+        - asr_ready
+        - tts_ready
+        - tts_warm
+        - diarization_ready
+        - diarization
+        - realtime_vad
+        - asr_state
+        - tts_state
+        - streaming_state
+        - ready
+        - job_spool_ready
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: speechrail
+        version:
+          type: string
+        backend:
+          type: string
+          description: Active managed ASR artifact, or the canonical ASR model ID when unmanaged.
+          example: asr-1.7b-q8
+        profile:
+          type: [string, 'null']
+          enum: [quality, balanced, light, null]
+          description: Active managed profile; null for an unmanaged runtime.
+        asr_ready:
+          type: boolean
+          description: ASR is configured and able to serve on demand.
+        tts_ready:
+          type: boolean
+          description: TTS is configured and able to serve on demand.
+        tts_warm:
+          type: [boolean, 'null']
+          description: TTS worker is loaded and ready without a load transition; null when the injected backend does not expose this signal.
+        diarization_ready:
+          type: boolean
+        diarization:
+          $ref: '#/components/schemas/DiarizationStatus'
+        realtime_vad:
+          $ref: '#/components/schemas/RealtimeVADStatus'
+        asr_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular ASR inference lifecycle state.
+        tts_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular TTS inference lifecycle state.
+        streaming_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular streaming ASR lifecycle state.
+        ready:
+          type: boolean
+        job_spool_ready:
+          type: boolean
+          description: True when a job spool repository is configured and available.
+    DiarizationStatus:
+      type: object
+      required: [configured, ready, code, message, profile]
+      properties:
+        configured:
+          type: boolean
+        ready:
+          type: boolean
+        code:
+          type: [string, 'null']
+          description: Stable diagnostic code; null when the profile is ready.
+        message:
+          type: string
+        profile:
+          type: [string, 'null']
+          enum: [sortformer, camplus, null]
+    RealtimeVADStatus:
+      type: object
+      required: [configured_engine, resolved_engine, speech_admission_enabled, ready, code, message]
+      properties:
+        configured_engine:
+          type: string
+          enum: [auto, legacy, silero]
+        resolved_engine:
+          type: string
+          enum: [legacy, silero]
+        speech_admission_enabled:
+          type: boolean
+        ready:
+          type: boolean
+          description: The configured realtime VAD path can accept server_vad frames.
+        code:
+          type: [string, 'null']
+          enum: [vad_runtime_missing, vad_model_missing, vad_not_ready, null]
+          description: Stable VAD diagnostic code; null when the selected path is ready.
+        message:
+          type: string
+    RuntimeMetrics:
+      type: object
+      required: [active_requests, pending_requests, workers, health, counters, gauges, histograms, resources]
+      properties:
+        active_requests:
+          $ref: '#/components/schemas/RuntimeRequestCounts'
+        pending_requests:
+          $ref: '#/components/schemas/RuntimeRequestCounts'
+        workers:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [active, warm_standby, cold_evicted, inactive, unconfigured, starting, stopping, failed]
+        health:
+          type: object
+          additionalProperties:
+            type: boolean
+        counters:
+          type: object
+          additionalProperties:
+            type: number
+        gauges:
+          type: object
+          additionalProperties:
+            type: number
+        histograms:
+          type: object
+          description: >
+            Histogram series keyed by metric name and optional low-cardinality
+            label set. `speechrail_asr_rtf` measures ASR inference duration /
+            processed audio duration. `speechrail_tts_rtf` measures TTS
+            inference duration / generated audio duration. These series are
+            absent when no valid positive-duration observation exists; an
+            absent series must not be interpreted as zero or as a streaming
+            latency measurement.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/RuntimeHistogramSummary'
+        resources:
+          $ref: '#/components/schemas/RuntimeResourceSnapshot'
+    RuntimeRequestCounts:
+      type: object
+      required: [realtime, batch]
+      properties:
+        realtime:
+          type: integer
+          minimum: 0
+        batch:
+          type: integer
+          minimum: 0
+    RuntimeHistogramSummary:
+      type: object
+      required: [count, sum, avg]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        sum:
+          type: number
+        avg:
+          type: number
+          description: Arithmetic mean represented by sum / count for the
+            observations in this histogram series; it is not a percentile and
+            is not a real-time guarantee.
+    RuntimeResourceSnapshot:
+      type: object
+      required:
+        - physical_memory_bytes
+        - memory_budget_bytes
+        - declared_footprint_bytes
+        - declared_component_bytes
+        - declaration_complete
+        - physical_footprint_bytes
+        - physical_footprint_source
+        - physical_footprint_complete
+        - physical_footprint_process_count
+        - heavy_overlap_allowed
+        - heavy_overlap_reason
+      properties:
+        physical_memory_bytes:
+          type: [integer, 'null']
+          minimum: 0
+        memory_budget_bytes:
+          type: [integer, 'null']
+          minimum: 0
+        declared_footprint_bytes:
+          type: [integer, 'null']
+          minimum: 0
+          description: Sum of configured enabled-component footprint declarations; not an observed memory measurement.
+        declared_component_bytes:
+          type: object
+          additionalProperties:
+            type: [integer, 'null']
+            minimum: 0
+        declaration_complete:
+          type: boolean
+        physical_footprint_bytes:
+          type: [integer, 'null']
+          minimum: 0
+          description: Aggregate macOS phys_footprint for the service process tree when sampling is complete.
+        physical_footprint_source:
+          type: string
+          enum: [macos_footprint, macos_footprint_incomplete, unavailable]
+        physical_footprint_complete:
+          type: boolean
+        physical_footprint_process_count:
+          type: integer
+          minimum: 0
+        heavy_overlap_allowed:
+          type: boolean
+        heavy_overlap_reason:
+          type: string
+    Model:
+      type: object
+      required: [id, object, owned_by, created]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: model
+        owned_by:
+          type: string
+          const: speechrail
+        created:
+          type: integer
+          description: >
+            Unix timestamp of model registration. Always 0: local snapshots
+            carry no creation time (OpenAI SDK clients expect the field).
+        resolves_to:
+          type: string
+          description: |
+            Canonical profile this OpenAI-standard alias resolves to. Present
+            only on alias entries; canonical entries omit it.
+        profile:
+          type: [string, 'null']
+          enum: [quality, balanced, light, null]
+          description: Active managed profile on canonical entries.
+        artifact:
+          type: string
+          description: Immutable managed artifact key on canonical entries.
+        source_model:
+          type: string
+          description: Upstream model identifier recorded in the managed catalog.
+        family:
+          type: string
+          enum: [qwen3_asr, qwen3_tts]
+        variant:
+          type: string
+          enum: [asr, voice_design, custom_voice, base]
+        quantization:
+          $ref: '#/components/schemas/Quantization'
+        capabilities:
+          $ref: '#/components/schemas/ModelCapabilities'
+    ModelCapabilities:
+      type: object
+      required: [supports_preview, supports_clone, supports_instruction]
+      properties:
+        supports_preview:
+          type: boolean
+          description: Whether ephemeral natural-language VoiceDesign previews are supported.
+        supports_clone:
+          type: boolean
+          description: Whether reference-audio voice cloning is supported.
+        supports_instruction:
+          type: boolean
+          description: Whether natural-language voice instructions are supported by the model.
+    Quantization:
+      type: object
+      required: [bits, group_size, format]
+      properties:
+        bits:
+          type: [integer, 'null']
+        group_size:
+          type: [integer, 'null']
+        format:
+          type: string
+    ModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Model'
+    VoiceProfile:
+      type: object
+      required: [id, name, description, instruction, aliases, is_default, is_system, created_at, available, variant, capabilities]
+      properties:
+        id:
+          type: string
+          description: System preset or user-created voice identifier.
+        name:
+          type: string
+        description:
+          type: string
+        instruction:
+          type: string
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional deterministic sampling seed for reproducible voice recipes.
+        aliases:
+          type: array
+          description: OpenAI standard and legacy SpeechRail voice names accepted for this preset.
+          items:
+            type: string
+        is_default:
+          type: boolean
+        is_system:
+          type: boolean
+        created_at:
+          type: number
+        available:
+          type: boolean
+          description: Whether the active TTS weights can synthesize this voice.
+        variant:
+          type: [string, 'null']
+          enum: [voice_design, custom_voice, base, null]
+        capabilities:
+          $ref: '#/components/schemas/VoiceCapabilities'
+        mode:
+          type: string
+          enum: [system, instruction, clone]
+          default: system
+        ref_text:
+          type: [string, 'null']
+        duration_seconds:
+          type: number
+        quality:
+          $ref: '#/components/schemas/VoiceQualityReport'
+        creation:
+          $ref: '#/components/schemas/VoiceCreation'
+    VoiceDesignRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [id, name, instruction, reference_text]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9_-]{1,64}$'
+          description: New target ID; system IDs, aliases and occupied IDs are rejected.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        reference_text:
+          type: string
+          minLength: 20
+          maxLength: 240
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          default: 42
+        language:
+          type: string
+          const: zh
+          default: zh
+    VoiceDesignRegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [voice, synthesis_validation]
+      properties:
+        voice:
+          $ref: '#/components/schemas/VoiceProfile'
+        synthesis_validation:
+          type: string
+          const: unevaluated
+          description: Reference registration does not execute Base output or speaker-identity validation.
+    VoiceCreation:
+      type: object
+      additionalProperties: false
+      required: [origin, method, model_artifact, model_revision, seed, instruction_sha256, reference_text_sha256, reference_audio_sha256, preprocessing_version]
+      properties:
+        origin:
+          type: string
+          const: generated
+        method:
+          type: string
+          const: voice_design_reference_v1
+        model_artifact:
+          type: string
+          pattern: '^[a-z0-9._-]{1,128}$'
+        model_revision:
+          type: string
+          pattern: '^[0-9a-f]{40}$'
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        instruction_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        reference_text_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        reference_audio_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        preprocessing_version:
+          type: string
+          const: energy_v1
+    VoiceCapabilities:
+      type: object
+      required: [supports_speaker, supports_instruction]
+      properties:
+        supports_speaker:
+          type: boolean
+        supports_instruction:
+          type: boolean
+        supports_clone:
+          type: boolean
+          default: false
+    VoiceCloneRequest:
+      type: object
+      required: [audio, ref_text, name]
+      properties:
+        audio:
+          type: string
+          format: binary
+          description: Uploaded voice sample (WebM, WAV, MP3, etc., up to 15MB)
+        ref_text:
+          type: string
+          maxLength: 2000
+          description: The reference prompt script that the user read aloud
+        name:
+          type: string
+          maxLength: 32
+          description: Display name for the cloned voice
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+          description: Optional identifier for the cloned voice
+    VoiceQualityReference:
+      type: object
+      required:
+        - duration_seconds
+        - sample_rate
+        - channels
+        - speech_active_ratio
+        - noise_floor_dbfs
+        - estimated_snr_db
+        - clipping_ratio
+        - leading_silence_seconds
+        - trailing_silence_seconds
+        - transcript_match
+      properties:
+        duration_seconds:
+          type: number
+        sample_rate:
+          type: integer
+          minimum: 1
+        channels:
+          type: integer
+          minimum: 1
+        speech_active_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        noise_floor_dbfs:
+          type: number
+        estimated_snr_db:
+          type: number
+        clipping_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        leading_silence_seconds:
+          type: number
+          minimum: 0
+        trailing_silence_seconds:
+          type: number
+          minimum: 0
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+    VoiceQualitySynthesis:
+      type: object
+      required:
+        - probe_count
+        - successful_probe_count
+        - active_rms_dbfs
+        - peak_dbfs
+        - chunk_jump_p95_db
+        - clipping_ratio
+        - deterministic
+        - transcript_match
+        - intelligibility_evaluated
+      properties:
+        probe_count:
+          type: integer
+          minimum: 0
+        successful_probe_count:
+          type: integer
+          minimum: 0
+        active_rms_dbfs:
+          type: number
+        peak_dbfs:
+          type: number
+        chunk_jump_p95_db:
+          type: number
+        clipping_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        deterministic:
+          type: boolean
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: Minimum normalized ASR transcript match across the fixed probe set; null when not evaluated.
+        intelligibility_evaluated:
+          type: boolean
+          description: Whether independent ASR intelligibility evidence was successfully collected.
+    VoiceQualityReport:
+      type: object
+      required:
+        - policy_version
+        - status
+        - run_id
+        - tested_at
+        - reference
+        - synthesis
+        - failure_codes
+      properties:
+        policy_version:
+          type: string
+          enum: [voice_quality_v1]
+        status:
+          type: string
+          enum: [pass, warn, reject, unevaluated]
+        run_id:
+          type: string
+        tested_at:
+          type: string
+          format: date-time
+        reference:
+          $ref: '#/components/schemas/VoiceQualityReference'
+        synthesis:
+          $ref: '#/components/schemas/VoiceQualitySynthesis'
+        failure_codes:
+          type: array
+          minItems: 0
+          items:
+            type: string
+            enum:
+              - audio_too_short
+              - low_snr
+              - high_noise_floor
+              - clipping
+              - transcript_mismatch
+              - probe_failed
+              - clone_speed_unsupported
+              - output_invalid
+              - output_peak_exceeded
+              - output_nondeterministic
+              - transcription_unavailable
+    VoiceQualityRunRequest:
+      type: object
+      properties:
+        probe_set:
+          type: string
+          default: voice_quality_v1_zh
+        runs:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 3
+        include_audio:
+          type: boolean
+          default: false
+          description: |
+            Reserved for inline audio probes; not implemented. Sending
+            `include_audio=true` is rejected with `422 include_audio_unsupported`.
+    ClonePromptItem:
+      type: object
+      required: [id, category, title, script, tips]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        title:
+          type: string
+        script:
+          type: string
+        tips:
+          type: string
+    ClonePromptList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClonePromptItem'
+    CreateVoiceRequest:
+      type: object
+      required: [name, instruction]
+      properties:
+        name:
+          type: string
+          description: Friendly display name for the voice
+        instruction:
+          type: string
+          description: Natural language prompt describing the voice characteristics
+        id:
+          type: string
+          description: Optional voice identifier. If omitted, auto-generated.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional deterministic sampling seed for a reusable voice recipe.
+    UpdateVoiceRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          description: New display name for the custom voice.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: New natural-language instruction for an instruction-mode voice.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: New deterministic sampling seed for an instruction-mode voice.
+    VoiceList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceProfile'
+    TranscriptionRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        model:
+          type: string
+          default: speechrail/qwen3-asr-1.7b
+        language:
+          type: string
+          description: BCP-47-style or provider-compatible language hint.
+          example: zh
+        languages:
+          type: array
+          items:
+            type: string
+          description: Multi-language hint list; the first entry is used when language is absent.
+        prompt:
+          type: string
+          maxLength: 2000
+          description: Domain vocabulary hint, not an instruction channel.
+        response_format:
+          type: string
+          enum: [json, verbose_json, diarized_json, text, srt, vtt]
+          default: json
+          description: Use diarized_json only with model=gpt-4o-transcribe-diarize.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          description: Sampling temperature hint; accepted for OpenAI parity.
+        timestamp_granularities:
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+          description: |
+            Legacy non-bracketed multipart field; still supported for compatibility.
+            When both this field and timestamp_granularities[] are supplied, their
+            values are merged. Only meaningful with response_format=verbose_json.
+        'timestamp_granularities[]':
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+          description: |
+            Standard OpenAI bracketed multipart field. When both this field and
+            timestamp_granularities are supplied, their values are merged. Only
+            meaningful with response_format=verbose_json.
+        stream:
+          type: boolean
+          default: false
+          description: For diarized_json, emits transcript.text.delta, transcript.text.segment and transcript.text.done SSE events.
+        chunking_strategy:
+          type: string
+          enum: [auto, server_vad]
+          description: Required for diarized uploads longer than 30 seconds.
+        include:
+          type: array
+          items:
+            type: string
+          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+        keywords:
+          type: array
+          items:
+            type: string
+          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+        known_speaker_names:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+        known_speaker_references:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+    SpeechRequest:
+      type: object
+      required: [model, input, voice]
+      properties:
+        model:
+          type: string
+          enum: [speechrail/qwen3-tts, tts-1, tts-1-hd, gpt-4o-mini-tts]
+          description: Canonical TTS model or an OpenAI-compatible alias.
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        voice:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: |
+            The nine canonical server roles (serena, vivian, uncle_fu, dylan,
+            eric, ryan, aiden, ono_anna, sohee) map one-to-one to the nine
+            CustomVoice speakers. Legacy SpeechRail names (default, warm,
+            bright, calm) and OpenAI standard names (alloy, ash, ballad, cedar,
+            coral, echo, fable, marin, nova, onyx, sage, shimmer, verse) remain
+            accepted aliases. Active weights and per-voice availability are
+            declared by GET /v1/voices.
+        response_format:
+          type: string
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: mp3
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: auto
+        instructions:
+          type: string
+          maxLength: 10000
+          description: VoiceDesign instruction for quality profiles. CustomVoice and clone voices reject it with a stable 400 error.
+        stream_format:
+          type: string
+          enum: [audio]
+          description: Only audio is accepted; other values are rejected with stream_format_unsupported.
+    VoicePreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [model, input, instruction]
+      properties:
+        model:
+          type: string
+          enum: [speechrail/qwen3-tts, tts-1, tts-1-hd, gpt-4o-mini-tts]
+          description: Canonical TTS model or an OpenAI-compatible alias.
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Text to synthesize for the preview.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Natural-language description of the desired voice.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional request-local seed for reproducible previews.
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: auto
+        response_format:
+          type: string
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: wav
+          description: Audio container or raw 24kHz signed 16-bit mono PCM.
+    JobCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, input_ref]
+      properties:
+        kind:
+          type: string
+          enum: [speech, transcription]
+        input_ref:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Opaque external input reference; no raw content or credentials.
+        params:
+          type: object
+          description: Opaque caller-supplied parameters; stored and echoed back on GET.
+    Job:
+      type: object
+      additionalProperties: false
+      required: [id, kind, state, error_code, result_ref]
+      properties:
+        id:
+          type: string
+          pattern: '^job_[a-f0-9]{32}$'
+          readOnly: true
+        kind:
+          type: string
+          enum: [speech, transcription]
+        state:
+          type: string
+          enum: [queued, running, completed, failed, cancelled, expired]
+        error_code:
+          type: [string, 'null']
+          maxLength: 200
+        error_message:
+          type: [string, 'null']
+          maxLength: 256
+          description: >
+            Bounded, desensitized failure detail. Optional; populated only on
+            single-job reads (GET /v1/jobs/{job_id}) for failed jobs, and null
+            in list, create, cancel and terminal responses. Never contains raw
+            audio, transcripts, credentials, URLs, absolute paths, emails or
+            exception dumps.
+        attempts:
+          type: integer
+          minimum: 0
+          description: >
+            Number of times this job has been claimed, incremented atomically on
+            each queued-to-running transition. Optional; populated only on
+            single-job reads (GET /v1/jobs/{job_id}), and absent from list,
+            create, cancel and result responses.
+        result_ref:
+          type: [string, 'null']
+          description: Opaque result reference, present only for completed jobs.
+        params:
+          type: [object, 'null']
+          description: Opaque caller-supplied parameters, echoed back from creation.
+        queue_position:
+          type: [integer, 'null']
+          minimum: 1
+          description: >
+            Best-effort 1-based position among queued jobs. Optional; populated
+            only on single-job reads (GET /v1/jobs/{job_id}) while the job is
+            queued, and null in list, create, cancel and terminal responses.
+        eta_seconds:
+          type: [number, 'null']
+          minimum: 0
+          description: >
+            Bounded best-effort queue-wait estimate in seconds. Optional;
+            populated only on single-job reads while the job is queued, and
+            null otherwise.
+        deadline:
+          type: [string, 'null']
+          description: >
+            ISO-8601 UTC timestamp approximating the run deadline. Optional;
+            populated only on single-job reads while the job is running, and
+            null otherwise.
+    JobList:
+      type: object
+      additionalProperties: false
+      required: [object, data, next_cursor, has_more]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+        next_cursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; null when exhausted.
+        has_more:
+          type: boolean
+          description: Whether more job records are available after this page.
+    Usage:
+      type: object
+      required: [type, seconds]
+      properties:
+        type:
+          type: string
+          const: duration
+        seconds:
+          type: number
+          minimum: 0
+    TranscriptionResponse:
+      type: object
+      required: [text, usage]
+      properties:
+        text:
+          type: string
+        usage:
+          $ref: '#/components/schemas/Usage'
+    TranscriptSegment:
+      type: object
+      required: [id, start, end, text]
+      properties:
+        id:
+          type: integer
+          minimum: 0
+        seek:
+          type: [number, "null"]
+        tokens:
+          type: ["array", "null"]
+          items:
+            type: integer
+        temperature:
+          type: [number, "null"]
+        avg_logprob:
+          type: [number, "null"]
+        compression_ratio:
+          type: [number, "null"]
+        no_speech_prob:
+          type: [number, "null"]
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        text:
+          type: string
+    TranscriptWord:
+      type: object
+      required: [word, start, end]
+      properties:
+        word:
+          type: string
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+    VerboseTranscriptionResponse:
+      type: object
+      required: [task, language, duration, text, usage]
+      properties:
+        task:
+          type: string
+          const: transcribe
+        language:
+          type: string
+          description: Lowercased detected language, or empty when undetected.
+        duration:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        segments:
+          type: array
+          description: Included when segment timestamps are requested; omitted for word-only responses. When no timestamp granularity is requested, both segments and words are returned.
+          items:
+            $ref: '#/components/schemas/TranscriptSegment'
+        words:
+          type: array
+          description: Included when word timestamps are requested; omitted for segment-only responses. When no timestamp granularity is requested, both segments and words are returned.
+          items:
+            $ref: '#/components/schemas/TranscriptWord'
+        usage:
+          $ref: '#/components/schemas/Usage'
+    DiarizedTranscriptSegment:
+      type: object
+      required: [id, type, start, end, speaker, text]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: transcript.text.segment
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        speaker:
+          type: string
+          pattern: '^[A-D]$'
+        text:
+          type: string
+    DiarizedTranscriptionResponse:
+      type: object
+      required: [task, duration, text, segments]
+      properties:
+        task:
+          type: string
+          const: transcribe
+        duration:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiarizedTranscriptSegment'
+    ErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+    Error:
+      type: object
+      required: [message, type, code, request_id, retryable]
+      properties:
+        message:
+          type: string
+        type:
+          type: string
+          enum: [invalid_request_error, authentication_error, server_error]
+        param:
+          type: [string, "null"]
+        code:
+          type: string
+        request_id:
+          type: string
+        retryable:
+          type: boolean
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Unauthorized:
+      description: Authentication failed
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    AudioTooLarge:
+      description: Audio exceeds configured limits
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    QueueFull:
+      description: Bounded inference queue is full
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    BackendNotReady:
+      description: Model runtime is not ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    DependencyMissing:
+      description: A required external dependency (e.g. ffmpeg) is missing
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    BackendDeliveryInvalid:
+      description: TTS worker delivered an invalid audio stream
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    VoiceStoreUnavailable:
+      description: Custom voice metadata or audio storage is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    VoiceInUse:
+      description: Custom voice has an active synthesis reader lease
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotFound:
+      description: Job does not exist or is outside the caller owner scope
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotCancellable:
+      description: Job is not in a cancellable state (running or failed)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotReady:
+      description: Job is not yet completed; result is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+
+          description: Optional immutable acoustic revision returned by safe voice discovery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechRequest'
+      responses:
+        '200':
+          description: Synthesized audio stream
+          content:
+            audio/mpeg:
+              schema: {type: string, format: binary}
+            audio/opus:
+              schema: {type: string, format: binary}
+            audio/aac:
+              schema: {type: string, format: binary}
+            audio/flac:
+              schema: {type: string, format: binary}
+            audio/wav:
+              schema: {type: string, format: binary}
+            audio/x-pcm:
+              schema: {type: string, format: binary}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: The requested acoustic voice revision no longer matches the resolved voice.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '502':
+          $ref: '#/components/responses/BackendDeliveryInvalid'
+        '503':
+          description: Model runtime or custom voice storage is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v2/capabilities:
+    get:
+      operationId: getEffectiveCapabilities
+      tags: [speech]
+      summary: Read one safe effective capability generation
+      description: |
+        Read-only metadata; does not start workers, infer audio or download models.
+        Unknown identity is not an inference version lock. See the versioned
+        discovery migration contract. Bearer authentication follows service configuration.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Previous ETag; a matching representation returns 304.
+      responses:
+        '200':
+          description: Safe discovery representation; no private reference, instruction or path
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Validator scoped to this service instance and representation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EffectiveCapabilitySnapshot'
+        '304':
+          description: Representation has not changed; no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v2/voices:
+    get:
+      operationId: listSafeVoices
+      tags: [speech]
+      summary: List safe voice discovery metadata without source text
+      description: |
+        Read-only metadata; does not start workers, infer audio or download models.
+        Unknown identity is not an inference version lock. See the versioned
+        discovery migration contract. Bearer authentication follows service configuration.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Previous ETag; a matching representation returns 304.
+      responses:
+        '200':
+          description: Safe discovery representation; no private reference, instruction or path
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Validator scoped to this service instance and representation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafeVoiceList'
+        '304':
+          description: Representation has not changed; no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v2/voices/{voice_id}:
+    get:
+      operationId: getSafeVoice
+      tags: [speech]
+      summary: Read safe voice discovery metadata by canonical ID or alias
+      description: |
+        Read-only metadata; does not start workers, infer audio or download models.
+        Unknown identity is not an inference version lock. See the versioned
+        discovery migration contract. Bearer authentication follows service configuration.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Previous ETag; a matching representation returns 304.
+        - in: path
+          name: voice_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Safe discovery representation; no private reference, instruction or path
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Validator scoped to this service instance and representation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafeVoiceEntry'
+        '304':
+          description: Representation has not changed; no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+        '404':
+          description: Voice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+      description: Required when the service is not loopback-only.
+  schemas:
+    CapabilityParameter:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [supported, unsupported, unknown]
+        values:
+          type: array
+          items: {}
+        minimum:
+          type: number
+        maximum:
+          type: number
+        reason:
+          type: string
+    ConfiguredModelIdentity:
+      type: object
+      required: [assurance, runtime_revision]
+      properties:
+        assurance:
+          type: string
+          enum: [unknown, configured_catalog]
+        runtime_revision:
+          type: 'null'
+          description: Not observed from a worker in this read-only discovery version.
+        source_model:
+          type: string
+        artifact:
+          type: string
+        variant:
+          type: [string, 'null']
+        catalog_revision:
+          type: string
+        quantization:
+          type: object
+          additionalProperties: true
+    SafeVoiceDescriptor:
+      type: object
+      required: [voice_mode, locales, style_tags, pitch_band, timbre_family, baseline_pace, source_type, metadata_method]
+      properties:
+        voice_mode:
+          type: string
+          enum: [system, instruction, clone]
+        locales:
+          type: array
+          items:
+            type: string
+          description: Declared locale metadata; empty means unknown, not unsupported language.
+        style_tags:
+          type: array
+          items:
+            type: string
+        pitch_band:
+          type: string
+          const: unknown
+        timbre_family:
+          type: string
+          const: unknown
+        baseline_pace:
+          type: string
+          const: unknown
+        source_type:
+          type: string
+          enum: [system_preset, instruction_profile, generated_reference, reference_unknown]
+        metadata_method:
+          type: string
+          const: declared_only
+    SafeVoiceEntry:
+      type: object
+      required: [id, name, mode, available, availability_reason, variant, voice_revision, voice_identity_assurance, model, descriptors, operations]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        aliases:
+          type: array
+          items:
+            type: string
+        mode:
+          type: string
+          enum: [system, instruction, clone]
+        available:
+          type: boolean
+          description: Configured for on-demand service, not proof of warm residency or quality.
+        availability_reason:
+          type: string
+          enum: [disabled, model_identity_unknown, voice_incompatible, backend_not_ready, available]
+        variant:
+          type: [string, 'null']
+        voice_revision:
           type: 'null'
           description: Legacy profiles have no verified immutable rendering identity.
+        voice_identity_assurance:
+          type: string
+          const: legacy
+        model:
+          $ref: '#/components/schemas/ConfiguredModelIdentity'
+        descriptors:
+          $ref: '#/components/schemas/SafeVoiceDescriptor'
+        operations:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              parameters:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/CapabilityParameter'
+        quality_summary:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [pass, warn, reject, unevaluated]
+            policy_version:
+              type: [string, 'null']
+        snapshot_id:
+          type: string
+    SafeVoiceList:
+      type: object
+      required: [object, snapshot_id, catalog_revision, data]
+      properties:
+        object:
+          type: string
+          const: list
+        snapshot_id:
+          type: string
+        catalog_revision:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SafeVoiceEntry'
+    EffectiveCapabilitySnapshot:
+      type: object
+      required: [schema_version, service_instance_epoch, catalog_revision, snapshot_id, profile, models, voices, operations, guarantees]
+      properties:
+        schema_version:
+          type: string
+          const: effective_capabilities_v1
+        service_instance_epoch:
+          type: string
+        catalog_revision:
+          type: string
+          description: Content validator, NOT an immutable voice revision or inference lease.
+        snapshot_id:
+          type: string
+        profile:
+          type: [string, 'null']
+        models:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ConfiguredModelIdentity'
+        voices:
+          type: array
+          items:
+            $ref: '#/components/schemas/SafeVoiceEntry'
+        operations:
+          type: object
+          additionalProperties: true
+        guarantees:
+          type: object
+          additionalProperties:
+            type: boolean
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - service
+        - version
+        - backend
+        - profile
+        - asr_ready
+        - tts_ready
+        - tts_warm
+        - diarization_ready
+        - diarization
+        - realtime_vad
+        - asr_state
+        - tts_state
+        - streaming_state
+        - ready
+        - job_spool_ready
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          const: speechrail
+        version:
+          type: string
+        backend:
+          type: string
+          description: Active managed ASR artifact, or the canonical ASR model ID when unmanaged.
+          example: asr-1.7b-q8
+        profile:
+          type: [string, 'null']
+          enum: [quality, balanced, light, null]
+          description: Active managed profile; null for an unmanaged runtime.
+        asr_ready:
+          type: boolean
+          description: ASR is configured and able to serve on demand.
+        tts_ready:
+          type: boolean
+          description: TTS is configured and able to serve on demand.
+        tts_warm:
+          type: [boolean, 'null']
+          description: TTS worker is loaded and ready without a load transition; null when the injected backend does not expose this signal.
+        diarization_ready:
+          type: boolean
+        diarization:
+          $ref: '#/components/schemas/DiarizationStatus'
+        realtime_vad:
+          $ref: '#/components/schemas/RealtimeVADStatus'
+        asr_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular ASR inference lifecycle state.
+        tts_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular TTS inference lifecycle state.
+        streaming_state:
+          type: string
+          enum: [active, warm_standby, cold_evicted, inactive, unconfigured]
+          description: Granular streaming ASR lifecycle state.
+        ready:
+          type: boolean
+        job_spool_ready:
+          type: boolean
+          description: True when a job spool repository is configured and available.
+    DiarizationStatus:
+      type: object
+      required: [configured, ready, code, message, profile]
+      properties:
+        configured:
+          type: boolean
+        ready:
+          type: boolean
+        code:
+          type: [string, 'null']
+          description: Stable diagnostic code; null when the profile is ready.
+        message:
+          type: string
+        profile:
+          type: [string, 'null']
+          enum: [sortformer, camplus, null]
+    RealtimeVADStatus:
+      type: object
+      required: [configured_engine, resolved_engine, speech_admission_enabled, ready, code, message]
+      properties:
+        configured_engine:
+          type: string
+          enum: [auto, legacy, silero]
+        resolved_engine:
+          type: string
+          enum: [legacy, silero]
+        speech_admission_enabled:
+          type: boolean
+        ready:
+          type: boolean
+          description: The configured realtime VAD path can accept server_vad frames.
+        code:
+          type: [string, 'null']
+          enum: [vad_runtime_missing, vad_model_missing, vad_not_ready, null]
+          description: Stable VAD diagnostic code; null when the selected path is ready.
+        message:
+          type: string
+    RuntimeMetrics:
+      type: object
+      required: [active_requests, pending_requests, workers, health, counters, gauges, histograms, resources]
+      properties:
+        active_requests:
+          $ref: '#/components/schemas/RuntimeRequestCounts'
+        pending_requests:
+          $ref: '#/components/schemas/RuntimeRequestCounts'
+        workers:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [active, warm_standby, cold_evicted, inactive, unconfigured, starting, stopping, failed]
+        health:
+          type: object
+          additionalProperties:
+            type: boolean
+        counters:
+          type: object
+          additionalProperties:
+            type: number
+        gauges:
+          type: object
+          additionalProperties:
+            type: number
+        histograms:
+          type: object
+          description: >
+            Histogram series keyed by metric name and optional low-cardinality
+            label set. `speechrail_asr_rtf` measures ASR inference duration /
+            processed audio duration. `speechrail_tts_rtf` measures TTS
+            inference duration / generated audio duration. These series are
+            absent when no valid positive-duration observation exists; an
+            absent series must not be interpreted as zero or as a streaming
+            latency measurement.
+          additionalProperties:
+            type: object
+            additionalProperties:
+              $ref: '#/components/schemas/RuntimeHistogramSummary'
+        resources:
+          $ref: '#/components/schemas/RuntimeResourceSnapshot'
+    RuntimeRequestCounts:
+      type: object
+      required: [realtime, batch]
+      properties:
+        realtime:
+          type: integer
+          minimum: 0
+        batch:
+          type: integer
+          minimum: 0
+    RuntimeHistogramSummary:
+      type: object
+      required: [count, sum, avg]
+      properties:
+        count:
+          type: integer
+          minimum: 0
+        sum:
+          type: number
+        avg:
+          type: number
+          description: Arithmetic mean represented by sum / count for the
+            observations in this histogram series; it is not a percentile and
+            is not a real-time guarantee.
+    RuntimeResourceSnapshot:
+      type: object
+      required:
+        - physical_memory_bytes
+        - memory_budget_bytes
+        - declared_footprint_bytes
+        - declared_component_bytes
+        - declaration_complete
+        - physical_footprint_bytes
+        - physical_footprint_source
+        - physical_footprint_complete
+        - physical_footprint_process_count
+        - heavy_overlap_allowed
+        - heavy_overlap_reason
+      properties:
+        physical_memory_bytes:
+          type: [integer, 'null']
+          minimum: 0
+        memory_budget_bytes:
+          type: [integer, 'null']
+          minimum: 0
+        declared_footprint_bytes:
+          type: [integer, 'null']
+          minimum: 0
+          description: Sum of configured enabled-component footprint declarations; not an observed memory measurement.
+        declared_component_bytes:
+          type: object
+          additionalProperties:
+            type: [integer, 'null']
+            minimum: 0
+        declaration_complete:
+          type: boolean
+        physical_footprint_bytes:
+          type: [integer, 'null']
+          minimum: 0
+          description: Aggregate macOS phys_footprint for the service process tree when sampling is complete.
+        physical_footprint_source:
+          type: string
+          enum: [macos_footprint, macos_footprint_incomplete, unavailable]
+        physical_footprint_complete:
+          type: boolean
+        physical_footprint_process_count:
+          type: integer
+          minimum: 0
+        heavy_overlap_allowed:
+          type: boolean
+        heavy_overlap_reason:
+          type: string
+    Model:
+      type: object
+      required: [id, object, owned_by, created]
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: model
+        owned_by:
+          type: string
+          const: speechrail
+        created:
+          type: integer
+          description: >
+            Unix timestamp of model registration. Always 0: local snapshots
+            carry no creation time (OpenAI SDK clients expect the field).
+        resolves_to:
+          type: string
+          description: |
+            Canonical profile this OpenAI-standard alias resolves to. Present
+            only on alias entries; canonical entries omit it.
+        profile:
+          type: [string, 'null']
+          enum: [quality, balanced, light, null]
+          description: Active managed profile on canonical entries.
+        artifact:
+          type: string
+          description: Immutable managed artifact key on canonical entries.
+        source_model:
+          type: string
+          description: Upstream model identifier recorded in the managed catalog.
+        family:
+          type: string
+          enum: [qwen3_asr, qwen3_tts]
+        variant:
+          type: string
+          enum: [asr, voice_design, custom_voice, base]
+        quantization:
+          $ref: '#/components/schemas/Quantization'
+        capabilities:
+          $ref: '#/components/schemas/ModelCapabilities'
+    ModelCapabilities:
+      type: object
+      required: [supports_preview, supports_clone, supports_instruction]
+      properties:
+        supports_preview:
+          type: boolean
+          description: Whether ephemeral natural-language VoiceDesign previews are supported.
+        supports_clone:
+          type: boolean
+          description: Whether reference-audio voice cloning is supported.
+        supports_instruction:
+          type: boolean
+          description: Whether natural-language voice instructions are supported by the model.
+    Quantization:
+      type: object
+      required: [bits, group_size, format]
+      properties:
+        bits:
+          type: [integer, 'null']
+        group_size:
+          type: [integer, 'null']
+        format:
+          type: string
+    ModelList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Model'
+    VoiceProfile:
+      type: object
+      required: [id, name, description, instruction, aliases, is_default, is_system, created_at, available, variant, capabilities]
+      properties:
+        id:
+          type: string
+          description: System preset or user-created voice identifier.
+        name:
+          type: string
+        description:
+          type: string
+        instruction:
+          type: string
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional deterministic sampling seed for reproducible voice recipes.
+        aliases:
+          type: array
+          description: OpenAI standard and legacy SpeechRail voice names accepted for this preset.
+          items:
+            type: string
+        is_default:
+          type: boolean
+        is_system:
+          type: boolean
+        created_at:
+          type: number
+        available:
+          type: boolean
+          description: Whether the active TTS weights can synthesize this voice.
+        variant:
+          type: [string, 'null']
+          enum: [voice_design, custom_voice, base, null]
+        capabilities:
+          $ref: '#/components/schemas/VoiceCapabilities'
+        mode:
+          type: string
+          enum: [system, instruction, clone]
+          default: system
+        ref_text:
+          type: [string, 'null']
+        duration_seconds:
+          type: number
+        quality:
+          $ref: '#/components/schemas/VoiceQualityReport'
+        creation:
+          $ref: '#/components/schemas/VoiceCreation'
+    VoiceDesignRegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [id, name, instruction, reference_text]
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9_-]{1,64}$'
+          description: New target ID; system IDs, aliases and occupied IDs are rejected.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+        reference_text:
+          type: string
+          minLength: 20
+          maxLength: 240
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          default: 42
+        language:
+          type: string
+          const: zh
+          default: zh
+    VoiceDesignRegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [voice, synthesis_validation]
+      properties:
+        voice:
+          $ref: '#/components/schemas/VoiceProfile'
+        synthesis_validation:
+          type: string
+          const: unevaluated
+          description: Reference registration does not execute Base output or speaker-identity validation.
+    VoiceCreation:
+      type: object
+      additionalProperties: false
+      required: [origin, method, model_artifact, model_revision, seed, instruction_sha256, reference_text_sha256, reference_audio_sha256, preprocessing_version]
+      properties:
+        origin:
+          type: string
+          const: generated
+        method:
+          type: string
+          const: voice_design_reference_v1
+        model_artifact:
+          type: string
+          pattern: '^[a-z0-9._-]{1,128}$'
+        model_revision:
+          type: string
+          pattern: '^[0-9a-f]{40}$'
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+        instruction_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        reference_text_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        reference_audio_sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        preprocessing_version:
+          type: string
+          const: energy_v1
+    VoiceCapabilities:
+      type: object
+      required: [supports_speaker, supports_instruction]
+      properties:
+        supports_speaker:
+          type: boolean
+        supports_instruction:
+          type: boolean
+        supports_clone:
+          type: boolean
+          default: false
+    VoiceCloneRequest:
+      type: object
+      required: [audio, ref_text, name]
+      properties:
+        audio:
+          type: string
+          format: binary
+          description: Uploaded voice sample (WebM, WAV, MP3, etc., up to 15MB)
+        ref_text:
+          type: string
+          maxLength: 2000
+          description: The reference prompt script that the user read aloud
+        name:
+          type: string
+          maxLength: 32
+          description: Display name for the cloned voice
+        id:
+          type: string
+          pattern: '^[a-zA-Z0-9_-]{1,64}$'
+          description: Optional identifier for the cloned voice
+    VoiceQualityReference:
+      type: object
+      required:
+        - duration_seconds
+        - sample_rate
+        - channels
+        - speech_active_ratio
+        - noise_floor_dbfs
+        - estimated_snr_db
+        - clipping_ratio
+        - leading_silence_seconds
+        - trailing_silence_seconds
+        - transcript_match
+      properties:
+        duration_seconds:
+          type: number
+        sample_rate:
+          type: integer
+          minimum: 1
+        channels:
+          type: integer
+          minimum: 1
+        speech_active_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        noise_floor_dbfs:
+          type: number
+        estimated_snr_db:
+          type: number
+        clipping_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        leading_silence_seconds:
+          type: number
+          minimum: 0
+        trailing_silence_seconds:
+          type: number
+          minimum: 0
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+    VoiceQualitySynthesis:
+      type: object
+      required:
+        - probe_count
+        - successful_probe_count
+        - active_rms_dbfs
+        - peak_dbfs
+        - chunk_jump_p95_db
+        - clipping_ratio
+        - deterministic
+        - transcript_match
+        - intelligibility_evaluated
+      properties:
+        probe_count:
+          type: integer
+          minimum: 0
+        successful_probe_count:
+          type: integer
+          minimum: 0
+        active_rms_dbfs:
+          type: number
+        peak_dbfs:
+          type: number
+        chunk_jump_p95_db:
+          type: number
+        clipping_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+        deterministic:
+          type: boolean
+        transcript_match:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: Minimum normalized ASR transcript match across the fixed probe set; null when not evaluated.
+        intelligibility_evaluated:
+          type: boolean
+          description: Whether independent ASR intelligibility evidence was successfully collected.
+    VoiceQualityReport:
+      type: object
+      required:
+        - policy_version
+        - status
+        - run_id
+        - tested_at
+        - reference
+        - synthesis
+        - failure_codes
+      properties:
+        policy_version:
+          type: string
+          enum: [voice_quality_v1]
+        status:
+          type: string
+          enum: [pass, warn, reject, unevaluated]
+        run_id:
+          type: string
+        tested_at:
+          type: string
+          format: date-time
+        reference:
+          $ref: '#/components/schemas/VoiceQualityReference'
+        synthesis:
+          $ref: '#/components/schemas/VoiceQualitySynthesis'
+        failure_codes:
+          type: array
+          minItems: 0
+          items:
+            type: string
+            enum:
+              - audio_too_short
+              - low_snr
+              - high_noise_floor
+              - clipping
+              - transcript_mismatch
+              - probe_failed
+              - clone_speed_unsupported
+              - output_invalid
+              - output_peak_exceeded
+              - output_nondeterministic
+              - transcription_unavailable
+    VoiceQualityRunRequest:
+      type: object
+      properties:
+        probe_set:
+          type: string
+          default: voice_quality_v1_zh
+        runs:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 3
+        include_audio:
+          type: boolean
+          default: false
+          description: |
+            Reserved for inline audio probes; not implemented. Sending
+            `include_audio=true` is rejected with `422 include_audio_unsupported`.
+    ClonePromptItem:
+      type: object
+      required: [id, category, title, script, tips]
+      properties:
+        id:
+          type: string
+        category:
+          type: string
+        title:
+          type: string
+        script:
+          type: string
+        tips:
+          type: string
+    ClonePromptList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClonePromptItem'
+    CreateVoiceRequest:
+      type: object
+      required: [name, instruction]
+      properties:
+        name:
+          type: string
+          description: Friendly display name for the voice
+        instruction:
+          type: string
+          description: Natural language prompt describing the voice characteristics
+        id:
+          type: string
+          description: Optional voice identifier. If omitted, auto-generated.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional deterministic sampling seed for a reusable voice recipe.
+    UpdateVoiceRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          description: New display name for the custom voice.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: New natural-language instruction for an instruction-mode voice.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: New deterministic sampling seed for an instruction-mode voice.
+    VoiceList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceProfile'
+    TranscriptionRequest:
+      type: object
+      required: [file]
+      properties:
+        file:
+          type: string
+          format: binary
+        model:
+          type: string
+          default: speechrail/qwen3-asr-1.7b
+        language:
+          type: string
+          description: BCP-47-style or provider-compatible language hint.
+          example: zh
+        languages:
+          type: array
+          items:
+            type: string
+          description: Multi-language hint list; the first entry is used when language is absent.
+        prompt:
+          type: string
+          maxLength: 2000
+          description: Domain vocabulary hint, not an instruction channel.
+        response_format:
+          type: string
+          enum: [json, verbose_json, diarized_json, text, srt, vtt]
+          default: json
+          description: Use diarized_json only with model=gpt-4o-transcribe-diarize.
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+          description: Sampling temperature hint; accepted for OpenAI parity.
+        timestamp_granularities:
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+          description: |
+            Legacy non-bracketed multipart field; still supported for compatibility.
+            When both this field and timestamp_granularities[] are supplied, their
+            values are merged. Only meaningful with response_format=verbose_json.
+        'timestamp_granularities[]':
+          type: array
+          items:
+            type: string
+            enum: [word, segment]
+          description: |
+            Standard OpenAI bracketed multipart field. When both this field and
+            timestamp_granularities are supplied, their values are merged. Only
+            meaningful with response_format=verbose_json.
+        stream:
+          type: boolean
+          default: false
+          description: For diarized_json, emits transcript.text.delta, transcript.text.segment and transcript.text.done SSE events.
+        chunking_strategy:
+          type: string
+          enum: [auto, server_vad]
+          description: Required for diarized uploads longer than 30 seconds.
+        include:
+          type: array
+          items:
+            type: string
+          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+        keywords:
+          type: array
+          items:
+            type: string
+          description: Rejected for anonymous diarization; known-speaker identification is not implemented.
+        known_speaker_names:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+        known_speaker_references:
+          type: array
+          items:
+            type: string
+          description: Accepted and ignored for OpenAI SDK parity.
+    SpeechRequest:
+      type: object
+      required: [model, input, voice]
+      properties:
+        model:
+          type: string
+          enum: [speechrail/qwen3-tts, tts-1, tts-1-hd, gpt-4o-mini-tts]
+          description: Canonical TTS model or an OpenAI-compatible alias.
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        voice:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: |
+            The nine canonical server roles (serena, vivian, uncle_fu, dylan,
+            eric, ryan, aiden, ono_anna, sohee) map one-to-one to the nine
+            CustomVoice speakers. Legacy SpeechRail names (default, warm,
+            bright, calm) and OpenAI standard names (alloy, ash, ballad, cedar,
+            coral, echo, fable, marin, nova, onyx, sage, shimmer, verse) remain
+            accepted aliases. Active weights and per-voice availability are
+            declared by GET /v1/voices.
+        response_format:
+          type: string
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: mp3
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: auto
+        instructions:
+          type: string
+          maxLength: 10000
+          description: VoiceDesign instruction for quality profiles. CustomVoice and clone voices reject it with a stable 400 error.
+        stream_format:
+          type: string
+          enum: [audio]
+          description: Only audio is accepted; other values are rejected with stream_format_unsupported.
+    VoicePreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [model, input, instruction]
+      properties:
+        model:
+          type: string
+          enum: [speechrail/qwen3-tts, tts-1, tts-1-hd, gpt-4o-mini-tts]
+          description: Canonical TTS model or an OpenAI-compatible alias.
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: Text to synthesize for the preview.
+        instruction:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Natural-language description of the desired voice.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional request-local seed for reproducible previews.
+        speed:
+          type: number
+          minimum: 0.25
+          maximum: 4
+          default: 1
+        language:
+          type: string
+          minLength: 1
+          maxLength: 64
+          default: auto
+        response_format:
+          type: string
+          enum: [mp3, opus, aac, flac, wav, pcm]
+          default: wav
+          description: Audio container or raw 24kHz signed 16-bit mono PCM.
+    JobCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, input_ref]
+      properties:
+        kind:
+          type: string
+          enum: [speech, transcription]
+        input_ref:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: Opaque external input reference; no raw content or credentials.
+        params:
+          type: object
+          description: Opaque caller-supplied parameters; stored and echoed back on GET.
+    Job:
+      type: object
+      additionalProperties: false
+      required: [id, kind, state, error_code, result_ref]
+      properties:
+        id:
+          type: string
+          pattern: '^job_[a-f0-9]{32}$'
+          readOnly: true
+        kind:
+          type: string
+          enum: [speech, transcription]
+        state:
+          type: string
+          enum: [queued, running, completed, failed, cancelled, expired]
+        error_code:
+          type: [string, 'null']
+          maxLength: 200
+        error_message:
+          type: [string, 'null']
+          maxLength: 256
+          description: >
+            Bounded, desensitized failure detail. Optional; populated only on
+            single-job reads (GET /v1/jobs/{job_id}) for failed jobs, and null
+            in list, create, cancel and terminal responses. Never contains raw
+            audio, transcripts, credentials, URLs, absolute paths, emails or
+            exception dumps.
+        attempts:
+          type: integer
+          minimum: 0
+          description: >
+            Number of times this job has been claimed, incremented atomically on
+            each queued-to-running transition. Optional; populated only on
+            single-job reads (GET /v1/jobs/{job_id}), and absent from list,
+            create, cancel and result responses.
+        result_ref:
+          type: [string, 'null']
+          description: Opaque result reference, present only for completed jobs.
+        params:
+          type: [object, 'null']
+          description: Opaque caller-supplied parameters, echoed back from creation.
+        queue_position:
+          type: [integer, 'null']
+          minimum: 1
+          description: >
+            Best-effort 1-based position among queued jobs. Optional; populated
+            only on single-job reads (GET /v1/jobs/{job_id}) while the job is
+            queued, and null in list, create, cancel and terminal responses.
+        eta_seconds:
+          type: [number, 'null']
+          minimum: 0
+          description: >
+            Bounded best-effort queue-wait estimate in seconds. Optional;
+            populated only on single-job reads while the job is queued, and
+            null otherwise.
+        deadline:
+          type: [string, 'null']
+          description: >
+            ISO-8601 UTC timestamp approximating the run deadline. Optional;
+            populated only on single-job reads while the job is running, and
+            null otherwise.
+    JobList:
+      type: object
+      additionalProperties: false
+      required: [object, data, next_cursor, has_more]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Job'
+        next_cursor:
+          type: [string, 'null']
+          description: Opaque cursor for the next page; null when exhausted.
+        has_more:
+          type: boolean
+          description: Whether more job records are available after this page.
+    Usage:
+      type: object
+      required: [type, seconds]
+      properties:
+        type:
+          type: string
+          const: duration
+        seconds:
+          type: number
+          minimum: 0
+    TranscriptionResponse:
+      type: object
+      required: [text, usage]
+      properties:
+        text:
+          type: string
+        usage:
+          $ref: '#/components/schemas/Usage'
+    TranscriptSegment:
+      type: object
+      required: [id, start, end, text]
+      properties:
+        id:
+          type: integer
+          minimum: 0
+        seek:
+          type: [number, "null"]
+        tokens:
+          type: ["array", "null"]
+          items:
+            type: integer
+        temperature:
+          type: [number, "null"]
+        avg_logprob:
+          type: [number, "null"]
+        compression_ratio:
+          type: [number, "null"]
+        no_speech_prob:
+          type: [number, "null"]
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        text:
+          type: string
+    TranscriptWord:
+      type: object
+      required: [word, start, end]
+      properties:
+        word:
+          type: string
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+    VerboseTranscriptionResponse:
+      type: object
+      required: [task, language, duration, text, usage]
+      properties:
+        task:
+          type: string
+          const: transcribe
+        language:
+          type: string
+          description: Lowercased detected language, or empty when undetected.
+        duration:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        segments:
+          type: array
+          description: Included when segment timestamps are requested; omitted for word-only responses. When no timestamp granularity is requested, both segments and words are returned.
+          items:
+            $ref: '#/components/schemas/TranscriptSegment'
+        words:
+          type: array
+          description: Included when word timestamps are requested; omitted for segment-only responses. When no timestamp granularity is requested, both segments and words are returned.
+          items:
+            $ref: '#/components/schemas/TranscriptWord'
+        usage:
+          $ref: '#/components/schemas/Usage'
+    DiarizedTranscriptSegment:
+      type: object
+      required: [id, type, start, end, speaker, text]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: transcript.text.segment
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        speaker:
+          type: string
+          pattern: '^[A-D]$'
+        text:
+          type: string
+    DiarizedTranscriptionResponse:
+      type: object
+      required: [task, duration, text, segments]
+      properties:
+        task:
+          type: string
+          const: transcribe
+        duration:
+          type: number
+          minimum: 0
+        text:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiarizedTranscriptSegment'
+    ErrorBody:
+      type: object
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/Error'
+    Error:
+      type: object
+      required: [message, type, code, request_id, retryable]
+      properties:
+        message:
+          type: string
+        type:
+          type: string
+          enum: [invalid_request_error, authentication_error, server_error]
+        param:
+          type: [string, "null"]
+        code:
+          type: string
+        request_id:
+          type: string
+        retryable:
+          type: boolean
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    Unauthorized:
+      description: Authentication failed
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            example: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    AudioTooLarge:
+      description: Audio exceeds configured limits
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    QueueFull:
+      description: Bounded inference queue is full
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    BackendNotReady:
+      description: Model runtime is not ready
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    DependencyMissing:
+      description: A required external dependency (e.g. ffmpeg) is missing
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    BackendDeliveryInvalid:
+      description: TTS worker delivered an invalid audio stream
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    VoiceStoreUnavailable:
+      description: Custom voice metadata or audio storage is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    VoiceInUse:
+      description: Custom voice has an active synthesis reader lease
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotFound:
+      description: Job does not exist or is outside the caller owner scope
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotCancellable:
+      description: Job is not in a cancellable state (running or failed)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+    JobNotReady:
+      description: Job is not yet completed; result is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
+
+          description: Verified content-addressed acoustic revision when available; legacy voices remain null.
         voice_identity_assurance:
           type: string
           const: legacy
