@@ -265,9 +265,9 @@ class SpeechRailClient:
         return cast(list[dict[str, Any]], [entry for entry in data if isinstance(entry, dict)])
 
     async def fetch_capabilities(self) -> dict[str, Any] | None:
-        """Read the atomic /v2 snapshot; only older missing routes permit fallback."""
+        """Read the atomic SpeechRail capability snapshot; older missing routes permit fallback."""
         try:
-            response = await self._request("GET", "v2/capabilities", api=False)
+            response = await self._request("GET", "speechrail/capabilities")
         except SpeechRailError as exc:
             if exc.status in {404, 405}:
                 return None
