@@ -43,6 +43,7 @@ from speechrail.domain.ports import (
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
     VoiceRevisionConflictError,
+    VoiceRevokedError,
     VoiceStoreUnavailableError,
     resolve_voice,
     tts_voice_class,
@@ -1378,6 +1379,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown preset voice: {body.voice}",
                 param="voice",
             )
+        if profile.revoked:
+            return error_response(
+                409 if request.url.path == "/v2/audio/speech" else 400,
+                request_id,
+                "voice_revoked",
+                "Requested voice revision has been revoked",
+                param="voice",
+            )
         binding_variant = (
             active.tts_clone.variant
             if profile.mode == "clone" and active.tts_clone is not None
@@ -1525,6 +1534,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "voice_revision_conflict",
                     "Requested voice revision no longer matches the resolved voice",
                 )
+            except VoiceRevokedError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revoked",
+                    "Requested voice revision has been revoked",
+                )
             except RuntimeError:
                 await _close_audio_stream(pcm_stream)
                 return error_response(
@@ -1625,6 +1642,22 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
+            except VoiceRevisionConflictError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revision_conflict",
+                    "Requested voice revision no longer matches the resolved voice",
+                )
+            except VoiceRevokedError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revoked",
+                    "Requested voice revision has been revoked",
+                )
             except RuntimeError:
                 await _close_audio_stream(encoded_stream)
                 return error_response(
@@ -1707,6 +1740,20 @@ def create_audio_router(services: AppServices) -> APIRouter:
         except TimeoutError:
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
+            )
+        except VoiceRevisionConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revision_conflict",
+                "Requested voice revision no longer matches the resolved voice",
+            )
+        except VoiceRevokedError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revoked",
+                "Requested voice revision has been revoked",
             )
         except RuntimeError:
             return error_response(
