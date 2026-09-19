@@ -577,6 +577,13 @@ turn produces exactly one positive observation. This makes the current-head metr
 usable as a commit-tail distribution input for E1; it does not provide managed
 runtime evidence, per-request stage correlation, or acoustic accuracy.
 
+The successful Realtime TTS path also records a bounded `tts_complete` phase after
+the final audio/content events are sent and before `response.done`. Together with
+`tts_admission`, `send`, ASR flush/commit/terminal phases, and governor queue/service
+histograms, this supplies a low-cardinality source-side stage boundary for E3a. It
+does not add request identifiers or text/audio labels and does not replace managed
+per-request measurements.
+
 ### 2026-09-20 observed TTS runtime identity
 
 The TTS worker parent now retains a revision derived only from the validated

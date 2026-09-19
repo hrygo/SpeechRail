@@ -50,6 +50,7 @@ _REALTIME_PHASES = frozenset(
         "asr_commit_ack",
         "asr_terminal_wait",
         "tts_admission",
+        "tts_complete",
         "send",
     }
 )

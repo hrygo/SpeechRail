@@ -185,6 +185,7 @@ def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
         "asr_commit_ack",
         "asr_terminal_wait",
         "tts_admission",
+        "tts_complete",
         "send",
     ):
         metrics.record_realtime_phase(phase, 0.04)
@@ -197,6 +198,7 @@ def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
         "asr_commit_ack",
         "asr_terminal_wait",
         "tts_admission",
+        "tts_complete",
         "send",
     ):
         assert f'phase="{phase}"' in text

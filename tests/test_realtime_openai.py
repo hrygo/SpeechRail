@@ -589,6 +589,58 @@ def test_realtime_completed_turn_records_commit_tail_duration() -> None:
     assert reading["avg"] > 0.0
 
 
+def test_realtime_tts_records_complete_phase() -> None:
+    async def scenario() -> dict[str, object]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                batch_transcriber=FakeTranscriber(),
+                tts_synthesizer=FakeSpeechSynthesizer(),
+                realtime_asr_factory=FakeStreamingFactory(),
+            ),
+        )
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_tts_metrics_test",
+            send=lambda event: asyncio.sleep(0),
+        )
+        await session.start()
+        await session.handle(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        await session.handle({"type": "response.create"})
+        assert session._tts_task is not None
+        await session._tts_task
+        await session.close()
+        return services.metrics.render_json()
+
+    metrics = asyncio.run(scenario())
+    histograms = metrics["histograms"]
+    assert isinstance(histograms, dict)
+    phases = histograms["speechrail_realtime_phase_duration_seconds"]
+    assert isinstance(phases, dict)
+    complete = [
+        reading
+        for labels, reading in phases.items()
+        if 'phase="tts_complete"' in labels
+    ]
+    assert len(complete) == 1
+    assert complete[0]["count"] == 1
+
+
 def test_openai_commit_releases_streaming_slot_for_next_append() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime") as socket:

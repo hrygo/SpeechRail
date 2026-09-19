@@ -1754,6 +1754,9 @@ class OpenAIRealtimeSession:
                     transcript=text,
                 )
             )
+            self._services.metrics.record_realtime_phase(
+                "tts_complete", max(0.0, time.monotonic() - _ttfa_t0)
+            )
             if receipt_id is not None:
                 self._services.render_receipts.complete(receipt_id)
             await self._send(
