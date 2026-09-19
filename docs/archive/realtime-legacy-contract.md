@@ -1,8 +1,8 @@
 # SpeechRail Realtime WebSocket 契约
 
 本文件描述已迁移到 `/v1/realtime/legacy` 的旧 batch 协议（deprecated）以及
-[Realtime v2 设计契约](realtime-v2.md)。标准 OpenAI Realtime 接入见
-[OpenAI Realtime 兼容契约](realtime-openai.md)。
+[已移除的 Realtime v2 历史设计](realtime-v2-contract.md)。标准 OpenAI Realtime 接入见
+[OpenAI Realtime 兼容契约](../../contracts/realtime-openai.md)。
 
 `WS /v1/realtime/legacy` 是面向旧客户端的 PCM 转写协议。事件名称参考 OpenAI Realtime
 transcription，但本版本的语义是“收集音频后一次 batch 转写”，不是持续 partial streaming。

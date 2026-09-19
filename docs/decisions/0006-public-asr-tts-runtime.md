@@ -4,6 +4,8 @@
 
 Accepted; superseded by [ADR-0009](0009-openai-realtime-only.md)
 
+> **当前边界：** 本 ADR 的 `/v2/realtime` 内容仅记录 2026-08-31 的历史设计，不能作为当前接口或协议名称。当前唯一公共 Realtime 入口是 `WS /v1/realtime`，详见 ADR-0009。
+
 ## Date
 
 2026-08-31
