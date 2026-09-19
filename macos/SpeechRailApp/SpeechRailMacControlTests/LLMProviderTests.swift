@@ -22,7 +22,7 @@ final class LLMProviderTests: XCTestCase {
         nonisolated(unsafe) private static var scripted: [Exchange] = []
         nonisolated(unsafe) private static var captured: [[String: Any]] = []
         nonisolated(unsafe) private static var capturedURLs: [String] = []
-        nonisolated(unsafe) private static let lock = NSLock()
+        private static let lock = NSLock()
 
         static func reset(_ exchanges: [Exchange]) {
             lock.lock()
