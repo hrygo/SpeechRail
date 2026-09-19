@@ -146,3 +146,19 @@ def test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request(
     assert receipt["status"] == "error"
     assert receipt["error_code"] == "backend_error"
     assert receipt["audio"]["sample_count"] == 0
+
+
+def test_openai_custom_voice_object_is_accepted_on_v1_speech(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    client, synth, _revision = _client(tmp_path, monkeypatch)
+    payload = _payload()
+    payload["voice"] = {"id": "narrator"}
+
+    response = client.post("/v1/audio/speech", json=payload)
+
+    assert response.status_code == 200
+    assert len(synth.requests) == 1
+    assert synth.requests[0].voice == "narrator"
+    assert "SpeechRail-Receipt-Id" not in response.headers
