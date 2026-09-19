@@ -1755,7 +1755,25 @@ class OpenAIRealtimeSession:
                     error_code="client_disconnected",
                 )
             return
-        except RuntimeError:
+        except RuntimeError as exc:
+            if infer_backend_busy_reason(exc) == BusyReason.BACKEND_UNAVAILABLE:
+                if receipt_id is not None:
+                    self._services.render_receipts.fail(receipt_id, "backend_busy")
+                await self._send(
+                    error_event(
+                        code="backend_busy",
+                        message="TTS worker is unavailable",
+                        busy_reason=str(BusyReason.BACKEND_UNAVAILABLE),
+                    )
+                )
+                await self._send(
+                    self._response_done_event(
+                        response_id=response_id,
+                        status="failed",
+                        receipt_id=receipt_id,
+                    )
+                )
+                return
             if receipt_id is not None:
                 self._services.render_receipts.fail(
                     receipt_id,

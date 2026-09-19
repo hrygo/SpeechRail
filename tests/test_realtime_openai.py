@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from speechrail.application.realtime_openai import Pcm16RateConverter
+from speechrail.application.realtime_openai import OpenAIRealtimeSession, Pcm16RateConverter
 from speechrail.application.services import AppOverrides, build_app_services
 from speechrail.compatibility.openai_realtime import (
     RealtimeAdapterError,
@@ -100,6 +100,15 @@ class EmptySpeechSynthesizer:
         async def chunks():
             if False:  # Keep this as an async generator without yielding audio.
                 yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
+class UnavailableSpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            raise RuntimeError("worker_unavailable; worker stderr tail: private detail")
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
 
         return chunks()
 
@@ -1924,6 +1933,62 @@ def _drive_tts(
         events.append(event)
         if event["type"] in {"response.done", "error"}:
             return events
+
+
+def test_realtime_tts_worker_unavailable_publishes_retryable_busy_error() -> None:
+    async def scenario() -> list[dict[str, object]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                batch_transcriber=FakeTranscriber(),
+                tts_synthesizer=UnavailableSpeechSynthesizer(),
+                realtime_asr_factory=FakeStreamingFactory(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_test",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        await session.handle({"type": "response.create"})
+        assert session._tts_task is not None
+        await session._tts_task
+        await session.close()
+        return events
+
+    events = asyncio.run(scenario())
+    error = next(event for event in events if event["type"] == "error")
+    assert error["error"]["code"] == "backend_busy"
+    assert error["speechrail"] == {
+        "busy_reason": "backend_unavailable",
+        "retryable": True,
+        "retry_hint": "retry_after_worker_recovery",
+    }
+    assert events[-1]["type"] == "response.done"
+    assert events[-1]["response"]["status"] == "failed"
+    assert "private detail" not in repr(events)
 
 
 def test_realtime_session_update_voice_alias_resolves_to_registered_preset() -> None:
