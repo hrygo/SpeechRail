@@ -27,6 +27,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from speechrail.domain.file_locks import exclusive_file_lock
 from speechrail.domain.voice_creation import VoiceCreation
 
 logger = logging.getLogger(__name__)
@@ -641,12 +642,21 @@ class VoiceRegistry:
         self._retired_audio: set[Path] = set()
         self._load_custom_voices()
 
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        """Serialize durable voice registry transactions across processes."""
+        with exclusive_file_lock(
+            self._storage_path,
+            unavailable_error=VoiceStoreUnavailableError,
+        ):
+            yield
+
     def _mark_unavailable(self, exc: BaseException) -> None:
         self._store_error = "custom voice registry is unavailable"
         logger.warning("failed to load custom voices: %s", type(exc).__name__)
 
     def _load_custom_voices(self) -> None:
-        with self._lock:
+        with self._lock, self._process_lock():
             self._load_custom_voices_locked()
 
     def _load_custom_voices_locked(self) -> None:
@@ -1024,14 +1034,14 @@ class VoiceRegistry:
 
     def snapshot_profiles(self) -> tuple[VoiceProfile, ...]:
         """Detach one catalog generation under the same registry read lock."""
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             return tuple(deepcopy(profile) for profile in (
                 *SYSTEM_VOICE_PROFILES.values(), *self._custom_voices.values(),
             ))
 
     def list_profiles(self) -> list[VoiceProfile]:
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             system = list(SYSTEM_VOICE_PROFILES.values())
             custom = sorted(
@@ -1043,7 +1053,7 @@ class VoiceRegistry:
         resolved = resolve_voice(voice)
         if resolved in SYSTEM_VOICE_PROFILES:
             return SYSTEM_VOICE_PROFILES[resolved]
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             if resolved in self._custom_voices:
                 return self._custom_voices[resolved]
@@ -1059,7 +1069,7 @@ class VoiceRegistry:
             raise ValueError("invalid expected voice revision")
         resolved = resolve_voice(voice)
         audio_path: Path | None = None
-        with self._lock:
+        with self._lock, self._process_lock():
             if resolved in SYSTEM_VOICE_PROFILES:
                 profile = SYSTEM_VOICE_PROFILES[resolved]
             else:
@@ -1141,7 +1151,7 @@ class VoiceRegistry:
                 temperature=0.1,
             ),
         )
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             previous = self._custom_voices.get(vid)
             candidate = dict(self._custom_voices)
@@ -1194,7 +1204,7 @@ class VoiceRegistry:
         ):
             raise ValueError("reference does not match voice provenance")
 
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             # This check shares the metadata commit lock; the HTTP preflight
             # alone cannot protect against concurrent registration of the ID.
@@ -1266,7 +1276,7 @@ class VoiceRegistry:
         if name is None and instruction is None and seed is None:
             raise ValueError("at least one voice field must be provided")
 
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             profile = self._custom_voices.get(vid)
             if profile is None:
@@ -1342,7 +1352,7 @@ class VoiceRegistry:
         vid = voice_id.strip().lower()
         if not VOICE_ID_RE.fullmatch(vid):
             raise ValueError("invalid voice ID format")
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             if vid not in self._custom_voices:
                 raise KeyError(f"custom voice not found: {vid}")
@@ -1368,7 +1378,7 @@ class VoiceRegistry:
             raise ValueError("invalid target voice revision")
         if not VOICE_REVISION_RE.fullmatch(expected_revision):
             raise ValueError("invalid expected voice revision")
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             current = self._custom_voices.get(vid)
             if current is None:
@@ -1419,7 +1429,7 @@ class VoiceRegistry:
             raise ValueError("invalid voice ID format")
         if not VOICE_REVISION_RE.fullmatch(revision):
             raise ValueError("invalid voice revision")
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             current = self._custom_voices.get(vid)
             if current is None:
@@ -1451,7 +1461,7 @@ class VoiceRegistry:
             raise ValueError("invalid voice ID format")
         if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"system voice cannot be deleted: {vid}")
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             profile = self._custom_voices.get(vid)
             if profile is None:

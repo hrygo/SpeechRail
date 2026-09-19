@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import math
@@ -11,11 +10,11 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+from speechrail.domain.file_locks import exclusive_file_lock
 
 
 class IdempotencyConflictError(RuntimeError):
@@ -56,40 +55,6 @@ class DurableIdempotencyJournal:
         self._path = Path(path)
         self._max_entries = max_entries
         self._lock = threading.RLock()
-
-    @contextmanager
-    def _process_lock(self) -> Iterator[None]:
-        """Serialize journal read/modify/write cycles across processes.
-
-        ``threading.RLock`` protects one journal object only.  The service can
-        create more than one journal instance during tests or a process
-        handoff, so the durable operation needs a filesystem lock around the
-        complete transaction as well.  The lock file is separate from the
-        JSON payload and intentionally remains after release.
-        """
-
-        lock_path = self._path.with_name(f".{self._path.name}.lock")
-        handle = None
-        try:
-            if self._path.parent.is_symlink() or lock_path.is_symlink():
-                raise OSError("unsafe idempotency journal path")
-            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            handle = lock_path.open("a+b")
-            lock_path.chmod(0o600)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except Exception as exc:
-            if handle is not None:
-                handle.close()
-            raise IdempotencyStoreUnavailableError(
-                "idempotency journal lock is unavailable"
-            ) from exc
-        try:
-            yield
-        finally:
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
 
     @staticmethod
     def key_hash(key: str) -> str:
@@ -249,7 +214,10 @@ class DurableIdempotencyJournal:
         """Persist pending before side effects, or replay an existing decision."""
 
         key_hash = self.key_hash(key)
-        with self._lock, self._process_lock():
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=IdempotencyStoreUnavailableError,
+        ):
             records = self._load_locked()
             for record in reversed(records):
                 if (
@@ -291,7 +259,10 @@ class DurableIdempotencyJournal:
         """Return durable state to a caller that proves possession of the key."""
 
         key_hash = self.key_hash(key)
-        with self._lock, self._process_lock():
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=IdempotencyStoreUnavailableError,
+        ):
             records = self._load_locked()
             for record in reversed(records):
                 if (
@@ -318,7 +289,10 @@ class DurableIdempotencyJournal:
         """Atomically commit a pending record; a concurrent winner is preserved."""
 
         key_hash = self.key_hash(key)
-        with self._lock, self._process_lock():
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=IdempotencyStoreUnavailableError,
+        ):
             records = self._load_locked()
             for record in reversed(records):
                 if (
@@ -357,7 +331,10 @@ class DurableIdempotencyJournal:
         """Remove only a matching pending record when no side effect occurred."""
 
         key_hash = self.key_hash(key)
-        with self._lock, self._process_lock():
+        with self._lock, exclusive_file_lock(
+            self._path,
+            unavailable_error=IdempotencyStoreUnavailableError,
+        ):
             records = self._load_locked()
             kept: list[dict[str, object]] = []
             removed = False

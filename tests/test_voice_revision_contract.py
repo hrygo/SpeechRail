@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import threading
 from pathlib import Path
@@ -225,6 +226,38 @@ def test_revision_persists_across_registry_restart(tmp_path):
     second = VoiceRegistry(storage_path=storage, voices_dir=voices)
     reloaded = second.get_profile("persistent")
     assert reloaded.revision == created.revision
+
+
+def test_registry_waits_for_a_process_lock_held_by_another_instance(tmp_path) -> None:
+    storage = tmp_path / "custom_voices.json"
+    registry = VoiceRegistry(storage_path=storage, voices_dir=tmp_path / "voices")
+    lock_path = storage.with_name(f".{storage.name}.lock")
+    finished = threading.Event()
+    revisions = []
+
+    with lock_path.open("a+b") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX)
+
+        def create_while_locked() -> None:
+            revisions.append(
+                registry.create_custom_profile(
+                    name="Narrator",
+                    instruction="stable narrator",
+                    voice_id="locked_voice",
+                    seed=17,
+                ).revision
+            )
+            finished.set()
+
+        thread = threading.Thread(target=create_while_locked)
+        thread.start()
+        assert not finished.wait(timeout=0.5)
+
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+        assert finished.wait(timeout=1.0)
+        thread.join(timeout=1.0)
+
+    assert len(revisions) == 1
 
 
 def test_revision_history_survives_restart_and_supports_cas_rollback(tmp_path):
