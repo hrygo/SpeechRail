@@ -444,6 +444,11 @@ Authorization: Bearer <TOKEN>
 - 合成侧稳定码包括 `probe_failed`、`clone_speed_unsupported`、`output_invalid`、`output_peak_exceeded`、`output_nondeterministic`、`transcript_mismatch`、`transcription_unavailable`。探针模式下 `reference` 为空指标对象，不产生参考侧失败码。
 - 音色不存在返回 `404 voice_not_found`；后端未就绪返回 `503 backend_not_ready`（可重试）；registry 不可读返回 `503 voice_store_unavailable`（可重试）。
 
+`/v1/speechrail/voices/{voice_id}/quality-runs` 还返回 `evidence` 命名空间。其
+`identity.model.runtime_revision` 只在 TTS worker 已完成 ready handshake 且 probe 已实际产生
+PCM 时填充 `rt_...`；worker 未提供完整身份或仅使用 fake/injected backend 时保持 `null`。
+TTS eviction 发生在可懂度 ASR 复核前，但不会丢失这份已捕获的 probe 执行身份。
+
 #### 5.7.4 `VoiceQualityReport` 结构与向后兼容
 
 报告顶层字段：

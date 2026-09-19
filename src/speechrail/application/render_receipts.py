@@ -244,18 +244,29 @@ def bind_observed_runtime_revision(
     voice: str,
 ) -> bool:
     """Bind an optional worker identity without changing the synthesis port."""
-    resolver = getattr(synthesizer, "runtime_revision_for_voice", None)
-    if not callable(resolver):
-        return False
-    try:
-        revision = resolver(voice)
-    except Exception:
-        # Receipt metadata is best-effort and must not turn a valid audio chunk
-        # into a failed synthesis if a mutable voice registry changes mid-stream.
-        return False
-    if not isinstance(revision, str) or not revision:
+    revision = observed_runtime_revision_for_synthesizer(synthesizer, voice)
+    if revision is None:
         return False
     try:
         return registry.bind_model_runtime_revision(receipt_id, revision)
     except Exception:
         return False
+
+
+def observed_runtime_revision_for_synthesizer(
+    synthesizer: object,
+    voice: str,
+) -> str | None:
+    """Read an optional worker identity without changing the synthesis port."""
+    resolver = getattr(synthesizer, "runtime_revision_for_voice", None)
+    if not callable(resolver):
+        return None
+    try:
+        revision = resolver(voice)
+    except Exception:
+        # Receipt metadata is best-effort and must not turn a valid audio chunk
+        # into a failed synthesis if a mutable voice registry changes mid-stream.
+        return None
+    if not isinstance(revision, str) or not revision:
+        return None
+    return revision

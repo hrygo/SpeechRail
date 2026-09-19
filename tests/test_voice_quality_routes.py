@@ -91,8 +91,13 @@ def _short_wav(duration: float = 1.0) -> bytes:
 
 
 class SineSynthesizer:
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_revision: str | None = None) -> None:
         self.requests: list[SpeechRequest] = []
+        self.runtime_revision = runtime_revision
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        del voice
+        return self.runtime_revision
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
@@ -711,6 +716,28 @@ def test_s5_quality_runs_ok_and_bounded(
     assert body["synthesis"]["transcript_match"] == pytest.approx(1.0)
     assert body["failure_codes"] == []
     assert len(synth.requests) == 18
+
+
+def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_revision = "rt_" + ("q" * 64)
+    synthesizer = SineSynthesizer(runtime_revision=runtime_revision)
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        synthesizer=synthesizer,
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    response = client.post(
+        "/v1/speechrail/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["evidence"]["identity"]["model"]["runtime_revision"] == (
+        runtime_revision
+    )
 
 
 
