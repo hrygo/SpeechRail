@@ -294,3 +294,68 @@ After those P0 dependencies, implement #70's immutable raw-to-spoken mapping bef
 separate identity, reference-conditioning, intelligibility and listening evidence,
 not a global synthetic quality score. External runtime changes/model downloads and
 user-desktop automation remain outside this repository-only implementation run.
+
+
+## #44 E5 / E13 bounded-yield checkpoint
+
+Implemented on the shared Qwen ASR owner without adding a second model worker.
+
+### Execution boundary
+
+- The existing synchronous `AsrModeGate` remains the final batch/streaming
+  mutual-exclusion guard.
+- A shared asynchronous `AsrModeScheduler` now sits above that gate.
+- Long batch transcription owns one persistent logical `AsrBatchTicket`, but
+  acquires the batch mode only for one bounded ~30 s inference window at a time.
+- After a successful window, batch releases the mode lease and yields the event
+  loop before requeueing the same logical ticket.
+- A realtime request already waiting at that safe boundary receives streaming
+  mode before the batch task's next window unless the head batch task has aged
+  past the configured fairness threshold.
+- An already-active streaming session is never hard-preempted. This change does
+  not claim Metal/kernel preemption and does not interrupt live model state.
+
+### Fairness state
+
+The same logical ticket survives all batch windows and retains:
+
+- first enqueue time;
+- cumulative queue wait;
+- successfully completed service-window count;
+- last successful progress time.
+
+Requeueing therefore cannot reset a long job's age indefinitely. An aged batch
+head blocks new streaming joiners after the current active streaming leases
+finish, allowing sustainable mixed traffic to make background progress.
+
+### Cancellation and correctness
+
+- cancelled batch waiters are removed from the scheduler queue;
+- failed windows do not increment progress;
+- existing transcript merger/window IDs and bounded transport retry semantics are
+  preserved;
+- the scheduler has a legacy synchronous-gate fallback for injected/testing
+  workers that do not expose the new scheduler.
+
+### Observability
+
+The metrics/resource snapshot exposes only fixed low-cardinality facts:
+
+- pending streaming requests;
+- pending batch logical tasks;
+- head batch cumulative wait;
+- head batch completed service windows;
+- head batch seconds since progress.
+
+No task ID, request ID, transcript text, audio content or client identity becomes
+a metric label.
+
+### Current evidence scope
+
+Automated mixed-load regression proves that a 65 s / three-window batch request
+can complete window 0, yield to an already-waiting realtime reservation, and
+resume windows 1–2 after realtime releases the shared mode. Scheduler unit tests
+also cover aged-batch anti-starvation and cancelled-waiter cleanup.
+
+This is code/protocol evidence. Current-head Ubuntu/macOS CI and real MLX mixed-load
+latency distributions remain required before declaring E5/E13 fully accepted.
