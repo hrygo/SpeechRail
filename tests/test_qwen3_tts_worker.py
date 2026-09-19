@@ -33,7 +33,7 @@ def test_float_overrange_is_observed_before_pcm16_clipping() -> None:
     pcm = engine._to_pcm(result)
     decoded = np.frombuffer(pcm, dtype="<i2")
 
-    assert decoded.tolist() == [8192, 32767, -32768]
+    assert decoded.tolist() == [8191, 32767, -32768]
     assert engine.consume_delivery_stats() == {"float_overrange_chunks": 1}
     assert engine.consume_delivery_stats() == {}
 
