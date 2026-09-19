@@ -109,6 +109,29 @@ def test_timing_registry_downgrades_incomplete_display_mapping(
     assert payload["chunks"] == []
 
 
+@pytest.mark.parametrize(
+    "display_spans",
+    [((-1, 2), (2, 4)), ((0, 2), (4, 3))],
+)
+def test_timing_registry_downgrades_invalid_display_spans(
+    display_spans: tuple[tuple[int, int], ...],
+) -> None:
+    registry = TtsTimingRegistry()
+    timing_id = registry.begin(
+        request_id="req-1",
+        sample_rate=24_000,
+        display_mapping_status="mapped",
+        expected_text_spans=((0, 3), (3, 5)),
+        display_spans=display_spans,
+    )
+    registry.complete(timing_id, _sidecar())
+
+    payload = registry.get(timing_id)
+    assert payload["status"] == "unavailable"
+    assert payload["reason"] == "display_mapping_span_invalid"
+    assert payload["chunks"] == []
+
+
 def test_timing_registry_fails_closed_on_planner_contract_mismatch() -> None:
     registry = TtsTimingRegistry()
     timing_id = registry.begin(

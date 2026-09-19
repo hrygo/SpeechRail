@@ -600,12 +600,13 @@ remains coordinate-integrity evidence, not acoustic timing accuracy.
 ### 2026-09-20 timing display-mapping completeness guard
 
 `TtsTimingRegistry` now fails closed when an `identity` or `mapped` timing entry
-does not provide exactly one non-null display span per completed planner chunk.
-Previously an empty display-span tuple could still publish a `completed` sidecar,
-which contradicted the advertised mapping status. The regression covers both
-statuses and keeps the public result `unavailable` with
-`display_mapping_chunk_mismatch`; this is metadata-contract evidence only and
-does not establish real-model timing accuracy.
+does not provide exactly one non-null, non-reversed display span per completed
+planner chunk. Previously an empty or malformed display-span tuple could still
+publish a `completed` sidecar, which contradicted the advertised mapping status.
+The regression covers both statuses and keeps the public result `unavailable`
+with `display_mapping_chunk_mismatch` or `display_mapping_span_invalid`; this
+is metadata-contract evidence only and does not establish real-model timing
+accuracy.
 
 ### Remaining acceptance gates
 

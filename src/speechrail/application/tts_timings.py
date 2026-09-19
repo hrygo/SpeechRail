@@ -112,6 +112,12 @@ class TtsTimingRegistry:
             ):
                 state.status = "unavailable"
                 state.reason = "display_mapping_chunk_mismatch"
+            elif state.display_mapping_status in {"identity", "mapped"} and any(
+                span is not None and (span[0] < 0 or span[1] < span[0])
+                for span in state.display_spans
+            ):
+                state.status = "unavailable"
+                state.reason = "display_mapping_span_invalid"
             else:
                 state.sidecar = sidecar
                 state.status = "completed"
