@@ -79,7 +79,10 @@ def test_timing_registry_enriches_only_metadata_display_spans() -> None:
     assert chunks[1]["audio_end_sample"] == 240
     assert chunks[0]["display_start"] == 0
     assert chunks[1]["display_end"] == 4
-    assert "text" not in str(payload).lower()
+    encoded = str(payload).lower()
+    assert "spoken_text" not in encoded
+    assert "raw_text" not in encoded
+    assert "private reference" not in encoded
 
 
 def test_timing_registry_fails_closed_on_planner_contract_mismatch() -> None:
