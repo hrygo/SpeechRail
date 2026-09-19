@@ -464,6 +464,20 @@ default `~/.speechrail` journal. This is local source/synthetic evidence; the fu
 repository gate and current-head macOS App job also passed in CI run
 `35451951303`.
 
+### 2026-09-20 managed model measurement: partial TTS warm slice
+
+在现有 managed `quality` profile（release `2.7.0`、generation `102`）上完成了一次
+受限的真实 TTS warm 测量。官方 `bench_profiles.py` 结果为 6/6 TTS fixtures HTTP
+200 且 `inference_observed=true`，资源采样完整；另以 `bench_tts.py` 对固定中文短句、
+中文长句和英文文本各重复 5 次，得到平均耗时分别为 0.63 s、2.13 s、1.28 s，
+continuous RTF 分别为 0.28x、0.27x、0.27x，`phys_footprint` 峰值为
+`3997618232` bytes。完整去标识化摘要见
+[`2026-09-20-pr74-tts-warm-evidence.md`](2026-09-20-pr74-tts-warm-evidence.md)。
+
+这只是 managed-model 性能切片：官方结果保持 `release_pass=false`，实际
+`model_identity` 为空，cold/local_quality/quality/switch、ASR/Realtime、声学质量、
+人类听感和身份匹配仍未验证；因此没有将任何 issue 标记为完成。
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
