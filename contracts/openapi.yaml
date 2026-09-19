@@ -306,6 +306,18 @@ paths:
       security:
         - BearerAuth: []
         - {}
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: >-
+            Optional durable idempotency key. A matching retry can replay the
+            original result across process restarts; a different payload under
+            the same key is rejected with idempotency_conflict.
       requestBody:
         required: true
         content:

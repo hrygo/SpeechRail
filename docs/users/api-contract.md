@@ -359,7 +359,7 @@ GET /v1/voices/custom_1788583825_59b3
 Authorization: Bearer <TOKEN>
 ```
 
-自定义音色可以原子更新 metadata。instruction 音色支持更新名称、instruction 和 seed；由 VoiceDesign/clone 生成的 reference 音色只支持更新名称，参考音频、`ref_text`、来源证明和 ID 不可替换：
+自定义音色可以原子更新 metadata。instruction 音色支持更新名称、instruction 和 seed；由 VoiceDesign/clone 生成的 reference 音色只支持更新名称，参考音频、`ref_text`、来源证明和 ID 不可替换。兼容的 `/v1` PATCH 保留历史的无条件更新语义；需要把更新绑定到已知不可变版本时，使用 SpeechRail 专用 `PATCH /v1/speechrail/voices/{voice_id}`，并提供必需的 `expected_revision`，过期版本返回 `409 voice_revision_conflict`：
 ```http
 PATCH /v1/voices/custom_1788583825_59b3
 Content-Type: application/json
@@ -372,7 +372,7 @@ Authorization: Bearer <TOKEN>
 }
 ```
 
-更新成功返回完整的 `VoiceProfile`。系统预置音色、标准 alias 和不存在的音色不可修改；更新失败时旧 registry 记录保持不变。
+更新成功返回完整的 `VoiceProfile`。系统预置音色、标准 alias 和不存在的音色不可修改；更新失败时旧 registry 记录保持不变。SpeechRail 专用版本更新、rollback 和 revoke 会保留不可变 revision 历史；legacy profile 缺少 revision 时保持 `null`，不会被推断或补写。
 
 ### 5.4 删除自定义音色 (`DELETE /v1/voices/{voice_id}`)
 ```http
@@ -429,7 +429,7 @@ Authorization: Bearer <TOKEN>
 | `name` | string | 是 | 克隆音色展示名称，最长 32 字符 |
 | `id` | string | 否 | 可选音色标识符，匹配 `^[a-zA-Z0-9_-]{1,64}$` |
 
-- **幂等**：可选 `Idempotency-Key` 请求头用于去重重试。缓存键为 `(Idempotency-Key, audio 的 SHA-256, ref_text)`；命中时直接 `201` 回放已注册的 `VoiceProfile`，不重复推理。缓存为进程内内存态，服务重启即失效，非持久化幂等。同一 key 下音频或 `ref_text` 变化即视为新请求，重新走质量分级，仍可能被 `voice_quality_reject` 拒绝。
+- **幂等**：可选 `Idempotency-Key` 请求头用于去重重试。服务在用户目录维护有界、原子写入的 durable journal，记录 `(owner, operation, key_hash, payload_fingerprint)`；同一 key 与不同 payload 返回 `409 idempotency_conflict`，pending/已完成记录在进程重启后仍可见，已完成且结果仍存在时直接 `201` 回放原 `VoiceProfile`，不重复推理。未知的写入结果保持 pending 并 fail-closed，不静默创建第二份音色；journal 不落原始 key、音频或参考正文。音频、`ref_text`、名称或目标 ID 变化都会形成不同 payload，仍可能被 `voice_quality_reject` 拒绝。
 - **质量门控**：参考音频通过信号校验后按 `voice_quality_v1` 策略打分；先对上传原始音频分级以尽早拒绝无效输入，再规范化为语音感知归一后的 canonical WAV 并对该 canonical 音频重新分级，持久化的参考资产与 `quality` 报告均描述 canonical 音频（与 `/v1/voices/designs` 同一契约）；canonical 重评结果为 `reject` 时同样返回 `400` 不落库。
   - `status=reject`：拒绝注册，返回 `400`，错误 envelope 为 `{"error": {"code": "voice_quality_reject", ...}, "quality_report": {...}}`（`quality_report` 与 `error` 同级）。客户端以响应体 `error.code` 作为可见的错误码信号；服务端内部通过 `X-SpeechRail-Error-Code` 响应头把错误码交给观测中间件消费，该头在到达客户端前已被中间件移除，不属于客户端可见契约。
   - `status=warn` 或 `pass`：正常注册，`201` 返回的 `VoiceProfile` 携带 `quality` 字段（即该报告，含 `status` 与 `run_id`）。
@@ -564,6 +564,6 @@ Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 
 
 201 响应包含 `voice`（标准 VoiceProfile，mode=clone、variant=base、含 creation 来源信息）以及 `synthesis_validation: "unevaluated"`。`voice.quality` 只描述生成参考与 ASR 内容核验，输出 probe_count=0；后续使用 `/v1/audio/speech` 调用 Base，并用 `/v1/voices/{id}/quality-runs` 单独验证输出。
 
-ID 已存在（含并发创建）返回 409 `voice_already_exists`，不会覆盖旧资产；没有幂等缓存，重试同一 ID 也返回 409，客户端可从 `/v1/voices` 确认资产。资源繁忙为 429，超时或 ASR 不可用为 503，内容不匹配为 400 `transcript_mismatch`，无效输出为 400/502。任何模型或 ASR 阶段失败都不会发布半成品。
+可选 `Idempotency-Key` 启用有界 durable 去重：同一 key 与相同 canonical 请求在成功后可回放原结果，服务重启或进程中断后不会静默发布第二份资产；同一 key 复用不同请求返回 409 `idempotency_conflict`，不带 key 的重复请求仍按新的目标 ID/现有资产冲突处理。`ID` 已存在（含并发创建）返回 409 `voice_already_exists`，不会覆盖旧资产。资源繁忙为 429，超时或 ASR 不可用为 503，内容不匹配为 400 `transcript_mismatch`，无效输出为 400/502。任何模型或 ASR 阶段失败都不会发布半成品；若发布后 journal 完成状态无法持久化，服务返回可重试的 503 并保留 pending 状态以阻止重复发布。
 
 语料质量与声纹稳定性尚需实机校准；详见[生成式音色注册架构](../architecture/generated-voice-registration.md)。
