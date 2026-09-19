@@ -822,6 +822,31 @@ def _append_resource_prometheus(
             "Whether the resource governor allows heavy compute overlap",
             _bool_metric_value(resources.get("heavy_overlap_allowed")),
         ),
+        (
+            "speechrail_asr_scheduler_pending_streaming",
+            "Realtime ASR requests waiting for a safe mode boundary",
+            resources.get("asr_scheduler_pending_streaming"),
+        ),
+        (
+            "speechrail_asr_scheduler_pending_batch",
+            "Batch ASR logical tasks waiting for a bounded execution window",
+            resources.get("asr_scheduler_pending_batch"),
+        ),
+        (
+            "speechrail_asr_batch_head_cumulative_wait_seconds",
+            "Cumulative wait of the current head batch task across its windows",
+            resources.get("asr_batch_head_cumulative_wait_seconds"),
+        ),
+        (
+            "speechrail_asr_batch_head_service_windows",
+            "Completed bounded inference windows for the current head batch task",
+            resources.get("asr_batch_head_service_windows"),
+        ),
+        (
+            "speechrail_asr_batch_head_seconds_since_progress",
+            "Seconds since the current head batch task last completed a window",
+            resources.get("asr_batch_head_seconds_since_progress"),
+        ),
     )
     for name, help_text, value in values:
         if value is None or isinstance(value, bool):
