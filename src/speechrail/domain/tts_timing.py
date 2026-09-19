@@ -24,7 +24,7 @@ class TtsTimingChunk(BaseModel):
     timing_quality: Literal["chunk"] = "chunk"
 
     @model_validator(mode="after")
-    def validate_ranges(self) -> "TtsTimingChunk":
+    def validate_ranges(self) -> TtsTimingChunk:
         if self.text_end < self.text_start:
             raise ValueError("text timing span is reversed")
         if self.audio_end_sample < self.audio_start_sample:
@@ -49,7 +49,7 @@ class TtsTimingSidecar(BaseModel):
     chunks: tuple[TtsTimingChunk, ...]
 
     @model_validator(mode="after")
-    def validate_contiguous_ranges(self) -> "TtsTimingSidecar":
+    def validate_contiguous_ranges(self) -> TtsTimingSidecar:
         previous_audio = 0
         previous_text = 0
         for index, chunk in enumerate(self.chunks):
