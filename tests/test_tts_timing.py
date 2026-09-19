@@ -102,6 +102,24 @@ def test_timing_registry_fails_closed_on_planner_contract_mismatch() -> None:
     assert payload["chunks"] == []
 
 
+def test_timing_registry_fails_closed_on_delivered_sample_count_mismatch() -> None:
+    registry = TtsTimingRegistry()
+    timing_id = registry.begin(
+        request_id="req-1",
+        sample_rate=24_000,
+        display_mapping_status="identity",
+        expected_text_spans=((0, 3), (3, 5)),
+        display_spans=((0, 3), (3, 5)),
+    )
+
+    registry.complete(timing_id, _sidecar(), actual_samples=239)
+
+    payload = registry.get(timing_id)
+    assert payload["status"] == "unavailable"
+    assert payload["reason"] == "timing_sample_count_mismatch"
+    assert payload["chunks"] == []
+
+
 class _CountingTimingEngine(MlxQwenTtsEngine):
     def __init__(self) -> None:
         self._sample_rate = 24_000
