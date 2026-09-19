@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 from uuid import uuid4
 
+from speechrail.backends.model_identity import is_observed_runtime_revision
+
 ReceiptStatus = Literal["pending", "completed", "cancelled", "error"]
 
 
@@ -267,6 +269,6 @@ def observed_runtime_revision_for_synthesizer(
         # Receipt metadata is best-effort and must not turn a valid audio chunk
         # into a failed synthesis if a mutable voice registry changes mid-stream.
         return None
-    if not isinstance(revision, str) or not revision:
+    if not isinstance(revision, str) or not is_observed_runtime_revision(revision):
         return None
     return revision

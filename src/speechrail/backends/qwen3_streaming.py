@@ -192,6 +192,12 @@ class Qwen3StreamingWorker:
         return self._shared_owner.identity
 
     @property
+    def runtime_revision(self) -> str | None:
+        """Return the ready ASR worker identity, if the handshake was complete."""
+
+        return self._shared_owner.runtime_revision
+
+    @property
     def timeout_seconds(self) -> float:
         return self._shared_owner.timeout_seconds
 
@@ -565,6 +571,12 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
         self._next_session_id = next_session_id
         self._max_sessions = max_sessions
         self._sessions: dict[str, Qwen3StreamingSession] = {}
+
+    @property
+    def runtime_revision(self) -> str | None:
+        """Return the shared ASR worker identity when it is ready."""
+
+        return getattr(self._worker, "runtime_revision", None)
 
     def create(self, *, language: str | None, prompt: str) -> Qwen3StreamingSession:
         resolved = (language or "auto").strip().lower()

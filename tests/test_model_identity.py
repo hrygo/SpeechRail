@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from speechrail.backends.model_identity import (
     inspect_model,
+    is_observed_runtime_revision,
     observed_runtime_revision,
     read_quantization,
     verify_loaded_identity,
@@ -37,11 +38,18 @@ def test_observed_runtime_revision_is_conservative_and_stable() -> None:
     revision = observed_runtime_revision(identity)
 
     assert revision is not None
+    assert is_observed_runtime_revision(revision) is True
     assert revision.startswith("rt_")
     assert observed_runtime_revision(dict(reversed(tuple(identity.items())))) == revision
     changed = dict(identity, weight_fingerprint="shape:" + ("b" * 64))
     assert observed_runtime_revision(changed) != revision
     assert observed_runtime_revision({**identity, "family": None}) is None
+
+
+def test_observed_runtime_revision_shape_is_strict() -> None:
+    assert is_observed_runtime_revision("rt_" + ("a" * 64)) is True
+    assert is_observed_runtime_revision("rt_" + ("A" * 64)) is False
+    assert is_observed_runtime_revision("not-a-runtime-revision") is False
 
 
 def _product(shape: list[int]) -> int:

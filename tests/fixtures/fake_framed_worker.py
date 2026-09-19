@@ -23,7 +23,22 @@ def main() -> None:
         action = str(frame.get("action", ""))
         if frame.get("type") == "start" and not action:
             model_dir = str(frame.get("model_dir", ""))
-            if model_dir.endswith("shared-bad-ready"):
+            if model_dir.endswith("shared-observed-identity"):
+                write_frame(
+                    stdout,
+                    {
+                        "type": "ready",
+                        "model_loaded": True,
+                        "backend": "mlx-qwen3-asr",
+                        "device": frame.get("device"),
+                        "dtype": frame.get("dtype"),
+                        "sample_rate": 16_000,
+                        "family": "qwen3_asr",
+                        "model_variant": "asr",
+                        "weight_fingerprint": "shape:" + ("a" * 64),
+                    },
+                )
+            elif model_dir.endswith("shared-bad-ready"):
                 write_frame(
                     stdout,
                     {

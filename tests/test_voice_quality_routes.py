@@ -724,7 +724,7 @@ def test_s5_quality_runs_ok_and_bounded(
 def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime_revision = "rt_" + ("q" * 64)
+    runtime_revision = "rt_" + ("a" * 64)
     synthesizer = SineSynthesizer(runtime_revision=runtime_revision)
     client, registry, _synth, _voices_dir = _make_client(
         tmp_path,

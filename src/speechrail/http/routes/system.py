@@ -687,6 +687,7 @@ def create_system_router(services: AppServices) -> APIRouter:
             "backend": active.asr.key if active.asr is not None else resolved.model_id,
             "profile": active.profile,
             "asr_ready": services.asr_ready,
+            "asr_runtime_revision": services.asr_runtime_revision,
             "tts_ready": services.tts_ready,
             "tts_warm": services.tts_warm,
             "diarization_ready": services.diarization_ready,

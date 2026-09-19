@@ -62,7 +62,7 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 
 | 请求方法 | 路径 | 描述 | 主要参数 / 返回格式 |
 |---|---|---|---|
-| `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息；`tts_ready` 表示可按需服务，`tts_warm` 表示当前无需加载即可服务，`realtime_vad` 表示 `server_vad` 子能力的独立状态 |
+| `GET` | `/health` | 进程存活检查与组件诊断 | 返回各 Worker 进程存活状态与配置信息；`asr_runtime_revision` 仅在 ASR ready handshake 身份完整时出现，`tts_ready` 表示可按需服务，`tts_warm` 表示当前无需加载即可服务，`realtime_vad` 表示 `server_vad` 子能力的独立状态 |
 | `GET` | `/readyz` | 推理就绪状态检查 | HTTP 200 只表示 ASR 或 TTS 至少一项可按需服务；响应中的 `realtime_vad` 仍需单独检查，worker 是否驻留请读取 `/health.tts_warm` 与 `/health.tts_state` |
 | `GET` | `/metrics` | 运行指标导出 | 默认 Prometheus 文本；`Accept: application/json` 返回结构化视图 |
 | `GET` | `/v1/models` | 模型清单与别名路由 | 列出 Canonical 模型名与 `whisper-1` 等兼容别名 |
@@ -79,7 +79,9 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
 
-`GET /health` 的 `tts_ready` 保持 v1 兼容含义：TTS 已配置并可按需接收请求；它不承诺权重
+`GET /health` 的 `asr_runtime_revision` 只在 ASR worker 已完成 ready handshake 且身份字段完整时
+填充 `rt_...`；未驻留、组件未提供 optional resolver 或身份不完整时为 `null`。它是低披露的当前 worker
+结构身份摘要，不是模型路径或权重内容哈希；不会触发模型加载。`tts_ready` 保持 v1 兼容含义：TTS 已配置并可按需接收请求；它不承诺权重
 当前驻留。新增的 `tts_warm` 为 `true` 时表示 worker 已完成加载握手，可直接产生 PCM，
 为 `false` 时表示冷/未配置，注入的 backend 无法报告驻留状态时为 `null`。`tts_state` 提供
 `active`、`warm_standby`、`cold_evicted`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态

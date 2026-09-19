@@ -288,6 +288,12 @@ class Qwen3Worker:  # pragma: no cover - exercised against an external isolated 
         return self._shared_owner.identity
 
     @property
+    def runtime_revision(self) -> str | None:
+        """Return the ready ASR worker identity, if the handshake was complete."""
+
+        return self._shared_owner.runtime_revision
+
+    @property
     def last_active(self) -> float:
         return self._shared_owner.last_active
 

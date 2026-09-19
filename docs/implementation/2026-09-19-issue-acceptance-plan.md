@@ -572,6 +572,20 @@ and is not an immutable weight-content hash. Focused receipt, worker, route and
 Realtime tests passed; a managed runtime receipt and cross-restart identity
 check remain external acceptance evidence.
 
+### 2026-09-20 observed ASR runtime identity
+
+The shared Qwen ASR owner now retains a low-disclosure `rt_...` revision derived
+from the validated ready handshake, including the explicit ASR backend and 16 kHz
+sample-rate contract. Batch and native Realtime facades expose the same optional
+revision, and `/health.asr_runtime_revision` reports it without loading a worker;
+unready or incomplete identities, and facades without the optional resolver, remain `null`. Restart and
+failure paths clear the value before the next handshake. The read-only capability
+snapshot remains a configured catalog view and continues to report its model
+`runtime_revision=null`; this additive health diagnostic does not turn catalog
+metadata into a model pin. Synthetic handshake and HTTP contract tests cover the
+state boundary; managed ASR identity and cross-restart observations remain external
+acceptance evidence.
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or

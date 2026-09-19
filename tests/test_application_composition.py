@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from sys import executable
 from types import SimpleNamespace
@@ -50,6 +51,18 @@ def test_audio_router_can_be_built_from_fake_services(fake_services: AppServices
         "/v1/speechrail/audio/timings/{timing_id}",
         "/v1/voices/previews",
     }
+
+
+def test_services_expose_only_an_observed_asr_runtime_revision(
+    fake_services: AppServices,
+) -> None:
+    revision = "rt_" + ("a" * 64)
+    services = replace(
+        fake_services,
+        asr_worker=SimpleNamespace(runtime_revision=revision),  # type: ignore[arg-type]
+    )
+
+    assert services.asr_runtime_revision == revision
 
 
 def test_system_router_can_be_built_from_fake_services(fake_services: AppServices) -> None:

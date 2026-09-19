@@ -50,6 +50,7 @@ paths:
                 backend: asr-1.7b-q8
                 profile: quality
                 asr_ready: true
+                asr_runtime_revision: null
                 tts_ready: true
                 tts_warm: true
                 diarization_ready: false
@@ -1478,6 +1479,7 @@ components:
         - backend
         - profile
         - asr_ready
+        - asr_runtime_revision
         - tts_ready
         - tts_warm
         - diarization_ready
@@ -1508,6 +1510,10 @@ components:
         asr_ready:
           type: boolean
           description: ASR is configured and able to serve on demand.
+        asr_runtime_revision:
+          type: [string, 'null']
+          pattern: '^rt_[0-9a-f]{64}$'
+          description: Low-disclosure identity of a currently ready ASR worker; null when unobserved.
         tts_ready:
           type: boolean
           description: TTS is configured and able to serve on demand.

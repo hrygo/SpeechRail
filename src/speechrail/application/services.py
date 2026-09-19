@@ -13,7 +13,7 @@ from speechrail.application.lifecycle import RuntimeLifecycle
 from speechrail.application.render_receipts import RenderReceiptRegistry
 from speechrail.application.tts_timings import TtsTimingRegistry
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
-from speechrail.backends.model_identity import inspect_model
+from speechrail.backends.model_identity import inspect_model, is_observed_runtime_revision
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -189,6 +189,16 @@ class AppServices:
             or self.realtime_asr_factory is not None
             or self.settings.backend_ready
         )
+
+    @property
+    def asr_runtime_revision(self) -> str | None:
+        """Return a low-disclosure identity from a currently ready ASR worker."""
+
+        for component in (self.asr_worker, self.realtime_asr_factory):
+            revision = getattr(component, "runtime_revision", None)
+            if isinstance(revision, str) and is_observed_runtime_revision(revision):
+                return revision
+        return None
 
     @property
     def tts_ready(self) -> bool:

@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from speechrail.backends.model_identity import observed_runtime_revision
 from speechrail.backends.qwen3_shared import FrameRouter, Qwen3SharedWorker
 from speechrail.runtime.asr_mode import AsrModeGate
 from speechrail.runtime.worker_lease import WorkerIdleEvictor, WorkerLifecycleState
@@ -84,6 +85,35 @@ def test_start_performs_ready_handshake_and_starts_one_dispatcher() -> None:
         assert worker.identity is None
         assert worker.mode_gate is mode_gate
         assert mode_gate.active_count == 0
+
+    _run(scenario())
+
+
+def test_start_retains_observed_runtime_revision_until_worker_closes() -> None:
+    expected = observed_runtime_revision(
+        {
+            "backend": "mlx-qwen3-asr",
+            "device": "cpu",
+            "dtype": "float32",
+            "sample_rate": 16_000,
+            "family": "qwen3_asr",
+            "model_variant": "asr",
+            "weight_fingerprint": "shape:" + ("a" * 64),
+        }
+    )
+    assert expected is not None
+
+    async def scenario() -> None:
+        worker = Qwen3SharedWorker(
+            _Config(model_dir=Path("/tmp/speechrail-shared-observed-identity"))
+        )
+        try:
+            assert worker.runtime_revision is None
+            await worker.start()
+            assert worker.runtime_revision == expected
+        finally:
+            await worker.close()
+        assert worker.runtime_revision is None
 
     _run(scenario())
 

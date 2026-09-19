@@ -374,8 +374,10 @@ def test_worker_ready_reports_model_identity_without_relabeling_four_bit() -> No
     assert responses[0] == {
         "version": PROTOCOL_VERSION,
         "type": "ready",
+        "backend": "mlx-qwen3-asr",
         "device": "mps",
         "dtype": "int8",
+        "sample_rate": 16_000,
         "model_loaded": True,
         "family": "qwen3_asr",
         "model_variant": "asr",

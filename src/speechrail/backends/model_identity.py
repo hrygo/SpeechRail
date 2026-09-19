@@ -121,6 +121,17 @@ def observed_runtime_revision(identity: Mapping[str, object]) -> str | None:
     return "rt_" + hashlib.sha256(encoded).hexdigest()
 
 
+def is_observed_runtime_revision(value: object) -> bool:
+    """Return whether a value has the canonical low-disclosure revision shape."""
+
+    return (
+        type(value) is str
+        and len(value) == 67
+        and value.startswith("rt_")
+        and all(character in "0123456789abcdef" for character in value[3:])
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _TensorHeader:
     name: str
@@ -663,6 +674,7 @@ def verify_loaded_identity(expected: ModelArtifact, actual: dict[str, object]) -
 __all__ = [
     "SnapshotIdentity",
     "inspect_model",
+    "is_observed_runtime_revision",
     "observed_runtime_revision",
     "read_quantization",
     "verify_loaded_identity",
