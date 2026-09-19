@@ -865,7 +865,66 @@ paths:
           required: false
           schema:
             type: string
-            pattern: '^vr_[0-9a-f]{32}    get:
+            pattern: '^vr_[0-9a-f]{32}$'
+          description: Optional immutable acoustic revision returned by safe voice discovery.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpeechRequest'
+      responses:
+        '200':
+          description: Synthesized audio stream
+          content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/opus:
+              schema:
+                type: string
+                format: binary
+            audio/aac:
+              schema:
+                type: string
+                format: binary
+            audio/flac:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/x-pcm:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Requested acoustic voice revision does not match the resolved voice.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/QueueFull'
+        '502':
+          $ref: '#/components/responses/BackendDeliveryInvalid'
+        '503':
+          description: Model runtime or custom voice storage is unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+  /v2/capabilities:
+    get:
       operationId: getEffectiveCapabilities
       tags: [speech]
       summary: Read one safe effective capability generation
