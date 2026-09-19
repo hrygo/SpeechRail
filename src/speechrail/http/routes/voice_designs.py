@@ -346,7 +346,18 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             report = _grade_clone_audio(wav_bytes)
             if report.status == "reject":
                 return _quality_reject_response(request_id, report)
-            await _evict_quality_tts_if_supported(synthesizer, expires_at=expires_at)
+            # Eviction is a group-level maintenance handoff: acquire the
+            # governor's wildcard TTS lane so no keyed capability worker is
+            # still active while the router closes its workers.
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                purpose=WorkPurpose.VOICE_CREATION,
+            ):
+                await _evict_quality_tts_if_supported(
+                    synthesizer,
+                    expires_at=expires_at,
+                )
             stage = "transcription"
             with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
                 pcm = wav.readframes(wav.getnframes())
