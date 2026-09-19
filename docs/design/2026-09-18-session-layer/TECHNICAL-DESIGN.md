@@ -94,7 +94,7 @@ date: 2026-09-19
 
 | 组件 / 能力 | 归属 | 终态落点 | 依据 |
 |---|---|---|---|
-| 麦克风采集（会话） | 原生 | `AudioEngineSession` 的输入节点（当前实现位于 `AssistantSession.swift`） | 与播放同引擎才拿得到系统 AEC（§3.3） |
+| 麦克风采集（会话） | 原生 | `AudioEngineSession` 的输入节点（当前实现位于 `AssistantAudioSession.swift`） | 与播放同引擎才拿得到系统 AEC（§3.3） |
 | 麦克风采集（音色克隆） | 原生 | 既有 `VoiceRecordingController`（`AVAudioRecorder`，**刻意不启用** AEC/AGC） | 克隆要的是用户本来的音色；两条通道目的不同（§3.1） |
 | 本机音频采集 | 原生 | `CaptureHelper`（XPC）的 process tap | 设备绑定 + TCC 身份 + 崩溃隔离（§3.2） |
 | 混音与格式归一 | 原生 | `AudioEngineSession`（host time 对齐） | 服务只收 16k/24k PCM16；统一 16k 以免换设备改格式 |
@@ -823,8 +823,8 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 - ✅ `UX-UI-SPEC` §13 的未决项 2（会话组进 `AppRoute`）与 4（实现侧 token 补齐）本轮结清。
 
 **实现状态**：阶段 1–9 的代码与文档都已落地（`macos/SpeechRailApp`，2026-09-19）。助手的
-`AudioEngineSession` 已接入 `AssistantSession` 默认链路；当前只做了 App 编译验证，尚未把真机声学
-测量写成通过结论。需要单独说明的差距：
+`AudioEngineSession` 已接入 `AssistantSession` 默认链路；本轮已完成 App Debug 构建、测试 bundle
+编译与 SwiftPM target 构建，但尚未把真机声学测量写成通过结论。需要单独说明的差距：
 
 1. **阶段 5.5 的 tap spike 没有单独跑过**。本机音频那条路直接落成了代码，§12 第 1、2 条
    （授权触发点、`bundleIDs` 是否真按 App 生效、`processRestoreEnabled` 的真实行为）

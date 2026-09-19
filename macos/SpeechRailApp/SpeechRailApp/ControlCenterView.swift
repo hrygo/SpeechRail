@@ -475,7 +475,9 @@ private final class ControlCenterResponsiveNSView: NSView {
             queue: .main
         ) { [weak self] notif in
             guard let win = notif.object as? NSWindow else { return }
-            self?.onResize?(win.frame.size.width, win)
+            MainActor.assumeIsolated {
+                self?.onResize?(win.frame.size.width, win)
+            }
         }
     }
 

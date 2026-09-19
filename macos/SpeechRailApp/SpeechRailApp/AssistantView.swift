@@ -34,7 +34,7 @@ public struct AssistantView: View {
     @State private var reviewVoiceChanges: [SessionChange] = []
     @State private var selectedPersonaID = ""
     @State private var selectedVoiceID = ""
-    @State private var mode: AssistantMode = .turnTaking
+    @State private var mode: AssistantMode = .duplex
     @State private var isCheckingInput = false
     @State private var isCreatingPersona = false
     @State private var personaDraft = PersonaDraft()

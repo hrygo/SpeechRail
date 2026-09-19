@@ -34,6 +34,8 @@ let package = Package(
                 "AppModel.swift",
                 "AppNavigationState.swift",
                 "AppRoute.swift",
+                "AssistantAudioPlayback.swift",
+                "AssistantAudioSession.swift",
                 "AudioPlaybackController.swift",
                 "Assets.xcassets",
                 "CaptionBandWindow.swift",
@@ -70,6 +72,7 @@ let package = Package(
                 "LLMProvider.swift",
                 "RuntimeMetricsSampler.swift",
                 "RuntimeMonitoringAccessibility.swift",
+                "AudioSampleRing.swift",
                 "VoicePrompt.swift",
                 "WindowLayoutPolicy.swift",
             ]

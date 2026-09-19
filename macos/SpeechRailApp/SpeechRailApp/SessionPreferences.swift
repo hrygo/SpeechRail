@@ -26,7 +26,7 @@ public enum AssistantMode: String, CaseIterable, Identifiable, Sendable {
     /// 半双工 / 全双工，写成用户读得懂的一句话。
     public var detail: String {
         switch self {
-        case .turnTaking: "它说话的时候麦克风关着；说完你说下一句。"
+        case .turnTaking: "它说话期间不上传麦克风声音；说完你说下一句。"
         case .duplex: "随时插话都能打断它。建议戴耳机，外放会有回声。"
         }
     }
@@ -122,7 +122,7 @@ public final class SessionPreferences {
         self.defaultPersonaID = defaults.string(forKey: Key.personaID) ?? Self.catalog[0].id
         self.defaultVoiceID = defaults.string(forKey: Key.voiceID) ?? ""
         self.assistantMode = AssistantMode(rawValue: defaults.string(forKey: Key.assistantMode) ?? "")
-            ?? .turnTaking
+            ?? .duplex
         self.captionsDiarizationEnabled = defaults.bool(forKey: Key.captionsDiarization)
         self.meetingDiarizationEnabled = defaults.bool(forKey: Key.meetingDiarization)
         self.meetingSystemAudioBundleIDs = defaults.stringArray(forKey: Key.meetingSystemAudioApps) ?? []
