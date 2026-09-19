@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -2933,3 +2934,144 @@ def test_manual_commit_timeout_followed_by_clear_never_succeeds(timeout_reader: 
     assert collector.state == "failed"
     assert collector.result is None
     assert len(factory.released) == 1
+
+
+def test_realtime_render_receipts_are_opt_in_and_completed() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {
+                        "render_receipts": {"enabled": True},
+                    }
+                },
+            }
+        )
+        updated = socket.receive_json()
+        assert updated["type"] == "session.updated"
+        receipt_config = updated["session"]["speechrail"]["render_receipts"]
+        assert receipt_config["enabled"] is True
+        assert receipt_config["integrity_boundary"] == "pcm16_after_websocket_send"
+
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+
+        done = None
+        while done is None:
+            event = socket.receive_json()
+            if event["type"] == "response.done":
+                done = event
+
+    receipt = done["speechrail"]["render_receipt"]
+    assert receipt["status"] == "completed"
+    assert receipt["response_id"] == done["response"]["id"]
+    assert receipt["audio"]["sample_count"] == 1
+    assert receipt["audio"]["pcm_sha256"] == hashlib.sha256(b"\x00\x00").hexdigest()
+    assert receipt["audio"]["integrity_boundary"] == "pcm16_after_websocket_send"
+
+
+def test_realtime_render_receipt_cancelled_terminal() -> None:
+    client, _ = _client(tts_synthesizer=BlockingSpeechSynthesizer())
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {
+                        "render_receipts": {"enabled": True},
+                    }
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        while True:
+            event = socket.receive_json()
+            if event["type"] == "response.audio.delta":
+                break
+
+        socket.send_json({"type": "response.cancel"})
+        cancelled = socket.receive_json()
+
+    assert cancelled["type"] == "response.done"
+    assert cancelled["response"]["status"] == "cancelled"
+    receipt = cancelled["speechrail"]["render_receipt"]
+    assert receipt["status"] == "cancelled"
+    assert receipt["error_code"] == "cancelled"
+    assert receipt["audio"]["sample_count"] == 1
+
+
+def test_realtime_response_done_has_no_receipt_without_negotiation() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+        while True:
+            done = socket.receive_json()
+            if done["type"] == "response.done":
+                break
+
+    assert "speechrail" not in done
+
+
+def test_realtime_render_receipt_extension_rejects_unknown_fields() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {
+                        "render_receipts": {
+                            "enabled": True,
+                            "unexpected": True,
+                        }
+                    }
+                },
+            }
+        )
+        error = socket.receive_json()
+
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "invalid_render_receipts"
