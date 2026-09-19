@@ -18,7 +18,7 @@ from speechrail.backends.qwen3_streaming import (
 )
 from speechrail.config import Settings
 from speechrail.domain.ports import StreamingAsrEvent
-from speechrail.runtime.asr_mode import AsrModeGate
+from speechrail.runtime.asr_mode import AsrModeGate, AsrModeScheduler
 from speechrail.runtime.busy import BusyReason
 
 
@@ -37,6 +37,10 @@ class FakeStreamingWorker:
         self._alive = False
         self._closed = False
         self.mode_gate = AsrModeGate()
+        self.mode_scheduler = AsrModeScheduler(
+            self.mode_gate,
+            batch_aging_seconds=0.05,
+        )
         self.identity: tuple[str, str] | None = None
         self._configured_identity = identity
         self._start_error = start_error
