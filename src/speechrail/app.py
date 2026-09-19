@@ -27,6 +27,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.http.errors import RequestIdMiddleware, install_error_handlers
 from speechrail.http.routes.audio import create_audio_router
+from speechrail.http.routes.capabilities import create_capability_router
 from speechrail.http.routes.jobs import create_jobs_router
 from speechrail.http.routes.realtime_openai import create_openai_realtime_router
 from speechrail.http.routes.system import create_system_router
@@ -254,6 +255,7 @@ def create_app(
 
     install_error_handlers(app)
     app.include_router(create_system_router(services))
+    app.include_router(create_capability_router(services))
     app.include_router(create_audio_router(services))
     app.include_router(create_voice_design_router(services))
     app.include_router(create_jobs_router(services))

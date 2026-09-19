@@ -94,3 +94,36 @@ Python 3.12 gates and final #69 acceptance are still pending.
 Additional unchanged-baseline check: `tests/test_tts_loudness_frozen.py`: **39 passed**
 on Python 3.13.5. This confirms the current synthetic F1-F4 regression suite, not
 the managed-model/latency/listening acceptance of #34.
+
+### Increment 2 — effective capability snapshot and safe discovery
+
+Adds `/v2/capabilities`, `/v2/voices` and `/v2/voices/{voice_id}` from one detached
+registry generation. Each voice resolves against its captured profile and actual
+configured lane, rather than looking up mutable registry data a second time.
+Read-only epochs/content validators, per-operation parameter domains, explicit
+unknown/unsupported states, conditional GET and safe descriptor/quality projections
+are included. Configured model metadata is NOT promoted to observed worker identity;
+legacy voices retain `voice_revision=null`, and conditional synthesis remains unsupported.
+
+MCP `describe` exposes the atomic v2 result separately from legacy observations;
+legacy voice lists use an allowlist before entering Agent context. Only missing routes
+or unknown schemas fall back; auth/storage errors remain errors. `/v1/voices` retains
+its historical source-detail projection for compatibility; this privacy boundary and
+migration are documented, not silently called a universal owner-access fix.
+
+Tests first reproduced private/nested legacy metadata disclosure, missing v2 access,
+and a malformed quality status crash. Result after implementation: **112 passed**
+(`tests/test_capability_snapshot.py tests/mcp`, Python **3.12.14**), including the
+three-profile/nine-voice-mode matrix and OpenAPI schema validation. Ruff over
+`src tests scripts hatch_build.py` and Mypy over 114 source files passed.
+
+The Python 3.12 toolchain limitation was resolved using an isolated Actions export
+of the repository's locked development dependencies (run `35417347586`, uv 0.12.13,
+lock SHA256 `3a4a96b64a754b270ed05d6b1bd5d4cede0aca7dedacb072f034365f89b8d8ec`).
+No model runtime was installed or service deployed. An initial full local suite
+attempt reached completion with three environment failures: this Linux image lacks
+`/bin/zsh` for the macOS launcher, and two wheel tests could not resolve Hatchling
+because package-index DNS is unavailable. These are NOT recorded as passed gates;
+current-head CI and packaging evidence remain required. The initial published
+commit's Ubuntu/macOS tests, macOS App and package checks succeeded; they do not
+validate this later increment until it is published and checked separately.

@@ -88,6 +88,8 @@ def _base_handler(
     health: dict[str, Any],
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v2/capabilities":
+            return httpx.Response(404, json={"detail": "Not Found"})
         if request.method == "GET" and request.url.path == "/v1/models":
             return _ok({"object": "list", "data": models})
         if request.method == "GET" and request.url.path == "/v1/voices":
@@ -171,6 +173,7 @@ def test_describe_merges_models_voices_health_for_quality(
         "/v1/models",
         "/v1/voices",
         "/health",
+        "/v2/capabilities",
     ]
 
 

@@ -845,6 +845,128 @@ paths:
           $ref: '#/components/responses/JobNotReady'
         '503':
           $ref: '#/components/responses/BackendNotReady'
+  /v2/capabilities:
+    get:
+      operationId: getEffectiveCapabilities
+      tags: [speech]
+      summary: Read one safe effective capability generation
+      description: |
+        Read-only metadata; does not start workers, infer audio or download models.
+        Unknown identity is not an inference version lock. See the versioned
+        discovery migration contract. Bearer authentication follows service configuration.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Previous ETag; a matching representation returns 304.
+      responses:
+        '200':
+          description: Safe discovery representation; no private reference, instruction or path
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Validator scoped to this service instance and representation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EffectiveCapabilitySnapshot'
+        '304':
+          description: Representation has not changed; no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v2/voices:
+    get:
+      operationId: listSafeVoices
+      tags: [speech]
+      summary: List safe voice discovery metadata without source text
+      description: |
+        Read-only metadata; does not start workers, infer audio or download models.
+        Unknown identity is not an inference version lock. See the versioned
+        discovery migration contract. Bearer authentication follows service configuration.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Previous ETag; a matching representation returns 304.
+      responses:
+        '200':
+          description: Safe discovery representation; no private reference, instruction or path
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Validator scoped to this service instance and representation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafeVoiceList'
+        '304':
+          description: Representation has not changed; no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v2/voices/{voice_id}:
+    get:
+      operationId: getSafeVoice
+      tags: [speech]
+      summary: Read safe voice discovery metadata by canonical ID or alias
+      description: |
+        Read-only metadata; does not start workers, infer audio or download models.
+        Unknown identity is not an inference version lock. See the versioned
+        discovery migration contract. Bearer authentication follows service configuration.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: header
+          name: If-None-Match
+          required: false
+          schema:
+            type: string
+          description: Previous ETag; a matching representation returns 304.
+        - in: path
+          name: voice_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Safe discovery representation; no private reference, instruction or path
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Validator scoped to this service instance and representation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafeVoiceEntry'
+        '304':
+          description: Representation has not changed; no response body
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+        '404':
+          description: Voice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
 components:
   securitySchemes:
     BearerAuth:
@@ -853,6 +975,172 @@ components:
       bearerFormat: API key
       description: Required when the service is not loopback-only.
   schemas:
+    CapabilityParameter:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [supported, unsupported, unknown]
+        values:
+          type: array
+          items: {}
+        minimum:
+          type: number
+        maximum:
+          type: number
+        reason:
+          type: string
+    ConfiguredModelIdentity:
+      type: object
+      required: [assurance, runtime_revision]
+      properties:
+        assurance:
+          type: string
+          enum: [unknown, configured_catalog]
+        runtime_revision:
+          type: 'null'
+          description: Not observed from a worker in this read-only discovery version.
+        source_model:
+          type: string
+        artifact:
+          type: string
+        variant:
+          type: [string, 'null']
+        catalog_revision:
+          type: string
+        quantization:
+          type: object
+          additionalProperties: true
+    SafeVoiceDescriptor:
+      type: object
+      required: [voice_mode, locales, style_tags, pitch_band, timbre_family, baseline_pace, source_type, metadata_method]
+      properties:
+        voice_mode:
+          type: string
+          enum: [system, instruction, clone]
+        locales:
+          type: array
+          items:
+            type: string
+          description: Declared locale metadata; empty means unknown, not unsupported language.
+        style_tags:
+          type: array
+          items:
+            type: string
+        pitch_band:
+          type: string
+          const: unknown
+        timbre_family:
+          type: string
+          const: unknown
+        baseline_pace:
+          type: string
+          const: unknown
+        source_type:
+          type: string
+          enum: [system_preset, instruction_profile, generated_reference, reference_unknown]
+        metadata_method:
+          type: string
+          const: declared_only
+    SafeVoiceEntry:
+      type: object
+      required: [id, name, mode, available, availability_reason, variant, voice_revision, voice_identity_assurance, model, descriptors, operations]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        aliases:
+          type: array
+          items:
+            type: string
+        mode:
+          type: string
+          enum: [system, instruction, clone]
+        available:
+          type: boolean
+          description: Configured for on-demand service, not proof of warm residency or quality.
+        availability_reason:
+          type: string
+          enum: [disabled, model_identity_unknown, voice_incompatible, backend_not_ready, available]
+        variant:
+          type: [string, 'null']
+        voice_revision:
+          type: 'null'
+          description: Legacy profiles have no verified immutable rendering identity.
+        voice_identity_assurance:
+          type: string
+          const: legacy
+        model:
+          $ref: '#/components/schemas/ConfiguredModelIdentity'
+        descriptors:
+          $ref: '#/components/schemas/SafeVoiceDescriptor'
+        operations:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              parameters:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/CapabilityParameter'
+        quality_summary:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [pass, warn, reject, unevaluated]
+            policy_version:
+              type: [string, 'null']
+        snapshot_id:
+          type: string
+    SafeVoiceList:
+      type: object
+      required: [object, snapshot_id, catalog_revision, data]
+      properties:
+        object:
+          type: string
+          const: list
+        snapshot_id:
+          type: string
+        catalog_revision:
+          type: string
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SafeVoiceEntry'
+    EffectiveCapabilitySnapshot:
+      type: object
+      required: [schema_version, service_instance_epoch, catalog_revision, snapshot_id, profile, models, voices, operations, guarantees]
+      properties:
+        schema_version:
+          type: string
+          const: effective_capabilities_v1
+        service_instance_epoch:
+          type: string
+        catalog_revision:
+          type: string
+          description: Content validator, NOT an immutable voice revision or inference lease.
+        snapshot_id:
+          type: string
+        profile:
+          type: [string, 'null']
+        models:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ConfiguredModelIdentity'
+        voices:
+          type: array
+          items:
+            $ref: '#/components/schemas/SafeVoiceEntry'
+        operations:
+          type: object
+          additionalProperties: true
+        guarantees:
+          type: object
+          additionalProperties:
+            type: boolean
     HealthResponse:
       type: object
       required:
