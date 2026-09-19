@@ -404,9 +404,10 @@ managed-runtime or human-acoustic evidence.
 
 The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
 the later ledger commit, deadline-test stabilization, runtime-default documentation,
-cross-process journal-lock fix, unsafe-parent hardening fix, and Realtime worker
-contention classification are represented by code checkpoint
-`32a92416f97766acc018e3b4c179964caa9cce50`. This ledger remains an acceptance
+cross-process journal-lock fix, unsafe-parent hardening fix, Realtime worker
+contention classification, busy retry guidance, and the batch HTTP worker boundary
+are represented by code checkpoint
+`c3f08cb4df44662f22a3da488d44e6348728afa9`. This ledger remains an acceptance
 record after that checkpoint, so its own documentation commits are not presented
 as implementation changes.
 
