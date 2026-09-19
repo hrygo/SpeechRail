@@ -216,6 +216,8 @@ public final class AppModel {
     public private(set) var cloneIdempotencyKey: String?
     public private(set) var playingWorkID: String?
     public private(set) var playingVoiceID: String?
+    /// 真实音频实时电平 0…1，由播放器实时功率（metering）驱动。
+    public private(set) var playbackLevel: Float = 0
     public private(set) var worksMessage: String?
     /// Result of an explicit work action (delete/rename). Kept apart from
     /// `worksMessage`, which reports that the history itself is unreadable.
@@ -244,6 +246,8 @@ public final class AppModel {
     /// `Waveform.envelopeBuckets`，视图按自己的排布重采样——同一段包络因此能给
     /// 12 / 16 / 18 根三种波形用（REDESIGN-SPEC §11.6 第五十七轮）。
     private var waveformEnvelopes: [String: [CGFloat]] = [:]
+    /// 试听音频内存缓存（key = `\(voiceID):\(speed):\(text)`），同音色试听即点即播，0 延迟
+    private var previewAudioCache: [String: Data] = [:]
     private var voicePreviewTask: Task<Void, Never>?
     private var voiceDesignGenerationTask: Task<Void, Never>?
     private var voiceDesignSaveTask: Task<Void, Never>?
@@ -284,6 +288,7 @@ public final class AppModel {
             self.playingWorkID = nil
             self.playingVoiceID = nil
             self.playbackProgress = 0
+            self.playbackLevel = 0
             guard !successfully else { return }
             if workWasPlaying {
                 self.workPlaybackMessage = "作品播放失败，请重新试听或重新生成。"
@@ -293,6 +298,9 @@ public final class AppModel {
         }
         self.audioPlaybackController.onProgress = { [weak self] value in
             self?.playbackProgress = value
+        }
+        self.audioPlaybackController.onLevel = { [weak self] value in
+            self?.playbackLevel = value
         }
     }
 
@@ -862,10 +870,24 @@ public final class AppModel {
 
     public func previewVoice(
         _ voice: CreatorVoice,
-        text: String = "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。",
+        text: String = "你好，这是我的声音。",
         speed: Double = 1.0
     ) async {
-        guard !isCreatingSpeech else { return }
+        // 如果当前正在播放该音色，再次点击即为停止
+        if isAudioPlaying && playingVoiceID == voice.id {
+            stopAudio()
+            return
+        }
+        guard !isCreatingSpeech else {
+            // 如果正在生成该音色，再次点击取消
+            if previewingVoiceID == voice.id {
+                voicePreviewTask?.cancel()
+                voicePreviewTask = nil
+                isCreatingSpeech = false
+                previewingVoiceID = nil
+            }
+            return
+        }
         guard voice.available else {
             creatorMessage = "当前音色暂不可用于试听"
             return
@@ -881,6 +903,25 @@ public final class AppModel {
         }
 
         stopAudio()
+        let cacheKey = "\(voice.id):\(speed):\(previewText)"
+
+        // 优先命中本地内存缓存：0 毫秒即点即播，彻底免除反复生成延迟
+        if let cachedData = previewAudioCache[cacheKey] {
+            do {
+                try audioPlaybackController.play(data: cachedData)
+                isAudioPlaying = audioPlaybackController.isPlaying
+                playingWorkID = nil
+                playingVoiceID = voice.id
+                cacheEnvelope(key: Self.envelopeKey(kind: "voice", id: voice.id)) { buckets in
+                    AudioEnvelope.levels(forAudioData: cachedData, buckets: buckets)
+                }
+            } catch {
+                clearPlaybackState()
+                creatorMessage = "音频播放失败，请重试。"
+            }
+            return
+        }
+
         isCreatingSpeech = true
         previewingVoiceID = voice.id
         creatorMessage = nil
@@ -895,6 +936,8 @@ public final class AppModel {
                 speed: speed
             )
             try Task.checkCancellation()
+            // 写入本地内存缓存
+            previewAudioCache[cacheKey] = data
             do {
                 try audioPlaybackController.play(data: data)
             } catch {
@@ -904,8 +947,7 @@ public final class AppModel {
             isAudioPlaying = audioPlaybackController.isPlaying
             playingWorkID = nil
             playingVoiceID = voice.id
-            // 试听的音频就是这段 data：顺手把它的包络算出来，详情面板的波形
-            // 从此画的是这个音色真实的声音，而不是稿上的固定图形。
+            // 顺手将真实音频包络算出来，让声波呈现当前真实声音的轮廓
             cacheEnvelope(key: Self.envelopeKey(kind: "voice", id: voice.id)) { buckets in
                 AudioEnvelope.levels(forAudioData: data, buckets: buckets)
             }
@@ -921,9 +963,13 @@ public final class AppModel {
     /// user has navigated elsewhere.
     public func startVoicePreview(
         _ voice: CreatorVoice,
-        text: String = "这是 SpeechRail 的音色试听。清晰、自然的声音，让每一句表达都恰到好处。",
+        text: String = "你好，这是我的声音。",
         speed: Double = 1.0
     ) {
+        if isAudioPlaying && playingVoiceID == voice.id {
+            stopAudio()
+            return
+        }
         guard voicePreviewTask == nil, !isCreatingSpeech else { return }
         voicePreviewTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -933,8 +979,9 @@ public final class AppModel {
     }
 
     public func cancelVoicePreview() {
-        guard voicePreviewTask != nil else { return }
+        guard voicePreviewTask != nil || isAudioPlaying else { return }
         voicePreviewTask?.cancel()
+        voicePreviewTask = nil
         stopAudio()
     }
 
@@ -978,6 +1025,7 @@ public final class AppModel {
     private func clearPlaybackState() {
         isAudioPlaying = false
         playbackProgress = 0
+        playbackLevel = 0
         playingWorkID = nil
         playingVoiceID = nil
     }

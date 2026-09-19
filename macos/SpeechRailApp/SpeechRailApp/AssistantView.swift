@@ -55,6 +55,8 @@ public struct AssistantView: View {
     @State private var hasStoredKey = false
     /// 「未开始」态里"换个角色 / 换个声音"是可选项，默认收起：想开始的人不该先做两道选择题。
     @State private var showsStyleOptions = false
+    /// 是否展开就地快速配置大模型卡片
+    @State private var isShowingQuickLLM = false
     /// 刚刚由这一页**结束**掉的那一段。只有它会在记录库顶上多一条绿色结论条——
     /// 翻一条旧记录时不该看见「刚结束」（那是一条谎）。
     @State private var justEndedSessionID: String?
@@ -68,6 +70,18 @@ public struct AssistantView: View {
     /// 这一次结束是**为了接着开新的一轮**（`restartWithPersonaPick`）：那种结束不落地，
     /// 用户要的是新的一轮，不是上一段的回看。见 `landOnFinalized` 第 4 条。
     @State private var isEndingToRestart = false
+    @State private var voiceSearchQuery = ""
+    @State private var voiceFilterScope: VoiceFilterScope = .all
+    @State private var voicePageIndex = 0
+    private let voicePageSize = 5
+
+    private enum VoiceFilterScope: String, CaseIterable, Identifiable {
+        case all = "全部"
+        case custom = "克隆定制"
+        case system = "预置声音"
+
+        var id: String { rawValue }
+    }
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
         case session
@@ -79,7 +93,7 @@ public struct AssistantView: View {
 
         var title: String {
             switch self {
-            case .session: "本次会话"
+            case .session: "会话"
             case .voice: "音色"
             case .record: "记录"
             case .memory: "记忆"
@@ -104,13 +118,15 @@ public struct AssistantView: View {
     /// 首屏是绿的「现在就能开始」，同一屏右栏却写着红字「对话模型 未配置」，按下
     /// 「开始对话」才翻到稿上的受阻板（`screenAssistantBlocked`）——**首屏骗人**。
     /// 这一条本来就在 `preferences` 里躺着，所以判定要读它，而不是等一次失败。
+    /// 受阻原因：麦克风被拒、服务没起来、被占用等真正的硬件/运行时阻断。
+    /// 未配大模型时不进入硬受阻，而是作为就绪待配置状态，在首屏提供极简一键预设。
     private var blockedReason: AssistantSession.BlockReason? {
         if isLive { return nil }
         if let blocked = assistant.blocked { return blocked }
-        return preferences.isLLMConfigured ? nil : .llmNotConfigured
+        return nil
     }
 
-    /// 三态：未开始 / 未配置模型 / 对话中。记录库是**同一个页面的另一个状态**（`reviewRecord`）。
+    /// 四态：未开始 / 运行时受阻 / 对话中 / 记录库回看。
     private var state: State {
         if reviewRecord != nil { return .review }
         if isLive { return .live }
@@ -144,14 +160,16 @@ public struct AssistantView: View {
             growsWithContent: true
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                statusBar
-                if state == .review {
+                if state == .live {
+                    statusBar
+                } else if state == .review {
                     justEndedBand
                     reviewArea
                 } else {
-                    band
+                    if state == .blocked {
+                        band
+                    }
                     splitArea
-                    controlsCard
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -173,12 +191,19 @@ public struct AssistantView: View {
             hasStoredKey = await Task.detached { LLMKeychain.hasKey }.value
             await reloadMemories()
             await reloadRecent()
+            await model.refreshCreatorVoices()
         }
         // 「结束」的落点由**封存完成**这件事驱动（见 `landOnFinalized`）：
         // 页头按钮、`⌘⇧.`、菜单栏三个入口因此有同一个结局。
         .onChange(of: session.lastFinalizedSessionID) { _, newValue in
             guard let newValue else { return }
             Task { await landOnFinalized(id: newValue) }
+        }
+        .onChange(of: voiceSearchQuery) { _, _ in
+            voicePageIndex = 0
+        }
+        .onChange(of: voiceFilterScope) { _, _ in
+            voicePageIndex = 0
         }
         .onAppear { isOnScreen = true }
         .onDisappear { isOnScreen = false }
@@ -263,11 +288,21 @@ public struct AssistantView: View {
             // 收起控件的名字按右栏**此刻装着什么**说（稿 `sideToggle`）：回看时那一栏叫
             // 「记录信息」，不再是"本次会话"。
             SessionPanelToggle(
-                panelName: state == .review ? "记录信息" : "本次会话",
+                panelName: inspectorTogglePanelName,
                 isCollapsed: isInspectorCollapsed
             ) {
                 isInspectorCollapsed.toggle()
             }
+        }
+    }
+
+    private var inspectorTogglePanelName: String {
+        if state == .review { return "记录信息" }
+        switch inspectorTab {
+        case .session: return "会话状态"
+        case .voice: return "音色库"
+        case .record: return "记录库"
+        case .memory: return "记忆库"
         }
     }
 
@@ -333,36 +368,16 @@ public struct AssistantView: View {
     /// 布局正常。二分证据：`AnyView` 版本 1355×4317，直接版本 1355×781。
     @ViewBuilder
     private var band: some View {
-        switch state {
-        case .ready:
+        if state == .blocked, let reason = blockedReason {
             SessionConclusionBand(
-                tone: .healthy,
-                title: "按默认就能开始",
-                message: "角色和声音已经替你选好，直接开始就行；想换在下面那一行展开。"
-                    + "说话或打字都可以，对话只留在这台 Mac 上。",
-                hint: "开始之后角色本轮不再变（要换就新开一轮）；声音随时能换，下一句就听得出来。"
+                tone: .attention,
+                title: reason.title,
+                message: reason.detail,
+                hint: blockedHint(reason)
             ) {
-                // 首屏只放**一件事**：开始。角色与声音在下面那一行里，默认收起——
-                // 想开始的人不该先做两道选择题（用户 2026-09-19：门槛极高）。
-                Button("开始对话") { Task { await start() } }
-                    .speechRailButton(.primary)
-                    .help("按现在选好的角色与声音开始；开始之后角色本轮不再变")
+                blockedActions(reason)
             }
-        case .blocked:
-            // 结论条按**原因**说话：`BlockReason` 已经有 `title` / `detail`，八个原因
-            // 共用一条写死的「还没有配置对话模型」会让麦克风被占、服务没起来这类情况
-            // 全部指错方向（`MeetingView` 的受阻卡一直是按原因取的，这里是唯一一处例外）。
-            if let reason = blockedReason {
-                SessionConclusionBand(
-                    tone: .attention,
-                    title: reason.title,
-                    message: reason.detail,
-                    hint: blockedHint(reason)
-                ) {
-                    blockedActions(reason)
-                }
-            }
-        case .live, .review:
+        } else {
             EmptyView()
         }
     }
@@ -463,36 +478,34 @@ public struct AssistantView: View {
     // MARK: - 主区
 
     private var splitArea: some View {
-        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 switch state {
                 case .ready:
-                    styleOptions
-                    if !showsStyleOptions {
-                        readyOverviewCard
+                    if !preferences.isLLMConfigured || isShowingQuickLLM {
+                        llmSetupCard
                     }
+                    readyMainWorkbenchCard
                 case .blocked:
-                    // 没配模型时**就地填**，不把人送去设置页：这是"必要时刻"。
-                    // 其他受阻（麦克风被拒、服务没起来、被占用）与模型配置无关，
-                    // 那时要看的仍然是"这台 Mac 现在能做什么"那张能力表。
                     if blockedReason == .llmNotConfigured {
                         llmSetupCard
                         capabilitiesCard
                     } else {
                         capabilitiesCard
                     }
-                default: streamCard
+                    controlsCard
+                default:
+                    streamCard
+                    controlsCard
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
 
             if !isInspectorCollapsed {
                 inspectorColumn
             }
         }
-        // 分栏吃掉卡片之间的余量：两列因此等高（稿的两张卡底边对齐），收起右栏时
-        // 主框体独自变宽（`closurePanelRulesBoard`）。
-        .frame(maxWidth: .infinity, minHeight: 300, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, minHeight: 460, maxHeight: .infinity, alignment: .topLeading)
     }
 
     // MARK: 人设（未开始）
@@ -524,108 +537,491 @@ public struct AssistantView: View {
         .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
     }
 
-    /// 「未开始」态下的声学概览卡：展示当前选定的角色与声音试听，避免首屏大面积留白。
-    private var readyOverviewCard: some View {
+    /// 「未开始」态下的声学概览卡：声学与人格集成全景展示，附带灵感提问。
+    /// 「未开始」态下的声学主舞台：声学生命力展示、人设与音色双核中枢、灵感提问与快捷开麦。
+    /// 「未开始」态下的一体化全高声学主工作台：
+    /// 声学舞台中枢、角色与音色双核名片、2×2 场景任务矩阵、最近会话回溯、锚定底部的输入中枢。
+    private var readyMainWorkbenchCard: some View {
         SessionPanel {
             SessionPanelHead(
-                title: "准备就绪",
-                badge: "随时开始",
-                detail: "对着麦克风说话即可开始，也可以在下方输入框直接打字发问。"
+                title: "声学对讲工作台",
+                badge: "待机就绪"
             )
             SessionHairline()
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    // 角色卡
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        HStack {
-                            Text("角色与风格")
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            Spacer()
-                            StatusPill(tone: .healthy, label: "已定")
-                        }
-                        Text(selectedPersonaTitle)
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        Text(selectedPersonaSummary)
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .lineLimit(2)
-                    }
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        SpeechRailDesignTokens.Color.field,
-                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                    )
+                // 1. 声学舞台中枢：动态呼吸声波与环境状态条
+                acousticStageRow
 
-                    // 音色与试听卡
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                        HStack {
-                            Text("朗读音色")
-                                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                            Spacer()
-                            if let voice = currentVoice {
-                                Button {
-                                    Task { await model.previewVoice(voice) }
-                                } label: {
-                                    HStack(spacing: 3) {
-                                        Image(systemName: model.previewingVoiceID == voice.id ? "stop.fill" : "play.fill")
-                                            .font(.system(size: 8))
-                                        Text(model.previewingVoiceID == voice.id ? "停止" : "试听")
-                                            .font(SpeechRailDesignTokens.Typography.caption)
-                                    }
-                                }
-                                .buttonStyle(.borderless)
-                                .help("试听 \(voice.name)")
-                            }
-                        }
-                        Text(currentVoiceName ?? Self.defaultVoiceLabel)
-                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        Text(currentVoice?.description.isEmpty == false ? currentVoice!.description : "语音合成使用此声音，对话中途下一句随时可换")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                            .lineLimit(2)
-                    }
-                    .padding(SpeechRailDesignTokens.Spacing.sm)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        SpeechRailDesignTokens.Color.field,
-                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                    )
+                // 2. 伙伴角色与发音音色双核心名片
+                personaAndVoiceRow
+
+                // 3. 灵感任务与场景卡片矩阵（2×2）
+                scenarioGrid
+
+                // 4. 最近会话快速回溯（若有记录）
+                if let latest = recent.first {
+                    recentSessionResumeBar(latest)
                 }
 
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "keyboard")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Text("提示：在下方输入框打字按 ↵ 发送，将直接开启对话；文字提问默认静音不朗读回复。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
-                .padding(.top, SpeechRailDesignTokens.Spacing.tight)
+                Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
-            Spacer(minLength: 0)
+
             SessionHairline()
-            CardFoot(note: "想要更换角色或声音，可展开上方可选项或在右栏选择。") {
-                Button("展开全部选项") {
-                    withAnimation { showsStyleOptions = true }
+
+            // 5. 锚定底部的输入中枢（一体化底栏）
+            VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                controlsInputRow
+                controlsSecondaryRow
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var acousticStageRow: some View {
+        HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
+            AcousticWaveformAura(
+                isPlaying: model.isAudioPlaying,
+                isLoading: model.isCreatingSpeech && model.previewingVoiceID != nil,
+                isLive: false,
+                level: model.isAudioPlaying ? Double(model.playbackLevel) : assistant.level,
+                envelope: currentVoice.flatMap { model.waveformEnvelope(forVoiceID: $0.id) },
+                progress: model.playbackProgress
+            )
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    StatusPill(tone: .healthy, label: "声场就绪")
+                    Text("Apple Silicon 本地低延迟声学管道")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
-                .speechRailButton(.secondary)
+                Text("当前输入源：\(microphoneLabel) · 说话即录，打字即问")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            Spacer()
+
+            StatusPill(tone: .healthy, label: "就绪待命")
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+        )
+    }
+
+    private var personaAndVoiceRow: some View {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.md) {
+            // 对话角色卡
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                HStack {
+                    Label("对话角色", systemImage: "theatermasks")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer()
+                    Menu {
+                        ForEach(preferences.personas) { p in
+                            Button {
+                                selectedPersonaID = p.id
+                                preferences.defaultPersonaID = p.id
+                            } label: {
+                                HStack {
+                                    Text(p.title)
+                                    if p.id == selectedPersonaID {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("新建自定义角色…") {
+                            personaDraft = PersonaDraft()
+                            isCreatingPersona = true
+                        }
+                    } label: {
+                        HStack(spacing: 2) {
+                            Text("切换")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 8))
+                        }
+                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    }
+                    .menuStyle(.borderlessButton)
+                }
+                Text(selectedPersonaTitle)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Text(selectedPersonaSummary)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .lineLimit(2)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                SpeechRailDesignTokens.Color.field,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            )
+
+            // 发音音色卡
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                HStack {
+                    Label("发音音色", systemImage: "waveform")
+                        .font(SpeechRailDesignTokens.Typography.captionMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer()
+                    if let voice = currentVoice {
+                        let isPlaying = model.isAudioPlaying && model.playingVoiceID == voice.id
+                        let isLoading = model.isCreatingSpeech && model.previewingVoiceID == voice.id
+                        Button {
+                            if isPlaying || isLoading {
+                                model.stopAudio()
+                            } else {
+                                Task { await model.previewVoice(voice) }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                if isLoading {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                    Text("准备中…")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                } else if isPlaying {
+                                    Image(systemName: "stop.fill")
+                                        .font(.system(size: 9))
+                                    Text("停止")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                } else {
+                                    Image(systemName: "speaker.wave.2.fill")
+                                        .font(.system(size: 9))
+                                    Text("试听")
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                }
+                            }
+                            .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(isPlaying ? "停止试听" : (isLoading ? "正在准备试听音频…" : "试听 \(voice.name)"))
+                    }
+                    voicePickerMenu
+                }
+                HStack(spacing: 4) {
+                    Text(currentVoiceName ?? Self.defaultVoiceLabel)
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    if let currentVoice {
+                        StatusPill(
+                            tone: currentVoice.isSystem ? .neutral : .healthy,
+                            label: currentVoice.isSystem ? "预置" : "克隆"
+                        )
+                    }
+                }
+                Text(currentVoice?.description.isEmpty == false ? currentVoice!.description : "支持 SpeechRail 音色库任意音色，随时可换")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    .lineLimit(2)
+            }
+            .padding(SpeechRailDesignTokens.Spacing.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                SpeechRailDesignTokens.Color.field,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            )
+        }
+    }
+
+    private var customVoices: [CreatorVoice] {
+        voiceRows.filter { !$0.isSystem && $0.available }
+    }
+
+    private var systemVoices: [CreatorVoice] {
+        voiceRows.filter { $0.isSystem && $0.available }
+    }
+
+    private var voicePickerMenu: some View {
+        Menu {
+            let custom = customVoices
+            if !custom.isEmpty {
+                Section("我的定制与克隆声音") {
+                    ForEach(custom) { v in
+                        Button {
+                            selectVoice(v)
+                        } label: {
+                            HStack {
+                                Text(v.name)
+                                if v.id == effectiveVoiceID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let system = systemVoices.isEmpty ? voiceRows : systemVoices
+            Section("系统预置声音") {
+                ForEach(system) { v in
+                    Button {
+                        selectVoice(v)
+                    } label: {
+                        HStack {
+                            Text(v.name)
+                            if v.id == effectiveVoiceID {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("🎙️ 录制专属声音（音色克隆）…") {
+                navigation.request(.voiceClone)
+            }
+            Button("✨ 创作新音色（音色创作）…") {
+                navigation.request(.voiceDesign)
+            }
+            Button("📚 打开音色库管理…") {
+                navigation.request(.voiceLibrary)
+            }
+        } label: {
+            HStack(spacing: 2) {
+                Text("换音色")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8))
+            }
+            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+        }
+        .menuStyle(.borderlessButton)
+    }
+
+    private struct AcousticWaveformAura: View {
+        let isPlaying: Bool
+        var isLoading: Bool = false
+        let isLive: Bool
+        let level: Double
+        var envelope: [CGFloat]? = nil
+        var progress: Double = 0
+
+        private static let baseHeights: [CGFloat] = [
+            8, 14, 22, 12, 28, 18, 32, 24, 16, 30, 20, 26, 14, 18
+        ]
+
+        var body: some View {
+            TimelineView(.animation(minimumInterval: 0.04, paused: !isPlaying && !isLoading && !isLive)) { timeline in
+                let date = timeline.date.timeIntervalSinceReferenceDate
+                let heights = resolvedHeights
+                HStack(alignment: .center, spacing: 3) {
+                    ForEach(0..<Self.baseHeights.count, id: \.self) { index in
+                        let base = heights[index]
+                        let factor: CGFloat = {
+                            if isPlaying {
+                                // 真实播放中：由真实实时电平 level (0...1) 驱动真实振幅
+                                let normalizedLevel = CGFloat(max(0.08, min(1.0, level * 1.6)))
+                                // 结合真实播放进度，播放头附近的条目具有更强的声学灵动性
+                                let pos = Double(index) / Double(Self.baseHeights.count)
+                                let isNearHead = abs(pos - progress) < 0.15
+                                let dynamicMultiplier: CGFloat = isNearHead ? 1.25 : 0.85
+                                return CGFloat(0.35 + 0.65 * normalizedLevel * dynamicMultiplier)
+                            } else if isLoading {
+                                // 生成请求中：温和呼吸波，明确提示正在计算准备中，绝不乱舞
+                                let wave = sin(date * 3.5 + Double(index) * 0.35)
+                                return CGFloat(0.45 + 0.25 * abs(wave))
+                            } else if isLive {
+                                // 麦克风录音对讲中：由真实输入电平驱动
+                                let currentLevel = CGFloat(max(0.1, min(1.0, level * 3.0)))
+                                let sine = sin(date * 5.0 + Double(index) * 0.4)
+                                return CGFloat(0.3 + 0.7 * (currentLevel * (0.5 + 0.5 * abs(sine))))
+                            } else {
+                                return 0.4
+                            }
+                        }()
+                        let barHeight = max(4, min(34, base * factor))
+                        let isPlayed: Bool = {
+                            guard isPlaying, progress > 0 else { return true }
+                            return Double(index + 1) / Double(Self.baseHeights.count) <= progress + 0.08
+                        }()
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .fill(
+                                isPlaying
+                                    ? SpeechRailDesignTokens.Color.voice
+                                    : (isLoading ? SpeechRailDesignTokens.Color.rail.opacity(0.8) : SpeechRailDesignTokens.Color.rail)
+                            )
+                            .frame(width: 3, height: barHeight)
+                            .opacity(
+                                isPlaying
+                                    ? (isPlayed ? 0.95 : 0.35)
+                                    : (isLoading ? 0.65 : (isLive ? 0.85 : 0.45))
+                            )
+                    }
+                }
+                .frame(height: 36)
             }
         }
-        .frame(maxHeight: .infinity)
+
+        /// 真实音频幅度包络重采样为 14 根条；未加载完成则回退至标准声学基准轮廓
+        private var resolvedHeights: [CGFloat] {
+            guard let envelope, !envelope.isEmpty else { return Self.baseHeights }
+            let peak: CGFloat = 32.0
+            return AudioEnvelope.resample(envelope, to: Self.baseHeights.count).map {
+                max(6, $0 * peak)
+            }
+        }
+    }
+
+    private struct ScenarioPrompt: Identifiable {
+        let id: String
+        let icon: String
+        let title: String
+        let subtitle: String
+        let prompt: String
+    }
+
+    private static let scenarioCards: [ScenarioPrompt] = [
+        ScenarioPrompt(
+            id: "critique",
+            icon: "brain.head.profile",
+            title: "批判性思辨与方案剖析",
+            subtitle: "以尖锐视角深度审查架构边界与隐性风险",
+            prompt: "请以批判性思维深度分析我接下来的方案，直指潜在漏洞与设计边界。"
+        ),
+        ScenarioPrompt(
+            id: "actions",
+            icon: "checklist.checked",
+            title: "核心逻辑与行动项梳理",
+            subtitle: "梳理繁杂材料，提炼清晰逻辑线与落地决策清单",
+            prompt: "请帮我梳理手头材料的核心逻辑，并提炼为清晰的行动清单。"
+        ),
+        ScenarioPrompt(
+            id: "rehearsal",
+            icon: "waveform.and.mic",
+            title: "即兴口语对讲与演练",
+            subtitle: "模拟业务汇报与答辩，练习流利自然的口头表达",
+            prompt: "我们来做一段即兴口语汇报练习，你来向我提出专业质询与提问。"
+        ),
+        ScenarioPrompt(
+            id: "summarize",
+            icon: "text.badge.checkmark",
+            title: "精简提炼核心结论",
+            subtitle: "去粗取精，用简明有力的口吻输出高价值决策摘要",
+            prompt: "请用简练有力的口吻，为我提炼当前讨论的核心结论与三条关键要点。"
+        )
+    ]
+
+    private var scenarioGrid: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack {
+                Label("灵感场景与任务指引", systemImage: "sparkles")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer()
+                Text("点击直接填入输入框，随时开麦发问")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(), spacing: SpeechRailDesignTokens.Spacing.sm),
+                    GridItem(.flexible(), spacing: SpeechRailDesignTokens.Spacing.sm)
+                ],
+                spacing: SpeechRailDesignTokens.Spacing.sm
+            ) {
+                ForEach(Self.scenarioCards) { item in
+                    Button {
+                        typed = item.prompt
+                    } label: {
+                        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs + 2) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                .frame(width: 26, height: 26)
+                                .background(
+                                    SpeechRailDesignTokens.Color.rail.opacity(0.1),
+                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                )
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(item.title)
+                                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                    .lineLimit(1)
+                                Text(item.subtitle)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                    .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(SpeechRailDesignTokens.Spacing.sm)
+                        .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+                        .background(
+                            SpeechRailDesignTokens.Color.field,
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("填入「\(item.prompt)」")
+                }
+            }
+        }
+    }
+
+    private func recentSessionResumeBar(_ latest: SessionSummary) -> some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: "clock.arrow.circlepath")
+                .font(.system(size: 11))
+                .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+            Text("最近会话：")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            Text(latest.record.title ?? "这一轮对话")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                .lineLimit(1)
+            Text("· \(recordSubtitle(latest))")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .lineLimit(1)
+            Spacer()
+            Button("查看记录") {
+                Task { await openRecord(latest) }
+            }
+            .font(SpeechRailDesignTokens.Typography.captionMedium)
+            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+        )
     }
 
     private var selectedPersonaSummary: String {
@@ -749,6 +1145,8 @@ public struct AssistantView: View {
             )
             SessionHairline()
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+                llmPresetsView
+                SessionHairline()
                 llmField(
                     label: "服务地址",
                     hint: "那台服务的地址，末尾不用带 /v1",
@@ -765,7 +1163,7 @@ public struct AssistantView: View {
                 )
                 llmField(
                     label: "密钥",
-                    hint: "那台服务不需要密钥就留空",
+                    hint: "那台服务不需要密钥就留空（如本地 Ollama）",
                     placeholder: "sk-…",
                     text: $llmKeyDraft,
                     isSecret: true
@@ -782,7 +1180,7 @@ public struct AssistantView: View {
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
-            CardFoot(note: "密钥只进钥匙串，不写进配置文件，也不出现在日志和导出物里。") {
+            CardFoot(note: "密钥通过本地安全加密保管（AES-GCM），不进配置文件，也不出现在日志中。") {
                 Button("保存并开始对话") { Task { await saveLLMAndStart() } }
                     .speechRailButton(.primary)
                     .disabled(!canSaveLLM)
@@ -837,6 +1235,63 @@ public struct AssistantView: View {
         llmSaveNote = nil
         llmKeyDraft = ""
         await start()
+    }
+
+    private var llmPresetsView: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+            HStack {
+                Text("常用提供商一键填入：")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Spacer()
+                Button {
+                    previewSelectedVoice()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "speaker.wave.2")
+                            .font(.system(size: 9))
+                        Text("无需大模型：先试听音色原声")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    }
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                }
+                .buttonStyle(.plain)
+                .help("直接调用本地 Apple Silicon TTS 试听当前音色，感受本地声学质量")
+            }
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                presetChip(title: "DeepSeek", url: "https://api.deepseek.com", model: "deepseek-chat")
+                presetChip(title: "硅基流动", url: "https://api.siliconflow.cn/v1", model: "Qwen/Qwen2.5-7B-Instruct")
+                presetChip(title: "OpenAI", url: "https://api.openai.com/v1", model: "gpt-4o-mini")
+                presetChip(title: "本地 Ollama", url: "http://localhost:11434/v1", model: "qwen2.5")
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func presetChip(title: String, url: String, model: String) -> some View {
+        let isSelected = llmBaseURLDraft == url && llmModelDraft == model
+        return Button {
+            llmBaseURLDraft = url
+            llmModelDraft = model
+        } label: {
+            Text(title)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.12) : SpeechRailDesignTokens.Color.field,
+                    in: Capsule()
+                )
+                .overlay(
+                    Capsule().stroke(
+                        isSelected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Surface.border,
+                        lineWidth: 1
+                    )
+                )
+                .foregroundStyle(isSelected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.ink)
+        }
+        .buttonStyle(.plain)
+        .help("一键填入 \(title) 的地址与默认推荐模型")
     }
 
     private var capabilitiesCard: some View {
@@ -1119,10 +1574,12 @@ public struct AssistantView: View {
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                     .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
             } else {
-                ForEach(Array(voiceRows.enumerated()), id: \.element.id) { index, voice in
+                ForEach(Array(pagedVoiceRows.enumerated()), id: \.element.id) { index, voice in
                     if index > 0 { SessionHairline() }
                     voiceRow(voice)
                 }
+                SessionHairline()
+                voicePaginationBar
             }
         }
     }
@@ -1142,18 +1599,31 @@ public struct AssistantView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             StatusPill(tone: voice.available ? .healthy : .attention, label: voicePillLabel(voice, isSelected: isSelected))
+            let isPlaying = model.isAudioPlaying && model.playingVoiceID == voice.id
+            let isLoading = model.isCreatingSpeech && model.previewingVoiceID == voice.id
             Button {
-                Task { await model.previewVoice(voice) }
+                if isPlaying || isLoading {
+                    model.stopAudio()
+                } else {
+                    Task { await model.previewVoice(voice) }
+                }
             } label: {
-                RowActionGlyph(systemImage: model.previewingVoiceID == voice.id ? "stop" : "play")
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 16, height: 16)
+                } else {
+                    RowActionGlyph(systemImage: isPlaying ? "stop" : "play")
+                }
             }
             .buttonStyle(.borderless)
             .disabled(!voice.available)
-            .help(voice.available ? "试听 \(voice.name)" : "这个音色现在用不了")
-            .accessibilityLabel("试听 \(voice.name)")
+            .help(isPlaying ? "停止试听" : (isLoading ? "正在准备试听音频…" : (voice.available ? "试听 \(voice.name)" : "这个音色现在用不了")))
+            .accessibilityLabel(isPlaying ? "停止试听" : "试听 \(voice.name)")
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, 11)
+        .padding(.vertical, 10)
+        .background(isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.08) : Color.clear)
         .contentShape(Rectangle())
             .onTapGesture {
                 guard voice.available else { return }
@@ -1336,25 +1806,183 @@ public struct AssistantView: View {
 
     private var controlsSecondaryRow: some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Button(assistant.isMuted ? "取消静音" : "静音麦克风") {
-                assistant.toggleMute()
-            }
-            .speechRailButton(.secondary)
-            .disabled(!isLive)
-            .help("只是暂时不说了；对话、记录都留着。要结束用页头的「结束对话」")
+            if isLive {
+                Button(assistant.isMuted ? "取消静音" : "静音麦克风") {
+                    assistant.toggleMute()
+                }
+                .speechRailButton(.secondary)
+                .help("只是暂时不说了；对话、记录都留着。要结束用页头的「结束对话」")
 
-            controlsModeIndicator
+                livePersonaBadge
+                controlsModeIndicator
+            } else {
+                Button {
+                    Task { await start() }
+                } label: {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        Image(systemName: "waveform.and.mic")
+                            .font(.system(size: 11, weight: .bold))
+                        Text("开麦对讲")
+                    }
+                }
+                .speechRailButton(.primary)
+                .help("开启双向语音对讲，对着麦克风说话即可交流")
+
+                idlePersonaCapsule
+                controlsModeIndicator
+            }
 
             Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
 
-            SessionVoiceCapsule(name: currentVoiceName ?? "未选") {
-                ForEach(voiceRows) { voice in
-                    Button(voice.name) { selectVoice(voice) }
-                        .disabled(!voice.available)
+            // 音色随时换：SpeechRail 音色库支持的任何音色（分组并支持直通工坊）
+            SessionVoiceCapsule(name: currentVoiceName ?? "未选音色") {
+                let custom = customVoices
+                if !custom.isEmpty {
+                    Section("我的定制与克隆声音") {
+                        ForEach(custom) { voice in
+                            Button {
+                                selectVoice(voice)
+                            } label: {
+                                HStack {
+                                    Text(voice.name)
+                                    if voice.id == effectiveVoiceID {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+                let system = systemVoices.isEmpty ? voiceRows : systemVoices
+                Section("系统预置声音") {
+                    ForEach(system) { voice in
+                        Button {
+                            selectVoice(voice)
+                        } label: {
+                            HStack {
+                                Text(voice.name)
+                                if voice.id == effectiveVoiceID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("🎙️ 录制专属声音（音色克隆）…") {
+                    navigation.request(.voiceClone)
+                }
+                Button("✨ 创作新音色（音色创作）…") {
+                    navigation.request(.voiceDesign)
+                }
+                Button("📚 打开音色库管理…") {
+                    navigation.request(.voiceLibrary)
+                }
+            }
+
+            // 一键试听当前选中的声音
+            if let voice = currentVoice {
+                let isPlaying = model.isAudioPlaying && model.playingVoiceID == voice.id
+                let isLoading = model.isCreatingSpeech && model.previewingVoiceID == voice.id
+                Button {
+                    if isPlaying || isLoading {
+                        model.stopAudio()
+                    } else {
+                        Task { await model.previewVoice(voice) }
+                    }
+                } label: {
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: isPlaying ? "stop.circle.fill" : "speaker.wave.2.circle")
+                            .font(.system(size: 16))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help(isPlaying ? "停止试听" : (isLoading ? "正在准备试听音频…" : "随时试听当前音色：\(voice.name)"))
             }
         }
         .opacity(state == .blocked ? 0.45 : 1)
+    }
+
+    /// 待机态下的角色风格切换胶囊
+    private var idlePersonaCapsule: some View {
+        Menu {
+            ForEach(preferences.personas) { p in
+                Button {
+                    selectedPersonaID = p.id
+                    preferences.defaultPersonaID = p.id
+                } label: {
+                    HStack {
+                        Text(p.title)
+                        if p.id == selectedPersonaID {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: "theatermasks")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(selectedPersonaTitle)
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+            .padding(.vertical, 4)
+            .background(
+                SpeechRailDesignTokens.Color.field,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .help("对话角色（风格）：开始前可自由选择，开始之后本轮会话中途锁定")
+    }
+
+    /// 会话中风格严格锁定：不切换会话不能更换风格
+    private var livePersonaBadge: some View {
+        Menu {
+            Text("当前会话已绑定角色：「\(selectedPersonaTitle)」")
+            Text("按设计规范，中途更换风格会导致上下文认知混乱。")
+            Divider()
+            Button("结束当前会话，并以新角色开新对话…") {
+                Task { await restartWithPersonaPick() }
+            }
+        } label: {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                Image(systemName: "theatermasks")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                Text(selectedPersonaTitle)
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                StatusPill(tone: .neutral, label: "本轮锁定")
+            }
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+            .padding(.vertical, 4)
+            .background(
+                SpeechRailDesignTokens.Color.field,
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .help("风格已绑定当前会话。不切换会话不能更换风格；点击可结束并新开一轮。")
     }
 
     private var liveModeIconName: String {
@@ -1433,6 +2061,10 @@ public struct AssistantView: View {
     private func send() {
         let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        if state == .ready && !preferences.isLLMConfigured {
+            withAnimation { isShowingQuickLLM = true }
+            return
+        }
         typed = ""
         Task {
             if state == .ready {
@@ -1464,38 +2096,61 @@ public struct AssistantView: View {
                 segmentedTabs
                 SessionHairline()
             }
-            if state == .review || inspectorTab == .session {
-                factsTabBody
-            } else if inspectorTab == .voice {
-                voiceTabBody
-            } else if inspectorTab == .record {
-                recordTabBody
-            } else {
-                memoryTabBody
+            Group {
+                switch inspectorTab {
+                case .session:
+                    factsTabBody
+                case .voice:
+                    voiceTabBody
+                case .record:
+                    recordTabBody
+                case .memory:
+                    memoryTabBody
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(maxHeight: .infinity, alignment: .top)
+        .frame(width: SpeechRailDesignTokens.Layout.sessionInspectorWidth)
+        .frame(maxHeight: .infinity)
     }
 
     private var headlineTitle: String {
-        state == .review ? "记录信息" : (state == .ready ? "本次对话" : "本次会话")
+        if state == .review { return "记录信息" }
+        switch inspectorTab {
+        case .session:
+            return state == .live ? "会话运行状态" : "会话环境信息"
+        case .voice:
+            return "音色库与试听"
+        case .record:
+            return "历史对话归档"
+        case .memory:
+            return "长期记忆资产"
+        }
     }
 
     private var headlineBadge: String {
-        switch state {
-        case .ready: "还没有开始"
-        case .blocked: "还不能开始"
-        case .live: "语音助手 · 进行中"
-        case .review: "从记录库打开 · 已保存"
+        if state == .review { return "已归档 · 本地留存" }
+        switch inspectorTab {
+        case .session:
+            switch state {
+            case .ready: return "待机就绪"
+            case .blocked: return "需要注意"
+            case .live: return "对讲进行中"
+            case .review: return "已归档"
+            }
+        case .voice:
+            let count = model.creatorVoices.count
+            return count > 0 ? "\(count) 个可用音色" : (model.isRefreshingCreatorVoices ? "正在读取…" : "未读取到")
+        case .record:
+            return recent.isEmpty ? "暂无记录" : "\(recent.count) 段对话"
+        case .memory:
+            return memories.isEmpty ? "暂无条目" : "\(memories.count) 条记忆"
         }
     }
 
     private var segmentedTabs: some View {
         HStack {
-            Picker("", selection: $inspectorTab) {
-                // **四个都得列出来**：`inspectorTab` 的默认值是 `.session`，而上一版这个
-                // 分段里只有「记录 / 记忆」两项——默认那一项没有按钮，切走之后回不来
-                // （2026-09-19 离屏走查）。
+            Picker("", selection: $inspectorTab.animation(.easeInOut(duration: 0.12))) {
                 ForEach(InspectorTab.allCases) { tab in
                     Text(tab.title).tag(tab)
                 }
@@ -1508,7 +2163,7 @@ public struct AssistantView: View {
     }
 
     private var factsTabBody: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(Array(factRows.enumerated()), id: \.offset) { _, row in
                     SessionKVRow(row.0, row.1)
@@ -1516,6 +2171,9 @@ public struct AssistantView: View {
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.top, SpeechRailDesignTokens.Spacing.md)
+            .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+
+            SessionHairline()
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text(factsNoteTitle)
@@ -1527,7 +2185,13 @@ public struct AssistantView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.bottom, SpeechRailDesignTokens.Spacing.md)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+
+            if state == .ready {
+                acousticPipelineCard
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+            }
 
             Spacer(minLength: 0)
             SessionHairline()
@@ -1536,10 +2200,6 @@ public struct AssistantView: View {
                     Button("检查输入电平") { isCheckingInput = true }
                         .speechRailButton(.secondary)
                 } else if state == .blocked {
-                    // 地址与模型都没填时这个按钮点了**不会有任何变化**（`retry()` 只会把
-                    // 同一个 `llmNotConfigured` 再落一次，屏幕上零回执），读起来像坏了。
-                    // `startPipeline()` 的第一道闸就是 `isLLMConfigured`，所以这种状态下
-                    // 确实没有可查对象——把出口留在结论条的「打开设置…」上。
                     Button("检查连接") { Task { await assistant.retry() } }
                         .speechRailButton(.secondary)
                         .disabled(!preferences.isLLMConfigured)
@@ -1549,9 +2209,6 @@ public struct AssistantView: View {
                                 : "还没填服务地址与模型；先在「设置 · 会话」里填好，再来点它"
                         )
                 } else if state == .live {
-                    // 这颗按钮通向的是「音色」那一页，不是「记录」。上一版写成
-                    // `inspectorTab = .record`：按「换音色」看到的是一列历史记录
-                    // （2026-09-19 离屏走查）。
                     Button("换音色") { inspectorTab = .voice }
                         .speechRailButton(.secondary)
                     Button("新开一轮以换角色") { Task { await restartWithPersonaPick() } }
@@ -1576,6 +2233,34 @@ public struct AssistantView: View {
                 }
             }
         }
+    }
+
+    private var acousticPipelineCard: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "waveform.badge.mic")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                Text("声学链路与硬件运行")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                Spacer()
+                StatusPill(tone: .healthy, label: "本地私有")
+            }
+            Text("实时麦克风电平动态感应，音频 PCM 纯内存流转、绝不落盘；识别与合成均由 Apple Silicon 独立单元驱动。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(SpeechRailDesignTokens.Spacing.sm)
+        .background(
+            SpeechRailDesignTokens.Color.recessedField,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+        )
     }
 
     /// 「几轮」= **一问一答**算一轮，所以按"你说了几次"数，不按行数。
@@ -1708,127 +2393,365 @@ public struct AssistantView: View {
     /// 它存在的理由有两层：一是稿上「换音色」那颗按钮通向的就是它，而上一版把它接到
     /// 「记录」页去了（按下去看到的是记录列表）；二是 `inspectorTab` 的默认值原先在
     /// 分段控件里没有对应项，切走就回不来（2026-09-19 离屏走查）。
+    private var filteredVoiceRows: [CreatorVoice] {
+        let base = voiceRows.filter { voice in
+            switch voiceFilterScope {
+            case .all: true
+            case .custom: !voice.isSystem
+            case .system: voice.isSystem
+            }
+        }
+        let query = voiceSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return base }
+        return base.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || $0.description.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    private var totalVoicePages: Int {
+        let count = filteredVoiceRows.count
+        guard count > 0 else { return 1 }
+        return max(1, Int(ceil(Double(count) / Double(voicePageSize))))
+    }
+
+    private var pagedVoiceRows: [CreatorVoice] {
+        let items = filteredVoiceRows
+        guard !items.isEmpty else { return [] }
+        let safeIndex = min(max(0, voicePageIndex), totalVoicePages - 1)
+        let start = safeIndex * voicePageSize
+        guard start < items.count else { return [] }
+        let end = min(start + voicePageSize, items.count)
+        return Array(items[start..<end])
+    }
+
+    private var voicePaginationBar: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Text("第 \(voicePageIndex + 1) / \(totalVoicePages) 页")
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+
+            Text("· 共 \(filteredVoiceRows.count) 个音色")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 4) {
+                Button {
+                    if voicePageIndex > 0 {
+                        voicePageIndex -= 1
+                    }
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 8, weight: .bold))
+                        Text("上一页")
+                    }
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        voicePageIndex > 0 ? SpeechRailDesignTokens.Color.field : Color.clear,
+                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(voicePageIndex <= 0)
+                .opacity(voicePageIndex <= 0 ? 0.35 : 1.0)
+
+                Button {
+                    if voicePageIndex < totalVoicePages - 1 {
+                        voicePageIndex += 1
+                    }
+                } label: {
+                    HStack(spacing: 2) {
+                        Text("下一页")
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        voicePageIndex < totalVoicePages - 1 ? SpeechRailDesignTokens.Color.field : Color.clear,
+                        in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(voicePageIndex >= totalVoicePages - 1)
+                .opacity(voicePageIndex >= totalVoicePages - 1 ? 0.35 : 1.0)
+            }
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, 6)
+        .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.6))
+    }
+
     private var voiceTabBody: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // 搜索框与分类过滤（支持海量音色毫秒级检索）
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("换音色只改声音")
-                    .font(SpeechRailDesignTokens.Typography.captionMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                Text(
-                    isLive
-                        ? "下一句就听得出来；已经说过的不重来。"
-                        : "开始之后随时能换，下一句就听得出来；已经说过的不重来。"
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 11))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    TextField("搜索音色名或特点…", text: $voiceSearchQuery)
+                        .textFieldStyle(.plain)
+                        .font(SpeechRailDesignTokens.Typography.body)
+                    if !voiceSearchQuery.isEmpty {
+                        Button {
+                            voiceSearchQuery = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                .padding(.vertical, 6)
+                .background(
+                    SpeechRailDesignTokens.Color.inputField,
+                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                 )
-                .font(SpeechRailDesignTokens.Typography.secondary)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .overlay(
+                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                )
+
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    ForEach(VoiceFilterScope.allCases) { scope in
+                        Button {
+                            voiceFilterScope = scope
+                        } label: {
+                            Text(scope.rawValue)
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(
+                                    voiceFilterScope == scope
+                                        ? SpeechRailDesignTokens.Color.rail.opacity(0.15)
+                                        : SpeechRailDesignTokens.Color.field,
+                                    in: Capsule()
+                                )
+                                .overlay(
+                                    Capsule().stroke(
+                                        voiceFilterScope == scope
+                                            ? SpeechRailDesignTokens.Color.rail
+                                            : SpeechRailDesignTokens.Surface.border,
+                                        lineWidth: 1
+                                    )
+                                )
+                                .foregroundStyle(
+                                    voiceFilterScope == scope
+                                        ? SpeechRailDesignTokens.Color.rail
+                                        : SpeechRailDesignTokens.Color.ink
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Spacer()
+                    if model.isRefreshingCreatorVoices {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                }
+                .padding(.top, 2)
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-            .padding(.top, SpeechRailDesignTokens.Spacing.md)
+            .padding(.top, SpeechRailDesignTokens.Spacing.sm)
             .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
 
+            SessionHairline()
+
+            // 分页音色列表：单页限制条数，告别超长铺满
             if voiceRows.isEmpty {
-                Text("还没有读到可用音色。")
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
-            } else {
-                ForEach(Array(voiceRows.enumerated()), id: \.element.id) { index, voice in
-                    if index > 0 { SessionHairline() }
-                    voiceRow(voice)
+                VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Spacer()
+                    if model.isRefreshingCreatorVoices {
+                        ProgressView("正在从本机服务读取音色…")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                    } else {
+                        Image(systemName: "waveform.badge.exclamationmark")
+                            .font(.system(size: 24))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        Text("还没有读取到可用音色")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        Text("服务可能刚刚启动，点击下方按钮重新读取。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                        Button("重新读取音色") {
+                            Task { await model.refreshCreatorVoices() }
+                        }
+                        .speechRailButton(.secondary)
+                    }
+                    Spacer()
                 }
+                .frame(maxWidth: .infinity, minHeight: 220)
+            } else if filteredVoiceRows.isEmpty {
+                VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
+                    Spacer()
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 22))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("未找到匹配的音色")
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Button("清除搜索") {
+                        voiceSearchQuery = ""
+                        voiceFilterScope = .all
+                    }
+                    .speechRailButton(.secondary)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, minHeight: 220)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(pagedVoiceRows.enumerated()), id: \.element.id) { index, voice in
+                        if index > 0 { SessionHairline() }
+                        voiceRow(voice)
+                    }
+                }
+                .frame(minHeight: 220, alignment: .top)
+
+                SessionHairline()
+                voicePaginationBar
             }
 
-            Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
             SessionHairline()
             personaLockBlock
+            Spacer(minLength: 0)
             SessionHairline()
             SessionPanelActions(alignment: .spread) {
-                Button("回到本次会话") { inspectorTab = .session }
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Button("🎙️ 录音克隆…") {
+                        navigation.request(.voiceClone)
+                    }
                     .speechRailButton(.secondary)
+                    .help("录制 10~30 秒样本，克隆专属音色")
+
+                    Button("✨ 创作音色…") {
+                        navigation.request(.voiceDesign)
+                    }
+                    .speechRailButton(.secondary)
+                    .help("用提示词创作新音色")
+                }
+
+                Button("回到会话") { inspectorTab = .session }
+                    .speechRailButton(.primary)
             }
         }
     }
 
-    /// 人设那块只读区。它在这一屏上是**对照物**：点进「音色」的人多半想改的是
-    /// "它怎么说话"，而这件事本轮改不了——所以要说清为什么，以及换它该走哪条路。
+    /// 紧凑角色说明区：告知用户角色在新轮次前已定，而音色随时可换且下一句生效。
     private var personaLockBlock: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-            Text("角色（它怎么说话）· 本轮已定")
-                .font(SpeechRailDesignTokens.Typography.captionMedium)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Image(systemName: "lock")
-                    .font(SpeechRailDesignTokens.Typography.caption)
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10))
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .accessibilityHidden(true)
-                Text(activePersonaTitle)
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                Text("对话角色：\(activePersonaTitle)")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                StatusPill(tone: .neutral, label: "只读")
-                Spacer(minLength: 0)
+                StatusPill(tone: .neutral, label: "会话锁定")
+                Spacer()
             }
-            Text("开始那一刻就定下了：留着这段开头，回答才快。中途换掉，之后每一轮都要重读一遍——"
-                + "你会觉得它突然变慢，也不像刚才那个助手了。要换就新开一轮，这一轮的记录留着。")
-                .font(SpeechRailDesignTokens.Typography.secondary)
+            Text("角色设定仅在新开会话前可选；朗读音色可随时在上方切换并于下一句生效。")
+                .font(SpeechRailDesignTokens.Typography.caption)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
         }
         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-        .padding(.vertical, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.35))
     }
 
     private var recordTabBody: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 10) {
                 SessionKVRow("这一段", "\(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句")
                 SessionKVRow("记录库", recent.isEmpty ? "还没有对话记录" : "\(recent.count) 段 · 长期保留")
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.top, SpeechRailDesignTokens.Spacing.md)
+            .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+
+            SessionHairline()
 
             if recent.isEmpty {
-                Text("还没有对话记录。结束一轮之后，它会出现在这里。")
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
-            } else {
-                ForEach(recent.prefix(6)) { summary in
-                    Button {
-                        Task { await openRecord(summary) }
-                    } label: {
-                        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                            Text(summary.record.title ?? "这一轮对话")
-                                .font(SpeechRailDesignTokens.Typography.callout)
-                                .lineLimit(1)
-                            Text(recordSubtitle(summary))
-                                .font(SpeechRailDesignTokens.Typography.caption)
-                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                .lineLimit(1)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                        .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .speechRailPointerCursor()
+                VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Spacer()
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 24))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("还没有对话记录")
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Text("结束一轮对话后，它会自动归档在此处。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    Spacer()
                 }
-                // 这里只列最近 6 条（面板放不下更多），而上面的「记录库」那一行报的是
-                // **总数**——两个数不一样时得说清为什么，否则少掉的那些看起来像丢了。
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(recent.prefix(6).enumerated()), id: \.element.id) { index, summary in
+                            if index > 0 { SessionHairline() }
+                            Button {
+                                Task { await openRecord(summary) }
+                            } label: {
+                                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                    Text(summary.record.title ?? "这一轮对话")
+                                        .font(SpeechRailDesignTokens.Typography.callout)
+                                        .lineLimit(1)
+                                    Text(recordSubtitle(summary))
+                                        .font(SpeechRailDesignTokens.Typography.caption)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                        .lineLimit(1)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .speechRailPointerCursor()
+                        }
+                    }
+                }
                 if recent.count > 6 {
-                    Text("这里只列最近 6 条；点开任意一条，左边的记录库就能翻全部。")
+                    Text("这里只列最近 6 条；点开任意一条可查看完整记录库。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                        .padding(.top, SpeechRailDesignTokens.Spacing.tight)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                 }
             }
+
             Spacer(minLength: 0)
+            SessionHairline()
+            SessionPanelActions(alignment: .spread) {
+                Text(recent.isEmpty ? "本地加密留存" : "共 \(recent.count) 段对话归档")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                Button("回到会话") { inspectorTab = .session }
+                    .speechRailButton(.primary)
+            }
         }
     }
 
@@ -1837,9 +2760,9 @@ public struct AssistantView: View {
     }
 
     private var memoryTabBody: some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("长期记忆")
+                Text("长期记忆资产")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Spacer()
@@ -1854,6 +2777,9 @@ public struct AssistantView: View {
             }
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
             .padding(.top, SpeechRailDesignTokens.Spacing.sm)
+            .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
+
+            SessionHairline()
 
             if isAddingMemory {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
@@ -1877,61 +2803,78 @@ public struct AssistantView: View {
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                SessionHairline()
             }
 
             if memories.isEmpty && !isAddingMemory {
-                // 这一句必须与写入点说的是同一件事：写进来的入口是**对话行尾那颗书签**或上方「+ 添加记忆」。
-                Text("还没有记下来的事。对话里点某一行的「记住」或点击上方「+ 添加记忆」，"
-                    + "内容就会长期留在这里，下一轮开始生效。")
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
-            }
-            ForEach(memories) { memory in
-                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Text(memory.body)
-                            .font(SpeechRailDesignTokens.Typography.callout)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 0)
-                        StatusPill(
-                            tone: memory.isActive ? .healthy : .neutral,
-                            label: memory.isActive ? memoryKindTitle(memory.kind) : "已停用"
-                        )
-                    }
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button(memory.isActive ? "停用" : "启用") {
-                            Task {
-                                try? await session.setMemoryActive(id: memory.id, active: !memory.isActive)
-                                await reloadMemories()
-                            }
-                        }
-                        .buttonStyle(.link)
+                VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Spacer()
+                    Image(systemName: "brain.head.profile")
+                        .font(.system(size: 24))
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    Text("还没有长期记忆")
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    Text("在对话中点击句末「记住」或上方添加，内容将在下一轮开始起效。")
                         .font(SpeechRailDesignTokens.Typography.caption)
-                        Button("移除") {
-                            Task {
-                                try? await session.removeMemory(id: memory.id)
-                                await reloadMemories()
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(memories.enumerated()), id: \.element.id) { index, memory in
+                            if index > 0 { SessionHairline() }
+                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                    Text(memory.body)
+                                        .font(SpeechRailDesignTokens.Typography.callout)
+                                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Spacer(minLength: 0)
+                                    StatusPill(
+                                        tone: memory.isActive ? .healthy : .neutral,
+                                        label: memory.isActive ? memoryKindTitle(memory.kind) : "已停用"
+                                    )
+                                }
+                                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                    Button(memory.isActive ? "停用" : "启用") {
+                                        Task {
+                                            try? await session.setMemoryActive(id: memory.id, active: !memory.isActive)
+                                            await reloadMemories()
+                                        }
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                    Button("移除") {
+                                        Task {
+                                            try? await session.removeMemory(id: memory.id)
+                                            await reloadMemories()
+                                        }
+                                    }
+                                    .buttonStyle(.link)
+                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                }
                             }
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                         }
-                        .buttonStyle(.link)
-                        .font(SpeechRailDesignTokens.Typography.caption)
                     }
                 }
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             }
+
             Spacer(minLength: 0)
-            // 三件事按用户会问的顺序说：谁写的、什么时候起作用、移除会动到什么。
-            Text("只有你点「记住」的那些会写进来；它在**下一轮**生效；移除记忆不会动历史记录。")
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                .padding(.bottom, SpeechRailDesignTokens.Spacing.sm)
+            SessionHairline()
+            SessionPanelActions(alignment: .spread) {
+                Text("记忆长期留存，下一轮生效")
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                Button("回到会话") { inspectorTab = .session }
+                    .speechRailButton(.primary)
+            }
         }
     }
 
@@ -2047,6 +2990,12 @@ public struct AssistantView: View {
     }
 
     private func start() async {
+        guard preferences.isLLMConfigured else {
+            await MainActor.run {
+                withAnimation { isShowingQuickLLM = true }
+            }
+            return
+        }
         let persona = preferences.persona(id: selectedPersonaID) ?? preferences.defaultPersona
         await assistant.start(
             persona: persona,

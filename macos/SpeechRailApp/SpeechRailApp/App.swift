@@ -280,6 +280,7 @@ struct SpeechRailApp: App {
                     await meeting.minutes.recoverPending(
                         configuration: preferences.minutesConfiguration
                     )
+                    await model.refreshCreatorVoices()
                 }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))

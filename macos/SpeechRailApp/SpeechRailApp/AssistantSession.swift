@@ -12,6 +12,9 @@ import Observation
 //   2. **音色只是声音**。换音色走 `session.update`，下一句生效，并落一条
 //      `session_change(kind='voice')`——「第 N 句起」这句话必须有数据支撑。
 //   3. **打字提问不朗读回复**（§6.1）：正文落库（`source='keyboard'`），回复仍可点「重播」。
+//   4. **契约在顶层 `instructions`，人设只是风格**：语音对话契约走 Responses 的 `instructions`
+//      （每轮重发，续轮不继承），人设走 developer 消息并让位给契约；送 TTS 前还有一道文本清洗。
+//      三者都收在 `VoicePrompt.swift` 里，单独可测。
 //
 // 打断的口径来自契约与规格：服务端检测到人声时会自己取消 TTS（Barge-in），
 // 客户端要做的只有三件——丢掉还没播的缓冲、留下服务端已经生成的那一句、记 `interrupted`。
@@ -299,11 +302,11 @@ public final class AssistantSession {
     ///
     /// 被拒时这一句仍用旧音色说，给可读原因与可用内置声音列表（§9 第 14 行）。
     public func changeVoice(to voice: String, name: String? = nil) async {
-        guard let client else { return }
         let previous = voiceID
+        voiceID = voice
+        guard let client else { return }
         do {
             try await client.updateVoice(voice)
-            voiceID = voice
             try? await coordinator.noteVoiceChange(
                 atOrdinal: currentOrdinal + 1,
                 // 名字一起存：库里那一列是 `id|name`，音色改名或删除之后
@@ -372,7 +375,9 @@ public final class AssistantSession {
         guard turn.role == .assistant, let client else { return }
         isSpeaking = true
         phase = .speaking
-        try? await client.speak(turn.text)
+        // 重播与首次朗读同一条口径：过一遍清洗，否则漏出来的标记会被念第二遍。
+        let utterance = VoicePrompt.spokenText(from: turn.text)
+        try? await client.speak(utterance.isEmpty ? turn.text : utterance)
     }
 
     /// 静音 / 取消静音。**不结束会话**：麦克风还在会话手里，只是不上行。
@@ -696,7 +701,9 @@ public final class AssistantSession {
         let key = apiKeyProvider()
         var messages: [LLMMessage] = []
         if let persona {
-            messages.append(LLMMessage(role: .developer, text: persona.body, cacheBreakpoint: true))
+            messages.append(
+                LLMMessage(role: .developer, text: VoicePrompt.styleBlock(persona.body), cacheBreakpoint: true)
+            )
         }
         if !memories.isEmpty {
             let block = "以下是用户确认过、可以长期记住的事：\n"
@@ -717,7 +724,8 @@ public final class AssistantSession {
             for try await delta in await provider.stream(
                 configuration: configuration,
                 messages: messages,
-                apiKey: key
+                apiKey: key,
+                instructions: VoicePrompt.instructions
             ) {
                 reply += delta
                 streamingReply = reply
@@ -725,7 +733,8 @@ public final class AssistantSession {
                 // 逐句合成：用户不必等整段话写完才听见第一句（§8.1 的首次可听响应）。
                 buffer += delta
                 for sentence in Self.takeSentences(&buffer, flush: false) {
-                    try? await client?.speak(sentence)
+                    let utterance = VoicePrompt.spokenText(from: sentence)
+                    if !utterance.isEmpty { try? await client?.speak(utterance) }
                 }
             }
         } catch {
@@ -744,7 +753,8 @@ public final class AssistantSession {
         }
         if spoken {
             for sentence in Self.takeSentences(&buffer, flush: true) {
-                try? await client?.speak(sentence)
+                let utterance = VoicePrompt.spokenText(from: sentence)
+                if !utterance.isEmpty { try? await client?.speak(utterance) }
             }
         }
         streamingReply = nil
