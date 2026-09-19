@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from speechrail.domain.tts_text_planner import PLANNER_VERSION
 
-TTS_TIMING_SCHEMA = "tts_timing_v1"
+TTS_TIMING_SCHEMA: Literal["tts_timing_v1"] = "tts_timing_v1"
 
 
 class TtsTimingChunk(BaseModel):
@@ -42,7 +42,7 @@ class TtsTimingSidecar(BaseModel):
     coordinate_space: Literal[
         "normalized_spoken_unicode_codepoints"
     ] = "normalized_spoken_unicode_codepoints"
-    planner_version: Literal["tts_bounded_v1"] = PLANNER_VERSION
+    planner_version: Literal["tts_bounded_v1"] = "tts_bounded_v1"
     sample_rate: int = Field(gt=0)
     text_length: int = Field(ge=0)
     total_samples: int = Field(ge=0)
