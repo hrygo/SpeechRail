@@ -877,8 +877,18 @@ public struct AssistantView: View {
                     Button("检查输入电平") { isCheckingInput = true }
                         .speechRailButton(.secondary)
                 } else if state == .blocked {
+                    // 地址与模型都没填时这个按钮点了**不会有任何变化**（`retry()` 只会把
+                    // 同一个 `llmNotConfigured` 再落一次，屏幕上零回执），读起来像坏了。
+                    // `startPipeline()` 的第一道闸就是 `isLLMConfigured`，所以这种状态下
+                    // 确实没有可查对象——把出口留在结论条的「打开设置…」上。
                     Button("检查连接") { Task { await assistant.retry() } }
                         .speechRailButton(.secondary)
+                        .disabled(!preferences.isLLMConfigured)
+                        .help(
+                            preferences.isLLMConfigured
+                                ? "重新走一遍连通性与接口检查"
+                                : "还没填服务地址与模型；先在「设置 · 会话」里填好，再来点它"
+                        )
                 } else if state == .live {
                     Button("换音色") { inspectorTab = .record }
                         .speechRailButton(.secondary)
