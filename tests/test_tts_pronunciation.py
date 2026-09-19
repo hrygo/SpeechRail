@@ -144,7 +144,8 @@ def test_registry_cas_revision_restart_revoke_and_delete(tmp_path) -> None:
     registry = PronunciationRegistry(path)
     first = registry.put("story", _entries(), expected_revision=None)
 
-    changed_entries = _entries() + (
+    changed_entries = (
+        *_entries(),
         PronunciationEntry(id="new", surface="GPU", spoken="G P U"),
     )
     with pytest.raises(PronunciationConflictError):
