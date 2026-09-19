@@ -669,8 +669,12 @@ class OpenAIRealtimeSession:
                 flush_threshold = max(1, int(chunk_sec * 32_000))
                 if self._unflushed_bytes >= flush_threshold:
                     self._unflushed_bytes = 0
+                    flush_started = _time.monotonic()
                     with contextlib.suppress(Exception):
                         await self._asr.flush()
+                    self._services.metrics.record_realtime_phase(
+                        "asr_flush", _time.monotonic() - flush_started
+                    )
 
         elif dec.kind == "end":
             self._services.metrics.record_vad("ended")
@@ -829,8 +833,12 @@ class OpenAIRealtimeSession:
             flush_threshold = max(1, int(chunk_sec * 32_000))
             if self._unflushed_bytes >= flush_threshold:
                 self._unflushed_bytes = 0
+                flush_started = _time.monotonic()
                 with contextlib.suppress(Exception):
                     await self._asr.flush()
+                self._services.metrics.record_realtime_phase(
+                    "asr_flush", _time.monotonic() - flush_started
+                )
 
     async def _commit_audio(self, reason: str = "client") -> None:
         # If speech admission is active, flush any remaining sub-frame leftover.
@@ -921,9 +929,17 @@ class OpenAIRealtimeSession:
             # terminal event.  Keep commit, final event delivery and teardown
             # under one request deadline so its governor lane is recoverable.
             async with asyncio.timeout(self._settings.request_timeout_seconds):
+                commit_started = _time.monotonic()
                 await self._asr.commit(want_segments=False)
+                self._services.metrics.record_realtime_phase(
+                    "asr_commit_ack", _time.monotonic() - commit_started
+                )
                 if self._asr_reader is not None:
+                    terminal_started = _time.monotonic()
                     await self._asr_reader
+                    self._services.metrics.record_realtime_phase(
+                        "asr_terminal_wait", _time.monotonic() - terminal_started
+                    )
                     self._asr_reader = None
         except TimeoutError as exc:
             await self._discard_failed_commit()
