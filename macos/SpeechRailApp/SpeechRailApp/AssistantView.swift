@@ -111,13 +111,13 @@ public struct AssistantView: View {
     }
 
     /// 三态：未开始 / 未配置模型 / 对话中。记录库是**同一个页面的另一个状态**（`reviewRecord`）。
-    private var state: State {
+    private var state: ViewState {
         if reviewRecord != nil { return .review }
         if isLive { return .live }
         return blockedReason == nil ? .ready : .blocked
     }
 
-    private enum State {
+    private enum ViewState {
         case ready
         case blocked
         case live
