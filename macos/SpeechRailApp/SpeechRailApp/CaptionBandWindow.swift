@@ -56,34 +56,146 @@ public enum CaptionBandFontSize: String, CaseIterable, Identifiable, Sendable {
 }
 
 /// 浮层当前该占多大。界面侧每次变化把这一份交给控制器，控制器只做"算出高度、动窗口"。
+///
+/// **高度按"视觉行"算，不按"逻辑行"算**（`SESSIONS-SPEC` §6.3.1「内容撑高」）。
+/// 一句 45 字的长话在 760pt 宽的带子里会折成两行；只数逻辑行就少算一整行，
+/// 最下面那半句会被顶到窗口外——这正是离屏走查量出来的那条差（`band-live` 夹具）。
+/// 所以行数由 `visualRowCount(for:style:availableWidth:)` 用**同一套字体和真实可用宽度**
+/// 量出来：折行在内容出现之前就能算清，不需要等布局回读，也就没有"首句到达时带子跳一下"。
 struct CaptionBandMetrics: Equatable {
-    var lineCount: Int
+    /// 屏幕上要留出的视觉行数（折行已经算进去）。控制器会按上下限再裁一次。
+    var visualRowCount: Int
+    /// 受阻行的高度（`blockedRowHeight(title:detail:contentWidth:)`）；没受阻就是 0。
+    var blockedRowHeight: CGFloat = 0
     var fontSize: CaptionBandFontSize
     var isHovering: Bool
+    /// 带子的内容宽度。它参与折行计算，所以宽度一变高度就得重算。
+    var contentWidth: CGFloat = SpeechRailDesignTokens.Layout.captionBandDefaultWidth
 
     static func height(_ metrics: CaptionBandMetrics) -> CGFloat {
         let layout = SpeechRailDesignTokens.Layout.self
         let rows: Int = min(
-            max(metrics.lineCount, layout.captionBandMinimumLineCount),
+            max(metrics.visualRowCount, layout.captionBandMinimumLineCount),
             layout.captionBandMaximumLineCount
         )
         let lineRow: CGFloat = metrics.fontSize.lineHeight + 2 * layout.captionLinePaddingV
         let hint: CGFloat = Self.lineHeight(for: .caption1)
         let foot: CGFloat = 2 * layout.captionBandFootPaddingV + max(layout.captionBandLevelBarHeight, hint)
         let verticalPadding: CGFloat = 2 * layout.captionBandPaddingV
-        let lines: CGFloat = CGFloat(rows) * lineRow
-        let gaps: CGFloat = CGFloat(rows) * layout.captionBandSpacing
+        let lines: CGFloat = CGFloat(rows) * (lineRow + layout.captionBandSpacing)
+        let blocked: CGFloat = metrics.blockedRowHeight > 0
+            ? metrics.blockedRowHeight + layout.captionBandSpacing
+            : 0
         // 工具条出现时窗口**向上长**，底边不动（`applyMetrics`）。
         let toolbar: CGFloat = metrics.isHovering
             ? 2 * layout.captionBandToolbarPaddingV + layout.captionBandIconButtonSize + layout.captionBandSpacing
             : 0
-        let total: CGFloat = verticalPadding + lines + gaps + foot + toolbar
+        let total: CGFloat = verticalPadding + blocked + lines + foot + toolbar
         return max(total, SpeechRailDesignTokens.CaptionBand.minimumHeight)
     }
 
     static func lineHeight(for style: NSFont.TextStyle) -> CGFloat {
         let font = NSFont.preferredFont(forTextStyle: style)
         return ceil(font.ascender - font.descender + font.leading)
+    }
+
+    /// 一段字在给定宽度下会占几个视觉行。**用同一套字体的真实排版结果算**：
+    /// 折行是这套高度计算里唯一没法靠"数逻辑行"得到的东西。
+    static func visualRowCount(
+        for text: String,
+        style: NSFont.TextStyle,
+        availableWidth: CGFloat
+    ) -> Int {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, availableWidth > 0 else { return 1 }
+        let font = NSFont.preferredFont(forTextStyle: style)
+        let attributed = NSAttributedString(string: trimmed, attributes: [.font: font])
+        // 宽度上留 2pt 余量：宁可多算一行把带子留高一点，也不要少算一行把字切掉。
+        let bounds = attributed.boundingRect(
+            with: NSSize(width: max(availableWidth - 2, 1), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading]
+        )
+        let line = max(1, lineHeight(for: style))
+        return max(1, Int(ceil(bounds.height / line)))
+    }
+
+    static func visualRowCount(
+        for text: String,
+        fontSize: CaptionBandFontSize,
+        availableWidth: CGFloat
+    ) -> Int {
+        visualRowCount(for: text, style: fontSize.textStyle, availableWidth: availableWidth)
+    }
+
+    /// 一行字幕里真正给文字用的宽度：两边各让 `captionLinePaddingH`；
+    /// 半句那一行还要给右边的「正在识别…」让位。
+    static func textAvailableWidth(contentWidth: CGFloat, isPartial: Bool) -> CGFloat {
+        let layout = SpeechRailDesignTokens.Layout.self
+        let base = contentWidth - 2 * layout.captionLinePaddingH
+        guard isPartial else { return max(base, 1) }
+        let label = NSAttributedString(
+            string: "正在识别…",
+            attributes: [.font: NSFont.preferredFont(forTextStyle: .caption1)]
+        )
+        return max(base - ceil(label.size().width) - SpeechRailDesignTokens.Spacing.xs, 1)
+    }
+
+    /// 受阻行的高度：标题一行 + 说明若干行（说明会折行），右边还要给动作按钮留出位置。
+    static func blockedRowHeight(title: String, detail: String, contentWidth: CGFloat) -> CGFloat {
+        let layout = SpeechRailDesignTokens.Layout.self
+        let textWidth = max(
+            contentWidth - 2 * layout.captionLinePaddingH - layout.captionBandBlockedActionsReserve,
+            1
+        )
+        let titleRows = CGFloat(visualRowCount(for: title, style: .callout, availableWidth: textWidth))
+        let detailRows = CGFloat(visualRowCount(for: detail, style: .caption1, availableWidth: textWidth))
+        let text = titleRows * lineHeight(for: .callout)
+            + detailRows * lineHeight(for: .caption1)
+            + SpeechRailDesignTokens.Spacing.micro
+        return text + 2 * layout.captionLinePaddingV
+    }
+
+    /// 从"要显示的内容 + 当前宽度"推出这一份指标。**视图和离屏走查共用这一个入口**，
+    /// 否则两边各算一次，量出来的高度就对不上账。
+    ///
+    /// 行数是**从最新一句往回数**的：屏幕上留得下几行就先满足最新的那几句，
+    /// 上面被顶掉的旧句交给滚动。
+    static func current(
+        lines: [CaptionSession.Line],
+        partialText: String?,
+        blocked: CaptionSession.BlockReason?,
+        fontSize: CaptionBandFontSize,
+        isHovering: Bool,
+        contentWidth: CGFloat
+    ) -> CaptionBandMetrics {
+        let layout = SpeechRailDesignTokens.Layout.self
+        let width = contentWidth > 0 ? contentWidth : layout.captionBandDefaultWidth
+        let limit = layout.captionBandMaximumLineCount
+        var rows = 0
+        if let partial = partialText, !partial.isEmpty {
+            rows += visualRowCount(
+                for: partial,
+                fontSize: fontSize,
+                availableWidth: textAvailableWidth(contentWidth: width, isPartial: true)
+            )
+        }
+        for line in lines.reversed() where rows < limit {
+            rows += visualRowCount(
+                for: line.text,
+                fontSize: fontSize,
+                availableWidth: textAvailableWidth(contentWidth: width, isPartial: false)
+            )
+        }
+        let blockedHeight = blocked.map {
+            blockedRowHeight(title: $0.title, detail: $0.detail, contentWidth: width)
+        } ?? 0
+        return CaptionBandMetrics(
+            visualRowCount: rows,
+            blockedRowHeight: blockedHeight,
+            fontSize: fontSize,
+            isHovering: isHovering,
+            contentWidth: width
+        )
     }
 }
 
@@ -95,7 +207,7 @@ public final class CaptionBandWindowController: NSObject {
     private let session: CaptionSession
     private let defaults: UserDefaults
     private var panel: CaptionBandPanel?
-    private var metrics = CaptionBandMetrics(lineCount: 2, fontSize: .standard, isHovering: false)
+    private var metrics = CaptionBandMetrics(visualRowCount: 2, fontSize: .standard, isHovering: false)
 
     private let onOpenActiveSession: () -> Void
 
@@ -322,6 +434,8 @@ struct CaptionBandView: View {
     @State private var isHovering = false
     @State private var isFollowing = true
     @State private var scrollProxy: ScrollViewProxy?
+    /// 自己量出来的内容宽度：宽度参与折行，所以高度得跟着它变。
+    @State private var contentWidth: CGFloat = 0
 
     private var fontSize: CaptionBandFontSize {
         CaptionBandFontSize(rawValue: fontSizeRaw) ?? .standard
@@ -331,15 +445,18 @@ struct CaptionBandView: View {
         session.lines
     }
 
-    private var visibleLineCount: Int {
-        rows.count + (session.partialText == nil ? 0 : 1)
+    private var effectiveContentWidth: CGFloat {
+        contentWidth > 0 ? contentWidth : SpeechRailDesignTokens.Layout.captionBandDefaultWidth
     }
 
     private var metrics: CaptionBandMetrics {
-        CaptionBandMetrics(
-            lineCount: visibleLineCount,
+        CaptionBandMetrics.current(
+            lines: rows,
+            partialText: session.partialText,
+            blocked: session.blocked,
             fontSize: fontSize,
-            isHovering: isHovering
+            isHovering: isHovering,
+            contentWidth: effectiveContentWidth
         )
     }
 
@@ -358,6 +475,9 @@ struct CaptionBandView: View {
         }
         .padding(.vertical, SpeechRailDesignTokens.Layout.captionBandPaddingV)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width in
+            contentWidth = width
+        }
         .onHover { hovering in
             isHovering = hovering
             onMetricsChange(metrics)

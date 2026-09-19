@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App · 实时会话模块设计规格"
 status: proposed
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "1.19.0"
+version: "1.20.0"
 date: 2026-09-19
 ---
 
@@ -374,7 +374,7 @@ M 条已写进纪要` + `⌘⇧I` + chevron），任何时候都能展开或收�
 
 | 项 | 规格 |
 |---|---|
-| 尺寸 | 默认 760 × 内容撑高（最少 2 行、最多 4 行）；宽度可拖 420–1200；位置记忆每屏一套 |
+| 尺寸 | 默认 760 × 内容撑高（最少 2 行、最多 4 行，按**视觉行**算——折行的长句占两行，见 §12.1.9）；宽度可拖 420–1200；宽度变了高度重算；位置记忆每屏一套 |
 | 默认位置 | 主屏底部居中，距屏幕底 96pt（避开 Dock 与常见视频控制条） |
 | 材质 | 系统浮动层材质（`NSVisualEffectView` 侧 `hudWindow` / `.glassEffect`），**不是**自绘半透明色块；稿里以 `surface/panel` + 1px `border/separator` 表示，实现取系统材质 |
 | 文本 | 行首可选说话人 chip（分人档位时）+ 正文。字号三档：紧凑 17 / 标准 20 / 大字 26（映射系统 `.title2` / `.title` / `.largeTitle`） |
@@ -1246,6 +1246,36 @@ data → computer-use **只按 AX 元素**（不用坐标点击、不激活窗�
 （`MinutesGenerator.failureNeedsSetup`），`MeetingSession.minutesNeedsSetup` 再并上
 「当前配置仍然空着」——重启后 `reload` 只读得回失败原因文本（库里没有 code 列）。
 **未做**：内心 OS 抽屉里同一类失败（消息已经写明「设置 → 会话」，但抽屉里没有那颗按钮）。
+
+#### 12.1.9 字幕带高度：按折行后的视觉行重算（2026-09-19，同一工装的第二处产出）
+
+离屏工装（§12.1.8.1）第一轮只看版面；第二轮把**窗口高度**也纳进了对账——窗口多高是**算**出来的
+（`CaptionBandMetrics.height`），内容要多高是**量**出来的（`NSHostingView.fittingSize`）。
+两者对不上，落在真机上就是"字被窗口切掉"。四条实证与处置：
+
+| # | 现象 | 实证 | 处置 |
+|---|---|---|---|
+| 1 | 高度按**逻辑行数**算，折行不算 | 4 条字幕里有一条长句折成两行：窗口按 4 行算出 225pt，屏幕上的内容要 240pt 以上 | 改按**视觉行**算：`visualRowCount(for:style:availableWidth:)` 用同一套系统字体与真实可用宽度做一次排版。折行在内容出现之前就算得清，所以仍然满足"高度先定、首句到达不跳"（`CaptionBandFontSize.lineHeight` 那条注释的口径不变） |
+| 2 | 打算显示哪几条不明确 | —— | 行数改成**尾部计划**：从最新一条往回累加，用满上限为止（`CaptionBandMetrics.current(...)`，视图与工装共用的唯一入口）。"最新的那句一定完整可见"从运气变成结构性保证，被顶掉的旧句交给滚动 |
+| 3 | 带子宽度可拖 420–1200，宽度没进算式 | —— | 视图自己 `onGeometryChange` 量内容宽度并交给 `CaptionBandMetrics`；拖窄一点，同一句话多折一行，窗口跟着长高 |
+| 4 | 受阻行被当成"一行" | 说明文字会折行，右侧还有动作按钮 | 受阻行单独量：标题（`callout`）+ 说明（`caption1`），先扣掉新增的 `Layout.captionBandBlockedActionsReserve`（240pt）再算折行行数。宁可留高，也不能把"怎么办"那颗按钮挤出窗口 |
+
+**测量方法本身的一处更正（重要）**：上一轮报的差额（`band-live` 差 95pt）里混进了工装假象——
+`LazyVStack` 在**无约束高度**下会多报一行（实测 0/1/2/3/4/5 条 → 滚动内容 0/42/125/167/209/251pt，
+即 N≥2 时按 N+1 行报）。它只出现在离屏 `fittingSize` 这种没有真实视口的场景；真机窗口高度是固定的，
+惰性栈在固定视口里不受影响。因此严格对账改用**同内容、非惰性布局的镜像**量一次，判据是
+「算出 ≥ 实测」。30 条样例（三档字号 × 五种长度、0–5 条短句、长句折行、六种受阻原因）全部通过，
+余量分别是 2/3/4 行 3/7/11pt、长句折行 27pt、受阻 39pt。
+
+**改动**：`CaptionBandWindow.swift`（`CaptionBandMetrics` 新增 `visualRowCount` / `blockedRowHeight` /
+`contentWidth` 与唯一入口 `current(...)`；视图不再自己数行）、`SpeechRailDesignTokens.swift`
+（新增 `captionBandBlockedActionsReserve`，并把行数注释写成**视觉行**）、`CaptionSession.swift`
+（`#if DEBUG` 的 `applyRenderFixture`：只写展示态，不碰存储、网络与设备）。
+
+**稿面待同步**：`main.js` 字幕带板的说明句写「高度跟随行数（2–4 行）」，口径应改成「视觉行（折行算）」。
+稿上画的是短句，几何不受影响，只是那句话的措辞。
+
+**仍未验证**：真机上浮层材质、屏幕吸附位置、悬停工具条出现时"向上长"三件事仍要解锁后走查。
 
 ## 13. 风险与待裁决
 

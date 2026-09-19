@@ -201,8 +201,12 @@ public enum SpeechRailDesignTokens {
         /// 默认位置：主屏底部居中，距屏幕底 96pt（避开 Dock 与常见视频控制条）。
         public static let captionBandBottomInset: CGFloat = 96
         /// 高度按内容撑，下限 2 行、上限 4 行（再多的行走回看）。
+        // 行数是**视觉行**（折行算两行），不是逻辑句数：一句长话在带子里占几行，
+        // 高度就得留几行，否则最后半句会被窗口切掉。见 `CaptionBandMetrics`。
         public static let captionBandMinimumLineCount: Int = 2
         public static let captionBandMaximumLineCount: Int = 4
+        /// 受阻行右侧要给动作按钮留出的宽度；算说明文字能折几行时先扣掉它。
+        public static let captionBandBlockedActionsReserve: CGFloat = 240
         public static let captionBandCornerRadius: CGFloat = 12
         public static let captionBandPaddingV: CGFloat = 10
         /// 工具条 / 字幕行 / 页脚之间的间隙（稿 `gap: 4`）。

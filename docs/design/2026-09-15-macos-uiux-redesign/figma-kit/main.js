@@ -4021,7 +4021,7 @@ function buildFloatBoards(group) {
 
   boards.push(floatBoard("浮层 · 字幕带 · 跟随中", "字幕带 · 跟随中（默认，2 行）",
     "半透明材质由系统提供（NSVisualEffectView · hudWindow）；稿里以 surface/panel + 1px hairline 表示。" +
-    "高度跟随行数（2–4 行），宽度可拖 420–1200，位置按屏幕记忆。",
+    "高度跟随视觉行数（2–4 行，折行的长句占两行），宽度可拖 420–1200，位置按屏幕记忆。",
     function (b) {
       add(b, captionBandFrame({
         hint: "跟随中 · ⌘⇧L 暂停 · 上滚回看", level: 0.62,
