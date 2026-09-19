@@ -24,6 +24,12 @@ PRONUNCIATION_ENTRY_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 _MARKDOWN_CHARS = frozenset("*#`~_>")
 _TRAILING_WEAK = frozenset("，,、：:")
 _SENTENCE_TERMINATORS = frozenset("。！？!?；;…—.")
+_URL_RE = re.compile(r"(?i)(?:https?://|www\\.)[^\\s]+")
+_EMAIL_RE = re.compile(
+    r"(?i)(?<![\\w.+-])[\\w.+-]+@[\\w.-]+\\.[a-z]{2,}(?![\\w.-])"
+)
+_FENCED_CODE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\\n]+`")
 EntrySource = Literal["system", "user"]
 
 
@@ -232,6 +238,31 @@ def _normalization_mapping(raw: str) -> tuple[str, tuple[tuple[int, int], ...]]:
     return normalized, mapping
 
 
+def _protected_raw_ranges(raw: str) -> tuple[tuple[int, int], ...]:
+    ranges: list[tuple[int, int]] = []
+    for pattern in (_FENCED_CODE_RE, _INLINE_CODE_RE, _URL_RE, _EMAIL_RE):
+        ranges.extend((match.start(), match.end()) for match in pattern.finditer(raw))
+    if not ranges:
+        return ()
+    ordered = sorted(ranges)
+    merged: list[tuple[int, int]] = [ordered[0]]
+    for start, end in ordered[1:]:
+        previous_start, previous_end = merged[-1]
+        if start <= previous_end:
+            merged[-1] = (previous_start, max(previous_end, end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _raw_span_is_protected(
+    raw_start: int,
+    raw_end: int,
+    protected: tuple[tuple[int, int], ...],
+) -> bool:
+    return any(raw_start < end and raw_end > start for start, end in protected)
+
+
 def _boundary_ok(text: str, start: int, end: int) -> bool:
     def word_char(char: str) -> bool:
         return char.isalnum() or char == "_"
@@ -286,6 +317,7 @@ def apply_pronunciation(
         )
 
     normalized, mapping = _normalization_mapping(raw_text)
+    protected_raw = _protected_raw_ranges(raw_text)
     if not normalized:
         return SpokenText(
             text="",
@@ -318,7 +350,14 @@ def apply_pronunciation(
                 language=language,
             )
             if end is not None:
-                candidates.append((end, entry))
+                raw_start = mapping[position][0]
+                raw_end = mapping[end - 1][1]
+                if not _raw_span_is_protected(
+                    raw_start,
+                    raw_end,
+                    protected_raw,
+                ):
+                    candidates.append((end, entry))
         if candidates:
             end, entry = min(
                 candidates,
