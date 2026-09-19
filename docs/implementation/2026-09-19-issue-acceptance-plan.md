@@ -547,6 +547,13 @@ ASR fixture 是外置合成静音，只能证明真实 worker 的调度/资源�
 已同步。该证据是 Python 合成 fake 的 HTTP 边界回归，不替代真实 managed runtime 的
 worker 恢复、延迟、资源、thermal 或声学验收。
 
+Realtime TTS now applies the same boundary: a known unavailable worker emits
+`backend_busy` with the namespaced `backend_unavailable` retry policy, terminates
+the response with `response.done(status=failed)`, and records `backend_busy` in an
+enabled render receipt. The regression also verifies that worker stderr details do
+not cross the WebSocket boundary. This is a deterministic handler test, not proof
+of managed worker recovery or realtime quality.
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
