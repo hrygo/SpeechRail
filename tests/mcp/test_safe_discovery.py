@@ -48,7 +48,7 @@ def test_capability_auth_and_storage_failures_are_not_legacy_fallback(status: in
 def test_describe_preserves_atomic_effective_snapshot_separate_from_legacy_observations() -> None:
     snapshot = {"schema_version": "effective_capabilities_v1", "snapshot_id": "e", "voices": []}
     def handler(request):
-        if request.url.path == "/v2/capabilities":
+        if request.url.path == "/v1/speechrail/capabilities":
             return httpx.Response(200, json=snapshot)
         if request.url.path == "/health":
             return httpx.Response(200, json={})
