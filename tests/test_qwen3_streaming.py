@@ -357,8 +357,9 @@ def test_factory_enforces_max_sessions_cap() -> None:
     )
     first = factory.create(language="zh", prompt="")
     second = factory.create(language="en", prompt="")
-    with pytest.raises(RuntimeError, match="busy"):
+    with pytest.raises(RealtimeSessionLimitError) as caught:
         factory.create(language="en", prompt="")
+    assert caught.value.busy_reason == BusyReason.REALTIME_SESSION_LIMIT
     factory.release(first)
     third = factory.create(language="en", prompt="")
     assert third is not first and third is not second
