@@ -209,6 +209,31 @@ def test_controller_reset_starts_a_new_request() -> None:
     assert controller.process(chunk) == first
 
 
+def test_frozen_controller_is_partition_invariant_and_resettable() -> None:
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+    source = _constant_pcm16(0.25, 4_800) + _constant_pcm16(0.1, 4_800)
+
+    whole = controller.process(source)
+    controller.reset()
+    assert controller.process(source) == whole
+
+    fragmented = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+    boundaries = (256, 1_152, 4_608, 9_600, len(source))
+    start = 0
+    fragments: list[bytes] = []
+    for end in boundaries:
+        fragments.append(fragmented.process(source[start:end]))
+        start = end
+
+    assert b"".join(fragments) == whole
+
+
 def test_controller_applies_calibration_when_first_chunk_covers_window() -> None:
     controller = StreamingPcm16LoudnessController(sample_rate=24_000)
     first_chunk = _constant_pcm16(0.02, 4_800)  # 200 ms

@@ -414,10 +414,11 @@ as implementation changes.
 ### Implementation deltas since the seven-increment checkpoint
 
 - **#34**: the frozen clone loudness path now has explicit regression cases for
-  leading silence, isolated transients, cross-block peak release and near-gate
-  samples in `tests/test_tts_loudness.py`; the existing production controller
-  remains request-scoped and length-preserving. This closes the reproduced F1–F4
-  code boundary, not the managed multi-voice or listening gate.
+  leading silence, isolated transients, cross-block peak release, near-gate
+  samples, transport fragmentation and reset in `tests/test_tts_loudness.py`;
+  the existing production controller remains request-scoped and length-preserving.
+  This closes the reproduced F1–F4 code boundary, not the managed multi-voice or
+  listening gate.
 - **#53**: the two macOS UI tests that targeted the ambiguous “服务状态” label now
   select the unique `overview` accessibility identifier. The latest full CI run
   `35459381100` passed the macOS App Build & Tests job; this remains CI evidence,
