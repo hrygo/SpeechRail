@@ -116,6 +116,26 @@ public final class CaptionSession {
     /// 失败过的话这里是给人看的一句；原始错误码不外泄（§9 的脱敏口径）。
     public private(set) var lastFailure: String?
 
+    #if DEBUG
+    /// 离屏渲染工装（`/tmp` 里的 `NSHostingView`）用的**只写展示状态**夹具。
+    ///
+    /// 字幕带是浮层，真机验收要"解锁 + 麦克风 + 服务"三样同时在手；在此之前，版面
+    /// （行、半句、页脚、受阻行）只能靠渲染真实视图来看。这个钩子沿用 App 里已有的
+    /// `--ui-test` fixture 口径：只在 Debug 构建里存在，不碰存储、网络与设备，
+    /// 也不改变任何产线行为。
+    func applyRenderFixture(
+        lines: [Line],
+        partialText: String?,
+        phase: Phase,
+        blocked: BlockReason?
+    ) {
+        self.lines = lines
+        self.partialText = partialText
+        self.phase = phase
+        self.blocked = blocked
+    }
+    #endif
+
     // MARK: 挂载点（由 App 注入）
 
     /// 浮层呈现口：`true` 出现、`false` 隐藏。会话层不认识窗口。
