@@ -180,13 +180,35 @@ def _voice_entry(
                         "supported",
                         reason="speechrail_versioned_preprocessor",
                     ),
+                    "purpose": parameter(
+                        "supported",
+                        values=["interactive", "prefetch"],
+                        default=None,
+                        transport="SpeechRail-Purpose header",
+                    ),
+                    "latency_budget_ms": parameter(
+                        "supported",
+                        minimum=50,
+                        maximum=120_000,
+                        default=None,
+                        transport="SpeechRail-Latency-Budget-Ms header",
+                        server_cap="request_timeout_seconds",
+                    ),
                 },
                 "output": {
                     "codecs": ["pcm", "wav", "mp3", "opus", "aac", "flac"],
                     "pcm_sample_rate": sample_rate,
                     "channels": 1,
                 },
-                "scheduling_class": "batch_tts",
+                "scheduling": {
+                    "default_class": "batch_tts",
+                    "purpose_classes": {
+                        "interactive": "realtime_tts",
+                        "prefetch": "batch_tts",
+                    },
+                    "same_lane_serial": True,
+                    "hard_preemption": False,
+                },
                 "terminal_evidence": "render_receipt_v1_optional",
             },
             "realtime_speech": {
