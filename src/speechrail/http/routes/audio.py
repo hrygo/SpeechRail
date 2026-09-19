@@ -2204,11 +2204,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         if receipt_id is not None:
             services.render_receipts.complete(receipt_id)
-        response = Response(content=content, media_type=media_type)
+        final_response = Response(content=content, media_type=media_type)
         if receipt_id is not None:
-            response.headers["SpeechRail-Receipt-Id"] = receipt_id
+            final_response.headers["SpeechRail-Receipt-Id"] = receipt_id
         if timing_id is not None:
-            response.headers["SpeechRail-Timing-Id"] = timing_id
-        return response
+            final_response.headers["SpeechRail-Timing-Id"] = timing_id
+        return final_response
 
     return router
