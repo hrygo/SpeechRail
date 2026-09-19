@@ -647,8 +647,18 @@ public struct PageScaffold<Content: View, Trailing: View>: View {
                 }
             }
         } else {
-            pageContent
-                .frame(maxHeight: .infinity, alignment: .topLeading)
+            if let minimumContentHeight {
+                GeometryReader { proxy in
+                    pageContent(
+                        paneHeight: proxy.size.height,
+                        minimumContentHeight: minimumContentHeight,
+                        growsWithContent: false
+                    )
+                }
+            } else {
+                pageContent
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
+            }
         }
     }
 

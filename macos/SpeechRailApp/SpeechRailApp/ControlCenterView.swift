@@ -20,6 +20,10 @@ public struct ControlCenterView: View {
     /// 一下变服务状态"。
     private static let landingRoute: AppRoute = .assistant
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// 记录是否是因为窗口拉窄而由系统自动收起左侧边栏（拉宽时据此自动恢复展开）
+    @State private var autoCollapsedSidebarDueToWidth = false
+    /// 上一次记录的窗口总宽度，用于避免初次渲染/冷启动动画闪动
+    @State private var lastObservedWindowWidth: CGFloat = 0
     @State private var skipsSwitchConfirmation = false
     @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
 
@@ -97,6 +101,10 @@ public struct ControlCenterView: View {
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
             )
             .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .preference(key: ControlCenterWindowWidthPreferenceKey.self, value: proxy.size.width)
+                }
 #if DEBUG
                 if isUITestSession {
                     ControlCenterWindowActivator()
@@ -104,6 +112,9 @@ public struct ControlCenterView: View {
                         .allowsHitTesting(false)
                 }
 #endif
+            }
+            .onPreferenceChange(ControlCenterWindowWidthPreferenceKey.self) { width in
+                handleWindowWidthChange(width)
             }
             .task {
                 // Settings ▸ 通用 can opt out of the launch-time read
@@ -394,6 +405,46 @@ public struct ControlCenterView: View {
             return 1_000
         }
         return SpeechRailDesignTokens.Layout.windowMinimumWidth
+    }
+
+    // MARK: - 侧边栏响应式自适应（接入中央 WindowLayoutTier 断点总线）
+
+    private func handleWindowWidthChange(_ width: CGFloat) {
+        guard width > 0 else { return }
+        navigation.updateWindowWidth(width)
+        let isColdStart = (lastObservedWindowWidth == 0)
+        lastObservedWindowWidth = width
+
+        let tier = navigation.layoutTier
+        // 在中屏与窄屏下（Window Width < 1280pt），立即优先收起边栏，全力保障主窗体饱满宽敞
+        if tier == .medium || tier == .compact {
+            if columnVisibility != .detailOnly {
+                if isColdStart {
+                    columnVisibility = .detailOnly
+                    autoCollapsedSidebarDueToWidth = true
+                } else {
+                    withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
+                        columnVisibility = .detailOnly
+                        autoCollapsedSidebarDueToWidth = true
+                    }
+                }
+            }
+        } else if tier == .expanded {
+            // 宽屏状态（Window Width ≥ 1360pt）：仅当此前是因为收窄被自动收起时，才自动恢复展开
+            if columnVisibility == .detailOnly && autoCollapsedSidebarDueToWidth {
+                withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
+                    columnVisibility = .all
+                    autoCollapsedSidebarDueToWidth = false
+                }
+            }
+        }
+    }
+}
+
+private struct ControlCenterWindowWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
     }
 }
 
