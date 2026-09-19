@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.deadline import await_until
 from speechrail.application.diarization import diarize_transcript
+from speechrail.application.render_receipts import bind_observed_runtime_revision
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
@@ -1767,6 +1768,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
             # Integrity and timing are measured over validated PCM16 before encoding.
             backend_response_id: str | None = None
             emitted_samples = 0
+            runtime_revision_checked = False
             try:
                 async with services.governor.reserve(
                     work_class,
@@ -1784,6 +1786,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         if counter is not None:
                             counter.accept(len(chunk.audio))
                         if receipt_id is not None:
+                            if not runtime_revision_checked:
+                                runtime_revision_checked = True
+                                bind_observed_runtime_revision(
+                                    services.render_receipts,
+                                    receipt_id,
+                                    synthesizer=synthesizer,
+                                    voice=synthesis.voice,
+                                )
                             services.render_receipts.accept_pcm(
                                 receipt_id,
                                 chunk.audio,

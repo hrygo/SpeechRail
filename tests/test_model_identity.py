@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from speechrail.backends.model_identity import (
     inspect_model,
+    observed_runtime_revision,
     read_quantization,
     verify_loaded_identity,
 )
@@ -18,6 +19,29 @@ from speechrail.config.model_catalog import ModelArtifact
 
 REVISION = "a" * 40
 SHA256 = "b" * 64
+
+
+def test_observed_runtime_revision_is_conservative_and_stable() -> None:
+    identity = {
+        "backend": "mlx-qwen3-tts",
+        "device": "mps",
+        "dtype": "int8",
+        "sample_rate": 24_000,
+        "family": "qwen3_tts",
+        "model_variant": "voice_design",
+        "quantization_bits": 8,
+        "quantization_group_size": 64,
+        "weight_fingerprint": "shape:" + ("a" * 64),
+    }
+
+    revision = observed_runtime_revision(identity)
+
+    assert revision is not None
+    assert revision.startswith("rt_")
+    assert observed_runtime_revision(dict(reversed(tuple(identity.items())))) == revision
+    changed = dict(identity, weight_fingerprint="shape:" + ("b" * 64))
+    assert observed_runtime_revision(changed) != revision
+    assert observed_runtime_revision({**identity, "family": None}) is None
 
 
 def _product(shape: list[int]) -> int:

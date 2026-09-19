@@ -85,6 +85,11 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 `active`、`warm_standby`、`cold_evicted`、`inactive` 或 `unconfigured` 等低基数诊断；冷状态
 不会单独把仍可在请求时加载的 `tts_ready=true` 改成 false。
 
+启用完整性回执时，`model.runtime_revision` 只有在首个 PCM 已由 worker 产生且 ready
+handshake 提供完整可验证身份后才会填充 `rt_...`；否则保持 `null`。该值是当前加载 worker
+的低披露结构身份摘要，不是本地路径，也不把 `shape:` 元数据误称为权重内容哈希；只读能力快照
+仍保持 `configured_catalog` / `null`，不会为发现请求启动模型。
+
 ---
 
 ## 3. 文件转写 API (`POST /v1/audio/transcriptions`)

@@ -16,9 +16,14 @@ _PCM = b"\x01\x00\x02\x00\x03\x00"
 
 
 class ReceiptSynthesizer:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, runtime_revision: str | None = None) -> None:
         self.requests: list[SpeechRequest] = []
         self.fail = fail
+        self.runtime_revision = runtime_revision
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        del voice
+        return self.runtime_revision
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
@@ -40,6 +45,7 @@ def _client(
     monkeypatch,
     *,
     fail: bool = False,
+    runtime_revision: str | None = None,
 ) -> tuple[TestClient, ReceiptSynthesizer, str]:
     preset = load_catalog().preset("quality")
     registry = VoiceRegistry(
@@ -57,7 +63,7 @@ def _client(
         "speechrail.domain.tts._GLOBAL_VOICE_REGISTRY",
         registry,
     )
-    synth = ReceiptSynthesizer(fail=fail)
+    synth = ReceiptSynthesizer(fail=fail, runtime_revision=runtime_revision)
     app = create_app(
         Settings(
             qwen3_model_dir=tmp_path / preset.asr,
@@ -114,6 +120,28 @@ def test_v1_speech_returns_negotiated_receipt_bound_to_revision(
     assert receipt["audio"]["integrity_boundary"] == "pcm16_pre_transport"
     assert receipt["model"]["runtime_revision"] is None
     assert "测试渲染回执" not in receipt_response.text
+
+
+def test_v1_receipt_binds_observed_runtime_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime_revision = "rt_" + ("d" * 64)
+    client, _synth, _revision = _client(
+        tmp_path,
+        monkeypatch,
+        runtime_revision=runtime_revision,
+    )
+
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Receipt-Mode": "integrity"},
+    )
+    receipt_id = response.headers["SpeechRail-Receipt-Id"]
+
+    receipt = client.get(f"/v1/speechrail/audio/receipts/{receipt_id}").json()
+    assert receipt["model"]["runtime_revision"] == runtime_revision
 
 
 def test_v1_accepts_namespaced_revision_pin_header(
