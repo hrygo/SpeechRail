@@ -846,8 +846,10 @@ public struct AssistantView: View {
                             } else if isLive {
                                 // 麦克风录音对讲中：由真实输入电平驱动
                                 let currentLevel = CGFloat(max(0.1, min(1.0, level * 3.0)))
-                                let sine = sin(date * 5.0 + Double(index) * 0.4)
-                                return CGFloat(0.3 + 0.7 * (currentLevel * (0.5 + 0.5 * abs(sine))))
+                                let sine = CGFloat(sin(date * 5.0 + Double(index) * 0.4))
+                                let pulse = 0.5 + 0.5 * abs(sine)
+                                let liveFactor = currentLevel * pulse
+                                return 0.3 + 0.7 * liveFactor
                             } else {
                                 return 0.4
                             }
