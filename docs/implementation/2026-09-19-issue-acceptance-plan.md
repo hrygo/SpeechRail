@@ -660,6 +660,26 @@ with `display_mapping_chunk_mismatch` or `display_mapping_span_invalid`; this
 is metadata-contract evidence only and does not establish real-model timing
 accuracy.
 
+### 2026-09-20 current-head deterministic regression refresh
+
+At head `392ffa8` (`392ffa890bebecf7bec9e94476af23babf0177b9`), Python `3.12.14`
+passed the issue-focused regression set covering frozen loudness, ASR mode
+scheduling, pronunciation routes and mapping, safe voice listing, TTS delivery,
+render receipts, and TTS timing routes:
+
+```text
+uv run --extra dev pytest -q --no-cov \
+  tests/test_tts_loudness_frozen.py tests/test_asr_mode.py \
+  tests/test_pronunciation_routes.py tests/test_voice_safe_listing.py \
+  tests/test_tts_delivery.py tests/test_render_receipts.py \
+  tests/test_render_receipt_routes.py tests/test_tts_timing.py \
+  tests/test_tts_timing_routes.py
+```
+
+All collected tests passed. This is current-head Python/contract evidence for
+#34/#44/#63/#64/#70/#71/#73; it does not substitute for managed model identity,
+resource/thermal measurements, or human acoustic evaluation.
+
 ### 2026-09-20 managed Realtime and overlap evidence refresh
 
 在现有 managed `quality` generation 102 上重新执行了官方 `bench_realtime_json.py`
