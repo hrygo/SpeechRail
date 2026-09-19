@@ -237,7 +237,11 @@ def _boundary_ok(text: str, start: int, end: int) -> bool:
         return char.isalnum() or char == "_"
 
     if start > 0 and word_char(text[start - 1]):
-        return False
+        # Numeric-unit fixtures such as "5km" are a required pronunciation
+        # use case. Treat digit -> alphabetic surface as a boundary, but keep
+        # ordinary alphabetic/underscore prefix collisions fail-closed.
+        if not (text[start - 1].isdigit() and text[start].isalpha()):
+            return False
     return not (end < len(text) and word_char(text[end]))
 
 
