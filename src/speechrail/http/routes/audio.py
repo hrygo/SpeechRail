@@ -1644,6 +1644,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     request_id=request_id,
                     sample_rate=resolved.tts_sample_rate,
                     display_mapping_status=display_mapping_status,
+                    expected_text_spans=tuple(
+                        (item.source_start, item.source_end)
+                        for item in timing_plan.chunks
+                    ),
                     display_spans=display_spans,
                     display_mapping_reason=display_mapping_reason,
                 )
