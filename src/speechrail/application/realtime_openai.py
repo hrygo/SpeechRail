@@ -1613,6 +1613,7 @@ class OpenAIRealtimeSession:
                 _ttfa_t0 = time.monotonic()
                 _ttfa_recorded = False
                 _admission_started = time.monotonic()
+                emitted_samples = 0
                 request = SpeechRequest(
                     text=text,
                     voice=voice,
@@ -1645,6 +1646,7 @@ class OpenAIRealtimeSession:
                                     wire_profile=wire_profile,
                                 )
                             )
+                            emitted_samples += len(chunk.audio) // 2
                             if receipt_id is not None:
                                 self._services.render_receipts.accept_pcm(
                                     receipt_id,
@@ -1677,6 +1679,23 @@ class OpenAIRealtimeSession:
                 )
                 return
 
+            if emitted_samples == 0:
+                if receipt_id is not None:
+                    self._services.render_receipts.fail(receipt_id, "empty_audio")
+                await self._send(
+                    error_event(
+                        code="empty_audio",
+                        message="TTS backend returned no audio",
+                    )
+                )
+                await self._send(
+                    self._response_done_event(
+                        response_id=response_id,
+                        status="failed",
+                        receipt_id=receipt_id,
+                    )
+                )
+                return
             await self._send(
                 response_audio_transcript_delta(
                     session_id=self._session_id,

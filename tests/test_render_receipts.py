@@ -89,6 +89,17 @@ def test_terminal_receipt_rejects_late_audio() -> None:
         registry.accept_pcm(receipt_id, b"\x00\x00")
 
 
+def test_empty_receipt_cannot_be_completed() -> None:
+    registry = RenderReceiptRegistry()
+    receipt_id = _begin(registry)
+
+    registry.complete(receipt_id)
+
+    receipt = registry.get(receipt_id)
+    assert receipt["status"] == "error"
+    assert receipt["error_code"] == "empty_audio"
+
+
 def test_find_by_request_id_returns_latest_receipt() -> None:
     registry = RenderReceiptRegistry()
     first = _begin(registry, request_id="shared")
