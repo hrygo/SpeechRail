@@ -49,7 +49,11 @@ from speechrail.http.routes.system import (
 )
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 _SAMPLE_RATE = 24_000
 _MAX_REFERENCE_PCM_BYTES = 30 * _SAMPLE_RATE * 2
@@ -176,6 +180,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
                 resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                purpose=WorkPurpose.VOICE_CREATION,
             ):
                 raw_wav = await _generate_reference(synthesizer, synthesis, expires_at=expires_at)
             raw_report = _grade_clone_audio(raw_wav)
@@ -197,7 +202,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 prompt="",
                 include_timestamps=False,
             )
-            async with services.governor.reserve(WorkClass.BATCH_ASR, expires_at=expires_at):
+            async with services.governor.reserve(\n                WorkClass.BATCH_ASR,\n                expires_at=expires_at,\n                purpose=WorkPurpose.VOICE_CREATION,\n            ):
                 remaining = expires_at - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError
