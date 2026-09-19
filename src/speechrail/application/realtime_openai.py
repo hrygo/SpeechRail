@@ -1022,13 +1022,38 @@ class OpenAIRealtimeSession:
                     "voice_not_found", f"unknown voice: {response_voice[:200]}"
                 ) from None
             self._require_voice_available(response_voice)
+        selected_voice = response_voice or str(
+            self._config.get("voice") or DEFAULT_VOICE_ID
+        )
+        from speechrail.domain.tts import get_voice_profile
+
+        try:
+            selected_profile = get_voice_profile(selected_voice)
+        except VoiceStoreUnavailableError:
+            raise RealtimeAdapterError(
+                "voice_store_unavailable",
+                "custom voice storage is unavailable",
+            ) from None
+        except ValueError:
+            raise RealtimeAdapterError(
+                "voice_not_found",
+                f"unknown voice: {selected_voice[:200]}",
+            ) from None
+        if selected_profile.revoked:
+            raise RealtimeAdapterError(
+                "voice_revoked",
+                f"voice {selected_voice[:200]} is revoked",
+            )
+
         response_id = f"resp_{uuid4().hex[:12]}"
         item_id = f"item_{uuid4().hex[:12]}"
         self._tts_response_id = response_id
         self._tts_task = asyncio.create_task(
             self._synthesize_tts(
                 self._pending_text,
-                voice=response_voice or str(self._config.get("voice") or DEFAULT_VOICE_ID),
+                voice=selected_voice,
+                voice_revision=selected_profile.revision,
+                voice_mode=selected_profile.mode,
                 language=str(self._config.get("language") or "auto"),
                 speed=response_speed,
                 response_id=response_id,
@@ -1057,6 +1082,11 @@ class OpenAIRealtimeSession:
                 "voice_not_found", f"unknown voice: {voice[:200]}"
             ) from None
 
+        if profile.revoked:
+            raise RealtimeAdapterError(
+                "voice_revoked",
+                f"voice {voice[:200]} is revoked",
+            )
         variant = self._tts_clone_variant if profile.mode == "clone" else self._tts_variant
         if variant not in {"voice_design", "custom_voice", "base"}:
             raise RealtimeAdapterError(
@@ -1091,11 +1121,19 @@ class OpenAIRealtimeSession:
         self._tts_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._tts_task
+        receipt_id = self._tts_receipt_id
+        if receipt_id is not None:
+            self._services.render_receipts.cancel(receipt_id)
         await self._send(
-            response_done(session_id=self._session_id, response_id=response_id, status="cancelled")
+            self._response_done_event(
+                response_id=response_id,
+                status="cancelled",
+                receipt_id=receipt_id,
+            )
         )
         self._tts_task = None
         self._tts_response_id = None
+        self._tts_receipt_id = None
 
     def _completed_event(self, *, transcript: str) -> dict[str, object]:
         """Render the terminal completed event for the current ASR item."""
@@ -1482,6 +1520,8 @@ class OpenAIRealtimeSession:
         text: str,
         *,
         voice: str,
+        voice_revision: str | None,
+        voice_mode: str,
         language: str,
         speed: float,
         response_id: str,
@@ -1497,6 +1537,39 @@ class OpenAIRealtimeSession:
         wire_profile: Literal["legacy", "current"] = (
             "current" if self._config.get("wire_profile") == "current" else "legacy"
         )
+        receipt_id: str | None = None
+        if self._render_receipts_enabled:
+            artifact = (
+                self._tts_clone_artifact
+                if voice_mode == "clone" and self._tts_clone_artifact is not None
+                else self._tts_artifact
+            )
+            try:
+                receipt_id = self._services.render_receipts.begin(
+                    request_id=response_id,
+                    response_id=response_id,
+                    voice_id=voice,
+                    voice_revision=voice_revision,
+                    model_artifact=artifact.key if artifact is not None else None,
+                    model_source=artifact.model_id if artifact is not None else None,
+                    model_variant=artifact.variant if artifact is not None else None,
+                    model_catalog_revision=(
+                        artifact.revision if artifact is not None else None
+                    ),
+                    model_runtime_revision=None,
+                    output_format="pcm16",
+                    sample_rate=24_000,
+                    boundary="pcm16_after_websocket_send",
+                )
+            except RuntimeError:
+                await self._send(
+                    error_event(
+                        code="render_receipt_store_full",
+                        message="render receipt store has no safe capacity",
+                    )
+                )
+                return
+        self._tts_receipt_id = receipt_id
         try:
             await self._send(response_created(session_id=self._session_id, response_id=response_id))
             await self._send(
@@ -1523,6 +1596,7 @@ class OpenAIRealtimeSession:
                     sample_rate=24_000,
                     speed=speed,
                     language=language,
+                    expected_voice_revision=voice_revision,
                 )
                 async with asyncio.timeout(self._settings.request_timeout_seconds):
                     async with self._services.governor.reserve(
@@ -1546,7 +1620,14 @@ class OpenAIRealtimeSession:
                                     wire_profile=wire_profile,
                                 )
                             )
+                            if receipt_id is not None:
+                                self._services.render_receipts.accept_pcm(
+                                    receipt_id,
+                                    chunk.audio,
+                                )
             except asyncio.CancelledError:
+                if receipt_id is not None:
+                    self._services.render_receipts.cancel(receipt_id)
                 raise
             except (
                 TTSDeliveryError,
@@ -1557,10 +1638,14 @@ class OpenAIRealtimeSession:
                 code = getattr(exc, "code", None) or (
                     "queue_full" if isinstance(exc, GovernorQueueFullError) else "backend_timeout"
                 )
+                if receipt_id is not None:
+                    self._services.render_receipts.fail(receipt_id, code)
                 await self._send(error_event(code=code, message="TTS response failed"))
                 await self._send(
-                    response_done(
-                        session_id=self._session_id, response_id=response_id, status="failed"
+                    self._response_done_event(
+                        response_id=response_id,
+                        status="failed",
+                        receipt_id=receipt_id,
                     )
                 )
                 return
@@ -1605,22 +1690,70 @@ class OpenAIRealtimeSession:
                     transcript=text,
                 )
             )
-            await self._send(response_done(session_id=self._session_id, response_id=response_id))
+            if receipt_id is not None:
+                self._services.render_receipts.complete(receipt_id)
+            await self._send(
+                self._response_done_event(
+                    response_id=response_id,
+                    status="completed",
+                    receipt_id=receipt_id,
+                )
+            )
         except asyncio.CancelledError:
+            if receipt_id is not None:
+                self._services.render_receipts.cancel(receipt_id)
             raise
-        except (WebSocketDisconnect, RuntimeError):
+        except WebSocketDisconnect:
+            if receipt_id is not None:
+                self._services.render_receipts.cancel(
+                    receipt_id,
+                    error_code="client_disconnected",
+                )
+            return
+        except RuntimeError:
+            if receipt_id is not None:
+                self._services.render_receipts.fail(
+                    receipt_id,
+                    "transport_error",
+                )
             return
         except Exception as exc:
+            if receipt_id is not None:
+                self._services.render_receipts.fail(
+                    receipt_id,
+                    "tts_error",
+                )
             traceback.print_exc(file=sys.stderr)
             with contextlib.suppress(Exception):
                 await self._send(error_event(code="tts_error", message=str(exc)))
                 await self._send(
-                    response_done(
-                        session_id=self._session_id,
+                    self._response_done_event(
                         response_id=response_id,
                         status="failed",
+                        receipt_id=receipt_id,
                     )
                 )
+
+    def _response_done_event(
+        self,
+        *,
+        response_id: str,
+        status: str,
+        receipt_id: str | None,
+    ) -> dict[str, object]:
+        event = response_done(
+            session_id=self._session_id,
+            response_id=response_id,
+            status=status,
+        )
+        if not self._render_receipts_enabled or receipt_id is None:
+            return event
+        try:
+            receipt = self._services.render_receipts.get(receipt_id)
+        except KeyError:
+            return event
+        event["speechrail"] = {"render_receipt": receipt}
+        return event
 
     async def _reserve_asr(self) -> None:
         self._asr_resources = AsyncExitStack()
