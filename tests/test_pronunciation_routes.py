@@ -80,7 +80,7 @@ def _client(
 
 def _create_set(client: TestClient) -> str:
     response = client.put(
-        "/v2/pronunciation-sets/story",
+        "/v1/speechrail/pronunciation-sets/story",
         json={
             "expected_revision": None,
             "entries": [
@@ -108,7 +108,7 @@ def test_v2_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
     revision = _create_set(client)
 
     response = client.post(
-        "/v2/audio/speech",
+        "/v1/audio/speech",
         headers={"SpeechRail-Pronunciation-Set": f"story@{revision}"},
         json={
             "model": "speechrail/qwen3-tts",
@@ -122,7 +122,7 @@ def test_v2_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
     assert synth.requests[-1].text == "去常安。"
 
     receipt = client.get(
-        f"/v2/audio/receipts/{response.headers['SpeechRail-Receipt-Id']}"
+        f"/v1/speechrail/audio/receipts/{response.headers['SpeechRail-Receipt-Id']}"
     ).json()
     assert receipt["text"]["pronunciation_set_id"] == "story"
     assert receipt["text"]["pronunciation_revision"] == revision
@@ -162,14 +162,14 @@ def test_pronunciation_management_cas_privacy_and_revoke(
     client, _synth, _registry = _client(tmp_path, monkeypatch)
     revision = _create_set(client)
 
-    listing = client.get("/v2/pronunciation-sets")
+    listing = client.get("/v1/speechrail/pronunciation-sets")
     assert listing.status_code == 200
     assert listing.json()["data"][0]["revision"] == revision
     assert "长安" not in listing.text
     assert "常安" not in listing.text
 
     stale = client.put(
-        "/v2/pronunciation-sets/story",
+        "/v1/speechrail/pronunciation-sets/story",
         json={
             "expected_revision": "pr_" + "0" * 32,
             "entries": [],
@@ -179,12 +179,12 @@ def test_pronunciation_management_cas_privacy_and_revoke(
     assert stale.json()["error"]["code"] == "pronunciation_conflict"
 
     revoke = client.post(
-        f"/v2/pronunciation-sets/story/revisions/{revision}/revoke"
+        f"/v1/speechrail/pronunciation-sets/story/revisions/{revision}/revoke"
     )
     assert revoke.status_code == 200
 
     speech = client.post(
-        "/v2/audio/speech",
+        "/v1/audio/speech",
         headers={"SpeechRail-Pronunciation-Set": f"story@{revision}"},
         json={
             "model": "speechrail/qwen3-tts",
@@ -196,5 +196,5 @@ def test_pronunciation_management_cas_privacy_and_revoke(
     assert speech.status_code == 409
     assert speech.json()["error"]["code"] == "pronunciation_revoked"
 
-    deleted = client.delete("/v2/pronunciation-sets/story")
+    deleted = client.delete("/v1/speechrail/pronunciation-sets/story")
     assert deleted.status_code == 200
