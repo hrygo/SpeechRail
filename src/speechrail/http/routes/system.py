@@ -36,6 +36,11 @@ from speechrail.compatibility.openai_realtime import (
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog, active_model_catalog
 from speechrail.domain import voice_quality as vq
+from speechrail.domain.idempotency import (
+    DurableIdempotencyJournal,
+    IdempotencyConflictError,
+    IdempotencyStoreUnavailableError,
+)
 from speechrail.domain.ports import (
     BatchTranscriber,
     SpeechRequest,
@@ -88,29 +93,31 @@ _TTS_LIFECYCLE_FIELDS = frozenset(
 )
 _LOGGER = logging.getLogger(__name__)
 
-# Bounded idempotency store keyed by (Idempotency-Key, audio sha256, sha256 of
-# ref_text). It retains only the created profile id — never the raw ref_text or
-# the full VoiceProfile — and evicts the oldest entry past 128 keys.
-_CLONE_IDEMPOTENCY_MAX_ENTRIES = 128
-_clone_idempotency: OrderedDict[tuple[str, str, str], str] = OrderedDict()
-_clone_idempotency_lock = threading.Lock()
+# Clone publication is single-owner local state. The journal stores only hashes,
+# operation metadata and the resulting profile ID; raw audio/text/API keys are never persisted.
+_CLONE_IDEMPOTENCY_OWNER = "speechrail-local"
+_CLONE_IDEMPOTENCY_OPERATION = "voice.clone"
+_clone_idempotency_journal = DurableIdempotencyJournal(
+    Path.home() / ".speechrail" / "voice_clone_idempotency.json",
+    max_entries=128,
+)
 
 
-def _clone_idempotency_key(
-    idempotency_key: str, audio_content: bytes, ref_text: str
-) -> tuple[str, str, str]:
-    audio_hash = hashlib.sha256(audio_content).hexdigest()
-    ref_hash = hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest()
-    return (idempotency_key, audio_hash, ref_hash)
-
-
-def _store_clone_idempotency_locked(
-    cache_key: tuple[str, str, str], profile_id: str
-) -> None:
-    _clone_idempotency[cache_key] = profile_id
-    _clone_idempotency.move_to_end(cache_key)
-    while len(_clone_idempotency) > _CLONE_IDEMPOTENCY_MAX_ENTRIES:
-        _clone_idempotency.popitem(last=False)
+def _clone_payload_fingerprint(
+    audio_content: bytes,
+    ref_text: str,
+    *,
+    name: str,
+    voice_id: str | None,
+) -> str:
+    payload = {
+        "audio_sha256": hashlib.sha256(audio_content).hexdigest(),
+        "ref_text_sha256": hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest(),
+        "name": name.strip(),
+        "voice_id": voice_id.strip().lower() if isinstance(voice_id, str) and voice_id.strip() else None,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _tts_lifecycle_diagnostics(
@@ -964,24 +971,6 @@ def create_system_router(services: AppServices) -> APIRouter:
             return read_error
 
         idempotency_key = request.headers.get("Idempotency-Key")
-        cache_key: tuple[str, str, str] | None = None
-        if idempotency_key:
-            cache_key = _clone_idempotency_key(idempotency_key, audio_content, ref_text)
-            cached_id = _clone_idempotency.get(cache_key)
-            if cached_id is not None:
-                try:
-                    profile = get_voice_registry().get_profile(cached_id)
-                except ValueError:
-                    # Stale idempotency entry: the cached profile was deleted after
-                    # the original clone. Drop the key and fall through to normal
-                    # creation instead of leaking a bare 500.
-                    with _clone_idempotency_lock:
-                        _clone_idempotency.pop(cache_key, None)
-                else:
-                    return JSONResponse(
-                        status_code=201,
-                        content=_voice_entry(profile, active, services.tts_ready),
-                    )
 
         ffmpeg_cmd = str(resolved.ffmpeg_path) if resolved.ffmpeg_path else "ffmpeg"
         try:
@@ -1014,8 +1003,70 @@ def create_system_router(services: AppServices) -> APIRouter:
             else None
         )
 
-        def _build_profile() -> VoiceProfile:
-            return get_voice_registry().create_cloned_profile(
+        fingerprint: str | None = None
+        if idempotency_key:
+            fingerprint = _clone_payload_fingerprint(
+                audio_content,
+                ref_text,
+                name=name,
+                voice_id=vid_str,
+            )
+            try:
+                decision = _clone_idempotency_journal.begin(
+                    owner=_CLONE_IDEMPOTENCY_OWNER,
+                    operation=_CLONE_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                )
+            except IdempotencyConflictError:
+                return error_response(
+                    409,
+                    request_id,
+                    "idempotency_conflict",
+                    "Idempotency-Key was already used with a different clone payload",
+                )
+            except IdempotencyStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "idempotency_store_unavailable",
+                    "Durable idempotency state is unavailable",
+                    retryable=True,
+                )
+            if decision.state == "pending":
+                return error_response(
+                    409,
+                    request_id,
+                    "idempotency_pending",
+                    "A previous clone request with this key has unknown completion state",
+                    retryable=True,
+                )
+            if decision.state == "completed":
+                if decision.result_id is None:
+                    return error_response(
+                        503,
+                        request_id,
+                        "idempotency_store_unavailable",
+                        "Completed idempotency record is missing its result",
+                        retryable=True,
+                    )
+                try:
+                    profile = get_voice_registry().get_profile(decision.result_id)
+                except (ValueError, VoiceStoreUnavailableError):
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_result_unavailable",
+                        "The original idempotent clone result is no longer available",
+                    )
+                return JSONResponse(
+                    status_code=201,
+                    content=_voice_entry(profile, active, services.tts_ready),
+                )
+
+        side_effect_committed = False
+        try:
+            profile = get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
                 audio_bytes=canonical_wav,
@@ -1023,26 +1074,33 @@ def create_system_router(services: AppServices) -> APIRouter:
                 duration_seconds=canonical_duration,
                 quality=report.to_dict(),
             )
-
-        def _create_or_reuse() -> VoiceProfile:
-            if cache_key is None:
-                return _build_profile()
-            with _clone_idempotency_lock:
-                existing_id = _clone_idempotency.get(cache_key)
-                if existing_id is not None:
-                    try:
-                        return get_voice_registry().get_profile(existing_id)
-                    except ValueError:
-                        # Stale idempotency entry: the cached profile was deleted.
-                        # Drop the key and re-create instead of failing the request.
-                        _clone_idempotency.pop(cache_key, None)
-                profile = _build_profile()
-                _store_clone_idempotency_locked(cache_key, profile.id)
-                return profile
-
-        try:
-            profile = _create_or_reuse()
+            side_effect_committed = True
+            if idempotency_key and fingerprint is not None:
+                result_id = _clone_idempotency_journal.complete(
+                    owner=_CLONE_IDEMPOTENCY_OWNER,
+                    operation=_CLONE_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    result_id=profile.id,
+                )
+                if result_id != profile.id:
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_conflict",
+                        "Another completed result already owns this Idempotency-Key",
+                    )
         except VoiceStoreUnavailableError:
+            if idempotency_key and fingerprint is not None and not side_effect_committed:
+                try:
+                    _clone_idempotency_journal.abort(
+                        owner=_CLONE_IDEMPOTENCY_OWNER,
+                        operation=_CLONE_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
+                except IdempotencyStoreUnavailableError:
+                    pass
             return error_response(
                 503,
                 request_id,
@@ -1050,7 +1108,27 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "Custom voice storage is unavailable",
                 retryable=True,
             )
+        except IdempotencyStoreUnavailableError:
+            # If publication already happened, preserve pending state. Retrying must
+            # not create a second voice until an operator resolves the unknown state.
+            return error_response(
+                503,
+                request_id,
+                "idempotency_store_unavailable",
+                "Voice may have been created but durable completion could not be recorded",
+                retryable=True,
+            )
         except ValueError as exc:
+            if idempotency_key and fingerprint is not None and not side_effect_committed:
+                try:
+                    _clone_idempotency_journal.abort(
+                        owner=_CLONE_IDEMPOTENCY_OWNER,
+                        operation=_CLONE_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
+                except IdempotencyStoreUnavailableError:
+                    pass
             return error_response(400, request_id, "voice_creation_failed", str(exc))
 
         return JSONResponse(
