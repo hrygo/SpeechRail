@@ -315,12 +315,27 @@ def _make_client(
     return TestClient(app), registry, synthesizer, voices_dir
 
 
-def _patch(registry: VoiceRegistry, wav: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch(
+    registry: VoiceRegistry,
+    wav: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    journal_path: Path | None = None,
+) -> None:
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
     monkeypatch.setattr(
         "speechrail.domain.tts.transcode_and_validate_clone_audio",
         lambda *args, **kwargs: (wav, 4.0),
     )
+    if journal_path is not None:
+        from speechrail.domain.idempotency import DurableIdempotencyJournal
+        from speechrail.http.routes import system as system_routes
+
+        monkeypatch.setattr(
+            system_routes,
+            "_clone_idempotency_journal",
+            DurableIdempotencyJournal(journal_path, max_entries=128),
+        )
 
 
 def _clone_payload(name: str = "我的数字分身", ref_text: str = "测试参考文本") -> dict[str, str]:
@@ -485,7 +500,12 @@ def test_s3_warn_clone_and_idempotency_dedup(
 ) -> None:
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(3.0)  # warn (duration 2-4s)
-    _patch(registry, wav, monkeypatch)
+    _patch(
+        registry,
+        wav,
+        monkeypatch,
+        journal_path=tmp_path / "clone-idempotency.json",
+    )
 
     payload = _clone_payload(name="轻度告警克隆", ref_text="白日依山尽，黄河入海流。")
     files = {"audio": ("sample.wav", wav, "audio/wav")}
@@ -508,7 +528,12 @@ def test_clone_completed_idempotency_result_is_not_recreated_after_delete(
 ) -> None:
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
-    _patch(registry, wav, monkeypatch)
+    _patch(
+        registry,
+        wav,
+        monkeypatch,
+        journal_path=tmp_path / "clone-idempotency.json",
+    )
 
     payload = _clone_payload(name="过期幂等克隆", ref_text="白日依山尽，黄河入海流。")
     files = {"audio": ("sample.wav", wav, "audio/wav")}
