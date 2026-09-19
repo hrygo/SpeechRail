@@ -661,6 +661,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 "clone_loudness_requests",
                 "clone_loudness_calibrated",
                 "clone_loudness_peak_ceiling",
+                "float_overrange_chunks",
             )
             if (count := int(self._delivery_stats.get(name, 0))) > 0
         }
@@ -674,6 +675,12 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         samples = self._numpy.asarray(result.audio, dtype=self._numpy.float32).reshape(-1).copy()
         if samples.size == 0:
             return b""
+        finite = self._numpy.isfinite(samples)
+        if bool(self._numpy.any(finite & (self._numpy.abs(samples) > 1.0))):
+            # Diagnostic only: PCM16 quantization below is still the established
+            # contract. Real-model evidence decides whether protection must move
+            # into the float domain before any future acoustic behavior change.
+            self._delivery_stats["float_overrange_chunks"] += 1
         samples = self._numpy.nan_to_num(samples, nan=0.0, posinf=1.0, neginf=-1.0)
         if bool(getattr(result, "is_final_chunk", False)):
             non_silent = self._numpy.flatnonzero(self._numpy.abs(samples) > 1e-3)
