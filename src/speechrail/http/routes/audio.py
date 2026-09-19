@@ -84,25 +84,43 @@ _MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
 _DIARIZATION_UNCHUNKED_MAX_SECONDS = 30
 
 
+class _SpeechVoiceID(BaseModel):
+    """OpenAI custom voice reference accepted by /v1/audio/speech."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=200)
+
+
 class _SpeechHTTPBody(BaseModel):
     """OpenAI-compatible subset for the public sentence TTS endpoint."""
 
     model: str = Field(min_length=1, max_length=200)
     input: str = Field(min_length=1, max_length=4_096)
-    voice: str = Field(min_length=1, max_length=200)
+    voice: str | _SpeechVoiceID
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
     instructions: str | None = Field(default=None, max_length=10_000)
     stream_format: str | None = Field(default=None, max_length=16)
 
-    @field_validator("input", "voice")
+    @field_validator("input")
     @classmethod
     def reject_blank_text(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+
+    @field_validator("voice")
+    @classmethod
+    def normalize_voice(cls, value: str | _SpeechVoiceID) -> str | _SpeechVoiceID:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError("must not be blank")
+            return normalized
+        return value
 
     @field_validator("language")
     @classmethod
@@ -1400,7 +1418,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
-        preset_voice = resolve_voice(body.voice)
+        requested_voice = body.voice.id if isinstance(body.voice, _SpeechVoiceID) else body.voice
+        preset_voice = resolve_voice(requested_voice)
         from speechrail.domain.tts import get_voice_profile
         try:
             profile = get_voice_profile(preset_voice)
@@ -1419,7 +1438,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 400,
                 request_id,
                 "voice_not_found",
-                f"Unknown preset voice: {body.voice}",
+                f"Unknown preset voice: {requested_voice}",
                 param="voice",
             )
         if profile.revoked:
@@ -1452,7 +1471,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     request_id,
                     "voice_not_available",
                     (
-                        f"Voice {body.voice[:200]} is unavailable for the active TTS weights; "
+                        f"Voice {requested_voice[:200]} is unavailable for the active TTS weights; "
                         "use an available system voice from /v1/voices"
                     ),
                     param="voice",
