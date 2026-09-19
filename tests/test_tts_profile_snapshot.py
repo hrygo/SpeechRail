@@ -38,8 +38,8 @@ def test_parent_sends_the_leased_recipe_even_after_alias_changes(
         entered = asyncio.Event()
 
         @contextmanager
-        def lease(voice):
-            with original_lease(voice) as profile:
+        def lease(voice, *, expected_revision=None):
+            with original_lease(voice, expected_revision=expected_revision) as profile:
                 entered.set()
                 yield profile
 
