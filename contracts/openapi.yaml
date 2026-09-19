@@ -661,6 +661,16 @@ paths:
             enum: [integrity]
           description: Request a SpeechRail service-side integrity receipt.
         - in: header
+          name: SpeechRail-Timing-Mode
+          required: false
+          schema:
+            type: string
+            enum: [chunk]
+          description: |
+            Request a SpeechRail metadata-only chunk timing sidecar. This does
+            not change the OpenAI request body or delay first PCM. The sidecar
+            becomes terminal only after complete synthesis.
+        - in: header
           name: SpeechRail-Purpose
           required: false
           schema:
@@ -696,6 +706,11 @@ paths:
                 type: string
                 pattern: '^rr_[0-9a-f]{32}$'
               description: Present only when SpeechRail-Receipt-Mode=integrity.
+            SpeechRail-Timing-Id:
+              schema:
+                type: string
+                pattern: '^tm_[0-9a-f]{32}$'
+              description: Present when SpeechRail-Timing-Mode=chunk and the bounded timing registry accepted the request.
           content:
             audio/mpeg:
               schema:
@@ -743,6 +758,90 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+  /v1/speechrail/audio/receipts/{receipt_id}:
+    get:
+      operationId: getRenderReceipt
+      tags: [speech]
+      summary: Read one SpeechRail render-integrity receipt
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: path
+          name: receipt_id
+          required: true
+          schema:
+            type: string
+            pattern: '^rr_[0-9a-f]{32}$'
+      responses:
+        '200':
+          description: Metadata-only service-side render evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderReceipt'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/speechrail/audio/receipts/by-request/{source_request_id}:
+    get:
+      operationId: getRenderReceiptByRequest
+      tags: [speech]
+      summary: Read the newest render receipt for a public request ID
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: path
+          name: source_request_id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+      responses:
+        '200':
+          description: Metadata-only service-side render evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderReceipt'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/speechrail/audio/timings/{timing_id}:
+    get:
+      operationId: getTtsTimingSidecar
+      tags: [speech]
+      summary: Read an optional TTS chunk timing sidecar
+      description: |
+        Timing is reported in the final 24 kHz PCM sample domain and normalized
+        spoken-text Unicode code-point coordinates. DisplayText coordinates are
+        returned only when mapping is proven; otherwise they remain null.
+        unavailable timing never retroactively fails successful audio.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - in: path
+          name: timing_id
+          required: true
+          schema:
+            type: string
+            pattern: '^tm_[0-9a-f]{32}$'
+      responses:
+        '200':
+          description: Timing lifecycle/result metadata; never contains audio or full source text
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TtsTimingResource'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /v1/jobs:
     post:
       operationId: createSpeechJob
@@ -1203,6 +1302,136 @@ components:
           type: object
           additionalProperties:
             type: boolean
+    RenderReceipt:
+      type: object
+      required: [receipt_id, request_id, status, voice, model, audio, error_code, created_at, completed_at]
+      properties:
+        receipt_id:
+          type: string
+          pattern: '^rr_[0-9a-f]{32}$'
+        request_id:
+          type: string
+        response_id:
+          type: [string, 'null']
+        status:
+          type: string
+          enum: [pending, completed, cancelled, error]
+        voice:
+          type: object
+          additionalProperties: true
+        model:
+          type: object
+          additionalProperties: true
+        audio:
+          type: object
+          additionalProperties: true
+        text:
+          type: [object, 'null']
+          additionalProperties: true
+        planner:
+          type: [object, 'null']
+          additionalProperties: true
+        error_code:
+          type: [string, 'null']
+        created_at:
+          type: number
+        completed_at:
+          type: [number, 'null']
+    TtsTimingChunk:
+      type: object
+      required:
+        - planner_chunk
+        - text_start
+        - text_end
+        - audio_start_sample
+        - audio_end_sample
+        - timing_quality
+        - display_start
+        - display_end
+      properties:
+        planner_chunk:
+          type: integer
+          minimum: 0
+        text_start:
+          type: integer
+          minimum: 0
+        text_end:
+          type: integer
+          minimum: 0
+        audio_start_sample:
+          type: integer
+          minimum: 0
+        audio_end_sample:
+          type: integer
+          minimum: 0
+        timing_quality:
+          type: string
+          const: chunk
+        display_start:
+          type: [integer, 'null']
+          minimum: 0
+        display_end:
+          type: [integer, 'null']
+          minimum: 0
+    TtsTimingResource:
+      type: object
+      required:
+        - timing_id
+        - request_id
+        - status
+        - timing_quality
+        - coordinate_space
+        - planner_version
+        - sample_rate
+        - total_samples
+        - display_mapping
+        - chunks
+        - reason
+        - created_at
+        - completed_at
+      properties:
+        timing_id:
+          type: string
+          pattern: '^tm_[0-9a-f]{32}$'
+        request_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, completed, unavailable, cancelled, error]
+        timing_quality:
+          type: string
+          enum: [chunk, unavailable]
+        coordinate_space:
+          type: [string, 'null']
+          enum: [normalized_spoken_unicode_codepoints, null]
+        planner_version:
+          type: [string, 'null']
+          enum: [tts_bounded_v1, null]
+        sample_rate:
+          type: integer
+          minimum: 1
+        total_samples:
+          type: [integer, 'null']
+          minimum: 0
+        display_mapping:
+          type: object
+          required: [status, reason]
+          properties:
+            status:
+              type: string
+              enum: [identity, mapped, unavailable]
+            reason:
+              type: [string, 'null']
+        chunks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TtsTimingChunk'
+        reason:
+          type: [string, 'null']
+        created_at:
+          type: number
+        completed_at:
+          type: [number, 'null']
     HealthResponse:
       type: object
       required:
