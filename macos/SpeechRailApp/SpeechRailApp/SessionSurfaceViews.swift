@@ -302,8 +302,11 @@ public struct SessionLibraryView: View {
                     }
                     // 页头的主入口（稿 `primaryButton(row, "打开字幕带", …)`）。它**只放在这里**：
                     // 空态里再放一颗同一动作的按钮，等于同一件事两个入口。
+                    // 未开始时它叫「开始字幕」：这是设计稿页头的主按钮名（`开始字幕`），
+                    // 也是「开始之前」那张卡页脚那句「这里只有「开始字幕」」指的对象——
+                    // 两处名字不一样时，页脚就成了一句指不到的承诺（2026-09-19 离屏走查）。
                     PageActionButton(
-                        title: caption.phase.isLive ? "显示字幕带" : "打开字幕带",
+                        title: caption.phase.isLive ? "显示字幕带" : "开始字幕",
                         systemImage: "captions.bubble",
                         helpText: caption.phase.isLive
                             ? "把字幕带重新显示到屏幕上；它一直在听"
@@ -421,7 +424,7 @@ public struct SessionLibraryView: View {
                 tone: .healthy,
                 title: "现在就可以开始字幕",
                 message: "只靠语音识别，不用配大模型。开始后字幕带贴在屏幕底部，SpeechRail 不必在前台。",
-                hint: "页头的「打开字幕带」或 ⌘⇧L 都能开始；再按一次 ⌘⇧L 结束并保存。"
+                hint: "页头的「开始字幕」或 ⌘⇧L 都能开始；再按一次 ⌘⇧L 结束并保存。"
                     + "字幕带不抢焦点，所以 esc 不会关掉它。"
             ) {
                 Button("字幕设置") { openSettings() }
@@ -500,8 +503,11 @@ public struct SessionLibraryView: View {
                         trailingDetail: "三种受阻共用同一个形状：说明影响 + 唯一出口；不弹对话框。"
                     )
                     SessionHairline()
-                    SessionCheckRow(
-                        tone: microphoneAuthorized ? .ready : .attention,
+                SessionCheckRow(
+                        // 这张卡是**查表**，不是实时体检——上面的「开始之前」才是看现在状态的。
+                        // 三行都用 attention 的感叹号（与稿一致），别在「麦克风未授权」旁边
+                        // 画一个绿勾：那时这一行说的是"遇到这种情况怎么办"，不是"你没问题"。
+                        tone: .attention,
                         name: "麦克风未授权",
                         detail: "系统设置里给过权限才能采音。拒绝一次不会反复弹窗。"
                     ) {
@@ -510,7 +516,7 @@ public struct SessionLibraryView: View {
                     }
                     SessionHairline()
                     SessionCheckRow(
-                        tone: serviceTone,
+                        tone: .attention,
                         name: "语音服务未就绪",
                         detail: "识别服务没起来时，字幕带换成同一条受阻带并保留最后一句。"
                     ) {

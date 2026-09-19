@@ -335,10 +335,14 @@ public struct AssistantView: View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             switch reason {
             case .llmNotConfigured:
-                Button("打开设置…") { openSettings() }
-                    .speechRailButton(.primary)
+                // **不给「打开设置…」**：就地填的那张卡（`llmSetupCard`）就在这条带子下面，
+                // 摆一颗更远的主按钮等于同一件事两个入口，还把人的视线从表单上引开
+                // （用户 2026-09-19：一次性设置只在必要时刻就地打扰）。
+                // 想去设置页的人（那里有「检查连接」）仍有一条安静的路。
                 Button("了解如何配置") { isShowingConfigHelp = true }
                     .speechRailButton(.secondary)
+                Button("去设置里填") { openSettings() }
+                    .speechRailButton(.quiet)
             case .llmUnreachable:
                 Button("打开设置…") { openSettings() }
                     .speechRailButton(.primary)
@@ -371,7 +375,7 @@ public struct AssistantView: View {
         switch reason {
         case .llmNotConfigured:
             "密钥只存钥匙串，不写进配置文件，也不出现在日志或导出物里；"
-                + "改完不用重启 —— 设置页的「检查连接」会立刻给出结论。"
+                + "下面三格填完点「保存并开始对话」就连一次，连不上会在这条带子上说明原因。"
         case .llmUnreachable:
             "地址、模型或密钥改完点一次「重试」即可，不用重启 App。"
         case .microphoneDenied:
@@ -457,7 +461,7 @@ public struct AssistantView: View {
     private var modeCard: some View {
         SessionPanel {
             SessionPanelHead(
-                title: "怎么跟它说话",
+                title: "对话方式",
                 badge: nil,
                 detail: "开始那一刻定下来，本次对话中途不变；新开一轮可以换（记录留着）。"
             )
@@ -827,9 +831,22 @@ public struct AssistantView: View {
                 trailingDetail: "音色只影响朗读，所以开始之后仍然能随时换，下一句就听得见。"
             )
             SessionHairline()
-            ForEach(Array(voiceRows.enumerated()), id: \.element.id) { index, voice in
-                if index > 0 { SessionHairline() }
-                voiceRow(voice)
+            if voiceRows.isEmpty {
+                // 空态也要说人话：音色列表来自本机语音服务，服务没起来（或还在加载）时
+                // 这一栏会是空的。原来这里什么都不画，卡片只剩一行标题——看起来像坏了
+                // （2026-09-19 离屏走查所见）。现在直说为什么空、以及不选也能开始。
+                Text("还没读到可用的声音：音色由本机语音服务提供，它没起来或还在加载时这一栏是空的。"
+                    + "不选也能开始，会用默认声音。")
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+            } else {
+                ForEach(Array(voiceRows.enumerated()), id: \.element.id) { index, voice in
+                    if index > 0 { SessionHairline() }
+                    voiceRow(voice)
+                }
             }
         }
     }
