@@ -161,8 +161,10 @@ def _voice_entry(
         "available": reason == "available",
         "availability_reason": reason,
         "variant": variant,
-        "voice_revision": None,
-        "voice_identity_assurance": "legacy",
+        "voice_revision": profile.revision,
+        "voice_identity_assurance": (
+            "content_addressed" if profile.revision is not None else "legacy"
+        ),
         "model": model_identity(artifact),
         "descriptors": safe_voice_descriptor(profile),
         "quality_summary": _safe_quality_summary(profile.quality),
@@ -184,7 +186,16 @@ def _voice_entry(
                 "terminal_evidence": "response.done",
             },
         },
-        "conditional_synthesis": parameter("unsupported"),
+        "conditional_synthesis": parameter(
+            "supported" if profile.revision is not None and compatible else "unsupported",
+            reason=(
+                "legacy_voice_has_no_verified_revision"
+                if profile.revision is None
+                else "voice_not_available"
+                if not compatible
+                else "atomic_registry_lease_pin"
+            ),
+        ),
         "prepared_reference_condition_cache": parameter(
             "unsupported", reason="no_adapted_public_port"
         ),
