@@ -12,8 +12,10 @@ date: 2026-09-19
 
 ---
 
-新增安全发现入口：`GET /v1/speechrail/capabilities`、`/v1/speechrail/voices`、`/v1/speechrail/voices/{voice_id}`。
-详见[有效能力快照与安全目录](effective-capabilities.md)；旧 `/v1` 合成请求不变。
+安全发现与强一致性管理统一位于 `/v1/speechrail/*`；OpenAI 兼容的 TTS 主路径始终是
+`POST /v1/audio/speech`。revision pin、发音集和完整性回执通过可选
+`SpeechRail-*` Header 渐进增强，不改变 OpenAI JSON 请求体。
+详见[有效能力快照与安全目录](effective-capabilities.md)。
 
 ## 1. 模型身份与别名映射
 
@@ -151,7 +153,9 @@ Content-Type: application/json
 生成、首块等待和后续流交付。响应头发送前超时返回 `503 backend_timeout`；响应头发送后
 则关闭流并在 access 记录中标记 `outcome=cancelled` 或 `outcome=error`。
 
-标准接口要求 `voice`。质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
+标准接口要求 `voice`，同时接受 OpenAI 兼容的字符串形式和 custom voice 对象
+`{"id":"voice_1234"}`；对象中的 `id` 进入与字符串 voice 相同的本地解析流程。
+质量档 VoiceDesign 可将 OpenAI SDK 的复数 `instructions` 字段作为
 一次性音色设计指令传入；该字段不会持久化。CustomVoice 和克隆音色会稳定返回
 `400 instructions_unsupported` 或 `400 clone_instruction_unsupported`，不会静默忽略。克隆
 音色仅支持 `speed=1.0`，其他值返回 `400 clone_speed_unsupported`。
@@ -181,6 +185,12 @@ VoiceDesign 预览与 Base reference clone 仅 `quality`），见 §1.1。
 ---
 
 ## 5. 音色管理与自然语言设计 API (`/v1/voices`)
+
+> **兼容边界**：这一组 `/v1/voices*` 是 SpeechRail 的历史本地管理 API，不冒充
+> OpenAI 当前的 `POST /v1/audio/voices`。OpenAI custom voice 创建要求
+> `audio_sample + consent + name`，其中 consent 是独立资源。SpeechRail 在没有实现
+> 等价 consent 生命周期前，不会把本地 clone/reference API 宣称为该 OpenAI endpoint 的兼容实现。
+> 已创建的本地 voice 仍可通过 `/v1/audio/speech` 的字符串或 `{"id": ...}` 形式使用。
 
 SpeechRail 提供系统角色目录与自然语言音色设计（Voice Design）体系。系统角色在三档均
 可用；自定义 VoiceDesign 音色仅在当前权重声明 `supports_instruction=true` 时可合成。
