@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import threading
 
 import pytest
 
@@ -241,6 +243,33 @@ def test_registry_cas_revision_restart_revoke_and_delete(tmp_path) -> None:
     restarted.delete("story")
     with pytest.raises(KeyError):
         restarted.get("story")
+
+
+def test_registry_waits_for_a_process_lock_held_by_another_instance(tmp_path) -> None:
+    path = tmp_path / "pronunciation.json"
+    lock_path = path.with_name(f".{path.name}.lock")
+    registry = PronunciationRegistry(path)
+    finished = threading.Event()
+    revisions = []
+
+    with lock_path.open("a+b") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX)
+
+        def put_while_locked() -> None:
+            revisions.append(
+                registry.put("story", _entries(), expected_revision=None).revision
+            )
+            finished.set()
+
+        thread = threading.Thread(target=put_while_locked)
+        thread.start()
+        assert not finished.wait(timeout=0.5)
+
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+        assert finished.wait(timeout=1.0)
+        thread.join(timeout=1.0)
+
+    assert len(revisions) == 1
 
 
 def test_registry_file_does_not_contain_input_text(tmp_path) -> None:
