@@ -91,7 +91,11 @@ def test_v1_speech_returns_negotiated_receipt_bound_to_revision(
 ) -> None:
     client, synth, revision = _client(tmp_path, monkeypatch)
 
-    response = client.post(\n        "/v1/audio/speech",\n        json=_payload(),\n        headers={"SpeechRail-Receipt-Mode": "integrity"},\n    )
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Receipt-Mode": "integrity"},
+    )
     assert response.status_code == 200
     receipt_id = response.headers["SpeechRail-Receipt-Id"]
     assert receipt_id.startswith("rr_")
@@ -134,7 +138,11 @@ def test_failed_negotiated_speech_keeps_error_receipt_queryable_by_request(
     monkeypatch,
 ) -> None:
     client, _synth, _revision = _client(tmp_path, monkeypatch, fail=True)
-    response = client.post(\n        "/v1/audio/speech",\n        json=_payload(),\n        headers={"SpeechRail-Receipt-Mode": "integrity"},\n    )
+    response = client.post(
+        "/v1/audio/speech",
+        json=_payload(),
+        headers={"SpeechRail-Receipt-Mode": "integrity"},
+    )
     assert response.status_code == 502
     request_id = response.json()["error"]["request_id"]
 
