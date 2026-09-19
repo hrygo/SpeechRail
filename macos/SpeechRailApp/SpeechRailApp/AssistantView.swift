@@ -35,6 +35,11 @@ public struct AssistantView: View {
     @State private var isCreatingPersona = false
     @State private var personaDraft = PersonaDraft()
     @State private var isShowingConfigHelp = false
+    /// 记录库那一栏：重命名与移除都用一次确认，移除还要刷新列表（`reloadToken`）。
+    @State private var isRenamingRecord = false
+    @State private var renameDraft = ""
+    @State private var confirmingRemove = false
+    @State private var libraryReloadToken = 0
 
     private enum InspectorTab: String, CaseIterable, Identifiable {
         case session
@@ -132,6 +137,18 @@ public struct AssistantView: View {
         .sheet(isPresented: $isCreatingPersona) { personaSheet }
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isShowingConfigHelp) { configurationHelpSheet }
+        .sheet(isPresented: $isRenamingRecord) { renameRecordSheet }
+        .confirmationDialog(
+            "从记录库移除这一条？",
+            isPresented: $confirmingRemove,
+            titleVisibility: .visible
+        ) {
+            Button("移除", role: .destructive) { Task { await removeReviewedRecord() } }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这一条对话的正文与它的分组信息都会从本机库里删掉，之后找不回来。"
+                + "只是不想再看了，用「新建对话」离开就好——记录会一直留着。")
+        }
     }
 
     private var pagePurpose: String {
@@ -179,14 +196,31 @@ public struct AssistantView: View {
                     helpText: "结束这次对话；记录会留在记录库里"
                 ) { Task { await session.stopCapture(endingWith: .user) } }
             case .review:
+                // 稿 `screenClosureAssistantClosed` 的页头：`⌘⇧.` / 导出 / 新建对话 / 收起。
+                // 「返回实时」只在**确实还开着**一段对话时才给：记录库里翻旧记录的时候
+                // 可能同时有一轮在跑，那时它是一条真出口；没在跑时它只会把人送回"未开始"，
+                // 与「新建对话」是同一件事，摆两颗一样的按钮就是凑数。
                 SessionHeaderKeycap("⌘⇧.")
+                if isLive {
+                    PageActionButton(
+                        title: "返回实时",
+                        systemImage: "arrow.uturn.backward",
+                        helpText: "回到还在进行的那一轮"
+                    ) { closeReview() }
+                }
+                exportMenu
                 PageActionButton(
-                    title: "返回实时",
-                    systemImage: "arrow.uturn.backward",
-                    helpText: "回到这一轮的实时对话"
-                ) { closeReview() }
+                    title: "新建对话",
+                    systemImage: "message",
+                    helpText: "回到「先定人设与音色」：这一条记录留在库里，一个字都不动"
+                ) { startNewRound() }
             }
-            SessionPanelToggle(panelName: "本次会话", isCollapsed: isInspectorCollapsed) {
+            // 收起控件的名字按右栏**此刻装着什么**说（稿 `sideToggle`）：回看时那一栏叫
+            // 「记录信息」，不再是"本次会话"。
+            SessionPanelToggle(
+                panelName: state == .review ? "记录信息" : "本次会话",
+                isCollapsed: isInspectorCollapsed
+            ) {
                 isInspectorCollapsed.toggle()
             }
         }
@@ -894,6 +928,23 @@ public struct AssistantView: View {
                         .speechRailButton(.secondary)
                     Button("新开一轮以换人设") { Task { await restartWithPersonaPick() } }
                         .speechRailButton(.secondary)
+                } else if state == .review {
+                    // 稿 `screenClosureAssistantClosed` 右栏那三颗：「继续这一轮」是主按钮，
+                    // 重命名与移除在下面一行。移除**只在这一处给**（稿上写明的唯一入口），
+                    // 而且要先确认——记录是资产（用户 2026-09-17）。
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button("继续这一轮") { continueFromReview() }
+                            .speechRailButton(.primary)
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                            Button("重命名") {
+                                renameDraft = reviewRecord?.title ?? ""
+                                isRenamingRecord = true
+                            }
+                            .speechRailButton(.secondary)
+                            Button("从记录库移除", role: .destructive) { confirmingRemove = true }
+                                .speechRailButton(.secondary)
+                        }
+                    }
                 }
             }
         }
@@ -1071,6 +1122,7 @@ public struct AssistantView: View {
                 title: "对话记录",
                 foot: "搜索标题与正文；记录长期留在记录库，App 重启也在。",
                 selectedID: reviewRecord?.id,
+                reloadToken: libraryReloadToken,
                 onSelect: { summary in Task { await openRecord(summary) } }
             )
             .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
@@ -1103,7 +1155,9 @@ public struct AssistantView: View {
                 }
                 .frame(maxHeight: .infinity)
                 SessionHairline()
-                CardFoot(note: "继续这一轮会接在后面，不会新建一段记录。") {
+                // 这句话今天必须与右栏那颗按钮说的是同一件事（`SESSIONS-SPEC` §15 的 E7）：
+                // 继续这一轮是**新开一轮**（库里另起一条），不是把新对话接进这一条。
+                CardFoot(note: "继续这一轮是新开一轮：人设与音色可以重新选；这一条记录一个字不动。") {
                     Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
                         .speechRailButton(.secondary)
                 }
@@ -1175,6 +1229,106 @@ public struct AssistantView: View {
         reviewRecord = nil
         reviewLines = []
         reviewSpeakerNames = [:]
+    }
+
+    // MARK: - 记录库那一栏的三个动作（稿 `screenClosureAssistantClosed` 的右栏）
+
+    /// 「继续这一轮」= **新开一轮**（`SESSIONS-SPEC` §15 的 E7）：人设与音色按这一条记录预填，
+    /// 但人设是每轮锁一次，所以新的这一轮**可以重选**——这正是它存在的理由
+    /// （`SessionPreferences.prefill(from:)` 本来就是为它写的，此前没有调用点）。
+    ///
+    /// 它不把新的一轮接进这一条记录：记录是资产，旧的那条一个字不动（库里另起一条 `session` 行）。
+    private func continueFromReview() {
+        guard let record = reviewRecord else { return }
+        preferences.prefill(from: record)
+        selectedPersonaID = preferences.defaultPersonaID
+        selectedVoiceID = preferences.defaultVoiceID
+        closeReview()
+    }
+
+    /// 「新建对话」= 同一条出口，但**不**预填：用现在的默认人设与音色开头。
+    private func startNewRound() {
+        selectedPersonaID = preferences.defaultPersonaID
+        selectedVoiceID = preferences.defaultVoiceID
+        closeReview()
+    }
+
+    /// 重命名只改 `session.title`（列表与页头读它），正文一个字不动。
+    /// 库里那一行是唯一权威，所以改完**重新读一遍**，界面不与库脱钩。
+    private func renameReviewedRecord() async {
+        guard let id = reviewRecord?.id else { return }
+        let name = renameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        try? await session.setSessionTitle(id: id, title: name.isEmpty ? nil : name)
+        if let refreshed = (try? await session.record(id: id)) ?? nil {
+            reviewRecord = refreshed
+        }
+        libraryReloadToken += 1
+        isRenamingRecord = false
+    }
+
+    /// 移除这一条记录。**只在这一页给**（稿），且必须先确认（上面那张 `confirmationDialog`）。
+    /// 删完把列表重新读一遍并退出回看——留在"已经不在的那一条"上只会看到空状态。
+    private func removeReviewedRecord() async {
+        guard let id = reviewRecord?.id else { return }
+        try? await session.removeSession(id: id)
+        closeReview()
+        libraryReloadToken += 1
+    }
+
+    /// 页头的导出动作。四种格式收进一个菜单（与记录库、会议页同一个口径）：
+    /// 助手默认纯文本，其余三种仍可选。导出**重新读库**，不导界面上这一份内存镜像。
+    private var exportMenu: some View {
+        PageActionsMenu(
+            title: "导出…",
+            systemImage: "square.and.arrow.down",
+            helpText: "把这一条记录导出成文件"
+        ) {
+            ForEach(orderedFormats) { format in
+                Button(format.title) {
+                    Task { await exportReviewedRecord(as: format) }
+                }
+            }
+        }
+        .disabled(reviewRecord == nil)
+    }
+
+    private var orderedFormats: [SessionExportFormat] {
+        let preferred = SessionExportFormat.preferred(for: .assistant)
+        return [preferred] + SessionExportFormat.allCases.filter { $0 != preferred }
+    }
+
+    private func exportReviewedRecord(as format: SessionExportFormat) async {
+        guard let id = reviewRecord?.id else { return }
+        guard let record = (try? await session.record(id: id)) ?? nil else { return }
+        let rows = (try? await session.lines(sessionID: id)) ?? []
+        let names = (try? await session.speakerNames(sessionID: id)) ?? [:]
+        SessionExportPanel.write(
+            SessionExportPayload(record: record, lines: rows, speakerNames: names, minutes: nil),
+            as: format
+        )
+    }
+
+    private var renameRecordSheet: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
+            Text("给这一条记录起个名字")
+                .font(SpeechRailDesignTokens.Typography.sectionTitle)
+            Text("只在记录库里显示。留空就把名字去掉，回到按时间认它。")
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            TextField("名字", text: $renameDraft)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { Task { await renameReviewedRecord() } }
+            HStack {
+                Spacer(minLength: 0)
+                Button("取消") { isRenamingRecord = false }
+                    .speechRailButton(.secondary)
+                Button("保存") { Task { await renameReviewedRecord() } }
+                    .speechRailButton(.primary)
+            }
+        }
+        .padding(SpeechRailDesignTokens.Layout.cardInset)
+        .frame(width: 420)
     }
 
     /// 「麦克风未授权」的唯一出口。`Privacy_Microphone` 这个锚点与音色克隆、字幕带用的是

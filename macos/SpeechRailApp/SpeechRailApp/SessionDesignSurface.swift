@@ -667,6 +667,10 @@ public struct SessionLibraryColumn: View {
     public let title: String
     public let foot: String
     public let selectedID: String?
+    /// 外部动作（重命名 / 移除）改过库之后，用计数变化叫这一栏**重新读库**。
+    /// 列表的权威在库里，界面只是它的一个读数——不刷新就会留下一条已经不存在的记录
+    /// （或一个改过的旧名字），用户看到的是"点了没反应"。
+    public let reloadToken: Int
     public let onSelect: (SessionSummary) -> Void
 
     @Environment(SessionCoordinator.self) private var session
@@ -678,12 +682,14 @@ public struct SessionLibraryColumn: View {
         title: String,
         foot: String,
         selectedID: String?,
+        reloadToken: Int = 0,
         onSelect: @escaping (SessionSummary) -> Void
     ) {
         self.kind = kind
         self.title = title
         self.foot = foot
         self.selectedID = selectedID
+        self.reloadToken = reloadToken
         self.onSelect = onSelect
     }
 
@@ -745,7 +751,7 @@ public struct SessionLibraryColumn: View {
             CardFoot(note: foot) { EmptyView() }
         }
         .frame(maxHeight: .infinity)
-        .task(id: kind.rawValue) { await reload() }
+        .task(id: "\(kind.rawValue)-\(reloadToken)") { await reload() }
     }
 
     private var filtered: [SessionSummary] {
