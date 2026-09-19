@@ -50,7 +50,7 @@ public enum SpeechRailDesignTokens {
         /// 18pt。应用此前分 12 / 16 / 24 三档，本轮统一到这里（4pt 网格取 20，与页面级
         /// 块间距同值，残差 2pt；稿的工具栏式卡片 `composer` 例外，仍是 16/12）。
         public static let cardInset: CGFloat = 20
-        public static let windowMinimumWidth: CGFloat = 1_120
+        public static let windowMinimumWidth: CGFloat = 800
         public static let windowMinimumHeight: CGFloat = 720
         /// 配音台输入卡的高度**跟随正文**（`SpeechRailComposerTextEditor.HeightPolicy.contentDriven`），
         /// 两个值是**整张卡**（正文 + 页脚元信息行）的下限与上限，与稿的 `editor`

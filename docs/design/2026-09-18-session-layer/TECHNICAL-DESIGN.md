@@ -2,7 +2,7 @@
 title: "SpeechRail 会话层技术方案（终态）· 语音助手 / 会议助手 / 实时字幕"
 status: active
 audience: "SpeechRail macOS App 实现者、服务维护者、设计评审"
-version: "2.6.0"
+version: "2.7.0"
 date: 2026-09-19
 ---
 
@@ -25,6 +25,8 @@ date: 2026-09-19
 §13.3。**v2.1.0 记录 `T1`–`T5` 五条技术裁决（用户 2026-09-18「全面采纳」）**，其中 `T5` 的三条 schema
 加法已并入规格 §15.7 的 R2。**v2.2.0 增加 `T6` 存储分区与重装契约**（§6.6）。**v2.6.0 补 §5.5.1
 「系统上下文分层」（语音契约 → 人设/记忆 → 历史），并补 2026-09-19 的语音场景本机实测（§13.2）。**
+**v2.7.0 将助手默认音频链路落成 `AudioEngineSession`：采集与 TTS 共用一个 engine，对讲模式
+在 input/output I/O node 同时启用 voice processing，并实现设备配置变化后的重建（2026-09-19）。**
 **本版无待裁决项。**
 
 **与相邻设计包的关系。** 产品口径以 SESSIONS-SPEC 为准。本文对它**只做两处补充**：已写入的 §5.3.1
@@ -92,7 +94,7 @@ date: 2026-09-19
 
 | 组件 / 能力 | 归属 | 终态落点 | 依据 |
 |---|---|---|---|
-| 麦克风采集（会话） | 原生 | `AudioEngineSession` 的输入节点 | 与播放同引擎才拿得到系统 AEC（§3.3） |
+| 麦克风采集（会话） | 原生 | `AudioEngineSession` 的输入节点（当前实现位于 `AssistantAudioSession.swift`） | 与播放同引擎才拿得到系统 AEC（§3.3） |
 | 麦克风采集（音色克隆） | 原生 | 既有 `VoiceRecordingController`（`AVAudioRecorder`，**刻意不启用** AEC/AGC） | 克隆要的是用户本来的音色；两条通道目的不同（§3.1） |
 | 本机音频采集 | 原生 | `CaptureHelper`（XPC）的 process tap | 设备绑定 + TCC 身份 + 崩溃隔离（§3.2） |
 | 混音与格式归一 | 原生 | `AudioEngineSession`（host time 对齐） | 服务只收 16k/24k PCM16；统一 16k 以免换设备改格式 |
@@ -820,14 +822,16 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 - ✅ 规格 §5.3.1 与本文 §参考号一致（`v2.2.0` 与规格 v1.6.0 对得上）。
 - ✅ `UX-UI-SPEC` §13 的未决项 2（会话组进 `AppRoute`）与 4（实现侧 token 补齐）本轮结清。
 
-**实现状态**：阶段 1–9 的代码与文档都已落地（`macos/SpeechRailApp`，2026-09-18）。
-两处需要单独说明的差距：
+**实现状态**：阶段 1–9 的代码与文档都已落地（`macos/SpeechRailApp`，2026-09-19）。助手的
+`AudioEngineSession` 已接入 `AssistantSession` 默认链路；本轮已完成 App Debug 构建、测试 bundle
+编译与 SwiftPM target 构建，但尚未把真机声学测量写成通过结论。需要单独说明的差距：
 
 1. **阶段 5.5 的 tap spike 没有单独跑过**。本机音频那条路直接落成了代码，§12 第 1、2 条
    （授权触发点、`bundleIDs` 是否真按 App 生效、`processRestoreEnabled` 的真实行为）
    **仍然是未验证**；这三条正是这条来源的全部前提。它是这份方案里剩下最该先做的一件事。
-2. **§9 第 13 行（换设备 → 重建引擎 + 新行 `device_switch = 1`）未实装**：今天设备被拔表现为
-   采集流结束并落一条中断，而不是"重建引擎继续录、新行标 `device_switch = 1`"。
+2. **会议/字幕的既有 `MicrophoneCapture` 仍未实现 §9 第 13 行的 `device_switch = 1`**：今天这些
+   能力设备被拔仍表现为采集流结束并落一条中断。助手的 `AudioEngineSession` 已实现配置变化后的
+   input tap / converter / player 重建，但没有新增 `device_switch` 记录行。
 
 ## 12. 未验证清单
 
@@ -894,6 +898,12 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 | # | 未验证的事 | 影响 | 何时验 |
 |---|---|---|---|
 | 20 | **契约在第三方端点上的强度**：A/B 只在本机 oMLX 的 `Qwen3.6-35B-A3B-MLX-6bit` 上做过（带契约 0 处列表标记 / 不带 2 例各 3 处）；CLIProxyAPI 的 `gpt-5.6-luna` 只验了请求形状与缓存命中，**没验格式服从**，也没验"关 thinking 被拒后按退化形状发"的那条路 | 契约 + `spokenText` 清洗这两道防线在非 Qwen 模型上够不够；清洗只清排版语法，模型真要长篇讲，助手会照着念完 | 配到第三方端点之后，各跑 2–3 轮真实问答（含一次"用列表回答"的诱导） |
+
+**新增第 21 条（2026-09-19，助手共享音频引擎）**：
+
+| # | 未验证的事 | 影响 | 何时验 |
+|---|---|---|---|
+| 21 | `AudioEngineSession` 已在 input/output I/O node 同时调用 `setVoiceProcessingEnabled(true)`，但尚未在本机外放与耳机组合上量化 AEC 的 ERLE、双讲收敛、尾音残留与设备切换后的连续性 | 实时对讲是否真的比当前闭麦方案少回采；是否需要按路由禁用 duplex 或调整服务端 250 ms barge-in 冷却 | 真机声学验收：内置麦克风 + 内置扬声器、3.5 mm/USB/Bluetooth 耳机各至少一轮，分别测单讲、双讲、插拔设备 |
 
 ## 13. 来源与裁决
 

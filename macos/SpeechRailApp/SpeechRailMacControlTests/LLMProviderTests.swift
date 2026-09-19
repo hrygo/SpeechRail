@@ -1,5 +1,8 @@
 import Foundation
 import XCTest
+#if SWIFT_PACKAGE
+@testable import SpeechRailAppSupport
+#endif
 
 /// `LLMProvider` 的请求形状回归（`TECHNICAL-DESIGN` §5.5 + 2026-09-19 本机 oMLX 实测）。
 ///

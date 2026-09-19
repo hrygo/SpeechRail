@@ -20,6 +20,10 @@ public struct ControlCenterView: View {
     /// 一下变服务状态"。
     private static let landingRoute: AppRoute = .assistant
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// 记录是否是因为窗口拉窄而由系统自动收起左侧边栏（拉宽时据此自动恢复展开）
+    @State private var autoCollapsedSidebarDueToWidth = false
+    /// 上一次记录的窗口总宽度，用于避免初次渲染/冷启动动画闪动
+    @State private var lastObservedWindowWidth: CGFloat = 0
     @State private var skipsSwitchConfirmation = false
     @AppStorage("speechrail.refreshOnLaunch") private var refreshOnLaunch = true
 
@@ -97,6 +101,9 @@ public struct ControlCenterView: View {
                 minHeight: SpeechRailDesignTokens.Layout.windowMinimumHeight
             )
             .background {
+                ControlCenterResponsiveBridge { width, window in
+                    handleWindowWidthChange(width, in: window)
+                }
 #if DEBUG
                 if isUITestSession {
                     ControlCenterWindowActivator()
@@ -287,7 +294,8 @@ public struct ControlCenterView: View {
             minimumHeight: SpeechRailDesignTokens.List.sidebarRowHeight
         )
         .help("打开服务状态")
-        .accessibilityLabel("服务状态")
+        // 与侧栏的「服务状态」导航项保持唯一标识；当前值通过 accessibilityValue 提供。
+        .accessibilityLabel("服务状态摘要")
         .accessibilityValue(sidebarStatusText)
     }
 
@@ -394,6 +402,176 @@ public struct ControlCenterView: View {
             return 1_000
         }
         return SpeechRailDesignTokens.Layout.windowMinimumWidth
+    }
+
+    // MARK: - 侧边栏响应式自适应（接入中央 WindowLayoutTier 断点总线与原生 AppKit 侧边栏控制器）
+
+    private func handleWindowWidthChange(_ width: CGFloat, in window: NSWindow?) {
+        guard width > 0 else { return }
+        navigation.updateWindowWidth(width)
+
+#if DEBUG
+        // UI 契约测试必须通过侧栏切换页面；测试窗口会按屏幕尺寸落在 medium tier，
+        // 但这不应让测试依赖响应式折叠行为。生产窗口仍按真实宽度自动收起/恢复侧栏。
+        if isUITestSession {
+            columnVisibility = .all
+            return
+        }
+#endif
+
+        let isColdStart = (lastObservedWindowWidth == 0)
+        lastObservedWindowWidth = width
+
+        let tier = navigation.layoutTier
+        let targetWindow = window ?? NSApp.windows.first(where: { $0.identifier?.rawValue == AppNavigationState.controlCenterWindowID }) ?? NSApp.keyWindow
+
+        // 在中屏与窄屏下（Window Width < 1260pt），立即优先强制收起边栏！释放 240pt，全力保障主窗体饱满宽敞
+        if tier == .medium || tier == .compact {
+            if !NativeSidebarBridge.isSidebarCollapsed(in: targetWindow) {
+                NativeSidebarBridge.setSidebarCollapsed(true, in: targetWindow, animated: !isColdStart)
+                columnVisibility = .detailOnly
+                autoCollapsedSidebarDueToWidth = true
+            }
+        } else if tier == .expanded {
+            // 宽屏状态（Window Width ≥ 1340pt）：仅当此前是因为收窄被自动收起时，才自动恢复展开
+            if autoCollapsedSidebarDueToWidth {
+                NativeSidebarBridge.setSidebarCollapsed(false, in: targetWindow, animated: !isColdStart)
+                columnVisibility = .all
+                autoCollapsedSidebarDueToWidth = false
+            }
+        }
+    }
+}
+
+// MARK: - 窗口尺寸实时捕获与 AppKit 侧边栏桥接
+
+private struct ControlCenterResponsiveBridge: NSViewRepresentable {
+    let onResize: (CGFloat, NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> ControlCenterResponsiveNSView {
+        let view = ControlCenterResponsiveNSView()
+        view.onResize = onResize
+        return view
+    }
+
+    func updateNSView(_ nsView: ControlCenterResponsiveNSView, context: Context) {
+        nsView.onResize = onResize
+    }
+}
+
+private final class ControlCenterResponsiveNSView: NSView {
+    var onResize: ((CGFloat, NSWindow?) -> Void)?
+    private var windowObserver: AnyObject?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let windowObserver {
+            NotificationCenter.default.removeObserver(windowObserver)
+            self.windowObserver = nil
+        }
+        guard let window else { return }
+
+        // 初次挂载（冷启动）：立即上报窗口当前实际尺寸
+        let initialWidth = window.frame.size.width
+        if initialWidth > 0 {
+            DispatchQueue.main.async { [weak self] in
+                self?.onResize?(initialWidth, window)
+            }
+        }
+
+        // 窗口拖拽 live resize 监听：像素级实时响应，彻底根除 GeometryReader 造成的拖拽感知延迟
+        windowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didResizeNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] notif in
+            guard let win = notif.object as? NSWindow else { return }
+            MainActor.assumeIsolated {
+                self?.onResize?(win.frame.size.width, win)
+            }
+        }
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        if newWindow == nil, let windowObserver {
+            NotificationCenter.default.removeObserver(windowObserver)
+            self.windowObserver = nil
+        }
+    }
+}
+
+@MainActor
+public enum NativeSidebarBridge {
+    /// 强制控制 AppKit 原生侧边栏折叠/展开（穿透 SwiftUI NavigationSplitView 的系统限制）
+    public static func setSidebarCollapsed(_ collapsed: Bool, in window: NSWindow?, animated: Bool = true) {
+        guard let window else { return }
+
+        // 1. 在 view 树中查找 NSSplitView，其 delegate 即为 NSSplitViewController
+        if let splitVC = findSplitViewController(in: window.contentView) {
+            applyCollapse(collapsed, to: splitVC, animated: animated)
+            return
+        }
+
+        // 2. 在 contentViewController 递归查找
+        if let rootVC = window.contentViewController,
+           let splitVC = findSplitViewController(in: rootVC) {
+            applyCollapse(collapsed, to: splitVC, animated: animated)
+            return
+        }
+
+        // 3. 兜底方案：若查找失败且状态不符，向响应者链发送系统的原生 toggleSidebar: 动作
+        if isSidebarCollapsed(in: window) != collapsed {
+            NSApp.sendAction(#selector(NSSplitViewController.toggleSidebar(_:)), to: nil, from: nil)
+        }
+    }
+
+    /// 查询当前 AppKit 侧边栏是否已处于折叠状态
+    public static func isSidebarCollapsed(in window: NSWindow?) -> Bool {
+        guard let window else { return false }
+        if let splitVC = findSplitViewController(in: window.contentView) ?? (window.contentViewController.flatMap { findSplitViewController(in: $0) }) {
+            let sidebarItem = splitVC.splitViewItems.first(where: { $0.behavior == .sidebar }) ?? splitVC.splitViewItems.first
+            return sidebarItem?.isCollapsed ?? false
+        }
+        return false
+    }
+
+    private static func applyCollapse(_ collapsed: Bool, to splitVC: NSSplitViewController, animated: Bool) {
+        guard let sidebarItem = splitVC.splitViewItems.first(where: { $0.behavior == .sidebar }) ?? splitVC.splitViewItems.first else {
+            return
+        }
+        guard sidebarItem.isCollapsed != collapsed else { return }
+        if animated {
+            sidebarItem.animator().isCollapsed = collapsed
+        } else {
+            sidebarItem.isCollapsed = collapsed
+        }
+    }
+
+    private static func findSplitViewController(in view: NSView?) -> NSSplitViewController? {
+        guard let view else { return nil }
+        if let splitView = view as? NSSplitView,
+           let splitVC = splitView.delegate as? NSSplitViewController {
+            return splitVC
+        }
+        for subview in view.subviews {
+            if let found = findSplitViewController(in: subview) {
+                return found
+            }
+        }
+        return nil
+    }
+
+    private static func findSplitViewController(in vc: NSViewController) -> NSSplitViewController? {
+        if let split = vc as? NSSplitViewController {
+            return split
+        }
+        for child in vc.children {
+            if let found = findSplitViewController(in: child) {
+                return found
+            }
+        }
+        return nil
     }
 }
 
