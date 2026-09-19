@@ -403,8 +403,8 @@ below are now present. This section does not convert synthetic evidence into
 managed-runtime or human-acoustic evidence.
 
 The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
-the later ledger commit and deadline-test stabilization are now followed by
-current head `994a991ab99c6b368ca39eab092781a1c08d02bd`.
+the later ledger commit, deadline-test stabilization and runtime-default documentation
+are now followed by implementation head `34194a083c925239a92b504e1d1bd967b6c63be0`.
 
 ### Implementation deltas since the seven-increment checkpoint
 
@@ -432,6 +432,10 @@ current head `994a991ab99c6b368ca39eab092781a1c08d02bd`.
   quality/voice maintenance now acquires a wildcard TTS reservation, which waits
   for all keyed capability lanes before eviction. Same-lane serialization,
   interactive fairness and cancellation cleanup remain governor responsibilities.
+- **#44**: the active documentation now records source release `2.7.0`, labels the
+  managed `2.3.2` benchmark as historical evidence, and aligns the example
+  `SPEECHRAIL_REALTIME_MAX_SESSIONS=3` with the `Settings` default. E1/E3 and
+  real scheduling, memory and thermal measurements remain pending.
 - **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
   handling, protected URL/email/code spans, raw→normalized→spoken hashes and
   bounded raw-span projections. The optional v1 header applies a pinned set while
@@ -451,13 +455,14 @@ current head `994a991ab99c6b368ca39eab092781a1c08d02bd`.
 
 ### Current deterministic validation
 
-On Python **3.12.14**, the focused integration set covering revisions, durable
-idempotency, voice-quality routes, render receipts, timing, pronunciation,
-governor maintenance and frozen loudness contains **179 tests: all passed**. The
-voice-quality route tests use per-test temporary idempotency journals so rerunning
-the suite cannot read a developer's default `~/.speechrail` journal. This is local
-source/synthetic evidence; the full repository gate and current-head macOS App job
-also passed in CI run `35450728000`.
+On Python **3.12.14**, the joint issue-focused regression set covering revisions,
+durable idempotency, voice-quality routes, render receipts, timing, pronunciation,
+governor maintenance, streaming, Realtime, planner and frozen loudness contains
+**549 tests: all passed, 0 skipped**. The voice-quality route tests use per-test
+temporary idempotency journals so rerunning the suite cannot read a developer's
+default `~/.speechrail` journal. This is local source/synthetic evidence; the full
+repository gate and current-head macOS App job also passed in CI run
+`35451951303`.
 
 ### Remaining acceptance gates
 
