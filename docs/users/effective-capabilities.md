@@ -18,7 +18,7 @@ date: 2026-09-19
 `service_instance_epoch` 在服务实例建立时生成；`catalog_revision` 由目录和配置内容
 决定，普通重复读取及 readiness 变化不改目录 revision；`snapshot_id` 同时覆盖实例
 与当前 availability。三个入口支持私有 ETag、If-None-Match 和 304；鉴权先于缓存判定。
-修改音色配方、启用列表、档位或配置制品会改变相关内容标识。
+修改音色配方、启用列表、档位、配置制品或 TTS planner 策略会改变相关内容标识。
 
 **这些标识不是推理版本锁。** 当前已有音色的 `voice_revision=null`、
 `voice_identity_assurance=legacy`。模型的 `assurance=configured_catalog` 只表示配置
@@ -61,3 +61,11 @@ Agent 上下文。需要原子路由时使用嵌套快照，而非顶层旧字�
 矩阵测试覆盖 light/balanced/quality 与 system/instruction/clone、内容变更/重启、
 鉴权、别名、存储损坏和私有字段隔离。测试使用 fake backend；没有启动用户服务，
 不能据此宣称模型语言域、音质、不可变音色或并发推理版本锁已经验收。
+
+## 分句规划版本
+
+`operations.tts_text_planner` 描述当前共用 worker planner：`tts_bounded_v1`、最大
+240 codepoints。内部 plan 持有规范化文本区间和确定性边界，尚不提供原始 HTTP 文本
+映射或音频时间轴。该版本保持既有发音输入，不添加强制预生成、上下文模型或额外停顿。
+`native_context_conditioning=unsupported` 指未适配该能力，`naturalness_evidence=unevaluated`
+保留真实多音色 A/B 验收；不能把 planner 版本当作完成回执或音质等级。

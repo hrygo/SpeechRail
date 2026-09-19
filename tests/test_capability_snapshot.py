@@ -196,3 +196,26 @@ def test_snapshot_matches_documented_openapi_schema(tier: str) -> None:
         tuple(voices.SYSTEM_VOICE_PROFILES.values()), _active(tier), epoch="e", ready=True,
         enabled_voices=frozenset(voices.SYSTEM_VOICE_PROFILES), sample_rate=24_000,
     ))
+
+
+def test_snapshot_tracks_the_actual_planner_policy(monkeypatch) -> None:
+    import speechrail.application.capability_snapshot as discovery
+    from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
+
+    def snapshot():
+        return discovery.build_capability_snapshot(
+            (), _active("quality"), epoch="same", ready=True,
+            enabled_voices=frozenset(), sample_rate=24_000,
+        )
+
+    first = snapshot()
+    policy = first["operations"]["tts_text_planner"]
+    plan = TtsTextPlanner().plan("test.")
+    assert policy["version"] == plan.version == PLANNER_VERSION
+    assert policy["max_chars"] == plan.max_chars
+    assert policy["coordinate_space"] == plan.coordinate_space
+    assert policy["naturalness_evidence"] == "unevaluated"
+    monkeypatch.setattr(discovery, "PLANNER_VERSION", "future_policy")
+    changed = snapshot()
+    assert changed["catalog_revision"] != first["catalog_revision"]
+    assert changed["snapshot_id"] != first["snapshot_id"]
