@@ -179,13 +179,30 @@ def test_metrics_record_tts_records_rtf() -> None:
 
 def test_realtime_phase_metrics_use_a_bounded_phase_label() -> None:
     metrics = Metrics()
-    metrics.record_realtime_phase("asr_admission", 0.04)
-    metrics.record_realtime_phase("send", 0.01)
+    for phase in (
+        "asr_admission",
+        "asr_flush",
+        "asr_commit_ack",
+        "asr_terminal_wait",
+        "tts_admission",
+        "send",
+    ):
+        metrics.record_realtime_phase(phase, 0.04)
     text = metrics.render_prometheus()
 
     assert "speechrail_realtime_phase_duration_seconds_bucket" in text
-    assert 'phase="asr_admission"' in text
-    assert 'phase="send"' in text
+    for phase in (
+        "asr_admission",
+        "asr_flush",
+        "asr_commit_ack",
+        "asr_terminal_wait",
+        "tts_admission",
+        "send",
+    ):
+        assert f'phase="{phase}"' in text
+
+    with pytest.raises(ValueError, match="unsupported realtime phase"):
+        metrics.record_realtime_phase("request_id_or_text", 0.01)
 
 
 def test_delivery_metrics_keep_alignment_and_tts_events_low_cardinality() -> None:
