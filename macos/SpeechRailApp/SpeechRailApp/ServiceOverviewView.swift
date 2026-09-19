@@ -247,7 +247,7 @@ public struct ServiceOverviewView: View {
         CardSurface {
             CardHead(
                 title: "运行信息",
-                detail: "只反映本机当前取值；修改运行态一律走 profile 与 preflight。"
+                detail: "只反映此刻的取值；要换档位或改运行方式，去「模型」页。"
             )
             Divider()
             runtimeRow(
@@ -259,7 +259,7 @@ public struct ServiceOverviewView: View {
             Divider()
             runtimeRow("运行版本", displayedHealth?.version ?? "未读取")
             Divider()
-            runtimeRow("常驻 worker", residentWorkerText)
+            runtimeRow("常驻模型", residentWorkerText)
         }
     }
 
@@ -365,19 +365,20 @@ public struct ServiceOverviewView: View {
             : nil
         let supportsQualityTier = health.profile == .quality
         let voiceDesign = capabilityVerdict(
-            title: "语音合成 · VoiceDesign",
-            capability: "VoiceDesign",
+            // 页面上不摆内部名：`VoiceDesign` / `Base` 是制品名，用户看到的是"两种合成各能做什么"。
+            title: "语音合成 · 语音设计",
+            capability: "语音设计",
             declared: declaredCapabilities?.supportsInstruction,
             supportedByProfile: supportsQualityTier,
-            missingReason: "Quality 档位下服务未公开 VoiceDesign capability。",
-            unsupportedReason: "VoiceDesign 只在 Quality 档位加载。"
+            missingReason: "这一档没有发布「语音设计」。",
+            unsupportedReason: "语音设计只在 Quality 档位加载。"
         )
         let voiceClone = capabilityVerdict(
             title: "音色复刻",
             capability: "音色复刻",
             declared: declaredCapabilities?.supportsClone,
             supportedByProfile: supportsQualityTier,
-            missingReason: "Quality 档位下服务未公开音色复刻 capability（Base 制品未解析）。",
+            missingReason: "这一档没有发布音色复刻（需要的模型还没就位）。",
             unsupportedReason: "音色复刻只在 Quality 档位加载。"
         )
         let diarization = diarizationCapability(for: health)
@@ -386,17 +387,17 @@ public struct ServiceOverviewView: View {
             ServiceCapability(
                 title: "语音识别",
                 status: asrReady ? .ready : .notReady,
-                reason: asrReady ? "\(asrState)；词级时间戳由 ASR 原生提供。" : asrState
+                reason: asrReady ? "\(asrState)；每个字的时间点由识别模型直接给出。" : asrState
             ),
             voiceDesign,
             ServiceCapability(
-                title: "语音合成 · Base",
+                title: "语音合成 · 内置音色",
                 status: ttsReady ? .ready : .notReady,
                 reason: ttsState
             ),
             voiceClone,
             ServiceCapability(
-                title: "实时语音 VAD",
+                title: "实时语音断句",
                 status: health.realtimeVAD?.ready == true ? .ready : .notReady,
                 reason: health.realtimeVAD?.message
                     ?? health.streamingState.map(SpeechRailRuntimeStatePresentation.text)
@@ -462,7 +463,7 @@ public struct ServiceOverviewView: View {
             return ServiceCapability(
                 title: title,
                 status: .ready,
-                reason: "服务已公开可用的 \(capability) capability。"
+                reason: "服务声明「\(capability)」已经可用。"
             )
         }
         if declared == false {

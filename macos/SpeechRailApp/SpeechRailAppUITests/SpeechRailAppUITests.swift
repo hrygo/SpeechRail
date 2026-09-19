@@ -10,7 +10,9 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["音色创作"].exists)
         XCTAssertTrue(app.buttons["运行监控"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
-        XCTAssertTrue(app.staticTexts["本地控制通道已就绪"].exists)
+        // 2026-09-19：这一行的文案从「本地控制通道已就绪」改成「可以在这里管理服务」——
+        // 首屏要说的是"能不能在这里管服务"，不是"哪条通道起来了"（SESSIONS-SPEC §12.1.8.1）。
+        XCTAssertTrue(app.staticTexts["可以在这里管理服务"].exists)
 
         app.buttons["音色创作"].clickWhenReady()
         let workspaceTitle = app.descendants(matching: .any)["workspace-title"]
