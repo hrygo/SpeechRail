@@ -384,6 +384,53 @@ def test_distinct_tts_resource_keys_can_run_concurrently() -> None:
     asyncio.run(scenario())
 
 
+def test_wildcard_tts_maintenance_waits_for_all_keyed_lanes() -> None:
+    async def scenario() -> None:
+        governor = ResourceGovernor(
+            GovernorLimits(total_capacity=4, realtime_reserved_capacity=1, max_pending_per_class=3)
+        )
+        release = asyncio.Event()
+        maintenance_started = asyncio.Event()
+
+        async def keyed_worker() -> None:
+            await release.wait()
+
+        async def maintenance() -> None:
+            maintenance_started.set()
+
+        design_task = asyncio.create_task(
+            governor.run(
+                keyed_worker,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_design",
+            )
+        )
+        clone_task = asyncio.create_task(
+            governor.run(
+                keyed_worker,
+                WorkClass.BATCH_TTS,
+                resource_key="voice_clone",
+            )
+        )
+        await asyncio.sleep(0)
+        maintenance_task = asyncio.create_task(
+            governor.run(
+                maintenance,
+                WorkClass.BATCH_TTS,
+                purpose=WorkPurpose.QUALITY_VALIDATION,
+            )
+        )
+        await asyncio.sleep(0)
+        assert not maintenance_started.is_set()
+        assert governor.snapshot().pending_batch == 1
+
+        release.set()
+        await asyncio.wait_for(maintenance_started.wait(), timeout=0.5)
+        await asyncio.gather(design_task, clone_task, maintenance_task)
+
+    asyncio.run(scenario())
+
+
 def test_distinct_tts_lane_can_bypass_waiter_blocked_on_another_lane() -> None:
     async def scenario() -> None:
         governor = ResourceGovernor(

@@ -2018,9 +2018,15 @@ def create_system_router(services: AppServices) -> APIRouter:
                 intelligibility_unavailable = True
             else:
                 try:
-                    await _evict_quality_tts_if_supported(
-                        synthesizer, expires_at=expires_at,
-                    )
+                    async with services.governor.reserve(
+                        WorkClass.BATCH_TTS,
+                        expires_at=expires_at,
+                        purpose=WorkPurpose.QUALITY_VALIDATION,
+                    ):
+                        await _evict_quality_tts_if_supported(
+                            synthesizer,
+                            expires_at=expires_at,
+                        )
                     transcript_match = await _evaluate_probe_intelligibility(
                         services,
                         transcriber,
