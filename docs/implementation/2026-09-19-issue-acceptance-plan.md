@@ -478,6 +478,19 @@ continuous RTF 分别为 0.28x、0.27x、0.27x，`phys_footprint` 峰值为
 `model_identity` 为空，cold/local_quality/quality/switch、ASR/Realtime、声学质量、
 人类听感和身份匹配仍未验证；因此没有将任何 issue 标记为完成。
 
+### 2026-09-20 managed model measurement: ASR∥TTS overlap slice
+
+使用官方 `bench_overlap.py` 在同一 managed `quality` generation 102 上完成了一次
+真实 ASR∥TTS 调度切片：C1（TTS 先、0.5 s 后 ASR）和 C2（ASR 先、0.5 s 后 TTS）
+均为 200；C1 观察到 governor batch peak `2`，C2 因 ASR 在延迟窗口内结束而为
+`1`。两个场景的资源采样均完整、无 sampler error，`phys_footprint` 峰值分别为
+`6747757840` 与 `7010721040` bytes。去标识化摘要见
+[`2026-09-20-pr74-overlap-evidence.md`](2026-09-20-pr74-overlap-evidence.md)。
+
+ASR fixture 是外置合成静音，只能证明真实 worker 的调度/资源路径，不证明识别质量；
+持续负载、维护任务公平性、取消清理、thermal/soak、model identity 和人工听感仍未
+验证，不能将此切片写成 #44/#65 完成。
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
