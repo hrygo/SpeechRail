@@ -238,9 +238,7 @@ def _boundary_ok(text: str, start: int, end: int) -> bool:
 
     if start > 0 and word_char(text[start - 1]):
         return False
-    if end < len(text) and word_char(text[end]):
-        return False
-    return True
+    return not (end < len(text) and word_char(text[end]))
 
 
 def _candidate_at(
