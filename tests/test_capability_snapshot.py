@@ -24,7 +24,10 @@ def test_v2_snapshot_is_stable_and_legacy_discovery_still_works(
     again = client.get("/v1/speechrail/capabilities")
     assert first.json() == again.json()
     assert (
-        client.get("/v1/speechrail/capabilities", headers={"If-None-Match": first.headers["etag"]}).status_code
+        client.get(
+            "/v1/speechrail/capabilities",
+            headers={"If-None-Match": first.headers["etag"]},
+        ).status_code
         == 304
     )
     restart = TestClient(create_app(settings)).get("/v1/speechrail/capabilities").json()
@@ -41,7 +44,10 @@ def test_v2_discovery_uses_configured_auth(tmp_path: Path, monkeypatch) -> None:
     )
     assert client.get("/v1/speechrail/capabilities").status_code == 401
     assert (
-        client.get("/v1/speechrail/capabilities", headers={"Authorization": "Bearer test-key"}).status_code
+        client.get(
+            "/v1/speechrail/capabilities",
+            headers={"Authorization": "Bearer test-key"},
+        ).status_code
         == 200
     )
 
