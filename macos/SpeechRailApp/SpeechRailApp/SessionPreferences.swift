@@ -254,8 +254,10 @@ public final class SessionPreferences {
         guard let profile else { return nil }
         let normalized = profile.lowercased()
         guard normalized.contains("light") else { return nil }
-        return "这台 Mac 现在用的是省资源的一档，不标说话人；在设置里换成 Balanced 或 Quality，"
-            + "新开的会话就能在行上看到说话人。"
+        // 换档的名字给中文短名（用户 2026-09-19：界面里不出现 `Balanced` / `Quality`
+        // 这类内部名）——用户要去「模型」页选的就是那三张卡上的字。
+        return "这台 Mac 现在用的是最省的一档，不标说话人；去「模型」页换成「均衡」或「精准」，"
+            + "新开的会话就能在行上看到谁在说。"
     }
 
     private enum Key {

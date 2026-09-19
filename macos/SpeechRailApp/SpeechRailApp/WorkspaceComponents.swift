@@ -461,27 +461,50 @@ enum SpeechRailRuntimeStatePresentation {
 }
 
 enum SpeechRailProfilePresentation {
-    /// 侧边栏底部状态区用的是短名（`服务已就绪 · Quality`，macOS App 设计系统 §4.1），
+    /// 侧边栏底部状态区用的是短名（`服务已就绪 · 均衡`，macOS App 设计系统 §4.1），
     /// 卡片与取值行才用 `title` 的「档位 · 取向」写法。
+    ///
+    /// **一律给中文名**（用户 2026-09-19：「还有一些用户看不懂的词汇」）：原来这里原样
+    /// 摆着 `Quality` / `Balanced` / `Light`——那是制品与 CLI 的 preset 名，中文界面里
+    /// 既读不出来也记不住，而用户在这一行要知道的只是「这台 Mac 现在处在哪一档」。
+    /// 内部键（`quality` 等）只留在开发者文档与诊断页：那里本来就是对着 CLI 看的。
     static func shortTitle(_ profile: SpeechRailProfile) -> String {
         switch profile {
         case .quality:
-            "Quality"
+            "精准"
         case .balanced:
-            "Balanced"
+            "均衡"
         case .light:
-            "Light"
+            "轻量"
         }
     }
 
     static func title(_ profile: SpeechRailProfile) -> String {
         switch profile {
         case .quality:
-            "Quality · 创作优先"
+            "精准 · 更适合创作"
         case .balanced:
-            "Balanced · 说话人与日常"
+            "均衡 · 日常够用"
         case .light:
-            "Light · 轻量快速"
+            "轻量 · 最快最省"
+        }
+    }
+
+    /// 档位卡上那句「这一档对用户意味着什么」。
+    ///
+    /// 事实来自 `model-catalog.json` 的 `presets`：三档的识别与合成权重不只是"快慢"
+    /// 之别——`light` 用的是 0.6B 识别 + 0.6B 合成、且没有对齐模型（不分说话人、
+    /// 不能创作音色），`balanced` 换成 1.7B 识别并可分人，`quality` 再把合成换成 1.7B
+    /// 的语音设计与内置音色两套。所以这句话说的是**用户拿到什么**，而不是制品名
+    /// （用户 2026-09-19：「有用户看不懂的词汇」）。
+    static func purpose(_ profile: SpeechRailProfile) -> String {
+        switch profile {
+        case .quality:
+            "识别与配音质量最好，支持音色创作和克隆；占用最多，换档要等一会儿。"
+        case .balanced:
+            "日常够用：识别更准、能区分说话人，配音也正常；内存占用适中。"
+        case .light:
+            "启动最快、占内存最少；识别与配音是基础质量，不区分说话人，也不能创作音色。"
         }
     }
 }
@@ -518,7 +541,7 @@ enum SpeechRailOperationMessagePresentation {
             break
         }
         if normalized.hasPrefix("profile") {
-            return "档位应用未完成，请重试或打开系统诊断。"
+            return "换档没成功，请重试；还不行就打开「诊断」看原因。"
         }
         if normalized.hasPrefix("model preparation was cancelled") {
             return "模型准备已取消。"
@@ -1735,7 +1758,7 @@ public struct OperationBar: View {
             }
             if let progress = operation.progress {
                 if let artifactKey = progress.artifactKey ?? progress.file {
-                    Text("当前制品：\(artifactKey)")
+                    Text("正在处理：\(artifactKey)")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .lineLimit(1)

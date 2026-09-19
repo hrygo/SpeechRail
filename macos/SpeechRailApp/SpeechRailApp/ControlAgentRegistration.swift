@@ -58,8 +58,11 @@ public struct ControlAgentStatusSnapshot: Equatable, Sendable {
 
     public var impact: String {
         switch kind {
-        case .local, .enabled: "影响：启动、停止、换档都能用"
-        case .notRegistered, .requiresApproval, .notFound, .unknown: "影响：只能看状态，不能改"
+        // 这一句在服务状态页是 `LabeledContent("影响", value:)`、在控制 Agent 卡里是
+        // `"影响：\(impact)"`——**两种写法都自带"影响"这个前缀**，所以这里不能再写一遍
+        // （2026-09-19 离屏渲染里出现过「影响：影响：启动、停止、换档都能用」）。
+        case .local, .enabled: "启动、停止、换档都能用"
+        case .notRegistered, .requiresApproval, .notFound, .unknown: "只能看状态，不能改"
         }
     }
 

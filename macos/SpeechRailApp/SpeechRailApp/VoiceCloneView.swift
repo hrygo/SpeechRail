@@ -509,7 +509,9 @@ public struct VoiceCloneView: View {
     /// 没跑预检时如实写「未预检」，不拿本地猜的数字顶替（稿这一格是 `24 dB`）。
     private var signalToNoiseText: String {
         guard let decibels = model.cloneEvaluation?.reference.estimatedSNRDecibels else {
-            return "未预检"
+            // 页面上的按钮是「先检查参考音频」，这一格就跟着说「未检查」——
+            // 「预检」是服务侧的说法，留在开发者详情里（用户 2026-09-19）。
+            return "未检查"
         }
         return String(format: "%.0f dB", decibels)
     }
@@ -622,7 +624,7 @@ public struct VoiceCloneView: View {
                 .font(SpeechRailDesignTokens.Typography.secondary)
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
         } else if cloneIsGated {
-            Text("当前档位不支持声音复刻；换到 quality 档位后回到本页继续。")
+            Text("现在这一档不加载音色克隆；去「模型」页换成「精准」，回来就能继续。")
                 .font(SpeechRailDesignTokens.Typography.secondary)
                 .foregroundStyle(SpeechRailDesignTokens.Color.attention)
         }
@@ -653,10 +655,10 @@ public struct VoiceCloneView: View {
 
     private func preflightTitle(_ report: VoiceQualityReportSnapshot) -> String {
         switch report.status {
-        case .pass: "预检通过"
-        case .warn: "预检有提醒"
-        case .reject: "预检未通过"
-        case .unevaluated: "预检没给结论"
+        case .pass: "检查通过"
+        case .warn: "检查有提醒"
+        case .reject: "检查没通过"
+        case .unevaluated: "这次没给结论"
         }
     }
 
@@ -678,13 +680,13 @@ public struct VoiceCloneView: View {
             : "失败码：\(report.failureCodes.joined(separator: "、"))。"
         switch report.status {
         case .pass:
-            return "服务端质量门核对了这段参考音频（\(facts)）。注册时它会再核对一次。"
+            return "这段参考音频检查通过（\(facts)）。保存成音色时还会再检查一次。"
         case .warn:
-            return "服务端质量门给了提醒（\(facts)）。\(codes)注册仍会尝试，按提醒调一段会更稳。"
+            return "这段参考音频有几个提醒（\(facts)）。\(codes)仍可以保存，按提醒重录一段会更稳。"
         case .reject:
-            return "服务端质量门没有放行（\(facts)）。\(codes)现在注册会被拒，请先重录一段。"
+            return "这段参考音频没通过（\(facts)）。\(codes)现在保存会被拒绝，请先重录一段。"
         case .unevaluated:
-            return "服务端这次没有给结论（\(facts)）。\(codes)注册时它会独立再核对一次。"
+            return "这次没有给出结论（\(facts)）。\(codes)保存时服务会再独立检查一次。"
         }
     }
 
@@ -725,8 +727,8 @@ public struct VoiceCloneView: View {
         if cloneIsGated {
             StatusBanner(
                 tone: .attention,
-                title: "当前档位不支持声音复刻",
-                message: "声音复刻需要 quality 档位（VoiceDesign + Base 两个 TTS 能力）。切档后回到本页即可继续。",
+                title: "现在这一档不加载音色克隆",
+                message: "音色克隆要用「精准」这一档里的两个合成模型。换档不会自动发生，去「模型」页切好再回来。",
                 actionTitle: "去模型页切档",
                 action: { navigation.request(.models) }
             )

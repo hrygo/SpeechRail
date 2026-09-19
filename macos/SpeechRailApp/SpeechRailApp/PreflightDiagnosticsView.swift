@@ -60,7 +60,7 @@ public struct PreflightDiagnosticsView: View {
             DeveloperInspector {
                 SectionHeading(
                     title: "预检上下文",
-                    detail: "预检只读取环境、制品和配置，不会下载模型或改变服务。"
+                    detail: "预检只读环境、模型文件和配置，不会下载模型，也不会改变服务。"
                 )
                 LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
                 LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
@@ -488,10 +488,10 @@ public struct PreflightDiagnosticsView: View {
             let verifiedCount = statuses.filter {
                 $0.state == .verified && $0.integrity == .verified
             }.count
-            LabeledContent("受管制品", value: "\(catalog.artifacts.count) 个目录项")
-            LabeledContent("完整性", value: "\(verifiedCount)/\(statuses.count) 个制品已通过校验")
+            LabeledContent("受管模型文件", value: "\(catalog.artifacts.count) 个目录项")
+            LabeledContent("完整性", value: "\(verifiedCount)/\(statuses.count) 个模型文件已通过校验")
         } else {
-            LabeledContent("模型快照", value: "尚未读取，不能在诊断页推断模型存在或使用状态")
+            LabeledContent("模型状态", value: "还没读取；本页不能推断模型是否存在、是否在用")
         }
     }
 
@@ -516,9 +516,9 @@ public struct PreflightDiagnosticsView: View {
         if isModelRelatedCheck(check) {
             return DiagnosticRecoveryPath(
                 route: .models,
-                detail: "打开模型管理核对目标档位的目录、文件完整性和当前服务使用状态；仅在制品通过校验后应用档位。",
+                detail: "打开「模型」页核对这一档的目录、文件完整性和当前服务使用状态；模型文件全部校验通过之后再换档。",
                 steps: [
-                    "打开模型管理，确认目标档位需要的制品都已登记。",
+                    "打开「模型」页，确认这一档需要的模型文件都已登记。",
                     "运行「下载并校验」，直到每项的存在状态与校验状态都通过。",
                     "回到本页重新运行预检，确认这一项已经通过。",
                 ]
@@ -533,10 +533,10 @@ public struct PreflightDiagnosticsView: View {
         {
             return DiagnosticRecoveryPath(
                 route: .overview,
-                detail: "先打开服务状态确认控制通道和受管 runtime，再重新运行预检；该页面不自动改写配置或权限。",
+                detail: "先打开「服务状态」确认能在这里管理服务、运行环境正常，再重新运行预检；本页不会自动改写配置或权限。",
                 steps: [
-                    "打开服务状态，确认控制通道可用且服务已就绪。",
-                    "确认受管 runtime、配置文件和模型的访问权限满足运行条件。",
+                    "打开「服务状态」，确认可以在这里管理服务，且服务已就绪。",
+                    "确认运行环境、配置文件和模型文件的访问权限满足运行条件。",
                     "回到本页重新运行预检，确认这一项已经通过。",
                 ]
             )
@@ -561,7 +561,7 @@ public struct PreflightDiagnosticsView: View {
             return "确认服务配置文件存在且可以被受管 runtime 读取。"
         }
         if normalized.contains("permission") {
-            return "确认配置和模型资产具备服务运行所需的访问权限。"
+            return "确认配置和模型文件具备服务运行所需的访问权限。"
         }
         if normalized.contains("ffmpeg") {
             return "确认音频编解码依赖可用，上传和输出流程能够正常工作。"
@@ -570,10 +570,10 @@ public struct PreflightDiagnosticsView: View {
             return "确认当前 profile 和运行参数可以被服务读取。"
         }
         if normalized.contains("asr") {
-            return "确认语音识别能力的配置、制品和运行状态满足启动条件。"
+            return "确认语音识别的配置、模型文件和运行状态满足启动条件。"
         }
         if normalized.contains("tts") {
-            return "确认语音合成能力的配置、制品和运行状态满足启动条件。"
+            return "确认语音合成的配置、模型文件和运行状态满足启动条件。"
         }
         return "确认 \(checkTitle(for: name)) 满足 SpeechRail 服务运行的前置条件。"
     }
@@ -609,39 +609,39 @@ public struct PreflightDiagnosticsView: View {
         case "runtime executable is missing or not executable":
             "运行时文件缺失或不可执行。"
         case "model snapshot is complete":
-            "模型制品文件完整。"
+            "模型文件完整。"
         case "model snapshot is incomplete":
-            "模型制品文件不完整。"
+            "模型文件不完整。"
         case "model snapshot path is not configured":
-            "尚未配置模型制品位置。"
+            "还没有配置模型文件的位置。"
         case "model snapshot directory is missing":
-            "找不到模型制品目录。"
+            "找不到模型文件目录。"
         case "model snapshot weights are missing":
-            "模型制品缺少必要权重文件。"
+            "模型文件里缺少必要的权重文件。"
         case "asr runtime and snapshot are configured":
-            "ASR 运行时和模型制品已配置。"
+            "识别用的运行环境和模型文件都已配置。"
         case "asr model and python paths must be configured together":
-            "ASR 模型与 Python 运行时需要同时配置。"
+            "识别模型与 Python 运行环境需要同时配置。"
         case "asr snapshot cannot be checked":
-            "缺少 ASR 配置，无法检查模型制品。"
+            "缺少识别配置，无法检查模型文件。"
         case "asr runtime cannot be checked":
-            "缺少 ASR 配置，无法检查运行时。"
+            "缺少识别配置，无法检查运行环境。"
         case "tts runtime and snapshot are configured":
-            "TTS 运行时和模型制品已配置。"
+            "合成用的运行环境和模型文件都已配置。"
         case "tts is not configured; use explicit asr-only mode":
-            "TTS 未配置；当前只能使用明确的 ASR-only 模式。"
+            "没有配置合成能力；当前只做识别。"
         case "tts snapshot cannot be checked":
-            "缺少 TTS 配置，无法检查模型制品。"
+            "缺少合成配置，无法检查模型文件。"
         case "tts runtime cannot be checked":
-            "缺少 TTS 配置，无法检查运行时。"
+            "缺少合成配置，无法检查运行环境。"
         case "cannot validate settings without configuration":
             "缺少配置文件，无法检查运行设置。"
         case "configuration validation failed":
             "服务配置校验失败。"
         case "asr configuration validation failed":
-            "ASR 配置校验失败。"
+            "识别配置校验失败。"
         case "tts configuration validation failed":
-            "TTS 配置校验失败。"
+            "合成配置校验失败。"
         case "diarization configuration validation failed":
             "说话人区分配置校验失败。"
         case "optional diarization profile is not configured":
@@ -649,51 +649,51 @@ public struct PreflightDiagnosticsView: View {
         case "diarization profile is configured":
             "说话人区分配置已登记。"
         case "compiled coreml diarization bundle is available":
-            "CoreML 说话人区分制品可用。"
+            "说话人区分的模型可用。"
         case "compiled coreml diarization bundle is missing or incorrect":
-            "CoreML 说话人区分制品缺失或版本不正确。"
+            "说话人区分要用的模型缺失，或版本不正确。"
         case "coreml diarization worker is executable":
-            "CoreML 说话人区分运行时可执行。"
+            "说话人区分的运行组件可以执行。"
         case "coreml diarization worker is missing or not executable":
-            "CoreML 说话人区分运行时缺失或不可执行。"
+            "说话人区分的运行组件缺失或无法执行。"
         case "legacy vad is ready":
-            "传统 VAD 能力已就绪。"
+            "实时语音断句（旧引擎）已就绪。"
         case "silero vad model file is available":
-            "Silero VAD 模型可用。"
+            "实时语音断句的模型可用。"
         case "silero vad model path is not configured":
-            "尚未配置 Silero VAD 模型。"
+            "还没有配置实时语音断句的模型。"
         case "silero vad model file is missing":
-            "找不到 Silero VAD 模型文件。"
+            "找不到实时语音断句的模型文件。"
         case "prepared runtime is unavailable":
-            "受管运行时不可用。"
+            "受管的运行环境不可用。"
         case "prepared vendor runtime is available":
-            "受管厂商运行时可用。"
+            "受管的厂商运行环境可用。"
         case "runtime lock and manifest identity match":
-            "运行时锁定版本与清单一致。"
+            "运行环境的锁定版本与清单一致。"
         case "prepared ffmpeg is available":
-            "受管音频编解码依赖可用。"
+            "受管的音频编解码组件可用。"
         case "prepared ffmpeg is missing":
-            "受管音频编解码依赖缺失。"
+            "受管的音频编解码组件缺失。"
         case "prepared asr runtime identity and worker import are available":
-            "受管 ASR 运行时身份和 worker 依赖可用。"
+            "识别用的受管运行环境可用。"
         case "prepared tts runtime identity and worker import are available":
-            "受管 TTS 运行时身份和 worker 依赖可用。"
+            "合成用的受管运行环境可用。"
         case "prepared asr runtime package or worker import failed":
-            "受管 ASR 运行时依赖或 worker 加载失败。"
+            "识别用的受管运行环境加载失败。"
         case "prepared tts runtime package or worker import failed":
-            "受管 TTS 运行时依赖或 worker 加载失败。"
+            "合成用的受管运行环境加载失败。"
         case "clone snapshot path is not configured":
-            "尚未配置音色克隆制品。"
+            "还没有配置音色克隆要用的模型。"
         case "clone snapshot config.json is missing or invalid":
-            "音色克隆制品的配置文件缺失或无效。"
+            "音色克隆模型的配置文件缺失或无效。"
         case "clone snapshot config.json must contain an object":
-            "音色克隆制品的配置文件格式不正确。"
+            "音色克隆模型的配置文件格式不正确。"
         case "clone snapshot is not a qwen3-tts model":
-            "音色克隆制品不是受支持的 Qwen3-TTS 模型。"
+            "音色克隆用的模型不是受支持的模型。"
         case "clone snapshot must be the base tts variant":
-            "音色克隆制品必须使用 Base TTS 版本。"
+            "音色克隆必须用内置音色那一版合成模型。"
         case "clone snapshot is the base tts variant":
-            "音色克隆制品已确认是 Base TTS 版本。"
+            "音色克隆用的模型版本正确。"
         default:
             check.ok
                 ? "检查已通过；服务端未提供额外安全详情。"
@@ -779,6 +779,10 @@ public struct PreflightDiagnosticsView: View {
     }
 
     private func checkTitle(for name: String) -> String {
+        // 这些名字是**用户**在"出问题了"的时候读的（这一页就是给用户的自检页），
+        // 所以一律说人话：`ASR 制品` → `识别模型`、`受管运行时` → `运行环境`
+        // （用户 2026-09-19：「有一些用户看不懂的词汇」）。服务侧的检查标识原样
+        // 留在开发者详情里，排障时对得上。
         switch name.lowercased() {
         case "app_home":
             "应用目录"
@@ -791,45 +795,45 @@ public struct PreflightDiagnosticsView: View {
         case "settings":
             "运行设置"
         case "asr_config":
-            "ASR 配置"
+            "识别配置"
         case "asr_snapshot":
-            "ASR 制品"
+            "识别模型"
         case "asr_runtime":
-            "ASR 运行时"
+            "识别运行状态"
         case "tts_config":
-            "TTS 配置"
+            "合成配置"
         case "tts_snapshot":
-            "TTS 制品"
+            "合成模型"
         case "tts_runtime":
-            "TTS 运行时"
+            "合成运行状态"
         case "tts_clone_snapshot":
-            "音色克隆制品"
+            "音色克隆模型"
         case "tts_clone_variant":
             "音色克隆版本"
         case "diarization_config":
             "说话人区分配置"
         case "diarization_snapshot":
-            "说话人区分制品"
+            "说话人区分模型"
         case "diarization_runtime":
-            "说话人区分运行时"
+            "说话人区分运行状态"
         case "diarization_aligner_snapshot":
-            "说话人区分对齐制品"
+            "说话人区分对齐模型"
         case "realtime_vad":
-            "实时语音检测"
+            "实时语音断句"
         case "realtime_vad_model":
-            "实时语音检测模型"
+            "实时语音断句模型"
         case "realtime_vad_runtime":
-            "实时语音检测运行时"
+            "实时语音断句运行状态"
         case "managed_runtime":
-            "受管运行时"
+            "运行环境"
         case "managed_runtime_identity":
-            "运行时身份"
+            "运行环境标识"
         case "managed_asr_runtime":
-            "受管 ASR 运行时"
+            "识别运行环境"
         case "managed_tts_runtime":
-            "受管 TTS 运行时"
+            "合成运行环境"
         case "managed_ffmpeg":
-            "受管音频编解码"
+            "音频编解码组件"
         default:
             name.replacingOccurrences(of: "_", with: " ")
         }
@@ -851,10 +855,10 @@ public struct PreflightDiagnosticsView: View {
             return "相关模型或语音能力无法被证明可用；继续启动可能导致对应请求返回未就绪。"
         }
         if normalized.contains("runtime") || normalized.contains("ffmpeg") {
-            return "受管运行时或音频编解码链路不完整，服务可能无法启动或无法交付音频。"
+            return "运行环境或音频编解码链路不完整，服务可能起不来，或者交付不了音频。"
         }
         if normalized.contains("config") || normalized.contains("permission") || normalized.contains("settings") {
-            return "服务无法安全读取配置；当前运行档位和能力结论不能视为可信。"
+            return "服务读不到配置；现在的档位和能力结论都不能当作可信。"
         }
         return "这项前置条件未满足，相关服务能力可能无法启动或使用。"
     }

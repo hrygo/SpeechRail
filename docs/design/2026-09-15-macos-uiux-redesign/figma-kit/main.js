@@ -1202,7 +1202,7 @@ function buildComponents() {
       o: { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 8, padY: 7, w: 210 },
       build: function (c) {
         dot(c, 8, V["status/ready"]);
-        add(c, text("label", "服务已就绪 · Quality", "Callout", V["text/secondary"]));
+        add(c, text("label", "服务已就绪 · 精准", "Callout", V["text/secondary"]));
       }
     },
     {
@@ -1232,8 +1232,8 @@ function buildComponents() {
         fill: V["surface/panel"], w: LAYOUT.profileCardW
       },
       build: function (c) {
-        add(c, text("name", "Balanced · 分人和日常", "Body / Medium", V["text/primary"]));
-        add(c, text("desc", "aligner-q8，可匿名分人", "Callout", V["text/secondary"],
+        add(c, text("name", "均衡 · 日常够用", "Body / Medium", V["text/primary"]));
+        add(c, text("desc", "日常够用：识别更准、能区分说话人，配音也正常", "Callout", V["text/secondary"],
           { w: LAYOUT.profileCardInnerW }));
       }
     },
@@ -1245,8 +1245,8 @@ function buildComponents() {
         w: LAYOUT.profileCardW
       },
       build: function (c) {
-        add(c, text("name", "Quality · 创作优先", "Body / Medium", V["text/primary"]));
-        add(c, text("desc", "aligner-bf16，双 TTS lane", "Callout", V["text/secondary"],
+        add(c, text("name", "精准 · 更适合创作", "Body / Medium", V["text/primary"]));
+        add(c, text("desc", "识别与配音质量最好，支持音色创作和克隆", "Callout", V["text/secondary"],
           { w: LAYOUT.profileCardInnerW }));
       }
     }
@@ -2062,7 +2062,7 @@ function buildShell(routeKey, title, iconName, contentFn, sessionState) {
   });
   size(status, LAYOUT.sidebarInnerW, 30);
   dot(status, 8, V["status/ready"]);
-  add(status, text("label", "服务已就绪 · Quality", "Callout", V["text/secondary"]));
+  add(status, text("label", "服务已就绪 · 精准", "Callout", V["text/secondary"]));
   add(statusWrap, status);
   // 会话所有权与「服务是否就绪」同级常驻：本机只有一个麦克风，谁在用它是这个 App
   // 的首要事实，而不是「点了才被拒绝」的内部状态（SESSIONS-SPEC §4 P5）。
@@ -2675,7 +2675,7 @@ function screenVoiceLibrary(d) {
     { name: "夜航主持", badge: "系统", sub: "温暖、清晰、亲近", sel: true },
     { name: "书卷 · 温和叙述", badge: "系统", sub: "从容、偏慢，适合长篇叙述" },
     { name: "沙哑沉郁", badge: "我的", sub: "低沉、有颗粒感 · 用参考音频复刻" },
-    { name: "少年清冽", badge: "系统", sub: "需要 Quality 档位的 VoiceDesign", unavailable: true },
+    { name: "少年清冽", badge: "系统", sub: "需要「精准」档位才能创作", unavailable: true },
     { name: "午后书场", badge: "我的", sub: "明亮、利落 · 用参考音频复刻" },
     { name: "晨间播报", badge: "系统", sub: "明亮、标准，适合资讯类口播" },
     { name: "纪录旁白", badge: "系统", sub: "沉稳、克制，适合纪录片解说" },
@@ -2860,22 +2860,22 @@ function screenOverview(d) {
   const cHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
   add(cHead, text("title", "能力", "Heading / Section", V["text/primary"]));
   // 这一行取自应用的原样输出（ServiceOverviewView.capabilitiesCard）：应用不写
-  // 「Quality」这一档的名字，因为卡片在任何档位下都要成立。
+  // 「精准」这一档的名字，因为卡片在任何档位下都要成立。
   add(cHead, text("detail", "按当前运行档位如实发布，不做能力预支。", "Callout", V["text/secondary"]));
   add(c, stretch(cHead));
   hairline(c);
-  // 行序与措辞对齐 REDESIGN-SPEC §7.5（ASR → TTS VoiceDesign / Base → 音色复刻 →
-  // 实时 VAD → 分人）与 App 的 ServiceOverviewView.capabilities；稿上原先把最后
+  // 行序与措辞对齐 REDESIGN-SPEC §7.5（语音识别 → 语音设计 / 内置音色 → 音色克隆 →
+  // 实时语音断句 → 说话人区分）与 App 的 ServiceOverviewView.capabilities；稿上原先把最后
   // 两行接反了。
   const caps = [
     // 原因列逐字取自应用能力矩阵（ServiceOverviewView.capabilities）：这一列是运行时
     // 事实，不是设计文案，稿上的示例串必须能在应用里原样出现。
-    ["语音识别", "Ready", "可用", "运行中；词级时间戳由 ASR 原生提供。"],
-    ["语音合成 · VoiceDesign", "Ready", "可用", "服务已公开可用的 VoiceDesign capability。"],
-    ["语音合成 · Base", "Ready", "可用", "运行中"],
-    ["音色复刻", "Ready", "可用", "服务已公开可用的音色复刻 capability。"],
-    ["实时语音 VAD", "Ready", "可用", "运行中"],
-    ["分人识别", "Ready", "可用", "只输出本次会话的匿名标签；不管理实名或声纹库。"]
+    ["语音识别", "Ready", "可用", "运行中；每个字的时间点由识别模型直接给出。"],
+    ["语音合成 · 语音设计", "Ready", "可用", "服务声明「语音设计」已经可用。"],
+    ["语音合成 · 内置音色", "Ready", "可用", "运行中"],
+    ["音色克隆", "Ready", "可用", "服务声明「音色克隆」已经可用。"],
+    ["实时语音断句", "Ready", "可用", "运行中"],
+    ["说话人区分", "Ready", "可用", "只输出本次会话的匿名标签；不管理实名或声纹库。"]
   ];
   caps.forEach(function (cap, i) {
     const row = frame("cap", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 18, padY: 12 });
@@ -2900,17 +2900,17 @@ function screenOverview(d) {
   const runtime = card(d, "runtime", { pad: 0, gap: 0, clip: true });
   const rHead = frame("head", { layout: "VERTICAL", gap: 3, padX: 18, padY: 16 });
   add(rHead, text("title", "运行信息", "Heading / Section", V["text/primary"]));
-  add(rHead, text("detail", "只反映本机当前取值；修改运行态一律走 profile 与 preflight。", "Callout", V["text/secondary"]));
+  add(rHead, text("detail", "只反映此刻的取值；要换档位或改运行方式，去「模型」页。", "Callout", V["text/secondary"]));
   add(runtime, stretch(rHead));
   hairline(runtime);
   [
     // 取值行与应用同源：档位用「档位 · 取向」，端口用 host:port 原样，版本就是版本。
-    // aligner 精度与 TTS lane 数属于模型页的档位卡，LaunchAgent 与 runtime 归属属于
+    // 对齐模型精度与合成通道数属于模型页的档位卡，LaunchAgent 与 runtime 归属属于
     // 开发者详情，都不在这四行里重复。
-    ["当前档位", "Quality · 创作优先"],
+    ["当前档位", "精准 · 更适合创作"],
     ["服务端口", "127.0.0.1:8201"],
     ["运行版本", "0.4.0"],
-    ["常驻 worker", "asr · tts-design · tts-base"]
+    ["已加载的模型", "语音设计 + 音色克隆"]
   ].forEach(function (r, i) {
     const row = frame("infoRow", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 18, padY: 10 });
     const k = frame("kCell", { layout: "HORIZONTAL" });
@@ -3029,16 +3029,19 @@ function screenModels(d) {
     {
       // 卡片文案取自应用 ProfileChoiceCard：标题是「档位 · 取向」，副行是它的适用场景
       // 说明（profilePurpose），下面三行规格只列差异。
-      name: "Light · 轻量快速", sub: "无 aligner、无分人；单个 TTS worker —— 更小的 ASR 组合，启动最快", sel: false,
-      specs: [["分人", "不支持"], ["aligner", "无"], ["TTS lane", "1 个"]]
+      name: "轻量 · 最快最省",
+      sub: "启动最快、占内存最少；识别与配音是基础质量，不区分说话人，也不能创作音色。", sel: false,
+      specs: [["说话人区分", "不支持"], ["音色创作", "不支持"], ["识别与配音", "基础"]]
     },
     {
-      name: "Balanced · 分人和日常", sub: "aligner-q8，可分人；单个 TTS worker —— 日常配音的平衡选择", sel: false,
-      specs: [["分人", "支持"], ["aligner", "aligner-q8"], ["TTS lane", "1 个"]]
+      name: "均衡 · 日常够用",
+      sub: "日常够用：识别更准、能区分说话人，配音也正常；内存占用适中。", sel: false,
+      specs: [["说话人区分", "支持"], ["音色创作", "不支持"], ["识别与配音", "更好"]]
     },
     {
-      name: "Quality · 创作优先", sub: "aligner-bf16，可分人；VoiceDesign 与 Base 双常驻，可跨 lane 并发 —— 适合音色创作", sel: true,
-      specs: [["分人", "支持"], ["aligner", "aligner-bf16"], ["TTS lane", "2 个 · 跨 lane 并发"]]
+      name: "精准 · 更适合创作",
+      sub: "识别与配音质量最好，支持音色创作和克隆；占用最多，换档要等一会儿。", sel: true,
+      specs: [["说话人区分", "支持（更准）"], ["音色创作", "支持（含克隆）"], ["识别与配音", "最好"]]
     }
   ].forEach(function (p) {
     const c = frame("Profile Card", {
@@ -3057,7 +3060,8 @@ function screenModels(d) {
     add(c, stretch(top));
     add(c, text("sub", p.sub, "Callout", V["text/secondary"], { w: 320 }));
     // Three facts per card, so the choice is made on the difference that
-    // matters (分人 / aligner / lane) instead of on the tier name.
+    // matters (谁在说话 / 能不能创作音色 / 识别与配音质量) instead of on the
+    // tier name. The internal names (aligner-bf16, lane 数) stay in 技术详情.
     hairline(c);
     const spec = frame("spec", { layout: "VERTICAL", gap: 6 });
     p.specs.forEach(function (s) { kvRow(spec, s[0], s[1], 76); });
@@ -3082,7 +3086,7 @@ function screenModels(d) {
 
   const COLS = [440, 200, 140];
   const header = frame("header", { layout: "HORIZONTAL", gap: 0, padX: 18, padY: 9 });
-  ["制品", "量化", "文件", "校验"].forEach(function (label, i) {
+  ["模型文件", "量化", "文件", "校验"].forEach(function (label, i) {
     const holder = frame("cell", { layout: "HORIZONTAL", justify: i >= 2 ? "MAX" : "MIN" });
     if (i === 3) grow(holder); else size(holder, COLS[i], null);
     add(holder, text("h", label, "Caption / Medium", V["text/secondary"]));
@@ -3111,7 +3115,7 @@ function screenModels(d) {
   });
   hairline(table);
   const foot = frame("foot", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 18, padY: 12 });
-  add(foot, text("note", "5 个制品 · 1 个待校验，分人能力在补齐前不可用。", "Subheadline", V["text/tertiary"]));
+  add(foot, text("note", "5 个模型文件 · 1 个待校验，说话人区分在补齐前不可用。", "Subheadline", V["text/tertiary"]));
   spacer(foot);
   secondaryButton(foot, "仅校验缺失项", "refresh-cw");
   add(table, stretch(foot));
@@ -3141,10 +3145,10 @@ function screenDiagnostics(d) {
     { tone: "Ready", icon: "check", ink: "status/ready", title: "配置文件", sub: "确认服务配置文件存在且可以被受管 runtime 读取。" },
     { tone: "Ready", icon: "check", ink: "status/ready", title: "音频编解码", sub: "确认音频编解码依赖可用，上传和输出流程能够正常工作。" },
     { tone: "Ready", icon: "check", ink: "status/ready", title: "运行设置", sub: "确认当前 profile 和运行参数可以被服务读取。" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "ASR 制品", sub: "确认语音识别能力的配置、制品和运行状态满足启动条件。" },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "TTS 制品", sub: "确认语音合成能力的配置、制品和运行状态满足启动条件。" },
-    { tone: "Attention", icon: "triangle-alert", ink: "status/attention", title: "分人对齐制品", sub: "确认分人对齐制品满足 SpeechRail 服务运行的前置条件。", cur: true },
-    { tone: "Ready", icon: "check", ink: "status/ready", title: "实时语音检测", sub: "确认实时语音检测满足 SpeechRail 服务运行的前置条件。" }
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "识别模型", sub: "确认语音识别的配置、模型文件和运行状态满足启动条件。" },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "合成模型", sub: "确认语音合成的配置、模型文件和运行状态满足启动条件。" },
+    { tone: "Attention", icon: "triangle-alert", ink: "status/attention", title: "说话人区分对齐模型", sub: "确认说话人区分对齐模型满足 SpeechRail 服务运行的前置条件。", cur: true },
+    { tone: "Ready", icon: "check", ink: "status/ready", title: "实时语音断句", sub: "确认实时语音断句满足 SpeechRail 服务运行的前置条件。" }
   ].forEach(function (item, i) {
     const row = frame("diagRow", { layout: "HORIZONTAL", gap: 10, align: "CENTER", padX: 16, padY: 12 });
     if (item.cur) bindFill(row, V["surface/railTint"]);
@@ -3175,7 +3179,7 @@ function screenDiagnostics(d) {
   spacer(pillRow);
   add(pillRow, text("when", "刚刚", "Caption", V["text/tertiary"]));
   add(sHead, stretch(pillRow));
-  add(sHead, text("title", "分人对齐制品", "Title / Page", V["text/primary"]));
+  add(sHead, text("title", "说话人区分对齐模型", "Title / Page", V["text/primary"]));
   // 影响句取自应用 PreflightDiagnosticsView.impact(for:)：这一行说的是后果，不是重复结论。
   add(sHead, text(
     "body",
@@ -3285,8 +3289,8 @@ function screenDeveloperDocs(d) {
   [
     ["服务地址", "http://127.0.0.1:8201"],
     ["鉴权", "回环免密钥；非回环需 Bearer"],
-    ["运行档位", "Quality"],
-    ["发布的能力", "识别 · 合成 · 匿名分人 · 声音复刻"]
+    ["运行档位", "精准"],
+    ["发布的能力", "识别 · 合成 · 说话人区分 · 音色克隆"]
   ].forEach(function (fact) {
     const col = frame("fact", { layout: "VERTICAL", gap: 3 });
     add(col, text("k", fact[0], "Caption / Medium", V["text/tertiary"]));
@@ -3340,7 +3344,7 @@ function screenDeveloperDocs(d) {
   add(body, stretch(topicHead));
   add(body, text("lead",
     "服务默认只监听回环地址。任何 OpenAI 兼容客户端把 base_url 指到本机端口即可接入，" +
-    "不需要改模型名，也不需要感知 worker 的加载与回收。",
+    "不需要改模型名，也不需要关心模型什么时候加载、什么时候释放。",
     "Body", V["text/secondary"], { w: 740 }));
 
   codeBlock(body, "Python · OpenAI SDK", [
@@ -3544,7 +3548,7 @@ function screenAssistantBlocked(d) {
   [
     ["语音识别", "Ready", "可用", "实时字幕与会议转录都靠它，现在就能用。"],
     ["语音合成", "Ready", "可用", "助手说话用它；音色可以在设置里换。"],
-    ["分人识别", "Ready", "可用", "只输出本次会话的匿名标签；不管理实名或声纹库。"],
+    ["说话人区分", "Ready", "可用", "只输出本次会话的匿名标签；不管理实名或声纹库。"],
     ["对话模型", "Off", "未配置", "填一个兼容 OpenAI、且支持 Responses API 的服务地址与模型。"]
   ].forEach(function (cap, i, all) {
     const row = frame("cap", { layout: "HORIZONTAL", gap: 12, align: "CENTER", padX: 16, padY: 12 });
@@ -3809,8 +3813,8 @@ function screenMeetingEmpty(d) {
   secondaryButton(acts, "查看设置", "sliders-horizontal");
   add(empty, acts);
     const caps = frame("caps", { layout: "HORIZONTAL", gap: 10, align: "CENTER" });
-    pill(caps, "Ready", "可标说话人 · Quality 档");
-    add(caps, text("note", "换到 light 档（最省资源）时会议照录，只是不标说话人。", "Caption", V["text/tertiary"]));
+    pill(caps, "Ready", "可标说话人 · 精准档");
+    add(caps, text("note", "换到「轻量」档（最省资源）时会议照录，只是不标说话人。", "Caption", V["text/tertiary"]));
     add(empty, caps);
     add(d, stretch(grow(empty)));
   }
@@ -4150,7 +4154,7 @@ const CLOSURE_W = LAYOUT.canvasW;
 const CLOSURE_PAD = 48;
 const CLOSURE_STAGES = ["① 入口", "② 前置与受阻", "③ 主交互", "④ 交还与守卫", "⑤ 产物与回看"];
 // 291 × 5 + 12 × 4 = 1503：**这行现在是 5 格**（系统入口 / 大模型 / 记录落点 / 麦克风所有权 /
-// 分人链路）。2026-09-17 实测教训：这里原先按 3 格写成 490，第 4 格越出画板右边缘 444px，
+// 说话人区分链路）。2026-09-17 实测教训：这里原先按 3 格写成 490，第 4 格越出画板右边缘 444px，
 // 报告里表现为 `root overflow=4 · spine/3+444`。格子宽度必须跟着**当前**条目数算，不能跟着
 // 上一版的条目数算——每次往这根脊柱上添一条，都要连带改这里与下一行的格高。
 const CLOSURE_SPINE_W = 291;
@@ -4235,7 +4239,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
     hairline(side);
     const sBody = frame("sBody", { layout: "VERTICAL", gap: 10, padX: 16, padY: 16 });
     [
-      ["运行档位", "Quality（本机最强）"],
+      ["运行档位", "精准（本机最强）"],
       ["默认字号", "标准"],
       ["字幕带位置", "屏幕底部居中 · 每块屏各记一套"],
       ["采集设备", "MacBook 麦克风"],
@@ -4244,7 +4248,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
     ].forEach(function (kv) { kvRow(sBody, kv[0], kv[1]); });
     add(sBody, text("label", "运行档位是什么意思", "Caption / Medium", V["text/secondary"]));
     add(sBody, text("desc",
-      "Quality 是这台 Mac 现在跑的那一档：认得最准，所以能标出说话人。换档在设置里，" +
+      "「精准」是这台 Mac 现在跑的那一档：认得最准，所以能标出说话人。换档在设置里，" +
         "已经存下的记录不跟着变。",
       "Subheadline", V["text/secondary"], { w: 308 }));
     add(side, stretch(sBody));
@@ -4336,7 +4340,7 @@ function closureCheckRow(parent, tone, label, note, trailing, noteW, nodeName) {
       ["时长", "38 分钟"],
       ["行数", "412 行"],
       ["说话人", "3 位 · 自动编号"],
-      ["说话人标签", "已开 · Quality"],
+      ["说话人标签", "已开 · 精准"],
       ["保存位置", "记录库 · 长期保留"],
       ["导出格式", "SRT / Markdown / 纯文本"]
     ].forEach(function (kv) { kvRow(sBody, kv[0], kv[1]); });
@@ -4650,7 +4654,7 @@ function screenClosureMeetingSources(d) {
   hairline(side);
   const sBody = frame("sBody", { layout: "VERTICAL", gap: 10, padX: 16, padY: 16 });
     [
-      ["运行档位", "Quality（本机最强）"],
+      ["运行档位", "精准（本机最强）"],
       ["音频来源", "麦克风 + 本机音频"],
       ["说话人标签", "已开 · 最多 4 位"],
       ["采集格式", "24 kHz → 内部 16 kHz"],
@@ -4735,7 +4739,7 @@ function screenClosureMeetingInnerOS(d) {
       meetingInfoSide(side, {
         badge: "录制中 · 还没存好",
         // 右栏的高度是「这一行剩下的高度」，不是按内容撑——展开的 OS 抽屉把这一段吃掉一大截
-        // （实测 2026-09-18：`sideBody +50B h275/302`）。所以这一态只留 5 行，把「分人」「整理」
+        // （实测 2026-09-18：`sideBody +50B h275/302`）。所以这一态只留 5 行，把「说话人区分」「整理」
         // 让给状态条与其它态（那两条在状态条上已经写着）。右栏不是信息仓库，是当前状态的摘要。
         rows: [
           ["时长", "00:12:47"],
@@ -5880,22 +5884,22 @@ function closureVoicePersonaBoard() {
 }
 
 // --- S2. 菜单栏 · 三个入口 -----------------------------------------------------
-// --- S3. 分人 · 会议与字幕共用一条链路 -----------------------------------------
+// --- S3. 说话人标签 · 会议与字幕共用一条链路 -----------------------------------------
 //
-// 「会议与字幕都要对接 SpeechRail 的分人能力」在稿上只有一个答案：它们走**同一条**链路——
-// 同一个 `/v1/realtime` 分人扩展（`session.speechrail.diarization.enabled`）、同一套会话内
+// 「会议与字幕都要对接 SpeechRail 的说话人区分能力」在稿上只有一个答案：它们走**同一条**链路——
+// 同一个 `/v1/realtime` 说话人区分扩展（`session.speechrail.diarization.enabled`）、同一套会话内
 // 匿名标签、同一套降级话术、同一处改名。两边各造一套的话，同一个说话人在会议里叫
 // 「说话人 A」、在字幕里又叫「Speaker 1」，用户得学两遍。
 //
-// 三种状态都画出来，是因为档位差异（light 没有分人）与运行期降级（overloaded / 结束超时）
+// 三种状态都画出来，是因为档位差异（light 没有说话人区分）与运行期降级（overloaded / 结束超时）
 // 都是正常状态：真正的判断是「降级时正文不许丢」，而不是把提示吞掉。
 function closureDiarizationBoard() {
-  const board = frame("▸ 分人 · 说话人标签（会议与字幕共用）", {
+  const board = frame("▸ 说话人标签（会议与字幕共用）", {
     layout: "VERTICAL", gap: 16, pad: 24, fill: V["surface/window"], radius: 12, clip: true
   });
   size(board, LAYOUT.windowW, null);
-  pageHead(board, "分人 · 会议与字幕共用一条链路",
-    "同一个分人扩展、同一套匿名标签、同一套降级话术：会议与字幕只是这条链路的两个出口。");
+  pageHead(board, "说话人标签 · 会议与字幕共用一条链路",
+    "同一个说话人区分扩展、同一套匿名标签、同一套降级话术：会议与字幕只是这条链路的两个出口。");
 
   // 220 + 550 + 550 + 12 × 2 = 1344，留在行内边距之后的 1360 里；2026-09-17 实测
   // 570 的第三列会顶出 8px（`head ▸ cell +8R [570 in 1392]`）。列宽要按「扣掉行内边距
@@ -5912,10 +5916,10 @@ function closureDiarizationBoard() {
   add(table, stretch(head));
   hairline(table);
   [
-    ["Attention", "档位不支持（light）",
-      "会议照录，没有说话人标签：开关置灰并写明「light 档位不分人」。",
+    ["Attention", "档位不支持（轻量）",
+      "会议照录，没有说话人标签：开关置灰并写明「现在的档位不标说话人」。",
       "字幕带照常跟随，历史里只有正文；按说话人筛这一项不可用，不假装是空结果。"],
-    ["Ready", "已启用（balanced / quality）",
+    ["Ready", "已启用（均衡 / 精准）",
       "会话内匿名标签「说话人 A/B/C」，最多 4 位；随时可以改名。",
       "字幕带上带标签；记录库里能改名、能按说话人筛，筛完再导出 SRT。"],
     ["Attention", "降级（overloaded / 结束超时）",
@@ -5944,7 +5948,7 @@ function closureDiarizationBoard() {
   hairline(table);
   const tFoot = frame("foot", { layout: "HORIZONTAL", gap: 8, align: "CENTER", padX: 16, padY: 10 });
   add(tFoot, text("note",
-    "两侧的开关粒度一样：每个会话一个开关、默认关；打开时才声明分人，未声明就按无分人跑。",
+    "两侧的开关粒度一样：每个会话一个开关、默认关；打开时才声明说话人区分，未声明就按没有说话人标签跑。",
     "Subheadline", V["text/tertiary"], { w: 900 }));
   add(table, stretch(tFoot));
 
@@ -6146,7 +6150,7 @@ const CLOSURE_BOARDS = [
     route: "meeting", session: "meeting", full: buildSessionGuardBoard,
     links: [["取消", "meetingRecording"]] }
   ,
-  { anchor: "diarization", title: "分人 · 说话人标签（会议与字幕共用）", icon: "users",
+  { anchor: "diarization", title: "说话人标签（会议与字幕共用）", icon: "users",
     route: "meeting", session: "meeting", full: closureDiarizationBoard,
     links: [["打开会议页", "meetingRecording"], ["打开字幕记录库", "captions"]] }
   ,
@@ -6224,7 +6228,7 @@ const CLOSURE_LANES = [
     stages: [
       ["① 入口", "⌘⇧L 或菜单栏", "字幕带贴在任何 App 之上；不改变当前页面。", "captionsIdle"],
       ["② 前置与受阻", "未授权 · 未就绪 · 被占用", "三种受阻共用一条带子，各给一个出口。", "bandBlocked"],
-      ["③ 主交互", "跟随中 · 可分人", "贴底跟随；分人档位上带说话人标签，light 档位只有正文。", "bandFollow"],
+      ["③ 主交互", "跟随中 · 可标说话人", "贴底跟随；说话人标签开着的档位上带标签，「轻量」档位只有正文。", "bandFollow"],
       ["④ 交还与守卫", "上滚回看", "上滚即暂停跟随并出现「回到最新」；它不持焦点，esc 不会关它。", "bandReview"],
       ["⑤ 产物与回看", "字幕记录库", "点字幕带上的 ✕ 结束并保存；记录库里搜索、按说话人筛、导出 SRT。", "captions"]
     ]
@@ -6232,7 +6236,7 @@ const CLOSURE_LANES = [
 ];
 
 // 共用脊柱：三条闭环在这五件事上必须只有一种说法，否则同一台 Mac 上会出现三套解释。
-// 第五条（分人）是用户 2026-09-17 要求「会议与字幕都要对接分人能力」的落点：两个功能共用
+// 第五条（说话人区分）是用户 2026-09-17 要求「会议与字幕都要对接说话人区分能力」的落点：两个功能共用
 // 同一条链路，答案不是各画一套，而是这根脊柱上多一格。
 const CLOSURE_SPINE = [
   ["共用脊柱", "系统级入口 · 菜单栏",
@@ -6243,10 +6247,10 @@ const CLOSURE_SPINE = [
   ["资产的落点", "记录 · 本机数据库",
     "会议、纪要、字幕与对话长期保存在同一个本机数据库里；导出才生成文件。", "settingsSession"],
   ["首要事实", "谁在用麦克风 · 会话占用",
-    "本机只有一个麦克风、一个实时 worker：所有权常驻可见，交还要确认。", "meetingGuard"]
+    "本机只有一个麦克风，同一时刻只有一路在听：所有权常驻可见，交还要确认。", "meetingGuard"]
   ,
-  ["同一条链路", "分人 · 会议与字幕共用",
-    "同一个分人扩展、同一套匿名标签与降级话术；档位不支持时两边都不分人，正文照常。", "diarization"]
+  ["同一条链路", "说话人标签 · 会议与字幕共用",
+    "同一个说话人区分扩展、同一套匿名标签与降级话术；档位不支持时两边都不标说话人，正文照常。", "diarization"]
 ];
 
 // 页面不是一次性画面（用户 2026-09-17：会改变一些页面设计的交互方式，现在的设计有些
@@ -6309,7 +6313,7 @@ const CLOSURE_STATES = [
       ["状态① · 未开始", "窗口里是前置检查",
         "窗口开着但不必在前台；开始字幕这个动作发生在浮层那侧，窗口不换页。", "captionsIdle"],
       ["状态② · 跟随中", "浮层贴底跟随",
-        "窗口可以关掉，记录照写；分人档位上带说话人标签，位置与字号按屏幕记住。", "bandFollow"],
+        "窗口可以关掉，记录照写；说话人标签开着的档位上带标签，位置与字号按屏幕记住。", "bandFollow"],
       ["状态③ · 回看", "同一个浮层上滚",
         "上滚只是换成了回看态（出现「回到最新」），不是第二个界面，也不结束会话。", "bandReview"],
       ["状态④ · 已保存", "浮层收起，记录库接手",
@@ -6964,7 +6968,7 @@ const FLOWS = [
     steps: [
       ["会议助手", "开始会议", "会议一开始就切到会议页：它必须看得见", "meeting"],
       ["会议助手", "边听边记", "是否出现说话人标签，由档位决定而不是由开关决定", "meeting"],
-      ["会议助手", "结束会议", "EOF 屏障：等分人水位对齐再封存，未对齐时保留正文", "meeting"],
+      ["会议助手", "结束会议", "EOF 屏障：等说话人标签对齐再封存，未对齐时保留正文", "meeting"],
       ["会议助手", "生成纪要", "本机大模型；重新生成新增版本，不覆盖旧版本", "meeting"],
       ["会议助手", "改名与导出", "说话人改名是元数据修订，正文不改写", "meeting"]
     ]
@@ -7084,7 +7088,7 @@ function menuPanel(name, o) {
   add(title, text("label", "SpeechRail", "Heading / Section", V["text/primary"]));
   add(head, stretch(title));
   // 状态行与副行都取自应用 ControlMenuView：档位用短名，副行是「版本 X · 端口 Y」。
-  add(head, text("status", o.status || "服务已就绪 · Quality", "Callout",
+  add(head, text("status", o.status || "服务已就绪 · 精准", "Callout",
     V["text/secondary"], { w: MENU_TEXT_W }));
   add(head, text("detail", o.detail || "版本 0.7.3 · 端口 8201", "Subheadline",
     V["text/tertiary"], { w: MENU_TEXT_W }));
@@ -7265,7 +7269,7 @@ function paneCreative(c) {
     function (p) { sliderControl(p, 132, 0.5, "1.0×"); }, { captionWidth: LAYOUT.settingsLabelW });
 }
 
-// 会话页签是这一轮唯一新增的设置面：SpeechRail 只提供识别、合成与分人，对话与纪要
+// 会话页签是这一轮唯一新增的设置面：SpeechRail 只提供识别、合成与说话人区分，对话与纪要
 // 要靠用户在**这台 Mac 上**运行的 OpenAI 兼容服务（SESSIONS-SPEC §6.5 / §10）。
 function paneSession(c) {
   const llm = settingsSection(c, "大模型（对话与纪要）");
@@ -7313,8 +7317,8 @@ function paneSession(c) {
     "按屏幕记忆；改乱了可以重置回「屏幕底部居中」。",
     function (p) { secondaryButton(p, "重置位置"); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(sub);
-  controlRow(sub, "分人标签",
-    "只给这一段标出「说话人 A/B/C」；需要 balanced 或 quality 档位。",
+  controlRow(sub, "说话人标签",
+    "只给这一段标出「说话人 A/B/C」；需要「均衡」或「精准」档位。",
     function (p) { switchControl(p, false); }, { captionWidth: LAYOUT.settingsLabelW });
 
   // 人设在设置里的位置要短、要准：这里定的是「新对话开始时预填什么」，不是
@@ -7339,7 +7343,7 @@ function paneSession(c) {
 
   const meet = settingsSection(c, "会议");
   controlRow(meet, "会议说话人标签",
-    "light 档位只保留正文，不出现说话人标签。",
+    "「轻量」档位只保留正文，不出现说话人标签。",
     function (p) { switchControl(p, true); }, { captionWidth: LAYOUT.settingsLabelW });
   hairline(meet);
   controlRow(meet, "纪要模型",
@@ -7466,7 +7470,7 @@ function buildMenuAndSettings() {
     menuPanel("panel · 控制受限", {
       restricted: true,
       // 控制受限只改状态行：副行仍然是「版本 · 端口」，应用不会为它换一句话。
-      status: "服务已就绪 · 控制受限 · Quality"
+      status: "服务已就绪 · 控制受限 · 精准"
     }),
     menuPanel("panel · 深色", {})
   ];

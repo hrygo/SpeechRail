@@ -1100,7 +1100,7 @@ public struct VoiceDesignView: View {
             ProgressView()
                 .controlSize(.large)
         } description: {
-            Text("正在核对当前服务、档位和音色能力。")
+            Text("正在检查这台 Mac 现在能不能生成新音色…")
         }
     }
 
@@ -1135,10 +1135,10 @@ public struct VoiceDesignView: View {
         }.count
         return DeveloperInspector {
             SectionHeading(
-                title: "VoiceDesign 技术摘要",
-                detail: "候选试听音频仅保留在本次会话；注册时服务端会按参数重新生成并持久化参考音频。"
+                title: "音色创作 · 技术摘要",
+                detail: "候选试听音频只留在这一次打开期间；保存进音色库时，服务会按同样的参数重新生成一份参考音频。"
             )
-            LabeledContent("能力门禁", value: voiceDesignAvailabilityText)
+            LabeledContent("现在能不能生成", value: voiceDesignAvailabilityText)
             LabeledContent("音色描述", value: "\(description.count) 字")
             LabeledContent("参考文案", value: "\(referenceText.count) 字")
             LabeledContent("候选状态", value: "\(readyCount) 个可试听 · \(failedCount) 个失败")
@@ -1153,15 +1153,15 @@ public struct VoiceDesignView: View {
     private var voiceDesignAvailabilityText: String {
         switch voiceDesignAvailability {
         case .checking:
-            "正在核对"
+            "正在检查"
         case .available:
-            "已确认可用"
+            "可以"
         case .requiresQuality:
-            "需要 Quality 档位"
+            "需要「精准」档位"
         case .serviceUnavailable:
-            "TTS 服务未就绪"
+            "语音合成服务未就绪"
         case .unsupported:
-            "服务端未提供"
+            "服务没有开放这个能力"
         }
     }
 
@@ -1215,15 +1215,15 @@ public struct VoiceDesignView: View {
     private var voiceDesignAvailabilityLine: some View {
         let status: (tone: StatusTone, title: String, message: String, image: String) = switch voiceDesignAvailability {
         case .checking:
-            (.neutral, "正在核对 VoiceDesign", "读取当前服务、档位和能力声明。", "arrow.clockwise")
+            (.neutral, "正在检查能不能生成新音色", "读取这台 Mac 的服务与档位。", "arrow.clockwise")
         case .available:
-            (.healthy, "VoiceDesign 已确认可用", "Quality、TTS 与服务声明的 VoiceDesign capability 均已确认。", "checkmark.circle")
+            (.healthy, "现在可以生成新音色", "语音合成与「精准」档位都已就位。", "checkmark.circle")
         case .requiresQuality:
-            (.attention, "当前档位未提供 VoiceDesign", "请在模型页确认 Quality 制品并应用目标档位。", "slider.horizontal.3")
+            (.attention, "现在这一档不生成新音色", "去「模型」页换成「精准」，再回到本页。", "slider.horizontal.3")
         case .serviceUnavailable:
-            (.attention, "TTS 服务尚未就绪", "先恢复服务状态，再生成真实候选音频。", "exclamationmark.triangle")
+            (.attention, "语音合成服务还没就绪", "先在「服务状态」把服务恢复，再生成候选音频。", "exclamationmark.triangle")
         case .unsupported:
-            (.critical, "服务端未公开 VoiceDesign", "服务未公开 VoiceDesign capability，请在模型页核对 Quality 制品和当前档位。", "xmark.circle")
+            (.critical, "这台服务没有开放音色生成", "去「模型」页核对「精准」档位需要的模型文件是否已下载并通过校验。", "xmark.circle")
         }
 
         ViewThatFits(in: .horizontal) {
@@ -1352,8 +1352,8 @@ public struct VoiceDesignView: View {
             nil
         case .requiresQuality:
             AvailabilityBanner(
-                title: "音色创作需要 Quality 档位",
-                message: "当前档位不会加载 VoiceDesign 能力。切换档位不会自动发生，请在模型页确认后再操作。",
+                title: "音色创作需要「精准」这一档",
+                message: "现在这一档不会加载创作新音色需要的模型。换档不会自动发生——去「模型」页确认后自己切。",
                 actionTitle: "去模型页切档",
                 route: .models
             )
@@ -1366,8 +1366,8 @@ public struct VoiceDesignView: View {
             )
         case .unsupported:
             AvailabilityBanner(
-                title: "当前 TTS 不支持 VoiceDesign",
-                message: "服务未公开可用的 VoiceDesign preview 能力。请在模型页核对 Quality 制品和当前档位。",
+                title: "这台服务没开放音色生成",
+                message: "去「模型」页核对「精准」档位需要的模型文件是否已下载并通过校验。",
                 actionTitle: "去模型页切档",
                 route: .models
             )
