@@ -115,7 +115,11 @@ def _clone_payload_fingerprint(
         "audio_sha256": hashlib.sha256(audio_content).hexdigest(),
         "ref_text_sha256": hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest(),
         "name": name.strip(),
-        "voice_id": (\n            voice_id.strip().lower()\n            if isinstance(voice_id, str) and voice_id.strip()\n            else None\n        ),
+        "voice_id": (
+            voice_id.strip().lower()
+            if isinstance(voice_id, str) and voice_id.strip()
+            else None
+        ),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()
