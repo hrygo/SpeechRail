@@ -12,7 +12,6 @@ from speechrail.config.model_catalog import load_catalog
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceRegistry
 
-
 _PCM = b"\x01\x00\x02\x00\x03\x00"
 
 
