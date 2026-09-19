@@ -19,12 +19,12 @@ from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
     VoiceStoreUnavailableError,
     apply_crossfade,
-    bounded_sentences,
     generation_token_budget,
     get_voice_profile,
     normalize_tts_text,
 )
 from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
+from speechrail.domain.tts_text_planner import TtsTextPlanner
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -412,10 +412,10 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             return pcm
 
         try:
-            for sentence in bounded_sentences(clean_text):
+            for planned_chunk in TtsTextPlanner().plan(clean_text).chunks:
                 self._delivery_stats["planner_chunks"] += 1
                 for pcm in self._generate(
-                    sentence,
+                    planned_chunk.spoken_text,
                     voice=voice,
                     speed=speed,
                     language=language,

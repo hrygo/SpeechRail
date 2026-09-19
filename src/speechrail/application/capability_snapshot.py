@@ -17,6 +17,7 @@ from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import ActiveModelCatalog
 from speechrail.domain.tts import VOICE_ALIASES, VoiceProfile
+from speechrail.domain.tts_text_planner import PLANNER_VERSION, TtsTextPlanner
 
 SCHEMA_VERSION = "effective_capabilities_v1"
 Support = Literal["supported", "unsupported", "unknown"]
@@ -210,6 +211,13 @@ def build_capability_snapshot(
     # Private recipe changes must invalidate discovery, even though neither the
     # recipe nor its text hash is a public voice identity. Never expose this input.
     private_versions = [content_revision(profile.to_dict()) for profile in ordered]
+    planner_policy = {
+        "version": PLANNER_VERSION,
+        "max_chars": TtsTextPlanner().max_chars,
+        "coordinate_space": "normalized_text_unicode_codepoints",
+        "native_context_conditioning": "unsupported",
+        "naturalness_evidence": "unevaluated",
+    }
     catalog_revision = content_revision(
         {
             "schema": SCHEMA_VERSION,
@@ -218,6 +226,7 @@ def build_capability_snapshot(
             "recipes": private_versions,
             "enabled": sorted(enabled_voices),
             "rate": sample_rate,
+            "tts_text_planner": planner_policy,
         }
     )
     result: dict[str, Any] = {
@@ -233,6 +242,7 @@ def build_capability_snapshot(
             for profile in ordered
         ],
         "operations": {
+            "tts_text_planner": planner_policy,
             "voice_preview": {
                 "status": "supported"
                 if active.tts is not None and active.tts.variant == "voice_design"

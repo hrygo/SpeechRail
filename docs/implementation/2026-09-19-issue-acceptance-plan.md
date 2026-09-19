@@ -28,7 +28,7 @@ measurement before changing policy. No performance percentages will be invented.
 |---|---|---|---|
 | #34 | Frozen gain already has credible 10 ms frames, bounded calibration and sample limiter; old issue body predates this code | Rerun frozen F1-F4, reset, fragmentation, cancellation and worker integration regressions; preserve dynamic path | Current multi-clone/text managed PCM matrix; transient distortion, latency and listening |
 | #44 | Existing governor, telemetry, budgets and batch windows are not proof of fair execution | E1/E2/E3 measurement/default alignment first; then E4/E5/E13 scheduling and E11a memory; E6 independent | Cold/warm paced and commit-tail distributions, real contention, memory and thermal observations; E7-E12 remain conditional, E14 no large mixed refactor |
-| #53 | Works fixtures always populate local work storage | Debug-only empty-store fixture plus empty-state/navigation UI regression, keep populated test | Isolated macOS UI execution; no desktop automation on user's machine |
+| #53 | UI-test composition uses the default persistent work store, allowing prior/user state to leak | Debug-only empty-store fixture plus empty-state/navigation UI regression, keep populated test | Isolated macOS UI execution; no desktop automation on user's machine |
 | #62 | Existing discovery reports variant but has no atomic cross-object snapshot or precise parameter domains | Versioned read-only effective snapshot; single registry read; stable catalog hash and per-service epoch; explicit unknown identities | Profile/voice matrix, update/restart/concurrency, no inference/download, privacy, legacy compatibility |
 | #63 | Registry already leases immutable audio; aliases and process-local idempotency do not ensure durable immutable identity | Revision history/CAS and resolved lease pin, transactional bounded idempotency, pre-PCM mismatch rejection | Restart/crash/write-failure/concurrent creation and revocation; no false legacy revision |
 | #64 | Chunk validator and Realtime done exist; raw HTTP EOF alone is weak evidence | Negotiated receipt with defined count/hash boundary and resolved identity; terminal failure/cancel handling | Slow/disconnected clients, premature EOF, malformed chunks, deadline/cancel; not proof of audible or correctly read text |
@@ -155,3 +155,41 @@ The public contract now specifies the single-writer closure window and evidence
 limits. It also corrects stale descriptions of the currently used bounded worker
 planner, independent Quality TTS lanes, and failed response.done terminal state.
 No field was added to the ordinary OpenAI WebSocket event schema.
+
+### Increment 5 — versioned immutable bounded TTS planner
+
+The common Qwen worker now wraps the existing acoustic splitter in `TtsTextPlanner`
+(`tts_bounded_v1`): immutable request-local chunks, normalized Unicode-codepoint
+spans, input digest, boundary kind, and a privacy-safe policy/count summary.
+Boundaries and spoken input are exactly equivalent to the existing splitter; no
+additional silence, native context conditioning, target KV sharing, or model calls
+are introduced. REST/Realtime/preview share this worker. Capability discovery
+advertises the actual policy; its catalog revision changes when policy changes.
+
+Coordinates intentionally refer to normalized input, not raw HTTP input. Raw-to-spoken
+span mapping (#70), completion receipts (#64), metrics integration, timing (#73),
+and multi-mode naturalness/latency measurements remain separate, unfulfilled gates.
+The planner does not log input text or its digest. An initial new policy regression
+found that catalog revision missed a planner-version change; that was corrected.
+
+Validation: planner, splitter, Qwen worker, clone and capability snapshot suite,
+Python 3.12.14: **98 passed**. Ruff and Mypy checked the changed source/tests.
+The test validates exact normalized-text conservation and boundary metadata, not
+acoustic continuity or raw-text meaning preservation.
+
+### Publication ledger at this milestone
+
+One Draft PR: #74, `feat/issue-acceptance-20260919` -> `main`. Initial real upstream
+base remains `28755de8cc51046f25ce75c7869fe1bacd34752d`. Published increments:
+
+| Increment | Remote commit | Verified tree |
+|---|---|---|
+| 1 | `7a04b3db7922083a9277d796724a6f46527b9f50` | `b9f0abe85ecf99251781278c88c8e9545ad3f973` |
+| 2 | `16fdfc4ee814f8273f4fe46f4ab9221b5e63375a` | `d340650b55e28fdf0ba6a31ece4ff1d479de78c7` |
+| 3 | `1d4fade67ede7d22bc3c0c1daac0d916c0a14513` | `80b6b5b719fda213abeee5d196d2c7aa1d746bc1` |
+| 4 | `34b2d8b678246db7ea419137d4258270bad343c0` | `bc694c257aa4fd7cb93da10c02d6d4934979ca33` |
+
+Each tree was matched to the locally tested source before the feature ref moved.
+The isolated bridge used standard Actions authorization and a disposable branch;
+transport contents/workflows are not part of the feature PR. Local snapshot commit
+IDs are not represented as upstream commit IDs. No user service was changed.
