@@ -517,12 +517,13 @@ class PronunciationRegistry:
             revisions = data.get(set_id)
             if not revisions:
                 raise KeyError(set_id)
+            value: PronunciationSet | None
             if revision is None:
                 value = revisions[next(reversed(revisions))]
             else:
                 value = revisions.get(revision)
-                if value is None:
-                    raise KeyError(revision)
+            if value is None:
+                raise KeyError(revision or set_id)
             if value.revoked:
                 raise PronunciationRevokedError(
                     f"pronunciation revision is revoked: {value.revision}"
