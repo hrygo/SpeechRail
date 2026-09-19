@@ -95,6 +95,7 @@ from speechrail.domain.tts import (
 )
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
+from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.resource_governor import (
     GovernorQueueFullError,
@@ -571,12 +572,15 @@ class OpenAIRealtimeSession:
             if isinstance(exc, asyncio.CancelledError):
                 raise
             message = str(exc)
-            code = (
-                "language_not_supported"
-                if message.startswith("language_not_supported")
-                else "backend_busy"
-            )
-            raise RealtimeAdapterError(code, message) from exc
+            if message.startswith("language_not_supported"):
+                raise RealtimeAdapterError("language_not_supported", message) from exc
+            raw_reason = getattr(exc, "busy_reason", BusyReason.BACKEND_TRANSITION)
+            busy_reason = str(raw_reason)
+            raise RealtimeAdapterError(
+                "backend_busy",
+                message,
+                busy_reason=busy_reason,
+            ) from exc
         self._asr = asr
         self._alignment_pcm.clear()
         self._alignment_overflow = False
@@ -1797,7 +1801,11 @@ class OpenAIRealtimeSession:
         except GovernorQueueFullError as exc:
             await self._asr_resources.aclose()
             self._asr_resources = None
-            raise RealtimeAdapterError("queue_full", "Realtime ASR queue is full") from exc
+            raise RealtimeAdapterError(
+                "queue_full",
+                "Realtime ASR queue is full",
+                busy_reason=str(BusyReason.GOVERNOR_QUEUE_FULL),
+            ) from exc
         except TimeoutError as exc:
             await self._asr_resources.aclose()
             self._asr_resources = None
@@ -1883,7 +1891,9 @@ class OpenAIRealtimeSession:
             await self._diarization_resources.aclose()
             self._diarization_resources = None
             raise RealtimeAdapterError(
-                "backend_busy", "another diarization session is active"
+                "backend_busy",
+                "another diarization session is active",
+                busy_reason=str(exc.busy_reason),
             ) from exc
 
     async def _release_diarization(self) -> None:
