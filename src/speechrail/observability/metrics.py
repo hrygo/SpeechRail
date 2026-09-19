@@ -43,7 +43,16 @@ _GOVERNOR_PURPOSES = frozenset(
     {"default", "interactive", "prefetch", "voice_creation", "quality_validation"}
 )
 _GOVERNOR_OUTCOMES = frozenset({"completed", "cancelled", "error"})
-_REALTIME_PHASES = frozenset({"asr_admission", "tts_admission", "send"})
+_REALTIME_PHASES = frozenset(
+    {
+        "asr_admission",
+        "asr_flush",
+        "asr_commit_ack",
+        "asr_terminal_wait",
+        "tts_admission",
+        "send",
+    }
+)
 _ALIGNMENT_EVENTS = frozenset(
     {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
 )
