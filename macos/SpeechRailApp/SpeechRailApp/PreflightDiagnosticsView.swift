@@ -811,13 +811,13 @@ public struct PreflightDiagnosticsView: View {
         case "tts_clone_variant":
             "音色克隆版本"
         case "diarization_config":
-            "「谁在说话」的配置"
+            "谁在说话的配置"
         case "diarization_snapshot":
-            "「谁在说话」的模型"
+            "谁在说话的模型"
         case "diarization_runtime":
-            "「谁在说话」的运行状态"
+            "谁在说话的运行状态"
         case "diarization_aligner_snapshot":
-            "「谁在说话」的配套模型"
+            "谁在说话的配套模型"
         case "realtime_vad":
             "实时语音断句"
         case "realtime_vad_model":
