@@ -48,6 +48,7 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import (
     VOICE_ALIASES,
+    VoiceAlreadyExistsError,
     VoiceInUseError,
     VoiceProfile,
     VoiceRevisionConflictError,
@@ -1258,6 +1259,9 @@ def create_system_router(services: AppServices) -> APIRouter:
             if isinstance(voice_id, str) and voice_id.strip()
             else None
         )
+        if idempotency_key and vid_str is None:
+            key_hash = DurableIdempotencyJournal.key_hash(idempotency_key)
+            vid_str = f"clone_idem_{key_hash[:24]}"
 
         fingerprint: str | None = None
         if idempotency_key:
@@ -1273,6 +1277,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     operation=_CLONE_IDEMPOTENCY_OPERATION,
                     key=idempotency_key,
                     fingerprint=fingerprint,
+                    provisional_result_id=vid_str,
                 )
             except IdempotencyConflictError:
                 return error_response(
@@ -1290,13 +1295,48 @@ def create_system_router(services: AppServices) -> APIRouter:
                     retryable=True,
                 )
             if decision.state == "pending":
-                return error_response(
-                    409,
-                    request_id,
-                    "idempotency_pending",
-                    "A previous clone request with this key has unknown completion state",
-                    retryable=True,
-                )
+                if decision.result_id is None:
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_pending",
+                        "Previous operation predates recoverable result identity",
+                        retryable=True,
+                    )
+                vid_str = decision.result_id
+                try:
+                    profile = get_voice_registry().get_profile(decision.result_id)
+                except VoiceStoreUnavailableError:
+                    return error_response(
+                        503,
+                        request_id,
+                        "voice_store_unavailable",
+                        "Custom voice storage is unavailable",
+                        retryable=True,
+                    )
+                except ValueError:
+                    profile = None
+                if profile is not None:
+                    try:
+                        _clone_idempotency_journal.complete(
+                            owner=_CLONE_IDEMPOTENCY_OWNER,
+                            operation=_CLONE_IDEMPOTENCY_OPERATION,
+                            key=idempotency_key,
+                            fingerprint=fingerprint,
+                            result_id=profile.id,
+                        )
+                    except IdempotencyStoreUnavailableError:
+                        return error_response(
+                            503,
+                            request_id,
+                            "idempotency_store_unavailable",
+                            "Recovered voice exists but completion state could not be recorded",
+                            retryable=True,
+                        )
+                    return JSONResponse(
+                        status_code=201,
+                        content=_voice_entry(profile, active, services.tts_ready),
+                    )
             if decision.state == "completed":
                 if decision.result_id is None:
                     return error_response(
@@ -1329,6 +1369,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 voice_id=vid_str,
                 duration_seconds=canonical_duration,
                 quality=report.to_dict(),
+                create_only=idempotency_key is not None,
             )
             side_effect_committed = True
             if idempotency_key and fingerprint is not None:
@@ -1372,6 +1413,31 @@ def create_system_router(services: AppServices) -> APIRouter:
                 "Voice may have been created but durable completion could not be recorded",
                 retryable=True,
             )
+        except VoiceAlreadyExistsError:
+            if idempotency_key is None or fingerprint is None or vid_str is None:
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_already_exists",
+                    "Target voice already exists",
+                )
+            try:
+                profile = get_voice_registry().get_profile(vid_str)
+                _clone_idempotency_journal.complete(
+                    owner=_CLONE_IDEMPOTENCY_OWNER,
+                    operation=_CLONE_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    result_id=profile.id,
+                )
+            except (ValueError, IdempotencyStoreUnavailableError):
+                return error_response(
+                    503,
+                    request_id,
+                    "idempotency_store_unavailable",
+                    "Concurrent clone result could not be reconciled",
+                    retryable=True,
+                )
         except ValueError as exc:
             if idempotency_key and fingerprint is not None and not side_effect_committed:
                 with suppress(IdempotencyStoreUnavailableError):
@@ -1386,6 +1452,50 @@ def create_system_router(services: AppServices) -> APIRouter:
         return JSONResponse(
             status_code=201,
             content=_voice_entry(profile, active, services.tts_ready),
+        )
+
+    @router.get("/v2/voices/clone/idempotency")
+    async def clone_idempotency_status(request: Request) -> JSONResponse:
+        """Read durable clone operation state by proving possession of its key."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_clone"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        idempotency_key = request.headers.get("Idempotency-Key")
+        if not idempotency_key:
+            return error_response(
+                400,
+                request_id,
+                "idempotency_key_required",
+                "Idempotency-Key header is required",
+            )
+        try:
+            decision = _clone_idempotency_journal.lookup(
+                owner=_CLONE_IDEMPOTENCY_OWNER,
+                operation=_CLONE_IDEMPOTENCY_OPERATION,
+                key=idempotency_key,
+            )
+        except IdempotencyStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "idempotency_store_unavailable",
+                "Durable idempotency state is unavailable",
+                retryable=True,
+            )
+        if decision is None:
+            return error_response(
+                404,
+                request_id,
+                "idempotency_not_found",
+                "No clone operation is recorded for this key",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "state": decision.state,
+                "result_id": decision.result_id,
+            },
         )
 
     @router.post("/v1/voices/clone/validate")
