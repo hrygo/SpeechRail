@@ -141,6 +141,57 @@ def test_word_boundary_allows_numeric_unit_prefix_without_matching_inside_words(
     assert apply_pronunciation("km2", pronunciation, language="zh").text == "km2."
 
 
+def test_pronunciation_protects_url_email_and_code_spans() -> None:
+    pronunciation = make_pronunciation_set(
+        "protected",
+        (
+            PronunciationEntry(
+                id="openai",
+                surface="OpenAI",
+                spoken="Open A I",
+                case_sensitive=False,
+                word_boundary=True,
+            ),
+            PronunciationEntry(
+                id="ai",
+                surface="AI",
+                spoken="A I",
+                case_sensitive=False,
+                word_boundary=True,
+            ),
+        ),
+    )
+
+    raw = "访问 https://openai.com，邮件 ai@example.com，代码 `OpenAI`，再说 OpenAI"
+    spoken = apply_pronunciation(raw, pronunciation, language="zh")
+
+    assert "https://openai.com" in spoken.text
+    assert "ai@example.com" in spoken.text
+    assert "代码 OpenAI" in spoken.text
+    assert spoken.text.endswith("再说 Open A I。")
+    assert [hit.entry_id for hit in spoken.hits] == ["openai"]
+
+
+def test_pronunciation_keeps_negation_semantics_outside_rewritten_term() -> None:
+    pronunciation = make_pronunciation_set(
+        "negation",
+        (
+            PronunciationEntry(
+                id="ai",
+                surface="AI",
+                spoken="A I",
+                case_sensitive=False,
+                word_boundary=True,
+            ),
+        ),
+    )
+
+    spoken = apply_pronunciation("不要开启AI模式", pronunciation, language="zh")
+    assert spoken.text == "不要开启A I模式。"
+    assert spoken.hits[0].raw_start == 4
+    assert spoken.hits[0].raw_end == 6
+
+
 def test_conflicting_duplicate_surface_policy_fails_closed() -> None:
     with pytest.raises(PronunciationConflictError):
         make_pronunciation_set(
