@@ -13,7 +13,7 @@ date: 2026-09-19
 ---
 
 安全发现与强一致性管理统一位于 `/v1/speechrail/*`；OpenAI 兼容的 TTS 主路径始终是
-`POST /v1/audio/speech`。revision pin、发音集和完整性回执通过可选
+`POST /v1/audio/speech`。revision pin、发音集、完整性回执、调度意图与可选 TTS chunk timing 通过
 `SpeechRail-*` Header 渐进增强，不改变 OpenAI JSON 请求体。
 详见[有效能力快照与安全目录](effective-capabilities.md)。
 
@@ -73,6 +73,8 @@ envelope 与 Realtime 子集；差异只在“如实声明哪些能力可用”�
 | `DELETE` | `/v1/voices/{voice_id}` | 删除自定义音色 | 删除指定自建音色（系统预置音色只读保护） |
 | `POST` | `/v1/audio/transcriptions` | OpenAI 兼容文件转写（匿名讲话人分离仅在支持分人的档位可用，见 §1.1） | `json`, `verbose_json`, `text`, `srt`, `vtt`, `diarized_json` |
 | `POST` | `/v1/audio/speech` | OpenAI 兼容语音合成 | `mp3`(默认), `opus`, `aac`, `flac`, `wav`, `pcm` (24kHz 16-bit Mono) |
+| `GET` | `/v1/speechrail/audio/receipts/{receipt_id}` | SpeechRail 完整性回执 | PCM sample count/hash 与终态元数据，不含音频正文 |
+| `GET` | `/v1/speechrail/audio/timings/{timing_id}` | SpeechRail 可选 TTS 时间轴 sidecar | 完整合成后返回 chunk 级文本 span ↔ 24kHz PCM sample span |
 | `POST` | `/v1/voices/previews` | 不落盘的自然语言音色试听 | VoiceDesign instruction、可选 seed 与音频格式 |
 | `POST/GET/DELETE` | `/v1/jobs` | 异步任务 Spool 管理 | 提交长任务元数据、查询状态与取消任务 |
 | `WS` | `/v1/realtime` | OpenAI Realtime WebSocket | 实时音频流式转写与合成；讲话人分离通过显式 session opt-in 开启（仅在支持分人的档位可用，见 §1.1） |
@@ -190,6 +192,40 @@ RTF。资源快照中的 `physical_memory_bytes`、`memory_budget_bytes` 与完�
 `/metrics` 的 TTS 交付计数只使用固定事件标签：`planner_chunk`、参考缓存命中/未命中/淘汰、
 `abort_fallback` 与 `reload`。它们用于比较同一 runtime 与 profile 下的实现路径，不含文本、
 音色 ID、音频、路径或实际音质结论。
+
+### 4.2 可选 TTS chunk timing sidecar
+
+需要字幕高亮、粗粒度口型或后续对齐的客户端可显式发送：
+
+```http
+SpeechRail-Timing-Mode: chunk
+```
+
+服务仍先按正常 OpenAI `/v1/audio/speech` 语义返回音频；若 bounded timing registry
+接受该请求，响应头额外返回 `SpeechRail-Timing-Id: tm_...`。客户端随后读取：
+
+```http
+GET /v1/speechrail/audio/timings/{timing_id}
+```
+
+当前只声明 `timing_quality=chunk`，**不声明 word/phoneme/lip-sync precision**。每个 chunk
+包含 planner chunk 序号、normalized spoken text 的 Unicode code-point span，以及最终
+24 kHz PCM 的 `audio_start_sample/audio_end_sample`。这些音频边界来自实际生成样本累计值，
+不是按字符数或平均语速估算；clone loudness/crossfade 路径只改变幅值且保持样本数量，因此
+sample domain 与最终 PCM 守恒。
+
+文本坐标分两层：
+
+- 主坐标固定为 `normalized_spoken_unicode_codepoints`；
+- `display_start/display_end` 仅在原始 DisplayText 到最终 spoken text 的映射被证明时返回；
+- normalization 删除 Markdown/emoji/弱标点或追加句末标点后若无法保持一一坐标，DisplayText
+  映射显式为 `unavailable`，对应字段为 `null`，不会伪造位置；
+- 使用版本化 pronunciation set 且其 raw→spoken span 可证明时，可返回 `mapped`。
+
+Timing 是**独立资源**，与 #64 render receipt 分离：receipt 证明服务生成/传输边界的完整性，
+timing 描述文本与生成 PCM 的内容位置。Timing unavailable、后端未提供 timing metadata 或
+timing registry 容量不足均不会把成功的音频合成改判失败。取消/错误请求不会发布
+`completed` timing。普通 OpenAI 客户端不发送该 Header 时，不创建 timing 资源。
 
 ### 预设音色库 (Preset Voices)
 
