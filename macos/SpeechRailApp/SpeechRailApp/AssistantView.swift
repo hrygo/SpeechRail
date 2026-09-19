@@ -129,13 +129,13 @@ public struct AssistantView: View {
     }
 
     /// 四态：未开始 / 运行时受阻 / 对话中 / 记录库回看。
-    private var state: State {
+    private var state: PageState {
         if reviewRecord != nil { return .review }
         if isLive { return .live }
         return blockedReason == nil ? .ready : .blocked
     }
 
-    private enum State {
+    private enum PageState {
         case ready
         case blocked
         case live
