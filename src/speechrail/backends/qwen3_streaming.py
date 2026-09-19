@@ -19,6 +19,7 @@ from speechrail.backends.qwen3_shared import Qwen3SharedWorker
 from speechrail.domain.contracts import TranscriptSegment
 from speechrail.domain.ports import RealtimeAsrFactory, RealtimeAsrSession, StreamingAsrEvent
 from speechrail.runtime.asr_mode import AsrModeGate, AsrModeLease
+from speechrail.runtime.busy import BusyReason
 from speechrail.runtime.worker_process import (
     WorkerProcessSpec,
     offline_environment,
@@ -521,6 +522,13 @@ def _language(value: object) -> str | None:
     return value
 
 
+class RealtimeSessionLimitError(RuntimeError):
+    """The bounded streaming-session registry is full."""
+
+    busy_reason = BusyReason.REALTIME_SESSION_LIMIT
+    retryable = True
+
+
 class NativeRealtimeFactory(RealtimeAsrFactory):
     """Creates bounded concurrent streaming sessions on one shared native worker."""
 
@@ -545,7 +553,7 @@ class NativeRealtimeFactory(RealtimeAsrFactory):
         if resolved not in _SUPPORTED_LANGUAGES and resolved != "auto":
             raise _unsupported_language(resolved)
         if len(self._sessions) >= self._max_sessions:
-            raise RuntimeError("realtime streaming backend busy")
+            raise RealtimeSessionLimitError("realtime streaming session capacity is full")
         config = getattr(self._worker, "config", None)
         session = Qwen3StreamingSession(
             worker=self._worker,
@@ -572,6 +580,7 @@ def _unsupported_language(language: str) -> RuntimeError:
 __all__ = [
     "NativeRealtimeFactory",
     "Qwen3StreamingBackendConfig",
+    "RealtimeSessionLimitError",
     "Qwen3StreamingSession",
     "Qwen3StreamingWorker",
     "StreamingWorkerProtocol",
