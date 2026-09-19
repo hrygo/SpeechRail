@@ -19,15 +19,15 @@ def test_v2_snapshot_is_stable_and_legacy_discovery_still_works(
     monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
     settings = Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)
     client = TestClient(create_app(settings))
-    first = client.get("/v2/capabilities")
+    first = client.get("/v1/speechrail/capabilities")
     assert first.status_code == 200
-    again = client.get("/v2/capabilities")
+    again = client.get("/v1/speechrail/capabilities")
     assert first.json() == again.json()
     assert (
-        client.get("/v2/capabilities", headers={"If-None-Match": first.headers["etag"]}).status_code
+        client.get("/v1/speechrail/capabilities", headers={"If-None-Match": first.headers["etag"]}).status_code
         == 304
     )
-    restart = TestClient(create_app(settings)).get("/v2/capabilities").json()
+    restart = TestClient(create_app(settings)).get("/v1/speechrail/capabilities").json()
     assert first.json()["catalog_revision"] == restart["catalog_revision"]
     assert first.json()["service_instance_epoch"] != restart["service_instance_epoch"]
     assert client.get("/v1/voices").status_code == 200
@@ -39,9 +39,9 @@ def test_v2_discovery_uses_configured_auth(tmp_path: Path, monkeypatch) -> None:
     client = TestClient(
         create_app(Settings(api_key="test-key", qwen3_model_dir=None, qwen3_python=None))
     )
-    assert client.get("/v2/capabilities").status_code == 401
+    assert client.get("/v1/speechrail/capabilities").status_code == 401
     assert (
-        client.get("/v2/capabilities", headers={"Authorization": "Bearer test-key"}).status_code
+        client.get("/v1/speechrail/capabilities", headers={"Authorization": "Bearer test-key"}).status_code
         == 200
     )
 
@@ -159,11 +159,11 @@ def test_v2_unknown_voice_and_store_failure_are_safe(tmp_path: Path, monkeypatch
     registry = voices.VoiceRegistry(tmp_path / "voices.json")
     monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
     client = TestClient(create_app(Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)))
-    assert client.get("/v2/voices/not-found").status_code == 404
-    assert client.get("/v2/voices/alloy").json()["id"] == "serena"
-    assert client.get("/v2/voices").json()["data"]
+    assert client.get("/v1/speechrail/voices/not-found").status_code == 404
+    assert client.get("/v1/speechrail/voices/alloy").json()["id"] == "serena"
+    assert client.get("/v1/speechrail/voices").json()["data"]
     (tmp_path / "voices.json").write_text("PRIVATE_INVALID_JSON", encoding="utf-8")
-    response = client.get("/v2/capabilities")
+    response = client.get("/v1/speechrail/capabilities")
     assert response.status_code == 503
     assert "PRIVATE" not in response.text
 
