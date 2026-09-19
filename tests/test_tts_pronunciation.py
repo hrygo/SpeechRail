@@ -121,6 +121,26 @@ def test_word_boundary_and_case_policy_are_explicit() -> None:
     assert apply_pronunciation("RAIL", pronunciation).text == "RAIL."
 
 
+def test_word_boundary_allows_numeric_unit_prefix_without_matching_inside_words() -> None:
+    pronunciation = make_pronunciation_set(
+        "units",
+        (
+            PronunciationEntry(
+                id="km",
+                surface="km",
+                spoken="公里",
+                language="zh",
+                case_sensitive=False,
+                word_boundary=True,
+            ),
+        ),
+    )
+
+    assert apply_pronunciation("跑5km", pronunciation, language="zh").text == "跑5公里。"
+    assert apply_pronunciation("skm", pronunciation, language="zh").text == "skm."
+    assert apply_pronunciation("km2", pronunciation, language="zh").text == "km2."
+
+
 def test_conflicting_duplicate_surface_policy_fails_closed() -> None:
     with pytest.raises(PronunciationConflictError):
         make_pronunciation_set(
