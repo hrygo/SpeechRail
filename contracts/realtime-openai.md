@@ -123,8 +123,12 @@ PCM chunk 由 worker 产生且 ready handshake 身份完整时才填充 `rt_...`
 `event_id`/`session_id`/`sequence` 是相对 OpenAI 的加法字段，标准 SDK 宽松解析容忍。
 本服务器不发送 `rate_limits.updated`（单机部署无多租户配额语义）。
 
-`/metrics` 仅记录低基数的 Realtime 阶段耗时：`asr_admission`、`tts_admission` 与 `send`。
-它们分别覆盖准入等待和服务端发送停顿，不能替代客户端实际播放延迟。服务端发送也受
+`/metrics` 仅记录低基数的 Realtime 阶段耗时：`asr_admission`、`asr_flush`、
+`asr_commit_ack`、`asr_terminal_wait`、`tts_admission`、`tts_complete` 与 `send`。
+这些是服务端 source-side 阶段边界；其中 `asr_commit_ack`/`asr_terminal_wait` 支持
+commit-tail 分解，`tts_complete` 在最终音频/content 事件发送后、`response.done` 前记录。
+阶段标签不包含 request/session ID、文本或音频内容，阶段之间不应被简单相加，也不能替代
+客户端实际播放延迟或 managed/人工质量证据。服务端发送也受
 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 约束；慢消费者超过该时限会以 `1011` 关闭连接，
 避免长期占住会话发送锁。
 
