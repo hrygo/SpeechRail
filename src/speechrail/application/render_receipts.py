@@ -6,10 +6,15 @@ import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import uuid4
 
 ReceiptStatus = Literal["pending", "completed", "cancelled", "error"]
+
+
+class _Hasher(Protocol):
+    def update(self, data: bytes) -> None: ...
+    def hexdigest(self) -> str: ...
 
 
 @dataclass(slots=True)
@@ -33,7 +38,7 @@ class _ReceiptState:
     completed_at: float | None = None
     sample_count: int = 0
     error_code: str | None = None
-    _hasher: object = field(default_factory=hashlib.sha256, repr=False)
+    _hasher: _Hasher = field(default_factory=hashlib.sha256, repr=False)
 
 
 class RenderReceiptRegistry:
@@ -111,7 +116,7 @@ class RenderReceiptRegistry:
             state = self._entries[receipt_id]
             if state.status != "pending":
                 raise RuntimeError("render receipt is already terminal")
-            state._hasher.update(pcm16)  # type: ignore[attr-defined]
+            state._hasher.update(pcm16)
             state.sample_count += len(pcm16) // 2
 
     def _finish(
@@ -137,12 +142,21 @@ class RenderReceiptRegistry:
     def fail(self, receipt_id: str, error_code: str) -> None:
         self._finish(receipt_id, status="error", error_code=error_code)
 
+    def find_by_request_id(self, request_id: str) -> dict[str, object]:
+        """Return the newest receipt associated with one public request ID."""
+
+        with self._lock:
+            for receipt_id in reversed(self._order):
+                if self._entries[receipt_id].request_id == request_id:
+                    return self.get(receipt_id)
+        raise KeyError(request_id)
+
     def get(self, receipt_id: str) -> dict[str, object]:
         with self._lock:
             state = self._entries.get(receipt_id)
             if state is None:
                 raise KeyError(receipt_id)
-            digest = state._hasher.hexdigest()  # type: ignore[attr-defined]
+            digest = state._hasher.hexdigest()
             return {
                 "receipt_id": state.receipt_id,
                 "request_id": state.request_id,
