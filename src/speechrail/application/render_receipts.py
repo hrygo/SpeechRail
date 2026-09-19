@@ -142,6 +142,13 @@ class RenderReceiptRegistry:
                 state.completed_at = time.time()
 
     def complete(self, receipt_id: str) -> None:
+        with self._lock:
+            state = self._entries[receipt_id]
+            if state.status == "pending" and state.sample_count == 0:
+                state.status = "error"
+                state.error_code = "empty_audio"
+                state.completed_at = time.time()
+                return
         self._finish(receipt_id, status="completed")
 
     def cancel(

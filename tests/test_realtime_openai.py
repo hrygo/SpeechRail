@@ -95,6 +95,15 @@ class InvalidSpeechSynthesizer:
         return chunks()
 
 
+class EmptySpeechSynthesizer:
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            if False:  # Keep this as an async generator without yielding audio.
+                yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
 class FakeStreamingSession:
     def __init__(
         self,
@@ -1481,6 +1490,53 @@ def test_openai_tts_invalid_audio_emits_stable_error() -> None:
                 break
 
     assert event["error"]["code"] == "tts_audio_invalid"
+
+
+def test_realtime_empty_tts_cannot_emit_completed_receipt() -> None:
+    client, _ = _client(tts_synthesizer=EmptySpeechSynthesizer())
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "session.update",
+                "session": {
+                    "speechrail": {
+                        "render_receipts": {"enabled": True},
+                    }
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        socket.receive_json()
+        socket.send_json({"type": "response.create"})
+
+        error = None
+        done = None
+        while done is None:
+            event = socket.receive_json()
+            if event["type"] == "error":
+                error = event
+            elif event["type"] == "response.done":
+                done = event
+
+    assert error is not None
+    assert error["error"]["code"] == "empty_audio"
+    assert done["response"]["status"] == "failed"
+    receipt = done["speechrail"]["render_receipt"]
+    assert receipt["status"] == "error"
+    assert receipt["error_code"] == "empty_audio"
+    assert receipt["audio"]["sample_count"] == 0
 
 
 def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() -> None:
