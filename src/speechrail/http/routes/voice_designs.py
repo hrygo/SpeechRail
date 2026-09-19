@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -451,14 +452,12 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 and idempotency_key
                 and fingerprint is not None
             ):
-                try:
+                with contextlib.suppress(IdempotencyStoreUnavailableError):
                     _design_idempotency_journal.abort(
                         owner=_DESIGN_IDEMPOTENCY_OWNER,
                         operation=_DESIGN_IDEMPOTENCY_OPERATION,
                         key=idempotency_key,
                         fingerprint=fingerprint,
                     )
-                except IdempotencyStoreUnavailableError:
-                    pass
 
     return router
