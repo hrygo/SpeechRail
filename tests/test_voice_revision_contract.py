@@ -8,6 +8,7 @@ import pytest
 from speechrail.domain.tts import (
     VoiceRegistry,
     VoiceRevisionConflictError,
+    VoiceRevokedError,
 )
 
 
@@ -211,3 +212,88 @@ def test_clone_history_keeps_old_audio_until_voice_is_deleted(tmp_path):
     }
     registry.delete_custom_profile("clone_history")
     assert all(not path.exists() for path in all_paths)
+
+
+def test_revocation_blocks_new_leases_but_not_an_existing_snapshot(tmp_path):
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    created = registry.create_custom_profile(
+        name="Narrator",
+        instruction="stable",
+        voice_id="revocable",
+        seed=31,
+    )
+
+    with registry.lease_profile(
+        "revocable", expected_revision=created.revision
+    ) as leased:
+        revoked = registry.revoke_revision(
+            "revocable",
+            revision=created.revision,
+        )
+        assert leased.revision == created.revision
+        assert leased.revoked is False
+        assert revoked.revoked is True
+
+    with pytest.raises(VoiceRevokedError):
+        with registry.lease_profile(
+            "revocable", expected_revision=created.revision
+        ):
+            pass
+
+
+def test_revoked_historic_revision_cannot_be_rolled_back(tmp_path):
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    first = registry.create_custom_profile(
+        name="Narrator",
+        instruction="first",
+        voice_id="rollback_revoke",
+        seed=41,
+    )
+    second = registry.update_custom_profile(
+        "rollback_revoke",
+        instruction="second",
+        expected_revision=first.revision,
+    )
+    registry.revoke_revision(
+        "rollback_revoke",
+        revision=first.revision,
+    )
+
+    with pytest.raises(VoiceRevokedError):
+        registry.rollback_custom_profile(
+            "rollback_revoke",
+            target_revision=first.revision,
+            expected_revision=second.revision,
+        )
+
+
+def test_new_acoustic_revision_can_replace_a_revoked_current_alias(tmp_path):
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    first = registry.create_custom_profile(
+        name="Narrator",
+        instruction="first",
+        voice_id="revoked_alias",
+        seed=51,
+    )
+    registry.revoke_revision("revoked_alias", revision=first.revision)
+
+    second = registry.update_custom_profile(
+        "revoked_alias",
+        instruction="second",
+        expected_revision=first.revision,
+    )
+    assert second.revision != first.revision
+    assert second.revoked is False
+    with registry.lease_profile(
+        "revoked_alias", expected_revision=second.revision
+    ) as leased:
+        assert leased.revision == second.revision
