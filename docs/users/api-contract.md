@@ -164,6 +164,23 @@ Content-Type: application/json
 固定 profile seed，CustomVoice 与克隆音色不接受调用方 `seed`。内部 adapter 对这些不支持的
 组合返回稳定错误，不以“已接受”暗示参数生效。
 
+### 4.1 SpeechRail 可选准入扩展
+
+普通 OpenAI-compatible `POST /v1/audio/speech` 不携带以下 Header 时，继续使用历史
+`batch_tts` 准入语义。需要本地交互调度时，可显式协商：
+
+- `SpeechRail-Purpose: interactive`：映射到现有 `realtime_tts` 保留容量；
+- `SpeechRail-Purpose: prefetch`：保持 `batch_tts`，用于可延后预取；
+- `SpeechRail-Latency-Budget-Ms: 50..120000`：相对服务预算，最终取该值与
+  `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 的较小值。
+
+客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
+`ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
+允许时并行；实现不承诺对正在运行的 Metal kernel 做硬抢占。Voice creation、quality validation
+和 Realtime 会话由服务端内部标记为固定 purpose，不信任客户端把维护任务伪装成更高优先级。
+`/metrics` 仅按固定 class/purpose/outcome 暴露 queue-wait、service-time 与释放结果，不记录
+请求 ID、文本、音频或 voice ID。
+
 `/metrics` 的结构化 JSON 视图中，`histograms` 的 `speechrail_asr_rtf` 定义为 ASR 推理时长 /
 已处理音频时长，`speechrail_tts_rtf` 定义为 TTS 推理时长 / 已生成音频时长。只有分母为正且
 存在有效观测时才会出现对应序列；缺失序列表示“未提供”，不是 0，也不能把实时流延迟改名为
