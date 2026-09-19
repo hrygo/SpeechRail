@@ -48,11 +48,11 @@ quality 调试对象。descriptors 只使用显式系统声明；缺失的 local
 
 本增量保留 `/v1/voices` 的历史投影，以免破坏现有音色编辑客户端；它仍可能含来源正文，
 **不是最小披露接口，也不存在新增的 owner 权限保证**。自动选音/第三方消费者应迁移
-到 v2。未来移除旧字段需要单独的版本迁移，不把 API key 等同于所有来源资料的 owner。
+到 namespaced discovery。未来移除旧字段需要单独的版本迁移，不把 API key 等同于所有来源资料的 owner。
 
 MCP `describe` 的旧顶层 models/readiness 来自独立读取，明确标记
 `legacy_discovery_consistency=independent_reads`；新增 `effective_capabilities` 保存
-一次 v2 响应。只有旧服务返回 404/405 或未知 schema 时该字段为空；鉴权和存储故障
+一次 namespaced capability 响应。只有旧服务返回 404/405 或未知 schema 时该字段为空；鉴权和存储故障
 不被悄悄降级掩盖。MCP 的兼容 voice 列表也使用白名单投影，不把 v1 来源正文带入
 Agent 上下文。需要原子路由时使用嵌套快照，而非顶层旧字段拼接。
 
