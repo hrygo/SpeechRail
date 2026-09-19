@@ -121,7 +121,22 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
             entry["operations"]["http_speech"]["parameters"]["instructions"]["status"]
             == "supported"
         )
-    assert entry["operations"]["http_speech"]["parameters"]["seed"]["status"] == "unsupported"
+    parameters = entry["operations"]["http_speech"]["parameters"]
+    assert parameters["seed"]["status"] == "unsupported"
+    assert parameters["phoneme"]["status"] == "unsupported"
+    assert parameters["ssml"]["status"] == "unsupported"
+    assert parameters["pronunciation_set"]["status"] == "supported"
+    expression = parameters["native_expression"]
+    if mode == "clone":
+        assert expression == {
+            "status": "unsupported",
+            "reason": "fixed_identity_neutral_only",
+        }
+    else:
+        assert expression == {
+            "status": "unknown",
+            "reason": "identity_preservation_unevaluated",
+        }
     scheduling = entry["operations"]["http_speech"]["scheduling"]
     assert scheduling == {
         "default_class": "batch_tts",
