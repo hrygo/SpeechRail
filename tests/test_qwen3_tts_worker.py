@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-from io import BytesIO
-from pathlib import Path
 
 import pytest
 
