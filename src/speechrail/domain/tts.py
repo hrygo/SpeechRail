@@ -32,6 +32,7 @@ from speechrail.domain.voice_creation import VoiceCreation
 logger = logging.getLogger(__name__)
 
 VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+VOICE_REVISION_RE = re.compile(r"^vr_[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +53,7 @@ class VoiceProfile:
     duration_seconds: float = 0.0
     quality: dict[str, Any] | None = None
     creation: VoiceCreation | None = None
+    revision: str | None = None
 
     @property
     def description(self) -> str:
@@ -80,6 +82,8 @@ class VoiceProfile:
             data["quality"] = self.quality
         if self.creation is not None:
             data["creation"] = self.creation.model_dump(mode="json")
+        if self.revision is not None:
+            data["revision"] = self.revision
         return data
 
 
@@ -572,6 +576,39 @@ class VoiceInUseError(RuntimeError):
     code = "voice_in_use"
 
 
+class VoiceRevisionConflictError(RuntimeError):
+    """A conditional voice operation observed a different acoustic revision."""
+
+    code = "voice_revision_conflict"
+
+
+def _voice_revision(
+    *,
+    mode: str,
+    instruction: str,
+    seed: int,
+    temperature: float,
+    ref_text: str | None = None,
+    reference_audio_sha256: str | None = None,
+    creation: VoiceCreation | None = None,
+) -> str:
+    """Return a content-addressed revision for acoustic identity only."""
+
+    payload = {
+        "mode": mode,
+        "instruction_sha256": hashlib.sha256(instruction.encode()).hexdigest(),
+        "seed": seed,
+        "temperature": temperature,
+        "reference_text_sha256": (
+            hashlib.sha256(ref_text.encode()).hexdigest() if ref_text is not None else None
+        ),
+        "reference_audio_sha256": reference_audio_sha256,
+        "creation": creation.model_dump(mode="json") if creation is not None else None,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "vr_" + hashlib.sha256(canonical).hexdigest()[:32]
+
+
 class VoiceRegistry:
     """Thread-safe registry with atomic metadata commits and reader leases."""
 
@@ -746,6 +783,12 @@ class VoiceRegistry:
         creation = None if creation_raw is None else VoiceCreation.model_validate(creation_raw)
         if creation is not None and raw_mode != "clone":
             raise ValueError("generated reference provenance requires clone mode")
+        revision_raw = item.get("revision")
+        revision: str | None = None
+        if revision_raw is not None:
+            if not isinstance(revision_raw, str) or not VOICE_REVISION_RE.fullmatch(revision_raw):
+                raise ValueError("custom voice revision is invalid")
+            revision = revision_raw
         return VoiceProfile(
             id=vid,
             name=name,
@@ -761,6 +804,7 @@ class VoiceRegistry:
             duration_seconds=float(duration_seconds),
             quality=quality,
             creation=creation,
+            revision=revision,
         )
 
     def _controlled_audio_path(
@@ -928,9 +972,13 @@ class VoiceRegistry:
         raise ValueError(f"unknown preset voice: {voice}")
 
     @contextmanager
-    def lease_profile(self, voice: str) -> Iterator[VoiceProfile]:
-        """Lease an immutable profile snapshot while a backend reads its audio."""
+    def lease_profile(
+        self, voice: str, *, expected_revision: str | None = None
+    ) -> Iterator[VoiceProfile]:
+        """Lease an immutable profile snapshot, optionally pinned by acoustic revision."""
 
+        if expected_revision is not None and not VOICE_REVISION_RE.fullmatch(expected_revision):
+            raise ValueError("invalid expected voice revision")
         resolved = resolve_voice(voice)
         audio_path: Path | None = None
         with self._lock:
@@ -942,6 +990,10 @@ class VoiceRegistry:
                 if custom_profile is None:
                     raise ValueError(f"unknown preset voice: {voice}")
                 profile = custom_profile
+                if expected_revision is not None and profile.revision != expected_revision:
+                    raise VoiceRevisionConflictError(
+                        f"voice revision changed for {profile.id}"
+                    )
                 if profile.audio_path is not None:
                     try:
                         audio_path = self._controlled_audio_path(
@@ -988,16 +1040,24 @@ class VoiceRegistry:
         if seed is not None and (type(seed) is not int or not 0 <= seed <= 2**32 - 1):
             raise ValueError("voice seed must be between 0 and 4294967295")
 
+        resolved_seed = seed if seed is not None else random.randint(1000, 999999)
+        instruction_text = instruction.strip()
         profile = VoiceProfile(
             id=vid,
             name=name.strip(),
-            instruction=instruction.strip(),
-            seed=seed if seed is not None else random.randint(1000, 999999),
+            instruction=instruction_text,
+            seed=resolved_seed,
             temperature=0.1,
             is_default=False,
             is_system=False,
             created_at=time.time(),
             mode="instruction",
+            revision=_voice_revision(
+                mode="instruction",
+                instruction=instruction_text,
+                seed=resolved_seed,
+                temperature=0.1,
+            ),
         )
         with self._lock:
             self._ensure_available_locked(reload=True)
@@ -1077,6 +1137,15 @@ class VoiceRegistry:
                 duration_seconds=round(float(duration_seconds), 2),
                 quality=quality,
                 creation=creation,
+                revision=_voice_revision(
+                    mode="clone",
+                    instruction="",
+                    seed=42,
+                    temperature=0.1,
+                    ref_text=ref_text.strip(),
+                    reference_audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+                    creation=creation,
+                ),
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
@@ -1092,8 +1161,12 @@ class VoiceRegistry:
         name: str | None = None,
         instruction: str | None = None,
         seed: int | None = None,
+        expected_revision: str | None = None,
     ) -> VoiceProfile:
-        """Atomically update mutable metadata without replacing voice assets."""
+        """Atomically update metadata; acoustic mutations may be revision-pinned."""
+
+        if expected_revision is not None and not VOICE_REVISION_RE.fullmatch(expected_revision):
+            raise ValueError("invalid expected voice revision")
 
         if not isinstance(voice_id, str):
             raise ValueError("invalid voice ID format")
@@ -1110,6 +1183,10 @@ class VoiceRegistry:
             profile = self._custom_voices.get(vid)
             if profile is None:
                 raise KeyError(f"custom voice not found: {vid}")
+            if expected_revision is not None and profile.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {profile.id}"
+                )
             if profile.mode == "clone" and (instruction is not None or seed is not None):
                 raise VoiceUpdateUnsupportedError(
                     "clone voice instruction and seed are immutable"
@@ -1135,11 +1212,30 @@ class VoiceRegistry:
                     raise ValueError("voice seed must be between 0 and 4294967295")
                 next_seed = seed
 
+            acoustic_changed = (
+                next_instruction != profile.instruction or next_seed != profile.seed
+            )
+            next_revision = profile.revision
+            if acoustic_changed:
+                next_revision = _voice_revision(
+                    mode=profile.mode,
+                    instruction=next_instruction,
+                    seed=next_seed,
+                    temperature=profile.temperature,
+                    ref_text=profile.ref_text,
+                    reference_audio_sha256=(
+                        profile.creation.reference_audio_sha256
+                        if profile.creation is not None
+                        else None
+                    ),
+                    creation=profile.creation,
+                )
             updated = replace(
                 profile,
                 name=next_name,
                 instruction=next_instruction,
                 seed=next_seed,
+                revision=next_revision,
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = updated
@@ -1485,10 +1581,12 @@ __all__ = [
     "VOICE_ALIASES",
     "VOICE_ID_RE",
     "VOICE_PROFILES",
+    "VOICE_REVISION_RE",
     "StreamingSentenceSplitter",
     "VoiceCapabilities",
     "VoiceProfile",
     "VoiceRegistry",
+    "VoiceRevisionConflictError",
     "apply_crossfade",
     "bounded_sentences",
     "canonicalize_clone_reference_audio",
