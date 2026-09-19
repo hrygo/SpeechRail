@@ -50,6 +50,8 @@ from speechrail.domain.tts import (
     VOICE_ALIASES,
     VoiceInUseError,
     VoiceProfile,
+    VoiceRevisionConflictError,
+    VoiceRevokedError,
     VoiceStoreUnavailableError,
     VoiceUpdateUnsupportedError,
     canonicalize_clone_reference_audio,
@@ -185,7 +187,7 @@ def _voice_entry(
     enabled: bool = True,
 ) -> dict[str, Any]:
     variant = active.tts.variant if active.tts is not None else None
-    available = tts_ready and enabled
+    available = tts_ready and enabled and not profile.revoked
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
@@ -234,7 +236,25 @@ def _voice_entry(
         entry["quality"] = profile.quality
     if profile.creation is not None:
         entry["creation"] = profile.creation.model_dump(mode="json")
+    if profile.revision is not None:
+        entry["revision"] = profile.revision
+    if profile.revoked:
+        entry["revoked"] = True
     return entry
+
+
+def _safe_revision_entry(
+    profile: VoiceProfile,
+    *,
+    current_revision: str | None,
+) -> dict[str, object]:
+    return {
+        "revision": profile.revision,
+        "current": profile.revision == current_revision,
+        "mode": profile.mode,
+        "revoked": profile.revoked,
+        "created_at": profile.created_at,
+    }
 
 
 def _empty_reference() -> vq.VoiceQualityReference:
@@ -836,6 +856,239 @@ def create_system_router(services: AppServices) -> APIRouter:
         return JSONResponse(
             status_code=200,
             content=_voice_entry(profile, active, services.tts_ready),
+        )
+
+    @router.patch("/v2/voices/{voice_id}")
+    async def update_voice_v2(voice_id: str, request: Request) -> JSONResponse:
+        """CAS-update a custom voice without changing the strict v1 request shape."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(400, request_id, "invalid_json", "Invalid JSON payload")
+        if not isinstance(body, dict):
+            return error_response(400, request_id, "invalid_payload", "JSON object expected")
+        allowed = {"name", "instruction", "seed", "expected_revision"}
+        if set(body) - allowed:
+            return error_response(400, request_id, "invalid_payload", "Unknown voice field")
+        expected_revision = body.get("expected_revision")
+        if not isinstance(expected_revision, str):
+            return error_response(
+                400,
+                request_id,
+                "expected_revision_required",
+                "expected_revision is required for v2 voice updates",
+            )
+        name = body.get("name")
+        instruction = body.get("instruction")
+        seed = body.get("seed")
+        if name is None and instruction is None and seed is None:
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "At least one mutable voice field is required",
+            )
+        try:
+            profile = get_voice_registry().update_custom_profile(
+                voice_id,
+                name=name,
+                instruction=instruction,
+                seed=seed,
+                expected_revision=expected_revision,
+            )
+        except VoiceRevisionConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revision_conflict",
+                "Voice alias no longer points at expected_revision",
+            )
+        except VoiceUpdateUnsupportedError as exc:
+            return error_response(
+                403,
+                request_id,
+                "voice_update_unsupported",
+                str(exc),
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(404, request_id, "voice_not_found", "Voice not found")
+        except ValueError as exc:
+            return error_response(400, request_id, "voice_update_failed", str(exc))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": profile.id,
+                "name": profile.name or profile.id,
+                "voice_revision": profile.revision,
+                "mode": profile.mode,
+                "revoked": profile.revoked,
+            },
+        )
+
+    @router.get("/v2/voices/{voice_id}/revisions")
+    async def list_voice_revisions(voice_id: str, request: Request) -> JSONResponse:
+        """List safe immutable revision metadata without private recipes or paths."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        registry = get_voice_registry()
+        try:
+            current = registry.get_profile(voice_id)
+            revisions = registry.list_revisions(voice_id)
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except (KeyError, ValueError):
+            return error_response(404, request_id, "voice_not_found", "Voice not found")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "object": "list",
+                "data": [
+                    _safe_revision_entry(
+                        item,
+                        current_revision=current.revision,
+                    )
+                    for item in revisions
+                ],
+            },
+        )
+
+    @router.post("/v2/voices/{voice_id}/rollback")
+    async def rollback_voice_revision(voice_id: str, request: Request) -> JSONResponse:
+        """Atomically point a friendly voice ID back to a non-revoked revision."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(400, request_id, "invalid_json", "Invalid JSON payload")
+        if not isinstance(body, dict) or set(body) != {
+            "target_revision",
+            "expected_revision",
+        }:
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "target_revision and expected_revision are required",
+            )
+        target = body.get("target_revision")
+        expected = body.get("expected_revision")
+        if not isinstance(target, str) or not isinstance(expected, str):
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "Voice revisions must be strings",
+            )
+        try:
+            profile = get_voice_registry().rollback_custom_profile(
+                voice_id,
+                target_revision=target,
+                expected_revision=expected,
+            )
+        except VoiceRevisionConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revision_conflict",
+                "Voice alias no longer points at expected_revision",
+            )
+        except VoiceRevokedError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revoked",
+                "Target voice revision is revoked",
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "voice_revision_not_found",
+                "Voice or target revision not found",
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "invalid_voice_revision", str(exc))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": profile.id,
+                "voice_revision": profile.revision,
+                "mode": profile.mode,
+                "revoked": profile.revoked,
+            },
+        )
+
+    @router.post("/v2/voices/{voice_id}/revisions/{revision}/revoke")
+    async def revoke_voice_revision(
+        voice_id: str,
+        revision: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Revoke one exact revision for future synthesis without killing active leases."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            profile = get_voice_registry().revoke_revision(
+                voice_id,
+                revision=revision,
+            )
+        except VoiceStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "voice_store_unavailable",
+                "Custom voice storage is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "voice_revision_not_found",
+                "Voice revision not found",
+            )
+        except ValueError as exc:
+            return error_response(400, request_id, "invalid_voice_revision", str(exc))
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": profile.id,
+                "voice_revision": profile.revision,
+                "revoked": True,
+            },
         )
 
     @router.post("/v1/voices")
