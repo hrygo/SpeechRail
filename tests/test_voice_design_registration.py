@@ -477,10 +477,13 @@ def test_design_new_voice_works_through_existing_tts_api(
     assert synth.requests[-1].voice == "designed_base"
     assert synth.requests[-1].instruction is None
     voices = client.get("/v1/voices").json()["data"]
-    created = next(v for v in voices if v["id"] == "designed_base")
-    assert created["capabilities"]["supports_clone"] is True
-    assert created["capabilities"]["supports_instruction"] is False
-    assert created["creation"]["origin"] == "generated"
+    listed = next(v for v in voices if v["id"] == "designed_base")
+    assert listed["capabilities"]["supports_clone"] is True
+    assert listed["capabilities"]["supports_instruction"] is False
+    assert "creation" not in listed
+    detail = client.get("/v1/voices/designed_base")
+    assert detail.status_code == 200
+    assert detail.json()["creation"]["origin"] == "generated"
 
 
 def test_registry_create_only_is_atomic_in_concurrent_calls(tmp_path: Path) -> None:
