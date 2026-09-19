@@ -134,3 +134,25 @@ def test_engine_timing_uses_actual_generated_sample_counts_across_planner_chunks
     assert chunks[0]["audio_end_sample"] == chunks[0]["text_end"]
     assert chunks[1]["audio_start_sample"] == chunks[0]["audio_end_sample"]
     assert chunks[1]["audio_end_sample"] == len(audio) // 2
+
+
+def test_timing_registry_does_not_overflow_when_all_entries_are_pending() -> None:
+    registry = TtsTimingRegistry(max_entries=1)
+    first = registry.begin(
+        request_id="req-1",
+        sample_rate=24_000,
+        display_mapping_status="identity",
+        expected_text_spans=((0, 1),),
+        display_spans=((0, 1),),
+    )
+
+    with pytest.raises(RuntimeError, match="full of pending"):
+        registry.begin(
+            request_id="req-2",
+            sample_rate=24_000,
+            display_mapping_status="identity",
+            expected_text_spans=((0, 1),),
+            display_spans=((0, 1),),
+        )
+
+    assert registry.get(first)["status"] == "pending"
