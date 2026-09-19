@@ -91,14 +91,14 @@ def test_v2_speech_returns_completed_receipt_bound_to_revision(
 ) -> None:
     client, synth, revision = _client(tmp_path, monkeypatch)
 
-    response = client.post("/v2/audio/speech", json=_payload())
+    response = client.post("/v1/audio/speech", json=_payload())
     assert response.status_code == 200
     receipt_id = response.headers["SpeechRail-Receipt-Id"]
     assert receipt_id.startswith("rr_")
     assert len(synth.requests) == 1
     assert synth.requests[0].expected_voice_revision == revision
 
-    receipt_response = client.get(f"/v2/audio/receipts/{receipt_id}")
+    receipt_response = client.get(f"/v1/speechrail/audio/receipts/{receipt_id}")
     assert receipt_response.status_code == 200
     receipt = receipt_response.json()
     assert receipt["status"] == "completed"
@@ -133,12 +133,12 @@ def test_failed_v2_speech_keeps_error_receipt_queryable_by_request(
     monkeypatch,
 ) -> None:
     client, _synth, _revision = _client(tmp_path, monkeypatch, fail=True)
-    response = client.post("/v2/audio/speech", json=_payload())
+    response = client.post("/v1/audio/speech", json=_payload())
     assert response.status_code == 502
     request_id = response.json()["error"]["request_id"]
 
     receipt_response = client.get(
-        f"/v2/audio/receipts/by-request/{request_id}"
+        f"/v1/speechrail/audio/receipts/by-request/{request_id}"
     )
     assert receipt_response.status_code == 200
     receipt = receipt_response.json()
