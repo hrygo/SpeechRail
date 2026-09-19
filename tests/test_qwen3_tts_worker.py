@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
+from types import SimpleNamespace
+
+import numpy as np
 from io import BytesIO
 from pathlib import Path
 
@@ -12,6 +16,26 @@ from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_tts_worker import TtsWorkerIdentity, serve
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, read_frame, write_frame
+
+
+def test_float_overrange_is_observed_before_pcm16_clipping() -> None:
+    engine = worker_module.MlxQwenTtsEngine.__new__(worker_module.MlxQwenTtsEngine)
+    engine._sample_rate = 24_000
+    engine._numpy = np
+    engine._delivery_stats = Counter()
+
+    result = SimpleNamespace(
+        sample_rate=24_000,
+        audio=np.array([0.25, 1.20, -1.40], dtype=np.float32),
+        is_final_chunk=False,
+    )
+
+    pcm = engine._to_pcm(result)
+    decoded = np.frombuffer(pcm, dtype="<i2")
+
+    assert decoded.tolist() == [8192, 32767, -32768]
+    assert engine.consume_delivery_stats() == {"float_overrange_chunks": 1}
+    assert engine.consume_delivery_stats() == {}
 
 
 def _snapshot_identity(
