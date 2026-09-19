@@ -247,7 +247,18 @@ def _voice_entry(
                 MLX_AUDIO_0_4_8_QWEN3_TTS_SUPPORT.private_cache_observed
             ),
         ),
-        "timing_sidecar": parameter("unsupported"),
+        "timing_sidecar": parameter(
+            "supported" if compatible else "unsupported",
+            values=["chunk"] if compatible else [],
+            coordinate_space="normalized_spoken_unicode_codepoints",
+            display_mapping="conditional",
+            delivery="async_resource",
+            reason=(
+                "planner_chunk_sample_conservation"
+                if compatible
+                else "voice_not_available"
+            ),
+        ),
     }
 
 
