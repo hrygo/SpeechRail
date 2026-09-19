@@ -202,7 +202,11 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 prompt="",
                 include_timestamps=False,
             )
-            async with services.governor.reserve(\n                WorkClass.BATCH_ASR,\n                expires_at=expires_at,\n                purpose=WorkPurpose.VOICE_CREATION,\n            ):
+            async with services.governor.reserve(
+                WorkClass.BATCH_ASR,
+                expires_at=expires_at,
+                purpose=WorkPurpose.VOICE_CREATION,
+            ):
                 remaining = expires_at - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError
