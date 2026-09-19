@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,89 @@ def test_instruction_voice_revision_changes_only_for_acoustic_fields(tmp_path):
             "narrator",
             seed=8,
             expected_revision=created.revision,
+        )
+
+
+def test_alias_update_does_not_mutate_an_inflight_revision_lease(tmp_path) -> None:
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+    created = registry.create_custom_profile(
+        name="Narrator",
+        instruction="old recipe",
+        voice_id="narrator",
+        seed=7,
+    )
+    assert created.revision is not None
+
+    entered = threading.Event()
+    release = threading.Event()
+    observed: dict[str, tuple[str | None, str, int]] = {}
+    failure: list[BaseException] = []
+
+    def synthesize_from_leased_snapshot() -> None:
+        try:
+            with registry.lease_profile(
+                "narrator",
+                expected_revision=created.revision,
+            ) as leased:
+                observed["before"] = (
+                    leased.revision,
+                    leased.instruction,
+                    leased.seed,
+                )
+                entered.set()
+                if not release.wait(timeout=2):
+                    raise TimeoutError("test lease release timed out")
+                observed["after"] = (
+                    leased.revision,
+                    leased.instruction,
+                    leased.seed,
+                )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failure.append(exc)
+            entered.set()
+
+    thread = threading.Thread(target=synthesize_from_leased_snapshot)
+    thread.start()
+    assert entered.wait(timeout=2)
+    assert failure == []
+
+    updated = registry.update_custom_profile(
+        "narrator",
+        instruction="new recipe",
+        seed=8,
+        expected_revision=created.revision,
+    )
+    assert updated.revision is not None
+    assert updated.revision != created.revision
+
+    with pytest.raises(VoiceRevisionConflictError):
+        with registry.lease_profile(
+            "narrator",
+            expected_revision=created.revision,
+        ):
+            pass
+
+    release.set()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert failure == []
+    assert observed["before"] == observed["after"] == (
+        created.revision,
+        "old recipe",
+        7,
+    )
+
+    with registry.lease_profile(
+        "narrator",
+        expected_revision=updated.revision,
+    ) as current:
+        assert (current.revision, current.instruction, current.seed) == (
+            updated.revision,
+            "new recipe",
+            8,
         )
 
 
