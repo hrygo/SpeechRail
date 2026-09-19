@@ -3,7 +3,7 @@ title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
 version: "2.1.2"
-date: 2026-09-14
+date: 2026-09-19
 ---
 
 # 📡 SpeechRail 公共 API 契约手册
@@ -11,6 +11,9 @@ date: 2026-09-14
 > 机器可读的 OpenAPI 3.1 规范位于 [`contracts/openapi.yaml`](../../contracts/openapi.yaml)；WebSocket 全双工事件规范位于 [`contracts/realtime-openai.md`](../../contracts/realtime-openai.md)。
 
 ---
+
+新增安全发现入口：`GET /v2/capabilities`、`/v2/voices`、`/v2/voices/{voice_id}`。
+详见[有效能力快照与安全目录](effective-capabilities.md)；旧 `/v1` 合成请求不变。
 
 ## 1. 模型身份与别名映射
 

@@ -20,6 +20,7 @@ import wave
 from array import array
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
@@ -898,6 +899,14 @@ class VoiceRegistry:
             if readers > 0 and (path.name == legacy or path.name.startswith(prefix)):
                 return True
         return False
+
+    def snapshot_profiles(self) -> tuple[VoiceProfile, ...]:
+        """Detach one catalog generation under the same registry read lock."""
+        with self._lock:
+            self._ensure_available_locked(reload=True)
+            return tuple(deepcopy(profile) for profile in (
+                *SYSTEM_VOICE_PROFILES.values(), *self._custom_voices.values(),
+            ))
 
     def list_profiles(self) -> list[VoiceProfile]:
         with self._lock:

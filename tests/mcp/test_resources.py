@@ -73,6 +73,8 @@ def _handler(
     json_response: Callable[..., httpx.Response],
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v2/capabilities":
+            return httpx.Response(404, json={"detail": "Not Found"})
         path = request.url.path
         if request.method == "GET" and path == "/v1/models":
             return json_response({"object": "list", "data": _models()})
@@ -119,6 +121,7 @@ def test_capabilities_resource_returns_describe_json(
         "/v1/models",
         "/v1/voices",
         "/health",
+        "/v2/capabilities",
     ]
 
 
