@@ -487,10 +487,16 @@ public struct SessionTurnRow: View {
 }
 
 
-/// 行内动作：稿的行尾图标按钮，动作只有两类，所以用枚举而不是散落的闭包。
+/// 行内动作：稿的行尾图标按钮，动作是有限几类，所以用枚举而不是散落的闭包。
 public enum SessionTurnAction: String, CaseIterable, Identifiable, Sendable {
     case play
     case copy
+    /// 只有语音助手用（`AssistantView`）：把这一句写进长期记忆。
+    ///
+    /// 它不适用于会议与字幕——记忆是助手的东西（`assistant_memory`），会议与字幕的
+    /// 长期资产是记录本身与纪要。放在同一个枚举里是因为按钮的形状与位置是同一处
+    /// （行尾那一列图标），而不是因为它们对三页同义。
+    case remember
 
     public var id: String { rawValue }
 
@@ -498,6 +504,7 @@ public enum SessionTurnAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .play: "play"
         case .copy: "copy"
+        case .remember: "bookmark"
         }
     }
 
@@ -505,6 +512,7 @@ public enum SessionTurnAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .play: "重播这一句"
         case .copy: "复制这一句"
+        case .remember: "记住这一句"
         }
     }
 
@@ -512,6 +520,7 @@ public enum SessionTurnAction: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .play: "重播这一句：原音色、原内容"
         case .copy: "复制这一句的正文"
+        case .remember: "把这一句写进长期记忆：下一轮开始生效，在右栏「记忆」里能改能删"
         }
     }
 }

@@ -109,6 +109,45 @@ public final class AssistantSession {
         public var source: SessionLineSource
         public var isInterrupted: Bool
         public var speakerLabel: String?
+        /// 这一句的时刻（墙上时间）。稿的对话行右侧有时间码（`14:02:11`），
+        /// 回看时读的是 `TranscriptLine.createdAt`——两处得是同一种时间。
+        public var createdAt: Date
+
+        public init(
+            id: String,
+            ordinal: Int,
+            role: SessionLineRole,
+            text: String,
+            source: SessionLineSource,
+            isInterrupted: Bool,
+            speakerLabel: String?,
+            createdAt: Date = Date()
+        ) {
+            self.id = id
+            self.ordinal = ordinal
+            self.role = role
+            self.text = text
+            self.source = source
+            self.isInterrupted = isInterrupted
+            self.speakerLabel = speakerLabel
+            self.createdAt = createdAt
+        }
+    }
+
+    /// 一次「换音色」：从第几句起、换成了谁。
+    ///
+    /// 界面靠它给**每一行**标出当时的音色——换过之后前面那些行仍是旧音色，
+    /// 这也是稿上那一屏要讲清的事（「第 13 句起：音色：温柔讲解」）。
+    public struct VoiceChange: Sendable, Equatable {
+        public var atOrdinal: Int
+        public var voiceID: String
+        public var name: String?
+
+        public init(atOrdinal: Int, voiceID: String, name: String? = nil) {
+            self.atOrdinal = atOrdinal
+            self.voiceID = voiceID
+            self.name = name
+        }
     }
 
     public enum ServiceReadiness: Sendable {
@@ -132,9 +171,54 @@ public final class AssistantSession {
     /// 本场用的人设（**开始那一刻定死**）。
     public private(set) var persona: Persona?
     public private(set) var voiceID: String?
+    /// 本场**开始那一刻**的音色。`voiceID` 会随「换音色」往前走，所以两者要分开：
+    /// 回看某一行的徽标时，得知道它是第几句、以及那句之前最后一次换成了谁。
+    public private(set) var startVoiceID: String?
+    /// 本场换音色的变更点（内存镜像；权威在库里 `session_change`，回看读那一份）。
+    public private(set) var voiceChanges: [VoiceChange] = []
     public private(set) var mode: AssistantMode = .turnTaking
     /// 本场用的大模型（库里也记这一份，用于复现）。
     public private(set) var llmModel: String?
+
+    #if DEBUG
+    /// 离屏渲染工装（`/tmp` 里的 `NSHostingView`）用的**只写展示状态**夹具。
+    ///
+    /// 「对话中」这一屏真机验收要"解锁 + 麦克风 + 服务 + 大模型"四样同时在手，
+    /// 在此之前版面（状态带、对话流、正在识别的那半句、被打断的那一句、受阻卡）
+    /// 只能靠渲染真实视图来看。口径与 `CaptionSession.applyRenderFixture` 一致：
+    /// 只在 Debug 构建里存在，不碰存储、网络与设备，也不改变任何产线行为。
+    func applyRenderFixture(
+        phase: Phase,
+        blocked: BlockReason? = nil,
+        turns: [Turn] = [],
+        partialText: String? = nil,
+        streamingReply: String? = nil,
+        level: Double = 0,
+        sessionID: String? = nil,
+        lastFailure: String? = nil,
+        persona: Persona? = nil,
+        voiceID: String? = nil,
+        startVoiceID: String? = nil,
+        voiceChanges: [VoiceChange] = [],
+        mode: AssistantMode = .turnTaking,
+        llmModel: String? = nil
+    ) {
+        self.phase = phase
+        self.blocked = blocked
+        self.turns = turns
+        self.partialText = partialText
+        self.streamingReply = streamingReply
+        self.level = level
+        self.sessionID = sessionID
+        self.lastFailure = lastFailure
+        self.persona = persona
+        self.voiceID = voiceID
+        self.startVoiceID = startVoiceID ?? voiceID
+        self.voiceChanges = voiceChanges
+        self.mode = mode
+        self.llmModel = llmModel
+    }
+    #endif
 
     // MARK: 挂载点（由 App 注入）
 
@@ -187,6 +271,10 @@ public final class AssistantSession {
     public func start(persona: Persona, voiceID: String?, mode: AssistantMode) async {
         self.persona = persona
         self.voiceID = voiceID
+        // 开始那一刻的音色要单独留一份：`voiceID` 会随「换音色」往前走，
+        // 而"这一句是谁说的"要按变更点回推（稿：第 13 句起才是新音色）。
+        self.startVoiceID = voiceID
+        self.voiceChanges = []
         self.mode = mode
         blocked = nil
         lastFailure = nil
@@ -210,7 +298,7 @@ public final class AssistantSession {
     /// 换音色：**下一句生效**，并落一条 `session_change`（§14.4 的实现约束 2）。
     ///
     /// 被拒时这一句仍用旧音色说，给可读原因与可用内置声音列表（§9 第 14 行）。
-    public func changeVoice(to voice: String) async {
+    public func changeVoice(to voice: String, name: String? = nil) async {
         guard let client else { return }
         let previous = voiceID
         do {
@@ -218,7 +306,12 @@ public final class AssistantSession {
             voiceID = voice
             try? await coordinator.noteVoiceChange(
                 atOrdinal: currentOrdinal + 1,
-                voice: VoiceSnapshot(id: voice)
+                // 名字一起存：库里那一列是 `id|name`，音色改名或删除之后
+                // 这一行仍然说得清当时是谁（`SessionStore.noteVoiceChange` 的注解）。
+                voice: VoiceSnapshot(id: voice, name: name)
+            )
+            voiceChanges.append(
+                VoiceChange(atOrdinal: currentOrdinal + 1, voiceID: voice, name: name)
             )
             lastFailure = nil
         } catch {
@@ -262,7 +355,8 @@ public final class AssistantSession {
                     text: question,
                     source: .keyboard,
                     isInterrupted: false,
-                    speakerLabel: nil
+                    speakerLabel: nil,
+                    createdAt: Date()
                 )
             )
             history.append(LLMMessage(role: .user, text: question))
@@ -286,6 +380,23 @@ public final class AssistantSession {
         isMuted.toggle()
         if !isMuted, phase == .paused { phase = .listening }
         if isMuted, phase == .listening { phase = .paused }
+    }
+
+    /// 主动停止当前助手的朗读或思考（打断当前回答），但不结束会话。
+    /// 用户按 ESC 或点击「停止朗读」时调用，清空播放队列与下行生成，保留上下文。
+    public func stopSpeaking() async {
+        guard phase == .speaking || phase == .thinking || isSpeaking else { return }
+        currentReplyInterrupted = true
+        await playback?.stop()
+        isSpeaking = false
+        if let client { try? await client.cancelResponse() }
+        streamingReply = nil
+        phase = .listening
+        isMutedForPlayback = false
+        // 若最后一条是助手且处于生成/朗读中，标记被打断
+        if let lastIndex = turns.indices.last, turns[lastIndex].role == .assistant {
+            turns[lastIndex].isInterrupted = true
+        }
     }
 
     // MARK: - 生命周期
@@ -533,6 +644,7 @@ public final class AssistantSession {
             committedItemIDs.insert(itemID)
         }
         let window = pendingItem ?? (start: commitCursor ?? startedAt, end: Date())
+        var appendedOrdinal = 0
         do {
             let ordinal = try await coordinator.appendLine(
                 LineDraft(
@@ -545,6 +657,7 @@ public final class AssistantSession {
                 )
             )
             currentOrdinal = ordinal
+            appendedOrdinal = ordinal
             turns.append(
                 Turn(
                     id: UUID().uuidString,
@@ -553,7 +666,10 @@ public final class AssistantSession {
                     text: text,
                     source: .microphone,
                     isInterrupted: false,
-                    speakerLabel: nil
+                    speakerLabel: nil,
+                    // 说这一句是**从**什么时候开始的：时间码给的是开口那一刻，
+                    // 与库里 `t_start` 同一个来源。
+                    createdAt: window.start
                 )
             )
             history.append(LLMMessage(role: .user, text: text))
@@ -561,6 +677,12 @@ public final class AssistantSession {
             committedItemIDs.remove(itemID)
             lastFailure = error.localizedDescription
             return
+        }
+        // 第一句顶上来当这一条记录的名字：记录库里一排「未命名」时，用户认不出哪条是哪条，
+        // 而"继续这一轮 / 导出 / 重命名"都要先认得它（`SessionTitleSuggestion` 里有取法）。
+        // 只在第一句上做，用户之后改名就是终局——那一列只由人来写。
+        if appendedOrdinal == 1, let name = SessionTitleSuggestion.suggest(from: text) {
+            try? await coordinator.setSessionTitle(id: sessionID, title: name)
         }
         await runReply(spoken: true)
     }
@@ -586,6 +708,9 @@ public final class AssistantSession {
         phase = .thinking
         streamingReply = ""
         currentReplyInterrupted = false
+        // 这一句回复的时刻按**开始回答**算，不是按它说完算：生成要几秒，
+        // 用结束时刻会让时间码落在那一句之后（稿行右侧那个 `14:02:16`）。
+        let replyStartedAt = Date()
         var buffer = ""
         var reply = ""
         do {
@@ -643,7 +768,8 @@ public final class AssistantSession {
                     text: trimmed,
                     source: spoken ? .microphone : .keyboard,
                     isInterrupted: currentReplyInterrupted,
-                    speakerLabel: nil
+                    speakerLabel: nil,
+                    createdAt: replyStartedAt
                 )
             )
         } catch {

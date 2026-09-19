@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 
 // 会话模块的麦克风采集（`TECHNICAL-DESIGN` §5.4 的单路来源）。
@@ -106,6 +107,38 @@ public final class MicrophoneCapture: AudioChunkSource, @unchecked Sendable {
     /// 与音色克隆同一处口径：`authorized` 才算有权限（`.notDetermined` 也还没拿到）。
     public static func authorizationStatus() -> AVAuthorizationStatus {
         AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    /// 系统当前默认输入设备的显示名（`AVAudioEngine.inputNode` 跟的就是它）。
+    ///
+    /// 走 CoreAudio 而不是 `AVCaptureDevice`：这里只是问"现在的默认输入是哪一个"，
+    /// **不需要麦克风权限、也不打开设备**——界面上把它写出来（「麦克风 MacBook 麦克风」）
+    /// 是为了让人一眼看出插着的耳机有没有被当成输入，而不是为了收样本。
+    /// 读不到就返回 `nil`，界面退回「系统默认」。
+    public static var defaultInputDeviceName: String? {
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        ) == noErr, deviceID != kAudioObjectUnknown else { return nil }
+
+        var name: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var nameAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceNameCFString,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            deviceID, &nameAddress, 0, nil, &nameSize, &name
+        ) == noErr, let name else { return nil }
+        let value = name.takeRetainedValue() as String
+        return value.isEmpty ? nil : value
     }
 
     /// 请求麦克风权限。`false` 表示用户没给（去过系统设置，或者拒绝了）。

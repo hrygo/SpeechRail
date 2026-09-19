@@ -555,6 +555,58 @@ public struct AssistantMemory: Identifiable, Hashable, Sendable {
     }
 }
 
+/// 记录名：用户不取名时，用**第一句**顶上来。
+///
+/// 为什么要有它（2026-09-19 用户验收："记录和纪要是资产"）：一条记录不取名，记录库那一列
+/// 就是一排「未命名 + 时间 + N 句」，翻起来认不出哪条是哪条，而"继续这一轮"、"导出"、
+/// "重命名"这些动作都要先认得它。第一句是这段对话里**唯一一处用户可以自己认领的标签**，
+/// 拿它当名字比"未命名"有用，也比让模型编一个标题诚实（用户改名之后以改名为准：
+/// 那一列只由人来写，这个建议只用一次）。
+///
+/// 取法（列表一行只放得下这么多，宁可短也不能折一半）：
+/// 1. 压掉所有换行与多余空白——名字是一行字；
+/// 2. 先取到第一个句末（`。！？`）为止；这一句短到不足 6 个字，就把下一句也接上，
+///    免得名字只有"嗯"、"那个"这种没有信息量的一句；
+/// 3. 还是太长就砍到 20 个字，优先断在最后一个逗号处（读起来是半句而不是断字），加省略号。
+public enum SessionTitleSuggestion {
+    /// 名字最多几个字。列表行的宽度与"一眼扫得过去"共同定下来的数。
+    public static let maxLength = 20
+
+    private static let sentenceEnders: Set<Character> = ["。", "！", "？", "!", "?", "."]
+    private static let softBreaks: Set<Character> = ["，", "、", ",", "；", ";", "：", ":", " "]
+
+    public static func suggest(from text: String) -> String? {
+        let flat = text
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "「」“”\"'"))
+        guard !flat.isEmpty else { return nil }
+
+        // 第 2 步：句末之前的部分。整段都没有句末时就是整段（后面按长度收）。
+        var head = ""
+        var rest = Substring(flat)
+        while let enderIndex = rest.firstIndex(where: { sentenceEnders.contains($0) }) {
+            head += rest[rest.startIndex..<enderIndex]
+            rest = rest[rest.index(after: enderIndex)...]
+            if head.count >= 6 { break }
+            head += "，"   // 太短就把下一句接上，句读用逗号
+        }
+        if head.isEmpty { head = flat }
+
+        let trimmedHead = head.trimmingCharacters(in: CharacterSet(charactersIn: "，、,；;：: "))
+        guard !trimmedHead.isEmpty else { return nil }
+        guard trimmedHead.count > maxLength else { return trimmedHead }
+
+        // 第 3 步：砍到 20 个字，能断在逗号处就断在逗号处。
+        let clipped = trimmedHead.prefix(maxLength)
+        if let breakIndex = clipped.lastIndex(where: { softBreaks.contains($0) }),
+           clipped.distance(from: clipped.startIndex, to: breakIndex) >= 8 {
+            return String(clipped[clipped.startIndex..<breakIndex]) + "…"
+        }
+        return String(clipped) + "…"
+    }
+}
+
 // MARK: - 建行 / 落行的输入
 
 /// `createSession` 的输入。只在**首个 PCM 已发送**时调用（§6.4）。

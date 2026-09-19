@@ -106,6 +106,12 @@ public final class SessionCoordinator {
     /// 最近一次读到的服务档位。分人的档位门禁（`light` 不给分人）要一个共同的事实来源，
     /// 而档位是**服务的事实**：它由每场会话开始时那一次 `/health` 读回，记在这里。
     public private(set) var lastKnownProfile: String?
+    /// 刚刚**封存进库**的那一段。页面用它把"结束"这件事做成一次落地：语音助手结束之后
+    /// 落到刚结束的那一段上（`AssistantView.landOnFinalized`），而不是回一个空白的"未开始"。
+    ///
+    /// 它在 `finalize` 里**写完库之后**才置位，所以读它的页面不会撞上"行还停在 `recording`"
+    /// 的中间态——那时读回来的 `ended_at` 还是空的，页面上"结束于 / 时长"两行会说错。
+    public private(set) var lastFinalizedSessionID: String?
 
     // MARK: - 能力层挂载点
     //
@@ -370,6 +376,10 @@ public final class SessionCoordinator {
         }
         if let activeSessionID {
             try? await store.finalizeSession(id: activeSessionID, endReason: reason)
+        }
+        // 先把库写完，再让页面知道"有一段刚刚封存了"（`lastFinalizedSessionID` 的注解）。
+        if let finalized = activeSessionID {
+            lastFinalizedSessionID = finalized
         }
         releaseDevices()
         stopClock()

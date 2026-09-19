@@ -11,7 +11,10 @@ public struct SettingsView: View {
     @AppStorage(SpeechRailDesignTokens.CaptionBand.fontSizeDefaultsKey)
     private var captionFontSizeRaw = CaptionBandFontSize.standard.rawValue
     @State private var llmKeyDraft = ""
-    @State private var llmKeySaved = LLMKeychain.hasKey
+    /// 钥匙串里有没有那一份密钥。**不在 `@State` 的默认值表达式里读**：那个表达式在
+    /// 每一次重建视图时都会跑，而读钥匙串是一次可能被系统弹框拦下的同步调用——
+    /// 它与助手页那处是同一个毛病（2026-09-19）。
+    @State private var llmKeySaved = false
     @State private var connectionResult: LLMConnectionResult?
     @State private var isChecking = false
 
@@ -38,6 +41,9 @@ public struct SettingsView: View {
             minWidth: SpeechRailDesignTokens.Layout.settingsWindowMinimumWidth,
             minHeight: SpeechRailDesignTokens.Layout.settingsWindowMinimumHeight
         )
+        .task {
+            llmKeySaved = await Task.detached { LLMKeychain.hasKey }.value
+        }
     }
 
     private var generalPane: some View {

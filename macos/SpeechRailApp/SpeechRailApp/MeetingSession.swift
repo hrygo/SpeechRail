@@ -145,6 +145,50 @@ public final class MeetingSession {
     /// 所以它与 `isPaused` 是两个独立的开关，一个开着不影响另一个。
     public private(set) var isMicrophoneMuted = false
 
+    #if DEBUG
+    /// 离屏渲染工装（`/tmp` 里的 `NSHostingView`）用的**只写展示状态**夹具。
+    ///
+    /// 「录制中 / 已中断 / 正在整理」这几屏真机验收要"解锁 + 麦克风 + 服务"三样同时在手；
+    /// 在此之前版面（来源读数、转录流、说话人编号、中断那一行、内心 OS 展开）只能靠渲染
+    /// 真实视图来看。口径与 `CaptionSession.applyRenderFixture` 一致：只在 Debug 构建里
+    /// 存在，不碰存储、网络与设备，也不改变任何产线行为。
+    func applyRenderFixture(
+        phase: Phase,
+        blocked: BlockReason? = nil,
+        lines: [Line] = [],
+        partialText: String? = nil,
+        level: Double = 0,
+        sessionID: String? = nil,
+        startedAt: Date? = nil,
+        lastFailure: String? = nil,
+        selection: AudioSourceCoordinator.Selection? = nil,
+        gapCount: Int = 0,
+        interruption: SessionInterruptionReason? = nil,
+        interruptedAt: Date? = nil,
+        interruptionNote: String? = nil,
+        reconnectedSources: Int = 0,
+        isPaused: Bool = false,
+        isMicrophoneMuted: Bool = false
+    ) {
+        self.phase = phase
+        self.blocked = blocked
+        self.lines = lines
+        self.partialText = partialText
+        self.level = level
+        self.sessionID = sessionID
+        self.startedAt = startedAt
+        self.lastFailure = lastFailure
+        self.selection = selection
+        self.gapCount = gapCount
+        self.interruption = interruption
+        self.interruptedAt = interruptedAt
+        self.interruptionNote = interruptionNote
+        self.reconnectedSources = reconnectedSources
+        self.isPaused = isPaused
+        self.isMicrophoneMuted = isMicrophoneMuted
+    }
+    #endif
+
     /// 分人账本：与会话同生共死，**会议与字幕共用同一份实现**。
     public let labeling: SpeakerLabeling
     /// 纪要生成（排队 + 租约 + 版本）。

@@ -456,7 +456,10 @@ public struct MeetingView: View {
             SessionPanelHead(title: "本次会议", badge: "还没有开始")
             SessionHairline()
             VStack(alignment: .leading, spacing: 10) {
-                SessionKVRow("档位", profileRowText)
+                // 「档位」这个词在**会话页**叫「识别精度」（`SESSIONS-SPEC` §16.3 判据 2
+                // 的术语表）：这一页要说的是"你现在拿到的是哪一档质量"，不是"运行选择器"。
+                // 那个选择器在设置与模型页，那边仍叫「档位」。
+                SessionKVRow("识别精度", profileRowText)
                 SessionKVRow("音频来源", sourceSummary)
                 SessionKVRow("谁在说话", preferences.meetingDiarizationEnabled ? "已开" : "关着")
                 SessionKVRow("保存位置", "记录库 · 长期保留")

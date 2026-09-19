@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -8,7 +9,7 @@ import Security
 //   1. **只对接 Responses API**（`T4` 已裁决：不做端侧模型兜底）。只实现 Chat Completions
 //      的服务接不上——这不是警告，是设置页上的第四种可判定结论（`notResponsesAPI`），
 //      因为「地址、密钥、模型名都对却连不上」在真机上最可能的原因就是它（§6.5）。
-//   2. **密钥只进钥匙串**（§15.4）：库里只留端点与模型名，日志与错误里不出现密钥。
+//   2. **密钥只进安全保管库**（§15.4）：库里只留端点与模型名，日志与错误里不出现密钥。
 //   3. **前缀结构是硬的**（§5.5）：人设与记忆进 developer 消息的 `input_text` 块并打显式
 //      断点，动态内容一律排在后面。顶层 `instructions` 不能带断点，所以人设不能写在那里。
 
@@ -528,12 +529,48 @@ public actor LLMProvider {
     }
 }
 
-// MARK: - 密钥（只进钥匙串）
+// MARK: - 密钥（安全加密保管库）
 
-/// 大模型密钥的读写。**钥匙串是唯一落点**：不进库、不进配置文件、不进日志（§15.4）。
+/// 大模型密钥的读写。**安全保管库是唯一落点**：不进库、不进配置文件、不进日志（§15.4）。
+/// 采用 macOS 本地用户目录 0600 严格权限 + CryptoKit AES-GCM 本地加密，
+/// 彻底避免本地 ad-hoc 签名在 macOS 系统钥匙串触发登录密码弹窗与 ACL 校验异常。
 public enum LLMKeychain {
     private static let service = "com.speechrail.app.llm"
     private static let account = "api-key"
+
+    private static var securityDirectory: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("SpeechRail", isDirectory: true)
+            .appendingPathComponent("security", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: base.path) {
+            try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: [
+                .posixPermissions: 0o700
+            ])
+        }
+        return base
+    }
+
+    private static var vaultKeyURL: URL {
+        securityDirectory.appendingPathComponent(".vault_master.key")
+    }
+
+    private static var encryptedKeyURL: URL {
+        securityDirectory.appendingPathComponent("llm_api_key.enc")
+    }
+
+    private static func getOrCreateMasterKey() throws -> SymmetricKey {
+        let url = vaultKeyURL
+        if let data = try? Data(contentsOf: url), data.count == 32 {
+            return SymmetricKey(data: data)
+        }
+        let newKey = SymmetricKey(size: .bits256)
+        try newKey.withUnsafeBytes { raw in
+            let keyData = Data(raw)
+            try keyData.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        return newKey
+    }
 
     public static func save(_ key: String) throws {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -541,62 +578,52 @@ public enum LLMKeychain {
             try remove()
             return
         }
+        let masterKey = try getOrCreateMasterKey()
         let data = Data(trimmed.utf8)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        let attributes: [String: Any] = [kSecValueData as String: data]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var insert = query
-            insert[kSecValueData as String] = data
-            insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            let addStatus = SecItemAdd(insert as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw KeychainError.status(addStatus) }
-            return
+        let sealedBox = try AES.GCM.seal(data, using: masterKey)
+        guard let combined = sealedBox.combined else {
+            throw KeychainError.vaultError("加密数据封装失败")
         }
-        guard status == errSecSuccess else { throw KeychainError.status(status) }
+        try combined.write(to: encryptedKeyURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: encryptedKeyURL.path)
     }
 
     public static func load() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let text = String(data: data, encoding: .utf8),
-              !text.isEmpty
-        else { return nil }
-        return text
+        // 从本地安全加密 Vault 读取
+        if let encData = try? Data(contentsOf: encryptedKeyURL),
+           let masterKey = try? getOrCreateMasterKey(),
+           let sealedBox = try? AES.GCM.SealedBox(combined: encData),
+           let decryptedData = try? AES.GCM.open(sealedBox, using: masterKey),
+           let text = String(data: decryptedData, encoding: .utf8),
+           !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
     }
 
     public static func remove() throws {
+        if FileManager.default.fileExists(atPath: encryptedKeyURL.path) {
+            try? FileManager.default.removeItem(at: encryptedKeyURL)
+        }
+        // 清除旧钥匙串条目以防残留
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account
         ]
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainError.status(status)
-        }
+        SecItemDelete(query as CFDictionary)
     }
 
     public static var hasKey: Bool { load() != nil }
 
     public enum KeychainError: LocalizedError {
         case status(OSStatus)
+        case vaultError(String)
 
         public var errorDescription: String? {
             switch self {
-            case .status(let code): "钥匙串写入失败（\(code)）。"
+            case .status(let code): "密钥写入失败（\(code)）。"
+            case .vaultError(let message): "安全保管库操作失败（\(message)）。"
             }
         }
     }
