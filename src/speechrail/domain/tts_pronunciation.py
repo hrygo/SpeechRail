@@ -276,7 +276,12 @@ def _boundary_ok(text: str, start: int, end: int) -> bool:
         and not (text[start - 1].isdigit() and text[start].isalpha())
     ):
         return False
-    return not (end < len(text) and word_char(text[end]))
+    if end >= len(text) or not word_char(text[end]):
+        return True
+    # ASCII terminology is commonly adjacent to CJK text ("AI模式").
+    # Treat the script transition as a word boundary while preserving ordinary
+    # alphabetic/underscore suffix collisions such as "AIrail".
+    return text[end - 1].isascii() and text[end - 1].isalpha() and not text[end].isascii()
 
 
 def _candidate_at(
