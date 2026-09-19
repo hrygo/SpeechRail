@@ -276,7 +276,7 @@ public struct AssistantView: View {
                     helpText: "结束这次对话；记录会留在记录库里"
                 ) { Task { await endConversation() } }
             case .review:
-                // 稿 `screenClosureAssistantClosed` 的页头：`⌘⇧.` / 导出 / 新建对话 / 收起。
+                // 稿 `screenClosureAssistantClosed` 的页头：`⌘⇧.` / 导出 / 新建对话。
                 // 「返回实时」只在**确实还开着**一段对话时才给：记录库里翻旧记录的时候
                 // 可能同时有一轮在跑，那时它是一条真出口；没在跑时它只会把人送回"未开始"，
                 // 与「新建对话」是同一件事，摆两颗一样的按钮就是凑数。
@@ -295,22 +295,22 @@ public struct AssistantView: View {
                     helpText: "回到「先定角色与声音」：这一条记录留在库里，一个字都不动"
                 ) { startNewRound() }
             }
-            // 收起控件的名字按右栏**此刻装着什么**说（稿 `sideToggle`）：回看时那一栏叫
-            // 「记录信息」，不再是"本次会话"。
-            SessionPanelToggle(
-                panelName: inspectorTogglePanelName,
-                isCollapsed: isInspectorCollapsed
-            ) {
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
-                    isInspectorCollapsed.toggle()
-                    autoCollapsedDueToWidth = false
+            if state != .review {
+                // 收起控件的名字按右栏**此刻装着什么**说（稿 `sideToggle`）。
+                SessionPanelToggle(
+                    panelName: inspectorTogglePanelName,
+                    isCollapsed: isInspectorCollapsed
+                ) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                        isInspectorCollapsed.toggle()
+                        autoCollapsedDueToWidth = false
+                    }
                 }
             }
         }
     }
 
     private var inspectorTogglePanelName: String {
-        if state == .review { return "记录信息" }
         switch inspectorTab {
         case .session: return "会话状态"
         case .voice: return "音色库"
@@ -402,7 +402,7 @@ public struct AssistantView: View {
     /// 稿 `语音助手 · 记录库 · 刚结束` 顶上就是这条绿带子。它与 `.ready` 的结论条是同一形状、
     /// 同一个位置，所以"结束"这件事有回执：记录已经封存、被选中、而且不因为结束就少一个字
     /// （用户 2026-09-17：「记录和纪要是资产」）。它**不给按钮**：真正的动作在页头
-    /// （导出 / 新建对话）与右栏（继续 / 重命名 / 移除），这里再摆一遍就是同一个动作画两遍。
+    /// （导出 / 新建对话）与正文底部（继续 / 重命名 / 移除），这里再摆一遍就是同一个动作画两遍。
     ///
     /// 只在**刚由这一页结束**的那一段上出现。翻旧记录时不出现——「刚结束」放在三天前那一条
     /// 上就是一句谎（`justEndedSessionID` 由 `endConversation()` 写、`openRecord()` 清）。
@@ -418,7 +418,7 @@ public struct AssistantView: View {
                     + "\(reviewDurationText)，排在列表最上面，也已经选中。"
                     + "记录长期留在这台 Mac 上，角色、声音与大模型都随它一起存下来。",
                 hint: "「结束对话」只结束这一次；记录不会因为结束少一个字。"
-                    + "不想要了是另一个动作——右栏的「从记录库移除」，只在这一页给，而且会先问一次。"
+                    + "不想要了是另一个动作——正文底部的「从记录库移除」，只在这一页给，而且会先问一次。"
             ) { EmptyView() }
         }
     }
@@ -2602,20 +2602,6 @@ public struct AssistantView: View {
                         .speechRailButton(.secondary)
                     Button("🔄 新开一轮换角色") { Task { await restartWithPersonaPick() } }
                         .speechRailButton(.secondary)
-                } else if state == .review {
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button("继续这一轮") { continueFromReview() }
-                            .speechRailButton(.primary)
-                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                            Button("重命名") {
-                                renameDraft = reviewRecord?.title ?? ""
-                                isRenamingRecord = true
-                            }
-                            .speechRailButton(.secondary)
-                            Button("从记录库移除", role: .destructive) { confirmingRemove = true }
-                                .speechRailButton(.secondary)
-                        }
-                    }
                 }
             }
         }
@@ -2738,17 +2724,15 @@ public struct AssistantView: View {
                 ("麦克风", microphoneLabel)
             ]
         case .review:
-            // 回看这一栏装的是**这一条记录**（`SessionPanelToggle` 把它叫「记录信息」），
-            // 所以每一行都得读记录自己的快照：角色、音色与大模型都随记录存下来了
-            // （§14.4）。原来这一屏直接复用对话中的那几行，读的是**此刻还开着的那一轮**
-            // （没开着时全是 0 或「未配置」），数字与眼前这条记录对不上。对话方式没进
-            // 记录（`session` 表没有这一列），所以这里不摆那一行，也不猜。
+            // 回看态现在由 `reviewArea` 负责「记录列表 + 正文」两栏；若记录事实卡被复用，
+            // 仍然读取这一条记录自己的快照，而不是此刻还开着的那一轮（§14.4）。
+            // 对话方式没进记录（`session` 表没有这一列），所以这里不摆那一行，也不猜。
             [
                 ("大模型", reviewRecord?.llmModel ?? "未记录"),
                 ("音色", reviewVoiceLabel),
                 ("角色", reviewRecord?.persona?.title ?? "默认角色"),
                 ("已聊", "\(reviewExchangeCount) 轮 · 共 \(reviewLines.count) 句"),
-                // 稿 `记录库 · 刚结束` 的「记录信息」给的是**结束于 / 轮数 / 时长**：
+                // 记录摘要给的是**结束于 / 轮数 / 时长**：
                 // 翻一条旧记录时先想知道的是"哪一段、多久"，而不是它从几点开始。
                 ("结束于", reviewRecord.map {
                     ($0.endedAt ?? $0.startedAt).formatted(date: .numeric, time: .shortened)
@@ -3481,7 +3465,7 @@ public struct AssistantView: View {
                                 pills: reviewPills(line),
                                 timestamp: Self.clock(line.createdAt),
                                 text: line.text,
-                                bodyWidth: 640
+                                bodyWidth: 760
                             )
                         }
                         if reviewLines.isEmpty {
@@ -3497,26 +3481,61 @@ public struct AssistantView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 SessionHairline()
                 CardFoot(note: "继续这一轮是新开一轮：角色与声音可以重新选；这一条记录一个字不动。") {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
-                            .speechRailButton(.secondary)
-                            .fixedSize()
-
-                        Button("继续这一轮") { continueFromReview() }
-                            .speechRailButton(.primary)
-                            .fixedSize()
-                    }
+                    reviewFooterActions
                 }
             }
             .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
-
-            if !isInspectorCollapsed {
-                inspectorColumn
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .animation(.spring(response: 0.32, dampingFraction: 0.88), value: isInspectorCollapsed)
+    }
+
+    private var reviewFooterActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                copyReviewedRecordButton
+                continueReviewedRecordButton
+                renameReviewedRecordButton
+                removeReviewedRecordButton
+            }
+
+            VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    copyReviewedRecordButton
+                    continueReviewedRecordButton
+                }
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    renameReviewedRecordButton
+                    removeReviewedRecordButton
+                }
+            }
+        }
+    }
+
+    private var copyReviewedRecordButton: some View {
+        Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
+            .speechRailButton(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var continueReviewedRecordButton: some View {
+        Button("继续这一轮") { continueFromReview() }
+            .speechRailButton(.primary)
+            .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var renameReviewedRecordButton: some View {
+        Button("重命名") {
+            renameDraft = reviewRecord?.title ?? ""
+            isRenamingRecord = true
+        }
+        .speechRailButton(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var removeReviewedRecordButton: some View {
+        Button("从记录库移除", role: .destructive) { confirmingRemove = true }
+            .speechRailButton(.secondary)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     private var reviewDetail: String {
@@ -3663,7 +3682,7 @@ public struct AssistantView: View {
         }
     }
 
-    // MARK: - 记录库那一栏的三个动作（稿 `screenClosureAssistantClosed` 的右栏）
+    // MARK: - 记录正文底部的三个动作（稿 `screenClosureAssistantClosed`）
 
     /// 「继续这一轮」= **新开一轮**（`SESSIONS-SPEC` §15 的 E7）：人设与音色按这一条记录预填，
     /// 但人设是每轮锁一次，所以新的这一轮**可以重选**——这正是它存在的理由
@@ -3846,16 +3865,9 @@ public struct AssistantView: View {
     // MARK: - 辅助面板响应式联动（接入中央 WindowLayoutTier 断点总线）
 
     private func syncInspectorWithLayoutTier(_ tier: WindowLayoutTier) {
-        let shouldCollapse: Bool
-        if state == .review {
-            // 在「对话记录复盘/回看态」下，左侧已有 280pt 的对话记录库栏目（三栏结构）！
-            // 除非处于宽屏全景（expanded，≥ 1340pt），否则优先自动收起最右侧的「记录信息」，
-            // 全力保障中央的对话正文主窗体饱满充裕（至少 560pt+ 空间），绝不压缩主窗体！
-            shouldCollapse = (tier != .expanded)
-        } else {
-            // 在「对讲主工作台态」下，双栏结构，仅在 compact 阶梯下收起辅助面板
-            shouldCollapse = (tier == .compact)
-        }
+        // 历史回看本身就是「记录列表 + 正文」两栏，不参与实时对讲的右栏收起策略。
+        guard state != .review else { return }
+        let shouldCollapse = tier == .compact
 
         if shouldCollapse {
             if !isInspectorCollapsed {
