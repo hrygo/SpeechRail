@@ -432,20 +432,58 @@ public struct AssistantView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 personaCard
                 voicesCard
+                modeCard
             }
             .padding(.top, SpeechRailDesignTokens.Spacing.sm)
         } label: {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text("换个角色或声音（可选）")
+                Text("换个角色、声音或对话方式（可选）")
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                Text("现在是「\(selectedPersonaTitle)」·「\(currentVoiceName ?? "默认声音")」")
+                Text("现在是「\(selectedPersonaTitle)」·「\(currentVoiceName ?? "默认声音")」·「\(mode.title)」")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Spacer(minLength: 0)
             }
         }
         .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
+    }
+
+    /// 「未开始」态里的第三个可选项：对讲模式。
+    ///
+    /// 它和角色、声音一样是**开始前的选择**，所以收在同一行里。不这么做的话，想开「实时对讲
+    /// （耳机）」的人只能去设置页改默认值再回来——而那正是用户点的「一次性设置不该到处拦人」
+    /// 的反面（2026-09-19 低门槛改造）。状态带里那一句事实行本来就报这个值，这里让它可改。
+    private var modeCard: some View {
+        SessionPanel {
+            SessionPanelHead(
+                title: "怎么跟它说话",
+                badge: nil,
+                detail: "开始那一刻定下来，本次对话中途不变；新开一轮可以换（记录留着）。"
+            )
+            SessionHairline()
+            ForEach(Array(AssistantMode.allCases.enumerated()), id: \.element.id) { index, option in
+                if index > 0 { SessionHairline() }
+                SessionCheckRow(
+                    tone: option == mode ? .selected : .neutral,
+                    name: option.title,
+                    detail: option.detail
+                ) {
+                    Button {
+                        mode = option
+                        preferences.assistantMode = option
+                    } label: {
+                        StatusPill(
+                            tone: option == mode ? .healthy : .neutral,
+                            label: option == mode ? "已选" : "可选"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("用这种方式开始下一轮")
+                }
+            }
+            Spacer(minLength: 0)
+        }
     }
 
     private var personaCard: some View {
@@ -925,10 +963,13 @@ public struct AssistantView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .fixedSize()
-                    .onChange(of: mode) { _, newValue in
-                        preferences.assistantMode = newValue
-                    }
-                    .help(mode.detail)
+                    // **会话中不让改**：`AssistantSession.mode` 只在 `start` 那一刻写入，
+                    // 中途拨动这个控件不会改变打断闸与播放闭麦——控件亮着却什么都没发生，
+                    // 就是「界面在撒谎」。所以这里按只读处理，并把换法写在帮助里。
+                    // 想换的人走「未开始」那一行可选项（`modeCard`）或新开一轮。
+                    .disabled(true)
+                    .help("本次对话的方式在开始那一刻定下了：" + assistant.mode.detail
+                        + " 要换就新开一轮对话，这一轮的记录留着。")
 
                     Spacer(minLength: SpeechRailDesignTokens.Spacing.xs)
 
@@ -1108,7 +1149,7 @@ public struct AssistantView: View {
             [
                 ("对话模型", preferences.isLLMConfigured ? "已连接 · \(preferences.llmConfiguration.model)" : "未配置"),
                 ("输入方式", "语音或打字"),
-                ("对讲模式", mode.title),
+                ("对话方式", mode.title),
                 ("输入设备", "系统默认"),
                 ("角色", "\(selectedPersonaTitle) · 本轮定"),
                 ("音色", currentVoiceName ?? "未选")
