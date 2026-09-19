@@ -18,6 +18,7 @@ from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config import Settings
 from speechrail.config.model_catalog import load_catalog
 from speechrail.domain.contracts import TranscriptResult
+from speechrail.domain.idempotency import DurableIdempotencyJournal
 from speechrail.domain.ports import AudioChunk, SpeechRequest, TranscriptionRequest
 from speechrail.domain.tts import VoiceRegistry
 
@@ -511,3 +512,97 @@ def test_registry_create_only_is_atomic_in_concurrent_calls(tmp_path: Path) -> N
         results = list(executor.map(create, [1, 2]))
     assert sum(results) == 1
     assert len(list((tmp_path / "voices").glob("*.wav"))) == 1
+
+
+
+def test_design_idempotency_replays_without_duplicate_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = DurableIdempotencyJournal(tmp_path / "design-idempotency.json")
+    monkeypatch.setattr(
+        "speechrail.http.routes.voice_designs._design_idempotency_journal",
+        journal,
+    )
+    client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
+    headers = {"Idempotency-Key": "design-replay-key"}
+
+    first = client.post("/v1/voices/designs", headers=headers, json=payload())
+    second = client.post("/v1/voices/designs", headers=headers, json=payload())
+
+    assert first.status_code == 201, first.text
+    assert second.status_code == 201, second.text
+    assert second.json()["voice"]["id"] == "designed_base"
+    assert len(synth.requests) == 1
+    assert len(asr.requests) == 1
+
+
+def test_design_idempotency_rejects_payload_conflict_before_side_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = DurableIdempotencyJournal(tmp_path / "design-idempotency.json")
+    monkeypatch.setattr(
+        "speechrail.http.routes.voice_designs._design_idempotency_journal",
+        journal,
+    )
+    client, _registry, synth, asr = make_client(tmp_path, monkeypatch)
+    headers = {"Idempotency-Key": "design-conflict-key"}
+
+    first = client.post("/v1/voices/designs", headers=headers, json=payload())
+    changed = payload()
+    changed["name"] = "Different name"
+    second = client.post("/v1/voices/designs", headers=headers, json=changed)
+
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "idempotency_conflict"
+    assert len(synth.requests) == 1
+    assert len(asr.requests) == 1
+
+
+def test_design_idempotency_recovers_pending_after_restart_without_regeneration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal_path = tmp_path / "design-idempotency.json"
+    journal = DurableIdempotencyJournal(journal_path)
+    monkeypatch.setattr(
+        "speechrail.http.routes.voice_designs._design_idempotency_journal",
+        journal,
+    )
+    first_client, _registry, first_synth, first_asr = make_client(tmp_path, monkeypatch)
+    headers = {"Idempotency-Key": "design-recovery-key"}
+
+    first = first_client.post("/v1/voices/designs", headers=headers, json=payload())
+    assert first.status_code == 201
+    assert len(first_synth.requests) == 1
+    assert len(first_asr.requests) == 1
+
+    records = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert len(records) == 1
+    records[0]["state"] = "pending"
+    records[0].pop("completed_at", None)
+    journal_path.write_text(json.dumps(records), encoding="utf-8")
+
+    restarted = DurableIdempotencyJournal(journal_path)
+    monkeypatch.setattr(
+        "speechrail.http.routes.voice_designs._design_idempotency_journal",
+        restarted,
+    )
+    second_client, _registry, second_synth, second_asr = make_client(tmp_path, monkeypatch)
+
+    replay = second_client.post("/v1/voices/designs", headers=headers, json=payload())
+
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["voice"]["id"] == "designed_base"
+    assert second_synth.requests == []
+    assert second_asr.requests == []
+    decision = restarted.lookup(
+        owner="speechrail-local",
+        operation="voice.design",
+        key="design-recovery-key",
+    )
+    assert decision is not None
+    assert decision.state == "completed"
+    assert decision.result_id == "designed_base"
