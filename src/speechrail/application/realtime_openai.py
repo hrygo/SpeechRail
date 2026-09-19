@@ -156,6 +156,8 @@ class OpenAIRealtimeSession:
         self._diarization_engine = services.diarization_engine
         self._tts = services.tts_synthesizer
         active = active_model_catalog(self._settings)
+        self._tts_artifact = active.tts
+        self._tts_clone_artifact = active.tts_clone
         self._tts_variant = active.tts.variant if active.tts is not None else None
         self._tts_clone_variant = (
             active.tts_clone.variant if active.tts_clone is not None else None
@@ -184,6 +186,8 @@ class OpenAIRealtimeSession:
         self._asr_resources: AsyncExitStack | None = None
         self._tts_task: asyncio.Task[None] | None = None
         self._tts_response_id: str | None = None
+        self._tts_receipt_id: str | None = None
+        self._render_receipts_enabled = False
         self._diarization: DiarizationSession | None = None
         self._diarization_events: asyncio.Task[None] | None = None
         self._diarization_resources: AsyncExitStack | None = None
@@ -320,6 +324,7 @@ class OpenAIRealtimeSession:
         # its legacy wire shape never reaches a client.
         adapted_event = dict(event)
         requested_enabled: bool | None = None
+        requested_receipts: bool | None = None
         raw_session = event.get("session")
         if isinstance(raw_session, dict):
             raw_transcription = raw_session.get("input_audio_transcription")
@@ -333,19 +338,41 @@ class OpenAIRealtimeSession:
         if isinstance(raw_session, dict) and "speechrail" in raw_session:
             session = dict(raw_session)
             raw_extension = session.pop("speechrail")
-            if (
-                not isinstance(raw_extension, dict)
-                or set(raw_extension) != {"diarization"}
-                or not isinstance(raw_extension["diarization"], dict)
-                or set(raw_extension["diarization"]) != {"enabled"}
-                or not isinstance(raw_extension["diarization"].get("enabled"), bool)
-            ):
+            if not isinstance(raw_extension, dict):
                 raise RealtimeAdapterError(
-                    "invalid_diarization",
-                    "session.speechrail.diarization requires boolean enabled only",
+                    "invalid_speechrail_extension",
+                    "session.speechrail must be an object",
                 )
-            enabled = raw_extension["diarization"]["enabled"]
-            requested_enabled = enabled
+            unknown = set(raw_extension) - {"diarization", "render_receipts"}
+            if unknown:
+                raise RealtimeAdapterError(
+                    "invalid_speechrail_extension",
+                    "unsupported session.speechrail field",
+                )
+            if "diarization" in raw_extension:
+                raw_diarization = raw_extension["diarization"]
+                if (
+                    not isinstance(raw_diarization, dict)
+                    or set(raw_diarization) != {"enabled"}
+                    or not isinstance(raw_diarization.get("enabled"), bool)
+                ):
+                    raise RealtimeAdapterError(
+                        "invalid_diarization",
+                        "session.speechrail.diarization requires boolean enabled only",
+                    )
+                requested_enabled = raw_diarization["enabled"]
+            if "render_receipts" in raw_extension:
+                raw_receipts = raw_extension["render_receipts"]
+                if (
+                    not isinstance(raw_receipts, dict)
+                    or set(raw_receipts) != {"enabled"}
+                    or not isinstance(raw_receipts.get("enabled"), bool)
+                ):
+                    raise RealtimeAdapterError(
+                        "invalid_render_receipts",
+                        "session.speechrail.render_receipts requires boolean enabled only",
+                    )
+                requested_receipts = raw_receipts["enabled"]
             adapted_event["session"] = session
         updated, config = apply_session_update(
             adapted_event,
@@ -478,15 +505,25 @@ class OpenAIRealtimeSession:
                 else None
             )
         self._config = config
-        if self._diarization_enabled:
-            session_payload = updated.get("session")
-            if isinstance(session_payload, dict):
-                session_payload["speechrail"] = {
-                    "diarization": {"enabled": True, "version": 1, "max_speakers": 4}
+        if requested_receipts is not None:
+            self._render_receipts_enabled = requested_receipts
+        session_payload = updated.get("session")
+        if isinstance(session_payload, dict):
+            extension: dict[str, object] = {}
+            if self._diarization_enabled:
+                extension["diarization"] = {
+                    "enabled": True,
+                    "version": 1,
+                    "max_speakers": 4,
                 }
-                session_payload["speechrail"] = {
-                    "diarization": {"enabled": True, "version": 1, "max_speakers": 4}
+            if self._render_receipts_enabled:
+                extension["render_receipts"] = {
+                    "enabled": True,
+                    "version": 1,
+                    "integrity_boundary": "pcm16_after_websocket_send",
                 }
+            if extension:
+                session_payload["speechrail"] = extension
         await self._send(self._with_speech_capabilities(updated))
 
     def _with_speech_capabilities(
