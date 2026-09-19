@@ -294,7 +294,8 @@ public struct ControlCenterView: View {
             minimumHeight: SpeechRailDesignTokens.List.sidebarRowHeight
         )
         .help("打开服务状态")
-        .accessibilityLabel("服务状态")
+        // 与侧栏的「服务状态」导航项保持唯一标识；当前值通过 accessibilityValue 提供。
+        .accessibilityLabel("服务状态摘要")
         .accessibilityValue(sidebarStatusText)
     }
 
