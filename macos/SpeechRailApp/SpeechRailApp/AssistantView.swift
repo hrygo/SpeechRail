@@ -750,6 +750,10 @@ public struct AssistantView: View {
                     Button("发送") { send() }
                         .speechRailButton(.primary)
                         .disabled(!canCompose || typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        // §8 的「对话页：结束并发送」`⌘⏎`（与配音台同义）。Enter 仍然是
+                        // `onSubmit` 那条路，加上 ⌘ 之后是一条**带修饰键**的命令，
+                        // 不会跟输入框里的普通按键抢键。
+                        .keyboardShortcut(.return, modifiers: .command)
                 }
                 // 打字这条路的可用性与「能不能开口说话」**不是**同一件事（§6.1）：
                 // 麦克风被占、服务正忙这几类受阻里，输入框照常亮着，所以淡出只作用在
