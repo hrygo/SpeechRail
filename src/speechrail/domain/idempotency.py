@@ -230,7 +230,7 @@ class DurableIdempotencyJournal:
                         return IdempotencyDecision("completed", result_id)
                     return IdempotencyDecision("pending", result_id)
 
-            record: dict[str, object] = {
+            new_record: dict[str, object] = {
                 "owner": owner,
                 "operation": operation,
                 "key_hash": key_hash,
@@ -239,8 +239,8 @@ class DurableIdempotencyJournal:
                 "created_at": time.time(),
             }
             if provisional_result_id is not None:
-                record["result_id"] = provisional_result_id
-            records.append(record)
+                new_record["result_id"] = provisional_result_id
+            records.append(new_record)
             self._save_locked(records)
             return IdempotencyDecision("new", provisional_result_id)
 
