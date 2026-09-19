@@ -198,6 +198,19 @@ def test_legacy_record_without_revision_remains_unknown(tmp_path):
         pass
 
 
+def test_expected_revision_rejects_system_voice_without_identity(tmp_path):
+    registry = VoiceRegistry(
+        storage_path=tmp_path / "custom_voices.json",
+        voices_dir=tmp_path / "voices",
+    )
+
+    with (
+        pytest.raises(VoiceRevisionConflictError),
+        registry.lease_profile("serena", expected_revision="vr_" + "0" * 32),
+    ):
+        pass
+
+
 def test_revision_persists_across_registry_restart(tmp_path):
     storage = tmp_path / "custom_voices.json"
     voices = tmp_path / "voices"
