@@ -260,6 +260,9 @@ class AppServices:
         footprint, footprint_source, footprint_complete, process_count = (
             service_physical_footprint()
         )
+        shared_asr_owner = getattr(self.asr_worker, "shared_owner", None)
+        mode_scheduler = getattr(shared_asr_owner, "mode_scheduler", None)
+        mode_snapshot = mode_scheduler.snapshot() if mode_scheduler is not None else None
         return {
             "physical_memory_bytes": physical_memory,
             "memory_budget_bytes": memory_budget,
@@ -273,6 +276,30 @@ class AppServices:
             "heavy_overlap_allowed": bool(getattr(snapshot, "allow_heavy_overlap", False)),
             "heavy_overlap_reason": str(
                 getattr(snapshot, "policy_reason", "未提供")
+            ),
+            "asr_scheduler_active_mode": (
+                mode_snapshot.active_mode if mode_snapshot is not None else None
+            ),
+            "asr_scheduler_pending_streaming": (
+                mode_snapshot.pending_streaming if mode_snapshot is not None else None
+            ),
+            "asr_scheduler_pending_batch": (
+                mode_snapshot.pending_batch if mode_snapshot is not None else None
+            ),
+            "asr_batch_head_cumulative_wait_seconds": (
+                mode_snapshot.head_batch_cumulative_wait_seconds
+                if mode_snapshot is not None
+                else None
+            ),
+            "asr_batch_head_service_windows": (
+                mode_snapshot.head_batch_service_windows
+                if mode_snapshot is not None
+                else None
+            ),
+            "asr_batch_head_seconds_since_progress": (
+                mode_snapshot.head_batch_seconds_since_progress
+                if mode_snapshot is not None
+                else None
             ),
         }
 
