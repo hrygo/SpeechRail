@@ -436,7 +436,11 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             memory_limit_mb=settings.mlx_memory_limit_mb,
             timeout_seconds=settings.request_timeout_seconds,
         )
-        shared_owner = Qwen3SharedWorker(asr_config, max_sessions=settings.realtime_max_sessions)
+        shared_owner = Qwen3SharedWorker(
+            asr_config,
+            max_sessions=settings.realtime_max_sessions,
+            batch_aging_seconds=settings.batch_aging_seconds,
+        )
         try:
             asr_worker = Qwen3Worker(asr_config, shared_owner=shared_owner)
         except TypeError:
@@ -554,7 +558,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
         if shared_owner is None:
             shared_owner = Qwen3SharedWorker(
-                streaming_config, max_sessions=settings.realtime_max_sessions
+                streaming_config,
+                max_sessions=settings.realtime_max_sessions,
+                batch_aging_seconds=settings.batch_aging_seconds,
             )
         try:
             streaming_worker = Qwen3StreamingWorker(streaming_config, shared_owner=shared_owner)
