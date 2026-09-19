@@ -2804,3 +2804,95 @@ def test_server_vad_admission_diarization_sample_mapping() -> None:
         assert completed_ev["transcript"] == "扩展模式转写"
         assert completed_ev["audio_start_sample"] >= 12000
         assert completed_ev["audio_end_sample"] > completed_ev["audio_start_sample"]
+
+
+def test_manual_rollover_commit_clear_wire_barrier_collects_every_item_once() -> None:
+    """Real WebSocket handler + fake ASR; not an acoustic/latency benchmark."""
+    from speechrail.realtime.turn_collection import ManualTurnCollector
+
+    client, factory = _client(
+        completed_text="same",
+        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192},
+    )
+    collector = ManualTurnCollector(epoch="wire")
+    observed: list[dict[str, Any]] = []
+    with client.websocket_connect("/v1/realtime") as socket:
+        def receive() -> dict[str, Any]:
+            event = socket.receive_json()
+            observed.append(event)
+            collector.accept(event, epoch="wire")
+            assert collector.state != "failed", collector.failure_reason
+            return event
+
+        receive()  # session.created (sequence 1)
+        receive()  # conversation.created
+        for size in (3000, 2000, 3000):
+            collector.note_append()
+            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00" * size)})
+            if size == 2000 or len(observed) > 2:
+                for _ in range(3):
+                    receive()  # committed, created, completed at each rollover
+        collector.begin_close()
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        for _ in range(4):
+            final = receive()
+        assert final["type"] == "input_audio_buffer.cleared"
+        assert collector.result is not None
+        assert collector.result.text == "samesamesame"
+        assert len(collector.result.item_ids) == 3
+        assert len(set(collector.result.item_ids)) == 3
+        assert all(
+            event.get("previous_item_id") is None
+            for event in observed if event["type"] == "input_audio_buffer.committed"
+        )
+    assert len(factory.sessions) == 3
+    assert all(session.closes == 1 for session in factory.sessions)
+
+
+def test_manual_append_failure_followed_by_clear_never_becomes_final_transcript() -> None:
+    from speechrail.realtime.turn_collection import ManualTurnCollector
+
+    client, _ = _client(
+        settings_kwargs={"max_realtime_buffer_bytes": 4096, "max_realtime_frame_bytes": 8192}
+    )
+    collector = ManualTurnCollector(epoch="wire")
+    with client.websocket_connect("/v1/realtime") as socket:
+        for _ in range(2):
+            collector.accept(socket.receive_json(), epoch="wire")
+        collector.note_append()
+        socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0" * 5000)})
+        failed = socket.receive_json()
+        assert failed["type"] == "error"
+        collector.accept(failed, epoch="wire")
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        cleared = socket.receive_json()
+        assert cleared["type"] == "input_audio_buffer.cleared"
+        collector.accept(cleared, epoch="wire")
+    assert collector.state == "failed" and collector.result is None
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_manual_clear_waits_for_terminal_and_preserves_empty_input(empty: bool) -> None:
+    from speechrail.realtime.turn_collection import ManualTurnCollector
+
+    client, factory = _client(factory=EarlyCompletionStreamingFactory())
+    collector = ManualTurnCollector(epoch="wire")
+    with client.websocket_connect("/v1/realtime") as socket:
+        for _ in range(2):
+            collector.accept(socket.receive_json(), epoch="wire")
+        if not empty:
+            collector.note_append()
+            socket.send_json({"type": "input_audio_buffer.append", "audio": _pcm16(b"\0" * 1000)})
+        collector.begin_close()
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        for _ in range(4):
+            event = socket.receive_json()
+            if event["type"] == "input_audio_buffer.cleared" and not empty:
+                assert factory.sessions[0].closes == 1
+            collector.accept(event, epoch="wire")
+        assert event["type"] == "input_audio_buffer.cleared"
+    assert collector.state == "completed"
+    assert collector.result is not None
+    assert collector.result.text == ("" if empty else "你好")

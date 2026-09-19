@@ -143,3 +143,15 @@ is preserved. This Linux environment cannot compile SwiftUI or execute XCUITest;
 macOS CI evidence is required. No UI automation was run on the user's desktop.
 The existing populated test can skip lower-pane assertions on small CI displays;
 a green job must not be described as proof that skipped assertions executed.
+
+### Increment 4 — manual ASR wire conformance and current realtime contract
+
+Connects the collector to the actual WebSocket handler with fake ASR: multi-rollover
+commit order, repeated identical text in different items, tail completion, clear
+following append failure, empty turns, and a terminal preceding backend commit ack.
+The collector cannot finish before the ordered clear/resource teardown. All **106**
+manual collector + Realtime handler tests passed on Python 3.12.14; Ruff passed.
+The public contract now specifies the single-writer closure window and evidence
+limits. It also corrects stale descriptions of the currently used bounded worker
+planner, independent Quality TTS lanes, and failed response.done terminal state.
+No field was added to the ordinary OpenAI WebSocket event schema.
