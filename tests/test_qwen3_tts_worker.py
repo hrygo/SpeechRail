@@ -249,6 +249,78 @@ def test_tts_worker_emits_ordered_pcm_frames_without_vendor_runtime(tmp_path: Pa
     assert completed == {"version": PROTOCOL_VERSION, "type": "completed", "request_id": "req-1"}
 
 
+def test_worker_completed_frame_carries_requested_chunk_timing(tmp_path: Path) -> None:
+    class TimedEngine(FakeEngine):
+        def consume_timing_sidecar(self) -> dict[str, object]:
+            return {
+                "schema_version": "tts_timing_v1",
+                "timing_quality": "chunk",
+                "coordinate_space": "normalized_spoken_unicode_codepoints",
+                "planner_version": "tts_bounded_v1",
+                "sample_rate": 24_000,
+                "text_length": 3,
+                "total_samples": 2,
+                "chunks": [
+                    {
+                        "planner_chunk": 0,
+                        "text_start": 0,
+                        "text_end": 3,
+                        "audio_start_sample": 0,
+                        "audio_end_sample": 2,
+                        "timing_quality": "chunk",
+                    }
+                ],
+            }
+
+    source = BytesIO()
+    target = BytesIO()
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "start",
+            "model_dir": str(model_dir),
+            "device": "mps",
+            "sample_rate": 24_000,
+        },
+    )
+    write_frame(
+        source,
+        {
+            "version": PROTOCOL_VERSION,
+            "type": "synthesize",
+            "request_id": "req-timed",
+            "text": "你好。",
+            "voice": "default",
+            "speed": 1.0,
+            "timing_mode": "chunk",
+        },
+    )
+    source.seek(0)
+
+    serve(
+        source,
+        target,
+        model_dir=model_dir,
+        device="mps",
+        sample_rate=24_000,
+        engine_factory=lambda _: TimedEngine(),
+    )
+
+    target.seek(0)
+    read_frame(target)  # ready
+    read_frame(target)  # first audio
+    read_frame(target)  # second audio
+    completed = read_frame(target)
+    assert completed["type"] == "completed"
+    timing = completed["timing_sidecar"]
+    assert timing["timing_quality"] == "chunk"
+    assert timing["total_samples"] == 2
+    assert timing["chunks"][0]["audio_end_sample"] == 2
+
+
 def test_worker_main_passes_explicit_local_runtime_arguments_to_private_server(
     monkeypatch, tmp_path: Path
 ) -> None:
