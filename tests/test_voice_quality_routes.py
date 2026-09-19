@@ -503,7 +503,7 @@ def test_s3_warn_clone_and_idempotency_dedup(
     assert len(custom) == 1
 
 
-def test_clone_stale_idempotency_after_delete_re_registers(
+def test_clone_completed_idempotency_result_is_not_recreated_after_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
@@ -522,11 +522,11 @@ def test_clone_stale_idempotency_after_delete_re_registers(
     assert deleted.status_code == 200
 
     second = client.post("/v1/voices/clone", data=payload, files=files, headers=headers)
-    assert second.status_code == 201
-    assert second.json()["id"] != voice_id
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "idempotency_result_unavailable"
 
     custom = [p for p in registry.list_profiles() if not p.is_system]
-    assert len(custom) == 1
+    assert custom == []
 
 
 def test_s3_tampered_revalidate_still_rejects(
@@ -550,14 +550,21 @@ def test_s3_tampered_revalidate_still_rejects(
 # ---------------------------------------------------------------------------
 
 
-def test_idempotency_key_hashes_ref_text_and_treats_as_new_request(
+def test_idempotency_key_rejects_different_payload_and_stores_no_raw_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from speechrail.domain.idempotency import DurableIdempotencyJournal
     from speechrail.http.routes import system as system_routes
 
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
     _patch(registry, wav, monkeypatch)
+    journal_path = tmp_path / "clone-idempotency.json"
+    monkeypatch.setattr(
+        system_routes,
+        "_clone_idempotency_journal",
+        DurableIdempotencyJournal(journal_path, max_entries=128),
+    )
 
     headers = {"Idempotency-Key": "idem-reftext-001"}
     files = {"audio": ("a.wav", wav, "audio/wav")}
@@ -576,27 +583,39 @@ def test_idempotency_key_hashes_ref_text_and_treats_as_new_request(
     )
 
     assert first.status_code == 201
-    assert second.status_code == 201
-    assert first.json()["id"] != second.json()["id"]
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "idempotency_conflict"
+    assert len([p for p in registry.list_profiles() if not p.is_system]) == 1
 
-    custom = [p for p in registry.list_profiles() if not p.is_system]
-    assert len(custom) == 2
-
-    for key in system_routes._clone_idempotency:
-        assert "第一种参考文本" not in key
-        assert "第二种参考文本" not in key
+    raw = journal_path.read_text(encoding="utf-8")
+    assert "第一种参考文本" not in raw
+    assert "第二种参考文本" not in raw
+    assert "idem-reftext-001" not in raw
 
 
-def test_clone_idempotency_store_is_bounded() -> None:
-    from speechrail.http.routes import system as system_routes
+def test_clone_idempotency_store_is_bounded(tmp_path: Path) -> None:
+    from speechrail.domain.idempotency import DurableIdempotencyJournal
 
-    with system_routes._clone_idempotency_lock:
-        system_routes._clone_idempotency.clear()
-        for index in range(150):
-            cache_key = (f"idem-bound-{index}", f"{index:064x}", f"{index:064x}")
-            system_routes._store_clone_idempotency_locked(cache_key, f"id-{index}")
-        assert len(system_routes._clone_idempotency) <= 128
-        system_routes._clone_idempotency.clear()
+    path = tmp_path / "journal.json"
+    journal = DurableIdempotencyJournal(path, max_entries=128)
+    for index in range(150):
+        key = f"idem-bound-{index}"
+        fingerprint = f"{index:064x}"
+        journal.begin(
+            owner="local",
+            operation="voice.clone",
+            key=key,
+            fingerprint=fingerprint,
+        )
+        journal.complete(
+            owner="local",
+            operation="voice.clone",
+            key=key,
+            fingerprint=fingerprint,
+            result_id=f"id-{index}",
+        )
+
+    assert len(json.loads(path.read_text(encoding="utf-8"))) <= 128
 
 
 # ---------------------------------------------------------------------------
