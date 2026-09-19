@@ -54,20 +54,20 @@ class RenderReceiptRegistry:
         self._entries: dict[str, _ReceiptState] = {}
         self._order: list[str] = []
 
-    def _evict_locked(self) -> None:
-        while len(self._order) > self._max_entries:
+    def _make_room_locked(self) -> None:
+        while len(self._order) >= self._max_entries:
             victim_index = next(
                 (
                     index
-                    for index, receipt_id in enumerate(self._order)
-                    if self._entries[receipt_id].status != "pending"
+                    for index, existing_id in enumerate(self._order)
+                    if self._entries[existing_id].status != "pending"
                 ),
                 None,
             )
             if victim_index is None:
                 raise RuntimeError("render receipt store is full of pending entries")
-            receipt_id = self._order.pop(victim_index)
-            self._entries.pop(receipt_id, None)
+            existing_id = self._order.pop(victim_index)
+            self._entries.pop(existing_id, None)
 
     def begin(
         self,
@@ -112,9 +112,9 @@ class RenderReceiptRegistry:
             ),
         )
         with self._lock:
+            self._make_room_locked()
             self._entries[receipt_id] = state
             self._order.append(receipt_id)
-            self._evict_locked()
         return receipt_id
 
     def accept_pcm(self, receipt_id: str, pcm16: bytes) -> None:
