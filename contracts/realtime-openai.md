@@ -52,17 +52,54 @@ ws://127.0.0.1:8201/v1/realtime
 | `input_audio_buffer.commit` | 触发流式转写终态；按序发送 `input_audio_buffer.committed` → `conversation.item.created` → `conversation.item.input_audio_transcription.delta`*（若后端产出 partial）→ `completed`/`failed`；`committed` 恒先于转写终态。ASR 的 commit、终态读取与资源回收共享 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 总 deadline；超时返回 `backend_timeout` 并释放该 turn 的 worker lane。缓冲区为空时幂等完成空闭环，保持 session 正常存活 |
 | `input_audio_buffer.clear` | 丢弃未提交缓冲；重置 VAD 状态机，返回 `input_audio_buffer.cleared` |
 | `conversation.item.create` | 接受单个 `role=user` 的 `input_text` 内容，创建文本 item（需 TTS ready）；随后必须发送 `response.create` 才触发合成 |
-| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 流式合成（使用 `StreamingSentenceSplitter` 分句合成并施加淡入淡出音频平滑）；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的规则校验（`voice_not_found`/`voice_not_available`/`invalid_voice`）。准入与整个生成/交付共享一个总 deadline；同机 TTS 请求共用一个有界 worker lane，超时返回 `backend_timeout` 与 failed `response.done` |
+| `response.create` | 用最近一次 `conversation.item.create` 的文本触发 TTS 流式合成（当前 Qwen worker 使用 `TtsTextPlanner(tts_bounded_v1)` 包装既有 `bounded_sentences` 进行有界分段，并施加淡入淡出音频平滑）；无待处理文本 → `invalid_state`；`response.voice` 按与 `session.update.voice` 相同的规则校验（`voice_not_found`/`voice_not_available`/`invalid_voice`）。准入与整个生成/交付共享一个总 deadline；同一 TTS capability 内请求共用有界 worker lane；Quality 的 VoiceDesign 与 Base lane 独立；超时返回 `backend_timeout` 与 failed `response.done`，已知 worker 生命周期不可用返回 `backend_busy`（带 `speechrail.busy_reason=backend_unavailable` 与重试提示），其他未知 TTS 运行时失败返回脱敏的 `backend_error`，均以 failed `response.done` 终止 response。 |
 | `response.cancel` | 取消进行中的 TTS response；丢弃未发送音频并返回 `response.done`（`status: cancelled`）。该事件走独立、有界的控制通道：先等待此前已接收的 `input_audio_buffer.append` 在 FIFO 数据通道开始分派，再取消 TTS；它不等待正在进行的 ASR `commit` 或推理结束，避免 TTS 占用 worker lane 时形成互相等待。其他客户端事件仍按接收顺序执行。 |
 
 以下客户端事件被拒绝（`unsupported_operation`）：`conversation.item.delete`、
 `conversation.item.truncate`。
 
+### 可选 TTS model revision 条件绑定
+
+在首个 TTS response 前，客户端可以通过 `session.update` 提供：
+
+```json
+{
+  "type": "session.update",
+  "session": {
+    "speechrail": {
+      "model_revision": {"expected": "<40-char-hex>"}
+    }
+  }
+}
+```
+
+服务端会在 `session.updated` 回显 `expected` 与匹配的 `catalog_revision`。条件不满足时返回
+`model_revision_conflict`，候选配置不会提交，当前 session 仍可继续使用或重新协商。该 revision
+是已加载 catalog artifact 的配置身份，不是模型权重内容 hash，也不替代真实 worker/runtime
+身份回执或跨重启证据。
+
+### 可选 TTS 完整性回执
+
+客户端可在首个 TTS response 前发送：
+
+```json
+{
+  "type": "session.update",
+  "session": {"speechrail": {"render_receipts": {"enabled": true}}}
+}
+```
+
+服务端在 `session.updated` 中回显协商结果；启用后，最终 `response.done` 追加
+`speechrail.render_receipt`。回执只包含 voice/catalog identity、终态、24 kHz PCM sample
+count 与 SHA-256，不包含音频正文或原始文本。`model.runtime_revision` 只有在首个已验证
+PCM chunk 由 worker 产生且 ready handshake 身份完整时才填充 `rt_...`；缺少可信身份时保持
+`null`。该摘要不暴露本地路径，也不把 `shape:` 结构元数据宣称为权重内容哈希。
+
 ## 服务端事件
 
 | 事件 | 说明 |
 |---|---|
-| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）、`capabilities` 列表及由当前权重生成的 `speech_capabilities`（`available`、默认 TTS `variant`、`supports_speaker`、`supports_instruction`、`supports_clone`）。`supports_clone=true` 表示独立 Base clone capability 已配置；此时同时声明 `audio_loudness_profile: stable_loudness_v1`。clone voice 可触发 Quality capability router 从默认 VoiceDesign 按需互斥切换到 Base |
+| `session.created` | 连接建立后立即发送；声明实际能力（modalities、`input_audio_format`/`output_audio_format: pcm16`、`turn_detection: null`）、`capabilities` 列表及由当前权重生成的 `speech_capabilities`（`available`、默认 TTS `variant`、`supports_speaker`、`supports_instruction`、`supports_clone`）。`supports_clone=true` 表示独立 Base clone capability 已配置；此时同时声明 `audio_loudness_profile: stable_loudness_v1`。clone voice 由 Quality capability router 路由至独立 Base worker；它与 VoiceDesign 可双常驻、跨 capability 并发，同一 capability 内串行 |
 | `conversation.created` | 会话容器；SpeechRail 不实现可查询/可编辑的消息历史 |
 | `session.updated` | `session.update` 的确认；重复当前 `speech_capabilities`（包括可选的 `audio_loudness_profile`），调用方无需上传或感知本机档位 |
 | `input_audio_buffer.speech_started` | 启用 `server_vad` 时，检测到连续有效语音帧（$\ge 96\text{ms}$ 防抖通过）后触发；自动打断当前会话正在进行的 TTS 合成输出 |
@@ -78,16 +115,20 @@ ws://127.0.0.1:8201/v1/realtime
 | `response.audio.delta` / `done` | legacy TTS 音频块（base64）；携带 `response_id`/`item_id`/`output_index`/`content_index`；输出为 24 kHz PCM16 |
 | `response.output_audio.delta` / `done` | current nested `audio` session profile 的 TTS 音频块；同一 response 只会使用一组 audio event literal，避免客户端重复播放 |
 | `response.audio_transcript.delta` / `done` | TTS 输入文本回显；不代表 ASR 结果 |
-| `response.done` | TTS response 终态（`status: completed` 或 `cancelled`） |
-| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；格式错误 JSON 或非对象事件返回 `invalid_event`，不使会话任务异常退出；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy` |
+| `response.done` | TTS response 终态（`status: completed`、`failed` 或 `cancelled`） |
+| `error` | 统一错误 envelope：`{"type": "error", "error": {"type": "invalid_request_error", "code": "...", "message": "...", "event_id": "<可选，回显触发错误的客户端事件 id>"}}`；格式错误 JSON 或非对象事件返回 `invalid_event`，不使会话任务异常退出；分人 profile 不可用时 `code=diarization_not_available`；`session.update` 传入超限转写 prompt 时 `code=prompt_too_long`；非法语言或后端忙时 `code=language_not_supported`/`backend_busy`；未知 TTS 运行时失败使用 `code=backend_error` 与固定脱敏消息，不返回内部异常文本。后端忙的 Realtime 错误可在顶层 `speechrail.busy_reason` 中提供低基数原因：`asr_mode_conflict`、`realtime_session_limit`、`diarization_capacity`、`governor_queue_full`、`backend_transition` 或 `backend_unavailable`；同一 `speechrail` namespace 还提供布尔 `retryable` 与低基数 `retry_hint`，例如 `wait_for_realtime_session_slot`、`retry_after_worker_recovery`、`backoff_and_retry`；worker 生命周期不可用仍保持兼容的 `code=backend_busy`。 |
 
 每个服务端事件还带顶层 `event_id`、`session_id` 和从 1 开始单调递增的 `sequence`。
 `event_id` 由服务端每次发送时生成、在一个连接内唯一；断线不会恢复旧事件，重连会创建新的 session。
 `event_id`/`session_id`/`sequence` 是相对 OpenAI 的加法字段，标准 SDK 宽松解析容忍。
 本服务器不发送 `rate_limits.updated`（单机部署无多租户配额语义）。
 
-`/metrics` 仅记录低基数的 Realtime 阶段耗时：`asr_admission`、`tts_admission` 与 `send`。
-它们分别覆盖准入等待和服务端发送停顿，不能替代客户端实际播放延迟。服务端发送也受
+`/metrics` 仅记录低基数的 Realtime 阶段耗时：`asr_admission`、`asr_flush`、
+`asr_commit_ack`、`asr_terminal_wait`、`tts_admission`、`tts_complete` 与 `send`。
+这些是服务端 source-side 阶段边界；其中 `asr_commit_ack`/`asr_terminal_wait` 支持
+commit-tail 分解，`tts_complete` 在最终音频/content 事件发送后、`response.done` 前记录。
+阶段标签不包含 request/session ID、文本或音频内容，阶段之间不应被简单相加，也不能替代
+客户端实际播放延迟或 managed/人工质量证据。服务端发送也受
 `SPEECHRAIL_REQUEST_TIMEOUT_SECONDS` 约束；慢消费者超过该时限会以 `1011` 关闭连接，
 避免长期占住会话发送锁。
 
@@ -104,7 +145,7 @@ ws://127.0.0.1:8201/v1/realtime
 `conversation.item.input_audio_transcription.segment`，每项含 `speaker`；**未启用
 diarization 时 `segments` 为空、不发送 `.segment` 事件**，行为与无分人路径一致。
 
-`/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v2/realtime`
+`/v1/realtime` 是 SpeechRail 唯一的 Realtime 入口。此前的 SpeechRail-native `/v1/speechrail/realtime`
 已移除；客户端不得依赖私有 v2 事件或把 v2 作为隐式降级路径。
 
 ## 语音准入与无声闭环（SR-SILENCE-1）
@@ -169,3 +210,44 @@ FluidAudio CoreML FP16 私有 worker；D1 已确认 runtime 选择，但真实�
   `stable_through_sample`、`status: complete | degraded` 与 `last_update_sequence`）。
   相同 `event_id` 重试幂等回显；不同 ID 请求拒绝返回 `invalid_state`；finish
   后追加音频返回 `invalid_state`。
+
+
+## 普通 manual ASR：commit/clear 收口参考契约
+
+这是一段逻辑录音的客户端收集规则，不新增服务端事件，也不改变普通 OpenAI 请求。
+调用方必须使用**单一串行 writer**：先停止 append，再发送一次 commit，紧跟一次 clear。
+在收到 cleared 前，不再发送新的 append/commit/clear；另一段录音不能共用这个关闭栅栏。
+服务端 FIFO 会先处理前面接收的音频、自动 rollover、commit 和资源收尾，再确认 clear。
+
+`cleared` 只证明处理顺序/清缓冲，**不是 ASR 成功回执**。成功结果同时要求：已观测到所有
+committed item，所有 item 都收到 completed，没有相关 error/failed、序号缺口、断线或取消，
+且最终收到本关闭窗口的 cleared。空缓冲的显式 commit 仍发出空的 committed/created/completed
+闭环；空文本不能被替换成上一次结果或合成占位语。
+
+参考消费者 `speechrail.realtime.turn_collection.ManualTurnCollector` 以 `(epoch, item_id)`
+隔离会话，用 committed 到达顺序拼接终态文本，每个 item 仅记一次。不能依赖
+`previous_item_id`（当前为 null），也不能按终态到达顺序或文本相同与否去重。
+全部服务端事件，包括 session/conversation 事件，都交给收集器，以校验连续 sequence。
+重连必须更新 epoch；同一连接开始另一段逻辑录音时应新建收集器并传入当前 `start_sequence`。
+`max_events/max_items/max_text_chars` 是显式有限预算，超限失败，不静默丢弃前段转录。
+
+确定性 wire 回归包含多次 rollover、末段提交、空输入、终态早于 backend commit ack、
+append 失败后 clear；消费者回归还覆盖乱序终态、重复/冲突、旧 epoch、缺失 item、
+取消和断线。它们不证明模型是否读对、样本级音频确认或真实延迟。
+
+## 请求内 TTS planner
+
+REST、Realtime 和 preview 继续共用 Qwen worker 的有界规划边界。worker 先执行既有
+`normalize_tts_text`，再通过不可变 `TtsTextPlanner`（`tts_bounded_v1`，240 Unicode
+codepoints/chunk）生成声学输入；没有将 Realtime 改成增量文本摄入。每个内部 chunk
+记录规范化文本的半开区间、边界类型和 spoken text。其坐标不等于 HTTP 原文、UTF-8
+字节、UTF-16 单元或音频时间；原文到规范化文本的映射由独立的词典/规范化契约负责。
+
+该版本保持既有逐 chunk 模型调用和波形平滑，不添加跨请求 decoder/KV 共享、不插入
+额外静音，也不声称已适配原生跨句 context。`suggested_pause_ms=null` 表示未提供建议，
+不是测得零停顿。`/v1/speechrail/capabilities.operations.tts_text_planner` 公布策略版本；策略
+变更会使目录 revision 失效。内部 `summary()` 可提供低基数版本/数量摘要，但尚未
+增加 TTS 完成回执、网络事件或新的指标。协议 chunk 不等于网络 audio delta。
+
+文本守恒只针对进入 planner 的规范化文本；旧的 Markdown 清理、末尾标点补齐仍发生在
+它之前。本版本不凭构造测试宣称原始文本语义、发音准确率、自然度或 TTFA/RTF 已验收。

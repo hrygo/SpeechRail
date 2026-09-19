@@ -24,6 +24,9 @@ from speechrail.runtime.worker_protocol import (
     write_frame,
 )
 
+ASR_BACKEND_ID = "mlx-qwen3-asr"
+ASR_SAMPLE_RATE = 16_000
+
 MAX_PCM_BYTES = 40 * 1024 * 1024
 # Batch requests are bounded by the shared framed IPC payload; keep a small
 # margin for the JSON header and length prefix.
@@ -145,6 +148,8 @@ class WorkerIdentity:
     quantization_bits: int | None = None
     quantization_group_size: int | None = None
     weight_fingerprint: str | None = None
+    backend: str = ASR_BACKEND_ID
+    sample_rate: int = ASR_SAMPLE_RATE
 
 
 class WorkerEngine(Protocol):
@@ -671,6 +676,12 @@ def _identity_matches_asr(identity: object, *, device: str, dtype: str) -> bool:
         return False
     family = getattr(identity, "family", None)
     variant = getattr(identity, "model_variant", None)
+    backend = getattr(identity, "backend", None)
+    sample_rate = getattr(identity, "sample_rate", None)
+    if backend is not None and backend != ASR_BACKEND_ID:
+        return False
+    if sample_rate is not None and sample_rate != ASR_SAMPLE_RATE:
+        return False
     if family is not None and family != "qwen3_asr":
         return False
     if variant is not None and variant != "asr":
@@ -686,6 +697,8 @@ def _identity_matches_asr(identity: object, *, device: str, dtype: str) -> bool:
 def _ready_identity_fields(identity: object) -> dict[str, object]:
     fields: dict[str, object] = {}
     for attribute in (
+        "backend",
+        "sample_rate",
         "family",
         "model_variant",
         "quantization_bits",

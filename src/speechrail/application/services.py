@@ -10,8 +10,10 @@ from uuid import uuid4
 
 from speechrail.application.diarization.alignment import FixedTextAligner
 from speechrail.application.lifecycle import RuntimeLifecycle
+from speechrail.application.render_receipts import RenderReceiptRegistry
+from speechrail.application.tts_timings import TtsTimingRegistry
 from speechrail.backends.diarization.coreml import CoreMLSortformerEngine
-from speechrail.backends.model_identity import inspect_model
+from speechrail.backends.model_identity import inspect_model, is_observed_runtime_revision
 from speechrail.backends.qwen3_native import (
     Qwen3BackendConfig,
     Qwen3BatchTranscriber,
@@ -176,6 +178,8 @@ class AppServices:
     alignment_admission: AlignmentAdmission = field(default_factory=AlignmentAdmission)
     diarization_admission: DiarizationAdmission = field(default_factory=DiarizationAdmission)
     metrics: Metrics = field(default_factory=Metrics)
+    render_receipts: RenderReceiptRegistry = field(default_factory=RenderReceiptRegistry)
+    tts_timings: TtsTimingRegistry = field(default_factory=TtsTimingRegistry)
 
     @property
     def asr_ready(self) -> bool:
@@ -185,6 +189,16 @@ class AppServices:
             or self.realtime_asr_factory is not None
             or self.settings.backend_ready
         )
+
+    @property
+    def asr_runtime_revision(self) -> str | None:
+        """Return a low-disclosure identity from a currently ready ASR worker."""
+
+        for component in (self.asr_worker, self.realtime_asr_factory):
+            revision = getattr(component, "runtime_revision", None)
+            if isinstance(revision, str) and is_observed_runtime_revision(revision):
+                return revision
+        return None
 
     @property
     def tts_ready(self) -> bool:
@@ -256,6 +270,9 @@ class AppServices:
         footprint, footprint_source, footprint_complete, process_count = (
             service_physical_footprint()
         )
+        shared_asr_owner = getattr(self.asr_worker, "shared_owner", None)
+        mode_scheduler = getattr(shared_asr_owner, "mode_scheduler", None)
+        mode_snapshot = mode_scheduler.snapshot() if mode_scheduler is not None else None
         return {
             "physical_memory_bytes": physical_memory,
             "memory_budget_bytes": memory_budget,
@@ -269,6 +286,30 @@ class AppServices:
             "heavy_overlap_allowed": bool(getattr(snapshot, "allow_heavy_overlap", False)),
             "heavy_overlap_reason": str(
                 getattr(snapshot, "policy_reason", "未提供")
+            ),
+            "asr_scheduler_active_mode": (
+                mode_snapshot.active_mode if mode_snapshot is not None else None
+            ),
+            "asr_scheduler_pending_streaming": (
+                mode_snapshot.pending_streaming if mode_snapshot is not None else None
+            ),
+            "asr_scheduler_pending_batch": (
+                mode_snapshot.pending_batch if mode_snapshot is not None else None
+            ),
+            "asr_batch_head_cumulative_wait_seconds": (
+                mode_snapshot.head_batch_cumulative_wait_seconds
+                if mode_snapshot is not None
+                else None
+            ),
+            "asr_batch_head_service_windows": (
+                mode_snapshot.head_batch_service_windows
+                if mode_snapshot is not None
+                else None
+            ),
+            "asr_batch_head_seconds_since_progress": (
+                mode_snapshot.head_batch_seconds_since_progress
+                if mode_snapshot is not None
+                else None
             ),
         }
 
@@ -432,7 +473,11 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
             memory_limit_mb=settings.mlx_memory_limit_mb,
             timeout_seconds=settings.request_timeout_seconds,
         )
-        shared_owner = Qwen3SharedWorker(asr_config, max_sessions=settings.realtime_max_sessions)
+        shared_owner = Qwen3SharedWorker(
+            asr_config,
+            max_sessions=settings.realtime_max_sessions,
+            batch_aging_seconds=settings.batch_aging_seconds,
+        )
         try:
             asr_worker = Qwen3Worker(asr_config, shared_owner=shared_owner)
         except TypeError:
@@ -550,7 +595,9 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
         )
         if shared_owner is None:
             shared_owner = Qwen3SharedWorker(
-                streaming_config, max_sessions=settings.realtime_max_sessions
+                streaming_config,
+                max_sessions=settings.realtime_max_sessions,
+                batch_aging_seconds=settings.batch_aging_seconds,
             )
         try:
             streaming_worker = Qwen3StreamingWorker(streaming_config, shared_owner=shared_owner)
@@ -586,6 +633,8 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     governor = ResourceGovernor(
         settings.governor_limits,
         on_reject=metrics.record_governor_rejection,
+        on_admit=metrics.record_governor_admission,
+        on_release=metrics.record_governor_release,
         allow_heavy_overlap=allow_heavy_overlap,
         policy_reason=policy_reason,
     )

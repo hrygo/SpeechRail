@@ -264,13 +264,47 @@ class SpeechRailClient:
             return []
         return cast(list[dict[str, Any]], [entry for entry in data if isinstance(entry, dict)])
 
+    async def fetch_capabilities(self) -> dict[str, Any] | None:
+        """Read the atomic SpeechRail capability snapshot; older missing routes permit fallback."""
+        try:
+            response = await self._request("GET", "speechrail/capabilities")
+        except SpeechRailError as exc:
+            if exc.status in {404, 405}:
+                return None
+            raise
+        payload = self._object(response)
+        if payload.get("schema_version") != "effective_capabilities_v1":
+            # An unknown schema is not permission to assume native capabilities.
+            return None
+        return payload
+
     async def fetch_voices(self) -> list[dict[str, Any]]:
-        """Return the ``data`` list of ``GET /v1/voices``."""
+        """Return a safe compatibility projection of GET /v1/voices.
+
+        Legacy servers include source instructions/reference text in discovery.
+        These are not required to select a voice and must not enter agent context.
+        Explicit creation responses remain scoped to that requested operation.
+        """
         response = await self._request("GET", "voices")
         data = self._object(response).get("data")
         if not isinstance(data, list):
             return []
-        return cast(list[dict[str, Any]], [entry for entry in data if isinstance(entry, dict)])
+        allowed = {"id", "name", "mode", "available", "variant", "is_default", "is_system",
+                   "aliases", "capabilities"}
+        capabilities = {"supports_speaker", "supports_instruction", "supports_clone"}
+        result: list[dict[str, Any]] = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            safe = {key: value for key, value in entry.items() if key in allowed}
+            if "capabilities" in safe:
+                value = safe["capabilities"]
+                safe["capabilities"] = {
+                    key: flag for key, flag in value.items()
+                    if key in capabilities and isinstance(flag, bool)
+                } if isinstance(value, dict) else {}
+            result.append(safe)
+        return result
 
     async def fetch_health(self) -> dict[str, Any]:
         """Return the body of ``GET /health`` (readiness/ profile facts)."""

@@ -101,6 +101,84 @@ def test_controller_can_freeze_clone_gain_after_request_calibration() -> None:
     assert _rms_dbfs(second) - _rms_dbfs(first) > 15.0
 
 
+def test_frozen_calibration_ignores_leading_silence() -> None:
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+
+    controller.process(b"\x00\x00" * 4_800)
+    assert controller._current_gain_db is None
+
+    controller.process(_constant_pcm16(0.25, 4_800))
+
+    assert controller._calibration_gain_db == pytest.approx(
+        -6.0,
+        abs=0.2,
+    )
+
+
+def test_frozen_calibration_rejects_an_isolated_transient() -> None:
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+    samples = [0] * 4_800
+    samples[137] = round(0.9 * 32767.0)
+
+    controller.process(struct.pack("<4800h", *samples))
+
+    assert controller._calibration_gain_db is None
+    assert controller._current_gain_db is None
+
+
+def test_frozen_peak_limiter_releases_without_block_wide_attenuation() -> None:
+    config = Pcm16LoudnessConfig(
+        target_rms=0.5,
+        peak_ceiling=0.8,
+        calibration_ms=10,
+        attack_ms=100,
+        release_ms=100,
+        limiter_release_ms=100,
+    )
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        config=config,
+        freeze_gain_after_calibration=True,
+    )
+    controller.process(_constant_pcm16(0.5, 4_800))
+
+    samples = [round(0.5 * 32767.0)] * 1_920
+    samples[100] = round(0.99 * 32767.0)
+    output = _decode_pcm16(controller.process(struct.pack("<1920h", *samples)))
+
+    assert abs(output[100]) <= round(0.8 * 32768.0)
+    assert output[-1] > round(0.43 * 32768.0)
+
+
+def test_frozen_mode_does_not_gate_near_threshold_samples() -> None:
+    config = Pcm16LoudnessConfig(
+        target_rms=0.2,
+        silence_rms=0.01,
+        calibration_ms=10,
+        attack_ms=100,
+        release_ms=100,
+    )
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        config=config,
+        freeze_gain_after_calibration=True,
+    )
+    controller.process(_constant_pcm16(0.1, 4_800))
+
+    near_threshold = round(0.005 * 32767.0)
+    output = _decode_pcm16(
+        controller.process(struct.pack("<1920h", *([near_threshold] * 1_920)))
+    )
+
+    assert output[-1] > near_threshold * 1.5
+
+
 def test_controller_applies_peak_ceiling_without_wraparound() -> None:
     controller = StreamingPcm16LoudnessController(sample_rate=24_000)
 
@@ -129,6 +207,31 @@ def test_controller_reset_starts_a_new_request() -> None:
     controller.reset()
 
     assert controller.process(chunk) == first
+
+
+def test_frozen_controller_is_partition_invariant_and_resettable() -> None:
+    controller = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+    source = _constant_pcm16(0.25, 4_800) + _constant_pcm16(0.1, 4_800)
+
+    whole = controller.process(source)
+    controller.reset()
+    assert controller.process(source) == whole
+
+    fragmented = StreamingPcm16LoudnessController(
+        sample_rate=24_000,
+        freeze_gain_after_calibration=True,
+    )
+    boundaries = (256, 1_152, 4_608, 9_600, len(source))
+    start = 0
+    fragments: list[bytes] = []
+    for end in boundaries:
+        fragments.append(fragmented.process(source[start:end]))
+        start = end
+
+    assert b"".join(fragments) == whole
 
 
 def test_controller_applies_calibration_when_first_chunk_covers_window() -> None:

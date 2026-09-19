@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import math
 import sys
 import traceback
 from collections import Counter, OrderedDict
@@ -17,14 +18,18 @@ from speechrail.backends.qwen3_native import snapshot_is_quantized
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.config.model_catalog import QuantizationSpec
 from speechrail.domain.tts import (
+    VOICE_ID_RE,
+    VoiceProfile,
     VoiceStoreUnavailableError,
     apply_crossfade,
-    bounded_sentences,
     generation_token_budget,
     get_voice_profile,
     normalize_tts_text,
+    resolve_voice,
 )
 from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
+from speechrail.domain.tts_text_planner import TtsTextPlanner
+from speechrail.domain.tts_timing import TtsTimingChunk, TtsTimingSidecar
 from speechrail.runtime.worker_protocol import (
     PROTOCOL_VERSION,
     ProtocolError,
@@ -120,6 +125,7 @@ class TtsWorkerEngine(Protocol):
         seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]: ...
 
 
@@ -256,7 +262,8 @@ def _ready_identity_fields(identity: object) -> dict[str, object]:
 
 
 def generation_condition(
-    variant: str, voice: str, *, instruction: str | None = None
+    variant: str, voice: str, *, instruction: str | None = None,
+    profile: VoiceProfile | None = None,
 ) -> dict[str, object]:
     """根据模型变体解析生成条件 (音色或提示词指令)。"""
 
@@ -269,7 +276,7 @@ def generation_condition(
         return {"instruct": normalized}
 
     try:
-        binding = resolve_binding(variant, voice)
+        binding = resolve_binding(variant, voice, profile=profile)
     except ValueError as exc:
         raise ValueError(f"unsupported voice or variant: {voice}") from exc
     condition: dict[str, object] = {"voice": binding.speaker}
@@ -353,6 +360,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         self._reference_cache_entries = reference_cache_entries
         self._reference_audio_cache: OrderedDict[tuple[str, int, int], Any] = OrderedDict()
         self._delivery_stats: Counter[str] = Counter()
+        self._last_timing_sidecar: dict[str, object] | None = None
         # Pre-quantized snapshots keep an int8 backbone; codec/embeddings stay bf16.
         self.identity = TtsWorkerIdentity(
             device=device,
@@ -382,10 +390,16 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]:
+        self._last_timing_sidecar = None
         clean_text = normalize_tts_text(text)
         if not clean_text:
             return
+        if profile is None and instruction is None and ref_audio is None and ref_text is None:
+            # Legacy private callers still receive one request-local recipe, never
+            # a fresh registry resolution for each acoustic chunk.
+            profile = get_voice_profile(voice)
         first_chunk = True
         loudness_controller = (
             StreamingPcm16LoudnessController(
@@ -411,11 +425,16 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 first_chunk = False
             return pcm
 
+        plan = TtsTextPlanner().plan(clean_text)
+        timing_chunks: list[TtsTimingChunk] = []
+        source_sample_cursor = 0
+        emitted_samples = 0
         try:
-            for sentence in bounded_sentences(clean_text):
+            for planned_chunk in plan.chunks:
                 self._delivery_stats["planner_chunks"] += 1
+                chunk_start_sample = source_sample_cursor
                 for pcm in self._generate(
-                    sentence,
+                    planned_chunk.spoken_text,
                     voice=voice,
                     speed=speed,
                     language=language,
@@ -423,9 +442,11 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     seed=seed,
                     ref_audio=ref_audio,
                     ref_text=ref_text,
+                    profile=profile,
                 ):
                     if not pcm:
                         continue
+                    source_sample_cursor += len(pcm) // 2
                     if loudness_controller is not None:
                         pending_clone_pcm.extend(pcm)
                         while len(pending_clone_pcm) >= clone_chunk_bytes:
@@ -433,13 +454,36 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                             del pending_clone_pcm[:clone_chunk_bytes]
                             clone_pcm = loudness_controller.process(clone_pcm)
                             if clone_pcm:
-                                yield prepare_output(clone_pcm)
+                                output = prepare_output(clone_pcm)
+                                emitted_samples += len(output) // 2
+                                yield output
                         continue
-                    yield prepare_output(pcm)
+                    output = prepare_output(pcm)
+                    emitted_samples += len(output) // 2
+                    yield output
+                timing_chunks.append(
+                    TtsTimingChunk(
+                        planner_chunk=planned_chunk.index,
+                        text_start=planned_chunk.source_start,
+                        text_end=planned_chunk.source_end,
+                        audio_start_sample=chunk_start_sample,
+                        audio_end_sample=source_sample_cursor,
+                    )
+                )
             if loudness_controller is not None and pending_clone_pcm:
                 clone_pcm = loudness_controller.process(bytes(pending_clone_pcm))
                 if clone_pcm:
-                    yield prepare_output(clone_pcm)
+                    output = prepare_output(clone_pcm)
+                    emitted_samples += len(output) // 2
+                    yield output
+            if emitted_samples != source_sample_cursor:
+                raise RuntimeError("tts_timing_sample_mismatch")
+            self._last_timing_sidecar = TtsTimingSidecar(
+                sample_rate=self._sample_rate,
+                text_length=len(clean_text),
+                total_samples=emitted_samples,
+                chunks=tuple(timing_chunks),
+            ).model_dump(mode="json")
         finally:
             if loudness_controller is not None:
                 self._delivery_stats["clone_loudness_requests"] += 1
@@ -464,6 +508,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         seed: int | None = None,
         ref_audio: str | None = None,
         ref_text: str | None = None,
+        profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]:
         if ref_audio is not None or ref_text is not None:
             # The Base reference-clone contract accepts neither SpeechRail speaking-rate
@@ -508,13 +553,15 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         variant = self.identity.model_variant or "voice_design"
         if variant == "custom_voice" and seed is not None:
             raise ValueError("custom_voice_seed_unsupported")
-        condition = generation_condition(variant, voice, instruction=instruction)
+        if profile is None and instruction is None and variant == "voice_design":
+            profile = get_voice_profile(voice)
+        condition = generation_condition(variant, voice, instruction=instruction, profile=profile)
         used_temperature = self._temperature
         if variant == "voice_design":
             if instruction is None:
                 if seed is not None:
                     raise ValueError("voice_design_seed_requires_instruction")
-                profile = get_voice_profile(voice)
+                assert profile is not None
                 used_temperature = profile.temperature
                 seed = profile.seed
             try:
@@ -594,6 +641,13 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 self._delivery_stats["reference_cache_evictions"] += 1
         return audio_array
 
+    def consume_timing_sidecar(self) -> dict[str, object] | None:
+        """Return the completed request timing metadata exactly once."""
+
+        sidecar = self._last_timing_sidecar
+        self._last_timing_sidecar = None
+        return dict(sidecar) if sidecar is not None else None
+
     def consume_delivery_stats(self) -> dict[str, int]:
         """Return per-request aggregate delivery counters and reset them."""
         result = {
@@ -606,6 +660,7 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                 "clone_loudness_requests",
                 "clone_loudness_calibrated",
                 "clone_loudness_peak_ceiling",
+                "float_overrange_chunks",
             )
             if (count := int(self._delivery_stats.get(name, 0))) > 0
         }
@@ -619,6 +674,12 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         samples = self._numpy.asarray(result.audio, dtype=self._numpy.float32).reshape(-1).copy()
         if samples.size == 0:
             return b""
+        finite = self._numpy.isfinite(samples)
+        if bool(self._numpy.any(finite & (self._numpy.abs(samples) > 1.0))):
+            # Diagnostic only: PCM16 quantization below is still the established
+            # contract. Real-model evidence decides whether protection must move
+            # into the float domain before any future acoustic behavior change.
+            self._delivery_stats["float_overrange_chunks"] += 1
         samples = self._numpy.nan_to_num(samples, nan=0.0, posinf=1.0, neginf=-1.0)
         if bool(getattr(result, "is_final_chunk", False)):
             non_silent = self._numpy.flatnonzero(self._numpy.abs(samples) > 1e-3)
@@ -711,6 +772,7 @@ def serve(
         "dtype": identity.dtype,
         "sample_rate": identity.sample_rate,
         "model_loaded": True,
+        "profile_snapshot_version": 1,
     }
     ready.update(_ready_identity_fields(identity))
     write_frame(
@@ -735,12 +797,18 @@ def serve(
                 ref_text,
                 instruction,
                 seed,
+                timing_mode,
             ) = _decode_synthesis_request(frame)
             synth_kwargs: dict[str, Any] = {
                 "voice": voice,
                 "speed": speed,
                 "language": language,
             }
+            profile = _decode_profile_snapshot(frame.get("voice_profile"), voice=voice)
+            if profile is not None:
+                if ref_audio is not None or ref_text is not None:
+                    raise ProtocolError("invalid voice profile snapshot")
+                synth_kwargs["profile"] = profile
             if ref_audio is not None or ref_text is not None:
                 synth_kwargs["ref_audio"] = ref_audio
                 synth_kwargs["ref_text"] = ref_text
@@ -772,6 +840,15 @@ def serve(
             }
             if stats:
                 completed["delivery_stats"] = stats
+            if timing_mode == "chunk":
+                consume_timing = getattr(engine, "consume_timing_sidecar", None)
+                timing = consume_timing() if callable(consume_timing) else None
+                if isinstance(timing, dict):
+                    completed["timing_sidecar"] = timing
+                else:
+                    completed["timing_unavailable_reason"] = (
+                        "backend_timing_metadata_unavailable"
+                    )
             write_frame(
                 output_stream,
                 completed,
@@ -814,9 +891,46 @@ def serve(
             _clear_metal_cache()
 
 
+
+def _decode_profile_snapshot(raw: object, *, voice: str) -> VoiceProfile | None:
+    """Validate private IPC recipe fields without querying mutable voice storage."""
+    if raw is None:
+        return None
+    keys = {"id", "mode", "instruction", "seed", "temperature"}
+    if not isinstance(raw, dict) or set(raw) != keys:
+        raise ProtocolError("invalid voice profile snapshot")
+    identifier, mode = raw["id"], raw["mode"]
+    instruction, seed, temperature = raw["instruction"], raw["seed"], raw["temperature"]
+    if (
+        not isinstance(identifier, str) or not VOICE_ID_RE.fullmatch(identifier)
+        or identifier != resolve_voice(voice)
+        or mode not in ("system", "instruction")
+        or not isinstance(instruction, str) or not instruction.strip()
+        or len(instruction) > 10_000 or type(seed) is not int or not 0 <= seed <= 2**32 - 1
+        or type(temperature) not in (float, int)
+        or not math.isfinite(temperature) or temperature < 0
+    ):
+        raise ProtocolError("invalid voice profile snapshot")
+    return VoiceProfile(
+        id=identifier, mode=mode, instruction=instruction, seed=seed,
+        temperature=float(temperature),
+    )
+
+
 def _decode_synthesis_request(
     frame: dict[str, object],
-) -> tuple[str, str, str, float, str, str | None, str | None, str | None, int | None]:
+) -> tuple[
+    str,
+    str,
+    str,
+    float,
+    str,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+]:
     request_id = frame.get("request_id")
     text = frame.get("text")
     voice = frame.get("voice")
@@ -826,6 +940,9 @@ def _decode_synthesis_request(
     ref_text = frame.get("ref_text")
     instruction = frame.get("instruction")
     seed = frame.get("seed")
+    timing_mode = frame.get("timing_mode")
+    if timing_mode not in (None, "chunk"):
+        raise ProtocolError("invalid timing_mode in synthesize request")
     if (
         frame.get("version") != PROTOCOL_VERSION
         or frame.get("type") != "synthesize"
@@ -881,6 +998,7 @@ def _decode_synthesis_request(
         validated_ref_text,
         validated_instruction,
         validated_seed,
+        timing_mode,
     )
 
 

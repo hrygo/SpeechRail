@@ -12,13 +12,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal, cast
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, Response, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 
 from speechrail.application.audio_stream import decode_upload
 from speechrail.application.deadline import await_until
 from speechrail.application.diarization import diarize_transcript
+from speechrail.application.render_receipts import bind_observed_runtime_revision
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
@@ -42,10 +43,20 @@ from speechrail.domain.ports import (
 )
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
+    VoiceRevisionConflictError,
+    VoiceRevokedError,
     VoiceStoreUnavailableError,
+    normalize_tts_text,
     resolve_voice,
     tts_voice_class,
 )
+from speechrail.domain.tts_pronunciation import (
+    PronunciationRevokedError,
+    PronunciationStoreUnavailableError,
+    apply_pronunciation,
+    get_pronunciation_registry,
+)
+from speechrail.domain.tts_text_planner import TtsTextPlanner
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import (
@@ -57,9 +68,14 @@ from speechrail.http.formatters import (
 )
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
+from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 _OPENAI_AUDIO_EXTENSIONS = frozenset(
     {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", ".webm"}
@@ -75,25 +91,83 @@ _MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
 _DIARIZATION_UNCHUNKED_MAX_SECONDS = 30
 
 
+def _worker_unavailable_response(
+    request_id: str,
+    exc: BaseException,
+) -> JSONResponse | None:
+    """Map a known worker lifecycle failure to a stable retryable response.
+
+    Worker exceptions can contain a private stderr tail.  Only the bounded
+    reason and retry hint cross the HTTP boundary; the raw exception is left
+    for internal logging and debugging.
+    """
+
+    reason = infer_backend_busy_reason(exc)
+    if reason != BusyReason.BACKEND_UNAVAILABLE:
+        return None
+    policy = busy_retry_policy(reason)
+    response = error_response(
+        503,
+        request_id,
+        "backend_busy",
+        "SpeechRail inference worker is unavailable",
+        retryable=policy.retryable,
+    )
+    response.headers.update(
+        {
+            "Retry-After": "1",
+            "SpeechRail-Busy-Reason": str(reason),
+            "SpeechRail-Retry-Hint": policy.hint,
+        }
+    )
+    return response
+
+
+def _tts_backend_failure_code(exc: BaseException) -> str:
+    """Keep receipt/timing failure codes aligned with the public TTS response."""
+
+    if infer_backend_busy_reason(exc) == BusyReason.BACKEND_UNAVAILABLE:
+        return "backend_busy"
+    return "backend_error"
+
+
+class _SpeechVoiceID(BaseModel):
+    """OpenAI custom voice reference accepted by /v1/audio/speech."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1, max_length=200)
+
+
 class _SpeechHTTPBody(BaseModel):
     """OpenAI-compatible subset for the public sentence TTS endpoint."""
 
     model: str = Field(min_length=1, max_length=200)
     input: str = Field(min_length=1, max_length=4_096)
-    voice: str = Field(min_length=1, max_length=200)
+    voice: str | _SpeechVoiceID
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "mp3"
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
     instructions: str | None = Field(default=None, max_length=10_000)
     stream_format: str | None = Field(default=None, max_length=16)
 
-    @field_validator("input", "voice")
+    @field_validator("input")
     @classmethod
     def reject_blank_text(cls, value: str) -> str:
         normalized = value.strip()
         if not normalized:
             raise ValueError("must not be blank")
         return normalized
+
+    @field_validator("voice")
+    @classmethod
+    def normalize_voice(cls, value: str | _SpeechVoiceID) -> str | _SpeechVoiceID:
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError("must not be blank")
+            return normalized
+        return value
 
     @field_validator("language")
     @classmethod
@@ -1056,7 +1130,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 ),
                 headers={"Retry-After": "1"},
             )
-        except AsrModeBusy:
+        except AsrModeBusy as exc:
             return JSONResponse(
                 status_code=429,
                 content=error(
@@ -1066,7 +1140,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     request_id=request_id,
                     retryable=True,
                 ),
-                headers={"Retry-After": "1"},
+                headers={
+                    "Retry-After": "1",
+                    "SpeechRail-Busy-Reason": str(exc.busy_reason),
+                },
             )
         except TimeoutError:
             return error_response(
@@ -1080,6 +1157,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Diarization backend returned an invalid result",
                 retryable=True,
             )
+        except RuntimeError as exc:
+            if (response := _worker_unavailable_response(request_id, exc)) is not None:
+                return response
+            raise
         # Freeze ASR text before deriving units.  Diarization can revise only
         # speakers; it must never be allowed to rewrite canonical text.
         result = result.model_copy(
@@ -1104,14 +1185,16 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         epoch=f"batch-{request_id}",
                         new_unit_id=lambda index: f"segment-{index}",
                     )
-            except DiarizationAdmissionFullError:
-                return error_response(
+            except DiarizationAdmissionFullError as exc:
+                response = error_response(
                     429,
                     request_id,
                     "backend_busy",
                     "another diarization session is active",
                     retryable=True,
                 )
+                response.headers["SpeechRail-Busy-Reason"] = str(exc.busy_reason)
+                return response
             except DiarizationError as exc:
                 return error_response(
                     502,
@@ -1161,6 +1244,63 @@ def create_audio_router(services: AppServices) -> APIRouter:
         if response_format == "srt":
             return PlainTextResponse(format_srt(result), media_type="application/x-subrip")
         return PlainTextResponse(format_vtt(result), media_type="text/vtt")
+
+    @router.get("/v1/speechrail/audio/receipts/{receipt_id}")
+    async def render_receipt(receipt_id: str, request: Request) -> JSONResponse:
+        """Return safe service-side rendering evidence without audio or text."""
+
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            payload = services.render_receipts.get(receipt_id)
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "render_receipt_not_found",
+                "Render receipt not found",
+            )
+        return JSONResponse(status_code=200, content=payload)
+
+    @router.get("/v1/speechrail/audio/receipts/by-request/{source_request_id}")
+    async def render_receipt_by_request(
+        source_request_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Return the newest receipt for one public request ID."""
+
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            payload = services.render_receipts.find_by_request_id(source_request_id)
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "render_receipt_not_found",
+                "Render receipt not found",
+            )
+        return JSONResponse(status_code=200, content=payload)
+
+    @router.get("/v1/speechrail/audio/timings/{timing_id}")
+    async def tts_timing(timing_id: str, request: Request) -> JSONResponse:
+        """Return an optional metadata-only TTS timing sidecar."""
+
+        request_id = request.state.request_id
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            payload = services.tts_timings.get(timing_id)
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "tts_timing_not_found",
+                "TTS timing sidecar not found",
+            )
+        return JSONResponse(status_code=200, content=payload)
 
     @router.post("/v1/voices/previews")
     async def voice_preview(request: Request, body: _VoicePreviewHTTPBody) -> Response:
@@ -1214,6 +1354,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
                 resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                purpose=WorkPurpose.VOICE_CREATION,
             ):
                 async for chunk in iter_until(
                     iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
@@ -1321,7 +1462,43 @@ def create_audio_router(services: AppServices) -> APIRouter:
         response_class=Response,
         responses={200: _TTS_OPENAPI_RESPONSE},
     )
-    async def speech(request: Request, body: _SpeechHTTPBody) -> Response:
+    async def speech(
+        request: Request,
+        body: _SpeechHTTPBody,
+        expected_voice_revision: str | None = Header(
+            default=None,
+            alias="SpeechRail-Expected-Voice-Revision",
+            pattern=r"^vr_[0-9a-f]{32}$",
+        ),
+        expected_model_revision: str | None = Header(
+            default=None,
+            alias="SpeechRail-Expected-Model-Revision",
+            pattern=r"^[0-9a-f]{40}$",
+        ),
+        pronunciation_set: str | None = Header(
+            default=None,
+            alias="SpeechRail-Pronunciation-Set",
+            pattern=r"^[a-zA-Z0-9_-]{1,64}@pr_[0-9a-f]{32}$",
+        ),
+        receipt_mode: Literal["integrity"] | None = Header(
+            default=None,
+            alias="SpeechRail-Receipt-Mode",
+        ),
+        purpose: Literal["interactive", "prefetch"] | None = Header(
+            default=None,
+            alias="SpeechRail-Purpose",
+        ),
+        latency_budget_ms: int | None = Header(
+            default=None,
+            alias="SpeechRail-Latency-Budget-Ms",
+            ge=50,
+            le=120_000,
+        ),
+        timing_mode: Literal["chunk"] | None = Header(
+            default=None,
+            alias="SpeechRail-Timing-Mode",
+        ),
+    ) -> Response:
         request_id = request.state.request_id
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
@@ -1335,7 +1512,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 f"Unknown TTS model: {body.model}",
                 param="model",
             )
-        preset_voice = resolve_voice(body.voice)
+        requested_voice = body.voice.id if isinstance(body.voice, _SpeechVoiceID) else body.voice
+        preset_voice = resolve_voice(requested_voice)
         from speechrail.domain.tts import get_voice_profile
         try:
             profile = get_voice_profile(preset_voice)
@@ -1354,7 +1532,15 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 400,
                 request_id,
                 "voice_not_found",
-                f"Unknown preset voice: {body.voice}",
+                f"Unknown preset voice: {requested_voice}",
+                param="voice",
+            )
+        if profile.revoked:
+            return error_response(
+                409 if expected_voice_revision is not None else 400,
+                request_id,
+                "voice_revoked",
+                "Requested voice revision has been revoked",
                 param="voice",
             )
         binding_variant = (
@@ -1362,6 +1548,21 @@ def create_audio_router(services: AppServices) -> APIRouter:
             if profile.mode == "clone" and active.tts_clone is not None
             else tts_variant
         )
+        tts_artifact = (
+            active.tts_clone
+            if profile.mode == "clone" and active.tts_clone is not None
+            else active.tts
+        )
+        if expected_model_revision is not None and (
+            tts_artifact is None or tts_artifact.revision != expected_model_revision
+        ):
+            return error_response(
+                409,
+                request_id,
+                "model_revision_conflict",
+                "Requested model revision is not the active TTS artifact",
+                param="model",
+            )
         if binding_variant in {"voice_design", "custom_voice", "base"}:
             try:
                 resolve_binding(binding_variant, preset_voice)
@@ -1379,7 +1580,7 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     request_id,
                     "voice_not_available",
                     (
-                        f"Voice {body.voice[:200]} is unavailable for the active TTS weights; "
+                        f"Voice {requested_voice[:200]} is unavailable for the active TTS weights; "
                         "use an available system voice from /v1/voices"
                     ),
                     param="voice",
@@ -1425,33 +1626,292 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "SpeechRail TTS backend is not ready",
                 retryable=True,
             )
+        spoken = None
+        planner_summary: dict[str, object] | None = None
+        text_summary: dict[str, object] | None = None
+        synthesis_text = body.input
+        if pronunciation_set is not None:
+            set_id, set_revision = pronunciation_set.split("@", 1)
+            try:
+                selected_set = get_pronunciation_registry().get(
+                    set_id,
+                    revision=set_revision,
+                )
+            except PronunciationRevokedError:
+                return error_response(
+                    409,
+                    request_id,
+                    "pronunciation_revoked",
+                    "Requested pronunciation revision is revoked",
+                )
+            except PronunciationStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "pronunciation_store_unavailable",
+                    "Pronunciation registry is unavailable",
+                    retryable=True,
+                )
+            except KeyError:
+                return error_response(
+                    404,
+                    request_id,
+                    "pronunciation_revision_not_found",
+                    "Pronunciation set or revision not found",
+                )
+            spoken = apply_pronunciation(
+                body.input,
+                selected_set,
+                language=body.language,
+            )
+            synthesis_text = spoken.text
+            text_summary = spoken.summary()
+            planner_summary = TtsTextPlanner().plan(spoken.text).summary()
+
+        timing_id: str | None = None
+        if timing_mode == "chunk":
+            normalized_spoken = normalize_tts_text(synthesis_text)
+            timing_plan = TtsTextPlanner().plan(normalized_spoken)
+            display_mapping_status: Literal["identity", "mapped", "unavailable"]
+            display_mapping_reason: str | None = None
+            display_spans: tuple[tuple[int, int] | None, ...]
+            if spoken is not None and normalized_spoken == spoken.text:
+                mapped = TtsTextPlanner().plan_spoken(spoken)
+                if tuple(
+                    (item.source_start, item.source_end) for item in mapped.chunks
+                ) == tuple(
+                    (item.source_start, item.source_end) for item in timing_plan.chunks
+                ):
+                    mapped_display_spans = tuple(
+                        (
+                            (item.raw_start, item.raw_end)
+                            if item.raw_start is not None and item.raw_end is not None
+                            else None
+                        )
+                        for item in mapped.chunks
+                    )
+                    if any(item is None for item in mapped_display_spans):
+                        display_mapping_status = "unavailable"
+                        display_mapping_reason = "display_mapping_ambiguous"
+                        display_spans = ()
+                    else:
+                        display_mapping_status = "mapped"
+                        display_spans = tuple(
+                            item for item in mapped_display_spans if item is not None
+                        )
+                else:
+                    display_mapping_status = "unavailable"
+                    display_mapping_reason = "planner_mapping_mismatch"
+                    display_spans = ()
+            elif normalized_spoken == body.input and synthesis_text == body.input:
+                display_mapping_status = "identity"
+                display_spans = tuple(
+                    (item.source_start, item.source_end)
+                    for item in timing_plan.chunks
+                )
+            else:
+                display_mapping_status = "unavailable"
+                display_mapping_reason = "normalization_changed_display_coordinates"
+                display_spans = ()
+            try:
+                timing_id = services.tts_timings.begin(
+                    request_id=request_id,
+                    sample_rate=resolved.tts_sample_rate,
+                    display_mapping_status=display_mapping_status,
+                    expected_text_spans=tuple(
+                        (item.source_start, item.source_end)
+                        for item in timing_plan.chunks
+                    ),
+                    display_spans=display_spans,
+                    display_mapping_reason=display_mapping_reason,
+                )
+            except RuntimeError:
+                timing_id = None
+
+        receipt_id: str | None = None
+        effective_revision = expected_voice_revision
+        if receipt_mode == "integrity":
+            if effective_revision is None:
+                effective_revision = profile.revision
+            try:
+                receipt_id = services.render_receipts.begin(
+                    request_id=request_id,
+                    voice_id=preset_voice,
+                    voice_revision=profile.revision,
+                    model_artifact=tts_artifact.key if tts_artifact is not None else None,
+                    model_source=tts_artifact.model_id if tts_artifact is not None else None,
+                    model_variant=tts_artifact.variant if tts_artifact is not None else None,
+                    model_catalog_revision=(
+                        tts_artifact.revision if tts_artifact is not None else None
+                    ),
+                    model_runtime_revision=None,
+                    output_format=body.response_format,
+                    sample_rate=resolved.tts_sample_rate,
+                    text_summary=text_summary,
+                    planner_summary=planner_summary,
+                )
+            except RuntimeError:
+                return error_response(
+                    503,
+                    request_id,
+                    "render_receipt_store_full",
+                    "Render receipt store has no safe capacity",
+                    retryable=True,
+                )
+
         synthesis = SpeechRequest(
-            text=body.input,
+            text=synthesis_text,
             voice=preset_voice,
             output_format="pcm16",
             speed=body.speed,
             language=body.language,
             instruction=body.instructions,
+            expected_voice_revision=effective_revision,
+            expected_model_revision=expected_model_revision,
+            timing_mode=timing_mode,
         )
-        expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
+        if purpose == "interactive":
+            work_class = WorkClass.REALTIME_TTS
+            work_purpose = WorkPurpose.INTERACTIVE
+        elif purpose == "prefetch":
+            work_class = WorkClass.BATCH_TTS
+            work_purpose = WorkPurpose.PREFETCH
+        else:
+            # Compatibility default: ordinary OpenAI requests keep the historical
+            # batch admission class unless the caller explicitly opts in.
+            work_class = WorkClass.BATCH_TTS
+            work_purpose = WorkPurpose.DEFAULT
+        budget_seconds = resolved.request_timeout_seconds
+        if latency_budget_ms is not None:
+            budget_seconds = min(budget_seconds, latency_budget_ms / 1000.0)
+        expires_at = asyncio.get_running_loop().time() + budget_seconds
 
         async def audio_stream(
             *, counter: PcmOutputCounter | None = None
         ) -> AsyncIterator[bytes]:
-            # Batch TTS flows through the governor so it cannot consume the
-            # reserved realtime TTS lane; the reserve is held while the stream
-            # is consumed and released as soon as the generator closes.
-            async with services.governor.reserve(
-                WorkClass.BATCH_TTS,
-                expires_at=expires_at,
-                resource_key=tts_resource_key(synthesizer, synthesis.voice),
-            ):
-                async for chunk in iter_until(
-                    iter_validated_audio(synthesizer.synthesize(synthesis)), expires_at
+            # Integrity and timing are measured over validated PCM16 before encoding.
+            backend_response_id: str | None = None
+            emitted_samples = 0
+            runtime_revision_checked = False
+            try:
+                async with services.governor.reserve(
+                    work_class,
+                    expires_at=expires_at,
+                    resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                    purpose=work_purpose,
                 ):
-                    if counter is not None:
-                        counter.accept(len(chunk.audio))
-                    yield chunk.audio
+                    async for chunk in iter_until(
+                        iter_validated_audio(synthesizer.synthesize(synthesis)),
+                        expires_at,
+                    ):
+                        if backend_response_id is None:
+                            backend_response_id = chunk.response_id
+                        emitted_samples += len(chunk.audio) // 2
+                        if counter is not None:
+                            counter.accept(len(chunk.audio))
+                        if receipt_id is not None:
+                            if not runtime_revision_checked:
+                                runtime_revision_checked = True
+                                bind_observed_runtime_revision(
+                                    services.render_receipts,
+                                    receipt_id,
+                                    synthesizer=synthesizer,
+                                    voice=synthesis.voice,
+                                )
+                            services.render_receipts.accept_pcm(
+                                receipt_id,
+                                chunk.audio,
+                            )
+                        yield chunk.audio
+                if timing_id is not None:
+                    if emitted_samples <= 0 or backend_response_id is None:
+                        services.tts_timings.fail(timing_id, "empty_audio")
+                    else:
+                        take_timing = getattr(
+                            synthesizer,
+                            "take_timing_sidecar",
+                            None,
+                        )
+                        sidecar = (
+                            take_timing(backend_response_id)
+                            if callable(take_timing)
+                            else None
+                        )
+                        if sidecar is None:
+                            services.tts_timings.unavailable(
+                                timing_id,
+                                "backend_timing_metadata_unavailable",
+                            )
+                        else:
+                            services.tts_timings.complete(
+                                timing_id,
+                                sidecar,
+                                actual_samples=emitted_samples,
+                            )
+            except asyncio.CancelledError:
+                if receipt_id is not None:
+                    services.render_receipts.cancel(receipt_id)
+                if timing_id is not None:
+                    services.tts_timings.cancel(timing_id)
+                raise
+            except TTSDeliveryError as exc:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, exc.code)
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, exc.code)
+                raise
+            except VoiceRevisionConflictError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "voice_revision_conflict",
+                    )
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, "voice_revision_conflict")
+                raise
+            except VoiceRevokedError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "voice_revoked")
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, "voice_revoked")
+                raise
+            except VoiceStoreUnavailableError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "voice_store_unavailable",
+                    )
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, "voice_store_unavailable")
+                raise
+            except GovernorQueueFullError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "queue_full")
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, "queue_full")
+                raise
+            except TimeoutError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "backend_timeout")
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, "backend_timeout")
+                raise
+            except OverflowError:
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "audio_encode_failed",
+                    )
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, "audio_encode_failed")
+                raise
+            except RuntimeError as exc:
+                failure_code = _tts_backend_failure_code(exc)
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, failure_code)
+                if timing_id is not None:
+                    services.tts_timings.fail(timing_id, failure_code)
+                raise
 
         if body.response_format == "pcm":
             pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
@@ -1495,8 +1955,26 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
-            except RuntimeError:
+            except VoiceRevisionConflictError:
                 await _close_audio_stream(pcm_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revision_conflict",
+                    "Requested voice revision no longer matches the resolved voice",
+                )
+            except VoiceRevokedError:
+                await _close_audio_stream(pcm_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revoked",
+                    "Requested voice revision has been revoked",
+                )
+            except RuntimeError as exc:
+                await _close_audio_stream(pcm_stream)
+                if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
+                    return worker_response
                 return error_response(
                     502,
                     request_id,
@@ -1515,6 +1993,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             if not first:
                 await _close_audio_stream(pcm_stream)
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "empty_audio")
                 return error_response(
                     502,
                     request_id,
@@ -1542,10 +2022,31 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         _emitted_bytes += len(chunk)
                         yield chunk
                     await _record_if_complete()
+                    if receipt_id is not None:
+                        services.render_receipts.complete(receipt_id)
+                except asyncio.CancelledError:
+                    if receipt_id is not None:
+                        services.render_receipts.cancel(receipt_id)
+                    raise
+                except BaseException:
+                    if receipt_id is not None:
+                        services.render_receipts.fail(
+                            receipt_id,
+                            "stream_delivery_error",
+                        )
+                    raise
                 finally:
                     await _close_audio_stream(pcm_stream)
 
-            return StreamingResponse(streamed_pcm(), media_type="audio/x-pcm")
+            response = StreamingResponse(
+                streamed_pcm(),
+                media_type="audio/x-pcm",
+            )
+            if receipt_id is not None:
+                response.headers["SpeechRail-Receipt-Id"] = receipt_id
+            if timing_id is not None:
+                response.headers["SpeechRail-Timing-Id"] = timing_id
+            return response
         pcm_counter = PcmOutputCounter(_MAX_ENCODED_AUDIO_BYTES)
         if body.response_format in _TTS_CONTAINER_ENCODERS:
             media_type, _ = _TTS_CONTAINER_ENCODERS[body.response_format]
@@ -1595,8 +2096,26 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 return error_response(
                     503, request_id, "backend_timeout", "Inference timed out", retryable=True
                 )
-            except RuntimeError:
+            except VoiceRevisionConflictError:
                 await _close_audio_stream(encoded_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revision_conflict",
+                    "Requested voice revision no longer matches the resolved voice",
+                )
+            except VoiceRevokedError:
+                await _close_audio_stream(encoded_stream)
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_revoked",
+                    "Requested voice revision has been revoked",
+                )
+            except RuntimeError as exc:
+                await _close_audio_stream(encoded_stream)
+                if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
+                    return worker_response
                 return error_response(
                     502,
                     request_id,
@@ -1606,6 +2125,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             except (OverflowError, ValueError):
                 await _close_audio_stream(encoded_stream)
+                if receipt_id is not None:
+                    services.render_receipts.fail(
+                        receipt_id,
+                        "audio_encode_failed",
+                    )
                 return error_response(
                     502,
                     request_id,
@@ -1615,6 +2139,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             if not first:
                 await _close_audio_stream(encoded_stream)
+                if receipt_id is not None:
+                    services.render_receipts.fail(receipt_id, "empty_audio")
                 return error_response(
                     502,
                     request_id,
@@ -1636,10 +2162,31 @@ def create_audio_router(services: AppServices) -> APIRouter:
                         / resolved.tts_sample_rate,
                         inference_duration_sec=_time.monotonic() - _tts_t0,
                     )
+                    if receipt_id is not None:
+                        services.render_receipts.complete(receipt_id)
+                except asyncio.CancelledError:
+                    if receipt_id is not None:
+                        services.render_receipts.cancel(receipt_id)
+                    raise
+                except BaseException:
+                    if receipt_id is not None:
+                        services.render_receipts.fail(
+                            receipt_id,
+                            "stream_delivery_error",
+                        )
+                    raise
                 finally:
                     await _close_audio_stream(encoded_stream)
 
-            return StreamingResponse(streamed_encoded(), media_type=media_type)
+            response = StreamingResponse(
+                streamed_encoded(),
+                media_type=media_type,
+            )
+            if receipt_id is not None:
+                response.headers["SpeechRail-Receipt-Id"] = receipt_id
+            if timing_id is not None:
+                response.headers["SpeechRail-Timing-Id"] = timing_id
+            return response
 
         pcm = bytearray()
         _tts_t0 = _time.monotonic()
@@ -1678,7 +2225,23 @@ def create_audio_router(services: AppServices) -> APIRouter:
             return error_response(
                 503, request_id, "backend_timeout", "Inference timed out", retryable=True
             )
-        except RuntimeError:
+        except VoiceRevisionConflictError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revision_conflict",
+                "Requested voice revision no longer matches the resolved voice",
+            )
+        except VoiceRevokedError:
+            return error_response(
+                409,
+                request_id,
+                "voice_revoked",
+                "Requested voice revision has been revoked",
+            )
+        except RuntimeError as exc:
+            if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
+                return worker_response
             return error_response(
                 502,
                 request_id,
@@ -1696,6 +2259,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
             )
         _tts_inference_sec = _time.monotonic() - _tts_t0
         if not pcm:
+            if receipt_id is not None:
+                services.render_receipts.fail(receipt_id, "empty_audio")
             return error_response(
                 502,
                 request_id,
@@ -1715,6 +2280,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             content = _wav_pcm16(bytes(pcm), sample_rate=resolved.tts_sample_rate)
             media_type = "audio/wav"
         except (OverflowError, ValueError):
+            if receipt_id is not None:
+                services.render_receipts.fail(
+                    receipt_id,
+                    "audio_encode_failed",
+                )
             return error_response(
                 502,
                 request_id,
@@ -1722,6 +2292,13 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Failed to encode the synthesized audio",
                 retryable=True,
             )
-        return Response(content=content, media_type=media_type)
+        if receipt_id is not None:
+            services.render_receipts.complete(receipt_id)
+        final_response = Response(content=content, media_type=media_type)
+        if receipt_id is not None:
+            final_response.headers["SpeechRail-Receipt-Id"] = receipt_id
+        if timing_id is not None:
+            final_response.headers["SpeechRail-Timing-Id"] = timing_id
+        return final_response
 
     return router

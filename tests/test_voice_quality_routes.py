@@ -91,8 +91,16 @@ def _short_wav(duration: float = 1.0) -> bytes:
 
 
 class SineSynthesizer:
-    def __init__(self) -> None:
+    def __init__(self, *, runtime_revision: str | None = None) -> None:
         self.requests: list[SpeechRequest] = []
+        self.runtime_revision = runtime_revision
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        del voice
+        return self.runtime_revision
+
+    async def evict_warm_capability(self) -> None:
+        self.runtime_revision = None
 
     def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         self.requests.append(request)
@@ -315,12 +323,27 @@ def _make_client(
     return TestClient(app), registry, synthesizer, voices_dir
 
 
-def _patch(registry: VoiceRegistry, wav: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch(
+    registry: VoiceRegistry,
+    wav: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    journal_path: Path | None = None,
+) -> None:
     monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
     monkeypatch.setattr(
         "speechrail.domain.tts.transcode_and_validate_clone_audio",
         lambda *args, **kwargs: (wav, 4.0),
     )
+    if journal_path is not None:
+        from speechrail.domain.idempotency import DurableIdempotencyJournal
+        from speechrail.http.routes import system as system_routes
+
+        monkeypatch.setattr(
+            system_routes,
+            "_clone_idempotency_journal",
+            DurableIdempotencyJournal(journal_path, max_entries=128),
+        )
 
 
 def _clone_payload(name: str = "我的数字分身", ref_text: str = "测试参考文本") -> dict[str, str]:
@@ -485,7 +508,12 @@ def test_s3_warn_clone_and_idempotency_dedup(
 ) -> None:
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(3.0)  # warn (duration 2-4s)
-    _patch(registry, wav, monkeypatch)
+    _patch(
+        registry,
+        wav,
+        monkeypatch,
+        journal_path=tmp_path / "clone-idempotency.json",
+    )
 
     payload = _clone_payload(name="轻度告警克隆", ref_text="白日依山尽，黄河入海流。")
     files = {"audio": ("sample.wav", wav, "audio/wav")}
@@ -503,12 +531,17 @@ def test_s3_warn_clone_and_idempotency_dedup(
     assert len(custom) == 1
 
 
-def test_clone_stale_idempotency_after_delete_re_registers(
+def test_clone_completed_idempotency_result_is_not_recreated_after_delete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
-    _patch(registry, wav, monkeypatch)
+    _patch(
+        registry,
+        wav,
+        monkeypatch,
+        journal_path=tmp_path / "clone-idempotency.json",
+    )
 
     payload = _clone_payload(name="过期幂等克隆", ref_text="白日依山尽，黄河入海流。")
     files = {"audio": ("sample.wav", wav, "audio/wav")}
@@ -522,11 +555,11 @@ def test_clone_stale_idempotency_after_delete_re_registers(
     assert deleted.status_code == 200
 
     second = client.post("/v1/voices/clone", data=payload, files=files, headers=headers)
-    assert second.status_code == 201
-    assert second.json()["id"] != voice_id
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "idempotency_result_unavailable"
 
     custom = [p for p in registry.list_profiles() if not p.is_system]
-    assert len(custom) == 1
+    assert custom == []
 
 
 def test_s3_tampered_revalidate_still_rejects(
@@ -550,14 +583,21 @@ def test_s3_tampered_revalidate_still_rejects(
 # ---------------------------------------------------------------------------
 
 
-def test_idempotency_key_hashes_ref_text_and_treats_as_new_request(
+def test_idempotency_key_rejects_different_payload_and_stores_no_raw_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from speechrail.domain.idempotency import DurableIdempotencyJournal
     from speechrail.http.routes import system as system_routes
 
     client, registry, _synth, _voices_dir = _make_client(tmp_path)
     wav = _clean_wav(4.0)
     _patch(registry, wav, monkeypatch)
+    journal_path = tmp_path / "clone-idempotency.json"
+    monkeypatch.setattr(
+        system_routes,
+        "_clone_idempotency_journal",
+        DurableIdempotencyJournal(journal_path, max_entries=128),
+    )
 
     headers = {"Idempotency-Key": "idem-reftext-001"}
     files = {"audio": ("a.wav", wav, "audio/wav")}
@@ -576,27 +616,39 @@ def test_idempotency_key_hashes_ref_text_and_treats_as_new_request(
     )
 
     assert first.status_code == 201
-    assert second.status_code == 201
-    assert first.json()["id"] != second.json()["id"]
+    assert second.status_code == 409
+    assert second.json()["error"]["code"] == "idempotency_conflict"
+    assert len([p for p in registry.list_profiles() if not p.is_system]) == 1
 
-    custom = [p for p in registry.list_profiles() if not p.is_system]
-    assert len(custom) == 2
-
-    for key in system_routes._clone_idempotency:
-        assert "第一种参考文本" not in key
-        assert "第二种参考文本" not in key
+    raw = journal_path.read_text(encoding="utf-8")
+    assert "第一种参考文本" not in raw
+    assert "第二种参考文本" not in raw
+    assert "idem-reftext-001" not in raw
 
 
-def test_clone_idempotency_store_is_bounded() -> None:
-    from speechrail.http.routes import system as system_routes
+def test_clone_idempotency_store_is_bounded(tmp_path: Path) -> None:
+    from speechrail.domain.idempotency import DurableIdempotencyJournal
 
-    with system_routes._clone_idempotency_lock:
-        system_routes._clone_idempotency.clear()
-        for index in range(150):
-            cache_key = (f"idem-bound-{index}", f"{index:064x}", f"{index:064x}")
-            system_routes._store_clone_idempotency_locked(cache_key, f"id-{index}")
-        assert len(system_routes._clone_idempotency) <= 128
-        system_routes._clone_idempotency.clear()
+    path = tmp_path / "journal.json"
+    journal = DurableIdempotencyJournal(path, max_entries=128)
+    for index in range(150):
+        key = f"idem-bound-{index}"
+        fingerprint = f"{index:064x}"
+        journal.begin(
+            owner="local",
+            operation="voice.clone",
+            key=key,
+            fingerprint=fingerprint,
+        )
+        journal.complete(
+            owner="local",
+            operation="voice.clone",
+            key=key,
+            fingerprint=fingerprint,
+            result_id=f"id-{index}",
+        )
+
+    assert len(json.loads(path.read_text(encoding="utf-8"))) <= 128
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +719,28 @@ def test_s5_quality_runs_ok_and_bounded(
     assert body["synthesis"]["transcript_match"] == pytest.approx(1.0)
     assert body["failure_codes"] == []
     assert len(synth.requests) == 18
+
+
+def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_revision = "rt_" + ("a" * 64)
+    synthesizer = SineSynthesizer(runtime_revision=runtime_revision)
+    client, registry, _synth, _voices_dir = _make_client(
+        tmp_path,
+        synthesizer=synthesizer,
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+
+    response = client.post(
+        "/v1/speechrail/voices/serena/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["evidence"]["identity"]["model"]["runtime_revision"] == (
+        runtime_revision
+    )
 
 
 

@@ -11,7 +11,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["运行监控"].exists)
         XCTAssertTrue(app.buttons["模型"].exists)
         // 2026-09-19：落地页从「服务状态」改成「语音助手」，所以这一页要自己走过去。
-        app.buttons["服务状态"].clickWhenReady()
+        app.buttons["overview"].clickWhenReady()
         // 2026-09-19：这一行的文案从「本地控制通道已就绪」改成「可以在这里管理服务」——
         // 首屏要说的是"能不能在这里管服务"，不是"哪条通道起来了"（SESSIONS-SPEC §12.1.8.1）。
         XCTAssertTrue(app.staticTexts["可以在这里管理服务"].exists)
@@ -50,7 +50,7 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(app.buttons["模型"].exists)
         // 2026-09-19：落地页改成「语音助手」；这一页的断言要先自己切过来
         // （SESSIONS-SPEC §13 D15）。
-        app.buttons["服务状态"].clickWhenReady()
+        app.buttons["overview"].clickWhenReady()
         // 页首那一句话取自 `AppRoute.overview.pageSubtitle`，与稿逐字一致；
         // 旧文案「确认本机语音服务能否使用」只留在 `purpose`（侧栏行的帮助值）。
         XCTAssertTrue(
@@ -201,6 +201,25 @@ final class SpeechRailAppUITests: XCTestCase {
         XCTAssertTrue(cancelControl.waitForExistence(timeout: 10))
         cancelControl.clickWhenReady()
         XCTAssertTrue(previewButton.waitForExistence(timeout: 10))
+    }
+
+    func testWorksEmptyFixtureOffersSafeNavigationWithoutStoredWorks() {
+        let app = launchSpeechRail(arguments: [
+            "--ui-test", "--ui-test-open-control-center", "--ui-test-empty-works"
+        ])
+        openControlCenter(in: app)
+        app.buttons["我的作品"].clickWhenReady()
+        XCTAssertTrue(app.staticTexts["还没有作品"].waitForExistence(timeout: 10))
+        XCTAssertFalse(identifierElement("work-row", in: app).exists)
+        app.buttons["去配音台"].clickWhenReady()
+        let title = identifierElement("workspace-title", in: app)
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        let navigated = NSPredicate(format: "label == %@", "配音台")
+        expectation(for: navigated, evaluatedWith: title)
+        waitForExpectations(timeout: 10)
+        app.buttons["我的作品"].clickWhenReady()
+        XCTAssertTrue(app.staticTexts["还没有作品"].waitForExistence(timeout: 10))
+        XCTAssertFalse(identifierElement("work-row", in: app).exists)
     }
 
     func testWorksViewExposesSelectionAndExportActions() throws {

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import io
+import json
 import wave
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Request
@@ -22,14 +25,21 @@ from speechrail.application.tts_delivery import (
     iter_until,
     iter_validated_audio,
 )
+from speechrail.config.model_catalog import ModelArtifact
 from speechrail.config.selection import active_model_catalog
 from speechrail.domain import voice_quality as vq
+from speechrail.domain.idempotency import (
+    DurableIdempotencyJournal,
+    IdempotencyConflictError,
+    IdempotencyStoreUnavailableError,
+)
 from speechrail.domain.ports import SpeechRequest, SpeechSynthesizer, TranscriptionRequest
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
     SYSTEM_VOICE_PROFILES,
     VOICE_ALIASES,
     VoiceAlreadyExistsError,
+    VoiceProfile,
     VoiceStoreUnavailableError,
     canonicalize_clone_reference_audio,
     get_voice_registry,
@@ -49,10 +59,20 @@ from speechrail.http.routes.system import (
 )
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 _SAMPLE_RATE = 24_000
 _MAX_REFERENCE_PCM_BYTES = 30 * _SAMPLE_RATE * 2
+_DESIGN_IDEMPOTENCY_OWNER = "speechrail-local"
+_DESIGN_IDEMPOTENCY_OPERATION = "voice.design"
+_design_idempotency_journal = DurableIdempotencyJournal(
+    Path.home() / ".speechrail" / "voice_design_idempotency.json",
+    max_entries=128,
+)
 
 
 class VoiceDesignRegistrationRequest(BaseModel):
@@ -74,6 +94,41 @@ class VoiceDesignRegistrationRequest(BaseModel):
         if value in SYSTEM_VOICE_PROFILES or value in VOICE_ALIASES:
             raise ValueError("reserved voice ID")
         return value
+
+
+def _design_payload_fingerprint(body: VoiceDesignRegistrationRequest) -> str:
+    payload = json.dumps(
+        body.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _design_result_matches(
+    profile: VoiceProfile,
+    body: VoiceDesignRegistrationRequest,
+    normalized_reference_text: str,
+    artifact: ModelArtifact,
+) -> bool:
+    """Prove a recovered profile belongs to this idempotent design request."""
+
+    creation = profile.creation
+    return (
+        profile.id == body.id
+        and profile.mode == "clone"
+        and profile.name == body.name.strip()
+        and profile.ref_text == normalized_reference_text
+        and creation is not None
+        and creation.model_artifact == artifact.key
+        and creation.model_revision == artifact.revision
+        and creation.seed == body.seed
+        and creation.instruction_sha256
+        == hashlib.sha256(body.instruction.encode("utf-8")).hexdigest()
+        and creation.reference_text_sha256
+        == hashlib.sha256(normalized_reference_text.encode("utf-8")).hexdigest()
+    )
 
 
 async def _generate_reference(
@@ -147,8 +202,120 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         registry = get_voice_registry()
+        text = normalize_tts_text(body.reference_text)
+        if not 20 <= len(text) <= 240:
+            return error_response(
+                422,
+                request_id,
+                "invalid_ref_text",
+                "Normalized reference text must contain 20 to 240 characters",
+            )
+
+        idempotency_key = request.headers.get("Idempotency-Key")
+        fingerprint = _design_payload_fingerprint(body) if idempotency_key else None
+        journal_started = False
+        if idempotency_key and fingerprint is not None:
+            try:
+                decision = _design_idempotency_journal.begin(
+                    owner=_DESIGN_IDEMPOTENCY_OWNER,
+                    operation=_DESIGN_IDEMPOTENCY_OPERATION,
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    provisional_result_id=body.id,
+                )
+            except IdempotencyConflictError:
+                return error_response(
+                    409,
+                    request_id,
+                    "idempotency_conflict",
+                    "Idempotency-Key was already used with a different voice-design payload",
+                )
+            except IdempotencyStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "idempotency_store_unavailable",
+                    "Durable idempotency state is unavailable",
+                    retryable=True,
+                )
+            journal_started = decision.state == "new"
+            if decision.state in {"pending", "completed"}:
+                result_id = decision.result_id
+                if result_id is None:
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_pending",
+                        "Previous voice-design operation has no recoverable result identity",
+                        retryable=True,
+                    )
+                try:
+                    recovered = registry.get_profile(result_id)
+                except VoiceStoreUnavailableError:
+                    return error_response(
+                        503,
+                        request_id,
+                        "voice_store_unavailable",
+                        "Voice store is unavailable",
+                        retryable=True,
+                    )
+                except ValueError:
+                    recovered = None
+                if recovered is not None:
+                    if not _design_result_matches(
+                        recovered,
+                        body,
+                        text,
+                        design,
+                    ):
+                        return error_response(
+                            409,
+                            request_id,
+                            "voice_already_exists",
+                            "Target voice ID is owned by a different design payload",
+                        )
+                    if decision.state == "pending":
+                        try:
+                            _design_idempotency_journal.complete(
+                                owner=_DESIGN_IDEMPOTENCY_OWNER,
+                                operation=_DESIGN_IDEMPOTENCY_OPERATION,
+                                key=idempotency_key,
+                                fingerprint=fingerprint,
+                                result_id=recovered.id,
+                            )
+                        except IdempotencyStoreUnavailableError:
+                            return error_response(
+                                503,
+                                request_id,
+                                "idempotency_store_unavailable",
+                                "Recovered voice exists but completion state could not be recorded",
+                                retryable=True,
+                            )
+                    return JSONResponse(
+                        status_code=201,
+                        content={
+                            "voice": _voice_entry(recovered, active, services.tts_ready),
+                            "synthesis_validation": "unevaluated",
+                        },
+                    )
+                if decision.state == "completed":
+                    return error_response(
+                        409,
+                        request_id,
+                        "idempotency_result_unavailable",
+                        "The original idempotent voice-design result is no longer available",
+                    )
+                return error_response(
+                    409,
+                    request_id,
+                    "idempotency_pending",
+                    "Previous voice-design operation may have started but no result is visible yet",
+                    retryable=True,
+                )
+
         expires_at = asyncio.get_running_loop().time() + services.settings.request_timeout_seconds
         stage = "generation"
+        publication_started = False
         try:
             try:
                 registry.get_profile(body.id)
@@ -156,14 +323,6 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 pass
             else:
                 raise VoiceAlreadyExistsError("target voice already exists")
-            text = normalize_tts_text(body.reference_text)
-            if not 20 <= len(text) <= 240:
-                return error_response(
-                    422,
-                    request_id,
-                    "invalid_ref_text",
-                    "Normalized reference text must contain 20 to 240 characters",
-                )
             synthesis = SpeechRequest(
                 text=text,
                 voice=DEFAULT_VOICE_ID,
@@ -176,6 +335,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
                 resource_key=tts_resource_key(synthesizer, synthesis.voice),
+                purpose=WorkPurpose.VOICE_CREATION,
             ):
                 raw_wav = await _generate_reference(synthesizer, synthesis, expires_at=expires_at)
             raw_report = _grade_clone_audio(raw_wav)
@@ -186,7 +346,18 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             report = _grade_clone_audio(wav_bytes)
             if report.status == "reject":
                 return _quality_reject_response(request_id, report)
-            await _evict_quality_tts_if_supported(synthesizer, expires_at=expires_at)
+            # Eviction is a group-level maintenance handoff: acquire the
+            # governor's wildcard TTS lane so no keyed capability worker is
+            # still active while the router closes its workers.
+            async with services.governor.reserve(
+                WorkClass.BATCH_TTS,
+                expires_at=expires_at,
+                purpose=WorkPurpose.VOICE_CREATION,
+            ):
+                await _evict_quality_tts_if_supported(
+                    synthesizer,
+                    expires_at=expires_at,
+                )
             stage = "transcription"
             with wave.open(io.BytesIO(wav_bytes), "rb") as wav:
                 pcm = wav.readframes(wav.getnframes())
@@ -197,7 +368,11 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 prompt="",
                 include_timestamps=False,
             )
-            async with services.governor.reserve(WorkClass.BATCH_ASR, expires_at=expires_at):
+            async with services.governor.reserve(
+                WorkClass.BATCH_ASR,
+                expires_at=expires_at,
+                purpose=WorkPurpose.VOICE_CREATION,
+            ):
                 remaining = expires_at - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError
@@ -231,6 +406,7 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
             )
             # Publication is the last step. No temporary custom profile or WAV is
             # exposed while TTS/ASR is running; create_only checks under the store lock.
+            publication_started = True
             profile = registry.create_cloned_profile(
                 name=body.name,
                 ref_text=text,
@@ -241,6 +417,23 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 creation=creation,
                 create_only=True,
             )
+            if idempotency_key and fingerprint is not None:
+                try:
+                    _design_idempotency_journal.complete(
+                        owner=_DESIGN_IDEMPOTENCY_OWNER,
+                        operation=_DESIGN_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                        result_id=profile.id,
+                    )
+                except IdempotencyStoreUnavailableError:
+                    return error_response(
+                        503,
+                        request_id,
+                        "idempotency_store_unavailable",
+                        "Voice was published but durable completion state could not be recorded",
+                        retryable=True,
+                    )
             return JSONResponse(
                 status_code=201,
                 content={
@@ -249,6 +442,15 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 },
             )
         except VoiceAlreadyExistsError:
+            if journal_started and idempotency_key and fingerprint is not None:
+                with contextlib.suppress(IdempotencyStoreUnavailableError):
+                    _design_idempotency_journal.abort(
+                        owner=_DESIGN_IDEMPOTENCY_OWNER,
+                        operation=_DESIGN_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
+                journal_started = False
             return error_response(
                 409,
                 request_id,
@@ -302,5 +504,19 @@ def create_voice_design_router(services: AppServices) -> APIRouter:
                 "Voice registration could not complete",
                 retryable=True,
             )
+        finally:
+            if (
+                journal_started
+                and not publication_started
+                and idempotency_key
+                and fingerprint is not None
+            ):
+                with contextlib.suppress(IdempotencyStoreUnavailableError):
+                    _design_idempotency_journal.abort(
+                        owner=_DESIGN_IDEMPOTENCY_OWNER,
+                        operation=_DESIGN_IDEMPOTENCY_OPERATION,
+                        key=idempotency_key,
+                        fingerprint=fingerprint,
+                    )
 
     return router

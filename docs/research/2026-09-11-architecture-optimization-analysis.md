@@ -2,8 +2,8 @@
 title: "SpeechRail 架构优化与演进基线"
 status: active
 audience: "架构评估者、维护者与后续演进决策者"
-version: "1.0"
-date: 2026-09-11
+version: "1.1"
+date: 2026-09-19
 ---
 
 # SpeechRail 架构优化与演进基线
@@ -13,6 +13,12 @@ date: 2026-09-11
 >
 > 证据等级：`[实测]` 仓库内真实基准 · `[契约]` 代码/契约事实 · `[一手]` 外部权威来源（论文/官方文档/WWDC） ·
 > `[二手]` 社区测量 · `[推断]` 未证实推理。**结论范围严格受证据等级约束。**
+
+> **2026-09-19 当前源码对照：** 本文主体保留 2026-09-11 的架构研究与当时的版本/测量快照；其中
+> `2.4.0`、`2.3.2` 及 Realtime 默认值 `2` 均属于历史观察，不是当前发布或运行时承诺。当前源码
+> release 基线为 `2.7.0`，`Settings.realtime_max_sessions` 的唯一源码默认值为 `3`；当前契约与配置
+> 请以 [`docs/architecture/current-boundaries.md`](../architecture/current-boundaries.md)、
+> `src/speechrail/config/__init__.py` 和 `configs/speechrail.example.env` 为准。
 
 ---
 

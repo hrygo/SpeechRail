@@ -20,17 +20,20 @@ import wave
 from array import array
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from speechrail.domain.file_locks import exclusive_file_lock
 from speechrail.domain.voice_creation import VoiceCreation
 
 logger = logging.getLogger(__name__)
 
 VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+VOICE_REVISION_RE = re.compile(r"^vr_[0-9a-f]{32}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,8 @@ class VoiceProfile:
     duration_seconds: float = 0.0
     quality: dict[str, Any] | None = None
     creation: VoiceCreation | None = None
+    revision: str | None = None
+    revoked: bool = False
 
     @property
     def description(self) -> str:
@@ -79,6 +84,10 @@ class VoiceProfile:
             data["quality"] = self.quality
         if self.creation is not None:
             data["creation"] = self.creation.model_dump(mode="json")
+        if self.revision is not None:
+            data["revision"] = self.revision
+        if self.revoked:
+            data["revoked"] = True
         return data
 
 
@@ -571,6 +580,45 @@ class VoiceInUseError(RuntimeError):
     code = "voice_in_use"
 
 
+class VoiceRevisionConflictError(RuntimeError):
+    """A conditional voice operation observed a different acoustic revision."""
+
+    code = "voice_revision_conflict"
+
+
+class VoiceRevokedError(RuntimeError):
+    """A voice revision was explicitly revoked for future synthesis."""
+
+    code = "voice_revoked"
+
+
+def _voice_revision(
+    *,
+    mode: str,
+    instruction: str,
+    seed: int,
+    temperature: float,
+    ref_text: str | None = None,
+    reference_audio_sha256: str | None = None,
+    creation: VoiceCreation | None = None,
+) -> str:
+    """Return a content-addressed revision for acoustic identity only."""
+
+    payload = {
+        "mode": mode,
+        "instruction_sha256": hashlib.sha256(instruction.encode()).hexdigest(),
+        "seed": seed,
+        "temperature": temperature,
+        "reference_text_sha256": (
+            hashlib.sha256(ref_text.encode()).hexdigest() if ref_text is not None else None
+        ),
+        "reference_audio_sha256": reference_audio_sha256,
+        "creation": creation.model_dump(mode="json") if creation is not None else None,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "vr_" + hashlib.sha256(canonical).hexdigest()[:32]
+
+
 class VoiceRegistry:
     """Thread-safe registry with atomic metadata commits and reader leases."""
 
@@ -586,11 +634,22 @@ class VoiceRegistry:
         self._lock = threading.RLock()
         self._last_loaded_mtime_ns = 0
         self._custom_voices: dict[str, VoiceProfile] = {}
+        self._revision_history: dict[str, dict[str, VoiceProfile]] = {}
         self._store_error: str | None = None
         self._pending_profiles: dict[str, VoiceProfile] | None = None
+        self._pending_revision_history: dict[str, dict[str, VoiceProfile]] | None = None
         self._audio_readers: dict[Path, int] = {}
         self._retired_audio: set[Path] = set()
         self._load_custom_voices()
+
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        """Serialize durable voice registry transactions across processes."""
+        with exclusive_file_lock(
+            self._storage_path,
+            unavailable_error=VoiceStoreUnavailableError,
+        ):
+            yield
 
     def _mark_unavailable(self, exc: BaseException) -> None:
         self._store_error = "custom voice registry is unavailable"
@@ -598,7 +657,18 @@ class VoiceRegistry:
 
     def _load_custom_voices(self) -> None:
         with self._lock:
-            self._load_custom_voices_locked()
+            # Preserve fail-closed construction for an unsafe parent path.  A
+            # sibling lock cannot be opened through a symlinked directory, so
+            # let the loader record the unavailable state before attempting
+            # the process lock.
+            if self._storage_path.parent.is_symlink():
+                self._load_custom_voices_locked()
+                return
+            try:
+                with self._process_lock():
+                    self._load_custom_voices_locked()
+            except VoiceStoreUnavailableError as exc:
+                self._mark_unavailable(exc)
 
     def _load_custom_voices_locked(self) -> None:
         if self._storage_path.parent.is_symlink():
@@ -611,6 +681,7 @@ class VoiceRegistry:
                 self._mark_unavailable(ValueError("custom voice registry symlink is broken"))
                 return
             self._custom_voices = {}
+            self._revision_history = {}
             self._last_loaded_mtime_ns = 0
             self._store_error = None
             return
@@ -627,16 +698,32 @@ class VoiceRegistry:
             if not isinstance(data, list):
                 raise ValueError("custom voice registry must be a JSON list")
             loaded: dict[str, VoiceProfile] = {}
+            loaded_history: dict[str, dict[str, VoiceProfile]] = {}
             for item in data:
                 profile = self._profile_from_record(item)
                 if profile.id in loaded:
                     raise ValueError(f"duplicate custom voice id: {profile.id}")
+                history: dict[str, VoiceProfile] = {}
+                if not isinstance(item, dict):
+                    raise ValueError("custom voice record must be an object")
+                raw_history = item.get("_revisions", [])
+                if not isinstance(raw_history, list):
+                    raise ValueError("custom voice revision history must be a list")
+                for raw_revision in raw_history:
+                    historic = self._profile_from_record(raw_revision)
+                    if historic.id != profile.id or historic.revision is None:
+                        raise ValueError("custom voice revision history is invalid")
+                    history[historic.revision] = historic
+                if profile.revision is not None:
+                    history[profile.revision] = profile
                 loaded[profile.id] = profile
+                loaded_history[profile.id] = history
         except Exception as exc:
             self._last_loaded_mtime_ns = self._safe_mtime_ns()
             self._mark_unavailable(exc)
             return
         self._custom_voices = loaded
+        self._revision_history = loaded_history
         self._last_loaded_mtime_ns = stat.st_mtime_ns
         self._store_error = None
 
@@ -659,6 +746,7 @@ class VoiceRegistry:
                     return
                 if self._last_loaded_mtime_ns or self._custom_voices:
                     self._custom_voices = {}
+                    self._revision_history = {}
                     self._last_loaded_mtime_ns = 0
                     self._store_error = None
                 return
@@ -745,6 +833,18 @@ class VoiceRegistry:
         creation = None if creation_raw is None else VoiceCreation.model_validate(creation_raw)
         if creation is not None and raw_mode != "clone":
             raise ValueError("generated reference provenance requires clone mode")
+        revision_raw = item.get("revision")
+        revision: str | None = None
+        if revision_raw is not None:
+            if (
+                not isinstance(revision_raw, str)
+                or not VOICE_REVISION_RE.fullmatch(revision_raw)
+            ):
+                raise ValueError("custom voice revision is invalid")
+            revision = revision_raw
+        revoked = item.get("revoked", False)
+        if not isinstance(revoked, bool):
+            raise ValueError("custom voice revoked flag is invalid")
         return VoiceProfile(
             id=vid,
             name=name,
@@ -760,6 +860,8 @@ class VoiceRegistry:
             duration_seconds=float(duration_seconds),
             quality=quality,
             creation=creation,
+            revision=revision,
+            revoked=revoked,
         )
 
     def _controlled_audio_path(
@@ -821,8 +923,22 @@ class VoiceRegistry:
             if self._pending_profiles is not None
             else self._custom_voices
         )
+        histories = (
+            self._pending_revision_history
+            if self._pending_revision_history is not None
+            else self._revision_history
+        )
         self._prepare_store_dirs_locked()
-        data = [profile.to_dict() for profile in profiles.values()]
+        data: list[dict[str, Any]] = []
+        for profile in profiles.values():
+            record = profile.to_dict()
+            history = histories.get(profile.id, {})
+            if history:
+                record["_revisions"] = [
+                    historic.to_dict()
+                    for _, historic in sorted(history.items())
+                ]
+            data.append(record)
         payload = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         written = _atomic_write_bytes(self._storage_path, payload, mode=0o600)
         self._last_loaded_mtime_ns = written.stat().st_mtime_ns
@@ -839,16 +955,26 @@ class VoiceRegistry:
         self,
         candidate: dict[str, VoiceProfile],
         *,
+        history_candidate: dict[str, dict[str, VoiceProfile]] | None = None,
         new_audio: Path | None = None,
     ) -> None:
         previous = self._custom_voices
+        previous_history = self._revision_history
+        next_history = (
+            history_candidate
+            if history_candidate is not None
+            else self._revision_history
+        )
         before = self._storage_state()
         self._pending_profiles = candidate
+        self._pending_revision_history = next_history
         try:
             self._save_custom_voices()
         except BaseException as exc:
             self._pending_profiles = None
+            self._pending_revision_history = None
             self._custom_voices = previous
+            self._revision_history = previous_history
             after = self._storage_state()
             safe_to_remove = after == before and (not before[0] or before[1] is not None)
             if new_audio is not None and safe_to_remove:
@@ -862,8 +988,26 @@ class VoiceRegistry:
             raise
         finally:
             self._pending_profiles = None
+            self._pending_revision_history = None
         self._custom_voices = candidate
+        self._revision_history = next_history
         self._store_error = None
+
+    def _history_candidate_locked(
+        self,
+        voice_id: str,
+        *profiles: VoiceProfile | None,
+    ) -> dict[str, dict[str, VoiceProfile]]:
+        history = {
+            key: dict(value)
+            for key, value in self._revision_history.items()
+        }
+        revisions = dict(history.get(voice_id, {}))
+        for profile in profiles:
+            if profile is not None and profile.revision is not None:
+                revisions[profile.revision] = profile
+        history[voice_id] = revisions
+        return history
 
     def _retire_audio_locked(self, raw_path: str | None, voice_id: str) -> None:
         if raw_path is None:
@@ -899,8 +1043,16 @@ class VoiceRegistry:
                 return True
         return False
 
+    def snapshot_profiles(self) -> tuple[VoiceProfile, ...]:
+        """Detach one catalog generation under the same registry read lock."""
+        with self._lock, self._process_lock():
+            self._ensure_available_locked(reload=True)
+            return tuple(deepcopy(profile) for profile in (
+                *SYSTEM_VOICE_PROFILES.values(), *self._custom_voices.values(),
+            ))
+
     def list_profiles(self) -> list[VoiceProfile]:
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             system = list(SYSTEM_VOICE_PROFILES.values())
             custom = sorted(
@@ -912,19 +1064,23 @@ class VoiceRegistry:
         resolved = resolve_voice(voice)
         if resolved in SYSTEM_VOICE_PROFILES:
             return SYSTEM_VOICE_PROFILES[resolved]
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             if resolved in self._custom_voices:
                 return self._custom_voices[resolved]
         raise ValueError(f"unknown preset voice: {voice}")
 
     @contextmanager
-    def lease_profile(self, voice: str) -> Iterator[VoiceProfile]:
-        """Lease an immutable profile snapshot while a backend reads its audio."""
+    def lease_profile(
+        self, voice: str, *, expected_revision: str | None = None
+    ) -> Iterator[VoiceProfile]:
+        """Lease an immutable profile snapshot, optionally pinned by acoustic revision."""
 
+        if expected_revision is not None and not VOICE_REVISION_RE.fullmatch(expected_revision):
+            raise ValueError("invalid expected voice revision")
         resolved = resolve_voice(voice)
         audio_path: Path | None = None
-        with self._lock:
+        with self._lock, self._process_lock():
             if resolved in SYSTEM_VOICE_PROFILES:
                 profile = SYSTEM_VOICE_PROFILES[resolved]
             else:
@@ -933,16 +1089,24 @@ class VoiceRegistry:
                 if custom_profile is None:
                     raise ValueError(f"unknown preset voice: {voice}")
                 profile = custom_profile
-                if profile.audio_path is not None:
-                    try:
-                        audio_path = self._controlled_audio_path(
-                            profile.audio_path, profile.id, require_exists=True
-                        )
-                    except ValueError as exc:
-                        raise VoiceStoreUnavailableError(
-                            "custom voice audio is unavailable"
-                        ) from exc
-                    self._audio_readers[audio_path] = self._audio_readers.get(audio_path, 0) + 1
+            if expected_revision is not None and profile.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {profile.id}"
+                )
+            if not profile.is_system and profile.revoked:
+                raise VoiceRevokedError(
+                    f"voice revision is revoked: {profile.id}"
+                )
+            if not profile.is_system and profile.audio_path is not None:
+                try:
+                    audio_path = self._controlled_audio_path(
+                        profile.audio_path, profile.id, require_exists=True
+                    )
+                except ValueError as exc:
+                    raise VoiceStoreUnavailableError(
+                        "custom voice audio is unavailable"
+                    ) from exc
+                self._audio_readers[audio_path] = self._audio_readers.get(audio_path, 0) + 1
         try:
             yield profile
         finally:
@@ -979,24 +1143,33 @@ class VoiceRegistry:
         if seed is not None and (type(seed) is not int or not 0 <= seed <= 2**32 - 1):
             raise ValueError("voice seed must be between 0 and 4294967295")
 
+        resolved_seed = seed if seed is not None else random.randint(1000, 999999)
+        instruction_text = instruction.strip()
         profile = VoiceProfile(
             id=vid,
             name=name.strip(),
-            instruction=instruction.strip(),
-            seed=seed if seed is not None else random.randint(1000, 999999),
+            instruction=instruction_text,
+            seed=resolved_seed,
             temperature=0.1,
             is_default=False,
             is_system=False,
             created_at=time.time(),
             mode="instruction",
+            revision=_voice_revision(
+                mode="instruction",
+                instruction=instruction_text,
+                seed=resolved_seed,
+                temperature=0.1,
+            ),
         )
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             previous = self._custom_voices.get(vid)
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
-            self._commit_candidate(candidate)
-            if previous is not None:
+            history = self._history_candidate_locked(vid, previous, profile)
+            self._commit_candidate(candidate, history_candidate=history)
+            if previous is not None and previous.revision is None:
                 self._retire_audio_locked(previous.audio_path, vid)
             return profile
 
@@ -1042,7 +1215,7 @@ class VoiceRegistry:
         ):
             raise ValueError("reference does not match voice provenance")
 
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             # This check shares the metadata commit lock; the HTTP preflight
             # alone cannot protect against concurrent registration of the ID.
@@ -1068,11 +1241,25 @@ class VoiceRegistry:
                 duration_seconds=round(float(duration_seconds), 2),
                 quality=quality,
                 creation=creation,
+                revision=_voice_revision(
+                    mode="clone",
+                    instruction="",
+                    seed=42,
+                    temperature=0.1,
+                    ref_text=ref_text.strip(),
+                    reference_audio_sha256=hashlib.sha256(audio_bytes).hexdigest(),
+                    creation=creation,
+                ),
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = profile
-            self._commit_candidate(candidate, new_audio=target_file)
-            if previous is not None:
+            history = self._history_candidate_locked(vid, previous, profile)
+            self._commit_candidate(
+                candidate,
+                history_candidate=history,
+                new_audio=target_file,
+            )
+            if previous is not None and previous.revision is None:
                 self._retire_audio_locked(previous.audio_path, vid)
             return profile
 
@@ -1083,8 +1270,12 @@ class VoiceRegistry:
         name: str | None = None,
         instruction: str | None = None,
         seed: int | None = None,
+        expected_revision: str | None = None,
     ) -> VoiceProfile:
-        """Atomically update mutable metadata without replacing voice assets."""
+        """Atomically update metadata; acoustic mutations may be revision-pinned."""
+
+        if expected_revision is not None and not VOICE_REVISION_RE.fullmatch(expected_revision):
+            raise ValueError("invalid expected voice revision")
 
         if not isinstance(voice_id, str):
             raise ValueError("invalid voice ID format")
@@ -1096,11 +1287,15 @@ class VoiceRegistry:
         if name is None and instruction is None and seed is None:
             raise ValueError("at least one voice field must be provided")
 
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             profile = self._custom_voices.get(vid)
             if profile is None:
                 raise KeyError(f"custom voice not found: {vid}")
+            if expected_revision is not None and profile.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {profile.id}"
+                )
             if profile.mode == "clone" and (instruction is not None or seed is not None):
                 raise VoiceUpdateUnsupportedError(
                     "clone voice instruction and seed are immutable"
@@ -1126,16 +1321,150 @@ class VoiceRegistry:
                     raise ValueError("voice seed must be between 0 and 4294967295")
                 next_seed = seed
 
+            acoustic_changed = (
+                next_instruction != profile.instruction or next_seed != profile.seed
+            )
+            next_revision = profile.revision
+            if acoustic_changed:
+                next_revision = _voice_revision(
+                    mode=profile.mode,
+                    instruction=next_instruction,
+                    seed=next_seed,
+                    temperature=profile.temperature,
+                    ref_text=profile.ref_text,
+                    reference_audio_sha256=(
+                        profile.creation.reference_audio_sha256
+                        if profile.creation is not None
+                        else None
+                    ),
+                    creation=profile.creation,
+                )
             updated = replace(
                 profile,
                 name=next_name,
                 instruction=next_instruction,
                 seed=next_seed,
+                revision=next_revision,
+                revoked=False if acoustic_changed else profile.revoked,
             )
             candidate = dict(self._custom_voices)
             candidate[vid] = updated
-            self._commit_candidate(candidate)
+            history = (
+                self._history_candidate_locked(vid, profile, updated)
+                if acoustic_changed
+                else self._revision_history
+            )
+            self._commit_candidate(candidate, history_candidate=history)
             return updated
+
+    def list_revisions(self, voice_id: str) -> tuple[VoiceProfile, ...]:
+        """Return immutable acoustic revisions for one custom voice."""
+
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        with self._lock, self._process_lock():
+            self._ensure_available_locked(reload=True)
+            if vid not in self._custom_voices:
+                raise KeyError(f"custom voice not found: {vid}")
+            history = self._revision_history.get(vid, {})
+            return tuple(
+                history[key]
+                for key in sorted(history)
+            )
+
+    def rollback_custom_profile(
+        self,
+        voice_id: str,
+        *,
+        target_revision: str,
+        expected_revision: str,
+    ) -> VoiceProfile:
+        """CAS the friendly voice ID back to one persisted acoustic revision."""
+
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        if not VOICE_REVISION_RE.fullmatch(target_revision):
+            raise ValueError("invalid target voice revision")
+        if not VOICE_REVISION_RE.fullmatch(expected_revision):
+            raise ValueError("invalid expected voice revision")
+        with self._lock, self._process_lock():
+            self._ensure_available_locked(reload=True)
+            current = self._custom_voices.get(vid)
+            if current is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            if current.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {current.id}"
+                )
+            target = self._revision_history.get(vid, {}).get(target_revision)
+            if target is None:
+                raise KeyError(f"voice revision not found: {target_revision}")
+            if target.revoked:
+                raise VoiceRevokedError(
+                    f"voice revision is revoked: {target_revision}"
+                )
+            if target.audio_path is not None:
+                try:
+                    self._controlled_audio_path(
+                        target.audio_path,
+                        vid,
+                        require_exists=True,
+                    )
+                except ValueError as exc:
+                    raise VoiceStoreUnavailableError(
+                        "historic voice audio is unavailable"
+                    ) from exc
+            restored = replace(
+                target,
+                name=current.name,
+                created_at=current.created_at,
+            )
+            candidate = dict(self._custom_voices)
+            candidate[vid] = restored
+            history = self._history_candidate_locked(vid, current, restored)
+            self._commit_candidate(candidate, history_candidate=history)
+            return restored
+
+    def revoke_revision(
+        self,
+        voice_id: str,
+        *,
+        revision: str,
+    ) -> VoiceProfile:
+        """Revoke one persisted revision; active leases remain valid until release."""
+
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        if not VOICE_REVISION_RE.fullmatch(revision):
+            raise ValueError("invalid voice revision")
+        with self._lock, self._process_lock():
+            self._ensure_available_locked(reload=True)
+            current = self._custom_voices.get(vid)
+            if current is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            history = self._revision_history.get(vid, {})
+            target = history.get(revision)
+            if target is None:
+                raise KeyError(f"voice revision not found: {revision}")
+            revoked_target = replace(target, revoked=True)
+            history_candidate = {
+                key: dict(value)
+                for key, value in self._revision_history.items()
+            }
+            revisions = dict(history_candidate.get(vid, {}))
+            revisions[revision] = revoked_target
+            history_candidate[vid] = revisions
+            candidate = dict(self._custom_voices)
+            if current.revision == revision:
+                candidate[vid] = replace(current, revoked=True)
+            self._commit_candidate(
+                candidate,
+                history_candidate=history_candidate,
+            )
+            return revoked_target
 
     def delete_custom_profile(self, voice_id: str) -> None:
         vid = voice_id.strip().lower()
@@ -1143,20 +1472,33 @@ class VoiceRegistry:
             raise ValueError("invalid voice ID format")
         if vid in SYSTEM_VOICE_PROFILES or vid in VOICE_ALIASES:
             raise ValueError(f"system voice cannot be deleted: {vid}")
-        with self._lock:
+        with self._lock, self._process_lock():
             self._ensure_available_locked(reload=True)
             profile = self._custom_voices.get(vid)
             if profile is None:
                 raise KeyError(f"custom voice not found: {vid}")
             if self._voice_has_readers_locked(vid):
                 raise VoiceInUseError(f"custom voice is in use: {vid}")
+            historic = self._revision_history.get(vid, {})
             candidate = dict(self._custom_voices)
             del candidate[vid]
-            self._commit_candidate(candidate)
-            if profile.audio_path is not None:
+            history = {
+                key: dict(value)
+                for key, value in self._revision_history.items()
+                if key != vid
+            }
+            self._commit_candidate(candidate, history_candidate=history)
+            audio_paths = {
+                item.audio_path
+                for item in (profile, *historic.values())
+                if item.audio_path is not None
+            }
+            for raw_path in audio_paths:
                 try:
                     path = self._controlled_audio_path(
-                        profile.audio_path, vid, require_exists=False
+                        raw_path,
+                        vid,
+                        require_exists=False,
                     )
                     path.unlink(missing_ok=True)
                 except OSError as exc:
@@ -1476,10 +1818,13 @@ __all__ = [
     "VOICE_ALIASES",
     "VOICE_ID_RE",
     "VOICE_PROFILES",
+    "VOICE_REVISION_RE",
     "StreamingSentenceSplitter",
     "VoiceCapabilities",
     "VoiceProfile",
     "VoiceRegistry",
+    "VoiceRevisionConflictError",
+    "VoiceRevokedError",
     "apply_crossfade",
     "bounded_sentences",
     "canonicalize_clone_reference_audio",

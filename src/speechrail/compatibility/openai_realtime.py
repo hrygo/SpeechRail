@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, resolve_voice
+from speechrail.runtime.busy import busy_retry_policy
 
 _PROTOCOL_VERSION = "realtime=v1"
 _DIARIZATION_EVENT_VERSION = 1
@@ -53,11 +54,19 @@ _UNSUPPORTED_CLIENT_EVENTS: frozenset[str] = frozenset(
 class RealtimeAdapterError(ValueError):
     """Protocol-level rejection with a stable OpenAI-style error code."""
 
-    def __init__(self, code: str, message: str, *, event_id: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        event_id: str | None = None,
+        busy_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.event_id = event_id
+        self.busy_reason = busy_reason
 
 
 def canonical_asr_model(model: str, *, registered: frozenset[str]) -> str | None:
@@ -561,7 +570,11 @@ def response_done(
 
 
 def error_event(
-    *, code: str, message: str, client_event_id: str | None = None
+    *,
+    code: str,
+    message: str,
+    client_event_id: str | None = None,
+    busy_reason: str | None = None,
 ) -> dict[str, object]:
     error: dict[str, object] = {
         "type": "invalid_request_error",
@@ -570,7 +583,15 @@ def error_event(
     }
     if client_event_id:
         error["event_id"] = client_event_id
-    return {"type": "error", "error": error}
+    event: dict[str, object] = {"type": "error", "error": error}
+    if busy_reason is not None:
+        policy = busy_retry_policy(busy_reason)
+        event["speechrail"] = {
+            "busy_reason": busy_reason,
+            "retryable": policy.retryable,
+            "retry_hint": policy.hint,
+        }
+    return event
 
 
 def resolve_handshake_model(

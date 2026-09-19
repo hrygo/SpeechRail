@@ -40,6 +40,24 @@ class SpeechRequest(BaseModel):
         description="Ephemeral VoiceDesign instruction; never persisted by the TTS port.",
     )
     seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
+    expected_voice_revision: str | None = Field(
+        default=None,
+        pattern=r"^vr_[0-9a-f]{32}$",
+        description=(
+            "Internal negotiated acoustic revision pin; legacy public v1 does not expose it."
+        ),
+    )
+    expected_model_revision: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{40}$",
+        description=(
+            "Internal negotiated model artifact revision pin; legacy public v1 does not expose it."
+        ),
+    )
+    timing_mode: Literal["chunk"] | None = Field(
+        default=None,
+        description="Internal SpeechRail timing negotiation; never changes OpenAI request JSON.",
+    )
 
 
 class AudioChunk(BaseModel):

@@ -33,7 +33,27 @@ REALTIME_TURN_DURATION_BUCKETS: tuple[float, ...] = (
 REALTIME_PHASE_BUCKETS: tuple[float, ...] = (
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0
 )
-_REALTIME_PHASES = frozenset({"asr_admission", "tts_admission", "send"})
+GOVERNOR_WAIT_BUCKETS: tuple[float, ...] = (
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0
+)
+GOVERNOR_SERVICE_BUCKETS: tuple[float, ...] = (
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0
+)
+_GOVERNOR_PURPOSES = frozenset(
+    {"default", "interactive", "prefetch", "voice_creation", "quality_validation"}
+)
+_GOVERNOR_OUTCOMES = frozenset({"completed", "cancelled", "error"})
+_REALTIME_PHASES = frozenset(
+    {
+        "asr_admission",
+        "asr_flush",
+        "asr_commit_ack",
+        "asr_terminal_wait",
+        "tts_admission",
+        "tts_complete",
+        "send",
+    }
+)
 _ALIGNMENT_EVENTS = frozenset(
     {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
 )
@@ -46,6 +66,7 @@ _TTS_DELIVERY_EVENTS = frozenset(
         "clone_loudness_request",
         "clone_loudness_calibrated",
         "clone_loudness_peak_ceiling",
+        "float_overrange",
         "abort_fallback",
         "reload",
     }
@@ -254,6 +275,18 @@ class Metrics:
         self._describe(
             "speechrail_governor_queue_rejections_total",
             "Total requests rejected due to full capacity queue",
+        )
+        self._describe(
+            "speechrail_governor_queue_wait_seconds",
+            "Governor admission queue wait by bounded class and purpose",
+        )
+        self._describe(
+            "speechrail_governor_service_seconds",
+            "Time holding a governor reservation by bounded class and purpose",
+        )
+        self._describe(
+            "speechrail_governor_releases_total",
+            "Governor reservation releases by bounded class, purpose and outcome",
         )
         self._describe(
             "speechrail_worker_evictions_total",
@@ -514,6 +547,51 @@ class Metrics:
             {"class": str(work_class), "reason": "queue_full"},
         )
 
+    def record_governor_admission(
+        self,
+        work_class: object,
+        purpose: object,
+        queue_wait_seconds: float,
+    ) -> None:
+        """Record bounded queue wait without request/user labels."""
+
+        purpose_value = str(purpose)
+        if purpose_value not in _GOVERNOR_PURPOSES:
+            raise ValueError("unsupported governor purpose")
+        self.observe(
+            "speechrail_governor_queue_wait_seconds",
+            max(0.0, queue_wait_seconds),
+            GOVERNOR_WAIT_BUCKETS,
+            **{"class": str(work_class), "purpose": purpose_value},
+        )
+
+    def record_governor_release(
+        self,
+        work_class: object,
+        purpose: object,
+        service_seconds: float,
+        outcome: str,
+    ) -> None:
+        """Record reservation service time and exactly one terminal release."""
+
+        purpose_value = str(purpose)
+        if purpose_value not in _GOVERNOR_PURPOSES:
+            raise ValueError("unsupported governor purpose")
+        if outcome not in _GOVERNOR_OUTCOMES:
+            raise ValueError("unsupported governor release outcome")
+        labels = {"class": str(work_class), "purpose": purpose_value}
+        self.observe(
+            "speechrail_governor_service_seconds",
+            max(0.0, service_seconds),
+            GOVERNOR_SERVICE_BUCKETS,
+            **labels,
+        )
+        self._increment_labeled(
+            "speechrail_governor_releases_total",
+            1.0,
+            {**labels, "outcome": outcome},
+        )
+
     def _increment_labeled(
         self,
         name: str,
@@ -745,6 +823,31 @@ def _append_resource_prometheus(
             "speechrail_resource_heavy_overlap_allowed",
             "Whether the resource governor allows heavy compute overlap",
             _bool_metric_value(resources.get("heavy_overlap_allowed")),
+        ),
+        (
+            "speechrail_asr_scheduler_pending_streaming",
+            "Realtime ASR requests waiting for a safe mode boundary",
+            resources.get("asr_scheduler_pending_streaming"),
+        ),
+        (
+            "speechrail_asr_scheduler_pending_batch",
+            "Batch ASR logical tasks waiting for a bounded execution window",
+            resources.get("asr_scheduler_pending_batch"),
+        ),
+        (
+            "speechrail_asr_batch_head_cumulative_wait_seconds",
+            "Cumulative wait of the current head batch task across its windows",
+            resources.get("asr_batch_head_cumulative_wait_seconds"),
+        ),
+        (
+            "speechrail_asr_batch_head_service_windows",
+            "Completed bounded inference windows for the current head batch task",
+            resources.get("asr_batch_head_service_windows"),
+        ),
+        (
+            "speechrail_asr_batch_head_seconds_since_progress",
+            "Seconds since the current head batch task last completed a window",
+            resources.get("asr_batch_head_seconds_since_progress"),
         ),
     )
     for name, help_text, value in values:

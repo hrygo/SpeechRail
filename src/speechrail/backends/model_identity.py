@@ -56,6 +56,82 @@ class SnapshotIdentity:
     model_size: str | None = None
 
 
+def observed_runtime_revision(identity: Mapping[str, object]) -> str | None:
+    """Derive a safe revision from a validated loaded-worker handshake.
+
+    The revision is intentionally based on the worker's observed structural
+    identity, not on a local snapshot path or a claim that ``shape:`` is a
+    cryptographic weight-content hash.  Incomplete handshakes remain unknown.
+    """
+
+    required = (
+        "backend",
+        "device",
+        "dtype",
+        "sample_rate",
+        "family",
+        "model_variant",
+        "weight_fingerprint",
+    )
+    missing = object()
+    values = {name: identity.get(name, missing) for name in required}
+    if any(value is missing for value in values.values()):
+        return None
+    if any(
+        not isinstance(values[name], str) or not values[name]
+        for name in required
+        if name != "sample_rate"
+    ):
+        return None
+    sample_rate = values["sample_rate"]
+    if type(sample_rate) is not int or sample_rate <= 0:
+        return None
+
+    quantization_bits = identity.get("quantization_bits")
+    quantization_group_size = identity.get("quantization_group_size")
+    if quantization_bits is not None and (
+        type(quantization_bits) is not int or quantization_bits not in {4, 8}
+    ):
+        return None
+    if quantization_group_size is not None and (
+        type(quantization_group_size) is not int or quantization_group_size <= 0
+    ):
+        return None
+    if quantization_bits is None and quantization_group_size is not None:
+        return None
+
+    payload = {
+        "backend": values["backend"],
+        "device": values["device"],
+        "dtype": values["dtype"],
+        "sample_rate": sample_rate,
+        "family": values["family"],
+        "model_variant": values["model_variant"],
+        "quantization_bits": quantization_bits,
+        "quantization_group_size": quantization_group_size,
+        "weight_fingerprint": values["weight_fingerprint"],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "rt_" + hashlib.sha256(encoded).hexdigest()
+
+
+def is_observed_runtime_revision(value: object) -> bool:
+    """Return whether a value has the canonical low-disclosure revision shape."""
+
+    return (
+        type(value) is str
+        and len(value) == 67
+        and value.startswith("rt_")
+        and all(character in "0123456789abcdef" for character in value[3:])
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _TensorHeader:
     name: str
@@ -598,6 +674,8 @@ def verify_loaded_identity(expected: ModelArtifact, actual: dict[str, object]) -
 __all__ = [
     "SnapshotIdentity",
     "inspect_model",
+    "is_observed_runtime_revision",
+    "observed_runtime_revision",
     "read_quantization",
     "verify_loaded_identity",
 ]

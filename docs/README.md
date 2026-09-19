@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail 文档中心"
 status: active
-version: "2.0.7"
-date: 2026-09-17
+version: "2.7.0"
+date: 2026-09-19
 ---
 
 # 📚 SpeechRail 文档中心
@@ -20,9 +20,9 @@ date: 2026-09-17
 
 欢迎查阅 SpeechRail 官方技术文档。本文档中心根据不同读者角色与职责进行模块化组织，助您快速获取所需信息。
 
-## 当前实现基线（2026-09-13）
+## 当前实现基线（2026-09-19）
 
-- 当前受管质量档为 SpeechRail `2.3.2`，由本源码仓库构建 wheel 后经 `tools.install_macos.install_managed` 部署；`runtime/current` 只接受 release 切换，不作为源码编辑目标。
+- 当前源码 release 基线为 SpeechRail `2.7.0`；文档中记录的受管质量档 `2.3.2` 是历史部署证据，不代表当前 `runtime/current`。受管运行时只能由构建 wheel 后经 `tools.install_macos.install_managed` 切换，不能直接编辑源码 checkout 或 `runtime/current`。
 - `/health` 当前应报告 `asr_ready=true`、`tts_ready=true`、`diarization_ready=true`；`realtime_vad` 为 `configured_engine=auto`、`resolved_engine=silero`、`speech_admission_enabled=true`、`ready=true`。
 - Realtime `server_vad` 是服务端 endpointing 能力。调用方可传递自己的窗口：Sona 标准字幕使用 `threshold=0.65/prefix=300ms/silence=400ms`，会议使用同 threshold/prefix、`silence=900ms`；这些不是 SpeechRail 公共 API 的全局默认值。
 - 连续 diarization 的 activity stream 与 endpointing 分离：activity 负责 speaker evidence，完成后以 speaker-only revision 更新，不改写 canonical completed text。
@@ -98,7 +98,7 @@ flowchart TD
 |---|---|---|---|---|
 | **批量语音识别 (ASR)** | 🟢 生产就绪 | `POST /v1/audio/transcriptions` | OpenAI 格式全兼容，WAV 零开销 Fast-path 直读，支持 `verbose_json`、`srt`、`vtt`；可选 `diarized_json` | 真实短音频与长音频基准测试通过；分人另见能力验收 |
 | **高保真语音合成 (TTS)** | 🟢 生产就绪 | `POST /v1/audio/speech` | 24 kHz PCM16 / WAV / MP3 输出，预设音色路由 (`default`, `warm`, `calm` 等) | 真实合成端到端验证通过 |
-| **实时全双工流式 (Realtime)** | 🟢 生产就绪 | `WS /v1/realtime` | 纯净 ASR/TTS 子集，支持 Server VAD、打断 (Barge-in)、逐句流式 TTS；多会话按 `session_id` 路由共享单个 streaming worker（`SPEECHRAIL_REALTIME_MAX_SESSIONS`，默认 2） | OpenAI SDK 与 Sona 接入实测完成；并发多会话冒烟通过 |
+| **实时全双工流式 (Realtime)** | 🟢 生产就绪 | `WS /v1/realtime` | 纯净 ASR/TTS 子集，支持 Server VAD、打断 (Barge-in)、逐句流式 TTS；多会话按 `session_id` 路由共享单个 streaming worker（`SPEECHRAIL_REALTIME_MAX_SESSIONS`，源码默认 3，可配置） | OpenAI SDK 与 Sona 接入实测完成；并发多会话冒烟通过 |
 | **说话人分离 (Diarization)** | 🟡 可选、按 profile 就绪 | 原生 `diarized_json`；Realtime `session.speechrail.diarization.enabled` | 私有 CoreML Sortformer FP16 worker；仅输出匿名 label | [能力诊断与验收](operations/capability-quality-acceptance.md)；真实内存与质量仍需独立实测 |
 | **macOS 常驻运维服务** | 🟢 生产就绪 | `speechrail service` CLI | 用户级 LaunchAgent 管理，支持原子安装、状态感知与一键回滚 | 自动化测试与实机验证通过 |
 

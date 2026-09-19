@@ -100,12 +100,32 @@ struct SpeechRailApp: App {
         capabilityClient = liveServiceClient
         creatorClient = liveServiceClient
 #endif
+        let workStore: CreativeWorkStore
+#if DEBUG
+        // A UI fixture must never read or mutate the user's Application Support works.
+        // Both populated and empty scenarios receive their own per-launch directory.
+        if isUITest {
+            do {
+                workStore = try Self.makeUITestWorkStore(
+                    empty: ProcessInfo.processInfo.arguments.contains("--ui-test-empty-works")
+                )
+            } catch {
+                // Fail closed instead of silently falling back to real user storage.
+                fatalError("Unable to initialize isolated UI test works")
+            }
+        } else {
+            workStore = CreativeWorkStore()
+        }
+#else
+        workStore = CreativeWorkStore()
+#endif
         let registration = isUITest || usesBundledXPCService ? nil : ControlAgentRegistration()
         let appModel = AppModel(
             transport: transport,
             apiClient: diagnosticsClient,
             capabilityClient: capabilityClient,
             creatorClient: creatorClient,
+            workStore: workStore,
             registration: registration
         )
         let navigationState = AppNavigationState()
@@ -212,6 +232,26 @@ struct SpeechRailApp: App {
         _preferences = State(initialValue: sessionPreferences)
         _captionBand = State(initialValue: band)
     }
+
+#if DEBUG
+    @MainActor
+    private static func makeUITestWorkStore(empty: Bool) throws -> CreativeWorkStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SpeechRailUITests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let store = CreativeWorkStore(directory: directory)
+        if !empty {
+            let work = CreativeWork(
+                id: "ui-test-work", title: "测试作品", scriptText: "测试文稿。",
+                voiceID: "serena", voiceName: "测试音色",
+                createdAt: Date(timeIntervalSince1970: 0), durationSeconds: 3,
+                audioFileName: "ui-test-work.wav"
+            )
+            try store.save(work, audioData: UITestAudioFactory.silentWAV)
+        }
+        return store
+    }
+#endif
 
     private static var hasBundledLocalXPCService: Bool {
         let serviceURL = Bundle.main.bundleURL

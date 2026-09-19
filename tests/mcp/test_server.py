@@ -396,6 +396,8 @@ def test_voice_record_accepts_fully_optional_payload() -> None:
 def _quality_rest_handler(request: httpx.Request) -> httpx.Response:
     """Serve the three GETs ``describe`` reads for a quality-tier snapshot."""
     path = request.url.path
+    if request.method == "GET" and path == "/v1/speechrail/capabilities":
+        return httpx.Response(404, json={"detail": "Not Found"})
     if request.method == "GET" and path == "/v1/models":
         return httpx.Response(
             200,

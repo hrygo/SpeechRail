@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 from sys import executable
 from types import SimpleNamespace
@@ -45,8 +46,23 @@ def test_audio_router_can_be_built_from_fake_services(fake_services: AppServices
     assert {route.path for route in router.routes} == {
         "/v1/audio/transcriptions",
         "/v1/audio/speech",
+        "/v1/speechrail/audio/receipts/{receipt_id}",
+        "/v1/speechrail/audio/receipts/by-request/{source_request_id}",
+        "/v1/speechrail/audio/timings/{timing_id}",
         "/v1/voices/previews",
     }
+
+
+def test_services_expose_only_an_observed_asr_runtime_revision(
+    fake_services: AppServices,
+) -> None:
+    revision = "rt_" + ("a" * 64)
+    services = replace(
+        fake_services,
+        asr_worker=SimpleNamespace(runtime_revision=revision),  # type: ignore[arg-type]
+    )
+
+    assert services.asr_runtime_revision == revision
 
 
 def test_system_router_can_be_built_from_fake_services(fake_services: AppServices) -> None:
@@ -65,6 +81,16 @@ def test_system_router_can_be_built_from_fake_services(fake_services: AppService
         "/v1/voices/clone",
         "/v1/voices/clone/prompts",
         "/v1/voices/clone/validate",
+        "/v1/speechrail/pronunciation-sets",
+        "/v1/speechrail/pronunciation-sets/{set_id}",
+        "/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}",
+        "/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}/revoke",
+        "/v1/speechrail/voices/{voice_id}",
+        "/v1/speechrail/voices/{voice_id}/revisions",
+        "/v1/speechrail/voices/{voice_id}/rollback",
+        "/v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke",
+        "/v1/speechrail/voices/clone/idempotency",
+        "/v1/speechrail/voices/{voice_id}/quality-runs",
     }
 
 
