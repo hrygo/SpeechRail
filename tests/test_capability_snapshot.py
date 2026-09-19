@@ -139,6 +139,15 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
     assert budget["minimum"] == 50
     assert budget["maximum"] == 120_000
     assert budget["server_cap"] == "request_timeout_seconds"
+    prepared = entry["prepared_reference_condition_cache"]
+    assert prepared == {
+        "status": "unsupported",
+        "reason": "public_api_has_no_reusable_prepared_reference_condition",
+        "vendor_package": "mlx-audio",
+        "vendor_version": "0.4.8",
+        "public_contract": "generate(ref_audio, ref_text)",
+        "private_cache_observed": True,
+    }
 
 
 def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> None:
@@ -178,7 +187,7 @@ def test_registry_snapshot_is_detached_from_mutable_quality(tmp_path: Path) -> N
     )
 
 
-def test_v2_unknown_voice_and_store_failure_are_safe(tmp_path: Path, monkeypatch) -> None:
+def test_namespaced_unknown_voice_and_store_failure_are_safe(tmp_path: Path, monkeypatch) -> None:
     registry = voices.VoiceRegistry(tmp_path / "voices.json")
     monkeypatch.setattr(voices, "_GLOBAL_VOICE_REGISTRY", registry)
     client = TestClient(create_app(Settings(api_key=None, qwen3_model_dir=None, qwen3_python=None)))
