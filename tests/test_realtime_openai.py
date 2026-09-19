@@ -113,6 +113,18 @@ class UnavailableSpeechSynthesizer:
         return chunks()
 
 
+class FailingSpeechSynthesizer:
+    def __init__(self, failure: Exception) -> None:
+        self._failure = failure
+
+    def synthesize(self, request: SpeechRequest):
+        async def chunks():
+            raise self._failure
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+
+        return chunks()
+
+
 class FakeStreamingSession:
     def __init__(
         self,
@@ -1994,6 +2006,64 @@ def test_realtime_tts_worker_unavailable_publishes_retryable_busy_error() -> Non
     assert events[-1]["type"] == "response.done"
     assert events[-1]["response"]["status"] == "failed"
     assert "private detail" not in repr(events)
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, ValueError])
+def test_realtime_unknown_tts_failures_emit_sanitized_backend_terminal(
+    failure_type: type[Exception], capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def scenario() -> list[dict[str, object]]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                batch_transcriber=FakeTranscriber(),
+                tts_synthesizer=FailingSpeechSynthesizer(
+                    failure_type("/private/model/path and worker detail")
+                ),
+                realtime_asr_factory=FakeStreamingFactory(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_test",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "你好"}],
+                },
+            }
+        )
+        await session.handle({"type": "response.create"})
+        assert session._tts_task is not None
+        await asyncio.wait_for(session._tts_task, timeout=1)
+        await session.close()
+        return events
+
+    events = asyncio.run(scenario())
+    error = next(event for event in events if event["type"] == "error")
+    assert error["error"]["code"] == "backend_error"
+    assert error["error"]["message"] == "TTS response failed"
+    assert events[-1]["type"] == "response.done"
+    assert events[-1]["response"]["status"] == "failed"
+    assert "private/model/path" not in repr(events)
+    assert "worker detail" not in capsys.readouterr().err
 
 
 def test_realtime_session_update_voice_alias_resolves_to_registered_preset() -> None:

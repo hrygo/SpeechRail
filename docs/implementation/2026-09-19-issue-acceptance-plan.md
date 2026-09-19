@@ -560,6 +560,12 @@ enabled render receipt. The regression also verifies that worker stderr details 
 not cross the WebSocket boundary. This is a deterministic handler test, not proof
 of managed worker recovery or realtime quality.
 
+An additional handler regression now covers unknown `RuntimeError` and generic
+exception paths: both terminate with a sanitized `backend_error` and failed
+`response.done`, while neither the client event stream nor stderr receives the
+internal exception text. This closes a protocol/privacy boundary; it does not
+replace managed worker or acoustic acceptance.
+
 ### 2026-09-20 observed TTS runtime identity
 
 The TTS worker parent now retains a revision derived only from the validated

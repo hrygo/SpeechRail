@@ -1553,8 +1553,6 @@ class OpenAIRealtimeSession:
         response_id: str,
         item_id: str,
     ) -> None:
-        import sys
-        import traceback
         if self._tts is None:
             await self._send(
                 error_event(code="backend_not_ready", message="TTS backend is not ready")
@@ -1785,20 +1783,23 @@ class OpenAIRealtimeSession:
                 )
                 return
             if receipt_id is not None:
-                self._services.render_receipts.fail(
-                    receipt_id,
-                    "transport_error",
+                self._services.render_receipts.fail(receipt_id, "backend_error")
+            logger.error("realtime TTS synthesis failed: %s", type(exc).__name__)
+            await self._send(error_event(code="backend_error", message="TTS response failed"))
+            await self._send(
+                self._response_done_event(
+                    response_id=response_id,
+                    status="failed",
+                    receipt_id=receipt_id,
                 )
+            )
             return
         except Exception as exc:
             if receipt_id is not None:
-                self._services.render_receipts.fail(
-                    receipt_id,
-                    "tts_error",
-                )
-            traceback.print_exc(file=sys.stderr)
+                self._services.render_receipts.fail(receipt_id, "backend_error")
+            logger.error("realtime TTS synthesis failed: %s", type(exc).__name__)
             with contextlib.suppress(Exception):
-                await self._send(error_event(code="tts_error", message=str(exc)))
+                await self._send(error_event(code="backend_error", message="TTS response failed"))
                 await self._send(
                     self._response_done_event(
                         response_id=response_id,
