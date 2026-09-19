@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
-
 import pytest
 
 import speechrail.backends.qwen3_tts_worker as worker_module
