@@ -656,8 +656,19 @@ class VoiceRegistry:
         logger.warning("failed to load custom voices: %s", type(exc).__name__)
 
     def _load_custom_voices(self) -> None:
-        with self._lock, self._process_lock():
-            self._load_custom_voices_locked()
+        with self._lock:
+            # Preserve fail-closed construction for an unsafe parent path.  A
+            # sibling lock cannot be opened through a symlinked directory, so
+            # let the loader record the unavailable state before attempting
+            # the process lock.
+            if self._storage_path.parent.is_symlink():
+                self._load_custom_voices_locked()
+                return
+            try:
+                with self._process_lock():
+                    self._load_custom_voices_locked()
+            except VoiceStoreUnavailableError as exc:
+                self._mark_unavailable(exc)
 
     def _load_custom_voices_locked(self) -> None:
         if self._storage_path.parent.is_symlink():
