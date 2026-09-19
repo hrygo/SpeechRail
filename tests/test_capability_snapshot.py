@@ -219,3 +219,32 @@ def test_snapshot_tracks_the_actual_planner_policy(monkeypatch) -> None:
     changed = snapshot()
     assert changed["catalog_revision"] != first["catalog_revision"]
     assert changed["snapshot_id"] != first["snapshot_id"]
+
+
+def test_content_addressed_voice_revision_enables_conditional_synthesis() -> None:
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    revision = "vr_" + "a" * 32
+    profile = voices.VoiceProfile(
+        id="local",
+        name="Local",
+        instruction="stable private recipe",
+        seed=42,
+        mode="instruction",
+        revision=revision,
+    )
+    data = build_capability_snapshot(
+        (profile,),
+        _active("quality"),
+        epoch="epoch",
+        ready=True,
+        enabled_voices=frozenset({"serena"}),
+        sample_rate=24_000,
+    )
+    entry = data["voices"][0]
+    assert entry["voice_revision"] == revision
+    assert entry["voice_identity_assurance"] == "content_addressed"
+    assert entry["conditional_synthesis"]["status"] == "supported"
+    assert entry["conditional_synthesis"]["reason"] == "atomic_registry_lease_pin"
+    encoded = str(entry)
+    assert "stable private recipe" not in encoded
