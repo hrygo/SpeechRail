@@ -14,10 +14,12 @@ from speechrail.backends.qwen3_streaming import (
     Qwen3StreamingBackendConfig,
     Qwen3StreamingSession,
     Qwen3StreamingWorker,
+    RealtimeSessionLimitError,
 )
 from speechrail.config import Settings
 from speechrail.domain.ports import StreamingAsrEvent
 from speechrail.runtime.asr_mode import AsrModeGate
+from speechrail.runtime.busy import BusyReason
 
 
 class FakeStreamingWorker:
@@ -373,6 +375,21 @@ def test_factory_generates_distinct_sessions_by_session_id() -> None:
     assert second.session_id == "s2"
     factory.release(first)
     factory.release(second)
+
+
+def test_factory_session_limit_has_stable_busy_reason() -> None:
+    factory = NativeRealtimeFactory(
+        worker=FakeStreamingWorker(),  # type: ignore[arg-type]
+        mode="windowed",
+        next_session_id=iter(["s1", "s2"]).__next__,
+        max_sessions=1,
+    )
+    first = factory.create(language="zh", prompt="")
+    with pytest.raises(RealtimeSessionLimitError) as caught:
+        factory.create(language="zh", prompt="")
+    assert caught.value.busy_reason == BusyReason.REALTIME_SESSION_LIMIT
+    assert caught.value.retryable is True
+    factory.release(first)
 
 
 def test_session_proxies_open_and_streams_events() -> None:
