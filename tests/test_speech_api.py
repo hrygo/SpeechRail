@@ -642,3 +642,137 @@ def test_speech_voice_alias_rejected_when_mapped_preset_not_registered() -> None
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "voice_not_found"
+
+
+def _governor_histogram_labels(client: TestClient, name: str) -> set[str]:
+    response = client.get("/metrics", headers={"accept": "application/json"})
+    assert response.status_code == 200
+    series = response.json()["histograms"].get(name, {})
+    assert isinstance(series, dict)
+    return set(series)
+
+
+def test_speechrail_interactive_purpose_uses_realtime_governor_class() -> None:
+    client = _speech_client()
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Purpose": "interactive"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+    assert response.status_code == 200
+
+    labels = _governor_histogram_labels(
+        client, "speechrail_governor_queue_wait_seconds"
+    )
+    assert any(
+        'class="realtime_tts"' in label and 'purpose="interactive"' in label
+        for label in labels
+    )
+
+
+def test_plain_openai_speech_keeps_historical_batch_admission() -> None:
+    client = _speech_client()
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+    assert response.status_code == 200
+
+    labels = _governor_histogram_labels(
+        client, "speechrail_governor_queue_wait_seconds"
+    )
+    assert any(
+        'class="batch_tts"' in label and 'purpose="default"' in label
+        for label in labels
+    )
+
+
+def test_speechrail_prefetch_purpose_stays_in_batch_class() -> None:
+    client = _speech_client()
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Purpose": "prefetch"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+    assert response.status_code == 200
+
+    labels = _governor_histogram_labels(
+        client, "speechrail_governor_queue_wait_seconds"
+    )
+    assert any(
+        'class="batch_tts"' in label and 'purpose="prefetch"' in label
+        for label in labels
+    )
+
+
+def test_speechrail_latency_budget_is_relative_and_server_bounded() -> None:
+    class SlowBudgetSynthesizer:
+        def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
+            del request
+
+            async def chunks() -> AsyncIterator[AudioChunk]:
+                await asyncio.sleep(0.2)
+                yield AudioChunk(
+                    response_id="budget",
+                    chunk_index=0,
+                    audio=b"\x00\x00",
+                )
+
+            return chunks()
+
+    client = TestClient(
+        create_app(
+            Settings(
+                qwen3_model_dir=None,
+                qwen3_python=None,
+                request_timeout_seconds=1.0,
+            ),
+            tts_synthesizer=SlowBudgetSynthesizer(),
+        )
+    )
+    response = client.post(
+        "/v1/audio/speech",
+        headers={
+            "SpeechRail-Purpose": "interactive",
+            "SpeechRail-Latency-Budget-Ms": "50",
+        },
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "backend_timeout"
+
+
+def test_speechrail_purpose_rejects_arbitrary_priority_strings() -> None:
+    client = _speech_client()
+    response = client.post(
+        "/v1/audio/speech",
+        headers={"SpeechRail-Purpose": "highest_priority"},
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "你好",
+            "voice": "default",
+            "response_format": "pcm",
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
