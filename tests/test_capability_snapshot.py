@@ -116,6 +116,23 @@ def test_effective_matrix_uses_captured_voice_and_base_lane(
             == "supported"
         )
     assert entry["operations"]["http_speech"]["parameters"]["seed"]["status"] == "unsupported"
+    scheduling = entry["operations"]["http_speech"]["scheduling"]
+    assert scheduling == {
+        "default_class": "batch_tts",
+        "purpose_classes": {
+            "interactive": "realtime_tts",
+            "prefetch": "batch_tts",
+        },
+        "same_lane_serial": True,
+        "hard_preemption": False,
+    }
+    purpose = entry["operations"]["http_speech"]["parameters"]["purpose"]
+    assert purpose["values"] == ["interactive", "prefetch"]
+    assert purpose["transport"] == "SpeechRail-Purpose header"
+    budget = entry["operations"]["http_speech"]["parameters"]["latency_budget_ms"]
+    assert budget["minimum"] == 50
+    assert budget["maximum"] == 120_000
+    assert budget["server_cap"] == "request_timeout_seconds"
 
 
 def test_content_revision_invalidates_on_private_recipe_but_not_readiness() -> None:
