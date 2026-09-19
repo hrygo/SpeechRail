@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import os
 import tempfile
 import threading
@@ -25,6 +27,21 @@ class IdempotencyStoreUnavailableError(RuntimeError):
 class IdempotencyDecision:
     state: Literal["new", "pending", "completed"]
     result_id: str | None = None
+
+
+_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+_RECORD_KEYS = frozenset(
+    {
+        "owner",
+        "operation",
+        "key_hash",
+        "fingerprint",
+        "state",
+        "created_at",
+        "result_id",
+        "completed_at",
+    }
+)
 
 
 class DurableIdempotencyJournal:
@@ -54,26 +71,75 @@ class DurableIdempotencyJournal:
                 raise ValueError("invalid idempotency journal")
             records: list[dict[str, object]] = []
             for item in raw:
-                if not isinstance(item, dict):
-                    raise ValueError("invalid idempotency record")
-                required = {
-                    "owner",
-                    "operation",
-                    "key_hash",
-                    "fingerprint",
-                    "state",
-                    "created_at",
-                }
-                if not required.issubset(item):
-                    raise ValueError("incomplete idempotency record")
-                if item["state"] not in {"pending", "completed"}:
-                    raise ValueError("invalid idempotency state")
-                records.append(item)
+                records.append(self._validate_record(item))
             return records
         except Exception as exc:
             raise IdempotencyStoreUnavailableError(
                 "idempotency journal is unavailable"
             ) from exc
+
+    @staticmethod
+    def _validate_record(item: object) -> dict[str, object]:
+        if not isinstance(item, dict):
+            raise ValueError("invalid idempotency record")
+        required = {
+            "owner",
+            "operation",
+            "key_hash",
+            "fingerprint",
+            "state",
+            "created_at",
+        }
+        if not required.issubset(item) or not set(item).issubset(_RECORD_KEYS):
+            raise ValueError("invalid idempotency record schema")
+
+        owner = item["owner"]
+        operation = item["operation"]
+        key_hash = item["key_hash"]
+        fingerprint = item["fingerprint"]
+        state = item["state"]
+        created_at = item["created_at"]
+        if not isinstance(owner, str) or not owner or len(owner) > 128:
+            raise ValueError("invalid idempotency owner")
+        if not isinstance(operation, str) or not operation or len(operation) > 128:
+            raise ValueError("invalid idempotency operation")
+        if not isinstance(key_hash, str) or _HEX_64_RE.fullmatch(key_hash) is None:
+            raise ValueError("invalid idempotency key hash")
+        if not isinstance(fingerprint, str) or not fingerprint or len(fingerprint) > 256:
+            raise ValueError("invalid idempotency fingerprint")
+        if state not in {"pending", "completed"}:
+            raise ValueError("invalid idempotency state")
+        if (
+            isinstance(created_at, bool)
+            or not isinstance(created_at, (int, float))
+            or not math.isfinite(float(created_at))
+            or float(created_at) < 0
+        ):
+            raise ValueError("invalid idempotency created_at")
+
+        result_id = item.get("result_id")
+        if result_id is not None and (
+            not isinstance(result_id, str)
+            or not result_id
+            or len(result_id) > 256
+        ):
+            raise ValueError("invalid idempotency result id")
+
+        completed_at = item.get("completed_at")
+        if state == "completed":
+            if result_id is None:
+                raise ValueError("completed idempotency record has no result")
+            if (
+                isinstance(completed_at, bool)
+                or not isinstance(completed_at, (int, float))
+                or not math.isfinite(float(completed_at))
+                or float(completed_at) < float(created_at)
+            ):
+                raise ValueError("invalid idempotency completed_at")
+        elif completed_at is not None:
+            raise ValueError("pending idempotency record cannot be completed")
+
+        return dict(item)
 
     def _bounded_locked(
         self, records: list[dict[str, object]]
