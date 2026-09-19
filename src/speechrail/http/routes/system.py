@@ -70,7 +70,11 @@ from speechrail.domain.voice_quality_metrics import compute_output_quality_metri
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.runtime.admission import QueueFullError
-from speechrail.runtime.resource_governor import GovernorQueueFullError, WorkClass
+from speechrail.runtime.resource_governor import (
+    GovernorQueueFullError,
+    WorkClass,
+    WorkPurpose,
+)
 
 _CLONE_PROMPTS_ASSET = (
     Path(__file__).resolve().parent.parent.parent
@@ -580,7 +584,7 @@ async def _evaluate_probe_intelligibility(
 ) -> float:
     """Transcribe one valid sample per fixed probe after the TTS phase completes."""
     scores: list[float] = []
-    async with services.governor.reserve(WorkClass.BATCH_ASR, expires_at=expires_at):
+    async with services.governor.reserve(\n        WorkClass.BATCH_ASR,\n        expires_at=expires_at,\n        purpose=WorkPurpose.QUALITY_VALIDATION,\n    ):
         for probe in vq.VOICE_QUALITY_V1_ZH_PROBES:
             pcm = representative_pcm.get(probe["id"])
             if pcm is None:
@@ -1854,6 +1858,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 WorkClass.BATCH_TTS,
                 expires_at=expires_at,
                 resource_key=tts_resource_key(synthesizer, voice_id),
+                purpose=WorkPurpose.QUALITY_VALIDATION,
             ):
                 with registry.lease_profile(voice_id) as profile:
                     (
