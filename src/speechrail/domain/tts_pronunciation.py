@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -445,6 +448,33 @@ class PronunciationRegistry:
         )
         self._lock = threading.RLock()
 
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        """Serialize registry read/modify/write cycles across processes."""
+
+        lock_path = self._path.with_name(f".{self._path.name}.lock")
+        handle = None
+        try:
+            if self._path.parent.is_symlink() or lock_path.is_symlink():
+                raise OSError("unsafe pronunciation registry path")
+            self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            handle = lock_path.open("a+b")
+            lock_path.chmod(0o600)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except Exception as exc:
+            if handle is not None:
+                handle.close()
+            raise PronunciationStoreUnavailableError(
+                "pronunciation registry lock is unavailable"
+            ) from exc
+        try:
+            yield
+        finally:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+
     def _load_locked(self) -> dict[str, dict[str, PronunciationSet]]:
         if not self._path.exists():
             return {}
@@ -547,7 +577,7 @@ class PronunciationRegistry:
             ) from exc
 
     def list_sets(self) -> tuple[PronunciationSet, ...]:
-        with self._lock:
+        with self._lock, self._process_lock():
             data = self._load_locked()
             current: list[PronunciationSet] = []
             for revisions in data.values():
@@ -561,7 +591,7 @@ class PronunciationRegistry:
         *,
         revision: str | None = None,
     ) -> PronunciationSet:
-        with self._lock:
+        with self._lock, self._process_lock():
             data = self._load_locked()
             revisions = data.get(set_id)
             if not revisions:
@@ -587,7 +617,7 @@ class PronunciationRegistry:
         expected_revision: str | None,
     ) -> PronunciationSet:
         candidate = make_pronunciation_set(set_id, entries)
-        with self._lock:
+        with self._lock, self._process_lock():
             data = self._load_locked()
             revisions = dict(data.get(set_id, {}))
             current = revisions[next(reversed(revisions))] if revisions else None
@@ -606,7 +636,7 @@ class PronunciationRegistry:
         set_id: str,
         revision: str,
     ) -> PronunciationSet:
-        with self._lock:
+        with self._lock, self._process_lock():
             data = self._load_locked()
             revisions = dict(data.get(set_id, {}))
             value = revisions.get(revision)
@@ -619,7 +649,7 @@ class PronunciationRegistry:
             return revoked
 
     def delete(self, set_id: str) -> None:
-        with self._lock:
+        with self._lock, self._process_lock():
             data = self._load_locked()
             if set_id not in data:
                 raise KeyError(set_id)

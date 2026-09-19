@@ -394,7 +394,7 @@ multi-clone/multi-text MLX measurements, first-audio/service-output timings, and
 listening evidence remain required for final #34 closure.
 
 
-## Current-head reconciliation — 2026-09-19
+## Current-head reconciliation — 2026-09-20
 
 The seven-increment sections above are historical checkpoints. They remain useful
 as an audit trail, but the current remote head has continued the same single-PR
@@ -403,8 +403,9 @@ below are now present. This section does not convert synthetic evidence into
 managed-runtime or human-acoustic evidence.
 
 The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
-the later ledger commit, deadline-test stabilization and runtime-default documentation
-are now followed by implementation head `34194a083c925239a92b504e1d1bd967b6c63be0`.
+the later ledger commit, deadline-test stabilization, runtime-default documentation,
+and cross-process journal-lock fix are now followed by current head
+`de069653e9d22ac036bda3b5d1c29d40342122c4`.
 
 ### Implementation deltas since the seven-increment checkpoint
 
@@ -423,6 +424,8 @@ are now followed by implementation head `34194a083c925239a92b504e1d1bd967b6c63be
   `revision=null`. Voice-design and clone creation use separate durable,
   owner/operation/key/fingerprint journals; pending records survive restart and an
   uncertain registry write remains pending instead of silently retrying publication.
+  Journal read/modify/write transactions also hold a sibling `fcntl` lock so
+  separate journal instances cannot overwrite each other's pending records.
   Recovery validates the stored result against the canonical request payload.
 - **#64**: HTTP and negotiated Realtime receipts record the resolved voice/catalog
   identity, pre-transport PCM sample count and SHA-256, and explicit completed,
@@ -439,7 +442,9 @@ are now followed by implementation head `34194a083c925239a92b504e1d1bd967b6c63be
 - **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
   handling, protected URL/email/code spans, raw→normalized→spoken hashes and
   bounded raw-span projections. The optional v1 header applies a pinned set while
-  keeping ordinary OpenAI requests unchanged.
+  keeping ordinary OpenAI requests unchanged. Registry read/modify/write
+  transactions also use a sibling `fcntl` lock, so concurrent set updates cannot
+  overwrite a revision history from another process.
 - **#73**: the optional HTTP chunk sidecar is validated against the planner and the
   actual delivered PCM sample count; mismatches become `unavailable` rather than a
   false complete timeline. Normalization changes, backend absence, cancellation
@@ -462,22 +467,23 @@ governor maintenance, streaming, Realtime, planner and frozen loudness contains
 temporary idempotency journals so rerunning the suite cannot read a developer's
 default `~/.speechrail` journal. This is local source/synthetic evidence; the full
 repository gate and current-head macOS App job also passed in CI run
-`35451951303`.
+`35456308093`.
 
-### 2026-09-20 durable idempotency cross-process serialization
+### 2026-09-20 durable registry cross-process serialization
 
-`DurableIdempotencyJournal` now places a sibling lock file beside its JSON journal
-and holds an exclusive `fcntl` lock across each load/modify/save transaction.
-The existing in-process `RLock` remains in place; the file lock closes the gap
-between separate journal instances or a process handoff, where two writers could
-otherwise each read the same state and overwrite the other's pending creation.
-The regression test externally holds that lock from a separate file descriptor,
-verifies the journal operation waits, and then releases it without changing the
-existing `idempotency_conflict` error semantics. The durable idempotency, voice
-design registration, revision contract, and revision route slice is **67 passed**
-on Python 3.12.14, with Ruff and targeted Mypy passing. This proves cross-process
-serialization behavior, not power-loss durability, filesystem repair, or the
-managed runtime's actual model/revision identity.
+`DurableIdempotencyJournal` and `PronunciationRegistry` now place a sibling lock
+file beside their JSON stores and hold an exclusive `fcntl` lock across each
+load/modify/save transaction. The existing in-process `RLock` remains in place;
+the file lock closes the gap between separate registry instances or a process
+handoff, where two writers could otherwise each read the same state and overwrite
+the other's pending creation or pronunciation revision history. Regression tests
+externally hold each lock from a separate file descriptor, verify the operation
+waits, and then release it without changing existing conflict error semantics.
+The durable idempotency, voice design/revision, pronunciation and route slices
+pass (**67** and **17** tests respectively) on Python 3.12.14, with Ruff and
+targeted Mypy passing. This proves cross-process serialization behavior, not
+power-loss durability, filesystem repair, or the managed runtime's actual
+model/revision identity.
 
 ### 2026-09-20 managed model measurement: partial TTS warm slice
 
