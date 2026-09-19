@@ -63,25 +63,25 @@ class TtsTimingRegistry:
             display_mapping_reason=display_mapping_reason,
         )
         with self._lock:
+            self._make_room_locked()
             self._entries[timing_id] = state
             self._order.append(timing_id)
-            self._evict_locked()
         return timing_id
 
-    def _evict_locked(self) -> None:
-        while len(self._order) > self._max_entries:
+    def _make_room_locked(self) -> None:
+        while len(self._order) >= self._max_entries:
             victim = next(
                 (
                     index
-                    for index, timing_id in enumerate(self._order)
-                    if self._entries[timing_id].status != "pending"
+                    for index, existing_id in enumerate(self._order)
+                    if self._entries[existing_id].status != "pending"
                 ),
                 None,
             )
             if victim is None:
                 raise RuntimeError("timing store is full of pending entries")
-            timing_id = self._order.pop(victim)
-            self._entries.pop(timing_id, None)
+            existing_id = self._order.pop(victim)
+            self._entries.pop(existing_id, None)
 
     def complete(self, timing_id: str, sidecar: TtsTimingSidecar) -> None:
         with self._lock:
