@@ -2513,6 +2513,12 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorBody'
+    NotFound:
+      description: Requested SpeechRail resource was not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorBody'
     Unauthorized:
       description: Authentication failed
       headers:
