@@ -260,6 +260,42 @@ def _voice_entry(
     return entry
 
 
+def _voice_list_entry(
+    profile: VoiceProfile,
+    active: ActiveModelCatalog,
+    tts_ready: bool,
+    *,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """Project only routing-safe discovery fields for the public voice list."""
+
+    detailed = _voice_entry(
+        profile,
+        active,
+        tts_ready,
+        enabled=enabled,
+    )
+    safe_fields = (
+        "id",
+        "name",
+        "aliases",
+        "is_default",
+        "is_system",
+        "created_at",
+        "available",
+        "variant",
+        "capabilities",
+        "mode",
+        "revision",
+        "revoked",
+    )
+    return {
+        key: detailed[key]
+        for key in safe_fields
+        if key in detailed
+    }
+
+
 def _safe_revision_entry(
     profile: VoiceProfile,
     *,
@@ -732,7 +768,7 @@ def create_system_router(services: AppServices) -> APIRouter:
         return {
             "object": "list",
             "data": [
-                _voice_entry(
+                _voice_list_entry(
                     profile,
                     active,
                     services.tts_ready,
@@ -746,6 +782,8 @@ def create_system_router(services: AppServices) -> APIRouter:
     async def voice_detail(voice_id: str, request: Request) -> JSONResponse:
         """Return one system or custom voice profile."""
         request_id: str = getattr(request.state, "request_id", "") or "req_voices"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
         try:
             profile = get_voice_registry().get_profile(voice_id)
         except VoiceStoreUnavailableError:
