@@ -237,11 +237,13 @@ def test_revocation_blocks_new_leases_but_not_an_existing_snapshot(tmp_path):
         assert leased.revoked is False
         assert revoked.revoked is True
 
-    with pytest.raises(VoiceRevokedError):
-        with registry.lease_profile(
+    with (
+        pytest.raises(VoiceRevokedError),
+        registry.lease_profile(
             "revocable", expected_revision=created.revision
-        ):
-            pass
+        ),
+    ):
+        pass
 
 
 def test_revoked_historic_revision_cannot_be_rolled_back(tmp_path):
