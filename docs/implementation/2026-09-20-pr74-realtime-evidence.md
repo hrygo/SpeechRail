@@ -49,6 +49,29 @@ worker 的阶段/资源切片，不是 paced speech、CER/WER 或长时稳定性
 C1 证明当前运行态可观察到 TTS 活跃期间的 ASR∥TTS overlap；C2 中 ASR 很快
 完成，不能据此推出反向公平性或优先级结论。
 
+## paced Realtime 切片
+
+为补充 E1 的第二种测量模式，在同一 managed `quality` 服务上使用 macOS
+系统 `Tingting` 生成一段已知中文短语，再转换为 16 kHz、mono、PCM16。音频
+与原始 AIFF 均保存在仓库外的同一 benchmark 目录，未写入仓库；这是真实声学
+输入的协议测量，但不是人工录音，也不构成 CER/WER 或自然度证据。
+
+手动 turn 以 20 ms chunk 按媒体时间线发送，先完成 1 个 paced warm-up，再测量
+5 个 sequential session。音频长度为 `6.895 s`；以 PCM16 振幅阈值 `400` 定义
+的最后 active sample 位于 `6.710 s`，因此以下 `last-speech` 数字是可复核的
+activity-threshold proxy，不冒称人工标注的语音边界。
+
+| 指标 | p50 | p95 | min–max | 成功 |
+|---|---:|---:|---:|---:|
+| commit → transcription completed | `120.73 ms` | `124.57 ms` | `110.49–125.37 ms` | 5/5 |
+| activity proxy → transcription completed | `7172.12 ms` | `7177.99 ms` | `7166.22–7178.43 ms` | 5/5 |
+| TTS first audio delta | `43.42 ms` | `43.91 ms` | `42.82–44.03 ms` | 5/5 |
+
+每个 session 均有非空 transcript；TTS 完整输出为 `107520` bytes。第一项是
+post-commit service tail，第二项包含近 6.7 秒的 paced media timeline，不能互相
+替代。该切片补充了 E1 的 paced 输入与 commit-tail 分布，但没有覆盖 cold/switch、
+并发公平、热稳定性、人工语音识别质量或当前 PR head 的 managed wheel 一致性。
+
 ## 受保护 metrics 快照
 
 在同一服务上通过鉴权 `/metrics` 做了只读核对。当前 managed `2.7.0` 实际
@@ -70,6 +93,6 @@ release 没有证明已经安装该观测契约；因此不能用这份旧 runti
 `SpeechRail-Receipt-Id`，因此本轮没有新增 #64 的 managed receipt identity
 证据。
 
-尚未覆盖：真实语音 ASR paced commit-tail、cold/switch、持续混合负载、维护任务
-交接、取消清理、memory/thermal soak、clone 多音色、声学自然度、身份匹配、
-ABX/人工听感，以及与当前 PR head 的 managed wheel 一致性证明。
+尚未覆盖：cold/switch、持续混合负载、维护任务交接、取消清理、memory/thermal
+soak、clone 多音色、声学自然度、身份匹配、ABX/人工听感，以及与当前 PR head 的
+managed wheel 一致性证明。

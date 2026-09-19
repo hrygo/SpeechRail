@@ -631,6 +631,23 @@ managed `2.7.0` 在 integrity receipt 请求中未返回 `SpeechRail-Receipt-Id`
 由于当前源码包含更完整的 phase 集合，这一差异进一步证明 managed `2.7.0`
 不是当前 PR head 的观测契约证明，不能据此宣称 #44 E3a 完成。
 
+### 2026-09-20 paced Realtime evidence
+
+在同一 managed `quality` generation 102 上补做了第二种 E1 测量模式：用 macOS
+系统 `Tingting` 生成已知中文短语，转换为 16 kHz mono PCM16，以 20 ms chunk
+按媒体时间线发送。先做 1 个 paced warm-up，再测 5 个 sequential manual-turn
+session；音频长 `6.895 s`，以 PCM16 振幅阈值 `400` 得到的最后 active sample
+在 `6.710 s`。commit→completed 为 `110.49–125.37 ms`（p50 `120.73 ms`、
+p95 `124.57 ms`），activity-threshold proxy→completed 为 `7166.22–7178.43 ms`
+（p50 `7172.12 ms`、p95 `7177.99 ms`），TTS first delta 为 `42.82–44.03 ms`
+（p50 `43.42 ms`、p95 `43.91 ms`），5/5 transcript 非空且 TTS 输出均为
+`107520` bytes。该输入是系统合成语音，不是人工录音；后一个数字包含 paced
+媒体时长，不能误读成纯服务延迟。完整脱敏摘要见
+`docs/implementation/2026-09-20-pr74-realtime-evidence.md`。
+
+这补充了 E1 的 paced/commit-tail 分布，但不替代人工语音 CER/WER、声学自然度、
+cold/switch、并发公平、热稳定性或当前 PR head 的 managed wheel 一致性证据。
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
