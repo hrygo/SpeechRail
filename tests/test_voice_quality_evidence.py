@@ -25,6 +25,8 @@ def _report(
         tested_at="2026-09-19T00:00:00Z",
         reference=VoiceQualityReference(
             duration_seconds=3.0,
+            sample_rate=24_000,
+            channels=1,
             noise_floor_dbfs=-60.0,
             estimated_snr_db=30.0,
             clipping_ratio=0.0,
