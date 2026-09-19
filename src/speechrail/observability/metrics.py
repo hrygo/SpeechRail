@@ -33,6 +33,16 @@ REALTIME_TURN_DURATION_BUCKETS: tuple[float, ...] = (
 REALTIME_PHASE_BUCKETS: tuple[float, ...] = (
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0
 )
+GOVERNOR_WAIT_BUCKETS: tuple[float, ...] = (
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0
+)
+GOVERNOR_SERVICE_BUCKETS: tuple[float, ...] = (
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0
+)
+_GOVERNOR_PURPOSES = frozenset(
+    {"default", "interactive", "prefetch", "voice_creation", "quality_validation"}
+)
+_GOVERNOR_OUTCOMES = frozenset({"completed", "cancelled", "error"})
 _REALTIME_PHASES = frozenset({"asr_admission", "tts_admission", "send"})
 _ALIGNMENT_EVENTS = frozenset(
     {"fixed_text_completed", "fixed_text_unavailable", "fixed_text_overflow"}
@@ -254,6 +264,18 @@ class Metrics:
         self._describe(
             "speechrail_governor_queue_rejections_total",
             "Total requests rejected due to full capacity queue",
+        )
+        self._describe(
+            "speechrail_governor_queue_wait_seconds",
+            "Governor admission queue wait by bounded class and purpose",
+        )
+        self._describe(
+            "speechrail_governor_service_seconds",
+            "Time holding a governor reservation by bounded class and purpose",
+        )
+        self._describe(
+            "speechrail_governor_releases_total",
+            "Governor reservation releases by bounded class, purpose and outcome",
         )
         self._describe(
             "speechrail_worker_evictions_total",
@@ -512,6 +534,51 @@ class Metrics:
             "speechrail_governor_queue_rejections_total",
             1.0,
             {"class": str(work_class), "reason": "queue_full"},
+        )
+
+    def record_governor_admission(
+        self,
+        work_class: object,
+        purpose: object,
+        queue_wait_seconds: float,
+    ) -> None:
+        """Record bounded queue wait without request/user labels."""
+
+        purpose_value = str(purpose)
+        if purpose_value not in _GOVERNOR_PURPOSES:
+            raise ValueError("unsupported governor purpose")
+        self.observe(
+            "speechrail_governor_queue_wait_seconds",
+            max(0.0, queue_wait_seconds),
+            GOVERNOR_WAIT_BUCKETS,
+            **{"class": str(work_class), "purpose": purpose_value},
+        )
+
+    def record_governor_release(
+        self,
+        work_class: object,
+        purpose: object,
+        service_seconds: float,
+        outcome: str,
+    ) -> None:
+        """Record reservation service time and exactly one terminal release."""
+
+        purpose_value = str(purpose)
+        if purpose_value not in _GOVERNOR_PURPOSES:
+            raise ValueError("unsupported governor purpose")
+        if outcome not in _GOVERNOR_OUTCOMES:
+            raise ValueError("unsupported governor release outcome")
+        labels = {"class": str(work_class), "purpose": purpose_value}
+        self.observe(
+            "speechrail_governor_service_seconds",
+            max(0.0, service_seconds),
+            GOVERNOR_SERVICE_BUCKETS,
+            **labels,
+        )
+        self._increment_labeled(
+            "speechrail_governor_releases_total",
+            1.0,
+            {**labels, "outcome": outcome},
         )
 
     def _increment_labeled(
