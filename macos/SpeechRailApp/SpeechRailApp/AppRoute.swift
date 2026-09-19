@@ -107,7 +107,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .models:
             "先下载并校验，再应用到运行档位；两者是独立操作。"
         case .diagnostics:
-            "本机自检结论与可执行的修复动作。"
+            "本机检查的结论与每一步可以照做的修复动作。"
         case .developerDocs:
             "把本机语音能力接入你的应用：地址、接口、示例与排查。"
         }

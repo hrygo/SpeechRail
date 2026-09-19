@@ -26,19 +26,19 @@ public struct PreflightDiagnosticsView: View {
             Button {
                 Task { await model.refreshPreflight() }
             } label: {
-                Label("重新运行预检", systemImage: "arrow.clockwise")
+                Label("重新运行诊断", systemImage: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
             // 稿的页头次按钮是 30pt（脚本 `secondaryButton`）；系统 `.large` 是 28。
             .controlSize(.large)
             .disabled(model.isBusy || model.isRefreshingPreflight)
-            .help("重新运行预检")
-            .accessibilityLabel("重新运行预检")
+            .help("重新运行诊断")
+            .accessibilityLabel("重新运行诊断")
             .accessibilityIdentifier("diagnostics-run")
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                // 重新运行预检是这一页的主动作，它留在正文的结论面板旁；
+                // 重新运行诊断是这一页的主动作，它留在正文的结论面板旁；
                 // 头部只放跨页要用的那一件事（§6.2）。
                 PageActionButton(
                     systemImage: "doc.on.clipboard",
@@ -52,15 +52,15 @@ public struct PreflightDiagnosticsView: View {
         }
         .focusedSceneValue(
             \.reloadPageCommand,
-            ReloadPageCommand(title: "重新运行预检") {
+            ReloadPageCommand(title: "重新运行诊断") {
                 Task { await model.refreshPreflight() }
             }
         )
         .inspector(isPresented: $showInspector) {
             DeveloperInspector {
                 SectionHeading(
-                    title: "预检上下文",
-                    detail: "预检只读环境、模型文件和配置，不会下载模型，也不会改变服务。"
+                    title: "诊断上下文",
+                    detail: "诊断只读环境、模型文件和配置，不会下载模型，也不会改变服务。"
                 )
                 LabeledContent("运行档位", value: displayedHealth?.profile?.rawValue ?? "未读取")
                 LabeledContent("配置档位", value: model.profile?.preset?.rawValue ?? "未配置")
@@ -94,7 +94,7 @@ public struct PreflightDiagnosticsView: View {
             if model.preflightChecks.isEmpty && model.isRefreshingPreflight {
                 // REDESIGN-SPEC §8：服务四页的「加载中」是 ProgressView，
                 // 不是一份空清单，也不是一个结论。
-                ProgressView("正在运行预检…")
+                ProgressView("正在运行诊断…")
                     .frame(
                         maxWidth: .infinity,
                         minHeight: SpeechRailDesignTokens.Layout.diagnosticsBodyMinimumHeight,
@@ -111,7 +111,7 @@ public struct PreflightDiagnosticsView: View {
                     kind: .conclusion,
                     tone: .healthy,
                     title: "未发现问题",
-                    message: "\(model.preflightChecks.count) 项预检全部通过。这只说明环境与配置满足启动条件，不代表模型质量、性能或发布验收通过。",
+                    message: "\(model.preflightChecks.count) 项检查全部通过。这只说明环境与配置满足启动条件，不代表模型质量、性能或发布验收通过。",
                     actionTitle: "查看检查明细"
                 ) {
                     showsPassingChecks = true
@@ -185,7 +185,7 @@ public struct PreflightDiagnosticsView: View {
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityLabel("预检检查项")
+                .accessibilityLabel("诊断检查项")
             }
             Divider()
             CardFoot(note: checklistFootnote) {
@@ -270,14 +270,14 @@ public struct PreflightDiagnosticsView: View {
         return reportCopySucceeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
     }
 
-    /// Figma `listFoot`：上次预检多久前、一共查了几项 —— 两个本机事实，
+    /// Figma `listFoot`：上次诊断多久前、一共查了几项 —— 两个本机事实，
     /// 不涉及任何检查内容或路径。
     private var checklistFootnote: String {
         let count = model.preflightChecks.count
         guard let lastUpdated = model.lastPreflightRefresh else {
-            return count == 0 ? "尚未运行预检" : "共 \(count) 项 · 上次预检时间未记录"
+            return count == 0 ? "尚未运行诊断" : "共 \(count) 项 · 上次诊断时间未记录"
         }
-        return "上次预检 \(relativeAgeText(lastUpdated)) · 共 \(count) 项"
+        return "上次诊断 \(relativeAgeText(lastUpdated)) · 共 \(count) 项"
     }
 
     private func relativeAgeText(_ date: Date) -> String {
@@ -520,7 +520,7 @@ public struct PreflightDiagnosticsView: View {
                 steps: [
                     "打开「模型」页，确认这一档需要的模型文件都已登记。",
                     "运行「下载并校验」，直到每项的存在状态与校验状态都通过。",
-                    "回到本页重新运行预检，确认这一项已经通过。",
+                    "回到本页重新运行诊断，确认这一项已经通过。",
                 ]
             )
         }
@@ -533,11 +533,11 @@ public struct PreflightDiagnosticsView: View {
         {
             return DiagnosticRecoveryPath(
                 route: .overview,
-                detail: "先打开「服务状态」确认能在这里管理服务、运行环境正常，再重新运行预检；本页不会自动改写配置或权限。",
+                detail: "先打开「服务状态」确认能在这里管理服务、运行环境正常，再重新运行诊断；本页不会自动改写配置或权限。",
                 steps: [
                     "打开「服务状态」，确认可以在这里管理服务，且服务已就绪。",
                     "确认运行环境、配置文件和模型文件的访问权限满足运行条件。",
-                    "回到本页重新运行预检，确认这一项已经通过。",
+                    "回到本页重新运行诊断，确认这一项已经通过。",
                 ]
             )
         }
@@ -547,7 +547,7 @@ public struct PreflightDiagnosticsView: View {
             steps: [
                 "复制脱敏诊断报告（不含凭据、原始音频或本地绝对路径）。",
                 "把报告连同本页的检查项交给开发者。",
-                "修复后回到本页重新运行预检，确认这一项已经通过。",
+                "修复后回到本页重新运行诊断，确认这一项已经通过。",
             ]
         )
     }
@@ -730,7 +730,7 @@ public struct PreflightDiagnosticsView: View {
         withAnimation(reduceMotion ? nil : .easeOut(duration: SpeechRailDesignTokens.Motion.standardDuration)) {
             reportMessage = reportCopySucceeded ? "已复制脱敏诊断报告" : "复制失败，请重试"
         }
-        // 回执是临时的：几秒后页脚的事实位要还给「上次预检 … · 共 N 项」。
+        // 回执是临时的：几秒后页脚的事实位要还给「上次诊断 … · 共 N 项」。
         Task {
             try? await Task.sleep(for: Self.reportReceiptDuration)
             guard reportMessage != nil else { return }
