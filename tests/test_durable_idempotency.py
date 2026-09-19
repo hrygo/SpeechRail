@@ -204,3 +204,86 @@ def test_bounded_journal_never_evicts_unresolved_pending_records(tmp_path):
             fingerprint="payload-overflow",
             provisional_result_id="voice-overflow",
         )
+
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {
+            "owner": 7,
+            "operation": "voice.clone",
+            "key_hash": "a" * 64,
+            "fingerprint": "payload",
+            "state": "pending",
+            "created_at": 1.0,
+        },
+        {
+            "owner": "local",
+            "operation": "voice.clone",
+            "key_hash": "not-a-hash",
+            "fingerprint": "payload",
+            "state": "pending",
+            "created_at": 1.0,
+        },
+        {
+            "owner": "local",
+            "operation": "voice.clone",
+            "key_hash": "a" * 64,
+            "fingerprint": "payload",
+            "state": "completed",
+            "created_at": 2.0,
+            "result_id": "voice-1",
+            "completed_at": 1.0,
+        },
+        {
+            "owner": "local",
+            "operation": "voice.clone",
+            "key_hash": "a" * 64,
+            "fingerprint": "payload",
+            "state": "pending",
+            "created_at": 1.0,
+            "unexpected": "field",
+        },
+    ],
+)
+def test_malformed_durable_records_fail_closed(tmp_path, record) -> None:
+    path = tmp_path / "journal.json"
+    path.write_text(json.dumps([record]), encoding="utf-8")
+    journal = DurableIdempotencyJournal(path)
+
+    with pytest.raises(IdempotencyStoreUnavailableError):
+        journal.lookup(
+            owner="local",
+            operation="voice.clone",
+            key="known-key",
+        )
+
+
+def test_completed_record_requires_result_and_monotonic_completion_time(tmp_path) -> None:
+    path = tmp_path / "journal.json"
+    journal = DurableIdempotencyJournal(path)
+    journal.begin(
+        owner="local",
+        operation="voice.clone",
+        key="known-key",
+        fingerprint="payload-a",
+        provisional_result_id="voice-1",
+    )
+    journal.complete(
+        owner="local",
+        operation="voice.clone",
+        key="known-key",
+        fingerprint="payload-a",
+        result_id="voice-1",
+    )
+
+    restarted = DurableIdempotencyJournal(path)
+    decision = restarted.lookup(
+        owner="local",
+        operation="voice.clone",
+        key="known-key",
+    )
+    assert decision is not None
+    assert decision.state == "completed"
+    assert decision.result_id == "voice-1"
