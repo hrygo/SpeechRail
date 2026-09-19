@@ -405,7 +405,7 @@ managed-runtime or human-acoustic evidence.
 The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
 the later ledger commit, deadline-test stabilization, runtime-default documentation,
 cross-process journal-lock fix, and unsafe-parent hardening fix are now followed
-by current head `3531141b243c3ce46a7c60a398a62beb76c1d275`.
+by current head `2cd7d61db0bdca24a510ccc7dcaa3286d5942ec4`.
 
 ### Implementation deltas since the seven-increment checkpoint
 
