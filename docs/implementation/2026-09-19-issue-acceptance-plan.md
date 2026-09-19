@@ -105,13 +105,13 @@ unknown/unsupported states, conditional GET and safe descriptor/quality projecti
 are included. Configured model metadata is NOT promoted to observed worker identity;
 legacy voices retain `voice_revision=null`, and conditional synthesis remains unsupported.
 
-MCP `describe` exposes the atomic v2 result separately from legacy observations;
+MCP `describe` exposes the atomic namespaced capability result separately from legacy observations;
 legacy voice lists use an allowlist before entering Agent context. Only missing routes
 or unknown schemas fall back; auth/storage errors remain errors. `/v1/voices` retains
 its historical source-detail projection for compatibility; this privacy boundary and
 migration are documented, not silently called a universal owner-access fix.
 
-Tests first reproduced private/nested legacy metadata disclosure, missing v2 access,
+Tests first reproduced private/nested legacy metadata disclosure, missing namespaced discovery access,
 and a malformed quality status crash. Result after implementation: **112 passed**
 (`tests/test_capability_snapshot.py tests/mcp`, Python **3.12.14**), including the
 three-profile/nine-voice-mode matrix and OpenAPI schema validation. Ruff over
