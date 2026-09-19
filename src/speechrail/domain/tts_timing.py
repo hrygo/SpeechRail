@@ -42,7 +42,7 @@ class TtsTimingSidecar(BaseModel):
     coordinate_space: Literal[
         "normalized_spoken_unicode_codepoints"
     ] = "normalized_spoken_unicode_codepoints"
-    planner_version: Literal["tts_bounded_v1"] = "tts_bounded_v1"
+    planner_version: Literal["tts_bounded_v1"] = PLANNER_VERSION
     sample_rate: int = Field(gt=0)
     text_length: int = Field(ge=0)
     total_samples: int = Field(ge=0)
