@@ -404,8 +404,8 @@ managed-runtime or human-acoustic evidence.
 
 The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
 the later ledger commit, deadline-test stabilization, runtime-default documentation,
-and cross-process journal-lock fix are now followed by current head
-`71b05280a92c1700bf194e25513f54d22e2f3e53`.
+cross-process journal-lock fix, and unsafe-parent hardening fix are now followed
+by current head `3531141b243c3ce46a7c60a398a62beb76c1d275`.
 
 ### Implementation deltas since the seven-increment checkpoint
 
@@ -416,7 +416,7 @@ and cross-process journal-lock fix are now followed by current head
   code boundary, not the managed multi-voice or listening gate.
 - **#53**: the two macOS UI tests that targeted the ambiguous “服务状态” label now
   select the unique `overview` accessibility identifier. Current-head CI run
-  `35450728000` passed the macOS App Build & Tests job; this remains CI evidence,
+  `35457829975` passed the macOS App Build & Tests job; this remains CI evidence,
   not a local UI-automation run.
 - **#63**: custom voices now persist content-addressed `vr_` revisions and bounded
   revision history, support expected-revision CAS update/rollback/revoke/delete
@@ -468,7 +468,7 @@ governor maintenance, streaming, Realtime, planner and frozen loudness contains
 temporary idempotency journals so rerunning the suite cannot read a developer's
 default `~/.speechrail` journal. This is local source/synthetic evidence; the full
 repository gate and current-head macOS App job also passed in CI run
-`35456308093`.
+`35457829975`.
 
 ### 2026-09-20 durable registry cross-process serialization
 
@@ -485,6 +485,17 @@ passes **68** tests and the pronunciation/route slice **17** tests on Python
 3.12.14, with Ruff and targeted Mypy passing. This proves cross-process
 serialization behavior, not power-loss durability, filesystem repair, or the
 managed runtime's actual model/revision identity.
+
+### 2026-09-20 unsafe metadata-parent hardening
+
+The shared lock helper now preserves the existing fail-closed behavior for a
+symlinked custom-voice metadata parent: `VoiceRegistry` records the store as
+unavailable during construction before attempting a sibling lock, and mutating
+operations still raise `VoiceStoreUnavailableError` without writing through the
+symlink. The regression was reproduced on both CI platforms, fixed in
+`3531141b243c3ce46a7c60a398a62beb76c1d275`, and the complete Linux/macOS test
+jobs passed in CI run `35457829975`. This is path-safety evidence only; it does
+not establish filesystem repair or managed-runtime evidence.
 
 ### 2026-09-20 managed model measurement: partial TTS warm slice
 
