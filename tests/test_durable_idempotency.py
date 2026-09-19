@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import fcntl
 import json
+import threading
 
 import pytest
 
@@ -140,6 +142,38 @@ def test_pending_replay_preserves_provisional_result_id(tmp_path):
     )
     assert replay.state == "pending"
     assert replay.result_id == "clone_idem_deadbeef"
+
+
+def test_journal_waits_for_a_process_lock_held_by_another_instance(tmp_path) -> None:
+    path = tmp_path / "journal.json"
+    lock_path = path.with_name(f".{path.name}.lock")
+    journal = DurableIdempotencyJournal(path)
+    finished = threading.Event()
+    decisions = []
+
+    with lock_path.open("a+b") as held_lock:
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_EX)
+
+        def begin_while_locked() -> None:
+            decisions.append(
+                journal.begin(
+                    owner="local",
+                    operation="voice.clone",
+                    key="cross-process-key",
+                    fingerprint="payload-a",
+                )
+            )
+            finished.set()
+
+        thread = threading.Thread(target=begin_while_locked)
+        thread.start()
+        assert not finished.wait(timeout=0.5)
+
+        fcntl.flock(held_lock.fileno(), fcntl.LOCK_UN)
+        assert finished.wait(timeout=1.0)
+        thread.join(timeout=1.0)
+
+    assert [decision.state for decision in decisions] == ["new"]
 
 
 def test_lookup_requires_key_possession_and_returns_terminal_state(tmp_path):
