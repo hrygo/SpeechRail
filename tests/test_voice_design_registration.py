@@ -606,3 +606,44 @@ def test_design_idempotency_recovers_pending_after_restart_without_regeneration(
     assert decision is not None
     assert decision.state == "completed"
     assert decision.result_id == "designed_base"
+
+
+def test_design_write_outcome_unknown_preserves_pending_without_duplicate_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal_path = tmp_path / "design-idempotency.json"
+    monkeypatch.setattr(
+        "speechrail.http.routes.voice_designs._design_idempotency_journal",
+        DurableIdempotencyJournal(journal_path),
+    )
+    client, registry, first_synth, first_asr = make_client(tmp_path, monkeypatch)
+    original_save = registry._save_custom_voices
+
+    def write_then_fail() -> None:
+        original_save()
+        raise OSError("write outcome unknown")
+
+    monkeypatch.setattr(registry, "_save_custom_voices", write_then_fail)
+    headers = {"Idempotency-Key": "design-uncertain-write"}
+
+    first = client.post("/v1/voices/designs", headers=headers, json=payload())
+    assert first.status_code == 503
+    assert len(first_synth.requests) == 1
+    assert len(first_asr.requests) == 1
+
+    restarted_journal = DurableIdempotencyJournal(journal_path)
+    monkeypatch.setattr(
+        "speechrail.http.routes.voice_designs._design_idempotency_journal",
+        restarted_journal,
+    )
+    second_client, _restarted_registry, second_synth, second_asr = make_client(
+        tmp_path,
+        monkeypatch,
+    )
+    second = second_client.post("/v1/voices/designs", headers=headers, json=payload())
+
+    assert second.status_code == 201, second.text
+    assert second.json()["voice"]["id"] == "designed_base"
+    assert second_synth.requests == []
+    assert second_asr.requests == []

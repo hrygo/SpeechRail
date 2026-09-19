@@ -138,6 +138,29 @@ def _clone_payload_fingerprint(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _clone_result_matches(
+    profile: VoiceProfile,
+    *,
+    name: str,
+    ref_text: str,
+    canonical_wav: bytes,
+) -> bool:
+    """Prove a recovered clone belongs to the idempotent request payload."""
+
+    if (
+        profile.mode != "clone"
+        or profile.name != name.strip()
+        or profile.ref_text != ref_text.strip()
+        or profile.audio_path is None
+    ):
+        return False
+    try:
+        stored_digest = hashlib.sha256(Path(profile.audio_path).read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return stored_digest == hashlib.sha256(canonical_wav).hexdigest()
+
+
 def _tts_lifecycle_diagnostics(
     services: AppServices,
 ) -> dict[str, object] | None:
@@ -1603,6 +1626,18 @@ def create_system_router(services: AppServices) -> APIRouter:
                 except ValueError:
                     profile = None
                 if profile is not None:
+                    if not _clone_result_matches(
+                        profile,
+                        name=name,
+                        ref_text=ref_text,
+                        canonical_wav=canonical_wav,
+                    ):
+                        return error_response(
+                            409,
+                            request_id,
+                            "voice_already_exists",
+                            "Target voice ID is owned by a different clone payload",
+                        )
                     try:
                         _clone_idempotency_journal.complete(
                             owner=_CLONE_IDEMPOTENCY_OWNER,
@@ -1641,13 +1676,26 @@ def create_system_router(services: AppServices) -> APIRouter:
                         "idempotency_result_unavailable",
                         "The original idempotent clone result is no longer available",
                     )
+                if not _clone_result_matches(
+                    profile,
+                    name=name,
+                    ref_text=ref_text,
+                    canonical_wav=canonical_wav,
+                ):
+                    return error_response(
+                        409,
+                        request_id,
+                        "voice_already_exists",
+                        "Idempotency result does not match the clone payload",
+                    )
                 return JSONResponse(
                     status_code=201,
                     content=_voice_entry(profile, active, services.tts_ready),
                 )
 
-        side_effect_committed = False
+        publication_started = False
         try:
+            publication_started = True
             profile = get_voice_registry().create_cloned_profile(
                 name=name.strip(),
                 ref_text=ref_text.strip(),
@@ -1657,7 +1705,6 @@ def create_system_router(services: AppServices) -> APIRouter:
                 quality=report.to_dict(),
                 create_only=idempotency_key is not None,
             )
-            side_effect_committed = True
             if idempotency_key and fingerprint is not None:
                 result_id = _clone_idempotency_journal.complete(
                     owner=_CLONE_IDEMPOTENCY_OWNER,
@@ -1674,7 +1721,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                         "Another completed result already owns this Idempotency-Key",
                     )
         except VoiceStoreUnavailableError:
-            if idempotency_key and fingerprint is not None and not side_effect_committed:
+            if idempotency_key and fingerprint is not None and not publication_started:
                 with suppress(IdempotencyStoreUnavailableError):
                     _clone_idempotency_journal.abort(
                         owner=_CLONE_IDEMPOTENCY_OWNER,
@@ -1709,6 +1756,18 @@ def create_system_router(services: AppServices) -> APIRouter:
                 )
             try:
                 profile = get_voice_registry().get_profile(vid_str)
+                if not _clone_result_matches(
+                    profile,
+                    name=name,
+                    ref_text=ref_text,
+                    canonical_wav=canonical_wav,
+                ):
+                    return error_response(
+                        409,
+                        request_id,
+                        "voice_already_exists",
+                        "Target voice ID is owned by a different clone payload",
+                    )
                 _clone_idempotency_journal.complete(
                     owner=_CLONE_IDEMPOTENCY_OWNER,
                     operation=_CLONE_IDEMPOTENCY_OPERATION,
@@ -1725,7 +1784,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                     retryable=True,
                 )
         except ValueError as exc:
-            if idempotency_key and fingerprint is not None and not side_effect_committed:
+            if idempotency_key and fingerprint is not None and not publication_started:
                 with suppress(IdempotencyStoreUnavailableError):
                     _clone_idempotency_journal.abort(
                         owner=_CLONE_IDEMPOTENCY_OWNER,

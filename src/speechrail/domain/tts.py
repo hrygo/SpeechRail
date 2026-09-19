@@ -1068,24 +1068,24 @@ class VoiceRegistry:
                 if custom_profile is None:
                     raise ValueError(f"unknown preset voice: {voice}")
                 profile = custom_profile
-                if profile.revoked:
-                    raise VoiceRevokedError(
-                        f"voice revision is revoked: {profile.id}"
+            if expected_revision is not None and profile.revision != expected_revision:
+                raise VoiceRevisionConflictError(
+                    f"voice revision changed for {profile.id}"
+                )
+            if not profile.is_system and profile.revoked:
+                raise VoiceRevokedError(
+                    f"voice revision is revoked: {profile.id}"
+                )
+            if not profile.is_system and profile.audio_path is not None:
+                try:
+                    audio_path = self._controlled_audio_path(
+                        profile.audio_path, profile.id, require_exists=True
                     )
-                if expected_revision is not None and profile.revision != expected_revision:
-                    raise VoiceRevisionConflictError(
-                        f"voice revision changed for {profile.id}"
-                    )
-                if profile.audio_path is not None:
-                    try:
-                        audio_path = self._controlled_audio_path(
-                            profile.audio_path, profile.id, require_exists=True
-                        )
-                    except ValueError as exc:
-                        raise VoiceStoreUnavailableError(
-                            "custom voice audio is unavailable"
-                        ) from exc
-                    self._audio_readers[audio_path] = self._audio_readers.get(audio_path, 0) + 1
+                except ValueError as exc:
+                    raise VoiceStoreUnavailableError(
+                        "custom voice audio is unavailable"
+                    ) from exc
+                self._audio_readers[audio_path] = self._audio_readers.get(audio_path, 0) + 1
         try:
             yield profile
         finally:
