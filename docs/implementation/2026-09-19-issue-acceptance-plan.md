@@ -439,7 +439,9 @@ by current head `2cd7d61db0bdca24a510ccc7dcaa3286d5942ec4`.
 - **#44**: the active documentation now records source release `2.7.0`, labels the
   managed `2.3.2` benchmark as historical evidence, and aligns the example
   `SPEECHRAIL_REALTIME_MAX_SESSIONS=3` with the `Settings` default. E1/E3 and
-  real scheduling, memory and thermal measurements remain pending.
+  real scheduling, memory and thermal measurements remain pending. Realtime keeps
+  the public `backend_busy` code while exposing worker lifecycle failures as the
+  distinct low-cardinality `speechrail.busy_reason=backend_unavailable`.
 - **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
   handling, protected URL/email/code spans, raw→normalized→spoken hashes and
   bounded raw-span projections. The optional v1 header applies a pinned set while
