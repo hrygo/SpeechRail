@@ -21,6 +21,7 @@ from uuid import uuid4
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceStoreUnavailableError
+from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
@@ -149,6 +150,7 @@ class Qwen3TtsWorker:
         self._fallback_abort_count = 0
         self._reload_count = 0
         self._on_delivery_event = on_delivery_event
+        self._timing_sidecars: dict[str, TtsTimingSidecar] = {}
         self.last_active: float = time.monotonic()
         self.model_variant: str = config.model_variant
 
@@ -255,6 +257,8 @@ class Qwen3TtsWorker:
                         frame_payload["instruction"] = request.instruction
                     if request.seed is not None:
                         frame_payload["seed"] = request.seed
+                    if request.timing_mode is not None:
+                        frame_payload["timing_mode"] = request.timing_mode
                     binding = resolve_binding(
                         self.model_variant,
                         request.voice,
@@ -288,6 +292,8 @@ class Qwen3TtsWorker:
                                 raise RuntimeError("worker_response_id_mismatch")
                             if frame.get("type") == "completed":
                                 self._record_completion_stats(frame)
+                                if request.timing_mode == "chunk":
+                                    self._store_timing_sidecar(response_id, frame)
                                 completed = True
                                 return
                             if frame.get("type") == "error":
@@ -335,6 +341,27 @@ class Qwen3TtsWorker:
                             await self._transport.abort()
 
         return stream()
+
+    def _store_timing_sidecar(
+        self,
+        response_id: str,
+        frame: dict[str, object],
+    ) -> None:
+        raw = frame.get("timing_sidecar")
+        if not isinstance(raw, dict):
+            return
+        try:
+            sidecar = TtsTimingSidecar.model_validate(raw)
+        except ValueError:
+            return
+        self._timing_sidecars[response_id] = sidecar
+        while len(self._timing_sidecars) > 64:
+            self._timing_sidecars.pop(next(iter(self._timing_sidecars)))
+
+    def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
+        """Consume one completed timing result without affecting audio delivery."""
+
+        return self._timing_sidecars.pop(response_id, None)
 
     def _record_completion_stats(self, frame: dict[str, object]) -> None:
         raw = frame.get("delivery_stats")
@@ -504,6 +531,16 @@ class Qwen3TtsCapabilityRouter:
         else:
             selected = self.primary
         return selected.synthesize(request)
+
+    def take_timing_sidecar(self, response_id: str) -> TtsTimingSidecar | None:
+        """Consume timing metadata from whichever worker served the response."""
+
+        sidecar = self.primary.take_timing_sidecar(response_id)
+        if sidecar is not None:
+            return sidecar
+        if self.clone is not None:
+            return self.clone.take_timing_sidecar(response_id)
+        return None
 
     async def evict_warm_capability(self) -> None:
         """Release all TTS workers before a heavyweight validation phase or idle eviction."""
