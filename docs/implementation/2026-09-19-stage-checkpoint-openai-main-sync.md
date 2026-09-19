@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail issue acceptance checkpoint — OpenAI compatibility and main sync"
-status: active
+status: historical
 date: 2026-09-19
 ---
 
