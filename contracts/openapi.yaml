@@ -660,6 +660,27 @@ paths:
             type: string
             enum: [integrity]
           description: Request a SpeechRail service-side integrity receipt.
+        - in: header
+          name: SpeechRail-Purpose
+          required: false
+          schema:
+            type: string
+            enum: [interactive, prefetch]
+          description: |
+            Optional bounded admission intent. interactive maps to the existing
+            realtime TTS reservation class; prefetch remains batch. Omission
+            preserves the historical OpenAI-compatible batch admission behavior.
+        - in: header
+          name: SpeechRail-Latency-Budget-Ms
+          required: false
+          schema:
+            type: integer
+            minimum: 50
+            maximum: 120000
+          description: |
+            Relative service budget in milliseconds, capped by the configured
+            server request timeout. It is not a client-supplied absolute deadline
+            and cannot create an arbitrary priority class.
       requestBody:
         required: true
         content:
