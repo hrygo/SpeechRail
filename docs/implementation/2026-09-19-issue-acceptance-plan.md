@@ -402,7 +402,9 @@ integration and supersedes the earlier “unimplemented” entries where the cha
 below are now present. This section does not convert synthetic evidence into
 managed-runtime or human-acoustic evidence.
 
-Current source head at this checkpoint: `db117796b42bc86b3623cbdd03c3722808cd1fe3`.
+The reconciliation implementation checkpoint was `db117796b42bc86b3623cbdd03c3722808cd1fe3`;
+the later ledger commit and deadline-test stabilization are now followed by
+current head `994a991ab99c6b368ca39eab092781a1c08d02bd`.
 
 ### Implementation deltas since the seven-increment checkpoint
 
@@ -412,8 +414,9 @@ Current source head at this checkpoint: `db117796b42bc86b3623cbdd03c3722808cd1fe
   remains request-scoped and length-preserving. This closes the reproduced F1–F4
   code boundary, not the managed multi-voice or listening gate.
 - **#53**: the two macOS UI tests that targeted the ambiguous “服务状态” label now
-  select the unique `overview` accessibility identifier. Current-head CI must still
-  execute the App job before this issue is called accepted.
+  select the unique `overview` accessibility identifier. Current-head CI run
+  `35450728000` passed the macOS App Build & Tests job; this remains CI evidence,
+  not a local UI-automation run.
 - **#63**: custom voices now persist content-addressed `vr_` revisions and bounded
   revision history, support expected-revision CAS update/rollback/revoke/delete
   behavior, preserve reader leases across changes, and keep legacy records at
@@ -454,14 +457,14 @@ governor maintenance and frozen loudness contains **179 tests: all passed**. The
 voice-quality route tests use per-test temporary idempotency journals so rerunning
 the suite cannot read a developer's default `~/.speechrail` journal. This is local
 source/synthetic evidence; the full repository gate and current-head macOS App job
-remain separate checks.
+also passed in CI run `35450728000`.
 
 ### Remaining acceptance gates
 
-The PR is still Draft. No merge, deployment, model download, voice registration or
-issue closure was performed. Final acceptance still requires current-head CI,
-managed Apple-Silicon measurements for #34/#44/#65/#72, actual worker/runtime
-identity evidence for #62/#63/#64/#67, vendor/runtime cache evidence for #66,
-matched identity/listening experiments for #68, and the human/acoustic portions of
-#34/#67/#72/#73. These gates are intentionally not inferred from fake backends,
-HTTP success, or the deterministic test count.
+The PR remains open. No merge, deployment, model download, voice registration or
+issue closure was performed. Current-head CI is green; final acceptance still
+requires managed Apple-Silicon measurements for #34/#44/#65/#72, actual
+worker/runtime identity evidence for #62/#63/#64/#67, vendor/runtime cache
+evidence for #66, matched identity/listening experiments for #68, and the
+human/acoustic portions of #34/#67/#72/#73. These gates are intentionally not
+inferred from fake backends, HTTP success, or the deterministic test count.
