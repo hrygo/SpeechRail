@@ -88,6 +88,8 @@ from speechrail.domain.itn import apply_light_itn
 from speechrail.domain.ports import RealtimeAsrSession, SpeechRequest
 from speechrail.domain.tts import (
     DEFAULT_VOICE_ID,
+    VoiceRevisionConflictError,
+    VoiceRevokedError,
     VoiceStoreUnavailableError,
     resolve_voice,
 )
@@ -1633,6 +1635,8 @@ class OpenAIRealtimeSession:
                 TTSDeliveryError,
                 GovernorQueueFullError,
                 TimeoutError,
+                VoiceRevisionConflictError,
+                VoiceRevokedError,
                 VoiceStoreUnavailableError,
             ) as exc:
                 code = getattr(exc, "code", None) or (
