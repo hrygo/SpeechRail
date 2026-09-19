@@ -445,7 +445,11 @@ as implementation changes.
   real scheduling, memory and thermal measurements remain pending. Realtime keeps
   the public `backend_busy` code while exposing worker lifecycle failures as the
   distinct low-cardinality `speechrail.busy_reason=backend_unavailable`, with
-  namespaced `retryable` and `retry_hint` guidance for each busy cause.
+  namespaced `retryable` and `retry_hint` guidance for each busy cause. Batch
+  transcription now applies the same worker-lifecycle distinction at its HTTP
+  boundary: known unavailable/dead-worker failures return `503 backend_busy`
+  with bounded `SpeechRail-Busy-Reason` and `SpeechRail-Retry-Hint` headers;
+  unknown runtime failures are not reclassified.
 - **#70**: versioned pronunciation sets now provide deterministic conflict/revoke
   handling, protected URL/email/code spans, raw→normalized→spoken hashes and
   bounded raw-span projections. The optional v1 header applies a pinned set while

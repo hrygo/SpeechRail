@@ -91,6 +91,45 @@ def test_busy_asr_mode_returns_stable_429_with_request_id() -> None:
     }
 
 
+def test_worker_unavailable_transcription_returns_stable_retry_diagnostic() -> None:
+    async def unavailable_backend(
+        audio: bytes,
+        language: str | None,
+        prompt: str,
+        include_timestamps: bool = False,
+    ) -> TranscriptResult:
+        del audio, language, prompt, include_timestamps
+        raise RuntimeError("worker_unavailable; worker stderr tail: private detail")
+
+    request_id = "req_worker_unavailable"
+    client = TestClient(
+        create_app(
+            Settings(max_upload_bytes=8, qwen3_model_dir=None, qwen3_python=None),
+            transcribe=unavailable_backend,
+        )
+    )
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("clip.wav", b"1234", "audio/wav")},
+        headers={"X-Request-ID": request_id},
+    )
+
+    assert response.status_code == 503
+    assert response.headers["X-Request-ID"] == request_id
+    assert response.headers["Retry-After"] == "1"
+    assert response.headers["SpeechRail-Busy-Reason"] == "backend_unavailable"
+    assert response.headers["SpeechRail-Retry-Hint"] == "retry_after_worker_recovery"
+    assert response.json()["error"] == {
+        "message": "SpeechRail inference worker is unavailable",
+        "type": "server_error",
+        "code": "backend_busy",
+        "request_id": request_id,
+        "retryable": True,
+    }
+    assert "private detail" not in response.text
+
+
 def test_ffmpeg_resolution_uses_absolute_fallback_without_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

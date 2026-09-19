@@ -511,7 +511,7 @@ Realtime 不在 OpenAI 原生范围内提供说话人标签，因此 SpeechRail 
 | **409** | `voice_in_use` | `true` | 自定义音色仍有活动 TTS 读者，等待当前合成完成后重试删除 |
 | **403** | `voice_update_unsupported` | `false` | 系统音色或 clone 音色的不可变来源字段不能修改 |
 | **400** | `voice_update_failed` | `false` | 音色更新字段不符合校验规则，修正名称、instruction 或 seed 后重试 |
-| **503** | `backend_not_ready` | `true` | 对应模型 Worker 尚未启动或预检未通过，等待就绪 |
+| **503** | `backend_not_ready` / `backend_busy` | `true` | 对应模型 Worker 尚未启动、预检未通过或正在恢复；`backend_busy` 的 worker 生命周期错误附带 `SpeechRail-Busy-Reason: backend_unavailable` 与 `SpeechRail-Retry-Hint: retry_after_worker_recovery`，不暴露 worker stderr |
 | **503** | `backend_timeout` | `true` | 队列准入、worker 生成或音频交付超出总 deadline，减小音频分块 |
 | **503** | `voice_store_unavailable` | `true` | 自定义音色 registry 或音频存储不可读/不可写，先保留原文件并按手册修复 |
 

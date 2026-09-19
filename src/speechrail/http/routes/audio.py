@@ -67,6 +67,7 @@ from speechrail.http.formatters import (
 )
 from speechrail.runtime.admission import QueueFullError
 from speechrail.runtime.asr_mode import AsrModeBusy
+from speechrail.runtime.busy import BusyReason, busy_retry_policy, infer_backend_busy_reason
 from speechrail.runtime.diarization_admission import DiarizationAdmissionFullError
 from speechrail.runtime.executable import resolve_configured_executable
 from speechrail.runtime.resource_governor import (
@@ -87,6 +88,38 @@ _FFMPEG_QUEUE_MAX_CHUNKS = 4
 _FFMPEG_TIMEOUT_SECONDS = 15.0
 _MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
 _DIARIZATION_UNCHUNKED_MAX_SECONDS = 30
+
+
+def _worker_unavailable_response(
+    request_id: str,
+    exc: BaseException,
+) -> JSONResponse | None:
+    """Map a known worker lifecycle failure to a stable retryable response.
+
+    Worker exceptions can contain a private stderr tail.  Only the bounded
+    reason and retry hint cross the HTTP boundary; the raw exception is left
+    for internal logging and debugging.
+    """
+
+    reason = infer_backend_busy_reason(exc)
+    if reason != BusyReason.BACKEND_UNAVAILABLE:
+        return None
+    policy = busy_retry_policy(reason)
+    response = error_response(
+        503,
+        request_id,
+        "backend_busy",
+        "SpeechRail inference worker is unavailable",
+        retryable=policy.retryable,
+    )
+    response.headers.update(
+        {
+            "Retry-After": "1",
+            "SpeechRail-Busy-Reason": str(reason),
+            "SpeechRail-Retry-Hint": policy.hint,
+        }
+    )
+    return response
 
 
 class _SpeechVoiceID(BaseModel):
@@ -1115,6 +1148,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Diarization backend returned an invalid result",
                 retryable=True,
             )
+        except RuntimeError as exc:
+            if (response := _worker_unavailable_response(request_id, exc)) is not None:
+                return response
+            raise
         # Freeze ASR text before deriving units.  Diarization can revise only
         # speakers; it must never be allowed to rewrite canonical text.
         result = result.model_copy(
