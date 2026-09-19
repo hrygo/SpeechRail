@@ -109,7 +109,10 @@ def test_v1_pronunciation_revision_rewrites_actual_synthesis_and_receipt(
 
     response = client.post(
         "/v1/audio/speech",
-        headers={\n            "SpeechRail-Pronunciation-Set": f"story@{revision}",\n            "SpeechRail-Receipt-Mode": "integrity",\n        },
+        headers={
+            "SpeechRail-Pronunciation-Set": f"story@{revision}",
+            "SpeechRail-Receipt-Mode": "integrity",
+        },
         json={
             "model": "speechrail/qwen3-tts",
             "input": "去长安",
