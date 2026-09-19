@@ -238,6 +238,27 @@ def test_metrics_escapes_label_values() -> None:
     assert 'weird\\"path\\\\with\\nnewline' in text
 
 
+def test_asr_scheduler_progress_metrics_use_fixed_names_without_task_labels() -> None:
+    metrics = Metrics()
+    text = metrics.render_prometheus(
+        resources={
+            "asr_scheduler_pending_streaming": 2,
+            "asr_scheduler_pending_batch": 1,
+            "asr_batch_head_cumulative_wait_seconds": 3.5,
+            "asr_batch_head_service_windows": 4,
+            "asr_batch_head_seconds_since_progress": 0.75,
+        }
+    )
+
+    assert "speechrail_asr_scheduler_pending_streaming 2" in text
+    assert "speechrail_asr_scheduler_pending_batch 1" in text
+    assert "speechrail_asr_batch_head_cumulative_wait_seconds 3.5" in text
+    assert "speechrail_asr_batch_head_service_windows 4" in text
+    assert "speechrail_asr_batch_head_seconds_since_progress 0.75" in text
+    assert "request_id" not in text
+    assert "task_id" not in text
+
+
 def test_metrics_governor_uses_class_label() -> None:
     """Verify governor gauges and rejections share the low-cardinality class label."""
     from types import SimpleNamespace
