@@ -6,7 +6,7 @@ date: 2026-09-19
 
 # Stage checkpoint
 
-Repository: `hrygo/SpeechRail`  
+Repository: `hrygo/SpeechRail`
 Integration PR: #74 (`feat/issue-acceptance-20260919` -> `main`)
 
 This checkpoint records the state immediately before integrating the latest main branch.
