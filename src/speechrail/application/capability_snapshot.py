@@ -173,14 +173,21 @@ def _voice_entry(
         "quality_summary": _safe_quality_summary(profile.quality),
         "operations": {
             "http_speech": {
-                "parameters": {**common, "instructions": parameter(instructions)},
+                "parameters": {
+                    **common,
+                    "instructions": parameter(instructions),
+                    "pronunciation_set": parameter(
+                        "supported",
+                        reason="speechrail_versioned_preprocessor",
+                    ),
+                },
                 "output": {
                     "codecs": ["pcm", "wav", "mp3", "opus", "aac", "flac"],
                     "pcm_sample_rate": sample_rate,
                     "channels": 1,
                 },
                 "scheduling_class": "batch_tts",
-                "terminal_evidence": "transport_eof_only",
+                "terminal_evidence": "render_receipt_v1_optional",
             },
             "realtime_speech": {
                 "parameters": {**common, "instructions": parameter("unsupported")},
