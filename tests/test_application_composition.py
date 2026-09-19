@@ -47,6 +47,7 @@ def test_audio_router_can_be_built_from_fake_services(fake_services: AppServices
         "/v1/audio/speech",
         "/v1/speechrail/audio/receipts/{receipt_id}",
         "/v1/speechrail/audio/receipts/by-request/{source_request_id}",
+        "/v1/speechrail/audio/timings/{timing_id}",
         "/v1/voices/previews",
     }
 
@@ -67,6 +68,16 @@ def test_system_router_can_be_built_from_fake_services(fake_services: AppService
         "/v1/voices/clone",
         "/v1/voices/clone/prompts",
         "/v1/voices/clone/validate",
+        "/v1/speechrail/pronunciation-sets",
+        "/v1/speechrail/pronunciation-sets/{set_id}",
+        "/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}",
+        "/v1/speechrail/pronunciation-sets/{set_id}/revisions/{revision}/revoke",
+        "/v1/speechrail/voices/{voice_id}",
+        "/v1/speechrail/voices/{voice_id}/revisions",
+        "/v1/speechrail/voices/{voice_id}/rollback",
+        "/v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke",
+        "/v1/speechrail/voices/clone/idempotency",
+        "/v1/speechrail/voices/{voice_id}/quality-runs",
     }
 
 
