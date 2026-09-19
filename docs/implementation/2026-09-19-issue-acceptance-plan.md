@@ -723,7 +723,9 @@ cold/switch、并发公平、热稳定性或当前 PR head 的 managed wheel 一
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
-issue closure was performed. Current-head CI is green; final acceptance still
+runtime mutation was performed. The 15 scoped issues were closed separately by
+explicit user instruction; issue closure does not convert the remaining external
+acceptance gates into verified evidence. Current-head CI is green; final acceptance still
 requires managed Apple-Silicon measurements for #34/#44/#65/#72, actual
 worker/runtime identity evidence for #62/#63/#64/#67, vendor/runtime cache
 evidence for #66, matched identity/listening experiments for #68, and the
