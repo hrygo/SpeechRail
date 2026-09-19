@@ -75,15 +75,15 @@ def create_capability_router(services: AppServices) -> APIRouter:
             return Response(status_code=304, headers=headers)
         return JSONResponse(payload, headers=headers)
 
-    @router.get("/v2/capabilities")
+    @router.get("/v1/speechrail/capabilities")
     async def capabilities(request: Request) -> Response:
         return respond(request)
 
-    @router.get("/v2/voices")
+    @router.get("/v1/speechrail/voices")
     async def voices(request: Request) -> Response:
         return respond(request, listing=True)
 
-    @router.get("/v2/voices/{voice_id}")
+    @router.get("/v1/speechrail/voices/{voice_id}")
     async def voice(voice_id: str, request: Request) -> Response:
         return respond(request, voice_id=voice_id)
 
