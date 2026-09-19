@@ -33,6 +33,8 @@ class _ReceiptState:
     sample_rate: int
     channels: int
     boundary: str
+    text_summary: dict[str, object] | None = None
+    planner_summary: dict[str, object] | None = None
     created_at: float = field(default_factory=time.time)
     status: ReceiptStatus = "pending"
     completed_at: float | None = None
@@ -83,6 +85,8 @@ class RenderReceiptRegistry:
         sample_rate: int,
         channels: int = 1,
         boundary: str = "pcm16_pre_transport",
+        text_summary: dict[str, object] | None = None,
+        planner_summary: dict[str, object] | None = None,
     ) -> str:
         if sample_rate <= 0 or channels <= 0:
             raise ValueError("invalid audio format")
@@ -102,6 +106,10 @@ class RenderReceiptRegistry:
             sample_rate=sample_rate,
             channels=channels,
             boundary=boundary,
+            text_summary=dict(text_summary) if text_summary is not None else None,
+            planner_summary=(
+                dict(planner_summary) if planner_summary is not None else None
+            ),
         )
         with self._lock:
             self._entries[receipt_id] = state
@@ -190,6 +198,16 @@ class RenderReceiptRegistry:
                     "sample_count": state.sample_count,
                     "pcm_sha256": digest,
                 },
+                "text": (
+                    dict(state.text_summary)
+                    if state.text_summary is not None
+                    else None
+                ),
+                "planner": (
+                    dict(state.planner_summary)
+                    if state.planner_summary is not None
+                    else None
+                ),
                 "error_code": state.error_code,
                 "created_at": state.created_at,
                 "completed_at": state.completed_at,
