@@ -15,13 +15,12 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
 
     public private(set) var isPlaying = false
     /// 当前播放进度 0…1，取自播放器自己的 `currentTime / duration`。
-    ///
-    /// 2026-09-16 新增（REDESIGN-SPEC §11.6 第五十七轮）：详情面板的波形此前只知道
-    /// 「在播」，画不出「播到哪了」。这是真实进度，不是按固定时长自走的动画——
-    /// 播放器一暂停、一结束、一换曲，值就跟着变。
     public private(set) var progress: Double = 0
+    /// 当前真实音频电平 0…1，由播放器实时功率（metering）驱动。
+    public private(set) var level: Float = 0
     public var onPlaybackFinished: (@MainActor (_ successfully: Bool) -> Void)?
     public var onProgress: (@MainActor (_ progress: Double) -> Void)?
+    public var onLevel: (@MainActor (_ level: Float) -> Void)?
 
     public override init() {
         super.init()
@@ -31,13 +30,14 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         stop()
         let nextPlayer = try AVAudioPlayer(data: data)
         nextPlayer.delegate = self
+        nextPlayer.isMeteringEnabled = true
         nextPlayer.prepareToPlay()
         guard nextPlayer.play() else {
             throw AudioPlaybackError.playbackFailed
         }
         player = nextPlayer
         isPlaying = true
-        updateProgress()
+        updateProgressAndMeter()
         startProgressTask()
     }
 
@@ -47,6 +47,7 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         player = nil
         isPlaying = false
         setProgress(0)
+        setLevel(0)
     }
 
     public func duration(for data: Data) -> TimeInterval? {
@@ -66,16 +67,17 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
             self.stopProgressTask()
             self.player = nil
             self.isPlaying = false
+            self.setLevel(0)
             self.onPlaybackFinished?(flag)
         }
     }
 
-    /// 20Hz 采样 `currentTime`：波形的进度要跟得上人耳，但也没必要每帧去问。
+    /// 20Hz 采样 `currentTime` 与实时电平：波形的进度与振幅跟得上人耳，能耗极低。
     private func startProgressTask() {
         progressTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let self, self.isPlaying else { return }
-                self.updateProgress()
+                self.updateProgressAndMeter()
                 try? await Task.sleep(for: .seconds(SpeechRailDesignTokens.Waveform.progressInterval))
             }
         }
@@ -86,14 +88,28 @@ public final class AudioPlaybackController: NSObject, AVAudioPlayerDelegate {
         progressTask = nil
     }
 
-    private func updateProgress() {
+    private func updateProgressAndMeter() {
         guard let player, player.duration > 0 else { return }
         setProgress(min(max(player.currentTime / player.duration, 0), 1))
+        player.updateMeters()
+        let power = player.averagePower(forChannel: 0)
+        // power: -160dB ~ 0dB。通常语音人声感知在 -45dB ~ 0dB
+        let minDb: Float = -45.0
+        let rawLevel = max(0.0, min(1.0, (power - minDb) / (-minDb)))
+        // 适当平滑避免生硬抖动
+        let smoothed = level * 0.35 + rawLevel * 0.65
+        setLevel(smoothed)
     }
 
     private func setProgress(_ value: Double) {
         guard value != progress else { return }
         progress = value
         onProgress?(value)
+    }
+
+    private func setLevel(_ value: Float) {
+        guard abs(value - level) > 0.001 || value == 0 else { return }
+        level = value
+        onLevel?(value)
     }
 }

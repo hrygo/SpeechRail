@@ -242,9 +242,13 @@ struct SpeechRailApp: App {
         let store = CreativeWorkStore(directory: directory)
         if !empty {
             let work = CreativeWork(
-                id: "ui-test-work", title: "测试作品", scriptText: "测试文稿。",
-                voiceID: "serena", voiceName: "测试音色",
-                createdAt: Date(timeIntervalSince1970: 0), durationSeconds: 3,
+                id: "ui-test-work",
+                title: "测试作品",
+                scriptText: "测试文稿。",
+                voiceID: "serena",
+                voiceName: "测试音色",
+                createdAt: Date(timeIntervalSince1970: 0),
+                durationSeconds: 3,
                 audioFileName: "ui-test-work.wav"
             )
             try store.save(work, audioData: UITestAudioFactory.silentWAV)
@@ -320,6 +324,7 @@ struct SpeechRailApp: App {
                     await meeting.minutes.recoverPending(
                         configuration: preferences.minutesConfiguration
                     )
+                    await model.refreshCreatorVoices()
                 }
         }
         .windowToolbarStyle(.unifiedCompact(showsTitle: false))

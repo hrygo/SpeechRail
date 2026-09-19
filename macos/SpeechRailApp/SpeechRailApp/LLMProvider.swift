@@ -12,6 +12,9 @@ import Security
 //   2. **密钥只进安全保管库**（§15.4）：库里只留端点与模型名，日志与错误里不出现密钥。
 //   3. **前缀结构是硬的**（§5.5）：人设与记忆进 developer 消息的 `input_text` 块并打显式
 //      断点，动态内容一律排在后面。顶层 `instructions` 不能带断点，所以人设不能写在那里。
+//   4. **语音场景关 thinking，且必须能退化**：顶层 `instructions` 承载语音对话契约（每轮重发，
+//      续轮不继承）；`chat_template_kwargs.enable_thinking=false` 挡住思维链（oMLX 上它会被念出来）；
+//      端点不认识这组参数时只失败一次，之后按不带它的形状发。
 
 /// 大模型服务的配置。**值本身不含密钥**：密钥只按需从钥匙串取。
 public struct LLMConfiguration: Sendable, Equatable {
@@ -134,6 +137,9 @@ public enum LLMError: LocalizedError, Equatable {
 /// 而流式读取不该与界面线程争。
 public actor LLMProvider {
     private let session: URLSession
+    /// 已经明确拒绝 `chat_template_kwargs` 的端点（键是 `baseURL|model`）。
+    /// 只记在内存里：换端点或重启后重新探一次，不做持久化。
+    private var thinkingControlRejected: Set<String> = []
 
     public init(session: URLSession = .shared) {
         self.session = session
@@ -143,11 +149,15 @@ public actor LLMProvider {
 
     /// 流式补全。逐段产出正文；`cancelled` 之外的所有失败都是**受阻**，
     /// 不是降级——助手没有第二套回答方式（§8.1）。
+    ///
+    /// `instructions` 是 Responses API 的**顶层系统提示词**（语音助手用它承载语音对话契约）。
+    /// 注意：它和 SpeechRail TTS 的 `instructions` 只是同名——那个管"怎么发声"，这个管"说什么"。
     public func stream(
         configuration: LLMConfiguration,
         messages: [LLMMessage],
         apiKey: String?,
-        maxOutputTokens: Int? = nil
+        maxOutputTokens: Int? = nil,
+        instructions: String? = nil
     ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
@@ -157,6 +167,7 @@ public actor LLMProvider {
                         messages: messages,
                         apiKey: apiKey,
                         maxOutputTokens: maxOutputTokens,
+                        instructions: instructions,
                         onDelta: { continuation.yield($0) }
                     )
                     continuation.finish()
@@ -175,17 +186,19 @@ public actor LLMProvider {
         apiKey: String?,
         maxOutputTokens: Int? = nil,
         textFormat: [String: Any]? = nil,
+        instructions: String? = nil,
         timeout: TimeInterval = 120
     ) async throws -> String {
-        let request = try makeRequest(
+        let (data, response) = try await performOnce(
             configuration: configuration,
             messages: messages,
             apiKey: apiKey,
-            stream: false,
             maxOutputTokens: maxOutputTokens,
-            textFormat: textFormat
+            textFormat: textFormat,
+            background: false,
+            instructions: instructions,
+            timeout: timeout
         )
-        let (data, response) = try await perform(request, timeout: timeout)
         try Self.validate(response: response, data: data)
         return try Self.extractText(from: data)
     }
@@ -203,19 +216,20 @@ public actor LLMProvider {
         messages: [LLMMessage],
         apiKey: String?,
         maxOutputTokens: Int? = nil,
-        textFormat: [String: Any]? = nil
+        textFormat: [String: Any]? = nil,
+        instructions: String? = nil
     ) async throws -> String {
-        let request = try makeRequest(
+        // 后台响应的第一次 POST 只回一个 id 就返回，所以超时给短一点：卡住就重来。
+        let (data, response) = try await performOnce(
             configuration: configuration,
             messages: messages,
             apiKey: apiKey,
-            stream: false,
             maxOutputTokens: maxOutputTokens,
             textFormat: textFormat,
-            background: true
+            background: true,
+            instructions: instructions,
+            timeout: 60
         )
-        // 后台响应的第一次 POST 只回一个 id 就返回，所以超时给短一点：卡住就重来。
-        let (data, response) = try await perform(request, timeout: 60)
         try Self.validate(response: response, data: data)
         guard
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -271,29 +285,52 @@ public actor LLMProvider {
         messages: [LLMMessage],
         apiKey: String?,
         maxOutputTokens: Int?,
+        instructions: String?,
         onDelta: @Sendable (String) -> Void
     ) async throws {
-        let request = try makeRequest(
-            configuration: configuration,
-            messages: messages,
-            apiKey: apiKey,
-            stream: true,
-            maxOutputTokens: maxOutputTokens
-        )
-        let (bytes, response): (URLSession.AsyncBytes, URLResponse)
-        do {
-            (bytes, response) = try await session.bytes(for: request)
-        } catch {
-            throw LLMError.transport(error.localizedDescription)
-        }
-        guard let http = response as? HTTPURLResponse else {
-            throw LLMError.transport("没有收到 HTTP 响应")
-        }
-        guard (200..<300).contains(http.statusCode) else {
+        var suppressThinking = !thinkingControlRejected.contains(thinkingKey(configuration))
+        var bytes: URLSession.AsyncBytes?
+        for attempt in 0...1 {
+            let request = try makeRequest(
+                configuration: configuration,
+                messages: messages,
+                apiKey: apiKey,
+                stream: true,
+                maxOutputTokens: maxOutputTokens,
+                instructions: instructions,
+                suppressThinking: suppressThinking
+            )
+            let result: (URLSession.AsyncBytes, URLResponse)
+            do {
+                result = try await session.bytes(for: request)
+            } catch {
+                throw LLMError.transport(error.localizedDescription)
+            }
+            guard let response = result.1 as? HTTPURLResponse else {
+                throw LLMError.transport("没有收到 HTTP 响应")
+            }
+            if (200..<300).contains(response.statusCode) {
+                bytes = result.0
+                break
+            }
             var body = ""
-            for try await line in bytes.lines { body += line }
-            try Self.validate(response: response, data: Data(body.utf8))
-            throw LLMError.http(status: http.statusCode, body: Self.shortBody(body))
+            for try await line in result.0.lines { body += line }
+            let failure: LLMError
+            do {
+                try Self.validate(response: response, data: Data(body.utf8))
+                failure = .http(status: response.statusCode, body: Self.shortBody(body))
+            } catch let error as LLMError {
+                failure = error
+            }
+            // 端点不认识关 thinking 的那组参数时只失败一次：记下来，再按不带它的形状重发。
+            guard attempt == 0, suppressThinking, Self.rejectsThinkingControl(failure) else {
+                throw failure
+            }
+            thinkingControlRejected.insert(thinkingKey(configuration))
+            suppressThinking = false
+        }
+        guard let bytes else {
+            throw LLMError.transport("请求没有完成")
         }
         for try await line in bytes.lines {
             guard line.hasPrefix("data:") else { continue }
@@ -328,7 +365,9 @@ public actor LLMProvider {
         stream: Bool,
         maxOutputTokens: Int?,
         textFormat: [String: Any]? = nil,
-        background: Bool = false
+        background: Bool = false,
+        instructions: String? = nil,
+        suppressThinking: Bool = true
     ) throws -> URLRequest {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
         guard !configuration.embedsCredential,
@@ -361,11 +400,80 @@ public actor LLMProvider {
             "stream": stream,
             "prompt_cache_options": ["mode": "explicit"]
         ]
+        // 顶层 `instructions` = 系统提示词。它每轮都要重发：Responses 的续轮（`previous_response_id`）
+        // **不继承**上一轮的 instructions（官方参考与 oMLX 实测一致），断链后也无从恢复。
+        if let instructions, !instructions.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            body["instructions"] = instructions
+        }
+        // 语音场景必须关掉 thinking：oMLX 上思维链会以 `reasoning_summary_text` 大量输出，
+        // 预算被打满时还会混进正文，被 TTS 逐字念出来（2026-09-19 实测）。
+        if suppressThinking {
+            body["chat_template_kwargs"] = ["enable_thinking": false]
+        }
         if let maxOutputTokens { body["max_output_tokens"] = maxOutputTokens }
         if let textFormat { body["text"] = ["format": textFormat] }
         if background { body["background"] = true }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
+    }
+
+    /// 非流式的一次请求，自带"端点不认识关 thinking 参数"的退化：只失败一次，之后记住。
+    private func performOnce(
+        configuration: LLMConfiguration,
+        messages: [LLMMessage],
+        apiKey: String?,
+        maxOutputTokens: Int?,
+        textFormat: [String: Any]?,
+        background: Bool,
+        instructions: String?,
+        timeout: TimeInterval
+    ) async throws -> (Data, URLResponse) {
+        var suppressThinking = !thinkingControlRejected.contains(thinkingKey(configuration))
+        for attempt in 0...1 {
+            let request = try makeRequest(
+                configuration: configuration,
+                messages: messages,
+                apiKey: apiKey,
+                stream: false,
+                maxOutputTokens: maxOutputTokens,
+                textFormat: textFormat,
+                background: background,
+                instructions: instructions,
+                suppressThinking: suppressThinking
+            )
+            let result = try await perform(request, timeout: timeout)
+            do {
+                try Self.validate(response: result.1, data: result.0)
+                return result
+            } catch let error as LLMError {
+                guard attempt == 0, suppressThinking, Self.rejectsThinkingControl(error) else {
+                    throw error
+                }
+                thinkingControlRejected.insert(thinkingKey(configuration))
+                suppressThinking = false
+            }
+        }
+        throw LLMError.transport("请求没有完成")
+    }
+
+    private func thinkingKey(_ configuration: LLMConfiguration) -> String {
+        "\(configuration.normalizedBaseURL)|\(configuration.model)"
+    }
+
+    /// 400 且明确指向这组参数——才是"端点不认识它"，不是别的问题。
+    private static func rejectsThinkingControl(_ error: LLMError) -> Bool {
+        guard case let .http(status, body) = error else { return false }
+        return rejectsThinkingControl(status: status, body: body)
+    }
+
+    /// 同上，但直接看原始状态码与正文：`check()` 在把响应包成 `LLMError` 之前就要先判一次。
+    private static func rejectsThinkingControl(status: Int, body: String) -> Bool {
+        guard status == 400 else { return false }
+        let lower = body.lowercased()
+        return lower.contains("chat_template_kwargs")
+            || lower.contains("unrecognized request argument")
+            || lower.contains("unknown parameter")
+            || lower.contains("extra inputs")
     }
 
     private func perform(_ request: URLRequest, timeout: TimeInterval) async throws -> (Data, URLResponse) {
@@ -385,6 +493,37 @@ public actor LLMProvider {
     }
 
     // MARK: - 检查连接（§6.5 的四种结论）
+
+    /// 「检查连接」用的最小探测请求：`/responses` + 一条 `ping`。
+    ///
+    /// `chat_template_kwargs` 要不要带上由已知结论决定；端点不认识它时这里只白吃一次 400，
+    /// `check()` 会重发一次不带它的形状并把结论记进 `thinkingControlRejected`，
+    /// 真实对话不必再先失败一次。
+    private static func probeRequest(
+        url: URL,
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        suppressThinking: Bool
+    ) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey, !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        var body: [String: Any] = [
+            "model": configuration.model,
+            "input": [["role": "user", "content": [["type": "input_text", "text": "ping"]]]],
+            "store": false,
+            "max_output_tokens": 16
+        ]
+        if suppressThinking {
+            body["chat_template_kwargs"] = ["enable_thinking": false]
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return request
+    }
 
     /// 一次点击检查两件事：服务通不通、接口对不对。
     public func check(
@@ -424,21 +563,43 @@ public actor LLMProvider {
         guard let responsesURL = URL(string: "\(configuration.normalizedBaseURL)/responses") else {
             return .badBaseURL
         }
-        var probe = URLRequest(url: responsesURL)
-        probe.httpMethod = "POST"
-        probe.timeoutInterval = 20
-        probe.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let apiKey, !apiKey.isEmpty {
-            probe.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        probe.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "model": configuration.model,
-            "input": [["role": "user", "content": [["type": "input_text", "text": "ping"]]]],
-            "store": false,
-            "max_output_tokens": 16
-        ])
+        var suppressThinking = !thinkingControlRejected.contains(thinkingKey(configuration))
+        let data: Data
+        let response: URLResponse
         do {
-            let (data, response) = try await session.data(for: probe)
+            var result = try await session.data(
+                for: Self.probeRequest(
+                    url: responsesURL,
+                    configuration: configuration,
+                    apiKey: apiKey,
+                    suppressThinking: suppressThinking
+                )
+            )
+            // 探测阶段就把"端点认不认关 thinking 的那组参数"定下来：
+            // 认识就记着用，不认识就记下来，真实对话不必先白吃一次 400。
+            if suppressThinking,
+               let http = result.1 as? HTTPURLResponse,
+               Self.rejectsThinkingControl(
+                   status: http.statusCode,
+                   body: String(decoding: result.0, as: UTF8.self)
+               ) {
+                thinkingControlRejected.insert(thinkingKey(configuration))
+                suppressThinking = false
+                result = try await session.data(
+                    for: Self.probeRequest(
+                        url: responsesURL,
+                        configuration: configuration,
+                        apiKey: apiKey,
+                        suppressThinking: false
+                    )
+                )
+            }
+            data = result.0
+            response = result.1
+        } catch {
+            return .unreachable(error.localizedDescription)
+        }
+        do {
             guard let http = response as? HTTPURLResponse else {
                 return .unreachable("没有收到 HTTP 响应")
             }
