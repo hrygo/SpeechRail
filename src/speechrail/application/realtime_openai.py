@@ -1610,8 +1610,6 @@ class OpenAIRealtimeSession:
             )
 
             try:
-                import time as _time
-
                 _ttfa_t0 = time.monotonic()
                 _ttfa_recorded = False
                 _admission_started = time.monotonic()
