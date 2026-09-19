@@ -608,6 +608,23 @@ with `display_mapping_chunk_mismatch` or `display_mapping_span_invalid`; this
 is metadata-contract evidence only and does not establish real-model timing
 accuracy.
 
+### 2026-09-20 managed Realtime and overlap evidence refresh
+
+在现有 managed `quality` generation 102 上重新执行了官方 `bench_realtime_json.py`
+与 `bench_overlap.py`。Realtime 为 warm-up 后 3 个 session，输入是 10 秒、16 kHz
+mono PCM16 合成静音：ASR commit→completed 为 `240.55–244.95 ms`，TTS 首 delta
+为 `35.21–36.25 ms`，3/3 成功；资源采样完整，窗口 `phys_footprint` 峰值为
+`6832758176` bytes。C1（TTS 先、0.5 s 后 ASR）与 C2（ASR 先、0.5 s 后 TTS）
+均为 200；C1 的 governor batch peak 为 `2`、`phys_footprint` 峰值
+`6748118384` bytes，C2 分别为 `1` 与 `6862069104` bytes。脱敏摘要见
+[`2026-09-20-pr74-realtime-evidence.md`](2026-09-20-pr74-realtime-evidence.md)。
+
+该轮补充了当前本机 managed worker 的延迟/调度/资源观测，但合成静音不证明
+CER/WER、声学质量或 paced speech；benchmark 的 `model_identity` 仍为空，且
+managed `2.7.0` 在 integrity receipt 请求中未返回 `SpeechRail-Receipt-Id`，
+所以没有将 #44/#65 或 #62/#63/#64/#67 标记为完成，也没有把它当作当前 PR head
+的 managed wheel 一致性证明。
+
 ### Remaining acceptance gates
 
 The PR remains open. No merge, deployment, model download, voice registration or
