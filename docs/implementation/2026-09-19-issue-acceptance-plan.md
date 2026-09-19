@@ -470,12 +470,14 @@ as implementation changes.
   and partial/error delivery retain explicit downgrade states.
 - **#66/#67/#68/#71/#72**: the pinned vendor reference-condition cache remains
   explicitly unsupported; quality evidence is dimensioned and revision-bound with
-  identity/repeatability/naturalness kept separate; clone expression remains an
-  explicit unsupported capability with neutral fixed-identity behavior; the safe
-  namespaced voice catalog remains the default new integration surface while the
-  legacy detail route is retained as a documented compatibility projection; and
-  the common bounded planner is used for pronunciation-aware timing/receipt
-  summaries without claiming native cross-sentence conditioning.
+  identity/repeatability/naturalness kept separate, and namespaced quality runs
+  now capture an observed TTS runtime revision before their ASR-phase eviction;
+  clone expression remains an explicit unsupported capability with neutral
+  fixed-identity behavior; the safe namespaced voice catalog remains the default
+  new integration surface while the legacy detail route is retained as a
+  documented compatibility projection; and the common bounded planner is used
+  for pronunciation-aware timing/receipt summaries without claiming native
+  cross-sentence conditioning.
 
 ### Current deterministic validation
 

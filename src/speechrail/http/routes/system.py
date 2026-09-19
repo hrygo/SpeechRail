@@ -19,6 +19,7 @@ from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
 from speechrail.application.deadline import await_until
+from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
 from speechrail.application.services import AppServices
 from speechrail.application.tts_admission import tts_resource_key
 from speechrail.application.tts_delivery import (
@@ -1954,6 +1955,7 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         registry = get_voice_registry()
         expires_at = asyncio.get_running_loop().time() + resolved.request_timeout_seconds
+        observed_model_runtime_revision: str | None = None
         try:
             async with services.governor.reserve(
                 WorkClass.BATCH_TTS,
@@ -1975,6 +1977,12 @@ def create_system_router(services: AppServices) -> APIRouter:
                         runs,
                         voice_revision=profile.revision,
                         expires_at=expires_at,
+                    )
+                    # Capture identity while the probe worker is still ready;
+                    # the ASR intelligibility phase may evict it before the
+                    # evidence projection is built.
+                    observed_model_runtime_revision = (
+                        observed_runtime_revision_for_synthesizer(synthesizer, profile.id)
                     )
         except GovernorQueueFullError:
             return JSONResponse(
@@ -2148,7 +2156,7 @@ def create_system_router(services: AppServices) -> APIRouter:
                 model_catalog_revision=(
                     artifact.revision if artifact is not None else None
                 ),
-                model_runtime_revision=None,
+                model_runtime_revision=observed_model_runtime_revision,
             )
             return JSONResponse(
                 status_code=200,
