@@ -9,6 +9,7 @@ import json
 import logging
 import struct
 import wave
+from contextlib import suppress
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -112,7 +113,7 @@ def _clone_payload_fingerprint(
         "audio_sha256": hashlib.sha256(audio_content).hexdigest(),
         "ref_text_sha256": hashlib.sha256(ref_text.strip().encode("utf-8")).hexdigest(),
         "name": name.strip(),
-        "voice_id": voice_id.strip().lower() if isinstance(voice_id, str) and voice_id.strip() else None,
+        "voice_id": (\n            voice_id.strip().lower()\n            if isinstance(voice_id, str) and voice_id.strip()\n            else None\n        ),
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()
@@ -1090,15 +1091,13 @@ def create_system_router(services: AppServices) -> APIRouter:
                     )
         except VoiceStoreUnavailableError:
             if idempotency_key and fingerprint is not None and not side_effect_committed:
-                try:
+                with suppress(IdempotencyStoreUnavailableError):
                     _clone_idempotency_journal.abort(
                         owner=_CLONE_IDEMPOTENCY_OWNER,
                         operation=_CLONE_IDEMPOTENCY_OPERATION,
                         key=idempotency_key,
                         fingerprint=fingerprint,
                     )
-                except IdempotencyStoreUnavailableError:
-                    pass
             return error_response(
                 503,
                 request_id,
@@ -1118,15 +1117,13 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         except ValueError as exc:
             if idempotency_key and fingerprint is not None and not side_effect_committed:
-                try:
+                with suppress(IdempotencyStoreUnavailableError):
                     _clone_idempotency_journal.abort(
                         owner=_CLONE_IDEMPOTENCY_OWNER,
                         operation=_CLONE_IDEMPOTENCY_OPERATION,
                         key=idempotency_key,
                         fingerprint=fingerprint,
                     )
-                except IdempotencyStoreUnavailableError:
-                    pass
             return error_response(400, request_id, "voice_creation_failed", str(exc))
 
         return JSONResponse(
