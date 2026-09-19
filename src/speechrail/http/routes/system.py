@@ -58,6 +58,13 @@ from speechrail.domain.tts import (
     canonicalize_clone_reference_audio,
     get_voice_registry,
 )
+from speechrail.domain.tts_pronunciation import (
+    PronunciationConflictError,
+    PronunciationEntry,
+    PronunciationRevokedError,
+    PronunciationStoreUnavailableError,
+    get_pronunciation_registry,
+)
 from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
 from speechrail.http.auth import http_auth_error
@@ -864,6 +871,236 @@ def create_system_router(services: AppServices) -> APIRouter:
         return JSONResponse(
             status_code=200,
             content=_voice_entry(profile, active, services.tts_ready),
+        )
+
+    @router.get("/v2/pronunciation-sets")
+    async def list_pronunciation_sets(request: Request) -> JSONResponse:
+        """Enumerate safe set identity only; entries remain management data."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            values = get_pronunciation_registry().list_sets()
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "object": "list",
+                "data": [
+                    {
+                        "id": value.id,
+                        "revision": value.revision,
+                        "revoked": value.revoked,
+                        "entry_count": len(value.entries),
+                    }
+                    for value in values
+                ],
+            },
+        )
+
+    @router.get("/v2/pronunciation-sets/{set_id}/revisions/{revision}")
+    async def get_pronunciation_revision(
+        set_id: str,
+        revision: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Read one explicit management revision including its local entries."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            value = get_pronunciation_registry().get(
+                set_id,
+                revision=revision,
+            )
+        except PronunciationRevokedError:
+            return error_response(
+                409,
+                request_id,
+                "pronunciation_revoked",
+                "Pronunciation revision is revoked",
+            )
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "pronunciation_revision_not_found",
+                "Pronunciation set or revision not found",
+            )
+        return JSONResponse(status_code=200, content=value.to_dict())
+
+    @router.put("/v2/pronunciation-sets/{set_id}")
+    async def put_pronunciation_set(
+        set_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        """Create or CAS-update a pronunciation set as a new immutable revision."""
+
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            body = await request.json()
+        except Exception:
+            return error_response(
+                400,
+                request_id,
+                "invalid_json",
+                "Invalid JSON payload",
+            )
+        if not isinstance(body, dict) or set(body) != {
+            "expected_revision",
+            "entries",
+        }:
+            return error_response(
+                400,
+                request_id,
+                "invalid_payload",
+                "expected_revision and entries are required",
+            )
+        expected_revision = body.get("expected_revision")
+        if expected_revision is not None and not isinstance(expected_revision, str):
+            return error_response(
+                400,
+                request_id,
+                "invalid_expected_revision",
+                "expected_revision must be a string or null",
+            )
+        raw_entries = body.get("entries")
+        if not isinstance(raw_entries, list):
+            return error_response(
+                400,
+                request_id,
+                "invalid_entries",
+                "entries must be an array",
+            )
+        try:
+            entries = tuple(
+                PronunciationEntry(**entry)
+                for entry in raw_entries
+                if isinstance(entry, dict)
+            )
+            if len(entries) != len(raw_entries):
+                raise ValueError("every pronunciation entry must be an object")
+            value = get_pronunciation_registry().put(
+                set_id,
+                entries,
+                expected_revision=expected_revision,
+            )
+        except PronunciationConflictError as exc:
+            return error_response(
+                409,
+                request_id,
+                "pronunciation_conflict",
+                str(exc),
+            )
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except (TypeError, ValueError) as exc:
+            return error_response(
+                400,
+                request_id,
+                "invalid_pronunciation_set",
+                str(exc),
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": value.id,
+                "revision": value.revision,
+                "revoked": value.revoked,
+                "entry_count": len(value.entries),
+            },
+        )
+
+    @router.post(
+        "/v2/pronunciation-sets/{set_id}/revisions/{revision}/revoke"
+    )
+    async def revoke_pronunciation_revision(
+        set_id: str,
+        revision: str,
+        request: Request,
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            value = get_pronunciation_registry().revoke(set_id, revision)
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "pronunciation_revision_not_found",
+                "Pronunciation set or revision not found",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": value.id,
+                "revision": value.revision,
+                "revoked": True,
+            },
+        )
+
+    @router.delete("/v2/pronunciation-sets/{set_id}")
+    async def delete_pronunciation_set(
+        set_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "") or "req_pronunciation"
+        if (auth_error := http_auth_error(request, resolved)) is not None:
+            return auth_error
+        try:
+            get_pronunciation_registry().delete(set_id)
+        except PronunciationStoreUnavailableError:
+            return error_response(
+                503,
+                request_id,
+                "pronunciation_store_unavailable",
+                "Pronunciation registry is unavailable",
+                retryable=True,
+            )
+        except KeyError:
+            return error_response(
+                404,
+                request_id,
+                "pronunciation_set_not_found",
+                "Pronunciation set not found",
+            )
+        return JSONResponse(
+            status_code=200,
+            content={"status": "deleted", "id": set_id},
         )
 
     @router.patch("/v2/voices/{voice_id}")
