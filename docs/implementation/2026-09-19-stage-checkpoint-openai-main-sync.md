@@ -99,3 +99,66 @@ The merge policy is therefore:
 
 No merge into main, deployment, issue closure, model download, or user-service mutation is
 authorized by this checkpoint.
+
+
+## Second checkpoint — scheduling, observability and vendor audit
+
+This checkpoint was recorded after the main-sync merge and the next implementation wave.
+
+### #65 interactive TTS admission
+
+- Added bounded `WorkPurpose`: default, interactive, prefetch, voice_creation,
+  quality_validation.
+- Public `/v1/audio/speech` accepts only `interactive` and `prefetch` via
+  `SpeechRail-Purpose`; arbitrary client priority strings are rejected.
+- `SpeechRail-Latency-Budget-Ms` is a bounded relative budget and is capped by
+  the server request timeout.
+- Existing `ResourceGovernor` remains the single admission authority.
+- Added bounded queue-wait/service/release telemetry; no request IDs, voice IDs,
+  text or audio are metric labels.
+- Realtime, voice creation and quality validation now carry server-owned purposes.
+
+### #44 E2 / E3a / E4
+
+- E2: source release is 2.7.0; old 2.3.0 managed-runtime observations and
+  MPS/float16 measurements are explicitly historical. The source default for
+  realtime sessions is 3 and is no longer duplicated as a second documentation default.
+- E3a: added bounded realtime phases for ASR admission, flush, commit acknowledgement,
+  terminal wait, TTS admission and transport send.
+- E4: introduced stable busy reasons while preserving public compatibility error codes:
+  `asr_mode_conflict`, `realtime_session_limit`, `diarization_capacity`,
+  `governor_queue_full`, and `backend_transition`.
+- HTTP exposes typed contention only through a SpeechRail header; Realtime uses a
+  namespaced `speechrail.busy_reason` field while keeping `backend_busy`/`queue_full`.
+
+### #66 pinned vendor audit
+
+The managed runtime pins `mlx-audio==0.4.8`. Its Qwen3-TTS implementation has a
+private `_icl_cache`, but the public generation contract still consumes raw
+`ref_audio + ref_text`. The private cache has no SpeechRail-safe public prepared
+condition object, bounded lifecycle, cryptographic identity contract, or stable API.
+
+SpeechRail therefore now exposes an immutable prepared-reference provider port but
+keeps the pinned backend explicitly unsupported and fail-closed. No private vendor
+cache is wrapped or relabeled as a SpeechRail performance feature.
+
+Detailed evidence:
+`docs/implementation/2026-09-19-issue-66-prepared-reference-audit.md`.
+
+### CI regression handling
+
+CI #383 surfaced deterministic integration regressions rather than acoustic/runtime
+evidence failures:
+
+- Ruff import/export ordering;
+- accidental use of an undefined `_time` alias in new realtime phase metrics;
+- macOS `AssistantView.State` shadowing SwiftUI's `@State` property wrapper.
+
+The Python lint/name regressions and the Swift shadowing compile failure are corrected
+on the feature branch. A fresh current-head CI remains required before acceptance.
+
+### Next
+
+Continue #73 with an honest chunk-level timing contract. Do not claim word/phoneme
+precision unless a measured native/forced-alignment path proves it. Then continue the
+remaining #44 scheduling/fairness work and the real-model evidence gates.
