@@ -1764,7 +1764,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
                                 "backend_timing_metadata_unavailable",
                             )
                         else:
-                            services.tts_timings.complete(timing_id, sidecar)
+                            services.tts_timings.complete(
+                                timing_id,
+                                sidecar,
+                                actual_samples=emitted_samples,
+                            )
             except asyncio.CancelledError:
                 if receipt_id is not None:
                     services.render_receipts.cancel(receipt_id)

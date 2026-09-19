@@ -83,7 +83,13 @@ class TtsTimingRegistry:
             existing_id = self._order.pop(victim)
             self._entries.pop(existing_id, None)
 
-    def complete(self, timing_id: str, sidecar: TtsTimingSidecar) -> None:
+    def complete(
+        self,
+        timing_id: str,
+        sidecar: TtsTimingSidecar,
+        *,
+        actual_samples: int | None = None,
+    ) -> None:
         with self._lock:
             state = self._entries[timing_id]
             if state.status != "pending":
@@ -97,6 +103,9 @@ class TtsTimingRegistry:
             elif backend_spans != state.expected_text_spans:
                 state.status = "unavailable"
                 state.reason = "planner_contract_mismatch"
+            elif actual_samples is not None and sidecar.total_samples != actual_samples:
+                state.status = "unavailable"
+                state.reason = "timing_sample_count_mismatch"
             elif state.display_spans and len(state.display_spans) != len(sidecar.chunks):
                 state.status = "unavailable"
                 state.reason = "display_mapping_chunk_mismatch"
