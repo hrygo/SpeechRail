@@ -958,94 +958,114 @@ public struct SessionLibraryColumn: View {
     private func libraryRow(_ summary: SessionSummary) -> some View {
         let isSelected = (selectedID == summary.id)
 
-        return Button {
-            onSelect(summary)
-        } label: {
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                // 顶行：微徽标 + 标题 + 状态胶囊
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    ZStack {
-                        Circle()
-                            .fill(SpeechRailDesignTokens.Color.rail.opacity(isSelected ? 0.22 : 0.12))
-                            .frame(width: 18, height: 18)
-                        Image(systemName: "waveform.and.mic")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+        return HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Button {
+                onSelect(summary)
+            } label: {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    // 顶行：微徽标 + 标题 + 状态胶囊
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        ZStack {
+                            Circle()
+                                .fill(SpeechRailDesignTokens.Color.rail.opacity(isSelected ? 0.22 : 0.12))
+                                .frame(width: 18, height: 18)
+                            Image(systemName: "waveform.and.mic")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        }
+
+                        Text(summary.record.title ?? "未命名对话")
+                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                            .lineLimit(1)
+
+                        Spacer(minLength: 4)
+
+                        if summary.openInterruption != nil {
+                            StatusPill(tone: .attention, label: "中断")
+                        } else if summary.lineCount == 0 {
+                            StatusPill(tone: .neutral, label: "0 句")
+                        } else {
+                            StatusPill(
+                                tone: isSelected ? .healthy : .neutral,
+                                label: "\(summary.lineCount) 句"
+                            )
+                        }
                     }
 
-                    Text(summary.record.title ?? "未命名对话")
-                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        .lineLimit(1)
+                    // 底行：角色 · 日期 · 耗时
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                        if let persona = summary.record.persona?.title {
+                            Text(persona)
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                            Text("·")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
 
-                    Spacer(minLength: 4)
+                        Text(Self.formatSessionDate(summary.record.startedAt))
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
-                    if summary.openInterruption != nil {
-                        StatusPill(tone: .attention, label: "中断")
-                    } else if summary.lineCount == 0 {
-                        StatusPill(tone: .neutral, label: "0 句")
-                    } else {
-                        StatusPill(
-                            tone: isSelected ? .healthy : .neutral,
-                            label: "\(summary.lineCount) 句"
-                        )
+                        if summary.duration() > 1 {
+                            Text("·")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            Text(Self.formatDuration(summary.duration()))
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .speechRailPointerCursor()
 
-                // 底行：角色 · 日期 · 耗时
-                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
-                    if let persona = summary.record.persona?.title {
-                        Text(persona)
-                            .font(SpeechRailDesignTokens.Typography.captionMedium)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                        Text("·")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    }
-
-                    Text(Self.formatSessionDate(summary.record.startedAt))
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                    if summary.duration() > 1 {
-                        Text("·")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        Text(Self.formatDuration(summary.duration()))
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    }
+            InPlaceDeleteButton(
+                style: .compactIcon,
+                title: "删除会话"
+            ) {
+                Task {
+                    try? await session.removeSession(id: summary.id)
+                    await reload()
                 }
             }
-            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                isSelected
-                    ? SpeechRailDesignTokens.Surface.selectionTint
-                    : SpeechRailDesignTokens.Color.field,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                    .stroke(
-                        isSelected
-                            ? SpeechRailDesignTokens.Color.rail.opacity(0.45)
-                            : SpeechRailDesignTokens.Surface.border,
-                        lineWidth: isSelected
-                            ? SpeechRailDesignTokens.Stroke.strong
-                            : SpeechRailDesignTokens.Stroke.hairline
-                    )
-            )
-            .contentShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .speechRailPointerCursor()
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isSelected
+                ? SpeechRailDesignTokens.Surface.selectionTint
+                : SpeechRailDesignTokens.Color.field,
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                .stroke(
+                    isSelected
+                        ? SpeechRailDesignTokens.Color.rail.opacity(0.45)
+                        : SpeechRailDesignTokens.Surface.border,
+                    lineWidth: isSelected
+                        ? SpeechRailDesignTokens.Stroke.strong
+                        : SpeechRailDesignTokens.Stroke.hairline
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous))
         .contextMenu {
             Button("在此处继续对话") { onSelect(summary) }
             Button("复制会话 ID") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(summary.id, forType: .string)
+            }
+            Divider()
+            Button("删除会话", role: .destructive) {
+                Task {
+                    try? await session.removeSession(id: summary.id)
+                    await reload()
+                }
             }
         }
     }
@@ -1080,6 +1100,148 @@ public struct SessionLibraryColumn: View {
         summaries = (try? await session.listSummaries(kind: kind)) ?? []
         if selectedID == nil, let first = summaries.first {
             onSelect(first)
+        }
+    }
+}
+
+/// 原位确认删除组件：点击后在原位平滑展开「确认」与「取消」；
+/// 点击「确认」执行删除动作，点击「取消」恢复原状。
+public struct InPlaceDeleteButton: View {
+    public enum Style {
+        /// 行内紧凑文字模式（如记忆条目、文本操作行）
+        case compactText
+        /// 行内微图标模式（如会话历史栏、记录列表每行右侧的小垃圾桶）
+        case compactIcon
+        /// 完整按钮模式（如复盘页底部的次级操作按钮）
+        case regularButton
+    }
+
+    public let style: Style
+    public let title: String
+    public let systemImage: String?
+    public let confirmText: String
+    public let cancelText: String
+    public let onConfirm: () -> Void
+
+    @State private var isConfirming = false
+
+    public init(
+        style: Style = .compactIcon,
+        title: String = "删除",
+        systemImage: String? = "trash",
+        confirmText: String = "确认",
+        cancelText: String = "取消",
+        onConfirm: @escaping () -> Void
+    ) {
+        self.style = style
+        self.title = title
+        self.systemImage = systemImage
+        self.confirmText = confirmText
+        self.cancelText = cancelText
+        self.onConfirm = onConfirm
+    }
+
+    public var body: some View {
+        if isConfirming {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                if style == .regularButton {
+                    Button(confirmText, role: .destructive) {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isConfirming = false
+                        }
+                        onConfirm()
+                    }
+                    .speechRailButton(.destructive)
+
+                    Button(cancelText) {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isConfirming = false
+                        }
+                    }
+                    .speechRailButton(.secondary)
+                } else {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isConfirming = false
+                        }
+                        onConfirm()
+                    } label: {
+                        Text(confirmText)
+                            .font(SpeechRailDesignTokens.Typography.captionMedium)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.critical)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(
+                                SpeechRailDesignTokens.Color.critical.opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isConfirming = false
+                        }
+                    } label: {
+                        Text(cancelText)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(
+                                SpeechRailDesignTokens.Color.field,
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
+                                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .speechRailPointerCursor()
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.95)))
+        } else {
+            if style == .regularButton {
+                Button(role: .destructive) {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        isConfirming = true
+                    }
+                } label: {
+                    if let systemImage {
+                        Label(title, systemImage: systemImage)
+                    } else {
+                        Text(title)
+                    }
+                }
+                .speechRailButton(.secondary)
+                .transition(.opacity.combined(with: .scale(scale: 0.95)))
+            } else {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        isConfirming = true
+                    }
+                } label: {
+                    switch style {
+                    case .compactIcon:
+                        Image(systemName: systemImage ?? "trash")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .padding(4)
+                            .contentShape(Rectangle())
+                    case .compactText:
+                        Text(title)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.critical)
+                    case .regularButton:
+                        EmptyView()
+                    }
+                }
+                .buttonStyle(.plain)
+                .speechRailPointerCursor()
+            }
         }
     }
 }
