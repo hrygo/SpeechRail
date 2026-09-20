@@ -15,18 +15,19 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 from speechrail.backends.model_identity import observed_runtime_revision
 from speechrail.backends.qwen3_tts_worker import TTS_BACKEND_ID
 from speechrail.domain.ports import AudioChunk, SpeechRequest
 from speechrail.domain.tts import VoiceStoreUnavailableError
+from speechrail.domain.tts_errors import TtsBackendError, from_worker_frame
+from speechrail.domain.tts_request import validate_tts_parameters
 from speechrail.domain.tts_timing import TtsTimingSidecar
 from speechrail.runtime.worker_process import (
     AsyncFramedWorkerProcess,
     WorkerProcessSpec,
-    error_frame_message,
     offline_environment,
 )
 from speechrail.runtime.worker_protocol import PROTOCOL_VERSION, ProtocolError
@@ -155,6 +156,7 @@ class Qwen3TtsWorker:
         self.last_active: float = time.monotonic()
         self.model_variant: str = config.model_variant
         self._runtime_revision: str | None = None
+        self._worker_attempt_id: str | None = None
 
     @property
     def alive(self) -> bool:
@@ -197,6 +199,7 @@ class Qwen3TtsWorker:
         is_reload = self._epoch > 0
         self._supports_profile_snapshot = False
         self._runtime_revision = None
+        self._worker_attempt_id = f"tts_attempt_{uuid4().hex}"
         try:
             await self._transport.start()
             await self._transport.send(
@@ -210,7 +213,14 @@ class Qwen3TtsWorker:
             )
             ready = await self._receive_profile_frame()
             if ready.get("type") != "ready" or ready.get("model_loaded") is not True:
-                raise RuntimeError(error_frame_message(ready, "worker_start_failed"))
+                if ready.get("type") == "error":
+                    raise from_worker_frame(
+                        ready,
+                        fallback_code="worker_start_failed",
+                        stage="initialize",
+                        worker_attempt_id=self._worker_attempt_id,
+                    )
+                raise RuntimeError("worker_start_failed")
             if (
                 ready.get("backend") != TTS_BACKEND_ID
                 or ready.get("device") != self.config.device
@@ -218,7 +228,12 @@ class Qwen3TtsWorker:
                 or ready.get("sample_rate") != self.config.sample_rate
                 or ready.get("model_variant") != self.config.model_variant
             ):
-                raise RuntimeError("backend_identity_mismatch")
+                raise TtsBackendError(
+                    "backend_identity_mismatch",
+                    stage="initialize",
+                    public_code="tts_initialization_failed",
+                    retryable=False,
+                )
             snapshot_version = ready.get("profile_snapshot_version")
             self._supports_profile_snapshot = (
                 type(snapshot_version) is int and snapshot_version == 1
@@ -248,6 +263,19 @@ class Qwen3TtsWorker:
             with get_voice_registry().lease_profile(
                 request.voice, expected_revision=request.expected_voice_revision
             ) as profile:
+                binding = resolve_binding(
+                    self.model_variant,
+                    request.voice,
+                    profile=profile,
+                )
+                validated = validate_tts_parameters(
+                    model_variant=cast(TtsModelVariant, self.model_variant),
+                    is_clone=binding.is_clone,
+                    speed=request.speed,
+                    language=request.language,
+                    instruction=request.instruction,
+                    seed=request.seed,
+                )
                 async with self._lock:
                     if not self._started:
                         await self._start_locked()
@@ -269,11 +297,8 @@ class Qwen3TtsWorker:
                         frame_payload["seed"] = request.seed
                     if request.timing_mode is not None:
                         frame_payload["timing_mode"] = request.timing_mode
-                    binding = resolve_binding(
-                        self.model_variant,
-                        request.voice,
-                        profile=profile,
-                    )
+                    frame_payload["speed"] = validated.speed
+                    frame_payload["language"] = validated.language
                     if (
                         self.model_variant == "voice_design" and request.instruction is None
                         and not self._supports_profile_snapshot
@@ -299,7 +324,14 @@ class Qwen3TtsWorker:
                         while True:
                             frame = await self._receive_profile_frame()
                             if frame.get("request_id") != response_id:
-                                raise RuntimeError("worker_response_id_mismatch")
+                                raise TtsBackendError(
+                                    "worker_response_id_mismatch",
+                                    stage="deliver",
+                                    public_code="tts_transport_failed",
+                                    retryable=False,
+                                    request_id=response_id,
+                                    worker_attempt_id=self._worker_attempt_id,
+                                )
                             if frame.get("type") == "completed":
                                 self._record_completion_stats(frame)
                                 if request.timing_mode == "chunk":
@@ -311,11 +343,22 @@ class Qwen3TtsWorker:
                                     raise VoiceStoreUnavailableError(
                                         "custom voice storage is unavailable"
                                     )
-                                raise RuntimeError(
-                                    error_frame_message(frame, "worker_inference_error")
+                                raise from_worker_frame(
+                                    frame,
+                                    fallback_code="worker_inference_error",
+                                    stage="infer",
+                                    request_id=response_id,
+                                    worker_attempt_id=self._worker_attempt_id,
                                 )
                             if frame.get("type") != "audio":
-                                raise RuntimeError("worker_frame_invalid")
+                                raise TtsBackendError(
+                                    "worker_frame_invalid",
+                                    stage="deliver",
+                                    public_code="tts_transport_failed",
+                                    retryable=False,
+                                    request_id=response_id,
+                                    worker_attempt_id=self._worker_attempt_id,
+                                )
                             chunk_index = frame.get("chunk_index")
                             raw_binary = frame.get("_binary")
                             encoded = frame.get("pcm_b64")
@@ -326,15 +369,36 @@ class Qwen3TtsWorker:
                                 try:
                                     audio = base64.b64decode(encoded, validate=True)
                                 except (ValueError, TypeError) as exc:
-                                    raise RuntimeError("worker_audio_frame_invalid") from exc
+                                    raise TtsBackendError(
+                                        "worker_audio_frame_invalid",
+                                        stage="decode",
+                                        public_code="output_invalid",
+                                        retryable=False,
+                                        request_id=response_id,
+                                        worker_attempt_id=self._worker_attempt_id,
+                                    ) from exc
                             else:
-                                raise RuntimeError("worker_audio_frame_invalid")
+                                raise TtsBackendError(
+                                    "worker_audio_frame_invalid",
+                                    stage="decode",
+                                    public_code="output_invalid",
+                                    retryable=False,
+                                    request_id=response_id,
+                                    worker_attempt_id=self._worker_attempt_id,
+                                )
                             if (
                                 chunk_index != expected_chunk_index
                                 or not audio
                                 or len(audio) % 2
                             ):
-                                raise RuntimeError("worker_audio_frame_invalid")
+                                raise TtsBackendError(
+                                    "worker_audio_frame_invalid",
+                                    stage="decode",
+                                    public_code="output_invalid",
+                                    retryable=False,
+                                    request_id=response_id,
+                                    worker_attempt_id=self._worker_attempt_id,
+                                )
                             self.last_active = time.monotonic()
                             yield AudioChunk(
                                 response_id=response_id,
@@ -402,7 +466,13 @@ class Qwen3TtsWorker:
         try:
             return await self._transport.receive()
         except ProtocolError as exc:
-            raise RuntimeError("worker_frame_invalid") from exc
+            raise TtsBackendError(
+                "worker_frame_invalid",
+                stage="deliver",
+                public_code="tts_transport_failed",
+                retryable=False,
+                worker_attempt_id=self._worker_attempt_id,
+            ) from exc
 
     async def trim_memory(self) -> None:
         if self.alive:

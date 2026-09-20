@@ -27,7 +27,9 @@ from speechrail.domain.tts import (
     normalize_tts_text,
     resolve_voice,
 )
+from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES
 from speechrail.domain.tts_loudness import StreamingPcm16LoudnessController
+from speechrail.domain.tts_request import validate_tts_parameters
 from speechrail.domain.tts_text_planner import TtsTextPlanner
 from speechrail.domain.tts_timing import TtsTimingChunk, TtsTimingSidecar
 from speechrail.runtime.worker_protocol import (
@@ -41,6 +43,15 @@ TTS_BACKEND_ID = "mlx-qwen3-tts"
 _CLONE_LOUDNESS_CHUNK_MS = 200
 _CLONE_TEMPERATURE = 0.1
 _CLONE_TOP_P = 0.95
+
+
+def _stable_worker_error_code(exc: BaseException) -> str:
+    """Expose only an allowlisted semantic code over the private IPC frame."""
+
+    code = str(exc).strip().splitlines()[0].strip()
+    if code in TTS_PARAMETER_ERROR_CODES:
+        return code
+    return "worker_inference_error"
 
 
 def _clone_generation_seed(*, voice: str, text: str, ref_text: str) -> int:
@@ -374,7 +385,13 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             quantization_group_size=expected.quantization.group_size,
             weight_fingerprint=expected.weight_fingerprint,
         )
-        if warmup:
+        # Base is clone-only: it has no system speaker that can be used for a
+        # generic warmup.  Calling the shared default-voice path here makes the
+        # worker fail before it can accept a legitimate ref_audio/ref_text
+        # request.  Model loading and identity validation above are the safe
+        # Base startup warmup; the first legal clone request performs acoustic
+        # initialization.
+        if warmup and expected.variant != "base":
             for _ in self._generate("预热。", voice="default", speed=1.0, language="auto"):
                 pass
             self.consume_delivery_stats()
@@ -510,6 +527,18 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
         ref_text: str | None = None,
         profile: VoiceProfile | None = None,
     ) -> Iterator[bytes]:
+        variant = self.identity.model_variant or "voice_design"
+        is_clone = ref_audio is not None or ref_text is not None
+        validated = validate_tts_parameters(
+            model_variant=variant,  # type: ignore[arg-type]
+            is_clone=is_clone,
+            speed=speed,
+            language=language,
+            instruction=instruction,
+            seed=seed,
+        )
+        speed = validated.speed
+        language = validated.language
         if ref_audio is not None or ref_text is not None:
             # The Base reference-clone contract accepts neither SpeechRail speaking-rate
             # controls nor VoiceDesign instructions. Reject them at the adapter
@@ -527,7 +556,6 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
             if self._audio_loader_fn is None:
                 raise RuntimeError("mlx_qwen3_tts_audio_loader_unavailable")
             audio_array = self._load_reference_audio(ref_audio)
-            variant = self.identity.model_variant or "voice_design"
             if variant != "base":
                 raise RuntimeError("voice_clone_requires_base_model")
 
@@ -550,7 +578,6 @@ class MlxQwenTtsEngine:  # pragma: no cover - requires separately authorized mod
                     yield pcm
             return
 
-        variant = self.identity.model_variant or "voice_design"
         if variant == "custom_voice" and seed is not None:
             raise ValueError("custom_voice_seed_unsupported")
         if profile is None and instruction is None and variant == "voice_design":
@@ -878,13 +905,13 @@ def serve(
             _clear_metal_cache()
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
+            code = _stable_worker_error_code(exc)
             write_frame(
                 output_stream,
                 {
                     "version": PROTOCOL_VERSION,
                     "type": "error",
-                    "code": "worker_inference_error",
-                    "message": str(exc),
+                    "code": code,
                     "request_id": request_id,
                 },
             )

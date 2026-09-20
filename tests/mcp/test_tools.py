@@ -389,6 +389,43 @@ def test_transcribe_includes_language_field(
     assert len(requests) == 1
 
 
+def test_get_voice_does_not_expose_private_recipe_or_reference(
+    make_client: Any, run_async: Any
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.path == "/v1/voices/clone_1"
+        return _ok(
+            {
+                "id": "clone_1",
+                "name": "Presenter",
+                "mode": "clone",
+                "variant": "base",
+                "available": True,
+                "availability_reason": "available",
+                "revision": "vr_" + "a" * 32,
+                "capabilities": {"supports_clone": True},
+                "validation_state": {
+                    "reference": {"status": "pass"},
+                    "synthesis": {"status": "pass"},
+                },
+                "production_ready": True,
+                "production_ready_reason": "validated",
+                "instruction": "private recipe",
+                "ref_text": "private reference text",
+                "audio_path": "/private/reference.wav",
+            }
+        )
+
+    client, _requests = make_client(handler)
+    result = run_async(tools.get_voice(client, voice_id="clone_1"))
+
+    assert result["production_ready"] is True
+    assert "instruction" not in result
+    assert "ref_text" not in result
+    assert "audio_path" not in result
+
+
 # ---------------------------------------------------------------------------
 # synthesize()
 # ---------------------------------------------------------------------------
@@ -484,6 +521,61 @@ def test_synthesize_uses_effective_snapshot_to_pin_voice_and_model(
     assert [request.url.path for request in requests] == [
         "/v1/speechrail/capabilities",
         "/v1/audio/speech",
+    ]
+
+
+def test_synthesize_allows_unverified_diagnostics_but_requires_output_pass_for_production(
+    make_client: Any, run_async: Any
+) -> None:
+    snapshot = {
+        "schema_version": "effective_capabilities_v1",
+        "snapshot_id": "snap-unverified",
+        "profile": "quality",
+        "models": {"tts": {"variant": "voice_design"}},
+        "voices": [
+            {
+                "id": "clone_1",
+                "name": "clone_1",
+                "mode": "clone",
+                "available": True,
+                "variant": "base",
+                "capabilities": {"supports_clone": True},
+                "production_ready": False,
+                "production_ready_reason": "synthesis_validation_not_run",
+                "validation_state": {
+                    "reference": {"status": "pass"},
+                    "synthesis": {"status": "unevaluated"},
+                },
+            }
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
+            return _ok(snapshot)
+        if request.method == "POST" and request.url.path == "/v1/audio/speech":
+            return httpx.Response(status_code=200, content=b"ID3-unverified")
+        raise AssertionError(f"unexpected request {request.method} {request.url.path}")
+
+    client, requests = make_client(handler)
+    result = run_async(tools.synthesize(client, text="试听", voice="clone_1"))
+    assert result["validation_state"]["synthesis"]["status"] == "unevaluated"
+    Path(result["audio_path"]).unlink()
+
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(
+            tools.synthesize(
+                client,
+                text="正式制作",
+                voice="clone_1",
+                validation_policy="require_output_pass",
+            )
+        )
+    assert excinfo.value.code == "voice_not_production_ready"
+    assert [request.url.path for request in requests] == [
+        "/v1/speechrail/capabilities",
+        "/v1/audio/speech",
+        "/v1/speechrail/capabilities",
     ]
 
 
@@ -900,7 +992,12 @@ def test_get_job_not_found_surfaces_job_error_code(
 
 
 def test_create_job_forwards_params_to_client(make_client: Any, run_async: Any) -> None:
-    job = {"id": "job_x", "kind": "transcription", "state": "queued", "params": {"k": "v"}}
+    job = {
+        "id": "job_x",
+        "kind": "transcription",
+        "state": "queued",
+        "params": {"language": "zh"},
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
@@ -909,18 +1006,83 @@ def test_create_job_forwards_params_to_client(make_client: Any, run_async: Any) 
         assert body == {
             "kind": "transcription",
             "input_ref": "/tmp/meeting.wav",
-            "params": {"k": "v"},
+            "params": {"language": "zh"},
         }
         return _ok(job, status=202)
 
     client, requests = make_client(handler)
     result = run_async(
         tools.create_job(
-            client, kind="transcription", input_ref="/tmp/meeting.wav", params={"k": "v"}
+            client,
+            kind="transcription",
+            input_ref="/tmp/meeting.wav",
+            params={"language": "zh"},
         )
     )
     assert result == job
     assert len(requests) == 1
+
+
+def test_create_speech_job_accepts_and_forwards_validation_policy(
+    make_client: Any, run_async: Any
+) -> None:
+    job = {
+        "id": "job_speech",
+        "kind": "speech",
+        "state": "queued",
+        "params": {
+            "voice": "clone_voice",
+            "speed": 1.0,
+            "validation_policy": "require_output_pass",
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/v1/jobs"
+        assert _json_body(request) == {
+            "kind": "speech",
+            "input_ref": "/tmp/script.txt",
+            "params": {
+                "voice": "clone_voice",
+                "speed": 1.0,
+                "validation_policy": "require_output_pass",
+            },
+        }
+        return _ok(job, status=202)
+
+    client, requests = make_client(handler)
+    result = run_async(
+        tools.create_job(
+            client,
+            kind="speech",
+            input_ref="/tmp/script.txt",
+            params={
+                "voice": "clone_voice",
+                "speed": 1.0,
+                "validation_policy": "require_output_pass",
+            },
+        )
+    )
+    assert result == job
+    assert len(requests) == 1
+
+
+def test_create_speech_job_rejects_unknown_validation_policy(
+    make_client: Any, run_async: Any
+) -> None:
+    client, requests = make_client(lambda request: _ok({"unexpected": True}))
+    with pytest.raises(ToolCallError) as excinfo:
+        run_async(
+            tools.create_job(
+                client,
+                kind="speech",
+                input_ref="/tmp/script.txt",
+                params={"validation_policy": "maybe"},
+            )
+        )
+    assert excinfo.value.code == "invalid_params"
+    assert requests == []
 
 
 def test_create_job_rejects_non_dict_params(make_client: Any, run_async: Any) -> None:

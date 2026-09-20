@@ -640,6 +640,7 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
     )
     if batch_transcriber is None and transcribe is not None:
         batch_transcriber = _CallableBatchTranscriber(transcribe, settings.model_id)
+    job_clone_artifact = active_model_catalog(settings).tts_clone
     job_runner: JobRunner | None = None
     if job_repository is not None:
         processor = overrides.job_processor
@@ -652,6 +653,12 @@ def build_app_services(settings: Settings, overrides: AppOverrides) -> AppServic
                 max_audio_seconds=settings.max_audio_seconds,
                 tts_sample_rate=settings.tts_sample_rate,
                 ffmpeg_path=settings.ffmpeg_path,
+                clone_model_artifact=(
+                    job_clone_artifact.key if job_clone_artifact is not None else None
+                ),
+                clone_model_catalog_revision=(
+                    job_clone_artifact.revision if job_clone_artifact is not None else None
+                ),
             )
         job_runner = JobRunner(
             repository=job_repository,

@@ -29,6 +29,7 @@ from typing import Any
 
 from speechrail.domain.file_locks import exclusive_file_lock
 from speechrail.domain.voice_creation import VoiceCreation
+from speechrail.domain.voice_validation import VoiceValidationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -631,6 +632,9 @@ class VoiceRegistry:
             storage_path or (Path.home() / ".speechrail" / "custom_voices.json")
         )
         self._voices_dir = Path(voices_dir or (Path.home() / ".speechrail" / "voices"))
+        self._validation_store = VoiceValidationRepository(
+            self._storage_path.with_name("voice_validations.json")
+        )
         self._lock = threading.RLock()
         self._last_loaded_mtime_ns = 0
         self._custom_voices: dict[str, VoiceProfile] = {}
@@ -1356,6 +1360,45 @@ class VoiceRegistry:
             )
             self._commit_candidate(candidate, history_candidate=history)
             return updated
+
+    def update_quality_validation(
+        self,
+        voice_id: str,
+        validation: dict[str, Any],
+    ) -> VoiceProfile:
+        """Persist output evidence without changing the acoustic voice record.
+
+        The method remains as a narrow compatibility seam for callers that
+        already know the registry.  Evidence is stored in the independent
+        bounded repository, never in ``VoiceProfile.quality``.
+        """
+
+        if not isinstance(voice_id, str):
+            raise ValueError("invalid voice ID format")
+        vid = voice_id.strip().lower()
+        if not VOICE_ID_RE.fullmatch(vid):
+            raise ValueError("invalid voice ID format")
+        if not isinstance(validation, dict):
+            raise ValueError("quality validation must be an object")
+
+        with self._lock, self._process_lock():
+            self._ensure_available_locked(reload=True)
+            profile = self._custom_voices.get(vid)
+            if profile is None:
+                raise KeyError(f"custom voice not found: {vid}")
+            evidence = dict(validation)
+            evidence.setdefault("voice_id", profile.id)
+            if profile.revision is None:
+                raise ValueError("voice validation requires a revisioned voice")
+            evidence.setdefault("voice_revision", profile.revision)
+            self._validation_store.put(evidence)
+            return profile
+
+    @property
+    def validation_store(self) -> VoiceValidationRepository:
+        """Return the output-validation repository paired with this registry."""
+
+        return self._validation_store
 
     def list_revisions(self, voice_id: str) -> tuple[VoiceProfile, ...]:
         """Return immutable acoustic revisions for one custom voice."""

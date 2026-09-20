@@ -94,6 +94,7 @@ from speechrail.domain.tts import (
     VoiceStoreUnavailableError,
     resolve_voice,
 )
+from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.realtime.speech_admission import AdmissionDecision, SpeechAdmission
 from speechrail.runtime.alignment_admission import AlignmentAdmissionFullError
 from speechrail.runtime.busy import BusyReason, infer_backend_busy_reason
@@ -1884,7 +1885,32 @@ class OpenAIRealtimeSession:
                 self._services.render_receipts.cancel(
                     receipt_id,
                     error_code="client_disconnected",
+            )
+            return
+        except TtsBackendError as exc:
+            if receipt_id is not None:
+                self._services.render_receipts.fail(receipt_id, exc.public_code)
+            logger.error(
+                "realtime TTS synthesis failed: code=%s diagnostic_class=%s",
+                exc.public_code,
+                exc.diagnostic_class,
+            )
+            await self._send(
+                error_event(
+                    code=exc.public_code,
+                    message="TTS response failed",
+                    request_id=request_id,
                 )
+            )
+            await self._finalize_tts(
+                response_id=response_id,
+                status="failed",
+                receipt_id=receipt_id,
+                request_id=request_id,
+                item_id=item_id,
+                text=text,
+                voice_revision=voice_revision,
+            )
             return
         except RuntimeError as exc:
             if infer_backend_busy_reason(exc) == BusyReason.BACKEND_UNAVAILABLE:

@@ -14,18 +14,28 @@ import json
 import os
 from collections.abc import Sequence
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, cast
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 from fastapi import UploadFile
 
 from speechrail.application.tts_admission import tts_resource_key
+from speechrail.application.voice_validation_gate import validation_state_for_voice
+from speechrail.domain.job_request import JobParamsValidationError, validate_job_params
 from speechrail.domain.ports import (
     BatchTranscriber,
     SpeechRequest,
     SpeechSynthesizer,
     TranscriptionRequest,
 )
-from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError
+from speechrail.domain.tts import DEFAULT_VOICE_ID, VoiceStoreUnavailableError, get_voice_registry
+from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
+from speechrail.domain.tts_request import ValidationPolicy, normalize_tts_language
+from speechrail.domain.voice_validation import (
+    VoiceValidationArtifact,
+    VoiceValidationStoreUnavailableError,
+)
 from speechrail.runtime.job_runner import JobProcessingError
 from speechrail.runtime.jobs import JobRecord
 
@@ -83,6 +93,8 @@ class LocalFileJobProcessor:
         max_audio_seconds: int = 3_600,
         tts_sample_rate: int = 24_000,
         ffmpeg_path: Path | None = None,
+        clone_model_artifact: str | None = None,
+        clone_model_catalog_revision: str | None = None,
         allowed_roots: Sequence[Path] | None = None,
     ) -> None:
         if not spool_dir.is_absolute():
@@ -99,6 +111,8 @@ class LocalFileJobProcessor:
         self._max_audio_seconds = max_audio_seconds
         self._tts_sample_rate = tts_sample_rate
         self._ffmpeg_path = ffmpeg_path
+        self._clone_model_artifact = clone_model_artifact
+        self._clone_model_catalog_revision = clone_model_catalog_revision
 
     def resource_key_for_job(self, job: JobRecord) -> str | None:
         """Return the TTS worker lane for a durable speech job when it is known."""
@@ -123,6 +137,10 @@ class LocalFileJobProcessor:
             params = {}
         if not isinstance(params, dict):
             raise JobProcessingError("job_input_invalid")
+        try:
+            validate_job_params(job.kind, params)
+        except JobParamsValidationError:
+            raise JobProcessingError("job_input_invalid") from None
         if job.kind == "transcription":
             return await self._transcribe(job, input_path, params)
         if job.kind == "speech":
@@ -133,7 +151,14 @@ class LocalFileJobProcessor:
         if not isinstance(raw, str):
             raise JobProcessingError("job_input_invalid")
         reference = raw.strip()
-        if not reference or "://" in reference or reference.startswith("//"):
+        if not reference:
+            raise JobProcessingError("job_input_not_allowed")
+        parsed = urlparse(reference)
+        if parsed.scheme:
+            if parsed.scheme.lower() != "file" or parsed.netloc not in {"", "localhost"}:
+                raise JobProcessingError("job_input_not_allowed")
+            reference = url2pathname(unquote(parsed.path))
+        elif reference.startswith("//"):
             raise JobProcessingError("job_input_not_allowed")
         candidate = Path(reference)
         if not candidate.is_absolute():
@@ -193,23 +218,61 @@ class LocalFileJobProcessor:
             raise JobProcessingError("job_backend_not_ready")
         text = self._read_text(input_path)
         voice = _optional_str(params.get("voice")) or DEFAULT_VOICE_ID
+        validation_policy_raw = _optional_str(params.get("validation_policy")) or "allow_unverified"
+        if validation_policy_raw not in {"allow_unverified", "require_output_pass"}:
+            raise JobProcessingError("job_input_invalid")
+        validation_policy = cast(ValidationPolicy, validation_policy_raw)
+        if validation_policy == "require_output_pass":
+            try:
+                profile = get_voice_registry().get_profile(voice)
+                if profile.mode == "clone":
+                    artifact = (
+                        VoiceValidationArtifact(
+                            self._clone_model_artifact,
+                            self._clone_model_catalog_revision,
+                        )
+                        if self._clone_model_artifact is not None
+                        and self._clone_model_catalog_revision is not None
+                        else None
+                    )
+                    validation_state, _evidence, _binding = validation_state_for_voice(
+                        profile,
+                        artifact,
+                        get_voice_registry().validation_store,
+                        synthesizer,
+                        require_current_binding=True,
+                    )
+                    if validation_state["production_ready"] is not True:
+                        raise JobProcessingError("voice_not_production_ready")
+            except VoiceValidationStoreUnavailableError:
+                raise JobProcessingError("voice_validation_store_unavailable") from None
+            except (KeyError, ValueError, VoiceStoreUnavailableError):
+                raise JobProcessingError("job_input_invalid") from None
         try:
             request = SpeechRequest(
                 text=text,
                 voice=voice,
                 output_format="pcm16",
                 speed=_coerce_speed(params.get("speed")),
-                language=_optional_str(params.get("language")) or "auto",
+                language=normalize_tts_language(
+                    _optional_str(params.get("language")) or "auto"
+                ),
                 instruction=_optional_str(params.get("instruction")),
                 seed=_coerce_seed(params.get("seed")),
+                validation_policy=validation_policy,
             )
-        except ValueError:
+        except (ValueError, TtsBackendError):
             raise JobProcessingError("job_input_invalid") from None
         pcm = bytearray()
-        async for chunk in synthesizer.synthesize(request):
-            pcm.extend(chunk.audio)
-            if len(pcm) > _MAX_ARTIFACT_BYTES:
-                raise JobProcessingError("job_input_too_large")
+        try:
+            async for chunk in synthesizer.synthesize(request):
+                pcm.extend(chunk.audio)
+                if len(pcm) > _MAX_ARTIFACT_BYTES:
+                    raise JobProcessingError("job_input_too_large")
+        except TtsBackendError as exc:
+            if exc.code in TTS_PARAMETER_ERROR_CODES:
+                raise JobProcessingError("job_input_invalid") from None
+            raise JobProcessingError("job_processor_failed") from None
         if not pcm:
             raise JobProcessingError("job_processor_failed")
         return self._write_artifact(job.id, _SPEECH_FILENAME, bytes(pcm))

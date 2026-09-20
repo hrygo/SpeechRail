@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any, Literal
 
@@ -11,6 +12,12 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from speechrail.application.services import AppServices
+from speechrail.domain.idempotency import (
+    DurableIdempotencyJournal,
+    IdempotencyConflictError,
+    IdempotencyStoreUnavailableError,
+)
+from speechrail.domain.job_request import JobParamsValidationError, validate_job_params
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error_response
 from speechrail.runtime.jobs import JobRecord, JobRepository
@@ -30,6 +37,16 @@ def _job_owner(api_key: str | None) -> str:
     if api_key is None:
         return "loopback"
     return hashlib.sha256(api_key.encode()).hexdigest()
+
+
+def _job_payload_fingerprint(*, kind: str, input_ref: str, params: object) -> str:
+    payload = json.dumps(
+        {"kind": kind, "input_ref": input_ref, "params": params},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _job_response(job: JobRecord) -> dict[str, object]:
@@ -94,6 +111,13 @@ def create_jobs_router(services: AppServices) -> APIRouter:
     router = APIRouter()
     resolved = services.settings
     job_repository = services.job_repository
+    job_idempotency = (
+        DurableIdempotencyJournal(
+            job_repository.spool_dir / "job_idempotency.json", max_entries=256
+        )
+        if job_repository is not None
+        else None
+    )
 
     def job_owner(request: Request) -> str:
         del request
@@ -103,13 +127,16 @@ def create_jobs_router(services: AppServices) -> APIRouter:
     async def create_job(request: Request, body: _JobHTTPBody) -> Response:
         if (auth_error := http_auth_error(request, resolved)) is not None:
             return auth_error
-        if body.params is not None and not isinstance(body.params, dict):
-            return error_response(
-                400,
-                request.state.request_id,
-                "invalid_params",
-                "params must be a JSON object",
-            )
+        if body.params is not None:
+            try:
+                validate_job_params(body.kind, body.params)
+            except JobParamsValidationError as exc:
+                return error_response(
+                    400,
+                    request.state.request_id,
+                    "invalid_params",
+                    str(exc),
+                )
         if job_repository is None:
             return error_response(
                 503,
@@ -118,12 +145,94 @@ def create_jobs_router(services: AppServices) -> APIRouter:
                 _JOB_SPOOL_HINT,
                 retryable=True,
             )
+        owner = job_owner(request)
         job_request: dict[str, Any] = {"input_ref": body.input_ref}
         if body.params is not None:
             job_request["params"] = body.params
+        idempotency_key = request.headers.get("Idempotency-Key")
+        provisional_id: str | None = None
+        if idempotency_key is not None:
+            if not idempotency_key.strip() or len(idempotency_key) > 256:
+                return error_response(
+                    400,
+                    request.state.request_id,
+                    "invalid_idempotency_key",
+                    "Idempotency-Key must be a non-empty value up to 256 characters",
+                )
+            assert job_idempotency is not None
+            fingerprint = _job_payload_fingerprint(
+                kind=body.kind,
+                input_ref=body.input_ref,
+                params=body.params,
+            )
+            key_hash = DurableIdempotencyJournal.key_hash(idempotency_key)
+            provisional_id = "job_" + hashlib.sha256(
+                f"{owner}\x00{key_hash}\x00{fingerprint}".encode()
+            ).hexdigest()[:32]
+            try:
+                decision = job_idempotency.begin(
+                    owner=owner,
+                    operation="job.create",
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    provisional_result_id=provisional_id,
+                )
+            except IdempotencyConflictError:
+                return error_response(
+                    409,
+                    request.state.request_id,
+                    "idempotency_conflict",
+                    "Idempotency-Key was reused with a different job payload",
+                )
+            except IdempotencyStoreUnavailableError:
+                return error_response(
+                    503,
+                    request.state.request_id,
+                    "idempotency_store_unavailable",
+                    "Durable job idempotency state is unavailable",
+                    retryable=True,
+                )
+            if decision.state != "new":
+                existing = (
+                    job_repository.get(decision.result_id, owner=owner)
+                    if decision.result_id is not None
+                    else None
+                )
+                if existing is not None:
+                    return JSONResponse(status_code=202, content=_job_response(existing))
+                return error_response(
+                    409 if decision.state == "pending" else 503,
+                    request.state.request_id,
+                    "idempotency_pending"
+                    if decision.state == "pending"
+                    else "idempotency_result_unavailable",
+                    "The original idempotent job is not currently recoverable",
+                    retryable=decision.state == "pending",
+                )
         job = job_repository.create(
-            kind=body.kind, owner=job_owner(request), request=job_request
+            kind=body.kind,
+            owner=owner,
+            request=job_request,
+            job_id=provisional_id,
         )
+        if idempotency_key is not None:
+            try:
+                assert job_idempotency is not None
+                job_idempotency.complete(
+                    owner=owner,
+                    operation="job.create",
+                    key=idempotency_key,
+                    fingerprint=fingerprint,
+                    result_id=job.id,
+                )
+            except IdempotencyStoreUnavailableError:
+                return error_response(
+                    503,
+                    request.state.request_id,
+                    "idempotency_store_unavailable",
+                    "Job was created but durable idempotency completion is unavailable",
+                    retryable=True,
+                )
         return JSONResponse(status_code=202, content=_job_response(job))
 
     @router.get("/v1/jobs")

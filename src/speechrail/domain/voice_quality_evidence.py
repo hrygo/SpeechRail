@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from speechrail.domain.tts import VoiceProfile
@@ -39,6 +40,7 @@ def build_quality_evidence(
     model_variant: str | None,
     model_catalog_revision: str | None,
     model_runtime_revision: str | None = None,
+    validation_binding: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Project legacy measurements into explicit independent evidence dimensions."""
 
@@ -119,6 +121,16 @@ def build_quality_evidence(
             metrics={"deterministic": synthesis.deterministic},
         )
 
+    binding = {
+        key: validation_binding.get(key)
+        for key in (
+            "runtime_fingerprint",
+            "preprocess_version",
+            "generation_recipe_revision",
+            "policy_version",
+        )
+    } if validation_binding is not None else None
+
     return {
         "policy_version": EVIDENCE_POLICY_VERSION,
         "run_id": report.run_id,
@@ -136,6 +148,7 @@ def build_quality_evidence(
                 "catalog_revision": model_catalog_revision,
                 "runtime_revision": model_runtime_revision,
             },
+            "validation_binding": binding,
         },
         "scope": {
             "probe_set": probe_set,

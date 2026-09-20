@@ -286,7 +286,7 @@ def test_tts_worker_starts_offline_transport_and_checks_ready_identity(tmp_path:
     asyncio.run(start_and_close())
 
 
-def test_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
+def test_start_failure_keeps_worker_diagnostics_out_of_exception_text(tmp_path: Path) -> None:
     snapshot = tmp_path.parent / "external-qwen3-tts-load-error"
     snapshot.mkdir()
     (snapshot / "config.json").write_text("{}")
@@ -315,7 +315,8 @@ def test_start_failure_embeds_worker_stderr_tail(tmp_path: Path) -> None:
     async def scenario() -> None:
         with pytest.raises(RuntimeError, match="worker_load_error") as exc_info:
             await worker.start()
-        assert "failed to allocate" in str(exc_info.value)
+        assert "failed to allocate" not in str(exc_info.value)
+        assert exc_info.value.public_code == "tts_initialization_failed"
 
     asyncio.run(scenario())
 

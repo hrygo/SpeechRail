@@ -2,8 +2,8 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "2.2.0"
-date: 2026-09-20
+version: "2.5.0"
+date: 2026-09-21
 ---
 
 # 🔌 SpeechRail MCP 主流 Agent 集成指南
@@ -22,7 +22,21 @@ date: 2026-09-20
 > **v2.2.0 变更**（2026-09-20）：MCP 只接受当前 `effective_capabilities_v1` 能力契约；
 > 移除 404/405/未知 schema 的 legacy discovery fallback，以及 `describe()` 的 legacy 输出字段。
 
-> **当前边界（2026-09-20）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
+> **v2.3.0 变更**（2026-09-21）：MCP 补齐 `get_voice`、`design_voice`、`clone_voice`、
+> `validate_voice`、`list_jobs`、`get_job_result`；clone 的 reference gate 与 synthesis
+> output gate 分离，`available=true` 不再等同 `production_ready=true`。可用
+> `speechrail agents install` 安装配套 skill 与 Codex MCP 配置；安装状态仍需重启/重新加载客户端。
+
+> **v2.4.0 变更**（2026-09-21）：普通 `synthesize` 默认允许未验证试听；正式制作使用
+> `validation_policy=require_output_pass`，由服务端在当前绑定下再次校验。验证报告与声学
+> voice revision 分开存储，MCP 产物带 host、request/validation 摘要。
+
+> **v2.5.0 变更**（2026-09-21）：正式 output validation 绑定到当前 runtime、前处理、Base
+> generation recipe 和 policy；cold/unknown runtime 不再复用旧 pass。REST 与 MCP durable job
+> 参数统一由同一校验器执行；job 的 `input_ref` 使用 allowlist 内的本地绝对路径或 `file://`
+> URI，speech 输入是 UTF-8 文本文件而不是 `synthesize` 的正文参数。
+
+> **当前边界（2026-09-21）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
 > `describe/transcribe/synthesize/voice/job` 工具；它不创建 Realtime WebSocket handle。
 > Native、Sona 或其他调用方直连 `/v1/realtime`，并自行拥有 LLM、历史、memory、persona、
 > tools、播放队列和 barge-in；Realtime TTS 只能由调用方显式发送 `speechrail.tts.create`/
@@ -51,16 +65,20 @@ flowchart LR
   `describe()` 的 `realtime` 字段会明确报告 `orchestration=caller`、`server_llm=false`、
   `conversation_state=false`。
 
-### 1.1 工具集（9 个）
+### 1.1 工具集（15 个）
 
 | 工具 | 作用 | 关键点 |
 |---|---|---|
 | `describe()` | 能力快照 | **应先调用**：拿档位、readiness、可用音色 |
 | `transcribe` | 转写本地音频 | 支持 `language` / `diarize` / `timestamps` |
-| `synthesize` | 文本合成到文件 | 返回 `audio_path`；默认音色 `serena`；自动 pin 可用的 voice/model revision |
+| `synthesize` | 文本合成到文件 | 返回 `audio_path`；默认允许未验证试听；正式制作使用 `validation_policy=require_output_pass` |
 | `preview_voice` | 试听 VoiceDesign 指令 | **仅 `quality` 档** |
 | `create_voice` / `delete_voice` | 注册/删除持久音色 | `delete_voice` 是破坏性操作 |
-| `create_job` / `get_job` / `cancel_job` | 长任务句柄 | 同步调用超时/过长时改用 |
+| `get_voice` | 查询安全音色详情 | 包含 reference/output validation 状态 |
+| `design_voice` | VoiceDesign 生成参考并注册 Base clone | 注册后仍需 output validation |
+| `clone_voice` | 本地 reference 音频注册 Base clone | 只接受本地 path/file URI |
+| `validate_voice` | 对当前 voice revision 执行输出验收 | 需要 TTS 计算资源 |
+| `create_job` / `get_job` / `list_jobs` / `get_job_result` / `cancel_job` | 长任务句柄与产物恢复 | create retry 使用 Idempotency-Key |
 
 只读资源：`speechrail://capabilities`、`speechrail://voices`、`speechrail://models`。
 
@@ -76,6 +94,12 @@ flowchart LR
 3. 使用返回结果中的 `voice_revision` / `model_revision` 记录实际采用的 pin。若服务返回
    `voice_revision_conflict`、`voice_revoked` 或 `model_revision_conflict`，重新 `describe()`
    并让调用方决定是否切换版本。
+
+`available=true` 只代表可路由，不代表输出验收通过。普通试听可以使用默认的
+`validation_policy=allow_unverified`；正式制作必须使用 `require_output_pass`，由服务端在
+当前 voice/model/runtime 绑定下再次校验，避免 Agent 检查后的竞态窗口。绑定还包括
+reference preprocessing、Base generation recipe 和 policy version；如果当前 runtime 处于
+cold/unknown，旧的 output pass 不会被复用，先重新 `validate_voice`，再刷新 `describe()`。
 
 effective capability 路径是 MCP 的当前必需契约。返回 `404/405`、未知 schema 或其他错误时，
 MCP 直接失败，不回退到 `/v1/models` + `/v1/voices`，也不伪造能力快照。`voice_revision=null`
@@ -111,6 +135,33 @@ MCP 直接失败，不回退到 `/v1/models` + `/v1/voices`，也不伪造能力
 >
 > 受管可执行文件属于**已安装的 release**，其命令行参数与行为随该 release 版本而定；例如
 > `--host` / `--port` 需要包含该特性的 release。
+
+### 2.2 一键安装 Codex 配套 skill 与 MCP 配置
+
+受管 release 同时提供 `speechrail` skill。它不是单独的业务实现，而是把当前 MCP 的 15 个
+tools、3 个 resources、Base/VoiceDesign 语义、错误码、幂等和产物处理规则以渐进式参考文档
+交给 Agent。安装器只针对当前用户的 Codex 配置工作，不启动主服务、不加载模型、不重启客户端。
+
+```bash
+speechrail agents install
+speechrail agents status --json
+```
+
+默认写入：
+
+- `~/.codex/skills/speechrail/`：`SKILL.md`、能力分组 references 和 manifest；
+- `~/.codex/config.toml`：`[mcp_servers.speechrail]` 及 `SPEECHRAIL_BASE_URL`；
+- `~/.codex/skills/.speechrail-install.json`：文件 hash、配置块 hash 和回滚收据。
+
+`agents status --json` 分开报告 `packaged`、`installed`、`client_configured`、
+`client_discovered`、`session_activated`。文件检查只能证明前两项和配置写入；后两项在没有
+客户端证据时保持 `unknown`，不能把文件存在冒充已经被客户端发现或激活。
+
+安装后重启或 reload Codex，再让 Agent 先调用 `describe()`。升级时使用
+`speechrail agents update`；如果 status 显示 `drifted`，先检查用户修改，只有确认覆盖才使用
+`--force`。`speechrail agents uninstall` 只删除仍与收据 hash 相同的文件；用户修改过的文件和
+冲突配置会保留，并在结果中列出。其他 Agent/IDE 仍按本指南对应客户端的配置方式接入同一个
+`speechrail-mcp`，不要把 Codex skill 路径当作其他客户端的 MCP 配置。
 
 ---
 
@@ -307,7 +358,7 @@ claude mcp add --scope user speechrail \
 ```
 
 - **架构适配**：Antigravity 支持标准 Stdio 协议与 Lazy MCP 按需加载机制。
-- **Schema 缓存**：工具 Schema 位于 `~/.gemini/antigravity-ide/mcp/speechrail/`（包含 9 个工具的 JSON 契约与 `instructions.md`）。
+- **Schema 缓存**：工具 Schema 位于 `~/.gemini/antigravity-ide/mcp/speechrail/`；客户端刷新后应看到当前 15 个工具与 server instructions。
 - **全局调用准则**：在 `~/.gemini/config/rules/speechrail.md` 中约束统一调用契约（统一使用 `call_mcp_tool(ServerName="speechrail", ...)` 调用；音频一律传本地绝对路径，严禁传 base64）。
 
 ---

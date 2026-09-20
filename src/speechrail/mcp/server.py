@@ -34,9 +34,12 @@ from speechrail.mcp.client import (
 from speechrail.mcp.models import (
     AudioArtifact,
     DescribeResult,
+    JobListResult,
     JobRecord,
+    JobResultArtifact,
     TranscribeResult,
     VoiceRecord,
+    VoiceValidationResult,
 )
 from speechrail.mcp.tools import ToolCallError
 
@@ -68,21 +71,29 @@ _CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
 }
 
 _INSTRUCTIONS = (
-    "SpeechRail MCP exposes the local SpeechRail ASR/TTS service as a small "
-    "toolset. Always start with describe(): it requires the current "
-    "effective_capabilities_v1 contract and reports the active profile tier, "
-    "readiness and available voices. Pass audio as an "
-    "audio_ref (a local file path or file:// URI) and never inline base64: "
-    "inline audio would leak into your context. Prefer the synchronous "
-    "transcribe/synthesize tools; when a call reports audio_too_long or "
-    "times out, use create_job with the same input_ref and poll get_job. If "
-    "SpeechRail is busy (backend_busy or queue_full) retry with backoff and "
-    "do not loop. Real-time full-duplex audio is outside this toolset and "
-    "uses the /v1/realtime WebSocket directly. SpeechRail is a stateless "
-    "Speech Plane: it performs ASR, VAD, diarization facts and explicit TTS "
-    "rendering only. The caller owns the LLM, conversation history, memory, "
-    "persona, tools, playback and barge-in policy; MCP never creates a "
-    "Realtime WebSocket handle or a server-side conversation."
+    "SpeechRail MCP exposes the complete local SpeechRail ASR/TTS, voice and "
+    "durable-job surface. Always start with describe(): it requires the current "
+    "effective_capabilities_v1 contract and reports the active profile, "
+    "readiness, available voices and validation state. `available=true` means "
+    "the voice can be routed; for clone voices it does not mean "
+    "`production_ready=true`. After design_voice or clone_voice, call "
+    "validate_voice and require a persisted synthesis output pass before a "
+    "production render. VoiceDesign preview/create_voice produces an "
+    "instruction voice; design_voice first generates a reference and registers "
+    "a Base clone, so reference-gate success is not output-gate success. Do "
+    "not retry `clone_speed_unsupported` by forcing a speed: Base clone is "
+    "fixed at speed=1.0 and the error is a capability mismatch. Pass audio as "
+    "a local file path or file:// URI and never inline base64. Prefer the "
+    "synchronous transcribe/synthesize tools; when a call reports "
+    "audio_too_long or times out, use create_job with an Idempotency-Key and "
+    "poll get_job, list_jobs, then fetch the result with get_job_result. If "
+    "SpeechRail is busy (backend_busy or queue_full), retry with bounded "
+    "backoff and do not loop. Real-time full-duplex audio is outside this "
+    "toolset and uses the /v1/realtime WebSocket directly. SpeechRail is a "
+    "stateless Speech Plane: it performs ASR, VAD, diarization facts and "
+    "explicit TTS rendering only. The caller owns the LLM, conversation "
+    "history, memory, persona, tools, playback and barge-in policy; MCP never "
+    "creates a Realtime WebSocket handle or a server-side conversation."
 )
 
 
@@ -308,6 +319,27 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             float,
             Field(description="Speaking rate from 0.25 to 4.0."),
         ] = 1.0,
+        language: Annotated[
+            str,
+            Field(description="TTS language code/name; describe() is authoritative."),
+        ] = "auto",
+        instruction: Annotated[
+            str | None,
+            Field(description="Ephemeral VoiceDesign instruction; unsupported for clone voices."),
+        ] = None,
+        seed: Annotated[
+            int | None,
+            Field(description="Caller seed; supported only on explicit VoiceDesign instructions."),
+        ] = None,
+        validation_policy: Annotated[
+            Literal["allow_unverified", "require_output_pass"],
+            Field(
+                description=(
+                    "allow_unverified for audition/diagnostics (default), or "
+                    "require_output_pass for formal production."
+                )
+            ),
+        ] = "allow_unverified",
         expected_voice_revision: Annotated[
             str | None,
             Field(
@@ -347,6 +379,10 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
                 voice=voice,
                 output_format=output_format,
                 speed=speed,
+                language=language,
+                instruction=instruction,
+                seed=seed,
+                validation_policy=validation_policy,
                 expected_voice_revision=expected_voice_revision,
                 expected_model_revision=expected_model_revision,
             )
@@ -452,6 +488,122 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         )
 
     @mcp.tool(
+        title="Get voice details",
+        annotations=_tool_annotations(
+            "Get voice details", read_only=True, destructive=False, idempotent=True
+        ),
+    )
+    async def get_voice(
+        voice_id: Annotated[str, Field(description="Canonical voice id or alias.")],
+    ) -> VoiceRecord:
+        """Return one safe voice record and its validation/production state."""
+        return VoiceRecord.model_validate(
+            await _map_errors(tools.get_voice(client, voice_id=voice_id))
+        )
+
+    @mcp.tool(
+        title="Design and register a Base voice",
+        annotations=_tool_annotations(
+            "Design and register a Base voice",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
+    async def design_voice(
+        voice_id: Annotated[str, Field(description="New stable voice id.")],
+        name: Annotated[str, Field(description="Display name.")],
+        instruction: Annotated[str, Field(description="VoiceDesign acoustic instruction.")],
+        reference_text: Annotated[
+            str,
+            Field(description="Text aligned to the generated reference audio; 20-240 chars."),
+        ],
+        seed: Annotated[int, Field(description="VoiceDesign seed; defaults to 42.")] = 42,
+        language: Annotated[
+            str,
+            Field(description="Current generated-reference gate language; defaults to zh."),
+        ] = "zh",
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Optional key for safe retry of the same registration payload."),
+        ] = None,
+    ) -> VoiceRecord:
+        """Generate a reference with VoiceDesign, then register it for Base clone."""
+        return VoiceRecord.model_validate(
+            await _map_errors(
+                tools.design_voice(
+                    client,
+                    voice_id=voice_id,
+                    name=name,
+                    instruction=instruction,
+                    reference_text=reference_text,
+                    seed=seed,
+                    language=language,
+                    idempotency_key=idempotency_key,
+                )
+            )
+        )
+
+    @mcp.tool(
+        title="Clone a voice from local audio",
+        annotations=_tool_annotations(
+            "Clone a voice from local audio",
+            read_only=False,
+            destructive=False,
+            idempotent=False,
+        ),
+    )
+    async def clone_voice(
+        audio_ref: Annotated[
+            str,
+            Field(
+                description=(
+                    "Local reference audio path or file:// URI; "
+                    "remote/base64 is rejected."
+                )
+            ),
+        ],
+        name: Annotated[str, Field(description="Display name.")],
+        ref_text: Annotated[str, Field(description="Transcript of the reference audio.")],
+        voice_id: Annotated[
+            str | None,
+            Field(description="Optional stable id matching ^[a-zA-Z0-9_-]{1,64}$."),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Optional key for safe retry of the same audio/payload."),
+        ] = None,
+    ) -> VoiceRecord:
+        """Register a local reference recording through the Base quality gate."""
+        return VoiceRecord.model_validate(
+            await _map_errors(
+                tools.clone_voice(
+                    client,
+                    audio_ref=audio_ref,
+                    name=name,
+                    ref_text=ref_text,
+                    voice_id=voice_id,
+                    idempotency_key=idempotency_key,
+                )
+            )
+        )
+
+    @mcp.tool(
+        title="Validate a registered voice",
+        annotations=_tool_annotations(
+            "Validate a registered voice", read_only=False, destructive=False, idempotent=False
+        ),
+    )
+    async def validate_voice(
+        voice_id: Annotated[str, Field(description="Registered voice id.")],
+        runs: Annotated[int, Field(description="Probe repetitions, 1-3.")] = 1,
+    ) -> VoiceValidationResult:
+        """Run the current synthesis output gate; this may load the local TTS worker."""
+        return VoiceValidationResult.model_validate(
+            await _map_errors(tools.validate_voice(client, voice_id=voice_id, runs=runs))
+        )
+
+    @mcp.tool(
         title="Delete a voice",
         annotations=_tool_annotations(
             "Delete a voice",
@@ -483,28 +635,48 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             str,
             Field(
                 description=(
-                    "Local path or file:// URI reused by the worker "
-                    "(up to 1000 characters)."
+                    "Absolute local path or file:// URI reused by the worker "
+                    "(up to 1000 characters); speech expects a UTF-8 text file."
                 )
             ),
         ],
         params: Annotated[
             dict[str, Any] | None,
-            Field(description="Opaque JSON object stored and echoed back by the server."),
+            Field(
+                description=(
+                    "Kind-specific JSON object stored and echoed back by the server; "
+                    "transcription accepts language, diarize, timestamps; speech "
+                    "accepts voice, speed, language, instruction, seed, and "
+                    "validation_policy (allow_unverified or require_output_pass). "
+                    "Unknown keys and invalid values are rejected."
+                )
+            ),
+        ] = None,
+        idempotency_key: Annotated[
+            str | None,
+            Field(description="Optional key; same owner/key/payload returns the same job."),
         ] = None,
     ) -> JobRecord:
         """Create a durable transcription/speech job and return its handle.
 
         kind: transcription or speech.
-        input_ref: path/URI reused by the worker (same convention as
-            audio_ref; up to 1000 chars).
-        params: reserved for future request options (not yet stored).
+        input_ref: absolute local path or file:// URI reused by the worker
+            (up to 1000 chars; speech expects a UTF-8 text file).
+        params: kind-specific options stored and echoed by the server; unknown
+            keys are rejected. Speech accepts validation_policy=allow_unverified
+            or require_output_pass.
         Returns the job record {id, kind, state, result_ref}; poll with
         get_job and cancel with cancel_job.
         """
         return JobRecord.model_validate(
             await _map_errors(
-                tools.create_job(client, kind=kind, input_ref=input_ref, params=params)
+                tools.create_job(
+                    client,
+                    kind=kind,
+                    input_ref=input_ref,
+                    params=params,
+                    idempotency_key=idempotency_key,
+                )
             )
         )
 
@@ -526,6 +698,37 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         raw = await _map_errors(tools.get_job(client, job_id=job_id))
         await ctx.report_progress(1.0, 1.0, "done")
         return JobRecord.model_validate(raw)
+
+    @mcp.tool(
+        title="List durable jobs",
+        annotations=_tool_annotations(
+            "List durable jobs", read_only=True, destructive=False, idempotent=True
+        ),
+    )
+    async def list_jobs(
+        limit: Annotated[int, Field(description="Page size, 1-100.")] = 20,
+        cursor: Annotated[
+            str | None, Field(description="Opaque cursor from the previous page.")
+        ] = None,
+    ) -> JobListResult:
+        """List owner-scoped jobs without exposing input contents."""
+        return JobListResult.model_validate(
+            await _map_errors(tools.list_jobs(client, limit=limit, cursor=cursor))
+        )
+
+    @mcp.tool(
+        title="Get job result",
+        annotations=_tool_annotations(
+            "Get job result", read_only=True, destructive=False, idempotent=True
+        ),
+    )
+    async def get_job_result(
+        job_id: Annotated[str, Field(description="Completed durable job id.")],
+    ) -> JobResultArtifact:
+        """Materialize a completed speech/transcription result on the MCP host."""
+        return JobResultArtifact.model_validate(
+            await _map_errors(tools.get_job_result(client, job_id=job_id))
+        )
 
     @mcp.tool(
         title="Cancel a job",

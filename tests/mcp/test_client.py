@@ -124,7 +124,7 @@ def test_synthesis_is_a_json_post_with_openai_body_keys(
         return httpx.Response(status_code=200, content=audio)
 
     client, requests = make_client(handler)
-    content = run_async(
+    content, request_id = run_async(
         client.synthesize(
             model="speechrail/qwen3-tts",
             text="你好",
@@ -134,6 +134,7 @@ def test_synthesis_is_a_json_post_with_openai_body_keys(
         )
     )
     assert content == audio
+    assert request_id is None
     assert len(requests) == 1
 
 
@@ -149,7 +150,7 @@ def test_synthesis_forwards_voice_and_model_revision_pins(
         return httpx.Response(status_code=200, content=b"audio")
 
     client, requests = make_client(handler)
-    content = run_async(
+    content, request_id = run_async(
         client.synthesize(
             model="speechrail/qwen3-tts",
             text="你好",
@@ -162,6 +163,7 @@ def test_synthesis_forwards_voice_and_model_revision_pins(
     )
 
     assert content == b"audio"
+    assert request_id is None
     assert len(requests) == 1
 
 

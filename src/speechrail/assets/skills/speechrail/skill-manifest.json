@@ -1,0 +1,37 @@
+{
+  "schema_version": "speechrail_skill_manifest_v1",
+  "skill": "speechrail",
+  "version": "1.1.0",
+  "mcp_contract": "speechrail-mcp",
+  "tools": [
+    "describe",
+    "transcribe",
+    "synthesize",
+    "preview_voice",
+    "create_voice",
+    "delete_voice",
+    "create_job",
+    "get_job",
+    "cancel_job",
+    "get_voice",
+    "design_voice",
+    "clone_voice",
+    "validate_voice",
+    "list_jobs",
+    "get_job_result"
+  ],
+  "resources": [
+    "speechrail://capabilities",
+    "speechrail://voices",
+    "speechrail://models"
+  ],
+  "references": [
+    "references/discovery.md",
+    "references/transcription.md",
+    "references/synthesis.md",
+    "references/voices.md",
+    "references/jobs.md",
+    "references/errors.md",
+    "references/artifacts.md"
+  ]
+}

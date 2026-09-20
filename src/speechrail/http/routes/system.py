@@ -18,6 +18,7 @@ from typing import Any, cast
 from fastapi import APIRouter, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse
 
+from speechrail.application.capability_snapshot import _validation_state
 from speechrail.application.deadline import await_until
 from speechrail.application.render_receipts import observed_runtime_revision_for_synthesizer
 from speechrail.application.services import AppServices
@@ -26,6 +27,10 @@ from speechrail.application.tts_delivery import (
     TTSDeliveryError,
     iter_until,
     iter_validated_audio,
+)
+from speechrail.application.voice_validation_gate import (
+    build_validation_binding,
+    validation_state_for_voice,
 )
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
@@ -59,6 +64,7 @@ from speechrail.domain.tts import (
     canonicalize_clone_reference_audio,
     get_voice_registry,
 )
+from speechrail.domain.tts_errors import TtsBackendError
 from speechrail.domain.tts_pronunciation import (
     PronunciationConflictError,
     PronunciationEntry,
@@ -68,6 +74,7 @@ from speechrail.domain.tts_pronunciation import (
 )
 from speechrail.domain.voice_quality_evidence import build_quality_evidence
 from speechrail.domain.voice_quality_metrics import compute_output_quality_metrics
+from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.runtime.admission import QueueFullError
@@ -226,9 +233,41 @@ def _voice_entry(
     tts_ready: bool,
     *,
     enabled: bool = True,
+    synthesizer: object | None = None,
+    strict_validation: bool = False,
 ) -> dict[str, Any]:
     variant = active.tts.variant if active.tts is not None else None
     available = tts_ready and enabled and not profile.revoked
+    artifact = active.tts_clone if profile.mode == "clone" else active.tts
+    validation: dict[str, Any] | None = None
+    validation_state: dict[str, object]
+    if profile.mode == "clone":
+        try:
+            repository = get_voice_registry().validation_store
+            if strict_validation:
+                validation_state, validation, _ = validation_state_for_voice(
+                    profile,
+                    artifact,
+                    repository,
+                    synthesizer,
+                    require_current_binding=True,
+                )
+            else:
+                validation = repository.get(
+                    voice_id=profile.id,
+                    voice_revision=profile.revision,
+                    model_artifact=artifact.key if artifact is not None else None,
+                    model_catalog_revision=artifact.revision if artifact is not None else None,
+                )
+                validation_state = _validation_state(profile, artifact, validation)
+        except VoiceValidationStoreUnavailableError:
+            # A corrupt or unavailable evidence store must fail closed: the
+            # voice remains routable for diagnostics but is not promoted to a
+            # production-ready voice.
+            validation = None
+            validation_state = _validation_state(profile, artifact, validation)
+    else:
+        validation_state = _validation_state(profile, artifact, validation)
     supports_speaker = False
     supports_instruction = False
     supports_clone = False
@@ -261,6 +300,15 @@ def _voice_entry(
         "is_system": profile.is_system,
         "created_at": profile.created_at,
         "available": available,
+        "availability_reason": (
+            "disabled"
+            if not enabled
+            else "voice_revoked"
+            if profile.revoked
+            else "backend_not_ready"
+            if not tts_ready
+            else "available"
+        ),
         "variant": binding_variant,
         "capabilities": {
             "supports_speaker": supports_speaker,
@@ -268,6 +316,14 @@ def _voice_entry(
             "supports_clone": supports_clone,
         },
         "mode": profile.mode,
+        "validation_state": validation_state,
+        "validated_for": validation_state["validated_for"],
+        "production_ready": available and validation_state["production_ready"] is True,
+        "production_ready_reason": (
+            validation_state["production_ready_reason"]
+            if available
+            else "voice_not_available"
+        ),
     }
     if profile.ref_text is not None:
         entry["ref_text"] = profile.ref_text
@@ -290,6 +346,8 @@ def _voice_list_entry(
     tts_ready: bool,
     *,
     enabled: bool = True,
+    synthesizer: object | None = None,
+    strict_validation: bool = False,
 ) -> dict[str, Any]:
     """Project only routing-safe discovery fields for the public voice list."""
 
@@ -298,6 +356,8 @@ def _voice_list_entry(
         active,
         tts_ready,
         enabled=enabled,
+        synthesizer=synthesizer,
+        strict_validation=strict_validation,
     )
     safe_fields = (
         "id",
@@ -312,6 +372,11 @@ def _voice_list_entry(
         "mode",
         "revision",
         "revoked",
+        "availability_reason",
+        "validation_state",
+        "validated_for",
+        "production_ready",
+        "production_ready_reason",
     )
     return {
         key: detailed[key]
@@ -463,8 +528,10 @@ _MAX_QUALITY_PROBE_PCM_BYTES = 30 * 24_000 * 2
 
 
 def _classify_probe_failure(exc: BaseException) -> str:
-    if isinstance(exc, RuntimeError) and "speed" in str(exc).lower():
+    if isinstance(exc, TtsBackendError) and exc.code == "clone_speed_unsupported":
         return _CLONE_SPEED_UNSUPPORTED_CODE
+    if isinstance(exc, TtsBackendError) and exc.public_code == _OUTPUT_INVALID_CODE:
+        return _OUTPUT_INVALID_CODE
     if isinstance(exc, (TTSDeliveryError, ValueError, TypeError)):
         return _OUTPUT_INVALID_CODE
     return vq.VoiceQualityFailureCode.PROBE_FAILED.value
@@ -492,6 +559,7 @@ async def _synthesize_probes(
                 voice=voice_id,
                 output_format="pcm16",
                 sample_rate=24_000,
+                speed=1.0,
                 expected_voice_revision=voice_revision,
             )
             probe_pcm = bytearray()
@@ -548,8 +616,6 @@ async def _synthesize_probes(
         len(digests) == repetitions and len(set(digests)) == 1
         for digests in digests_by_probe.values()
     )
-    if repetitions >= 2 and ok == attempted and not deterministic:
-        failure_codes.append(vq.VoiceQualityFailureCode.OUTPUT_NONDETERMINISTIC.value)
 
     return (
         bytes(pcm),
@@ -798,6 +864,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                     active,
                     services.tts_ready,
                     enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
+                    synthesizer=services.tts_synthesizer,
+                    strict_validation=True,
                 )
                 for profile in profiles
             ],
@@ -833,6 +901,8 @@ def create_system_router(services: AppServices) -> APIRouter:
                 active,
                 services.tts_ready,
                 enabled=not profile.is_system or profile.id in resolved.tts_voice_ids,
+                synthesizer=services.tts_synthesizer,
+                strict_validation=True,
             ),
         )
 
@@ -941,7 +1011,13 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
         return JSONResponse(
             status_code=200,
-            content=_voice_entry(profile, active, services.tts_ready),
+            content=_voice_entry(
+                profile,
+                active,
+                services.tts_ready,
+                synthesizer=services.tts_synthesizer,
+                strict_validation=True,
+            ),
         )
 
     @router.get("/v1/speechrail/pronunciation-sets")
@@ -1477,7 +1553,13 @@ def create_system_router(services: AppServices) -> APIRouter:
             )
             return JSONResponse(
                 status_code=201,
-                content=_voice_entry(profile, active, services.tts_ready),
+                content=_voice_entry(
+                    profile,
+                    active,
+                    services.tts_ready,
+                    synthesizer=services.tts_synthesizer,
+                    strict_validation=True,
+                ),
             )
         except VoiceStoreUnavailableError:
             return error_response(
@@ -1658,7 +1740,13 @@ def create_system_router(services: AppServices) -> APIRouter:
                         )
                     return JSONResponse(
                         status_code=201,
-                        content=_voice_entry(profile, active, services.tts_ready),
+                        content=_voice_entry(
+                            profile,
+                            active,
+                            services.tts_ready,
+                            synthesizer=services.tts_synthesizer,
+                            strict_validation=True,
+                        ),
                     )
             if decision.state == "completed":
                 if decision.result_id is None:
@@ -1692,7 +1780,13 @@ def create_system_router(services: AppServices) -> APIRouter:
                     )
                 return JSONResponse(
                     status_code=201,
-                    content=_voice_entry(profile, active, services.tts_ready),
+                    content=_voice_entry(
+                        profile,
+                        active,
+                        services.tts_ready,
+                        synthesizer=services.tts_synthesizer,
+                        strict_validation=True,
+                    ),
                 )
 
         publication_started = False
@@ -1798,7 +1892,13 @@ def create_system_router(services: AppServices) -> APIRouter:
 
         return JSONResponse(
             status_code=201,
-            content=_voice_entry(profile, active, services.tts_ready),
+            content=_voice_entry(
+                profile,
+                active,
+                services.tts_ready,
+                synthesizer=services.tts_synthesizer,
+                strict_validation=True,
+            ),
         )
 
     @router.get("/v1/speechrail/voices/clone/idempotency")
@@ -2140,12 +2240,57 @@ def create_system_router(services: AppServices) -> APIRouter:
             variant_name,
             resolved.version,
         )
-        if request.url.path.startswith("/v1/speechrail/"):
-            artifact = (
-                active.tts_clone
-                if profile.mode == "clone" and active.tts_clone is not None
-                else active.tts
+        artifact = (
+            active.tts_clone
+            if profile.mode == "clone" and active.tts_clone is not None
+            else active.tts
+        )
+        validation_binding = build_validation_binding(
+            profile,
+            artifact,
+            require_current_binding=True,
+            observed_runtime_revision=observed_model_runtime_revision,
+        )
+        validation_persisted = True
+        try:
+            registry.update_quality_validation(
+                profile.id,
+                {
+                    "voice_id": profile.id,
+                    "status": report.status,
+                    "identity_status": "unevaluated",
+                    "run_id": report.run_id,
+                    "tested_at": report.tested_at,
+                    "policy_version": report.policy_version,
+                    "voice_revision": profile.revision,
+                    "model_artifact": artifact.key if artifact is not None else None,
+                    "model_source": artifact.model_id if artifact is not None else None,
+                    "model_variant": artifact.variant if artifact is not None else None,
+                    "model_catalog_revision": (
+                        artifact.revision if artifact is not None else None
+                    ),
+                    "model_runtime_revision": observed_model_runtime_revision,
+                    "runtime_fingerprint": validation_binding.runtime_fingerprint,
+                    "preprocess_version": validation_binding.preprocess_version,
+                    "generation_recipe_revision": (
+                        validation_binding.generation_recipe_revision
+                    ),
+                    "probe_set": str(probe_set),
+                    "repetitions": runs,
+                    "failure_codes": list(report.failure_codes),
+                    "validated_for": (
+                        ["output"]
+                        if report.status
+                        in {vq.VoiceQualityStatus.PASS.value, vq.VoiceQualityStatus.WARN.value}
+                        else []
+                    ),
+                },
             )
+        except (VoiceStoreUnavailableError, KeyError, ValueError):
+            # The measurement remains useful, but discovery must not claim
+            # production readiness when durable binding could not be saved.
+            validation_persisted = False
+        if request.url.path.startswith("/v1/speechrail/"):
             evidence = build_quality_evidence(
                 profile=profile,
                 report=report,
@@ -2158,15 +2303,20 @@ def create_system_router(services: AppServices) -> APIRouter:
                     artifact.revision if artifact is not None else None
                 ),
                 model_runtime_revision=observed_model_runtime_revision,
+                validation_binding=validation_binding.as_mapping(),
             )
             return JSONResponse(
                 status_code=200,
                 content={
                     "legacy_report": report.to_dict(),
                     "evidence": evidence,
+                    "validation_persisted": validation_persisted,
                 },
             )
-        return JSONResponse(status_code=200, content=report.to_dict())
+        return JSONResponse(
+            status_code=200,
+            content={**report.to_dict(), "validation_persisted": validation_persisted},
+        )
 
     @router.delete("/v1/voices/{voice_id}")
     async def delete_voice(voice_id: str, request: Request) -> JSONResponse:

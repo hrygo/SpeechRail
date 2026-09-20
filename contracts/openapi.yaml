@@ -618,7 +618,10 @@ paths:
       summary: Run quality probes for a voice profile
       description: |
         Runs bounded quality probes against a voice profile and returns a full
-        `VoiceQualityReport` summary.
+        `VoiceQualityReport` summary and persists the output-validation binding
+        for clone voices. The legacy route returns the report fields plus
+        `validation_persisted`; the namespaced route returns `legacy_report`,
+        `evidence` and `validation_persisted`.
       security:
         - BearerAuth: []
         - {}
@@ -640,7 +643,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VoiceQualityReport'
+                $ref: '#/components/schemas/VoiceQualityRunResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '404':
@@ -918,6 +921,15 @@ paths:
       security:
         - BearerAuth: []
         - {}
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 256
+          description: Same owner/key/payload replays the original job; a changed payload conflicts.
       requestBody:
         required: true
         content:
@@ -1045,23 +1057,41 @@ paths:
     get:
       operationId: getSpeechJobResult
       tags: [jobs]
-      summary: Fetch the result reference of a completed job
-      description: Returns the opaque result reference only when the job is completed and the caller has the same authenticated owner scope.
+      summary: Fetch the result artifact of a completed job
+      description: Returns the completed audio artifact or JSON result reference when the caller has the same authenticated owner scope.
       security:
         - BearerAuth: []
         - {}
       responses:
         '200':
-          description: Job result reference
+          description: Completed job artifact. The server may return JSON metadata when no file artifact is available.
           content:
+            audio/mpeg:
+              schema:
+                type: string
+                format: binary
+            audio/wav:
+              schema:
+                type: string
+                format: binary
+            audio/x-pcm:
+              schema:
+                type: string
+                format: binary
             application/json:
               schema:
-                type: object
-                required: [result_ref]
-                properties:
-                  result_ref:
-                    type: string
-                    description: Opaque result reference stored at completion.
+                oneOf:
+                  - type: string
+                    format: binary
+                  - type: object
+                    properties:
+                      result_ref:
+                        type: string
+                        description: Opaque result reference stored at completion.
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1492,6 +1522,19 @@ components:
               enum: [pass, warn, reject, unevaluated]
             policy_version:
               type: [string, 'null']
+        validation_state:
+          type: object
+          description: Independent reference/output validation state; output pass is not inferred from reference pass.
+          additionalProperties: true
+        validated_for:
+          type: array
+          items:
+            type: string
+          description: Bounded production uses supported by current validation evidence.
+        production_ready:
+          type: boolean
+        production_ready_reason:
+          type: string
         snapshot_id:
           type: string
     SafeVoiceList:
@@ -2109,6 +2152,27 @@ components:
           $ref: '#/components/schemas/VoiceQualityReport'
         creation:
           $ref: '#/components/schemas/VoiceCreation'
+        revision:
+          type: [string, 'null']
+          pattern: '^vr_[0-9a-f]{32}$'
+          description: Current content-addressed voice revision when available.
+        revoked:
+          type: boolean
+          description: Whether this custom voice has been revoked.
+        availability_reason:
+          type: string
+          description: Stable reason when the voice is not routable.
+        validation_state:
+          type: object
+          additionalProperties: true
+        validated_for:
+          type: array
+          items:
+            type: string
+        production_ready:
+          type: boolean
+        production_ready_reason:
+          type: string
     VoiceDesignRegistrationRequest:
       type: object
       additionalProperties: false
@@ -2340,6 +2404,29 @@ components:
               - output_peak_exceeded
               - output_nondeterministic
               - transcription_unavailable
+    VoiceQualityRunResponse:
+      oneOf:
+        - allOf:
+            - $ref: '#/components/schemas/VoiceQualityReport'
+            - type: object
+              required: [validation_persisted]
+              properties:
+                validation_persisted:
+                  type: boolean
+                  description: Whether output validation was durably bound to the current voice revision.
+        - type: object
+          additionalProperties: false
+          required: [legacy_report, evidence, validation_persisted]
+          properties:
+            legacy_report:
+              $ref: '#/components/schemas/VoiceQualityReport'
+            evidence:
+              type: object
+              additionalProperties: true
+              description: Namespaced quality evidence with model and voice identity bindings.
+            validation_persisted:
+              type: boolean
+              description: Whether output validation was durably bound to the current voice revision.
     VoiceQualityRunRequest:
       type: object
       properties:
@@ -2556,6 +2643,19 @@ components:
           type: string
           maxLength: 10000
           description: VoiceDesign instruction for quality profiles. CustomVoice and clone voices reject it with a stable 400 error.
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+          description: Optional caller seed; clone voices reject it with clone_seed_unsupported.
+        validation_policy:
+          type: string
+          enum: [allow_unverified, require_output_pass]
+          default: allow_unverified
+          description: |
+            `allow_unverified` is suitable for audition/diagnosis. Formal
+            production may require `require_output_pass`; the service checks
+            the current voice/model binding at admission time.
         stream_format:
           type: string
           enum: [audio]
@@ -2611,10 +2711,39 @@ components:
           type: string
           minLength: 1
           maxLength: 1000
-          description: Opaque external input reference; no raw content or credentials.
+          description: Local absolute path or file URI inside the worker allowlist; no remote URL, raw content or credentials.
         params:
           type: object
-          description: Opaque caller-supplied parameters; stored and echoed back on GET.
+          additionalProperties: false
+          properties:
+            language:
+              type: string
+              minLength: 1
+              maxLength: 64
+            diarize:
+              type: boolean
+            timestamps:
+              type: boolean
+            voice:
+              type: string
+              minLength: 1
+              maxLength: 200
+            speed:
+              type: number
+              minimum: 0.25
+              maximum: 4
+            instruction:
+              type: [string, 'null']
+              maxLength: 10000
+            seed:
+              type: [integer, 'null']
+              minimum: 0
+              maximum: 4294967295
+            validation_policy:
+              type: string
+              enum: [allow_unverified, require_output_pass]
+              default: allow_unverified
+          description: Strict kind-specific parameters; transcription accepts language/diarize/timestamps and speech accepts voice/speed/language/instruction/seed/validation_policy.
     Job:
       type: object
       additionalProperties: false
@@ -2655,7 +2784,7 @@ components:
           description: Opaque result reference, present only for completed jobs.
         params:
           type: [object, 'null']
-          description: Opaque caller-supplied parameters, echoed back from creation.
+          description: Strict kind-specific caller parameters, echoed back from creation; the service rejects unknown keys and invalid values.
         queue_position:
           type: [integer, 'null']
           minimum: 1
@@ -2839,6 +2968,9 @@ components:
           type: string
         retryable:
           type: boolean
+        diagnostic_class:
+          type: [string, 'null']
+          description: Safe backend diagnostic class; raw exception details are never returned.
   responses:
     BadRequest:
       description: Invalid request

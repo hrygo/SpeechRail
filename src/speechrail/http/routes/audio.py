@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import shutil
 import struct
 import time as _time
@@ -28,6 +29,7 @@ from speechrail.application.tts_delivery import (
     iter_until,
     iter_validated_audio,
 )
+from speechrail.application.voice_validation_gate import validation_state_for_voice
 from speechrail.backends.qwen3_voice_binding import resolve_binding
 from speechrail.compatibility.openai_realtime import (
     canonical_asr_model,
@@ -46,17 +48,21 @@ from speechrail.domain.tts import (
     VoiceRevisionConflictError,
     VoiceRevokedError,
     VoiceStoreUnavailableError,
+    get_voice_registry,
     normalize_tts_text,
     resolve_voice,
     tts_voice_class,
 )
+from speechrail.domain.tts_errors import TTS_PARAMETER_ERROR_CODES, TtsBackendError
 from speechrail.domain.tts_pronunciation import (
     PronunciationRevokedError,
     PronunciationStoreUnavailableError,
     apply_pronunciation,
     get_pronunciation_registry,
 )
+from speechrail.domain.tts_request import TtsParameterError, validate_tts_parameters
 from speechrail.domain.tts_text_planner import TtsTextPlanner
+from speechrail.domain.voice_validation import VoiceValidationStoreUnavailableError
 from speechrail.http.auth import http_auth_error
 from speechrail.http.errors import error, error_response
 from speechrail.http.formatters import (
@@ -89,6 +95,7 @@ _FFMPEG_QUEUE_MAX_CHUNKS = 4
 _FFMPEG_TIMEOUT_SECONDS = 15.0
 _MAX_ENCODED_AUDIO_BYTES = 128 * 1024 * 1024
 _DIARIZATION_UNCHUNKED_MAX_SECONDS = 30
+_LOGGER = logging.getLogger(__name__)
 
 
 def _worker_unavailable_response(
@@ -123,6 +130,45 @@ def _worker_unavailable_response(
     return response
 
 
+def _tts_backend_error_response(
+    request_id: str,
+    exc: BaseException,
+) -> JSONResponse | None:
+    """Map a typed TTS failure without exposing worker diagnostics."""
+
+    if not isinstance(exc, TtsBackendError):
+        return None
+    _LOGGER.warning(
+        "tts request failed: request_id=%s code=%s stage=%s diagnostic_class=%s "
+        "worker_attempt_id=%s",
+        request_id,
+        exc.code,
+        exc.stage,
+        exc.diagnostic_class,
+        exc.worker_attempt_id,
+    )
+    if exc.code in TTS_PARAMETER_ERROR_CODES:
+        status_code = 400
+        message = "TTS request parameters are unsupported for the selected voice"
+    elif exc.public_code == "tts_initialization_failed":
+        status_code = 503
+        message = "TTS backend failed to initialize"
+    elif exc.public_code == "tts_transport_failed":
+        status_code = 503
+        message = "TTS worker transport failed"
+    else:
+        status_code = 502
+        message = "TTS backend failed to synthesize audio"
+    return error_response(
+        status_code,
+        request_id,
+        exc.public_code,
+        message,
+        retryable=exc.retryable,
+        diagnostic_class=exc.diagnostic_class,
+    )
+
+
 def _tts_backend_failure_code(exc: BaseException) -> str:
     """Keep receipt/timing failure codes aligned with the public TTS response."""
 
@@ -149,6 +195,8 @@ class _SpeechHTTPBody(BaseModel):
     speed: float = Field(default=1.0, ge=0.25, le=4.0)
     language: str = Field(default="auto", min_length=1, max_length=64)
     instructions: str | None = Field(default=None, max_length=10_000)
+    seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
+    validation_policy: Literal["allow_unverified", "require_output_pass"] = "allow_unverified"
     stream_format: str | None = Field(default=None, max_length=16)
 
     @field_validator("input")
@@ -1158,6 +1206,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
         except RuntimeError as exc:
+            if (response := _tts_backend_error_response(request_id, exc)) is not None:
+                return response
             if (response := _worker_unavailable_response(request_id, exc)) is not None:
                 return response
             raise
@@ -1336,11 +1386,28 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 retryable=True,
             )
 
+        try:
+            validated = validate_tts_parameters(
+                model_variant="voice_design",
+                is_clone=False,
+                speed=body.speed,
+                language=body.language,
+                instruction=body.instruction,
+                seed=body.seed,
+            )
+        except TtsParameterError as exc:
+            return error_response(
+                400,
+                request_id,
+                exc.public_code,
+                exc.message,
+                param=exc.param,
+            )
         synthesis = SpeechRequest(
             text=body.input,
             voice=DEFAULT_VOICE_ID,
             output_format="pcm16",
-            speed=body.speed,
+            speed=validated.speed,
             language=body.language,
             instruction=body.instruction,
             seed=body.seed,
@@ -1401,6 +1468,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Failed to encode the synthesized audio",
                 retryable=True,
             )
+        except TtsBackendError as exc:
+            if (response := _tts_backend_error_response(request_id, exc)) is not None:
+                return response
+            raise
         except (RuntimeError, ValueError):
             return error_response(
                 502,
@@ -1563,9 +1634,32 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Requested model revision is not the active TTS artifact",
                 param="model",
             )
-        if binding_variant in {"voice_design", "custom_voice", "base"}:
+        validated_tts = None
+        validation_variant = binding_variant or "voice_design"
+        if body.instructions is not None and profile.mode != "clone" and (
+            active.tts is None
+            or active.tts.variant != "voice_design"
+            or validation_variant != "voice_design"
+        ):
+            return error_response(
+                400,
+                request_id,
+                "instructions_unsupported",
+                "instructions require an active VoiceDesign TTS model",
+                param="instructions",
+            )
+        if validation_variant in {"voice_design", "custom_voice", "base"}:
             try:
-                resolve_binding(binding_variant, preset_voice)
+                if binding_variant is not None:
+                    resolve_binding(binding_variant, preset_voice)
+                validated_tts = validate_tts_parameters(
+                    model_variant=validation_variant,
+                    is_clone=profile.mode == "clone",
+                    speed=body.speed,
+                    language=body.language,
+                    instruction=body.instructions,
+                    seed=body.seed,
+                )
             except VoiceStoreUnavailableError:
                 return error_response(
                     503,
@@ -1573,6 +1667,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     "voice_store_unavailable",
                     "Custom voice storage is unavailable",
                     retryable=True,
+                )
+            except TtsParameterError as exc:
+                return error_response(
+                    400,
+                    request_id,
+                    exc.public_code,
+                    exc.message,
+                    param="instructions" if exc.param == "instruction" else exc.param,
                 )
             except ValueError:
                 return error_response(
@@ -1585,37 +1687,14 @@ def create_audio_router(services: AppServices) -> APIRouter:
                     ),
                     param="voice",
                 )
-        if profile.mode == "clone" and body.speed != 1.0:
-            return error_response(
-                400,
-                request_id,
-                "clone_speed_unsupported",
-                "The active clone backend does not support speed control",
-                param="speed",
-            )
-        if body.instructions is not None and tts_variant != "voice_design":
-            return error_response(
-                400,
-                request_id,
-                "instructions_unsupported",
-                "Instructions require an active VoiceDesign TTS profile",
-                param="instructions",
-            )
-        if profile.mode == "clone" and body.instructions is not None:
-            return error_response(
-                400,
-                request_id,
-                "clone_instruction_unsupported",
-                "The active clone backend does not support instructions",
-                param="instructions",
-            )
-        if body.stream_format not in (None, "audio"):
-            return error_response(
-                422,
-                request_id,
-                "stream_format_unsupported",
-                "SpeechRail returns a complete audio body; stream_format is not supported",
-                param="stream_format",
+        if validated_tts is None:
+            validated_tts = validate_tts_parameters(
+                model_variant="voice_design",
+                is_clone=profile.mode == "clone",
+                speed=body.speed,
+                language=body.language,
+                instruction=body.instructions,
+                seed=body.seed,
             )
         synthesizer = services.tts_synthesizer
         if synthesizer is None or not services.tts_ready:
@@ -1625,6 +1704,39 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "backend_not_ready",
                 "SpeechRail TTS backend is not ready",
                 retryable=True,
+            )
+        if body.validation_policy == "require_output_pass" and profile.mode == "clone":
+            try:
+                validation_state, _evidence, _binding = validation_state_for_voice(
+                    profile,
+                    tts_artifact,
+                    get_voice_registry().validation_store,
+                    synthesizer,
+                    require_current_binding=True,
+                )
+            except VoiceValidationStoreUnavailableError:
+                return error_response(
+                    503,
+                    request_id,
+                    "voice_validation_store_unavailable",
+                    "Voice output validation state is unavailable",
+                    retryable=True,
+                )
+            if validation_state["production_ready"] is not True:
+                return error_response(
+                    409,
+                    request_id,
+                    "voice_not_production_ready",
+                    "The selected clone voice has no current passing output validation",
+                    param="voice",
+                )
+        if body.stream_format not in (None, "audio"):
+            return error_response(
+                422,
+                request_id,
+                "stream_format_unsupported",
+                "SpeechRail returns a complete audio body; stream_format is not supported",
+                param="stream_format",
             )
         spoken = None
         planner_summary: dict[str, object] | None = None
@@ -1763,9 +1875,11 @@ def create_audio_router(services: AppServices) -> APIRouter:
             text=synthesis_text,
             voice=preset_voice,
             output_format="pcm16",
-            speed=body.speed,
+            speed=validated_tts.speed,
             language=body.language,
             instruction=body.instructions,
+            seed=body.seed,
+            validation_policy=body.validation_policy,
             expected_voice_revision=effective_revision,
             expected_model_revision=expected_model_revision,
             timing_mode=timing_mode,
@@ -1973,6 +2087,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             except RuntimeError as exc:
                 await _close_audio_stream(pcm_stream)
+                if (worker_response := _tts_backend_error_response(request_id, exc)) is not None:
+                    return worker_response
                 if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
                     return worker_response
                 return error_response(
@@ -2114,6 +2230,8 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 )
             except RuntimeError as exc:
                 await _close_audio_stream(encoded_stream)
+                if (worker_response := _tts_backend_error_response(request_id, exc)) is not None:
+                    return worker_response
                 if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
                     return worker_response
                 return error_response(
@@ -2240,6 +2358,10 @@ def create_audio_router(services: AppServices) -> APIRouter:
                 "Requested voice revision has been revoked",
             )
         except RuntimeError as exc:
+            if (
+                typed_response := _tts_backend_error_response(request_id, exc)
+            ) is not None:
+                return typed_response
             if (worker_response := _worker_unavailable_response(request_id, exc)) is not None:
                 return worker_response
             return error_response(

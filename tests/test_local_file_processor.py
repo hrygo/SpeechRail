@@ -14,6 +14,8 @@ from speechrail.domain.ports import (
     SpeechRequest,
     TranscriptionRequest,
 )
+from speechrail.domain.tts import VoiceProfile
+from speechrail.domain.voice_validation import VoiceValidationArtifact, VoiceValidationRepository
 from speechrail.runtime.job_runner import JobProcessingError, JobRunner
 from speechrail.runtime.jobs import JobRecord, JobRepository
 from speechrail.runtime.local_file_processor import (
@@ -309,9 +311,19 @@ def test_processor_transcription_fails_when_no_transcriber(tmp_path: Path) -> No
 
 
 class _FakeSynthesizer:
-    def __init__(self, pcm: bytes = b"\x00\x01\x02\x03") -> None:
+    def __init__(
+        self,
+        pcm: bytes = b"\x00\x01\x02\x03",
+        *,
+        runtime_revision: str | None = None,
+    ) -> None:
         self._pcm = pcm
+        self.runtime_revision = runtime_revision
         self.calls: list[SpeechRequest] = []
+
+    def runtime_revision_for_voice(self, voice: str) -> str | None:
+        del voice
+        return self.runtime_revision
 
     async def synthesize(self, request: SpeechRequest) -> AsyncIterator[AudioChunk]:
         yield AudioChunk(response_id=request.voice, chunk_index=0, audio=self._pcm)
@@ -344,6 +356,116 @@ def test_processor_speech_writes_artifact_and_returns_relative_ref(tmp_path: Pat
     assert artifact.is_file()
     assert artifact.stat().st_mode & 0o777 == 0o600
     assert artifact.read_bytes() == b"\xaa\xbb"
+
+
+def test_processor_accepts_file_uri_for_an_allowlisted_input(tmp_path: Path) -> None:
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    text_file = spool / "input with spaces.txt"
+    text_file.write_text("hello speech")
+    processor = LocalFileJobProcessor(
+        spool_dir=spool,
+        tts_synthesizer=_FakeSynthesizer(pcm=b"\xaa\xbb"),
+    )
+    job = JobRecord(
+        id="job_file_uri",
+        kind="speech",
+        state="queued",
+        owner="loopback",
+        request={
+            "input_ref": text_file.as_uri(),
+            "params": {"voice": "serena"},
+        },
+        error_code=None,
+        result_ref=None,
+    )
+
+    result = asyncio.run(processor.process(job))
+
+    assert result == f"{RESULTS_SUBDIR}/job_file_uri/speech.pcm"
+
+
+def test_processor_speech_uses_the_same_strict_validation_gate_as_http(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from speechrail.application.voice_validation_gate import build_validation_binding
+
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    text_file = spool / "input.txt"
+    text_file.write_text("formal speech")
+    runtime_revision = "rt_" + "a" * 64
+    synthesizer = _FakeSynthesizer(runtime_revision=runtime_revision)
+    profile = VoiceProfile(
+        id="clone_job",
+        mode="clone",
+        revision="vr_" + "b" * 32,
+        ref_text="参考文本",
+        quality={"status": "pass", "policy_version": "voice_quality_v1"},
+    )
+    validation_store = VoiceValidationRepository(tmp_path / "voice_validations.json")
+    artifact_key = "tts_clone_base"
+    catalog_revision = "c" * 40
+    binding = build_validation_binding(
+        profile,
+        VoiceValidationArtifact(artifact_key, catalog_revision),
+        synthesizer,
+        require_current_binding=True,
+    )
+    validation_store.put(
+        {
+            "voice_id": profile.id,
+            "voice_revision": profile.revision,
+            "status": "pass",
+            "run_id": "run_job",
+            "model_artifact": artifact_key,
+            "model_catalog_revision": catalog_revision,
+            "model_runtime_revision": binding.model_runtime_revision,
+            "runtime_fingerprint": binding.runtime_fingerprint,
+            "preprocess_version": binding.preprocess_version,
+            "generation_recipe_revision": binding.generation_recipe_revision,
+            "policy_version": binding.policy_version,
+            "failure_codes": [],
+            "validated_for": ["output"],
+        }
+    )
+
+    class _Registry:
+        def __init__(self, store: VoiceValidationRepository) -> None:
+            self.validation_store = store
+
+        def get_profile(self, voice: str) -> VoiceProfile:
+            assert voice == profile.id
+            return profile
+
+    registry = _Registry(validation_store)
+    monkeypatch.setattr(
+        "speechrail.runtime.local_file_processor.get_voice_registry", lambda: registry
+    )
+    processor = LocalFileJobProcessor(
+        spool_dir=spool,
+        tts_synthesizer=synthesizer,
+        clone_model_artifact=artifact_key,
+        clone_model_catalog_revision=catalog_revision,
+    )
+    job = JobRecord(
+        id="job_strict",
+        kind="speech",
+        state="queued",
+        owner="loopback",
+        request={
+            "input_ref": str(text_file),
+            "params": {
+                "voice": profile.id,
+                "validation_policy": "require_output_pass",
+            },
+        },
+        error_code=None,
+        result_ref=None,
+    )
+
+    result = asyncio.run(processor.process(job))
+    assert result == f"{RESULTS_SUBDIR}/job_strict/speech.pcm"
 
 
 def test_processor_speech_rejects_url_input_ref(tmp_path: Path) -> None:

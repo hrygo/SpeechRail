@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from speechrail.domain.contracts import TranscriptResult, TranscriptSegment
 from speechrail.domain.diarization.ports import StreamingActivityPort
+from speechrail.domain.tts_request import ValidationPolicy
 
 
 class TranscriptionRequest(BaseModel):
@@ -40,6 +41,7 @@ class SpeechRequest(BaseModel):
         description="Ephemeral VoiceDesign instruction; never persisted by the TTS port.",
     )
     seed: StrictInt | None = Field(default=None, ge=0, le=2**32 - 1)
+    validation_policy: ValidationPolicy = "allow_unverified"
     expected_voice_revision: str | None = Field(
         default=None,
         pattern=r"^vr_[0-9a-f]{32}$",

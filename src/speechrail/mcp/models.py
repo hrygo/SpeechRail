@@ -21,11 +21,18 @@ class AudioArtifact(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     audio_path: str
+    host: str = "mcp_host"
     content_type: str
     output_format: str
     bytes: int
+    language: str | None = None
+    sample_rate: int | None = None
+    duration_seconds: float | None = None
+    request_id: str | None = None
     voice_revision: str | None = None
     model_revision: str | None = None
+    validation_policy: str | None = None
+    validation_state: dict[str, Any] | None = None
 
 
 class TranscriptSegment(BaseModel):
@@ -89,6 +96,10 @@ class VoiceEntry(BaseModel):
     is_default: bool | None = None
     aliases: list[str] | None = None
     capabilities: dict[str, Any] | None = None
+    validation_state: dict[str, Any] | None = None
+    validated_for: list[str] | None = None
+    production_ready: bool | None = None
+    production_ready_reason: str | None = None
 
 
 class Readiness(BaseModel):
@@ -154,7 +165,26 @@ class VoiceRecord(BaseModel):
     name: str | None = None
     mode: str | None = None
     available: bool | None = None
+    availability_reason: str | None = None
     capabilities: dict[str, Any] | None = None
+    variant: str | None = None
+    revision: str | None = None
+    validation_state: dict[str, Any] | None = None
+    validated_for: list[str] | None = None
+    production_ready: bool | None = None
+    production_ready_reason: str | None = None
+    synthesis_validation: str | None = None
+
+
+class VoiceValidationResult(BaseModel):
+    """Reference/output validation result for one current voice revision."""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str | None = None
+    run_id: str | None = None
+    failure_codes: list[str] = Field(default_factory=list)
+    validation_persisted: bool | None = None
 
 
 class JobRecord(BaseModel):
@@ -165,5 +195,33 @@ class JobRecord(BaseModel):
     id: str | None = None
     kind: str | None = None
     state: str | None = None
+    error_code: str | None = None
+    error_message: str | None = None
     result_ref: str | None = None
     params: dict[str, Any] | None = None
+    attempts: int | None = None
+    queue_position: int | None = None
+    eta_seconds: float | None = None
+    deadline: str | None = None
+
+
+class JobListResult(BaseModel):
+    """Owner-scoped paginated durable-job listing."""
+
+    model_config = ConfigDict(extra="allow")
+
+    data: list[JobRecord] = Field(default_factory=list)
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class JobResultArtifact(BaseModel):
+    """A job result materialized as a local file on the MCP host."""
+
+    model_config = ConfigDict(extra="allow")
+
+    result_path: str
+    host: str = "mcp_host"
+    content_type: str
+    bytes: int
+    job_id: str | None = None

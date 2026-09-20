@@ -315,3 +315,121 @@ def test_content_addressed_voice_revision_enables_conditional_synthesis() -> Non
     assert entry["conditional_synthesis"]["reason"] == "atomic_registry_lease_pin"
     encoded = str(entry)
     assert "stable private recipe" not in encoded
+
+
+def test_clone_reference_pass_does_not_imply_production_ready_without_output_pass() -> None:
+    from speechrail.application.capability_snapshot import build_capability_snapshot
+
+    active = _active("quality")
+    revision = "vr_" + "b" * 32
+    profile = voices.VoiceProfile(
+        id="clone_ready_reference",
+        name="Clone",
+        mode="clone",
+        ref_text="参考文本",
+        audio_path="/private/reference.wav",
+        revision=revision,
+        quality={
+            "policy_version": "voice_quality_v1",
+            "status": "pass",
+            "run_id": "run_reference",
+        },
+    )
+
+    before = build_capability_snapshot(
+        (profile,), active, epoch="e", ready=True,
+        enabled_voices=frozenset(), sample_rate=24_000,
+    )["voices"][0]
+    assert before["available"] is True
+    assert before["validation_state"]["reference"]["status"] == "pass"
+    assert before["validation_state"]["synthesis"]["status"] == "unevaluated"
+    assert before["validation_state"]["identity"]["status"] == "unevaluated"
+    assert before["validated_for"] == []
+    assert before["production_ready"] is False
+    assert before["production_ready_reason"] == "synthesis_validation_not_run"
+
+    profile_with_output = voices.VoiceProfile(
+        id=profile.id,
+        name=profile.name,
+        mode=profile.mode,
+        ref_text=profile.ref_text,
+        audio_path=profile.audio_path,
+        revision=profile.revision,
+        quality={
+            **(profile.quality or {}),
+            "synthesis_validation": {
+                "status": "pass",
+                "run_id": "run_output",
+                "voice_revision": revision,
+                "model_artifact": active.tts_clone.key,
+                "model_catalog_revision": active.tts_clone.revision,
+                "model_runtime_revision": None,
+                "failure_codes": [],
+            },
+        },
+    )
+    validation = {
+        "voice_id": profile.id,
+        "status": "pass",
+        "run_id": "run_output",
+        "voice_revision": revision,
+        "model_artifact": active.tts_clone.key,
+        "model_catalog_revision": active.tts_clone.revision,
+        "model_runtime_revision": None,
+        "failure_codes": [],
+        "validated_for": ["output"],
+    }
+    after = build_capability_snapshot(
+        (profile_with_output,), active, epoch="e", ready=True,
+        enabled_voices=frozenset(), sample_rate=24_000,
+        validation_records={profile.id: validation},
+    )["voices"][0]
+    assert after["validation_state"]["synthesis"]["status"] == "pass"
+    assert after["validation_state"]["identity"]["status"] == "unevaluated"
+    assert after["validated_for"] == ["output"]
+    assert after["production_ready"] is True
+
+
+def test_clone_output_pass_does_not_survive_unknown_current_runtime() -> None:
+    from speechrail.application.capability_snapshot import _validation_state
+
+    active = _active("quality")
+    revision = "vr_" + "d" * 32
+    profile = voices.VoiceProfile(
+        id="runtime_bound_clone",
+        mode="clone",
+        revision=revision,
+        ref_text="参考文本",
+        audio_path="/private/reference.wav",
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    validation = {
+        "voice_id": profile.id,
+        "voice_revision": revision,
+        "status": "pass",
+        "model_artifact": active.tts_clone.key,
+        "model_catalog_revision": active.tts_clone.revision,
+        "model_runtime_revision": "rt_" + "1" * 64,
+        "runtime_fingerprint": "vf_" + "1" * 64,
+        "preprocess_version": "energy_v1",
+        "generation_recipe_revision": "qwen3_tts_base_clone_v1",
+        "policy_version": "voice_quality_v1",
+        "validated_for": ["output"],
+    }
+    state = _validation_state(
+        profile,
+        active.tts_clone,
+        validation,
+        runtime_identity_status="unknown",
+        validation_binding={
+            "model_runtime_revision": None,
+            "runtime_fingerprint": None,
+            "preprocess_version": "energy_v1",
+            "generation_recipe_revision": "qwen3_tts_base_clone_v1",
+            "policy_version": "voice_quality_v1",
+        },
+        binding_required=True,
+    )
+    assert state["production_ready"] is False
+    assert state["production_ready_reason"] == "stale_synthesis_validation"
+    assert state["synthesis"]["stale_reason"] == "model_runtime_identity_unknown"

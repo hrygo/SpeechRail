@@ -32,6 +32,7 @@ from speechrail.domain.ports import (
     TranscriptionRequest,
 )
 from speechrail.domain.tts import VoiceRegistry
+from speechrail.domain.tts_errors import TtsBackendError
 
 _SAMPLE_RATE = 24_000
 
@@ -122,21 +123,33 @@ class SpeedUnsupportedSynthesizer:
 
         async def chunks() -> AsyncIterator[AudioChunk]:
             if len(self.requests) == 1:
-                # Real parent-side shape: the worker raises
-                # ValueError("clone_speed_unsupported") and the error-frame path
-                # re-raises it as a RuntimeError embedding the stderr tail.
-                raise RuntimeError(
-                    "worker_inference_error; worker stderr tail:\n"
-                    "Traceback (most recent call last):\n"
-                    '  File "qwen3_tts_worker.py", line 473, in _generate\n'
-                    '    raise ValueError("clone_speed_unsupported")\n'
-                    "ValueError: clone_speed_unsupported"
+                # The worker now preserves the semantic code across the
+                # process boundary; quality classification must not inspect
+                # traceback or stderr text.
+                raise TtsBackendError(
+                    "clone_speed_unsupported",
+                    stage="validate",
                 )
             yield AudioChunk(
                 response_id="quality_probe", chunk_index=0, audio=_sine_pcm(0.5)
             )
 
         return chunks()
+
+
+def test_probe_failure_uses_structured_clone_code_not_error_text() -> None:
+    from speechrail.http.routes.system import _classify_probe_failure
+
+    assert (
+        _classify_probe_failure(RuntimeError("backend failed while checking speed"))
+        == vq.VoiceQualityFailureCode.PROBE_FAILED.value
+    )
+    assert (
+        _classify_probe_failure(
+            TtsBackendError("clone_speed_unsupported", stage="validate")
+        )
+        == vq.VoiceQualityFailureCode.CLONE_SPEED_UNSUPPORTED.value
+    )
 
 
 class MalformedAudioSynthesizer:
@@ -719,6 +732,7 @@ def test_s5_quality_runs_ok_and_bounded(
     assert body["synthesis"]["transcript_match"] == pytest.approx(1.0)
     assert body["failure_codes"] == []
     assert len(synth.requests) == 18
+    assert {request.speed for request in synth.requests} == {1.0}
 
 
 def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
@@ -738,9 +752,13 @@ def test_namespaced_quality_run_binds_observed_runtime_identity_before_eviction(
     )
 
     assert response.status_code == 200
-    assert response.json()["evidence"]["identity"]["model"]["runtime_revision"] == (
-        runtime_revision
-    )
+    evidence = response.json()["evidence"]
+    assert evidence["identity"]["model"]["runtime_revision"] == runtime_revision
+    binding = evidence["identity"]["validation_binding"]
+    assert binding["runtime_fingerprint"].startswith("vf_")
+    assert binding["preprocess_version"] == "energy_v1"
+    assert binding["generation_recipe_revision"] == "qwen3_tts_base_clone_v1"
+    assert binding["policy_version"] == "voice_quality_v1"
 
 
 
@@ -896,6 +914,64 @@ def test_quality_runs_classifies_clone_speed_unsupported(
     assert body["synthesis"]["successful_probe_count"] == 17
 
 
+def test_quality_run_persists_output_validation_and_promotes_capability_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, registry, _synth, _voices_dir = _make_client(tmp_path)
+    profile = registry.create_cloned_profile(
+        name="Clone",
+        ref_text="测试参考文本",
+        audio_bytes=_clean_wav(),
+        voice_id="clone_quality",
+        duration_seconds=4.0,
+        quality={"policy_version": "voice_quality_v1", "status": "pass"},
+    )
+    monkeypatch.setattr("speechrail.http.routes.system.get_voice_registry", lambda: registry)
+    monkeypatch.setattr("speechrail.domain.tts._GLOBAL_VOICE_REGISTRY", registry)
+
+    response = client.post(
+        f"/v1/voices/{profile.id}/quality-runs",
+        json={"probe_set": "voice_quality_v1_zh", "runs": 1},
+    )
+    assert response.status_code == 200
+    persisted = registry.get_profile(profile.id)
+    preset = load_catalog().preset("quality")
+    artifact = next(item for item in load_catalog().artifacts if item.key == preset.tts_clone)
+    validation = registry.validation_store.get(
+        voice_id=profile.id,
+        voice_revision=profile.revision,
+        model_artifact=artifact.key,
+        model_catalog_revision=artifact.revision,
+    )
+    assert persisted.quality == profile.quality
+    assert isinstance(validation, dict)
+    assert validation["voice_revision"] == profile.revision
+    assert response.json()["validation_persisted"] is True
+
+    snapshot = client.get("/v1/speechrail/capabilities").json()
+    entry = next(item for item in snapshot["voices"] if item["id"] == profile.id)
+    # The quality run captured a worker identity, but the fake lifecycle evicts
+    # that worker before discovery.  Discovery must not promote the persisted
+    # pass while the current runtime identity is unknown.
+    assert entry["validation_state"]["synthesis"]["status"] == "unevaluated"
+    assert entry["validation_state"]["synthesis"]["reason"] == (
+        "model_runtime_identity_unknown"
+    )
+    assert entry["production_ready"] is False
+
+    formal = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "speechrail/qwen3-tts",
+            "input": "正式制作",
+            "voice": profile.id,
+            "validation_policy": "require_output_pass",
+        },
+    )
+    assert formal.status_code == 409
+    assert formal.json()["error"]["code"] == "voice_not_production_ready"
+
+
 def test_quality_runs_classifies_output_invalid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -997,10 +1073,10 @@ def test_quality_runs_detects_repeated_output_nondeterminism(
         json={"probe_set": "voice_quality_v1_zh", "runs": 2},
     )
     body = resp.json()
-    assert body["status"] == "reject"
+    assert body["status"] == "pass"
     assert body["synthesis"]["successful_probe_count"] == 12
     assert body["synthesis"]["deterministic"] is False
-    assert "output_nondeterministic" in body["failure_codes"]
+    assert "output_nondeterministic" not in body["failure_codes"]
 
 
 def test_quality_runs_single_run_never_claims_determinism(
