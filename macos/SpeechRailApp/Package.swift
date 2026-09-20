@@ -78,6 +78,8 @@ let package = Package(
                 "VoicePrompt.swift",
                 "WindowLayoutPolicy.swift",
                 "TeleprompterDomain.swift",
+                "TeleprompterTimingPolicy.swift",
+                "TeleprompterPreparationDomain.swift",
                 "TeleprompterNormalizer.swift",
                 "TeleprompterSegmenter.swift",
                 "TeleprompterAligner.swift",
