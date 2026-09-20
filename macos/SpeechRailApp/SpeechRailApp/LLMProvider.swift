@@ -116,6 +116,8 @@ public enum LLMError: LocalizedError, Equatable {
     case http(status: Int, body: String)
     /// 端点没有 Responses API（404/405，或返回里明确说没有）。
     case notResponsesAPI
+    /// 端点可达，但不支持请求要求的严格结构化输出。
+    case unsupportedStructuredOutput
     case refused(String)
     case cancelled
 
@@ -127,6 +129,7 @@ public enum LLMError: LocalizedError, Equatable {
         case .http(let status, let body):
             body.isEmpty ? "服务返回了 \(status)。" : "服务返回了 \(status)：\(body)"
         case .notResponsesAPI: "这个服务没有 Responses API。"
+        case .unsupportedStructuredOutput: "这个服务不支持严格结构化输出。"
         case .refused(let reason): "模型没有回答：\(reason)"
         case .cancelled: "已取消。"
         }
@@ -446,6 +449,9 @@ public actor LLMProvider {
                 try Self.validate(response: result.1, data: result.0)
                 return result
             } catch let error as LLMError {
+                if textFormat != nil, Self.rejectsStructuredOutput(error) {
+                    throw LLMError.unsupportedStructuredOutput
+                }
                 guard attempt == 0, suppressThinking, Self.rejectsThinkingControl(error) else {
                     throw error
                 }
@@ -464,6 +470,27 @@ public actor LLMProvider {
     private static func rejectsThinkingControl(_ error: LLMError) -> Bool {
         guard case let .http(status, body) = error else { return false }
         return rejectsThinkingControl(status: status, body: body)
+    }
+
+    /// 严格结构化输出是提词器分析的安全边界：端点不支持时必须让调用方明确降级，
+    /// 不能把同一份请求静默改成自由文本或 JSON mode。
+    private static func rejectsStructuredOutput(_ error: LLMError) -> Bool {
+        guard case let .http(status, body) = error, status == 400 || status == 422 else {
+            return false
+        }
+        let lower = body.lowercased()
+        let mentionsStructuredOutput = lower.contains("text.format")
+            || lower.contains("response_format")
+            || lower.contains("json_schema")
+            || lower.contains("structured output")
+            || lower.contains("structured_outputs")
+        let rejectsCapability = lower.contains("not supported")
+            || lower.contains("unsupported")
+            || lower.contains("unrecognized")
+            || lower.contains("unknown parameter")
+            || lower.contains("not implemented")
+            || lower.contains("does not support")
+        return mentionsStructuredOutput && rejectsCapability
     }
 
     /// 同上，但直接看原始状态码与正文：`check()` 在把响应包成 `LLMError` 之前就要先判一次。

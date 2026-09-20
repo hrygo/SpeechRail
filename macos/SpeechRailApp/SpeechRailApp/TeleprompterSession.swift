@@ -220,7 +220,7 @@ public final class TeleprompterSession {
             )
             phase = .review
         } catch {
-            blocked = .aiUnavailable("AI 没有返回可采用的结构化结果，原稿未改变。可以改用纯文本分段。")
+            blocked = .aiUnavailable(Self.aiFailureMessage(for: error))
             phase = .draft
         }
     }
@@ -529,6 +529,14 @@ public final class TeleprompterSession {
         }
         if let blocked = error as? Blocked { return blocked.reason }
         return .serviceNotReady(error.localizedDescription)
+    }
+
+    private static func aiFailureMessage(for error: Error) -> String {
+        if let error = error as? LLMError,
+           error == .unsupportedStructuredOutput {
+            return "当前 AI 服务不支持严格结构化输出。请更换 Responses-compatible endpoint，或改用纯文本分段；原稿未改变。"
+        }
+        return "AI 没有返回可采用的结构化结果，原稿未改变。可以改用纯文本分段。"
     }
 
     private struct Blocked: Error {
