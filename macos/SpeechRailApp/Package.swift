@@ -79,6 +79,8 @@ let package = Package(
                 "TeleprompterNormalizer.swift",
                 "TeleprompterSegmenter.swift",
                 "TeleprompterAligner.swift",
+                "TeleprompterAnalysis.swift",
+                "TeleprompterStore.swift",
             ]
         ),
         .testTarget(
