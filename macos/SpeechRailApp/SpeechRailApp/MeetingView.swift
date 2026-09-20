@@ -869,7 +869,10 @@ public struct MeetingView: View {
     /// 生成之后回到「纪要」页签看新版；选中态清掉，否则会以为"重新生成没生效"。
     private func regenerateMinutes(for sessionID: String?) async {
         guard let id = sessionID else { return }
-        await meeting.minutes.generate(sessionID: id, configuration: preferences.minutesConfiguration)
+        await meeting.minutes.generate(
+            sessionID: id,
+            resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
+        )
         if reviewRecord?.id == id {
             reviewMinutes = try? await session.latestMinutes(sessionID: id)
             selectedMinutesVersionID = nil

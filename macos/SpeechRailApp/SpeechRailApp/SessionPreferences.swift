@@ -7,7 +7,7 @@ import Observation
 // （`session.llm_model` / `persona_id` / `voice_id` / `diarization`），所以改了偏好
 // 不会改写历史记录——这也是"库里那份是为了复现"的意思。
 //
-// 一条硬规矩：**密钥不在这里**。它只进钥匙串（`LLMKeychain`），这里最多知道"有没有"。
+// 一条硬规矩：**密钥不在这里**。它只进安全保管库（`LLMKeychain`），这里最多知道"有没有"。
 
 /// 助手的两种模式（§14.5）。差别只有一个：**能不能打断它**。
 public enum AssistantMode: String, CaseIterable, Identifiable, Sendable {
@@ -62,6 +62,10 @@ public final class SessionPreferences {
     }
     public var llmModel: String {
         didSet { defaults.set(llmModel, forKey: Key.llmModel) }
+    }
+    /// 模块覆盖只保存地址与模型；Key 由 `LLMKeychain.Scope.module` 单独保管。
+    private var llmModuleOverrides: [LLMModule: LLMModuleOverride] {
+        didSet { persistLLMModuleOverrides() }
     }
     /// 只读事实：`Responses · 必须`（§6.5 的接口行，不提供降级选项）。
     public let llmInterface = "Responses · 必须"
@@ -119,6 +123,9 @@ public final class SessionPreferences {
         self.defaults = defaults
         self.llmBaseURL = defaults.string(forKey: Key.llmBaseURL) ?? ""
         self.llmModel = defaults.string(forKey: Key.llmModel) ?? ""
+        self.llmModuleOverrides = Self.decodeLLMModuleOverrides(
+            defaults.data(forKey: Key.llmModuleOverrides)
+        )
         self.defaultPersonaID = defaults.string(forKey: Key.personaID) ?? Self.catalog[0].id
         self.defaultVoiceID = defaults.string(forKey: Key.voiceID) ?? ""
         self.assistantMode = AssistantMode(rawValue: defaults.string(forKey: Key.assistantMode) ?? "")
@@ -139,15 +146,81 @@ public final class SessionPreferences {
         LLMConfiguration(baseURL: llmBaseURL, model: llmModel)
     }
 
-    /// 纪要用的那一份配置（`minutesModel` 留空 = 同大模型）。
+    /// 不读取 Key 的配置投影，供状态栏等只展示 endpoint/model 的 UI 使用。
+    public func llmConfiguration(for module: LLMModule) -> LLMConfiguration {
+        LLMConfigurationResolver.resolve(
+            global: llmConfiguration,
+            globalAPIKey: nil,
+            moduleOverride: effectiveLLMOverride(for: module),
+            moduleAPIKey: nil
+        ).configuration
+    }
+
+    /// 纪要用的那一份配置（保留旧 `minutesModel` 兼容语义）。
     public var minutesConfiguration: LLMConfiguration {
-        var configuration = llmConfiguration
-        let override = minutesModel.trimmingCharacters(in: .whitespaces)
-        if !override.isEmpty { configuration.model = override }
-        return configuration
+        llmConfiguration(for: .minutes)
     }
 
     public var isLLMConfigured: Bool { llmConfiguration.isConfigured }
+
+    /// 返回设置页编辑用的覆盖值。没有显式新值时，把旧纪要模型映射成一个可编辑覆盖。
+    public func llmOverride(for module: LLMModule) -> LLMModuleOverride {
+        if let override = llmModuleOverrides[module] { return override }
+        guard module == .minutes else { return LLMModuleOverride() }
+        let legacyModel = minutesModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacyModel.isEmpty else { return LLMModuleOverride() }
+        return LLMModuleOverride(enabled: true, baseURL: llmBaseURL, model: legacyModel)
+    }
+
+    /// 切换模块专用配置。首次打开时复制全局值，避免用户打开开关后落入空配置。
+    public func setLLMOverrideEnabled(_ enabled: Bool, for module: LLMModule) {
+        var override = llmOverride(for: module)
+        override.enabled = enabled
+        if enabled {
+            if override.baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                override.baseURL = llmBaseURL
+            }
+            if override.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                override.model = llmModel
+            }
+        }
+        updateLLMOverride(override, for: module)
+    }
+
+    public func updateLLMOverride(_ override: LLMModuleOverride, for module: LLMModule) {
+        var normalized = override
+        normalized.baseURL = normalized.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalized.model = normalized.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        llmModuleOverrides[module] = normalized
+    }
+
+    /// 普通运行时入口：统一读取 global/module Key，再走同一个解析器。
+    public func resolvedLLMConfiguration(for module: LLMModule) -> ResolvedLLMConfiguration {
+        let moduleOverride = effectiveLLMOverride(for: module)
+        return resolvedLLMConfiguration(
+            for: module,
+            globalAPIKey: LLMKeychain.load(scope: .global),
+            moduleAPIKey: moduleOverride == nil ? nil : LLMKeychain.load(scope: .module(module))
+        )
+    }
+
+    /// 注入式入口供会话测试/运行时使用，避免为测试改写真实安全保管库。
+    public func resolvedLLMConfiguration(
+        for module: LLMModule,
+        globalAPIKey: String?,
+        moduleAPIKey: String?
+    ) -> ResolvedLLMConfiguration {
+        LLMConfigurationResolver.resolve(
+            global: llmConfiguration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: effectiveLLMOverride(for: module),
+            moduleAPIKey: moduleAPIKey
+        )
+    }
+
+    public func isLLMConfigured(for module: LLMModule) -> Bool {
+        llmConfiguration(for: module).isConfigured
+    }
 
     /// 内置人设目录（正文可改，改的是"下一次开始"用的那份）。
     public static let catalog: [Persona] = [
@@ -235,6 +308,32 @@ public final class SessionPreferences {
         return personas
     }
 
+    private func effectiveLLMOverride(for module: LLMModule) -> LLMModuleOverride? {
+        if let override = llmModuleOverrides[module] {
+            return override.enabled ? override : nil
+        }
+        guard module == .minutes else { return nil }
+        let legacyModel = minutesModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !legacyModel.isEmpty else { return nil }
+        return LLMModuleOverride(enabled: true, baseURL: llmBaseURL, model: legacyModel)
+    }
+
+    private func persistLLMModuleOverrides() {
+        guard let data = try? JSONEncoder().encode(llmModuleOverrides) else { return }
+        defaults.set(data, forKey: Key.llmModuleOverrides)
+    }
+
+    private static func decodeLLMModuleOverrides(_ data: Data?) -> [LLMModule: LLMModuleOverride] {
+        guard
+            let data,
+            let overrides = try? JSONDecoder().decode(
+                [LLMModule: LLMModuleOverride].self,
+                from: data
+            )
+        else { return [:] }
+        return overrides
+    }
+
     /// 从记录库「继续这一轮」时预填当时的设置（§14.4：那里**可以**换人设，因为那是新会话）。
     public func prefill(from record: SessionRecord) {
         if let persona = record.persona, persona.id != defaultPersonaID, self.persona(id: persona.id) != nil {
@@ -263,6 +362,7 @@ public final class SessionPreferences {
     private enum Key {
         static let llmBaseURL = "speechrail.llm.baseURL"
         static let llmModel = "speechrail.llm.model"
+        static let llmModuleOverrides = "speechrail.llm.moduleOverrides.v1"
         static let personaID = "speechrail.session.assistant.persona"
         static let voiceID = "speechrail.session.assistant.voice"
         static let assistantMode = "speechrail.session.assistant.mode"

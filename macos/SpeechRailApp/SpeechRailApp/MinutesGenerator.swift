@@ -186,11 +186,27 @@ public final class MinutesGenerator {
 
     /// 转录封存之后调它：排队 → 认领 → 生成 → 落库（§8.2 的最后一步）。
     public func generate(sessionID: String, configuration: LLMConfiguration) async {
+        await generate(
+            sessionID: sessionID,
+            resolvedConfiguration: ResolvedLLMConfiguration(
+                configuration: configuration,
+                apiKey: LLMKeychain.load(),
+                origin: .global
+            )
+        )
+    }
+
+    /// 应用入口传入模块解析结果；后台任务不再自行读取 global Key。
+    public func generate(
+        sessionID: String,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async {
         guard inFlight == nil else { return }
         inFlight = sessionID
         defer { inFlight = nil }
         state = .queued
         failedOnSetup = false
+        let configuration = resolvedConfiguration.configuration
 
         let version: MinutesVersion
         do {
@@ -212,7 +228,7 @@ public final class MinutesGenerator {
                     _ = try? await self?.run(
                         version: version,
                         transcript: transcript,
-                        configuration: configuration
+                        resolvedConfiguration: resolvedConfiguration
                     )
                 }
                 runTask = task
@@ -235,9 +251,19 @@ public final class MinutesGenerator {
 
     /// 重开 App 之后回收过期租约：`running` 且租约过期的那些行可以被重新认领（§5.8）。
     public func recoverPending(configuration: LLMConfiguration) async {
+        await recoverPending(
+            resolvedConfiguration: ResolvedLLMConfiguration(
+                configuration: configuration,
+                apiKey: LLMKeychain.load(),
+                origin: .global
+            )
+        )
+    }
+
+    public func recoverPending(resolvedConfiguration: ResolvedLLMConfiguration) async {
         guard let sessionIDs = try? await coordinator.sessionsWithPendingMinutes() else { return }
         for sessionID in sessionIDs {
-            await generate(sessionID: sessionID, configuration: configuration)
+            await generate(sessionID: sessionID, resolvedConfiguration: resolvedConfiguration)
         }
     }
 
@@ -272,12 +298,13 @@ public final class MinutesGenerator {
     private func run(
         version: MinutesVersion,
         transcript: String,
-        configuration: LLMConfiguration
+        resolvedConfiguration: ResolvedLLMConfiguration
     ) async throws {
         let claimed = try await coordinator.claimMinutes(sessionID: version.sessionID, lease: Self.lease)
         guard let claimed else { return }
         state = .running
-        let key = LLMKeychain.load()
+        let configuration = resolvedConfiguration.configuration
+        let key = resolvedConfiguration.apiKey
         do {
             let responseID = try await provider.startBackground(
                 configuration: configuration,

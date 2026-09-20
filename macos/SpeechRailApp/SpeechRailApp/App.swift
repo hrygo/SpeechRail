@@ -171,14 +171,15 @@ struct SpeechRailApp: App {
             store: teleprompterStore
         )
         teleprompterSession.aiClient = TeleprompterAIClient { prompt in
-            guard sessionPreferences.llmConfiguration.isConfigured,
-                  !sessionPreferences.llmConfiguration.embedsCredential else {
+            let resolved = sessionPreferences.resolvedLLMConfiguration(for: .teleprompter)
+            guard resolved.configuration.isConfigured,
+                  !resolved.configuration.embedsCredential else {
                 throw LLMError.notConfigured
             }
             return try await llmProvider.complete(
-                configuration: sessionPreferences.llmConfiguration,
+                configuration: resolved.configuration,
                 messages: [LLMMessage(role: .user, text: prompt.input)],
-                apiKey: LLMKeychain.load(),
+                apiKey: resolved.apiKey,
                 maxOutputTokens: 4000,
                 textFormat: TeleprompterAnalysis.jsonSchema,
                 instructions: prompt.instructions,
@@ -425,7 +426,7 @@ struct SpeechRailApp: App {
                     // 启动时回收：① 上次没正常结束的会话已经封存（`openStore` 里做）；
                     // ② 卡在 `queued` / 租约过期的纪要在这里重新排一次（§5.8）。
                     await meeting.minutes.recoverPending(
-                        configuration: preferences.minutesConfiguration
+                        resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .minutes)
                     )
                     await model.refreshCreatorVoices()
                 }

@@ -275,8 +275,13 @@ public final class MeetingSession {
         phase = .archived
         guard let id else { return }
         // ② 整理：转录已封存，失败也不影响它（§9 第 18 行）。
-        let configuration = preferences?().minutesConfiguration ?? LLMConfiguration()
-        await minutes.generate(sessionID: id, configuration: configuration)
+        let resolvedConfiguration = preferences?().resolvedLLMConfiguration(for: .minutes)
+            ?? ResolvedLLMConfiguration(
+                configuration: LLMConfiguration(),
+                apiKey: nil,
+                origin: .global
+            )
+        await minutes.generate(sessionID: id, resolvedConfiguration: resolvedConfiguration)
     }
 
     /// 页头的「结束会议」。**会议永远确认**（防误停，§6.4），确认在界面上做。
@@ -294,7 +299,7 @@ public final class MeetingSession {
     public var minutesNeedsSetup: Bool {
         guard case .failed = minutes.state else { return false }
         if minutes.failureNeedsSetup { return true }
-        return !(preferences?().isLLMConfigured ?? true)
+        return !(preferences?().isLLMConfigured(for: .minutes) ?? true)
     }
 
     /// 「继续这一段」= 新 epoch：序号与水位不重置，丢掉的音频就是没录上（§5.6）。
@@ -337,6 +342,7 @@ public final class MeetingSession {
             throw Blocked(reason: .noSourceSelected)
         }
         let preferences = preferences?()
+        let minutesConfiguration = preferences?.resolvedLLMConfiguration(for: .minutes).configuration
 
         var profile = coordinator.lastKnownProfile ?? "unknown"
         if let serviceReadiness {
@@ -383,8 +389,8 @@ public final class MeetingSession {
                     audioSource: selection.resolvedSource,
                     diarization: wantsDiarization ? .active : (gateNote == nil ? .off : .unavailable),
                     diarizationNote: gateNote,
-                    llmEndpoint: preferences?.minutesConfiguration.normalizedBaseURL,
-                    llmModel: preferences?.minutesConfiguration.model
+                    llmEndpoint: minutesConfiguration?.normalizedBaseURL,
+                    llmModel: minutesConfiguration?.model
                 )
             )
             sessionID = record.id

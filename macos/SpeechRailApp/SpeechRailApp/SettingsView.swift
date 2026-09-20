@@ -15,8 +15,11 @@ public struct SettingsView: View {
     /// 每一次重建视图时都会跑，而读钥匙串是一次可能被系统弹框拦下的同步调用——
     /// 它与助手页那处是同一个毛病（2026-09-19）。
     @State private var llmKeySaved = false
+    @State private var moduleKeyDrafts: [String: String] = [:]
+    @State private var moduleKeySaved: Set<String> = []
     @State private var connectionResult: LLMConnectionResult?
     @State private var isChecking = false
+    @State private var checkedModule: LLMModule?
 
     public init() {}
 
@@ -42,7 +45,13 @@ public struct SettingsView: View {
             minHeight: SpeechRailDesignTokens.Layout.settingsWindowMinimumHeight
         )
         .task {
+            let savedModules = await Task.detached {
+                LLMModule.allCases
+                    .filter { LLMKeychain.hasKey(scope: .module($0)) }
+                    .map(\.rawValue)
+            }.value
             llmKeySaved = await Task.detached { LLMKeychain.hasKey }.value
+            moduleKeySaved = Set(savedModules)
         }
     }
 
@@ -217,7 +226,7 @@ public struct SettingsView: View {
 
     private var sessionPane: some View {
         settingsPane {
-            settingsSection("大模型（对话与纪要）") {
+            settingsSection("大模型（全局默认）") {
                 settingsRow {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         settingsRowLabel(
@@ -301,20 +310,22 @@ public struct SettingsView: View {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button("检查连接") {
-                                Task { await checkConnection() }
+                                Task { await checkConnection(for: nil) }
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
                             .disabled(isChecking || !preferences.isLLMConfigured)
-                            if isChecking { ProgressView().controlSize(.small) }
-                            if let result = connectionResult {
+                            if isChecking, checkedModule == nil {
+                                ProgressView().controlSize(.small)
+                            }
+                            if checkedModule == nil, let result = connectionResult {
                                 StatusPill(
                                     tone: result.isReady ? .healthy : .attention,
                                     label: result.title
                                 )
                             }
                         }
-                        if let result = connectionResult {
+                        if checkedModule == nil, let result = connectionResult {
                             Text(result.detail)
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
@@ -324,8 +335,23 @@ public struct SettingsView: View {
                 }
                 settingsRowSeparator
                 settingsRow {
-                    Text("对话与纪要都要靠一台兼容 OpenAI、支持 Responses API 的服务；"
-                        + "识别、合成与「谁在说话」由 SpeechRail 本机提供。")
+                    Text("所有 AI 模块默认使用一台兼容 OpenAI、支持 Responses API 的服务；"
+                        + "需要时可以在下面为单个模块指定不同配置。识别、合成与「谁在说话」由 SpeechRail 本机提供。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            settingsSection("模块专用配置（可选）") {
+                ForEach(LLMModule.allCases) { module in
+                    moduleConfigurationRows(for: module)
+                    if module != LLMModule.allCases.last {
+                        settingsRowSeparator
+                    }
+                }
+                settingsRow {
+                    Text("专用配置只影响对应模块；没有完整填写时会整组回退到全局默认，不会把不同来源的地址与模型拼在一起。专用 Key 留空则继承全局 Key。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -408,15 +434,6 @@ public struct SettingsView: View {
                 settingsRowSeparator
                 settingsRow {
                     VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        settingsRowLabel("纪要模型", caption: "留空表示跟大模型用同一个。")
-                        TextField("同大模型", text: minutesModelBinding)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 360)
-                    }
-                }
-                settingsRowSeparator
-                settingsRow {
-                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         settingsRowLabel("记录库", caption: "本机数据库（SQLite）；删掉 App 不会动它。")
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button("打开数据目录") {
@@ -489,6 +506,170 @@ public struct SettingsView: View {
         )
     }
 
+    @ViewBuilder
+    private func moduleConfigurationRows(for module: LLMModule) -> some View {
+        let override = preferences.llmOverride(for: module)
+        let configuration = preferences.llmConfiguration(for: module)
+
+        settingsRow {
+            Toggle(isOn: moduleEnabledBinding(for: module)) {
+                settingsRowLabel(
+                    module.title,
+                    caption: override.enabled
+                        ? moduleStatusText(override: override, configuration: configuration)
+                        : "跟随全局默认配置。\(module.detail)"
+                )
+            }
+            .modifier(settingsRowControl())
+        }
+
+        if override.enabled {
+            settingsRowSeparator
+            settingsRow {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    settingsRowLabel("专用服务地址", caption: "与全局配置成对生效；地址里不要放密钥。")
+                    TextField("http://127.0.0.1:8000/v1", text: moduleOverrideBinding(for: module, keyPath: \.baseURL))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 360)
+                }
+            }
+            settingsRowSeparator
+            settingsRow {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    settingsRowLabel("专用模型", caption: "留空或不完整时，这张卡会回退到全局配置。")
+                    TextField("模型名", text: moduleOverrideBinding(for: module, keyPath: \.model))
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 360)
+                }
+            }
+            settingsRowSeparator
+            settingsRow {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    settingsRowLabel(
+                        "专用密钥",
+                        caption: moduleKeySaved.contains(module.rawValue)
+                            ? "已存入模块专用安全保管库。"
+                            : "留空表示继承全局 Key；只存安全保管库，不落配置文件。"
+                    )
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        SecureField("留空继承全局 Key", text: moduleKeyBinding(for: module))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 280)
+                        Button("保存专用 Key") {
+                            saveModuleKey(for: module)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        if moduleKeySaved.contains(module.rawValue) {
+                            Button("清除") {
+                                clearModuleKey(for: module)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+            }
+            settingsRowSeparator
+            settingsRow {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Button("检查连接") {
+                            Task { await checkConnection(for: module) }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(
+                            isChecking
+                                || !configuration.isConfigured
+                                || !configuration.isBaseURLValid
+                                || configuration.embedsCredential
+                        )
+                        if isChecking, checkedModule == module {
+                            ProgressView().controlSize(.small)
+                        }
+                        if checkedModule == module, let result = connectionResult {
+                            StatusPill(
+                                tone: result.isReady ? .healthy : .attention,
+                                label: result.title
+                            )
+                        }
+                    }
+                    if checkedModule == module, let result = connectionResult {
+                        Text(result.detail)
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func moduleStatusText(
+        override: LLMModuleOverride,
+        configuration: LLMConfiguration
+    ) -> String {
+        guard override.enabled else { return "跟随全局默认配置。" }
+        guard configuration.isConfigured, configuration.isBaseURLValid, !configuration.embedsCredential else {
+            return "专用配置不完整或地址不合法，当前回退到全局默认。"
+        }
+        return "当前生效：专用服务与模型。"
+    }
+
+    private func moduleEnabledBinding(for module: LLMModule) -> Binding<Bool> {
+        Binding(
+            get: { preferences.llmOverride(for: module).enabled },
+            set: { preferences.setLLMOverrideEnabled($0, for: module) }
+        )
+    }
+
+    private func moduleOverrideBinding(
+        for module: LLMModule,
+        keyPath: WritableKeyPath<LLMModuleOverride, String>
+    ) -> Binding<String> {
+        Binding(
+            get: { preferences.llmOverride(for: module)[keyPath: keyPath] },
+            set: { newValue in
+                var override = preferences.llmOverride(for: module)
+                override[keyPath: keyPath] = newValue
+                preferences.updateLLMOverride(override, for: module)
+            }
+        )
+    }
+
+    private func moduleKeyBinding(for module: LLMModule) -> Binding<String> {
+        Binding(
+            get: { moduleKeyDrafts[module.rawValue] ?? "" },
+            set: { moduleKeyDrafts[module.rawValue] = $0 }
+        )
+    }
+
+    private func saveModuleKey(for module: LLMModule) {
+        do {
+            try LLMKeychain.save(
+                moduleKeyDrafts[module.rawValue] ?? "",
+                scope: .module(module)
+            )
+            moduleKeyDrafts[module.rawValue] = ""
+            moduleKeySaved.insert(module.rawValue)
+        } catch {
+            checkedModule = module
+            connectionResult = .unreachable(error.localizedDescription)
+        }
+    }
+
+    private func clearModuleKey(for module: LLMModule) {
+        do {
+            try LLMKeychain.remove(scope: .module(module))
+            moduleKeyDrafts[module.rawValue] = ""
+            moduleKeySaved.remove(module.rawValue)
+        } catch {
+            checkedModule = module
+            connectionResult = .unreachable(error.localizedDescription)
+        }
+    }
+
     private var diarizationCaptionsBinding: Binding<Bool> {
         Binding(
             get: { preferences.captionsDiarizationEnabled },
@@ -503,10 +684,6 @@ public struct SettingsView: View {
         )
     }
 
-    private var minutesModelBinding: Binding<String> {
-        Binding(get: { preferences.minutesModel }, set: { preferences.minutesModel = $0 })
-    }
-
     private var notifyBinding: Binding<Bool> {
         Binding(
             get: { preferences.notifyOnInterruption },
@@ -514,12 +691,23 @@ public struct SettingsView: View {
         )
     }
 
-    private func checkConnection() async {
+    private func checkConnection(for module: LLMModule?) async {
         isChecking = true
+        checkedModule = module
         defer { isChecking = false }
+        let resolved: ResolvedLLMConfiguration
+        if let module {
+            resolved = preferences.resolvedLLMConfiguration(for: module)
+        } else {
+            resolved = ResolvedLLMConfiguration(
+                configuration: preferences.llmConfiguration,
+                apiKey: LLMKeychain.load(),
+                origin: .global
+            )
+        }
         connectionResult = await LLMProvider().check(
-            configuration: preferences.llmConfiguration,
-            apiKey: LLMKeychain.load()
+            configuration: resolved.configuration,
+            apiKey: resolved.apiKey
         )
     }
 
