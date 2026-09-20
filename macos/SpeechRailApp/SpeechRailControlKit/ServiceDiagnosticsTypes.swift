@@ -87,6 +87,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
     public let backend: String?
     public let profile: SpeechRailProfile?
     public let asrReady: Bool?
+    public let asrRuntimeRevision: String?
     public let ttsReady: Bool?
     public let ttsWarm: Bool?
     public let diarizationReady: Bool?
@@ -106,6 +107,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         backend: String? = nil,
         profile: SpeechRailProfile? = nil,
         asrReady: Bool? = nil,
+        asrRuntimeRevision: String? = nil,
         ttsReady: Bool? = nil,
         ttsWarm: Bool? = nil,
         diarizationReady: Bool? = nil,
@@ -124,6 +126,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         self.backend = backend
         self.profile = profile
         self.asrReady = asrReady
+        self.asrRuntimeRevision = asrRuntimeRevision
         self.ttsReady = ttsReady
         self.ttsWarm = ttsWarm
         self.diarizationReady = diarizationReady
@@ -144,6 +147,7 @@ public struct HealthSnapshot: Codable, Equatable, Sendable {
         case backend
         case profile
         case asrReady = "asr_ready"
+        case asrRuntimeRevision = "asr_runtime_revision"
         case ttsReady = "tts_ready"
         case ttsWarm = "tts_warm"
         case diarizationReady = "diarization_ready"
