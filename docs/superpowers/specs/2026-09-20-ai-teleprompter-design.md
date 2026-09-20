@@ -2,7 +2,7 @@
 title: "SpeechRail AI 提词器设计规格"
 status: draft
 audience: "SpeechRail macOS App 用户体验、客户端会话层与维护者"
-version: "0.1.0"
+version: "0.2.0"
 date: 2026-09-20
 ---
 
@@ -77,6 +77,7 @@ SpeechRail macOS App 当前已有三类可复用基础：
 | D8 | AI 结果需要用户确认 | AI 返回结构化分析；用户确认后才成为活动稿件版本 |
 | D9 | 提词运行不进入现有转录记录库 | 统一使用会话占用管理，稿件进度和运行状态由 `TeleprompterStore` 保存 |
 | D10 | v1 不增加全局提词快捷键 | 只提供舞台窗口内快捷键，避免与现有 Carbon 快捷键和直播软件冲突 |
+| D11 | UI 使用统一设计 token | 颜色、间距、圆角、字体、尺寸、表面和动效优先消费 `SpeechRailDesignTokens` 或 macOS 系统语义值，不在功能视图散落视觉常量 |
 
 ## 5. 范围
 
@@ -94,6 +95,7 @@ SpeechRail macOS App 当前已有三类可复用基础：
 - 键盘快捷操作；
 - 本机稿件、版本、设置和最后进度保存；
 - 直播窗口采集安全说明。
+- 使用系统统一设计 token 的准备页、状态区和舞台窗口。
 
 ### 5.2 v1 不包含
 
@@ -211,6 +213,24 @@ v1 不增加全局提词快捷键。原因是直播软件、系统和现有 Spee
 > 请在直播软件中选择摄像头或目标直播窗口，不要使用包含提词器的整屏采集。SpeechRail 不负责直播推流，也不会把提词器内容写入直播画面。
 
 舞台窗口应使用独立标题和独立窗口身份。若 macOS 26 SDK 与实际采集链路验证通过，可额外设置窗口的屏幕共享排除属性；该属性只是防护层，不能替代用户正确选择窗口采集。
+
+### 9.4 设计 token 约束
+
+提词器的新增 UI 必须接入现有设计系统，单一事实来源为：
+
+`macos/SpeechRailApp/SpeechRailApp/SpeechRailDesignTokens.swift`
+
+实施规则：
+
+- 间距从 `SpeechRailDesignTokens.Spacing` 取值；页面和窗口尺寸从 `Layout` 取值；字体层级从 `Typography` 取值；控件尺寸和工具栏档位从 `Control` / `Toolbar` 取值；
+- 颜色优先使用 macOS 系统语义色和 `SpeechRailDesignTokens.Color`；不在提词器视图中新增 `Color(red:green:blue:)`、十六进制颜色或自挑灰度；
+- 容器和嵌套表面使用现有 `Corner`、`ConcentricRectangle` 及 `.speechRailSurface(...)`、`.speechRailContentSurface()`、`.speechRailField()` 等统一 modifier；不在局部重复 `.cornerRadius(...)`；
+- 舞台窗口优先使用系统窗口材质、`glassEffect` / `GlassEffectContainer` 和现有浮层层级；不自绘一套新的玻璃、阴影或背景渐变；
+- 动效使用现有 `Motion` 语义，并在 `accessibilityReduceMotion` 下退化为即时状态切换；
+- 新增确实无法复用的视觉值时，只能先扩展 `SpeechRailDesignTokens.swift`，为 token 写明语义和使用范围，再由视图消费；不能把局部常量留在 `TeleprompterView` 或 `TeleprompterStageView`；
+- 复用 `SessionDesignSurface` 等现有组件时，必须保留其 token 接线；当前工作区已有该文件的并行改动，实施时逐段合并，不得整文件覆盖。
+
+设计验收必须覆盖浅色/深色外观、系统强调色、动态字体、键盘焦点、增加对比度、VoiceOver 和减少动态效果。
 
 ## 10. AI 分析规格
 
@@ -419,7 +439,7 @@ v1 不新增 Python 路由、OpenAPI 字段、Realtime 事件或服务端 worker
 
 ### 阶段 4：舞台窗口与 App 路由
 
-增加 App 路由、准备页、舞台窗口、窗口位置记忆、键盘控制、菜单栏入口和直播采集提醒。必要时补充窗口屏幕共享排除的本机实测。
+增加 App 路由、准备页、舞台窗口、窗口位置记忆、键盘控制、菜单栏入口和直播采集提醒。所有新增视觉值先进入统一 token，再接入页面与舞台窗口；完成一次 token 使用审查。必要时补充窗口屏幕共享排除的本机实测。
 
 ### 阶段 5：验收
 
@@ -472,4 +492,5 @@ v1 不新增 Python 路由、OpenAPI 字段、Realtime 事件或服务端 worker
 4. 窗口安全、麦克风生命周期、隐私和手动回退均有明确出口；
 5. Python 服务公共边界没有被隐式扩大；
 6. 每个核心行为都有对应的测试或真机验收证据类型；
-7. 没有 `TBD`、`TODO` 或未决的产品裁决项。
+7. 新增 UI 已通过统一 token 审查，没有散落的颜色、字号、间距、圆角或材质常量；
+8. 没有 `TBD`、`TODO` 或未决的产品裁决项。
