@@ -7,6 +7,7 @@ public struct TeleprompterView: View {
     @Environment(TeleprompterStageSettings.self) private var settings
     @State private var documents: [TeleprompterDocument] = []
     @State private var isImporterPresented = false
+    @State private var operationMessage: String?
 
     public init() {}
 
@@ -18,6 +19,12 @@ public struct TeleprompterView: View {
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 safetyNotice
+                if let operationMessage {
+                    Label(operationMessage, systemImage: "exclamationmark.triangle")
+                        .font(SpeechRailDesignTokens.Typography.callout)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+                }
                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                     recentDocuments
                         .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
@@ -32,18 +39,25 @@ public struct TeleprompterView: View {
         }
         .fileImporter(
             isPresented: $isImporterPresented,
-            allowedContentTypes: [.plainText]
+            allowedContentTypes: [.plainText, .text]
         ) { result in
-            guard case .success(let url) = result else { return }
-            do {
-                let text = try TeleprompterTextImporter.load(from: url)
-                session.createDocument(
-                    title: url.deletingPathExtension().lastPathComponent,
-                    sourceText: text
-                )
-                reloadDocuments()
-            } catch {
-                session.createDocument(title: "导入失败", sourceText: "")
+            switch result {
+            case .success(let url):
+                do {
+                    let text = try TeleprompterTextImporter.load(from: url)
+                    session.createDocument(
+                        title: url.deletingPathExtension().lastPathComponent,
+                        sourceText: text
+                    )
+                    operationMessage = nil
+                    reloadDocuments()
+                } catch {
+                    operationMessage = error.localizedDescription
+                }
+            case .failure(let error):
+                if let cocoaError = error as? CocoaError, cocoaError.code != .userCancelled {
+                    operationMessage = "导入失败：\(error.localizedDescription)"
+                }
             }
         }
     }
@@ -73,7 +87,12 @@ public struct TeleprompterView: View {
                 } else {
                     ForEach(documents) { document in
                         Button {
-                            try? session.load(documentID: document.id)
+                            do {
+                                try session.load(documentID: document.id)
+                                operationMessage = nil
+                            } catch {
+                                operationMessage = error.localizedDescription
+                            }
                         } label: {
                             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                                 Text(document.title)
@@ -153,8 +172,13 @@ public struct TeleprompterView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(sourceIsEmpty || session.phase == .analyzing)
-                    Button("使用纯文本分段") {
-                        try? session.useDeterministicFallback()
+                     Button("使用纯文本分段") {
+                        do {
+                            try session.useDeterministicFallback()
+                            operationMessage = nil
+                        } catch {
+                            operationMessage = error.localizedDescription
+                        }
                     }
                     .buttonStyle(.bordered)
                     .disabled(sourceIsEmpty)
@@ -178,9 +202,14 @@ public struct TeleprompterView: View {
                     CardHead(title: "AI 建议（待确认）", detail: "建议不会覆盖原稿") {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button("撤销") { session.discardPendingVersion() }
-                            Button("接受并生成活动版本") {
-                                try? session.acceptPendingVersion()
-                                reloadDocuments()
+                             Button("接受并生成活动版本") {
+                                 do {
+                                     try session.acceptPendingVersion()
+                                     operationMessage = nil
+                                     reloadDocuments()
+                                 } catch {
+                                     operationMessage = error.localizedDescription
+                                 }
                             }
                             .buttonStyle(.borderedProminent)
                         }
@@ -302,6 +331,11 @@ public struct TeleprompterView: View {
     }
 
     private func reloadDocuments() {
-        documents = (try? session.listDocuments()) ?? []
+        do {
+            documents = try session.listDocuments()
+        } catch {
+            documents = []
+            operationMessage = error.localizedDescription
+        }
     }
 }
