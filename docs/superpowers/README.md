@@ -13,6 +13,7 @@
 - [讲话人分离整洁架构](specs/2026-09-08-diarization-clean-architecture-design.md)（`accepted`）
 - [讲话人分离 D1 选择证据](specs/2026-09-08-diarization-d1-selection-evidence.md)
 - [Clone frozen-gain 边界修复候选](specs/2026-09-12-clone-loudness-boundaries.md)（`draft`）
+- [无状态 Speech Plane 与调用方编排设计](specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)（`approved`）
 
 ## 实施计划
 
@@ -34,6 +35,7 @@
 - [v1.13.0 高 ROI 优化计划](plans/2026-09-09-full-stack-memory-evidence.md)
 - [v1.13.0 高 ROI 优化计划](plans/2026-09-08-v1.13.0-high-roi-optimization.md)
 - [三档用户定位重排与按档位精度策略](plans/2026-09-11-tier-user-repositioning-and-precision-policy.md)
+- [无状态 Speech Plane 与调用方编排实施计划](plans/2026-09-20-stateless-speech-plane-caller-orchestration.md)（`ready`）
 
 ## 当前正式架构文档
 

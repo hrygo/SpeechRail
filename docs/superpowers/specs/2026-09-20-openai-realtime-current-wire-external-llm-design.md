@@ -1,10 +1,15 @@
 ---
 title: "OpenAI Realtime current wire 与外部 LLM 设计"
-status: draft
+status: superseded
 date: 2026-09-20
+superseded_by: docs/decisions/0019-stateless-speech-plane-caller-orchestration.md
 ---
 
 # OpenAI Realtime current wire 与外部 LLM 设计
+
+> **已废止（2026-09-20）**：本文档在实施前被 ADR-0019 取代。不要按本文档增加
+> 服务端外部 LLM、conversation history 或 provider port；请改读
+> [无状态 Speech Plane 与调用方编排设计](2026-09-20-stateless-speech-plane-caller-orchestration-design.md)。
 
 ## 目标
 

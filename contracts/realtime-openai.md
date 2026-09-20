@@ -1,5 +1,11 @@
 # SpeechRail OpenAI Realtime 兼容契约
 
+> **契约重置提示（2026-09-20）**：ADR-0019 已批准将本入口重置为“无状态 Speech Plane、调用方拥有
+> LLM/Agent 编排”的 current-only 契约。本文当前段落仍描述工作区现有实现，直到实施计划完成前
+> 不应被视为目标行为；目标契约禁止旧事件、旧字段、旧 alias 和服务端 LLM，详见
+> [设计规格](../docs/superpowers/specs/2026-09-20-stateless-speech-plane-caller-orchestration-design.md)
+> 与 [实施计划](../docs/superpowers/plans/2026-09-20-stateless-speech-plane-caller-orchestration.md)。
+
 `WS /v1/realtime` 实现 OpenAI Realtime WebSocket 协议的 ASR/TTS 子集，让标准 OpenAI
 客户端（`openai` SDK 的 `client.realtime.connect(model=...)`、以及硬编码 `/v1/realtime`
 路径的客户端）无需定制 URL 即可接入 SpeechRail 的本机转写与合成能力。

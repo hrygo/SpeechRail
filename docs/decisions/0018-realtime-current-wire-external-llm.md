@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed
+Superseded by ADR-0019
+
+This proposal was replaced before implementation. The accepted direction keeps
+SpeechRail as a stateless speech plane and leaves LLM orchestration to callers;
+no server-side external LLM provider is to be implemented from this ADR.
 
 ## Date
 

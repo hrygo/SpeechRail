@@ -1,5 +1,9 @@
 # OpenAI Realtime Current Wire + External LLM Implementation Plan
 
+> **已废止（2026-09-20）**：本文档不再执行。它假定 SpeechRail 承载服务端外部 LLM，
+> 与 ADR-0019 的“无状态 Speech Plane、调用方拥有助手编排、无旧版本兼容”方向冲突。
+> 新实施计划见 `docs/superpowers/plans/2026-09-20-stateless-speech-plane-caller-orchestration.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 将 `/v1/realtime` 收敛到 current OpenAI wire，并接入可选的 OpenAI-compatible 外部 LLM，同时用官方 `openai-node` WebSocket 客户端对真实 loopback 服务完成兼容性验收。
