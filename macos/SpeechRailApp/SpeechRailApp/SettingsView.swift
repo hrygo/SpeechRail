@@ -20,6 +20,8 @@ public struct SettingsView: View {
     @State private var connectionResult: LLMConnectionResult?
     @State private var isChecking = false
     @State private var checkedModule: LLMModule?
+    @State private var isAdvancedLLMConfigurationExpanded = false
+    @State private var didSeedAdvancedLLMConfigurationExpansion = false
 
     public init() {}
 
@@ -45,6 +47,7 @@ public struct SettingsView: View {
             minHeight: SpeechRailDesignTokens.Layout.settingsWindowMinimumHeight
         )
         .task {
+            seedAdvancedLLMConfigurationExpansion()
             let savedModules = await Task.detached {
                 LLMModule.allCases
                     .filter { LLMKeychain.hasKey(scope: .module($0)) }
@@ -336,26 +339,39 @@ public struct SettingsView: View {
                 settingsRowSeparator
                 settingsRow {
                     Text("所有 AI 模块默认使用一台兼容 OpenAI、支持 Responses API 的服务；"
-                        + "需要时可以在下面为单个模块指定不同配置。识别、合成与「谁在说话」由 SpeechRail 本机提供。")
+                        + "需要时可以在下方高级设置里为单个功能指定不同配置。识别、合成与「谁在说话」由 SpeechRail 本机提供。")
                         .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
-            settingsSection("模块专用配置（可选）") {
-                ForEach(LLMModule.allCases) { module in
-                    moduleConfigurationRows(for: module)
-                    if module != LLMModule.allCases.last {
-                        settingsRowSeparator
+            settingsSection("高级：按功能自定义") {
+                DisclosureGroup(isExpanded: $isAdvancedLLMConfigurationExpanded) {
+                    VStack(spacing: 0) {
+                        ForEach(LLMModule.allCases) { module in
+                            moduleConfigurationRows(for: module)
+                            if module != LLMModule.allCases.last {
+                                settingsRowSeparator
+                            }
+                        }
+                        settingsRow {
+                            Text("默认跟随全局；专用配置只影响对应功能，填写不完整时整组回退到全局。专用 Key 留空则继承全局 Key。")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
+                    .padding(.top, SpeechRailDesignTokens.Spacing.xs)
+                } label: {
+                    settingsRowLabel(
+                        "为特定功能使用不同配置",
+                        caption: llmModuleConfigurationSummary
+                    )
                 }
-                settingsRow {
-                    Text("专用配置只影响对应模块；没有完整填写时会整组回退到全局默认，不会把不同来源的地址与模型拼在一起。专用 Key 留空则继承全局 Key。")
-                        .font(SpeechRailDesignTokens.Typography.caption)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                .padding(.horizontal, Metrics.rowInsetX)
+                .padding(.vertical, Metrics.rowInsetY)
+                .accessibilityHint("展开后可为语音助手、会议纪要或 AI 提词器使用不同的服务与模型。")
             }
 
             settingsSection("语音助手") {
@@ -603,6 +619,36 @@ public struct SettingsView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var llmModuleConfigurationSummary: String {
+        let enabledModules = LLMModule.allCases.filter { preferences.llmOverride(for: $0).enabled }
+        let needsAttention = enabledModules.contains { moduleConfigurationNeedsAttention(for: $0) }
+
+        if needsAttention {
+            return "有专用配置需要检查；未设置的功能仍跟随全局。"
+        }
+        if enabledModules.isEmpty {
+            return "默认跟随全局；需要不同模型时再展开。"
+        }
+        return "已有 \(enabledModules.count) 个功能使用专用配置；其余仍跟随全局。"
+    }
+
+    private func moduleConfigurationNeedsAttention(for module: LLMModule) -> Bool {
+        let override = preferences.llmOverride(for: module)
+        let configuration = preferences.llmConfiguration(for: module)
+        guard override.enabled else { return false }
+        return !configuration.isConfigured
+            || !configuration.isBaseURLValid
+            || configuration.embedsCredential
+    }
+
+    private func seedAdvancedLLMConfigurationExpansion() {
+        guard !didSeedAdvancedLLMConfigurationExpansion else { return }
+        didSeedAdvancedLLMConfigurationExpansion = true
+        isAdvancedLLMConfigurationExpanded = LLMModule.allCases.contains {
+            preferences.llmOverride(for: $0).enabled
         }
     }
 

@@ -4,7 +4,7 @@
 
 **Goal:** 在保持全局 LLM 配置兼容的前提下，为语音助手、会议纪要、AI 提词器提供可选的模块专用 endpoint/model/Key，并让 UI 与运行时共享同一套解析规则。
 
-**Architecture:** 在现有 `LLMConfiguration` 与 `LLMKeychain` 之上增加模块枚举、值类型覆盖、纯解析器和 scoped encrypted-key API；`SessionPreferences` 负责 UserDefaults 持久化与旧 `minutesModel` 兼容，应用入口把 resolved value 注入各功能。Settings 使用统一的 design tokens 渲染全局默认与模块覆盖卡片。
+**Architecture:** 在现有 `LLMConfiguration` 与 `LLMKeychain` 之上增加模块枚举、值类型覆盖、纯解析器和 scoped encrypted-key API；`SessionPreferences` 负责 UserDefaults 持久化与旧 `minutesModel` 兼容，应用入口把 resolved value 注入各功能。Settings 以全局默认作为唯一主路径，使用统一的 design tokens 通过渐进式披露呈现可选模块覆盖。
 
 **Tech Stack:** Swift 6 / SwiftUI / Observation / Foundation / CryptoKit；现有 macOS 26 App target 与 `SpeechRailAppSupport` SwiftPM 测试 target。
 
@@ -50,10 +50,10 @@
 
 **Files:** `SettingsView.swift`
 
-1. 将全局设置标题和说明改成“全局默认”，保留现有 global 连接检查。
-2. 添加三个模块覆盖卡片：开关、endpoint、model、专用 Key、保存/清除、实际生效来源、模块连接检查。
+1. 将全局设置标题和说明改成“全局默认”，保留现有 global 连接检查，并明确所有功能默认继承它。
+2. 添加一个默认收起的“高级：按功能自定义”入口；展开后提供三个模块覆盖卡片：开关、endpoint、model、专用 Key、保存/清除、实际生效来源、模块连接检查。
 3. 删除重复的旧纪要模型输入 UI，但保留旧存储键和运行时兼容。
-4. 只使用既有 `settingsSection/settingsRow` 与 `SpeechRailDesignTokens`。
+4. 已有模块覆盖或回退异常时自动展开高级入口；只使用既有 `settingsSection/settingsRow` 与 `SpeechRailDesignTokens`。
 
 ## Task 5: Review, documentation and verification ✅
 
