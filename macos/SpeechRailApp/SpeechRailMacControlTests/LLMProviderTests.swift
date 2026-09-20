@@ -116,6 +116,10 @@ final class LLMProviderTests: XCTestCase {
 
     private static let unrelatedBadRequest = #"{"error":{"message":"model not found"}}"#
 
+    private static let rejectedStructuredOutputBody = #"{"error":{"message":"Invalid parameter: text.format json_schema is not supported by this model"}}"#
+
+    private static let invalidStructuredSchemaBody = #"{"error":{"message":"Invalid json_schema: additionalProperties must be false"}}"#
+
     private static let messages: [LLMMessage] = [
         LLMMessage(role: .developer, text: "# 角色风格（人设）\n简洁。", cacheBreakpoint: true),
         LLMMessage(role: .developer, text: "以下是用户确认过、可以长期记住的事：\n- 只会说中文", cacheBreakpoint: true),
@@ -200,6 +204,65 @@ final class LLMProviderTests: XCTestCase {
             XCTAssertTrue(body.contains("model not found"))
         }
         XCTAssertEqual(FakeTransport.requestBodies().count, 1)
+    }
+
+    func testStructuredOutputRejectionIsClassifiedWithoutLooseJsonFallback() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 400,
+                contentType: "application/json",
+                body: Self.rejectedStructuredOutputBody
+            )
+        ])
+
+        do {
+            _ = try await makeProvider().complete(
+                configuration: configuration,
+                messages: [LLMMessage(role: .user, text: "整理稿件")],
+                apiKey: nil,
+                textFormat: [
+                    "type": "json_schema",
+                    "name": "teleprompter_analysis",
+                    "strict": true,
+                    "schema": ["type": "object"]
+                ]
+            )
+            XCTFail("应报告 endpoint 不支持严格结构化输出")
+        } catch let error as LLMError {
+            XCTAssertEqual(error, .unsupportedStructuredOutput)
+        }
+
+        XCTAssertEqual(
+            FakeTransport.requestBodies().count,
+            1,
+            "不应静默重试为非结构化 JSON"
+        )
+    }
+
+    func testInvalidStructuredSchemaIsNotMisclassifiedAsUnsupportedCapability() async throws {
+        FakeTransport.reset([
+            .init(
+                status: 400,
+                contentType: "application/json",
+                body: Self.invalidStructuredSchemaBody
+            )
+        ])
+
+        do {
+            _ = try await makeProvider().complete(
+                configuration: configuration,
+                messages: [LLMMessage(role: .user, text: "整理稿件")],
+                apiKey: nil,
+                textFormat: ["type": "json_schema"]
+            )
+            XCTFail("应报告原始 schema 错误")
+        } catch let error as LLMError {
+            guard case let .http(status, body) = error else {
+                return XCTFail("错误类型不应被改写：\(error)")
+            }
+            XCTAssertEqual(status, 400)
+            XCTAssertTrue(body.contains("additionalProperties"))
+        }
     }
 
     func testMissingInstructionsKeepsRequestUsable() async throws {

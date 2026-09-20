@@ -7,7 +7,10 @@ public struct TeleprompterView: View {
     @Environment(TeleprompterStageSettings.self) private var settings
     @State private var documents: [TeleprompterDocument] = []
     @State private var isImporterPresented = false
+    @State private var isAIDataFlowDisclosurePresented = false
     @State private var operationMessage: String?
+    @AppStorage(TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey)
+    private var hasAcknowledgedAIDataFlow = false
 
     public init() {}
 
@@ -19,6 +22,7 @@ public struct TeleprompterView: View {
         ) {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 safetyNotice
+                aiDataFlowNotice
                 if let operationMessage {
                     Label(operationMessage, systemImage: "exclamationmark.triangle")
                         .font(SpeechRailDesignTokens.Typography.callout)
@@ -36,6 +40,18 @@ public struct TeleprompterView: View {
         }
         .task {
             reloadDocuments()
+        }
+        .alert(
+            TeleprompterAIDataFlowDisclosure.title,
+            isPresented: $isAIDataFlowDisclosurePresented
+        ) {
+            Button("取消", role: .cancel) {}
+            Button("继续并发送原稿") {
+                hasAcknowledgedAIDataFlow = true
+                startAIAnalysis()
+            }
+        } message: {
+            Text(TeleprompterAIDataFlowDisclosure.message)
         }
         .fileImporter(
             isPresented: $isImporterPresented,
@@ -168,7 +184,7 @@ public struct TeleprompterView: View {
                     .speechRailField()
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Button("AI 整理稿件", systemImage: "sparkles") {
-                        Task { await session.analyzeDraft(language: "跟随原稿", style: "自然、适合直播") }
+                        requestAIAnalysis()
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(sourceIsEmpty || session.phase == .analyzing)
@@ -305,6 +321,22 @@ public struct TeleprompterView: View {
         .accessibilityElement(children: .combine)
     }
 
+    private var aiDataFlowNotice: some View {
+        Label {
+            Text(TeleprompterAIDataFlowDisclosure.inlineMessage)
+                .font(SpeechRailDesignTokens.Typography.caption)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        } icon: {
+            Image(systemName: "lock.shield")
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+        }
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
+        .speechRailSurface(.control)
+        .clipShape(SpeechRailDesignTokens.Corner.containerShape)
+        .accessibilityElement(children: .combine)
+    }
+
     private var sourceIsEmpty: Bool {
         TeleprompterNormalizer.tokens(session.document?.sourceText ?? "").isEmpty
     }
@@ -336,6 +368,20 @@ public struct TeleprompterView: View {
         } catch {
             documents = []
             operationMessage = error.localizedDescription
+        }
+    }
+
+    private func requestAIAnalysis() {
+        guard hasAcknowledgedAIDataFlow else {
+            isAIDataFlowDisclosurePresented = true
+            return
+        }
+        startAIAnalysis()
+    }
+
+    private func startAIAnalysis() {
+        Task {
+            await session.analyzeDraft(language: "跟随原稿", style: "自然、适合直播")
         }
     }
 }

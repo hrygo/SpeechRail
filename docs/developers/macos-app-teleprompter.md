@@ -76,7 +76,9 @@ Decoder 会拒绝 schema 版本错误、空段落、无效/重叠区间、无法
 | `text.format` | `TeleprompterAnalysis.jsonSchema`，`type=json_schema`、`strict=true`、对象和段落均 `additionalProperties=false` | 传输层结构约束 |
 | 本地 decoder | schema 版本、非空段落、UTF-16 合法性、顺序、不重叠、`text` 与原文范围一致 | 领域边界的语义约束 |
 
-应用侧只把 `TeleprompterAnalysisPrompt` 映射到 Responses 请求：`input` 不带历史、RAG、工具调用或隐藏会话状态；`LLMProvider` 继续使用 `store=false`、最多 4000 output tokens 和 45 秒超时。`store=false` 只表示不使用 Responses 会话状态，不能向用户承诺“原稿不会离开本机”；是否联网取决于用户配置的 endpoint。真实产品 UI 需要在首次 AI 整理前明确展示这一数据流说明。
+应用侧只把 `TeleprompterAnalysisPrompt` 映射到 Responses 请求：`input` 不带历史、RAG、工具调用或隐藏会话状态；`LLMProvider` 继续使用 `store=false`、最多 4000 output tokens 和 45 秒超时。`store=false` 只表示不使用 Responses 会话状态，不能向用户承诺“原稿不会离开本机”；是否联网取决于用户配置的 endpoint。准备页现在会在首次 AI 整理前要求用户确认这一数据流，并持续显示简短说明。
+
+如果 endpoint 返回 400/422 且明确表示不支持 `text.format`、`json_schema` 或 Structured Outputs，`LLMProvider` 会返回 `unsupportedStructuredOutput`。应用不会静默改用自由文本或 JSON mode，而是提示用户更换 endpoint 或使用纯文本分段。
 
 这样做的目的不是把所有校验都交给模型：Structured Outputs 负责形状，领域 decoder 负责来源和范围，二者各自只有一个职责；prompt 的稳定部分也不会和每次变化的原稿重复拼接。
 

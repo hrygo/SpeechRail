@@ -20,6 +20,22 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+/// AI 整理前向用户说明的数据流边界。
+///
+/// 文案不包含 endpoint、密钥或 provider 的实现细节，避免把敏感配置带入界面或持久化稿件。
+public enum TeleprompterAIDataFlowDisclosure {
+    public static let acknowledgementDefaultsKey =
+        "speechrail.teleprompter.aiDataFlowAcknowledged.v1"
+    public static let title = "AI 整理会发送原稿"
+    public static let inlineMessage =
+        "AI 整理只在你主动点击时发生；原稿和偏好会发送到当前配置的 Responses-compatible endpoint。"
+    public static let message = """
+        点击继续后，当前原稿正文和语言/表达偏好会发送到你配置的 Responses-compatible endpoint；它可能是本机服务，也可能是网络服务。SpeechRail 使用 store=false，不使用 Responses 会话状态，但 endpoint 自身的传输、日志和保留策略仍由其服务方决定。
+
+        跟读和直播过程中不会调用大模型，也不会发送麦克风、摄像头或直播画面。
+        """
+}
+
 public struct TeleprompterSourceRange: Codable, Equatable, Sendable {
     public let start: Int
     public let end: Int
