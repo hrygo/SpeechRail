@@ -16,32 +16,7 @@ public struct ControlMenuView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Menu.sectionSpacing) {
-            // Figma `menuHead`：产品名 + 结论 + 版本与端口。菜单栏面板是唯一
-            // 不经过页面就打开的窗口，所以它自带身份与两条本机事实。
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "waveform")
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                        .accessibilityHidden(true)
-                    Text("SpeechRail")
-                        .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                }
-                // 状态行用档位短名：`服务已就绪 · Quality`（REDESIGN-SPEC §7.9、
-                // macOS App 设计系统 §4.1）。长写法「Quality · 创作优先」属于卡片标题，
-                // 拼进这一行会变成两段「 · 」。
-                Text(statusSummary + " · " + profileText)
-                    .font(SpeechRailDesignTokens.Typography.callout)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(detailLine)
-                    .font(SpeechRailDesignTokens.Typography.secondary)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .accessibilityElement(children: .combine)
+            menuHeader
             if let operation = model.serviceOperation,
                operation.phase.isActive || operation.phase == .failed
             {
@@ -50,181 +25,27 @@ public struct ControlMenuView: View {
 
             Divider()
 
-            Button {
-                openWindow(id: AppNavigationState.controlCenterWindowID)
-            } label: {
-                Label("打开 SpeechRail", systemImage: "macwindow")
-                    .speechRailMenuRow()
-            }
-            .keyboardShortcut("o", modifiers: .command)
-
-            Button {
-                navigation.request(.dubbing)
-                openWindow(id: AppNavigationState.controlCenterWindowID)
-            } label: {
-                Label("开始配音", systemImage: AppRoute.dubbing.systemImage)
-                    .speechRailMenuRow()
-            }
-            .keyboardShortcut("n", modifiers: .command)
-
-            Button {
-                navigation.request(.voiceDesign)
-                openWindow(id: AppNavigationState.controlCenterWindowID)
-            } label: {
-                Label("音色创作", systemImage: AppRoute.voiceDesign.systemImage)
-                    .speechRailMenuRow()
-            }
+            primaryActions
 
             Divider()
 
-            // 「会话」这一段（§6.6）：状态行 + 三个命令。会话是这一版新增的产品面，
-            // 菜单栏是 App 不在前台时唯一能碰到它的地方。
-            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Circle()
-                        .fill(sessionTone.color)
-                        .frame(width: 8, height: 8)
-                        .accessibilityHidden(true)
-                    Text(session.ownershipText)
-                        .font(SpeechRailDesignTokens.Typography.callout)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .lineLimit(1)
-                }
-                .accessibilityElement(children: .combine)
-
-                if session.occupancy?.kind == .meeting, meeting.phase.isLive {
-                    Text("已存好 \(meeting.storedLineCount) 段"
-                        + (meeting.labeling.labels.isEmpty
-                            ? ""
-                            : " · \(meeting.labeling.labels.count) 位说话人"))
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                }
-
-                Button {
-                    Task { await caption.openBand() }
-                    openWindow(id: AppNavigationState.controlCenterWindowID)
-                } label: {
-                    Label("开始实时字幕", systemImage: AppRoute.captions.systemImage)
-                        .speechRailMenuRow()
-                }
-                .disabled(caption.phase.isLive)
-
-                Button {
-                    navigation.request(.meeting)
-                    openWindow(id: AppNavigationState.controlCenterWindowID)
-                } label: {
-                    Label("开始会议", systemImage: AppRoute.meeting.systemImage)
-                        .speechRailMenuRow()
-                }
-                .disabled(session.occupancy?.kind == .meeting)
-
-                Button {
-                    session.requestEndCurrentSession()
-                    // 带省略号 = 要问一句；窗口不出来的话那个确认没人能回答。
-                    openWindow(id: AppNavigationState.controlCenterWindowID)
-                } label: {
-                    Label("结束当前会话…", systemImage: "stop.circle")
-                        .speechRailMenuRow()
-                }
-                .disabled(session.isIdle)
-
-                // 禁用组要就地解释（面板里既有的约定）：空闲时说清为什么那颗按钮是灰的。
-                if session.isIdle {
-                    Text("没有正在进行的会话")
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                } else if session.phase == .interrupted {
-                    Text("这一场中断了，去页面里选「继续这一段」或「结束并整理」")
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+            sessionActions
 
             Divider()
 
-            Button {
-                navigation.request(.diagnostics)
-                openWindow(id: AppNavigationState.controlCenterWindowID)
-                Task { await model.refreshPreflight() }
-            } label: {
-                Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
-                    .speechRailMenuRow()
-            }
-            .disabled(
-                model.isBusy
-                    || model.hasActiveMutation
-                    || model.isRefreshingService
-                    || !canMutate
-            )
-
-            // A greyed-out group with no reason on screen is the failure mode
-            // this line exists to prevent (Figma `warning`).
+            preflightAction
             if !canMutate {
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .accessibilityHidden(true)
-                    Text("控制通道不可用，服务操作已禁用")
-                        .font(SpeechRailDesignTokens.Typography.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .foregroundStyle(SpeechRailDesignTokens.Color.attention)
-                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
-                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    SpeechRailDesignTokens.Color.attention.opacity(
-                        SpeechRailDesignTokens.Surface.statusTintOpacity
-                    ),
-                    // 跟随菜单面板自己的圆角；面板不提供容器形状时退到叶面保底值。
-                    in: SpeechRailDesignTokens.Corner.nestedShape
-                )
+                controlChannelWarning
             }
-
-            Button {
-                pendingServiceAction = .start
-            } label: {
-                Label("启动服务…", systemImage: "play.circle")
-                    .speechRailMenuRow()
-            }
-            .disabled(serviceActionsDisabled)
-
-            Button {
-                pendingServiceAction = .stop
-            } label: {
-                Label("停止服务…", systemImage: "stop.circle")
-                    .speechRailMenuRow()
-            }
-            .disabled(serviceActionsDisabled)
-
-            Button {
-                pendingServiceAction = .restart
-            } label: {
-                Label("重启服务…", systemImage: "arrow.clockwise")
-                    .speechRailMenuRow()
-            }
-            .disabled(serviceActionsDisabled)
+            serviceMenu
 
             Divider()
 
-            Button {
-                openSettings()
-            } label: {
-                Label("打开设置…", systemImage: "gearshape")
-                    .speechRailMenuRow()
-            }
-            .keyboardShortcut(",", modifiers: .command)
+            settingsAction
 
             Divider()
 
-            Button {
-                NSApplication.shared.terminate(nil)
-            } label: {
-                Label("退出 SpeechRail", systemImage: "power")
-                    .speechRailMenuRow()
-            }
-            .keyboardShortcut("q", modifiers: .command)
+            quitAction
         }
         .padding(SpeechRailDesignTokens.Menu.contentPadding)
         .frame(width: SpeechRailDesignTokens.Menu.contentWidth, alignment: .leading)
@@ -258,7 +79,211 @@ public struct ControlMenuView: View {
         }
     }
 
-    /// 版本 + 端口：菜单面板里仅有的两条纯事实（Figma `menuHead` 第二行）。
+    /// 菜单栏是快速入口，不是技术看板：主层只保留身份、服务结论和档位。
+    private var menuHeader: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "waveform")
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    .accessibilityHidden(true)
+                Text("SpeechRail")
+                    .font(SpeechRailDesignTokens.Typography.sectionTitle)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            }
+            Text(statusSummary + " · " + profileText)
+                .font(SpeechRailDesignTokens.Typography.callout)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var primaryActions: some View {
+        Button {
+            openWindow(id: AppNavigationState.controlCenterWindowID)
+        } label: {
+            Label("打开 SpeechRail", systemImage: "macwindow")
+                .speechRailMenuRow()
+        }
+        .keyboardShortcut("o", modifiers: .command)
+
+        Button {
+            navigation.request(.dubbing)
+            openWindow(id: AppNavigationState.controlCenterWindowID)
+        } label: {
+            Label("开始配音", systemImage: AppRoute.dubbing.systemImage)
+                .speechRailMenuRow()
+        }
+        .keyboardShortcut("n", modifiers: .command)
+
+        Button {
+            navigation.request(.voiceDesign)
+            openWindow(id: AppNavigationState.controlCenterWindowID)
+        } label: {
+            Label("音色创作", systemImage: AppRoute.voiceDesign.systemImage)
+                .speechRailMenuRow()
+        }
+    }
+
+    /// 空闲时不画无效的「结束当前会话」按钮；`ownershipText` 已经提供了唯一状态结论。
+    @ViewBuilder
+    private var sessionActions: some View {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Circle()
+                    .fill(sessionTone.color)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
+                Text(session.ownershipText)
+                    .font(SpeechRailDesignTokens.Typography.callout)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .combine)
+
+            if session.occupancy?.kind == .meeting, meeting.phase.isLive {
+                Text("已存好 \(meeting.storedLineCount) 段"
+                    + (meeting.labeling.labels.isEmpty
+                        ? ""
+                        : " · \(meeting.labeling.labels.count) 位说话人"))
+                    .font(SpeechRailDesignTokens.Typography.secondary)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+            }
+
+            Button {
+                Task { await caption.openBand() }
+                openWindow(id: AppNavigationState.controlCenterWindowID)
+            } label: {
+                Label("开始实时字幕", systemImage: AppRoute.captions.systemImage)
+                    .speechRailMenuRow()
+            }
+            .disabled(caption.phase.isLive)
+
+            Button {
+                navigation.request(.meeting)
+                openWindow(id: AppNavigationState.controlCenterWindowID)
+            } label: {
+                Label("开始会议", systemImage: AppRoute.meeting.systemImage)
+                    .speechRailMenuRow()
+            }
+            .disabled(session.occupancy?.kind == .meeting)
+
+            if !session.isIdle {
+                Button {
+                    session.requestEndCurrentSession()
+                    // 带省略号 = 要问一句；窗口不出来的话那个确认没人能回答。
+                    openWindow(id: AppNavigationState.controlCenterWindowID)
+                } label: {
+                    Label("结束当前会话…", systemImage: "stop.circle")
+                        .speechRailMenuRow()
+                }
+
+                if session.phase == .interrupted {
+                    Text("这一场中断了，去页面里选「继续这一段」或「结束并整理」")
+                        .font(SpeechRailDesignTokens.Typography.secondary)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var preflightAction: some View {
+        Button {
+            navigation.request(.diagnostics)
+            openWindow(id: AppNavigationState.controlCenterWindowID)
+            Task { await model.refreshPreflight() }
+        } label: {
+            Label("运行预检", systemImage: AppRoute.diagnostics.systemImage)
+                .speechRailMenuRow()
+        }
+        .disabled(
+            model.isBusy
+                || model.hasActiveMutation
+                || model.isRefreshingService
+                || !canMutate
+        )
+    }
+
+    private var controlChannelWarning: some View {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .accessibilityHidden(true)
+            Text("控制通道不可用，服务操作已禁用")
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            SpeechRailDesignTokens.Color.attention.opacity(
+                SpeechRailDesignTokens.Surface.statusTintOpacity
+            ),
+            in: SpeechRailDesignTokens.Corner.nestedShape
+        )
+    }
+
+    /// 服务生命周期动作属于低频运维操作，收进原生子菜单，避免占据主层高度。
+    private var serviceMenu: some View {
+        Menu {
+            Text(detailLine)
+                .font(SpeechRailDesignTokens.Typography.secondary)
+                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+
+            Divider()
+
+            Button {
+                pendingServiceAction = .start
+            } label: {
+                Label("启动服务…", systemImage: "play.circle")
+                    .speechRailMenuRow()
+            }
+
+            Button {
+                pendingServiceAction = .stop
+            } label: {
+                Label("停止服务…", systemImage: "stop.circle")
+                    .speechRailMenuRow()
+            }
+
+            Button {
+                pendingServiceAction = .restart
+            } label: {
+                Label("重启服务…", systemImage: "arrow.clockwise")
+                    .speechRailMenuRow()
+            }
+        } label: {
+            Label("服务", systemImage: AppRoute.overview.systemImage)
+                .speechRailMenuRow()
+        }
+        .disabled(serviceActionsDisabled)
+    }
+
+    private var settingsAction: some View {
+        Button {
+            openSettings()
+        } label: {
+            Label("打开设置…", systemImage: "gearshape")
+                .speechRailMenuRow()
+        }
+        .keyboardShortcut(",", modifiers: .command)
+    }
+
+    private var quitAction: some View {
+        Button {
+            NSApplication.shared.terminate(nil)
+        } label: {
+            Label("退出 SpeechRail", systemImage: "power")
+                .speechRailMenuRow()
+        }
+        .keyboardShortcut("q", modifiers: .command)
+    }
+
+    /// 版本 + 端口：只在「服务」子菜单中提供给需要排查的用户。
     private var detailLine: String {
         let version = Bundle.main.shortVersionString
         guard let port = model.service.port else {
