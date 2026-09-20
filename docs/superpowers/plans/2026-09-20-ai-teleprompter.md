@@ -370,7 +370,13 @@ git diff --check
 
 ## Execution Handoff
 
-计划保存后，先由用户评审范围、接口和工作量；确认后再按任务顺序实施。当前用户已经指定独立 worktree，但尚未指定执行方式，请在评审计划时选择：
+本计划已在独立 worktree `/Users/hrygo/.codex/worktrees/ai-teleprompter/SpeechRail` 的
+`feat/ai-teleprompter` 分支完成实施。对应提交为：
 
-1. 在当前线程由主代理按此计划逐任务实施；或
-2. 使用 subagent-driven implementation 在该 worktree 中逐任务实施。
+- `9b31c90` / `79410c3`：领域匹配、AI 分析与稿件存储；
+- `d3874297`：会话、路由、准备页与独立舞台窗口；
+- `759d7629`：准备页错误可见性与 Markdown 导入修正；
+- `e18f5aa`：正式规格与开发文档；
+- `743d6a2d`：为 Xcode 27 / Swift 6 编译所需的既有兼容修正。
+
+已验证：提词器专项 SwiftPM 测试 24/24 通过；Debug App 编译通过。真实麦克风、Realtime 服务、OBS/直播软件窗口采集和 UI 自动化未执行，需要用户另行明确授权。
