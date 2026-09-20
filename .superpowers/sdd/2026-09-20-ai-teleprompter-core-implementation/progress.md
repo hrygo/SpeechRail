@@ -14,3 +14,5 @@ Task 1: Ruling: reuse the parallel `TeleprompterTimingPolicy.swift` and the adde
 
 Task 1: complete (commit 00c94f97, tests: `swift test --package-path macos/SpeechRailApp --filter TeleprompterPreparationDomainTests` → 7/7 passed)
 Task 2: complete (commit ebe586a7, tests: `swift test --package-path macos/SpeechRailApp --filter TeleprompterPreparationPromptsTests` → 5/5 passed)
+Task 3: complete (commit 6b096a80, tests: `swift test --package-path macos/SpeechRailApp --filter TeleprompterPreparationPipelineTests` → 5/5 passed)
+Task 4: complete (focused tests: `swift test --package-path macos/SpeechRailApp --filter TeleprompterV2StoreTests` → 6/6 passed)

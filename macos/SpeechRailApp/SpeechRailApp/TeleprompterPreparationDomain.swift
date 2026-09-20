@@ -132,7 +132,7 @@ public enum TeleprompterSourceImporter {
         let digest = SHA256.hash(data: Data(body))
         let hash = digest.map { String(format: "%02x", $0) }.joined()
         return TeleprompterImportedSource(
-            sourceRevisionID: "source-(hash.prefix(16))",
+            sourceRevisionID: "source-\(hash.prefix(16))",
             sourceText: sourceText,
             formatHint: formatHint,
             hasBOM: hasBOM,
