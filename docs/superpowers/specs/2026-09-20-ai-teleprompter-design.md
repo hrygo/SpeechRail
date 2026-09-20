@@ -1,6 +1,6 @@
 ---
 title: "SpeechRail AI 提词器设计规格"
-status: draft
+status: approved
 audience: "SpeechRail macOS App 用户体验、客户端会话层与维护者"
 version: "0.2.0"
 date: 2026-09-20

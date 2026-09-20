@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.7"
+version: "0.8.8"
 date: 2026-09-20
 ---
 
@@ -17,10 +17,11 @@ date: 2026-09-20
 > Light/Dark、Increase Contrast、Dynamic Type、Reduce Motion 的实际观感；VoiceOver 实读顺序；
 > 列表「空格试听」在真实焦点下的行为；`.searchable` 与页面级 `List` 在窄窗口下的布局。
 
-> **当前范围说明（2026-09-20）**：2026-09-18 起新增的语音助手、会议助手、实时字幕属于独立的
-> App 会话层，不是本 2026-09-15 UI 迁移包的完整页面清单。会话生命周期、音频来源与记录边界以
-> [`会话层技术方案`](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md) 和
-> [`macOS App 开发与测试`](macos-app-development.md) 为准；本文的 token 与系统控件约束仍适用于这些页面。
+> **当前范围说明（2026-09-20）**：2026-09-18 起新增的语音助手、会议助手、实时字幕，以及 2026-09-20
+> 新增的 AI 提词器属于独立的 App 会话/舞台能力，不是本 2026-09-15 UI 迁移包的完整页面清单。
+> 会话生命周期、音频来源与记录边界以 [`会话层技术方案`](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md)、
+> [`AI 提词器开发说明`](macos-app-teleprompter.md) 和 [`macOS App 开发与测试`](macos-app-development.md) 为准；
+> 本文的 token 与系统控件约束仍适用于这些页面。
 
 ## 1. 研究基线与 Logo 设计基因
 

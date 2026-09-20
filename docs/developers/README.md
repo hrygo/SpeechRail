@@ -2,7 +2,7 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.1.2"
+version: "2.1.3"
 date: 2026-09-20
 ---
 
@@ -33,6 +33,7 @@ graph TD
    助手共享播放引擎、系统 voice processing、权限/entitlement、设备与线程约束，以及一次「录不到声音」的实测排障记录。
 9. **[🧩 macOS App 会话层技术方案](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md)**：语音助手、会议助手、实时字幕的
    资源边界、音频来源、记录存储、失败出口与尚未完成的真机验收。
+10. **[📝 macOS App AI 提词器](macos-app-teleprompter.md)**：直播准备稿件、AI 审阅、Realtime 自动跟读、独立舞台窗口、隐私边界与验收矩阵。
 
 ---
 
