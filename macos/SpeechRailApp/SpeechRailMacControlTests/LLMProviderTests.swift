@@ -144,6 +144,44 @@ final class LLMProviderTests: XCTestCase {
 
     // MARK: - 断言
 
+    func testBaseURLRejectsQueryAndFragment() {
+        XCTAssertTrue(
+            LLMConfiguration(
+                baseURL: "http://127.0.0.1:8000/v1",
+                model: "test-model"
+            ).isBaseURLValid
+        )
+        XCTAssertFalse(
+            LLMConfiguration(
+                baseURL: "http://127.0.0.1:8000/v1?api_key=secret",
+                model: "test-model"
+            ).isBaseURLValid
+        )
+        XCTAssertFalse(
+            LLMConfiguration(
+                baseURL: "http://127.0.0.1:8000/v1#fragment",
+                model: "test-model"
+            ).isBaseURLValid
+        )
+    }
+
+    func testConnectionRejectsInvalidBaseURLBeforeRequest() async {
+        FakeTransport.reset([
+            .init(status: 200, contentType: "application/json", body: Self.modelsBody)
+        ])
+
+        let result = await makeProvider().check(
+            configuration: LLMConfiguration(
+                baseURL: "http://127.0.0.1:8000/v1?trace=1",
+                model: "test-model"
+            ),
+            apiKey: nil
+        )
+
+        XCTAssertEqual(result, .badBaseURL)
+        XCTAssertTrue(FakeTransport.requestURLs().isEmpty)
+    }
+
     func testCompleteSendsVoiceContractAndSuppressesThinking() async throws {
         FakeTransport.reset([.init(status: 200, contentType: "application/json", body: Self.okBody)])
 

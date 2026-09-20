@@ -56,6 +56,8 @@ let package = Package(
                 "ServiceOverviewView.swift",
                 "ServiceRoutePreviewView.swift",
                 "ServiceStatusView.swift",
+                "SettingsAssistantPane.swift",
+                "SettingsComponents.swift",
                 "SettingsView.swift",
                 "SessionCoordinator.swift",
                 "SessionDomain.swift",
