@@ -35,6 +35,13 @@ CONTROL_EVENT_QUEUE_LIMIT = 16
 _CONTROL_EVENT_TYPES = frozenset({"speechrail.tts.cancel"})
 
 
+def _request_id_from_payload(payload: dict[str, Any]) -> str | None:
+    value = payload.get("request_id")
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        return None
+    return value
+
+
 async def _send_json_with_deadline(
     websocket: WebSocket, payload: dict[str, object], *, timeout_seconds: float
 ) -> bool:
@@ -102,14 +109,11 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                 return sequence
 
         registered_asr = frozenset({settings.model_id, *settings.compatibility_model_ids})
-        registered_tts = frozenset({settings.tts_model_id})
         try:
             if requested_model:
                 model = resolve_handshake_model(
                     requested_model,
-                    asr_model=settings.model_id,
                     registered_asr=registered_asr,
-                    registered_tts=registered_tts,
                     diarization_ready=services.diarization_ready,
                 )
                 display_model = requested_model
@@ -180,12 +184,12 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         # task failure.  Keep this session usable and leave its
                         # admission slot to the normal close path.
                         await send_event(
-                error_event(
-                    code=exc.code,
-                    message=exc.message,
-                    busy_reason=exc.busy_reason,
-                )
-            )
+                            error_event(
+                                code=exc.code,
+                                message=exc.message,
+                                busy_reason=exc.busy_reason,
+                            )
+                        )
                         continue
                     event_type = event.get("type")
                     append_dispatch: asyncio.Future[None] | None = None
@@ -232,6 +236,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
             nonlocal pending_client_event_bytes
             pending_client_event_bytes -= payload_size
             client_event_id: str | None = None
+            request_id = _request_id_from_payload(payload)
             try:
                 raw_event_id = payload.get("event_id")
                 if isinstance(raw_event_id, str) and raw_event_id.strip():
@@ -246,13 +251,17 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         code=exc.code,
                         message=exc.message,
                         client_event_id=exc.event_id or client_event_id,
+                        request_id=request_id,
                         busy_reason=exc.busy_reason,
                     )
                 )
             except DiarizationError as exc:
                 await send_event(
                     error_event(
-                        code=exc.code, message=str(exc), client_event_id=client_event_id
+                        code=exc.code,
+                        message=str(exc),
+                        client_event_id=client_event_id,
+                        request_id=request_id,
                     )
                 )
             except Exception as exc:
@@ -262,6 +271,7 @@ def create_openai_realtime_router(services: AppServices) -> APIRouter:
                         code="backend_error",
                         message=str(exc) or "internal backend error",
                         client_event_id=client_event_id,
+                        request_id=request_id,
                     )
                 )
 

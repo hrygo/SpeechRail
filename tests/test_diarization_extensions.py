@@ -614,11 +614,7 @@ def test_apply_session_update_rejects_unknown_extension_values() -> None:
             event,
             session_id="s",
             asr_model="speechrail/qwen3-asr-1.7b",
-            tts_model=None,
-            tts_ready=False,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-            registered_tts=frozenset(),
-            tts_voice_ids=frozenset(),
         )
     assert "invalid_diarization" in str(excinfo.value) or getattr(
         excinfo.value, "code", ""

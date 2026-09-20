@@ -107,6 +107,7 @@ from speechrail.runtime.resource_governor import (
 SendEvent = Callable[[dict[str, object]], Awaitable[int | None]]
 
 _MAX_UPDATES_PER_EVENT = 256
+_MAX_TTS_REQUEST_IDS = 256
 _MAX_ALIGNMENT_PCM_BYTES = 30 * 32_000
 _MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -188,8 +189,6 @@ class OpenAIRealtimeSession:
         self._registered_asr = frozenset(
             {self._settings.model_id, *self._settings.compatibility_model_ids}
         )
-        self._registered_tts = frozenset({self._settings.tts_model_id})
-        self._tts_voice_ids = frozenset(self._settings.tts_voice_ids)
         self._asr: RealtimeAsrSession | None = None
         self._asr_reader: asyncio.Task[None] | None = None
         self._asr_resources: AsyncExitStack | None = None
@@ -198,9 +197,12 @@ class OpenAIRealtimeSession:
         # putting a session/request identifier into metrics labels.
         self._asr_commit_started_at: float | None = None
         self._tts_task: asyncio.Task[None] | None = None
-        # Request ids are connection-scoped idempotency keys. Retain only a
-        # bounded ledger of opaque ids; text/audio never enters this ledger.
-        self._tts_request_ids: deque[str] = deque(maxlen=256)
+        # Request ids are connection-scoped idempotency keys. Keep a bounded,
+        # non-evicting ledger: evicting an old id would make a duplicate valid
+        # again later on the same connection.
+        self._tts_request_ids: set[str] = set()
+        self._tts_terminal_lock = asyncio.Lock()
+        self._tts_terminal_sent = False
         self._tts_request_id: str | None = None
         self._tts_response_id: str | None = None
         self._tts_item_id: str | None = None
@@ -239,11 +241,6 @@ class OpenAIRealtimeSession:
         self._bargein_pending_audio: deque[bytes] = deque()
         self._bargein_pending_bytes = 0
         self._bargein_pending_max_bytes = 9_600
-        # Barge-in cooldown: after a TTS cancellation or speech_stopped, a new
-        # speech onset within this window does not re-trigger a cancellation,
-        # preventing the TTS tail echo from making the agent never finish.
-        self._bargein_cooldown_s = self._settings.realtime_vad_bargein_cooldown_ms / 1000.0
-        self._bargein_cooldown_until = 0.0
         # Session-global sample clock (SPK-E2E-1): every accepted PCM sample
         # advances exactly once; each ASR item records the offset it starts at
         # so item-local vendor times lift into the session domain once.
@@ -433,11 +430,7 @@ class OpenAIRealtimeSession:
             adapted_event,
             session_id=self._session_id,
             asr_model=self._settings.model_id,
-            tts_model=self._settings.tts_model_id,
-            tts_ready=self._services.tts_ready,
             registered_asr=self._registered_asr,
-            registered_tts=self._registered_tts,
-            tts_voice_ids=self._tts_voice_ids,
             current_config=self._config,
         )
         if model_revision_present:
@@ -759,7 +752,6 @@ class OpenAIRealtimeSession:
 
         elif dec.kind == "end":
             self._services.metrics.record_vad("ended")
-            self._mark_bargein_cooldown()
             audio_end_ms = int((dec.end_sample / 16_000) * 1000)
             await self._send(
                 input_audio_buffer_speech_stopped(
@@ -847,7 +839,6 @@ class OpenAIRealtimeSession:
                     )
                 elif v_event.speech_ended:
                     self._services.metrics.record_vad("ended")
-                    self._mark_bargein_cooldown()
                     await self._send(
                         input_audio_buffer_speech_stopped(
                             session_id=self._session_id,
@@ -1004,7 +995,11 @@ class OpenAIRealtimeSession:
             async with asyncio.timeout(self._settings.request_timeout_seconds):
                 commit_started = time.monotonic()
                 self._asr_commit_started_at = commit_started
-                await self._asr.commit(want_segments=False)
+                timestamp_granularities = self._config.get("timestamp_granularities")
+                want_segments = isinstance(timestamp_granularities, list) and (
+                    "segment" in timestamp_granularities
+                )
+                await self._asr.commit(want_segments=want_segments)
                 self._services.metrics.record_realtime_phase(
                     "asr_commit_ack", time.monotonic() - commit_started
                 )
@@ -1056,7 +1051,6 @@ class OpenAIRealtimeSession:
     async def _clear_audio(self) -> None:
         self._turn_generation += 1
         self._turn_has_admitted_speech = False
-        self._bargein_cooldown_until = 0.0
         if self._speech_admission is not None:
             self._speech_admission.reset(next_sample=self._timeline.accepted_samples)
         self._vad_raw_buffer.clear()
@@ -1096,6 +1090,11 @@ class OpenAIRealtimeSession:
             raise RealtimeAdapterError(
                 "tts_request_invalid",
                 "request_id must be unique within this WebSocket connection",
+            )
+        if len(self._tts_request_ids) >= _MAX_TTS_REQUEST_IDS:
+            raise RealtimeAdapterError(
+                "tts_request_invalid",
+                "TTS request id ledger is full; start a new WebSocket connection",
             )
 
         selected_voice = resolve_voice(
@@ -1143,7 +1142,8 @@ class OpenAIRealtimeSession:
         self._tts_text = request.text
         self._tts_voice_revision = selected_profile.revision
         self._tts_receipt_id = None
-        self._tts_request_ids.append(request.request_id)
+        self._tts_request_ids.add(request.request_id)
+        self._tts_terminal_sent = False
         self._tts_task = asyncio.create_task(
             self._run_tts(
                 request.text,
@@ -1218,12 +1218,6 @@ class OpenAIRealtimeSession:
                 ),
             ) from None
 
-    def _bargein_allowed(self) -> bool:
-        return time.monotonic() >= self._bargein_cooldown_until
-
-    def _mark_bargein_cooldown(self) -> None:
-        self._bargein_cooldown_until = time.monotonic() + self._bargein_cooldown_s
-
     async def _cancel_response(self, event: dict[str, Any]) -> None:
         request = parse_tts_cancel(event)
         if (
@@ -1247,16 +1241,14 @@ class OpenAIRealtimeSession:
             await self._tts_task
         if receipt_id is not None:
             self._services.render_receipts.cancel(receipt_id)
-        await self._send(
-            self._response_done_event(
-                response_id=response_id,
-                status="cancelled",
-                receipt_id=receipt_id,
-                request_id=request_id,
-                item_id=item_id,
-                text=text,
-                voice_revision=voice_revision,
-            )
+        await self._finalize_tts(
+            response_id=response_id,
+            status="cancelled",
+            receipt_id=receipt_id,
+            request_id=request_id,
+            item_id=item_id,
+            text=text,
+            voice_revision=voice_revision,
         )
 
     async def _run_tts(self, text: str, **kwargs: Any) -> None:
@@ -1671,9 +1663,14 @@ class OpenAIRealtimeSession:
         response_id: str,
         item_id: str,
     ) -> None:
+        request_id = self._tts_request_id or response_id
         if self._tts is None:
             await self._send(
-                error_event(code="backend_not_ready", message="TTS backend is not ready")
+                error_event(
+                    code="backend_not_ready",
+                    message="TTS backend is not ready",
+                    request_id=request_id,
+                )
             )
             return
         receipt_id: str | None = None
@@ -1685,7 +1682,7 @@ class OpenAIRealtimeSession:
             )
             try:
                 receipt_id = self._services.render_receipts.begin(
-                    request_id=self._tts_request_id or response_id,
+                    request_id=request_id,
                     response_id=response_id,
                     voice_id=voice,
                     voice_revision=voice_revision,
@@ -1705,6 +1702,7 @@ class OpenAIRealtimeSession:
                     error_event(
                         code="render_receipt_store_full",
                         message="render receipt store has no safe capacity",
+                        request_id=request_id,
                     )
                 )
                 return
@@ -1721,7 +1719,14 @@ class OpenAIRealtimeSession:
                     session_id=self._session_id, response_id=response_id, item_id=item_id
                 )
             )
-
+            await self._send(
+                response_audio_transcript_delta(
+                    session_id=self._session_id,
+                    response_id=response_id,
+                    item_id=item_id,
+                    delta=text,
+                )
+            )
             try:
                 _ttfa_t0 = time.monotonic()
                 _ttfa_recorded = False
@@ -1791,13 +1796,17 @@ class OpenAIRealtimeSession:
                 )
                 if receipt_id is not None:
                     self._services.render_receipts.fail(receipt_id, code)
-                await self._send(error_event(code=code, message="TTS response failed"))
                 await self._send(
-                    self._response_done_event(
-                        response_id=response_id,
-                        status="failed",
-                        receipt_id=receipt_id,
-                    )
+                    error_event(code=code, message="TTS response failed", request_id=request_id)
+                )
+                await self._finalize_tts(
+                    response_id=response_id,
+                    status="failed",
+                    receipt_id=receipt_id,
+                    request_id=request_id,
+                    item_id=item_id,
+                    text=text,
+                    voice_revision=voice_revision,
                 )
                 return
 
@@ -1808,24 +1817,19 @@ class OpenAIRealtimeSession:
                     error_event(
                         code="empty_audio",
                         message="TTS backend returned no audio",
+                        request_id=request_id,
                     )
                 )
-                await self._send(
-                    self._response_done_event(
-                        response_id=response_id,
-                        status="failed",
-                        receipt_id=receipt_id,
-                    )
+                await self._finalize_tts(
+                    response_id=response_id,
+                    status="failed",
+                    receipt_id=receipt_id,
+                    request_id=request_id,
+                    item_id=item_id,
+                    text=text,
+                    voice_revision=voice_revision,
                 )
                 return
-            await self._send(
-                response_audio_transcript_delta(
-                    session_id=self._session_id,
-                    response_id=response_id,
-                    item_id=item_id,
-                    delta=text,
-                )
-            )
             await self._send(
                 response_audio_transcript_done(
                     session_id=self._session_id,
@@ -1862,12 +1866,14 @@ class OpenAIRealtimeSession:
             )
             if receipt_id is not None:
                 self._services.render_receipts.complete(receipt_id)
-            await self._send(
-                self._response_done_event(
-                    response_id=response_id,
-                    status="completed",
-                    receipt_id=receipt_id,
-                )
+            await self._finalize_tts(
+                response_id=response_id,
+                status="completed",
+                receipt_id=receipt_id,
+                request_id=request_id,
+                item_id=item_id,
+                text=text,
+                voice_revision=voice_revision,
             )
         except asyncio.CancelledError:
             if receipt_id is not None:
@@ -1888,27 +1894,38 @@ class OpenAIRealtimeSession:
                     error_event(
                         code="backend_busy",
                         message="TTS worker is unavailable",
+                        request_id=request_id,
                         busy_reason=str(BusyReason.BACKEND_UNAVAILABLE),
                     )
                 )
-                await self._send(
-                    self._response_done_event(
-                        response_id=response_id,
-                        status="failed",
-                        receipt_id=receipt_id,
-                    )
+                await self._finalize_tts(
+                    response_id=response_id,
+                    status="failed",
+                    receipt_id=receipt_id,
+                    request_id=request_id,
+                    item_id=item_id,
+                    text=text,
+                    voice_revision=voice_revision,
                 )
                 return
             if receipt_id is not None:
                 self._services.render_receipts.fail(receipt_id, "backend_error")
             logger.error("realtime TTS synthesis failed: %s", type(exc).__name__)
-            await self._send(error_event(code="backend_error", message="TTS response failed"))
             await self._send(
-                self._response_done_event(
-                    response_id=response_id,
-                    status="failed",
-                    receipt_id=receipt_id,
+                error_event(
+                    code="backend_error",
+                    message="TTS response failed",
+                    request_id=request_id,
                 )
+            )
+            await self._finalize_tts(
+                response_id=response_id,
+                status="failed",
+                receipt_id=receipt_id,
+                request_id=request_id,
+                item_id=item_id,
+                text=text,
+                voice_revision=voice_revision,
             )
             return
         except Exception as exc:
@@ -1916,14 +1933,68 @@ class OpenAIRealtimeSession:
                 self._services.render_receipts.fail(receipt_id, "backend_error")
             logger.error("realtime TTS synthesis failed: %s", type(exc).__name__)
             with contextlib.suppress(Exception):
-                await self._send(error_event(code="backend_error", message="TTS response failed"))
                 await self._send(
-                    self._response_done_event(
-                        response_id=response_id,
-                        status="failed",
-                        receipt_id=receipt_id,
+                    error_event(
+                        code="backend_error",
+                        message="TTS response failed",
+                        request_id=request_id,
                     )
                 )
+                await self._finalize_tts(
+                    response_id=response_id,
+                    status="failed",
+                    receipt_id=receipt_id,
+                    request_id=request_id,
+                    item_id=item_id,
+                    text=text,
+                    voice_revision=voice_revision,
+                )
+
+    async def _finalize_tts(
+        self,
+        *,
+        response_id: str,
+        status: str,
+        receipt_id: str | None,
+        request_id: str | None,
+        item_id: str | None,
+        text: str | None,
+        voice_revision: str | None,
+    ) -> None:
+        """Send exactly one TTS terminal event, even across cancel races.
+
+        A normal synthesis task can have already started sending ``completed``
+        when the control lane cancels it.  Claiming the terminal under a lock
+        and shielding the actual send makes cancellation wait for that one
+        event instead of appending a second ``cancelled`` terminal.
+        """
+        event = self._response_done_event(
+            response_id=response_id,
+            status=status,
+            receipt_id=receipt_id,
+            request_id=request_id,
+            item_id=item_id,
+            text=text,
+            voice_revision=voice_revision,
+        )
+        async with self._tts_terminal_lock:
+            if self._tts_terminal_sent:
+                return
+            send_task = asyncio.create_task(self._send(event))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(send_task)
+                except asyncio.CancelledError:
+                    if send_task.done() and send_task.cancelled():
+                        raise
+                    cancelled = True
+                    continue
+                break
+            await send_task
+            self._tts_terminal_sent = True
+            if cancelled:
+                raise asyncio.CancelledError
 
     def _response_done_event(
         self,

@@ -43,7 +43,7 @@ ws://127.0.0.1:8201/v1/realtime
       "language": "zh",
       "prompt": "可选，最多 2000 字符",
       "keywords": ["SpeechRail"],
-      "timestamp_granularities": ["segment", "word"]
+      "timestamp_granularities": ["segment"]
     },
     "turn_detection": {
       "type": "server_vad",
@@ -71,7 +71,7 @@ ws://127.0.0.1:8201/v1/realtime
 | `language` / `languages` | 传给 ASR；不支持时 `language_not_supported` |
 | `prompt` | 最多 2000 字符；超限 `prompt_too_long` |
 | `keywords` | 有界字符串数组，作为 hotword prompt 输入 |
-| `timestamp_granularities` | ASR 原生 timestamp 请求；不依赖 aligner |
+| `timestamp_granularities` | 当前仅支持 `segment`；由 streaming worker 生成并校验 segment 时间戳。`word` 明确返回 `unsupported_operation`，不会静默忽略 |
 | `turn_detection` | `null`、`"manual"` 或 `{"type":"server_vad", ...}` |
 | `speechrail.tts.enabled` | 调用方显式开启无状态 TTS；未开启时 `speechrail.tts.create` 返回 `tts_not_enabled` |
 | `speechrail.diarization.enabled` | 首个 PCM 前 opt-in；按档位能力返回 `diarization_not_available` |
@@ -104,7 +104,7 @@ ws://127.0.0.1:8201/v1/realtime
 }
 ```
 
-- `request_id` 必填、连接内唯一；服务端只保留有界的 opaque ID ledger，不保留请求历史。
+- `request_id` 必填、连接内唯一；服务端只保留最多 256 个 opaque ID。账本满后拒绝新的 request，避免淘汰旧 ID 造成重复请求重新有效；不保留请求历史。
 - `text` 最多 4096 字符；`speed` 范围 `0.25..4.0`；voice/revision/model 必须匹配当前能力。
 - 同一连接同时只允许一个 TTS render。完成或取消后，调用方可以提交下一个 request。
 - `speechrail.tts.cancel` 是唯一的 TTS 取消命令：
@@ -140,7 +140,7 @@ ws://127.0.0.1:8201/v1/realtime
 | `response.output_audio_transcript.delta/done` | 对已提交 TTS 文本的回显，不是 ASR 结果。 |
 | `response.output_audio.delta/done` | 统一的当前 TTS PCM16 Base64 音频流。 |
 | `response.done` | TTS 终态：`completed`、`failed` 或 `cancelled`；包含 caller `request_id` 和 `speechrail.kind=tts`。 |
-| `error` | 稳定错误 envelope，含 `request_id` 时回显触发事件 ID。 |
+| `error` | 稳定错误 envelope；请求级错误在 `error.request_id` 回显触发请求 ID，事件级错误在 `error.event_id` 回显客户端事件 ID。 |
 
 TTS 的正常序列是：
 

@@ -58,7 +58,7 @@ date: 2026-09-20
 └──────────────┬──────────────────────────────────────────────────────────────┘
                │ PCM 上行 · 事件下行（WebSocket，loopback）
 ┌──────────────▼──── Python 服务（SpeechRail）───────────────────────────────┐
-│  /v1/realtime：流式 ASR · TTS 子集 · barge-in · 分人扩展 · 语音准入          │
+│  /v1/realtime：流式 ASR · TTS 子集 · VAD 事实 · 分人扩展 · 语音准入       │
 │  /v1/models /readyz /metrics /v1/audio/* /v1/voices                         │
 │  模型 · worker · 队列 · ResourceGovernor · worker lease（全部既有）          │
 │  **不承载**：LLM、会议持久化、UI、用户资产（红线，§4.2）                     │
@@ -175,7 +175,7 @@ playerNode( TTS 24k PCM ) ───────────┘
 | 模式 | 采集门 | 引擎配置 | 打断 |
 |---|---|---|---|
 | 一问一答（外放，半双工） | 播放期间**闭麦**（本地门闩） | voice processing 可不开 | 闭麦天然挡住自激；不需要 barge-in |
-| 实时对讲（耳机，全双工） | 全程开麦 | **voice processing 开启** | 服务端 `speech_started` → 原子取消 TTS，随后 250 ms 冷却（契约默认值） |
+| 实时对讲（耳机，全双工） | 全程开麦 | **voice processing 开启** | Native 根据服务端 `speech_started` 事实决定是否取消 TTS；如需防回声，冷却由调用方按播放路由配置 |
 
 第二道防线只保留一条**极窄**规则：正在播放、且这一句与刚播出的文本高度重合（同一句话），才丢弃；
 每次丢弃必须留下可查记录，避免静默吃掉用户的话。**不做**拼音相似度与能量自适应门那套。
@@ -218,8 +218,9 @@ playerNode( TTS 24k PCM ) ───────────┘
 ### 3.6 播放与打断
 
 - TTS 音频（24 kHz PCM）经 `playerNode` 播放；**同一 engine**，因此对讲模式的 AEC 有 far-end 参考。
-- 打断：服务端检测到人声即原子取消当前 TTS 响应（契约「全双工打断」），App 侧丢弃未播缓冲、
-  把这一句标 `interrupted`、保留已生成正文并允许重播——**被打断不是错误**。
+- 打断：服务端只上报 `speech_started` 事实；App 根据播放、回声和业务状态决定是否发送
+  `speechrail.tts.cancel`。App 侧丢弃未播缓冲、把这一句标 `interrupted`、保留已生成正文并允许重播——
+  **被打断不是错误**。
 - 打字提问**不朗读**回复；每条回复仍可点重播。
 
 ### 3.7 窗口、热键与系统集成
@@ -856,7 +857,7 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 | 6 | 目标大模型端点的**前缀缓存**行为：整段前缀完全匹配、显式断点是否可用、最小可缓存前缀长度 | 人设锁与前缀结构的价值成立与否 | 阶段 5 |
 | 7 | 端点是否支持 Responses **background** 模式与 `store=false` | 纪要的长任务形态与隐私承诺 | 阶段 5/6 |
 | 8 | 端点对 `json_schema` + `strict` 的真实支持度 | 纪要正文的可渲染性；不支持时要退到"纯文本 + 后校验" | 阶段 6 |
-| 9 | `realtime_vad_bargein_cooldown_ms` 的 250 ms 默认值在本机外放场景够不够 | 自激风险 | 阶段 5 |
+| 9 | Native 在不同播放路由下根据 `speech_started` 决定取消的体验是否自然 | AEC、播放队列与用户打断体验 | 阶段 5 真机走查 |
 | 10 | FTS5 是否可用（§15.5）；v1 先用 `LIKE` | 检索性能，不阻塞功能 | 阶段 2 |
 | 11 | 内心 OS 的上下文窗口与截断阈值（§15.5） | 超长会议的答案质量 | 阶段 7 |
 | 12 | 字幕带 `NSPanel` 在"其他 App 全屏 + 多显示器 + 多 Space"下的实际层级 | 字幕能不能真的贴在腾讯会议全屏画面上 | 阶段 3/8 |
@@ -911,7 +912,7 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 
 | # | 未验证的事 | 影响 | 何时验 |
 |---|---|---|---|
-| 21 | `AudioEngineSession` 已在 input/output I/O node 同时调用 `setVoiceProcessingEnabled(true)`，但尚未在本机外放与耳机组合上量化 AEC 的 ERLE、双讲收敛、尾音残留与设备切换后的连续性 | 实时对讲是否真的比当前闭麦方案少回采；是否需要按路由禁用 duplex 或调整服务端 250 ms barge-in 冷却 | 真机声学验收：内置麦克风 + 内置扬声器、3.5 mm/USB/Bluetooth 耳机各至少一轮，分别测单讲、双讲、插拔设备 |
+| 21 | `AudioEngineSession` 已在 input/output I/O node 同时调用 `setVoiceProcessingEnabled(true)`，但尚未在本机外放与耳机组合上量化 AEC 的 ERLE、双讲收敛、尾音残留与设备切换后的连续性 | 实时对讲是否真的比当前闭麦方案少回采；是否需要按路由禁用 duplex 或调整调用方的 cancel/冷却策略 | 真机声学验收：内置麦克风 + 内置扬声器、3.5 mm/USB/Bluetooth 耳机各至少一轮，分别测单讲、双讲、插拔设备 |
 
 ## 13. 来源与裁决
 
@@ -942,7 +943,6 @@ J1 语音助手 5 条 · J2 会议助手 7 条 · J3 实时字幕 5 条 · J0 �
 `AVAudioEngineConfigurationChangeNotification` 存在。
 
 **本仓源码事实**：`src/speechrail/config/__init__.py:104` `realtime_max_sessions` 默认 **3**（区间 1–8）·
-`:123` `realtime_vad_bargein_cooldown_ms` 默认 250（区间 0–5000）·
 `src/speechrail/observability/rollup.py` 的指标名 `speechrail_realtime_active_sessions` /
 `speechrail_realtime_sessions_total` / `speechrail_realtime_turn_commits_total` /
 `speechrail_realtime_bargein_events_total` / `speechrail_governor_queue_rejections_total` /

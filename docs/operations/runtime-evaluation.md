@@ -124,8 +124,9 @@ mlx 转写/流式原生支持 30+ 语言。已放开 `NativeRealtimeFactory._SUP
 - **Quality TTS 口径**：评估必须分别记录 `voice_design` / `voice_clone` 两个 worker 的常驻状态、各 lane
   的 RTF/P95、跨 lane 并发结果以及 Quality group 冷却后的恢复延迟；不能用旧 VoiceDesign-only 数字代表双 worker 活跃态。
 - **aligner 变体**：`balanced`/`quality` 的 aligner 由 catalog 按档供给（`aligner-q8` / `aligner-bf16`），
-  评估须报告该档实际供给的变体；`light` 无 aligner、无分人，不做分人评估。word-level timestamps 由 ASR
-  原生提供，不依赖 aligner，因此不列入 aligner 评估。
+  评估须报告该档实际供给的变体；`light` 无 aligner、无分人，不做分人评估。batch 的 word-level
+  timestamps 由 ASR 原生提供，不依赖 aligner；Realtime 当前只承诺 segment timestamps，因此不把
+  streaming word-level 能力列入 aligner 评估。
 - **未测即 `unset`**：当前 catalog v2 下三档的 RTF、物理内存与分人 DER/SACER 尚未重新实测，必须记为
   `unset`，直到按[能力诊断与质量验收](capability-quality-acceptance.md) 的 E1–E7 门完成并留存聚合证据。
   `light` 的 ASR 精度（E1）已完成并落定为回退 q8；其余指标仍为 `unset`。

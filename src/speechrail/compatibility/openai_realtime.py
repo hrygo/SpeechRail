@@ -699,6 +699,7 @@ def error_event(
     code: str,
     message: str,
     client_event_id: str | None = None,
+    request_id: str | None = None,
     busy_reason: str | None = None,
 ) -> dict[str, object]:
     error: dict[str, object] = {
@@ -708,6 +709,8 @@ def error_event(
     }
     if client_event_id:
         error["event_id"] = client_event_id
+    if request_id:
+        error["request_id"] = request_id
     event: dict[str, object] = {"type": "error", "error": error}
     if busy_reason is not None:
         policy = busy_retry_policy(busy_reason)
@@ -722,17 +725,13 @@ def error_event(
 def resolve_handshake_model(
     model: str,
     *,
-    asr_model: str,
     registered_asr: frozenset[str],
-    registered_tts: frozenset[str],
     diarization_ready: bool,
 ) -> str:
     """Resolve the ``?model=`` handshake value to an internal ASR profile id."""
     resolved = canonical_asr_model(model, registered=registered_asr)
     if resolved is None:
-        if canonical_tts_model(model, registered=registered_tts) is None:
-            raise RealtimeAdapterError("model_not_found", f"unknown model: {model[:200]}")
-        resolved = asr_model
+        raise RealtimeAdapterError("model_not_found", f"unknown model: {model[:200]}")
     if model == "gpt-4o-transcribe-diarize" and not diarization_ready:
         raise RealtimeAdapterError(
             "model_not_found",
@@ -753,11 +752,7 @@ def apply_session_update(
     *,
     session_id: str,
     asr_model: str,
-    tts_model: str | None,
-    tts_ready: bool,
     registered_asr: frozenset[str],
-    registered_tts: frozenset[str],
-    tts_voice_ids: frozenset[str],
     current_config: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, object], dict[str, Any]]:
     """Validate the current transcription session update and return its config.
@@ -809,8 +804,6 @@ def apply_session_update(
             "prompt",
             "keywords",
             "timestamp_granularities",
-            "known_speaker_names",
-            "known_speaker_references",
         }
         if set(transcription_obj) - allowed_transcription_fields:
             if "diarization" in transcription_obj:
@@ -820,7 +813,8 @@ def apply_session_update(
                 )
             raise RealtimeAdapterError(
                 "unsupported_operation",
-                "unsupported input_audio_transcription field",
+                "unsupported input_audio_transcription field: "
+                + ", ".join(sorted(set(transcription_obj) - allowed_transcription_fields)),
             )
     if "diarization" in session or (
         transcription_obj is not None and "diarization" in transcription_obj
@@ -886,8 +880,6 @@ def apply_session_update(
     keywords: list[str] | None = None
     prompt: str | None = None
     timestamp_granularities: list[str] | None = None
-    known_speaker_names: list[str] | None = None
-    known_speaker_references: list[str] | None = None
     if transcription_obj is not None:
         language = transcription_obj.get("language")
         if language is not None and not isinstance(language, str):
@@ -899,16 +891,18 @@ def apply_session_update(
             raise RealtimeAdapterError("prompt_too_long", "prompt exceeds 2000 characters")
         languages = _string_list(transcription_obj, "languages")
         keywords = _string_list(transcription_obj, "keywords")
-        known_speaker_names = _string_list(transcription_obj, "known_speaker_names")
-        known_speaker_references = _string_list(transcription_obj, "known_speaker_references")
         timestamp_granularities = _string_list(transcription_obj, "timestamp_granularities")
-        if timestamp_granularities is not None and any(
-            value not in {"word", "segment"} for value in timestamp_granularities
-        ):
-            raise RealtimeAdapterError(
-                "invalid_timestamp_granularities",
-                "timestamp_granularities must contain only word or segment",
-            )
+        if timestamp_granularities is not None:
+            if any(value not in {"word", "segment"} for value in timestamp_granularities):
+                raise RealtimeAdapterError(
+                    "invalid_timestamp_granularities",
+                    "timestamp_granularities must contain only word or segment",
+                )
+            if "word" in timestamp_granularities:
+                raise RealtimeAdapterError(
+                    "unsupported_operation",
+                    "word-level timestamp granularity is not supported by realtime ASR",
+                )
         if language is None and languages:
             language = languages[0]
     # ``transcription_session.update`` is a patch: absence preserves the effective session,
@@ -938,8 +932,6 @@ def apply_session_update(
         ("languages", languages),
         ("keywords", keywords),
         ("timestamp_granularities", timestamp_granularities),
-        ("known_speaker_names", known_speaker_names),
-        ("known_speaker_references", known_speaker_references),
     ):
         if (transcription_obj is not None and key in transcription_obj) or value is not None:
             config[key] = value

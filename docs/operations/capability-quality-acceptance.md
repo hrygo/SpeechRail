@@ -41,7 +41,8 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 | 能力 | `light` | `balanced` | `quality` |
 |---|---|---|---|
-| batch / realtime / segment + word timestamps | ✓ | ✓ | ✓ |
+| batch segment + word timestamps | ✓ | ✓ | ✓ |
+| realtime segment timestamps | ✓ | ✓ | ✓ |
 | diarization（`gpt-4o-transcribe-diarize`） | ✗ | ✓ | ✓ |
 | aligner（分人专用） | — | `aligner-q8` | `aligner-bf16` |
 | 精度策略 | 8-bit ASR/TTS | 8-bit ASR/TTS | 8-bit ASR/TTS，aligner bf16 |
@@ -50,7 +51,8 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
   `gpt-4o-transcribe-diarize`；`light` 不声明，`/v1/models` 中不出现该别名。
 - **aligner 是分人专用制品**：由安装器与 `profile apply` 供给到 `app_home/diarization/<aligner-key>`，只服务
   分人对固定正文的对齐；它不进入 `PreparedModelSet`，也不参与词级时间戳。
-- **词级时间戳由 ASR 原生提供**（`timestamp_granularities`），三档均可用，与 aligner 是否存在无关。
+- **批量词级时间戳由 ASR 原生提供**（`timestamp_granularities`）；Realtime 当前只承诺 `segment`，
+  `word` 请求明确拒绝，不把 batch 能力推断成 streaming 能力。
 - `diarization_ready` 是动态能力声明：该档未启用分人时不存在，不得用 `readyz=200` 推断分人可用。
 - **E1 结果（2026-09-11）**：公开真人语料实测 light 的 0.6B 4-bit ASR 相对 8-bit 基线劣化
   **1.38pp**（en WER +1.25pp、zh CER +1.46pp）> 0.5pp 阈值，**E1 FAILED**；依计划「未过即回退

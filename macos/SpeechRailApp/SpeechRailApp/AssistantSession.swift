@@ -273,6 +273,11 @@ public final class AssistantSession {
     /// 调用方拥有的句子队列：SpeechRail 同一连接同时只接受一个 active TTS。
     private var pendingTTS: [String] = []
     private var ttsRequestInFlight = false
+    private var activeTTSRequestID: String?
+    /// 当前 Responses 流的所有权。停止/插话会取消任务并递增代际，旧流即使
+    /// 上游不及时响应，也不能继续把 delta、TTS 或落库写回当前会话。
+    private var replyTask: Task<Void, Never>?
+    private var replyGeneration = 0
     /// 用户按了「静音麦克风」：不再上行音频，但会话、连接、记录都留着。
     /// 它与「结束对话」是两件事——前者只是暂时不说，后者交出占用（§6.1 的状态带尾部两个动作）。
     public private(set) var isMuted = false
@@ -382,7 +387,7 @@ public final class AssistantSession {
             lastFailure = error.localizedDescription
             return
         }
-        await runReply(spoken: false)
+        beginReply(spoken: false)
     }
 
     /// 重播某一句话（打字提问的回复也能听——「不朗读」不等于「不能听」）。
@@ -405,8 +410,9 @@ public final class AssistantSession {
     /// 主动停止当前助手的朗读或思考（打断当前回答），但不结束会话。
     /// 用户按 ESC 或点击「停止朗读」时调用，清空播放队列与下行生成，保留上下文。
     public func stopSpeaking() async {
-        guard phase == .speaking || phase == .thinking || isSpeaking else { return }
+        guard phase == .speaking || phase == .thinking || isSpeaking || replyTask != nil else { return }
         currentReplyInterrupted = true
+        invalidateReply()
         pendingTTS.removeAll()
         if let audioSession {
             await audioSession.stopPlayback()
@@ -522,6 +528,7 @@ public final class AssistantSession {
         let startedAt = Date()
         sessionStartedAt = startedAt
         commitCursor = startedAt
+        invalidateReply()
         turns = []
         history = []
         partialText = nil
@@ -529,6 +536,7 @@ public final class AssistantSession {
         committedItemIDs = []
         pendingTTS = []
         ttsRequestInFlight = false
+        activeTTSRequestID = nil
         currentOrdinal = 0
         isStoppingIntentionally = false
         memories = ((try? await coordinator.memories(activeOnly: true)) ?? []).map(\.body)
@@ -572,6 +580,8 @@ public final class AssistantSession {
         guard phase != .ending else { return }
         phase = .ending
         isStoppingIntentionally = true
+        invalidateReply()
+        pendingTTS.removeAll()
         if let audioSession {
             audioSession.stop()
             self.audioSession = nil
@@ -600,6 +610,7 @@ public final class AssistantSession {
     }
 
     private func resetToIdleKeepingTurns() {
+        invalidateReply()
         phase = .idle
         level = 0
         partialText = nil
@@ -612,6 +623,13 @@ public final class AssistantSession {
         isSpeaking = false
         pendingTTS.removeAll()
         ttsRequestInFlight = false
+        activeTTSRequestID = nil
+    }
+
+    private func invalidateReply() {
+        replyGeneration &+= 1
+        replyTask?.cancel()
+        replyTask = nil
     }
 
     // MARK: - 采集 → 上行
@@ -675,8 +693,9 @@ public final class AssistantSession {
             lastFailure = "\(code)：\(message)"
         case .speechStarted:
             // 实时对讲：插话是否打断由客户端决定；服务端只上报 VAD 事实。
-            guard mode.allowsBargeIn, isSpeaking else { return }
+            guard mode.allowsBargeIn, isSpeaking || replyTask != nil else { return }
             currentReplyInterrupted = true
+            invalidateReply()
             pendingTTS.removeAll()
             if let audioSession {
                 await audioSession.stopPlayback()
@@ -697,6 +716,7 @@ public final class AssistantSession {
                 await playback?.enqueue(pcm)
             }
         case .responseDone(let status, _):
+            activeTTSRequestID = nil
             ttsRequestInFlight = false
             if status == "cancelled" {
                 currentReplyInterrupted = true
@@ -704,7 +724,15 @@ public final class AssistantSession {
             } else {
                 await sendNextTTSIfNeeded()
             }
-        case .serverError(let code, let message, _, _, _):
+        case .serverError(let code, let message, _, _, _, let requestID):
+            if let requestID, requestID == activeTTSRequestID {
+                // Preflight/worker errors may arrive without response.done.  A
+                // request-scoped error must release the caller-owned queue;
+                // otherwise the assistant remains permanently "in flight".
+                activeTTSRequestID = nil
+                ttsRequestInFlight = false
+                pendingTTS.removeAll()
+            }
             lastFailure = Self.readableError(code: code, message: message)
         case .cleared:
             break
@@ -764,7 +792,7 @@ public final class AssistantSession {
         if appendedOrdinal == 1, let name = SessionTitleSuggestion.suggest(from: text) {
             try? await coordinator.setSessionTitle(id: sessionID, title: name)
         }
-        await runReply(spoken: true)
+        beginReply(spoken: true)
     }
 
     /// Queue caller-generated sentences and submit them one at a time. The
@@ -780,19 +808,44 @@ public final class AssistantSession {
         guard !ttsRequestInFlight, !pendingTTS.isEmpty, let client else { return }
         let text = pendingTTS.removeFirst()
         ttsRequestInFlight = true
+        let requestID = "tts_req_\(UUID().uuidString.lowercased())"
+        activeTTSRequestID = requestID
         do {
-            try await client.sendTTSCreate(text: text)
+            try Task.checkCancellation()
+            try await client.sendTTSCreate(text: text, requestID: requestID)
+        } catch is CancellationError {
+            if activeTTSRequestID == requestID { activeTTSRequestID = nil }
+            ttsRequestInFlight = false
         } catch {
+            if activeTTSRequestID == requestID { activeTTSRequestID = nil }
             ttsRequestInFlight = false
             lastFailure = error.localizedDescription
+        }
+    }
+
+    private func beginReply(spoken: Bool) {
+        replyGeneration &+= 1
+        let generation = replyGeneration
+        replyTask?.cancel()
+        replyTask = Task { [weak self] in
+            await self?.runReply(spoken: spoken, generation: generation)
         }
     }
 
     /// 一次回答：Responses 流式 → 句子切分 → TTS。
     ///
     /// 前缀顺序是硬的（§5.5）：人设 → 记忆 → 历史 → 本轮。**只追加，从不重写**。
-    private func runReply(spoken: Bool) async {
-        guard let sessionID, let preferences = preferences?() else { return }
+    private func runReply(spoken: Bool, generation: Int) async {
+        defer {
+            if replyGeneration == generation {
+                replyTask = nil
+            }
+        }
+        guard generation == replyGeneration,
+              let sessionID,
+              let preferences = preferences?()
+        else { return }
+
         let resolved = preferences.resolvedLLMConfiguration(
             for: .assistant,
             globalAPIKey: apiKeyProvider(),
@@ -822,29 +875,41 @@ public final class AssistantSession {
         var buffer = ""
         var reply = ""
         do {
+            try Task.checkCancellation()
             for try await delta in await provider.stream(
                 configuration: configuration,
                 messages: messages,
                 apiKey: key,
                 instructions: VoicePrompt.instructions
             ) {
+                try Task.checkCancellation()
+                guard generation == replyGeneration else { return }
                 reply += delta
                 streamingReply = reply
                 guard spoken else { continue }
                 // 逐句合成：用户不必等整段话写完才听见第一句（§8.1 的首次可听响应）。
                 buffer += delta
                 for sentence in Self.takeSentences(&buffer, flush: false) {
+                    try Task.checkCancellation()
+                    guard generation == replyGeneration else { return }
                     let utterance = VoicePrompt.spokenText(from: sentence)
                     if !utterance.isEmpty { await enqueueTTS(utterance) }
                 }
             }
+        } catch is CancellationError {
+            if generation == replyGeneration {
+                streamingReply = nil
+            }
+            return
         } catch {
+            guard generation == replyGeneration else { return }
             lastFailure = "这一次没有回答出来：\(error.localizedDescription)"
             streamingReply = nil
             phase = .listening
             return
         }
 
+        guard generation == replyGeneration else { return }
         let trimmed = reply.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             streamingReply = nil
@@ -854,13 +919,18 @@ public final class AssistantSession {
         }
         if spoken {
             for sentence in Self.takeSentences(&buffer, flush: true) {
+                try? Task.checkCancellation()
+                guard !Task.isCancelled, generation == replyGeneration else { return }
                 let utterance = VoicePrompt.spokenText(from: sentence)
                 if !utterance.isEmpty { await enqueueTTS(utterance) }
             }
         }
+        guard generation == replyGeneration else { return }
         streamingReply = nil
         history.append(LLMMessage(role: .assistant, text: trimmed))
         do {
+            try Task.checkCancellation()
+            guard generation == replyGeneration else { return }
             let ordinal = try await coordinator.appendLine(
                 LineDraft(
                     sessionID: sessionID,
@@ -870,6 +940,8 @@ public final class AssistantSession {
                     isInterrupted: currentReplyInterrupted
                 )
             )
+            try Task.checkCancellation()
+            guard generation == replyGeneration else { return }
             currentOrdinal = ordinal
             turns.append(
                 Turn(
@@ -883,10 +955,13 @@ public final class AssistantSession {
                     createdAt: replyStartedAt
                 )
             )
+        } catch is CancellationError {
+            return
         } catch {
+            guard generation == replyGeneration else { return }
             lastFailure = error.localizedDescription
         }
-        if !spoken { phase = .listening }
+        if !spoken, generation == replyGeneration { phase = .listening }
     }
 
     /// 从流式正文里切出"已经可以念"的句子：遇到句末标点就切，**并且要够长**

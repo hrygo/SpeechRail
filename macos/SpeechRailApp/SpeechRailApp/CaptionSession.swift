@@ -608,7 +608,7 @@ public final class CaptionSession {
         case .responseAudio, .responseDone(_, _):
             // TTS 不属于这一层（字幕与会议都不说话）。
             break
-        case .serverError(let code, let message, _, _, _):
+        case .serverError(let code, let message, _, _, _, _):
             await handleServerError(code: code, message: message)
         case .cleared:
             break
