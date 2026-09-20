@@ -75,6 +75,10 @@ let package = Package(
                 "AudioSampleRing.swift",
                 "VoicePrompt.swift",
                 "WindowLayoutPolicy.swift",
+                "TeleprompterDomain.swift",
+                "TeleprompterNormalizer.swift",
+                "TeleprompterSegmenter.swift",
+                "TeleprompterAligner.swift",
             ]
         ),
         .testTarget(
