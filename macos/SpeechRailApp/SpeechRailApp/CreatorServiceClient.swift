@@ -46,33 +46,199 @@ public struct VoiceQualityReportSnapshot: Codable, Equatable, Sendable {
     public struct Reference: Codable, Equatable, Sendable {
         public let durationSeconds: Double
         public let sampleRate: Int
+        public let channels: Int
         public let speechActiveRatio: Double
         public let noiseFloorDecibels: Double
         public let estimatedSNRDecibels: Double
         public let clippingRatio: Double
+        public let leadingSilenceSeconds: Double
+        public let trailingSilenceSeconds: Double
         public let transcriptMatch: Double?
+
+        public init(
+            durationSeconds: Double,
+            sampleRate: Int,
+            channels: Int = 1,
+            speechActiveRatio: Double,
+            noiseFloorDecibels: Double,
+            estimatedSNRDecibels: Double,
+            clippingRatio: Double,
+            leadingSilenceSeconds: Double = 0,
+            trailingSilenceSeconds: Double = 0,
+            transcriptMatch: Double?
+        ) {
+            self.durationSeconds = durationSeconds
+            self.sampleRate = sampleRate
+            self.channels = channels
+            self.speechActiveRatio = speechActiveRatio
+            self.noiseFloorDecibels = noiseFloorDecibels
+            self.estimatedSNRDecibels = estimatedSNRDecibels
+            self.clippingRatio = clippingRatio
+            self.leadingSilenceSeconds = leadingSilenceSeconds
+            self.trailingSilenceSeconds = trailingSilenceSeconds
+            self.transcriptMatch = transcriptMatch
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            durationSeconds = try container.decode(Double.self, forKey: .durationSeconds)
+            sampleRate = try container.decode(Int.self, forKey: .sampleRate)
+            channels = try container.decodeIfPresent(Int.self, forKey: .channels) ?? 1
+            speechActiveRatio = try container.decode(Double.self, forKey: .speechActiveRatio)
+            noiseFloorDecibels = try container.decode(Double.self, forKey: .noiseFloorDecibels)
+            estimatedSNRDecibels = try container.decode(Double.self, forKey: .estimatedSNRDecibels)
+            clippingRatio = try container.decode(Double.self, forKey: .clippingRatio)
+            leadingSilenceSeconds = try container.decodeIfPresent(
+                Double.self,
+                forKey: .leadingSilenceSeconds
+            ) ?? 0
+            trailingSilenceSeconds = try container.decodeIfPresent(
+                Double.self,
+                forKey: .trailingSilenceSeconds
+            ) ?? 0
+            transcriptMatch = try container.decodeIfPresent(Double.self, forKey: .transcriptMatch)
+        }
 
         enum CodingKeys: String, CodingKey {
             case durationSeconds = "duration_seconds"
             case sampleRate = "sample_rate"
+            case channels
             case speechActiveRatio = "speech_active_ratio"
             case noiseFloorDecibels = "noise_floor_dbfs"
             case estimatedSNRDecibels = "estimated_snr_db"
             case clippingRatio = "clipping_ratio"
+            case leadingSilenceSeconds = "leading_silence_seconds"
+            case trailingSilenceSeconds = "trailing_silence_seconds"
             case transcriptMatch = "transcript_match"
+        }
+    }
+
+    public struct Synthesis: Codable, Equatable, Sendable {
+        public let probeCount: Int?
+        public let successfulProbeCount: Int?
+        public let activeRMSDecibels: Double?
+        public let peakDecibels: Double?
+        public let chunkJumpP95Decibels: Double?
+        public let clippingRatio: Double?
+        public let deterministic: Bool?
+        public let transcriptMatch: Double?
+        public let intelligibilityEvaluated: Bool?
+
+        public init(
+            probeCount: Int? = nil,
+            successfulProbeCount: Int? = nil,
+            activeRMSDecibels: Double? = nil,
+            peakDecibels: Double? = nil,
+            chunkJumpP95Decibels: Double? = nil,
+            clippingRatio: Double? = nil,
+            deterministic: Bool? = nil,
+            transcriptMatch: Double? = nil,
+            intelligibilityEvaluated: Bool? = nil
+        ) {
+            self.probeCount = probeCount
+            self.successfulProbeCount = successfulProbeCount
+            self.activeRMSDecibels = activeRMSDecibels
+            self.peakDecibels = peakDecibels
+            self.chunkJumpP95Decibels = chunkJumpP95Decibels
+            self.clippingRatio = clippingRatio
+            self.deterministic = deterministic
+            self.transcriptMatch = transcriptMatch
+            self.intelligibilityEvaluated = intelligibilityEvaluated
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case probeCount = "probe_count"
+            case successfulProbeCount = "successful_probe_count"
+            case activeRMSDecibels = "active_rms_dbfs"
+            case peakDecibels = "peak_dbfs"
+            case chunkJumpP95Decibels = "chunk_jump_p95_db"
+            case clippingRatio = "clipping_ratio"
+            case deterministic
+            case transcriptMatch = "transcript_match"
+            case intelligibilityEvaluated = "intelligibility_evaluated"
         }
     }
 
     public let policyVersion: String
     public let status: Status
+    public let runID: String?
+    public let testedAt: String?
     public let failureCodes: [String]
     public let reference: Reference
+    public let synthesis: Synthesis?
+
+    public init(
+        policyVersion: String,
+        status: Status,
+        runID: String? = nil,
+        testedAt: String? = nil,
+        failureCodes: [String],
+        reference: Reference,
+        synthesis: Synthesis? = nil
+    ) {
+        self.policyVersion = policyVersion
+        self.status = status
+        self.runID = runID
+        self.testedAt = testedAt
+        self.failureCodes = failureCodes
+        self.reference = reference
+        self.synthesis = synthesis
+    }
 
     enum CodingKeys: String, CodingKey {
         case policyVersion = "policy_version"
         case status
+        case runID = "run_id"
+        case testedAt = "tested_at"
         case failureCodes = "failure_codes"
         case reference
+        case synthesis
+    }
+}
+
+public struct VoiceCreationSnapshot: Codable, Equatable, Sendable {
+    public let origin: String?
+    public let method: String?
+    public let modelArtifact: String?
+    public let modelRevision: String?
+    public let seed: Int?
+    public let instructionSHA256: String?
+    public let referenceTextSHA256: String?
+    public let referenceAudioSHA256: String?
+    public let preprocessingVersion: String?
+
+    public init(
+        origin: String? = nil,
+        method: String? = nil,
+        modelArtifact: String? = nil,
+        modelRevision: String? = nil,
+        seed: Int? = nil,
+        instructionSHA256: String? = nil,
+        referenceTextSHA256: String? = nil,
+        referenceAudioSHA256: String? = nil,
+        preprocessingVersion: String? = nil
+    ) {
+        self.origin = origin
+        self.method = method
+        self.modelArtifact = modelArtifact
+        self.modelRevision = modelRevision
+        self.seed = seed
+        self.instructionSHA256 = instructionSHA256
+        self.referenceTextSHA256 = referenceTextSHA256
+        self.referenceAudioSHA256 = referenceAudioSHA256
+        self.preprocessingVersion = preprocessingVersion
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case origin
+        case method
+        case modelArtifact = "model_artifact"
+        case modelRevision = "model_revision"
+        case seed
+        case instructionSHA256 = "instruction_sha256"
+        case referenceTextSHA256 = "reference_text_sha256"
+        case referenceAudioSHA256 = "reference_audio_sha256"
+        case preprocessingVersion = "preprocessing_version"
     }
 }
 
@@ -114,6 +280,11 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
     public let mode: String?
     public let refText: String?
     public let durationSeconds: Double?
+    public let revision: String?
+    public let revoked: Bool
+    public let availabilityReason: SafeVoiceAvailabilityReason?
+    public let quality: VoiceQualityReportSnapshotV2?
+    public let creation: VoiceCreationSnapshot?
 
     public init(
         id: String,
@@ -130,7 +301,12 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         capabilities: CreatorVoiceCapabilities = CreatorVoiceCapabilities(),
         mode: String? = nil,
         refText: String? = nil,
-        durationSeconds: Double? = nil
+        durationSeconds: Double? = nil,
+        revision: String? = nil,
+        revoked: Bool = false,
+        availabilityReason: SafeVoiceAvailabilityReason? = nil,
+        quality: VoiceQualityReportSnapshotV2? = nil,
+        creation: VoiceCreationSnapshot? = nil
     ) {
         self.id = id
         self.name = name
@@ -147,6 +323,11 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         self.mode = mode
         self.refText = refText
         self.durationSeconds = durationSeconds
+        self.revision = revision
+        self.revoked = revoked
+        self.availabilityReason = availabilityReason
+        self.quality = quality
+        self.creation = creation
     }
 
     public init(from decoder: Decoder) throws {
@@ -169,6 +350,14 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         mode = try container.decodeIfPresent(String.self, forKey: .mode)
         refText = try container.decodeIfPresent(String.self, forKey: .refText)
         durationSeconds = try container.decodeIfPresent(Double.self, forKey: .durationSeconds)
+        revision = try container.decodeIfPresent(String.self, forKey: .revision)
+        revoked = try container.decodeIfPresent(Bool.self, forKey: .revoked) ?? false
+        availabilityReason = try container.decodeIfPresent(
+            SafeVoiceAvailabilityReason.self,
+            forKey: .availabilityReason
+        )
+        quality = try container.decodeIfPresent(VoiceQualityReportSnapshotV2.self, forKey: .quality)
+        creation = try container.decodeIfPresent(VoiceCreationSnapshot.self, forKey: .creation)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -187,6 +376,11 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
         case mode
         case refText = "ref_text"
         case durationSeconds = "duration_seconds"
+        case revision
+        case revoked
+        case availabilityReason = "availability_reason"
+        case quality
+        case creation
     }
 }
 
@@ -228,6 +422,163 @@ public protocol SpeechRailCreatorClient: Sendable {
         seed: Int?
     ) async throws -> CreatorVoice
     func deleteVoice(id: String) async throws
+
+    func createVoice(
+        name: String,
+        instruction: String,
+        id: String?,
+        seed: Int?
+    ) async throws -> CreatorVoice
+    func fetchVoiceRevisions(id: String) async throws -> [VoiceRevision]
+    func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?,
+        expectedRevision: String?
+    ) async throws -> VoiceRevisionMutation
+    func rollbackVoice(
+        id: String,
+        targetRevision: String,
+        expectedRevision: String
+    ) async throws -> VoiceRevisionMutation
+    func revokeVoiceRevision(id: String, revision: String) async throws -> VoiceRevisionMutation
+    func fetchPronunciationSet(id: String, revision: String) async throws -> PronunciationSet
+    func upsertPronunciationSet(
+        id: String,
+        expectedRevision: String?,
+        entries: [PronunciationEntry]
+    ) async throws -> PronunciationSet
+    func revokePronunciationRevision(id: String, revision: String) async throws -> PronunciationSet
+    func deletePronunciationSet(id: String) async throws
+    func runVoiceQuality(
+        id: String,
+        request: VoiceQualityRunRequest
+    ) async throws -> VoiceQualityReportSnapshotV2
+}
+
+public extension SpeechRailCreatorClient {
+    func createVoice(
+        name: String,
+        instruction: String,
+        id: String?,
+        seed: Int?
+    ) async throws -> CreatorVoice {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice creation is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchVoiceRevisions(id: String) async throws -> [VoiceRevision] {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice revisions are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?,
+        expectedRevision: String?
+    ) async throws -> VoiceRevisionMutation {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "conditional voice updates are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func rollbackVoice(
+        id: String,
+        targetRevision: String,
+        expectedRevision: String
+    ) async throws -> VoiceRevisionMutation {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice rollback is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func revokeVoiceRevision(id: String, revision: String) async throws -> VoiceRevisionMutation {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice revision revocation is unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func fetchPronunciationSet(id: String, revision: String) async throws -> PronunciationSet {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "pronunciation sets are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func upsertPronunciationSet(
+        id: String,
+        expectedRevision: String?,
+        entries: [PronunciationEntry]
+    ) async throws -> PronunciationSet {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "pronunciation sets are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func revokePronunciationRevision(id: String, revision: String) async throws -> PronunciationSet {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "pronunciation revisions are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func deletePronunciationSet(id: String) async throws {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "pronunciation sets are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
+
+    func runVoiceQuality(
+        id: String,
+        request: VoiceQualityRunRequest
+    ) async throws -> VoiceQualityReportSnapshotV2 {
+        throw ServiceAPIClientError.http(
+            statusCode: 501,
+            code: "unsupported",
+            message: "voice quality runs are unsupported by this client",
+            requestID: nil,
+            retryable: false
+        )
+    }
 }
 
 struct UnavailableCreatorClient: SpeechRailCreatorClient {

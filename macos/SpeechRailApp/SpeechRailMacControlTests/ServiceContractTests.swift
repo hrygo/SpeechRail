@@ -212,6 +212,63 @@ final class ServiceContractTests: XCTestCase {
         )
     }
 
+    func testVoiceRevisionDecodesLegacyMutationAndRevisionListShapes() throws {
+        let mutation = try JSONDecoder().decode(
+            VoiceRevisionMutation.self,
+            from: Data(#"{"id":"voice_demo","voice_revision":"vr_0123456789abcdef0123456789abcdef","mode":"clone","revoked":false}"#.utf8)
+        )
+        XCTAssertEqual(mutation.id, "voice_demo")
+        XCTAssertEqual(mutation.revision, "vr_0123456789abcdef0123456789abcdef")
+
+        let revision = try JSONDecoder().decode(
+            VoiceRevision.self,
+            from: Data(#"{"revision":"vr_0123456789abcdef0123456789abcdef","current":true,"created_at":1.5,"revoked":false}"#.utf8)
+        )
+        XCTAssertEqual(revision.id, revision.revision)
+        XCTAssertEqual(revision.active, true)
+        XCTAssertEqual(revision.createdAt, 1.5)
+    }
+
+    func testVoicePatchEncodesOnlySuppliedExpectedRevision() throws {
+        let data = try JSONEncoder().encode(
+            VoicePatch(
+                name: "Updated",
+                instruction: nil,
+                seed: nil,
+                expectedRevision: "vr_0123456789abcdef0123456789abcdef"
+            )
+        )
+
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertEqual(object?["name"] as? String, "Updated")
+        XCTAssertEqual(
+            object?["expected_revision"] as? String,
+            "vr_0123456789abcdef0123456789abcdef"
+        )
+        XCTAssertNil(object?["instruction"])
+        XCTAssertNil(object?["seed"])
+    }
+
+    func testPronunciationSetUpdateUsesContractEntryArrayAndNullExpectedRevision() throws {
+        let data = try JSONEncoder().encode(
+            PronunciationSetUpdate(
+                id: "zh_demo",
+                entries: [
+                    PronunciationEntry(
+                        id: "sr",
+                        surface: "SpeechRail",
+                        spoken: "Speech Rail"
+                    ),
+                ]
+            )
+        )
+
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertNil(object?["id"])
+        XCTAssertTrue(object?.keys.contains("expected_revision") == true)
+        XCTAssertEqual((object?["entries"] as? [[String: Any]])?.first?["spoken"] as? String, "Speech Rail")
+    }
+
     func testRequestBuilderAddsBearerAndConditionalHeaders() throws {
         let request = try ServiceRequestBuilder(
             baseURL: URL(string: "http://127.0.0.1:8201")!,

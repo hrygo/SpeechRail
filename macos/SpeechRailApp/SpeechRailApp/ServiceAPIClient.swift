@@ -214,6 +214,36 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return try await get(path: "/v1/voices/\(id)")
     }
 
+    public func createVoice(
+        name: String,
+        instruction: String,
+        id: String?,
+        seed: Int?
+    ) async throws -> CreatorVoice {
+        try await postJSON(
+            path: "/v1/voices",
+            body: CreateVoiceRequestBody(
+                name: name,
+                instruction: instruction,
+                id: id,
+                seed: seed
+            )
+        )
+    }
+
+    public func fetchVoiceRevisions(id: String) async throws -> [VoiceRevision] {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        let response: VoiceRevisionListResponse = try await get(
+            path: "/v1/speechrail/voices/\(id)/revisions"
+        )
+        guard response.object == "list" else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return response.data
+    }
+
     public func createSpeech(
         text: String,
         voiceID: String,
@@ -291,6 +321,145 @@ public final class ServiceAPIClient: @unchecked Sendable {
             return try JSONDecoder().decode(CreatorVoice.self, from: response.data)
         } catch {
             throw ServiceAPIClientError.invalidResponse
+        }
+    }
+
+    public func updateVoice(
+        id: String,
+        name: String?,
+        instruction: String?,
+        seed: Int?,
+        expectedRevision: String?
+    ) async throws -> VoiceRevisionMutation {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        guard let expectedRevision else {
+            let voice = try await updateVoice(
+                id: id,
+                name: name,
+                instruction: instruction,
+                seed: seed
+            )
+            return VoiceRevisionMutation(
+                id: voice.id,
+                voiceRevision: voice.revision,
+                mode: voice.mode,
+                revoked: voice.revoked
+            )
+        }
+        return try await postJSON(
+            path: "/v1/speechrail/voices/\(id)",
+            body: VoicePatch(
+                name: name,
+                instruction: instruction,
+                seed: seed,
+                expectedRevision: expectedRevision
+            ),
+            method: "PATCH"
+        )
+    }
+
+    public func rollbackVoice(
+        id: String,
+        targetRevision: String,
+        expectedRevision: String
+    ) async throws -> VoiceRevisionMutation {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await postJSON(
+            path: "/v1/speechrail/voices/\(id)/rollback",
+            body: VoiceRollbackRequestBody(
+                targetRevision: targetRevision,
+                expectedRevision: expectedRevision
+            )
+        )
+    }
+
+    public func revokeVoiceRevision(id: String, revision: String) async throws -> VoiceRevisionMutation {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await postJSON(
+            path: "/v1/speechrail/voices/\(id)/revisions/\(revision)/revoke",
+            body: EmptyJSONBody()
+        )
+    }
+
+    public func fetchPronunciationSet(id: String, revision: String) async throws -> PronunciationSet {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await get(
+            path: "/v1/speechrail/pronunciation-sets/\(id)/revisions/\(revision)"
+        )
+    }
+
+    public func upsertPronunciationSet(
+        id: String,
+        expectedRevision: String?,
+        entries: [PronunciationEntry]
+    ) async throws -> PronunciationSet {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await postJSON(
+            path: "/v1/speechrail/pronunciation-sets/\(id)",
+            body: PronunciationSetUpdate(
+                id: id,
+                expectedRevision: expectedRevision,
+                entries: entries
+            ),
+            method: "PUT"
+        )
+    }
+
+    public func revokePronunciationRevision(
+        id: String,
+        revision: String
+    ) async throws -> PronunciationSet {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await postJSON(
+            path: "/v1/speechrail/pronunciation-sets/\(id)/revisions/\(revision)/revoke",
+            body: EmptyJSONBody()
+        )
+    }
+
+    public func deletePronunciationSet(id: String) async throws {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        let request = try makeRequest(
+            path: "/v1/speechrail/pronunciation-sets/\(id)",
+            method: "DELETE",
+            accept: "application/json"
+        )
+        _ = try await execute(request)
+    }
+
+    public func runVoiceQuality(
+        id: String,
+        request: VoiceQualityRunRequest = VoiceQualityRunRequest()
+    ) async throws -> VoiceQualityReportSnapshotV2 {
+        guard id.range(of: "^[A-Za-z0-9_-]{1,64}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        do {
+            return try await postJSON(
+                path: "/v1/speechrail/voices/\(id)/quality-runs",
+                body: request
+            )
+        } catch let error as ServiceAPIClientError
+            where error.statusCode == 404 || error.statusCode == 405 {
+            // Only route absence permits the historical endpoint. Auth,
+            // validation, conflict and backend errors remain visible.
+            return try await postJSON(
+                path: "/v1/voices/\(id)/quality-runs",
+                body: request
+            )
         }
     }
 
@@ -448,11 +617,12 @@ public final class ServiceAPIClient: @unchecked Sendable {
 
     private func postJSON<Body: Encodable, Value: Decodable & Sendable>(
         path: String,
-        body: Body
+        body: Body,
+        method: String = "POST"
     ) async throws -> Value {
         var request = try makeRequest(
             path: path,
-            method: "POST",
+            method: method,
             accept: "application/json"
         )
         request.timeoutInterval = Self.longRunningRequestTimeout
@@ -641,6 +811,30 @@ private struct VoiceDesignRegistrationRequestBody: Encodable {
         case language
     }
 }
+
+private struct CreateVoiceRequestBody: Encodable {
+    let name: String
+    let instruction: String
+    let id: String?
+    let seed: Int?
+}
+
+private struct VoiceRevisionListResponse: Decodable {
+    let object: String
+    let data: [VoiceRevision]
+}
+
+private struct VoiceRollbackRequestBody: Encodable {
+    let targetRevision: String
+    let expectedRevision: String
+
+    enum CodingKeys: String, CodingKey {
+        case targetRevision = "target_revision"
+        case expectedRevision = "expected_revision"
+    }
+}
+
+private struct EmptyJSONBody: Encodable {}
 
 private struct UpdateVoiceRequestBody: Encodable {
     let name: String?

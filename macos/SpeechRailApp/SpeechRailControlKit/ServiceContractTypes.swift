@@ -183,7 +183,9 @@ public enum ServiceErrorClassifier {
             switch code {
             case "invalid_api_key", "unauthorized", "forbidden":
                 .unauthorized
-            case "voice_revision_mismatch", "model_revision_mismatch":
+            case "voice_revision_mismatch", "voice_revision_conflict",
+                 "model_revision_mismatch", "model_revision_conflict",
+                 "pronunciation_conflict":
                 .conflict
             case "backend_busy", "queue_full":
                 .busy
@@ -712,14 +714,14 @@ public struct EffectiveCapabilitySnapshot: Codable, Equatable, Sendable {
 public struct VoiceRevision: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let revision: String
-    public let createdAt: String?
+    public let createdAt: Double?
     public let active: Bool?
     public let revoked: Bool?
 
     public init(
         id: String,
         revision: String,
-        createdAt: String? = nil,
+        createdAt: Double? = nil,
         active: Bool? = nil,
         revoked: Bool? = nil
     ) {
@@ -730,11 +732,32 @@ public struct VoiceRevision: Codable, Equatable, Sendable, Identifiable {
         self.revoked = revoked
     }
 
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let revision: String
+        if let value = try container.decodeIfPresent(String.self, forKey: .revision) {
+            revision = value
+        } else {
+            revision = try container.decode(String.self, forKey: .voiceRevision)
+        }
+        self.revision = revision
+        self.id = try container.decodeIfPresent(String.self, forKey: .id) ?? revision
+        self.createdAt = try container.decodeIfPresent(Double.self, forKey: .createdAt)
+        if let value = try container.decodeIfPresent(Bool.self, forKey: .active) {
+            self.active = value
+        } else {
+            self.active = try container.decodeIfPresent(Bool.self, forKey: .current)
+        }
+        self.revoked = try container.decodeIfPresent(Bool.self, forKey: .revoked)
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case revision
+        case voiceRevision = "voice_revision"
         case createdAt = "created_at"
         case active
+        case current
         case revoked
     }
 }
@@ -750,6 +773,14 @@ public struct VoicePatch: Codable, Equatable, Sendable {
         self.instruction = instruction
         self.seed = seed
         self.expectedRevision = expectedRevision
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(instruction, forKey: .instruction)
+        try container.encodeIfPresent(seed, forKey: .seed)
+        try container.encodeIfPresent(expectedRevision, forKey: .expectedRevision)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -816,29 +847,130 @@ public struct VoiceQualityRunRequest: Codable, Equatable, Sendable {
     }
 }
 
+public struct VoiceRevisionMutation: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let voiceRevision: String?
+    public let mode: String?
+    public let revoked: Bool?
+
+    public init(
+        id: String,
+        voiceRevision: String? = nil,
+        mode: String? = nil,
+        revoked: Bool? = nil
+    ) {
+        self.id = id
+        self.voiceRevision = voiceRevision
+        self.mode = mode
+        self.revoked = revoked
+    }
+
+    public var revision: String? { voiceRevision }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case voiceRevision = "voice_revision"
+        case mode
+        case revoked
+    }
+}
+
+public struct PronunciationEntry: Codable, Equatable, Sendable, Identifiable {
+    public let id: String
+    public let surface: String
+    public let spoken: String
+    public let language: String
+    public let caseSensitive: Bool
+    public let wordBoundary: Bool
+    public let source: String
+
+    public init(
+        id: String,
+        surface: String,
+        spoken: String,
+        language: String = "auto",
+        caseSensitive: Bool = true,
+        wordBoundary: Bool = false,
+        source: String = "user"
+    ) {
+        self.id = id
+        self.surface = surface
+        self.spoken = spoken
+        self.language = language
+        self.caseSensitive = caseSensitive
+        self.wordBoundary = wordBoundary
+        self.source = source
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case surface
+        case spoken
+        case language
+        case caseSensitive = "case_sensitive"
+        case wordBoundary = "word_boundary"
+        case source
+    }
+}
+
 public struct PronunciationSet: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let revision: String?
-    public let entries: [String: String]
+    public let entries: [PronunciationEntry]
     public let revoked: Bool?
+    public let entryCount: Int?
 
-    public init(id: String, revision: String? = nil, entries: [String: String] = [:], revoked: Bool? = nil) {
+    public init(
+        id: String,
+        revision: String? = nil,
+        entries: [PronunciationEntry] = [],
+        revoked: Bool? = nil,
+        entryCount: Int? = nil
+    ) {
         self.id = id
         self.revision = revision
         self.entries = entries
         self.revoked = revoked
+        self.entryCount = entryCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        revision = try container.decodeIfPresent(String.self, forKey: .revision)
+        entries = try container.decodeIfPresent([PronunciationEntry].self, forKey: .entries) ?? []
+        revoked = try container.decodeIfPresent(Bool.self, forKey: .revoked)
+        entryCount = try container.decodeIfPresent(Int.self, forKey: .entryCount)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case revision
+        case entries
+        case revoked
+        case entryCount = "entry_count"
     }
 }
 
 public struct PronunciationSetUpdate: Codable, Equatable, Sendable {
     public let id: String
     public let expectedRevision: String?
-    public let entries: [String: String]
+    public let entries: [PronunciationEntry]
 
-    public init(id: String, expectedRevision: String? = nil, entries: [String: String]) {
+    public init(
+        id: String,
+        expectedRevision: String? = nil,
+        entries: [PronunciationEntry]
+    ) {
         self.id = id
         self.expectedRevision = expectedRevision
         self.entries = entries
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(expectedRevision, forKey: .expectedRevision)
+        try container.encode(entries, forKey: .entries)
     }
 
     enum CodingKeys: String, CodingKey {
