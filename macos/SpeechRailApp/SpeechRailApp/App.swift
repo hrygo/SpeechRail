@@ -576,9 +576,11 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
 
     func fetchVoice(id: String) async throws -> CreatorVoice {
         guard let voice = await store.get(id: id) else {
-            throw ServiceAPIClientError.server(
+            throw ServiceAPIClientError.http(
+                statusCode: 404,
                 code: "voice_not_found",
                 message: "voice not found",
+                requestID: nil,
                 retryable: false
             )
         }

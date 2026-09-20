@@ -1841,7 +1841,11 @@ public final class AppModel {
             return "无法连接本机 SpeechRail 服务，请检查服务状态后重试"
         case .requestTimedOut:
             return "创作服务响应超时，请稍后重试"
-        case let .server(code, _, _):
+        case .notModifiedWithoutCache:
+            return "创作服务缓存已失效，请重新读取后重试"
+        case .invalidContract:
+            return "创作服务版本不匹配，请运行诊断后重试"
+        case let .http(_, code, _, _, _):
             switch code {
             case "invalid_api_key":
                 return "本机服务凭据不可用，请检查服务配置后重试"
@@ -1922,7 +1926,11 @@ public final class AppModel {
             return .timeout
         case .invalidResponse:
             return .invalidResponse
-        case let .server(code, _, _):
+        case .notModifiedWithoutCache:
+            return .connection
+        case .invalidContract:
+            return .invalidResponse
+        case let .http(_, code, _, _, _):
             return .server(code: code)
         case .invalidURL, .requestFailed:
             return .connection
@@ -1942,7 +1950,11 @@ public final class AppModel {
             return "服务健康检查超时，可能正在启动或负载较高，请稍后重新读取。"
         case .invalidResponse:
             return "服务返回无法识别的健康状态，请运行预检检查版本和运行时。"
-        case let .server(code, _, _):
+        case .notModifiedWithoutCache:
+            return "服务健康缓存已失效，请重新读取后重试。"
+        case .invalidContract:
+            return "服务返回的契约版本无法识别，请运行预检检查版本。"
+        case let .http(_, code, _, _, _):
             switch code {
             case "backend_not_ready":
                 return "服务已连接，但语音运行时尚未就绪，请运行预检查看阻塞项。"

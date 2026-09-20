@@ -120,4 +120,34 @@ final class ServiceContractTests: XCTestCase {
             .notReady
         )
     }
+
+    func testRequestBuilderAddsBearerAndConditionalHeaders() throws {
+        let request = try ServiceRequestBuilder(
+            baseURL: URL(string: "http://127.0.0.1:8201")!,
+            apiKey: "secret"
+        ).make(
+            path: "/v1/speechrail/capabilities",
+            method: "GET",
+            query: [],
+            headers: ["If-None-Match": "\"snap-1\""],
+            body: nil
+        )
+
+        XCTAssertEqual(request.url?.path, "/v1/speechrail/capabilities")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "If-None-Match"), "\"snap-1\"")
+    }
+
+    func test304WithoutCachedValueThrowsCacheMiss() {
+        XCTAssertThrowsError(
+            try ServiceResponseDecoder.decode(
+                Data(),
+                statusCode: 304,
+                headers: ["ETag": "\"snap-2\""],
+                cachedValue: nil as EffectiveCapabilitySnapshot?
+            )
+        ) { error in
+            XCTAssertEqual(error as? ServiceAPIClientError, .notModifiedWithoutCache)
+        }
+    }
 }

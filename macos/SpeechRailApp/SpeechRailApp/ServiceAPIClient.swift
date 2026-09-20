@@ -1,14 +1,6 @@
 import Foundation
 import SpeechRailControlKit
 
-public enum ServiceAPIClientError: Error, Equatable, Sendable {
-    case invalidURL
-    case invalidResponse
-    case requestFailed
-    case requestTimedOut
-    case server(code: String, message: String, retryable: Bool)
-}
-
 extension ServiceAPIClientError: LocalizedError {
     public var errorDescription: String? {
         switch self {
@@ -20,7 +12,7 @@ extension ServiceAPIClientError: LocalizedError {
             "无法连接本机 SpeechRail 服务"
         case .requestTimedOut:
             "本机 SpeechRail 服务响应超时"
-        case .server:
+        case .notModifiedWithoutCache, .invalidContract, .http:
             // Server detail can contain backend paths or implementation text.
             // Feature surfaces map stable error codes to user-facing copy.
             "SpeechRail 服务请求失败"
@@ -89,8 +81,8 @@ struct UnavailableModelCapabilityClient: ServiceModelCapabilityClient {
 public final class ServiceAPIClient: @unchecked Sendable {
     private static let longRunningRequestTimeout: TimeInterval = 180
     private let baseURL: URL
-    private let session: URLSession
-    private let apiKey: String?
+    private let transport: any ServiceTransporting
+    private let requestBuilder: ServiceRequestBuilder
 
     public init(
         port: Int = 8201,
@@ -98,8 +90,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
         apiKey: String? = nil
     ) {
         self.baseURL = URL(string: "http://127.0.0.1:\(port)")!
-        self.session = session
-        self.apiKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
+        let resolvedKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
+        self.transport = ServiceHTTPTransport(session: session)
+        self.requestBuilder = ServiceRequestBuilder(baseURL: self.baseURL, apiKey: resolvedKey)
     }
 
     public init(
@@ -108,8 +101,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
         apiKey: String? = nil
     ) {
         self.baseURL = baseURL
-        self.session = session
-        self.apiKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
+        let resolvedKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
+        self.transport = ServiceHTTPTransport(session: session)
+        self.requestBuilder = ServiceRequestBuilder(baseURL: baseURL, apiKey: resolvedKey)
     }
 
     public var port: Int? { baseURL.port }
@@ -135,6 +129,62 @@ public final class ServiceAPIClient: @unchecked Sendable {
 
     public func fetchMetrics() async throws -> RuntimeMetricsSnapshot {
         try await get(path: "/metrics")
+    }
+
+    public func fetchReadiness() async throws -> ReadySnapshot {
+        try await get(path: "/readyz")
+    }
+
+    public func fetchEffectiveCapabilities(
+        ifNoneMatch: String?
+    ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+        try await fetchEffectiveCapabilities(ifNoneMatch: ifNoneMatch, cachedValue: nil)
+    }
+
+    public func fetchEffectiveCapabilities(
+        ifNoneMatch: String?,
+        cachedValue: EffectiveCapabilitySnapshot?
+    ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+        let response = try await execute(
+            makeRequest(
+                path: "/v1/speechrail/capabilities",
+                method: "GET",
+                accept: "application/json",
+                headers: conditionalHeaders(ifNoneMatch)
+            )
+        )
+        return try ServiceResponseDecoder.decode(
+            response.data,
+            statusCode: response.metadata.statusCode,
+            headers: response.metadata.headers,
+            cachedValue: cachedValue
+        )
+    }
+
+    public func fetchSafeVoices(
+        ifNoneMatch: String?
+    ) async throws -> ServiceConditionalResponse<SafeVoiceList> {
+        try await fetchSafeVoices(ifNoneMatch: ifNoneMatch, cachedValue: nil)
+    }
+
+    public func fetchSafeVoices(
+        ifNoneMatch: String?,
+        cachedValue: SafeVoiceList?
+    ) async throws -> ServiceConditionalResponse<SafeVoiceList> {
+        let response = try await execute(
+            makeRequest(
+                path: "/v1/speechrail/voices",
+                method: "GET",
+                accept: "application/json",
+                headers: conditionalHeaders(ifNoneMatch)
+            )
+        )
+        return try ServiceResponseDecoder.decode(
+            response.data,
+            statusCode: response.metadata.statusCode,
+            headers: response.metadata.headers,
+            cachedValue: cachedValue
+        )
     }
 
     /// 读取服务公开的 TTS 能力声明。这是能力的唯一事实来源：`supports_clone`
@@ -236,9 +286,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
             UpdateVoiceRequestBody(name: name, instruction: instruction, seed: seed)
         )
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, _) = try await execute(request)
+        let response = try await execute(request)
         do {
-            return try JSONDecoder().decode(CreatorVoice.self, from: data)
+            return try JSONDecoder().decode(CreatorVoice.self, from: response.data)
         } catch {
             throw ServiceAPIClientError.invalidResponse
         }
@@ -269,9 +319,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
             voiceID: voiceID,
             idempotencyKey: nil
         )
-        let (data, _) = try await execute(request)
+        let response = try await execute(request)
         do {
-            return try JSONDecoder().decode(VoiceQualityReportSnapshot.self, from: data)
+            return try JSONDecoder().decode(VoiceQualityReportSnapshot.self, from: response.data)
         } catch {
             throw ServiceAPIClientError.invalidResponse
         }
@@ -296,9 +346,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
             voiceID: voiceID,
             idempotencyKey: idempotencyKey
         )
-        let (data, _) = try await execute(request)
+        let response = try await execute(request)
         do {
-            return try JSONDecoder().decode(CreatorVoice.self, from: data)
+            return try JSONDecoder().decode(CreatorVoice.self, from: response.data)
         } catch {
             throw ServiceAPIClientError.invalidResponse
         }
@@ -375,17 +425,28 @@ public final class ServiceAPIClient: @unchecked Sendable {
         _ = try await execute(request)
     }
 
-    private func get<Value: Decodable>(path: String) async throws -> Value {
+    private func get<Value: Decodable & Sendable>(path: String) async throws -> Value {
         let request = try makeRequest(path: path, method: "GET", accept: "application/json")
-        let (data, _) = try await execute(request)
+        let response = try await execute(request)
         do {
-            return try JSONDecoder().decode(Value.self, from: data)
+            let decoded: ServiceConditionalResponse<Value> = try ServiceResponseDecoder.decode(
+                response.data,
+                statusCode: response.metadata.statusCode,
+                headers: response.metadata.headers
+            )
+            guard let value = decoded.value else {
+                throw ServiceAPIClientError.invalidResponse
+            }
+            return value
         } catch {
+            if let error = error as? ServiceAPIClientError {
+                throw error
+            }
             throw ServiceAPIClientError.invalidResponse
         }
     }
 
-    private func postJSON<Body: Encodable, Value: Decodable>(
+    private func postJSON<Body: Encodable, Value: Decodable & Sendable>(
         path: String,
         body: Body
     ) async throws -> Value {
@@ -397,10 +458,21 @@ public final class ServiceAPIClient: @unchecked Sendable {
         request.timeoutInterval = Self.longRunningRequestTimeout
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, _) = try await execute(request)
+        let response = try await execute(request)
         do {
-            return try JSONDecoder().decode(Value.self, from: data)
+            let decoded: ServiceConditionalResponse<Value> = try ServiceResponseDecoder.decode(
+                response.data,
+                statusCode: response.metadata.statusCode,
+                headers: response.metadata.headers
+            )
+            guard let value = decoded.value else {
+                throw ServiceAPIClientError.invalidResponse
+            }
+            return value
         } catch {
+            if let error = error as? ServiceAPIClientError {
+                throw error
+            }
             throw ServiceAPIClientError.invalidResponse
         }
     }
@@ -414,75 +486,59 @@ public final class ServiceAPIClient: @unchecked Sendable {
         request.timeoutInterval = Self.longRunningRequestTimeout
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let (data, response) = try await execute(request)
-        guard response.value(forHTTPHeaderField: "Content-Type")?
-            .lowercased()
-            .hasPrefix(acceptedContentType)
-            == true,
-            !data.isEmpty
-        else {
+        let response = try await execute(request)
+        let audio = try ServiceResponseDecoder.decodeAudio(
+            response.data,
+            statusCode: response.metadata.statusCode,
+            headers: response.metadata.headers
+        )
+        guard audio.contentType.lowercased().hasPrefix(acceptedContentType) else {
             throw ServiceAPIClientError.invalidResponse
         }
-        return data
+        return audio.audioData
     }
 
     private func makeRequest(
         path: String,
         method: String,
-        accept: String
+        accept: String,
+        headers: [String: String] = [:]
     ) throws -> URLRequest {
-        guard let url = URL(string: path, relativeTo: baseURL) else {
-            throw ServiceAPIClientError.invalidURL
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        request.setValue(accept, forHTTPHeaderField: "Accept")
-        if let apiKey {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
+        var request = try requestBuilder.make(
+            path: path,
+            method: method,
+            query: [],
+            headers: headers,
+            body: nil
+        )
+        request.setValue(accept, forHTTPHeaderField: HTTPHeaderNames.accept)
         return request
     }
 
-    private func execute(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw ServiceAPIClientError.invalidResponse
-            }
-            guard (200..<300).contains(httpResponse.statusCode) else {
-                throw serverError(from: data, statusCode: httpResponse.statusCode)
-            }
-            return (data, httpResponse)
-        } catch let error as ServiceAPIClientError {
-            throw error
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let error as URLError where error.code == .cancelled {
-            // URLSession commonly reports Task cancellation as
-            // URLError.cancelled. Preserve the cancellation boundary so
-            // preview/synthesis callers do not show a false connection error.
-            throw CancellationError()
-        } catch let error as URLError where error.code == .timedOut {
-            throw ServiceAPIClientError.requestTimedOut
-        } catch {
-            throw ServiceAPIClientError.requestFailed
+    private func execute(_ request: URLRequest) async throws -> ServiceRawHTTPResponse {
+        let response = try await transport.execute(request)
+        if (200..<300).contains(response.metadata.statusCode)
+            || response.metadata.statusCode == 304
+        {
+            return response
         }
+        throw ServiceResponseDecoder.makeError(
+            data: response.data,
+            metadata: response.metadata
+        )
     }
 
-    private func serverError(from data: Data, statusCode: Int) -> ServiceAPIClientError {
-        let payload = try? JSONDecoder().decode(ServiceAPIErrorEnvelope.self, from: data)
-        return .server(
-            code: payload?.error.code ?? "http_\(statusCode)",
-            message: payload?.error.message ?? "SpeechRail 服务请求失败",
-            retryable: payload?.error.retryable ?? (statusCode >= 500)
-        )
+    private func conditionalHeaders(_ etag: String?) -> [String: String] {
+        guard let etag, !etag.isEmpty else { return [:] }
+        return [HTTPHeaderNames.ifNoneMatch: etag]
     }
 }
 
 extension ServiceAPIClient:
     ServiceDiagnosticsClient,
     SpeechRailCreatorClient,
-    ServiceModelCapabilityClient
+    ServiceModelCapabilityClient,
+    ServiceCapabilityDiscoveryClient
 {}
 
 private struct CreatorVoiceListResponse: Decodable {
@@ -603,14 +659,4 @@ private struct UpdateVoiceRequestBody: Encodable {
         try container.encodeIfPresent(instruction, forKey: .instruction)
         try container.encodeIfPresent(seed, forKey: .seed)
     }
-}
-
-private struct ServiceAPIErrorEnvelope: Decodable {
-    let error: ServiceAPIError
-}
-
-private struct ServiceAPIError: Decodable {
-    let code: String
-    let message: String
-    let retryable: Bool?
 }

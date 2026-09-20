@@ -275,7 +275,7 @@ public enum ServiceResponseDecoder {
         )
     }
 
-    private static func makeError(
+    public static func makeError(
         data: Data,
         metadata: ServiceResponseMetadata
     ) -> ServiceAPIClientError {
