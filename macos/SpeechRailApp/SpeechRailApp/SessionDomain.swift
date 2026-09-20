@@ -13,6 +13,7 @@ public enum SessionKind: String, CaseIterable, Identifiable, Codable, Sendable {
     case assistant
     case meeting
     case captions
+    case teleprompter
 
     public var id: String { rawValue }
 
@@ -21,6 +22,7 @@ public enum SessionKind: String, CaseIterable, Identifiable, Codable, Sendable {
         case .assistant: "语音助手"
         case .meeting: "会议助手"
         case .captions: "实时字幕"
+        case .teleprompter: "AI 提词器"
         }
     }
 
@@ -30,6 +32,7 @@ public enum SessionKind: String, CaseIterable, Identifiable, Codable, Sendable {
         case .assistant: "语音助手"
         case .meeting: "会议助手"
         case .captions: "实时字幕"
+        case .teleprompter: "AI 提词器"
         }
     }
 
@@ -38,6 +41,7 @@ public enum SessionKind: String, CaseIterable, Identifiable, Codable, Sendable {
         case .assistant: "message.circle"
         case .meeting: "person.2"
         case .captions: "captions.bubble"
+        case .teleprompter: "text.bubble"
         }
     }
 
@@ -46,8 +50,21 @@ public enum SessionKind: String, CaseIterable, Identifiable, Codable, Sendable {
         case .assistant: .assistant
         case .meeting: .meeting
         case .captions: .captions
+        case .teleprompter: .teleprompter
         }
     }
+
+    public var persistencePolicy: SessionPersistencePolicy {
+        switch self {
+        case .teleprompter: .ephemeral
+        case .assistant, .meeting, .captions: .persistent
+        }
+    }
+}
+
+public enum SessionPersistencePolicy: String, Codable, Sendable {
+    case persistent
+    case ephemeral
 }
 
 // MARK: - 库里的取值域

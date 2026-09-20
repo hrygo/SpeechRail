@@ -579,6 +579,7 @@ public struct SessionLibraryView: View {
         case .assistant: "还没有对话记录"
         case .meeting: "还没有会议记录"
         case .captions: "还没有字幕记录"
+        case .teleprompter: "提词稿不进入语音记录库"
         }
     }
 
@@ -635,6 +636,8 @@ public struct SessionLibraryView: View {
             "开始会议之后，文字记录会边听边出现；结束后可以生成纪要、改说话人的名字，并导出 Markdown 或 SRT。原始音频不留存。"
         case .captions:
             "字幕带打开之后，看过的字幕会留在这里，可以回看、搜索和导出 SRT。原始音频不留存。"
+        case .teleprompter:
+            "提词器只保存稿件版本和最后位置，不保存原始音频或语音记录。"
         }
     }
 

@@ -1050,6 +1050,35 @@ public enum SpeechRailDesignTokens {
         public static let hoverFeedback = Animation.easeOut(duration: hoverDuration)
         public static let pressFeedback = Animation.easeOut(duration: pressDuration)
     }
+
+    // MARK: 提词器（准备页与独立舞台窗口）
+    //
+    // 新增提词器视觉值只在这里声明；视图不自行散落字号、窗口尺寸或间距。
+    public enum Teleprompter {
+        public static let preparationMinimumHeight: CGFloat = 560
+        public static let stageDefaultWidth: CGFloat = 960
+        public static let stageMinimumWidth: CGFloat = 640
+        public static let stageDefaultHeight: CGFloat = 620
+        public static let stageMinimumHeight: CGFloat = 420
+        public static let stagePadding: CGFloat = Spacing.xl
+        public static let stageSegmentSpacing: CGFloat = Spacing.lg
+        public static let stageStatusSpacing: CGFloat = Spacing.sm
+        public static let stageScriptPointSize: CGFloat = 42
+        public static let stageScriptMinimumPointSize: CGFloat = 28
+        public static let stageScriptMaximumPointSize: CGFloat = 64
+        public static let stageLineSpacing: CGFloat = 8
+        public static let stageDefaultOpacity: Double = 0.94
+        public static let stageMaximumWidth: CGFloat = 1_440
+        public static let stageMinimumFontScale: Double = 0.67
+        public static let stageMaximumFontScale: Double = 1.52
+        public static let stageMinimumOpacity: Double = 0.55
+        public static let stageMaximumOpacity: Double = 1
+        public static let stageMinimumLineSpacing: Double = 0
+        public static let stageMaximumLineSpacing: Double = 24
+        public static let stageMinimumVisibleSegmentCount = 2
+        public static let stageMaximumVisibleSegmentCount = 3
+        public static let stageWindowAutosaveName = "SpeechRail.Teleprompter.Stage"
+    }
 }
 
 private func dynamicColor(

@@ -367,6 +367,8 @@ public struct ControlCenterView: View {
             MeetingView()
         case .captions:
             SessionLibraryView(kind: .captions)
+        case .teleprompter:
+            TeleprompterView()
         case .overview:
             ServiceOverviewView()
         case .monitoring:

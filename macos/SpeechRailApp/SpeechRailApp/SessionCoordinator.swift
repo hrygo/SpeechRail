@@ -311,8 +311,9 @@ public final class SessionCoordinator {
         }
     }
 
-    /// 首个 PCM 已发送：库里的行此刻才存在（由能力层调 `createSession` 之后回报）。
-    public func sessionDidStartRecording(id: String) {
+    /// 首个 PCM 已发送：持久化会话此刻才有库里的行（由能力层调 `createSession` 之后回报）。
+    /// 提词器传入 `nil`，只进入实时 recording 占用，不创建 `SessionStore` 记录。
+    public func sessionDidStartRecording(id: String? = nil) {
         guard occupancy != nil else { return }
         activeSessionID = id
         phase = .recording

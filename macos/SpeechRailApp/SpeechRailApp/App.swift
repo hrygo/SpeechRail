@@ -17,6 +17,9 @@ struct SpeechRailApp: App {
     /// 两者都不在启动时占设备：`⌘⇧L` 或页面上的「打开字幕带」按下去才拿麦克风。
     @State private var caption: CaptionSession
     @State private var captionBand: CaptionBandWindowController
+    @State private var teleprompter: TeleprompterSession
+    @State private var teleprompterSettings: TeleprompterStageSettings
+    @State private var teleprompterStage: TeleprompterStageWindowController
     /// 语音助手的会话层（`SESSIONS-SPEC` §12 阶段 5）：麦克风 → ASR → Responses → TTS。
     @State private var assistant: AssistantSession
     /// 会议助手的会话层（§12 阶段 6）：多路来源 → ASR → 分人 → 纪要。
@@ -140,6 +143,47 @@ struct SpeechRailApp: App {
         let coordinator = SessionCoordinator(store: SessionStore())
         let captionSession = CaptionSession(coordinator: coordinator)
         let sessionPreferences = SessionPreferences()
+        let teleprompterStore: TeleprompterStore
+#if DEBUG
+        if isUITest {
+            do {
+                teleprompterStore = try Self.makeUITestTeleprompterStore()
+            } catch {
+                fatalError("Unable to initialize isolated UI test teleprompter store")
+            }
+        } else {
+            do {
+                teleprompterStore = try TeleprompterStore()
+            } catch {
+                fatalError("Unable to initialize teleprompter store")
+            }
+        }
+#else
+        do {
+            teleprompterStore = try TeleprompterStore()
+        } catch {
+            fatalError("Unable to initialize teleprompter store")
+        }
+#endif
+        let llmProvider = LLMProvider()
+        let teleprompterSession = TeleprompterSession(
+            coordinator: coordinator,
+            store: teleprompterStore
+        )
+        teleprompterSession.aiClient = TeleprompterAIClient { prompt in
+            guard sessionPreferences.llmConfiguration.isConfigured,
+                  !sessionPreferences.llmConfiguration.embedsCredential else {
+                throw LLMError.notConfigured
+            }
+            return try await llmProvider.complete(
+                configuration: sessionPreferences.llmConfiguration,
+                messages: [LLMMessage(role: .user, text: prompt)],
+                apiKey: LLMKeychain.load(),
+                maxOutputTokens: 4000,
+                textFormat: ["type": "json_object"],
+                timeout: 45
+            )
+        }
         let assistantSession = AssistantSession(coordinator: coordinator)
         assistantSession.preferences = { sessionPreferences }
         assistantSession.realtimeModelRevision = { [weak appModel] voiceID in
@@ -203,6 +247,24 @@ struct SpeechRailApp: App {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
         }
+        teleprompterSession.serviceReadiness = { [weak appModel] in
+            do {
+                let readiness = try await discoveryClient.fetchReadiness()
+                guard readiness.ready else {
+                    return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
+                }
+                return .ready(
+                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                )
+            } catch {
+                return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
+            }
+        }
+        let teleprompterSettings = TeleprompterStageSettings()
+        let teleprompterStage = TeleprompterStageWindowController(
+            session: teleprompterSession,
+            settings: teleprompterSettings
+        )
         // 会议助手的接线（§12 阶段 6）。它与字幕共用分人那条链路，差别在来源与纪要，
         // 所以这里只接三件它自己不认识的事：服务就绪判定、新会话预填值、来源断了的出口。
         let meetingSession = MeetingSession(coordinator: coordinator)
@@ -230,6 +292,8 @@ struct SpeechRailApp: App {
                 try await assistantSession.beginCapture()
             case .meeting:
                 try await meetingSession.beginCapture()
+            case .teleprompter:
+                try await teleprompterSession.beginCapture()
             }
         }
         coordinator.stopper = { kind in
@@ -240,6 +304,8 @@ struct SpeechRailApp: App {
                 await assistantSession.stopCapture()
             case .meeting:
                 await meetingSession.stopCapture()
+            case .teleprompter:
+                await teleprompterSession.stopCapture()
             }
         }
         // 「结束当前会话…」（菜单栏 `⌘⇧.` / 守卫确认之后）走会议自己的收尾。
@@ -252,6 +318,9 @@ struct SpeechRailApp: App {
         _navigation = State(initialValue: navigationState)
         _session = State(initialValue: coordinator)
         _caption = State(initialValue: captionSession)
+        _teleprompter = State(initialValue: teleprompterSession)
+        _teleprompterSettings = State(initialValue: teleprompterSettings)
+        _teleprompterStage = State(initialValue: teleprompterStage)
         _assistant = State(initialValue: assistantSession)
         _meeting = State(initialValue: meetingSession)
         _preferences = State(initialValue: sessionPreferences)
@@ -275,6 +344,15 @@ struct SpeechRailApp: App {
             try store.save(work, audioData: UITestAudioFactory.silentWAV)
         }
         return store
+    }
+
+    @MainActor
+    private static func makeUITestTeleprompterStore() throws -> TeleprompterStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SpeechRailUITests", isDirectory: true)
+            .appendingPathComponent("Teleprompter", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        return try TeleprompterStore(directoryURL: directory)
     }
 #endif
 
@@ -335,6 +413,9 @@ struct SpeechRailApp: App {
                 .environment(navigation)
                 .environment(session)
                 .environment(caption)
+                .environment(teleprompter)
+                .environment(teleprompterSettings)
+                .environment(teleprompterStage)
                 .environment(assistant)
                 .environment(meeting)
                 .environment(preferences)
@@ -462,10 +543,16 @@ struct SpeechRailCommands: Commands {
         CommandGroup(after: .toolbar) {
             Divider()
             ForEach(AppRoute.allCases, id: \.self) { route in
-                Button(route.title) {
-                    navigation.request(route)
+                if let shortcut = Self.shortcut(for: route) {
+                    Button(route.title) {
+                        navigation.request(route)
+                    }
+                    .keyboardShortcut(shortcut)
+                } else {
+                    Button(route.title) {
+                        navigation.request(route)
+                    }
                 }
-                .keyboardShortcut(Self.shortcut(for: route))
             }
 
             Divider()
@@ -499,10 +586,11 @@ struct SpeechRailCommands: Commands {
 
     /// 表里必须覆盖每一条路由；缺一条就退回 ⌘1，这会与「配音台」撞键——
     /// 所以缺项要当成缺陷来修，而不是靠这里的兜底悄悄过去。
-    private static func shortcut(for route: AppRoute) -> KeyboardShortcut {
+    private static func shortcut(for route: AppRoute) -> KeyboardShortcut? {
+        if route == .teleprompter { return nil }
         guard let entry = routeShortcuts[route] else {
             assertionFailure("路由 \(route.rawValue) 没有登记快捷键")
-            return KeyboardShortcut("1", modifiers: .command)
+            return nil
         }
         return KeyboardShortcut(entry.key, modifiers: entry.modifiers)
     }

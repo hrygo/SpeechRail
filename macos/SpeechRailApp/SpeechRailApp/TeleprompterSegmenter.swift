@@ -95,9 +95,8 @@ public enum TeleprompterSegmenter {
                 offsetBy: maxCharactersPerSegment,
                 limitedBy: range.upperBound
             ) ?? range.upperBound
-            let boundedEnd = end == range.upperBound ? end : end
-            result.append(start..<boundedEnd)
-            start = boundedEnd
+            result.append(start..<end)
+            start = end
             while start < range.upperBound && sourceText[start].isWhitespace {
                 start = sourceText.index(after: start)
             }

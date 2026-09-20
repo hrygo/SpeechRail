@@ -44,6 +44,7 @@ public enum SessionExportFormat: String, CaseIterable, Identifiable, Sendable {
         case .meeting: .markdown
         case .captions: .srt
         case .assistant: .plainText
+        case .teleprompter: .plainText
         }
     }
 }

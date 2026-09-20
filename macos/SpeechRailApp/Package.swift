@@ -81,6 +81,7 @@ let package = Package(
                 "TeleprompterAligner.swift",
                 "TeleprompterAnalysis.swift",
                 "TeleprompterStore.swift",
+                "TeleprompterFollowController.swift",
             ]
         ),
         .testTarget(
