@@ -1092,6 +1092,19 @@ public enum SpeechRailDesignTokens {
         public static let segmentOpacityCurrent: Double = 1.0
         public static let segmentOpacityNext: Double = 0.60
         public static let segmentOpacityPrevious: Double = 0.35
+        /// 首屏欢迎工作台：范例卡片最小宽度与图标尺寸
+        public static let welcomeIconSize: CGFloat = 36
+        public static let welcomeTemplateMinimumWidth: CGFloat = 200
+        /// 计时试读窗口尺寸
+        public static let trialReadingSheetWidth: CGFloat = 560
+        public static let trialReadingSheetHeight: CGFloat = 480
+        /// 内容范围选择窗口尺寸
+        public static let contentSelectionSheetWidth: CGFloat = 620
+        public static let contentSelectionSheetHeight: CGFloat = 540
+        /// 审阅对照分栏最小宽度
+        public static let diffColumnMinimumWidth: CGFloat = 320
+        /// 待确认事项提示图标尺寸
+        public static let reviewBadgeSize: CGFloat = 16
     }
 }
 
