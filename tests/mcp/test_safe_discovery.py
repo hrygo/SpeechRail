@@ -10,7 +10,7 @@ from speechrail.mcp.client import SpeechRailClient, SpeechRailError
 from speechrail.mcp.tools import describe
 
 
-def test_mcp_legacy_voice_projection_does_not_leak_source_or_nested_details() -> None:
+def test_mcp_voice_projection_does_not_leak_source_or_nested_details() -> None:
     async def run():
         client = SpeechRailClient(transport=httpx.MockTransport(lambda request: httpx.Response(
             200, json={"data": [{
@@ -32,7 +32,7 @@ def test_mcp_legacy_voice_projection_does_not_leak_source_or_nested_details() ->
 
 
 @pytest.mark.parametrize("status", [401, 503])
-def test_capability_auth_and_storage_failures_are_not_legacy_fallback(status: int) -> None:
+def test_capability_auth_and_storage_failures_propagate(status: int) -> None:
     async def run():
         client = SpeechRailClient(transport=httpx.MockTransport(lambda req: httpx.Response(
             status, json={"error": {"code": "test_error", "message": "safe"}},
@@ -45,8 +45,59 @@ def test_capability_auth_and_storage_failures_are_not_legacy_fallback(status: in
     asyncio.run(run())
 
 
-def test_describe_preserves_atomic_effective_snapshot_separate_from_legacy_observations() -> None:
-    snapshot = {"schema_version": "effective_capabilities_v1", "snapshot_id": "e", "voices": []}
+@pytest.mark.parametrize("status", [404, 405])
+def test_capability_route_is_required(status: int) -> None:
+    async def run():
+        client = SpeechRailClient(
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(status, json={"detail": "Not Found"})
+            )
+        )
+        try:
+            with pytest.raises(SpeechRailError) as excinfo:
+                await client.fetch_capabilities()
+            assert excinfo.value.status == status
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_unknown_capability_schema_is_rejected() -> None:
+    async def run():
+        client = SpeechRailClient(
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(
+                    200,
+                    json={"schema_version": "effective_capabilities_v2"},
+                )
+            )
+        )
+        try:
+            with pytest.raises(SpeechRailError) as excinfo:
+                await client.fetch_capabilities()
+            assert excinfo.value.code == "invalid_capability_schema"
+            assert excinfo.value.retryable is False
+        finally:
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+def test_describe_uses_atomic_effective_snapshot_without_legacy_fields() -> None:
+    snapshot = {
+        "schema_version": "effective_capabilities_v1",
+        "snapshot_id": "e",
+        "voices": [
+            {
+                "id": "effective_voice",
+                "name": "Effective voice",
+                "mode": "clone",
+                "available": True,
+                "voice_revision": "vr_" + "a" * 32,
+            }
+        ],
+    }
     def handler(request):
         if request.url.path == "/v1/speechrail/capabilities":
             return httpx.Response(200, json=snapshot)
@@ -58,7 +109,10 @@ def test_describe_preserves_atomic_effective_snapshot_separate_from_legacy_obser
         try:
             result = await describe(client)
             assert result["effective_capabilities"] == snapshot
-            assert result["legacy_discovery_consistency"] == "independent_reads"
+            assert result["voices"][0]["id"] == "effective_voice"
+            assert "legacy_voices" not in result
+            assert "voice_discovery_source" not in result
+            assert "legacy_discovery_consistency" not in result
         finally:
             await client.aclose()
     asyncio.run(run())

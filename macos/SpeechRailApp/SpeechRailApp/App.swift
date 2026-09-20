@@ -188,6 +188,13 @@ struct SpeechRailApp: App {
         }
         let assistantSession = AssistantSession(coordinator: coordinator)
         assistantSession.preferences = { sessionPreferences }
+        assistantSession.realtimeVoiceRevision = { [weak appModel] voiceID in
+            SpeechRailCapabilityRevisionSelector.voiceRevision(
+                for: voiceID,
+                in: appModel?.effectiveCapabilities,
+                operation: "realtime_speech"
+            )
+        }
         assistantSession.realtimeModelRevision = { [weak appModel] voiceID in
             guard
                 let snapshot = appModel?.effectiveCapabilities,
@@ -833,7 +840,12 @@ private struct UITestCreatorClient: SpeechRailCreatorClient {
         return voice
     }
 
-    func createSpeech(text: String, voiceID: String, speed: Double) async throws -> Data {
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
         if ProcessInfo.processInfo.arguments.contains("--ui-test-slow-voice-preview") {
             try await Task.sleep(for: .seconds(5))
         }

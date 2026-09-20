@@ -134,6 +134,7 @@ Sona 是专为本地高私密环境打造的实时双工会议助理，通过 `/
 - **WebSocket URL**：`ws://127.0.0.1:8201/v1/realtime`
 - **核心能力**：current-only 全双工 ASR、Server VAD 事实与调用方驱动的流式 TTS。连续 native diarization 未通过独立 gate 时不会广播；客户端应先读取 Realtime capability。该分人扩展仅在支持分人的档位（`balanced`/`quality`）可用，`light` 不声明。
 - **架构权责**：Sona 负责麦克风音频采集、会话状态机、LLM/工具/历史、播放队列和 barge-in 决策；SpeechRail 只接收 PCM、交付 ASR/VAD/匿名分人事实，并在收到 `speechrail.tts.create` 后渲染音频。
+- **音色一致性**：需要跨句或跨请求保持同一音色时，Sona 应从同一份 effective capability snapshot 复制 `voice_revision`，在 Realtime `speechrail.tts.create` 中发送 `expected_voice_revision`；不可用时省略 pin，不把音色名称当作版本身份。
 
 ### 3.2 [Open-WebUI 个人 AI 工作台](https://github.com/open-webui/open-webui)
 在 Open-WebUI 的管理员设置（Admin Settings -> Audio）中配置：
@@ -204,6 +205,12 @@ curl -X POST http://127.0.0.1:8201/v1/audio/speech \
   }' \
   --output test.mp3
 ```
+
+上面的最小 TTS 请求适合一次性验证。若调用方需要跨请求保持同一音色，应先读取
+`GET /v1/speechrail/capabilities`，从同一份 snapshot 复制 `voice_revision` 与 TTS model 的
+`catalog_revision`，分别发送 `SpeechRail-Expected-Voice-Revision` 和
+`SpeechRail-Expected-Model-Revision`。Realtime 的 `speechrail.tts.create` 使用同样的
+`expected_voice_revision`；revision 不可用时省略 pin，不要从 voice 名称推断版本。
 
 ## 5. 文件、播报与实时字幕的自检和恢复
 

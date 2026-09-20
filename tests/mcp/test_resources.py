@@ -69,12 +69,22 @@ def _health() -> dict[str, Any]:
     }
 
 
+def _capabilities() -> dict[str, Any]:
+    return {
+        "schema_version": "effective_capabilities_v1",
+        "snapshot_id": "quality-resources",
+        "profile": "quality",
+        "models": {"tts": {"variant": "voice_design"}},
+        "voices": _voices(),
+    }
+
+
 def _handler(
     json_response: Callable[..., httpx.Response],
 ) -> Callable[[httpx.Request], httpx.Response]:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "GET" and request.url.path == "/v1/speechrail/capabilities":
-            return httpx.Response(404, json={"detail": "Not Found"})
+            return json_response(_capabilities())
         path = request.url.path
         if request.method == "GET" and path == "/v1/models":
             return json_response({"object": "list", "data": _models()})
@@ -119,7 +129,6 @@ def test_capabilities_resource_returns_describe_json(
     assert payload["readiness"] == {"asr": True, "tts": True, "diarization": True}
     assert [request.url.path for request in requests] == [
         "/v1/models",
-        "/v1/voices",
         "/health",
         "/v1/speechrail/capabilities",
     ]

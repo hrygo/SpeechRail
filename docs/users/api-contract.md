@@ -2,7 +2,7 @@
 title: "SpeechRail 公共 API 契约手册"
 status: active
 audience: "应用开发者、客户端工程师、API 消费者"
-version: "3.0.0"
+version: "3.1.0"
 date: 2026-09-20
 ---
 
@@ -194,11 +194,38 @@ model revision 必须等于当前有效 TTS artifact 的 catalog revision，未�
 `409 model_revision_conflict`，不会启动该次合成。未携带这些扩展 Header 的旧请求保持原有
 alias/模型选择行为。
 
+### 4.2 跨请求音色一致性控制
+
+推荐客户端先读取一次 `GET /v1/speechrail/capabilities`，选择 `available=true` 的 voice，
+再在每个需要一致性的 `POST /v1/audio/speech` 请求中发送：
+
+| Header | 来源 | 失败语义 |
+|---|---|---|
+| `SpeechRail-Expected-Voice-Revision` | `voices[].voice_revision`，形如 `vr_<32 hex>` | 版本过期或撤销时 `409 voice_revision_conflict` / `voice_revoked` |
+| `SpeechRail-Expected-Model-Revision` | `voices[].model.catalog_revision`，40 位 hex | 当前 artifact 未知或变化时 `409 model_revision_conflict` |
+
+服务端会在首个 PCM 前完成比较并占用对应的 voice lease；它不会因 pin 失败而静默改用另一
+音色、另一模型或最新 revision。`voice_revision=null` 且 `voice_identity_assurance=legacy`
+的条目没有可复制的不可变音色身份，只能按普通可用性路由。revision pin 约束版本绑定，
+不等价于跨文本说话人相似度、自然度或长时稳定性的质量验收。
+
+`speechrail-mcp` 对同一流程提供自动化：当 effective snapshot 可用时，`synthesize` 自动
+转发上述两个 Header；调用方也可用工具参数 `expected_voice_revision` /
+`expected_model_revision` 显式指定。冲突时应重新 `describe()`，由业务决定继续使用旧版、
+回滚到历史 revision，还是切换音色。
+
 Realtime 客户端可在 `transcription_session.update.session.speechrail` 中使用
 `model_revision: {"expected": "<40-char-hex>"}` 绑定同一 catalog artifact；服务端在
 `transcription_session.updated` 回显匹配 revision，并在首个 PCM 前以 `model_revision_conflict` 拒绝未知或
 不匹配的 revision。该扩展只证明配置 catalog 身份，不等同于权重内容 hash 或 worker 重启后
 身份证明。
+
+调用方提交 `speechrail.tts.create` 时，还可在事件中携带
+`expected_voice_revision: "vr_..."`。Native App 和其他需要跨请求音色一致性的客户端应从同一份
+effective capability snapshot 读取当前 voice 的 `voice_revision`，并在换音色时同步更新 voice 与
+revision；revision 缺失时保持字段省略，不从 voice 名称推断。服务端在该次 TTS render 的首个音频
+交付前校验 voice pin，冲突或撤销时返回稳定的 `voice_revision_conflict` / `voice_revoked`，不会
+静默改用另一音色。
 
 客户端不能提交任意 purpose 或绝对时间戳来制造新的优先级。服务仍以同一个
 `ResourceGovernor` 为唯一准入源：同一 TTS capability lane 串行，不同 lane 只有在资源预算
@@ -217,7 +244,7 @@ RTF。资源快照中的 `physical_memory_bytes`、`memory_budget_bytes` 与完�
 `abort_fallback` 与 `reload`。它们用于比较同一 runtime 与 profile 下的实现路径，不含文本、
 音色 ID、音频、路径或实际音质结论。
 
-### 4.2 可选 TTS chunk timing sidecar
+### 4.3 可选 TTS chunk timing sidecar
 
 需要字幕高亮、粗粒度口型或后续对齐的客户端可显式发送：
 

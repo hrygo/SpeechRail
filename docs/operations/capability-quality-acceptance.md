@@ -18,9 +18,14 @@ SpeechRail 是单机语音基座。诊断只报告当前可用能力和可复现
 
 `GET /readyz` 仍仅表示 ASR 或 TTS 至少一个可用；成功响应中的 `realtime_vad` 是独立的能力诊断，不能把顶层 `ready=true` 当作 `server_vad` 已可用。`backend_busy`、`queue_full` 和 `backend_timeout` 是某次请求的稳定错误，调用方应依据 `retryable` 和 `retry_after` 退避；不要把瞬时忙碌当作全局健康状态。
 
-### 当前 v2.0.3 运行快照
+### 历史 v2.0.3 运行快照（2026-09-09；证据）
 
-当前 quality managed release 的有效组合为：
+本节保留当时 quality managed release 的运行证据，不代表当前服务状态。源码 release 当前为
+`3.0.0`；managed runtime 的 active release、profile、health 和 readiness 必须在验收时通过
+本节前述 `service status`、`preflight` 与公开端点重新核实，不能由历史快照或 `/readyz=200`
+推断当前质量通过。
+
+当时 quality managed release 的有效组合为：
 
 | 能力 | 当前事实 |
 |---|---|

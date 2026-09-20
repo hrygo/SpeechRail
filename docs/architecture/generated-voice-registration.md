@@ -2,8 +2,8 @@
 title: "生成式音色注册：VoiceDesign 参考到 Base 音色"
 status: active
 audience: "SpeechRail / Sona 维护者与客户端工程师"
-version: "1.0"
-date: 2026-09-12
+version: "1.1"
+date: 2026-09-20
 ---
 
 # 生成式音色注册
@@ -66,7 +66,7 @@ ID 冲突为 409 `voice_already_exists`。目标 ID 检查会在 registry 提交
 参考不合格为 400 `voice_quality_reject`，内容不匹配为 400 `transcript_mismatch`，
 畸形或超限输出为 502 `output_invalid`。异常响应不带 vendor 原始正文或路径。
 
-## 来源信息不是完整 revision 系统
+## 来源记录与 revision 状态
 
 新音色可包含 `creation`，其类型为不可变 `VoiceCreation`：
 
@@ -77,8 +77,10 @@ ID 冲突为 409 `voice_already_exists`。目标 ID 检查会在 registry 提交
 
 registry 在写入前核对参考音频及文本 hash。旧记录可缺省 creation，不自动重写；
 无效的新 metadata 会让 registry fail-closed。hash 用于可追溯性，不是密码学签名，
-也不替代独立说话人向量或完整多版本历史。Base 仍按 Quality catalog 路由，
-后端升级时的音色迁移与模型兼容策略需要另行显式验收。
+也不替代独立说话人向量或声学质量证据。当前 registry 已持久化有界 VoiceRevision 历史，
+并提供 revision list、CAS update、rollback、revoke 与 delete；`creation` 仍是来源元数据，
+不能单独证明跨文本 speaker similarity。Base 仍按 Quality catalog 路由，后端升级时的旧资产
+迁移与模型兼容策略需要另行显式验收。
 
 ## Sona 对接与回退
 

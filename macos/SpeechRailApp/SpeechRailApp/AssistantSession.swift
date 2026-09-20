@@ -238,6 +238,9 @@ public final class AssistantSession {
     }
     /// 音色被拒时的可用内置声音列表（给可读结论用，§9 第 14 行）。
     public var availableVoices: @MainActor () -> [String] = { [] }
+    /// 仅从同一代 capability snapshot 读取当前 voice revision；未知时保持 nil，
+    /// 不从 voice 名称或本地时间推断 revision。
+    public var realtimeVoiceRevision: @MainActor (String?) -> String? = { _ in nil }
     /// 仅从同一代 capability snapshot 读取 TTS catalog revision；未知时保持 nil，
     /// 让服务按普通协商处理，不从模型名或本地时间推断 revision。
     public var realtimeModelRevision: @MainActor (String?) -> String? = { _ in nil }
@@ -326,7 +329,10 @@ public final class AssistantSession {
         voiceID = voice
         guard let client else { return }
         do {
-            try await client.updateVoice(voice)
+            try await client.updateVoice(
+                voice,
+                expectedVoiceRevision: realtimeVoiceRevision(voice)
+            )
             try? await coordinator.noteVoiceChange(
                 atOrdinal: currentOrdinal + 1,
                 // 名字一起存：库里那一列是 `id|name`，音色改名或删除之后
@@ -484,6 +490,7 @@ public final class AssistantSession {
             voice: voiceID,
             apiKey: serviceKey,
             expectedModelRevision: realtimeModelRevision(voiceID),
+            expectedVoiceRevision: realtimeVoiceRevision(voiceID),
             renderReceiptsEnabled: realtimeRenderReceiptsEnabled(voiceID),
             callerTTSEnabled: true
         )

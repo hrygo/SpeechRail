@@ -1,13 +1,18 @@
 openapi: 3.1.0
 info:
   title: SpeechRail API
-  version: 3.0.0
+  version: 3.1.0
   description: |
     Local-first shared ASR and TTS service.
 
     OpenAI-compatible operations remain under /v1/audio/*.
     SpeechRail-only management and strong-consistency extensions use
     /v1/speechrail/* or optional SpeechRail-* request headers.
+
+    Effective capability discovery is a safe, atomic selection surface; it is
+    not itself an inference lease. Clients that need cross-request voice
+    consistency should copy voice_revision and the selected model's
+    catalog_revision into the expected revision headers on /v1/audio/speech.
 
     The /v1/audio/transcriptions endpoint follows the OpenAI-compatible
     multipart shape so existing SDK clients can be reused. The realtime
@@ -1187,6 +1192,179 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorBody'
+    patch:
+      operationId: updateVoiceRevisioned
+      tags: [speech]
+      summary: CAS-update a custom voice and create a new immutable revision
+      description: |
+        Updates one or more mutable custom-voice fields only when
+        expected_revision still names the current alias target. The operation
+        never mutates an existing revision. System voices and immutable clone
+        reference data cannot be updated.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceRevisionUpdateRequest'
+      responses:
+        '200':
+          description: Updated voice alias and current immutable revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceRevisionMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Voice update is unsupported for this profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '404':
+          description: Voice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: Current voice alias no longer points at expected_revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/speechrail/voices/{voice_id}/revisions:
+    get:
+      operationId: listVoiceRevisions
+      tags: [speech]
+      summary: List safe immutable voice revision metadata
+      description: Does not expose reference audio, private instructions or local paths.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Immutable revision metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceRevisionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/speechrail/voices/{voice_id}/rollback:
+    post:
+      operationId: rollbackVoiceRevision
+      tags: [speech]
+      summary: CAS-rollback a voice alias to a non-revoked revision
+      description: The alias changes atomically; existing synthesis leases are not interrupted.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VoiceRollbackRequest'
+      responses:
+        '200':
+          description: Rolled-back voice alias and current immutable revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceRevisionMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice or target revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '409':
+          description: Current revision conflict or target revision is revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
+  /v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke:
+    post:
+      operationId: revokeVoiceRevision
+      tags: [speech]
+      summary: Revoke one exact voice revision for future synthesis
+      description: Revocation does not kill already acquired synthesis leases.
+      security:
+        - BearerAuth: []
+        - {}
+      parameters:
+        - name: voice_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: revision
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^vr_[0-9a-f]{32}$'
+      responses:
+        '200':
+          description: Revoked voice revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceRevisionMutation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Voice revision not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorBody'
+        '503':
+          $ref: '#/components/responses/VoiceStoreUnavailable'
 components:
   securitySchemes:
     BearerAuth:
@@ -1331,6 +1509,77 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/SafeVoiceEntry'
+    VoiceRevisionUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision]
+      description: At least one of name, instruction or seed must accompany expected_revision.
+      properties:
+        expected_revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        name:
+          type: string
+          minLength: 1
+        instruction:
+          type: string
+          minLength: 1
+        seed:
+          type: integer
+          minimum: 0
+          maximum: 4294967295
+    VoiceRollbackRequest:
+      type: object
+      additionalProperties: false
+      required: [target_revision, expected_revision]
+      properties:
+        target_revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        expected_revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+    VoiceRevisionMutation:
+      type: object
+      required: [id, voice_revision, revoked]
+      properties:
+        id:
+          type: string
+        voice_revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        mode:
+          type: [string, 'null']
+          enum: [system, instruction, clone, null]
+        revoked:
+          type: boolean
+    VoiceRevisionEntry:
+      type: object
+      required: [revision, current, mode, revoked, created_at]
+      properties:
+        revision:
+          type: string
+          pattern: '^vr_[0-9a-f]{32}$'
+        current:
+          type: boolean
+        mode:
+          type: string
+          enum: [system, instruction, clone]
+        revoked:
+          type: boolean
+        created_at:
+          type: [string, 'null']
+    VoiceRevisionList:
+      type: object
+      required: [object, data]
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceRevisionEntry'
     EffectiveCapabilitySnapshot:
       type: object
       required: [schema_version, service_instance_epoch, catalog_revision, snapshot_id, profile, models, realtime, voices, operations, guarantees]

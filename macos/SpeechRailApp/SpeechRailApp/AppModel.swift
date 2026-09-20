@@ -321,12 +321,32 @@ public final class AppModel {
         try await creatorClient.fetchVoices()
     }
 
+    private func speechRequestOptions(
+        for voiceID: String,
+        fallbackVoiceRevision: String? = nil
+    ) -> SpeechRailRequestOptions {
+        SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: voiceID,
+            fallbackVoiceRevision: fallbackVoiceRevision,
+            in: effectiveCapabilities
+        )
+    }
+
+    private func speechRequestOptions(for voice: CreatorVoice) -> SpeechRailRequestOptions {
+        speechRequestOptions(for: voice.id, fallbackVoiceRevision: voice.revision)
+    }
+
     public func createSpeech(
         text: String,
         voiceID: String,
         speed: Double
     ) async throws -> Data {
-        try await creatorClient.createSpeech(text: text, voiceID: voiceID, speed: speed)
+        try await creatorClient.createSpeech(
+            text: text,
+            voiceID: voiceID,
+            speed: speed,
+            options: speechRequestOptions(for: voiceID)
+        )
     }
 
     public func createVoicePreview(
@@ -946,7 +966,8 @@ public final class AppModel {
             let data = try await creatorClient.createSpeech(
                 text: previewText,
                 voiceID: voice.id,
-                speed: speed
+                speed: speed,
+                options: speechRequestOptions(for: voice)
             )
             try Task.checkCancellation()
             // 写入本地内存缓存
@@ -1272,7 +1293,8 @@ public final class AppModel {
             let data = try await creatorClient.createSpeech(
                 text: scriptText,
                 voiceID: voice.id,
-                speed: speed
+                speed: speed,
+                options: speechRequestOptions(for: voice)
             )
             try Task.checkCancellation()
             let workID = "work_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()

@@ -35,7 +35,7 @@
 **Interfaces:**
 
 - `SpeechRailCreatorClient.fetchVoices() async throws -> [CreatorVoice]`
-- `SpeechRailCreatorClient.createSpeech(text:voice:speed:) async throws -> Data`
+- `SpeechRailCreatorClient.createSpeech(text:voiceID:speed:options:) async throws -> Data`
 - `SpeechRailCreatorClient.createVoicePreview(text:instruction:speed:seed:) async throws -> Data`
 - `SpeechRailCreatorClient.registerVoiceDesign(id:name:instruction:referenceText:seed:) async throws -> CreatorVoice`
 - `AudioPlaybackController.play(data:) throws`, `stop()`, `isPlaying`

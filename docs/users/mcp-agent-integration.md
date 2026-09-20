@@ -2,7 +2,7 @@
 title: "SpeechRail MCP 主流 Agent 集成指南"
 status: active
 audience: "Agent 集成工程师、客户端开发者、AI 工具使用者"
-version: "2.0.0"
+version: "2.2.0"
 date: 2026-09-20
 ---
 
@@ -14,6 +14,13 @@ date: 2026-09-20
 >
 > **v1.3.0 变更**（2026-09-13）：补充 Codex 当前 `codex mcp add` / `config.toml` 指引，以及 ChatGPT Web 自定义 MCP App 的远程连接边界。ChatGPT Web 不能直接启动本机 `stdio` 或访问 `127.0.0.1`；本机 SpeechRail 必须通过 `streamable-http` 和受信任的 HTTPS 隧道/网关连接。
 > ChatGPT 的套餐、界面和权限会持续变化，请同时参考 [OpenAI 官方 Developer mode and MCP apps in ChatGPT](https://help.openai.com/en/articles/12584461)。
+
+> **v2.1.0 变更**（2026-09-20）：`synthesize` 使用 effective capability snapshot 自动 pin
+> `voice_revision` 与 model `catalog_revision`；也接受显式 `expected_voice_revision` /
+> `expected_model_revision`，遇到 revision 冲突时重新 `describe()`，不要静默换音色。
+
+> **v2.2.0 变更**（2026-09-20）：MCP 只接受当前 `effective_capabilities_v1` 能力契约；
+> 移除 404/405/未知 schema 的 legacy discovery fallback，以及 `describe()` 的 legacy 输出字段。
 
 > **当前边界（2026-09-20）**：SpeechRail 是无状态 Speech Plane。MCP 只代理 REST 的
 > `describe/transcribe/synthesize/voice/job` 工具；它不创建 Realtime WebSocket handle。
@@ -50,12 +57,29 @@ flowchart LR
 |---|---|---|
 | `describe()` | 能力快照 | **应先调用**：拿档位、readiness、可用音色 |
 | `transcribe` | 转写本地音频 | 支持 `language` / `diarize` / `timestamps` |
-| `synthesize` | 文本合成到文件 | 返回 `audio_path`；默认音色 `serena` |
+| `synthesize` | 文本合成到文件 | 返回 `audio_path`；默认音色 `serena`；自动 pin 可用的 voice/model revision |
 | `preview_voice` | 试听 VoiceDesign 指令 | **仅 `quality` 档** |
 | `create_voice` / `delete_voice` | 注册/删除持久音色 | `delete_voice` 是破坏性操作 |
 | `create_job` / `get_job` / `cancel_job` | 长任务句柄 | 同步调用超时/过长时改用 |
 
 只读资源：`speechrail://capabilities`、`speechrail://voices`、`speechrail://models`。
+
+### 1.2 音色一致性调用顺序
+
+对跨句、跨请求或长对话需要稳定音色的 Agent，采用以下顺序：
+
+1. 调用 `describe()`，使用其必含 effective snapshot 投影中
+   `voices[].available=true` 的条目；记录该条目的 `voice_revision` 和 `model.catalog_revision`。
+2. 调用 `synthesize()`。MCP 会再次读取已知的 effective snapshot，并自动把这两个 revision
+   作为 REST 的 `SpeechRail-Expected-Voice-Revision` / `SpeechRail-Expected-Model-Revision`
+   header 发送；显式传入的 `expected_*` 参数优先。
+3. 使用返回结果中的 `voice_revision` / `model_revision` 记录实际采用的 pin。若服务返回
+   `voice_revision_conflict`、`voice_revoked` 或 `model_revision_conflict`，重新 `describe()`
+   并让调用方决定是否切换版本。
+
+effective capability 路径是 MCP 的当前必需契约。返回 `404/405`、未知 schema 或其他错误时，
+MCP 直接失败，不回退到 `/v1/models` + `/v1/voices`，也不伪造能力快照。`voice_revision=null`
+的 voice 只表示可路由，不是质量或声学身份验收。
 
 ---
 

@@ -89,7 +89,9 @@ final class RealtimeContractTests: XCTestCase {
         XCTAssertEqual(event.type, "speechrail.tts.create")
         XCTAssertEqual(event.requestID, "tts_req_001")
         XCTAssertEqual(event.jsonObject["type"] as? String, "speechrail.tts.create")
+        XCTAssertEqual(event.jsonObject["expected_voice_revision"] as? String, "vr_abc")
         XCTAssertNil(SpeechRailTTSCreate(requestID: "r", text: "hi").jsonObject["voice"])
+        XCTAssertNil(SpeechRailTTSCreate(requestID: "r", text: "hi").jsonObject["expected_voice_revision"])
     }
 
     func testCallerTTSCancelUsesExplicitRequestAndOptionalResponseID() {

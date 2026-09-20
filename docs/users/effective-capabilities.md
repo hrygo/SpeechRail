@@ -26,6 +26,22 @@ date: 2026-09-20
 不可变历史版本和实际渲染回执仍需各自的能力；本接口明确报告
 `inference_version_pin=false`、`admission_reserved=false`。
 
+## 用 revision pin 固定跨请求音色
+
+发现快照本身不产生 lease，也不会把下一次推理自动绑定到某个版本。需要跨句或跨请求保持
+一致时，客户端应把选中条目的 `voice_revision` 与 `model.catalog_revision` 分别复制到
+`POST /v1/audio/speech` 的 `SpeechRail-Expected-Voice-Revision` 和
+`SpeechRail-Expected-Model-Revision`。服务端在首个 PCM 前原子校验：voice revision 过期或
+撤销、model catalog revision 未知或变化，均返回稳定的 `409`，不会静默切换到另一音色或模型。
+
+`speechrail-mcp` 已把这条规则做成工具行为：`describe()` 与 `synthesize()` 必须读取已知的
+`effective_capabilities_v1`；`synthesize` 自动携带两个可验证的 pin；MCP 调用方传入的
+`expected_voice_revision` / `expected_model_revision` 优先。返回结果回显实际采用的 revision，
+便于调用方记录和审计。能力契约缺失或无法识别时，MCP 直接返回契约错误，不回退到独立的旧列表。
+
+这套机制保证的是“绑定到同一个声明版本”，不是声学质量证明；跨文本说话人相似度、自然度与
+长时稳定性仍须使用真实 Base clone runtime 和独立质量基准验收。
+
 `available=true` 是当前配置允许按需服务，不代表已驻留、队列一定可准入或声音质量合格。
 `unsupported` 应拒绝或经用户选择降级，`unknown` 应保守处理，不能等同 supported。
 
@@ -40,21 +56,22 @@ sample rate 描述 PCM 域；容器编码仍可能有其自身约束。HTTP EOF 
 Realtime 的 response.done 也不证明扬声器播放或内容读对。SSML/phoneme、clone 原生表演、
 prepared-reference 条件缓存和精细时间轴，在适配与验收前不得由客户端自行假定支持。
 
-## 最小披露和兼容迁移
+## 最小披露与路由边界
 
 namespaced 能力目录不返回 reference text、本机音频路径、私有 instruction、creation 正文或完整
 quality 调试对象。descriptors 只使用显式系统声明；缺失的 locale/音高/音色族/速度等
 保留 unknown，不根据私有参考推断年龄、性别、族裔或真实身份。
 
-本增量保留 `/v1/voices` 的历史投影，以免破坏现有音色编辑客户端；它仍可能含来源正文，
-**不是最小披露接口，也不存在新增的 owner 权限保证**。自动选音/第三方消费者应迁移
-到 namespaced discovery。未来移除旧字段需要单独的版本迁移，不把 API key 等同于所有来源资料的 owner。
+`/v1/voices` 是独立的列表/详情资源，仍可能含来源正文，**不是最小披露接口，也不存在新增的
+owner 权限保证**。它不参与 MCP 的能力发现、自动选音或原子路由；自动选音和第三方消费者
+必须使用 namespaced discovery。MCP 的安全投影只允许公开选择音色所需字段，不把 API key 等同于
+所有来源资料的 owner。
 
-MCP `describe` 的旧顶层 models/readiness 来自独立读取，明确标记
-`legacy_discovery_consistency=independent_reads`；新增 `effective_capabilities` 保存
-一次 namespaced capability 响应。只有旧服务返回 404/405 或未知 schema 时该字段为空；鉴权和存储故障
-不被悄悄降级掩盖。MCP 的兼容 voice 列表也使用白名单投影，不把 `/v1/voices` 来源正文带入
-Agent 上下文。需要原子路由时使用嵌套快照，而非顶层旧字段拼接。
+MCP `describe` 的顶层 `models` 与 readiness 仍是独立当前观察；`effective_capabilities` 是必需的
+namespaced capability 响应，`voices` 只使用其安全投影，不再输出
+`legacy_discovery_consistency`、`legacy_voices` 或 `voice_discovery_source`。MCP 的独立
+`speechrail://voices` 资源仍使用白名单投影，不把 `/v1/voices` 来源正文带入 Agent 上下文；需要
+原子路由时始终使用嵌套快照。
 
 ## 证据和剩余验收
 

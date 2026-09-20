@@ -1,7 +1,7 @@
 # 音色管理与全局交互统一设计契约
 
 > 状态：active
-> 日期：2026-09-14
+> 日期：2026-09-20
 > 适用范围：SpeechRail macOS 控制面、SpeechRail REST 音色管理接口
 
 ## 背景与已确认事实
@@ -54,20 +54,29 @@ if let apiKey = apiKey {
 
 未配置 key 时仍允许公开的健康/列表读取请求；服务端返回稳定的 `401` 时，UI 显示“本机服务凭据不可用”类安全文案，不显示响应原文中的路径或 secret。
 
-## 音色 CRUD 契约
+## 音色 CRUD 与 revision 契约
 
-现有能力保留：
+兼容的 `/v1` surface 保留：
 
 - `GET /v1/voices`：读取当前服务端音色列表；
+- `GET /v1/voices/{voice_id}`：返回单个服务端音色的完整安全 metadata；
 - `POST /v1/voices/designs`：通过 VoiceDesign 生成并注册 clone 音色；
+- `PATCH /v1/voices/{voice_id}`：兼容的无条件 metadata 更新；
 - `DELETE /v1/voices/{voice_id}`：删除自定义音色，系统音色和 alias 受保护。
 
-新增能力：
+需要把写入绑定到已知不可变版本时，以 namespaced API 为权威：
 
-- `GET /v1/voices/{voice_id}`：返回单个服务端音色的完整安全 metadata；
-- `PATCH /v1/voices/{voice_id}`：原子更新允许修改的 metadata。
+- `GET /v1/speechrail/voices/{voice_id}/revisions`：读取有界 revision 历史；
+- `PATCH /v1/speechrail/voices/{voice_id}`：必须提供 `expected_revision` 的 CAS 更新；
+- `POST /v1/speechrail/voices/{voice_id}/rollback`：以 `target_revision` + `expected_revision` 回滚；
+- `POST /v1/speechrail/voices/{voice_id}/revisions/{revision}/revoke`：撤销指定 revision 的后续使用。
 
-PATCH 请求只接受下列字段，至少提供一个：
+两套入口共享同一 registry。兼容 PATCH 只适用于明确接受普通协商的旧调用方；App 管理面、
+需要跨请求一致性的客户端和自动化工具必须使用 namespaced conditional API，不能把无条件 PATCH
+当作 revision-safe 写入。
+
+两种 PATCH 请求都只接受下列字段，且至少提供一个；namespaced 入口另需提供
+`expected_revision`：
 
 ```json
 {
@@ -83,7 +92,8 @@ PATCH 请求只接受下列字段，至少提供一个：
 - 所有自定义音色都可更新 `name`；
 - `instruction` 与 `seed` 仅对 `mode=instruction` 的自然语言音色开放；
 - `mode=clone` 的 reference audio、`ref_text`、provenance、音频质量和 voice ID 不可修改；
-- 更新使用与创建相同的锁、原子 metadata commit 和验证规则；失败时旧记录保持不变；
+- namespaced 更新使用 CAS、同一 registry 锁和原子 metadata commit；冲突时返回
+  `409 voice_revision_conflict`，失败时旧记录保持不变；
 - API 返回完整更新后的 `VoiceProfile`，不返回绝对音频路径或 secret。
 
 ## App 音色库 UX

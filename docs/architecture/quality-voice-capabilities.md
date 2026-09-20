@@ -2,8 +2,8 @@
 title: "Quality 档音色创造、克隆与稳定化能力架构"
 status: active
 audience: "SpeechRail / Sona 架构师、维护者、音频质量负责人"
-version: "1.2"
-date: 2026-09-13
+version: "1.3"
+date: 2026-09-20
 ---
 
 # Quality 档音色创造、克隆与稳定化能力架构
@@ -145,7 +145,7 @@ quality:
   run_id: ...
 ```
 
-对于 prompt-created voice，`origin=generated`；对于 Sona 录音，`origin=recorded`。两者在完成 Base 稳定化后都可以成为同一种可复用 VoiceRevision。当前 `VoiceProfile.creation` 已为新生成参考记录模型制品/revision、seed、文本/指令/规范音频 hash 和前处理版本，旧记录可缺省该字段。它是来源元数据，并不是完整 revision 历史或声纹相似度证据；上述其余字段与旧资产迁移仍是后续 schema evolution 的目标。
+对于 prompt-created voice，`origin=generated`；对于 Sona 录音，`origin=recorded`。两者在完成 Base 稳定化后都可以成为同一种可复用 VoiceRevision。当前 `VoiceProfile.creation` 已为新生成参考记录模型制品/revision、seed、文本/指令/规范音频 hash 和前处理版本，旧记录可缺省该字段。registry 现已持久化有界 VoiceRevision 历史，并提供 CAS update、rollback、revoke 和 delete；这些 revision 记录用于不可变绑定与并发保护，不等价于声纹相似度或长时稳定性证据。旧资产迁移、跨模型兼容策略和声学身份验收仍需单独完成。
 
 ## 6. Reference conditioning 最佳实践与 Sona 边界
 
@@ -222,9 +222,9 @@ Reference clone 的 speaker identity 和用户录音中的 prosody 并不是同�
 ### Phase C — Prompt voice 稳定化
 
 - 已实现显式 `/v1/voices/designs` 生成/验证 canonical reference，并创建新的 Base-bound clone（不覆盖旧 ID）；
-- 完整 VoiceRevision 历史与已有音色迁移尚未实现；
-- 显式迁移与回滚；
-- 跨文本 speaker similarity 与 ABX 门。
+- VoiceRevision 历史、CAS update、rollback、revoke 与 delete 已由 registry 提供；
+- 已有 legacy 音色的显式迁移与跨模型兼容仍未完成；
+- 跨文本 speaker similarity 与 ABX 门仍是独立的声学验收，不由 revision metadata 代替。
 
 ### Phase D — 专业表达
 

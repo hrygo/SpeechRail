@@ -39,6 +39,8 @@ _MAX_VOICE_NAME = 200
 _MAX_VOICE_INSTRUCTION = 10_000
 _MAX_VOICE_SEED = 2**32 - 1
 _VOICE_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_VOICE_REVISION_RE = re.compile(r"^vr_[0-9a-f]{32}$")
+_MODEL_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_JOB_REF = 1_000
 _SPEED_RANGE = (0.25, 4.0)
 _TTS_OUTPUT_FORMATS = frozenset({"mp3", "wav", "pcm"})
@@ -114,25 +116,11 @@ def _first_tts_model(models: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def _active_profile(models: list[dict[str, Any]]) -> str | None:
-    for entry in models:
-        profile = _text(entry.get("profile"))
-        if profile:
-            return profile
-    return None
-
-
 def _tts_variant(models: list[dict[str, Any]]) -> str | None:
     entry = _first_tts_model(models)
     if entry is None:
         return None
     return _text(entry.get("variant"))
-
-
-def _tts_model_id(models: list[dict[str, Any]]) -> str:
-    entry = _first_tts_model(models)
-    model_id = _text(entry.get("id")) if entry is not None else None
-    return model_id if model_id else _DEFAULT_TTS_MODEL
 
 
 def _derive_tier(*, profile: str | None, variant: str | None) -> str:
@@ -155,10 +143,81 @@ def _find_voice(voices: list[dict[str, Any]], voice: str) -> dict[str, Any] | No
     return None
 
 
+def _effective_voice_projection(effective: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project the safe atomic voice snapshot for agent-facing discovery."""
+    raw_voices = effective.get("voices")
+    if not isinstance(raw_voices, list):
+        return []
+    allowed = {
+        "id",
+        "name",
+        "aliases",
+        "is_default",
+        "is_system",
+        "mode",
+        "available",
+        "availability_reason",
+        "variant",
+        "voice_revision",
+        "voice_identity_assurance",
+        "revoked",
+        "model",
+        "descriptors",
+        "quality_summary",
+        "operations",
+    }
+    result: list[dict[str, Any]] = []
+    for raw in raw_voices:
+        if not isinstance(raw, dict):
+            continue
+        safe = {key: value for key, value in raw.items() if key in allowed}
+        result.append(safe)
+    return result
+
+
+def _effective_tts_variant(effective: dict[str, Any]) -> str | None:
+    models = effective.get("models")
+    if not isinstance(models, dict):
+        return None
+    tts = models.get("tts")
+    return _text(tts.get("variant")) if isinstance(tts, dict) else None
+
+
+def _effective_model_revision(
+    effective: dict[str, Any], entry: dict[str, Any]
+) -> str | None:
+    model = entry.get("model")
+    if isinstance(model, dict):
+        revision = _text(model.get("catalog_revision"))
+        if revision is not None:
+            return revision
+    models = effective.get("models")
+    if not isinstance(models, dict):
+        return None
+    model_key = "tts_clone" if entry.get("mode") == "clone" else "tts"
+    model = models.get(model_key)
+    if not isinstance(model, dict):
+        return None
+    return _text(model.get("catalog_revision"))
+
+
+def _validate_revision_pin(
+    value: str | None,
+    *,
+    field: str,
+    pattern: re.Pattern[str],
+) -> None:
+    if value is not None and pattern.fullmatch(value) is None:
+        raise ToolCallError(
+            code=f"invalid_{field}",
+            message=f"{field} has an invalid format",
+            hint="call describe() and copy the current revision exactly",
+        )
+
+
 async def describe(client: SpeechRailClient) -> dict[str, Any]:
-    """Return current observations plus an atomic capability snapshot."""
+    """Return current observations plus the required atomic capability snapshot."""
     models = await client.fetch_models()
-    voices = await client.fetch_voices()
     health = await client.fetch_health()
     effective = await client.fetch_capabilities()
     variant = _tts_variant(models)
@@ -203,9 +262,8 @@ async def describe(client: SpeechRailClient) -> dict[str, Any]:
             "runner_active": _bool_flag(health.get("job_runner_active")),
         },
         "models": models,
-        "voices": voices,
+        "voices": _effective_voice_projection(effective),
         "effective_capabilities": effective,
-        "legacy_discovery_consistency": "independent_reads",
     }
 
 
@@ -396,6 +454,8 @@ async def synthesize(
     voice: str = "serena",
     output_format: str = "mp3",
     speed: float = 1.0,
+    expected_voice_revision: str | None = None,
+    expected_model_revision: str | None = None,
 ) -> dict[str, Any]:
     """Synthesize ``text`` with ``voice`` into a local audio file.
 
@@ -424,19 +484,53 @@ async def synthesize(
             code="invalid_speed",
             message=f"speed must be between {_SPEED_RANGE[0]} and {_SPEED_RANGE[1]}",
         )
-    models = await client.fetch_models()
-    voices = await client.fetch_voices()
-    entry = _find_voice(voices, voice)
-    if entry is not None:
-        _enforce_available_voice(
-            entry, voice, variant=_tts_variant(models), profile=_active_profile(models)
+    _validate_revision_pin(
+        expected_voice_revision,
+        field="voice_revision",
+        pattern=_VOICE_REVISION_RE,
+    )
+    _validate_revision_pin(
+        expected_model_revision,
+        field="model_revision",
+        pattern=_MODEL_REVISION_RE,
+    )
+
+    effective = await client.fetch_capabilities()
+    raw_voices = effective.get("voices")
+    effective_voices = (
+        [entry for entry in raw_voices if isinstance(entry, dict)]
+        if isinstance(raw_voices, list)
+        else []
+    )
+    entry = _find_voice(effective_voices, voice)
+    if entry is None:
+        raise ToolCallError(
+            code="voice_not_found",
+            message=f"voice {voice!r} is not present in the effective capability snapshot",
+            hint="call describe() and choose a voice from voices",
         )
+    profile = _text(effective.get("profile"))
+    variant = _effective_tts_variant(effective)
+    _enforce_available_voice(entry, voice, variant=variant, profile=profile)
+    snapshot_voice_revision = _text(entry.get("voice_revision"))
+    snapshot_model_revision = _effective_model_revision(effective, entry)
+    if expected_voice_revision is None and _VOICE_REVISION_RE.fullmatch(
+        snapshot_voice_revision or ""
+    ):
+        expected_voice_revision = snapshot_voice_revision
+    if expected_model_revision is None and _MODEL_REVISION_RE.fullmatch(
+        snapshot_model_revision or ""
+    ):
+        expected_model_revision = snapshot_model_revision
+    model = _DEFAULT_TTS_MODEL
     content = await client.synthesize(
-        model=_tts_model_id(models),
+        model=model,
         text=stripped_text,
         voice=voice,
         response_format=output_format,
         speed=speed,
+        expected_voice_revision=expected_voice_revision,
+        expected_model_revision=expected_model_revision,
     )
     if not content:
         raise ToolCallError(
@@ -451,6 +545,8 @@ async def synthesize(
         "content_type": _TTS_CONTENT_TYPES[output_format],
         "output_format": output_format,
         "bytes": len(content),
+        "voice_revision": expected_voice_revision,
+        "model_revision": expected_model_revision,
     }
 
 
@@ -492,10 +588,10 @@ async def preview_voice(
             code="invalid_text",
             message=f"text exceeds the {_MAX_PREVIEW_TEXT} character limit",
         )
-    models = await client.fetch_models()
-    variant = _tts_variant(models)
+    effective = await client.fetch_capabilities()
+    variant = _effective_tts_variant(effective)
     if variant != "voice_design":
-        profile = _active_profile(models) or "not the quality profile"
+        profile = _text(effective.get("profile")) or "not the quality profile"
         raise ToolCallError(
             code="voice_preview_unsupported",
             message=(
@@ -506,7 +602,7 @@ async def preview_voice(
             hint="switch to the quality profile before using preview_voice",
         )
     content = await client.voice_preview(
-        model=_tts_model_id(models),
+        model=_DEFAULT_TTS_MODEL,
         text=stripped_text,
         instruction=stripped_instruction,
         response_format=_PREVIEW_FORMAT,

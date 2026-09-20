@@ -35,14 +35,14 @@ graph TD
 5. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：追溯重大技术选型的历史背景、权衡与替代方案。
 6. **[⚖️ OpenAI 契约对标审查 (openai-conformance-audit.md)](openai-conformance-audit.md)**（`superseded`）：历史审计；不得作为当前 Realtime 事件或兼容策略依据。
 7. **[🚀 ASR/TTS 深度优化规范 (asr-tts-best-practices-and-optimization-spec.md)](asr-tts-best-practices-and-optimization-spec.md)**（`superseded`）：历史优化方案；当前协议与责任边界以 Speech Plane 契约为准。
-7. **[🎙️ Quality 音色创造、克隆与稳定化能力 (quality-voice-capabilities.md)](quality-voice-capabilities.md)**：Quality 独享 VoiceDesign + Base 双 capability、双 worker 分 lane 并发、冷却驱逐、Sona 两条创建链路、VoiceRevision 收敛与分阶段质量路线。
-8. **[🎙️ 音色克隆架构设计与工程交接 (voice-cloning-design-and-handoff.md)](voice-cloning-design-and-handoff.md)**：reference clone 固定由 Base 承担，定义 API、worker、IPC、双 capability lane 与 Sona 工程边界。
-9. **[讲话人分离整洁架构](../superpowers/specs/2026-09-08-diarization-clean-architecture-design.md)**（`accepted`，领域设计）：文件接口遵循 OpenAI 原生 `diarized_json`；Realtime wire 服从 current-only Speech Plane。运行时固定为 FluidAudio CoreML FP16 私有 worker，无 NeMo/CAM++ 回退；质量门以[能力与质量验收](../operations/capability-quality-acceptance.md)为准。旧 [SPK-E2E-1](speaker-diarization-e2e-design.md) 仅保留历史背景。
-10. **[🎙️ SpeechRail MCP Proxy 工具与契约 (speechrail-mcp-proxy.md)](speechrail-mcp-proxy.md)**（`active`）：外置 `speechrail-mcp` 进程把 ASR/TTS/diarization 暴露为 MCP 工具，无状态 + 零配置 key，供 agent 精准调用本地语音能力。
-11. **[单机语音基座优化交付审计](2026-09-08-single-machine-speech-foundation-delivery.md)**（`superseded`）：历史方案审计；不定义当前 Realtime wire。
-12. **[实时 VAD 最佳实践与当前模式策略](realtime-vad-2026-best-practices.md)**（`active`）：Silero/legacy 解析、SpeechAdmission、Sona 的 400/900ms 调用策略与帧量化边界。
-13. **[克隆音色质量门禁与自量保障契约](voice-clone-quality-gates-and-contract.md)**（`under_review`）：参考音频门禁、clone revalidate、固定 probe、VoiceQualityReport、低基数观测与 Sona 闭环边界。
-14. **[克隆音色输出可懂度与 ASR 复核设计](voice-quality-intelligibility-validation.md)**（`active`）：实现 TTS probe 完成并释放模型槽后再批量 ASR 的阶段化验收，避免 Base TTS 与 ASR 形成未治理重模型重叠，并为随机噪声、错读/漏读提供独立文本证据。
+8. **[🎙️ Quality 音色创造、克隆与稳定化能力 (quality-voice-capabilities.md)](quality-voice-capabilities.md)**：Quality 独享 VoiceDesign + Base 双 capability、双 worker 分 lane 并发、冷却驱逐、Sona 两条创建链路、VoiceRevision 收敛与分阶段质量路线。
+9. **[🎙️ 音色克隆架构设计与工程交接 (voice-cloning-design-and-handoff.md)](voice-cloning-design-and-handoff.md)**：reference clone 固定由 Base 承担，定义 API、worker、IPC、双 capability lane 与 Sona 工程边界。
+10. **[讲话人分离整洁架构](../superpowers/specs/2026-09-08-diarization-clean-architecture-design.md)**（`accepted`，领域设计）：文件接口遵循 OpenAI 原生 `diarized_json`；Realtime wire 服从 current-only Speech Plane。运行时固定为 FluidAudio CoreML FP16 私有 worker，无 NeMo/CAM++ 回退；质量门以[能力与质量验收](../operations/capability-quality-acceptance.md)为准。旧 [SPK-E2E-1](speaker-diarization-e2e-design.md) 仅保留历史背景。
+11. **[🎙️ SpeechRail MCP Proxy 工具与契约 (speechrail-mcp-proxy.md)](speechrail-mcp-proxy.md)**（`active`）：外置 `speechrail-mcp` 进程把 ASR/TTS/diarization 暴露为 MCP 工具，无状态；loopback 可 keyless，非 loopback 必须使用 Bearer，供 agent 精准调用本地语音能力。
+12. **[单机语音基座优化交付审计](2026-09-08-single-machine-speech-foundation-delivery.md)**（`superseded`）：历史方案审计；不定义当前 Realtime wire。
+13. **[实时 VAD 最佳实践与当前模式策略](realtime-vad-2026-best-practices.md)**（`active`）：Silero/legacy 解析、SpeechAdmission、Sona 的 400/900ms 调用策略与帧量化边界。
+14. **[克隆音色质量门禁与自量保障契约](voice-clone-quality-gates-and-contract.md)**（`under_review`）：参考音频门禁、clone revalidate、固定 probe、VoiceQualityReport、低基数观测与 Sona 闭环边界。
+15. **[克隆音色输出可懂度与 ASR 复核设计](voice-quality-intelligibility-validation.md)**（`active`）：实现 TTS probe 完成并释放模型槽后再批量 ASR 的阶段化验收，避免 Base TTS 与 ASR 形成未治理重模型重叠，并为随机噪声、错读/漏读提供独立文本证据。
 
 ---
 

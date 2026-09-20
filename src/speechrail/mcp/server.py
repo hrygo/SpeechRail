@@ -69,8 +69,9 @@ _CACHE_HINTS: dict[CacheableMethod, CacheHint] = {
 
 _INSTRUCTIONS = (
     "SpeechRail MCP exposes the local SpeechRail ASR/TTS service as a small "
-    "toolset. Always start with describe() to learn the active profile tier, "
-    "its readiness and the voices that are available on it. Pass audio as an "
+    "toolset. Always start with describe(): it requires the current "
+    "effective_capabilities_v1 contract and reports the active profile tier, "
+    "readiness and available voices. Pass audio as an "
     "audio_ref (a local file path or file:// URI) and never inline base64: "
     "inline audio would leak into your context. Prefer the synchronous "
     "transcribe/synthesize tools; when a call reports audio_too_long or "
@@ -213,12 +214,12 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         ),
     )
     async def describe() -> DescribeResult:
-        """Return current capability observations and an optional atomic snapshot.
+        """Return current capability observations and the atomic snapshot.
 
         Realtime metadata explicitly reports caller-owned orchestration and
         the absence of server-side LLM or conversation state. Every voice
-        entry carries mode, available and capability discriminators; only
-        choose voices with available=true.
+        entry carries current mode, availability and revision discriminators;
+        only choose voices with available=true.
         """
         return DescribeResult.model_validate(await _map_errors(tools.describe(client)))
 
@@ -307,6 +308,24 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             float,
             Field(description="Speaking rate from 0.25 to 4.0."),
         ] = 1.0,
+        expected_voice_revision: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional vr_... voice revision from describe(); when omitted, "
+                    "the effective snapshot is pinned automatically."
+                )
+            ),
+        ] = None,
+        expected_model_revision: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Optional model catalog revision from describe(); when omitted, "
+                    "the effective snapshot is pinned automatically."
+                )
+            ),
+        ] = None,
     ) -> AudioArtifact:
         """Synthesize text to a local audio file and return its path.
 
@@ -315,6 +334,8 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
             clone/instruction voices are rejected outside the quality tier.
         output_format: mp3 (default), wav or pcm.
         speed: speaking rate from 0.25 to 4.0.
+        expected_voice_revision / expected_model_revision: optional revision
+            pins; effective capability snapshots supply them automatically.
         Returns {audio_path, content_type, output_format, bytes}; delete the
         temp file after the host plays/sends it.
         """
@@ -326,6 +347,8 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
                 voice=voice,
                 output_format=output_format,
                 speed=speed,
+                expected_voice_revision=expected_voice_revision,
+                expected_model_revision=expected_model_revision,
             )
         )
         await ctx.report_progress(1.0, 1.0, "done")
@@ -526,7 +549,7 @@ def create_server(*, client: SpeechRailClient | None = None) -> MCPServer:
         name="capabilities",
         title="SpeechRail capabilities",
         description=(
-            "Capability observations plus an optional atomic "
+            "Current capability observations plus the required atomic "
             "effective-capabilities snapshot: active tier/profile, readiness, "
             "models and voices."
         ),

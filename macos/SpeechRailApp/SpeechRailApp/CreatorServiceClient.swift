@@ -387,7 +387,12 @@ public struct CreatorVoice: Codable, Equatable, Identifiable, Sendable {
 public protocol SpeechRailCreatorClient: Sendable {
     func fetchVoices() async throws -> [CreatorVoice]
     func fetchVoice(id: String) async throws -> CreatorVoice
-    func createSpeech(text: String, voiceID: String, speed: Double) async throws -> Data
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data
     func createVoicePreview(
         text: String,
         instruction: String,
@@ -590,7 +595,12 @@ struct UnavailableCreatorClient: SpeechRailCreatorClient {
         throw ServiceAPIClientError.requestFailed
     }
 
-    func createSpeech(text: String, voiceID: String, speed: Double) async throws -> Data {
+    func createSpeech(
+        text: String,
+        voiceID: String,
+        speed: Double,
+        options: SpeechRailRequestOptions
+    ) async throws -> Data {
         throw ServiceAPIClientError.requestFailed
     }
 

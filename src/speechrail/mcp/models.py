@@ -24,6 +24,8 @@ class AudioArtifact(BaseModel):
     content_type: str
     output_format: str
     bytes: int
+    voice_revision: str | None = None
+    model_revision: str | None = None
 
 
 class TranscriptSegment(BaseModel):
@@ -75,7 +77,7 @@ class ModelEntry(BaseModel):
 
 
 class VoiceEntry(BaseModel):
-    """One ``GET /v1/voices`` entry with its discriminators."""
+    """One safe voice entry projected from the effective capability snapshot."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -125,7 +127,7 @@ class RealtimeStatus(BaseModel):
 
 
 class DescribeResult(BaseModel):
-    """The merged capability snapshot returned by ``describe``."""
+    """Current observations plus the required effective capability snapshot."""
 
     model_config = ConfigDict(extra="allow")
 
@@ -140,8 +142,7 @@ class DescribeResult(BaseModel):
     jobs: JobsStatus
     models: list[ModelEntry] = Field(default_factory=list)
     voices: list[VoiceEntry] = Field(default_factory=list)
-    effective_capabilities: dict[str, Any] | None = None
-    legacy_discovery_consistency: str = "independent_reads"
+    effective_capabilities: dict[str, Any]
 
 
 class VoiceRecord(BaseModel):

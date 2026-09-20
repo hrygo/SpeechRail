@@ -31,7 +31,7 @@ graph TD
 3. **[📡 公共 API 契约手册 (api-contract.md)](api-contract.md)**：包含原生 OpenAI `diarized_json` 文件分人、TTS 语音合成、异步 Jobs、音色目录及标准错误 Envelope 的详细规范。
 4. **[⚡ OpenAI Realtime 协议规范](../../contracts/realtime-openai.md)**：包含 `/v1/realtime` current-only WebSocket ASR/TTS、Server VAD 事实、调用方显式 TTS cancel 与 namespaced diarization opt-in。
 5. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。
-6. **[🧭 有效能力快照与安全音色目录](effective-capabilities.md)**：说明 `effective_capabilities_v1`、同代一致性、ETag 与 legacy 投影的迁移边界。
+6. **[🧭 有效能力快照与安全音色目录](effective-capabilities.md)**：说明 `effective_capabilities_v1`、同代一致性、ETag 与安全 voice 列表投影。
 
 ---
 
@@ -72,8 +72,8 @@ response.stream_to_file("output.mp3")
 
 HTTP 客户端可读取 `GET /health`；需要跨模型、音色和操作参数保持同代一致时，读取
 `GET /v1/speechrail/capabilities`（`effective_capabilities_v1`）。MCP 客户端可调用
-`describe()`：它保留 legacy models/voices/readiness 字段，并在服务支持时附带一次有效能力快照；旧服务
-只有返回 404/405 或未知 schema 才会让该可选字段为空。鉴权、存储等真实故障不会被静默降级。
+`describe()`：它返回当前 models/readiness 观察，并且必须附带有效能力快照及其安全 voice 投影；能力
+契约缺失、未知 schema、鉴权或存储故障都会直接失败，不会被静默降级。
 这些入口都不会返回模型绝对路径、音频或转写内容。
 
 `/readyz` 只表示 ASR 或 TTS 至少一个可用；成功响应也包含独立的 `realtime_vad` 诊断。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。

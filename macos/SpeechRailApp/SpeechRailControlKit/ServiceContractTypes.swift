@@ -1803,3 +1803,63 @@ public struct CapabilitySnapshotStore: Equatable, Sendable {
         }
     }
 }
+
+/// Selects caller-owned revision pins from one effective capability snapshot.
+///
+/// This helper deliberately returns `nil` when the snapshot cannot prove that a
+/// voice is available for the requested operation. Callers may then use the
+/// service's ordinary negotiation path instead of guessing a revision.
+public enum SpeechRailCapabilityRevisionSelector {
+    public static func voiceRevision(
+        for voiceID: String?,
+        in snapshot: EffectiveCapabilitySnapshot?,
+        operation: String
+    ) -> String? {
+        guard
+            let voiceID,
+            !voiceID.isEmpty,
+            let snapshot,
+            let voice = matchingVoice(voiceID, in: snapshot),
+            voice.available,
+            voice.operations[operation] != nil
+        else {
+            return nil
+        }
+
+        return nonEmpty(voice.voiceRevision)
+    }
+
+    public static func creatorRequestOptions(
+        voiceID: String,
+        fallbackVoiceRevision: String?,
+        in snapshot: EffectiveCapabilitySnapshot?
+    ) -> SpeechRailRequestOptions {
+        guard
+            let snapshot,
+            let voice = matchingVoice(voiceID, in: snapshot),
+            voice.available,
+            voice.operations["http_speech"] != nil
+        else {
+            return SpeechRailRequestOptions()
+        }
+
+        return SpeechRailRequestOptions(
+            expectedVoiceRevision: nonEmpty(voice.voiceRevision) ?? nonEmpty(fallbackVoiceRevision),
+            expectedModelRevision: nonEmpty(snapshot.models["tts"]?.catalogRevision)
+        )
+    }
+
+    private static func matchingVoice(
+        _ voiceID: String,
+        in snapshot: EffectiveCapabilitySnapshot
+    ) -> SafeVoiceEntry? {
+        snapshot.voices.first { voice in
+            voice.id == voiceID || voice.aliases.contains(voiceID)
+        }
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let value, !value.isEmpty else { return nil }
+        return value
+    }
+}

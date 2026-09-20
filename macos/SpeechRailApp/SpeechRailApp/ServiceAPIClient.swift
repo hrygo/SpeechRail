@@ -259,7 +259,8 @@ public final class ServiceAPIClient: @unchecked Sendable {
     public func createSpeech(
         text: String,
         voiceID: String,
-        speed: Double
+        speed: Double,
+        options: SpeechRailRequestOptions
     ) async throws -> Data {
         try await synthesize(
             SpeechRequest(
@@ -269,7 +270,8 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 responseFormat: "wav",
                 language: "auto",
                 speed: speed
-            )
+            ),
+            options: options
         ).audioData
     }
 

@@ -378,4 +378,152 @@ final class ServiceContractTests: XCTestCase {
             XCTAssertEqual(error as? ServiceAPIClientError, .notModifiedWithoutCache)
         }
     }
+
+    func testCapabilityRevisionSelectorMatchesVoiceIDAndAlias() {
+        let snapshot = makeRevisionSnapshot(
+            voice: SafeVoiceEntry(
+                id: "voice-1",
+                name: "Serena",
+                aliases: ["serena"],
+                mode: "design",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "vr_001",
+                voiceIdentityAssurance: .contentAddressed,
+                model: ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "model-cat-1"
+                ),
+                descriptors: [],
+                operations: [
+                    "http_speech": JSONValue(.string("supported")),
+                    "realtime_speech": JSONValue(.string("supported")),
+                ]
+            )
+        )
+
+        XCTAssertEqual(
+            SpeechRailCapabilityRevisionSelector.voiceRevision(
+                for: "voice-1",
+                in: snapshot,
+                operation: "realtime_speech"
+            ),
+            "vr_001"
+        )
+        XCTAssertEqual(
+            SpeechRailCapabilityRevisionSelector.voiceRevision(
+                for: "serena",
+                in: snapshot,
+                operation: "http_speech"
+            ),
+            "vr_001"
+        )
+    }
+
+    func testCapabilityRevisionSelectorRejectsUnavailableOrUnsupportedVoices() {
+        let unavailable = makeRevisionSnapshot(
+            voice: SafeVoiceEntry(
+                id: "voice-unavailable",
+                name: "Unavailable",
+                mode: "design",
+                available: false,
+                availabilityReason: .backendNotReady,
+                voiceRevision: "vr_unavailable",
+                voiceIdentityAssurance: .contentAddressed,
+                model: ConfiguredModelIdentity(assurance: .configuredCatalog),
+                descriptors: [],
+                operations: ["realtime_speech": JSONValue(.string("supported"))]
+            )
+        )
+        let unsupported = makeRevisionSnapshot(
+            voice: SafeVoiceEntry(
+                id: "voice-unsupported",
+                name: "Unsupported",
+                mode: "legacy",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "vr_unsupported",
+                voiceIdentityAssurance: .contentAddressed,
+                model: ConfiguredModelIdentity(assurance: .configuredCatalog),
+                descriptors: [],
+                operations: [:]
+            )
+        )
+
+        XCTAssertNil(
+            SpeechRailCapabilityRevisionSelector.voiceRevision(
+                for: "voice-unavailable",
+                in: unavailable,
+                operation: "realtime_speech"
+            )
+        )
+        XCTAssertNil(
+            SpeechRailCapabilityRevisionSelector.voiceRevision(
+                for: "voice-unsupported",
+                in: unsupported,
+                operation: "realtime_speech"
+            )
+        )
+        XCTAssertNil(
+            SpeechRailCapabilityRevisionSelector.voiceRevision(
+                for: "missing",
+                in: unsupported,
+                operation: "realtime_speech"
+            )
+        )
+    }
+
+    func testCapabilityRevisionSelectorBuildsCreatorRequestOptions() {
+        let snapshot = makeRevisionSnapshot(
+            voice: SafeVoiceEntry(
+                id: "voice-1",
+                name: "Serena",
+                mode: "design",
+                available: true,
+                availabilityReason: .available,
+                voiceRevision: "vr_001",
+                voiceIdentityAssurance: .contentAddressed,
+                model: ConfiguredModelIdentity(assurance: .configuredCatalog),
+                descriptors: [],
+                operations: ["http_speech": JSONValue(.string("supported"))]
+            )
+        )
+
+        let options = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: "voice-1",
+            fallbackVoiceRevision: "vr_detail",
+            in: snapshot
+        )
+
+        XCTAssertEqual(options.expectedVoiceRevision, "vr_001")
+        XCTAssertEqual(options.expectedModelRevision, "model-cat-1")
+        XCTAssertEqual(options.headers["SpeechRail-Expected-Voice-Revision"], "vr_001")
+        XCTAssertEqual(options.headers["SpeechRail-Expected-Model-Revision"], "model-cat-1")
+
+        let withoutSnapshot = SpeechRailCapabilityRevisionSelector.creatorRequestOptions(
+            voiceID: "voice-1",
+            fallbackVoiceRevision: "vr_detail",
+            in: nil
+        )
+        XCTAssertNil(withoutSnapshot.expectedVoiceRevision)
+        XCTAssertNil(withoutSnapshot.expectedModelRevision)
+    }
+
+    private func makeRevisionSnapshot(voice: SafeVoiceEntry) -> EffectiveCapabilitySnapshot {
+        EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "catalog-1",
+            snapshotID: "snap-1",
+            profile: "quality",
+            models: [
+                "tts": ConfiguredModelIdentity(
+                    assurance: .configuredCatalog,
+                    catalogRevision: "model-cat-1"
+                )
+            ],
+            voices: [voice],
+            operations: [:],
+            guarantees: [:]
+        )
+    }
 }

@@ -2,8 +2,8 @@
 title: "VoiceDesign 能力优势与音色稳定性边界"
 status: active
 audience: "架构师、TTS 质量负责人、Sona Voice Studio 开发者"
-version: "2.1"
-date: 2026-09-13
+version: "2.2"
+date: 2026-09-20
 ---
 
 # VoiceDesign 能力优势与音色稳定性边界
@@ -47,22 +47,22 @@ Quality catalog 同时安装：
 
 本 PR 保持兼容：已有 prompt-created profile 仍直接由 VoiceDesign 合成，不自动修改 voice asset。
 
-当前已通过 `/v1/voices/designs` 提供显式生成参考注册：创建全新 Base-bound clone，保存来源 hash，原音色不变。下面的完整 VoiceRevision 与输出声纹验收仍是目标流程，不能将参考注册完成视为整体完成：
+当前已通过 `/v1/voices/designs` 提供显式生成参考注册：创建全新 Base-bound clone，保存来源 hash，原音色不变。VoiceRevision 的持久化历史、CAS update、rollback、revoke 和 delete 已由 registry 提供；这仍不等于输出声纹验收通过，不能将参考注册完成视为整体声学完成：
 
 ```text
 instruction
   → VoiceDesign 生成候选 canonical reference
   → 质量门 + 人工试听（可选）
-  → Base 建立新 VoiceRevision
+  → Base 建立新 VoiceRevision，并进入可回滚的 revision 历史
   → 后续目标文本由 Base 复现
 ```
 
 该动作必须：
 
-- 创建新 revision，而不是覆盖旧 profile；
+- 创建新 revision，而不是覆盖旧 profile，并保留旧 revision 的回滚/撤销语义；
 - 记录 canonical text/audio hash、preprocessing version、model revision；
-- 可回滚到 VoiceDesign-backed revision；
-- 用 holdout 文本验证 speaker identity，不能仅用同一文本重复 hash。
+- 通过 CAS 约束更新、回滚和撤销；
+- 用 holdout 文本验证 speaker identity，不能仅用同一文本重复 hash；该声学验收当前仍需独立执行。
 
 ## 5. 稳定性证据边界
 

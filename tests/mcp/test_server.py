@@ -31,9 +31,24 @@ _TOOL_ANNOTATIONS: dict[str, tuple[str, bool, bool, bool]] = {
 
 # Each tool's published outputSchema must expose these known model keys.
 _TOOL_OUTPUT_KEYS: dict[str, set[str]] = {
-    "describe": {"tier", "readiness", "realtime", "jobs", "models", "voices"},
+    "describe": {
+        "tier",
+        "readiness",
+        "realtime",
+        "jobs",
+        "models",
+        "voices",
+        "effective_capabilities",
+    },
     "transcribe": {"text", "segments", "words", "language", "duration"},
-    "synthesize": {"audio_path", "content_type", "output_format", "bytes"},
+    "synthesize": {
+        "audio_path",
+        "content_type",
+        "output_format",
+        "bytes",
+        "voice_revision",
+        "model_revision",
+    },
     "preview_voice": {"audio_path", "content_type", "output_format", "bytes"},
     "create_voice": {"id", "name", "mode", "available", "capabilities"},
     "delete_voice": {"id", "name", "mode", "available", "capabilities"},
@@ -90,7 +105,14 @@ def test_tool_schemas_never_leak_client_context() -> None:
     assert transcribe_props == {"audio_ref", "language", "diarize", "timestamps"}
 
     synthesize_props = set(by_name["synthesize"].input_schema.get("properties", {}))
-    assert synthesize_props == {"text", "voice", "output_format", "speed"}
+    assert synthesize_props == {
+        "text",
+        "voice",
+        "output_format",
+        "speed",
+        "expected_voice_revision",
+        "expected_model_revision",
+    }
 
     preview_props = set(by_name["preview_voice"].input_schema.get("properties", {}))
     assert preview_props == {"instruction", "text"}
@@ -262,6 +284,9 @@ def test_every_tool_publishes_concrete_output_schema() -> None:
         assert properties, f"{name} has no properties"
         assert expected_keys <= set(properties), name
 
+    describe_schema = by_name["describe"].output_schema
+    assert "effective_capabilities" in describe_schema.get("required", [])
+
 
 def test_tool_parameters_carry_descriptions() -> None:
     by_name = _tools_by_name()
@@ -370,6 +395,9 @@ def test_describe_result_tolerates_unknown_and_partial_nested_payloads() -> None
             "jobs": {},
             "models": [{"id": "speechrail/qwen3-asr", "unexpected_field": 7}],
             "voices": [],
+            "effective_capabilities": {
+                "schema_version": "effective_capabilities_v1",
+            },
             "top_level_extra": "kept",
         }
     )
@@ -399,10 +427,27 @@ def test_voice_record_accepts_fully_optional_payload() -> None:
 
 
 def _quality_rest_handler(request: httpx.Request) -> httpx.Response:
-    """Serve legacy discovery reads and the optional capability route."""
+    """Serve current discovery reads and the required capability route."""
     path = request.url.path
     if request.method == "GET" and path == "/v1/speechrail/capabilities":
-        return httpx.Response(404, json={"detail": "Not Found"})
+        return httpx.Response(
+            200,
+            json={
+                "schema_version": "effective_capabilities_v1",
+                "snapshot_id": "quality-test",
+                "profile": "quality",
+                "models": {"tts": {"variant": "voice_design"}},
+                "voices": [
+                    {
+                        "id": "serena",
+                        "name": "serena",
+                        "mode": "system",
+                        "available": True,
+                        "variant": "voice_design",
+                    }
+                ],
+            },
+        )
     if request.method == "GET" and path == "/v1/models":
         return httpx.Response(
             200,

@@ -137,6 +137,34 @@ def test_synthesis_is_a_json_post_with_openai_body_keys(
     assert len(requests) == 1
 
 
+def test_synthesis_forwards_voice_and_model_revision_pins(
+    make_client: Any, run_async: Any
+) -> None:
+    voice_revision = "vr_" + "a" * 32
+    model_revision = "b" * 40
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["SpeechRail-Expected-Voice-Revision"] == voice_revision
+        assert request.headers["SpeechRail-Expected-Model-Revision"] == model_revision
+        return httpx.Response(status_code=200, content=b"audio")
+
+    client, requests = make_client(handler)
+    content = run_async(
+        client.synthesize(
+            model="speechrail/qwen3-tts",
+            text="你好",
+            voice="clone_1",
+            response_format="wav",
+            speed=1.0,
+            expected_voice_revision=voice_revision,
+            expected_model_revision=model_revision,
+        )
+    )
+
+    assert content == b"audio"
+    assert len(requests) == 1
+
+
 def test_voice_preview_json_body_and_raw_audio_response(
     make_client: Any, run_async: Any
 ) -> None:

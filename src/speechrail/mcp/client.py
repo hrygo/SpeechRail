@@ -264,31 +264,39 @@ class SpeechRailClient:
             return []
         return cast(list[dict[str, Any]], [entry for entry in data if isinstance(entry, dict)])
 
-    async def fetch_capabilities(self) -> dict[str, Any] | None:
-        """Read the ``effective_capabilities_v1`` snapshot when available.
+    async def fetch_capabilities(self) -> dict[str, Any]:
+        """Read the required ``effective_capabilities_v1`` snapshot.
 
-        Older servers without the namespaced route return ``None`` so callers
-        can use legacy discovery; authentication and other server errors
-        propagate.
+        The namespaced capability route is the current MCP discovery
+        contract.  Missing routes and server errors propagate as typed
+        failures; the proxy never reconstructs an atomic snapshot from
+        independent legacy endpoints.
         """
-        try:
-            response = await self._request("GET", "speechrail/capabilities")
-        except SpeechRailError as exc:
-            if exc.status in {404, 405}:
-                return None
-            raise
+        response = await self._request("GET", "speechrail/capabilities")
         payload = self._object(response)
         if payload.get("schema_version") != "effective_capabilities_v1":
-            # An unknown schema is not permission to assume native capabilities.
-            return None
+            raise SpeechRailError(
+                status=502,
+                code="invalid_capability_schema",
+                message=(
+                    "SpeechRail returned an unsupported capability schema; "
+                    "expected effective_capabilities_v1"
+                ),
+                retryable=False,
+                hint=(
+                    "upgrade SpeechRail and publish the current "
+                    "effective_capabilities_v1 contract"
+                ),
+            )
         return payload
 
     async def fetch_voices(self) -> list[dict[str, Any]]:
-        """Return a safe compatibility projection of GET /v1/voices.
+        """Return a safe projection of the current ``GET /v1/voices`` list.
 
-        Legacy servers include source instructions/reference text in discovery.
-        These are not required to select a voice and must not enter agent context.
-        Explicit creation responses remain scoped to that requested operation.
+        Source instructions/reference text is not required to select a voice and
+        must not enter agent context.  Explicit creation responses remain
+        scoped to that requested operation; atomic routing still uses the
+        effective capability snapshot.
         """
         response = await self._request("GET", "voices")
         data = self._object(response).get("data")
@@ -346,8 +354,17 @@ class SpeechRailClient:
         voice: str,
         response_format: str,
         speed: float,
+        expected_voice_revision: str | None = None,
+        expected_model_revision: str | None = None,
     ) -> bytes:
-        """POST /v1/audio/speech and return the raw audio body."""
+        """POST /v1/audio/speech and return the raw audio body.
+
+        Revision pins are sent as headers rather than JSON fields so this
+        remains compatible with the OpenAI-compatible request body.  A pin is
+        optional when the current capability snapshot has no stable revision;
+        when present the service performs the atomic compare-and-swap check at
+        admission time.
+        """
         body = {
             "model": model,
             "input": text,
@@ -355,7 +372,17 @@ class SpeechRailClient:
             "response_format": response_format,
             "speed": speed,
         }
-        response = await self._request("POST", "audio/speech", json=body)
+        headers: dict[str, str] = {}
+        if expected_voice_revision is not None:
+            headers["SpeechRail-Expected-Voice-Revision"] = expected_voice_revision
+        if expected_model_revision is not None:
+            headers["SpeechRail-Expected-Model-Revision"] = expected_model_revision
+        response = await self._request(
+            "POST",
+            "audio/speech",
+            headers=headers or None,
+            json=body,
+        )
         return response.content
 
     async def voice_preview(

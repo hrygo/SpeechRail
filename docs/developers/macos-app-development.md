@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.5.6"
+version: "0.5.7"
 date: 2026-09-20
 ---
 
@@ -38,6 +38,12 @@ capability 真正解析成功时才置为 `true`。服务状态页的能力矩�
 不要把多次读取 `/v1/models`、`/v1/voices` 拼成原子结果。音色列表（`/v1/voices`）是用户数据，
 可以为空，「还没有克隆音色」不能推出「服务没有克隆能力」；用列表反推能力会报出假的「未就绪」。
 
+App 的 TTS 请求必须把这个快照当作 revision pin 的来源：Realtime 通过
+`speechrail.tts.create.expected_voice_revision` 绑定当前 voice，并在切换音色时同时更新 voice
+与 revision；REST creator 通过 `SpeechRail-Expected-Voice-Revision` 和
+`SpeechRail-Expected-Model-Revision` 传递同代约束。匹配不到可用 voice、对应 operation 或
+revision 时显式保持 `nil`，走服务端普通协商，不从 voice 名称、模型名或本地时间推断版本。
+
 ### Native Realtime 编排边界（current-only）
 
 `SpeechRailApp` 的 `RealtimeASRClient` 只发当前契约：先发
@@ -45,6 +51,10 @@ capability 真正解析成功时才置为 `true`。服务状态页的能力矩�
 Responses 流中完成 LLM、历史、记忆、人设和工具编排，把句子放入本地 `pendingTTS` 队列，逐条发送
 `speechrail.tts.create`；同一 WebSocket 同时只允许一个服务端 TTS render，收到 `response.done` 后才
 提交下一句。
+
+每个可验证的 caller-owned TTS request 都带当前 voice revision；Realtime 建连和会话内换音色都从
+同一份 effective snapshot 重新解析。revision 不可用时不伪造 pin；服务端返回 revision conflict
+时由调用方重新发现并决定是否继续，不自动改用最新音色。
 
 服务端的 `input_audio_buffer.speech_started` 只是 VAD 事实。实时对讲模式由 `AssistantSession` 根据
 播放状态清空本地播放队列并显式发送 `speechrail.tts.cancel`；服务端不自动替 App 做 barge-in。旧

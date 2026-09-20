@@ -180,6 +180,8 @@ public actor RealtimeASRClient {
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
     private let diarizationEnabled: Bool
     private let expectedModelRevision: String?
+    /// 当前 caller-owned TTS voice 的 revision。随 voice 一起在连接内更新。
+    private var expectedVoiceRevision: String?
     private let renderReceiptsEnabled: Bool
     private let callerTTSEnabled: Bool
     private let session: URLSession
@@ -222,6 +224,7 @@ public actor RealtimeASRClient {
         apiKey: String? = nil,
         session: URLSession = .shared,
         expectedModelRevision: String? = nil,
+        expectedVoiceRevision: String? = nil,
         renderReceiptsEnabled: Bool = false,
         callerTTSEnabled: Bool = false
     ) {
@@ -240,6 +243,7 @@ public actor RealtimeASRClient {
         self.threshold = threshold
         self.diarizationEnabled = diarizationEnabled
         self.expectedModelRevision = expectedModelRevision
+        self.expectedVoiceRevision = expectedVoiceRevision
         self.renderReceiptsEnabled = renderReceiptsEnabled
         self.callerTTSEnabled = callerTTSEnabled
         self.voice = voice
@@ -334,8 +338,10 @@ public actor RealtimeASRClient {
     }
 
     /// 换音色。**下一次 TTS request 生效**，只影响 TTS，不进 prompt。
-    public func updateVoice(_ voice: String) async throws {
+    /// voice 没有可验证 revision 时必须传 nil，以免沿用旧音色的 pin。
+    public func updateVoice(_ voice: String, expectedVoiceRevision: String? = nil) async throws {
         self.voice = voice
+        self.expectedVoiceRevision = expectedVoiceRevision
     }
 
     /// 让服务端把调用方生成的一段文本念出来（助手用；字幕/会议不调）。
@@ -346,7 +352,12 @@ public actor RealtimeASRClient {
         activeTTSRequestID = requestID
         do {
             try await send(
-                SpeechRailTTSCreate(requestID: requestID, text: text, voice: voice).jsonObject
+                SpeechRailTTSCreate(
+                    requestID: requestID,
+                    text: text,
+                    voice: voice,
+                    expectedVoiceRevision: expectedVoiceRevision
+                ).jsonObject
             )
         } catch {
             if activeTTSRequestID == requestID {
