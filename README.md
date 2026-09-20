@@ -106,10 +106,10 @@ above.
 
 ## Requirements
 
-- Apple Silicon Mac with macOS 14 or later for the native managed runtime;
-  Intel Macs are not a supported target.
-- The bundled `SpeechRailApp` targets macOS 26.0 or later and `arm64`; this is
-  a separate baseline from the managed service runtime.
+- Apple Silicon Mac with macOS 26.0 or later for the native managed runtime;
+  Intel Macs and Ubuntu/Linux are not supported runtime targets. Linux may be
+  used for platform-neutral development checks only.
+- The bundled `SpeechRailApp` also targets macOS 26.0 or later and `arm64`.
 - Python `>=3.12,<3.13` for source development and the Python service CLI.
 - [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
 - `ffmpeg` for the audio decoding/transcoding paths used by local setup and
