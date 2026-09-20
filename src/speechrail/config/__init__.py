@@ -120,7 +120,6 @@ class Settings(BaseSettings):
     realtime_vad_engine: Literal["auto", "legacy", "silero"] = "auto"
     realtime_vad_model_path: Path | None = None
     realtime_vad_shadow_enabled: bool = False
-    realtime_vad_bargein_cooldown_ms: int = Field(default=250, ge=0, le=5_000)
     # Durable telemetry: rotating operator logs and the per-interval metrics
     # rollup that backs any monitoring span longer than the live /metrics view.
     # ``log_dir`` defaults to the macOS user log directory; the rollup directory

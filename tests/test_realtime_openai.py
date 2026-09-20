@@ -859,6 +859,31 @@ def test_openai_commit_without_diarization_does_not_request_segments() -> None:
     assert not any(event["type"].endswith(".segment") for event in events)
 
 
+def test_openai_commit_with_segment_timestamps_requests_segments() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()  # session.created
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "input_audio_transcription": {"timestamp_granularities": ["segment"]}
+                },
+            }
+        )
+        assert socket.receive_json()["type"] == "transcription_session.updated"
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        while socket.receive_json()["type"] != (
+            "conversation.item.input_audio_transcription.completed"
+        ):
+            pass
+
+    assert factory.sessions and factory.sessions[0].want_segments is True
+
+
 def test_openai_realtime_rejects_a_frame_over_the_configured_limit() -> None:
     factory_client, _ = _client()
     with factory_client.websocket_connect("/v1/realtime") as socket:
@@ -1040,14 +1065,86 @@ def test_openai_text_item_triggers_tts_response() -> None:
             events.append(event["type"])
             if event["type"] == "response.done":
                 break
-        assert "response.created" in events
-        assert "response.output_item.added" in events
-        assert "response.content_part.added" in events
-        assert "response.output_audio.delta" in events
-        assert "response.output_audio.done" in events
-        assert "response.content_part.done" in events
-        assert "response.output_item.done" in events
-        assert events[-1] == "response.done"
+        assert events == [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_audio_transcript.delta",
+            "response.output_audio.delta",
+            "response.output_audio_transcript.done",
+            "response.output_audio.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.done",
+        ]
+
+
+def test_openai_tts_terminal_is_idempotent_when_cancel_races_completed() -> None:
+    async def scenario() -> list[str]:
+        settings = Settings(
+            qwen3_model_dir=None,
+            qwen3_python=None,
+            diarization_model_path=None,
+            diarization_embedding_model_path=None,
+        )
+        services = build_app_services(
+            settings,
+            AppOverrides(
+                batch_transcriber=FakeTranscriber(),
+                tts_synthesizer=FakeSpeechSynthesizer(),
+                realtime_asr_factory=FakeStreamingFactory(),
+            ),
+        )
+        events: list[dict[str, object]] = []
+        terminal_started = asyncio.Event()
+        terminal_release = asyncio.Event()
+
+        async def send(event: dict[str, object]) -> None:
+            events.append(event)
+            if event.get("type") == "response.done":
+                response = event.get("response")
+                if isinstance(response, dict) and response.get("status") == "completed":
+                    terminal_started.set()
+                    await terminal_release.wait()
+
+        session = OpenAIRealtimeSession(
+            services,
+            session_id="realtime_tts_race_test",
+            send=send,
+        )
+        await session.start()
+        await session.handle(
+            {
+                "type": "transcription_session.update",
+                "session": {"speechrail": {"tts": {"enabled": True}}},
+            }
+        )
+        await session.handle(
+            {"type": "speechrail.tts.create", "request_id": "race_001", "text": "你好"}
+        )
+        assert session._tts_task is not None
+        await asyncio.wait_for(terminal_started.wait(), timeout=1.0)
+
+        cancel_task = asyncio.create_task(
+            session.handle(
+                {"type": "speechrail.tts.cancel", "request_id": "race_001"}
+            )
+        )
+        for _ in range(100):
+            if session._tts_task is not None and session._tts_task.cancelling():
+                break
+            await asyncio.sleep(0)
+        terminal_release.set()
+        await cancel_task
+        await session.close()
+        return [
+            str(event["response"]["status"])
+            for event in events
+            if event.get("type") == "response.done"
+            and isinstance(event.get("response"), dict)
+        ]
+
+    assert asyncio.run(scenario()) == ["completed"]
 
 
 def test_fake_loopback_caller_orchestration_can_cancel_and_restart_tts() -> None:
@@ -1144,6 +1241,40 @@ def test_openai_tts_request_id_is_connection_unique() -> None:
         error = socket.receive_json()
         assert error["type"] == "error"
         assert error["error"]["code"] == "tts_request_invalid"
+
+
+def test_openai_tts_request_ledger_rejects_new_ids_when_full() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {"speechrail": {"tts": {"enabled": True}}},
+            }
+        )
+        assert socket.receive_json()["type"] == "transcription_session.updated"
+        for index in range(256):
+            socket.send_json(
+                {
+                    "type": "speechrail.tts.create",
+                    "request_id": f"ledger_{index}",
+                    "text": "你好",
+                }
+            )
+            while socket.receive_json()["type"] != "response.done":
+                pass
+        socket.send_json(
+            {
+                "type": "speechrail.tts.create",
+                "request_id": "ledger_overflow",
+                "text": "你好",
+            }
+        )
+        error = socket.receive_json()
+
+    assert error["error"]["code"] == "tts_request_invalid"
+    assert "ledger" in error["error"]["message"]
 
 
 def test_openai_removed_response_create_is_rejected() -> None:
@@ -1246,38 +1377,44 @@ def test_openai_segment_formatter_uses_standard_fields() -> None:
     assert event["end"] == 1.2
 
 
-def test_openai_session_update_preserves_standard_hints_without_diarization_state() -> None:
-    _, config = apply_session_update(
-        {
-            "type": "transcription_session.update",
-            "session": {
-                "input_audio_transcription": {
-                    "model": "gpt-4o-transcribe-diarize",
-                    "language": "zh",
-                    "languages": ["zh", "en"],
-                    "keywords": ["SpeechRail"],
-                    "timestamp_granularities": ["segment"],
-                    "known_speaker_names": ["Alice"],
-                    "known_speaker_references": ["ref_opaque"],
-                }
+def test_openai_session_update_rejects_unused_speaker_hints() -> None:
+    with pytest.raises(RealtimeAdapterError, match="known_speaker"):
+        apply_session_update(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "input_audio_transcription": {
+                        "model": "gpt-4o-transcribe-diarize",
+                        "language": "zh",
+                        "languages": ["zh", "en"],
+                        "keywords": ["SpeechRail"],
+                        "timestamp_granularities": ["segment"],
+                        "known_speaker_names": ["Alice"],
+                        "known_speaker_references": ["ref_opaque"],
+                    }
+                },
             },
-        },
-        session_id="realtime_test",
-        asr_model="speechrail/qwen3-asr-1.7b",
-        tts_model="speechrail/qwen3-tts",
-        tts_ready=True,
-        registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-        registered_tts=frozenset({"speechrail/qwen3-tts"}),
-        tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
-    )
+            session_id="realtime_test",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+        )
 
-    assert config["language"] == "zh"
-    assert config["languages"] == ["zh", "en"]
-    assert config["keywords"] == ["SpeechRail"]
-    assert config["timestamp_granularities"] == ["segment"]
-    assert "diarization" not in config
-    assert config["known_speaker_names"] == ["Alice"]
-    assert config["known_speaker_references"] == ["ref_opaque"]
+
+def test_openai_session_update_rejects_word_timestamps_until_wire_support_exists() -> None:
+    with pytest.raises(RealtimeAdapterError, match="word-level"):
+        apply_session_update(
+            {
+                "type": "transcription_session.update",
+                "session": {
+                    "input_audio_transcription": {
+                        "timestamp_granularities": ["segment", "word"],
+                    }
+                },
+            },
+            session_id="realtime_test",
+            asr_model="speechrail/qwen3-asr-1.7b",
+            registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
+        )
 
 
 def test_openai_realtime_rejects_retired_diarization_request_shape() -> None:
@@ -1603,11 +1740,7 @@ def test_openai_session_update_rejects_non_string_language_hints() -> None:
             },
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
-            tts_model="speechrail/qwen3-tts",
-            tts_ready=True,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-            registered_tts=frozenset({"speechrail/qwen3-tts"}),
-            tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
         )
 
 
@@ -1622,11 +1755,7 @@ def test_openai_session_update_rejects_invalid_timestamp_granularity() -> None:
             },
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
-            tts_model="speechrail/qwen3-tts",
-            tts_ready=True,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-            registered_tts=frozenset({"speechrail/qwen3-tts"}),
-            tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
         )
 
 
@@ -1643,11 +1772,7 @@ def test_openai_session_update_rejects_invalid_diarization_config() -> None:
             },
             session_id="realtime_test",
             asr_model="speechrail/qwen3-asr-1.7b",
-            tts_model="speechrail/qwen3-tts",
-            tts_ready=True,
             registered_asr=frozenset({"speechrail/qwen3-asr-1.7b"}),
-            registered_tts=frozenset({"speechrail/qwen3-tts"}),
-            tts_voice_ids=frozenset({"default", "warm", "bright", "calm"}),
         )
 
 
@@ -1782,8 +1907,11 @@ def test_openai_response_cancel_suppresses_audio_and_emits_cancelled_terminal() 
                 "text": "你好",
             }
         )
-        response_events = [socket.receive_json() for _ in range(4)]
-        assert response_events[-1]["type"] == "response.output_audio.delta"
+        response_events: list[dict[str, Any]] = []
+        while True:
+            response_events.append(socket.receive_json())
+            if response_events[-1]["type"] == "response.output_audio.delta":
+                break
 
         socket.send_json({"type": "speechrail.tts.cancel", "request_id": "cancel_001"})
         cancelled = socket.receive_json()
@@ -1949,7 +2077,11 @@ def test_realtime_tts_total_deadline_covers_generation() -> None:
         socket.send_json(
             {"type": "speechrail.tts.create", "request_id": "deadline", "text": "你好"}
         )
-        events = [socket.receive_json() for _ in range(5)]
+        events: list[dict[str, Any]] = []
+        while True:
+            events.append(socket.receive_json())
+            if events[-1]["type"] == "response.done":
+                break
 
     assert events[-2]["type"] == "error"
     assert events[-2]["error"]["code"] == "backend_timeout"
@@ -1977,6 +2109,18 @@ def test_openai_query_model_echoed_in_session_created() -> None:
 def test_openai_query_model_unknown_rejected_with_error_then_close_4004() -> None:
     client, factory = _client()
     with client.websocket_connect("/v1/realtime?model=does-not-exist-xyz") as socket:
+        event = socket.receive_json()
+        assert event["type"] == "error"
+        assert event["error"]["code"] == "model_not_found"
+        with pytest.raises(WebSocketDisconnect) as excinfo:
+            socket.receive_json()
+    assert excinfo.value.code == 4004
+    assert factory.sessions == []
+
+
+def test_openai_query_tts_model_is_rejected_before_session_creation() -> None:
+    client, factory = _client()
+    with client.websocket_connect("/v1/realtime?model=tts-1") as socket:
         event = socket.receive_json()
         assert event["type"] == "error"
         assert event["error"]["code"] == "model_not_found"
@@ -2015,6 +2159,23 @@ def test_openai_error_event_correlates_client_event_id() -> None:
     assert error["error"]["event_id"] == "evt_client_42"
     assert error["event_id"] != "evt_client_42"
     assert error["event_id"].startswith("event_")
+
+
+def test_openai_tts_error_event_correlates_request_id() -> None:
+    client, _ = _client()
+    with client.websocket_connect("/v1/realtime") as socket:
+        socket.receive_json()
+        socket.send_json(
+            {
+                "type": "speechrail.tts.create",
+                "request_id": "tts_error_42",
+                "text": "你好",
+            }
+        )
+        error = socket.receive_json()
+    assert error["type"] == "error"
+    assert error["error"]["code"] == "tts_not_enabled"
+    assert error["error"]["request_id"] == "tts_error_42"
 
 
 def test_openai_unsupported_language_surfaces_error_event_and_recovers() -> None:

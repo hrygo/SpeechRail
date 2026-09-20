@@ -518,39 +518,3 @@ def test_settings_auto_with_model_rejects_shadow(tmp_path: Path) -> None:
             realtime_vad_model_path=model_file,
             realtime_vad_shadow_enabled=True,
         )
-
-
-def test_bargein_cooldown_gates_repeat_cancel() -> None:
-    """A speech onset inside the cooldown window must not re-cancel TTS."""
-
-    services = build_app_services(
-        Settings(
-            qwen3_model_dir=None,
-            qwen3_python=None,
-            diarization_model_path=None,
-            diarization_embedding_model_path=None,
-            realtime_vad_bargein_cooldown_ms=250,
-        ),
-        AppOverrides(
-            batch_transcriber=FakeTranscriber(),
-            tts_synthesizer=FakeSpeechSynthesizer(),
-            realtime_asr_factory=FakeStreamingFactory(),
-            diarization_engine=None,
-        ),
-    )
-
-    async def send(event: dict[str, Any]) -> int | None:
-        return 0
-
-    session = OpenAIRealtimeSession(services, session_id="s", send=send)
-
-    with patch("speechrail.application.realtime_openai.time.monotonic", return_value=1000.0):
-        session._mark_bargein_cooldown()
-        assert session._bargein_allowed() is False
-
-    with patch("speechrail.application.realtime_openai.time.monotonic", return_value=1000.3):
-        assert session._bargein_allowed() is True
-
-    with patch("speechrail.application.realtime_openai.time.monotonic", return_value=2000.0):
-        session._bargein_cooldown_until = 0.0
-        assert session._bargein_allowed() is True

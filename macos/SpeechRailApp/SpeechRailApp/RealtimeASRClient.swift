@@ -162,7 +162,8 @@ public actor RealtimeASRClient {
             message: String,
             retryable: Bool?,
             busyReason: String?,
-            retryHint: String?
+            retryHint: String?,
+            requestID: String?
         )
         /// `input_audio_buffer.cleared`：清空屏障的服务端确认。
         case cleared
@@ -339,13 +340,21 @@ public actor RealtimeASRClient {
 
     /// 让服务端把调用方生成的一段文本念出来（助手用；字幕/会议不调）。
     /// LLM、历史、句子切分和排队都在调用方；这里仅提交一个无状态 render request。
-    public func sendTTSCreate(text: String) async throws {
+    public func sendTTSCreate(text: String, requestID: String? = nil) async throws {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let requestID = "tts_req_\(UUID().uuidString.lowercased())"
+        let requestID = requestID ?? "tts_req_\(UUID().uuidString.lowercased())"
         activeTTSRequestID = requestID
-        try await send(
-            SpeechRailTTSCreate(requestID: requestID, text: text, voice: voice).jsonObject
-        )
+        do {
+            try await send(
+                SpeechRailTTSCreate(requestID: requestID, text: text, voice: voice).jsonObject
+            )
+        } catch {
+            if activeTTSRequestID == requestID {
+                activeTTSRequestID = nil
+                activeTTSResponseID = nil
+            }
+            throw error
+        }
     }
 
     /// 取消正在合成的 TTS（用户插话）。未发送的音频由服务端丢弃。
@@ -624,13 +633,19 @@ public actor RealtimeASRClient {
             let error = object["error"] as? [String: Any]
             let speechrail = (error?["speechrail"] as? [String: Any])
                 ?? (object["speechrail"] as? [String: Any])
+            let requestID = error?["request_id"] as? String
+            if requestID == activeTTSRequestID {
+                activeTTSRequestID = nil
+                activeTTSResponseID = nil
+            }
             emit(
                 .serverError(
                     code: error?["code"] as? String ?? error?["type"] as? String ?? "unknown",
                     message: error?["message"] as? String ?? "语音服务返回了一个错误",
                     retryable: speechrail?["retryable"] as? Bool ?? error?["retryable"] as? Bool,
                     busyReason: speechrail?["busy_reason"] as? String ?? error?["busy_reason"] as? String,
-                    retryHint: speechrail?["retry_hint"] as? String ?? error?["retry_hint"] as? String
+                    retryHint: speechrail?["retry_hint"] as? String ?? error?["retry_hint"] as? String,
+                    requestID: requestID
                 )
             )
         default:

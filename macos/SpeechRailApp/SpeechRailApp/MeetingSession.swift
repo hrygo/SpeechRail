@@ -558,7 +558,7 @@ public final class MeetingSession {
             }
         case .diarizationDone:
             diarizationDrained = true
-        case .serverError(let code, let message, _, _, _):
+        case .serverError(let code, let message, _, _, _, _):
             lastFailure = Self.readableError(code: code, message: message)
             if code == "backend_busy" {
                 await enterInterruption(.serviceLost, note: lastFailure)
