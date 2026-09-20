@@ -111,6 +111,62 @@ public final class TeleprompterStore {
         try saveBundle(bundle)
     }
 
+    public func deleteDocument(documentID: String) throws {
+        let url = try fileURL(documentID: documentID)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw TeleprompterStoreError.notFound
+        }
+        try fileManager.removeItem(at: url)
+    }
+
+    public func duplicateDocument(documentID: String) throws -> TeleprompterDocumentBundle {
+        let original = try loadBundle(documentID: documentID)
+        let newDocID = UUID().uuidString
+        let now = Date()
+        let newTitle = "\(original.document.title) 副本"
+
+        var idMap: [String: String] = [:]
+        let newVersions = original.versions.map { v in
+            let newVID = UUID().uuidString
+            idMap[v.id] = newVID
+            let newSegments = v.segments.map { s in
+                TeleprompterSegment(
+                    id: UUID().uuidString,
+                    ordinal: s.ordinal,
+                    sourceRange: s.sourceRange,
+                    text: s.text,
+                    keywords: s.keywords,
+                    matchPhrases: s.matchPhrases,
+                    pauseHint: s.pauseHint
+                )
+            }
+            return TeleprompterVersion(
+                id: newVID,
+                documentID: newDocID,
+                sourceText: v.sourceText,
+                segments: newSegments,
+                analysisSource: v.analysisSource,
+                createdAt: now
+            )
+        }
+        let newActiveVID = original.document.activeVersionID.flatMap { idMap[$0] }
+        let newDoc = TeleprompterDocument(
+            id: newDocID,
+            title: newTitle,
+            sourceText: original.document.sourceText,
+            activeVersionID: newActiveVID,
+            createdAt: now,
+            updatedAt: now
+        )
+        let newBundle = TeleprompterDocumentBundle(
+            document: newDoc,
+            versions: newVersions,
+            runState: nil
+        )
+        try saveBundle(newBundle)
+        return newBundle
+    }
+
     public func exportMarkdown(_ bundle: TeleprompterDocumentBundle) -> String {
         let version = bundle.versions.first { $0.id == bundle.document.activeVersionID }
             ?? bundle.versions.first

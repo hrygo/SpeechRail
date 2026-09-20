@@ -1,10 +1,10 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 
 import PackageDescription
 
 let package = Package(
     name: "SpeechRailMacControl",
-    platforms: [.macOS(.v14)],
+    platforms: [.macOS(.v26)],
     products: [
         .library(name: "SpeechRailControlKit", targets: ["SpeechRailControlKit"]),
         .library(name: "SpeechRailControlAgentCore", targets: ["SpeechRailControlAgentCore"]),
@@ -63,7 +63,6 @@ let package = Package(
                 "SpeechRailAPICredentials.swift",
                 "SessionStore.swift",
                 "SessionSurfaceViews.swift",
-                "SpeechRailDesignTokens.swift",
                 "SurfaceHeaderView.swift",
                 "WorkspaceComponents.swift",
             ],
@@ -73,6 +72,7 @@ let package = Package(
                 "RuntimeMetricsSampler.swift",
                 "RuntimeMonitoringAccessibility.swift",
                 "AudioSampleRing.swift",
+                "SpeechRailDesignTokens.swift",
                 "VoicePrompt.swift",
                 "WindowLayoutPolicy.swift",
                 "TeleprompterDomain.swift",
@@ -82,6 +82,7 @@ let package = Package(
                 "TeleprompterAnalysis.swift",
                 "TeleprompterStore.swift",
                 "TeleprompterFollowController.swift",
+                "TeleprompterStageSettings.swift",
             ]
         ),
         .testTarget(

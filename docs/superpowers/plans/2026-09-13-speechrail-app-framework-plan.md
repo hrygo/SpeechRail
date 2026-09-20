@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- `SpeechRailApp` GUI target 的 deployment target 为 macOS 26.0；ControlKit、ControlAgent 和服务侧 worker 维持独立 target 的最低版本，不能反向约束 App UI 特性。
+- `SpeechRailApp`、ControlKit、ControlAgent、CaptureHelper 和服务侧 worker 统一使用 macOS 26.0 deployment target；Native targets 不保留旧系统兼容分支。
 - SpeechRail App 是控制面，不采集麦克风、不播放音频、不加载模型、不直接执行 `launchctl`；运行态动作继续经受约束的 XPC control agent 委托现有 managed Python CLI。
 - 使用独立管理控制中心、保留音色创作一级区域和独立 `Settings`；`Settings` 只承载应用偏好，不承载运行监控或模型下载。
 - 控制中心使用 `NavigationSplitView`；一级导航固定包含“配音台”“音色创作”“音色库”“我的作品”“总览”“运行监控”“模型管理”“预检与诊断”。

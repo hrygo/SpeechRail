@@ -68,7 +68,14 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
             )
         )
         if !panel.setFrameUsingName(SpeechRailDesignTokens.Teleprompter.stageWindowAutosaveName) {
-            panel.center()
+            if let screen = NSScreen.main {
+                let screenFrame = screen.visibleFrame
+                let x = screenFrame.midX - settings.width / 2
+                let y = screenFrame.maxY - SpeechRailDesignTokens.Teleprompter.stageDefaultHeight - SpeechRailDesignTokens.Teleprompter.stageTopInset
+                panel.setFrameOrigin(NSPoint(x: x, y: y))
+            } else {
+                panel.center()
+            }
         }
         self.panel = panel
         return panel

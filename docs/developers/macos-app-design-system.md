@@ -2,7 +2,7 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.8"
+version: "0.8.9"
 date: 2026-09-20
 ---
 
@@ -26,10 +26,9 @@ date: 2026-09-20
 ## 1. 研究基线与 Logo 设计基因
 
 本设计系统以 macOS 26 的设计语义、当前 Xcode 27.0 / macOS 27 SDK 工具链为基线。`SpeechRailApp` GUI target
-明确以 macOS 26.0 为最低版本，不为 App UI 编写 macOS 14 的兼容 fallback；服务协议、
-ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否保留更低最低版本由各自
-运行职责决定。研究结论是：App 在 macOS 26 上完整使用系统新设计能力，不把新特性降级为
-共同最低版本的视觉实现。
+明确以 macOS 26.0 为最低版本，不为 Native App、ControlKit、ControlAgent、CaptureHelper
+或服务侧 SwiftPM worker 编写 macOS 14 的兼容 fallback。研究结论是：所有 Native target
+在 macOS 26 上完整使用系统新设计能力，不把新特性降级为共同最低版本的视觉实现。
 
 - Apple 的 macOS 指南要求充分利用大屏、可调整窗口、菜单栏、键盘快捷键和可定制工具栏，避免把重要内容藏在过多模态层级中。[Designing for macOS](https://developer.apple.com/design/human-interface-guidelines/designing-for-macos/)
 - macOS 26 的新设计以 Liquid Glass 作为工具栏、侧边栏和重要控制的系统层；标准 SwiftUI 结构和控件会获得系统级更新，定制玻璃只用于真正重要的产品特性，不用自绘玻璃模拟系统。[Build a SwiftUI app with the new design](https://developer.apple.com/videos/play/wwdc2025/323/)、[Meet Liquid Glass](https://developer.apple.com/videos/play/wwdc2025/219/)

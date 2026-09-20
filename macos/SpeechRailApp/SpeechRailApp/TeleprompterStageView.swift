@@ -43,22 +43,43 @@ public struct TeleprompterStageView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.sm) {
-            Label("AI 提词器", systemImage: AppRoute.teleprompter.systemImage)
-                .font(SpeechRailDesignTokens.Typography.sectionTitle)
-                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: AppRoute.teleprompter.systemImage)
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                Text("AI 提词器")
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+            }
             Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
-            Text(session.progressText)
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .accessibilityLabel("提词进度")
-                .accessibilityValue(session.progressText)
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                StatusPill(
+                    tone: session.phase == .following ? .healthy : (session.phase == .uncertain ? .attention : .neutral),
+                    label: stagePhaseBadge(session.phase)
+                )
+                Text(session.progressText)
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+            }
+            .accessibilityLabel("提词进度")
+            .accessibilityValue(session.progressText)
+        }
+    }
+
+    private func stagePhaseBadge(_ phase: TeleprompterSession.Phase) -> String {
+        switch phase {
+        case .following: "跟读中"
+        case .paused: "已暂停"
+        case .uncertain: "待确认"
+        case .manual: "手动"
+        default: "提词"
         }
     }
 
     private var scriptStack: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Teleprompter.stageSegmentSpacing) {
             if let previous = previousSegment {
-                segmentText(previous.text, emphasis: .secondary)
+                segmentText(previous.text, emphasis: .previous)
             }
             if let current = session.currentSegment {
                 segmentText(current.text, emphasis: .primary)
@@ -71,19 +92,26 @@ public struct TeleprompterStageView: View {
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
             if settings.visibleSegmentCount >= 3, let next = nextSegment {
-                segmentText(next.text, emphasis: .secondary)
+                segmentText(next.text, emphasis: .next)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
     private enum SegmentEmphasis {
+        case previous
         case primary
-        case secondary
+        case next
     }
 
     private func segmentText(_ text: String, emphasis: SegmentEmphasis) -> some View {
-        Text(text)
+        let opacity: Double = switch emphasis {
+        case .primary: SpeechRailDesignTokens.Teleprompter.segmentOpacityCurrent
+        case .next: SpeechRailDesignTokens.Teleprompter.segmentOpacityNext
+        case .previous: SpeechRailDesignTokens.Teleprompter.segmentOpacityPrevious
+        }
+
+        return Text(text)
             .font(.system(size: settings.scriptPointSize, weight: emphasis == .primary ? .semibold : .regular))
             .lineSpacing(settings.lineSpacing)
             .foregroundStyle(
@@ -93,7 +121,7 @@ public struct TeleprompterStageView: View {
             )
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(emphasis == .primary ? 1 : 0.55)
+            .opacity(opacity)
     }
 
     private var statusBar: some View {
@@ -101,8 +129,8 @@ public struct TeleprompterStageView: View {
             Circle()
                 .fill(statusColor)
                 .frame(
-                    width: SpeechRailDesignTokens.Spacing.sm,
-                    height: SpeechRailDesignTokens.Spacing.sm
+                    width: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize,
+                    height: SpeechRailDesignTokens.Teleprompter.stageStatusIndicatorSize
                 )
                 .accessibilityHidden(true)
             Text(statusText)
@@ -132,34 +160,59 @@ public struct TeleprompterStageView: View {
                     session.pauseFollowing()
                 }
             } label: {
-                Label(
-                    session.phase == .paused ? "继续" : "暂停",
-                    systemImage: session.phase == .paused ? "play.fill" : "pause.fill"
-                )
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: session.phase == .paused ? "play.fill" : "pause.fill")
+                    Text(session.phase == .paused ? "继续" : "暂停")
+                    SessionKeycap("Space")
+                }
             }
             .keyboardShortcut(.space, modifiers: [])
 
-            Button("上一段", systemImage: "chevron.left") {
+            Button {
                 session.moveToPrevious()
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: "chevron.left")
+                    Text("上一段")
+                    SessionKeycap("←")
+                }
             }
             .keyboardShortcut(.leftArrow, modifiers: [])
 
-            Button("下一段", systemImage: "chevron.right") {
+            Button {
                 session.moveToNext()
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Text("下一段")
+                    Image(systemName: "chevron.right")
+                    SessionKeycap("→")
+                }
             }
             .keyboardShortcut(.rightArrow, modifiers: [])
 
-            Button("回到当前段", systemImage: "arrow.counterclockwise") {
+            Button {
                 session.resetFollow()
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: "arrow.counterclockwise")
+                    Text("回正")
+                    SessionKeycap("R")
+                }
             }
             .keyboardShortcut("r", modifiers: [])
 
             Spacer(minLength: 0)
 
-            Button("结束提词", systemImage: "xmark") {
+            Button {
                 Task {
                     await session.endFollowing()
                     close()
+                }
+            } label: {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                    Image(systemName: "xmark")
+                    Text("结束")
+                    SessionKeycap("Esc")
                 }
             }
             .keyboardShortcut(.escape, modifiers: [])

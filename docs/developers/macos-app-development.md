@@ -13,7 +13,7 @@ token；新页面不得自行定义颜色、间距、圆角和字体层级。
 
 ## 工具链
 
-- 当前本机工具链为 Xcode 27.0（build 27A266）、Swift 6.4；`SpeechRailApp` GUI target 使用 macOS deployment target 26.0，首期只构建 `arm64`；ControlKit、ControlAgent 和服务侧 worker 可按独立职责保留更低最低版本。
+- 当前本机工具链为 Xcode 27.0（build 27A266）、Swift 6.4；Native targets（`SpeechRailApp`、ControlKit、ControlAgent、CaptureHelper 与服务侧 worker）统一使用 macOS deployment target 26.0，首期只构建 `arm64`。
 - Python 仍固定为 `>=3.12,<3.13`，使用仓库现有 `uv` 环境。
 - 运行 App 前，首次安装 Xcode 的管理员需要在本机接受 Apple 许可；不要把管理员密码写入脚本或仓库。
 - 当前本机不依赖 Apple Developer ID；Debug/Release 可用 ad hoc 本地签名且关闭 Hardened Runtime。无 Team ID 时，Debug/Release 使用 App bundle 内的 XPC service，避免把 ad hoc helper 交给 macOS 的 `SMAppService` Launch Constraint；Distribution 才启用 Hardened Runtime 并使用签名的 `SMAppService`。

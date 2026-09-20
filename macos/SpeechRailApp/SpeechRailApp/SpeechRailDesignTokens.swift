@@ -1078,6 +1078,14 @@ public enum SpeechRailDesignTokens {
         public static let stageMinimumVisibleSegmentCount = 2
         public static let stageMaximumVisibleSegmentCount = 3
         public static let stageWindowAutosaveName = "SpeechRail.Teleprompter.Stage"
+        /// 舞台窗口首发距屏幕顶端偏移（贴近摄像头，建立自然眼神视线锚点）。
+        public static let stageTopInset: CGFloat = 48
+        /// 状态指示灯（圆点）的边长。
+        public static let stageStatusIndicatorSize: CGFloat = 8
+        /// 三段视界不透明度阶梯：当前段 100%、下一段预读 60%、上一段回溯 35%。
+        public static let segmentOpacityCurrent: Double = 1.0
+        public static let segmentOpacityNext: Double = 0.60
+        public static let segmentOpacityPrevious: Double = 0.35
     }
 }
 

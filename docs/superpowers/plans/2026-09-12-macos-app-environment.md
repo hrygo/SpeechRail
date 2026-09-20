@@ -66,7 +66,7 @@ security find-identity -p codesigning -v
 
 - [x] 用 Xcode 原生工程创建 `SpeechRail` App，并加入 `SpeechRailControlKit` framework、`SpeechRailControlAgent` executable、unit test target 和 UI test target；Xcode target 保留 `SpeechRailApp` 技术名。
 - [x] 使用 `com.speechrail.desktop` 作为 App bundle identifier，使用 `com.speechrail.desktop.control` 作为 Agent Mach service/LaunchAgent label；所有标识符集中在配置文件或构建设置中，代码不散落硬编码。
-- [x] `SpeechRailApp` 与 UI test target 设置 `MACOSX_DEPLOYMENT_TARGET = 26.0`、Apple Silicon `arm64`、Swift 6 language mode、严格并发检查；ControlKit、ControlAgent 和服务侧 worker 继续由各自 target/Package 的最低版本控制，Debug/Release/Distribution 三套配置显式分离。
+- [x] Native targets（`SpeechRailApp`、UI test、ControlKit、ControlAgent、CaptureHelper 与服务侧 worker）统一设置 `MACOSX_DEPLOYMENT_TARGET = 26.0` / Package platform `macOS 26`，使用 Apple Silicon `arm64`、Swift 6 language mode 与严格并发检查；Debug/Release/Distribution 三套配置显式分离。
 - [x] Distribution target 开启 Hardened Runtime；无 Apple Developer ID 的 Debug/Release 保持关闭以支持本地 bundle 运行。App Sandbox 保持关闭并在配置注释中说明这是 direct Developer ID distribution 的边界决定，不为 App Store 伪造兼容性。
 - [x] 不添加 microphone entitlement、`NSMicrophoneUsageDescription`、JIT、unsigned executable、DYLD/library validation 等例外；只有后续实测确有需要时才单独评审例外。
 - [x] 将 Agent executable 复制到 App `Contents/Resources/SpeechRailControlAgent`，将 `com.speechrail.desktop.control.plist` 复制到 `Contents/Library/LaunchAgents/`；plist 使用 `BundleProgram`，不使用旧式 `Program`。
