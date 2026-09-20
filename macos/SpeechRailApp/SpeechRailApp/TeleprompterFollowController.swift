@@ -6,8 +6,6 @@ public struct TeleprompterFollowController: Sendable {
     public private(set) var uncertainty: Double?
     public private(set) var partialPreview: String?
 
-    private var followEpoch = 0
-
     public init(
         currentIndex: Int = 0,
         mode: TeleprompterRunMode = .following
@@ -49,14 +47,12 @@ public struct TeleprompterFollowController: Sendable {
     public mutating func pause() {
         mode = .paused
         partialPreview = nil
-        followEpoch += 1
     }
 
     public mutating func resume() {
         mode = .following
         uncertainty = nil
         partialPreview = nil
-        followEpoch += 1
     }
 
     public mutating func move(to index: Int, segmentCount: Int) {
@@ -65,20 +61,17 @@ public struct TeleprompterFollowController: Sendable {
         mode = .manual
         uncertainty = nil
         partialPreview = nil
-        followEpoch += 1
     }
 
     public mutating func enterManual() {
         mode = .manual
         uncertainty = nil
         partialPreview = nil
-        followEpoch += 1
     }
 
     public mutating func resetFollowWindow() {
         mode = .following
         uncertainty = nil
         partialPreview = nil
-        followEpoch += 1
     }
 }
