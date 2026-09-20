@@ -139,10 +139,10 @@ final class SpeechRailAppUITests: XCTestCase {
         // 菜单项与 REDESIGN-SPEC §7.9 一致：`打开 SpeechRail`（⌘O）。
         XCTAssertTrue(app.menuItems["打开 SpeechRail"].waitForExistence(timeout: 5))
         // 设置窗口现在是面向普通用户的「通用 / 创作 / 助手 / 服务」四个页签。
-        XCTAssertTrue(app.staticTexts["通用"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["创作"].exists)
-        XCTAssertTrue(app.staticTexts["助手"].exists)
-        XCTAssertTrue(app.staticTexts["服务"].exists)
+        XCTAssertTrue(settingsTab("通用", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(settingsTab("创作", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(settingsTab("助手", in: app).waitForExistence(timeout: 5))
+        XCTAssertTrue(settingsTab("服务", in: app).waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["会话"].exists)
         // 默认页签是「通用」，它只放 App 自己的偏好（「启动与窗口」「开发者」两节）；
         // 「产品定位 / 最低系统 / 版本」已经搬进未选中的「服务」页签（§7.10），
@@ -288,6 +288,15 @@ final class SpeechRailAppUITests: XCTestCase {
 
     private func identifierElement(_ identifier: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any).matching(identifier: identifier).firstMatch
+    }
+
+    /// Native macOS `Tab` exposes the selected label as a text descendant and
+    /// unselected labels as button descendants. Keep the assertion about the
+    /// user-visible tab name, not the platform-specific AX element type.
+    private func settingsTab(_ title: String, in app: XCUIApplication) -> XCUIElement {
+        app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", title)
+        ).firstMatch
     }
 
     /// A workspace pane needs roughly 900pt of window height. The CI runner only
