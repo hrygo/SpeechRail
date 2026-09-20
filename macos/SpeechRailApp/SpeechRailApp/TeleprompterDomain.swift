@@ -64,6 +64,197 @@ public struct TeleprompterSourceRange: Codable, Equatable, Sendable {
     }
 }
 
+public typealias TeleprompterPace = TeleprompterTimingPolicy.Pace
+
+public enum TeleprompterReviewIssue: String, Codable, Sendable, CaseIterable {
+    case missingContext = "missing_context"
+    case formatAmbiguity = "format_ambiguity"
+    case readingChoice = "reading_choice"
+    case uncertainMeaning = "uncertain_meaning"
+    case nonspokenContent = "nonspoken_content"
+
+    public var title: String {
+        switch self {
+        case .missingContext: "指代缺失"
+        case .formatAmbiguity: "格式歧义"
+        case .readingChoice: "读法选择"
+        case .uncertainMeaning: "含义存疑"
+        case .nonspokenContent: "建议略过"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .missingContext: "原文存在未指明的代词或前文依赖，请核对是否需要补足主语。"
+        case .formatAmbiguity: "原文包含代码、表格或特殊符号，AI 提出了转述建议，请确认表达方式。"
+        case .readingChoice: "存在多种读法（如按字读或按意译读），请选择你希望的读法。"
+        case .uncertainMeaning: "原文含义模糊或存在歧义，未做臆测，请确认正文。"
+        case .nonspokenContent: "模型建议不朗读此项（如版权声明、未闭合标记或纯排版内容），由你决定是否跳过。"
+        }
+    }
+}
+
+public enum TeleprompterReviewAction: String, Codable, Sendable {
+    case accept      // 采用建议
+    case edit        // 修改
+    case keepSource  // 保留原文
+    case convertToCue // 仅作提示
+    case skip        // 跳过
+}
+
+public struct TeleprompterReviewItem: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public let blockID: String
+    public let issue: TeleprompterReviewIssue
+    public var suggestedText: String
+    public var sourceSnippet: String
+    public var resolvedAction: TeleprompterReviewAction?
+
+    public init(
+        id: String = UUID().uuidString,
+        blockID: String,
+        issue: TeleprompterReviewIssue,
+        suggestedText: String,
+        sourceSnippet: String,
+        resolvedAction: TeleprompterReviewAction? = nil
+    ) {
+        self.id = id
+        self.blockID = blockID
+        self.issue = issue
+        self.suggestedText = suggestedText
+        self.sourceSnippet = sourceSnippet
+        self.resolvedAction = resolvedAction
+    }
+
+    public var isResolved: Bool {
+        resolvedAction != nil
+    }
+}
+
+public enum TeleprompterBlockDisposition: String, Codable, Sendable {
+    case speak
+    case cue
+    case skip
+    case unresolved
+}
+
+public enum TeleprompterBlockOrigin: String, Codable, Sendable {
+    case ai
+    case deterministic
+    case user
+}
+
+public struct TeleprompterReadingBlock: Codable, Equatable, Identifiable, Sendable {
+    public let id: String
+    public var ordinal: Int
+    public var sourceRange: TeleprompterSourceRange
+    public var text: String
+    public var rawSourceText: String
+    public var disposition: TeleprompterBlockDisposition
+    public var origin: TeleprompterBlockOrigin
+    public var reviewIssues: [TeleprompterReviewIssue]
+    public var budgetSeconds: Double
+
+    public init(
+        id: String,
+        ordinal: Int,
+        sourceRange: TeleprompterSourceRange,
+        text: String,
+        rawSourceText: String = "",
+        disposition: TeleprompterBlockDisposition = .speak,
+        origin: TeleprompterBlockOrigin = .ai,
+        reviewIssues: [TeleprompterReviewIssue] = [],
+        budgetSeconds: Double = 0
+    ) {
+        self.id = id
+        self.ordinal = ordinal
+        self.sourceRange = sourceRange
+        self.text = text
+        self.rawSourceText = rawSourceText
+        self.disposition = disposition
+        self.origin = origin
+        self.reviewIssues = reviewIssues
+        self.budgetSeconds = budgetSeconds
+    }
+}
+
+public struct TeleprompterContentSelection: Codable, Equatable, Sendable {
+    public var totalParagraphCount: Int
+    public var selectedParagraphIndices: Set<Int>
+
+    public init(totalParagraphCount: Int = 0, selectedParagraphIndices: Set<Int> = []) {
+        self.totalParagraphCount = totalParagraphCount
+        self.selectedParagraphIndices = selectedParagraphIndices
+    }
+
+    public var isAllSelected: Bool {
+        totalParagraphCount > 0 && selectedParagraphIndices.count == totalParagraphCount
+    }
+
+    public var hasExclusions: Bool {
+        !isAllSelected && !selectedParagraphIndices.isEmpty
+    }
+
+    public var selectedCount: Int {
+        selectedParagraphIndices.count
+    }
+}
+
+public struct TeleprompterTrialReadingResult: Codable, Equatable, Sendable {
+    public let durationSeconds: TimeInterval
+    public let baseEstimateSeconds: TimeInterval
+    public let calibrationFactor: Double
+    public let isAdopted: Bool
+
+    public init(
+        durationSeconds: TimeInterval,
+        baseEstimateSeconds: TimeInterval,
+        calibrationFactor: Double,
+        isAdopted: Bool = false
+    ) {
+        self.durationSeconds = durationSeconds
+        self.baseEstimateSeconds = baseEstimateSeconds
+        self.calibrationFactor = calibrationFactor
+        self.isAdopted = isAdopted
+    }
+
+    public var isWithinValidRange: Bool {
+        (TeleprompterTimingPolicy.minimumCalibrationFactor...TeleprompterTimingPolicy.maximumCalibrationFactor)
+            .contains(calibrationFactor)
+    }
+}
+
+public struct TeleprompterRunClockState: Codable, Equatable, Sendable {
+    public var elapsedSeconds: TimeInterval
+    public var targetSeconds: TimeInterval
+    public var estimatedRemainingSeconds: TimeInterval
+    public var isPaused: Bool
+
+    public init(
+        elapsedSeconds: TimeInterval = 0,
+        targetSeconds: TimeInterval = 1200,
+        estimatedRemainingSeconds: TimeInterval = 1200,
+        isPaused: Bool = false
+    ) {
+        self.elapsedSeconds = elapsedSeconds
+        self.targetSeconds = targetSeconds
+        self.estimatedRemainingSeconds = estimatedRemainingSeconds
+        self.isPaused = isPaused
+    }
+
+    public var targetRemainingSeconds: TimeInterval {
+        max(0, targetSeconds - elapsedSeconds)
+    }
+
+    public var isOverTarget: Bool {
+        elapsedSeconds > targetSeconds
+    }
+
+    public var overTargetSeconds: TimeInterval {
+        max(0, elapsedSeconds - targetSeconds)
+    }
+}
+
 public enum TeleprompterAnalysisSource: String, Codable, Sendable {
     case ai
     case deterministic
