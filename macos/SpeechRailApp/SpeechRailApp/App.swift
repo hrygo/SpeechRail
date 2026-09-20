@@ -177,10 +177,11 @@ struct SpeechRailApp: App {
             }
             return try await llmProvider.complete(
                 configuration: sessionPreferences.llmConfiguration,
-                messages: [LLMMessage(role: .user, text: prompt)],
+                messages: [LLMMessage(role: .user, text: prompt.input)],
                 apiKey: LLMKeychain.load(),
                 maxOutputTokens: 4000,
-                textFormat: ["type": "json_object"],
+                textFormat: TeleprompterAnalysis.jsonSchema,
+                instructions: prompt.instructions,
                 timeout: 45
             )
         }

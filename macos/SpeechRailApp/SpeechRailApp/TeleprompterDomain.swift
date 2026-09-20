@@ -4,6 +4,7 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     case emptySource
     case invalidSourceRange
     case invalidAnalysis
+    case promptConstructionFailed
 
     public var errorDescription: String? {
         switch self {
@@ -13,6 +14,8 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
             "提词稿段落无法追溯到原文"
         case .invalidAnalysis:
             "AI 提词分析结果无效"
+        case .promptConstructionFailed:
+            "AI 提词请求构建失败"
         }
     }
 }
@@ -37,7 +40,7 @@ public enum TeleprompterAnalysisSource: String, Codable, Sendable {
     case user
 }
 
-public enum TeleprompterPauseHint: String, Codable, Sendable {
+public enum TeleprompterPauseHint: String, Codable, Sendable, CaseIterable {
     case short
     case medium
     case long
