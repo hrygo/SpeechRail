@@ -65,19 +65,17 @@ CLI 从源码 checkout 执行带 `--app-home` 的 service/profile/setup 状态�
 ### 普通 service 操作
 
 先阅读 [operator contract](references/operator-contract.md)；需要实际 stop/start 时再阅读
-[lifecycle controller](references/lifecycle.md)。所有替换、启停和回滚都必须：
+[lifecycle controller](references/lifecycle.md)。按动作选择路径：
 
-共享 contract 固定生命周期上限：默认最多等待 `2 秒`；只有重新核对身份后才允许对精确进程组发送
-`SIGKILL`，强杀后最多再等待 `10 秒` 确认 lock 释放。
+| 请求 | 执行与完成条件 |
+|---|---|
+| start / 确保启动 | 目标已 ready 且身份一致时直接报告；已停止时确认 lock/端口无冲突后启动并验证 ready。正在启动则有界等待；身份不符或不健康时报告诊断，不自动 stop/restart。 |
+| stop | 按共享 contract 排除活动请求，通过 controller 停止并确认目标退出、lock 释放和 listener 消失；已停止且无残留时直接报告。 |
+| restart | 排除活动请求，完成 controller stop，再 start 并核对 ready 与身份。 |
+| profile apply / rollback | 交给下述 profile 事务管理停启与恢复，不在事务外额外执行一轮 stop/start。 |
 
-1. 检查外部 `/v1/realtime` 客户端：只把 `ESTABLISHED` 连接视为活动，并确认 realtime session
-   与 batch/realtime active requests 为零；不能自动关闭 Sona、浏览器或其他客户端。
-2. 通过 controller 执行 `bootout`/stop，而不是直接把 `launchctl` 返回当作退出证明。
-3. 旧进程仍持锁时，重新核对当前 owner、PID、命令行和 executable；只有精确匹配的进程组
-   才能按 controller 规则强杀。PID 不安全、身份不一致或 lock 未释放时 fail closed。
-4. 仅当请求包含启动、重启或切换时通过 controller start，等待真实 ready，核对所需 identity；
-   单独 stop 的完成条件是目标进程退出、lock 释放且 listener 消失，不再启动服务。
-   profile 事务内置 smoke 按已授权事务执行，额外真实推理需用户明确要求。
+停止等待、精确进程身份复核与强杀上限统一见 operator contract。profile 事务内置 smoke 按已授权事务执行，
+额外真实推理需用户明确要求。
 
 ### profile apply / rollback
 

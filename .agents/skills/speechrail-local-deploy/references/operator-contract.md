@@ -25,7 +25,14 @@
 - App 退出、control-agent 注销或 App bundle 升级都不得停止、删除或覆盖服务的 `runtime/current`、selection、模型、私有配置和 `com.speechrail` plist。服务发布与 App 发布可以独立回滚；联合发布必须先验收服务，再验收 App 控制链路。
 - App 发布只保留一个实际安装 bundle（默认 `~/Applications/SpeechRail.app`）。测试/归档副本放在构建或临时目录，验收后注销并清理；不要把上一版本的 `.app` 作为可执行副本长期留在 Applications 或 DerivedData 中，以免 Finder/LaunchServices 显示重复项目。
 
-## 唯一生命周期流程
+## 生命周期分支
+
+先按请求选择 start、stop、restart 或安装/切档事务。单独 start 不进入下面的停止流程：目标已 ready 且
+身份一致时直接报告；正在启动时有界等待；确认已停止且 lock/端口无冲突后才调用 start。未知进程占用、
+身份不一致或现有服务不健康时报告诊断，不自动停服或强杀。已停止且无残留的 stop 请求直接报告状态。
+
+以下流程适用于需要停止旧实例的 stop、restart、替换或切档；安装/profile 事务由对应入口执行，
+不要在事务外重复编排停启：
 
 1. 记录 active profile、generation、runtime target、PID/listener 和健康状态。
 2. 隔离外部 realtime 客户端：`lsof` 只把 `ESTABLISHED` 视为活动连接，metrics 确认 realtime session 和 batch/realtime active requests 为零。发现活动客户端时暂停并报告阻塞，只有用户明确授权关闭指定客户端时才按精确 PID 结束，不自动关闭 Sona、浏览器或其它客户端。
@@ -33,7 +40,7 @@
 4. 有端口时轮询同一个 per-port singleton lock；无端口测试路径立即返回，不插入无意义 sleep。
 5. 默认最多等待 2 秒；仍占用时先重新读取当前 lock owner 并核对命令行/executable，不能直接信任早期 `launchctl status` 快照；只有身份仍一致的精确 PID/进程组才允许发送 `SIGKILL`。
 6. 强杀后最多再等待 10 秒确认 lock 释放；PID 身份不一致、无法验证或 lock 未释放时中止，不启动候选。`launchctl`、`ps` 和 lock waiter 都必须有界，不能因为控制面无响应而无限等待。
-7. 请求包含启动、重启或切换时，通过 `LaunchAgentServiceController.start()` 在 bootstrap/kickstart 前再次确认 lock，启动后等待真实 ready，再核对身份与已授权的 smoke。单独 stop 到 lock 释放、目标进程退出和 listener 消失即完成。
+7. restart、替换或切档在停止成功后，通过 `LaunchAgentServiceController.start()` 在 bootstrap/kickstart 前再次确认 lock，启动后等待真实 ready，再核对身份与已授权的 smoke。单独 stop 到 lock 释放、目标进程退出和 listener 消失即完成。
 
 禁止 `pkill`、`killall`、模糊名称匹配、手工 plist 修改和连续 `restart` 重试。停止失败必须保留旧 runtime/selection 作为回退点。
 

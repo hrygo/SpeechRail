@@ -8,6 +8,9 @@ wheel 替换时使用 `speechrail service stop`；`service disable` 只是兼容
 仅用于已授权维护且需要定位 controller 的场景；它读取私有配置但不打印内容。
 当前 release 缺少 `LaunchAgentServiceController` 时停止并报告所需升级，不自动升级，也不能退回模糊 kill。
 
+单独 start 按 [operator contract](operator-contract.md) 的启动分支处理，不执行下方 stop 片段。
+以下示例分别说明停止与启动机制，不是一套必须连续执行的命令；profile 事务使用其 CLI 入口。
+
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
 CURRENT_PYTHON="$APP_HOME/runtime/current/.venv/bin/python"

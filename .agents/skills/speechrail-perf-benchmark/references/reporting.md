@@ -3,6 +3,9 @@
 仅在需要生成或修订性能归档、比较结果或 README 时读取。原始 JSON、音频、embedding 和日志
 始终留在仓库外；Git 只保存脱敏摘要。
 
+先确定交付位置：临时测量按用户指定位置交付，未指定时在仓库外保存结果并给出摘要；只有用户请求
+正式归档时才写入性能归档和索引。README 同步单独按下文判断，不由是否修改 README 反推归档范围。
+
 ## 比较口径
 
 按实际测量与可比基线选择视图，不为填满模板补跑未授权基准：
@@ -18,7 +21,8 @@
 
 ## 归档报告模板
 
-保存为 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`：
+正式归档时保存为 `docs/archive/performance/YYYY-MM-DD-v<version>-performance-benchmark.md`，并更新索引。
+临时报告可复用下列相关字段，不因此写入仓库或补跑未请求的测量：
 
 ```markdown
 # SpeechRail vX.Y.Z 性能与质量基准
@@ -122,7 +126,8 @@
 
 ## README 同步
 
-只有用户明确要求修改 README 时，才同步“真实性能基准实测”区；否则只更新正式报告和性能归档索引。
+只有用户明确要求修改 README 时，才同步“真实性能基准实测”区；未请求同步时保留 README，
+报告与索引是否更新由前述交付范围决定。
 
 同步规则：
 
