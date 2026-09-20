@@ -13,6 +13,7 @@ public enum TeleprompterPreparationError: Error, Equatable, LocalizedError, Send
     case invalidTargetMinutes
     case invalidSourceUnits
     case invalidTimingPlan
+    case invalidPromptResponse
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +27,7 @@ public enum TeleprompterPreparationError: Error, Equatable, LocalizedError, Send
         case .invalidTargetMinutes: "目标时长必须是 1–120 分钟的整数"
         case .invalidSourceUnits: "稿件分片无法无损恢复"
         case .invalidTimingPlan: "无法为这份稿件建立时间预算"
+        case .invalidPromptResponse: "AI 返回的结构化结果无法使用"
         }
     }
 }
