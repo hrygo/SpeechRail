@@ -1980,7 +1980,7 @@ class OpenAIRealtimeSession:
         async with self._tts_terminal_lock:
             if self._tts_terminal_sent:
                 return
-            send_task = asyncio.create_task(self._send(event))
+            send_task: asyncio.Future[int | None] = asyncio.ensure_future(self._send(event))
             cancelled = False
             while True:
                 try:

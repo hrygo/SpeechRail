@@ -496,7 +496,7 @@ public final class TeleprompterSession {
             )
             syncFollowState()
             phase = uncertainty == nil ? (followController.mode == .following ? .following : .manual) : .uncertain
-        case .serverError(let code, let message, _, _, _):
+        case .serverError(let code, let message, _, _, _, _):
             if code == "backend_busy" {
                 await enterManual(.serviceBusy(message))
             } else {

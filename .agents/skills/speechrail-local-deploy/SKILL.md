@@ -77,6 +77,9 @@ CLI 从源码 checkout 执行带 `--app-home` 的 service/profile/setup 状态�
 停止等待、精确进程身份复核与强杀上限统一见 operator contract。profile 事务内置 smoke 按已授权事务执行，
 额外真实推理需用户明确要求。
 
+生命周期硬上限是：`bootout` 后最多等待 `2 秒`；仅在重新核对 PID、命令行和 owner 后，才可对精确进程组发送
+`SIGKILL`，强杀后最多再等待 `10 秒` 确认 lock 与 listener 释放；身份无法核实时必须 fail closed。
+
 ### profile apply / rollback
 
 `profile apply <preset> --yes` 与 `profile rollback --yes` 是一次事务，不是热重启。保留初始

@@ -23,6 +23,15 @@ def _silence_pcm(duration_ms: int = 32) -> bytes:
     return b"\x00\x00" * num_samples
 
 
+def _receive_audio_delta(socket):
+    """Consume the contract-defined TTS prelude until PCM audio starts."""
+    for _ in range(16):
+        event = socket.receive_json()
+        if event["type"] == "response.output_audio.delta":
+            return event
+    raise AssertionError("TTS response did not emit response.output_audio.delta")
+
+
 def test_vad_detector_debounce_and_silence() -> None:
     config = VadConfig(threshold=0.3, debounce_frames=3, silence_duration_ms=96)
     vad = VoiceActivityDetector(config)
@@ -110,9 +119,8 @@ def test_realtime_vad_fact_does_not_cancel_tts_without_caller_command() -> None:
             }
         )
 
-        # Wait for TTS audio to start streaming
-        response_events = [socket.receive_json() for _ in range(4)]
-        assert response_events[-1]["type"] == "response.output_audio.delta"
+        # The transcript echo precedes PCM audio in the current TTS event sequence.
+        _receive_audio_delta(socket)
 
         # Now simulate user speaking (Barge-in!) -> Send 4 frames of active speech
         active_speech = _sine_pcm(440, 32, 10000.0)
@@ -184,8 +192,7 @@ def test_bargein_session_isolation() -> None:
             }
         )
 
-        b_events = [socket_b.receive_json() for _ in range(4)]
-        assert b_events[-1]["type"] == "response.output_audio.delta"
+        _receive_audio_delta(socket_b)
 
         # Speak into Session A -> Barge-in on Session A
         active_speech = _sine_pcm(440, 32, 10000.0)
