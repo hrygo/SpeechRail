@@ -210,6 +210,18 @@ final class ServiceContractTests: XCTestCase {
             ),
             .notReady
         )
+        XCTAssertEqual(
+            ServiceErrorClassifier.category(
+                for: .http(
+                    statusCode: 409,
+                    code: "voice_revoked",
+                    message: "redacted",
+                    requestID: "req-3",
+                    retryable: false
+                )
+            ),
+            .voiceRevoked
+        )
     }
 
     func testVoiceRevisionDecodesLegacyMutationAndRevisionListShapes() throws {

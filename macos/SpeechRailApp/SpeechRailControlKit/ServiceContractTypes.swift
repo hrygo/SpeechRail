@@ -169,6 +169,7 @@ public enum ServiceErrorCategory: Equatable, Sendable {
     case notReady
     case busy
     case unauthorized
+    case voiceRevoked
     case unsupported
     case invalidContract
     case connection
@@ -183,6 +184,8 @@ public enum ServiceErrorClassifier {
             switch code {
             case "invalid_api_key", "unauthorized", "forbidden":
                 .unauthorized
+            case "voice_revoked":
+                .voiceRevoked
             case "voice_revision_mismatch", "voice_revision_conflict",
                  "model_revision_mismatch", "model_revision_conflict",
                  "pronunciation_conflict":
