@@ -142,6 +142,20 @@ struct SpeechRailApp: App {
         let sessionPreferences = SessionPreferences()
         let assistantSession = AssistantSession(coordinator: coordinator)
         assistantSession.preferences = { sessionPreferences }
+        assistantSession.realtimeModelRevision = { [weak appModel] voiceID in
+            guard
+                let snapshot = appModel?.effectiveCapabilities,
+                let revision = snapshot.models["tts"]?.catalogRevision,
+                snapshot.voices.contains(where: { voice in
+                    guard voice.available, voice.operations["realtime_speech"] != nil else {
+                        return false
+                    }
+                    guard let voiceID else { return true }
+                    return voice.id == voiceID || voice.aliases.contains(voiceID)
+                })
+            else { return nil }
+            return revision
+        }
         assistantSession.serviceReadiness = { [weak appModel] in
             do {
                 let readiness = try await discoveryClient.fetchReadiness()

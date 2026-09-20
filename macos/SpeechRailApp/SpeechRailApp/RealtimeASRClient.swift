@@ -45,6 +45,8 @@ public actor RealtimeASRClient {
                     "语音服务没有在关闭期限内确认提交。"
                 case .terminalItems:
                     "最后一段语音没有在关闭期限内完成转写。"
+                case .diarization:
+                    "说话人归属没有在关闭期限内完成收口。"
                 case .clear:
                     "语音服务没有在关闭期限内确认清空缓冲区。"
                 case .close:
@@ -194,10 +196,15 @@ public actor RealtimeASRClient {
     private var clearAcknowledged = false
     private var committedEventCount = 0
     private var closeBarrier = RealtimeCloseBarrier()
+    private var diarizationAcknowledged = false
     private var sequenceValidator = RealtimeSequenceValidator()
     /// Latest sequence diagnostic. The event envelope remains the source of
     /// truth; this property is only a non-sensitive convenience for session UI.
     public private(set) var sequenceStatus: RealtimeSequenceStatus = .missing
+    /// Opaque server session identity and a bounded in-memory event ID window.
+    /// Neither is persisted or logged.
+    public private(set) var serverSessionID: String?
+    public private(set) var recentEventIDs: [String] = []
     private var currentEventMetadata: RealtimeEventMetadata?
     private var closeCode: Int?
 
@@ -307,6 +314,12 @@ public actor RealtimeASRClient {
             timeout: timeout,
             afterCommittedEventCount: committedCountBeforeCommit
         )
+        if diarizationEnabled {
+            try await withStageTimeout(stage: .diarization, timeout: timeout) {
+                try await self.finishDiarization()
+            }
+            try await waitForDiarizationAcknowledgement(timeout: timeout)
+        }
         try await withStageTimeout(stage: .clear, timeout: timeout) {
             try await self.clear()
         }
@@ -351,10 +364,10 @@ public actor RealtimeASRClient {
     /// 只在协商过分人的会话上调用。同一个 `event_id` 重试是幂等的——所以重试安全。
     public func finishDiarization() async throws {
         guard diarizationEnabled, !finishSent else { return }
-        finishSent = true
         let id = finishEventID ?? UUID().uuidString
         finishEventID = id
         try await send(["type": "speechrail.diarization.finish", "event_id": id])
+        finishSent = true
     }
 
     private func send(_ payload: [String: Any]) async throws {
@@ -473,6 +486,24 @@ public actor RealtimeASRClient {
         }
     }
 
+    private func waitForDiarizationAcknowledgement(timeout: Duration) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            if didClose {
+                throw Failure.closed(closeCode)
+            }
+            if diarizationAcknowledged {
+                return
+            }
+            guard clock.now < deadline else {
+                throw Failure.drainTimedOut(.diarization)
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
     // MARK: - 下行
 
     private func startReceiveLoop(on task: URLSessionWebSocketTask) {
@@ -508,6 +539,15 @@ public actor RealtimeASRClient {
             sessionID: object["session_id"] as? String,
             sequence: Self.int(object["sequence"])
         )
+        if let sessionID = metadata.sessionID {
+            serverSessionID = sessionID
+        }
+        if let eventID = metadata.eventID {
+            recentEventIDs.append(eventID)
+            if recentEventIDs.count > 64 {
+                recentEventIDs.removeFirst(recentEventIDs.count - 64)
+            }
+        }
         sequenceStatus = sequenceValidator.accept(metadata)
         currentEventMetadata = metadata
         defer { currentEventMetadata = nil }
@@ -576,6 +616,7 @@ public actor RealtimeASRClient {
                 )
             )
         case "speechrail.diarization.done":
+            diarizationAcknowledged = true
             emit(
                 .diarizationDone(
                     throughSample: Self.int(object["through_sample"]) ?? 0,
@@ -611,11 +652,11 @@ public actor RealtimeASRClient {
                 ?? (object["speechrail"] as? [String: Any])
             emit(
                 .serverError(
-                    code: error?["code"] as? String ?? "unknown",
+                    code: error?["code"] as? String ?? error?["type"] as? String ?? "unknown",
                     message: error?["message"] as? String ?? "语音服务返回了一个错误",
-                    retryable: speechrail?["retryable"] as? Bool,
-                    busyReason: speechrail?["busy_reason"] as? String,
-                    retryHint: speechrail?["retry_hint"] as? String
+                    retryable: speechrail?["retryable"] as? Bool ?? error?["retryable"] as? Bool,
+                    busyReason: speechrail?["busy_reason"] as? String ?? error?["busy_reason"] as? String,
+                    retryHint: speechrail?["retry_hint"] as? String ?? error?["retry_hint"] as? String
                 )
             )
         default:

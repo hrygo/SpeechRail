@@ -131,6 +131,7 @@ public struct RealtimeCloseBarrier: Equatable, Sendable {
 public enum RealtimeDrainStage: String, Equatable, Sendable {
     case commit
     case terminalItems = "terminal_items"
+    case diarization
     case clear
     case close
 }

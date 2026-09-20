@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SpeechRailControlKit
 
 // 实时字幕的会话层（`SESSIONS-SPEC` §6.3、`TECHNICAL-DESIGN` §5.7）。
 //
@@ -379,16 +380,14 @@ public final class CaptionSession {
         source?.stop()
         source = nil
         if let client {
-            // 先 commit 再关：最后半句要走进 `committed` → `completed`，
-            // 而不是留在服务端缓冲区里随连接一起消失。
-            try? await client.commit()
-            if diarizationActive {
-                // 分人的 EOF 屏障（§14.3）：先把水位对齐、把末段的归属冲刷出来，再封存记录。
-                // 契约里同一个 `event_id` 重试是幂等的，所以这一条重试安全。
-                try? await client.finishDiarization()
-                await waitForDiarizationDrain()
+            do {
+                // RealtimeASRClient owns the single commit → terminal →
+                // diarization (if negotiated) → clear barrier.
+                try await client.drainAndClear(timeout: .seconds(8))
+            } catch {
+                lastFailure = error.localizedDescription
+                await markDiarizationDrainFailureIfNeeded(error)
             }
-            await waitForFinalLine()
             await client.close()
         }
         pump?.cancel()
@@ -437,8 +436,12 @@ public final class CaptionSession {
         source?.stop()
         source = nil
         if let client {
-            try? await client.commit()
-            await waitForFinalLine()
+            do {
+                try await client.drainAndClear(timeout: .seconds(8))
+            } catch {
+                lastFailure = error.localizedDescription
+                await markDiarizationDrainFailureIfNeeded(error)
+            }
             await client.close()
         }
         pump?.cancel()
@@ -535,9 +538,9 @@ public final class CaptionSession {
                 }
                 group.addTask { [weak self] in
                     let events = await client.events()
-                    for await event in events {
+                    for await envelope in events {
                         guard let self else { return }
-                        await self.handle(event)
+                        await self.handle(envelope)
                     }
                 }
                 await group.waitForAll()
@@ -558,8 +561,10 @@ public final class CaptionSession {
 
     // MARK: - 下行
 
-    private func handle(_ event: RealtimeASRClient.Event) async {
-        switch event {
+    private func handle(
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+    ) async {
+        switch envelope.payload {
         case .ready, .configured, .speechStarted, .speechStopped:
             break
         case .committed:
@@ -600,11 +605,13 @@ public final class CaptionSession {
             }
         case .diarizationDone:
             diarizationDrained = true
-        case .responseAudio, .responseDone:
+        case .responseAudio, .responseDone(_, _):
             // TTS 不属于这一层（字幕与会议都不说话）。
             break
-        case .serverError(let code, let message):
+        case .serverError(let code, let message, _, _, _):
             await handleServerError(code: code, message: message)
+        case .cleared:
+            break
         case .closed(let code):
             await handleUnexpectedClose(code: code)
         }
@@ -722,29 +729,11 @@ public final class CaptionSession {
         blocked = reason
     }
 
-    /// 等最后一行落库。判据是"新行落地"或"收到终态事件"——空终态（纯静音、空缓冲）
-    /// 是契约里的确定性行为，所以它也算等到了，不该把结束一直拖在超时上。
-    private func waitForFinalLine() async {
-        let ordinalAtCommit = currentOrdinal
-        let terminalsAtCommit = terminalCount
-        let deadline = Date().addingTimeInterval(Self.finalLineTimeout)
-        while Date() < deadline {
-            if currentOrdinal > ordinalAtCommit || terminalCount > terminalsAtCommit { return }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-    }
-
-    private static let finalLineTimeout: TimeInterval = 3
-
-    /// 等 `speechrail.diarization.done`。等不到不是"失败"：末段归属没冲刷出来的话，
-    /// 正文照样在库里，只是标签停在收到过的那一版——**如实记成降级**，不假装对齐了。
-    private func waitForDiarizationDrain() async {
-        guard diarizationActive else { return }
-        let deadline = Date().addingTimeInterval(Self.diarizationDrainTimeout)
-        while Date() < deadline {
-            if diarizationDrained { return }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
+    private func markDiarizationDrainFailureIfNeeded(_ error: Error) async {
+        guard diarizationActive,
+              let drainError = error as? RealtimeASRClient.Failure,
+              drainError == .drainTimedOut(.diarization)
+        else { return }
         labeling.markDegraded(
             code: "finalization_timeout",
             message: "说话人编号没能在结束前对齐，正文已经存好了。"
@@ -753,8 +742,6 @@ public final class CaptionSession {
             await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
         }
     }
-
-    private static let diarizationDrainTimeout: TimeInterval = 8
 
     // MARK: - 浮层上的动作
 

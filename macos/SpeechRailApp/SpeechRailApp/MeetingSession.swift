@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import Observation
+import SpeechRailControlKit
 
 // 会议助手（`SESSIONS-SPEC` §6.2、§14.1、§14.3、§16.7；`TECHNICAL-DESIGN` §5.6）。
 //
@@ -254,7 +255,7 @@ public final class MeetingSession {
     /// 协调器的 `stopper`：只释放设备与连接，**不动库里的行**（封存由协调器做）。
     public func stopCapture() async {
         isStoppingIntentionally = true
-        await releaseCapture()
+        await releaseCapture(drain: true)
     }
 
     /// 结束这一场并整理：EOF 屏障 → 释放设备 → 封存 → 排纪要（§8.2 的最后三步）。
@@ -264,20 +265,16 @@ public final class MeetingSession {
             return
         }
         isStoppingIntentionally = true
-        // ① EOF 屏障：先要分人收尾，再断连接。顺序反了会丢掉最后半句的归属（§14.3）。
-        if labeling.isEnabled {
-            try? await client?.finishDiarization()
-            await waitForDiarizationDrain()
-        }
         let id = sessionID
-        // ② 设备在这里释放，**早于**封存：整理期间不该还占着麦克风（R4）。
-        await releaseCapture()
+        // ① RealtimeASRClient drains ASR and diarization before clear/close;
+        // devices are released before the record is archived (R4).
+        await releaseCapture(drain: true)
         phase = .processing
         await coordinator.stopCapture(endingWith: .user)
         await coordinator.finishProcessing(endReason: .user)
         phase = .archived
         guard let id else { return }
-        // ③ 整理：转录已封存，失败也不影响它（§9 第 18 行）。
+        // ② 整理：转录已封存，失败也不影响它（§9 第 18 行）。
         let configuration = preferences?().minutesConfiguration ?? LLMConfiguration()
         await minutes.generate(sessionID: id, configuration: configuration)
     }
@@ -431,11 +428,25 @@ public final class MeetingSession {
     }
 
     /// 释放这一层的设备与连接。**幂等**，中断与结束两条路都走它。
-    private func releaseCapture() async {
+    private func releaseCapture(drain: Bool = false) async {
+        if !drain {
+            pump?.cancel()
+            pump = nil
+        }
+        await audio.stop()
+        if let client {
+            if drain {
+                do {
+                    try await client.drainAndClear(timeout: .seconds(8))
+                } catch {
+                    lastFailure = error.localizedDescription
+                    await markDiarizationDrainFailureIfNeeded(error)
+                }
+            }
+            await client.close()
+        }
         pump?.cancel()
         pump = nil
-        await audio.stop()
-        if let client { await client.close() }
         client = nil
         level = 0
         partialText = nil
@@ -483,9 +494,9 @@ public final class MeetingSession {
                 }
                 group.addTask { [weak self] in
                     let events = await client.events()
-                    for await event in events {
+                    for await envelope in events {
                         guard let self else { return }
-                        await self.handle(event)
+                        await self.handle(envelope)
                     }
                 }
                 await group.waitForAll()
@@ -504,10 +515,12 @@ public final class MeetingSession {
         }
     }
 
-    private func handle(_ event: RealtimeASRClient.Event) async {
-        switch event {
+    private func handle(
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+    ) async {
+        switch envelope.payload {
         case .ready, .configured, .speechStarted, .speechStopped, .segment, .responseAudio,
-             .responseDone:
+             .responseDone(_, _), .cleared:
             break
         case .committed:
             let now = Date()
@@ -545,7 +558,7 @@ public final class MeetingSession {
             }
         case .diarizationDone:
             diarizationDrained = true
-        case .serverError(let code, let message):
+        case .serverError(let code, let message, _, _, _):
             lastFailure = Self.readableError(code: code, message: message)
             if code == "backend_busy" {
                 await enterInterruption(.serviceLost, note: lastFailure)
@@ -642,6 +655,20 @@ public final class MeetingSession {
         await enterInterruption(.serviceLost, note: note)
     }
 
+    private func markDiarizationDrainFailureIfNeeded(_ error: Error) async {
+        guard labeling.isEnabled,
+              let drainError = error as? RealtimeASRClient.Failure,
+              drainError == .drainTimedOut(.diarization)
+        else { return }
+        labeling.markDegraded(
+            code: "finalization_timeout",
+            message: "说话人编号没能在结束前对齐，正文已经存好了。"
+        )
+        if let sessionID, let note = labeling.note {
+            await coordinator.updateSessionDiarization(id: sessionID, state: .degraded, note: note)
+        }
+    }
+
     /// 采集流自己结束了：设备被拔、引擎停了这一类。**不是来源 App 退出**
     /// （那一类在 `handleSystemAudioLost` 里，会自动接回）。它需要人决定怎么继续。
     private func captureStreamEnded() async {
@@ -684,17 +711,6 @@ public final class MeetingSession {
     public var interruptedElapsed: TimeInterval? {
         guard let interruptedAt, let startedAt else { return nil }
         return max(0, interruptedAt.timeIntervalSince(startedAt))
-    }
-
-    private func waitForDiarizationDrain(timeout: Duration = .seconds(6)) async {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-        while !diarizationDrained, ContinuousClock.now < deadline {
-            try? await Task.sleep(for: .milliseconds(80))
-        }
-        if !diarizationDrained {
-            // 未对齐不是错误：正文照常，只是时间码要说实话（§8.2 唯一允许降级的位置）。
-            lastFailure = "说话人编号没能在结束前全部对齐；文字记录还在，时间码可能不完整。"
-        }
     }
 
     // MARK: - 说话人标注（会中 / 会后同一件事的两种节奏，§6.2）

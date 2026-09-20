@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SpeechRailControlKit
 
 // 语音助手的会话层（`TECHNICAL-DESIGN` §5.5、`SESSIONS-SPEC` §6.1 / §8.1 / §14.4 / §14.5）。
 //
@@ -234,6 +235,11 @@ public final class AssistantSession {
     public var apiKeyProvider: @MainActor () -> String? = { LLMKeychain.load() }
     /// 音色被拒时的可用内置声音列表（给可读结论用，§9 第 14 行）。
     public var availableVoices: @MainActor () -> [String] = { [] }
+    /// 仅从同一代 capability snapshot 读取 TTS catalog revision；未知时保持 nil，
+    /// 让服务按普通协商处理，不从模型名或本地时间推断 revision。
+    public var realtimeModelRevision: @MainActor (String?) -> String? = { _ in nil }
+    /// 回执是显式协商项；没有用户/功能偏好时不主动打开。
+    public var realtimeRenderReceiptsEnabled: @MainActor (String?) -> Bool = { _ in false }
 
     private let coordinator: SessionCoordinator
     private let provider = LLMProvider()
@@ -456,7 +462,9 @@ public final class AssistantSession {
             port: port,
             silenceDurationMilliseconds: 400,
             voice: voiceID,
-            apiKey: serviceKey
+            apiKey: serviceKey,
+            expectedModelRevision: realtimeModelRevision(voiceID),
+            renderReceiptsEnabled: realtimeRenderReceiptsEnabled(voiceID)
         )
         do {
             try await client.connect()
@@ -559,8 +567,13 @@ public final class AssistantSession {
         }
         source = nil
         if let client {
-            try? await client.commit()
-            await waitForFinalTurn()
+            do {
+                try await client.drainAndClear(timeout: .seconds(8))
+            } catch {
+                // The session can still be closed locally, but it must not
+                // claim that the final remote item completed.
+                lastFailure = error.localizedDescription
+            }
             await client.close()
         }
         pump?.cancel()
@@ -582,15 +595,6 @@ public final class AssistantSession {
         isSpeaking = false
     }
 
-    private func waitForFinalTurn() async {
-        let ordinalAtCommit = currentOrdinal
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            if currentOrdinal > ordinalAtCommit { return }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-    }
-
     // MARK: - 采集 → 上行
 
     private func startPump(stream: AsyncStream<AudioChunk>, client: RealtimeASRClient) {
@@ -605,9 +609,9 @@ public final class AssistantSession {
                 }
                 group.addTask { [weak self] in
                     let events = await client.events()
-                    for await event in events {
+                    for await envelope in events {
                         guard let self else { return }
-                        await self.handle(event)
+                        await self.handle(envelope)
                     }
                 }
                 await group.waitForAll()
@@ -631,8 +635,10 @@ public final class AssistantSession {
 
     // MARK: - 下行
 
-    private func handle(_ event: RealtimeASRClient.Event) async {
-        switch event {
+    private func handle(
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+    ) async {
+        switch envelope.payload {
         case .ready, .configured, .diarizationDone, .attribution, .diarizationDegraded,
              .segment, .speechStopped:
             break
@@ -671,10 +677,12 @@ public final class AssistantSession {
             } else {
                 await playback?.enqueue(pcm)
             }
-        case .responseDone(let status):
+        case .responseDone(let status, _):
             if status == "cancelled" { currentReplyInterrupted = true }
-        case .serverError(let code, let message):
+        case .serverError(let code, let message, _, _, _):
             lastFailure = Self.readableError(code: code, message: message)
+        case .cleared:
+            break
         case .closed(let code):
             await handleUnexpectedClose(code: code)
         }
