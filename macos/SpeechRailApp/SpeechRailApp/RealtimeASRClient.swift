@@ -1,4 +1,5 @@
 import Foundation
+import SpeechRailControlKit
 
 // `/v1/realtime` 的客户端（契约：`contracts/realtime-openai.md`）。
 //
@@ -24,10 +25,11 @@ public actor RealtimeASRClient {
     /// 原生层归一到 16 kHz，把"不得改格式"这条硬约束变成结构上碰不到的情况。
     public static let sampleRate: Double = 16_000
 
-    public enum Failure: LocalizedError, Equatable {
+    public enum Failure: LocalizedError, Equatable, Sendable {
         case unsupportedModel(String)
         case transport(String)
         case closed(Int?)
+        case drainTimedOut(RealtimeDrainStage)
 
         public var errorDescription: String? {
             switch self {
@@ -37,6 +39,17 @@ public actor RealtimeASRClient {
                 "连不上语音服务：\(message)"
             case .closed(let code):
                 code.map { "语音服务断开了连接（\($0)）。" } ?? "语音服务断开了连接。"
+            case .drainTimedOut(let stage):
+                switch stage {
+                case .commit:
+                    "语音服务没有在关闭期限内确认提交。"
+                case .terminalItems:
+                    "最后一段语音没有在关闭期限内完成转写。"
+                case .clear:
+                    "语音服务没有在关闭期限内确认清空缓冲区。"
+                case .close:
+                    "语音服务没有在关闭期限内完成关闭。"
+                }
             }
         }
     }
@@ -141,8 +154,16 @@ public actor RealtimeASRClient {
         /// TTS 音频块（24 kHz PCM16）。助手那一侧才用得上。
         case responseAudio(Data)
         /// TTS 一轮结束：`completed` / `cancelled` / `failed`。
-        case responseDone(status: String)
-        case serverError(code: String, message: String)
+        case responseDone(status: String, receipt: RenderReceipt?)
+        case serverError(
+            code: String,
+            message: String,
+            retryable: Bool?,
+            busyReason: String?,
+            retryHint: String?
+        )
+        /// `input_audio_buffer.cleared`：清空屏障的服务端确认。
+        case cleared
         case closed(code: Int?)
     }
 
@@ -155,18 +176,30 @@ public actor RealtimeASRClient {
     private let threshold: Double
     /// 分人开关（每场一次，**首个 PCM 之前**协商，之后改不了）。
     private let diarizationEnabled: Bool
+    private let expectedModelRevision: String?
+    private let renderReceiptsEnabled: Bool
     private let session: URLSession
 
     private var task: URLSessionWebSocketTask?
     private var receiveLoop: Task<Void, Never>?
     private var didClose = false
-    private var continuation: AsyncStream<Event>.Continuation?
-    private var stream: AsyncStream<Event>?
+    private var continuation: AsyncStream<RealtimeEventEnvelope<Event>>.Continuation?
+    private var stream: AsyncStream<RealtimeEventEnvelope<Event>>?
     /// 最近一次写进 `session.update` 的音色。换音色走同一个字段（下一句生效）。
     private var voice: String?
     /// `finish` 的 event_id。契约要求同一个 id 重试幂等、不同 id 拒绝。
     private var finishEventID: String?
     private var finishSent = false
+    private var clearSent = false
+    private var clearAcknowledged = false
+    private var committedEventCount = 0
+    private var closeBarrier = RealtimeCloseBarrier()
+    private var sequenceValidator = RealtimeSequenceValidator()
+    /// Latest sequence diagnostic. The event envelope remains the source of
+    /// truth; this property is only a non-sensitive convenience for session UI.
+    public private(set) var sequenceStatus: RealtimeSequenceStatus = .missing
+    private var currentEventMetadata: RealtimeEventMetadata?
+    private var closeCode: Int?
 
     public init(
         port: Int = 8201,
@@ -176,9 +209,17 @@ public actor RealtimeASRClient {
         diarizationEnabled: Bool = false,
         voice: String? = nil,
         apiKey: String? = nil,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        expectedModelRevision: String? = nil,
+        renderReceiptsEnabled: Bool = false
     ) {
-        self.url = URL(string: "ws://127.0.0.1:\(port)/v1/realtime")!
+        var components = URLComponents()
+        components.scheme = "ws"
+        components.host = "127.0.0.1"
+        components.port = port
+        components.path = "/v1/realtime"
+        components.queryItems = [URLQueryItem(name: "model", value: model)]
+        self.url = components.url!
         // 与 REST 走**同一处**凭据解析：服务配了 key 时，握手缺 `Authorization` 会被
         // 以 1008 关掉（契约「连接与认证」）。这里不自己读环境变量。
         self.apiKey = apiKey ?? SpeechRailAPICredentialProvider.resolve()
@@ -186,14 +227,18 @@ public actor RealtimeASRClient {
         self.silenceDurationMilliseconds = silenceDurationMilliseconds
         self.threshold = threshold
         self.diarizationEnabled = diarizationEnabled
+        self.expectedModelRevision = expectedModelRevision
+        self.renderReceiptsEnabled = renderReceiptsEnabled
         self.voice = voice
         self.session = session
     }
 
     /// 事件流。**只能取一次**：这条流与这条连接一一对应，多个消费者会让"谁负责写库"变得不确定。
-    public func events() -> AsyncStream<Event> {
+    public func events() -> AsyncStream<RealtimeEventEnvelope<Event>> {
         if let stream { return stream }
-        let (stream, continuation) = AsyncStream<Event>.makeStream(bufferingPolicy: .unbounded)
+        let (stream, continuation) = AsyncStream<RealtimeEventEnvelope<Event>>.makeStream(
+            bufferingPolicy: .unbounded
+        )
         self.stream = stream
         self.continuation = continuation
         return stream
@@ -204,6 +249,7 @@ public actor RealtimeASRClient {
     /// 建连、声明转写会话、等 `session.updated`。返回即表示可以开始喂 PCM。
     public func connect() async throws {
         guard task == nil else { return }
+        guard !didClose else { throw Failure.closed(closeCode) }
         var request = URLRequest(url: url)
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -238,6 +284,33 @@ public actor RealtimeASRClient {
     /// 它保证最后半句也走完 `committed` → `completed`，而不是留在缓冲区里丢掉。
     public func commit() async throws {
         try await send(["type": "input_audio_buffer.commit"])
+    }
+
+    /// Discards the uncommitted input buffer. Repeating the operation on one
+    /// connection is intentionally idempotent, but a new connection gets a
+    /// fresh clear barrier.
+    public func clear() async throws {
+        guard !clearSent else { return }
+        try await send(["type": "input_audio_buffer.clear"])
+        clearSent = true
+    }
+
+    /// Closes one logical recording without treating a socket close as an ASR
+    /// receipt. The server must first acknowledge the commit and terminal
+    /// state of every committed item, then acknowledge `clear`.
+    public func drainAndClear(timeout: Duration = .seconds(8)) async throws {
+        let committedCountBeforeCommit = committedEventCount
+        try await withStageTimeout(stage: .commit, timeout: timeout) {
+            try await self.commit()
+        }
+        try await waitForCommittedItems(
+            timeout: timeout,
+            afterCommittedEventCount: committedCountBeforeCommit
+        )
+        try await withStageTimeout(stage: .clear, timeout: timeout) {
+            try await self.clear()
+        }
+        try await waitForClearAcknowledgement(timeout: timeout)
     }
 
     /// 换音色。**下一句生效**，只影响 TTS，不进 prompt（§14.4）。
@@ -321,8 +394,18 @@ public actor RealtimeASRClient {
                 ]
             ]
         ]
+        var speechrail: [String: Any] = [:]
         if diarizationEnabled {
-            session["speechrail"] = ["diarization": ["enabled": true]]
+            speechrail["diarization"] = ["enabled": true]
+        }
+        if let expectedModelRevision {
+            speechrail["model_revision"] = ["expected": expectedModelRevision]
+        }
+        if renderReceiptsEnabled {
+            speechrail["render_receipts"] = ["enabled": true]
+        }
+        if !speechrail.isEmpty {
+            session["speechrail"] = speechrail
         }
         if let voice {
             session["voice"] = voice
@@ -331,6 +414,63 @@ public actor RealtimeASRClient {
             "type": "session.update",
             "session": session
         ]
+    }
+
+    private func withStageTimeout<T: Sendable>(
+        stage: RealtimeDrainStage,
+        timeout: Duration,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw Failure.drainTimedOut(stage)
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+
+    private func waitForCommittedItems(
+        timeout: Duration,
+        afterCommittedEventCount baseline: Int
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            if didClose {
+                throw Failure.closed(closeCode)
+            }
+            if committedEventCount > baseline, closeBarrier.isReadyToClear {
+                return
+            }
+            guard clock.now < deadline else {
+                throw Failure.drainTimedOut(.terminalItems)
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    private func waitForClearAcknowledgement(timeout: Duration) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while true {
+            try Task.checkCancellation()
+            if didClose {
+                throw Failure.closed(closeCode)
+            }
+            if clearAcknowledged {
+                return
+            }
+            guard clock.now < deadline else {
+                throw Failure.drainTimedOut(.clear)
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     // MARK: - 下行
@@ -363,6 +503,14 @@ public actor RealtimeASRClient {
         else {
             return
         }
+        let metadata = RealtimeEventMetadata(
+            eventID: object["event_id"] as? String,
+            sessionID: object["session_id"] as? String,
+            sequence: Self.int(object["sequence"])
+        )
+        sequenceStatus = sequenceValidator.accept(metadata)
+        currentEventMetadata = metadata
+        defer { currentEventMetadata = nil }
         switch type {
         case "session.created":
             let model = (object["session"] as? [String: Any])?["model"] as? String ?? self.model
@@ -374,7 +522,13 @@ public actor RealtimeASRClient {
         case "input_audio_buffer.speech_stopped":
             emit(.speechStopped)
         case "input_audio_buffer.committed":
-            emit(.committed(itemID: object["item_id"] as? String ?? ""))
+            let itemID = object["item_id"] as? String ?? ""
+            committedEventCount += 1
+            closeBarrier.committed(itemID: itemID)
+            emit(.committed(itemID: itemID))
+        case "input_audio_buffer.cleared":
+            clearAcknowledged = true
+            emit(.cleared)
         case "conversation.item.input_audio_transcription.delta":
             emit(
                 .partial(
@@ -397,9 +551,11 @@ public actor RealtimeASRClient {
                 )
             )
         case "conversation.item.input_audio_transcription.completed":
+            let itemID = object["item_id"] as? String ?? ""
+            closeBarrier.completed(itemID: itemID)
             emit(
                 .completed(
-                    itemID: object["item_id"] as? String ?? "",
+                    itemID: itemID,
                     transcript: object["transcript"] as? String ?? "",
                     units: Self.attributionUnits(object["attribution_units"])
                 )
@@ -431,22 +587,35 @@ public actor RealtimeASRClient {
                 emit(.responseAudio(data))
             }
         case "response.done":
-            let status = (object["response"] as? [String: Any])?["status"] as? String ?? "completed"
-            emit(.responseDone(status: status))
+            let response = object["response"] as? [String: Any]
+            let status = response?["status"] as? String ?? "completed"
+            emit(
+                .responseDone(
+                    status: status,
+                    receipt: Self.renderReceipt(from: object)
+                )
+            )
         case "conversation.item.input_audio_transcription.failed":
+            let itemID = object["item_id"] as? String ?? ""
+            closeBarrier.failed(itemID: itemID)
             emit(
                 .failed(
-                    itemID: object["item_id"] as? String ?? "",
+                    itemID: itemID,
                     code: object["code"] as? String ?? "backend_error",
                     message: object["message"] as? String ?? "流式转写失败"
                 )
             )
         case "error":
             let error = object["error"] as? [String: Any]
+            let speechrail = (error?["speechrail"] as? [String: Any])
+                ?? (object["speechrail"] as? [String: Any])
             emit(
                 .serverError(
                     code: error?["code"] as? String ?? "unknown",
-                    message: error?["message"] as? String ?? "语音服务返回了一个错误"
+                    message: error?["message"] as? String ?? "语音服务返回了一个错误",
+                    retryable: speechrail?["retryable"] as? Bool,
+                    busyReason: speechrail?["busy_reason"] as? String,
+                    retryHint: speechrail?["retry_hint"] as? String
                 )
             )
         default:
@@ -501,19 +670,61 @@ public actor RealtimeASRClient {
         return nil
     }
 
+    /// Supports the current top-level `speechrail.render_receipt` shape and
+    /// the older nested response shape used by early Realtime servers.
+    private static func renderReceipt(from object: [String: Any]) -> RenderReceipt? {
+        var candidates: [[String: Any]] = []
+        if let speechrail = object["speechrail"] as? [String: Any],
+           let receipt = speechrail["render_receipt"] as? [String: Any] {
+            candidates.append(receipt)
+        }
+        if let response = object["response"] as? [String: Any] {
+            if let speechrail = response["speechrail"] as? [String: Any],
+               let receipt = speechrail["render_receipt"] as? [String: Any] {
+                candidates.append(receipt)
+            }
+            if let receipt = response["render_receipt"] as? [String: Any] {
+                candidates.append(receipt)
+            }
+        }
+        if let receipt = object["render_receipt"] as? [String: Any] {
+            candidates.append(receipt)
+        }
+
+        let decoder = JSONDecoder()
+        for candidate in candidates {
+            guard let data = try? JSONSerialization.data(withJSONObject: candidate),
+                  let receipt = try? decoder.decode(RenderReceipt.self, from: data)
+            else { continue }
+            return receipt
+        }
+        return nil
+    }
+
     private func emit(_ event: Event) {
-        continuation?.yield(event)
+        continuation?.yield(
+            RealtimeEventEnvelope(
+                metadata: currentEventMetadata ?? RealtimeEventMetadata(),
+                payload: event
+            )
+        )
     }
 
     /// 只收尾一次：接收循环、显式 `close()`、以及流被取消这三条路都会走到这里。
     private func finish(code: Int?) {
         guard !didClose else { return }
         didClose = true
+        closeCode = code
         receiveLoop?.cancel()
         receiveLoop = nil
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
-        continuation?.yield(.closed(code: code))
+        continuation?.yield(
+            RealtimeEventEnvelope(
+                metadata: RealtimeEventMetadata(),
+                payload: .closed(code: code)
+            )
+        )
         continuation?.finish()
         continuation = nil
     }
