@@ -32,7 +32,7 @@ public struct TeleprompterAnalysis: Codable, Equatable, Sendable {
                     "required": ["start_unit", "end_unit", "keywords", "match_phrases", "pause_hint"],
                     "properties": [
                         "start_unit": ["type": "integer"], "end_unit": ["type": "integer"],
-                        "keywords": ["type": "array", "items": ["type": "string"]],
+                        "keywords": ["type": "array", "maxItems": 5, "items": ["type": "string"]],
                         "match_phrases": ["type": "array", "maxItems": 0, "items": ["type": "string"]],
                         "pause_hint": ["type": "string", "enum": TeleprompterPauseHint.allCases.map(\.rawValue)]
                     ]
@@ -79,7 +79,7 @@ public struct TeleprompterAnalysisDecoder: Sendable {
                 guard let range = Range(nsRange, in: sourceText) else { throw TeleprompterTextError.invalidAnalysis }
                 let text = String(sourceText[range])
                 guard text.count <= 180,
-                      annotation.keywords.allSatisfy({ !$0.isEmpty && text.localizedCaseInsensitiveContains($0) }),
+                      keywordsAppearInOrder(annotation.keywords, in: text),
                       annotation.match_phrases.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.count <= 120 }) else {
                     throw TeleprompterTextError.invalidAnalysis
                 }
@@ -106,6 +106,22 @@ public struct TeleprompterAnalysisDecoder: Sendable {
         let keywords: [String]
         let match_phrases: [String]
         let pause_hint: TeleprompterPauseHint
+    }
+
+    private func keywordsAppearInOrder(_ keywords: [String], in text: String) -> Bool {
+        var lowerBound = text.startIndex
+        for keyword in keywords {
+            guard !keyword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let range = text.range(
+                    of: keyword,
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    range: lowerBound..<text.endIndex
+                  ) else {
+                return false
+            }
+            lowerBound = range.upperBound
+        }
+        return true
     }
 }
 
@@ -153,7 +169,15 @@ public struct TeleprompterAIClient: Sendable {
                                firstUnit: Int) throws -> TeleprompterAnalysisPrompt {
         let context = Context(language_preference: request.language ?? "跟随原稿",
                               style_preference: request.style ?? "自然、适合朗读",
-                              units: units.enumerated().map { Unit(id: firstUnit + $0.offset, text: $0.element.text) })
+                              units: units.enumerated().map { offset, unit in
+                                  let previousEnd = offset > 0 ? units[offset - 1].sourceRange.end : unit.sourceRange.start
+                                  return Unit(
+                                      id: firstUnit + offset,
+                                      text: unit.text,
+                                      boundaryBefore: offset > 0 && unit.sourceRange.start > previousEnd,
+                                      endsSection: unit.text.last.map { ".。!?！？".contains($0) } ?? false
+                                  )
+                              })
         let data = try JSONEncoder().encode(context)
         return .init(instructions: """
             你是提词稿朗读标注员。用户已写好正文；你的任务是让现有稿件更容易看、停顿和朗读，不改写、不翻译、不删减、不扩写。
@@ -167,7 +191,19 @@ public struct TeleprompterAIClient: Sendable {
             """, input: String(decoding: data, as: UTF8.self))
     }
 
-    private struct Unit: Encodable { let id: Int; let text: String }
+    private struct Unit: Encodable {
+        let id: Int
+        let text: String
+        let boundaryBefore: Bool
+        let endsSection: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case text
+            case boundaryBefore = "boundary_before"
+            case endsSection = "ends_section"
+        }
+    }
     private struct Context: Encodable {
         let language_preference: String
         let style_preference: String

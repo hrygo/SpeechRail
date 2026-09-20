@@ -30,6 +30,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
     public let sourceUnits: [TeleprompterSourceUnit]
     public let timingPlan: TeleprompterTimingPlan
     public let pace: TeleprompterPace
+    public let calibrationFactor: Double
     public let operation: TeleprompterPreparationOperation
     public let selectedUnitIDs: Set<Int>?
     public let currentBlocks: [TeleprompterMapCurrentBlock]
@@ -39,6 +40,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         sourceUnits: [TeleprompterSourceUnit],
         timingPlan: TeleprompterTimingPlan,
         pace: TeleprompterPace,
+        calibrationFactor: Double = 1.0,
         operation: TeleprompterPreparationOperation = .prepare,
         selectedUnitIDs: Set<Int>? = nil,
         currentBlocks: [TeleprompterMapCurrentBlock] = []
@@ -47,6 +49,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         self.sourceUnits = sourceUnits
         self.timingPlan = timingPlan
         self.pace = pace
+        self.calibrationFactor = calibrationFactor
         self.operation = operation
         self.selectedUnitIDs = selectedUnitIDs
         self.currentBlocks = currentBlocks
@@ -215,7 +218,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
         onProgress: ProgressHandler? = nil
     ) async throws -> TeleprompterPreparationResult {
         let selection = try validate(input)
-        let windows = try makeWindows(selection: selection, input: input)
+        var windows = try makeWindows(selection: selection, input: input)
         onProgress?(.init(phase: .mapping, completed: 0, total: windows.count))
 
         var windowStates: [[BlockState]] = []
@@ -223,9 +226,12 @@ public struct TeleprompterPreparationPipeline: Sendable {
         var mapRequestCount = 0
         var recoveryRequestCount = 0
         let recoveryBudget = min(policy.maxRecoveryRequests, max(2, min(windows.count, 3)))
+        var splitWindowIDs = Set<String>()
 
-        for (windowIndex, window) in windows.enumerated() {
+        var windowIndex = 0
+        while windowIndex < windows.count {
             try Task.checkCancellation()
+            let window = windows[windowIndex]
             let sourceUnits = selection.unitsByID
             let targets = window.sourceUnitIDs.compactMap { sourceUnits[$0] }
             guard targets.count == window.sourceUnitIDs.count else {
@@ -238,6 +244,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 localBudgetSeconds: window.localBudgetSeconds,
                 weightMode: input.timingPlan.weightMode,
                 pace: input.pace,
+                calibrationFactor: input.calibrationFactor,
                 operation: input.operation,
                 currentBlocks: input.currentBlocks.filter {
                     $0.startUnit < (window.sourceUnitIDs.last ?? -1) + 1
@@ -250,7 +257,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 ),
                 maxGroupUnits: policy.maxGroupUnits
             )
-            let states: [BlockState]
+            var states: [BlockState]?
             do {
                 states = try await mapStates(
                     prompt: prompt,
@@ -261,25 +268,63 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 )
             } catch is CancellationError {
                 throw CancellationError()
-            } catch {
-                guard recoveryRequestCount < recoveryBudget else {
-                    throw TeleprompterPreparationError.invalidPromptResponse
+            } catch let initialError {
+                var failure: Error = initialError
+                let canRetryTransient = isTransientProviderFailure(initialError)
+                let canRecoverStructure = isStructuralMapFailure(initialError)
+                guard recoveryRequestCount < recoveryBudget,
+                      canRetryTransient || canRecoverStructure else {
+                    throw normalizedMapFailure(initialError)
                 }
+
                 recoveryRequestCount += 1
-                let recoveryPrompt = TeleprompterPreparationPrompt(
-                    instructions: prompt.instructions + "\n上一轮响应未通过本地结构校验。请丢弃上一轮输出，只根据同一份输入重新输出完整、连续、闭合的 JSON；不要解释失败原因。",
-                    input: prompt.input,
-                    schemaVersion: prompt.schemaVersion
-                )
-                states = try await mapStates(
-                    prompt: recoveryPrompt,
-                    targets: targets,
-                    window: window,
-                    sourceUnits: sourceUnits,
-                    pace: input.pace
-                )
+                let retryPrompt = canRecoverStructure
+                    ? recoveryPrompt(from: prompt)
+                    : prompt
+                do {
+                    states = try await mapStates(
+                        prompt: retryPrompt,
+                        targets: targets,
+                        window: window,
+                        sourceUnits: sourceUnits,
+                        pace: input.pace
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch let retryError {
+                    failure = retryError
+                }
+
+                if states == nil {
+                    if isStructuralMapFailure(failure),
+                       window.sourceUnitIDs.count > 1,
+                       !splitWindowIDs.contains(window.id),
+                       recoveryRequestCount < recoveryBudget {
+                        let splitWindows = try split(window: window, timingPlan: input.timingPlan)
+                        splitWindowIDs.insert(window.id)
+                        windows.replaceSubrange(windowIndex...windowIndex, with: splitWindows)
+                        windows = windows.enumerated().map { index, item in
+                            .init(
+                                id: item.id,
+                                ordinal: index,
+                                sourceUnitIDs: item.sourceUnitIDs,
+                                localBudgetSeconds: item.localBudgetSeconds
+                            )
+                        }
+                        onProgress?(.init(
+                            phase: .mapping,
+                            completed: windowIndex,
+                            total: windows.count,
+                            currentIndex: windowIndex
+                        ))
+                        continue
+                    }
+                    throw normalizedMapFailure(failure)
+                }
             }
-            guard !states.isEmpty else { throw TeleprompterPreparationError.invalidPromptResponse }
+            guard let states, !states.isEmpty else {
+                throw TeleprompterPreparationError.invalidPromptResponse
+            }
             windowStates.append(states)
             mapRequestCount += 1
             onProgress?(.init(
@@ -288,6 +333,7 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 total: windows.count,
                 currentIndex: windowIndex
             ))
+            windowIndex += 1
         }
 
         let allBlocks = windowStates.flatMap { $0 }
@@ -325,8 +371,8 @@ public struct TeleprompterPreparationPipeline: Sendable {
             }
 
             let editable = [
-                TeleprompterReduceEditableBlock(id: left.block.id, revision: left.revision, text: left.block.text),
-                TeleprompterReduceEditableBlock(id: right.block.id, revision: right.revision, text: right.block.text)
+                reduceBlock(left),
+                reduceBlock(right)
             ]
             let readOnly = makeReduceContext(
                 for: boundaryPair,
@@ -338,9 +384,11 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 editableBudgetSeconds: left.block.budgetSeconds + right.block.budgetSeconds,
                 editableEstimatedSeconds: estimateSeconds(
                     text: left.block.text + right.block.text,
-                    pace: input.pace
+                    pace: input.pace,
+                    calibrationFactor: input.calibrationFactor
                 ),
-                pace: input.pace
+                pace: input.pace,
+                calibrationFactor: input.calibrationFactor
             )
             reduceRequestCount += 1
             do {
@@ -429,6 +477,7 @@ private extension TeleprompterPreparationPipeline {
     struct BlockState {
         var block: TeleprompterReadingBlock
         var sourceUnitIDs: [Int]
+        var sourceUnits: [TeleprompterMapContextItem]
         var revision: Int
     }
 
@@ -438,13 +487,70 @@ private extension TeleprompterPreparationPipeline {
         let rightIndex: Int
     }
 
+    struct ProviderCallFailure: Error {
+        let underlying: Error
+    }
+
+    func recoveryPrompt(from prompt: TeleprompterPreparationPrompt) -> TeleprompterPreparationPrompt {
+        .init(
+            instructions: prompt.instructions + "\n上一轮响应未通过本地结构校验。请丢弃上一轮输出，只根据同一份输入重新输出完整、连续、闭合的 JSON；不要解释失败原因。",
+            input: prompt.input,
+            schemaVersion: prompt.schemaVersion,
+            promptVersion: prompt.promptVersion
+        )
+    }
+
+    func isStructuralMapFailure(_ error: Error) -> Bool {
+        guard let error = error as? TeleprompterPreparationError else { return false }
+        return error == .invalidPromptResponse
+    }
+
+    func isTransientProviderFailure(_ error: Error) -> Bool {
+        guard let failure = error as? ProviderCallFailure,
+              let providerError = failure.underlying as? LLMError else { return false }
+        guard case let .http(status, _) = providerError else { return false }
+        return status == 429 || (500...599).contains(status)
+    }
+
+    func normalizedMapFailure(_ error: Error) -> Error {
+        guard let failure = error as? ProviderCallFailure else { return error }
+        if let providerError = failure.underlying as? LLMError {
+            return providerError
+        }
+        return TeleprompterPreparationError.invalidPromptResponse
+    }
+
+    func split(
+        window: TeleprompterPreparationMapWindow,
+        timingPlan: TeleprompterTimingPlan
+    ) throws -> [TeleprompterPreparationMapWindow] {
+        let midpoint = window.sourceUnitIDs.count / 2
+        guard midpoint > 0, midpoint < window.sourceUnitIDs.count else {
+            throw TeleprompterPreparationError.invalidPromptResponse
+        }
+        let leftIDs = Array(window.sourceUnitIDs[..<midpoint])
+        let rightIDs = Array(window.sourceUnitIDs[midpoint...])
+        return [leftIDs, rightIDs].enumerated().map { index, IDs in
+            .init(
+                id: "\(window.id)-split-\(index)",
+                ordinal: window.ordinal + index,
+                sourceUnitIDs: IDs,
+                localBudgetSeconds: timingPlan.budget(for: IDs)
+            )
+        }
+    }
+
     func call(_ prompt: TeleprompterPreparationPrompt) async throws -> String {
         do {
             return try await completion(prompt)
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as LLMError where error == .cancelled {
+            throw CancellationError()
+        } catch let error as TeleprompterPreparationError {
+            throw error
         } catch {
-            throw TeleprompterPreparationError.invalidPromptResponse
+            throw ProviderCallFailure(underlying: error)
         }
     }
 
@@ -596,6 +702,9 @@ private extension TeleprompterPreparationPipeline {
                         / Double(max(1, window.sourceUnitIDs.reduce(0) { $0 + sourceUnits[$1]!.budgetUnits }))
                 ),
                 sourceUnitIDs: IDs,
+                sourceUnits: IDs.compactMap { sourceUnits[$0] }.map {
+                    .init(id: $0.id, rawText: $0.rawText)
+                },
                 revision: 0
             )
         }.compactMap { $0 }
@@ -636,13 +745,23 @@ private extension TeleprompterPreparationPipeline {
     ) -> [TeleprompterReduceEditableBlock] {
         if boundary.leftIndex > 0 {
             let state = states[boundary.leftIndex - 1]
-            return [.init(id: state.block.id, revision: state.revision, text: state.block.text)]
+            return [reduceBlock(state)]
         }
         if boundary.rightIndex + 1 < states.count {
             let state = states[boundary.rightIndex + 1]
-            return [.init(id: state.block.id, revision: state.revision, text: state.block.text)]
+            return [reduceBlock(state)]
         }
         return []
+    }
+
+    func reduceBlock(_ state: BlockState) -> TeleprompterReduceEditableBlock {
+        .init(
+            id: state.block.id,
+            revision: state.revision,
+            text: state.block.text,
+            sourceUnits: state.sourceUnits,
+            protectedLiterals: TeleprompterProtectedLiteralExtractor.extract(from: state.block.rawSourceText)
+        )
     }
 
     func apply(
@@ -669,8 +788,16 @@ private extension TeleprompterPreparationPipeline {
         }
     }
 
-    func estimateSeconds(text: String, pace: TeleprompterPace) -> TimeInterval? {
-        let estimate = TeleprompterDurationEstimator.estimate(text, pace: pace)
+    func estimateSeconds(
+        text: String,
+        pace: TeleprompterPace,
+        calibrationFactor: Double
+    ) -> TimeInterval? {
+        let estimate = TeleprompterDurationEstimator.estimate(
+            text,
+            pace: pace,
+            calibrationFactor: calibrationFactor
+        )
         return estimate.pointSeconds ?? (estimate.knownPartSeconds > 0 ? estimate.knownPartSeconds : nil)
     }
 
@@ -692,8 +819,12 @@ private extension TeleprompterPreparationPipeline {
         let readingText = blocks
             .filter { $0.disposition == .speak || $0.disposition == .unresolved }
             .map(\.text)
-            .joined(separator: "\n")
-        let durationEstimate = TeleprompterDurationEstimator.estimate(readingText, pace: input.pace)
+            .joined(separator: "\n\n")
+        let durationEstimate = TeleprompterDurationEstimator.estimate(
+            readingText,
+            pace: input.pace,
+            calibrationFactor: input.calibrationFactor
+        )
         return .init(
             id: "draft-\(input.source.sourceRevisionID)-\(input.operation.rawValue)",
             sourceRevisionID: input.source.sourceRevisionID,

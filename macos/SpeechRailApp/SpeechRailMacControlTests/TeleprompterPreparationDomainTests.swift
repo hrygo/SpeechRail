@@ -45,6 +45,20 @@ struct TeleprompterPreparationDomainTests {
         #expect(units.map(\.ordinal) == Array(0..<units.count))
     }
 
+    @Test func sourceUnitsPreferParagraphBoundariesInsideBoundedWindows() throws {
+        let paragraphs = (0..<8).map { "第\($0)段内容。" }.joined(separator: "\n\n")
+        let source = try TeleprompterSourceImporter.importData(Data(paragraphs.utf8), fileExtension: "md")
+        let units = try TeleprompterSourceUnitBuilder(maxBudgetUnits: 24).build(source)
+
+        #expect(units.allSatisfy {
+            $0.rawText
+                .components(separatedBy: "\n\n")
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .count <= 1
+        })
+        #expect(units.map(\.rawText).joined().data(using: .utf8) == Data(paragraphs.utf8))
+    }
+
     @Test func durationSeparatesKnownEnglishAndHanFromUncertainDigits() throws {
         let known = TeleprompterDurationEstimator.estimate("你好 hello world。")
         #expect(known.pointSeconds != nil)

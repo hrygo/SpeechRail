@@ -40,4 +40,33 @@ final class TeleprompterNormalizerTests: XCTestCase {
             XCTAssertEqual(error as? TeleprompterTextError, .emptySource)
         }
     }
+
+    func testSegmenterDoesNotSplitVersionsURLsOrAbbreviations() throws {
+        let source = "版本 2.0 已发布。请访问 https://example.com。由 Dr. Wang 介绍。"
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertEqual(
+            segments.map(\.text),
+            ["版本 2.0 已发布。", "请访问 https://example.com。", "由 Dr. Wang 介绍。"]
+        )
+    }
+
+    func testSentenceClosingQuoteStaysWithTheSentence() throws {
+        let source = "他说：‘现在开始。’然后继续。"
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        XCTAssertEqual(segments.map(\.text), ["他说：‘现在开始。’", "然后继续。"])
+    }
+
+    func testLongLatinIdentifierIsNotSplitAtTheSoftTarget() throws {
+        let source = "请检查 super_long_identifier_that_should_stay_together_then继续说明。"
+
+        let segments = try TeleprompterSegmenter.segment(sourceText: source)
+
+        let identifier = "super_long_identifier_that_should_stay_together"
+        XCTAssertEqual(segments.filter { $0.text.contains(identifier) }.count, 1)
+        XCTAssertTrue(segments.map(\.text).joined().contains(identifier))
+    }
 }

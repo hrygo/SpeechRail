@@ -6,7 +6,7 @@
 
 **Architecture:** Domain 文件只负责不可变值类型和确定性算法；Prompt 文件负责 wire payload、固定 instructions、schema 和边界校验；Pipeline 文件以 `@Sendable` completion 注入现有 Responses provider，串行执行 Map/Reduce 并在完整覆盖后产出草稿；V2 Store 文件只负责当前 v2 格式的校验、原子保存与损坏稿件隔离；Session/UI 只做协调、审阅、保存和跟读接线。当前产品不做旧格式迁移，旧数据可删除后由用户重新导入重建。
 
-**Tech Stack:** Swift 6.0/6.2、macOS 26、Foundation、Swift Testing、XCTest（仅复用现有测试框架）、现有 `LLMProvider` 的 `/responses` completion 适配。
+**Tech Stack:** Swift 6.4、macOS 26+、Foundation、Swift Testing、XCTest（仅复用现有测试框架）、现有 `LLMProvider` 的 `/responses` completion 适配。
 
 **Spec:** `docs/superpowers/specs/2026-09-20-ai-teleprompter-final-spec.md`
 
@@ -215,13 +215,13 @@
 
   Run: `git diff --check` and `rg -n "TeleprompterView|SpeechRailDesignTokens" <our changed core files>`。
 
-  Expected: no whitespace errors; changed core files contain no SwiftUI imports or UI symbol references。
+  Expected: no whitespace errors; domain/prompt/pipeline/store core files contain no SwiftUI imports or UI symbol references；UI 仅保留已交接页面所需的确定性不可估提示。
 
 - [ ] **Step 4: Review the branch boundary**
 
   Run: `git status --short --branch`, `git diff --stat main...HEAD`, and `git diff --name-only main...HEAD`。
 
-  Expected: branch commits contain only core files, tests, package/project membership, plan/spec documentation; the other team’s uncommitted UI files remain uncommitted and are not staged。
+  Expected: branch commits contain core files, tests, package/project membership, plan/spec documentation，以及已交接页面所需的最小显示修正；其他团队无关的未提交改动保持不动且不入暂存区。
 
 - [ ] **Step 5: Commit the plan/spec or adapter-only changes and prepare the independent PR**
 
@@ -236,7 +236,7 @@
 
 - Domain、Prompt/Schema/Decoder、MapReduce、v2 Store、Session/provider wiring 和 UI 接入已实现；v2 是唯一运行格式。
 - 旧格式、未知版本和损坏稿件只在列表中标记为不可打开；用户可删除后重新导入原稿重建。没有迁移、备份或兼容 alias。
-- 已通过 `swift test --package-path macos/SpeechRailApp --filter 'Teleprompter(Preparation|V2Store|Analysis)'`：32 个测试通过；并通过 macOS Debug scheme 编译。
+- 已通过 `rtk swift test --package-path macos/SpeechRailApp`：XCTest 129 项、Swift Testing 61 项，均 0 failures；并通过 `rtk xcodebuild -project macos/SpeechRailApp/SpeechRailApp.xcodeproj -scheme SpeechRailApp -configuration Debug -destination 'platform=macOS' build`（macOS 27 SDK、arm64）。
 - 尚未执行真实模型、真实音频、人工视觉或 UI 自动化验收；因此不把模型质量、真人朗读质量或视觉验收标记为完成。
 
 ## Self-Review Checklist
@@ -244,4 +244,4 @@
 - Spec sections 5–12 map to Tasks 1–4 and the landed Session/UI integration；UI 由前端团队交接后已接线。
 - No task depends on an undefined type or method; later interfaces are named in each task’s Interfaces block。
 - No free-text fallback, hidden summarization, automatic deletion, or real endpoint/model invocation is introduced。
-- No UI file is part of the intended write set；current dirty UI changes are preserved。
+- No UI redesign or handoff overwrite was introduced；`TeleprompterTrialReadingSheet.swift` 仅增加不可估时的明确显示与阻断提示，其他 UI 改动保持不动。

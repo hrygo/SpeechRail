@@ -185,6 +185,12 @@ public final class TeleprompterSession {
     private var preparationTask: Task<TeleprompterPreparationResult, Error>?
     private var tightenTask: Task<TeleprompterPreparationResult, Error>?
     private var annotationTask: Task<TeleprompterAnalysis, Error>?
+    private var draftSaveTask: Task<Void, Never>?
+    private var clockLastInstant: ContinuousClock.Instant?
+    private var clockAdaptiveFactor = 1.0
+    private var clockSamples: [Double] = []
+    private var clockSampleStartSegment = 0
+    private var clockSampleStartElapsed = 0.0
     private var savedRunState: TeleprompterRunState?
     private var importedSource: TeleprompterImportedSource?
 
@@ -328,7 +334,7 @@ public final class TeleprompterSession {
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.title = title
         document?.updatedAt = Date()
-        persistDraft()
+        scheduleDraftSave()
     }
 
     public func updateSourceText(_ sourceText: String) {
@@ -341,7 +347,7 @@ public final class TeleprompterSession {
         contentSelection = TeleprompterContentSelection()
         pendingVersion = nil
         phase = .draft
-        persistDraft()
+        scheduleDraftSave()
     }
 
     public func useDeterministicFallback() throws {
@@ -437,6 +443,7 @@ public final class TeleprompterSession {
                 sourceUnits: sourceUnits,
                 timingPlan: timingPlan,
                 pace: pace,
+                calibrationFactor: calibrationFactor,
                 selectedUnitIDs: selectedUnitIDs
             )
             let progressSink: TeleprompterPreparationPipeline.ProgressHandler = { [weak self] progress in
@@ -536,6 +543,7 @@ public final class TeleprompterSession {
         syncFollowState()
         phase = .ready
         blocked = nil
+        cancelScheduledDraftSave()
         try saveBundle()
     }
 
@@ -550,8 +558,13 @@ public final class TeleprompterSession {
     // MARK: - 目标时长、节奏与校准
 
     public func setTargetMinutes(_ minutes: Int) {
-        targetMinutes = minutes
-        runClock.targetSeconds = Double(minutes * 60)
+        targetMinutes = min(
+            max(minutes, TeleprompterTimingPolicy.minimumTargetMinutes),
+            TeleprompterTimingPolicy.maximumTargetMinutes
+        )
+        runClock.targetSeconds = Double(targetMinutes * 60)
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
     }
 
     /// 根据当前原稿可靠估算得出的建议目标分钟数（预填 max(1, ceil(D/60))）。
@@ -570,14 +583,26 @@ public final class TeleprompterSession {
 
     public func setPace(_ pace: TeleprompterPace) {
         self.pace = pace
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
     }
 
     public func applyTrialCalibration(k: Double) {
         calibrationFactor = min(max(k, TeleprompterTimingPolicy.minimumCalibrationFactor), TeleprompterTimingPolicy.maximumCalibrationFactor)
+        recalculateCurrentDraftBudget()
+        scheduleDraftSave()
     }
 
     public func updateContentSelection(_ selection: TeleprompterContentSelection) {
         self.contentSelection = selection
+        if pendingVersion != nil || !readingBlocks.isEmpty {
+            invalidateAnalysis()
+            pendingVersion = nil
+            reviewItems = []
+            readingBlocks = []
+            phase = activeVersion == nil ? .draft : .ready
+        }
+        scheduleDraftSave()
     }
 
     // MARK: - 待确认事项处理
@@ -607,6 +632,7 @@ public final class TeleprompterSession {
             }
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     // MARK: - 再精简表达 (Tighten)
@@ -628,7 +654,7 @@ public final class TeleprompterSession {
 
         let candidateIndices = readingBlocks.indices.filter {
             readingBlocks[$0].disposition == .speak && readingBlocks[$0].origin == .ai
-        }.prefix(3)
+        }
         guard !candidateIndices.isEmpty else {
             return "没有符合条件的 AI 整理段落可供自动精简，请手动编辑文本。"
         }
@@ -664,15 +690,32 @@ public final class TeleprompterSession {
                 let ids = sourceUnits.filter { unit in
                     unit.sourceRange.start < block.sourceRange.end
                         && block.sourceRange.start < unit.sourceRange.end
-                }.map(\.id)
+                }.map(\.id).filter(sourceUnitIDs.contains)
                 guard !ids.isEmpty else { return nil }
                 return (index, ids)
             }
-            let selectedIDs = Set(candidates.flatMap(\.1)).intersection(sourceUnitIDs)
+            let rankedCandidates = candidates.sorted { lhs, rhs in
+                let leftEstimate = TeleprompterDurationEstimator.estimate(
+                    readingBlocks[lhs.0].text,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds ?? 0
+                let rightEstimate = TeleprompterDurationEstimator.estimate(
+                    readingBlocks[rhs.0].text,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds ?? 0
+                let leftExcess = max(0, leftEstimate - readingBlocks[lhs.0].budgetSeconds)
+                let rightExcess = max(0, rightEstimate - readingBlocks[rhs.0].budgetSeconds)
+                if leftExcess != rightExcess { return leftExcess > rightExcess }
+                return readingBlocks[lhs.0].ordinal < readingBlocks[rhs.0].ordinal
+            }
+            let selectedCandidates = Array(rankedCandidates.prefix(3))
+            let selectedIDs = Set(selectedCandidates.flatMap(\.1)).intersection(sourceUnitIDs)
             guard !selectedIDs.isEmpty else {
                 return "当前 AI 段落没有可用来源坐标，请手动编辑文本。"
             }
-            let currentBlocks = candidates.map { index, ids in
+            let currentBlocks = selectedCandidates.map { index, ids in
                 TeleprompterMapCurrentBlock(
                     startUnit: ids.first!,
                     endUnit: ids.last! + 1,
@@ -684,6 +727,7 @@ public final class TeleprompterSession {
                 sourceUnits: sourceUnits,
                 timingPlan: timingPlan,
                 pace: pace,
+                calibrationFactor: calibrationFactor,
                 operation: .tighten,
                 selectedUnitIDs: selectedIDs,
                 currentBlocks: currentBlocks
@@ -703,7 +747,7 @@ public final class TeleprompterSession {
 
             var replacements: [Int: [String]] = [:]
             for resultBlock in result.draft.blocks where resultBlock.disposition == .speak {
-                let matching = candidates.filter { _, ids in
+                    let matching = selectedCandidates.filter { _, ids in
                     let range = sourceUnits.filter { ids.contains($0.id) }
                         .map(\.sourceRange)
                     guard let first = range.map(\.start).min(), let last = range.map(\.end).max() else {
@@ -719,9 +763,23 @@ public final class TeleprompterSession {
             for (index, texts) in replacements {
                 let candidate = texts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !candidate.isEmpty else { continue }
+                let oldEstimate = TeleprompterDurationEstimator.estimate(
+                    readingBlocks[index].text,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+                let newEstimate = TeleprompterDurationEstimator.estimate(
+                    candidate,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+                guard let oldEstimate, let newEstimate, newEstimate < oldEstimate else {
+                    continue
+                }
                 readingBlocks[index].text = candidate
             }
             syncPendingVersionFromBlocks()
+            scheduleDraftSave()
             return replacements.isEmpty ? "这次没有找到安全的精简改动。" : nil
         } catch is CancellationError {
             return "已取消精简。"
@@ -737,6 +795,7 @@ public final class TeleprompterSession {
         readingBlocks[index].text = text
         readingBlocks[index].origin = .user
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     public func mergeBlock(at index: Int) {
@@ -755,6 +814,7 @@ public final class TeleprompterSession {
             readingBlocks[i].ordinal = i
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     public func splitBlock(at index: Int, splitPoint: Int? = nil) {
@@ -793,6 +853,7 @@ public final class TeleprompterSession {
             readingBlocks[i].ordinal = i
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     public func insertBlock(after index: Int) {
@@ -816,6 +877,7 @@ public final class TeleprompterSession {
             readingBlocks[i].ordinal = i
         }
         syncPendingVersionFromBlocks()
+        scheduleDraftSave()
     }
 
     private func syncPendingVersionFromBlocks() {
@@ -829,6 +891,58 @@ public final class TeleprompterSession {
             analysisSource: .user,
             createdAt: pendingVersion?.createdAt ?? .now
         )
+    }
+
+    private func recalculateCurrentDraftBudget() {
+        guard !readingBlocks.isEmpty, let document else { return }
+        do {
+            let source = try TeleprompterSourceImporter.importData(Data(document.sourceText.utf8))
+            let sourceUnits = try TeleprompterSourceUnitBuilder().build(source)
+            let selectedIDs = try selectedSourceUnitIDs(sourceUnits: sourceUnits, sourceText: source.sourceText)
+            let estimates = sourceUnits.map { unit in
+                TeleprompterDurationEstimator.estimate(
+                    unit.rawText,
+                    pace: pace,
+                    calibrationFactor: calibrationFactor
+                ).pointSeconds
+            }
+            let plan = try TeleprompterTimingPlanner.plan(
+                sourceUnits: sourceUnits,
+                estimates: estimates,
+                targetMinutes: targetMinutes,
+                selectedUnitIDs: selectedIDs
+            )
+            for index in readingBlocks.indices {
+                let ids = sourceUnits.filter { unit in
+                    unit.sourceRange.start < readingBlocks[index].sourceRange.end
+                        && readingBlocks[index].sourceRange.start < unit.sourceRange.end
+                }.map(\.id)
+                readingBlocks[index].budgetSeconds = plan.budget(for: ids)
+            }
+        } catch {
+            // Invalid editor text is surfaced by sourceValidationError; keep the
+            // previous in-memory allocation until the user fixes the source.
+        }
+    }
+
+    private func scheduleDraftSave() {
+        guard document != nil else { return }
+        draftSaveTask?.cancel()
+        draftSaveTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.persistDraft()
+            self.draftSaveTask = nil
+        }
+    }
+
+    private func cancelScheduledDraftSave() {
+        draftSaveTask?.cancel()
+        draftSaveTask = nil
     }
 
     private func localSegments(from blocks: [TeleprompterReadingBlock]) -> [TeleprompterSegment] {
@@ -1024,20 +1138,21 @@ public final class TeleprompterSession {
         clockTask?.cancel()
         runClock.elapsedSeconds = 0
         runClock.targetSeconds = Double(targetMinutes * 60)
-        runClock.estimatedRemainingSeconds = Double(targetMinutes * 60)
+        runClock.estimatedRemainingSeconds = remainingTextEstimate()
         runClock.isPaused = false
-        clockTask = Task { [weak self] in
+        clockLastInstant = ContinuousClock.now
+        resetAdaptiveClockSamples()
+        clockSampleStartSegment = currentSegmentIndex
+        clockSampleStartElapsed = 0
+        clockTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(1))
-                guard let self else { return }
-                if !self.runClock.isPaused {
-                    self.runClock.elapsedSeconds += 1
-                    let count = self.activeVersion?.segments.count ?? 1
-                    let current = self.currentSegmentIndex
-                    let remainingRatio = max(0, Double(count - current - 1)) / Double(max(1, count))
-                    let estTotal = self.runClock.targetSeconds
-                    self.runClock.estimatedRemainingSeconds = estTotal * remainingRatio
+                do {
+                    try await Task.sleep(for: .milliseconds(250))
+                } catch {
+                    return
                 }
+                guard let self else { return }
+                self.advanceRunClock()
             }
         }
     }
@@ -1045,15 +1160,71 @@ public final class TeleprompterSession {
     private func stopRunClock() {
         clockTask?.cancel()
         clockTask = nil
+        clockLastInstant = nil
         runClock.isPaused = true
     }
 
     private func pauseRunClock() {
+        advanceRunClock()
         runClock.isPaused = true
+        clockLastInstant = nil
+        resetAdaptiveClockSamples()
     }
 
     private func resumeRunClock() {
         runClock.isPaused = false
+        clockLastInstant = ContinuousClock.now
+        resetAdaptiveClockSamples()
+    }
+
+    private func advanceRunClock() {
+        guard !runClock.isPaused, let last = clockLastInstant else { return }
+        let now = ContinuousClock.now
+        let duration = last.duration(to: now)
+        let components = duration.components
+        let seconds = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+        guard seconds.isFinite, seconds >= 0 else {
+            clockLastInstant = now
+            return
+        }
+        runClock.elapsedSeconds += seconds
+        clockLastInstant = now
+        runClock.estimatedRemainingSeconds = remainingTextEstimate()
+    }
+
+    private func resetAdaptiveClockSamples() {
+        clockSamples.removeAll(keepingCapacity: true)
+        clockAdaptiveFactor = 1.0
+        clockSampleStartSegment = currentSegmentIndex
+        clockSampleStartElapsed = runClock.elapsedSeconds
+    }
+
+    private func remainingTextEstimate() -> TimeInterval {
+        guard let version = activeVersion, !version.segments.isEmpty else { return 0 }
+        var remaining = ""
+        for index in version.segments.indices where index >= currentSegmentIndex {
+            var text = version.segments[index].text
+            if index == currentSegmentIndex,
+               readingOffset > 0,
+               let range = Range(
+                NSRange(location: min(readingOffset, text.utf16.count), length: max(0, text.utf16.count - readingOffset)),
+                in: text
+               ) {
+                text = String(text[range])
+            }
+            if !text.isEmpty {
+                if !remaining.isEmpty { remaining += "\n\n" }
+                remaining += text
+            }
+        }
+        guard !remaining.isEmpty else { return 0 }
+        let estimate = TeleprompterDurationEstimator.estimate(
+            remaining,
+            pace: pace,
+            calibrationFactor: calibrationFactor
+        )
+        let base = estimate.pointSeconds ?? estimate.knownPartSeconds
+        return max(0, base * clockAdaptiveFactor)
     }
 
     public func updatePendingSegment(id: String, text: String) {
@@ -1154,6 +1325,7 @@ public final class TeleprompterSession {
 
     public func moveToPrevious() {
         guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
         followController.move(to: currentSegmentIndex - 1, segmentCount: count)
         syncFollowState()
         phase = .manual
@@ -1162,6 +1334,7 @@ public final class TeleprompterSession {
 
     public func moveToSegment(_ index: Int) {
         guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
         followController.move(to: index, segmentCount: count)
         syncFollowState()
         phase = .manual
@@ -1170,6 +1343,7 @@ public final class TeleprompterSession {
 
     public func moveToNext() {
         guard let count = activeVersion?.segments.count else { return }
+        resetAdaptiveClockSamples()
         followController.move(to: currentSegmentIndex + 1, segmentCount: count)
         syncFollowState()
         phase = .manual
@@ -1359,6 +1533,10 @@ public final class TeleprompterSession {
         if coordinator.occupancy?.kind == .teleprompter {
             await coordinator.stopCapture(endingWith: .user)
         }
+        // A transport failure freezes the run clock. Manual positioning is a
+        // user-controlled state, but it must not inherit a pre-failure speed
+        // sample or continue counting while disconnected.
+        pauseRunClock()
         followController.enterManual()
         syncFollowState()
         blocked = reason
@@ -1368,14 +1546,59 @@ public final class TeleprompterSession {
     }
 
     private func syncFollowState() {
+        let previousIndex = currentSegmentIndex
         currentSegmentIndex = followController.currentIndex
         readingOffset = followController.position.utf16Offset
         partialText = followController.partialPreview
         uncertainty = followController.uncertainty
+        if uncertainty != nil {
+            resetAdaptiveClockSamples()
+            runClock.estimatedRemainingSeconds = remainingTextEstimate()
+        } else if currentSegmentIndex != previousIndex {
+            observeClockProgress()
+            runClock.estimatedRemainingSeconds = remainingTextEstimate()
+        }
+    }
+
+    private func observeClockProgress() {
+        guard currentSegmentIndex > clockSampleStartSegment,
+              let version = activeVersion,
+              clockSampleStartSegment < version.segments.count else {
+            if currentSegmentIndex < clockSampleStartSegment {
+                clockSamples.removeAll()
+                clockAdaptiveFactor = 1.0
+                clockSampleStartSegment = currentSegmentIndex
+                clockSampleStartElapsed = runClock.elapsedSeconds
+            }
+            return
+        }
+        let elapsed = runClock.elapsedSeconds - clockSampleStartElapsed
+        guard elapsed >= TeleprompterTimingPolicy.minimumTrialDurationSeconds else { return }
+        let end = min(currentSegmentIndex, version.segments.count)
+        let text = version.segments[clockSampleStartSegment..<end]
+            .map(\.text)
+            .joined(separator: "\n\n")
+        let estimate = TeleprompterDurationEstimator.estimate(
+            text,
+            pace: pace,
+            calibrationFactor: calibrationFactor
+        ).pointSeconds
+        if let estimate, estimate > 0 {
+            let factor = elapsed / estimate
+            if factor.isFinite, (0.5...2.0).contains(factor) {
+                clockSamples.append(factor)
+                if clockSamples.count > 3 { clockSamples.removeFirst() }
+                let sorted = clockSamples.sorted()
+                clockAdaptiveFactor = sorted[sorted.count / 2]
+            }
+        }
+        clockSampleStartSegment = end
+        clockSampleStartElapsed = runClock.elapsedSeconds
     }
 
     private func saveProgress() {
         guard let document, let activeVersion else { return }
+        cancelScheduledDraftSave()
         do {
             let state = TeleprompterRunState(
                     documentID: document.id,
@@ -1915,20 +2138,12 @@ public final class TeleprompterSession {
                 weightMode: .proxyCharacters,
                 allocations: []
             )
-        } else if let planned = try? TeleprompterTimingPlanner.plan(
-            sourceUnits: source.sourceUnits,
-            estimates: estimates,
-            targetMinutes: targetMinutes,
-            selectedUnitIDs: selectedUnitIDs
-        ) {
-            plan = planned
         } else {
-            plan = .init(
+            plan = try TeleprompterTimingPlanner.plan(
+                sourceUnits: source.sourceUnits,
+                estimates: estimates,
                 targetMinutes: targetMinutes,
-                targetSeconds: Double(targetMinutes * 60),
-                budgetSeconds: Double(targetMinutes * 60) * TeleprompterTimingPolicy.budgetRatio,
-                weightMode: .proxyCharacters,
-                allocations: []
+                selectedUnitIDs: selectedUnitIDs
             )
         }
         return TeleprompterV2ReadingDraft(
@@ -2014,6 +2229,7 @@ public final class TeleprompterSession {
     }
 
     private func invalidateAnalysis() {
+        cancelScheduledDraftSave()
         preparationTask?.cancel()
         preparationTask = nil
         tightenTask?.cancel()

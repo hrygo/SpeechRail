@@ -755,6 +755,7 @@ private extension TeleprompterV2Store {
         for source in bundle.sourceRevisions {
             guard !source.id.isEmpty,
                   source.encoding.lowercased() == "utf8",
+                  !source.builderVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   TeleprompterV2Hash.sha256(source.sourceText) == source.utf8SHA256 else {
                 throw TeleprompterV2StoreError.invalidBundle
             }
@@ -766,6 +767,26 @@ private extension TeleprompterV2Store {
                     == source.sourceText.data(using: .utf8) else {
                 throw TeleprompterV2StoreError.invalidBundle
             }
+            var expectedStart = 0
+            for unit in source.sourceUnits {
+                guard unit.sourceRange.isValid(in: source.sourceText),
+                      unit.sourceRange.start == expectedStart,
+                      let range = Range(
+                          NSRange(
+                              location: unit.sourceRange.start,
+                              length: unit.sourceRange.end - unit.sourceRange.start
+                          ),
+                          in: source.sourceText
+                      ),
+                      String(source.sourceText[range]) == unit.rawText,
+                      unit.budgetUnits > 0 else {
+                    throw TeleprompterV2StoreError.invalidBundle
+                }
+                expectedStart = unit.sourceRange.end
+            }
+            guard expectedStart == source.sourceText.utf16.count else {
+                throw TeleprompterV2StoreError.invalidBundle
+            }
         }
         for version in bundle.versions {
             try validate(version, in: bundle)
@@ -774,7 +795,16 @@ private extension TeleprompterV2Store {
             guard sourceIDs.contains(draft.sourceRevisionID), draft.draftRevision >= 0 else {
                 throw TeleprompterV2StoreError.invalidBundle
             }
-            try validate(blocks: draft.blocks, source: bundle.sourceRevisions.first { $0.id == draft.sourceRevisionID })
+            let source = bundle.sourceRevisions.first { $0.id == draft.sourceRevisionID }
+            try validate(blocks: draft.blocks, source: source)
+            try validate(timing: draft.timingAllocation.plan, source: source, selectedUnitIDs: nil)
+            let reviewIDs = draft.reviewIssues.map(\.id)
+            guard reviewIDs.count == Set(reviewIDs).count,
+                  draft.reviewIssues.allSatisfy({ item in
+                      draft.blocks.contains(where: { $0.id == item.blockID })
+                  }) else {
+                throw TeleprompterV2StoreError.invalidBundle
+            }
         }
         if let run = bundle.lastRun {
             guard bundle.versions.contains(where: { $0.id == run.versionID }),
@@ -788,11 +818,13 @@ private extension TeleprompterV2Store {
     func validate(_ version: TeleprompterV2ReadingVersion, in bundle: TeleprompterV2DocumentBundle) throws {
         guard version.documentID == bundle.document.id,
               bundle.sourceRevisions.contains(where: { $0.id == version.sourceRevisionID }),
-              version.goalSnapshot.targetSeconds.isFinite, version.goalSnapshot.targetSeconds >= 0,
+              (try? TeleprompterTimingPlanner.validateTargetMinutes(version.goalSnapshot.targetSeconds / 60.0)) != nil,
               version.readingHash == TeleprompterV2Hash.sha256(version.readingText) else {
             throw TeleprompterV2StoreError.invalidBundle
         }
         let source = bundle.sourceRevisions.first { $0.id == version.sourceRevisionID }
+        guard let source else { throw TeleprompterV2StoreError.invalidBundle }
+        try validate(selection: version.selectionSnapshot, source: source)
         try validate(blocks: version.blocks, source: source)
         let speakingText = version.blocks
             .filter { $0.disposition == .speak }
@@ -801,11 +833,29 @@ private extension TeleprompterV2Store {
         guard speakingText == version.readingText else {
             throw TeleprompterV2StoreError.invalidBundle
         }
-        guard version.segments.enumerated().allSatisfy({ index, segment in
+        let segmentIDs = version.segments.map(\.id)
+        guard !version.segments.isEmpty,
+              segmentIDs.count == Set(segmentIDs).count,
+              version.segments.enumerated().allSatisfy({ index, segment in
             segment.ordinal == index
+                && segment.keywords.count <= 5
+                && segment.matchPhrases.isEmpty
                 && segment.readingRange.isValid(in: version.readingText)
                 && Range(NSRange(location: segment.readingRange.start, length: segment.readingRange.end - segment.readingRange.start), in: version.readingText).map { String(version.readingText[$0]) == segment.text } ?? false
-        }) else {
+        }),
+        version.segments.enumerated().reduce(0, { expectedStart, item in
+            let segment = item.element
+            guard segment.readingRange.start == expectedStart else { return Int.min }
+            return segment.readingRange.end + (item.offset + 1 < version.segments.count ? 2 : 0)
+        }) == version.readingText.utf16.count else {
+            throw TeleprompterV2StoreError.invalidBundle
+        }
+        guard version.goalSnapshot.targetSeconds.isFinite,
+              version.goalSnapshot.targetSeconds > 0,
+              version.estimate.pointSeconds.map({ $0.isFinite && $0 >= 0 }) ?? true,
+              version.estimate.knownPartSeconds.isFinite,
+              version.estimate.knownPartSeconds >= 0,
+              version.estimate.rangeSeconds.map({ $0.lowerBound.isFinite && $0.upperBound.isFinite && $0.lowerBound >= 0 && $0.upperBound >= $0.lowerBound }) ?? true else {
             throw TeleprompterV2StoreError.invalidBundle
         }
     }
@@ -831,6 +881,79 @@ private extension TeleprompterV2Store {
                 }
             }
         }
+    }
+
+    func validate(
+        selection: TeleprompterV2SelectionRevision,
+        source: TeleprompterV2SourceRevision
+    ) throws {
+        let sourceUnitIDs = Set(source.sourceUnits.map(\.id))
+        let selectedIDs = Set(selection.selectedUnitIDs)
+        let allRanges = selection.selectedRanges + selection.userExcludedRanges
+        guard selection.sourceUnitRevision == source.id,
+              !selection.id.isEmpty,
+              selection.selectedUnitIDs.count == selectedIDs.count,
+              selectedIDs.isSubset(of: sourceUnitIDs),
+              allRanges.allSatisfy({ $0.isValid(in: source.sourceText) }) else {
+            throw TeleprompterV2StoreError.invalidBundle
+        }
+        for (index, range) in allRanges.enumerated() {
+            guard !allRanges.dropFirst(index + 1).contains(where: { overlaps(range, $0) }) else {
+                throw TeleprompterV2StoreError.invalidBundle
+            }
+        }
+        for unit in source.sourceUnits {
+            guard unit.rawText.enumerated().allSatisfy({ offset, character in
+                let characterStart = unit.sourceRange.start + unit.rawText[..<unit.rawText.index(unit.rawText.startIndex, offsetBy: offset)].utf16.count
+                let characterEnd = characterStart + String(character).utf16.count
+                return character.isWhitespace
+                    || allRanges.contains(where: { $0.start <= characterStart && characterEnd <= $0.end })
+            }) else {
+                throw TeleprompterV2StoreError.invalidBundle
+            }
+        }
+    }
+
+    func validate(
+        timing: TeleprompterTimingPlan,
+        source: TeleprompterV2SourceRevision?,
+        selectedUnitIDs: Set<Int>?
+    ) throws {
+        guard let source,
+              (try? TeleprompterTimingPlanner.validateTargetMinutes(timing.targetMinutes)) != nil,
+              timing.targetSeconds.isFinite,
+              abs(timing.targetSeconds - Double(timing.targetMinutes * 60)) <= 0.001,
+              timing.budgetSeconds.isFinite,
+              abs(timing.budgetSeconds - timing.targetSeconds * TeleprompterTimingPolicy.budgetRatio) <= 0.001 else {
+            throw TeleprompterV2StoreError.invalidBundle
+        }
+        let sourceIDs = source.sourceUnits.map(\.id)
+        let allocationIDs = timing.allocations.map(\.sourceUnitID)
+            guard allocationIDs == sourceIDs,
+                  timing.allocations.allSatisfy({
+                  $0.weight.isFinite && $0.weight >= 0
+                      && $0.budgetSeconds.isFinite && $0.budgetSeconds >= 0
+              }),
+              abs(timing.allocations.reduce(0) { $0 + $1.budgetSeconds } - timing.budgetSeconds) <= 0.001 else {
+            throw TeleprompterV2StoreError.invalidBundle
+        }
+        let selectedIDs = selectedUnitIDs ?? Set(sourceIDs)
+        guard timing.allocations.allSatisfy({ allocation in
+            !selectedIDs.contains(allocation.sourceUnitID)
+                || allocation.weight > 0
+        }) else {
+            throw TeleprompterV2StoreError.invalidBundle
+        }
+        if let selectedUnitIDs {
+            guard selectedUnitIDs.isSubset(of: Set(sourceIDs)),
+                  timing.allocations.allSatisfy({ selectedUnitIDs.contains($0.sourceUnitID) || $0.budgetSeconds == 0 }) else {
+                throw TeleprompterV2StoreError.invalidBundle
+            }
+        }
+    }
+
+    func overlaps(_ lhs: TeleprompterSourceRange, _ rhs: TeleprompterSourceRange) -> Bool {
+        lhs.start < rhs.end && rhs.start < lhs.end
     }
 
     func validateImmutableSourceRevisions(

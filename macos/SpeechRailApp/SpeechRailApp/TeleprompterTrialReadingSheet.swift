@@ -83,7 +83,7 @@ public struct TeleprompterTrialReadingSheet: View {
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 Spacer()
-                Text("基准预计用时：\(formatSeconds(baseEstimateSeconds))")
+                Text("基准预计用时：\(baseEstimateSeconds.map(formatSeconds) ?? "暂不可估")")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
             }
@@ -248,13 +248,13 @@ public struct TeleprompterTrialReadingSheet: View {
         TeleprompterTimingPolicy.countMetrics(in: sampleText)
     }
 
-    private var baseEstimateSeconds: TimeInterval {
+    private var baseEstimateSeconds: TimeInterval? {
         let est = TeleprompterTimingPolicy.estimateDuration(
             metrics: sampleMetrics,
             pace: session.pace,
             calibrationFactor: 1.0
         )
-        return est.pointSeconds ?? 60
+        return est.pointSeconds
     }
 
     private func prepareSampleText() {
@@ -292,6 +292,12 @@ public struct TeleprompterTrialReadingSheet: View {
 
         guard elapsedSeconds >= TeleprompterTimingPolicy.minimumTrialDurationSeconds else {
             guidanceMessage = "试读时间不足 \(Int(TeleprompterTimingPolicy.minimumTrialDurationSeconds)) 秒，样本过短无法获得稳定语速，建议重新试读。"
+            trialResult = nil
+            return
+        }
+
+        guard let baseEstimateSeconds else {
+            guidanceMessage = "这段文字含数字、网址或暂时无法确定读法的内容，请换一段纯中英文正文再试读。"
             trialResult = nil
             return
         }

@@ -251,31 +251,62 @@ public struct TeleprompterSourceUnitBuilder: Sendable {
 
     private func preferredEnd(in characters: [Character], start: Int, hardEnd: Int) -> Int {
         guard hardEnd > start + 1 else { return hardEnd }
-        if hardEnd == characters.count {
-            for end in (start + 2)...hardEnd {
-                if characters[end - 2] == "\n", characters[end - 1] == "\n" {
-                    return end
-                }
+        // Keep paragraph boundaries intact whenever the current bounded window
+        // contains one. This is important for content selection: a unit must not
+        // straddle a selected and an excluded paragraph just because the whole
+        // source happens to be longer than one window.
+        for end in (start + 1)...hardEnd {
+            if isParagraphBoundary(in: characters, endingAt: end) {
+                return end
             }
         }
         for end in stride(from: hardEnd, through: start + 1, by: -1) {
-            let previous = characters[end - 1]
-            if isSemanticBoundary(previous) {
+            if isSemanticBoundary(in: characters, endingAt: end) {
                 return end
             }
         }
         return hardEnd
     }
 
-    private func isSemanticBoundary(_ character: Character) -> Bool {
+    private func isParagraphBoundary(in characters: [Character], endingAt end: Int) -> Bool {
+        guard end > 1 else { return false }
+        let suffixStart = max(0, end - 4)
+        let suffix = characters[suffixStart..<end].map(String.init).joined()
+        return suffix.hasSuffix("\n\n")
+            || suffix.hasSuffix("\r\r")
+            || suffix.hasSuffix("\n\r")
+            || suffix.hasSuffix("\r\n\r\n")
+    }
+
+    private func isSemanticBoundary(in characters: [Character], endingAt end: Int) -> Bool {
+        let character = characters[end - 1]
         let value = String(character)
-        return value == "\n" || value == "\r" || value == "。" || value == "！" || value == "？"
-            || value == "." || value == "!" || value == "?" || value == ";" || value == "；"
-            || isWhitespace(character)
+        guard value == "\n" || value == "\r" || value == "。" || value == "！" || value == "？"
+                || value == "." || value == "!" || value == "?" || value == ";" || value == "；"
+                || isWhitespace(character) else {
+            return false
+        }
+
+        // A dot between word/digit characters is part of a version, decimal,
+        // domain, URL or abbreviation, not a safe semantic cut.
+        if value == ".", end >= 2, end < characters.count {
+            let previous = characters[end - 2]
+            let next = characters[end]
+            if isWordCharacter(previous) && isWordCharacter(next) {
+                return false
+            }
+        }
+        return true
     }
 
     private func isWhitespace(_ character: Character) -> Bool {
         String(character).rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+    }
+
+    private func isWordCharacter(_ character: Character) -> Bool {
+        character.unicodeScalars.allSatisfy {
+            CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+        }
     }
 }
 
@@ -307,10 +338,14 @@ public enum TeleprompterDurationEstimator {
         calibrationFactor: Double = 1
     ) -> TeleprompterDurationEstimate {
         let metrics = metrics(in: text)
+        let k = min(
+            max(calibrationFactor, TeleprompterTimingPolicy.minimumCalibrationFactor),
+            TeleprompterTimingPolicy.maximumCalibrationFactor
+        )
         let knownPartSeconds = 60 * (
             Double(metrics.hanCount) / pace.cjkUnitsPerMinute
                 + Double(metrics.latinWordCount) / pace.latinWordsPerMinute
-        ) * calibrationFactor
+        ) * k
 
         guard metrics.uncertaintyReasons.isEmpty else {
             return TeleprompterDurationEstimate(

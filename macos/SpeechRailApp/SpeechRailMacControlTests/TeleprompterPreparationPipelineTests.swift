@@ -40,6 +40,42 @@ struct TeleprompterPreparationPipelineTests {
         #expect(await attempts.value == 2)
     }
 
+    @Test func repeatedStructuralFailureSplitsWindowOnceBeforeContinuing() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.preparation.v2",
+               await attempts.next() <= 2 {
+                return "{}"
+            }
+            return try Self.mapResponse(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.mapWindows.count == 2)
+        #expect(result.mapRequestCount == 2)
+        #expect(result.draft.blocks.map(\.rawSourceText).joined() == fixture.source.sourceText)
+        #expect(await attempts.value == 4)
+    }
+
+    @Test func transientRateLimitGetsOneBoundedRetry() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.preparation.v2",
+               await attempts.next() == 1 {
+                throw LLMError.http(status: 429, body: "retry later")
+            }
+            return try Self.mapResponse(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.mapRequestCount == 1)
+        #expect(await attempts.value == 2)
+    }
+
     @Test func longSourceMapsInBoundedWindowsThenReducesEachAdjacentSeam() async throws {
         let fixture = try makeFixture(lineCount: 96)
         let calls = CallLog()
