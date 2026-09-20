@@ -2,8 +2,8 @@
 title: "SpeechRail 用户与集成指南中心"
 status: active
 audience: "应用开发者、客户端集成工程师、API 消费者"
-version: "2.0.10"
-date: 2026-09-17
+version: "2.0.11"
+date: 2026-09-20
 ---
 
 # 🔌 SpeechRail 用户与集成指南
@@ -31,6 +31,7 @@ graph TD
 3. **[📡 公共 API 契约手册 (api-contract.md)](api-contract.md)**：包含原生 OpenAI `diarized_json` 文件分人、TTS 语音合成、异步 Jobs、音色目录及标准错误 Envelope 的详细规范。
 4. **[⚡ OpenAI Realtime 协议规范](../../contracts/realtime-openai.md)**：包含 `/v1/realtime` WebSocket 全双工流式 ASR/TTS、Server VAD、打断机制与一个 namespaced diarization opt-in。
 5. **[📑 OpenAPI 3.1 规范文档](../../contracts/openapi.yaml)**：提供标准 OpenAPI 3.1 Schema，支持直接导入 Postman、Apifox 或生成客户端 SDK。
+6. **[🧭 有效能力快照与安全音色目录](effective-capabilities.md)**：说明 `effective_capabilities_v1`、同代一致性、ETag 与 legacy 投影的迁移边界。
 
 ---
 
@@ -69,15 +70,20 @@ response.stream_to_file("output.mp3")
 
 ## 调用前诊断
 
-HTTP 客户端可读取 `GET /health`，MCP 客户端可调用 `describe()`。两者都会给出 ASR、TTS、diarization 的可用状态，以及 realtime worker 状态和 VAD 的 `ready/code/message`；不包含模型绝对路径、音频或转写内容。
+HTTP 客户端可读取 `GET /health`；需要跨模型、音色和操作参数保持同代一致时，读取
+`GET /v1/speechrail/capabilities`（`effective_capabilities_v1`）。MCP 客户端可调用
+`describe()`：它保留 legacy models/voices/readiness 字段，并在服务支持时附带一次有效能力快照；旧服务
+只有返回 404/405 或未知 schema 才会让该可选字段为空。鉴权、存储等真实故障不会被静默降级。
+这些入口都不会返回模型绝对路径、音频或转写内容。
 
 `/readyz` 只表示 ASR 或 TTS 至少一个可用；成功响应也包含独立的 `realtime_vad` 诊断。需要某项能力时，应检查对应的 readiness 字段后再发起推理请求。
 
 ## macOS App 控制面
 
-SpeechRail macOS App 面向本机用户提供两类入口：
+SpeechRail macOS App 面向本机用户提供三类入口：
 
 - **创作**：配音台、音色创作、音色克隆、音色库和我的作品。音色创作保留 VoiceDesign 的描述、试听和保存主线；音色克隆让你照服务端下发的提词稿读一段、录下自己的声音，注册成可复用的音色（只在按下录制到停止之间采集麦克风，录音收下即删）。
+- **会话**：语音助手、会议助手和实时字幕。只有功能真正开始时才启用麦克风、进程音频 tap 或播放引擎；PCM 不落盘，结束后释放设备，文字与记录保存在本机。
 - **服务**：本机服务总览、运行监控、模型管理、预检与诊断，以及给接入方的开发者文档。普通用户先看“现在能不能用”和“下一步做什么”；开发者可展开技术详情核对档位、worker、metrics、revision 和校验文件数；开发者文档在应用内给出服务地址、鉴权、运行档位、已发布能力和最小示例，完整版仍在 `docs/users/`。
 
 在“模型管理”中，选择 `quality`、`balanced` 或 `light` 后可以单独执行“下载并校验”。该操作只使用 SpeechRail 锁定的模型目录，逐文件校验大小和 SHA-256，并原子发布到本机；它不会自动应用 profile、启动/重启服务、删除已有模型，也不会上传音频或作品。确认“应用此档位”才会触发 profile 切换和现有服务验收。

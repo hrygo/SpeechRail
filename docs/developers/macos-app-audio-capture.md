@@ -2,15 +2,16 @@
 title: "SpeechRail macOS App 录音通道与音频采集最佳实践"
 status: active
 audience: "SpeechRail macOS App 设计与开发人员"
-version: "0.2.0"
-date: 2026-09-19
+version: "0.2.1"
+date: 2026-09-20
 ---
 
 # SpeechRail macOS App 录音通道与音频采集最佳实践
 
-> 本文是 2026-09-16 的调研 + 本机实测记录，回答两个问题：音色克隆页的麦克风采集现在是怎么做的，
-> 以及 macOS 上这件事的当前推荐做法是什么。结论区分「契约/文档声明」「本机实测」和「推断」，
-> 外部来源都标了核实日期；本机结论只对本机、当前系统版本成立。
+> 本文是 2026-09-16 起的调研与本机实测记录，覆盖音色克隆的文件录音，以及语音助手、会议助手、
+> 实时字幕的会话级采集/播放链路。2026-09-19 已补入助手的共享 `AudioEngineSession` 与系统
+> voice processing 实装；结论区分「契约/文档声明」「本机实测」和「推断」，外部来源都标了核实日期，
+> 本机结论只对本机、当前系统版本成立。
 
 ## 1. 当前实现（以代码为准）
 
@@ -97,8 +98,8 @@ date: 2026-09-19
 - TCC：Info.plist 必须有 `NSMicrophoneUsageDescription`，请求用
   `AVCaptureDevice.requestAccess(for: .audio)`（macOS 10.14+）。denied 时给的是「去系统设置」的路。
 - 沙盒：需要 `com.apple.security.device.audio-input`（Apple entitlements 文档：先开 Hardened Runtime，
-  再在 Resource Access 里勾 Audio Input）。**本仓库待补**：该文件现在是空 dict，
-  Distribution 会开 Hardened Runtime，届时内置麦克风采集需要这个 entitlement。
+  再在 Resource Access 里勾 Audio Input）。`SpeechRailApp.entitlements` 已加入该声明（2026-09-18）；
+  Distribution 构建的真机采集与签名路径仍未验收，不能用本机 ad hoc Debug 结果替代。
 - **ad hoc 签名 + 每次重建会重新弹权限**：TCC 记录按 static code 匹配，
   `tccd` 会记 `Failed to match existing code requirement for subject ... and service kTCCServiceMicrophone`
   并重新提示。用稳定签名（Developer ID）发布后这个现象消失；排障时不要把「又弹了一次」当成故障。
@@ -212,8 +213,9 @@ date: 2026-09-19
 2. **发布路径也要在真机上验收一次录音**，不能只用本机 Debug 构建的结论替代。
 3. **采集侧不做 AGC/AEC 的原则**已经是现状，值得在 ADR 里固化，避免以后被「更干净」说服。
 4. **默认输入设备变化**：录音中提示重录（§3.5）。
-5. **需要实时能力时再迁移**：本地 VAD / 边录边传 → `AVAudioEngine` + `AVAudioSinkNode`，
-   保留 48 kHz 硬件格式。
+5. **实时能力使用会话级 `AVAudioEngine` 链路**：字幕与会议走 `MicrophoneCapture`，语音助手走
+   共享 `AudioEngineSession`；输入在出口统一为 16 kHz 单声道 PCM16，实时回调仍保持无 I/O、无分配、
+   不等待锁的约束。
 6. `AVAudioRecorder(url:format:)` 替代 settings 字典，给格式一个类型化的来源。
 
 ## 5. 来源（核实日期 2026-09-16）
@@ -237,7 +239,7 @@ date: 2026-09-19
 
 - 本文第 2 节的结论只覆盖本机、当前系统版本；**系统侧麦克风恢复之前，任何「录音质量」结论都不成立**，
   恢复后需要按 `.agents/skills/speechrail-perf-benchmark/SKILL.md` 的制品口径重新实测一次。
-- 建议里的 1、4、5、6 项尚未实施。
+- 建议里的 4、6 尚未实施；第 5 项已经由会话级 `AVAudioEngine` 链路落地，不再是待迁移事项。
 - 未做：多设备切换实测、蓝牙耳机采集实测、长时间（>5 分钟）录音的稳定性实测。
 - 未做：**进程 tap 的真机验证**（`TECHNICAL-DESIGN` §12 第 1、2 条）——授权弹窗的实际触发点、
   `bundleIDs` 是否真按 App 生效、`processRestoreEnabled` 的真实行为，三件都只有 SDK 标注语义。

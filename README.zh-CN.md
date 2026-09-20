@@ -43,7 +43,8 @@ SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语
 |---|---|---|
 | `POST /v1/audio/transcriptions` | 文件 ASR | OpenAI 兼容 multipart 输入；支持 `json`、`verbose_json`、`text`、`srt`、`vtt`，以及可选的 `diarized_json`。 |
 | `POST /v1/audio/speech` | TTS | 流式输出 `mp3`、`opus`、`aac`、`flac`、`wav` 或原始 `pcm`；请从 `/v1/voices` 选择 `available=true` 的音色。 |
-| `GET /v1/models`、`GET /v1/voices` | 能力发现 | 返回当前 profile、可用模型制品和可用音色。 |
+| `GET /v1/models`、`GET /v1/voices` | 兼容能力发现 | 当前 profile 与可用音色的历史投影。 |
+| `GET /v1/speechrail/capabilities`、`/v1/speechrail/voices*` | 安全能力发现 | `effective_capabilities_v1` 返回同一代有效能力快照；命名空间音色发现不返回来源正文，也不启动 worker。 |
 | `WS /v1/realtime` | 实时 ASR/TTS | OpenAI Realtime 事件子集、服务端语音准入，以及可选的命名空间分人扩展。 |
 | `/v1/jobs` | 异步任务元数据 | 可选的 owner-scoped 持久任务记录；调用方提供不透明引用，不传原始音频或转写文本。 |
 | `speechrail-mcp` | Agent 接入 | 支持 `stdio` 或 `streamable-http` 的无状态 MCP 代理；它调用本地 REST 服务，不托管模型。 |
@@ -52,14 +53,17 @@ SpeechRail 是面向桌面 Agent、会议工具、内容生产流程和其他语
 可用。它只返回会话范围内的匿名标签，不识别人名，也不维护跨会话讲话人数据库。
 
 仓库还包含 `macos/SpeechRailApp` SwiftUI macOS 控制面。它读取服务状态，
-并将 profile/服务操作委托给现有 Python CLI；它不是音频运行时，不采集麦克风、
-不播放音频、不加载模型，也不替代用户级 `com.speechrail` LaunchAgent。
+并将 profile/服务操作委托给现有 Python CLI；它不加载模型，也不替代用户级
+`com.speechrail` LaunchAgent。它的语音助手、会议助手、实时字幕会话，以及音色克隆和
+试听流程，只在用户主动启用对应功能期间采集或播放音频；会话 PCM 不落盘，文本与记录保存在
+App 本机存储中。
 
 ## 范围与边界
 
 SpeechRail 是语音运行时，不是完整的语音 Agent 应用。它不负责：
 
-- 麦克风采集、扬声器播放、会议管理或 UI；
+- SpeechRail 服务本身不负责麦克风采集、扬声器播放、会议管理或 UI；随附 App 只在明确启用的
+  功能会话内提供这些客户端能力；
 - LLM response、tool call 或应用级打断策略；
 - 实名讲话人识别、声纹库或跨会话归属；
 - 云端推理、多租户隔离、高可用或分布式队列。
@@ -70,6 +74,7 @@ OpenAI 能力前，请先阅读对应契约。
 ## 环境要求
 
 - Apple Silicon Mac，macOS 14 或更高版本；Intel Mac 不是支持目标。
+- 随附的 `SpeechRailApp` 以 macOS 26.0+、`arm64` 为目标；这与受管服务的运行时最低版本是两个边界。
 - 源码开发和 Python 服务 CLI 使用 `>=3.12,<3.13`。
 - 使用 [`uv`](https://docs.astral.sh/uv/) 管理依赖和环境。
 - 模型 snapshot 与 vendor runtime 存放在仓库之外。

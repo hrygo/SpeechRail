@@ -2,8 +2,8 @@
 title: "SpeechRail 开发者文档中心"
 status: active
 audience: "核心开发者、开源贡献者"
-version: "2.1.1"
-date: 2026-09-16
+version: "2.1.2"
+date: 2026-09-20
 ---
 
 # 🛠️ SpeechRail 开发者文档
@@ -29,8 +29,10 @@ graph TD
 5. **[🎛️ macOS App 设计系统与 Token](macos-app-design-system.md)**：macOS 26 设计研究、Liquid Glass 分层、颜色/间距/字体/可访问性 token。
 6. **[📦 macOS App 分发与签名](macos-app-release.md)**：Distribution archive、签名/公证、安装清理、控制链路验收与独立回滚。
 7. **[📜 架构决策记录 (ADR)](../decisions/README.md)**：关键技术选型与设计原则约束。
-8. **[🎙️ macOS App 录音通道与音频采集最佳实践](macos-app-audio-capture.md)**：麦克风采集 API 选型、格式与音质、
-   权限/entitlement、设备与线程约束，以及 2026-09-16 一次「录不到声音」的实测排障记录。
+8. **[🎙️ macOS App 录音通道与音频采集最佳实践](macos-app-audio-capture.md)**：音色克隆文件录音、会话级采集、
+   助手共享播放引擎、系统 voice processing、权限/entitlement、设备与线程约束，以及一次「录不到声音」的实测排障记录。
+9. **[🧩 macOS App 会话层技术方案](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md)**：语音助手、会议助手、实时字幕的
+   资源边界、音频来源、记录存储、失败出口与尚未完成的真机验收。
 
 ---
 

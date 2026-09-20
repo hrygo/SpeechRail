@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 分发与签名"
 status: active
-version: "0.5.3"
-date: 2026-09-17
+version: "0.5.4"
+date: 2026-09-20
 ---
 
 # SpeechRail macOS App 分发与签名
@@ -21,7 +21,7 @@ date: 2026-09-17
 
 | 制品 | 内容 | 实际 owner | 登录启动 | 不能做什么 |
 |---|---|---|---|---|
-| `SpeechRail.app` | SwiftUI 菜单栏/设置控制面 | 用户按需打开 | **否** | 不加载模型，不启动服务；不在后台采集或播放音频（只在音色克隆页按下录制时采集麦克风，播放只在用户点「播放 / 试听」时发生） |
+| `SpeechRail.app` | SwiftUI 菜单栏/设置与会话控制面 | 用户按需打开 | **否** | 不加载模型，不启动服务；不在后台采集或播放音频，只有用户主动启用音色克隆、试听或会话功能时才按功能持有设备；会话 PCM 不落盘 |
 | `com.speechrail.desktop.control` | Distribution App bundle 内的 `SpeechRailControlAgent` + `SMAppService` plist | XPC 控制 helper | 仅签名 Distribution 由 `SMAppService` 注册 | 不拥有 8201，不创建第二个 ASGI/worker，不替换服务 runtime |
 | `com.speechrail.desktop.local-control` | Debug/Release App bundle 内的 `XPCServices/*.xpc` | 按需 XPC 控制 helper | 由 `NSXPCConnection(serviceName:)` 按需启动 | 不注册登录项，不拥有 8201，不创建第二个 ASGI/worker |
 | `com.speechrail` | Python managed service LaunchAgent | SpeechRail 服务 | **是** | 不依赖 App 是否打开 |

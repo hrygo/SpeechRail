@@ -664,11 +664,11 @@ public struct AssistantView: View {
                             isCreatingPersona = true
                         }
                     } label: {
-                        HStack(spacing: 2) {
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                             Text("切换")
                                 .font(SpeechRailDesignTokens.Typography.caption)
                             Image(systemName: "chevron.down")
-                                .font(.system(size: 8))
+                                .font(SpeechRailDesignTokens.Typography.caption)
                         }
                         .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                     }
@@ -718,12 +718,12 @@ public struct AssistantView: View {
                                         .font(SpeechRailDesignTokens.Typography.caption)
                                 } else if isPlaying {
                                     Image(systemName: "stop.fill")
-                                        .font(.system(size: 9))
+                                        .font(SpeechRailDesignTokens.Typography.caption)
                                     Text("停止")
                                         .font(SpeechRailDesignTokens.Typography.caption)
                                 } else {
                                     Image(systemName: "speaker.wave.2.fill")
-                                        .font(.system(size: 9))
+                                        .font(SpeechRailDesignTokens.Typography.caption)
                                     Text("试听")
                                         .font(SpeechRailDesignTokens.Typography.caption)
                                 }
@@ -735,7 +735,7 @@ public struct AssistantView: View {
                     }
                     voicePickerMenu
                 }
-                HStack(spacing: 4) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                     Text(currentVoiceName ?? Self.defaultVoiceLabel)
                         .font(SpeechRailDesignTokens.Typography.bodyMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -817,11 +817,11 @@ public struct AssistantView: View {
                 navigation.request(.voiceLibrary)
             }
         } label: {
-            HStack(spacing: 2) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
                 Text("换音色")
                     .font(SpeechRailDesignTokens.Typography.caption)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8))
+                    .font(SpeechRailDesignTokens.Typography.caption)
             }
             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
         }
@@ -966,14 +966,14 @@ public struct AssistantView: View {
                     Button {
                         typed = item.prompt
                     } label: {
-                        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs + 2) {
+                        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Image(systemName: item.icon)
-                                .font(.system(size: 13, weight: .semibold))
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                                 .frame(width: 26, height: 26)
                                 .background(
                                     SpeechRailDesignTokens.Color.rail.opacity(0.1),
-                                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                 )
 
                             VStack(alignment: .leading, spacing: 3) {
@@ -1010,7 +1010,7 @@ public struct AssistantView: View {
     private func recentSessionResumeBar(_ latest: SessionSummary) -> some View {
         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
             Image(systemName: "clock.arrow.circlepath")
-                .font(.system(size: 11))
+                .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .foregroundStyle(SpeechRailDesignTokens.Color.voice)
             Text("最近会话：")
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -1295,8 +1295,8 @@ public struct AssistantView: View {
         } label: {
             Text(title)
                 .font(SpeechRailDesignTokens.Typography.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                 .background(
                     isSelected ? SpeechRailDesignTokens.Color.rail.opacity(0.12) : SpeechRailDesignTokens.Color.field,
                     in: Capsule()
@@ -1304,7 +1304,7 @@ public struct AssistantView: View {
                 .overlay(
                     Capsule().stroke(
                         isSelected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Surface.border,
-                        lineWidth: 1
+                        lineWidth: SpeechRailDesignTokens.Stroke.strong
                     )
                 )
                 .foregroundStyle(isSelected ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.ink)
@@ -1390,7 +1390,7 @@ public struct AssistantView: View {
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                         if assistant.turns.isEmpty && assistant.partialText == nil && assistant.streamingReply == nil {
                             liveListeningWorkspace
                         } else {
@@ -1513,9 +1513,9 @@ public struct AssistantView: View {
         Button {
             inspectorTab = .voice
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "person.wave.2")
-                    .font(.system(size: 9))
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .accessibilityHidden(true)
                 Text(currentVoiceName ?? "默认音色")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -1523,8 +1523,8 @@ public struct AssistantView: View {
                     .truncationMode(.tail)
                     .frame(maxWidth: 140, alignment: .leading)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
             .background(
                 SpeechRailDesignTokens.Color.voice.opacity(0.12),
                 in: Capsule()
@@ -1553,20 +1553,20 @@ public struct AssistantView: View {
     }
 
     private var liveChatElapsed: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
             Circle()
-                .fill(assistant.isMuted ? Color.orange : Color.green)
+                .fill(assistant.isMuted ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.ready)
                 .frame(width: 6, height: 6)
             Text(formatElapsed(session.elapsed))
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
                 .monospacedDigit()
                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 2)
+        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+        .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
         .background(
             SpeechRailDesignTokens.Color.recessedField,
-            in: RoundedRectangle(cornerRadius: 4, style: .continuous)
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Spacing.micro, style: .continuous)
         )
         .fixedSize(horizontal: true, vertical: false)
     }
@@ -1586,7 +1586,7 @@ public struct AssistantView: View {
     // MARK: - 助手思考中动效气泡
 
     private var liveAssistantThinkingBubble: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
             ZStack {
                 Circle()
                     .fill(SpeechRailDesignTokens.Color.rail.opacity(0.12))
@@ -1597,7 +1597,7 @@ public struct AssistantView: View {
             }
             .padding(.top, 2)
 
-            HStack(spacing: 8) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 ProgressView()
                     .controlSize(.mini)
                 Text("助手正在思考与生成回答…")
@@ -1608,10 +1608,10 @@ public struct AssistantView: View {
             .padding(.vertical, 10)
             .background(
                 SpeechRailDesignTokens.Color.field,
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.container, style: .continuous)
                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
             )
 
@@ -1633,17 +1633,17 @@ public struct AssistantView: View {
                     .fill(SpeechRailDesignTokens.Color.rail.opacity(0.08))
                     .frame(width: 80, height: 80)
                 Circle()
-                    .stroke(SpeechRailDesignTokens.Color.rail.opacity(0.2), lineWidth: 1.5)
+                    .stroke(SpeechRailDesignTokens.Color.rail.opacity(0.2), lineWidth: SpeechRailDesignTokens.Stroke.strong)
                     .frame(width: 64, height: 64)
                 Circle()
                     .fill(SpeechRailDesignTokens.Color.rail.opacity(0.15))
                     .frame(width: 48, height: 48)
                 Image(systemName: assistant.isMuted ? "mic.slash.fill" : "waveform.and.mic")
                     .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(assistant.isMuted ? Color.orange : SpeechRailDesignTokens.Color.rail)
+                    .foregroundStyle(assistant.isMuted ? SpeechRailDesignTokens.Color.attention : SpeechRailDesignTokens.Color.rail)
             }
 
-            VStack(spacing: 4) {
+            VStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Text(assistant.isMuted ? "麦克风当前已静音" : "对讲已就绪，正在聆听您的声音")
                     .font(SpeechRailDesignTokens.Typography.sectionTitle)
                     .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -1653,12 +1653,12 @@ public struct AssistantView: View {
             }
 
             // 快捷破冰话题推荐
-            VStack(spacing: 8) {
+            VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 Text("快捷破冰提问：")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
 
-                HStack(spacing: 8) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Button("👋 你好，介绍一下你自己") {
                         sendPrompt("你好，介绍一下你自己")
                     }
@@ -1737,9 +1737,9 @@ public struct AssistantView: View {
         Button {
             assistant.toggleMute()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: assistant.isMuted ? "mic.slash.fill" : "mic.fill")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .accessibilityHidden(true)
                 Text(assistant.isMuted ? "取消静音" : "静音")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -1755,7 +1755,7 @@ public struct AssistantView: View {
             .textFieldStyle(.plain)
             .font(SpeechRailDesignTokens.Typography.body)
             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-            .padding(.vertical, 7)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             .background(
                 SpeechRailDesignTokens.Color.inputField,
                 in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
@@ -1773,9 +1773,9 @@ public struct AssistantView: View {
         Button {
             Task { await assistant.stopSpeaking() }
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: assistant.phase == .speaking ? "speaker.wave.2.fill" : "circle.dotted")
-                    .font(.system(size: 10))
+                    .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                     .accessibilityHidden(true)
                 Image(systemName: "stop.fill")
@@ -1803,9 +1803,9 @@ public struct AssistantView: View {
         Button {
             Task { await endConversation() }
         } label: {
-            HStack(spacing: 3) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Image(systemName: "stop.circle")
-                    .font(.system(size: 11))
+                    .font(SpeechRailDesignTokens.Typography.captionMedium)
                     .accessibilityHidden(true)
                 Text("结束")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -2554,7 +2554,7 @@ public struct AssistantView: View {
                     .padding(.top, SpeechRailDesignTokens.Spacing.md)
                     .padding(.bottom, SpeechRailDesignTokens.Spacing.xs)
             } else {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                     ForEach(Array(factRows.enumerated()), id: \.offset) { _, row in
                         SessionKVRow(row.0, row.1)
                     }
@@ -2608,7 +2608,7 @@ public struct AssistantView: View {
     }
 
     private var liveFactsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
             HStack {
                 Text("实时对讲链路")
                     .font(SpeechRailDesignTokens.Typography.captionMedium)
@@ -2617,7 +2617,7 @@ public struct AssistantView: View {
                 StatusPill(tone: .healthy, label: "已连线")
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 SessionKVRow("对话模型", assistant.llmModel ?? "未连接")
                 SessionKVRow("当前音色", "\(currentVoiceName ?? Self.defaultVoiceLabel) · 下一句生效")
                 SessionKVRow("对话角色", "\(activePersonaTitle) · 本轮已锁定")
@@ -2828,7 +2828,7 @@ public struct AssistantView: View {
 
             Spacer(minLength: 0)
 
-            HStack(spacing: 4) {
+            HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                 Button {
                     if voicePageIndex > 0 {
                         voicePageIndex -= 1
@@ -2836,19 +2836,19 @@ public struct AssistantView: View {
                 } label: {
                     HStack(spacing: 2) {
                         Image(systemName: "chevron.left")
-                            .font(.system(size: 8, weight: .bold))
+                            .font(SpeechRailDesignTokens.Typography.caption)
                         Text("上一页")
                     }
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                     .background(
                         voicePageIndex > 0 ? SpeechRailDesignTokens.Color.field : Color.clear,
                         in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.strong)
                     )
                 }
                 .buttonStyle(.plain)
@@ -2863,18 +2863,18 @@ public struct AssistantView: View {
                     HStack(spacing: 2) {
                         Text("下一页")
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 8, weight: .bold))
+                            .font(SpeechRailDesignTokens.Typography.caption)
                     }
                     .font(SpeechRailDesignTokens.Typography.caption)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
+                    .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                     .background(
                         voicePageIndex < totalVoicePages - 1 ? SpeechRailDesignTokens.Color.field : Color.clear,
                         in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: 1)
+                            .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.strong)
                     )
                 }
                 .buttonStyle(.plain)
@@ -2893,7 +2893,7 @@ public struct AssistantView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Image(systemName: "magnifyingglass")
-                        .font(.system(size: 11))
+                        .font(SpeechRailDesignTokens.Typography.caption)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     TextField("搜索音色名或特点…", text: $voiceSearchQuery)
                         .textFieldStyle(.plain)
@@ -2903,7 +2903,7 @@ public struct AssistantView: View {
                             voiceSearchQuery = ""
                         } label: {
                             Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 11))
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         }
                         .buttonStyle(.plain)
@@ -2927,8 +2927,8 @@ public struct AssistantView: View {
                         } label: {
                             Text(scope.rawValue)
                                 .font(SpeechRailDesignTokens.Typography.caption)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
+                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.tight)
                                 .background(
                                     voiceFilterScope == scope
                                         ? SpeechRailDesignTokens.Color.rail.opacity(0.15)
@@ -2940,7 +2940,7 @@ public struct AssistantView: View {
                                         voiceFilterScope == scope
                                             ? SpeechRailDesignTokens.Color.rail
                                             : SpeechRailDesignTokens.Surface.border,
-                                        lineWidth: 1
+                                        lineWidth: SpeechRailDesignTokens.Stroke.strong
                                     )
                                 )
                                 .foregroundStyle(
@@ -3138,7 +3138,7 @@ public struct AssistantView: View {
 
     private var recordTabBody: some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                 SessionKVRow("当前会话", "\(liveExchangeCount) 轮 · 共 \(assistant.turns.count) 句")
                 SessionKVRow("历史归档", recent.isEmpty ? "还没有对话记录" : "\(recent.count) 段 · 本地加密留存")
             }
@@ -3196,13 +3196,13 @@ public struct AssistantView: View {
                                     }
                                 }
                                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                                .padding(.vertical, 8)
+                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                                 .background(
                                     SpeechRailDesignTokens.Color.field,
-                                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                 )
                                 .overlay(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                         .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                                 )
                             }
@@ -3239,7 +3239,7 @@ public struct AssistantView: View {
     private var memoryTabBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                     Text("长期记忆资产")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
@@ -3268,13 +3268,13 @@ public struct AssistantView: View {
                         .textFieldStyle(.plain)
                         .font(SpeechRailDesignTokens.Typography.body)
                         .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
                         .background(
                             SpeechRailDesignTokens.Color.inputField,
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                 .stroke(SpeechRailDesignTokens.Surface.borderStrong, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                         )
                         .onSubmit { Task { await saveNewMemory() } }
@@ -3318,9 +3318,9 @@ public struct AssistantView: View {
                 .frame(maxWidth: .infinity)
             } else {
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                         ForEach(Array(memories.enumerated()), id: \.element.id) { _, memory in
-                            VStack(alignment: .leading, spacing: 6) {
+                            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                                 HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.xs) {
                                     Text(memory.body)
                                         .font(SpeechRailDesignTokens.Typography.body)
@@ -3352,17 +3352,17 @@ public struct AssistantView: View {
                                     }
                                     .buttonStyle(.plain)
                                     .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(Color.red.opacity(0.8))
+                                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                                 }
                             }
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                            .padding(.vertical, 8)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
                             .background(
                                 SpeechRailDesignTokens.Color.field,
-                                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                             )
                             .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
                             )
                         }
@@ -3410,51 +3410,77 @@ public struct AssistantView: View {
             .frame(maxHeight: .infinity)
 
             SessionPanel(expandsVertically: true) {
-                SessionPanelHead(title: reviewRecord?.title ?? "这一轮对话", detail: nil, trailingDetail: reviewDetail)
+                SessionPanelHead(title: reviewRecord?.title ?? "历史对话复盘", detail: nil, trailingDetail: reviewDetail)
                 SessionHairline()
 
                 // 历史记录摘要状态栏
                 if let record = reviewRecord {
-                    HStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "person.crop.circle")
-                                .font(.system(size: 10))
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        // 角色微胶囊
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Image(systemName: "person.crop.circle.fill")
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.rail)
                             Text(record.persona?.title ?? "默认角色")
                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+                        .background(
+                            SpeechRailDesignTokens.Color.field,
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                        )
 
-                        Text("·")
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-
-                        HStack(spacing: 4) {
+                        // 音色微胶囊
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
                             Image(systemName: "waveform")
-                                .font(.system(size: 10))
+                                .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.voice)
                             Text(reviewVoiceLabel)
                                 .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                         }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+                        .background(
+                            SpeechRailDesignTokens.Color.field,
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                        )
 
-                        Text("·")
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                        // 时长微信息
+                        HStack(spacing: SpeechRailDesignTokens.Spacing.micro) {
+                            Image(systemName: "stopwatch")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            Text("耗时 \(reviewDurationText)")
+                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                        }
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
 
-                        Text("耗时 \(reviewDurationText)")
-                            .font(SpeechRailDesignTokens.Typography.caption)
-                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-
-                        Spacer()
+                        Spacer(minLength: SpeechRailDesignTokens.Spacing.sm)
 
                         StatusPill(tone: .healthy, label: "已归档")
                     }
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
-                    .padding(.vertical, 6)
-                    .background(SpeechRailDesignTokens.Color.recessedField.opacity(0.5))
+                    .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                    .background(SpeechRailDesignTokens.Color.recessedField)
 
                     SessionHairline()
                 }
 
                 ScrollView(.vertical) {
-                    LazyVStack(alignment: .leading, spacing: 10) {
+                    LazyVStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
                         ForEach(Array(reviewLines.enumerated()), id: \.element.id) { _, line in
                             SessionTurnRow(
                                 who: line.role == .assistant ? "助手" : "你",
@@ -3472,7 +3498,7 @@ public struct AssistantView: View {
                             SessionEmptyState(
                                 systemImage: "text.alignleft",
                                 title: "这一条记录里还没有正文",
-                                message: "它可能是被打断就结束的一段。"
+                                message: "它可能是刚发起或被打断就结束的一段。"
                             ) { EmptyView() }
                         }
                     }
@@ -3493,49 +3519,62 @@ public struct AssistantView: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                 copyReviewedRecordButton
-                continueReviewedRecordButton
                 renameReviewedRecordButton
                 removeReviewedRecordButton
+                Spacer()
+                continueReviewedRecordButton
             }
 
             VStack(alignment: .trailing, spacing: SpeechRailDesignTokens.Spacing.xs) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     copyReviewedRecordButton
-                    continueReviewedRecordButton
-                }
-                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     renameReviewedRecordButton
                     removeReviewedRecordButton
                 }
+                continueReviewedRecordButton
             }
         }
     }
 
     private var copyReviewedRecordButton: some View {
-        Button("复制全文") { copy(reviewLines.map(\.text).joined(separator: "\n")) }
-            .speechRailButton(.secondary)
-            .fixedSize(horizontal: true, vertical: false)
+        Button {
+            copy(reviewLines.map(\.text).joined(separator: "\n"))
+        } label: {
+            Label("复制全文", systemImage: "doc.on.doc")
+        }
+        .speechRailButton(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var continueReviewedRecordButton: some View {
-        Button("继续这一轮") { continueFromReview() }
-            .speechRailButton(.primary)
-            .fixedSize(horizontal: true, vertical: false)
+        Button {
+            continueFromReview()
+        } label: {
+            Label("继续这一轮", systemImage: "arrow.uturn.forward")
+        }
+        .speechRailButton(.primary)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var renameReviewedRecordButton: some View {
-        Button("重命名") {
+        Button {
             renameDraft = reviewRecord?.title ?? ""
             isRenamingRecord = true
+        } label: {
+            Label("重命名", systemImage: "pencil")
         }
         .speechRailButton(.secondary)
         .fixedSize(horizontal: true, vertical: false)
     }
 
     private var removeReviewedRecordButton: some View {
-        Button("从记录库移除", role: .destructive) { confirmingRemove = true }
-            .speechRailButton(.secondary)
-            .fixedSize(horizontal: true, vertical: false)
+        Button(role: .destructive) {
+            confirmingRemove = true
+        } label: {
+            Label("移除记录", systemImage: "trash")
+        }
+        .speechRailButton(.secondary)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var reviewDetail: String {

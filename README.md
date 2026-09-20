@@ -66,7 +66,8 @@ It is a good fit when you need:
 | `GET /health`, `/readyz`, `/metrics` | Service diagnostics | Inspect process, subsystem, readiness, and metrics state. |
 | `POST /v1/audio/transcriptions` | File ASR | OpenAI-compatible multipart input; `json`, `verbose_json`, `text`, `srt`, `vtt`, and optional `diarized_json` responses. |
 | `POST /v1/audio/speech` | TTS | Streaming `mp3`, `opus`, `aac`, `flac`, `wav`, or raw `pcm`; select an `available=true` voice from `/v1/voices`. |
-| `GET /v1/models`, `GET /v1/voices` | Capability discovery | Results describe the active profile and currently available artifacts and voices. |
+| `GET /v1/models`, `GET /v1/voices` | Compatibility discovery | Legacy projections for the active profile and available voices. |
+| `GET /v1/speechrail/capabilities`, `/v1/speechrail/voices*` | Safe discovery | `effective_capabilities_v1` provides one effective capability generation; namespaced voice discovery omits source text and does not start workers. |
 | `WS /v1/realtime` | Realtime ASR/TTS | OpenAI Realtime event subset, server-side speech admission, and an opt-in namespaced diarization extension. |
 | `/v1/jobs` | Asynchronous job metadata | Optional owner-scoped durable job records; callers provide opaque references, not raw audio or transcripts. |
 | `speechrail-mcp` | Agent access | Stateless MCP proxy over `stdio` or `streamable-http`; it calls the local REST service and does not host models. |
@@ -78,16 +79,21 @@ database.
 
 The repository also contains a SwiftUI macOS control plane under
 `macos/SpeechRailApp`. It reports service state and delegates profile/service
-operations to the existing Python CLI. It is not the audio runtime and does
-not capture microphones, play audio, load models, or replace the user-level
-`com.speechrail` LaunchAgent.
+operations to the existing Python CLI. It does not load models or replace the
+user-level `com.speechrail` LaunchAgent. Its feature-scoped session surfaces
+(voice assistant, meeting assistant, and live captions), plus voice-clone and
+preview flows, may capture or play audio only while the user has enabled that
+feature; session PCM is not persisted, while text and records stay in local
+App storage.
 
 ## Scope and boundaries
 
 SpeechRail is deliberately a speech runtime, not a complete voice-agent
 application. It does not provide:
 
-- microphone capture, speaker playback, conference management, or UI;
+- The SpeechRail service itself does not provide microphone capture, speaker
+  playback, conference management, or UI. The bundled App may provide those
+  client-side capabilities only inside an explicitly active feature session;
 - LLM responses, tool calls, or application-level interruption policy;
 - named-speaker identity, voiceprint databases, or cross-session attribution;
 - cloud inference, multi-tenant isolation, high availability, or a distributed queue.
@@ -100,6 +106,8 @@ listed above.
 
 - Apple Silicon Mac with macOS 14 or later for the native managed runtime;
   Intel Macs are not a supported target.
+- The bundled `SpeechRailApp` targets macOS 26.0 or later and `arm64`; this is
+  a separate baseline from the managed service runtime.
 - Python `>=3.12,<3.13` for source development and the Python service CLI.
 - [`uv`](https://docs.astral.sh/uv/) for dependency and environment management.
 - `ffmpeg` for the audio decoding/transcoding paths used by local setup and

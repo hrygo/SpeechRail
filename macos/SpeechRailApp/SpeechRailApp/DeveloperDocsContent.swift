@@ -78,6 +78,9 @@ enum DeveloperDocsCatalog {
                     .init(method: "GET", path: "/readyz", detail: "ASR 或 TTS 至少一个可用时的 200"),
                     .init(method: "GET", path: "/metrics", detail: "Prometheus 文本指标，本机采集用"),
                     .init(method: "GET", path: "/v1/models", detail: "模型与 supports_preview / clone / instruction 声明"),
+                    .init(method: "GET", path: "/v1/speechrail/capabilities", detail: "一次 effective_capabilities_v1 原子能力快照；只读，不启动 worker"),
+                    .init(method: "GET", path: "/v1/speechrail/voices", detail: "不含来源正文的安全音色发现列表"),
+                    .init(method: "GET", path: "/v1/speechrail/voices/{voice_id}", detail: "按 canonical ID 或 alias 读取安全音色发现详情"),
                     .init(method: "POST", path: "/v1/audio/transcriptions", detail: "上传音频取文本，可选词级时间戳与匿名分人"),
                     .init(method: "POST", path: "/v1/audio/speech", detail: "文本合成音频：mp3 / opus / aac / flac / wav / pcm"),
                     .init(method: "GET", path: "/v1/voices", detail: "系统音色与已保存的自定义音色"),
@@ -93,7 +96,8 @@ enum DeveloperDocsCatalog {
                 ]),
                 .note(
                     "可选的 owner-scoped /v1/jobs（含 /{job_id}/result）只在服务开启作业队列时存在，"
-                    + "普通客户端用上面的同步接口就够。"
+                    + "普通客户端用上面的同步接口就够。/v1/models 与 /v1/voices 仍是兼容投影；"
+                    + "需要跨对象同代一致性时使用 /v1/speechrail/capabilities，不要拼接多次读取。"
                 )
             ]
         ),
@@ -160,7 +164,9 @@ enum DeveloperDocsCatalog {
                 ]),
                 .paragraph(
                     "档位改变的是服务端发布的能力，不是客户端接口形状：三个档位共用同一套 REST 与 "
-                    + "WebSocket 契约，客户端按 /v1/models 的 capabilities 决定展示哪些入口。"
+                    + "WebSocket 契约，普通 UI 按 /v1/models 的 capabilities 决定展示哪些入口；"
+                    + "需要一次同代、可缓存的完整发现结果时读取 /v1/speechrail/capabilities，"
+                    + "其 schema_version 固定为 effective_capabilities_v1。"
                 ),
                 .note(
                     "词级时间戳由识别模型原生提供，不依赖 aligner；分人运行时只输出 session 级匿名标签，"
@@ -186,6 +192,8 @@ enum DeveloperDocsCatalog {
                 .bullets([
                     "stdio 是默认传输，不监听任何端口；streamable-http 用 --transport streamable-http "
                     + "--host 127.0.0.1 --port 8202 启动，供同机客户端连接 http://127.0.0.1:8202/mcp。",
+                    "describe() 保留 legacy models/voices/readiness 字段，同时尽力附带一次 "
+                    + "effective_capabilities_v1；旧服务只有在 404/405 或未知 schema 时才回退为空。",
                     "Realtime 不经代理：流式会话仍直接连 /v1/realtime。"
                 ]),
                 .note(

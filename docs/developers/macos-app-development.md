@@ -1,8 +1,8 @@
 ---
 title: "SpeechRail macOS App 开发与测试"
 status: active
-version: "0.5.4"
-date: 2026-09-16
+version: "0.5.5"
+date: 2026-09-20
 ---
 
 # SpeechRail macOS App 开发与测试
@@ -13,14 +13,14 @@ token；新页面不得自行定义颜色、间距、圆角和字体层级。
 
 ## 工具链
 
-- Xcode 26.6 stable，Swift 6.3，`SpeechRailApp` GUI target 使用 macOS deployment target 26.0，首期只构建 `arm64`；ControlKit、ControlAgent 和服务侧 worker 可按独立职责保留更低最低版本。
+- 当前本机工具链为 Xcode 27.0（build 27A266）、Swift 6.4；`SpeechRailApp` GUI target 使用 macOS deployment target 26.0，首期只构建 `arm64`；ControlKit、ControlAgent 和服务侧 worker 可按独立职责保留更低最低版本。
 - Python 仍固定为 `>=3.12,<3.13`，使用仓库现有 `uv` 环境。
 - 运行 App 前，首次安装 Xcode 的管理员需要在本机接受 Apple 许可；不要把管理员密码写入脚本或仓库。
 - 当前本机不依赖 Apple Developer ID；Debug/Release 可用 ad hoc 本地签名且关闭 Hardened Runtime。无 Team ID 时，Debug/Release 使用 App bundle 内的 XPC service，避免把 ad hoc helper 交给 macOS 的 `SMAppService` Launch Constraint；Distribution 才启用 Hardened Runtime 并使用签名的 `SMAppService`。
 
 ## 边界
 
-`SpeechRail` 是控制面，不是 ASR/TTS runtime。它不加载模型，也不直接执行 `launchctl`。音频只在用户主动操作时进出：音色克隆页在「开始录制 → 停止」之间采集麦克风（只落系统临时目录，应用收下后立刻删文件、字节只留内存；采集链关闭 AEC / AGC / 降噪），播放只发生在用户点「播放 / 试听」时（合成预览与刚录的那一段），没有后台采集或后台播放。Distribution 的 `SpeechRailControlAgent` 由 `SMAppService` 管理；本机 Debug/Release 则使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动同一控制代码，通过 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
+`SpeechRail` 是控制面，不是 ASR/TTS runtime。它不加载模型，也不直接执行 `launchctl`。音频只在用户主动启用的功能会话里进出：音色克隆仍在「开始录制 → 停止」之间采集参考音频并关闭 AEC / AGC / 降噪；语音助手使用共享的 `AudioEngineSession` 做采集与 TTS 播放，会议助手/实时字幕使用会话级采集链，按功能启用、离开即释放。会话 PCM 不落盘，文本与记录才写入本机 SQLite；助手默认使用实时对讲（耳机）并请求系统 voice processing，设备不支持时显式失败并建议切换半双工。完整的音频线程、格式、XPC process tap 与未验收声学边界见 [音频采集最佳实践](macos-app-audio-capture.md)。Distribution 的 `SpeechRailControlAgent` 由 `SMAppService` 管理；本机 Debug/Release 则使用 `Contents/XPCServices/com.speechrail.desktop.local-control.xpc` 按需启动同一控制代码，通过 XPC 接收固定命令，再委托现有 managed Python CLI。实际服务仍由唯一的 `com.speechrail` user LaunchAgent 运行。
 
 App 只连接 loopback；健康/目录读取保持公开状态语义，创作 REST 请求通过进程环境或受管
 `Application Support/SpeechRail/config/.env` 发现 Bearer key。模型目录、`.env`、日志、原始音频、完整转写和 API key 均留在 App bundle 之外，key 只在请求内存中使用。
@@ -32,18 +32,27 @@ App 只连接 loopback；健康/目录读取保持公开状态语义，创作 RE
 
 能力结论只认服务声明：`ServiceModelCapabilityClient` 读取 `GET /v1/models` 的
 `capabilities`（`supports_preview` / `supports_clone` / `supports_instruction`），服务只在对应
-capability 真正解析成功时才置为 `true`。服务状态页的能力矩阵与音色创作门禁都读这一份
-快照。音色列表（`/v1/voices`）是用户数据，可以为空，「还没有克隆音色」不能推出「服务没有
-克隆能力」；用列表反推能力会报出假的「未就绪」。
+capability 真正解析成功时才置为 `true`。服务状态页的能力矩阵与音色创作门禁仍读这一份
+快照。服务另提供 `GET /v1/speechrail/capabilities`（`effective_capabilities_v1`）和
+`/v1/speechrail/voices*` 安全发现投影；跨模型、音色和操作参数需要同代一致性时使用前者，
+不要把多次读取 `/v1/models`、`/v1/voices` 拼成原子结果。音色列表（`/v1/voices`）是用户数据，
+可以为空，「还没有克隆音色」不能推出「服务没有克隆能力」；用列表反推能力会报出假的「未就绪」。
 
 ## 当前控制面 surface
 
-`WindowGroup(id: "control-center")` 承载同一个 `AppModel` 下的两类一级 surface：
+`WindowGroup(id: "control-center")` 承载同一个 `AppModel` 下的三类一级 surface：
 
 - 创作：配音台、音色创作、音色克隆、音色库、我的作品。音色创作保留 VoiceDesign 的描述、候选、试听和保存主线；音色克隆在应用内读服务端下发的提词稿、录制参考音频，经 `validate` 预检后注册成新音色（录音只落系统临时目录、应用收下即删，采集链关闭 AEC / AGC / 降噪，注册需要 `quality` 档位）；配音与试听通过统一的本机 Bearer 凭据接入服务，音色库提供服务端列表、详情、更新和删除，失败时保留用户输入并解释稳定错误。
+- 会话：语音助手、会议助手、实时字幕。三类功能共享会话层的启停与资源占用边界，但各自拥有不同的来源、转写和本机记录；空闲时不持有麦克风、系统音频 tap 或播放引擎。
 - 服务：本机服务总览、运行监控、模型管理、预检与诊断、开发者文档。总览解释健康状态和能力，监控读取 `/metrics`，模型管理通过 XPC Agent 调用锁定目录的 `model catalog/status/prepare`，预检显示可操作的失败原因；开发者文档把接入信息（服务地址 / 鉴权 / 运行档位 / 已发布能力）与 8 个主题的最小示例放进应用，事实仍以 `contracts/` 与 `docs/users/` 为准。
 
 模型页明确区分“下载并校验”和“应用此档位”：前者执行逐文件大小/SHA-256 校验和原子发布，可显示 JSONL 进度并取消；后者才改变当前 profile。App 不直接访问模型源、不把本地路径或 hash 返回给页面，也不把模型下载放进请求路径。
+
+### 语音助手的会话与回看布局
+
+`AssistantView` 的 live/ready 状态可使用右侧 inspector；窗口进入 compact tier 时，右栏响应式收起，主内容仍保持可操作。`review` 状态是独立的记录阅读布局：只显示记录列表与转写正文，不再显示右侧 inspector；复制、继续、重命名、移除动作固定在正文底部，并通过 `ViewThatFits` 在一行或两行之间适配。继续会话从原记录预填人设、音色和会话偏好并建立新会话，原记录保持不变；移除记录仍是明确的破坏性操作。
+
+这段是当前代码行为说明，不替代会话层技术方案；真实声学 AEC、双讲收敛和各种设备组合仍以音频文档中的未验收项为准。
 
 ## 发布与运行态关系
 
@@ -64,6 +73,7 @@ capability 真正解析成功时才置为 `true`。服务状态页的能力矩�
 
 - Swift unit tests 只使用 in-process fake runner/transport。
 - UI/integration tests 使用 fake transport、临时 app home、端口和 helper label；测试结束必须注销临时 LaunchAgent 并清理临时目录。
+- 任何会接管前台窗口、焦点或输入的 UI 自动化都需要当前用户当次明确授权；文档、发布流程或历史记录本身不构成运行许可。
 - 真实 `SMAppService` register/unregister 只在签名 Distribution 验收中执行；本机 Debug/Release 走内嵌 XPC service。真实 `com.speechrail` smoke 仍只在单独、明确授权的本机验收中执行。
 - profile apply 仍由 Python transaction journal、preflight、public smoke 和 rollback 决定成功与否；App 不自行推断模型能力。
 - `model prepare` 是独立的可取消 mutation；Agent 仅转发已确认的档位、进度和终态，取消后不会把部分 staging 目录当作可用模型。

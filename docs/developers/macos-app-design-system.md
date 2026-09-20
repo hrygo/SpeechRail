@@ -2,8 +2,8 @@
 title: "SpeechRail macOS App 设计系统与 Token"
 status: active
 audience: "SpeechRail macOS App 设计、开发与测试人员"
-version: "0.8.6"
-date: 2026-09-17
+version: "0.8.7"
+date: 2026-09-20
 ---
 
 # SpeechRail macOS App 设计系统与 Token
@@ -17,9 +17,14 @@ date: 2026-09-17
 > Light/Dark、Increase Contrast、Dynamic Type、Reduce Motion 的实际观感；VoiceOver 实读顺序；
 > 列表「空格试听」在真实焦点下的行为；`.searchable` 与页面级 `List` 在窄窗口下的布局。
 
+> **当前范围说明（2026-09-20）**：2026-09-18 起新增的语音助手、会议助手、实时字幕属于独立的
+> App 会话层，不是本 2026-09-15 UI 迁移包的完整页面清单。会话生命周期、音频来源与记录边界以
+> [`会话层技术方案`](../design/2026-09-18-session-layer/TECHNICAL-DESIGN.md) 和
+> [`macOS App 开发与测试`](macos-app-development.md) 为准；本文的 token 与系统控件约束仍适用于这些页面。
+
 ## 1. 研究基线与 Logo 设计基因
 
-本设计系统以 Apple 官方 macOS 26 / Xcode 26 资料为基线。`SpeechRailApp` GUI target
+本设计系统以 macOS 26 的设计语义、当前 Xcode 27.0 / macOS 27 SDK 工具链为基线。`SpeechRailApp` GUI target
 明确以 macOS 26.0 为最低版本，不为 App UI 编写 macOS 14 的兼容 fallback；服务协议、
 ControlKit、ControlAgent 和服务侧 SwiftPM worker 是独立边界，是否保留更低最低版本由各自
 运行职责决定。研究结论是：App 在 macOS 26 上完整使用系统新设计能力，不把新特性降级为
@@ -333,11 +338,12 @@ Apple 的系统颜色、字体、材料和标准控件优先于自定义 token�
 
 | 范围 | 实际结果 | 验证时间 |
 |---|---|---|
-| App Debug 构建 | `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`，0 条新增 warning；未运行测试 | 2026-09-15 20:33 |
+| App Debug 构建 | 历史 `BUILD SUCCEEDED`，Xcode 26.6 / SDK 26.5，目标为 `arm64-apple-macos26.0`，0 条新增 warning；未运行测试 | 2026-09-15 20:33 |
+| App Release 构建（当前工作树） | 本次文档同步的最小构建检查未通过：未提交的 `SessionDesignSurface.swift:1083` 报 `Extraneous '}' at top level`；该文件不属于本次文档改动，未擅自修改 | 2026-09-20 |
 | Swift 单元测试 | 本轮未运行；此前历史记录不作为本轮证据 | — |
 | UI 测试 | 本轮未运行（AGENTS.md 硬约束：未经当次明确授权不运行 UI 自动化） | — |
 | 设置单场景复核 | 本轮未执行 | — |
-| App 安装 | `2.6.5 (15)`、`arm64`、`LSMinimumSystemVersion=26.0`，ad-hoc 签名与嵌入 XPC 通过；Debug 构建已覆盖安装到 `~/Applications/SpeechRail.app`（`mdfind` 只有这一个 bundle），上一版 `2.6.5 (14)` 存档于 `~/Library/Application Support/SpeechRail/app-archive/`；App 退出后服务仍在跑（`/health`、`/readyz` 均 200、8201 唯一 listener） | 2026-09-16 22:21 |
+| App 安装 | 此前独立 Release 构建已安装 `2.7.0 (19)`、`arm64`、`LSMinimumSystemVersion=26.0`，ad-hoc 签名与嵌入 XPC 通过，路径为 `~/Applications/SpeechRail.app`。`mdfind` 还会返回两个预先存在的 DerivedData Debug bundle，不能再把 bundle ID 搜索结果当成唯一安装实例；该制品不等同于当前未提交工作树 | 2026-09-20 |
 | 深色（离屏） | 八页深色扫查、页面底 `#1E1E1E` / 卡片 `#171717`、`StatusTone` 与系统语义色四外观逐字节相同；材质观感仍需真机 | 2026-09-16（§11.6 第三十七轮） |
 | Increase Contrast | **离屏不可测**：Swift 常量 `.accessibilityHighContrastAqua` 的 rawValue 少了 `HighContrast`，`NSAppearance(named:)` 静默回退成普通 Aqua；系统资源已改名 `AquaAX.car` / `DarkAquaAX.car`，旧名解析出的是浅色混合体（`hc-*` 渲染不作证据） | 2026-09-16（§11.6 第三十七轮） |
 | 动态字体 | macOS 上 `.dynamicTypeSize` 对系统文本样式不生效（`body`/`title`/`caption` 五档字号墨迹逐像素相同）；落地口径改为「系统文本样式 + `minHeight`」并在真机改系统文字大小走查 | 2026-09-16（§11.6 第三十七轮） |
