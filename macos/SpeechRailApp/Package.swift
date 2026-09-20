@@ -80,6 +80,7 @@ let package = Package(
                 "TeleprompterDomain.swift",
                 "TeleprompterTimingPolicy.swift",
                 "TeleprompterPreparationDomain.swift",
+                "TeleprompterPreparationPrompts.swift",
                 "TeleprompterNormalizer.swift",
                 "TeleprompterSegmenter.swift",
                 "TeleprompterAligner.swift",
