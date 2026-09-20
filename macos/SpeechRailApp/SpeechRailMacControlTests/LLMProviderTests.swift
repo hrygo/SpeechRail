@@ -320,4 +320,149 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertFalse(result.isReady)
         XCTAssertEqual(probeBodies().count, 1, "与这组参数无关的 400 不该触发重发")
     }
+
+    // MARK: - 模块差异化配置解析
+
+    private let globalAPIKey = "global-key"
+
+    private let moduleConfiguration = LLMConfiguration(
+        baseURL: "http://127.0.0.1:8317/v1",
+        model: "module-model"
+    )
+
+    func testModuleOverrideWinsAsAnAtomicProfile() {
+        let result = LLMConfigurationResolver.resolve(
+            global: configuration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: LLMModuleOverride(
+                enabled: true,
+                baseURL: moduleConfiguration.baseURL,
+                model: moduleConfiguration.model
+            ),
+            moduleAPIKey: "module-key"
+        )
+
+        XCTAssertEqual(result.configuration, moduleConfiguration)
+        XCTAssertEqual(result.apiKey, "module-key")
+        XCTAssertEqual(result.origin, .moduleOverride)
+        XCTAssertNil(result.fallbackReason)
+    }
+
+    func testIncompleteModuleOverrideFallsBackAsAnAtomicProfile() {
+        let result = LLMConfigurationResolver.resolve(
+            global: configuration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: LLMModuleOverride(
+                enabled: true,
+                baseURL: moduleConfiguration.baseURL,
+                model: ""
+            ),
+            moduleAPIKey: "module-key"
+        )
+
+        XCTAssertEqual(result.configuration, configuration)
+        XCTAssertEqual(result.apiKey, globalAPIKey)
+        XCTAssertEqual(result.origin, .globalFallback)
+        XCTAssertEqual(result.fallbackReason, .incomplete)
+    }
+
+    func testModuleOverrideWithCredentialInURLFallsBackWithoutLeakingTheModuleKey() {
+        let result = LLMConfigurationResolver.resolve(
+            global: configuration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: LLMModuleOverride(
+                enabled: true,
+                baseURL: "http://user:secret@example.test/v1",
+                model: moduleConfiguration.model
+            ),
+            moduleAPIKey: "module-key"
+        )
+
+        XCTAssertEqual(result.configuration, configuration)
+        XCTAssertEqual(result.apiKey, globalAPIKey)
+        XCTAssertEqual(result.origin, .globalFallback)
+        XCTAssertEqual(result.fallbackReason, .embedsCredential)
+    }
+
+    func testMalformedModuleEndpointFallsBackBeforeARequestIsAttempted() {
+        let result = LLMConfigurationResolver.resolve(
+            global: configuration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: LLMModuleOverride(
+                enabled: true,
+                baseURL: "not a URL",
+                model: moduleConfiguration.model
+            ),
+            moduleAPIKey: "module-key"
+        )
+
+        XCTAssertEqual(result.configuration, configuration)
+        XCTAssertEqual(result.apiKey, globalAPIKey)
+        XCTAssertEqual(result.origin, .globalFallback)
+        XCTAssertEqual(result.fallbackReason, .invalidBaseURL)
+    }
+
+    func testEmptyModuleKeyInheritsOnlyTheGlobalKey() {
+        let result = LLMConfigurationResolver.resolve(
+            global: configuration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: LLMModuleOverride(
+                enabled: true,
+                baseURL: moduleConfiguration.baseURL,
+                model: moduleConfiguration.model
+            ),
+            moduleAPIKey: "   "
+        )
+
+        XCTAssertEqual(result.configuration, moduleConfiguration)
+        XCTAssertEqual(result.apiKey, globalAPIKey)
+        XCTAssertEqual(result.origin, .moduleOverride)
+    }
+
+    func testDisabledModuleOverrideUsesGlobalConfiguration() {
+        let result = LLMConfigurationResolver.resolve(
+            global: configuration,
+            globalAPIKey: globalAPIKey,
+            moduleOverride: LLMModuleOverride(
+                enabled: false,
+                baseURL: moduleConfiguration.baseURL,
+                model: moduleConfiguration.model
+            ),
+            moduleAPIKey: "module-key"
+        )
+
+        XCTAssertEqual(result.configuration, configuration)
+        XCTAssertEqual(result.apiKey, globalAPIKey)
+        XCTAssertEqual(result.origin, .global)
+        XCTAssertNil(result.fallbackReason)
+    }
+
+    func testModuleOverrideIsCodableForUserDefaultsPersistence() throws {
+        let override = LLMModuleOverride(
+            enabled: true,
+            baseURL: moduleConfiguration.baseURL,
+            model: moduleConfiguration.model
+        )
+
+        let encoded = try JSONEncoder().encode([LLMModule.teleprompter: override])
+        let decoded = try JSONDecoder().decode(
+            [LLMModule: LLMModuleOverride].self,
+            from: encoded
+        )
+
+        XCTAssertEqual(decoded[.teleprompter], override)
+    }
+
+    func testTeleprompterDataFlowAcknowledgementIsScopedWithoutEmbeddingEndpoint() {
+        let first = TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
+            for: LLMConfiguration(baseURL: "http://127.0.0.1:8000/v1", model: "model-a")
+        )
+        let second = TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
+            for: LLMConfiguration(baseURL: "http://127.0.0.1:8317/v1", model: "model-a")
+        )
+
+        XCTAssertTrue(first.hasPrefix("speechrail.teleprompter.aiDataFlowAcknowledged.v2."))
+        XCTAssertNotEqual(first, second)
+        XCTAssertFalse(first.contains("127.0.0.1"))
+    }
 }

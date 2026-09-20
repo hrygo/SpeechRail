@@ -5,12 +5,11 @@ public struct TeleprompterView: View {
     @Environment(TeleprompterSession.self) private var session
     @Environment(TeleprompterStageWindowController.self) private var stage
     @Environment(TeleprompterStageSettings.self) private var settings
+    @Environment(SessionPreferences.self) private var preferences
     @State private var documents: [TeleprompterDocument] = []
     @State private var isImporterPresented = false
     @State private var isAIDataFlowDisclosurePresented = false
     @State private var operationMessage: String?
-    @AppStorage(TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey)
-    private var hasAcknowledgedAIDataFlow = false
 
     public init() {}
 
@@ -47,7 +46,7 @@ public struct TeleprompterView: View {
         ) {
             Button("取消", role: .cancel) {}
             Button("继续并发送原稿") {
-                hasAcknowledgedAIDataFlow = true
+                UserDefaults.standard.set(true, forKey: aiDataFlowAcknowledgementKey)
                 startAIAnalysis()
             }
         } message: {
@@ -372,11 +371,17 @@ public struct TeleprompterView: View {
     }
 
     private func requestAIAnalysis() {
-        guard hasAcknowledgedAIDataFlow else {
+        guard UserDefaults.standard.bool(forKey: aiDataFlowAcknowledgementKey) else {
             isAIDataFlowDisclosurePresented = true
             return
         }
         startAIAnalysis()
+    }
+
+    private var aiDataFlowAcknowledgementKey: String {
+        TeleprompterAIDataFlowDisclosure.acknowledgementDefaultsKey(
+            for: preferences.llmConfiguration(for: .teleprompter)
+        )
     }
 
     private func startAIAnalysis() {

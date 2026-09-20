@@ -308,7 +308,10 @@ public struct InnerOSDrawer: View {
         let text = question
         guard !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         question = ""
-        session.ask(text, configuration: preferences.llmConfiguration)
+        session.ask(
+            text,
+            resolvedConfiguration: preferences.resolvedLLMConfiguration(for: .assistant)
+        )
     }
 
     private func copy(_ exchange: InnerOSExchange) {

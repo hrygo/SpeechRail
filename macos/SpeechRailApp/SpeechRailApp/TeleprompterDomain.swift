@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
@@ -24,6 +25,7 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
 ///
 /// 文案不包含 endpoint、密钥或 provider 的实现细节，避免把敏感配置带入界面或持久化稿件。
 public enum TeleprompterAIDataFlowDisclosure {
+    /// 旧版本的全局确认键保留但不复用；新确认按实际 endpoint/model 作用域保存。
     public static let acknowledgementDefaultsKey =
         "speechrail.teleprompter.aiDataFlowAcknowledged.v1"
     public static let title = "AI 整理会发送原稿"
@@ -34,6 +36,16 @@ public enum TeleprompterAIDataFlowDisclosure {
 
         跟读和直播过程中不会调用大模型，也不会发送麦克风、摄像头或直播画面。
         """
+
+    /// 不把 endpoint 原文写进 UserDefaults key；配置变化后必须重新确认数据流。
+    public static func acknowledgementDefaultsKey(for configuration: LLMConfiguration) -> String {
+        let material = configuration.normalizedBaseURL
+            + "\u{0}"
+            + configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digest = SHA256.hash(data: Data(material.utf8))
+        let fingerprint = digest.prefix(12).map { String(format: "%02x", $0) }.joined()
+        return "speechrail.teleprompter.aiDataFlowAcknowledged.v2.\(fingerprint)"
+    }
 }
 
 public struct TeleprompterSourceRange: Codable, Equatable, Sendable {

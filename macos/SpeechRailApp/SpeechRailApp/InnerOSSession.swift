@@ -132,16 +132,32 @@ public final class InnerOSSession {
     /// 提问本身不进 `await` 链：界面按下去就返回，只有这一问在飞（`askTask` 是唯一的
     /// 句柄）。同一时刻只允许一问——再问一次会取消上一问，而不是两条回答争同一块界面。
     public func ask(_ question: String, configuration: LLMConfiguration) {
+        ask(
+            question,
+            resolvedConfiguration: ResolvedLLMConfiguration(
+                configuration: configuration,
+                apiKey: LLMKeychain.load(),
+                origin: .global
+            )
+        )
+    }
+
+    /// 应用入口传入已经解析好的模块配置，避免执行层重新读取 global Key。
+    public func ask(_ question: String, resolvedConfiguration: ResolvedLLMConfiguration) {
         askTask?.cancel()
         askTask = Task { [weak self] in
-            await self?.performAsk(question, configuration: configuration)
+            await self?.performAsk(question, resolvedConfiguration: resolvedConfiguration)
         }
     }
 
-    private func performAsk(_ question: String, configuration: LLMConfiguration) async {
+    private func performAsk(
+        _ question: String,
+        resolvedConfiguration: ResolvedLLMConfiguration
+    ) async {
         defer { askTask = nil }
         let trimmed = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let sessionID else { return }
+        let configuration = resolvedConfiguration.configuration
         guard configuration.isConfigured else {
             state = .failed("还没有配置对话模型（设置 → 会话）。")
             lastFailure = state.failureText
@@ -171,7 +187,7 @@ public final class InnerOSSession {
             answerText = try await provider.complete(
                 configuration: configuration,
                 messages: Self.prompt(question: trimmed, lines: lines, names: names),
-                apiKey: LLMKeychain.load(),
+                apiKey: resolvedConfiguration.apiKey,
                 maxOutputTokens: 1_200,
                 textFormat: InnerOSAnswer.jsonSchema,
                 timeout: 90

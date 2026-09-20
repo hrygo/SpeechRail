@@ -231,8 +231,11 @@ public final class AssistantSession {
     /// 测试替身或历史调用方若返回普通 source，就继续走下面的兼容播放器。
     public var audioSourceFactory: @MainActor () -> AudioChunkSource = { AudioEngineSession() }
     public var preferences: (@MainActor () -> SessionPreferences)?
-    /// 取密钥。**只有这一处读钥匙串**，密钥不进任何状态、不进日志。
+    /// 取全局密钥。模块专用密钥由下面的 provider 按作用域读取。
     public var apiKeyProvider: @MainActor () -> String? = { LLMKeychain.load() }
+    public var moduleAPIKeyProvider: @MainActor (LLMModule) -> String? = {
+        LLMKeychain.load(scope: .module($0))
+    }
     /// 音色被拒时的可用内置声音列表（给可读结论用，§9 第 14 行）。
     public var availableVoices: @MainActor () -> [String] = { [] }
     /// 仅从同一代 capability snapshot 读取 TTS catalog revision；未知时保持 nil，
@@ -425,10 +428,17 @@ public final class AssistantSession {
 
     private func startPipeline() async throws {
         guard let preferences = preferences?() else { throw Blocked(.llmNotConfigured) }
-        guard preferences.isLLMConfigured else { throw Blocked(.llmNotConfigured) }
-        llmModel = preferences.llmConfiguration.model
-        let configuration = preferences.llmConfiguration
-        let key = apiKeyProvider()
+        let resolved = preferences.resolvedLLMConfiguration(
+            for: .assistant,
+            globalAPIKey: apiKeyProvider(),
+            moduleAPIKey: moduleAPIKeyProvider(.assistant)
+        )
+        guard resolved.configuration.isConfigured, !resolved.configuration.embedsCredential else {
+            throw Blocked(.llmNotConfigured)
+        }
+        llmModel = resolved.configuration.model
+        let configuration = resolved.configuration
+        let key = resolved.apiKey
         // 大模型先探一次：它连不上时**不开会话、不取设备**（§9 第 15–16 行）。
         let result = await provider.check(configuration: configuration, apiKey: key)
         guard result.isReady else {
@@ -783,8 +793,13 @@ public final class AssistantSession {
     /// 前缀顺序是硬的（§5.5）：人设 → 记忆 → 历史 → 本轮。**只追加，从不重写**。
     private func runReply(spoken: Bool) async {
         guard let sessionID, let preferences = preferences?() else { return }
-        let configuration = preferences.llmConfiguration
-        let key = apiKeyProvider()
+        let resolved = preferences.resolvedLLMConfiguration(
+            for: .assistant,
+            globalAPIKey: apiKeyProvider(),
+            moduleAPIKey: moduleAPIKeyProvider(.assistant)
+        )
+        let configuration = resolved.configuration
+        let key = resolved.apiKey
         var messages: [LLMMessage] = []
         if let persona {
             messages.append(

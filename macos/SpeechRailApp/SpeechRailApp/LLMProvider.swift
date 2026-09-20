@@ -38,11 +38,153 @@ public struct LLMConfiguration: Sendable, Equatable {
         return text
     }
 
+    public var isBaseURLValid: Bool {
+        guard
+            let url = URL(string: normalizedBaseURL),
+            let scheme = url.scheme?.lowercased(),
+            ["http", "https"].contains(scheme),
+            url.host != nil
+        else { return false }
+        return true
+    }
+
     /// 端点上是否混进了凭据。带 `?api_key=` / `?key=` 的地址一律拒绝——项目约束不允许
     /// key 出现在 URL 里（`AGENTS.md` 的同一条）。
     public var embedsCredential: Bool {
         let text = baseURL.lowercased()
         return text.contains("api_key=") || text.contains("apikey=") || text.contains("key=") || text.contains("@")
+    }
+}
+
+/// 需要 LLM 的应用能力作用域。全局配置是默认值，不是一个额外模块。
+public enum LLMModule: String, CaseIterable, Codable, Identifiable, Sendable {
+    case assistant
+    case minutes
+    case teleprompter
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .assistant: "语音助手"
+        case .minutes: "会议纪要"
+        case .teleprompter: "AI 提词器"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .assistant: "语音助手与会议中的内心 OS，共用这一类对话能力。"
+        case .minutes: "会后长任务，适合结构化输出能力更强的模型。"
+        case .teleprompter: "主动点击才发送原稿，跟读和直播过程中不会调用。"
+        }
+    }
+}
+
+/// 单个模块的专用配置。Key 不在这里，仍由 `LLMKeychain` 作用域保管。
+public struct LLMModuleOverride: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var baseURL: String
+    public var model: String
+
+    public init(enabled: Bool = false, baseURL: String = "", model: String = "") {
+        self.enabled = enabled
+        self.baseURL = baseURL
+        self.model = model
+    }
+
+    public var configuration: LLMConfiguration {
+        LLMConfiguration(baseURL: baseURL, model: model)
+    }
+}
+
+public enum LLMConfigurationOrigin: String, Codable, Equatable, Sendable {
+    case global
+    case moduleOverride
+    case globalFallback
+}
+
+public enum LLMConfigurationFallbackReason: String, Codable, Equatable, Sendable {
+    case incomplete
+    case embedsCredential
+    case invalidBaseURL
+}
+
+/// 一次 LLM 执行所需的已解析值。Key 只在内存中短暂存在，不参与 UserDefaults 持久化。
+public struct ResolvedLLMConfiguration: Equatable, Sendable {
+    public let configuration: LLMConfiguration
+    public let apiKey: String?
+    public let origin: LLMConfigurationOrigin
+    public let fallbackReason: LLMConfigurationFallbackReason?
+
+    public init(
+        configuration: LLMConfiguration,
+        apiKey: String?,
+        origin: LLMConfigurationOrigin,
+        fallbackReason: LLMConfigurationFallbackReason? = nil
+    ) {
+        self.configuration = configuration
+        self.apiKey = apiKey
+        self.origin = origin
+        self.fallbackReason = fallbackReason
+    }
+
+    public var usesModuleOverride: Bool { origin == .moduleOverride }
+}
+
+/// 模块配置的唯一优先级解析点。它不探测网络，也不在请求失败后切换 endpoint。
+public enum LLMConfigurationResolver {
+    public static func resolve(
+        global: LLMConfiguration,
+        globalAPIKey: String?,
+        moduleOverride: LLMModuleOverride?,
+        moduleAPIKey: String?
+    ) -> ResolvedLLMConfiguration {
+        guard let moduleOverride, moduleOverride.enabled else {
+            return ResolvedLLMConfiguration(
+                configuration: global,
+                apiKey: normalizedKey(globalAPIKey),
+                origin: .global
+            )
+        }
+
+        let moduleConfiguration = moduleOverride.configuration
+        guard moduleConfiguration.isConfigured else {
+            return ResolvedLLMConfiguration(
+                configuration: global,
+                apiKey: normalizedKey(globalAPIKey),
+                origin: .globalFallback,
+                fallbackReason: .incomplete
+            )
+        }
+        guard !moduleConfiguration.embedsCredential else {
+            return ResolvedLLMConfiguration(
+                configuration: global,
+                apiKey: normalizedKey(globalAPIKey),
+                origin: .globalFallback,
+                fallbackReason: .embedsCredential
+            )
+        }
+        guard moduleConfiguration.isBaseURLValid else {
+            return ResolvedLLMConfiguration(
+                configuration: global,
+                apiKey: normalizedKey(globalAPIKey),
+                origin: .globalFallback,
+                fallbackReason: .invalidBaseURL
+            )
+        }
+
+        return ResolvedLLMConfiguration(
+            configuration: moduleConfiguration,
+            apiKey: normalizedKey(moduleAPIKey) ?? normalizedKey(globalAPIKey),
+            origin: .moduleOverride
+        )
+    }
+
+    private static func normalizedKey(_ key: String?) -> String? {
+        guard let key else { return nil }
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 
@@ -723,6 +865,18 @@ public actor LLMProvider {
 /// 采用 macOS 本地用户目录 0600 严格权限 + CryptoKit AES-GCM 本地加密，
 /// 彻底避免本地 ad-hoc 签名在 macOS 系统钥匙串触发登录密码弹窗与 ACL 校验异常。
 public enum LLMKeychain {
+    public enum Scope: Hashable, Sendable {
+        case global
+        case module(LLMModule)
+
+        fileprivate var encryptedFileName: String {
+            switch self {
+            case .global: "llm_api_key.enc"
+            case .module(let module): "llm_api_key_\(module.rawValue).enc"
+            }
+        }
+    }
+
     private static let service = "com.speechrail.app.llm"
     private static let account = "api-key"
 
@@ -742,8 +896,8 @@ public enum LLMKeychain {
         securityDirectory.appendingPathComponent(".vault_master.key")
     }
 
-    private static var encryptedKeyURL: URL {
-        securityDirectory.appendingPathComponent("llm_api_key.enc")
+    private static func encryptedKeyURL(for scope: Scope) -> URL {
+        securityDirectory.appendingPathComponent(scope.encryptedFileName)
     }
 
     private static func getOrCreateMasterKey() throws -> SymmetricKey {
@@ -760,10 +914,10 @@ public enum LLMKeychain {
         return newKey
     }
 
-    public static func save(_ key: String) throws {
+    public static func save(_ key: String, scope: Scope = .global) throws {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            try remove()
+            try remove(scope: scope)
             return
         }
         let masterKey = try getOrCreateMasterKey()
@@ -772,13 +926,14 @@ public enum LLMKeychain {
         guard let combined = sealedBox.combined else {
             throw KeychainError.vaultError("加密数据封装失败")
         }
-        try combined.write(to: encryptedKeyURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: encryptedKeyURL.path)
+        let url = encryptedKeyURL(for: scope)
+        try combined.write(to: url, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
-    public static func load() -> String? {
+    public static func load(scope: Scope = .global) -> String? {
         // 从本地安全加密 Vault 读取
-        if let encData = try? Data(contentsOf: encryptedKeyURL),
+        if let encData = try? Data(contentsOf: encryptedKeyURL(for: scope)),
            let masterKey = try? getOrCreateMasterKey(),
            let sealedBox = try? AES.GCM.SealedBox(combined: encData),
            let decryptedData = try? AES.GCM.open(sealedBox, using: masterKey),
@@ -789,20 +944,27 @@ public enum LLMKeychain {
         return nil
     }
 
-    public static func remove() throws {
-        if FileManager.default.fileExists(atPath: encryptedKeyURL.path) {
-            try? FileManager.default.removeItem(at: encryptedKeyURL)
+    public static func remove(scope: Scope = .global) throws {
+        let url = encryptedKeyURL(for: scope)
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
         }
-        // 清除旧钥匙串条目以防残留
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(query as CFDictionary)
+        if scope == .global {
+            // 清除旧钥匙串条目以防残留
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
     }
 
-    public static var hasKey: Bool { load() != nil }
+    public static var hasKey: Bool { load(scope: .global) != nil }
+
+    public static func hasKey(scope: Scope) -> Bool {
+        load(scope: scope) != nil
+    }
 
     public enum KeychainError: LocalizedError {
         case status(OSStatus)

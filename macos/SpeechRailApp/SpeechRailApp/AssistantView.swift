@@ -362,7 +362,10 @@ public struct AssistantView: View {
             return [mode.title]
         case .live, .review:
             var facts: [String] = []
-            if let model = assistant.llmModel ?? (preferences.isLLMConfigured ? preferences.llmConfiguration.model : nil) {
+            if let model = assistant.llmModel
+                ?? (preferences.isLLMConfigured(for: .assistant)
+                    ? preferences.llmConfiguration(for: .assistant).model
+                    : nil) {
                 facts.append("大模型 \(model) · 已连接")
             }
             facts.append(mode.title)
@@ -495,7 +498,7 @@ public struct AssistantView: View {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
                 switch state {
                 case .ready:
-                    if !preferences.isLLMConfigured || isShowingQuickLLM {
+                    if !preferences.isLLMConfigured(for: .assistant) || isShowingQuickLLM {
                         llmSetupCard
                     }
                     readyMainWorkbenchCard
@@ -1373,12 +1376,12 @@ public struct AssistantView: View {
     /// 模型配好了、只是因为别的理由受阻（麦克风被占、服务没起来）时，仍报「未配置」
     /// 就是这一屏第二处骗人的字（`BlockReason.title` 已经在说真正的原因）。
     private var llmCapabilityRow: (name: String, tone: StatusTone, pill: String, note: String) {
-        guard preferences.isLLMConfigured else {
+        guard preferences.isLLMConfigured(for: .assistant) else {
             return ("对话模型", .attention, "未配置",
                     "填一个兼容 OpenAI、且支持 Responses API 的服务地址与模型。")
         }
         return ("对话模型", .healthy, "已配置",
-                "已指向 \(preferences.llmConfiguration.model)；可达性与接口是否对得上由设置页的「检查连接」回答。")
+                "已指向 \(preferences.llmConfiguration(for: .assistant).model)；可达性与接口是否对得上由设置页的「检查连接」回答。")
     }
 
     // MARK: 实时对讲主 Chat 工作台（对话中）
@@ -2445,7 +2448,7 @@ public struct AssistantView: View {
     private func send() {
         let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        if state == .ready && !preferences.isLLMConfigured {
+        if state == .ready && !preferences.isLLMConfigured(for: .assistant) {
             withAnimation { isShowingQuickLLM = true }
             return
         }
@@ -2591,9 +2594,9 @@ public struct AssistantView: View {
                 } else if state == .blocked {
                     Button("检查连接") { Task { await assistant.retry() } }
                         .speechRailButton(.secondary)
-                        .disabled(!preferences.isLLMConfigured)
+                        .disabled(!preferences.isLLMConfigured(for: .assistant))
                         .help(
-                            preferences.isLLMConfigured
+                            preferences.isLLMConfigured(for: .assistant)
                                 ? "重新走一遍连通性与接口检查"
                                 : "还没填服务地址与模型；先在「设置 · 会话」里填好，再来点它"
                         )
@@ -2688,8 +2691,8 @@ public struct AssistantView: View {
                 // 「已配置」不是「已连接」：这一行读的是**填过没有**，还没发过一次请求。
                 // 能不能连上由设置页的「检查连接」回答（2026-09-19 走查：上一版写「已连接」，
                 // 地址写错时这一屏照样说连上了）。
-                ("对话模型", preferences.isLLMConfigured
-                    ? "已配置 · \(preferences.llmConfiguration.model)"
+                ("对话模型", preferences.isLLMConfigured(for: .assistant)
+                    ? "已配置 · \(preferences.llmConfiguration(for: .assistant).model)"
                     : "未配置"),
                 ("输入方式", "语音或打字"),
                 ("对话方式", mode.title),
@@ -3620,7 +3623,7 @@ public struct AssistantView: View {
     }
 
     private func start() async {
-        guard preferences.isLLMConfigured else {
+        guard preferences.isLLMConfigured(for: .assistant) else {
             await MainActor.run {
                 withAnimation { isShowingQuickLLM = true }
             }
