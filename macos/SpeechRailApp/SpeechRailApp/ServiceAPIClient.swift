@@ -244,20 +244,33 @@ public final class ServiceAPIClient: @unchecked Sendable {
         return response.data
     }
 
+    public func synthesize(
+        _ request: SpeechRequest,
+        options: SpeechRailRequestOptions = SpeechRailRequestOptions()
+    ) async throws -> SpeechAudioResponse {
+        try await postAudio(
+            path: "/v1/audio/speech",
+            body: request,
+            accept: Self.audioAcceptHeader(for: request.responseFormat),
+            headers: options.headers
+        )
+    }
+
     public func createSpeech(
         text: String,
         voiceID: String,
         speed: Double
     ) async throws -> Data {
-        try await postAudio(
-            path: "/v1/audio/speech",
-            body: SpeechRequestBody(
+        try await synthesize(
+            SpeechRequest(
                 input: text,
-                voice: voiceID,
+                voice: .name(voiceID),
+                model: "speechrail/qwen3-tts",
+                responseFormat: "wav",
+                language: "auto",
                 speed: speed
-            ),
-            acceptedContentType: "audio/wav"
-        )
+            )
+        ).audioData
     }
 
     public func createVoicePreview(
@@ -274,7 +287,112 @@ public final class ServiceAPIClient: @unchecked Sendable {
                 seed: seed,
                 speed: speed
             ),
-            acceptedContentType: "audio/wav"
+            accept: "audio/*"
+        ).audioData
+    }
+
+    public func fetchReceipt(id: String) async throws -> RenderReceipt {
+        guard id.range(of: "^rr_[0-9a-f]{32}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await get(path: "/v1/speechrail/audio/receipts/\(id)")
+    }
+
+    public func fetchReceipt(byRequestID requestID: String) async throws -> RenderReceipt {
+        guard requestID.range(of: "^[A-Za-z0-9_-]{1,200}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await get(
+            path: "/v1/speechrail/audio/receipts/by-request/\(requestID)"
+        )
+    }
+
+    public func fetchTiming(id: String) async throws -> TtsTimingResource {
+        guard id.range(of: "^tm_[0-9a-f]{32}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return try await get(path: "/v1/speechrail/audio/timings/\(id)")
+    }
+
+    public func transcribe(_ request: TranscriptionRequest) async throws -> TranscriptionResponse {
+        let urlRequest = try makeTranscriptionRequest(request)
+        let response = try await execute(urlRequest)
+        let contentType = response.metadata.value(forHeader: HTTPHeaderNames.contentType)?.lowercased()
+        if contentType?.hasPrefix("application/json") == true {
+            do {
+                let decoded: ServiceConditionalResponse<TranscriptionResponse> = try ServiceResponseDecoder.decode(
+                    response.data,
+                    statusCode: response.metadata.statusCode,
+                    headers: response.metadata.headers
+                )
+                guard let value = decoded.value else {
+                    throw ServiceAPIClientError.invalidResponse
+                }
+                return value
+            } catch let error as ServiceContractDecodingError {
+                throw ServiceAPIClientError.invalidContract(String(describing: error))
+            }
+        }
+        guard let text = String(data: response.data, encoding: .utf8), !text.isEmpty else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return TranscriptionResponse(text: text)
+    }
+
+    public func createJob(_ request: JobCreateRequest) async throws -> Job {
+        try await postJSON(path: "/v1/jobs", body: request)
+    }
+
+    public func fetchJobs(limit: Int = 20, cursor: String? = nil) async throws -> JobList {
+        guard (1...100).contains(limit) else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        var query: [(String, String)] = [("limit", String(limit))]
+        if let cursor, !cursor.isEmpty {
+            query.append(("cursor", cursor))
+        }
+        return try await get(path: "/v1/jobs", query: query)
+    }
+
+    public func fetchJob(id: String) async throws -> Job {
+        try await get(path: try jobPath(id: id))
+    }
+
+    public func cancelJob(id: String) async throws -> Job {
+        let request = try makeRequest(
+            path: try jobPath(id: id),
+            method: "DELETE",
+            accept: "application/json"
+        )
+        let response = try await execute(request)
+        return try decodeJSON(Job.self, from: response)
+    }
+
+    public func fetchJobResult(id: String) async throws -> JobResult {
+        let request = try makeRequest(
+            path: try jobPath(id: id) + "/result",
+            method: "GET",
+            accept: "application/json"
+        )
+        let response = try await execute(request)
+        let contentType = response.metadata.value(forHeader: HTTPHeaderNames.contentType)?.lowercased()
+        if contentType?.hasPrefix("application/json") == true {
+            let envelope = try decodeJSON(JobResultEnvelope.self, from: response)
+            return JobResult(
+                resultReference: envelope.resultReference,
+                data: nil,
+                contentType: contentType,
+                metadata: response.metadata
+            )
+        }
+        guard !response.data.isEmpty else {
+            throw ServiceAPIClientError.invalidResponse
+        }
+        return JobResult(
+            resultReference: nil,
+            data: response.data,
+            contentType: contentType,
+            metadata: response.metadata
         )
     }
 
@@ -562,7 +680,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
         boundary: String,
         audio: Data,
         filename: String,
-        fields: [(String, String?)]
+        fields: [(String, String?)],
+        fileFieldName: String = "audio",
+        audioContentType: String = "audio/wav"
     ) -> Data {
         var body = Data()
         func append(_ text: String) {
@@ -575,8 +695,8 @@ public final class ServiceAPIClient: @unchecked Sendable {
             append("\(value)\r\n")
         }
         append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
-        append("Content-Type: audio/wav\r\n\r\n")
+        append("Content-Disposition: form-data; name=\"\(fileFieldName)\"; filename=\"\(filename)\"\r\n")
+        append("Content-Type: \(audioContentType)\r\n\r\n")
         body.append(audio)
         append("\r\n--\(boundary)--\r\n")
         return body
@@ -594,8 +714,16 @@ public final class ServiceAPIClient: @unchecked Sendable {
         _ = try await execute(request)
     }
 
-    private func get<Value: Decodable & Sendable>(path: String) async throws -> Value {
-        let request = try makeRequest(path: path, method: "GET", accept: "application/json")
+    private func get<Value: Decodable & Sendable>(
+        path: String,
+        query: [(String, String)] = []
+    ) async throws -> Value {
+        let request = try makeRequest(
+            path: path,
+            method: "GET",
+            accept: "application/json",
+            query: query
+        )
         let response = try await execute(request)
         do {
             let decoded: ServiceConditionalResponse<Value> = try ServiceResponseDecoder.decode(
@@ -610,6 +738,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
         } catch {
             if let error = error as? ServiceAPIClientError {
                 throw error
+            }
+            if let error = error as? ServiceContractDecodingError {
+                throw ServiceAPIClientError.invalidContract(String(describing: error))
             }
             throw ServiceAPIClientError.invalidResponse
         }
@@ -643,6 +774,9 @@ public final class ServiceAPIClient: @unchecked Sendable {
             if let error = error as? ServiceAPIClientError {
                 throw error
             }
+            if let error = error as? ServiceContractDecodingError {
+                throw ServiceAPIClientError.invalidContract(String(describing: error))
+            }
             throw ServiceAPIClientError.invalidResponse
         }
     }
@@ -650,34 +784,133 @@ public final class ServiceAPIClient: @unchecked Sendable {
     private func postAudio<Body: Encodable>(
         path: String,
         body: Body,
-        acceptedContentType: String
-    ) async throws -> Data {
-        var request = try makeRequest(path: path, method: "POST", accept: acceptedContentType)
+        accept: String,
+        headers: [String: String] = [:]
+    ) async throws -> SpeechAudioResponse {
+        var request = try makeRequest(
+            path: path,
+            method: "POST",
+            accept: accept,
+            headers: headers
+        )
         request.timeoutInterval = Self.longRunningRequestTimeout
         request.httpBody = try JSONEncoder().encode(body)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let response = try await execute(request)
-        let audio = try ServiceResponseDecoder.decodeAudio(
+        return try ServiceResponseDecoder.decodeAudio(
             response.data,
             statusCode: response.metadata.statusCode,
             headers: response.metadata.headers
         )
-        guard audio.contentType.lowercased().hasPrefix(acceptedContentType) else {
-            throw ServiceAPIClientError.invalidResponse
+    }
+
+    private static func audioAcceptHeader(for responseFormat: String?) -> String {
+        switch responseFormat?.lowercased() {
+        case "mp3": "audio/mpeg"
+        case "opus": "audio/opus"
+        case "aac": "audio/aac"
+        case "flac": "audio/flac"
+        case "wav": "audio/wav"
+        case "pcm": "audio/x-pcm"
+        default: "audio/*"
         }
-        return audio.audioData
+    }
+
+    private func makeTranscriptionRequest(_ request: TranscriptionRequest) throws -> URLRequest {
+        guard !request.filename.contains("\r"),
+              !request.filename.contains("\n"),
+              !request.filename.contains("\""),
+              !request.contentType.contains("\r"),
+              !request.contentType.contains("\n")
+        else {
+            throw ServiceAPIClientError.invalidURL
+        }
+
+        var fields: [(String, String?)] = [
+            ("model", request.model),
+            ("language", request.language),
+            ("prompt", request.prompt),
+            ("response_format", request.responseFormat),
+            ("temperature", request.temperature.map(String.init)),
+            ("stream", request.stream.map(String.init)),
+            ("chunking_strategy", request.chunkingStrategy),
+            ("timestamp_granularities", request.timestamps),
+        ]
+        fields.append(contentsOf: request.languages.map { ("languages", $0) })
+        fields.append(contentsOf: request.timestampGranularities.map { ("timestamp_granularities[]", $0) })
+        fields.append(contentsOf: request.include.map { ("include", $0) })
+        fields.append(contentsOf: request.keywords.map { ("keywords", $0) })
+        fields.append(contentsOf: request.knownSpeakerNames.map { ("known_speaker_names", $0) })
+        fields.append(contentsOf: request.knownSpeakerReferences.map { ("known_speaker_references", $0) })
+
+        let boundary = "speechrail-\(UUID().uuidString)"
+        var urlRequest = try makeRequest(
+            path: "/v1/audio/transcriptions",
+            method: "POST",
+            accept: Self.transcriptionAcceptHeader(for: request.responseFormat)
+        )
+        urlRequest.timeoutInterval = Self.longRunningRequestTimeout
+        urlRequest.setValue(
+            "multipart/form-data; boundary=\(boundary)",
+            forHTTPHeaderField: HTTPHeaderNames.contentType
+        )
+        urlRequest.httpBody = Self.multipartBody(
+            boundary: boundary,
+            audio: request.audio,
+            filename: request.filename,
+            fields: fields,
+            fileFieldName: "file",
+            audioContentType: request.contentType
+        )
+        return urlRequest
+    }
+
+    private static func transcriptionAcceptHeader(for responseFormat: String) -> String {
+        switch responseFormat.lowercased() {
+        case "text", "srt", "vtt": "text/plain"
+        default: "application/json"
+        }
+    }
+
+    private func jobPath(id: String) throws -> String {
+        guard id.range(of: "^job_[0-9a-f]{32}$", options: .regularExpression) != nil else {
+            throw ServiceAPIClientError.invalidURL
+        }
+        return "/v1/jobs/\(id)"
+    }
+
+    private func decodeJSON<Value: Decodable & Sendable>(
+        _ type: Value.Type,
+        from response: ServiceRawHTTPResponse
+    ) throws -> Value {
+        do {
+            let decoded: ServiceConditionalResponse<Value> = try ServiceResponseDecoder.decode(
+                response.data,
+                statusCode: response.metadata.statusCode,
+                headers: response.metadata.headers
+            )
+            guard let value = decoded.value else {
+                throw ServiceAPIClientError.invalidResponse
+            }
+            return value
+        } catch let error as ServiceAPIClientError {
+            throw error
+        } catch let error as ServiceContractDecodingError {
+            throw ServiceAPIClientError.invalidContract(String(describing: error))
+        }
     }
 
     private func makeRequest(
         path: String,
         method: String,
         accept: String,
-        headers: [String: String] = [:]
+        headers: [String: String] = [:],
+        query: [(String, String)] = []
     ) throws -> URLRequest {
         var request = try requestBuilder.make(
             path: path,
             method: method,
-            query: [],
+            query: query,
             headers: headers,
             body: nil
         )
@@ -756,24 +989,6 @@ private struct VoiceDesignRegistrationResponse: Decodable {
     let voice: CreatorVoice
 }
 
-private struct SpeechRequestBody: Encodable {
-    let model = "speechrail/qwen3-tts"
-    let input: String
-    let voice: String
-    let responseFormat = "wav"
-    let speed: Double
-    let language = "auto"
-
-    enum CodingKeys: String, CodingKey {
-        case model
-        case input
-        case voice
-        case responseFormat = "response_format"
-        case speed
-        case language
-    }
-}
-
 private struct VoicePreviewRequestBody: Encodable {
     let model = "speechrail/qwen3-tts"
     let input: String
@@ -822,6 +1037,14 @@ private struct CreateVoiceRequestBody: Encodable {
 private struct VoiceRevisionListResponse: Decodable {
     let object: String
     let data: [VoiceRevision]
+}
+
+private struct JobResultEnvelope: Decodable, Sendable {
+    let resultReference: String
+
+    enum CodingKeys: String, CodingKey {
+        case resultReference = "result_ref"
+    }
 }
 
 private struct VoiceRollbackRequestBody: Encodable {

@@ -269,6 +269,60 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual((object?["entries"] as? [[String: Any]])?.first?["spoken"] as? String, "Speech Rail")
     }
 
+    func testAudioResponseAcceptsNonWavAndCarriesReceiptHeaders() throws {
+        let response = try ServiceResponseDecoder.decodeAudio(
+            Data([0x01, 0x02]),
+            statusCode: 200,
+            headers: [
+                "Content-Type": "audio/mpeg",
+                "SpeechRail-Receipt-Id": "rr_0123456789abcdef0123456789abcdef",
+                "SpeechRail-Timing-Id": "tm_0123456789abcdef0123456789abcdef",
+            ]
+        )
+
+        XCTAssertEqual(response.contentType, "audio/mpeg")
+        XCTAssertEqual(response.receiptID, "rr_0123456789abcdef0123456789abcdef")
+        XCTAssertEqual(response.timingID, "tm_0123456789abcdef0123456789abcdef")
+    }
+
+    func testSpeechRequestEncodesObjectVoiceAndResponseFormat() throws {
+        let request = SpeechRequest(
+            input: "hello",
+            voice: .id("voice_demo"),
+            model: "tts-1.7b-base",
+            responseFormat: "mp3",
+            language: "en",
+            speed: 1.0
+        )
+
+        let body = try JSONEncoder().encode(request)
+        let object = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        XCTAssertEqual((object?["voice"] as? [String: String])?["id"], "voice_demo")
+        XCTAssertEqual(object?["response_format"] as? String, "mp3")
+    }
+
+    func testJobDecodingKeepsRequiredNullFieldsAndOptionalMetadata() throws {
+        let job = try JSONDecoder().decode(
+            Job.self,
+            from: Data(#"{"id":"job_0123456789abcdef0123456789abcdef","kind":"speech","state":"queued","error_code":null,"result_ref":null,"params":{"purpose":"interactive"}}"#.utf8)
+        )
+
+        XCTAssertEqual(job.id, "job_0123456789abcdef0123456789abcdef")
+        XCTAssertNil(job.resultReference)
+        XCTAssertEqual(job.params?["purpose"], JSONValue(.string("interactive")))
+    }
+
+    func testReceiptMissingRequiredFieldIsInvalidContract() throws {
+        let data = Data(#"{"receipt_id":"rr_0123456789abcdef0123456789abcdef","request_id":"req-1","status":"completed","voice":{},"model":{},"audio":{},"created_at":1,"completed_at":2}"#.utf8)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(RenderReceipt.self, from: data)) { error in
+            XCTAssertEqual(
+                error as? ServiceContractDecodingError,
+                .missingRequiredField("error_code")
+            )
+        }
+    }
+
     func testRequestBuilderAddsBearerAndConditionalHeaders() throws {
         let request = try ServiceRequestBuilder(
             baseURL: URL(string: "http://127.0.0.1:8201")!,

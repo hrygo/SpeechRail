@@ -1186,6 +1186,35 @@ public struct RenderReceipt: Codable, Equatable, Sendable {
         case createdAt = "created_at"
         case completedAt = "completed_at"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func required<T: Decodable>(_ key: CodingKeys) throws -> T {
+            guard container.contains(key) else {
+                throw ServiceContractDecodingError.missingRequiredField(key.stringValue)
+            }
+            return try container.decode(T.self, forKey: key)
+        }
+
+        receiptID = try required(.receiptID)
+        requestID = try required(.requestID)
+        responseID = try container.decodeIfPresent(String.self, forKey: .responseID)
+        status = try required(.status)
+        voice = try required(.voice)
+        model = try required(.model)
+        audio = try required(.audio)
+        guard container.contains(.errorCode) else {
+            throw ServiceContractDecodingError.missingRequiredField("error_code")
+        }
+        text = try container.decodeIfPresent(JSONValue.self, forKey: .text)
+        planner = try container.decodeIfPresent(JSONValue.self, forKey: .planner)
+        errorCode = try container.decodeIfPresent(String.self, forKey: .errorCode)
+        createdAt = try required(.createdAt)
+        guard container.contains(.completedAt) else {
+            throw ServiceContractDecodingError.missingRequiredField("completed_at")
+        }
+        completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
+    }
 }
 
 public enum TimingStatus: Codable, Equatable, Sendable {
@@ -1244,6 +1273,28 @@ public struct TtsTimingChunk: Codable, Equatable, Sendable {
         case displayStart = "display_start"
         case displayEnd = "display_end"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func required<T: Decodable>(_ key: CodingKeys) throws -> T {
+            guard container.contains(key) else {
+                throw ServiceContractDecodingError.missingRequiredField(key.stringValue)
+            }
+            return try container.decode(T.self, forKey: key)
+        }
+
+        plannerChunk = try required(.plannerChunk)
+        textStart = try required(.textStart)
+        textEnd = try required(.textEnd)
+        audioStartSample = try required(.audioStartSample)
+        audioEndSample = try required(.audioEndSample)
+        timingQuality = try required(.timingQuality)
+        guard container.contains(.displayStart), container.contains(.displayEnd) else {
+            throw ServiceContractDecodingError.missingRequiredField("display_mapping")
+        }
+        displayStart = try container.decodeIfPresent(Int.self, forKey: .displayStart)
+        displayEnd = try container.decodeIfPresent(Int.self, forKey: .displayEnd)
+    }
 }
 
 public struct TtsTimingResource: Codable, Equatable, Sendable {
@@ -1276,6 +1327,42 @@ public struct TtsTimingResource: Codable, Equatable, Sendable {
         case createdAt = "created_at"
         case completedAt = "completed_at"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func required<T: Decodable>(_ key: CodingKeys) throws -> T {
+            guard container.contains(key) else {
+                throw ServiceContractDecodingError.missingRequiredField(key.stringValue)
+            }
+            return try container.decode(T.self, forKey: key)
+        }
+
+        timingID = try required(.timingID)
+        requestID = try required(.requestID)
+        status = try required(.status)
+        timingQuality = try required(.timingQuality)
+        guard container.contains(.coordinateSpace), container.contains(.plannerVersion) else {
+            throw ServiceContractDecodingError.missingRequiredField("coordinate_space")
+        }
+        coordinateSpace = try container.decodeIfPresent(String.self, forKey: .coordinateSpace)
+        plannerVersion = try container.decodeIfPresent(String.self, forKey: .plannerVersion)
+        sampleRate = try required(.sampleRate)
+        guard container.contains(.totalSamples) else {
+            throw ServiceContractDecodingError.missingRequiredField("total_samples")
+        }
+        totalSamples = try container.decodeIfPresent(Int.self, forKey: .totalSamples)
+        displayMapping = try required(.displayMapping)
+        chunks = try required(.chunks)
+        guard container.contains(.reason) else {
+            throw ServiceContractDecodingError.missingRequiredField("reason")
+        }
+        reason = try container.decodeIfPresent(String.self, forKey: .reason)
+        createdAt = try required(.createdAt)
+        guard container.contains(.completedAt) else {
+            throw ServiceContractDecodingError.missingRequiredField("completed_at")
+        }
+        completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
+    }
 }
 
 public struct TranscriptionRequest: Sendable {
@@ -1287,6 +1374,13 @@ public struct TranscriptionRequest: Sendable {
     public let languages: [String]
     public let prompt: String?
     public let timestamps: String?
+    public let responseFormat: String
+    public let temperature: Double?
+    public let timestampGranularities: [String]
+    public let stream: Bool?
+    public let chunkingStrategy: String?
+    public let include: [String]
+    public let keywords: [String]
     public let diarized: Bool?
     public let knownSpeakerNames: [String]
     public let knownSpeakerReferences: [String]
@@ -1300,6 +1394,13 @@ public struct TranscriptionRequest: Sendable {
         languages: [String] = [],
         prompt: String? = nil,
         timestamps: String? = nil,
+        responseFormat: String = "json",
+        temperature: Double? = nil,
+        timestampGranularities: [String] = [],
+        stream: Bool? = nil,
+        chunkingStrategy: String? = nil,
+        include: [String] = [],
+        keywords: [String] = [],
         diarized: Bool? = nil,
         knownSpeakerNames: [String] = [],
         knownSpeakerReferences: [String] = []
@@ -1312,9 +1413,78 @@ public struct TranscriptionRequest: Sendable {
         self.languages = languages
         self.prompt = prompt
         self.timestamps = timestamps
+        self.responseFormat = responseFormat
+        self.temperature = temperature
+        self.timestampGranularities = timestampGranularities
+        self.stream = stream
+        self.chunkingStrategy = chunkingStrategy
+        self.include = include
+        self.keywords = keywords
         self.diarized = diarized
         self.knownSpeakerNames = knownSpeakerNames
         self.knownSpeakerReferences = knownSpeakerReferences
+    }
+}
+
+public struct TranscriptionUsage: Codable, Equatable, Sendable {
+    public let type: String
+    public let seconds: Double
+
+    public init(type: String = "duration", seconds: Double) {
+        self.type = type
+        self.seconds = seconds
+    }
+}
+
+public struct TranscriptionResponse: Codable, Equatable, Sendable {
+    public let text: String
+    public let usage: TranscriptionUsage?
+    public let task: String?
+    public let language: String?
+    public let duration: Double?
+    public let segments: [JSONValue]?
+    public let words: [JSONValue]?
+
+    public init(
+        text: String,
+        usage: TranscriptionUsage? = nil,
+        task: String? = nil,
+        language: String? = nil,
+        duration: Double? = nil,
+        segments: [JSONValue]? = nil,
+        words: [JSONValue]? = nil
+    ) {
+        self.text = text
+        self.usage = usage
+        self.task = task
+        self.language = language
+        self.duration = duration
+        self.segments = segments
+        self.words = words
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case text
+        case usage
+        case task
+        case language
+        case duration
+        case segments
+        case words
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.text) else {
+            throw ServiceContractDecodingError.missingRequiredField("text")
+        }
+        text = try container.decode(String.self, forKey: .text)
+        usage = try container.decodeIfPresent(TranscriptionUsage.self, forKey: .usage)
+        task = try container.decodeIfPresent(String.self, forKey: .task)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+        duration = try container.decodeIfPresent(Double.self, forKey: .duration)
+        segments = try container.decodeIfPresent([JSONValue].self, forKey: .segments)
+        words = try container.decodeIfPresent([JSONValue].self, forKey: .words)
     }
 }
 
@@ -1341,8 +1511,12 @@ public struct Job: Codable, Equatable, Sendable, Identifiable {
     public let kind: String
     public let state: String
     public let errorCode: String?
+    public let errorMessage: String?
     public let resultReference: String?
-    public let queueWaitSeconds: Double?
+    public let params: [String: JSONValue]?
+    public let attempts: Int?
+    public let queuePosition: Int?
+    public let etaSeconds: Double?
     public let deadline: String?
 
     enum CodingKeys: String, CodingKey {
@@ -1350,9 +1524,83 @@ public struct Job: Codable, Equatable, Sendable, Identifiable {
         case kind
         case state
         case errorCode = "error_code"
+        case errorMessage = "error_message"
         case resultReference = "result_ref"
-        case queueWaitSeconds = "queue_wait_seconds"
+        case params
+        case attempts
+        case queuePosition = "queue_position"
+        case etaSeconds = "eta_seconds"
         case deadline
+    }
+
+    public init(
+        id: String,
+        kind: String,
+        state: String,
+        errorCode: String? = nil,
+        errorMessage: String? = nil,
+        resultReference: String? = nil,
+        params: [String: JSONValue]? = nil,
+        attempts: Int? = nil,
+        queuePosition: Int? = nil,
+        etaSeconds: Double? = nil,
+        deadline: String? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.state = state
+        self.errorCode = errorCode
+        self.errorMessage = errorMessage
+        self.resultReference = resultReference
+        self.params = params
+        self.attempts = attempts
+        self.queuePosition = queuePosition
+        self.etaSeconds = etaSeconds
+        self.deadline = deadline
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func required<T: Decodable>(_ key: CodingKeys) throws -> T {
+            guard container.contains(key) else {
+                throw ServiceContractDecodingError.missingRequiredField(key.stringValue)
+            }
+            return try container.decode(T.self, forKey: key)
+        }
+
+        id = try required(.id)
+        kind = try required(.kind)
+        state = try required(.state)
+        guard container.contains(.errorCode), container.contains(.resultReference) else {
+            throw ServiceContractDecodingError.missingRequiredField("error_code")
+        }
+        errorCode = try container.decodeIfPresent(String.self, forKey: .errorCode)
+        errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
+        resultReference = try container.decodeIfPresent(String.self, forKey: .resultReference)
+        params = try container.decodeIfPresent([String: JSONValue].self, forKey: .params)
+        attempts = try container.decodeIfPresent(Int.self, forKey: .attempts)
+        queuePosition = try container.decodeIfPresent(Int.self, forKey: .queuePosition)
+        etaSeconds = try container.decodeIfPresent(Double.self, forKey: .etaSeconds)
+        deadline = try container.decodeIfPresent(String.self, forKey: .deadline)
+    }
+}
+
+public struct JobResult: Sendable, Equatable {
+    public let resultReference: String?
+    public let data: Data?
+    public let contentType: String?
+    public let metadata: ServiceResponseMetadata
+
+    public init(
+        resultReference: String?,
+        data: Data?,
+        contentType: String?,
+        metadata: ServiceResponseMetadata
+    ) {
+        self.resultReference = resultReference
+        self.data = data
+        self.contentType = contentType
+        self.metadata = metadata
     }
 }
 
@@ -1367,6 +1615,31 @@ public struct JobList: Codable, Equatable, Sendable {
         case data
         case nextCursor = "next_cursor"
         case hasMore = "has_more"
+    }
+
+    public init(
+        object: String,
+        data: [Job],
+        nextCursor: String?,
+        hasMore: Bool
+    ) {
+        self.object = object
+        self.data = data
+        self.nextCursor = nextCursor
+        self.hasMore = hasMore
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard container.contains(.object), container.contains(.data),
+              container.contains(.nextCursor), container.contains(.hasMore)
+        else {
+            throw ServiceContractDecodingError.missingRequiredField("job_list")
+        }
+        object = try container.decode(String.self, forKey: .object)
+        data = try container.decode([Job].self, forKey: .data)
+        nextCursor = try container.decodeIfPresent(String.self, forKey: .nextCursor)
+        hasMore = try container.decode(Bool.self, forKey: .hasMore)
     }
 }
 
