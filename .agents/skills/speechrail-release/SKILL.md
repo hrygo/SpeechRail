@@ -15,10 +15,14 @@ description: >-
 
 | 用户请求 | 入口 | 是否改运行态 |
 |---|---|---|
-| 只问版本或 bump | 读取代码/标签并给出 SemVer 建议 | 否 |
-| 只构建 wheel/App | 版本材料、代码门、构建和产物校验 | 否 |
-| App 本机验证或 bundle 整理 | 构建、唯一安装路径和清理；XCTest/UI test 仅在当前用户明确要求时运行 | 否 |
-| 安装/替换本机服务或 App | 完整发布、运行态验收和回滚点 | 是 |
+| 查询版本、评估 bump | 读取代码/标签并给出 SemVer 建议 | 否 |
+| 明确要求更新版本 | 修改对应版本材料并检查一致性 | 否 |
+| 只构建 wheel/App | 对应构建和产物校验；不自动 bump | 否 |
+| App 本机验证 | 按请求做静态或非 UI 检查；接管窗口的测试需当前消息明确要求 | 依检查方式而定 |
+| 安装/替换或 bundle 整理 | 仅对指定单元安装、验收或清理，保留回退点 | 是 |
+
+以下章节按入口选用，不是必须顺序执行的完整流水线。用户已有授权持续有效；构建不包含安装、
+清理、真实签名、公证、创建 tag 或远端发布。安装验收中的真实推理须已被请求覆盖，否则记录未验证项。
 
 全新 Mac 首装、下载模型和首次注册服务读
 [speechrail-zero-setup](../speechrail-zero-setup/SKILL.md)；性能/质量/内存 benchmark 读
@@ -37,25 +41,22 @@ description: >-
 
 ## 平台基线
 
-- `service-only` 或 `combined` 的服务部分按 Apple Silicon `arm64`、macOS `14.0+`、Python
-  `>=3.12,<3.13` 验收；该基线适用于 wheel、managed runtime 和 `com.speechrail` LaunchAgent。
-- `app-only` 或 `combined` 的 App 部分按 `SpeechRailApp` GUI target 的
-  `MACOSX_DEPLOYMENT_TARGET=26.0`、`arm64` 验收；不为 App UI 添加 macOS 14 fallback。
-- `ControlKit`、`ControlAgent` 和服务侧 SwiftPM worker 继续按各自 target/package 的最低版本验收，不能
-  从服务或 App 基线推断。
+遵循仓库 `AGENTS.md` 的平台目标，并核对本次交付物的 package/target、Python 约束和构建设置。
+发现旧脚本或 target 仍声明更低版本时，报告与项目目标的差异；不以旧检查放行证明当前基线已满足，
+也不因发布任务擅自修改无关平台代码。
 
 ## 1. 确定范围、版本与快照
 
 以 `pyproject.toml` 的 `[project].version` 为服务版本事实来源；App 同时必须有可审计的
 `CFBundleShortVersionString` 和单调递增的 `CFBundleVersion`。按用户可见变化选择：
 
-| 类型 | 条件 | 必测 profile |
-|---|---|---|
-| PATCH | 兼容 bug、安全、稳定性或性能修复，不增加公共能力 | 当前 active profile |
-| MINOR | 新增兼容 API、档位/音色能力或改变默认行为 | `quality`、`balanced`、`light`，恢复原档 |
-| MAJOR | 破坏公共契约或需要迁移 | 三档完整套件，加迁移/兼容/回退 |
+| 类型 | 条件 |
+|---|---|
+| PATCH | 兼容 bug、安全、稳定性或性能修复，不增加公共能力 |
+| MINOR | 新增兼容 API 或能力；默认行为变化须先判断是否破坏公共契约 |
+| MAJOR | 破坏公共契约或需要迁移 |
 
-无法判定时取更高一级；纯文档通常不单独发版。明确 `service-only`、`app-only` 或 `combined`，不要因
+证据不足时列出待确认的公共影响，不仅凭不确定性提高版本；纯文档通常不单独发版。明确 `service-only`、`app-only` 或 `combined`，不要因
 “配套”扩大 scope。
 
 版本材料按字段核对：
@@ -65,7 +66,7 @@ description: >-
 对应测试 fixture、`uv.lock`、`CHANGELOG.md`，以及 scope 包含 App 时的 build settings / `.xcconfig`。
 不要修改 worker frame `version: 1`、历史 changelog 标题或旧归档报告版本。
 
-前置快照至少记录：
+版本与构建只需源码快照；以下运行态快照仅用于已授权的服务安装、替换或回滚：
 
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
@@ -86,7 +87,9 @@ curl --fail http://127.0.0.1:8201/health
 
 ## 2. 代码门与 wheel
 
-从明确、无未归属改动的源快照构建，记录 `git rev-parse HEAD`、wheel metadata 和 SHA-256。最小代码门：
+从明确、无未归属改动的源快照构建，记录 commit、相关未提交 diff、wheel metadata 和 SHA-256。
+普通构建只运行对应构建、制品检查和受影响的必要验证。下列完整代码门仅在用户明确要求完整验收时执行；
+文档更新、App-only 构建不运行整套 Python 检查：
 
 ```bash
 env -u SPEECHRAIL_API_KEY uv run --extra dev pytest
@@ -107,13 +110,13 @@ macOS 打包阶段的 CI 也执行同一步）；`dist/`、模型、音频、日
 
 ## 3. 安全替换 managed 服务
 
-scope 包含服务时，先读 local-deploy 的
+用户已要求安装或替换服务时，先读 local-deploy 的
 [lifecycle controller](../speechrail-local-deploy/references/lifecycle.md) 和 operator contract：
 
 1. 保存 active profile、旧 selection、runtime/vendor 回退点，并确认外部连接和 active request 已清零。
 2. 通过 controller 安全 stop；bootout 返回、旧 PID 或 lock 未经复核都不能证明服务已退出。
-3. 用 `speechrail.service.managed_install.install_managed(...)`（`tools/install_macos.py` 是它的兼容外壳）
-   做 staging、preflight 和原子切换；失败时恢复旧
+3. 通过 wheel 自带的 `speechrail install` 入口，按当前 `--help` 和运维手册选择参数，
+   做 staging、preflight 和原子切换；不直接编排内部 Python 安装函数。失败时恢复旧
    `runtime/current`/selection，不删除旧 release、模型、配置或日志。
 4. 用新 managed runtime 通过 controller start；等待真实 ready，核对 profile/model/voice identity 和
    必要公共 smoke。任何 PID、身份、lock 或 listener 不一致都 fail closed，不循环 restart。
@@ -125,7 +128,7 @@ wheel 替换和 profile 切换分开执行；不要直接使用底层 `launchctl
 
 ## 4. macOS App 构建、安装与清理
 
-scope 包含 App 时读取 [macOS App 分发与签名](../../../docs/developers/macos-app-release.md)，并执行：
+scope 包含 App 构建时读取 [macOS App 分发与签名](../../../docs/developers/macos-app-release.md)，并执行：
 
 ```bash
 scripts/macos_app_build.sh --configuration Debug
@@ -160,13 +163,13 @@ mdfind 'kMDItemFSName == "SpeechRailApp.app"'
 非空结果和 request ID，且外部 realtime session/active requests 为零。只看到进程、plist、配置或 `/health`
 200 不算发布成功。
 
-性能和质量范围读取 [speechrail-perf-benchmark](../speechrail-perf-benchmark/SKILL.md)，不要在 release skill
+只有明确要求性能或质量基准时才读取 [speechrail-perf-benchmark](../speechrail-perf-benchmark/SKILL.md)，不要在 release skill
 中重复基准模板。服务回滚读取 local-deploy 的 rollback/controller 规则；App-only 失败只恢复上一份已验证
 ZIP 到同一路径，不删除服务数据；combined 先判断失败单元再独立回滚。
 
 ## 6. 证据与 tag
 
-最终 evidence 记录 scope、SemVer、commit、wheel/App hash、runtime target、profile/generation、
+最终 evidence 仅填写本次适用的 scope、SemVer、commit、wheel/App hash、runtime target、profile/generation、
 PID/listener、health/ready、preflight、models/voices、smoke、App 签名/公证状态、回退点和未验证项；原始
-JSON、音频、embedding、日志和绝对私有路径留在仓库外。只有发布 commit 包含全部所需材料、工作树无未归属改动且
+JSON、音频、embedding、日志和绝对私有路径留在仓库外。创建 commit/tag 需用户明确授权；只有发布 commit 包含全部所需材料、工作树无未归属改动且
 同名 tag 不存在时才创建 tag；远端 push 需用户明确授权，禁止 force-push。

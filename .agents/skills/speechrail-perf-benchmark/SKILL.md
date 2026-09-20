@@ -1,9 +1,8 @@
 ---
 name: speechrail-perf-benchmark
 description: >-
-  SpeechRail 性能、质量和资源基准：按 SemVer 选择 active profile 或三档，测量 ASR/TTS/Realtime
-  延迟、RTF、吞吐、phys_footprint 与音色稳定性。仅在用户明确要求基准或质量验收时触发；
-  README 同步另需明确授权。
+  SpeechRail ASR/TTS/Realtime 性能、质量和资源基准，测量延迟、RTF、吞吐、内存与音色稳定性。
+  仅在用户明确要求基准测量或质量验收时触发；普通诊断和发布不自动执行。
 ---
 
 # SpeechRail 性能与质量基准
@@ -13,11 +12,11 @@ description: >-
 
 ## 触发与边界
 
-- 用户明确要求性能、延迟、RTF、吞吐、内存、质量、音色稳定性或 benchmark 时使用本 skill。
+- 用户明确要求测量性能、延迟、RTF、吞吐、内存、质量或音色稳定性时使用本 skill；概念解释不触发。
 - 普通服务诊断、启停、切档和回滚读
   [speechrail-local-deploy](../speechrail-local-deploy/SKILL.md)；发布范围与版本材料读
   [speechrail-release](../speechrail-release/SKILL.md)。
-- 不因生成 benchmark 报告自动修改 README；只有用户明确要求时才读取
+- 生成或比较报告时读取以下指南；修改 README 仍需用户明确要求：
   [报告与 README 规则](references/reporting.md)。
 
 ## 共享安全契约
@@ -42,13 +41,17 @@ description: >-
 
 ## 1. 选择基准范围
 
-| 发布类型 | 必测范围 | 切换规则 |
+先按用户指定的指标、场景与 profile 确定范围；未指定时测当前 active profile 的相关场景。
+版本号仅用于已请求发布基准时评估覆盖建议，不构成切档、重启或完整套件授权：
+
+| 发布类型 | 发布基准覆盖建议 | 切换规则 |
 |---|---|---|
 | PATCH | 当前部署 profile | 不为基准切档；与同机同口径版本纵向比较 |
 | MINOR | `quality`、`balanced`、`light` | active → 其余档 → active，逐档恢复 |
 | MAJOR | 三档完整套件 | 另加迁移、兼容客户端和回退验证 |
 
-若改动影响未覆盖的 profile、模型、共同 runtime 或 benchmark 工具，扩大到三档；纯文档改动不制造
+若改动影响未覆盖的 profile、模型、共同 runtime 或 benchmark 工具，说明扩大覆盖的理由；只有授权包含
+对应切档和测量时才执行。三档测量按初始档 → 其余档 → 初始档串行推进。纯文档改动不制造
 新的性能结论。三档当前能力以 `/v1/models` 和 `/v1/voices` 实测声明为准，不能根据计划或目录名推断。
 
 ## 2. 测量口径
@@ -68,7 +71,9 @@ description: >-
 ASR 质量集或作为发布入口。正式入口：
 
 ```bash
-uv run python examples/perf/bench_profiles.py \
+APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
+CURRENT_PYTHON="$APP_HOME/runtime/current/.venv/bin/python"
+"$CURRENT_PYTHON" examples/perf/bench_profiles.py \
   --base-url http://127.0.0.1:8201 \
   --app-home "${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}" \
   --manifest <repo-external-manifest.json> \
@@ -83,7 +88,7 @@ uv run python examples/perf/bench_profiles.py \
 Realtime 正式证据使用：
 
 ```bash
-uv run python examples/perf/bench_realtime_json.py <external-16khz-pcm> \
+"$CURRENT_PYTHON" examples/perf/bench_realtime_json.py <external-16khz-pcm> \
   --profile <quality|balanced|light> \
   --output <repo-external-realtime.json> \
   --app-home "${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
@@ -95,9 +100,10 @@ uv run python examples/perf/bench_realtime_json.py <external-16khz-pcm> \
 
 ## 4. 基础与质量套件
 
-每个适用 profile 的基础套件包含：
+以下是完整发布基准的套件；单项测量只选与请求相关的部分：
 
 - 身份：`/health`、`/readyz`、`/v1/models`、`/v1/voices`、公共 ASR/TTS smoke；身份读取不影响 cold。
+  cold 测量安排在任何对应模型的 smoke 或预热之前；已发生推理就按 warm 或 `cold_unavailable` 报告。
 - Batch ASR：独立中英文 3/10/30/60 秒样本，cold 1 次、warm N=5，记录 latency、RTF、CER/WER，
   可选吞吐；不得使用 SpeechRail TTS 生成主质量集。
 - TTS：固定短长句、canonical `serena`，cold 1 次、warm N=5，记录输出实测时长、RTF、首音频时间；
@@ -108,14 +114,14 @@ uv run python examples/perf/bench_realtime_json.py <external-16khz-pcm> \
 PATCH 若影响推理、分句、采样、量化、音色或模型 runtime，仍执行质量套件。质量报告至少覆盖：
 
 - ASR 总体及语言/时长分组 CER/WER、样本数和失败数，并报告 p50/p95；
-- 九个角色的中英文、短长句、数字和标点，生成失败率及独立 ASR 回读；没有人工 MOS/偏好测试就写
+- 本次 catalog 中适用音色的中英文、短长句、数字和标点，生成失败率及独立 ASR 回读；没有人工 MOS/偏好测试就写
   “未验证”；
 - 每角色 3 类文本 × 3 次生成、服务重启后重复、同文本 PCM hash、跨文本 speaker embedding、
   跨重启变化和 ABX 盲听。建议门值需先在首个可信数据集上冻结。
 
 ## 5. 切档与恢复
 
-MINOR/MAJOR 切档通过 `speechrail profile apply <profile> --yes`，不能用热重启代替；每档后先核对
+获授权的切档通过 `speechrail profile apply <profile> --yes`，不能用热重启代替；每档后先核对
 `/health.profile`，再核对 catalog、做该档套件，结束恢复初始 profile。停止、lock、精确 PID、回滚
 和失败出口统一按 local-deploy 的 controller 与 operator contract 执行；不循环 restart，不在同一时间
 运行多个 benchmark。
@@ -132,4 +138,4 @@ README 授权边界和核对命令。主流程完成时应满足：
 - 报告记录 identity、warm/cold/N、资源采样完整性、外部客户端隔离、gate、限制和未验证项；
 - 性能/质量不足时写 `unset`/`fail`，不以一次 smoke、健康端点或目录名代替证据；
 - 最终 active profile 与开始一致，服务 listener、health/ready 和必要 smoke 复核通过；
-- 性能归档索引已更新。README 只有在用户明确要求同步时才修改。
+- 用户请求正式归档时更新性能归档索引；临时测量按指定位置交付。README 只有在用户明确要求同步时才修改。

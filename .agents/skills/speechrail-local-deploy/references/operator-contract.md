@@ -1,17 +1,17 @@
 # SpeechRail 本机 operator contract
 
-这是本机服务发布、安装、停启、切档和基准共同遵守的终态契约。具体命令可以因入口不同而变化，但安全边界和验收条件不能分叉。
+这是本机服务发布、安装、停启、切档和基准共用的运行约束。按请求选择相关分支；读取本文件不授权
+停服、切档、下载、真实推理、清理或发布。已有明确授权无需重复确认。
 
 ## 平台基线（按交付物区分）
 
-- **服务**：Apple Silicon `arm64`、macOS `14.0+`、Python `>=3.12,<3.13`。这是 Python/wheel、managed runtime 和用户级 `com.speechrail` LaunchAgent 的运行基线，不是 App UI 的编译基线。
-- **App**：`SpeechRailApp` GUI target 为 Apple Silicon `arm64`、`MACOSX_DEPLOYMENT_TARGET=26.0`。App 页面可直接使用 macOS 26 API，不为 macOS 14 保留 UI fallback；App 的最低版本不反向约束服务。
-- `ControlKit`、`ControlAgent` 和服务侧 SwiftPM worker 各自按 target/package 的最低版本管理；不能从服务 14.0+ 或 App 26.0 推断它们的最低版本。
+- 目标以仓库 `AGENTS.md` 为准，实况以交付物的 package/target、Python 约束和构建设置核对。
+- 旧安装器或 target 的低版本检查不是当前平台承诺；发现差异时报告，不静默扩大兼容范围。
 
 ## 运行边界
 
 - 单机、单用户、单实例：一个 `com.speechrail` LaunchAgent、一个 ASGI 父进程、一个 loopback listener。
-- 允许完全停服和数分钟级启动真空。效率来自减少重复检查和重复重启，不来自并行启动第二个实例。
+- 已授权的维护可包含停服与启动等待；状态查询和诊断不因此获得停服授权。
 - 所有替换、切档和回滚都先停旧实例；`launchctl bootout` 成功不等于进程和 vendor worker 已退出。
 - 只使用用户级 LaunchAgent、managed `runtime/current`、私有配置和锁定的模型/runtime 制品。
 - 从源码 checkout 执行带 `--app-home` 的 service 命令，以及会改变 profile/selection 的
@@ -33,7 +33,7 @@
 4. 有端口时轮询同一个 per-port singleton lock；无端口测试路径立即返回，不插入无意义 sleep。
 5. 默认最多等待 2 秒；仍占用时先重新读取当前 lock owner 并核对命令行/executable，不能直接信任早期 `launchctl status` 快照；只有身份仍一致的精确 PID/进程组才允许发送 `SIGKILL`。
 6. 强杀后最多再等待 10 秒确认 lock 释放；PID 身份不一致、无法验证或 lock 未释放时中止，不启动候选。`launchctl`、`ps` 和 lock waiter 都必须有界，不能因为控制面无响应而无限等待。
-7. 通过 `LaunchAgentServiceController.start()` 在 bootstrap/kickstart 前再次确认 lock，启动后等待真实 ready，再做 profile/model/voice 和公共 smoke。
+7. 请求包含启动、重启或切换时，通过 `LaunchAgentServiceController.start()` 在 bootstrap/kickstart 前再次确认 lock，启动后等待真实 ready，再核对身份与已授权的 smoke。单独 stop 到 lock 释放、目标进程退出和 listener 消失即完成。
 
 禁止 `pkill`、`killall`、模糊名称匹配、手工 plist 修改和连续 `restart` 重试。停止失败必须保留旧 runtime/selection 作为回退点。
 
@@ -53,8 +53,8 @@
 - manifest 的 fixture `id` 和 `language` 只能使用安全标签；原始路径、任意 token、文本和音频不得进入结果 JSON 或归档报告。
 - benchmark、CLI diagnose 和本机辅助脚本统一按 `SPEECHRAIL_API_KEY` 环境变量优先、managed
   `config/.env` 回退的顺序读取 key；不得 `source` 配置、把 key 写进命令行、日志或结果。
-- `PATCH` 测 active profile；`MINOR` 按 `quality → balanced → light → quality` 串行执行并恢复初始档；`MAJOR` 在此基础上加入迁移与兼容验证。
+- 基准仅在用户明确要求时执行，范围见 [基准技能](../../speechrail-perf-benchmark/SKILL.md)。切档从实际初始档出发并恢复该档，不固定恢复为 `quality`。
 
 ## 完成证据
 
-最终结果至少包含：版本/commit、wheel digest、runtime target、profile/generation、唯一 listener、health/ready、models/voices、真实 ASR/TTS smoke、benchmark report、回退目标和未验证项。若范围包含 App，额外记录 App bundle version/build、bundle identifier、签名/公证状态、control-agent label、App 控制链路 smoke 和清理后的唯一安装路径。不得包含 API key、Authorization、音频、完整转写、日志全文或私人绝对路径。
+按动作选取适用证据：查询记录实际状态；stop 记录退出、lock 与 listener 释放；启动/切档记录 runtime、profile/generation、ready 与身份；安装增加版本、制品 digest 和回退目标。真实 smoke、benchmark、签名/公证和 App 控制链路仅记录获授权且实际执行的结果。报告验证时间、失败与未验证项；不得包含 API key、Authorization、音频、完整转写、日志全文或私人绝对路径。

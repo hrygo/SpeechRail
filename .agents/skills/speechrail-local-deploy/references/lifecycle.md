@@ -4,7 +4,9 @@ wheel 替换时使用 `speechrail service stop`；`service disable` 只是兼容
 
 ## 安全 stop/start
 
-下面的 Python 片段只读取 app home 的私有配置，不打印配置内容。它要求当前 release 已包含 `LaunchAgentServiceController`；缺失时应中止发布并先升级到支持该 controller 的 release，不能退回到模糊 kill。
+优先使用 `speechrail service stop/start --app-home ...` 的受管入口。下面的 Python 片段会实际改变服务状态，
+仅用于已授权维护且需要定位 controller 的场景；它读取私有配置但不打印内容。
+当前 release 缺少 `LaunchAgentServiceController` 时停止并报告所需升级，不自动升级，也不能退回模糊 kill。
 
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
@@ -77,4 +79,4 @@ PY
 
 - 只使用精确 PID/进程组；禁止 `pkill`、`killall`、`grep | kill` 和按名称杀进程。
 - 不删除旧 release、模型、selection、vendor runtime 或日志来“解决”停止问题。
-- 强杀后必须以 lock 释放、单 listener、health/profile identity 和真实 smoke 为证据；命令返回 0、进程存在或端口曾经打开都不够。
+- 强杀后先证明目标退出与 lock/listener 释放；只有请求包含再次启动时才继续核对单 listener、health/profile identity 和已授权 smoke。命令返回 0、进程存在或端口曾经打开都不够。

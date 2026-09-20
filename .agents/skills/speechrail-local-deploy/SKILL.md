@@ -24,7 +24,7 @@ description: >-
 ## 不变量
 
 - 单机单用户只保留一个 `com.speechrail` user `LaunchAgent`、一个 ASGI 父进程和一个
-  `127.0.0.1:8201` listener；不复制服务或 worker 以提高吞吐。
+  配置端口的 listener（默认 `127.0.0.1:8201`）；不复制服务或 worker 以提高吞吐。
 - 服务只使用用户级 LaunchAgent、managed `runtime/current`、受管私有配置和锁定制品；
   不以源码 checkout 的 `.venv` 证明安装态，不在请求路径下载模型。
 - 默认 loopback。非 loopback 必须同时配置 `SPEECHRAIL_API_KEY`、Bearer 鉴权和明确的
@@ -40,6 +40,7 @@ description: >-
 
 状态读取默认只读。执行任何 stop/start、profile 或 rollback 前，先记录当前版本、active
 profile、generation、runtime target、PID/listener 和健康状态；不要输出私有配置内容。
+以下命令以默认端口为例；先从状态结果核对实际端口。纯查询只取回答所需字段，不自动执行整套验收。
 
 ```bash
 APP_HOME="${SPEECHRAIL_APP_HOME:-$HOME/Library/Application Support/SpeechRail}"
@@ -74,7 +75,9 @@ CLI 从源码 checkout 执行带 `--app-home` 的 service/profile/setup 状态�
 2. 通过 controller 执行 `bootout`/stop，而不是直接把 `launchctl` 返回当作退出证明。
 3. 旧进程仍持锁时，重新核对当前 owner、PID、命令行和 executable；只有精确匹配的进程组
    才能按 controller 规则强杀。PID 不安全、身份不一致或 lock 未释放时 fail closed。
-4. 通过 controller start，等待真实 ready，再核对 profile/model/voice identity 和公共 smoke。
+4. 仅当请求包含启动、重启或切换时通过 controller start，等待真实 ready，核对所需 identity；
+   单独 stop 的完成条件是目标进程退出、lock 释放且 listener 消失，不再启动服务。
+   profile 事务内置 smoke 按已授权事务执行，额外真实推理需用户明确要求。
 
 ### profile apply / rollback
 
@@ -104,7 +107,8 @@ profile/generation；切换失败停止后续动作，只允许一次明确回�
 
 ## 完成证据
 
-结论至少能回溯到：版本/commit、runtime target、active profile/generation、唯一 listener、
+按请求选择证据：查询报告实际读到的状态；stop 报告退出和 lock/listener 释放；启动或切换再核对 ready 与身份。
+适用时记录版本/commit、runtime target、active profile/generation、唯一 listener、
 PID/executable、health/ready、models/voices、必要的真实 smoke（仅在当前用户明确授权时执行，否则列为
 未执行项）、回退目标和未验证项。若请求包含 App，另记录 bundle version/build、bundle identifier、
 control-agent 状态和唯一安装路径。

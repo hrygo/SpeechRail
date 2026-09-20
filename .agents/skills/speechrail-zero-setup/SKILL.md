@@ -14,9 +14,10 @@ wheel/App 发布或已有 App 整理读 [speechrail-release](../speechrail-relea
 
 ## 前置条件
 
-- 服务首装基线：Apple Silicon `arm64`、macOS `14.0+`、Python `>=3.12,<3.13`；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
-- App 控制面基线（仅在同时安装 `SpeechRail.app` 时适用）：`SpeechRailApp` GUI target 为 Apple Silicon `arm64`，最低系统为 macOS `26.0`；App target 不反向约束服务。
-- 预留至少 25 GB 磁盘空间，并可访问项目锁定的下载源。
+- 按仓库 `AGENTS.md` 核对 Apple Silicon、macOS 与 Python 基线；Python 由 `uv` 提供隔离运行时，不修改系统 Python。
+  首装脚本仍有 macOS 14 检查，不能用其放行证明满足项目 macOS 26 目标；安装前须额外核对。
+- 依据目标 profile 的锁定制品、vendor runtime、wheel staging 与回退空间估算磁盘需求；脚本最小空间检查
+  只是预检，不是完整容量保证。确认可访问所需锁定下载源。
 - profile 推荐以代码中的 `recommend_profile()` 为内存兜底建议；无法读取物理内存时停止自动推荐，要求用户显式指定 `--preset`。
 - 安装前确认脚本解析到包含 `pyproject.toml` 的项目根目录；不得从未知目录继续执行。
 
@@ -64,10 +65,12 @@ uv run --python 3.12 python \
 
 不要把真实 API key 放进命令参数或 shell 历史，不在仓库内生成测试音频，也不输出完整转写。手工复查仍使用统一探针；只记录 HTTP 状态、request ID、非空音频/转写校验和脱敏错误。
 
-上述 smoke 属于本次显式 `--yes` 确认的安装事务，`--yes` 本身就是该事务的授权。除安装事务内的探针外，不运行 UI 自动化、benchmark 或额外验收命令；额外验收需要当前用户明确授权，否则列入未验证项。
+上述 smoke 属于完整首装事务。只有用户请求已覆盖依赖安装、模型下载、服务注册与启动及内置探针时，
+才传入 `--yes`；该参数只表达已有授权，不能由 agent 添加参数来创造授权。用户明确限定只准备或只诊断时，
+不得调用完整首装入口。UI 自动化、benchmark 和额外真实推理按各自授权边界处理。
 
 每次安装都会在 `runtime/releases` 新增一个 release 目录，installer 不自动清理旧版本；重复首装或升级会让
-app home 持续增长。因此「预留至少 25 GB」是单次全新安装的增量需求，不是 app home 的长期上限。保留、清理
+app home 持续增长。因此磁盘预算还需考虑 release 累积，不能把首次预检阈值当作长期上限。保留、清理
 与陈旧进程边界读 [speechrail-local-deploy](../speechrail-local-deploy/SKILL.md)。
 
 ## 已有实例

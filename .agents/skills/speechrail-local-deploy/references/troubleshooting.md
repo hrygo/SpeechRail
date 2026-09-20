@@ -2,6 +2,9 @@
 
 先读取主 SOP 和 [生命周期 controller](lifecycle.md)。所有服务故障先确认“单实例、单 listener、lock 是否释放”，再判断模型或依赖；不要把旧 listener 的响应当成候选版本的结果。
 
+本指南先用于只读取证。以下 stop/start、安装、权限修复和重试步骤仅在用户已授权对应修复时执行；
+诊断请求交付原因与可评审处置，保留当前状态。端口与 app home 以已核对的目标为准，示例使用默认值。
+
 ## 1. 端口冲突或 server_already_running
 
 ~~~bash
@@ -37,7 +40,7 @@ readlink "$APP_HOME/runtime/current"
 speechrail profile status --app-home "$APP_HOME"
 ~~~
 
-确认 selection、snapshot hash、共享 vendor runtime、配置权限和 managed Python。preflight 失败时保持停服，修复后重新执行；不要用源码 checkout 的依赖结果替代 managed runtime。
+确认 selection、snapshot hash、共享 vendor runtime、配置权限和 managed Python。已停服的安装事务在 preflight 失败时不启动候选；只读诊断不因此停止原服务。获授权修复后重新执行相关检查；不要用源码 checkout 的依赖结果替代 managed runtime。
 
 ## 5. this wheel is already staged
 
@@ -60,11 +63,8 @@ chmod 0600 "$HOME/Library/Application Support/SpeechRail/config/.env"
 
 ## 7. 日志证据
 
-只截取与失败时间窗口对应的脱敏尾部，避免输出 key、音频、完整转写、完整 prompt 或完整配置：
-
-~~~bash
-tail -n 80 "$HOME/Library/Logs/SpeechRail/stderr.log"
-tail -n 80 "$HOME/Library/Logs/SpeechRail/stdout.log"
-~~~
+先用结构化状态和错误码定位；确需日志时在本机读取失败时间窗口，经脱敏后只输出必要错误类型、
+request ID 和状态。不要直接将 stdout/stderr 原始尾部送入工具输出；尾部也可能包含 key、音频、
+完整转写、完整 prompt 或私有路径。
 
 交付记录版本、wheel hash、runtime target、profile/generation、PID/listener、错误码、controller stop 结果和回退目标；原始日志保留在 app home，不提交 Git。
