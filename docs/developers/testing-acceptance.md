@@ -20,7 +20,7 @@ npx --yes @redocly/cli@2.52.1 lint contracts/openapi.yaml
 git diff --check
 ```
 
-GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy、版本一致性、OpenAPI lint、分人契约回归和差异空白检查；`test` 在 `ubuntu-latest` 与 `macos-15` 的 Python 3.12 矩阵中先构建 wheel 再运行完整 pytest；`macos-app` 使用 `macos-26` arm64 runner 运行 Swift/Xcode 测试；所有门禁通过后 `package` 才上传 wheel artifact。普通 CI 的 `package` 默认使用 Ubuntu，tag Release 通过 `package-runner: macos-26` 构建并检查 Darwin CoreML native worker，保持正式 macOS wheel 的能力。CI workflow 同时支持普通 push/PR 和 Release workflow 的 `workflow_call`，Release 不重复维护 Python 检查命令。
+GitHub Actions 使用同一套锁定依赖门禁：`quality` 运行 Ruff、Mypy、版本一致性、OpenAPI lint、分人契约回归和差异空白检查；`test` 在 `macos-26` 的 Python 3.12 环境中先构建 wheel 再运行完整 pytest；`macos-app` 使用 `macos-26` arm64 runner 运行 Swift/Xcode 测试；所有门禁通过后 `package` 才上传 wheel artifact。普通 CI 与 tag Release 的 `package` 都使用 `macos-26`，确保 wheel 构建并检查 Darwin CoreML native worker。Ubuntu 仅承载平台无关的 Quality Gates，不代表产品运行支持。CI workflow 同时支持普通 push/PR 和 Release workflow 的 `workflow_call`，Release 不重复维护 Python 检查命令。
 
 版本 tag release 还会并行构建 unsigned arm64 DMG。发布前核对 tag、App bundle 版本、App 架构、DMG 可挂载内容和 wheel/DMG checksum；最终 Release 资产为 wheel、`SpeechRail-<version>-macOS-arm64.dmg` 和 `SHA256SUMS`。GitHub 上生成的 DMG 不做 Developer ID、notarization 或 staple，因此不能替代本机正式分发验收。
 

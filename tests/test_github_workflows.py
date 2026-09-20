@@ -31,11 +31,11 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
     assert "pull_request" in triggers
     workflow_call = triggers["workflow_call"]
     assert isinstance(workflow_call, dict)
-    assert workflow_call["inputs"]["package-runner"]["default"] == "ubuntu-latest"
+    assert workflow_call["inputs"]["package-runner"]["default"] == "macos-26"
 
     jobs = _jobs(workflow)
     assert jobs["test"]["runs-on"] == "${{ matrix.os }}"
-    assert jobs["test"]["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-15"]
+    assert jobs["test"]["strategy"]["matrix"]["os"] == ["macos-26"]
     assert jobs["macos-app"]["runs-on"] == "macos-26"
     assert jobs["package"]["needs"] == ["quality", "test"]
     assert "speechrail-${version}-*.whl" in ci_text
