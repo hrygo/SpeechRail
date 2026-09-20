@@ -18,6 +18,8 @@ public struct SettingsView: View {
     @State private var moduleKeyDrafts: [String: String] = [:]
     @State private var moduleKeySaved: Set<String> = []
     @State private var connectionResult: LLMConnectionResult?
+    /// 新密钥测试通过但写入安全保管库失败时的独立提示；连接结论本身仍然保留。
+    @State private var keySaveError: String?
     @State private var isChecking = false
     @State private var checkedModule: LLMModule?
     @State private var isAdvancedLLMConfigurationExpanded = false
@@ -280,27 +282,19 @@ public struct SettingsView: View {
                             "密钥",
                             caption: llmKeySaved
                                 ? "已存入钥匙串（不落配置文件、不进日志）。"
-                                : "只存钥匙串；服务不需要密钥时留空即可。"
+                                : "只存钥匙串；检查连接通过后才保存，服务不需要密钥时留空即可。"
                         )
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             SecureField("粘贴密钥", text: $llmKeyDraft)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(maxWidth: 280)
-                            Button("保存到钥匙串") {
-                                do {
-                                    try LLMKeychain.save(llmKeyDraft)
-                                    llmKeyDraft = ""
-                                    llmKeySaved = LLMKeychain.hasKey
-                                } catch {
-                                    connectionResult = .unreachable(error.localizedDescription)
-                                }
-                            }
+                            Button("保存到钥匙串") { saveDraftKey(for: nil) }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
+                            .disabled(LLMKeyDraftPolicy.normalizedDraft(llmKeyDraft) == nil)
                             if llmKeySaved {
                                 Button("清除") {
-                                    try? LLMKeychain.remove()
-                                    llmKeySaved = false
+                                    clearGlobalKey()
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
@@ -317,6 +311,11 @@ public struct SettingsView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
+                            .help(
+                                LLMKeyDraftPolicy.normalizedDraft(llmKeyDraft) == nil
+                                    ? "使用已保存的密钥检查连接"
+                                    : "先用当前密钥检查；连接成功后自动保存新密钥"
+                            )
                             .disabled(isChecking || !preferences.isLLMConfigured)
                             if isChecking, checkedModule == nil {
                                 ProgressView().controlSize(.small)
@@ -329,7 +328,11 @@ public struct SettingsView: View {
                             }
                         }
                         if checkedModule == nil, let result = connectionResult {
-                            Text(result.detail)
+                            Text(
+                                keySaveError.map {
+                                    "连接已通过，但密钥未保存：\($0)"
+                                } ?? result.detail
+                            )
                                 .font(SpeechRailDesignTokens.Typography.caption)
                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -565,17 +568,18 @@ public struct SettingsView: View {
                         "专用密钥",
                         caption: moduleKeySaved.contains(module.rawValue)
                             ? "已存入模块专用安全保管库。"
-                            : "留空表示继承全局 Key；只存安全保管库，不落配置文件。"
+                            : "留空表示继承全局 Key；检查连接通过后才保存，只存安全保管库。"
                     )
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         SecureField("留空继承全局 Key", text: moduleKeyBinding(for: module))
                             .textFieldStyle(.roundedBorder)
                             .frame(maxWidth: 280)
-                        Button("保存专用 Key") {
-                            saveModuleKey(for: module)
-                        }
+                        Button("保存专用 Key") { saveDraftKey(for: module) }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .disabled(
+                            LLMKeyDraftPolicy.normalizedDraft(moduleKeyDrafts[module.rawValue] ?? "") == nil
+                        )
                         if moduleKeySaved.contains(module.rawValue) {
                             Button("清除") {
                                 clearModuleKey(for: module)
@@ -595,6 +599,11 @@ public struct SettingsView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
+                        .help(
+                            LLMKeyDraftPolicy.normalizedDraft(moduleKeyDrafts[module.rawValue] ?? "") == nil
+                                ? "使用已保存的专用 Key 检查连接"
+                                : "先用当前专用 Key 检查；连接成功后自动保存"
+                        )
                         .disabled(
                             isChecking
                                 || !configuration.isConfigured
@@ -612,7 +621,11 @@ public struct SettingsView: View {
                         }
                     }
                     if checkedModule == module, let result = connectionResult {
-                        Text(result.detail)
+                        Text(
+                            keySaveError.map {
+                                "连接已通过，但专用 Key 未保存：\($0)"
+                            } ?? result.detail
+                        )
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -691,16 +704,70 @@ public struct SettingsView: View {
         )
     }
 
-    private func saveModuleKey(for module: LLMModule) {
-        do {
-            try LLMKeychain.save(
-                moduleKeyDrafts[module.rawValue] ?? "",
-                scope: .module(module)
-            )
-            moduleKeyDrafts[module.rawValue] = ""
+    private func keyDraft(for module: LLMModule?) -> String {
+        if let module {
+            return moduleKeyDrafts[module.rawValue] ?? ""
+        }
+        return llmKeyDraft
+    }
+
+    private func setKeyDraft(_ draft: String, for module: LLMModule?) {
+        if let module {
+            moduleKeyDrafts[module.rawValue] = draft
+        } else {
+            llmKeyDraft = draft
+        }
+    }
+
+    private func keyScope(for module: LLMModule?) -> LLMKeychain.Scope {
+        if let module {
+            return .module(module)
+        }
+        return .global
+    }
+
+    private func markKeySaved(for module: LLMModule?) {
+        if let module {
             moduleKeySaved.insert(module.rawValue)
+        } else {
+            llmKeySaved = LLMKeychain.hasKey
+        }
+    }
+
+    @discardableResult
+    private func persistDraftKeyIfPresent(for module: LLMModule?) throws -> Bool {
+        let draft = keyDraft(for: module)
+        guard let normalizedDraft = LLMKeyDraftPolicy.normalizedDraft(draft) else {
+            return false
+        }
+        try LLMKeychain.save(normalizedDraft, scope: keyScope(for: module))
+        setKeyDraft("", for: module)
+        markKeySaved(for: module)
+        return true
+    }
+
+    private func saveDraftKey(for module: LLMModule?) {
+        do {
+            _ = try persistDraftKeyIfPresent(for: module)
         } catch {
             checkedModule = module
+            keySaveError = nil
+            connectionResult = .unreachable(error.localizedDescription)
+        }
+    }
+
+    private func clearGlobalKey() {
+        do {
+            try LLMKeychain.remove()
+            llmKeySaved = false
+            if checkedModule == nil {
+                checkedModule = nil
+                connectionResult = nil
+                keySaveError = nil
+            }
+        } catch {
+            checkedModule = nil
+            keySaveError = nil
             connectionResult = .unreachable(error.localizedDescription)
         }
     }
@@ -710,8 +777,14 @@ public struct SettingsView: View {
             try LLMKeychain.remove(scope: .module(module))
             moduleKeyDrafts[module.rawValue] = ""
             moduleKeySaved.remove(module.rawValue)
+            if checkedModule == module {
+                checkedModule = nil
+                connectionResult = nil
+                keySaveError = nil
+            }
         } catch {
             checkedModule = module
+            keySaveError = nil
             connectionResult = .unreachable(error.localizedDescription)
         }
     }
@@ -740,6 +813,7 @@ public struct SettingsView: View {
     private func checkConnection(for module: LLMModule?) async {
         isChecking = true
         checkedModule = module
+        keySaveError = nil
         defer { isChecking = false }
         let resolved: ResolvedLLMConfiguration
         if let module {
@@ -751,10 +825,24 @@ public struct SettingsView: View {
                 origin: .global
             )
         }
-        connectionResult = await LLMProvider().check(
-            configuration: resolved.configuration,
-            apiKey: resolved.apiKey
+        let draft = keyDraft(for: module)
+        let candidateKey = LLMKeyDraftPolicy.candidateKey(
+            draft: draft,
+            storedKey: resolved.apiKey
         )
+        let result = await LLMProvider().check(
+            configuration: resolved.configuration,
+            apiKey: candidateKey
+        )
+        connectionResult = result
+        guard LLMKeyDraftPolicy.shouldPersist(draft: draft, connection: result) else {
+            return
+        }
+        do {
+            _ = try persistDraftKeyIfPresent(for: module)
+        } catch {
+            keySaveError = error.localizedDescription
+        }
     }
 
     private func backupLibrary() {

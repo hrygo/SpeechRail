@@ -1,112 +1,55 @@
 import XCTest
+import Testing
 
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
 
-final class TeleprompterAlignerTests: XCTestCase {
-    private let aligner = TeleprompterAligner(
-        configuration: .init(minimumConfidence: 0.55, advanceMargin: 0.08, lookahead: 2)
-    )
-
-    private var segments: [TeleprompterSegment] {
-        [
-            TeleprompterSegment(
-                id: "segment-1",
-                ordinal: 0,
-                sourceRange: .init(start: 0, end: 8),
-                text: "欢迎来到今天的直播。",
-                keywords: ["欢迎", "直播"],
-                matchPhrases: ["大家好，欢迎来到直播"],
-                pauseHint: .short
-            ),
-            TeleprompterSegment(
-                id: "segment-2",
-                ordinal: 1,
-                sourceRange: .init(start: 8, end: 18),
-                text: "今天我们会介绍三个重点。",
-                keywords: ["三个", "重点"],
-                matchPhrases: ["今天介绍三个重点"],
-                pauseHint: .medium
-            ),
-            TeleprompterSegment(
-                id: "segment-3",
-                ordinal: 2,
-                sourceRange: .init(start: 18, end: 26),
-                text: "最后感谢大家的观看。",
-                keywords: ["感谢", "观看"],
-                matchPhrases: [],
-                pauseHint: .short
-            ),
-        ]
+struct TeleprompterPositionTests {
+    private func script() throws -> [TeleprompterSegment] {
+        try TeleprompterSegmenter.segment(sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。最后演示照片导出。")
     }
 
-    func testCurrentSegmentStaysWhenTranscriptMatchesIt() {
-        let result = aligner.evaluate(
-            completedTranscript: "欢迎来到直播",
-            segments: segments,
-            currentIndex: 0
+    @Test func bodyAloneMatchesWithProductionDefaults() throws {
+        let segments = try script()
+        let result = TeleprompterAligner().locate(
+            transcript: "今天我们介绍相机设置", segments: segments,
+            anchor: .init(segmentIndex: 0, utf16Offset: 0)
         )
-
-        guard case .stay(let confidence) = result.decision else {
-            return XCTFail("expected stay, got \(result.decision)")
-        }
-        XCTAssertGreaterThan(confidence, 0.55)
+        #expect(result.position?.segmentIndex == 1)
     }
 
-    func testCompletedTranscriptAdvancesAtMostOneSegment() {
-        let result = aligner.evaluate(
-            completedTranscript: "今天介绍三个重点",
-            segments: segments,
-            currentIndex: 0
-        )
-
-        guard case .advance(let index, let confidence) = result.decision else {
-            return XCTFail("expected one-step advance, got \(result.decision)")
-        }
-        XCTAssertEqual(index, 1)
-        XCTAssertGreaterThan(confidence, 0.55)
+    @Test func tracksInsideSentenceAndAcrossSegments() throws {
+        let segments = try script()
+        let aligner = TeleprompterAligner()
+        let first = aligner.locate(transcript: "欢迎来到", segments: segments,
+                                   anchor: .init(segmentIndex: 0, utf16Offset: 0))
+        #expect(first.position?.utf16Offset == 4)
+        let last = aligner.locate(transcript: "今天我们介绍相机设置最后演示照片导出", segments: segments,
+                                  anchor: .init(segmentIndex: 0, utf16Offset: 0))
+        #expect(last.position?.segmentIndex == 2)
     }
 
-    func testLowConfidenceDoesNotJump() {
-        let result = aligner.evaluate(
-            completedTranscript: "完全无关的话",
-            segments: segments,
-            currentIndex: 0
-        )
-
-        guard case .uncertain(let candidate, let confidence) = result.decision else {
-            return XCTFail("expected uncertain, got \(result.decision)")
-        }
-        XCTAssertNil(candidate)
-        XCTAssertLessThan(confidence, 0.55)
+    @Test func localRepeatCanReturnToPreviousSentence() throws {
+        let result = TeleprompterAligner().locate(
+            transcript: "今天我们介绍相机设置", segments: try script(),
+            anchor: .init(segmentIndex: 2, utf16Offset: 4))
+        #expect(result.position?.segmentIndex == 1)
     }
 
-    func testRepeatedPreviousSegmentNeverMovesBackward() {
-        let result = aligner.evaluate(
-            completedTranscript: "欢迎来到直播",
-            segments: segments,
-            currentIndex: 1
-        )
-
-        guard case .uncertain(let candidate, _) = result.decision else {
-            return XCTFail("expected uncertain, got \(result.decision)")
-        }
-        XCTAssertNil(candidate)
+    @Test func unrelatedSpeechAndRepeatedShortPhrasesDoNotMove() throws {
+        let repeated = try TeleprompterSegmenter.segment(sourceText: "谢谢大家。今天讲相机。谢谢大家。现在讲手机。")
+        let aligner = TeleprompterAligner()
+        #expect(aligner.locate(transcript: "谢谢大家", segments: repeated,
+                              anchor: .init(segmentIndex: 1, utf16Offset: 0)).position == nil)
+        #expect(aligner.locate(transcript: "外面的天气非常晴朗", segments: try script(),
+                              anchor: .init(segmentIndex: 0, utf16Offset: 0)).position == nil)
     }
 
-    func testInsufficientMarginRemainsUncertain() {
-        let cautious = TeleprompterAligner(
-            configuration: .init(minimumConfidence: 0.05, advanceMargin: 0.95, lookahead: 2)
-        )
-        let result = cautious.evaluate(
-            completedTranscript: "今天",
-            segments: segments,
-            currentIndex: 0
-        )
-
-        guard case .uncertain = result.decision else {
-            return XCTFail("expected uncertain, got \(result.decision)")
-        }
+    @Test func normalizationPreservesWordsAndSourceCoordinates() {
+        #expect(TeleprompterNormalizer.tokens("number summer") == ["number", "summer"])
+        let tokens = TeleprompterNormalizer.indexedTokens("😀今天 number")
+        #expect(tokens.first?.range.start == 2)
+        #expect(tokens.last?.range.end == 11)
     }
 }

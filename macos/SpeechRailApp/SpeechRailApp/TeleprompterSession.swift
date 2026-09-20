@@ -30,28 +30,28 @@ public final class TeleprompterSession {
 
         public var title: String {
             switch self {
-            case .noActiveVersion: "还没有活动稿件版本"
-            case .microphoneDenied: "麦克风未授权"
-            case .serviceNotReady: "语音服务未就绪"
-            case .serviceBusy: "语音服务正忙"
+            case .noActiveVersion: "还没有可跟读的稿子"
+            case .microphoneDenied: "麦克风不可用"
+            case .serviceNotReady: "语音识别还没准备好"
+            case .serviceBusy: "语音识别正在被其他功能使用"
             case .occupiedBy(let kind): "\(kind.title)正在使用麦克风"
-            case .streamFailed: "自动跟读已暂停"
-            case .aiUnavailable: "AI 整理不可用"
-            case .storeUnavailable: "提词稿保存失败"
+            case .streamFailed: "跟读暂时停了"
+            case .aiUnavailable: "AI 整理暂时不可用"
+            case .storeUnavailable: "稿子保存失败"
             }
         }
 
         public var detail: String {
             switch self {
             case .noActiveVersion:
-                "请先确认一版稿件，或使用纯文本分段。"
+                "先确认一份用于跟读的稿子，或直接按原文分段。"
             case .microphoneDenied:
-                "在系统设置里允许 SpeechRail 使用麦克风，然后重试；手动提词仍可用。"
+                "请在系统设置中允许 SpeechRail 使用麦克风，然后再试。你也可以先手动提词。"
             case .serviceNotReady(let message), .serviceBusy(let message), .streamFailed(let message),
                  .aiUnavailable(let message), .storeUnavailable(let message):
                 message
             case .occupiedBy(let kind):
-                "结束\(kind.title)后才能开始自动跟读；当前仍可手动提词。"
+                "结束\(kind.title)后才能开始跟读；现在仍可以手动提词。"
             }
         }
     }
@@ -70,8 +70,13 @@ public final class TeleprompterSession {
     public private(set) var currentSegmentIndex = 0
     public private(set) var uncertainty: Double?
     public private(set) var lastFailure: String?
+    public private(set) var readingOffset = 0
+    public private(set) var isResuming = false
+    public var canEdit: Bool { source == nil && client == nil && phase != .preparing && !isResuming }
+    public var isCapturing: Bool { client != nil }
 
     public var activeVersion: TeleprompterVersion? {
+        if let runningVersion { return runningVersion }
         guard let activeID = document?.activeVersionID else { return nil }
         return versions.first { $0.id == activeID }
     }
@@ -101,6 +106,9 @@ public final class TeleprompterSession {
     private var pump: Task<Void, Never>?
     private var followController = TeleprompterFollowController()
     private var isStoppingIntentionally = false
+    private var runningVersion: TeleprompterVersion?
+    private var captureGeneration = UUID()
+    private var draftGeneration = UUID()
 
     public init(
         coordinator: SessionCoordinator,
@@ -123,6 +131,8 @@ public final class TeleprompterSession {
     }
 
     public func load(documentID: String) throws {
+        guard canEdit else { return }
+        draftGeneration = UUID()
         let bundle = try store.loadBundle(documentID: documentID)
         document = bundle.document
         versions = bundle.versions
@@ -140,10 +150,12 @@ public final class TeleprompterSession {
     }
 
     public func createDocument(title: String, sourceText: String) {
+        guard canEdit else { return }
+        draftGeneration = UUID()
         let now = Date()
         document = TeleprompterDocument(
             id: UUID().uuidString,
-            title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名提词稿" : title,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "未命名稿子" : title,
             sourceText: sourceText,
             createdAt: now,
             updatedAt: now
@@ -154,9 +166,11 @@ public final class TeleprompterSession {
         phase = .draft
         blocked = nil
         lastFailure = nil
+        persistDraft()
     }
 
     public func deleteDocument(documentID: String) throws {
+        guard canEdit else { return }
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         try store.deleteDocument(documentID: documentID)
         if document?.id == documentID {
@@ -175,6 +189,7 @@ public final class TeleprompterSession {
     }
 
     public func duplicateDocument(documentID: String) throws -> TeleprompterDocument {
+        guard canEdit else { throw TeleprompterTextError.invalidAnalysis }
         guard phase != .following, phase != .paused, phase != .uncertain else {
             throw TeleprompterTextError.emptySource
         }
@@ -194,20 +209,27 @@ public final class TeleprompterSession {
     }
 
     public func updateTitle(_ title: String) {
+        guard canEdit else { return }
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.title = title
         document?.updatedAt = Date()
+        persistDraft()
     }
 
     public func updateSourceText(_ sourceText: String) {
+        guard canEdit else { return }
+        draftGeneration = UUID()
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.sourceText = sourceText
         document?.updatedAt = Date()
         pendingVersion = nil
         phase = .draft
+        persistDraft()
     }
 
     public func useDeterministicFallback() throws {
+        guard canEdit else { return }
+        draftGeneration = UUID()
         guard var document else { throw TeleprompterTextError.emptySource }
         let segments = try TeleprompterSegmenter.segment(sourceText: document.sourceText)
         let version = TeleprompterVersion(
@@ -230,15 +252,17 @@ public final class TeleprompterSession {
     }
 
     public func analyzeDraft(language: String? = nil, style: String? = nil) async {
+        guard canEdit, phase != .analyzing else { return }
         guard let document else {
-            blocked = .aiUnavailable("请先创建提词稿。")
+            blocked = .aiUnavailable("请先创建一份稿子。")
             return
         }
         guard let aiClient else {
-            blocked = .aiUnavailable("尚未配置可用的 Responses-compatible AI；可以使用纯文本分段。")
+            blocked = .aiUnavailable("还没有设置 AI 整理服务；你可以直接按原文分段。")
             return
         }
         phase = .analyzing
+        let generation = draftGeneration
         blocked = nil
         do {
             let analysis = try await aiClient.analyze(
@@ -248,6 +272,7 @@ public final class TeleprompterSession {
                     style: style
                 )
             )
+            guard generation == draftGeneration, self.document?.id == document.id, canEdit else { return }
             pendingVersion = TeleprompterVersion(
                 id: UUID().uuidString,
                 documentID: document.id,
@@ -257,13 +282,16 @@ public final class TeleprompterSession {
             )
             phase = .review
         } catch {
+            guard generation == draftGeneration, self.document?.id == document.id, canEdit else { return }
             blocked = .aiUnavailable(Self.aiFailureMessage(for: error))
             phase = .draft
         }
     }
 
     public func acceptPendingVersion() throws {
-        guard let pendingVersion, var document else {
+        guard canEdit, let pendingVersion, var document,
+              pendingVersion.documentID == document.id,
+              pendingVersion.sourceText == document.sourceText else {
             throw TeleprompterTextError.invalidAnalysis
         }
         versions.append(pendingVersion)
@@ -279,15 +307,18 @@ public final class TeleprompterSession {
     }
 
     public func discardPendingVersion() {
+        guard canEdit else { return }
         pendingVersion = nil
         phase = activeVersion == nil ? .draft : .ready
     }
 
     public func updatePendingSegment(id: String, text: String) {
-        guard let pendingVersion,
+        guard canEdit, let pendingVersion,
               let index = pendingVersion.segments.firstIndex(where: { $0.id == id }) else { return }
         var segments = pendingVersion.segments
         segments[index].text = text
+        segments[index].keywords = []
+        segments[index].matchPhrases = []
         self.pendingVersion = TeleprompterVersion(
             id: pendingVersion.id,
             documentID: pendingVersion.documentID,
@@ -299,6 +330,11 @@ public final class TeleprompterSession {
     }
 
     public func beginFollowing() async {
+        guard client == nil, phase != .preparing else { return }
+        if activeVersion == nil || phase == .draft {
+            do { try useDeterministicFallback() }
+            catch { blocked = .noActiveVersion; return }
+        }
         guard activeVersion != nil else {
             blocked = .noActiveVersion
             phase = .manual
@@ -315,12 +351,16 @@ public final class TeleprompterSession {
 
     /// SessionCoordinator 的 starter：此时已取得 `.teleprompter` 占用，但还没有持久化记录。
     public func beginCapture() async throws {
+        guard client == nil, let activeVersion else { throw Blocked(reason: .noActiveVersion) }
+        runningVersion = activeVersion
+        draftGeneration = UUID()
         phase = .preparing
         blocked = nil
         lastFailure = nil
         do {
             try await startPipeline()
         } catch {
+            runningVersion = nil
             let reason = Self.blockReason(for: error)
             blocked = reason
             phase = .manual
@@ -336,8 +376,22 @@ public final class TeleprompterSession {
         saveProgress()
     }
 
-    public func resumeFollowing() {
+    public func resumeFollowing() async {
         guard phase == .paused || phase == .manual || phase == .uncertain else { return }
+        guard !isResuming else { return }
+        guard let client else { await beginFollowing(); return }
+        isResuming = true
+        let generation = captureGeneration
+        followController.pause()
+        defer { isResuming = false }
+        do {
+            try await client.drainAndClear(timeout: .seconds(8))
+        } catch {
+            guard generation == captureGeneration else { return }
+            await enterManual(.streamFailed("暂时无法恢复跟读，请重新开始。"))
+            return
+        }
+        guard generation == captureGeneration else { return }
         followController.resume()
         syncFollowState()
         phase = .following
@@ -353,6 +407,14 @@ public final class TeleprompterSession {
         saveProgress()
     }
 
+    public func moveToSegment(_ index: Int) {
+        guard let count = activeVersion?.segments.count else { return }
+        followController.move(to: index, segmentCount: count)
+        syncFollowState()
+        phase = .manual
+        saveProgress()
+    }
+
     public func moveToNext() {
         guard let count = activeVersion?.segments.count else { return }
         followController.move(to: currentSegmentIndex + 1, segmentCount: count)
@@ -361,12 +423,8 @@ public final class TeleprompterSession {
         saveProgress()
     }
 
-    public func resetFollow() {
-        followController.resetFollowWindow()
-        syncFollowState()
-        phase = .following
-        blocked = nil
-        saveProgress()
+    public func resetFollow() async {
+        await resumeFollowing()
     }
 
     public func endFollowing() async {
@@ -383,6 +441,7 @@ public final class TeleprompterSession {
     public func stopCapture() async {
         guard !isStoppingIntentionally else { return }
         isStoppingIntentionally = true
+        captureGeneration = UUID()
         source?.stop()
         source = nil
         if let client {
@@ -400,6 +459,7 @@ public final class TeleprompterSession {
         followController.resetFollowWindow()
         syncFollowState()
         saveProgress()
+        runningVersion = nil
         isStoppingIntentionally = false
     }
 
@@ -438,6 +498,7 @@ public final class TeleprompterSession {
         }
 
         self.client = client
+        captureGeneration = UUID()
         isStoppingIntentionally = false
         partialText = nil
         uncertainty = nil
@@ -450,19 +511,20 @@ public final class TeleprompterSession {
 
     private func startPump(stream: AsyncStream<AudioChunk>, client: RealtimeASRClient) {
         pump?.cancel()
+        let generation = captureGeneration
         pump = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 group.addTask { [weak self] in
                     for await chunk in stream {
                         guard let self else { return }
-                        await self.upload(chunk, to: client)
+                        await self.upload(chunk, to: client, generation: generation)
                     }
                 }
                 group.addTask { [weak self] in
                     let events = await client.events()
                     for await envelope in events {
                         guard let self else { return }
-                        await self.handle(envelope)
+                        await self.handle(envelope, generation: generation)
                     }
                 }
                 await group.waitForAll()
@@ -470,8 +532,9 @@ public final class TeleprompterSession {
         }
     }
 
-    private func upload(_ chunk: AudioChunk, to client: RealtimeASRClient) async {
-        guard !isStoppingIntentionally else { return }
+    private func upload(_ chunk: AudioChunk, to client: RealtimeASRClient, generation: UUID) async {
+        guard generation == captureGeneration, !isStoppingIntentionally,
+              !isResuming, followController.mode == .following else { return }
         do {
             try await client.append(chunk.pcm)
         } catch {
@@ -480,22 +543,24 @@ public final class TeleprompterSession {
     }
 
     private func handle(
-        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>
+        _ envelope: RealtimeEventEnvelope<RealtimeASRClient.Event>, generation: UUID
     ) async {
+        guard generation == captureGeneration, !isStoppingIntentionally else { return }
         switch envelope.payload {
-        case .partial(_, let delta):
-            partialText = (partialText ?? "") + delta
-            followController.receivePartial(partialText ?? "")
+        case .partial(let itemID, let delta):
+            guard !isResuming, let activeVersion else { return }
+            followController.receivePartial(itemID: itemID, delta: delta, segments: activeVersion.segments)
             syncFollowState()
-        case .completed(_, let transcript, _):
-            guard let activeVersion else { return }
+        case .completed(let itemID, let transcript, _):
+            guard !isResuming, let activeVersion else { return }
             followController.receiveCompleted(
-                transcript,
-                segments: activeVersion.segments,
-                aligner: TeleprompterAligner()
+                itemID: itemID, transcript: transcript,
+                segments: activeVersion.segments
             )
             syncFollowState()
-            phase = uncertainty == nil ? (followController.mode == .following ? .following : .manual) : .uncertain
+            if followController.mode == .following {
+                phase = uncertainty == nil ? .following : .uncertain
+            }
         case .serverError(let code, let message, _, _, _, _):
             if code == "backend_busy" {
                 await enterManual(.serviceBusy(message))
@@ -514,6 +579,7 @@ public final class TeleprompterSession {
     }
 
     private func enterManual(_ reason: BlockReason) async {
+        captureGeneration = UUID()
         source?.stop()
         source = nil
         await client?.close()
@@ -525,10 +591,12 @@ public final class TeleprompterSession {
         blocked = reason
         phase = .manual
         saveProgress()
+        runningVersion = nil
     }
 
     private func syncFollowState() {
         currentSegmentIndex = followController.currentIndex
+        readingOffset = followController.position.utf16Offset
         partialText = followController.partialPreview
         uncertainty = followController.uncertainty
     }
@@ -560,6 +628,11 @@ public final class TeleprompterSession {
         )
     }
 
+    private func persistDraft() {
+        do { try saveBundle() }
+        catch { blocked = .storeUnavailable("稿子暂时没能保存，请稍后重试。") }
+    }
+
     private static func blockReason(for error: Error) -> BlockReason {
         if let failure = error as? MicrophoneCapture.Failure, failure == .permissionDenied {
             return .microphoneDenied
@@ -571,9 +644,9 @@ public final class TeleprompterSession {
     private static func aiFailureMessage(for error: Error) -> String {
         if let error = error as? LLMError,
            error == .unsupportedStructuredOutput {
-            return "当前 AI 服务不支持严格结构化输出。请更换 Responses-compatible endpoint，或改用纯文本分段；原稿未改变。"
+            return "当前 AI 服务暂时无法整理这份稿子。请在设置中更换 AI 服务，或直接按原文分段；原稿没有变化。"
         }
-        return "AI 没有返回可采用的结构化结果，原稿未改变。可以改用纯文本分段。"
+        return "AI 暂时没能整理这份稿子，原稿没有变化。你可以重试，或直接按原文分段。"
     }
 
     private struct Blocked: Error {

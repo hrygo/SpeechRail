@@ -465,4 +465,18 @@ final class LLMProviderTests: XCTestCase {
         XCTAssertNotEqual(first, second)
         XCTAssertFalse(first.contains("127.0.0.1"))
     }
+
+    func testTeleprompterDataFlowDisclosureUsesPlainLanguage() {
+        XCTAssertEqual(TeleprompterAIDataFlowDisclosure.title, "整理稿件前请确认")
+        XCTAssertTrue(TeleprompterAIDataFlowDisclosure.inlineMessage.contains("只有点击"))
+        XCTAssertTrue(TeleprompterAIDataFlowDisclosure.message.contains("麦克风、摄像头或直播画面"))
+        XCTAssertFalse(TeleprompterAIDataFlowDisclosure.message.contains("Responses-compatible"))
+        XCTAssertFalse(TeleprompterAIDataFlowDisclosure.message.contains("store=false"))
+    }
+
+    func testTeleprompterErrorsUsePlainLanguage() {
+        XCTAssertEqual(TeleprompterTextError.emptySource.errorDescription, "请先输入稿件内容")
+        XCTAssertEqual(TeleprompterTextError.invalidAnalysis.errorDescription, "AI 返回的整理结果无法使用")
+        XCTAssertFalse(TeleprompterTextError.invalidSourceRange.errorDescription?.contains("UTF-16") == true)
+    }
 }

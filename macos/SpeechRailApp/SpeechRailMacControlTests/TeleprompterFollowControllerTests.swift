@@ -1,86 +1,65 @@
-import XCTest
-
+import Testing
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
 #endif
 
-final class TeleprompterFollowControllerTests: XCTestCase {
-    private let aligner = TeleprompterAligner(
-        configuration: .init(minimumConfidence: 0.55, advanceMargin: 0.08, lookahead: 2)
-    )
-
-    private let segments = [
-        TeleprompterSegment(
-            id: "segment-1",
-            ordinal: 0,
-            sourceRange: .init(start: 0, end: 8),
-            text: "欢迎来到直播。",
-            keywords: ["欢迎", "直播"],
-            matchPhrases: ["欢迎来到直播"],
-            pauseHint: .short
-        ),
-        TeleprompterSegment(
-            id: "segment-2",
-            ordinal: 1,
-            sourceRange: .init(start: 8, end: 17),
-            text: "今天介绍三个重点。",
-            keywords: ["三个", "重点"],
-            matchPhrases: ["今天介绍三个重点"],
-            pauseHint: .medium
-        ),
-    ]
-
-    func testPartialOnlyUpdatesPreview() {
-        var controller = TeleprompterFollowController()
-
-        controller.receivePartial("今天介绍")
-
-        XCTAssertEqual(controller.currentIndex, 0)
-        XCTAssertEqual(controller.partialPreview, "今天介绍")
-        XCTAssertEqual(controller.mode, .following)
+struct TeleprompterFollowControllerTests {
+    private func script() throws -> [TeleprompterSegment] {
+        try TeleprompterSegmenter.segment(sourceText: "欢迎来到今天的直播。今天我们介绍相机设置。最后演示照片导出。")
     }
 
-    func testCompletedTranscriptAdvancesOneSegment() {
+    @Test func splitFinalsAccumulatePosition() throws {
+        let segments = try script()
         var controller = TeleprompterFollowController()
-
-        controller.receiveCompleted("今天介绍三个重点", segments: segments, aligner: aligner)
-
-        XCTAssertEqual(controller.currentIndex, 1)
-        XCTAssertNil(controller.uncertainty)
+        controller.receiveCompleted(itemID: "a", transcript: "欢迎来到", segments: segments)
+        #expect(controller.position.utf16Offset == 4)
+        controller.receiveCompleted(itemID: "b", transcript: "今天的直播", segments: segments)
+        #expect(controller.position.utf16Offset == 9)
+        controller.receiveCompleted(itemID: "c", transcript: "今天我们介绍相机设置最后演示照片导出", segments: segments)
+        #expect(controller.currentIndex == 2)
     }
 
-    func testPauseAndManualMoveIgnoreOldCompletedTranscript() {
+    @Test func partialIsProvisionalAndFinalReplacesIt() throws {
+        let segments = try script()
         var controller = TeleprompterFollowController()
+        controller.receivePartial(itemID: "a", delta: "今天我们介绍", segments: segments)
+        #expect(controller.candidatePosition?.segmentIndex == 1)
+        #expect(controller.currentIndex == 0)
+        controller.receivePartial(itemID: "a", delta: "相机设置", segments: segments)
+        #expect(controller.currentIndex == 1)
+        controller.receiveCompleted(itemID: "a", transcript: "欢迎来到今天的直播", segments: segments)
+        #expect(controller.currentIndex == 0)
+        controller.receiveCompleted(itemID: "a", transcript: "最后演示照片导出", segments: segments)
+        #expect(controller.currentIndex == 0)
+    }
 
+    @Test func detourHoldsAndFollowingSpeechRecovers() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receiveCompleted(itemID: "a", transcript: "欢迎来到今天的直播", segments: segments)
+        let before = controller.position
+        controller.receiveCompleted(itemID: "b", transcript: "请稍等我回复一下评论", segments: segments)
+        #expect(controller.position == before)
+        #expect(controller.uncertainty != nil)
+        controller.receiveCompleted(itemID: "c", transcript: "今天我们介绍相机设置", segments: segments)
+        #expect(controller.currentIndex == 1)
+        #expect(controller.uncertainty == nil)
+    }
+
+    @Test func pausedAndRetiredItemsCannotOverrideManualPosition() throws {
+        let segments = try script()
+        var controller = TeleprompterFollowController()
+        controller.receivePartial(itemID: "old", delta: "今天我们", segments: segments)
         controller.pause()
-        controller.receiveCompleted("今天介绍三个重点", segments: segments, aligner: aligner)
-        XCTAssertEqual(controller.currentIndex, 0)
-        XCTAssertEqual(controller.mode, .paused)
-
+        controller.receiveCompleted(itemID: "paused", transcript: "最后演示照片导出", segments: segments)
+        #expect(controller.mode == .paused)
         controller.move(to: 1, segmentCount: segments.count)
-        controller.receiveCompleted("欢迎来到直播", segments: segments, aligner: aligner)
-        XCTAssertEqual(controller.currentIndex, 1)
-        XCTAssertEqual(controller.mode, .manual)
-    }
-
-    func testResetFollowWindowReturnsToFollowing() {
-        var controller = TeleprompterFollowController()
-        controller.move(to: 1, segmentCount: segments.count)
-
-        controller.resetFollowWindow()
-
-        XCTAssertEqual(controller.mode, .following)
-        XCTAssertNil(controller.partialPreview)
-        XCTAssertNil(controller.uncertainty)
-    }
-
-    func testUncertainMatchDoesNotMove() {
-        var controller = TeleprompterFollowController()
-
-        controller.receiveCompleted("完全无关的话", segments: segments, aligner: aligner)
-
-        XCTAssertEqual(controller.currentIndex, 0)
-        XCTAssertEqual(controller.mode, .following)
-        XCTAssertNotNil(controller.uncertainty)
+        controller.resume()
+        controller.receiveCompleted(itemID: "old", transcript: "最后演示照片导出", segments: segments)
+        controller.receiveCompleted(itemID: "paused", transcript: "最后演示照片导出", segments: segments)
+        #expect(controller.currentIndex == 1)
+        #expect(controller.position.utf16Offset == 0)
+        controller.receiveCompleted(itemID: "new", transcript: "今天我们介绍相机设置", segments: segments)
+        #expect(controller.position.utf16Offset > 0)
     }
 }

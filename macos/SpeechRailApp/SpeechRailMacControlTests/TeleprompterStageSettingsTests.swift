@@ -58,4 +58,10 @@ struct TeleprompterStageSettingsTests {
         #expect(settings.visibleSegmentCount == SpeechRailDesignTokens.Teleprompter.stageMaximumVisibleSegmentCount)
         #expect(defaults.integer(forKey: "speechrail.teleprompter.stage.visibleSegmentCount") == 3)
     }
+
+    @Test("source editor keeps a bounded preparation-page height")
+    func sourceEditorHeightRangeIsOrdered() {
+        #expect(SpeechRailDesignTokens.Teleprompter.sourceEditorMinimumHeight <= SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight)
+        #expect(SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight <= SpeechRailDesignTokens.Teleprompter.sourceEditorMaximumHeight)
+    }
 }

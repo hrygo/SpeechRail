@@ -8,7 +8,7 @@ final class TeleprompterNormalizerTests: XCTestCase {
     func testNormalizesPunctuationWhitespaceCaseAndFillerWords() {
         let tokens = TeleprompterNormalizer.tokens("  嗯，你好，Hello  WORLD！  然后 继续。 ")
 
-        XCTAssertEqual(tokens, ["你", "好", "hello", "world", "继", "续"])
+        XCTAssertEqual(tokens, ["你", "好", "hello", "world", "然", "后", "继", "续"])
     }
 
     func testKeepsLatinWordsTogetherAndChineseCharactersOrder() {

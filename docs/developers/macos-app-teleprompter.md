@@ -91,6 +91,8 @@ Realtime 连接失败、服务 busy、麦克风未授权或服务未 ready 时�
 ## 设计 token 约束
 
 所有提词器新增尺寸、字号、行距、透明度范围、视线吸顶偏移、状态指示灯尺寸、窗口 autosave 名称均位于 `SpeechRailDesignTokens.Teleprompter`。
+- 准备页「原稿」编辑区固定在 `sourceEditorMinimumHeight`–`sourceEditorMaximumHeight`（144–360pt）范围内，默认取 `sourceEditorIdealHeight`（260pt）；超过上限后由原生 `TextEditor` 内部滚动。
+- 首次使用 AI 整理前，用面向普通用户的确认说明解释发送内容、触发时机、不会发送的音视频内容，以及本机/网络服务和保存策略的差异；不要把 `Responses-compatible endpoint`、`store=false` 等实现术语直接暴露给用户。
 - **视线吸顶与视线锚点**：`stageTopInset = 48`，窗口首发吸顶在主屏上沿中央，紧贴摄像头下方，减少主播看词时的眼神偏移；
 - **三段视界不透明度阶梯**：`segmentOpacityCurrent = 1.0`（当前段朗读中心）、`segmentOpacityNext = 0.60`（下一段预读缓冲区）、`segmentOpacityPrevious = 0.35`（上一段回溯断句），杜绝局部散落透明度字面量；
 - **状态指示灯尺寸**：`stageStatusIndicatorSize = 8`，替换原先的 `Spacing.sm` 占位；

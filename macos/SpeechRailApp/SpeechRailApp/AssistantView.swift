@@ -543,20 +543,18 @@ public struct AssistantView: View {
         .disclosureGroupStyle(SpeechRailDisclosureGroupStyle())
     }
 
-    /// 「未开始」态下的声学概览卡：声学与人格集成全景展示，附带灵感提问。
-    /// 「未开始」态下的声学主舞台：声学生命力展示、人设与音色双核中枢、灵感提问与快捷开麦。
-    /// 「未开始」态下的一体化全高声学主工作台：
-    /// 声学舞台中枢、角色与音色双核名片、2×2 场景任务矩阵、最近会话回溯、锚定底部的输入中枢。
+    /// 「未开始」态下的一体化语音对话工作台：
+    /// 语音状态、角色与声音选择、场景任务矩阵、最近会话回溯，以及底部的输入中枢。
     private var readyMainWorkbenchCard: some View {
         SessionPanel(expandsVertically: true) {
             SessionPanelHead(
-                title: "声学对讲工作台",
+                title: "语音对话工作台",
                 badge: "待机就绪"
             )
             SessionHairline()
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    // 1. 声学舞台中枢：动态呼吸声波与环境状态条
+                    // 1. 语音状态：动态波形与输入源状态
                     acousticStageRow
 
                     // 2. 伙伴角色与发音音色双核心名片
@@ -603,8 +601,8 @@ public struct AssistantView: View {
 
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.micro) {
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    StatusPill(tone: .healthy, label: "声场就绪")
-                    Text("Apple Silicon 本地低延迟声学管道")
+                    StatusPill(tone: .healthy, label: "语音已就绪")
+                    Text("本地低延迟语音处理")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
                 }
@@ -657,14 +655,44 @@ public struct AssistantView: View {
                         }
                     } label: {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                            Text("切换")
+                            Image(systemName: "theatermasks")
                                 .font(SpeechRailDesignTokens.Typography.caption)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                                .accessibilityHidden(true)
+                            Text(selectedPersonaTitle)
+                                .font(SpeechRailDesignTokens.Typography.captionMedium)
+                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                .lineLimit(1)
                             Image(systemName: "chevron.down")
-                                .font(SpeechRailDesignTokens.Typography.caption)
+                                .font(.system(size: 9))
+                                .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                .accessibilityHidden(true)
                         }
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                        .padding(.horizontal, SpeechRailDesignTokens.Spacing.xs)
+                        .padding(.vertical, 4)
+                        .background(
+                            SpeechRailDesignTokens.Color.inputField,
+                            in: RoundedRectangle(
+                                cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                                style: .continuous
+                            )
+                        )
+                        .overlay(
+                            RoundedRectangle(
+                                cornerRadius: SpeechRailDesignTokens.Corner.nested,
+                                style: .continuous
+                            )
+                            .stroke(
+                                SpeechRailDesignTokens.Surface.border,
+                                lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                            )
+                        )
                     }
                     .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help("选择对话角色；开始后本轮对话中途不会改变角色")
+                    .accessibilityLabel("对话角色：\(selectedPersonaTitle)")
                 }
                 Text(selectedPersonaTitle)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
@@ -688,7 +716,7 @@ public struct AssistantView: View {
             // 发音音色卡
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
                 HStack {
-                    Label("发音音色", systemImage: "waveform")
+                    Label("回复声音", systemImage: "waveform")
                         .font(SpeechRailDesignTokens.Typography.captionMedium)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     Spacer()
@@ -738,7 +766,7 @@ public struct AssistantView: View {
                         )
                     }
                 }
-                Text(currentVoice?.description.isEmpty == false ? currentVoice!.description : "支持 SpeechRail 音色库任意音色，随时可换")
+                Text(currentVoice?.description.isEmpty == false ? currentVoice!.description : "用于朗读回复的声音，下一句即可生效")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                     .lineLimit(2)
@@ -809,15 +837,39 @@ public struct AssistantView: View {
                 navigation.request(.voiceLibrary)
             }
         } label: {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.tight) {
-                Text("换音色")
+            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Image(systemName: "waveform")
                     .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.voice)
+                    .accessibilityHidden(true)
+                Text(currentVoiceName ?? Self.defaultVoiceLabel)
+                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                    .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .accessibilityHidden(true)
             }
-            .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+            .padding(.horizontal, 10)
+            .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
+            .background(
+                SpeechRailDesignTokens.Color.inputField,
+                in: Capsule(style: .continuous)
+            )
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(
+                        SpeechRailDesignTokens.Surface.borderStrong,
+                        lineWidth: SpeechRailDesignTokens.Stroke.hairline
+                    )
+            }
         }
         .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("选择回复声音；只影响下一句，不会改变对话角色")
+        .accessibilityLabel("回复声音：\(currentVoiceName ?? Self.defaultVoiceLabel)")
     }
 
     private struct AcousticWaveformAura: View {

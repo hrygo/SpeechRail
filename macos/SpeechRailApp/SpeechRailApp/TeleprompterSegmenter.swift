@@ -1,7 +1,7 @@
 import Foundation
 
 public enum TeleprompterSegmenter {
-    private static let maxCharactersPerSegment = 160
+    private static let maxCharactersPerSegment = 60
 
     public static func segment(sourceText: String) throws -> [TeleprompterSegment] {
         guard !TeleprompterNormalizer.tokens(sourceText).isEmpty else {
@@ -31,7 +31,6 @@ public enum TeleprompterSegmenter {
 
         return ranges.enumerated().map { ordinal, range in
             let text = String(sourceText[range])
-            let tokens = Array(TeleprompterNormalizer.tokens(text).prefix(8))
             let pauseHint: TeleprompterPauseHint = switch text.count {
             case 0..<45: .short
             case 45..<100: .medium
@@ -45,8 +44,8 @@ public enum TeleprompterSegmenter {
                     end: range.upperBound.utf16Offset(in: sourceText)
                 ),
                 text: text,
-                keywords: tokens,
-                matchPhrases: [text],
+                keywords: [],
+                matchPhrases: [],
                 pauseHint: pauseHint
             )
         }
@@ -90,11 +89,21 @@ public enum TeleprompterSegmenter {
         var result: [Range<String.Index>] = []
         var start = range.lowerBound
         while start < range.upperBound {
-            let end = sourceText.index(
+            var end = sourceText.index(
                 start,
                 offsetBy: maxCharactersPerSegment,
                 limitedBy: range.upperBound
             ) ?? range.upperBound
+            // Do not cut an English word. Prefer a nearby whitespace/comma boundary.
+            if end < range.upperBound {
+                let candidates = sourceText[start..<end].indices.filter {
+                    sourceText[$0].isWhitespace || ",，、:：".contains(sourceText[$0])
+                }
+                if let boundary = candidates.last,
+                   sourceText.distance(from: start, to: boundary) >= maxCharactersPerSegment / 2 {
+                    end = sourceText.index(after: boundary)
+                }
+            }
             result.append(start..<end)
             start = end
             while start < range.upperBound && sourceText[start].isWhitespace {

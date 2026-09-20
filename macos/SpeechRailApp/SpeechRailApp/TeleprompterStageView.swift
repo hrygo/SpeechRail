@@ -87,7 +87,7 @@ public struct TeleprompterStageView: View {
                     .accessibilityLabel("当前段落")
                     .accessibilityValue(current.text)
             } else {
-                Text("请先在准备页确认一版稿件。")
+                Text("请先回到准备页，确认一份用于跟读的稿子。")
                     .font(SpeechRailDesignTokens.Typography.callout)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             }
@@ -236,14 +236,14 @@ public struct TeleprompterStageView: View {
 
     private var statusText: String {
         if let blocked = session.blocked { return blocked.title }
-        if session.uncertainty != nil { return "请确认当前位置，可用方向键接管" }
+        if session.uncertainty != nil { return "没听清当前位置，请用方向键选择下一段" }
         switch session.phase {
         case .following: return "自动跟读中"
-        case .paused: return "已暂停自动跟读"
+        case .paused: return "已暂停跟读"
         case .manual: return "手动提词"
-        case .preparing: return "正在连接语音服务…"
+        case .preparing: return "正在连接语音识别…"
         case .analyzing: return "正在整理稿件…"
-        case .review: return "等待确认 AI 建议"
+        case .review: return "请先检查 AI 建议"
         case .ready, .draft: return "准备开始"
         case .ended: return "提词已结束"
         case .uncertain: return "请确认当前位置"

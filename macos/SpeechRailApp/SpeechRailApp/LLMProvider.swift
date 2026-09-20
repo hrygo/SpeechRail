@@ -231,6 +231,25 @@ public enum LLMConnectionResult: Sendable, Equatable {
     }
 }
 
+/// 设置页密钥草稿的提交规则：先用草稿测试，只有连接成功后才持久化。
+public enum LLMKeyDraftPolicy {
+    public static func normalizedDraft(_ draft: String) -> String? {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    public static func candidateKey(draft: String, storedKey: String?) -> String? {
+        normalizedDraft(draft) ?? storedKey
+    }
+
+    public static func shouldPersist(
+        draft: String,
+        connection: LLMConnectionResult
+    ) -> Bool {
+        normalizedDraft(draft) != nil && connection.isReady
+    }
+}
+
 /// 对话里的一条消息。`role` 对着 Responses API 的取值域。
 public struct LLMMessage: Sendable, Equatable {
     public enum Role: String, Sendable {

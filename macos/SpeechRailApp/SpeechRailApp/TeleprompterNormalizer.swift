@@ -1,58 +1,59 @@
 import Foundation
 
 public enum TeleprompterNormalizer {
-    private static let fillerPhrases = [
-        "嗯", "呃", "额", "然后", "就是", "那个", "其实", "uh", "um", "er"
-    ]
+    public struct IndexedToken: Equatable, Sendable {
+        public let value: String
+        public let range: TeleprompterSourceRange
+    }
 
     public static func normalize(_ text: String) -> String {
         tokens(text).joined(separator: " ")
     }
 
     public static func tokens(_ text: String) -> [String] {
-        var folded = text.folding(
+        indexedTokens(text).map(\.value)
+    }
+
+    /// Fold individual graphemes while retaining their original UTF-16 range.
+    /// Fillers are removed only as whole tokens, never inside English words.
+    public static func indexedTokens(_ text: String) -> [IndexedToken] {
+        var result: [IndexedToken] = []
+        var buffer = ""
+        var bufferStart = 0
+        var bufferEnd = 0
+        var offset = 0
+        func flush() {
+            if !buffer.isEmpty, !["uh", "um", "er", "嗯", "呃", "额"].contains(buffer) {
+                result.append(.init(value: buffer, range: .init(start: bufferStart, end: bufferEnd)))
+            }
+            buffer = ""
+        }
+        for character in text {
+            let raw = String(character)
+            let end = offset + raw.utf16.count
+            let folded = raw.folding(
             options: [.caseInsensitive, .diacriticInsensitive],
             locale: Locale(identifier: "en_US_POSIX")
         )
-        for phrase in fillerPhrases {
-            folded = folded.replacingOccurrences(of: phrase, with: " ")
-        }
-
-        var cleaned = String.UnicodeScalarView()
-        for scalar in folded.unicodeScalars {
-            if CharacterSet.whitespacesAndNewlines.contains(scalar) || isPunctuationOrSymbol(scalar) {
-                cleaned.append(" ")
-            } else if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
-                cleaned.append(scalar)
-            } else {
-                cleaned.append(" ")
+            for scalar in folded.unicodeScalars {
+                if isCJK(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                    flush()
+                    let value = String(scalar)
+                    if !["嗯", "呃", "额"].contains(value) {
+                        result.append(.init(value: value, range: .init(start: offset, end: end)))
+                    }
+                } else if CharacterSet.letters.contains(scalar) {
+                    if buffer.isEmpty { bufferStart = offset }
+                    buffer.append(contentsOf: String(scalar))
+                    bufferEnd = end
+                } else {
+                    flush()
+                }
             }
+            offset = end
         }
-
-        var result: [String] = []
-        var latinBuffer = ""
-        func flushLatin() {
-            guard !latinBuffer.isEmpty else { return }
-            result.append(latinBuffer)
-            latinBuffer.removeAll(keepingCapacity: true)
-        }
-
-        for scalar in cleaned {
-            if isCJK(scalar) {
-                flushLatin()
-                result.append(String(scalar))
-            } else if scalar.properties.isWhitespace {
-                flushLatin()
-            } else {
-                latinBuffer.append(contentsOf: String(scalar))
-            }
-        }
-        flushLatin()
+        flush()
         return result
-    }
-
-    private static func isPunctuationOrSymbol(_ scalar: Unicode.Scalar) -> Bool {
-        CharacterSet.punctuationCharacters.contains(scalar) || CharacterSet.symbols.contains(scalar)
     }
 
     private static func isCJK(_ scalar: Unicode.Scalar) -> Bool {

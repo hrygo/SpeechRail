@@ -9,11 +9,11 @@ public enum TeleprompterStoreError: Error, Equatable, LocalizedError, Sendable {
 
     public var errorDescription: String? {
         switch self {
-        case .invalidDocumentID: "提词稿标识无效"
-        case .notFound: "找不到提词稿"
-        case .corruptBundle: "提词稿文件已损坏"
-        case .invalidBundle: "提词稿版本无效"
-        case .unsupportedImport: "只支持 TXT 或 Markdown 文件"
+        case .invalidDocumentID: "这份稿子无法打开"
+        case .notFound: "找不到这份稿子"
+        case .corruptBundle: "这份稿子已损坏"
+        case .invalidBundle: "这份稿子无法使用"
+        case .unsupportedImport: "请选择文本文件（TXT 或 Markdown）"
         }
     }
 }

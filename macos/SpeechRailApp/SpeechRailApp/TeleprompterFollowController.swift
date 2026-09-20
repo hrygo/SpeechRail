@@ -1,77 +1,129 @@
 import Foundation
 
+/// Pure event reducer. ASR text is bounded, in-memory only, and scoped to item IDs.
 public struct TeleprompterFollowController: Sendable {
-    public private(set) var currentIndex: Int
+    public private(set) var position: TeleprompterAligner.Position
+    public var currentIndex: Int { position.segmentIndex }
+    public private(set) var candidatePosition: TeleprompterAligner.Position?
     public private(set) var mode: TeleprompterRunMode
     public private(set) var uncertainty: Double?
     public private(set) var partialPreview: String?
 
-    public init(
-        currentIndex: Int = 0,
-        mode: TeleprompterRunMode = .following
-    ) {
-        self.currentIndex = max(0, currentIndex)
+    private struct Item: Sendable {
+        var text: String
+        let anchor: TeleprompterAligner.Position
+        var previousEvidence = 0
+    }
+    private var items: [String: Item] = [:]
+    private var retired: [String] = []
+    private var history: [String] = []
+    private var script: TeleprompterAligner.Script?
+    private var scriptSegments: [TeleprompterSegment] = []
+    private let aligner = TeleprompterAligner()
+
+    public init(currentIndex: Int = 0, mode: TeleprompterRunMode = .following) {
+        position = .init(segmentIndex: max(0, currentIndex), utf16Offset: 0)
         self.mode = mode
     }
 
-    public mutating func receivePartial(_ text: String) {
-        guard mode == .following else { return }
-        partialPreview = text
+    public mutating func receivePartial(itemID: String, delta: String, segments: [TeleprompterSegment]) {
+        guard !itemID.isEmpty, !retired.contains(itemID) else { return }
+        guard mode == .following else { retire(itemID); return }
+        prepare(segments)
+        guard let script else { return }
+        var item = items[itemID] ?? Item(text: "", anchor: position)
+        item.text = String((item.text + delta).suffix(2048))
+        partialPreview = item.text
+        let tokens = TeleprompterNormalizer.tokens(item.text)
+        let match = locate(tokens, script: script, anchor: item.anchor)
+        candidatePosition = match.position
+        // Two genuinely growing hypotheses are required before provisional scrolling.
+        if let candidate = match.position, match.confidence >= 0.88,
+           match.matchedCount >= 5, item.previousEvidence >= 3,
+           match.matchedCount > item.previousEvidence,
+           candidate.segmentIndex >= position.segmentIndex {
+            position = candidate
+            uncertainty = nil
+        }
+        item.previousEvidence = match.position == nil ? 0 : match.matchedCount
+        items[itemID] = item
+        if items.count > 8, let oldest = items.keys.sorted().first { retire(oldest) }
     }
 
-    public mutating func receiveCompleted(
-        _ text: String,
-        segments: [TeleprompterSegment],
-        aligner: TeleprompterAligner
-    ) {
-        guard mode == .following, !segments.isEmpty else { return }
-        partialPreview = nil
-        let result = aligner.evaluate(
-            completedTranscript: text,
-            segments: segments,
-            currentIndex: min(currentIndex, segments.count - 1)
-        )
-        switch result.decision {
-        case let .stay(confidence):
-            uncertainty = confidence < aligner.configuration.minimumConfidence
-                ? confidence
-                : nil
-        case let .advance(to, _):
-            currentIndex = min(max(0, to), segments.count - 1)
-            uncertainty = nil
-        case let .uncertain(_, confidence):
-            uncertainty = confidence
+    public mutating func receiveCompleted(itemID: String, transcript: String, segments: [TeleprompterSegment]) {
+        guard !itemID.isEmpty, !retired.contains(itemID) else { return }
+        guard mode == .following else { retire(itemID); return }
+        prepare(segments)
+        guard let script else { return }
+        let anchor = items[itemID]?.anchor ?? position
+        let tokens = TeleprompterNormalizer.tokens(transcript)
+        if !tokens.isEmpty {
+            let match = locate(tokens, script: script, anchor: anchor)
+            candidatePosition = match.position
+            if let candidate = match.position {
+                position = candidate
+                uncertainty = nil
+                history = Array((history + tokens).suffix(48))
+            } else {
+                // Do not carry an off-script answer into the next return-to-script attempt.
+                history = []
+                uncertainty = match.confidence
+            }
         }
+        partialPreview = nil
+        retire(itemID)
+    }
+
+    private func locate(_ tokens: [String], script: TeleprompterAligner.Script,
+                        anchor: TeleprompterAligner.Position) -> TeleprompterAligner.Match {
+        // Try the current utterance first so a detour/repeat cannot be pinned by old text.
+        let current = aligner.locate(tokens: tokens, script: script, anchor: anchor)
+        if current.position != nil { return current }
+        return aligner.locate(tokens: history + tokens, script: script, anchor: anchor)
+    }
+
+    private mutating func prepare(_ segments: [TeleprompterSegment]) {
+        guard script == nil || scriptSegments != segments else { return }
+        scriptSegments = segments
+        script = .init(segments: segments)
+        history = []
+    }
+
+    private mutating func retire(_ id: String) {
+        items.removeValue(forKey: id)
+        if !retired.contains(id) { retired.append(id) }
+        if retired.count > 128 { retired.removeFirst(retired.count - 128) }
+    }
+
+    private mutating func invalidatePending() {
+        for id in Array(items.keys) { retire(id) }
+        history = []
+        partialPreview = nil
+        candidatePosition = nil
+        uncertainty = nil
     }
 
     public mutating func pause() {
+        invalidatePending()
         mode = .paused
-        partialPreview = nil
     }
 
     public mutating func resume() {
+        invalidatePending()
         mode = .following
-        uncertainty = nil
-        partialPreview = nil
     }
 
     public mutating func move(to index: Int, segmentCount: Int) {
         guard segmentCount > 0 else { return }
-        currentIndex = min(max(0, index), segmentCount - 1)
+        invalidatePending()
+        position = .init(segmentIndex: min(max(0, index), segmentCount - 1), utf16Offset: 0)
         mode = .manual
-        uncertainty = nil
-        partialPreview = nil
     }
 
     public mutating func enterManual() {
+        invalidatePending()
         mode = .manual
-        uncertainty = nil
-        partialPreview = nil
     }
 
-    public mutating func resetFollowWindow() {
-        mode = .following
-        uncertainty = nil
-        partialPreview = nil
-    }
+    public mutating func resetFollowWindow() { resume() }
 }

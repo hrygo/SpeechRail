@@ -10,13 +10,13 @@ public enum TeleprompterTextError: Error, Equatable, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .emptySource:
-            "提词稿不能为空"
+            "请先输入稿件内容"
         case .invalidSourceRange:
-            "提词稿段落无法追溯到原文"
+            "整理结果和原稿对不上"
         case .invalidAnalysis:
-            "AI 提词分析结果无效"
+            "AI 返回的整理结果无法使用"
         case .promptConstructionFailed:
-            "AI 提词请求构建失败"
+            "没能准备好 AI 整理请求"
         }
     }
 }
@@ -28,13 +28,15 @@ public enum TeleprompterAIDataFlowDisclosure {
     /// 旧版本的全局确认键保留但不复用；新确认按实际 endpoint/model 作用域保存。
     public static let acknowledgementDefaultsKey =
         "speechrail.teleprompter.aiDataFlowAcknowledged.v1"
-    public static let title = "AI 整理会发送原稿"
+    public static let title = "整理稿件前请确认"
     public static let inlineMessage =
-        "AI 整理只在你主动点击时发生；原稿和偏好会发送到当前配置的 Responses-compatible endpoint。"
+        "只有点击「允许发送并整理」时，原稿才会发给 AI 服务；跟读时不会调用 AI。"
     public static let message = """
-        点击继续后，当前原稿正文和语言/表达偏好会发送到你配置的 Responses-compatible endpoint；它可能是本机服务，也可能是网络服务。SpeechRail 使用 store=false，不使用 Responses 会话状态，但 endpoint 自身的传输、日志和保留策略仍由其服务方决定。
+        点击「允许发送并整理」后，SpeechRail 会把当前原稿文字，以及你选择的语言和表达方式，发送给设置中的 AI 服务，用来分段、提取关键词和建议停顿。
 
-        跟读和直播过程中不会调用大模型，也不会发送麦克风、摄像头或直播画面。
+        不会发送麦克风、摄像头或直播画面。跟读和直播时也不会调用 AI。
+
+        这个服务可能在本机，也可能在网络上；它是否记录或保存内容，由服务方的规则决定。
         """
 
     /// 不把 endpoint 原文写进 UserDefaults key；配置变化后必须重新确认数据流。

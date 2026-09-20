@@ -46,7 +46,7 @@ public struct TeleprompterView: View {
             isPresented: $isAIDataFlowDisclosurePresented
         ) {
             Button("取消", role: .cancel) {}
-            Button("继续并发送原稿") {
+            Button("允许发送并整理") {
                 UserDefaults.standard.set(true, forKey: aiDataFlowAcknowledgementKey)
                 startAIAnalysis()
             }
@@ -77,7 +77,7 @@ public struct TeleprompterView: View {
             }
         }
         .alert(
-            "确定删除提词稿？",
+            "确定删除这份稿子？",
             isPresented: $isDeleteAlertPresented,
             presenting: documentToDelete
         ) { doc in
@@ -92,19 +92,19 @@ public struct TeleprompterView: View {
             }
             Button("取消", role: .cancel) {}
         } message: { doc in
-            Text("删除「\(doc.title)」后将无法恢复。")
+            Text("删除「\(doc.title)」后无法恢复。")
         }
     }
 
     private var recentDocuments: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
-                CardHead(title: "我的提词稿", detail: "稿件与活动版本") {
+                CardHead(title: "我的稿子", detail: "保存的稿子与跟读版本") {
                     Menu {
-                        Button("新建稿件") {
-                            session.createDocument(title: "未命名提词稿", sourceText: "")
+                        Button("新建稿子") {
+                            session.createDocument(title: "未命名稿子", sourceText: "")
                         }
-                        Button("导入 TXT / Markdown…") {
+                        Button("导入文本文件…") {
                             isImporterPresented = true
                         }
                     } label: {
@@ -118,10 +118,10 @@ public struct TeleprompterView: View {
                         Image(systemName: "doc.text")
                             .font(.system(size: 24))
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                        Text("还没有保存的稿件")
+                        Text("还没有保存的稿子")
                             .font(SpeechRailDesignTokens.Typography.bodyMedium)
                             .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                        Text("点击右上角「新建」或导入 TXT / Markdown 即可开始。")
+                        Text("点击右上角「新建」或导入文本文件开始。")
                             .font(SpeechRailDesignTokens.Typography.caption)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                             .multilineTextAlignment(.center)
@@ -171,11 +171,11 @@ public struct TeleprompterView: View {
                                                 operationMessage = error.localizedDescription
                                             }
                                         }
-                                        Button("复制 Markdown", systemImage: "doc.on.doc") {
+                                        Button("复制稿件内容", systemImage: "doc.on.doc") {
                                             if let markdown = session.exportMarkdown() {
                                                 NSPasteboard.general.clearContents()
                                                 NSPasteboard.general.setString(markdown, forType: .string)
-                                                operationMessage = "已复制 Markdown 格式稿件"
+                                                operationMessage = "已复制稿件内容"
                                             }
                                         }
                                         Divider()
@@ -216,20 +216,20 @@ public struct TeleprompterView: View {
                                         if let markdown = session.exportMarkdown() {
                                             NSPasteboard.general.clearContents()
                                             NSPasteboard.general.setString(markdown, forType: .string)
-                                            operationMessage = "已复制 Markdown 格式稿件"
+                                            operationMessage = "已复制稿件内容"
                                         }
                                     } label: {
-                                        Label("复制 Markdown", systemImage: "doc.on.doc")
+                                        Label("复制稿件内容", systemImage: "doc.on.doc")
                                     }
 
                                     Divider()
 
-                                    Button(role: .destructive) {
-                                        documentToDelete = document
-                                        isDeleteAlertPresented = true
-                                    } label: {
-                                        Label("删除稿件…", systemImage: "trash")
-                                    }
+                                     Button(role: .destructive) {
+                                         documentToDelete = document
+                                         isDeleteAlertPresented = true
+                                     } label: {
+                                        Label("删除稿子…", systemImage: "trash")
+                                     }
                                 }
                             }
                         }
@@ -246,15 +246,15 @@ public struct TeleprompterView: View {
         if session.document == nil {
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.md) {
-                    Text("开始准备一份提词稿")
+                    Text("先准备一份稿子")
                         .font(SpeechRailDesignTokens.Typography.display)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                    Text("粘贴或导入 TXT / Markdown。AI 只在你主动点击时整理，运行时不会逐句调用大模型。")
+                    Text("粘贴或导入文本文件。需要时点「AI 帮我整理」；原稿不会被直接改掉。")
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                        Button("新建稿件") {
-                            session.createDocument(title: "未命名提词稿", sourceText: "")
+                        Button("新建稿子") {
+                            session.createDocument(title: "未命名稿子", sourceText: "")
                         }
                         .buttonStyle(.borderedProminent)
                         Button("导入文件…") {
@@ -277,13 +277,13 @@ public struct TeleprompterView: View {
     private var sourceEditor: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(title: "原稿", detail: "活动版本不会在跟读中被静默修改") {
+                CardHead(title: "原稿", detail: "这里的内容不会被 AI 直接改掉") {
                     HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                         Text("\(sourceBinding.wrappedValue.count) 字")
                             .font(SpeechRailDesignTokens.Typography.technicalValue)
                             .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
                         if session.activeVersion != nil {
-                            StatusPill(tone: .neutral, label: "版本 \(session.document?.activeVersionID?.prefix(8) ?? "")")
+                            StatusPill(tone: .neutral, label: "跟读版 \(session.document?.activeVersionID?.prefix(8) ?? "")")
                         }
                         Menu {
                             Button("创建副本", systemImage: "plus.square.on.square") {
@@ -296,15 +296,15 @@ public struct TeleprompterView: View {
                                     }
                                 }
                             }
-                            Button("复制 Markdown 全文", systemImage: "doc.on.doc") {
+                            Button("复制稿件内容", systemImage: "doc.on.doc") {
                                 if let markdown = session.exportMarkdown() {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(markdown, forType: .string)
-                                    operationMessage = "已复制 Markdown 格式稿件"
+                                    operationMessage = "已复制稿件内容"
                                 }
                             }
                             Divider()
-                            Button("删除此稿件…", systemImage: "trash", role: .destructive) {
+                            Button("删除这份稿子…", systemImage: "trash", role: .destructive) {
                                 if let doc = session.document {
                                     documentToDelete = doc
                                     isDeleteAlertPresented = true
@@ -319,27 +319,33 @@ public struct TeleprompterView: View {
                     }
                 }
                 SessionHairline()
-                TextField("稿件标题", text: titleBinding)
+                TextField("稿子名称", text: titleBinding)
                     .textFieldStyle(.plain)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .speechRailField()
                 TextEditor(text: sourceBinding)
                     .font(SpeechRailDesignTokens.Typography.body)
-                    .frame(minHeight: SpeechRailDesignTokens.Layout.creatorComposerMinimumHeight)
+                    .scrollContentBackground(.hidden)
+                    .frame(
+                        minHeight: SpeechRailDesignTokens.Teleprompter.sourceEditorMinimumHeight,
+                        idealHeight: SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight,
+                        maxHeight: SpeechRailDesignTokens.Teleprompter.sourceEditorMaximumHeight
+                    )
+                    .accessibilityLabel("原稿正文")
                     .speechRailField()
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                     Button {
                         requestAIAnalysis()
                     } label: {
                         Label(
-                            session.phase == .analyzing ? "AI 整理中…" : "AI 整理稿件",
+                            session.phase == .analyzing ? "整理中…" : "AI 帮我整理",
                             systemImage: "sparkles"
                         )
                     }
                     .speechRailButton(.primary)
                     .disabled(sourceIsEmpty || session.phase == .analyzing)
 
-                    Button("使用纯文本分段") {
+                    Button("直接按原文分段") {
                         do {
                             try session.useDeterministicFallback()
                             operationMessage = nil
@@ -367,12 +373,12 @@ public struct TeleprompterView: View {
         if let pending = session.pendingVersion {
             CardSurface {
                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                    CardHead(title: "AI 建议（待确认）", detail: "建议不会覆盖原稿，确认后生成活动版本") {
+                    CardHead(title: "AI 建议（待确认）", detail: "检查建议后，再生成用于跟读的版本") {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
                             Button("撤销") { session.discardPendingVersion() }
                                 .speechRailButton(.secondary)
 
-                            Button("接受并生成活动版本") {
+                            Button("确认建议并用于跟读") {
                                 do {
                                     try session.acceptPendingVersion()
                                     operationMessage = nil
@@ -419,17 +425,17 @@ public struct TeleprompterView: View {
 
     private func pauseHintLabel(_ hint: TeleprompterPauseHint) -> String {
         switch hint {
-        case .short: "短停顿 · 0.5s"
-        case .medium: "中停顿 · 1.0s"
-        case .long: "长停顿 · 2.0s"
+        case .short: "短暂停顿 · 0.5 秒"
+        case .medium: "中等停顿 · 1 秒"
+        case .long: "长暂停顿 · 2 秒"
         }
     }
 
     private var stageSettings: some View {
         CardSurface {
             VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.sm) {
-                CardHead(title: "舞台与跟读", detail: "独立浮层 · 直播软件请使用摄像头或目标窗口采集") {
-                    Button("打开舞台", systemImage: "macwindow") {
+                CardHead(title: "直播提词", detail: "单独的提词窗口；直播软件只采集摄像头或目标内容窗口") {
+                    Button("打开提词窗口", systemImage: "macwindow") {
                         stage.show()
                     }
                     .speechRailButton(.secondary)
@@ -450,7 +456,7 @@ public struct TeleprompterView: View {
                                 .frame(width: 44, alignment: .trailing)
                         }
                     } label: {
-                        Text("字号")
+                        Text("文字大小")
                     }
                     LabeledContent {
                         HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
@@ -468,7 +474,7 @@ public struct TeleprompterView: View {
                         Text("透明度")
                     }
                     Stepper(
-                        "显示 \(settings.visibleSegmentCount) 段",
+                        "同时显示 \(settings.visibleSegmentCount) 段",
                         value: Binding(
                             get: { settings.visibleSegmentCount },
                             set: { settings.visibleSegmentCount = $0 }
@@ -477,7 +483,7 @@ public struct TeleprompterView: View {
                     )
                 }
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Button("打开舞台并开始跟读", systemImage: "play.fill") {
+                    Button("打开提词窗口并开始跟读", systemImage: "play.fill") {
                         stage.show()
                         Task { await session.beginFollowing() }
                     }
@@ -485,7 +491,7 @@ public struct TeleprompterView: View {
                     .disabled(session.activeVersion == nil)
 
                     if session.phase == .following || session.phase == .paused || session.phase == .uncertain {
-                        Button("结束提词", systemImage: "stop.fill") {
+                        Button("停止跟读", systemImage: "stop.fill") {
                             Task { await session.endFollowing() }
                         }
                         .speechRailButton(.secondary)
@@ -503,15 +509,15 @@ public struct TeleprompterView: View {
 
     private func phaseLabel(_ phase: TeleprompterSession.Phase) -> String {
         switch phase {
-        case .draft: "草稿"
+        case .draft: "还没整理"
         case .analyzing: "正在整理…"
-        case .review: "待确认"
-        case .ready: "已就绪"
-        case .preparing: "连接中…"
+        case .review: "请检查建议"
+        case .ready: "可以开始"
+        case .preparing: "正在连接…"
         case .following: "跟读中"
         case .paused: "已暂停"
         case .uncertain: "请确认位置"
-        case .manual: "手动模式"
+        case .manual: "手动提词"
         case .ended: "已结束"
         }
     }
@@ -519,7 +525,7 @@ public struct TeleprompterView: View {
     private var headerNotices: some View {
         HStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.md) {
             Label {
-                Text("请在直播软件中选择摄像头或目标直播窗口，避免整屏采集。")
+                Text("直播软件请只采集摄像头或目标内容窗口，不要采集整个屏幕。")
                     .font(SpeechRailDesignTokens.Typography.caption)
                     .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
             } icon: {

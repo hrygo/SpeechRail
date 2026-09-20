@@ -1056,6 +1056,10 @@ public enum SpeechRailDesignTokens {
     // 新增提词器视觉值只在这里声明；视图不自行散落字号、窗口尺寸或间距。
     public enum Teleprompter {
         public static let preparationMinimumHeight: CGFloat = 560
+        /// 准备页「原稿」编辑区的高度范围。短稿保留稳定的写作空间，长稿在编辑器内部滚动。
+        public static let sourceEditorMinimumHeight: CGFloat = 144
+        public static let sourceEditorIdealHeight: CGFloat = 260
+        public static let sourceEditorMaximumHeight: CGFloat = 360
         public static let stageDefaultWidth: CGFloat = 960
         public static let stageMinimumWidth: CGFloat = 640
         public static let stageDefaultHeight: CGFloat = 620
