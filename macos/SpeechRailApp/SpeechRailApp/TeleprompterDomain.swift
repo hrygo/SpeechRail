@@ -149,6 +149,22 @@ public struct TeleprompterRunState: Codable, Equatable, Sendable {
     }
 }
 
+public struct TeleprompterDocumentBundle: Codable, Equatable, Sendable {
+    public var document: TeleprompterDocument
+    public var versions: [TeleprompterVersion]
+    public var runState: TeleprompterRunState?
+
+    public init(
+        document: TeleprompterDocument,
+        versions: [TeleprompterVersion],
+        runState: TeleprompterRunState?
+    ) {
+        self.document = document
+        self.versions = versions
+        self.runState = runState
+    }
+}
+
 public enum TeleprompterAlignmentDecision: Equatable, Sendable {
     case stay(confidence: Double)
     case advance(to: Int, confidence: Double)
