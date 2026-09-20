@@ -133,7 +133,7 @@ public struct TeleprompterAnalysisDecoder: Sendable {
 }
 
 public struct TeleprompterAIClient: Sendable {
-    public typealias Completion = @Sendable (String) async throws -> String
+    public typealias Completion = @MainActor @Sendable (String) async throws -> String
 
     private let completion: Completion
     private let decoder: TeleprompterAnalysisDecoder

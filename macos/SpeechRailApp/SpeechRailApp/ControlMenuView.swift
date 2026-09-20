@@ -439,7 +439,7 @@ struct MenuBarStatusLabel: View {
         switch session.occupancy?.kind {
         // 会议录着的时候，机器在收声——这是最需要"不打开也知道"的一态。
         case .meeting: return .attention
-        case .assistant, .captions: return nil
+        case .assistant, .captions, .teleprompter: return nil
         case .none: return isOperating ? .attention : nil
         }
     }

@@ -29,6 +29,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     case assistant
     case meeting
     case captions
+    case teleprompter
     case overview
     case monitoring
     case models
@@ -41,7 +42,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         switch self {
         case .dubbing, .voiceDesign, .voiceClone, .voiceLibrary, .works:
             .creator
-        case .assistant, .meeting, .captions:
+        case .assistant, .meeting, .captions, .teleprompter:
             .session
         case .overview, .monitoring, .models, .diagnostics, .developerDocs:
             .service
@@ -66,6 +67,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "会议助手"
         case .captions:
             "实时字幕"
+        case .teleprompter:
+            "AI 提词器"
         case .overview:
             "服务状态"
         case .monitoring:
@@ -100,6 +103,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "边开会边记：谁说了什么、说了哪些要点，都留在本机记录库里。"
         case .captions:
             "字幕带贴在屏幕上看；记录长期留在记录库，这里回看、搜索和导出。"
+        case .teleprompter:
+            "准备一份稿件，在独立舞台窗口中跟读；直播软件请使用摄像头或目标窗口采集。"
         case .overview:
             "本机语音引擎的当前结论与运行事实。"
         case .monitoring:
@@ -135,6 +140,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "person.2"
         case .captions:
             "captions.bubble"
+        case .teleprompter:
+            "text.bubble"
         case .overview:
             "server.rack"
         case .monitoring:
@@ -166,6 +173,8 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
             "记录会议、标注说话人并生成纪要"
         case .captions:
             "把正在说的话变成屏幕上的字幕"
+        case .teleprompter:
+            "把自己的稿件放进独立舞台窗口，按讲话进度自动跟读"
         case .overview:
             "确认本机语音服务能否使用"
         case .monitoring:
@@ -188,7 +197,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
     }
 
     public static var sessionRoutes: [AppRoute] {
-        [.assistant, .meeting, .captions]
+        [.assistant, .meeting, .captions, .teleprompter]
     }
 
     /// 这个路由属于哪条会话能力；不是会话页时为 `nil`。
@@ -197,6 +206,7 @@ public enum AppRoute: String, CaseIterable, Identifiable, Hashable, Sendable {
         case .assistant: .assistant
         case .meeting: .meeting
         case .captions: .captions
+        case .teleprompter: .teleprompter
         default: nil
         }
     }
