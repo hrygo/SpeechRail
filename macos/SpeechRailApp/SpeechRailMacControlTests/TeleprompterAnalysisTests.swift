@@ -73,4 +73,34 @@ struct TeleprompterAnalysisTests {
             try await client.analyze(.init(sourceText: source, language: nil, style: nil))
         }
     }
+
+    @Test @MainActor func laterWindowFailureDoesNotReturnPartialScript() async {
+        var calls = 0
+        let client = TeleprompterAIClient { prompt in
+            calls += 1
+            if calls == 2 { return "{}" }
+            let context = try #require(JSONSerialization.jsonObject(with: Data(prompt.input.utf8)) as? [String: Any])
+            let units = try #require(context["units"] as? [[String: Any]])
+            let annotations = try units.map { unit -> [String: Any] in
+                let id = try #require(unit["id"] as? Int)
+                return ["start_unit": id, "end_unit": id + 1, "keywords": [], "match_phrases": [], "pause_hint": "short"]
+            }
+            return String(decoding: try JSONSerialization.data(withJSONObject: ["schema_version": "teleprompter.analysis.v2", "segments": annotations]), as: UTF8.self)
+        }
+        await #expect(throws: TeleprompterTextError.self) {
+            try await client.analyze(.init(sourceText: String(repeating: "测试完整稿件。", count: 24), language: nil, style: nil))
+        }
+        #expect(calls == 2)
+    }
+
+    @Test func rejectsInventedKeywordAndMissingLastUnit() {
+        let invented = valid.replacingOccurrences(of: "直播", with: "新事实")
+        #expect(throws: TeleprompterTextError.self) {
+            try TeleprompterAnalysisDecoder().decode(invented, sourceText: source)
+        }
+        let omitted = #"{"schema_version":"teleprompter.analysis.v2","segments":[{"start_unit":0,"end_unit":1,"keywords":[],"match_phrases":[],"pause_hint":"short"}]}"#
+        #expect(throws: TeleprompterTextError.self) {
+            try TeleprompterAnalysisDecoder().decode(omitted, sourceText: source)
+        }
+    }
 }

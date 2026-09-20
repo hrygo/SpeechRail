@@ -30,7 +30,7 @@ public enum TeleprompterAIDataFlowDisclosure {
         "speechrail.teleprompter.aiDataFlowAcknowledged.v1"
     public static let title = "整理稿件前请确认"
     public static let inlineMessage =
-        "只有点击「允许发送并整理」时，原稿才会发给 AI 服务；跟读时不会调用 AI。"
+        "只有点击 AI 朗读标注时，原稿才会发给 AI 服务；跟读时不会调用 AI。"
     public static let message = """
         点击「允许发送并整理」后，SpeechRail 会把当前原稿文字，以及你选择的语言和表达方式，发送给设置中的 AI 服务，用来分段、提取关键词和建议停顿。
 

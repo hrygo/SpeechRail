@@ -6,6 +6,33 @@ public enum TeleprompterNormalizer {
         public let range: TeleprompterSourceRange
     }
 
+    public struct ReadingSlice: Identifiable, Equatable, Sendable {
+        public let id: String
+        public let segmentIndex: Int
+        public let start: Int
+        public let end: Int
+        public let text: String
+    }
+
+    public static func readingSlices(segments: [TeleprompterSegment], tokensPerSlice: Int) -> [ReadingSlice] {
+        var result: [ReadingSlice] = []
+        for (index, segment) in segments.enumerated() {
+            let tokens = indexedTokens(segment.text)
+            var start = 0
+            let limit = max(1, tokensPerSlice)
+            var boundaries = stride(from: limit, to: tokens.count, by: limit).map { tokens[$0].range.start }
+            boundaries.append(segment.text.utf16.count)
+            for end in boundaries where end > start {
+                if let range = Range(NSRange(location: start, length: end - start), in: segment.text) {
+                    result.append(.init(id: "\(segment.id):\(start)", segmentIndex: index, start: start,
+                                        end: end, text: String(segment.text[range])))
+                }
+                start = end
+            }
+        }
+        return result
+    }
+
     public static func normalize(_ text: String) -> String {
         tokens(text).joined(separator: " ")
     }

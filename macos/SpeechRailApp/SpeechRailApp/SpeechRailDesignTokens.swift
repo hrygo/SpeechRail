@@ -1066,6 +1066,8 @@ public enum SpeechRailDesignTokens {
         public static let stageMinimumHeight: CGFloat = 420
         public static let stagePadding: CGFloat = Spacing.xl
         public static let stageSegmentSpacing: CGFloat = Spacing.lg
+        /// 一个滚动阅读单元的匹配 token 数；与字体换行和 AI 分段独立。
+        public static let stageReadingTokensPerSlice = 12
         public static let stageStatusSpacing: CGFloat = Spacing.sm
         public static let stageScriptPointSize: CGFloat = 42
         public static let stageScriptMinimumPointSize: CGFloat = 28

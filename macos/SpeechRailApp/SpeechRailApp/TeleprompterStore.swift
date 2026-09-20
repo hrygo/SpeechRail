@@ -198,8 +198,6 @@ public final class TeleprompterStore {
     private func validate(_ bundle: TeleprompterDocumentBundle) throws {
         guard !bundle.document.id.isEmpty,
               !bundle.document.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !TeleprompterNormalizer.tokens(bundle.document.sourceText).isEmpty,
-              !bundle.versions.isEmpty,
               bundle.versions.allSatisfy({ $0.documentID == bundle.document.id }),
               bundle.document.activeVersionID == nil
                   || bundle.versions.contains(where: { $0.id == bundle.document.activeVersionID }) else {

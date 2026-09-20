@@ -58,7 +58,6 @@ public final class TeleprompterStageWindowController: NSObject, NSWindowDelegate
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.setFrameAutosaveName(SpeechRailDesignTokens.Teleprompter.stageWindowAutosaveName)
-        panel.sharingType = .none
         panel.delegate = self
         panel.contentView = NSHostingView(
             rootView: TeleprompterStageView(

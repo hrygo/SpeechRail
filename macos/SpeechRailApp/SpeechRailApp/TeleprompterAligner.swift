@@ -4,16 +4,19 @@ public struct TeleprompterAligner: Sendable {
     public struct Configuration: Equatable, Sendable {
         public var minimumConfidence: Double
         public var advanceMargin: Double
-        public var lookahead: Int
+        public var lookBehindTokens: Int
+        public var lookAheadTokens: Int
 
         public init(
             minimumConfidence: Double = 0.72,
             advanceMargin: Double = 0.12,
-            lookahead: Int = 2
+            lookBehindTokens: Int = 80,
+            lookAheadTokens: Int = 320
         ) {
             self.minimumConfidence = minimumConfidence
             self.advanceMargin = advanceMargin
-            self.lookahead = max(1, lookahead)
+            self.lookBehindTokens = max(0, min(320, lookBehindTokens))
+            self.lookAheadTokens = max(1, min(640, lookAheadTokens))
         }
     }
 
@@ -68,8 +71,8 @@ public struct TeleprompterAligner: Sendable {
             $0.position.segmentIndex > anchor.segmentIndex ||
             ($0.position.segmentIndex == anchor.segmentIndex && $0.position.utf16Offset >= anchor.utf16Offset)
         } ?? script.tokens.count - 1
-        let lower = max(0, anchorIndex - 80)
-        let upper = min(script.tokens.count, anchorIndex + 320)
+        let lower = max(0, anchorIndex - configuration.lookBehindTokens)
+        let upper = min(script.tokens.count, anchorIndex + configuration.lookAheadTokens)
         let window = Array(script.tokens[lower..<upper])
         struct Cell {
             var cost: Double
@@ -86,9 +89,10 @@ public struct TeleprompterAligner: Sendable {
                                     start: previous[j - 1].start)
                 let inserted = Cell(cost: previous[j].cost + 1, matches: previous[j].matches, start: previous[j].start)
                 let deleted = Cell(cost: row[j - 1].cost + 1, matches: row[j - 1].matches, start: row[j - 1].start)
-                row.append([diagonal, inserted, deleted].min {
-                    $0.cost == $1.cost ? $0.matches > $1.matches : $0.cost < $1.cost
-                }!)
+                var best = diagonal
+                if inserted.cost < best.cost || (inserted.cost == best.cost && inserted.matches > best.matches) { best = inserted }
+                if deleted.cost < best.cost || (deleted.cost == best.cost && deleted.matches > best.matches) { best = deleted }
+                row.append(best)
             }
             previous = row
         }
@@ -115,15 +119,22 @@ public struct TeleprompterAligner: Sendable {
             abs($0.start - best.start) >= max(3, input.count / 2)
                 && abs($0.end - best.end) >= max(3, input.count / 2)
         }
-        if let competitor, best.confidence - competitor.confidence < configuration.advanceMargin {
+        // A long unique exact span crossing the existing anchor is continuity
+        // evidence, even in numbered lists whose neighbouring sentences differ
+        // by only one token. Equal exact copies remain ambiguous.
+        let continuesAnchor = lower + best.start <= anchorIndex + 4 && lower + best.end >= anchorIndex
+        let uniqueExactContinuation = best.confidence == 1 && best.matches >= 8 && continuesAnchor
+            && (competitor?.confidence ?? 0) < 1
+        if let competitor, best.confidence - competitor.confidence < configuration.advanceMargin,
+           !uniqueExactContinuation {
             return Match(position: nil, confidence: best.confidence, matchedCount: best.matches)
         }
         return Match(position: window[best.end - 1].position, confidence: best.confidence, matchedCount: best.matches)
     }
 
-    private func equivalent(_ lhs: String, _ rhs: String) -> Bool {
-        let digits = ["零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+    private static let digits = ["零": "0", "〇": "0", "一": "1", "二": "2", "三": "3", "四": "4",
                       "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"]
-        return (digits[lhs] ?? lhs) == (digits[rhs] ?? rhs)
+    private func equivalent(_ lhs: String, _ rhs: String) -> Bool {
+        (Self.digits[lhs] ?? lhs) == (Self.digits[rhs] ?? rhs)
     }
 }

@@ -25,12 +25,20 @@
 
 ## Execution
 
-- [ ] 1. 在现有 Normalizer/Aligner 测试中加入默认参数的正文匹配、分句、跨段、局部重读、无关内容与坐标测试；先运行失败，再实现索引与局部编辑距离对齐。
-- [ ] 2. 在 FollowController 测试中加入 item 增量、final 替换、重复抑制、暂停与恢复边界；实现候选/确认位置和有界内存。
-- [ ] 3. Session 固定运行版本、门控编辑和 AI 响应、恢复前排空旧事件；舞台加入原文位置提示、滚动及从指定段落开始，准备流程默认按原文开始。
-- [ ] 4. Analysis 改用本地编号单元、分窗口请求、严格全覆盖校验和保留原文的 prompt；测试 Unicode、错误引用和长稿合并。
-- [ ] 5. 同步当前开发文档，运行 `swift test --package-path macos/SpeechRailApp --filter Teleprompter` 和不签名的 App 编译验证；检查差异与并行修改。
+- [x] 1. 在现有 Normalizer/Aligner 测试中加入默认参数的正文匹配、分句、跨段、局部重读、无关内容与坐标测试；先运行失败，再实现索引与局部编辑距离对齐。
+- [x] 2. 在 FollowController 测试中加入 item 增量、final 替换、重复抑制、暂停与恢复边界；实现候选/确认位置和有界内存。
+- [x] 3. Session 固定运行版本、门控编辑和 AI 响应、恢复前排空旧事件；舞台加入原文位置提示、滚动及从指定段落开始，准备流程默认按原文开始。
+- [x] 4. Analysis 改用本地编号单元、分窗口请求、严格全覆盖校验和保留原文的 prompt；测试 Unicode、错误引用和长稿合并。
+- [x] 5. 同步当前开发文档，运行 `swift test --package-path macos/SpeechRailApp --filter Teleprompter` 和Debug 本地 ad hoc App 编译验证；检查差异与并行修改。
 
 ## Validation and Recovery
 
 确定性测试使用合成文本和 fake completion；不将测试通过等同于真实跟读质量。保留每个修改文件的任务开始快照于仓库外，仅在需要时用差异定位本轮修改，不整文件覆盖现有工作。AI wire schema 更新为 v2，本机版本存储不变，已有稿件仍可使用。回退仅撤回本轮 diff；不回退其他任务的修改。
+
+## Execution evidence
+
+- 聚焦测试：12 个 XCTest + 28 个 Swift Testing，全部通过（2026-09-20）。
+- 已复现并修复：无版本草稿无法保存、错误 partial 无法回退、旧 final 覆盖新位置、短片段不能积累、长连续 turn 无法跟出初始窗口。
+- 并行任务经用户授权的 `commit all` 创建了 `53388a8e`，包含本轮早期代码；本任务未提交或推送，后续改动保持工作区状态。
+- 真实语音、LLM 质量和视觉验收未执行；设备使用既有系统默认麦克风，未新增设备选择器。
+- 最终 App Debug 构建成功，`git diff --check` 无错误（2026-09-20）；未安装、发布或操作运行服务。

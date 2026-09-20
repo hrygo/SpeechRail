@@ -72,7 +72,11 @@ public final class TeleprompterSession {
     public private(set) var lastFailure: String?
     public private(set) var readingOffset = 0
     public private(set) var isResuming = false
-    public var canEdit: Bool { source == nil && client == nil && phase != .preparing && !isResuming }
+    public private(set) var hasHeardSpeech = false
+    public var canEdit: Bool {
+        source == nil && client == nil && runningVersion == nil
+            && phase != .preparing && !isResuming && !isStoppingIntentionally
+    }
     public var isCapturing: Bool { client != nil }
 
     public var activeVersion: TeleprompterVersion? {
@@ -109,6 +113,8 @@ public final class TeleprompterSession {
     private var runningVersion: TeleprompterVersion?
     private var captureGeneration = UUID()
     private var draftGeneration = UUID()
+    private var analysisTask: Task<TeleprompterAnalysis, Error>?
+    private var savedRunState: TeleprompterRunState?
 
     public init(
         coordinator: SessionCoordinator,
@@ -132,8 +138,9 @@ public final class TeleprompterSession {
 
     public func load(documentID: String) throws {
         guard canEdit else { return }
-        draftGeneration = UUID()
+        invalidateAnalysis()
         let bundle = try store.loadBundle(documentID: documentID)
+        savedRunState = bundle.runState
         document = bundle.document
         versions = bundle.versions
         pendingVersion = nil
@@ -147,11 +154,13 @@ public final class TeleprompterSession {
         )
         phase = activeVersion == nil ? .draft : .ready
         blocked = nil
+        syncFollowState()
     }
 
     public func createDocument(title: String, sourceText: String) {
         guard canEdit else { return }
-        draftGeneration = UUID()
+        invalidateAnalysis()
+        savedRunState = nil
         let now = Date()
         document = TeleprompterDocument(
             id: UUID().uuidString,
@@ -163,6 +172,7 @@ public final class TeleprompterSession {
         versions = []
         pendingVersion = nil
         currentSegmentIndex = 0
+        readingOffset = 0
         phase = .draft
         blocked = nil
         lastFailure = nil
@@ -218,7 +228,7 @@ public final class TeleprompterSession {
 
     public func updateSourceText(_ sourceText: String) {
         guard canEdit else { return }
-        draftGeneration = UUID()
+        invalidateAnalysis()
         guard phase != .following, phase != .paused, phase != .uncertain else { return }
         document?.sourceText = sourceText
         document?.updatedAt = Date()
@@ -229,7 +239,8 @@ public final class TeleprompterSession {
 
     public func useDeterministicFallback() throws {
         guard canEdit else { return }
-        draftGeneration = UUID()
+        invalidateAnalysis()
+        savedRunState = nil
         guard var document else { throw TeleprompterTextError.emptySource }
         let segments = try TeleprompterSegmenter.segment(sourceText: document.sourceText)
         let version = TeleprompterVersion(
@@ -246,6 +257,7 @@ public final class TeleprompterSession {
         pendingVersion = nil
         currentSegmentIndex = 0
         followController = TeleprompterFollowController()
+        syncFollowState()
         phase = .ready
         blocked = nil
         try saveBundle()
@@ -265,14 +277,16 @@ public final class TeleprompterSession {
         let generation = draftGeneration
         blocked = nil
         do {
-            let analysis = try await aiClient.analyze(
-                TeleprompterAnalysisRequest(
+            let request = TeleprompterAnalysisRequest(
                     sourceText: document.sourceText,
                     language: language,
                     style: style
                 )
-            )
+            let task = Task { try await aiClient.analyze(request) }
+            analysisTask = task
+            let analysis = try await task.value
             guard generation == draftGeneration, self.document?.id == document.id, canEdit else { return }
+            analysisTask = nil
             pendingVersion = TeleprompterVersion(
                 id: UUID().uuidString,
                 documentID: document.id,
@@ -283,6 +297,7 @@ public final class TeleprompterSession {
             phase = .review
         } catch {
             guard generation == draftGeneration, self.document?.id == document.id, canEdit else { return }
+            analysisTask = nil
             blocked = .aiUnavailable(Self.aiFailureMessage(for: error))
             phase = .draft
         }
@@ -295,12 +310,14 @@ public final class TeleprompterSession {
             throw TeleprompterTextError.invalidAnalysis
         }
         versions.append(pendingVersion)
+        savedRunState = nil
         document.activeVersionID = pendingVersion.id
         document.updatedAt = Date()
         self.document = document
         self.pendingVersion = nil
         currentSegmentIndex = 0
         followController = TeleprompterFollowController()
+        syncFollowState()
         phase = .ready
         blocked = nil
         try saveBundle()
@@ -353,13 +370,16 @@ public final class TeleprompterSession {
     public func beginCapture() async throws {
         guard client == nil, let activeVersion else { throw Blocked(reason: .noActiveVersion) }
         runningVersion = activeVersion
-        draftGeneration = UUID()
+        invalidateAnalysis()
+        captureGeneration = UUID()
+        let generation = captureGeneration
         phase = .preparing
         blocked = nil
         lastFailure = nil
         do {
-            try await startPipeline()
+            try await startPipeline(generation: generation)
         } catch {
+            guard generation == captureGeneration else { throw error }
             runningVersion = nil
             let reason = Self.blockReason(for: error)
             blocked = reason
@@ -377,6 +397,10 @@ public final class TeleprompterSession {
     }
 
     public func resumeFollowing() async {
+        if client == nil, phase == .ready || phase == .ended || phase == .manual {
+            await beginFollowing()
+            return
+        }
         guard phase == .paused || phase == .manual || phase == .uncertain else { return }
         guard !isResuming else { return }
         guard let client else { await beginFollowing(); return }
@@ -463,7 +487,7 @@ public final class TeleprompterSession {
         isStoppingIntentionally = false
     }
 
-    private func startPipeline() async throws {
+    private func startPipeline(generation: UUID) async throws {
         if let serviceReadiness {
             switch await serviceReadiness() {
             case .ready:
@@ -473,14 +497,20 @@ public final class TeleprompterSession {
             }
         }
 
+        guard generation == captureGeneration else { throw CancellationError() }
+
         let source = audioSourceFactory()
         self.source = source
         let stream: AsyncStream<AudioChunk>
         do {
             stream = try await source.start()
         } catch {
-            self.source = nil
+            if generation == captureGeneration { self.source = nil }
             throw Blocked(reason: Self.blockReason(for: error))
+        }
+        guard generation == captureGeneration else {
+            source.stop()
+            throw CancellationError()
         }
 
         let client = RealtimeASRClient(
@@ -493,15 +523,20 @@ public final class TeleprompterSession {
             try await client.connect()
         } catch {
             source.stop()
-            self.source = nil
+            if generation == captureGeneration { self.source = nil }
             throw Blocked(reason: .serviceNotReady(error.localizedDescription))
+        }
+        guard generation == captureGeneration else {
+            source.stop()
+            await client.close()
+            throw CancellationError()
         }
 
         self.client = client
-        captureGeneration = UUID()
         isStoppingIntentionally = false
         partialText = nil
         uncertainty = nil
+        hasHeardSpeech = false
         coordinator.sessionDidStartRecording(id: nil)
         followController.resume()
         syncFollowState()
@@ -538,7 +573,8 @@ public final class TeleprompterSession {
         do {
             try await client.append(chunk.pcm)
         } catch {
-            lastFailure = error.localizedDescription
+            guard generation == captureGeneration else { return }
+            await enterManual(.streamFailed("语音连接中断，可以手动继续或重新开始。"))
         }
     }
 
@@ -547,15 +583,18 @@ public final class TeleprompterSession {
     ) async {
         guard generation == captureGeneration, !isStoppingIntentionally else { return }
         switch envelope.payload {
+        case .speechStarted:
+            if followController.mode == .following, !isResuming { hasHeardSpeech = true }
         case .partial(let itemID, let delta):
             guard !isResuming, let activeVersion else { return }
-            followController.receivePartial(itemID: itemID, delta: delta, segments: activeVersion.segments)
+            followController.receivePartial(itemID: itemID, delta: delta, segments: activeVersion.segments,
+                                            eventID: envelope.metadata.eventID)
             syncFollowState()
         case .completed(let itemID, let transcript, _):
             guard !isResuming, let activeVersion else { return }
             followController.receiveCompleted(
                 itemID: itemID, transcript: transcript,
-                segments: activeVersion.segments
+                segments: activeVersion.segments, eventID: envelope.metadata.eventID
             )
             syncFollowState()
             if followController.mode == .following {
@@ -586,6 +625,9 @@ public final class TeleprompterSession {
         client = nil
         pump?.cancel()
         pump = nil
+        if coordinator.occupancy?.kind == .teleprompter {
+            await coordinator.stopCapture(endingWith: .user)
+        }
         followController.enterManual()
         syncFollowState()
         blocked = reason
@@ -604,33 +646,45 @@ public final class TeleprompterSession {
     private func saveProgress() {
         guard let document, let activeVersion else { return }
         do {
-            try store.updateRunState(
-                TeleprompterRunState(
+            let state = TeleprompterRunState(
                     documentID: document.id,
                     versionID: activeVersion.id,
                     currentSegmentID: currentSegment?.id,
                     mode: followController.mode
                 )
-            )
+            try store.updateRunState(state)
+            savedRunState = state
         } catch {
             lastFailure = error.localizedDescription
         }
     }
 
     private func saveBundle() throws {
-        guard let document else { throw TeleprompterStoreError.invalidBundle }
+        guard var document else { throw TeleprompterStoreError.invalidBundle }
+        if document.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            document.title = "未命名稿子"
+        }
         try store.saveBundle(
             TeleprompterDocumentBundle(
                 document: document,
                 versions: versions,
-                runState: nil
+                runState: savedRunState
             )
         )
     }
 
     private func persistDraft() {
-        do { try saveBundle() }
+        do {
+            try saveBundle()
+            if case .storeUnavailable = blocked { blocked = nil }
+        }
         catch { blocked = .storeUnavailable("稿子暂时没能保存，请稍后重试。") }
+    }
+
+    private func invalidateAnalysis() {
+        analysisTask?.cancel()
+        analysisTask = nil
+        draftGeneration = UUID()
     }
 
     private static func blockReason(for error: Error) -> BlockReason {

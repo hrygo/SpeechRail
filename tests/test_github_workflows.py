@@ -38,7 +38,8 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
     assert jobs["test"]["strategy"]["matrix"]["os"] == ["macos-26"]
     assert jobs["macos-app"]["runs-on"] == "macos-26"
     assert jobs["package"]["needs"] == ["quality", "test"]
-    assert "speechrail-${version}-*.whl" in ci_text
+    assert "speechrail-*.whl" in ci_text
+    assert "speechrail-wheel-candidate" in ci_text
     assert "tests/test_diarization_extensions.py" in ci_text
     assert "tests/test_diarization_sdk.py" in ci_text
     assert "tests/test_diarization_contracts.py" not in ci_text
@@ -47,6 +48,51 @@ def test_ci_is_reusable_and_keeps_service_and_app_runner_boundaries() -> None:
         "tests/test_diarization_sdk.py",
     ):
         assert (ROOT / relative_path).is_file()
+
+
+def test_ci_reuses_the_tested_wheel_artifact_in_the_package_job() -> None:
+    workflow = _workflow("ci.yml")
+    ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    jobs = _jobs(workflow)
+
+    test_steps = jobs["test"]["steps"]
+    package_steps = jobs["package"]["steps"]
+    assert isinstance(test_steps, list)
+    assert isinstance(package_steps, list)
+    test_run_text = "\n".join(
+        step.get("run", "")
+        for step in test_steps
+        if isinstance(step, dict) and isinstance(step.get("run", ""), str)
+    )
+    package_run_text = "\n".join(
+        step.get("run", "")
+        for step in package_steps
+        if isinstance(step, dict) and isinstance(step.get("run", ""), str)
+    )
+
+    assert "uv build --no-sources --wheel" in test_run_text
+    assert "SPEECHRAIL_WHEEL_PATH" in test_run_text
+    assert "speechrail-wheel-candidate" in ci_text
+    assert any(
+        isinstance(step, dict)
+        and str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        and step.get("with", {}).get("name") == "speechrail-wheel-candidate"
+        for step in test_steps
+    )
+    assert any(
+        isinstance(step, dict)
+        and str(step.get("uses", "")).startswith("actions/download-artifact@")
+        and step.get("with", {}).get("name") == "speechrail-wheel-candidate"
+        for step in package_steps
+    )
+    assert not any(
+        isinstance(step, dict)
+        and str(step.get("uses", "")).startswith("actions/checkout@")
+        for step in package_steps
+    )
+    assert "uv sync --locked --extra dev --extra mcp" not in package_run_text
+    assert "uv build --no-sources --wheel" not in package_run_text
+    assert "tests/test_wheel_contents.py" not in package_run_text
 
 
 def test_release_blocks_publish_until_tag_ci_and_unsigned_dmg_are_verified() -> None:

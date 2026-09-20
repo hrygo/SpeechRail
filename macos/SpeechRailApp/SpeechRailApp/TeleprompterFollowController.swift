@@ -12,64 +12,90 @@ public struct TeleprompterFollowController: Sendable {
     private struct Item: Sendable {
         var text: String
         let anchor: TeleprompterAligner.Position
+        let sequence: Int
         var previousEvidence = 0
     }
     private var items: [String: Item] = [:]
     private var retired: [String] = []
+    private var eventIDs: [String] = []
     private var history: [String] = []
     private var script: TeleprompterAligner.Script?
     private var scriptSegments: [TeleprompterSegment] = []
     private let aligner = TeleprompterAligner()
+    private var nextSequence = 0
+    private var finalizedSequence = -1
+    private var provisionalItemID: String?
 
     public init(currentIndex: Int = 0, mode: TeleprompterRunMode = .following) {
         position = .init(segmentIndex: max(0, currentIndex), utf16Offset: 0)
         self.mode = mode
     }
 
-    public mutating func receivePartial(itemID: String, delta: String, segments: [TeleprompterSegment]) {
+    public mutating func receivePartial(itemID: String, delta: String, segments: [TeleprompterSegment], eventID: String? = nil) {
+        guard acceptEvent(eventID) else { return }
         guard !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
         prepare(segments)
         guard let script else { return }
-        var item = items[itemID] ?? Item(text: "", anchor: position)
+        var item = item(for: itemID)
+        guard item.sequence > finalizedSequence else { retire(itemID); return }
         item.text = String((item.text + delta).suffix(2048))
         partialPreview = item.text
         let tokens = TeleprompterNormalizer.tokens(item.text)
-        let match = locate(tokens, script: script, anchor: item.anchor)
+        let match = locate(tokens, script: script, anchor: position)
         candidatePosition = match.position
         // Two genuinely growing hypotheses are required before provisional scrolling.
         if let candidate = match.position, match.confidence >= 0.88,
            match.matchedCount >= 5, item.previousEvidence >= 3,
-           match.matchedCount > item.previousEvidence,
+           !TeleprompterNormalizer.tokens(delta).isEmpty,
            candidate.segmentIndex >= position.segmentIndex {
             position = candidate
+            provisionalItemID = itemID
             uncertainty = nil
         }
         item.previousEvidence = match.position == nil ? 0 : match.matchedCount
         items[itemID] = item
-        if items.count > 8, let oldest = items.keys.sorted().first { retire(oldest) }
+        if items.count > 8, let oldest = items.min(by: { $0.value.sequence < $1.value.sequence })?.key { retire(oldest) }
     }
 
-    public mutating func receiveCompleted(itemID: String, transcript: String, segments: [TeleprompterSegment]) {
+    public mutating func receiveCompleted(itemID: String, transcript: String, segments: [TeleprompterSegment], eventID: String? = nil) {
+        guard acceptEvent(eventID) else { return }
         guard !itemID.isEmpty, !retired.contains(itemID) else { return }
         guard mode == .following else { retire(itemID); return }
         prepare(segments)
         guard let script else { return }
-        let anchor = items[itemID]?.anchor ?? position
+        let item = item(for: itemID)
+        guard item.sequence > finalizedSequence else { retire(itemID); return }
+        finalizedSequence = item.sequence
+        let anchor = item.anchor
         let tokens = TeleprompterNormalizer.tokens(transcript)
+        if tokens.count + history.count < 3 {
+            history += tokens
+            partialPreview = nil
+            if provisionalItemID == itemID { position = anchor; provisionalItemID = nil }
+            retire(itemID)
+            return
+        }
         if !tokens.isEmpty {
-            let match = locate(tokens, script: script, anchor: anchor)
+            var match = locate(tokens, script: script, anchor: position)
+            if match.position == nil, anchor != position {
+                match = locate(tokens, script: script, anchor: anchor)
+            }
             candidatePosition = match.position
             if let candidate = match.position {
                 position = candidate
                 uncertainty = nil
                 history = Array((history + tokens).suffix(48))
             } else {
+                if provisionalItemID == itemID { position = anchor }
                 // Do not carry an off-script answer into the next return-to-script attempt.
                 history = []
                 uncertainty = match.confidence
             }
+        } else if provisionalItemID == itemID {
+            position = anchor
         }
+        if provisionalItemID == itemID { provisionalItemID = nil }
         partialPreview = nil
         retire(itemID)
     }
@@ -79,7 +105,15 @@ public struct TeleprompterFollowController: Sendable {
         // Try the current utterance first so a detour/repeat cannot be pinned by old text.
         let current = aligner.locate(tokens: tokens, script: script, anchor: anchor)
         if current.position != nil { return current }
-        return aligner.locate(tokens: history + tokens, script: script, anchor: anchor)
+        guard tokens.count < 3 || current.confidence > 0 else { return current }
+        return aligner.locate(tokens: Array(history.suffix(24)) + tokens, script: script, anchor: anchor)
+    }
+
+    private mutating func item(for id: String) -> Item {
+        if let item = items[id] { return item }
+        let item = Item(text: "", anchor: position, sequence: nextSequence)
+        nextSequence += 1
+        return item
     }
 
     private mutating func prepare(_ segments: [TeleprompterSegment]) {
@@ -95,11 +129,20 @@ public struct TeleprompterFollowController: Sendable {
         if retired.count > 128 { retired.removeFirst(retired.count - 128) }
     }
 
+    private mutating func acceptEvent(_ id: String?) -> Bool {
+        guard let id else { return true }
+        guard !eventIDs.contains(id) else { return false }
+        eventIDs.append(id)
+        if eventIDs.count > 128 { eventIDs.removeFirst(eventIDs.count - 128) }
+        return true
+    }
+
     private mutating func invalidatePending() {
         for id in Array(items.keys) { retire(id) }
         history = []
         partialPreview = nil
         candidatePosition = nil
+        provisionalItemID = nil
         uncertainty = nil
     }
 

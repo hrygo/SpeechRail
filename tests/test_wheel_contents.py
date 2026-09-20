@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
+import pytest
+
 _REQUIRED_WHEEL_FILES = {
     "speechrail/assets/model-catalog.json",
     "speechrail/assets/runtime-lock.json",
@@ -23,6 +25,12 @@ _BUILT_WHEEL: Path | None = None
 
 
 def _wheel_for_test() -> Path:
+    configured_wheel = os.environ.get("SPEECHRAIL_WHEEL_PATH")
+    if configured_wheel:
+        wheel = Path(configured_wheel).resolve()
+        assert wheel.is_file(), f"configured wheel does not exist: {wheel}"
+        return wheel
+
     global _BUILT_WHEEL
     if _BUILT_WHEEL is not None:
         return _BUILT_WHEEL
@@ -42,6 +50,21 @@ def _wheel_for_test() -> Path:
     assert changed, "uv build did not produce a new wheel"
     _BUILT_WHEEL = max(changed, key=lambda wheel: wheel.stat().st_mtime_ns).resolve()
     return _BUILT_WHEEL
+
+
+def test_configured_wheel_path_skips_rebuild(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    wheel = tmp_path / "speechrail-test.whl"
+    wheel.write_bytes(b"test artifact")
+    monkeypatch.setenv("SPEECHRAIL_WHEEL_PATH", str(wheel))
+
+    def fail_build(*args: object, **kwargs: object) -> None:
+        raise AssertionError("configured wheel path must skip uv build")
+
+    monkeypatch.setattr(subprocess, "run", fail_build)
+
+    assert _wheel_for_test() == wheel.resolve()
 
 
 def assert_wheel_contents(wheel_path: Path) -> None:

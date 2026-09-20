@@ -1,4 +1,5 @@
 import XCTest
+import Testing
 
 #if SWIFT_PACKAGE
 @testable import SpeechRailAppSupport
@@ -141,5 +142,17 @@ final class TeleprompterStoreTests: XCTestCase {
             versions: [version],
             runState: nil
         )
+    }
+}
+
+struct TeleprompterDraftStoreTests {
+    @Test @MainActor func savesDraftBeforeAnyAnalysis() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try TeleprompterStore(directoryURL: directory)
+        let draft = TeleprompterDocument(id: "draft", title: "未命名稿子", sourceText: "")
+        try store.saveBundle(.init(document: draft, versions: [], runState: nil))
+        #expect(try store.loadBundle(documentID: "draft").versions.isEmpty)
+        #expect(try store.listDocuments().count == 1)
     }
 }

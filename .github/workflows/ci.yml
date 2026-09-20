@@ -121,7 +121,12 @@ jobs:
         run: uv sync --locked --extra dev --extra mcp
 
       - name: Build wheel package
-        run: uv build --no-sources --wheel
+        run: |
+          uv build --no-sources --wheel
+          shopt -s nullglob
+          wheels=(dist/speechrail-*.whl)
+          test "${#wheels[@]}" -eq 1
+          echo "SPEECHRAIL_WHEEL_PATH=${wheels[0]}" >> "$GITHUB_ENV"
 
       - name: Verify the wheel installs itself without a checkout (macOS)
         if: runner.os == 'macOS'
@@ -136,6 +141,14 @@ jobs:
 
       - name: Run test suite with coverage gate (Pytest)
         run: uv run pytest --cov=src
+
+      - name: Upload tested wheel artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: speechrail-wheel-candidate
+          path: dist/speechrail-*.whl
+          if-no-files-found: error
+          retention-days: 1
 
   macos-app:
     name: macOS App Build & Tests
@@ -182,43 +195,23 @@ jobs:
     needs: [quality, test]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download tested wheel artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          persist-credentials: false
+          name: speechrail-wheel-candidate
+          path: dist
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Set up Python 3.12
-        run: uv python install 3.12
-
-      - name: Install locked project dependencies
-        run: uv sync --locked --extra dev --extra mcp
-
-      - name: Build and verify release wheel
+      - name: Verify tested wheel artifact
         run: |
-          uv build --no-sources --wheel
-          version="$(uv run python -c 'import tomllib; from pathlib import Path; print(tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"])')"
           shopt -s nullglob
-          wheel_candidates=(dist/speechrail-${version}-*.whl)
+          wheel_candidates=(dist/speechrail-*.whl)
           test "${#wheel_candidates[@]}" -eq 1
           wheel="${wheel_candidates[0]}"
           test -f "$wheel"
           unzip -t "$wheel"
           if [[ "$RUNNER_OS" == "macOS" ]]; then
             unzip -l "$wheel" | grep -F 'speechrail/_native/SpeechRailDiarizationWorker'
-            # A release must be installable from this wheel alone: the packaged
-            # installer has to resolve without a source checkout.
-            uvx --python 3.12 --from "$wheel" speechrail install --help \
-              | grep -F 'usage: speechrail install'
           fi
-          uv run pytest --no-cov tests/test_wheel_contents.py -q
-          uv run python scripts/check_version_consistency.py
 
       - name: Prepare wheel artifact and checksum
         run: |

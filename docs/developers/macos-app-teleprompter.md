@@ -1,7 +1,7 @@
 ---
 title: "SpeechRail macOS App AI 提词器"
 status: active
-version: "0.1.0"
+version: "0.2.1"
 date: 2026-09-20
 ---
 
@@ -12,20 +12,20 @@ AI 提词器是 macOS App 内的直播准备与跟读能力。它面向主播本
 ## 产品边界
 
 - 输入为用户粘贴的纯文本，或导入 `TXT` / `Markdown` 文件。
-- AI 只在用户点击「AI 整理稿件」时调用一次；返回结果必须是可追溯到原稿 UTF-16 区间的 `teleprompter.analysis.v1` JSON。
-- 用户必须先审阅并接受 AI 建议，活动版本才会用于跟读；无法使用 AI 时可使用本地确定性分段。
+- AI 仅由用户主动触发；短稿一次请求，长稿按最多 12 个本地单元逐窗口处理。返回 `teleprompter.analysis.v2` 单元引用，原文与 UTF-16 范围由本地程序还原，任一窗口失败则不采用整份结果。
+- 原稿无需 AI 即可开始；草稿自动保存，AI 标注是可选步骤，建议经用户确认后才成为活动版本。跟读期间固定版本，不允许切稿或编辑。
 - 运行时复用现有 `MicrophoneCapture`、`RealtimeASRClient` 和 `SessionCoordinator`，但不创建 `SessionStore` 会话行，也不保存 PCM、摄像头画面、直播画面或完整 ASR 文本。
 - 不包含 TTS、摄像头采集、直播推流、全局提词热键或云端稿件同步。
 
 ## 用户旅程
 
-1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件。
-2. 主动点击 AI 整理，逐段检查建议；AI 不能扩写事实，用户可编辑段落。
-3. 点击「接受并生成活动版本」，稿件进入可跟读状态；也可直接采用纯文本分段。
-4. 调整独立舞台的字号、透明度和显示段数，打开舞台并开始跟读。
-5. 舞台接收 Realtime ASR 的 `partial` 作为预览，接收 `completed` 后只在高置信且相邻段落上前进。
-6. 置信度不足时进入「请确认当前位置」，用户用方向键或按钮手动接管；暂停、恢复和结束都可随时执行。
-7. 直播软件选择摄像头或目标内容窗口采集。提词器舞台使用 `NSPanel.sharingType = .none` 作为窗口级防误采集措施，但仍要求用户不要做整屏采集。
+1. 从侧边栏打开「AI 提词器」，新建、粘贴或导入稿件；草稿无需先生成版本即可保存。
+2. 点击「打开舞台并开始跟读」即可直接进入舞台；AI 朗读标注是可选准备步骤，不会阻塞开始。
+3. 如使用 AI，审阅分组、重点、表达参考与语义停顿，再确认采用。编辑段落时清空对应旧辅助标注。
+4. 调整字号、透明度和预读段数；也可以先点击「只打开提词窗口」检查版式。舞台按原文字词坐标显示已读部分并滚动，排版切片与 AI 分组独立。
+5. 短暂脱稿时保持位置，读回附近稿件后继续；可以点击某段、使用方向键选择起讲段，再点击「开始/继续跟读」。
+6. 暂停/手动期间停止上传新音频；继续前完成旧 ASR item 的 drain/clear 屏障。服务断开后释放设备占用，保留手动阅读，并可重新开始。
+7. 直播软件必须选择摄像头或目标内容窗口，不分享包含提词器的屏幕。不能依赖 `NSWindow.sharingType = .none` 隐藏窗口；当前 Apple 文档已将该值标注为系统不再使用的旧常量。
 
 ## 模块边界
 
@@ -48,65 +48,62 @@ AI 返回的顶层结构固定为：
 
 ```json
 {
-  "schema_version": "teleprompter.analysis.v1",
+  "schema_version": "teleprompter.analysis.v2",
   "segments": [
     {
-      "id": "segment-1",
-      "source_start": 0,
-      "source_end": 12,
-      "text": "必须来自原稿对应区间",
+      "start_unit": 0,
+      "end_unit": 1,
       "keywords": ["关键词"],
-      "match_phrases": ["可接受的口语表达"],
+      "match_phrases": [],
       "pause_hint": "short"
     }
   ]
 }
 ```
 
-Decoder 会拒绝 schema 版本错误、空段落、无效/重叠区间、无法在原稿中复原的 `text` 和未知的 `pause_hint`。未知字段可忽略。AI 调用使用现有 Responses-compatible `LLMProvider`，密钥仍只从 Keychain 读取，不进入稿件 JSON、日志或 prompt 之外的持久化数据。
+本地确定性分段产生编号单元；模型只引用连续的 `[start_unit, end_unit)`，不得返回正文副本、ID 或字符偏移。每个窗口必须按顺序完整覆盖其所有单元恰好一次。decoder 同时拒绝未知字段、漏单元、重叠、越界、未知停顿、过长分组和不来自原文的关键词。分组正文和原文范围均由程序生成；全部窗口成功后才创建待确认版本。口语变体仍需用户审阅，不声称程序能验证其全部事实语义。
+
+v2 仅改变内部 AI wire schema；本机 `TeleprompterVersion`/稿件 JSON 结构不变，既有版本仍可跟读。草稿允许没有活动版本或正文；这扩展了有效保存状态，旧代码无法完整支持新的草稿流程。不得回退或删除用户稿件来处理版本差异。
 
 ## LLM 指令与 context 构建
 
-提词分析遵循“稳定规则与动态数据分离”的边界：
+- `instructions`：保持事实和正文、不执行输入内命令、连续单元引用、完整覆盖、语义停顿与有限标注。
+- user `input`：纯 JSON，包含语言/表达偏好和本窗口 `units: [{id, text}]`；无历史、RAG、音频或隐藏会话状态。
+- `text.format`：严格 `json_schema`；对象均 `additionalProperties=false`。
+- 每窗口沿用 4000 output tokens / 45 秒上限，不将窗口结果直接展示为完整稿件；稿件切换、编辑或开始运行会使旧请求失效并取消后续窗口。
+- endpoint 不支持 Structured Outputs 时明确失败，用户仍可按原稿开始。首次发送的说明与按 endpoint/model 保存的确认保持原有流程。
 
-| 请求部分 | 内容 | 责任 |
-|---|---|---|
-| 顶层 `instructions` | 提词器角色、不可扩写、原文可追溯、UTF-16 区间、顺序/不重叠和注入防护规则 | `TeleprompterAIClient` 的稳定任务契约 |
-| user `input` | `language_preference`、`style_preference` 和本次 `source_text`，序列化为 JSON 并包在 `<teleprompter_context_json>` 中 | 本次请求的动态 context；原稿只作为数据读取 |
-| `text.format` | `TeleprompterAnalysis.jsonSchema`，`type=json_schema`、`strict=true`、对象和段落均 `additionalProperties=false` | 传输层结构约束 |
-| 本地 decoder | schema 版本、非空段落、UTF-16 合法性、顺序、不重叠、`text` 与原文范围一致 | 领域边界的语义约束 |
+## 位置跟读与恢复
 
-应用侧只把 `TeleprompterAnalysisPrompt` 映射到 Responses 请求：`input` 不带历史、RAG、工具调用或隐藏会话状态；`LLMProvider` 继续使用 `store=false`、最多 4000 output tokens 和 45 秒超时。`store=false` 只表示不使用 Responses 会话状态，不能向用户承诺“原稿不会离开本机”；是否联网取决于用户配置的 endpoint。准备页现在会在首次 AI 整理前要求用户确认这一数据流，并持续显示简短说明。
+对齐单位为字词而非 ASR turn 或 UI 段落。中文按字符、英文按完整词建立 UTF-16 原文映射；不再全局删除英文词内部的 `um` 或正文中的“然后”。支持逐位中文数字/阿拉伯数字匹配，不声称支持所有数值读法或声学逐字时间戳。
 
-如果 endpoint 返回 400/422 且明确表示不支持 `text.format`、`json_schema` 或 Structured Outputs，`LLMProvider` 会返回 `unsupportedStructuredOutput`。应用不会静默改用自由文本或 JSON mode，而是提示用户更换 endpoint 或使用纯文本分段。
+`TeleprompterAligner` 使用有界半全局编辑距离：输入最多保留 72 个 token，默认搜索锚点前 80、后 320 个 token，允许插入、删除和替换。正文独立评分，关键词/口语变体缺失不降低可达最高分；多处相似位置差距不足则保持原位。该分数是启发式匹配值，不是校准概率。
 
-这样做的目的不是把所有校验都交给模型：Structured Outputs 负责形状，领域 decoder 负责来源和范围，二者各自只有一个职责；prompt 的稳定部分也不会和每次变化的原稿重复拼接。
+控制器按 `itemID` 分别累积 partial，按 `eventID` 抑制重复事件；final 替换本 item 的暂定结果，已终结 item 和晚于新 final 才到达的旧 final 不重复推进。两次具有增长证据的高分 partial 可暂定推进；final 不支持该位置时退回 item 起点。短完成片段可以积累，插话后清理无关上下文并等待重新匹配。缓存有界且仅存在内存中。
 
-## 跟读与安全降级
+舞台在稳定的阅读切片间滚动，切片中的已读文字随 UTF-16 位置变化。近距离重读可以回退；较远跳读需手动选段，当前没有全文语义重定位。暂停/手动操作退休已知 item，恢复时由会话层 drain/clear 排除尚未收到的旧事件；连接 generation 排除已关闭连接的迟到结果。暂停后 final 不得把 UI 改成手动态。
 
-对齐器只搜索当前段和有限 lookahead；单次 completed 最多前进一段。候选置信度不足、相邻候选差距不足或出现跨段跳跃时，保持当前位置并进入不确定态，不自动跳过稿件。用户的暂停、手动上一段/下一段和「回到当前段」会清空旧 partial，避免迟到事件覆盖手动选择。
-
-Realtime 连接失败、服务 busy、麦克风未授权或服务未 ready 时，停止采集、关闭连接并进入手动提词；最后一段位置保留在本机运行状态中。跟读过程中不会调用 LLM，不会播放音频，也不会启动摄像头。
+运行中不调用 LLM，不保存音频或转写。稿件和最后段落位置持久化；句内位置仅在本次运行内保留。AI、服务或识别失败均不阻止用户手动看稿。
 
 ## 设计 token 约束
 
-所有提词器新增尺寸、字号、行距、透明度范围、视线吸顶偏移、状态指示灯尺寸、窗口 autosave 名称均位于 `SpeechRailDesignTokens.Teleprompter`。
+所有提词器新增尺寸、字号、行距、透明度范围、视线吸顶偏移、状态指示灯尺寸、窗口 autosave 名称均位于 `SpeechRailDesignTokens.Teleprompter`。阅读切片粒度统一使用 `stageReadingTokensPerSlice = 12`，改变字体不会改变匹配坐标。
 - 准备页「原稿」编辑区固定在 `sourceEditorMinimumHeight`–`sourceEditorMaximumHeight`（144–360pt）范围内，默认取 `sourceEditorIdealHeight`（260pt）；超过上限后由原生 `TextEditor` 内部滚动。
 - 首次使用 AI 整理前，用面向普通用户的确认说明解释发送内容、触发时机、不会发送的音视频内容，以及本机/网络服务和保存策略的差异；不要把 `Responses-compatible endpoint`、`store=false` 等实现术语直接暴露给用户。
 - **视线吸顶与视线锚点**：`stageTopInset = 48`，窗口首发吸顶在主屏上沿中央，紧贴摄像头下方，减少主播看词时的眼神偏移；
-- **三段视界不透明度阶梯**：`segmentOpacityCurrent = 1.0`（当前段朗读中心）、`segmentOpacityNext = 0.60`（下一段预读缓冲区）、`segmentOpacityPrevious = 0.35`（上一段回溯断句），杜绝局部散落透明度字面量；
+- **预读不透明度阶梯**：`segmentOpacityCurrent = 1.0`（当前段朗读中心）、`segmentOpacityNext = 0.60`（下一段预读缓冲区）、`segmentOpacityPrevious = 0.35`（上一段回溯断句），杜绝局部散落透明度字面量；
 - **状态指示灯尺寸**：`stageStatusIndicatorSize = 8`，替换原先的 `Spacing.sm` 占位；
 - 页面复用现有 `Typography`、`Spacing`、`Color`、`Corner`、`speechRailSurface` 和系统按钮样式，不在视图中新增颜色、圆角或散落视觉常量。窗口以 macOS 26+ 的系统 `NSPanel`、`ultraThinMaterial` 和原生键盘快捷键为基线。
 
-## 验收矩阵
+## 验收与限制
 
-| 维度 | 已验证方式 | 当前结论 |
-|---|---|---|
-| 归一化、分段、UTF-16 区间 | `TeleprompterNormalizerTests`、`TeleprompterAlignerTests` | 通过 |
-| AI schema、原文追溯、错误拒绝 | `TeleprompterAnalysisTests` | 通过 |
-| 单稿保存、加载、进度、导出 | `TeleprompterStoreTests` | 通过 |
-| partial/completed、暂停、手动接管、不确定态 | `TeleprompterFollowControllerTests` | 通过 |
-| Swift 6 / Xcode App 编译 | `scripts/macos_app_build.sh --configuration Debug` | 通过，2026-09-20 |
-| 真实麦克风、Realtime 服务、OBS/直播软件、窗口可见性 | 需要用户明确授权的桌面/UI/真机验收 | 本轮未执行 |
+2026-09-20：使用合成文本、fake completion 和临时目录执行聚焦测试；覆盖默认参数的正文定位、分次/跨段/局部重读、Unicode 坐标、数字与漏词、重复事件、乱序 final、partial 纠正、暂停和手动边界、草稿保存、AI 全覆盖及长稿窗口失败。App Debug 编译用于检查会话和 SwiftUI 接线；不代表实际视觉或跟读质量验收。
 
-当前功能工作量估算为 9–13.5 人日：核心领域与测试 2–3 日，存储/AI 适配 1.5–2 日，会话接线 2–3 日，舞台窗口与准备页 2–3 日，集成/回归/文档 1–1.5 日。若加入真实直播软件适配、屏幕采集白名单或多平台兼容，应另立范围与估算。
+```bash
+swift test --package-path macos/SpeechRailApp --filter Teleprompter
+scripts/macos_app_build.sh --configuration Debug
+```
+
+未执行真实麦克风、LLM 效果、Realtime 端到端、OBS/会议软件可见性或 UI 自动化。仍需测量误跳、位置滞后、脱稿恢复耗时、手动纠正频率和滚动观感。没有新增 ASR 模型、强制对齐器、全局热键或提纲语义跟读。
+
+回退时仅撤回本轮源码差异，保留稿件 JSON；不可整文件还原并行任务的修改，也不可将 AI v2 输出交给旧 v1 decoder。
