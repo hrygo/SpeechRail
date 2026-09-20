@@ -42,7 +42,6 @@ public struct AssistantView: View {
     /// 记录库那一栏：重命名与移除都用一次确认，移除还要刷新列表（`reloadToken`）。
     @State private var isRenamingRecord = false
     @State private var renameDraft = ""
-    @State private var confirmingRemove = false
     @State private var libraryReloadToken = 0
     /// 记忆库那一栏：主动添加记忆的内联草稿
     @State private var isAddingMemory = false
@@ -221,18 +220,8 @@ public struct AssistantView: View {
         .sheet(isPresented: $isCheckingInput) { InputLevelSheet() }
         .sheet(isPresented: $isShowingConfigHelp) { configurationHelpSheet }
         .sheet(isPresented: $isRenamingRecord) { renameRecordSheet }
-        .confirmationDialog(
-            "从记录库移除这一条？",
-            isPresented: $confirmingRemove,
-            titleVisibility: .visible
-        ) {
-            Button("移除", role: .destructive) { Task { await removeReviewedRecord() } }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("这一条对话的正文与它的分组信息都会从本机库里删掉，之后找不回来。"
-                + "只是不想再看了，用「新建对话」离开就好——记录会一直留着。")
-        }
     }
+
 
     private var pagePurpose: String {
         switch state {
@@ -3170,47 +3159,61 @@ public struct AssistantView: View {
                 ScrollView(.vertical, showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(recent.prefix(8).enumerated()), id: \.element.id) { _, summary in
-                            Button {
-                                Task { await openRecord(summary) }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                        Text(summary.record.title ?? "未命名对话")
-                                            .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                                            .foregroundStyle(SpeechRailDesignTokens.Color.ink)
-                                            .lineLimit(1)
-                                        Spacer()
-                                        StatusPill(tone: .neutral, label: "\(summary.lineCount) 句")
-                                    }
+                            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                Button {
+                                    Task { await openRecord(summary) }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                            Text(summary.record.title ?? "未命名对话")
+                                                .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                                                .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            StatusPill(tone: .neutral, label: "\(summary.lineCount) 句")
+                                        }
 
-                                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                                        if let persona = summary.record.persona?.title {
-                                            Text(persona)
-                                                .font(SpeechRailDesignTokens.Typography.caption)
-                                                .foregroundStyle(SpeechRailDesignTokens.Color.rail)
-                                            Text("·")
+                                        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                                            if let persona = summary.record.persona?.title {
+                                                Text(persona)
+                                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                                    .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                                                Text("·")
+                                                    .font(SpeechRailDesignTokens.Typography.caption)
+                                                    .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                            }
+                                            Text(recordSubtitle(summary))
                                                 .font(SpeechRailDesignTokens.Typography.caption)
                                                 .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                                                .lineLimit(1)
                                         }
-                                        Text(recordSubtitle(summary))
-                                            .font(SpeechRailDesignTokens.Typography.caption)
-                                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                                            .lineLimit(1)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .speechRailPointerCursor()
+
+                                InPlaceDeleteButton(
+                                    style: .compactIcon,
+                                    title: "删除记录"
+                                ) {
+                                    Task {
+                                        try? await session.removeSession(id: summary.id)
+                                        await reloadRecent()
+                                        libraryReloadToken += 1
                                     }
                                 }
-                                .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
-                                .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
-                                .background(
-                                    SpeechRailDesignTokens.Color.field,
-                                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
-                                        .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
-                                )
                             }
-                            .buttonStyle(.plain)
-                            .speechRailPointerCursor()
+                            .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
+                            .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
+                            .background(
+                                SpeechRailDesignTokens.Color.field,
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
+                                    .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
+                            )
                         }
                     }
                     .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
@@ -3347,15 +3350,17 @@ public struct AssistantView: View {
                                     .font(SpeechRailDesignTokens.Typography.caption)
                                     .foregroundStyle(SpeechRailDesignTokens.Color.rail)
 
-                                    Button("移除") {
+                                    InPlaceDeleteButton(
+                                        style: .compactText,
+                                        title: "移除",
+                                        confirmText: "确认",
+                                        cancelText: "取消"
+                                    ) {
                                         Task {
                                             try? await session.removeMemory(id: memory.id)
                                             await reloadMemories()
                                         }
                                     }
-                                    .buttonStyle(.plain)
-                                    .font(SpeechRailDesignTokens.Typography.caption)
-                                    .foregroundStyle(SpeechRailDesignTokens.Color.critical)
                                 }
                             }
                             .padding(.horizontal, SpeechRailDesignTokens.Spacing.sm)
@@ -3571,12 +3576,15 @@ public struct AssistantView: View {
     }
 
     private var removeReviewedRecordButton: some View {
-        Button(role: .destructive) {
-            confirmingRemove = true
-        } label: {
-            Label("移除记录", systemImage: "trash")
+        InPlaceDeleteButton(
+            style: .regularButton,
+            title: "移除记录",
+            systemImage: "trash",
+            confirmText: "确认移除",
+            cancelText: "取消"
+        ) {
+            Task { await removeReviewedRecord() }
         }
-        .speechRailButton(.secondary)
         .fixedSize(horizontal: true, vertical: false)
     }
 

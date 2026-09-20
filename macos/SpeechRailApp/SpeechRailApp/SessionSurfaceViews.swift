@@ -706,30 +706,38 @@ public struct SessionLibraryView: View {
     }
 
     private func recordRow(_ summary: SessionSummary) -> some View {
-        VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
-            HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                Text(displayTitle(for: summary))
-                    .font(SpeechRailDesignTokens.Typography.bodyMedium)
-                    .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+        HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.tight) {
+                HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    Text(displayTitle(for: summary))
+                        .font(SpeechRailDesignTokens.Typography.bodyMedium)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.ink)
+                        .lineLimit(1)
+                    if let reason = summary.openInterruption {
+                        StatusPill(tone: .critical, label: reason.title)
+                    }
+                    Spacer(minLength: SpeechRailDesignTokens.Spacing.micro)
+                    if summary.record.state == .recording {
+                        StatusPill(tone: .attention, label: "录制中")
+                    } else if summary.record.state == .processing {
+                        StatusPill(tone: .attention, label: "整理中")
+                    }
+                }
+                Text(recordSubtitle(summary))
+                    .font(SpeechRailDesignTokens.Typography.caption)
+                    .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    .frame(
+                        maxWidth: SpeechRailDesignTokens.Layout.sessionListRowInnerWidth,
+                        alignment: .leading
+                    )
                     .lineLimit(1)
-                if let reason = summary.openInterruption {
-                    StatusPill(tone: .critical, label: reason.title)
-                }
-                Spacer(minLength: SpeechRailDesignTokens.Spacing.micro)
-                if summary.record.state == .recording {
-                    StatusPill(tone: .attention, label: "录制中")
-                } else if summary.record.state == .processing {
-                    StatusPill(tone: .attention, label: "整理中")
-                }
             }
-            Text(recordSubtitle(summary))
-                .font(SpeechRailDesignTokens.Typography.caption)
-                .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
-                .frame(
-                    maxWidth: SpeechRailDesignTokens.Layout.sessionListRowInnerWidth,
-                    alignment: .leading
-                )
-                .lineLimit(1)
+            InPlaceDeleteButton(
+                style: .compactIcon,
+                title: "移除记录"
+            ) {
+                Task { await remove(summary) }
+            }
         }
         .padding(.vertical, SpeechRailDesignTokens.Spacing.micro)
     }
@@ -756,10 +764,15 @@ public struct SessionLibraryView: View {
                         Task { await copyTranscript(of: summary) }
                     }
                     .buttonStyle(.bordered)
-                    Button("移除记录…", role: .destructive) {
-                        pendingRemoval = summary
+                    InPlaceDeleteButton(
+                        style: .regularButton,
+                        title: "移除记录",
+                        systemImage: "trash",
+                        confirmText: "确认移除",
+                        cancelText: "取消"
+                    ) {
+                        Task { await remove(summary) }
                     }
-                    .buttonStyle(.bordered)
                 }
                 .padding(.horizontal, SpeechRailDesignTokens.Spacing.md)
                 .padding(.vertical, SpeechRailDesignTokens.Spacing.sm)
