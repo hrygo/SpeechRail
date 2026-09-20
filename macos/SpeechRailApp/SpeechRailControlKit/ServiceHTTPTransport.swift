@@ -95,12 +95,53 @@ public struct ServiceRequestBuilder: Sendable {
 
 public protocol ServiceCapabilityDiscoveryClient: Sendable {
     func fetchEffectiveCapabilities(
-        ifNoneMatch: String?
+        ifNoneMatch: String?,
+        cachedValue: EffectiveCapabilitySnapshot?
     ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot>
 
     func fetchSafeVoices(
-        ifNoneMatch: String?
+        ifNoneMatch: String?,
+        cachedValue: SafeVoiceList?
     ) async throws -> ServiceConditionalResponse<SafeVoiceList>
 
     func fetchReadiness() async throws -> ReadySnapshot
+}
+
+public extension ServiceCapabilityDiscoveryClient {
+    func fetchEffectiveCapabilities(
+        ifNoneMatch: String?
+    ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+        try await fetchEffectiveCapabilities(ifNoneMatch: ifNoneMatch, cachedValue: nil)
+    }
+
+    func fetchSafeVoices(
+        ifNoneMatch: String?
+    ) async throws -> ServiceConditionalResponse<SafeVoiceList> {
+        try await fetchSafeVoices(ifNoneMatch: ifNoneMatch, cachedValue: nil)
+    }
+}
+
+/// Default discovery client used by fixtures and control surfaces that do not
+/// own a live REST connection. It fails closed so an unavailable client never
+/// fabricates a ready or capability snapshot.
+public struct UnavailableServiceCapabilityDiscoveryClient: ServiceCapabilityDiscoveryClient {
+    public init() {}
+
+    public func fetchEffectiveCapabilities(
+        ifNoneMatch: String?,
+        cachedValue: EffectiveCapabilitySnapshot?
+    ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    public func fetchSafeVoices(
+        ifNoneMatch: String?,
+        cachedValue: SafeVoiceList?
+    ) async throws -> ServiceConditionalResponse<SafeVoiceList> {
+        throw ServiceAPIClientError.requestFailed
+    }
+
+    public func fetchReadiness() async throws -> ReadySnapshot {
+        throw ServiceAPIClientError.requestFailed
+    }
 }

@@ -1243,6 +1243,16 @@ public struct ReadySnapshot: Codable, Equatable, Sendable {
     public let diarization: JSONValue?
     public let realtimeVAD: JSONValue?
 
+    public init(
+        ready: Bool,
+        diarization: JSONValue? = nil,
+        realtimeVAD: JSONValue? = nil
+    ) {
+        self.ready = ready
+        self.diarization = diarization
+        self.realtimeVAD = realtimeVAD
+    }
+
     enum CodingKeys: String, CodingKey {
         case ready
         case diarization

@@ -77,6 +77,7 @@ struct SpeechRailApp: App {
 #endif
         let diagnosticsClient: any ServiceDiagnosticsClient
         let capabilityClient: any ServiceModelCapabilityClient
+        let discoveryClient: any ServiceCapabilityDiscoveryClient
         let creatorClient: (any SpeechRailCreatorClient)?
 #if DEBUG
         if isUITest {
@@ -87,17 +88,20 @@ struct SpeechRailApp: App {
             )
             diagnosticsClient = fixtureClient
             capabilityClient = fixtureClient
+            discoveryClient = fixtureClient
             creatorClient = UITestCreatorClient()
         } else {
             let liveServiceClient = ServiceAPIClient()
             diagnosticsClient = liveServiceClient
             capabilityClient = liveServiceClient
+            discoveryClient = liveServiceClient
             creatorClient = liveServiceClient
         }
 #else
         let liveServiceClient = ServiceAPIClient()
         diagnosticsClient = liveServiceClient
         capabilityClient = liveServiceClient
+        discoveryClient = liveServiceClient
         creatorClient = liveServiceClient
 #endif
         let workStore: CreativeWorkStore
@@ -124,6 +128,7 @@ struct SpeechRailApp: App {
             transport: transport,
             apiClient: diagnosticsClient,
             capabilityClient: capabilityClient,
+            discoveryClient: discoveryClient,
             creatorClient: creatorClient,
             workStore: workStore,
             registration: registration
@@ -137,13 +142,15 @@ struct SpeechRailApp: App {
         let sessionPreferences = SessionPreferences()
         let assistantSession = AssistantSession(coordinator: coordinator)
         assistantSession.preferences = { sessionPreferences }
-        assistantSession.serviceReadiness = {
+        assistantSession.serviceReadiness = { [weak appModel] in
             do {
-                let health = try await ServiceAPIClient().fetchHealthSnapshot()
-                guard health.ready == true else {
+                let readiness = try await discoveryClient.fetchReadiness()
+                guard readiness.ready else {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
-                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+                return .ready(
+                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
@@ -155,7 +162,7 @@ struct SpeechRailApp: App {
             SessionPreferences.diarizationGateNote(for: coordinator.lastKnownProfile)
         }
         assistantSession.availableVoices = { [weak appModel] in
-            (appModel?.creatorVoices ?? []).filter(\.available).map(\.name)
+            (appModel?.safeVoiceCatalog?.data ?? []).filter(\.available).map(\.name)
         }
         let band = CaptionBandWindowController(
             session: captionSession,
@@ -169,13 +176,15 @@ struct SpeechRailApp: App {
         // 「就绪」要在**按下的那一刻**判定，不是读一轮缓存的健康快照：`⌘⇧L` 是全局键，
         // 按下时很可能这一轮刷新还没跑完，拿旧结论会把可用说成不可用。loopback 上一次
         // `/health` 就是毫秒级的事。
-        captionSession.serviceReadiness = {
+        captionSession.serviceReadiness = { [weak appModel] in
             do {
-                let health = try await ServiceAPIClient().fetchHealthSnapshot()
-                guard health.ready == true else {
+                let readiness = try await discoveryClient.fetchReadiness()
+                guard readiness.ready else {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
-                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+                return .ready(
+                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
@@ -184,13 +193,15 @@ struct SpeechRailApp: App {
         // 所以这里只接三件它自己不认识的事：服务就绪判定、新会话预填值、来源断了的出口。
         let meetingSession = MeetingSession(coordinator: coordinator)
         meetingSession.preferences = { sessionPreferences }
-        meetingSession.serviceReadiness = {
+        meetingSession.serviceReadiness = { [weak appModel] in
             do {
-                let health = try await ServiceAPIClient().fetchHealthSnapshot()
-                guard health.ready == true else {
+                let readiness = try await discoveryClient.fetchReadiness()
+                guard readiness.ready else {
                     return .notReady("本机语音服务还没就绪。去「服务状态」启动它，再回到这里重试。")
                 }
-                return .ready(profile: health.profile.map(SpeechRailProfilePresentation.shortTitle))
+                return .ready(
+                    profile: appModel?.health?.profile.map(SpeechRailProfilePresentation.shortTitle)
+                )
             } catch {
                 return .notReady("连不上本机语音服务。去「服务状态」看看它起来没有。")
             }
@@ -486,7 +497,8 @@ struct SpeechRailCommands: Commands {
 #if DEBUG
 private struct UITestServiceDiagnosticsClient:
     ServiceDiagnosticsClient,
-    ServiceModelCapabilityClient
+    ServiceModelCapabilityClient,
+    ServiceCapabilityDiscoveryClient
 {
     let metricsUnavailable: Bool
 
@@ -537,6 +549,136 @@ private struct UITestServiceDiagnosticsClient:
             jobSpoolReady: false
         )
     }
+
+    func fetchReadiness() async throws -> ReadySnapshot {
+        ReadySnapshot(
+            ready: true,
+            diarization: JSONValue(.object([
+                "ready": JSONValue(.bool(true)),
+            ])),
+            realtimeVAD: JSONValue(.object([
+                "ready": JSONValue(.bool(true)),
+            ]))
+        )
+    }
+
+    func fetchEffectiveCapabilities(
+        ifNoneMatch: String?,
+        cachedValue: EffectiveCapabilitySnapshot?
+    ) async throws -> ServiceConditionalResponse<EffectiveCapabilitySnapshot> {
+        let etag = Self.fixtureETag
+        let metadata = ServiceResponseMetadata(
+            statusCode: ifNoneMatch == etag ? 304 : 200,
+            headers: [HTTPHeaderNames.etag: etag],
+            etag: etag
+        )
+        if ifNoneMatch == etag {
+            guard cachedValue != nil else {
+                throw ServiceAPIClientError.notModifiedWithoutCache
+            }
+            return .notModified(metadata: metadata)
+        }
+        return ServiceConditionalResponse(
+            value: Self.fixtureSnapshot,
+            metadata: metadata
+        )
+    }
+
+    func fetchSafeVoices(
+        ifNoneMatch: String?,
+        cachedValue: SafeVoiceList?
+    ) async throws -> ServiceConditionalResponse<SafeVoiceList> {
+        let etag = Self.fixtureETag
+        let metadata = ServiceResponseMetadata(
+            statusCode: ifNoneMatch == etag ? 304 : 200,
+            headers: [HTTPHeaderNames.etag: etag],
+            etag: etag
+        )
+        if ifNoneMatch == etag {
+            guard cachedValue != nil else {
+                throw ServiceAPIClientError.notModifiedWithoutCache
+            }
+            return .notModified(metadata: metadata)
+        }
+        return ServiceConditionalResponse(
+            value: Self.fixtureSafeVoices,
+            metadata: metadata
+        )
+    }
+
+    private static let fixtureETag = "\"fixture-snapshot-1\""
+
+    private static let fixtureTTSModel = ConfiguredModelIdentity(
+        assurance: .configuredCatalog,
+        runtimeRevision: "fixture-tts-runtime",
+        sourceModel: "fixture-tts",
+        artifact: "fixture-tts",
+        variant: "voice_design",
+        catalogRevision: "fixture-catalog"
+    )
+
+    private static let fixtureCloneModel = ConfiguredModelIdentity(
+        assurance: .configuredCatalog,
+        runtimeRevision: "fixture-clone-runtime",
+        sourceModel: "fixture-clone",
+        artifact: "fixture-clone",
+        variant: "base",
+        catalogRevision: "fixture-catalog"
+    )
+
+    private static let fixtureDescriptor = SafeVoiceDescriptor(
+        voiceMode: "instruction",
+        locales: ["zh-CN"],
+        styleTags: [],
+        pitchBand: "unknown",
+        timbreFamily: "unknown",
+        baselinePace: "unknown",
+        sourceType: "system_preset",
+        metadataMethod: "declared_only"
+    )
+
+    private static let fixtureVoice = SafeVoiceEntry(
+        id: "fixture_voice_design",
+        name: "夜航主持",
+        aliases: [],
+        mode: "instruction",
+        available: true,
+        availabilityReason: .available,
+        variant: "voice_design",
+        voiceRevision: nil,
+        voiceIdentityAssurance: .legacy,
+        model: fixtureTTSModel,
+        descriptors: [fixtureDescriptor],
+        operations: [:],
+        snapshotID: "fixture-snapshot-1"
+    )
+
+    private static let fixtureSafeVoices = SafeVoiceList(
+        snapshotID: "fixture-snapshot-1",
+        catalogRevision: "fixture-catalog",
+        data: [fixtureVoice]
+    )
+
+    private static let fixtureSnapshot = EffectiveCapabilitySnapshot(
+        serviceInstanceEpoch: "fixture-epoch",
+        catalogRevision: "fixture-catalog",
+        snapshotID: "fixture-snapshot-1",
+        profile: "quality",
+        models: [
+            "tts": fixtureTTSModel,
+            "tts_clone": fixtureCloneModel,
+        ],
+        voices: [fixtureVoice],
+        operations: [
+            "voice_preview": JSONValue(.object([
+                "status": JSONValue(.string("supported")),
+                "instruction": JSONValue(.object([
+                    "status": JSONValue(.string("supported")),
+                ])),
+            ])),
+        ],
+        guarantees: ["discovery_only": true]
+    )
 
     func fetchMetrics() async throws -> RuntimeMetricsSnapshot {
         if metricsUnavailable {

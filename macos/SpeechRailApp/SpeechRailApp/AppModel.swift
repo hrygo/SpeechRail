@@ -171,6 +171,13 @@ public final class AppModel {
     public private(set) var serviceCapabilities: ServiceModelCapabilities?
     public private(set) var serviceCapabilitiesLoadState: ServiceCapabilitiesLoadState = .unknown
     public private(set) var isRefreshingServiceCapabilities = false
+    /// 同一代、最小披露的能力快照。能力发现只认这里或服务明确提供的 legacy 投影，
+    /// 不把音色用户数据拼成能力结论。
+    public private(set) var effectiveCapabilities: EffectiveCapabilitySnapshot?
+    public private(set) var safeVoiceCatalog: SafeVoiceList?
+    public private(set) var discoveryState: CapabilityDiscoveryState = .idle
+    public private(set) var discoveryMetadata: ServiceResponseMetadata?
+    public private(set) var isRefreshingDiscovery = false
     public private(set) var creatorVoices: [CreatorVoice] = []
     public private(set) var creatorVoicesLoadState: CreatorVoicesLoadState = .unknown
     public private(set) var isRefreshingCreatorVoiceDetail = false
@@ -232,6 +239,7 @@ public final class AppModel {
     private let transport: any SpeechRailControlTransport
     private let apiClient: any ServiceDiagnosticsClient
     private let capabilityClient: any ServiceModelCapabilityClient
+    private let discoveryClient: any ServiceCapabilityDiscoveryClient
     private let creatorClient: any SpeechRailCreatorClient
     private let audioPlaybackController: AudioPlaybackController
     private let workStore: CreativeWorkStore
@@ -241,6 +249,9 @@ public final class AppModel {
     private var metricsRefreshGeneration: UInt64 = 0
     private var monitoringHistoryGeneration: UInt64 = 0
     private var creatorVoiceDetailGeneration: UInt64 = 0
+    private var discoveryRefreshGeneration: UInt64 = 0
+    private var capabilitySnapshotStore = CapabilitySnapshotStore()
+    private var safeVoiceCatalogETag: String?
     private var synthesisTask: Task<Void, Never>?
     /// 波形包络缓存（key = `voice:<id>` / `work:<id>`）。分辨率固定
     /// `Waveform.envelopeBuckets`，视图按自己的排布重采样——同一段包络因此能给
@@ -264,6 +275,7 @@ public final class AppModel {
         transport: any SpeechRailControlTransport,
         apiClient: any ServiceDiagnosticsClient,
         capabilityClient: (any ServiceModelCapabilityClient)? = nil,
+        discoveryClient: (any ServiceCapabilityDiscoveryClient)? = nil,
         creatorClient: (any SpeechRailCreatorClient)? = nil,
         audioPlaybackController: AudioPlaybackController = AudioPlaybackController(),
         workStore: CreativeWorkStore = CreativeWorkStore(),
@@ -273,6 +285,7 @@ public final class AppModel {
         self.transport = transport
         self.apiClient = apiClient
         self.capabilityClient = capabilityClient ?? UnavailableModelCapabilityClient()
+        self.discoveryClient = discoveryClient ?? UnavailableServiceCapabilityDiscoveryClient()
         self.creatorClient = creatorClient ?? UnavailableCreatorClient()
         self.audioPlaybackController = audioPlaybackController
         self.workStore = workStore
@@ -1335,15 +1348,88 @@ public final class AppModel {
         }
     }
 
-    /// 读取服务公开的能力清单（`GET /v1/models.capabilities`）。
+    /// 读取一次同代的 capability snapshot 与安全音色目录。
     ///
-    /// 能力结论只认服务声明。音色列表是用户数据，可以为空；“列表里没有克隆音色”
-    /// 不能推出“服务不支持克隆”，那会把用户数据当成能力事实。
+    /// 能力快照是唯一的跨对象发现真相；ETag/304 只复用上一份完整快照，加载中和
+    /// 失败时不会把旧结论清空，也不会用 legacy `/v1/models` 伪造一个新的 snapshot。
+    public func refreshDiscovery() async {
+        guard !isRefreshingDiscovery else { return }
+        isRefreshingDiscovery = true
+        defer { isRefreshingDiscovery = false }
+
+        discoveryRefreshGeneration &+= 1
+        let refreshGeneration = discoveryRefreshGeneration
+        let requestToken = capabilitySnapshotStore.beginRefresh()
+        discoveryState = .loading
+        let cachedSnapshot = capabilitySnapshotStore.snapshot
+        let etag = capabilitySnapshotStore.etag
+
+        do {
+            let response = try await discoveryClient.fetchEffectiveCapabilities(
+                ifNoneMatch: etag,
+                cachedValue: cachedSnapshot
+            )
+            guard refreshGeneration == discoveryRefreshGeneration else { return }
+            capabilitySnapshotStore.apply(response, requestToken: requestToken)
+            effectiveCapabilities = capabilitySnapshotStore.snapshot
+            discoveryState = capabilitySnapshotStore.state
+            discoveryMetadata = response.metadata
+        } catch is CancellationError {
+            guard refreshGeneration == discoveryRefreshGeneration else { return }
+            discoveryState = effectiveCapabilities == nil ? .idle : .loaded
+            return
+        } catch {
+            guard refreshGeneration == discoveryRefreshGeneration else { return }
+            applyDiscoveryFailure(error, requestToken: requestToken)
+        }
+
+        // The safe voice list is an independent, minimal-disclosure projection. A
+        // failure here must not replace an otherwise valid effective snapshot.
+        do {
+            let response = try await discoveryClient.fetchSafeVoices(
+                ifNoneMatch: safeVoiceCatalogETag,
+                cachedValue: safeVoiceCatalog
+            )
+            guard refreshGeneration == discoveryRefreshGeneration else { return }
+            if let value = response.value {
+                safeVoiceCatalog = value
+                safeVoiceCatalogETag = response.metadata.etag ?? safeVoiceCatalogETag
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            // Keep the last safe catalog. The atomic capability state above is
+            // still authoritative and carries its own diagnostic metadata.
+        }
+    }
+
+    /// 读取服务公开的 legacy 能力投影（`GET /v1/models`）。
+    ///
+    /// 新服务先从 atomic snapshot 的显式 operations/model identity 生成兼容视图；
+    /// 只有旧服务返回 404/405 或 snapshot schema 无法识别时，才读取 `/v1/models`。
+    /// 鉴权、冲突、未就绪和其他服务错误不会静默降级成成功。
     public func refreshServiceCapabilities() async {
         guard !isRefreshingServiceCapabilities else { return }
         isRefreshingServiceCapabilities = true
         serviceCapabilitiesLoadState = .loading
         defer { isRefreshingServiceCapabilities = false }
+
+        if effectiveCapabilities == nil, discoveryState == .idle {
+            await refreshDiscovery()
+        }
+
+        if discoveryState == .loaded, let snapshot = effectiveCapabilities {
+            serviceCapabilities = Self.legacyCapabilities(from: snapshot)
+            serviceCapabilitiesLoadState = .loaded
+            return
+        }
+
+        guard discoveryState == .notSupported || discoveryState == .invalidContract else {
+            serviceCapabilities = nil
+            serviceCapabilitiesLoadState = .unknown
+            return
+        }
+
         do {
             serviceCapabilities = try await capabilityClient.fetchModelCapabilities()
             serviceCapabilitiesLoadState = .loaded
@@ -1354,6 +1440,64 @@ public final class AppModel {
             serviceCapabilities = nil
             serviceCapabilitiesLoadState = .failed
         }
+    }
+
+    private func applyDiscoveryFailure(
+        _ error: Error,
+        requestToken: UInt64
+    ) {
+        let contractError: ServiceAPIClientError
+        switch error {
+        case let error as ServiceAPIClientError:
+            contractError = error
+        case let error as ServiceContractDecodingError:
+            contractError = .invalidContract(String(describing: error))
+        default:
+            contractError = .requestFailed
+        }
+
+        if let statusCode = contractError.statusCode, statusCode == 404 || statusCode == 405 {
+            capabilitySnapshotStore.markUnsupported(requestToken: requestToken)
+        } else {
+            capabilitySnapshotStore.markFailure(contractError, requestToken: requestToken)
+        }
+        effectiveCapabilities = capabilitySnapshotStore.snapshot
+        discoveryState = capabilitySnapshotStore.state
+    }
+
+    private static func legacyCapabilities(
+        from snapshot: EffectiveCapabilitySnapshot
+    ) -> ServiceModelCapabilities {
+        let preview = operationStatus(snapshot.operations["voice_preview"]) == "supported"
+        let instruction = operationStatus(
+            operationObject(snapshot.operations["voice_preview"])?["instruction"]
+        ) == "supported"
+        // `tts_clone` is a configured capability identity, not an inference from
+        // whether a user currently owns a clone voice.
+        let clone = snapshot.models["tts_clone"]?.artifact != nil
+        return ServiceModelCapabilities(
+            supportsPreview: preview,
+            supportsClone: clone,
+            supportsInstruction: instruction
+        )
+    }
+
+    private static func operationObject(
+        _ value: JSONValue?
+    ) -> [String: JSONValue]? {
+        guard let value,
+              case let .object(object) = value.storage
+        else { return nil }
+        return object
+    }
+
+    private static func operationStatus(
+        _ value: JSONValue?
+    ) -> String? {
+        guard let object = operationObject(value),
+              case let .string(status)? = object["status"]
+        else { return nil }
+        return status
     }
 
     public func refresh() async {

@@ -94,6 +94,97 @@ final class ServiceContractTests: XCTestCase {
         XCTAssertEqual(store.state, .loaded)
     }
 
+    func testCapabilityStoreRetainsSnapshotWhileRefreshIsLoading() {
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "catalog-1",
+            snapshotID: "snap-1",
+            profile: "quality",
+            models: [:],
+            voices: [],
+            operations: [:],
+            guarantees: [:]
+        )
+        var store = CapabilitySnapshotStore.loaded(snapshot: snapshot, etag: "\"snap-1\"")
+        _ = store.beginRefresh()
+
+        XCTAssertEqual(store.snapshot?.snapshotID, "snap-1")
+        XCTAssertEqual(store.state, .loading)
+    }
+
+    func testUnauthorizedDoesNotBecomeLegacySuccess() {
+        let snapshot = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "catalog-1",
+            snapshotID: "snap-1",
+            profile: "quality",
+            models: [:],
+            voices: [],
+            operations: [:],
+            guarantees: [:]
+        )
+        var store = CapabilitySnapshotStore.loaded(snapshot: snapshot, etag: "\"snap-1\"")
+        let token = store.beginRefresh()
+
+        store.markUnauthorized(
+            .http(
+                statusCode: 401,
+                code: "invalid_api_key",
+                message: "redacted",
+                requestID: "req-7",
+                retryable: false
+            ),
+            requestToken: token
+        )
+
+        XCTAssertEqual(store.state, .unauthorized)
+        XCTAssertEqual(store.snapshot?.snapshotID, "snap-1")
+    }
+
+    func testCapabilityStoreIgnoresStaleGeneration() {
+        let first = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "catalog-1",
+            snapshotID: "snap-1",
+            profile: "quality",
+            models: [:],
+            voices: [],
+            operations: [:],
+            guarantees: [:]
+        )
+        let second = EffectiveCapabilitySnapshot(
+            serviceInstanceEpoch: "epoch-1",
+            catalogRevision: "catalog-2",
+            snapshotID: "snap-2",
+            profile: "quality",
+            models: [:],
+            voices: [],
+            operations: [:],
+            guarantees: [:]
+        )
+        var store = CapabilitySnapshotStore.loaded(snapshot: first, etag: "\"snap-1\"")
+        let staleToken = store.beginRefresh()
+        let currentToken = store.beginRefresh()
+
+        store.apply(
+            ServiceConditionalResponse(
+                value: second,
+                metadata: ServiceResponseMetadata(statusCode: 200, etag: "\"snap-2\"")
+            ),
+            requestToken: staleToken
+        )
+        XCTAssertEqual(store.snapshot?.snapshotID, "snap-1")
+
+        store.apply(
+            ServiceConditionalResponse(
+                value: second,
+                metadata: ServiceResponseMetadata(statusCode: 200, etag: "\"snap-2\"")
+            ),
+            requestToken: currentToken
+        )
+        XCTAssertEqual(store.snapshot?.snapshotID, "snap-2")
+    }
+
     func testErrorClassifierSeparatesConflictAndNotReady() {
         XCTAssertEqual(
             ServiceErrorClassifier.category(
