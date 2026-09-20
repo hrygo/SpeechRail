@@ -311,4 +311,3 @@ surface | declared | unit-tested | fake-loopback | native-contract | real-runtim
 
 回滚只能整体回到上一个已知 release，不允许让新服务端和旧客户端通过“兼容模式”混跑。
 本次设计不引入数据库迁移、模型下载、外部 secret 或新的运行态服务。
-

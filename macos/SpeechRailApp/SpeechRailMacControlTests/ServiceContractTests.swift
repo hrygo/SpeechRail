@@ -36,11 +36,25 @@ final class ServiceContractTests: XCTestCase {
 
         XCTAssertEqual(snapshot.schemaVersion, "effective_capabilities_v1")
         XCTAssertEqual(snapshot.snapshotID, "snap-9")
+        XCTAssertEqual(snapshot.voices[0].aliases, [])
         XCTAssertEqual(snapshot.voices[0].availabilityReason.rawValue, "future_reason")
     }
 
     func testMissingSnapshotIDIsInvalidContract() {
-        let data = Data(#"{"schema_version":"effective_capabilities_v1"}"#.utf8)
+        let data = Data(
+            """
+            {
+                "schema_version": "effective_capabilities_v1",
+                "service_instance_epoch": "epoch-1",
+                "catalog_revision": "catalog-1",
+                "profile": "quality",
+                "models": {},
+                "voices": [],
+                "operations": {},
+                "guarantees": {}
+            }
+            """.utf8
+        )
 
         XCTAssertThrowsError(
             try JSONDecoder().decode(EffectiveCapabilitySnapshot.self, from: data)

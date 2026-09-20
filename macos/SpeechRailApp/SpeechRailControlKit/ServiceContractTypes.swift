@@ -623,6 +623,35 @@ public struct SafeVoiceEntry: Codable, Equatable, Sendable, Identifiable {
         case qualitySummary = "quality_summary"
         case snapshotID = "snapshot_id"
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            id: try container.decode(String.self, forKey: .id),
+            name: try container.decode(String.self, forKey: .name),
+            aliases: try container.decodeIfPresent([String].self, forKey: .aliases) ?? [],
+            mode: try container.decode(String.self, forKey: .mode),
+            available: try container.decode(Bool.self, forKey: .available),
+            availabilityReason: try container.decode(
+                SafeVoiceAvailabilityReason.self,
+                forKey: .availabilityReason
+            ),
+            variant: try container.decodeIfPresent(String.self, forKey: .variant),
+            voiceRevision: try container.decodeIfPresent(String.self, forKey: .voiceRevision),
+            voiceIdentityAssurance: try container.decode(
+                VoiceIdentityAssurance.self,
+                forKey: .voiceIdentityAssurance
+            ),
+            model: try container.decode(ConfiguredModelIdentity.self, forKey: .model),
+            descriptors: try container.decode([SafeVoiceDescriptor].self, forKey: .descriptors),
+            operations: try container.decode([String: JSONValue].self, forKey: .operations),
+            qualitySummary: try container.decodeIfPresent(
+                SafeVoiceQualitySummary.self,
+                forKey: .qualitySummary
+            ),
+            snapshotID: try container.decodeIfPresent(String.self, forKey: .snapshotID)
+        )
+    }
 }
 
 public struct SafeVoiceList: Codable, Equatable, Sendable {

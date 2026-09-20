@@ -137,4 +137,3 @@ MCP 不持有 Realtime WebSocket、不创建语音助手 session、不代理持�
 - 调用方需要实现完整的 LLM/Agent orchestration，但这与现有 Native 架构一致。
 - 服务端状态机更小、隐私边界更清晰、网络依赖更少，TTS/ASR 可以独立演进。
 - 未经过官方当前 wire fixture、fake loopback 和 Native contract tests 的能力，不得写入当前契约。
-
