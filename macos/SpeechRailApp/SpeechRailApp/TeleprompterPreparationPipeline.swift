@@ -32,6 +32,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
     public let pace: TeleprompterPace
     public let operation: TeleprompterPreparationOperation
     public let selectedUnitIDs: Set<Int>?
+    public let currentBlocks: [TeleprompterMapCurrentBlock]
 
     public init(
         source: TeleprompterImportedSource,
@@ -39,7 +40,8 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         timingPlan: TeleprompterTimingPlan,
         pace: TeleprompterPace,
         operation: TeleprompterPreparationOperation = .prepare,
-        selectedUnitIDs: Set<Int>? = nil
+        selectedUnitIDs: Set<Int>? = nil,
+        currentBlocks: [TeleprompterMapCurrentBlock] = []
     ) {
         self.source = source
         self.sourceUnits = sourceUnits
@@ -47,6 +49,7 @@ public struct TeleprompterPreparationInput: Equatable, Sendable {
         self.pace = pace
         self.operation = operation
         self.selectedUnitIDs = selectedUnitIDs
+        self.currentBlocks = currentBlocks
     }
 }
 
@@ -55,17 +58,20 @@ public struct TeleprompterPreparationPolicy: Codable, Equatable, Sendable {
     public let maxWindowBudgetUnits: Int
     public let maxGroupUnits: Int
     public let maxReadOnlyContextUnits: Int
+    public let maxRecoveryRequests: Int
 
     public init(
         maxWindowUnits: Int = 24,
         maxWindowBudgetUnits: Int = 1_600,
         maxGroupUnits: Int = 8,
-        maxReadOnlyContextUnits: Int = 1
+        maxReadOnlyContextUnits: Int = 1,
+        maxRecoveryRequests: Int = 3
     ) {
         self.maxWindowUnits = max(1, maxWindowUnits)
         self.maxWindowBudgetUnits = max(1, maxWindowBudgetUnits)
         self.maxGroupUnits = max(1, maxGroupUnits)
         self.maxReadOnlyContextUnits = max(0, maxReadOnlyContextUnits)
+        self.maxRecoveryRequests = max(0, maxRecoveryRequests)
     }
 }
 
@@ -215,6 +221,8 @@ public struct TeleprompterPreparationPipeline: Sendable {
         var windowStates: [[BlockState]] = []
         windowStates.reserveCapacity(windows.count)
         var mapRequestCount = 0
+        var recoveryRequestCount = 0
+        let recoveryBudget = min(policy.maxRecoveryRequests, max(2, min(windows.count, 3)))
 
         for (windowIndex, window) in windows.enumerated() {
             try Task.checkCancellation()
@@ -231,6 +239,10 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 weightMode: input.timingPlan.weightMode,
                 pace: input.pace,
                 operation: input.operation,
+                currentBlocks: input.currentBlocks.filter {
+                    $0.startUnit < (window.sourceUnitIDs.last ?? -1) + 1
+                        && $0.endUnit > (window.sourceUnitIDs.first ?? 0)
+                },
                 readOnlyContext: makeContext(
                     for: window,
                     selection: selection,
@@ -238,19 +250,35 @@ public struct TeleprompterPreparationPipeline: Sendable {
                 ),
                 maxGroupUnits: policy.maxGroupUnits
             )
-            let response = try await call(prompt)
-            try Task.checkCancellation()
-            let output = try TeleprompterMapDecoder().decode(
-                response,
-                targets: targets,
-                maxGroupUnits: policy.maxGroupUnits
-            )
-            let states = try makeBlockStates(
-                output: output,
-                window: window,
-                sourceUnits: sourceUnits,
-                pace: input.pace
-            )
+            let states: [BlockState]
+            do {
+                states = try await mapStates(
+                    prompt: prompt,
+                    targets: targets,
+                    window: window,
+                    sourceUnits: sourceUnits,
+                    pace: input.pace
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                guard recoveryRequestCount < recoveryBudget else {
+                    throw TeleprompterPreparationError.invalidPromptResponse
+                }
+                recoveryRequestCount += 1
+                let recoveryPrompt = TeleprompterPreparationPrompt(
+                    instructions: prompt.instructions + "\n上一轮响应未通过本地结构校验。请丢弃上一轮输出，只根据同一份输入重新输出完整、连续、闭合的 JSON；不要解释失败原因。",
+                    input: prompt.input,
+                    schemaVersion: prompt.schemaVersion
+                )
+                states = try await mapStates(
+                    prompt: recoveryPrompt,
+                    targets: targets,
+                    window: window,
+                    sourceUnits: sourceUnits,
+                    pace: input.pace
+                )
+            }
             guard !states.isEmpty else { throw TeleprompterPreparationError.invalidPromptResponse }
             windowStates.append(states)
             mapRequestCount += 1
@@ -368,6 +396,29 @@ public struct TeleprompterPreparationPipeline: Sendable {
     }
 }
 
+/// The UI-independent adapter boundary between the preparation pipeline and an
+/// LLM provider. The provider receives one fully constructed prompt at a time;
+/// scheduling, validation, cancellation, and assembly remain in the pipeline.
+public struct TeleprompterPreparationClient: Sendable {
+    public typealias Completion = @Sendable (TeleprompterPreparationPrompt) async throws -> String
+
+    private let pipeline: TeleprompterPreparationPipeline
+
+    public init(
+        completion: @escaping Completion,
+        policy: TeleprompterPreparationPolicy = .init()
+    ) {
+        self.pipeline = TeleprompterPreparationPipeline(completion: completion, policy: policy)
+    }
+
+    public func prepare(
+        _ input: TeleprompterPreparationInput,
+        onProgress: TeleprompterPreparationPipeline.ProgressHandler? = nil
+    ) async throws -> TeleprompterPreparationResult {
+        try await pipeline.prepare(input, onProgress: onProgress)
+    }
+}
+
 private extension TeleprompterPreparationPipeline {
     struct Selection {
         let units: [TeleprompterSourceUnit]
@@ -395,6 +446,28 @@ private extension TeleprompterPreparationPipeline {
         } catch {
             throw TeleprompterPreparationError.invalidPromptResponse
         }
+    }
+
+    func mapStates(
+        prompt: TeleprompterPreparationPrompt,
+        targets: [TeleprompterSourceUnit],
+        window: TeleprompterPreparationMapWindow,
+        sourceUnits: [Int: TeleprompterSourceUnit],
+        pace: TeleprompterPace
+    ) async throws -> [BlockState] {
+        let response = try await call(prompt)
+        try Task.checkCancellation()
+        let output = try TeleprompterMapDecoder().decode(
+            response,
+            targets: targets,
+            maxGroupUnits: policy.maxGroupUnits
+        )
+        return try makeBlockStates(
+            output: output,
+            window: window,
+            sourceUnits: sourceUnits,
+            pace: pace
+        )
     }
 
     func validate(_ input: TeleprompterPreparationInput) throws -> Selection {

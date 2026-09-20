@@ -23,6 +23,23 @@ struct TeleprompterPreparationPipelineTests {
         #expect((await calls.schemaVersions) == ["teleprompter.preparation.v2"])
     }
 
+    @Test func malformedMapResponseUsesOneBoundedRecoveryRequest() async throws {
+        let fixture = try makeFixture(lineCount: 4)
+        let attempts = AttemptCounter()
+        let pipeline = TeleprompterPreparationPipeline(completion: { prompt in
+            if prompt.schemaVersion == "teleprompter.preparation.v2",
+               await attempts.next() == 1 {
+                return "{}"
+            }
+            return try Self.mapResponse(for: prompt)
+        })
+
+        let result = try await pipeline.prepare(fixture.input)
+
+        #expect(result.mapRequestCount == 1)
+        #expect(await attempts.value == 2)
+    }
+
     @Test func longSourceMapsInBoundedWindowsThenReducesEachAdjacentSeam() async throws {
         let fixture = try makeFixture(lineCount: 96)
         let calls = CallLog()
@@ -139,6 +156,15 @@ struct TeleprompterPreparationPipelineTests {
                 reduceCount += 1
                 reduceStartedOnlyAfterAllMaps = reduceStartedOnlyAfterAllMaps && mapsCompleted == 4
             }
+        }
+    }
+
+    private actor AttemptCounter {
+        private(set) var value = 0
+
+        func next() -> Int {
+            value += 1
+            return value
         }
     }
 

@@ -8,7 +8,6 @@ public enum TeleprompterV2StoreError: Error, Equatable, LocalizedError, Sendable
     case invalidBundle
     case unsupportedVersion(Int)
     case immutableSourceRevision
-    case backupFailed
     case atomicWriteFailed
     case unsupportedImport
 
@@ -20,7 +19,6 @@ public enum TeleprompterV2StoreError: Error, Equatable, LocalizedError, Sendable
         case .invalidBundle: "这份稿子无法使用"
         case let .unsupportedVersion(version): "这份稿子需要更新版本的 SpeechRail（格式 \(version)）"
         case .immutableSourceRevision: "原稿历史版本不可修改，请创建新的来源版本"
-        case .backupFailed: "无法保存原稿备份，未升级这份稿子"
         case .atomicWriteFailed: "稿件保存失败，原版本仍然保留"
         case .unsupportedImport: "请选择文本文件（TXT 或 Markdown）"
         }
@@ -458,10 +456,23 @@ public final class TeleprompterV2Store {
     private let directoryURL: URL
     private let fileManager: FileManager
 
-    public init(directoryURL: URL, fileManager: FileManager = .default) throws {
-        self.directoryURL = directoryURL
+    public init(directoryURL: URL? = nil, fileManager: FileManager = .default) throws {
         self.fileManager = fileManager
-        try fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        if let directoryURL {
+            self.directoryURL = directoryURL
+        } else {
+            let applicationSupport = try fileManager.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            self.directoryURL = applicationSupport
+                .appendingPathComponent("SpeechRail", isDirectory: true)
+                .appendingPathComponent("Teleprompter", isDirectory: true)
+                .appendingPathComponent("documents", isDirectory: true)
+        }
+        try fileManager.createDirectory(at: self.directoryURL, withIntermediateDirectories: true)
     }
 
     public func load(documentID: String) throws -> TeleprompterV2DocumentBundle {
@@ -502,18 +513,13 @@ public final class TeleprompterV2Store {
 
     public func save(_ bundle: TeleprompterV2DocumentBundle) throws {
         let destination = try fileURL(documentID: bundle.document.id)
-        var existingData: Data?
-        var existingIsLegacy = false
 
         if fileManager.fileExists(atPath: destination.path) {
             do {
-                existingData = try Data(contentsOf: destination)
-                let existing = try decodeExisting(existingData!)
+                let existing = try decodeExisting(Data(contentsOf: destination))
                 switch existing {
                 case let .v2(existingBundle):
                     try validateImmutableSourceRevisions(old: existingBundle, new: bundle)
-                case .legacy:
-                    existingIsLegacy = true
                 case let .future(version):
                     throw TeleprompterV2StoreError.unsupportedVersion(version)
                 }
@@ -526,9 +532,6 @@ public final class TeleprompterV2Store {
 
         try validate(bundle)
         let data = try encode(bundle)
-        if existingIsLegacy, let existingData {
-            try preserveLegacyBackup(documentID: bundle.document.id, data: existingData)
-        }
         try atomicWrite(data, to: destination)
     }
 
@@ -653,6 +656,14 @@ public final class TeleprompterV2Store {
         return copied
     }
 
+    public func delete(documentID: String) throws {
+        let url = try fileURL(documentID: documentID)
+        guard fileManager.fileExists(atPath: url.path) else {
+            throw TeleprompterV2StoreError.notFound
+        }
+        try fileManager.removeItem(at: url)
+    }
+
     public func exportSource(_ bundle: TeleprompterV2DocumentBundle) throws -> Data {
         try validate(bundle)
         guard let source = bundle.sourceRevisions.first(where: { $0.id == bundle.document.currentSourceRevisionID }) else {
@@ -671,15 +682,11 @@ public final class TeleprompterV2Store {
         return version.readingText.isEmpty ? "" : version.readingText + "\n"
     }
 
-    public func backupURL(documentID: String) -> URL {
-        directoryURL.appendingPathComponent(".\(documentID).legacy.json.bak", isDirectory: false)
-    }
 }
 
 private extension TeleprompterV2Store {
     enum ExistingBundle {
         case v2(TeleprompterV2DocumentBundle)
-        case legacy(TeleprompterDocumentBundle)
         case future(Int)
     }
 
@@ -709,164 +716,26 @@ private extension TeleprompterV2Store {
         case let .v2(bundle):
             try validate(bundle)
             return bundle
-        case let .legacy(bundle):
-            return try migrate(bundle)
         case let .future(version):
             throw TeleprompterV2StoreError.unsupportedVersion(version)
         }
     }
 
     func decodeExisting(_ data: Data) throws -> ExistingBundle {
-        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw TeleprompterV2StoreError.corruptBundle
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let number = object["format_version"] as? NSNumber else {
+            throw TeleprompterV2StoreError.invalidBundle
         }
-        if let number = object["format_version"] as? NSNumber {
-            let version = number.intValue
-            if version > Self.formatVersion { return .future(version) }
-            guard version == Self.formatVersion else { throw TeleprompterV2StoreError.invalidBundle }
-            do {
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .secondsSince1970
-                return .v2(try decoder.decode(TeleprompterV2DocumentBundle.self, from: data))
-            } catch {
-                throw TeleprompterV2StoreError.corruptBundle
-            }
-        }
+        let version = number.intValue
+        if version > Self.formatVersion { return .future(version) }
+        guard version == Self.formatVersion else { throw TeleprompterV2StoreError.invalidBundle }
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .secondsSince1970
-            return .legacy(try decoder.decode(TeleprompterDocumentBundle.self, from: data))
+            return .v2(try decoder.decode(TeleprompterV2DocumentBundle.self, from: data))
         } catch {
             throw TeleprompterV2StoreError.corruptBundle
         }
-    }
-
-    func migrate(_ legacy: TeleprompterDocumentBundle) throws -> TeleprompterV2DocumentBundle {
-        var sourceRevisions: [TeleprompterV2SourceRevision] = []
-        var sourceIDs: [String: String] = [:]
-        var importedUnits: [String: [TeleprompterSourceUnit]] = [:]
-
-        func sourceRevision(for text: String) -> TeleprompterV2SourceRevision {
-            let hash = TeleprompterV2Hash.sha256(text)
-            let id = "legacy-source-\(hash.prefix(16))"
-            if let existing = sourceRevisions.first(where: { $0.id == id }) { return existing }
-            let units: [TeleprompterSourceUnit]
-            if text.isEmpty {
-                units = []
-            } else if let imported = try? TeleprompterSourceImporter.importData(Data(text.utf8)) {
-                let built = (try? TeleprompterSourceUnitBuilder().build(imported)) ?? []
-                units = built.map {
-                    .init(
-                        id: $0.id,
-                        ordinal: $0.ordinal,
-                        sourceRevisionID: id,
-                        sourceRange: $0.sourceRange,
-                        rawText: $0.rawText,
-                        continuation: $0.continuation,
-                        budgetUnits: $0.budgetUnits
-                    )
-                }
-            } else {
-                units = []
-            }
-            importedUnits[id] = units
-            let revision = TeleprompterV2SourceRevision(
-                id: id,
-                sourceText: text,
-                utf8SHA256: hash,
-                encoding: "utf8",
-                hasBOM: false,
-                formatHint: .unknown,
-                builderVersion: "legacy",
-                sourceUnits: units
-            )
-            sourceRevisions.append(revision)
-            return revision
-        }
-
-        let currentSource = sourceRevision(for: legacy.document.sourceText)
-        sourceIDs[legacy.document.sourceText] = currentSource.id
-        let versions = legacy.versions.map { version in
-            let source = sourceRevision(for: version.sourceText)
-            sourceIDs[version.sourceText] = source.id
-            let readingText = version.segments.map(\.text).joined(separator: "\n\n")
-            let blocks = version.segments.map { segment in
-                TeleprompterV2ReadingBlock(
-                    id: segment.id,
-                    revision: 0,
-                    sourceUnitIDs: [],
-                    text: segment.text,
-                    disposition: .speak,
-                    origin: .deterministic,
-                    budgetShare: 0
-                )
-            }
-            let selection = TeleprompterV2SelectionRevision(
-                id: "legacy-selection-\(version.id)",
-                sourceUnitRevision: source.id,
-                selectedUnitIDs: importedUnits[source.id, default: []].map(\.id),
-                selectedRanges: version.sourceText.isEmpty
-                    ? []
-                    : [.init(start: 0, end: version.sourceText.utf16.count)],
-                userExcludedRanges: []
-            )
-            var readingOffset = 0
-            let segments = version.segments.enumerated().map { index, segment in
-                let start = readingOffset
-                readingOffset += segment.text.utf16.count
-                if index < version.segments.count - 1 {
-                    readingOffset += 2
-                }
-                return TeleprompterV2ReadingSegment(
-                    id: segment.id,
-                    ordinal: segment.ordinal,
-                    readingRange: .init(start: start, end: start + segment.text.utf16.count),
-                    text: segment.text,
-                    keywords: segment.keywords,
-                    matchPhrases: segment.matchPhrases,
-                    pauseHint: segment.pauseHint
-                )
-            }
-            return TeleprompterV2ReadingVersion(
-                id: version.id,
-                documentID: legacy.document.id,
-                sourceRevisionID: source.id,
-                selectionSnapshot: selection,
-                readingText: readingText,
-                blocks: blocks,
-                segments: segments,
-                goalSnapshot: .init(targetSeconds: 0, goalRevision: 0),
-                paceSnapshot: .natural,
-                estimate: TeleprompterDurationEstimator.estimate(readingText),
-                analysisSource: version.analysisSource,
-                createdAt: version.createdAt
-            )
-        }
-        let document = TeleprompterV2Document(
-            id: legacy.document.id,
-            title: legacy.document.title,
-            currentSourceRevisionID: sourceIDs[legacy.document.sourceText] ?? currentSource.id,
-            activeVersionID: legacy.document.activeVersionID,
-            createdAt: legacy.document.createdAt,
-            updatedAt: legacy.document.updatedAt
-        )
-        let lastRun = legacy.runState.map {
-            TeleprompterV2RunSummary(
-                versionID: $0.versionID,
-                targetSeconds: 0,
-                elapsedSeconds: 0,
-                lastSegmentID: $0.currentSegmentID,
-                endedReason: $0.mode.rawValue,
-                completedReading: false
-            )
-        }
-        return .init(
-            document: document,
-            sourceRevisions: sourceRevisions,
-            draft: nil,
-            versions: versions,
-            lastRun: lastRun
-        )
     }
 
     func validate(_ bundle: TeleprompterV2DocumentBundle) throws {
@@ -977,22 +846,6 @@ private extension TeleprompterV2Store {
                   oldSource.sourceUnits == newSource.sourceUnits else {
                 throw TeleprompterV2StoreError.immutableSourceRevision
             }
-        }
-    }
-
-    func preserveLegacyBackup(documentID: String, data: Data) throws {
-        let backup = backupURL(documentID: documentID)
-        do {
-            if fileManager.fileExists(atPath: backup.path) {
-                guard try Data(contentsOf: backup) == data else { throw TeleprompterV2StoreError.backupFailed }
-            } else {
-                try fileManager.copyItem(at: fileURL(documentID: documentID), to: backup)
-                guard try Data(contentsOf: backup) == data else { throw TeleprompterV2StoreError.backupFailed }
-            }
-        } catch let error as TeleprompterV2StoreError {
-            throw error
-        } catch {
-            throw TeleprompterV2StoreError.backupFailed
         }
     }
 

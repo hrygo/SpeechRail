@@ -99,10 +99,10 @@ public struct TeleprompterTrialReadingSheet: View {
             .frame(height: 140)
             .background(
                 SpeechRailDesignTokens.Color.recessedField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
             )
         }
@@ -126,10 +126,10 @@ public struct TeleprompterTrialReadingSheet: View {
             .padding(.vertical, SpeechRailDesignTokens.Spacing.xs)
             .background(
                 SpeechRailDesignTokens.Color.inputField,
-                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                     .stroke(SpeechRailDesignTokens.Surface.border, lineWidth: SpeechRailDesignTokens.Stroke.hairline)
             )
 
@@ -196,10 +196,10 @@ public struct TeleprompterTrialReadingSheet: View {
         .padding(SpeechRailDesignTokens.Spacing.sm)
         .background(
             SpeechRailDesignTokens.Color.recessedField,
-            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                 .stroke(
                     result.isWithinValidRange ? SpeechRailDesignTokens.Color.ready.opacity(0.3) : SpeechRailDesignTokens.Color.attention.opacity(0.3),
                     lineWidth: SpeechRailDesignTokens.Stroke.hairline

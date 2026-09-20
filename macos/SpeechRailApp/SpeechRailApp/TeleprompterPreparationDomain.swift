@@ -131,6 +131,17 @@ public enum TeleprompterSourceImporter {
 
         let digest = SHA256.hash(data: Data(body))
         let hash = digest.map { String(format: "%02x", $0) }.joined()
+        _ = try TeleprompterSourceUnitBuilder(maxSourceUnits: limits.maxSourceUnits).build(
+            TeleprompterImportedSource(
+                sourceRevisionID: "validation",
+                sourceText: sourceText,
+                formatHint: formatHint,
+                hasBOM: hasBOM,
+                originalUTF8Data: data,
+                sourceSHA256: hash,
+                referenceSeconds: referenceSeconds
+            )
+        )
         return TeleprompterImportedSource(
             sourceRevisionID: "source-\(hash.prefix(16))",
             sourceText: sourceText,
@@ -174,9 +185,11 @@ public struct TeleprompterSourceUnit: Codable, Equatable, Identifiable, Sendable
 public struct TeleprompterSourceUnitBuilder: Sendable {
     public static let version = "source-unit-builder.v1"
     public let maxBudgetUnits: Int
+    public let maxSourceUnits: Int
 
-    public init(maxBudgetUnits: Int = 600) {
+    public init(maxBudgetUnits: Int = 600, maxSourceUnits: Int = 20_000) {
         self.maxBudgetUnits = max(1, maxBudgetUnits)
+        self.maxSourceUnits = max(1, maxSourceUnits)
     }
 
     public func build(_ source: TeleprompterImportedSource) throws -> [TeleprompterSourceUnit] {
@@ -203,12 +216,7 @@ public struct TeleprompterSourceUnitBuilder: Sendable {
             hardEnd -= 1
             guard hardEnd > start else { throw TeleprompterPreparationError.invalidSourceUnits }
 
-            let end: Int
-            if hardEnd == characters.count {
-                end = hardEnd
-            } else {
-                end = preferredEnd(in: characters, start: start, hardEnd: hardEnd)
-            }
+            let end = preferredEnd(in: characters, start: start, hardEnd: hardEnd)
 
             let startIndex = boundaries[start]
             let endIndex = boundaries[end]
@@ -229,7 +237,7 @@ public struct TeleprompterSourceUnitBuilder: Sendable {
             )
             start = end
 
-            guard units.count <= 20_000 else {
+            guard units.count <= maxSourceUnits else {
                 throw TeleprompterPreparationError.sourceUnitLimitExceeded
             }
         }
@@ -243,6 +251,13 @@ public struct TeleprompterSourceUnitBuilder: Sendable {
 
     private func preferredEnd(in characters: [Character], start: Int, hardEnd: Int) -> Int {
         guard hardEnd > start + 1 else { return hardEnd }
+        if hardEnd == characters.count {
+            for end in (start + 2)...hardEnd {
+                if characters[end - 2] == "\n", characters[end - 1] == "\n" {
+                    return end
+                }
+            }
+        }
         for end in stride(from: hardEnd, through: start + 1, by: -1) {
             let previous = characters[end - 1]
             if isSemanticBoundary(previous) {
@@ -315,10 +330,23 @@ public enum TeleprompterDurationEstimator {
     }
 
     public static func referenceSeconds(for text: String) -> TimeInterval {
-        let metrics = metrics(in: text)
+        var hanCount = 0
+        var nonHanWordCount = 0
+        var inNonHanWord = false
+        for scalar in text.unicodeScalars {
+            if isHan(scalar.value) {
+                hanCount += 1
+                inNonHanWord = false
+            } else if CharacterSet.letters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar) {
+                if !inNonHanWord { nonHanWordCount += 1 }
+                inNonHanWord = true
+            } else {
+                inNonHanWord = false
+            }
+        }
         return 60 * (
-            Double(metrics.hanCount) / 250
-                + Double(metrics.latinWordCount) / 160
+            Double(hanCount) / 250
+                + Double(nonHanWordCount) / 160
         )
     }
 
@@ -426,19 +454,30 @@ public enum TeleprompterTimingPlanner {
     public static func plan(
         sourceUnits: [TeleprompterSourceUnit],
         estimates: [TimeInterval?],
-        targetMinutes: Int
+        targetMinutes: Int,
+        selectedUnitIDs: Set<Int>? = nil
     ) throws -> TeleprompterTimingPlan {
         let targetSeconds = try validateTargetMinutes(targetMinutes)
         guard !sourceUnits.isEmpty, estimates.count == sourceUnits.count else {
             throw TeleprompterPreparationError.invalidTimingPlan
         }
-
-        let allEstimated = estimates.allSatisfy { value in
-            guard let value else { return false }
-            return value.isFinite && value >= 0
+        let selectedIDs = selectedUnitIDs ?? Set(sourceUnits.map(\.id))
+        guard !selectedIDs.isEmpty,
+              selectedIDs.isSubset(of: Set(sourceUnits.map(\.id))) else {
+            throw TeleprompterPreparationError.invalidTimingPlan
         }
+
+        let allEstimated = sourceUnits.enumerated()
+            .filter { selectedIDs.contains($0.element.id) }
+            .map(\.offset)
+            .allSatisfy { index in
+                let value = estimates[index]
+                guard let value else { return false }
+                return value.isFinite && value >= 0
+            }
         let mode: TeleprompterTimingWeightMode = allEstimated ? .estimatedDuration : .proxyCharacters
         let rawWeights = sourceUnits.enumerated().map { index, unit in
+            guard selectedIDs.contains(unit.id) else { return (unit.id, 0.0) }
             let weight: Double
             switch mode {
             case .estimatedDuration:
@@ -457,9 +496,12 @@ public enum TeleprompterTimingPlanner {
         var allocations: [TeleprompterTimingAllocation] = []
         allocations.reserveCapacity(rawWeights.count)
         var assigned = 0.0
+        let selectedIndexes = rawWeights.indices.filter { selectedIDs.contains(rawWeights[$0].0) }
         for (index, item) in rawWeights.enumerated() {
             let budget: Double
-            if index == rawWeights.index(before: rawWeights.endIndex) {
+            if !selectedIDs.contains(item.0) {
+                budget = 0
+            } else if index == selectedIndexes.last {
                 budget = budgetSeconds - assigned
             } else {
                 budget = budgetSeconds * item.1 / totalWeight

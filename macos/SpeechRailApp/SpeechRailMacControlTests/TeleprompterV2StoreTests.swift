@@ -23,34 +23,6 @@ struct TeleprompterV2StoreTests {
         #expect(loaded.versions[0].segments[0].readingRange == .init(start: 0, end: 4))
     }
 
-    @Test @MainActor func legacyLoadDoesNotWriteUntilSaveAndFirstV2WriteBacksUpExactBytes() throws {
-        let fixture = try makeFixture()
-        let directory = try makeDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let store = try TeleprompterV2Store(directoryURL: directory)
-        let legacy = try makeLegacyBundle()
-        let legacyData = try encodeLegacy(legacy)
-        let legacyURL = directory.appendingPathComponent("legacy-doc.json")
-        try legacyData.write(to: legacyURL)
-
-        let migrated = try store.load(documentID: "legacy-doc")
-        #expect(migrated.formatVersion == 2)
-        #expect(migrated.versions[0].readingText == "旧稿\n\n正文")
-        #expect(migrated.versions[0].segments[1].readingRange == .init(start: 4, end: 6))
-        #expect(!FileManager.default.fileExists(atPath: store.backupURL(documentID: "legacy-doc").path))
-
-        try store.save(migrated)
-        let backupURL = store.backupURL(documentID: "legacy-doc")
-        #expect(try Data(contentsOf: backupURL) == legacyData)
-        #expect(try Data(contentsOf: legacyURL) != legacyData)
-        #expect(try store.load(documentID: "legacy-doc").formatVersion == 2)
-
-        let backupData = try Data(contentsOf: backupURL)
-        try store.save(migrated)
-        #expect(try Data(contentsOf: backupURL) == backupData)
-        _ = fixture
-    }
-
     @Test @MainActor func sourceRevisionIsImmutableAndInvalidSaveLeavesPreviousBytesUntouched() throws {
         let fixture = try makeFixture()
         let directory = try makeDirectory()
@@ -269,39 +241,6 @@ struct TeleprompterV2StoreTests {
             sourceText: sourceText,
             sourceRevisionID: source.sourceRevisionID
         )
-    }
-
-    private func makeLegacyBundle() throws -> TeleprompterDocumentBundle {
-        let document = TeleprompterDocument(id: "legacy-doc", title: "旧稿", sourceText: "旧稿正文")
-        let firstSegment = TeleprompterSegment(
-            id: "legacy-segment",
-            ordinal: 0,
-            sourceRange: .init(start: 0, end: 2),
-            text: "旧稿"
-        )
-        let secondSegment = TeleprompterSegment(
-            id: "legacy-segment-2",
-            ordinal: 1,
-            sourceRange: .init(start: 2, end: 4),
-            text: "正文"
-        )
-        let version = TeleprompterVersion(
-            id: "legacy-version",
-            documentID: document.id,
-            sourceText: document.sourceText,
-            segments: [firstSegment, secondSegment],
-            analysisSource: .deterministic
-        )
-        var active = document
-        active.activeVersionID = version.id
-        return .init(document: active, versions: [version], runState: nil)
-    }
-
-    private func encodeLegacy(_ bundle: TeleprompterDocumentBundle) throws -> Data {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .secondsSince1970
-        return try encoder.encode(bundle)
     }
 
     private func makeDirectory() throws -> URL {

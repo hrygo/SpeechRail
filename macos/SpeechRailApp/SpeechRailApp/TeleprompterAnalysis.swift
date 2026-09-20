@@ -33,7 +33,7 @@ public struct TeleprompterAnalysis: Codable, Equatable, Sendable {
                     "properties": [
                         "start_unit": ["type": "integer"], "end_unit": ["type": "integer"],
                         "keywords": ["type": "array", "items": ["type": "string"]],
-                        "match_phrases": ["type": "array", "items": ["type": "string"]],
+                        "match_phrases": ["type": "array", "maxItems": 0, "items": ["type": "string"]],
                         "pause_hint": ["type": "string", "enum": TeleprompterPauseHint.allCases.map(\.rawValue)]
                     ]
                 ]]
@@ -53,9 +53,9 @@ public struct TeleprompterAnalysisDecoder: Sendable {
                             units: [TeleprompterSegment], firstUnit: Int) throws -> TeleprompterAnalysis {
         do {
             let data = Data(json.utf8)
-            // Validate closed objects locally as well as through Structured Outputs.
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  Set(object.keys) == ["schema_version", "segments"],
+            // Validate closed objects and duplicate keys locally as well as through Structured Outputs.
+            let object = try TeleprompterStrictJSON.object(from: data)
+            guard Set(object.keys) == ["schema_version", "segments"],
                   let raw = object["segments"] as? [[String: Any]], !raw.isEmpty,
                   raw.allSatisfy({ Set($0.keys) == ["start_unit", "end_unit", "keywords", "match_phrases", "pause_hint"] }) else {
                 throw TeleprompterTextError.invalidAnalysis
@@ -69,7 +69,7 @@ public struct TeleprompterAnalysisDecoder: Sendable {
             for annotation in payload.segments {
                 guard annotation.start_unit == next, annotation.end_unit > next,
                       annotation.end_unit <= firstUnit + units.count,
-                      annotation.keywords.count <= 5, annotation.match_phrases.count <= 3 else {
+                      annotation.keywords.count <= 5, annotation.match_phrases.isEmpty else {
                     throw TeleprompterTextError.invalidAnalysis
                 }
                 let first = units[annotation.start_unit - firstUnit]
@@ -161,7 +161,7 @@ public struct TeleprompterAIClient: Sendable {
             只返回规定的 teleprompter.analysis.v2 结构化对象，不输出 Markdown、解释或正文副本，不计算字符偏移。
             分组：每组引用连续编号 [start_unit, end_unit)，end_unit 不包含在组内。按顺序覆盖本次提供的每一个单元恰好一次，不遗漏、不重叠、不引用其他窗口。通常保留单个语义完整句；仅合并紧密相关的短单元，总长度不超过 180 字。不要跨话题、标题或列表项合并。
             keywords：0 至 5 个来自本组原文的连续短语，优先专有名词、动作和关键数字，保持原顺序。不要使用“大家好”“接下来”等泛化套话凑数；没有必要时返回空数组。
-            match_phrases：0 至 3 个本组的简短口语变体，每项不超过 120 字；保留主体、否定、数字和单位，不新增事实，不生成脱离上下文的泛化短语。不确定则留空。它们仅是建议，跟读必须能依靠正文独立工作。
+            match_phrases：固定返回空数组。确认稿就是实际要读的正文，不生成口语变体或正文副本。
             pause_hint：short 表示句内或紧接下一句；medium 表示完整句意结束；long 表示章节、话题转换或明确舞台停顿。按语义判断，不按字数猜秒数。
             返回前核对：首组 start_unit 等于输入首个 id，后组 start_unit 等于前组 end_unit，末组 end_unit 等于输入最后 id 加 1；字段严格符合 schema。
             """, input: String(decoding: data, as: UTF8.self))

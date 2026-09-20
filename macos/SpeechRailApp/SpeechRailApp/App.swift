@@ -143,33 +143,72 @@ struct SpeechRailApp: App {
         let coordinator = SessionCoordinator(store: SessionStore())
         let captionSession = CaptionSession(coordinator: coordinator)
         let sessionPreferences = SessionPreferences()
-        let teleprompterStore: TeleprompterStore
+        let teleprompterV2Store: TeleprompterV2Store
 #if DEBUG
         if isUITest {
             do {
-                teleprompterStore = try Self.makeUITestTeleprompterStore()
+                teleprompterV2Store = try TeleprompterV2Store(
+                    directoryURL: Self.makeUITestTeleprompterDirectory()
+                )
             } catch {
-                fatalError("Unable to initialize isolated UI test teleprompter store")
+                fatalError("Unable to initialize isolated UI test teleprompter v2 store")
             }
         } else {
             do {
-                teleprompterStore = try TeleprompterStore()
+                teleprompterV2Store = try TeleprompterV2Store()
             } catch {
-                fatalError("Unable to initialize teleprompter store")
+                fatalError("Unable to initialize teleprompter v2 store")
             }
         }
 #else
         do {
-            teleprompterStore = try TeleprompterStore()
+            teleprompterV2Store = try TeleprompterV2Store()
         } catch {
-            fatalError("Unable to initialize teleprompter store")
+            fatalError("Unable to initialize teleprompter v2 store")
         }
 #endif
         let llmProvider = LLMProvider()
         let teleprompterSession = TeleprompterSession(
             coordinator: coordinator,
-            store: teleprompterStore
+            v2Store: teleprompterV2Store
         )
+        teleprompterSession.preparationClient = TeleprompterPreparationClient { prompt in
+            let resolved = await MainActor.run {
+                sessionPreferences.resolvedLLMConfiguration(for: .teleprompter)
+            }
+            guard resolved.configuration.isConfigured,
+                  !resolved.configuration.embedsCredential else {
+                throw LLMError.notConfigured
+            }
+            let schema: [String: Any]
+            let maxOutputTokens: Int
+            let timeout: TimeInterval
+            switch prompt.schemaVersion {
+            case "teleprompter.preparation.v2":
+                schema = TeleprompterPreparationJSONSchema.map
+                maxOutputTokens = 6000
+                timeout = 90
+            case "teleprompter.reduction.v1":
+                schema = TeleprompterPreparationJSONSchema.reduction
+                maxOutputTokens = 4000
+                timeout = 60
+            case "teleprompter.analysis.v2":
+                schema = TeleprompterPreparationJSONSchema.analysis
+                maxOutputTokens = 4000
+                timeout = 45
+            default:
+                throw LLMError.unsupportedStructuredOutput
+            }
+            return try await llmProvider.complete(
+                configuration: resolved.configuration,
+                messages: [LLMMessage(role: .user, text: prompt.input)],
+                apiKey: resolved.apiKey,
+                maxOutputTokens: maxOutputTokens,
+                textFormat: schema,
+                instructions: prompt.instructions,
+                timeout: timeout
+            )
+        }
         teleprompterSession.aiClient = TeleprompterAIClient { prompt in
             let resolved = sessionPreferences.resolvedLLMConfiguration(for: .teleprompter)
             guard resolved.configuration.isConfigured,
@@ -356,12 +395,11 @@ struct SpeechRailApp: App {
     }
 
     @MainActor
-    private static func makeUITestTeleprompterStore() throws -> TeleprompterStore {
-        let directory = FileManager.default.temporaryDirectory
+    private static func makeUITestTeleprompterDirectory() -> URL {
+        FileManager.default.temporaryDirectory
             .appendingPathComponent("SpeechRailUITests", isDirectory: true)
             .appendingPathComponent("Teleprompter", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        return try TeleprompterStore(directoryURL: directory)
     }
 #endif
 

@@ -15,6 +15,8 @@ public struct TeleprompterView: View {
     @State private var operationMessage: String?
     @State private var documentToDelete: TeleprompterDocument?
     @State private var isDeleteAlertPresented = false
+    @State private var unavailableDocumentToDelete: TeleprompterV2DocumentListItem?
+    @State private var isUnavailableDeleteAlertPresented = false
     @State private var searchQuery = ""
 
     // 终版规格 Sheet 状态
@@ -26,6 +28,12 @@ public struct TeleprompterView: View {
     @State private var editingReviewItemID: String? = nil
     @State private var editingReviewItemText: String = ""
     @State private var narrowComparisonTab: ComparisonTab = .reading
+    @State private var pendingAIAction: AIPendingAction = .prepare
+
+    private enum AIPendingAction {
+        case prepare
+        case annotate
+    }
 
     private enum ComparisonTab: String, CaseIterable, Identifiable {
         case source = "原稿"
@@ -61,6 +69,9 @@ public struct TeleprompterView: View {
                 } else {
                     populatedWorkspace
                 }
+                if !session.unavailableDocuments.isEmpty {
+                    unavailableDocumentsNotice
+                }
             }
         } trailing: {
             headerActions
@@ -93,9 +104,14 @@ public struct TeleprompterView: View {
             isPresented: $isAIDataFlowDisclosurePresented
         ) {
             Button("取消", role: .cancel) {}
-            Button("允许发送并整理") {
+            Button(pendingAIAction == .prepare ? "允许发送并整理" : "允许发送并添加提示") {
                 UserDefaults.standard.set(true, forKey: aiDataFlowAcknowledgementKey)
-                startAIAnalysis()
+                switch pendingAIAction {
+                case .prepare:
+                    startAIAnalysis()
+                case .annotate:
+                    startAnnotation()
+                }
             }
         } message: {
             Text(TeleprompterAIDataFlowDisclosure.message)
@@ -139,6 +155,24 @@ public struct TeleprompterView: View {
             Button("取消", role: .cancel) {}
         } message: { doc in
             Text("删除「\(doc.title)」后无法恢复。")
+        }
+        .alert(
+            "删除无法打开的稿件？",
+            isPresented: $isUnavailableDeleteAlertPresented,
+            presenting: unavailableDocumentToDelete
+        ) { item in
+            Button("删除", role: .destructive) {
+                do {
+                    try session.deleteDocument(documentID: item.id)
+                    unavailableDocumentToDelete = nil
+                    reloadDocuments()
+                } catch {
+                    operationMessage = error.localizedDescription
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: { item in
+            Text("「\(item.id)」的当前格式无法读取。删除后可以重新导入原稿。")
         }
     }
 
@@ -376,6 +410,38 @@ public struct TeleprompterView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
+    private var unavailableDocumentsNotice: some View {
+        CardSurface {
+            VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
+                Label {
+                    Text("有 \(session.unavailableDocuments.count) 份稿件无法打开，未影响其他稿件。可以删除后重新导入原稿重建。")
+                        .font(SpeechRailDesignTokens.Typography.caption)
+                        .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                } icon: {
+                    Image(systemName: "doc.badge.ellipsis")
+                        .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                }
+
+                ForEach(session.unavailableDocuments, id: \.id) { item in
+                    HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                        Text(item.id)
+                            .font(SpeechRailDesignTokens.Typography.technicalValue)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                            .lineLimit(1)
+                        Spacer()
+                        Button("删除", role: .destructive) {
+                            unavailableDocumentToDelete = item
+                            isUnavailableDeleteAlertPresented = true
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(!session.canEdit)
+                    }
+                }
+            }
+            .padding(SpeechRailDesignTokens.Spacing.md)
+        }
+    }
+
     private func workflowStepCard(step: String, icon: String, title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.sm) {
             ZStack {
@@ -459,7 +525,7 @@ public struct TeleprompterView: View {
         HStack(alignment: .top, spacing: SpeechRailDesignTokens.Spacing.gutter) {
             recentDocuments
                 .frame(width: SpeechRailDesignTokens.Layout.sessionListWidth)
-                .disabled(!session.canEdit)
+                .disabled(!session.canEdit || session.isPreparingDraft)
             editor
         }
     }
@@ -751,13 +817,14 @@ public struct TeleprompterView: View {
                 SessionHairline()
 
                 TextField("稿子名称", text: titleBinding)
-                    .disabled(!session.canEdit)
+                    .disabled(!session.canEdit || session.isPreparingDraft)
                     .textFieldStyle(.plain)
                     .font(SpeechRailDesignTokens.Typography.bodyMedium)
                     .speechRailRecessedSlot()
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
+        .disabled(session.isPreparingDraft)
     }
 
     // MARK: - 目标时长、节奏与预检控制条
@@ -792,10 +859,10 @@ public struct TeleprompterView: View {
                         .padding(.vertical, 4)
                         .background(
                             SpeechRailDesignTokens.Color.inputField,
-                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                            RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                                 .stroke(
                                     !isTargetMinutesValid && !targetMinutesInput.isEmpty
                                         ? SpeechRailDesignTokens.Color.attention
@@ -916,13 +983,14 @@ public struct TeleprompterView: View {
             }
             .padding(SpeechRailDesignTokens.Spacing.md)
         }
+        .disabled(session.isPreparingDraft)
     }
 
-    private func preflightTone(_ conclusion: TeleprompterTimingPolicy.PreflightConclusion) -> StatusPillTone {
+    private func preflightTone(_ conclusion: TeleprompterTimingPolicy.PreflightConclusion) -> StatusTone {
         switch conclusion {
         case .emptyText, .uncertain: .neutral
         case .matching: .healthy
-        case .underfilled, .slightlyOver: .info
+        case .underfilled, .slightlyOver: .neutral
         case .tight, .invalidTarget: .attention
         }
     }
@@ -949,10 +1017,17 @@ public struct TeleprompterView: View {
                         idealHeight: SpeechRailDesignTokens.Teleprompter.sourceEditorIdealHeight,
                         maxHeight: SpeechRailDesignTokens.Teleprompter.sourceEditorMaximumHeight
                     )
-                    .accessibilityLabel("原稿正文")
+                .accessibilityLabel("原稿正文")
                     .speechRailRecessedSlot()
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
+                    if let sourceValidationError = session.sourceValidationError {
+                        Label(sourceValidationError.localizedDescription, systemImage: "exclamationmark.triangle")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                            .lineLimit(2)
+                    }
+
                     Button {
                         requestAIAnalysis()
                     } label: {
@@ -963,7 +1038,13 @@ public struct TeleprompterView: View {
                     }
                     .keyboardShortcut(.return, modifiers: .command)
                     .speechRailButton(.primary)
-                    .disabled(sourceIsEmpty || !session.canEdit || !isTargetMinutesValid)
+                    .disabled(
+                        sourceIsEmpty
+                            || session.sourceValidationError != nil
+                            || !session.canEdit
+                            || session.isPreparingDraft
+                            || !isTargetMinutesValid
+                    )
 
                     Button("直接使用原稿") {
                         do {
@@ -974,7 +1055,7 @@ public struct TeleprompterView: View {
                         }
                     }
                     .speechRailButton(.secondary)
-                    .disabled(sourceIsEmpty || !session.canEdit)
+                    .disabled(sourceIsEmpty || session.sourceValidationError != nil || !session.canEdit)
 
                     Spacer()
                 }
@@ -988,31 +1069,38 @@ public struct TeleprompterView: View {
     private var analyzingWorkspace: some View {
         CardSurface {
             VStack(alignment: .center, spacing: SpeechRailDesignTokens.Spacing.gutter) {
-                ProgressView()
-                    .controlSize(.large)
+                if let progress = session.preparationProgress, progress.total > 0 {
+                    ProgressView(
+                        value: Double(progress.completed),
+                        total: Double(progress.total)
+                    )
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 360)
                     .padding(.top, SpeechRailDesignTokens.Spacing.md)
+                } else {
+                    ProgressView()
+                        .controlSize(.large)
+                        .padding(.top, SpeechRailDesignTokens.Spacing.md)
+                }
 
                 VStack(spacing: SpeechRailDesignTokens.Spacing.xs) {
-                    Text("正在整理朗读稿…")
+                    Text(preparationPhaseTitle)
                         .font(SpeechRailDesignTokens.Typography.sectionTitle)
                         .foregroundStyle(SpeechRailDesignTokens.Color.ink)
 
-                    Text("正在按目标 \(session.targetMinutes) 分钟规划篇幅，保真口语化并检查段落衔接。")
+                    Text(preparationProgressDetail)
                         .font(SpeechRailDesignTokens.Typography.callout)
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
                 }
 
                 HStack(spacing: SpeechRailDesignTokens.Spacing.md) {
-                    Label("正在整理内容", systemImage: "1.circle.fill")
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    preparationStepLabel("正在整理内容", phase: .mapping, systemImage: "1.circle.fill")
                     Image(systemName: "arrow.right")
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Label("正在检查衔接", systemImage: "2.circle.fill")
-                        .foregroundStyle(SpeechRailDesignTokens.Color.rail)
+                    preparationStepLabel("正在检查衔接", phase: .reducing, systemImage: "2.circle.fill")
                     Image(systemName: "arrow.right")
                         .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
-                    Label("准备预览", systemImage: "3.circle.fill")
-                        .foregroundStyle(SpeechRailDesignTokens.Color.inkTertiary)
+                    preparationStepLabel("准备预览", phase: .finalizing, systemImage: "3.circle.fill")
                 }
                 .font(SpeechRailDesignTokens.Typography.captionMedium)
 
@@ -1027,10 +1115,53 @@ public struct TeleprompterView: View {
         }
     }
 
+    private var preparationPhaseTitle: String {
+        switch session.preparationProgress?.phase {
+        case .mapping: "正在整理内容…"
+        case .reducing: "正在检查衔接…"
+        case .finalizing: "正在准备预览…"
+        case nil: "正在整理朗读稿…"
+        }
+    }
+
+    private var preparationProgressDetail: String {
+        guard let progress = session.preparationProgress else {
+            return "正在按目标 \(session.targetMinutes) 分钟规划篇幅，保真口语化并检查段落衔接。"
+        }
+        if progress.total > 0 {
+            return "已完成 \(min(progress.completed, progress.total)) / \(progress.total) 项；原稿保持只读。"
+        }
+        return "正在按目标 \(session.targetMinutes) 分钟规划篇幅；原稿保持只读。"
+    }
+
+    private func preparationStepLabel(
+        _ title: String,
+        phase: TeleprompterPreparationPhase,
+        systemImage: String
+    ) -> some View {
+        let active = session.preparationProgress?.phase == phase
+        return Label(title, systemImage: systemImage)
+            .foregroundStyle(active ? SpeechRailDesignTokens.Color.rail : SpeechRailDesignTokens.Color.inkTertiary)
+    }
+
     // MARK: - 3. 审阅候选稿工作区
 
     private var reviewWorkspace: some View {
         VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.gutter) {
+            if session.hasUncheckedPreparationBoundaries {
+                CardSurface {
+                    Label {
+                        Text("朗读稿已整理，但部分相邻段落未完成衔接检查；仍可采用，请在原文对照中重点核对这些接缝。")
+                            .font(SpeechRailDesignTokens.Typography.caption)
+                            .foregroundStyle(SpeechRailDesignTokens.Color.inkSecondary)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(SpeechRailDesignTokens.Color.attention)
+                    }
+                    .padding(SpeechRailDesignTokens.Spacing.md)
+                }
+            }
+
             // 待确认事项总览与操作门禁
             if session.unresolvedReviewItemCount > 0 {
                 CardSurface {
@@ -1185,7 +1316,7 @@ public struct TeleprompterView: View {
                             .padding(SpeechRailDesignTokens.Spacing.xs)
                             .background(
                                 SpeechRailDesignTokens.Color.recessedField,
-                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                                in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                             )
                         }
                     }
@@ -1215,9 +1346,10 @@ public struct TeleprompterView: View {
                     ScrollView {
                         VStack(spacing: SpeechRailDesignTokens.Spacing.sm) {
                             ForEach(session.readingBlocks) { block in
+                                let blockNumber = block.ordinal + 1
                                 VStack(alignment: .leading, spacing: SpeechRailDesignTokens.Spacing.xs) {
                                     HStack {
-                                        Text("第 \(block.ordinal + 1) 组")
+                                        Text("第 \(blockNumber) 组")
                                             .font(SpeechRailDesignTokens.Typography.captionMedium)
                                             .foregroundStyle(SpeechRailDesignTokens.Color.rail)
 
@@ -1226,7 +1358,7 @@ public struct TeleprompterView: View {
                                         }
 
                                         if block.text != block.rawSourceText && !block.rawSourceText.isEmpty {
-                                            StatusPill(tone: .info, label: "已口语化")
+                                            StatusPill(tone: .neutral, label: "已口语化")
                                         }
 
                                         Spacer()
@@ -1308,15 +1440,17 @@ public struct TeleprompterView: View {
                         .speechRailButton(.primary)
                         .disabled(!session.canAcceptPendingVersion)
 
-                        Button("再精简表达") {
-                            if let msg = session.tightenReadingBlocks() {
-                                operationMessage = msg
-                            } else {
-                                operationMessage = "已对超时 AI 段落完成精简表达。"
+                        Button(session.isTightening ? "正在精简…" : "再精简表达") {
+                            Task {
+                                if let msg = await session.tightenReadingBlocks() {
+                                    operationMessage = msg
+                                } else {
+                                    operationMessage = "已对符合条件的 AI 段落完成精简表达。"
+                                }
                             }
                         }
                         .speechRailButton(.secondary)
-                        .disabled(!session.canTighten)
+                        .disabled(!session.canTighten || session.isTightening)
 
                         Button("计时试读", systemImage: "stopwatch") {
                             isTrialReadingPresented = true
@@ -1354,7 +1488,7 @@ public struct TeleprompterView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     SpeechRailDesignTokens.Color.recessedField,
-                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                 )
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1505,7 +1639,7 @@ public struct TeleprompterView: View {
                         .frame(maxHeight: 180)
                         .background(
                             SpeechRailDesignTokens.Color.recessedField,
-                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.control, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: SpeechRailDesignTokens.Corner.nested, style: .continuous)
                         )
                     }
                 }
@@ -1523,9 +1657,10 @@ public struct TeleprompterView: View {
                     .speechRailButton(.secondary)
 
                     Button("添加朗读提示", systemImage: "text.quote") {
-                        addReadingCues()
+                        requestReadingCues()
                     }
                     .speechRailButton(.secondary)
+                    .disabled(session.isAnnotating)
 
                     Button("重新编辑原稿") {
                         session.discardPendingVersion()
@@ -1681,9 +1816,13 @@ public struct TeleprompterView: View {
 
     private func createFromClipboard() {
         if let snippet = pasteboardSnippet {
-            session.createDocument(title: "剪贴板稿件", sourceText: snippet.text)
-            operationMessage = nil
-            reloadDocuments()
+            do {
+                try session.createDocumentValidated(title: "剪贴板稿件", sourceText: snippet.text)
+                operationMessage = nil
+                reloadDocuments()
+            } catch {
+                operationMessage = "导入失败：\(error.localizedDescription)"
+            }
         } else {
             operationMessage = "剪贴板中未检测到文本内容"
         }
@@ -1736,6 +1875,7 @@ public struct TeleprompterView: View {
     }
 
     private func requestAIAnalysis() {
+        pendingAIAction = .prepare
         guard UserDefaults.standard.bool(forKey: aiDataFlowAcknowledgementKey) else {
             isAIDataFlowDisclosurePresented = true
             return
@@ -1751,7 +1891,26 @@ public struct TeleprompterView: View {
 
     private func startAIAnalysis() {
         Task {
-            await session.analyzeDraft(language: "跟随原稿", style: "自然、适合直播")
+            await session.analyzeDraft()
+        }
+    }
+
+    private func requestReadingCues() {
+        pendingAIAction = .annotate
+        guard UserDefaults.standard.bool(forKey: aiDataFlowAcknowledgementKey) else {
+            isAIDataFlowDisclosurePresented = true
+            return
+        }
+        startAnnotation()
+    }
+
+    private func startAnnotation() {
+        Task {
+            if let message = await session.annotateActiveVersion() {
+                operationMessage = message
+            } else {
+                operationMessage = "已添加朗读提示；正文保持不变。"
+            }
         }
     }
 
@@ -1767,10 +1926,10 @@ public struct TeleprompterView: View {
 
     private func exportSourceDocument() {
         guard let doc = session.document else { return }
-        exportDocument(
+        exportDataDocument(
             title: "导出原稿",
             defaultFilename: "\(doc.title)-原稿.md",
-            content: doc.sourceText
+            data: session.exportSourceData() ?? Data(doc.sourceText.utf8)
         )
     }
 
@@ -1795,6 +1954,14 @@ public struct TeleprompterView: View {
     }
 
     private func exportDocument(title: String, defaultFilename: String, content: String) {
+        exportDataDocument(
+            title: title,
+            defaultFilename: defaultFilename,
+            data: Data(content.utf8)
+        )
+    }
+
+    private func exportDataDocument(title: String, defaultFilename: String, data: Data) {
         let savePanel = NSSavePanel()
         savePanel.title = title
         savePanel.nameFieldStringValue = defaultFilename
@@ -1803,16 +1970,12 @@ public struct TeleprompterView: View {
         savePanel.canCreateDirectories = true
         if savePanel.runModal() == .OK, let url = savePanel.url {
             do {
-                try content.write(to: url, atomically: true, encoding: .utf8)
+                try data.write(to: url, options: .atomic)
                 operationMessage = "已导出到「\(url.lastPathComponent)」"
             } catch {
                 operationMessage = "导出失败：\(error.localizedDescription)"
             }
         }
-    }
-
-    private func addReadingCues() {
-        operationMessage = "已为朗读稿标记重点短语与停顿提示（short/medium/long）。"
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1829,9 +1992,13 @@ public struct TeleprompterView: View {
             _ = provider.loadObject(ofClass: String.self) { string, _ in
                 guard let string else { return }
                 DispatchQueue.main.async {
-                    session.createDocument(title: "拖拽导入稿件", sourceText: string)
-                    operationMessage = "已从拖拽文本创建新稿件"
-                    reloadDocuments()
+                    do {
+                        try session.createDocumentValidated(title: "拖拽导入稿件", sourceText: string)
+                        operationMessage = "已从拖拽文本创建新稿件"
+                        reloadDocuments()
+                    } catch {
+                        operationMessage = "导入失败：\(error.localizedDescription)"
+                    }
                 }
             }
             return true
@@ -1841,10 +2008,10 @@ public struct TeleprompterView: View {
 
     private func importFromURL(_ url: URL) {
         do {
-            let text = try TeleprompterTextImporter.load(from: url)
+            let imported = try TeleprompterSourceImporter.load(from: url)
             session.createDocument(
                 title: url.deletingPathExtension().lastPathComponent,
-                sourceText: text
+                importedSource: imported
             )
             operationMessage = "已导入「\(url.lastPathComponent)」"
             reloadDocuments()

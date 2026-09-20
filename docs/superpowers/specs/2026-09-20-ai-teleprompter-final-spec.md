@@ -3,7 +3,7 @@ title: "AI 提词器终版规格"
 status: final
 version: "1.0.0"
 date: 2026-09-20
-implementation_status: not_implemented
+implementation_status: implemented_pending_model_and_ui_acceptance
 supersedes:
   - 2026-09-20-teleprompter-reading-preparation-design.md
   - 2026-09-20-teleprompter-duration-design.md
@@ -170,7 +170,7 @@ flowchart TD
 | TeleprompterAligner / FollowController | ASR 事件 → 暂定/稳定位置与跟读状态 |
 | TeleprompterRunClock | 单调计时、暂停、剩余预测；不拥有音频和 LLM |
 | TeleprompterSession | MainActor 业务协调、可观察状态、快照、采集生命周期 |
-| TeleprompterStore | 原子保存、格式迁移、复制、导出、版本进度 |
+| TeleprompterV2Store | v2 原子保存、复制、导出、版本进度与损坏稿件隔离 |
 | Preparation / Review / Stage Views | 呈现及用户动作，不构造 prompt、不计算来源位置 |
 
 LLMProvider、MicrophoneCapture、RealtimeASRClient 和 SessionCoordinator 复用现有边界。CPU 文本计算与网络工作不得长时间占用 MainActor；界面状态只在 MainActor 提交。每个异步任务持有不可变 request snapshot，按 generation 和 revision 验收结果。
@@ -578,9 +578,9 @@ App 自动执行，无用户手工分段步骤。先按已确认块/换行形成
 
 任务身份为 source/selection/draft/goal/pace/allocation revision、endpoint/model、prompt/schema/builder/estimator 版本与 generation。完整 canonical 请求材料的 hash 用于同任务内复用；更换任何关联值使旧结果失效。hash 不上传模型、不当匿名化保证。草稿和完整候选正常落盘，未完成请求原文/输出不另建日志或跨任务缓存。
 
-迁移：无 formatVersion 按 legacy 解码。旧版本 sourceText 逐字复制为 readingText，旧 segment sourceRange 迁移为 readingRange，不自动重新清理或口语化；历史稿 formatHint=unknown，goal 缺失，依然可直接跟读。首次写 v2 前保存一次不可覆盖的原始文件字节备份，校验完整新 bundle 后原子替换；备份或保存失败不升级文件。未知更高版本只读报错，不写回。损坏一个稿件不得使整个稿件列表不可用，该项显示不可打开。
+不做旧格式迁移。v2 存储是当前唯一运行格式；没有 `format_version=2` 的稿件、未知更高版本稿件或损坏稿件均只读报错并在列表标记为不可打开，用户可以删除后重新导入原稿重建。v2 保存仍校验完整 bundle 并原子替换，失败时保留现有 v2 文件；损坏一个稿件不得使整个稿件列表不可用。
 
-复制重建文档/版本/块/片段 ID 与引用，进度清空。导出明确区分「原稿」与「朗读稿」；导出原稿恢复 UTF-8 BOM，朗读稿导出已批准正文，不将 cue/skip 混入。返回旧 App 前保留 v2 与导出稿，使用对应备份的副本；旧程序不能覆盖 v2，新建 v2 稿没有旧备份时保留原文件。
+复制重建文档/版本/块/片段 ID 与引用，进度清空。导出明确区分「原稿」与「朗读稿」；导出原稿恢复 UTF-8 BOM，朗读稿导出已批准正文，不将 cue/skip 混入。旧格式不在当前 App 中恢复；需要时由用户重新导入原稿重建。
 
 ## 12. 失败恢复、取消与资源边界
 
@@ -615,7 +615,7 @@ AI处理不占麦克风。开始跟读前检查服务、权限和共享采集占
 
 实现顺序为：
 
-1. Domain/Store v2、迁移与不可变快照；无损builder、估算器和时间计划纯函数。
+1. Domain/Store v2、不可变快照与损坏稿件隔离；无损 builder、估算器和时间计划纯函数。
 2. 三套prompt/schema/context builder及严格decoder，fake completion覆盖正常/错误响应。
 3. MapReduce调度、预算树、原子装配、局部精简及取消屏障。
 4. 准备/审阅UX、范围选择、目标预检、试读与自动保存。
@@ -639,7 +639,7 @@ AI处理不占麦克风。开始跟读前检查服务、权限和共享采集占
 | 编辑 | 手改块不被精简覆盖、撤销/合并/拆分的来源与预算、编辑重算、不移动光标、保存失败保留 |
 | 坐标 | emoji/组合字符/CRLF、中英与数字、版本号点不误分句、长单词不截断、segment切片一致 |
 | 运行 | 去重/乱序/partial纠正、重读/跳读、暂停/手动/断连屏障、时钟冻结、实际与预计剩余分离 |
-| 存储 | legacy恒等迁移、备份失败无覆盖、原子保存、未知版本、损坏单稿隔离、复制/导出/跨版本进度 |
+| 存储 | v2 原子保存、未知版本、损坏单稿隔离、删除后重建、复制/导出/跨版本进度 |
 | UX | 主操作及禁用原因明确、键盘编辑不被舞台快捷键抢占、紧凑布局可达、无障碍状态和Reduce Motion |
 
 可运行的聚焦测试使用合成文本、fake provider、临时目录，不调用真实模型或音频。UI表中的行为需人工或获当前用户明确授权的UI自动化验收；不得仅凭编译声称视觉通过。

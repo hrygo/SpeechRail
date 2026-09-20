@@ -76,6 +76,25 @@ struct TeleprompterPreparationDomainTests {
         #expect(plan.budget(for: units.map(\.id)) == plan.budgetSeconds)
     }
 
+    @Test func selectedTimingBudgetExcludesUnselectedSourceUnits() throws {
+        let source = try TeleprompterSourceImporter.importData(
+            Data("第一段。\n\n第二段。\n\n第三段。".utf8),
+            fileExtension: "md"
+        )
+        let units = try TeleprompterSourceUnitBuilder().build(source)
+        #expect(units.count == 3)
+        let selected = Set(units.dropFirst().map(\.id))
+        let plan = try TeleprompterTimingPlanner.plan(
+            sourceUnits: units,
+            estimates: Array(repeating: nil, count: units.count),
+            targetMinutes: 5,
+            selectedUnitIDs: selected
+        )
+
+        #expect(plan.budget(for: Array(selected)) == plan.budgetSeconds)
+        #expect(plan.allocations.first?.budgetSeconds == 0)
+    }
+
     @Test func unknownEstimateFallsBackToProxyWithoutClaimingDuration() throws {
         let source = try TeleprompterSourceImporter.importData(
             Data("第一句。second language مرحبا。".utf8),

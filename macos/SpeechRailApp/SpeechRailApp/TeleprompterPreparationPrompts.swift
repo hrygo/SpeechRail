@@ -377,7 +377,7 @@ public enum TeleprompterPreparationJSONSchema {
                                 "start_unit": ["type": "integer"],
                                 "end_unit": ["type": "integer"],
                                 "keywords": ["type": "array", "items": ["type": "string"]],
-                                "match_phrases": ["type": "array", "items": ["type": "string"]],
+                                "match_phrases": ["type": "array", "maxItems": 0, "items": ["type": "string"]],
                                 "pause_hint": ["type": "string", "enum": TeleprompterPauseHint.allCases.map(\.rawValue)]
                             ]
                         ]
@@ -637,7 +637,7 @@ public struct TeleprompterReduceDecoder: Sendable {
     }
 }
 
-private enum TeleprompterStrictJSON {
+enum TeleprompterStrictJSON {
     static func object(from data: Data) throws -> [String: Any] {
         var scanner = Scanner(bytes: Array(data))
         try scanner.parseDocument()
