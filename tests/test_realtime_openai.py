@@ -77,6 +77,24 @@ class BlockingSpeechSynthesizer:
         return chunks()
 
 
+class LoopbackSpeechSynthesizer:
+    """Block the first render and complete the next one after cancellation."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def synthesize(self, request: SpeechRequest):
+        call_index = len(self.calls)
+        self.calls.append(request.text)
+
+        async def chunks():
+            yield AudioChunk(response_id="internal", chunk_index=0, audio=b"\x00\x00")
+            if call_index == 0:
+                await asyncio.sleep(60)
+
+        return chunks()
+
+
 class HangingSpeechSynthesizer:
     def synthesize(self, request: SpeechRequest):
         async def chunks():
@@ -1030,6 +1048,78 @@ def test_openai_text_item_triggers_tts_response() -> None:
         assert "response.content_part.done" in events
         assert "response.output_item.done" in events
         assert events[-1] == "response.done"
+
+
+def test_fake_loopback_caller_orchestration_can_cancel_and_restart_tts() -> None:
+    synthesizer = LoopbackSpeechSynthesizer()
+    client, factory = _client(tts_synthesizer=synthesizer)
+
+    with client.websocket_connect("/v1/realtime") as socket:
+        assert socket.receive_json()["type"] == "session.created"
+        socket.send_json(
+            {
+                "type": "transcription_session.update",
+                "session": {"speechrail": {"tts": {"enabled": True}}},
+            }
+        )
+        assert socket.receive_json()["type"] == "transcription_session.updated"
+
+        socket.send_json(
+            {"type": "input_audio_buffer.append", "audio": _pcm16(b"\x00\x00")}
+        )
+        socket.send_json({"type": "input_audio_buffer.commit"})
+        transcription_events: list[dict[str, Any]] = []
+        while True:
+            event = socket.receive_json()
+            transcription_events.append(event)
+            if event["type"] == "conversation.item.input_audio_transcription.completed":
+                break
+        assert transcription_events[-1]["transcript"] == "你好"
+
+        socket.send_json(
+            {
+                "type": "speechrail.tts.create",
+                "request_id": "loopback_tts_001",
+                "text": "第一句",
+            }
+        )
+        first_tts_events: list[dict[str, Any]] = []
+        while True:
+            event = socket.receive_json()
+            first_tts_events.append(event)
+            if event["type"] == "response.output_audio.delta":
+                break
+        assert any(event["type"] == "response.created" for event in first_tts_events)
+
+        socket.send_json(
+            {"type": "speechrail.tts.cancel", "request_id": "loopback_tts_001"}
+        )
+        cancelled = socket.receive_json()
+        assert cancelled["type"] == "response.done"
+        assert cancelled["response"]["status"] == "cancelled"
+
+        socket.send_json(
+            {
+                "type": "speechrail.tts.create",
+                "request_id": "loopback_tts_002",
+                "text": "第二句",
+            }
+        )
+        second_tts_events: list[dict[str, Any]] = []
+        while True:
+            event = socket.receive_json()
+            second_tts_events.append(event)
+            if event["type"] == "response.done":
+                break
+        assert any(event["type"] == "response.output_audio.delta" for event in second_tts_events)
+        assert second_tts_events[-1]["response"]["status"] == "completed"
+
+        socket.send_json({"type": "input_audio_buffer.clear"})
+        assert socket.receive_json()["type"] == "input_audio_buffer.cleared"
+
+    assert len(factory.sessions) == 1
+    assert len(factory.released) == 1
+    assert synthesizer.calls == ["第一句", "第二句"]
 
 
 def test_openai_tts_request_id_is_connection_unique() -> None:

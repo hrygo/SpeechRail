@@ -31,3 +31,7 @@ Verification evidence (2026-09-20, Asia/Shanghai):
 - `git diff --check`: passed.
 
 Acceptance boundary: no UI automation, real model/audio smoke, service install, or runtime mutation was executed. The Xcode test scheme is `SpeechRailApp`; the plan's stale `SpeechRailMacControlTests` name was corrected by using the actual scheme. Swift 6.4 build blockers found during acceptance were fixed minimally (`Codable`/temporary container encoding, testability, `JSONValue` pattern matching, and `@retroactive` conformance).
+
+Final audit (2026-09-20, Asia/Shanghai): added and passed the deterministic fake loopback test `tests/test_realtime_openai.py::test_fake_loopback_caller_orchestration_can_cancel_and_restart_tts`, then reran the full Python suite (`2073 passed, 1 skipped, 1 warning`, coverage `81.77%`), Ruff, mypy, OpenAPI lint, version consistency, plist lint, selected Native pure tests (exit `0`), and Debug build (`BUILD SUCCEEDED`).
+
+Final review: self-review (no subagent tool). Reviewed the final plan/test diff across correctness, readability, architecture, security, performance, and verification evidence. No Critical, Required, or deferred Minor findings. The added test uses existing fakes, bounded PCM, no network, no persistent audio, and does not alter production behavior.
